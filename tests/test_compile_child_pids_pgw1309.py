@@ -147,7 +147,7 @@ def test_a_compile_childs_pids_reach_the_wire(
         assert keys and all(k.startswith("ek1-") for k in keys), facts
         assert int(facts["classes"]) == len(keys), facts
         assert row.duration_ms > 0, "the child's wall is the span this measures"
-    # The union of the pid rows' keys is the cell the mint packed.
+    # The union of the pid rows' keys is the compiled graph the mint packed.
     assert sorted(
         k for u in finishes
         for k in _detail(u)["compiled_graph_keys"].split(",")

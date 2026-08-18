@@ -2,7 +2,7 @@
 verifier, which is the worst place in the repo for one.
 
 `receipts.verify_delivered_artifact` is the integrity gate for every
-hub-delivered cell. Both of the reads it performs before it can compare
+hub-delivered compiled graph. Both of the reads it performs before it can compare
 anything were sizeless:
 
 * the packed `metadata.json` — read to obtain the envelope it will verify, off
@@ -37,7 +37,7 @@ from gen_worker import artifact_meta, receipts
 
 def _cell(tmp_path: Path, meta_bytes: bytes, name: str = "cell.tar.gz") -> Path:
     """A real gzip-compressed artifact carrying `meta_bytes` as its
-    metadata.json, plus a payload member so it is shaped like a cell."""
+    metadata.json, plus a payload member so it is shaped like a compiled graph."""
     path = tmp_path / name
     with tarfile.open(path, mode="w:gz") as tar:
         info = tarfile.TarInfo(artifact_meta.METADATA_NAME)

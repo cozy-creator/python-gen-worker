@@ -1,28 +1,28 @@
 # torch.compile cache artifacts (#384)
 
-> **pgw#1010 — "cell" means AOT cell.** The only artifact class the platform
+> **pgw#1010 — "compiled graph" means compiled graph.** The only artifact class the platform
 > publishes, delivers or adopts is `kind="aot-inductor"` (an exported `.pt2`,
-> `aot_mint` -> `aot_cells.discover` -> `aot_serve`). The
+> `aot_mint` -> `aot_compiled_graphs.discover` -> `aot_serve`). The
 > `kind="torch-inductor-cache"` artifact this document was written about is
-> RETIRED: `aot_cells` rejects it by name, so it had no consumer, and nothing
+> RETIRED: `aot_compiled_graphs` rejects it by name, so it had no consumer, and nothing
 > mints, seals or publishes one any more. JIT/dynamo compilation survives as
 > **intake** — a family with no export declaration arms
 > `compile_cache.arm_jit_intake`, compiles on the pod that needs it, serves
 > compiled for that pod's life, and produces no artifact. Honest cold boots are
 > the contract there, not a gap. Sections below that describe capturing,
 > packing or publishing an inductor cache are history; the keying, verification
-> and lane material still applies to the cell that survived.
+> and lane material still applies to the compiled graph that survived.
 
 ## Vocabulary: the graph digest is a fact, the envelope is a promise
 
-A cell states two different kinds of thing about itself, and keeping them apart
+A compiled graph states two different kinds of thing about itself, and keeping them apart
 is what makes its refusals readable:
 
 - **The graph digest** — the digest of the traced graph. A MEASURED FACT about
   the program that was exported: same computation, same digest, on any pod. One
-  derivation, used identically when the cell is stamped, looked up and admitted.
+  derivation, used identically when the compiled graph is stamped, looked up and admitted.
 - **The envelope** — the DECLARED serving region: which resolutions, text
-  lengths, guidance values and batch sizes the cell promises to serve. As in a
+  lengths, guidance values and batch sizes the compiled graph promises to serve. As in a
   flight envelope: a declared region of operation, with graceful fallback
   outside it. A request outside the envelope is not an error — it is served
   eager and named (`request out of declared envelope, serving eager`).
@@ -52,8 +52,8 @@ about the WEIGHTS, not about the compiled program:
   checks against what it would derive. It is th#1938's third intersection.
 - **The tensor-binding contract** — the artifact's LINKING rule for tensors:
   bound by name at load (DYNAMIC — an opaque slot the compiler must never
-  value-specialize, which is what makes a cell checkpoint-agnostic) versus a
-  baked literal (STATIC — the value folds into cell identity; driven to zero).
+  value-specialize, which is what makes a compiled graph checkpoint-agnostic) versus a
+  baked literal (STATIC — the value folds into compiled graph identity; driven to zero).
   GB-scale derived data is neither and becomes a named CAS component. The
   classification derives from `state_dict` membership at trace time: the author
   configures the compiler by how the code is written, never out of band.
@@ -72,7 +72,7 @@ about the WEIGHTS, not about the compiled program:
 `tensor-` and not `weight-` in both names, deliberately — they govern scales,
 buffers and computed tables, not just trained weights.
 
-Widening the envelope moves the promise; it does not move the fact. The cell
+Widening the envelope moves the promise; it does not move the fact. The compiled graph
 key says exactly that since pgw#1059 (the ck1 REDEFINITION, landed pre-launch
 with the disposable corpus purged): the key is `graph` x `envelope` x `sm` x
 `toolchain` — the traced computation, the declared serving region, the GPU
@@ -86,9 +86,9 @@ recompile") is enforced by `tests/test_compiled_graph_key_pgw1059.py`.
 `toolchain` is the COMPILER — torch/Inductor, triton, ptxas, the CUDA runtime
 wheels, the settings declaration, the boot-frozen native manifest. It is **not**
 `diffusers`/`transformers`/`peft` (pgw#1050): those are pure python, run at
-trace time only, and everything they do to a cell arrives as the traced graph,
+trace time only, and everything they do to a compiled graph arrives as the traced graph,
 which the `graph` axis hashes node-for-node since pgw#1031. Folding them
-re-keyed every cell in the fleet on every model-library patch release for a
+re-keyed every compiled graph in the fleet on every model-library patch release for a
 computation that had not moved. Their versions stay recorded for forensics.
 `tests/test_toolchain_membership_pgw1050.py` holds both halves: an evicted
 library moves no key, a compiler component still does.
@@ -105,7 +105,7 @@ Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
   training-endpoints' `produce-inductor-cache` was deleted by te#179 and
   DESIGN-RULINGS §4.28/§4.30 make its absence permanent — no forge, no mint
   request, no compile fleet, and compilation runs on the machine that will USE
-  the cell. A family whose mint does not fit beside its own server is a
+  the compiled graph. A family whose mint does not fit beside its own server is a
   PLACEMENT question, not a missing-producer question: §4.28's answer is "boot
   an ordinary serving pod on a card that fits". **pgw#1175 deleted the
   `card>=<N>GiB` figure that used to name which card**: it was
@@ -123,7 +123,7 @@ Compile wins 15-34% warm latency on flux-class models but costs 20-46s per
   torch, triton, diffusers/transformers), then arms guarded `torch.compile`
   (static by declaration: `dynamic=None` + `assume_static_by_default` + explicit marks, SDK v2) on `Compile.targets`. Plain optional lanes fall back to eager
   on a miss or mismatch. W8A8 is mandatory compiled execution: a missing,
-  mismatched, or unproven cell fails retryably before GPU/handler work and
+  mismatched, or unproven compiled graph fails retryably before GPU/handler work and
   never dequantizes or runs eager. A plain compiled call that still needs a
   fresh compile (undeclared shape, no toolchain) permanently unwraps to eager
   — never a failed request.
@@ -132,7 +132,7 @@ Serving artifacts are immutable per-(SKU, torch) snapshots attached by
 Tensorhub. They are verified against the exact live pipeline contract before
 the worker activates their cache files. Local tooling passes artifact paths
 explicitly or uses `gen_worker.local_serve` (which reaches this machine's own
-`local_cell_store`); the compile producer opts into cold compilation through an
+`local_compiled_graph_store`); the compile producer opts into cold compilation through an
 explicit library argument. There is no serving
 environment fallback that can bypass scheduler attachment or W8A8 fencing.
 
@@ -205,8 +205,8 @@ $12 benchmark campaign and one human edit per new card class. While they were
 because a single switch cannot say "baseline linears, packed modulation".
 
 A lane is therefore the **combination**, written `<linear>+<modulation>`
-(`baseline+packed`, `fused+dense`, …). It is measured on the card the cell is
-minted for and recorded in the cell (⚠️ this named `gen_worker/kernel_path.py`,
+(`baseline+packed`, `fused+dense`, …). It is measured on the card the compiled graph is
+minted for and recorded in the compiled graph (⚠️ this named `gen_worker/kernel_path.py`,
 deleted by pgw#1270 and not re-pointed — pgw#1304):
 
 - **Mint.** `mint_child.lane_verdict_for` loads the endpoint once per
@@ -235,7 +235,7 @@ deleted by pgw#1270 and not re-pointed — pgw#1304):
 - **Determinism.** The 5% margin means measurement noise cannot flip a
   recorded verdict between two mints on one card, and every number behind a
   verdict is recorded as its evidence.
-- **Where it lands.** `metadata.json` inside the packed cell carries the
+- **Where it lands.** `metadata.json` inside the packed compiled graph carries the
   DISCRETE verdict (`kernel_lane`: winner, rule, binding term, margin,
   candidates) plus a `fit` block — each measured candidate's peak, QUANTIZED
   up to 256 MiB, and the fallback order. No wall clocks, because the #699
@@ -244,24 +244,24 @@ deleted by pgw#1270 and not re-pointed — pgw#1304):
   way the 5% margin makes the winner reproducible. The timings ride the
   published checkpoint metadata as `kernel_lane_evidence`, beside
   `mint_phases`.
-- **Serving re-applies the fit rule locally.** Cell keys are keyed on SM and
+- **Serving re-applies the fit rule locally.** Compiled graph keys are keyed on SM and
   the lane is deliberately NOT a key axis, so one key spans very different
   cards — a 96 GB RTX PRO 6000 and a 32 GB RTX 5090 are both sm_120. A
   recorded verdict is therefore EVIDENCE, not an instruction. The executor
-  reads it off the delivered cell and pins it BEFORE `setup()` runs, but only
+  reads it off the delivered compiled graph and pins it BEFORE `setup()` runs, but only
   after re-checking the recorded winner's peak against THIS device's honestly
   detected total: it fits, the verdict stands (`kernel_lane_verdict_adopted`);
   it does not, the fastest recorded candidate that DOES fit here is pinned
   (`kernel_lane_refit_local`); nothing fits, the smallest recorded peak is
   pinned (`kernel_lane_refit_no_fit`) — never the declared default, which
-  carries the larger DENSE modulation and would be the bigger ask. A cell with
+  carries the larger DENSE modulation and would be the bigger ask. A compiled graph with
   no recorded peaks is adopted and marked `kernel_lane_fit_unverified`. Each
   axis then projects its own value out of the pin
-  (`native_kernels.svdq_linear_lane` / `svdq_modulation_lane`). No cell, a
-  pre-pgw#947 cell, or an unreadable envelope is the declared conservative
+  (`native_kernels.svdq_linear_lane` / `svdq_modulation_lane`). No compiled graph, a
+  pre-pgw#947 compiled graph, or an unreadable envelope is the declared conservative
   default (`baseline+dense`) with a typed reason
   (`kernel_lane_verdict_absent` / `_unreadable` / `_unknown_lane` /
-  `kernel_lane_no_cell`) — never a silent fall-through. An armed axis still
+  `kernel_lane_no_compiled_graph`) — never a silent fall-through. An armed axis still
   has to pass its OWN numerics self-check on the box; a gap degrades that
   axis alone, same artifact, with the reason logged. The numerics checks are
   CORRECTNESS checks and say nothing about memory, which is why the fit has

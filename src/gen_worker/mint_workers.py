@@ -68,8 +68,8 @@ def compiled_graph_peak_rss(family: str, weight_lane: str) -> int:
 # actually costs a card — activation scale — and that is a MEASUREMENT nobody
 # was keeping.
 #
-# WHY THE MACHINE, AND NOT THE CELL MANIFEST. The manifest is written when a
-# cell SEALS, and the mint that most needs measuring is the one that OOMed and
+# WHY THE MACHINE, AND NOT THE COMPILED GRAPH MANIFEST. The manifest is written when a
+# compiled graph SEALS, and the mint that most needs measuring is the one that OOMed and
 # sealed nothing — a bank whose writer dies exactly when the interesting data
 # exists is not a bank. And the consumer is local: K is decided in the mint
 # child, on this card, so a fleet table reachable only through a hub is the
@@ -110,12 +110,12 @@ class DevicePeakKey(NamedTuple):
     graph_class: str
     #: The card, both ways it can be named: a human-legible SKU slug
     #: (``h100-80gb-hbm3``) and the arch the kernels were built for
-    #: (``sm_90``). A cell minted at the wrong arch is unadoptable, so the
+    #: (``sm_90``). A compiled graph minted at the wrong arch is unadoptable, so the
     #: reading must not be shared across arches.
     card: str
     sm: str
-    #: The SAME digest the cell key's toolchain axis uses
-    #: (``tcg.identity.toolchain_axis_digest``), so a banked row and the cell it
+    #: The SAME digest the compiled graph key's toolchain axis uses
+    #: (``tcg.identity.toolchain_axis_digest``), so a banked row and the compiled graph it
     #: was measured for agree about what "this toolchain" means.
     toolchain: str
     gen_worker: str
@@ -139,7 +139,7 @@ def record_entry_device_peak(
     Written on EVERY outcome including failures — pgw#848's rule for the host
     half, which applies here with more force: the attempt that ran out of
     device memory is the one whose reading the next attempt most needs, and it
-    is exactly the attempt that seals no cell.
+    is exactly the attempt that seals no compiled graph.
 
     Each reading is maxed INDEPENDENTLY. They come from one child and normally
     move together, but taking ``max`` per field can only ever widen a reading,
@@ -217,7 +217,7 @@ def adopt_watermark(device: Optional[int] = None) -> Tuple[int, int]:
 
     The pair an adopt brackets itself with, and the instrument behind the
     ``compiled_graph_adopt_budget`` row — the only answer anyone has to "where does a
-    loaded cell's device memory go". ``max_memory_allocated`` is
+    loaded compiled graph's device memory go". ``max_memory_allocated`` is
     process-monotone, so the caller takes ``peak_after - allocated_before``
     and never resets the counter, which other readers on this process share.
     """

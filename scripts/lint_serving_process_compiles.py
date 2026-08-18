@@ -41,7 +41,7 @@ AST, not strings and not bare attribute access. A deferred
 ``getattr(torch.export, "save")`` in a serving module would pass. That is a
 deliberate trade — the banned names appear in dozens of comments and
 docstrings that describe the boundary correctly, and a string check would
-make the gate pure noise. The cell-key layout fence counts strings because
+make the gate pure noise. The compiled graph-key layout fence counts strings because
 its banned vocabulary never appears in prose; this one's does.
 
 Run::

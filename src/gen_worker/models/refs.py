@@ -3,7 +3,7 @@
 Normal form — the ONE canonical string for a model ref (grammar th#597 C5,
 re-keyed by th#1987; shared vectors ``tests/testdata/ref_grammar_vectors.json``):
 
-    tensorhub:  owner/repo[@<release>|@sha256:<hex>|@blake3:<hex>][?<lane-spec>][#<cell-fragment>]
+    tensorhub:  owner/repo[@<release>|@sha256:<hex>|@blake3:<hex>][?<lane-spec>][#<compiled graph-fragment>]
     hf:         owner/repo[@revision]
 
 THE `:tag` PRODUCTION IS DEAD (th#1987, HARDCUT A9). A tag was a movable
@@ -36,8 +36,8 @@ keeps it and ``CanonicalRef.Address`` drops it — ``canonical()`` is the twin o
 module owns the grammar's SHAPE, the hub owns what a pattern may say.
 
 THE FLAVOR IS DEAD ENTIRELY (pgw#1290 / th#2031, completing §1.32(d)). The
-`#` tail has exactly ONE meaning left — the COMPILE CELL fragment of a
-platform cell repo, ``root/family-<f>#<key>`` — and :func:`parse_model_ref`
+`#` tail has exactly ONE meaning left — the COMPILE COMPILED GRAPH fragment of a
+platform compiled graph repo, ``root/family-<f>#<key>`` — and :func:`parse_model_ref`
 REFUSES it on every other repo with :class:`RefFragmentRemoved`. The refusal
 moved into the parser because a fragment that parses and is then dropped
 resolves to the release default and reads as success; the earlier
@@ -56,7 +56,7 @@ from typing import NewType, Optional
 from gen_worker.refgrammar import MAX_FRAGMENT_LEN as _MAX_FRAGMENT_LEN
 
 # th#597 C5: `#` fragment charset [a-z0-9][a-z0-9._-]*, bounded by
-# MAX_FRAGMENT_LEN (matches tensorhub's isValidFragmentToken). Cell fragments
+# MAX_FRAGMENT_LEN (matches tensorhub's isValidFragmentToken). Compiled graph fragments
 # only — see the module docstring.
 #
 # th#1897/pgw#1213: the bound is 96, MIRRORING tensorhub's
@@ -104,7 +104,7 @@ class RetiredTagRef(ValueError):
 
 def _fragment_removed_message(ref: str) -> str:
     return (
-        f"model ref {ref!r} carries a `#` fragment, which names a COMPILE CELL "
+        f"model ref {ref!r} carries a `#` fragment, which names a COMPILE COMPILED GRAPH "
         "key on root/family-<f> and nothing else (th#2031 — deleted, not "
         "aliased). Narrow the variant with the lane-spec tail "
         "'owner/repo@<release>?<contract pattern>', declare what the code "
@@ -160,10 +160,10 @@ class TensorhubRef:
     #: inside it, exactly as tensorhub's ``CanonicalRef.Release`` does.
     release: str = ""
     digest: Optional[str] = None  # snapshot digest, including algorithm prefix (e.g. "blake3:<hex>")
-    #: The `#` tail. A COMPILE CELL fragment (``root/family-<f>#<key>``)
+    #: The `#` tail. A COMPILE COMPILED GRAPH fragment (``root/family-<f>#<key>``)
     #: and nothing else — never a weight selector (§1.32(d), th#2031). The
     #: parser refuses it on any other repo; the compile cache is the one
-    #: reader (``compile_cache.parse_cell_ref``).
+    #: reader (``compile_cache.parse_compiled_graph_ref``).
     fragment: Optional[str] = None
     #: The `?` tail (th#2006): the compact contract pattern naming WHICH
     #: variant of the release is meant. A resolution input carried BESIDE the
@@ -175,7 +175,7 @@ class TensorhubRef:
         return f"{self.owner}/{self.repo}"
 
     def canonical(self) -> "WireRef":
-        """Normal form: ``owner/repo[@release|@digest][#cell-fragment]``.
+        """Normal form: ``owner/repo[@release|@digest][#compiled graph-fragment]``.
 
         Nothing is elided (th#1987) and the digest takes the single ``@`` slot
         when both are set. The `?<lane-spec>` tail is DROPPED (th#2006): this
@@ -267,7 +267,7 @@ def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
         if not fragment_part:
             raise ValueError("tensorhub ref fragment is empty")
         # th#597 C5: ONE fragment token per ref, charset
-        # [a-z0-9][a-z0-9._-]{0,95} — `#a#b` is invalid (cells encode
+        # [a-z0-9][a-z0-9._-]{0,95} — `#a#b` is invalid (compiled graphs encode
         # conjunction inside one token). Shared grammar vectors:
         # tests/testdata/ref_grammar_vectors.json (byte-identical copy in
         # tensorhub internal/orchestrator/release/testdata/, whose Go
@@ -364,7 +364,7 @@ def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
                 f"tensorhub ref {name} {val!r} contains a grammar separator")
 
     # th#2031 / pgw#1290: the fragment's ONE surviving meaning is the compile
-    # cell key of a platform cell repo. Anywhere else it was the dead `#flavor`
+    # compiled graph key of a platform compiled graph repo. Anywhere else it was the dead `#flavor`
     # selector, which parsed and was then DROPPED — resolving to whatever the
     # release's default variant is, with no error to see. Mirrors the Go twin's
     # placement: after owner/repo, because that is when the question is

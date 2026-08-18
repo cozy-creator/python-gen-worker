@@ -298,7 +298,7 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
     typed, and because a test can reach the whole preflight without an
     inductor compile — the compile itself cannot be a cheap test.
     """
-    from . import compile_cache as cc, fleet_cells
+    from . import compile_cache as cc, fleet_compiled_graphs
     from .cli.run import run_setup
     from .models import structure_only
     from .registry import collect_endpoints
@@ -355,12 +355,12 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
         # arms it itself (pgw#1132); a second arm site here is how the two
         # halves drifted apart.
         cc.apply_lora_execution_lane(pipeline, int(cfg.lora_bucket))
-    spec = fleet_cells.aot_export_spec(pipeline, cfg)
+    spec = fleet_compiled_graphs.aot_export_spec(pipeline, cfg)
     decl = export_declaration(str(spec.family or ""))
     if decl is None:
         raise PreflightRefused(
             f"family {spec.family!r} has no registered export declaration — "
-            f"a multi-graph cell derives its class set from it")
+            f"a multi-graph compiled graph derives its class set from it")
     _reconcile_latent_basis(pipeline, decl)
     return pipeline, spec, decl
 
@@ -504,7 +504,7 @@ def run(job: EntryJob) -> int:
     ledger = SpanLedger()
     report_path = Path(job.report)
     # Before anything expensive: if the parent dies, this work dies with it. A
-    # serving pod must never be left burning CPU on a cell nobody is waiting
+    # serving pod must never be left burning CPU on a compiled graph nobody is waiting
     # for any more.
     _install_posture(job)
     # The seal is the parent's — re-established, not re-derived, because this
@@ -520,7 +520,7 @@ def run(job: EntryJob) -> int:
     # Before ANY compile touches the card: every inductor GPU benchmark in
     # this process goes through the pool-wide lock, so K concurrent children
     # cannot time kernels against each other and bake contention-chosen
-    # configs into a cell whose key would not move (pgw#809).
+    # configs into a compiled graph whose key would not move (pgw#809).
     with ledger.span("child_devlock_s"):
         if job.device_lock:
             aot_device_lock.install(Path(job.device_lock))

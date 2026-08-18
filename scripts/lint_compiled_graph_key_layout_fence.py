@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""CONVERSION IS UPSTREAM OF COMPUTE — no cell re-keys.
+"""CONVERSION IS UPSTREAM OF COMPUTE — no compiled graph re-keys.
 
     Every byte the endpoint's loader/`setup()` observes is in one of the slot's
     DECLARED accepted layouts. Conversion completes strictly before
     materialization into the worker's snapshot tree, and the endpoint has no code
     path that can observe the source layout, the conversion, or its provenance.
-    Therefore the traced graph, `Compile.contract_axes()`, the ck1 cell key and
-    the declared envelope are unchanged by any conversion, and no cell re-keys —
+    Therefore the traced graph, `Compile.contract_axes()`, the ck1 compiled graph key and
+    the declared envelope are unchanged by any conversion, and no compiled graph re-keys —
     ever.
 
 Two fences, both structural:
 
-**FENCE 1 — no cell-key axis reads the layout vocabulary.** The fenced module
-set is DERIVED, not hand-listed: any module that calls a cell-key axis producer
+**FENCE 1 — no compiled graph-key axis reads the layout vocabulary.** The fenced module
+set is DERIVED, not hand-listed: any module that calls a compiled graph-key axis producer
 (`compiled_graph_key.from_axes`, `envelope_digest`, `toolchain_axis_digest`,
 `facts_digest`, `from_entry_metadata`, or constructs `CompiledGraphKey`) is
 in it, plus `compiled_graph_key` itself. A new module that starts computing a key joins
@@ -57,10 +57,10 @@ from _lint_scope import is_unowned  # noqa: E402
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "gen_worker"
 
-#: Calling one of these MAKES a module a cell-key axis producer. Narrow on
+#: Calling one of these MAKES a module a compiled graph-key axis producer. Narrow on
 #: purpose: `facts_digest` and `subject_digest` are generic canonical-digest
 #: helpers whose callers say so (`contract_facts`: "NOT a key-axis input";
-#: `subject_digest` names a MINT OBLIGATION, never a cell key), so probing on
+#: `subject_digest` names a MINT OBLIGATION, never a compiled graph key), so probing on
 #: them would fence modules that compute no key and make the gate noise.
 # A fence that names a DELETED symbol guards nothing and passes vacuously
 # forever. After ANY rename, re-read every fence and ask what symbol it names
@@ -147,7 +147,7 @@ _HANDLE_LITERAL = re.compile(r"^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$")
 def _iter_modules(root: Path) -> List[Path]:
     # pgw#1332: skip the subtrees that are not ours to change. `_vendor` is the
     # one that matters here and it is a REAL finding shape, not a nuisance:
-    # torchcg's `recipe.py` computes a cell-key axis (`GraphClassVariant.key`)
+    # torchcg's `recipe.py` computes a compiled graph-key axis (`GraphClassVariant.key`)
     # AND reads `.layouts` — but that `layouts` is the TRACED-LAYOUT axis of a
     # graph-class row (torchcg G15), a different concept that happens to share
     # the word with §1.33's demand/conversion vocabulary. torchcg says so
@@ -179,7 +179,7 @@ def fenced_modules(root: Path = SRC) -> Dict[Path, str]:
     out: Dict[Path, str] = {}
     for path in _iter_modules(root):
         if path.name in FENCE_SEED and path.parent == root:
-            out[path] = "defines the cell key or one of its axis inputs"
+            out[path] = "defines the compiled graph key or one of its axis inputs"
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -187,7 +187,7 @@ def fenced_modules(root: Path = SRC) -> Dict[Path, str]:
             continue
         hits = sorted(_called_names(tree) & set(AXIS_PRODUCERS))
         if hits:
-            out[path] = f"computes a cell-key axis ({', '.join(hits)})"
+            out[path] = f"computes a compiled graph-key axis ({', '.join(hits)})"
     return out
 
 
@@ -279,7 +279,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("FAIL: the fence covers NO module — the axis-producer probe is "
               "stale, which makes this gate green for the wrong reason")
         return 1
-    print(f"fence 1: {len(fenced)} cell-key module(s)")
+    print(f"fence 1: {len(fenced)} compiled graph-key module(s)")
     for path, why in sorted(fenced.items()):
         rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
         hits = _violations(path)
@@ -306,11 +306,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for line in failures:
             print(f"  - {line}")
         print(
-            "\nConversion is UPSTREAM of compute. If a cell-key axis needs to "
+            "\nConversion is UPSTREAM of compute. If a compiled graph-key axis needs to "
             "know the layout, the conversion is happening too late — move it "
             "ahead of materialization instead of widening the key.")
         return 1
-    print("\n§1.33 point 5 fence holds: no cell re-keys on a conversion")
+    print("\n§1.33 point 5 fence holds: no compiled graph re-keys on a conversion")
     return 0
 
 

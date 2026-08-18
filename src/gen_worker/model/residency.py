@@ -12,7 +12,7 @@ weight-bearing module the loader already produced, and until ``Runner.component`
 existed nothing said which module that was. With it, the whole path is a lookup:
 
     loaded pipeline ──Runner.component──▶ {runner: module} ──▶ EagerBacking
-    armed cells ─────────────────────────────────────────────▶ CompiledBacking
+    armed compiled graphs ─────────────────────────────────────────────▶ CompiledBacking
                                     │
                                     ▼
                           Model.adopt(...) ──▶ handler kwarg
@@ -63,7 +63,7 @@ def eager_modules(spec: ModelSpec | None, tree: Any) -> dict[str, Any]:
 
     ``spec`` is ``None`` on an adopt-only serve pod, where importing the
     declaration would acquire a model library the role forbids (pgw#1328). That
-    is not a failure: such a pod serves compiled cells, so an empty eager map is
+    is not a failure: such a pod serves compiled graphs, so an empty eager map is
     the correct answer and the compiled backing carries the request.
     """
 
@@ -104,7 +104,7 @@ def instance_for(
         raise ModelError(
             ModelRefusal.BACKING_MISSING,
             f"model {model.FAMILY!r} bound to {ref!r} has neither an eager module "
-            f"nor an armed cell on this pod. Either the checkpoint did not load, or "
+            f"nor an armed compiled graph on this pod. Either the checkpoint did not load, or "
             f"the declaration's runners name components this tree does not have "
             f"(declare `Runner(..., component=...)` for each runner that has an "
             f"eager equivalent).",

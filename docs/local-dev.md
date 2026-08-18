@@ -258,14 +258,14 @@ uses):
   consume the parent shell's stdin.
 
   **Turning compiled serving off** (DESIGN-RULINGS §4.32 item 4). Start with
-  `--eager-only` and the serve arms no compiled cell and mints none — for a
-  cell that turns out to be broken, or simply to skip a mint you do not want
+  `--eager-only` and the serve arms no compiled graph and mints none — for a
+  compiled graph that turns out to be broken, or simply to skip a mint you do not want
   to spend your machine's minutes on. On an already-running serve, send the
   posture control frame; it is reversible, and the reverse costs nothing
   because the artifact is never unwrapped, only bypassed:
 
   ```bash
-  $ printf '{"posture":{"eager_only":true,"reason":"the cell crashes"}}\n' \
+  $ printf '{"posture":{"eager_only":true,"reason":"the compiled graph crashes"}}\n' \
       | nc -U .gen-worker.sock
   {"ok":true,"eager_only":true,"changed":true,"posture":"compiled serving suppressed by cozy-local-cli"}
   ```

@@ -1,8 +1,8 @@
-"""pgw#754: host-CPU ISA portability of AOTI cells.
+"""pgw#754: host-CPU ISA portability of AOTI compiled graphs.
 
-The failure mode: a worker arming a DISCOVERED aot-inductor cell dies
+The failure mode: a worker arming a DISCOVERED aot-compiled graph dies
 SIGILL (exit 132) inside
-``aoti_load_package`` — the cell's host wrapper ``.so`` was compiled
+``aoti_load_package`` — the compiled graph's host wrapper ``.so`` was compiled
 ``-march=native`` on an AVX-512 mint host (the shipped kernel.cpp embeds the
 compile command: ``-march=native ... -mavx512f -mavx512vnni``) and carries
 EVEX-encoded AVX-512F scalar instructions the serving host cannot decode.

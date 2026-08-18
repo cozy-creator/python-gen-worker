@@ -3,7 +3,7 @@
 An endpoint can bind a bare tag with an EMPTY flavor and then quantize its DiT
 to w8a8 fp8 with torchao INSIDE `setup()`. If `_served_execution_lane` is a pure
 function of the BINDING, every request reports `bf16-w16a16+compiled` while an
-fp8 DiT executes. The lane id is a KEY (quant verdicts, compile cells, floors,
+fp8 DiT executes. The lane id is a KEY (quant verdicts, compiled graphs, floors,
 pricing, the executed-lane proof), so the label is then wrong everywhere the key
 is joined.
 
@@ -155,7 +155,7 @@ def test_a_serve_time_recipe_moves_the_reported_lane(boot) -> None:
         # The binding on its own still says bf16 — the divergence is real,
         # not a mis-resolved binding.
         assert ex._bound_execution_body(eff) == "bf16-w16a16"
-        # This rig has no compiled cell, so the honest execution axis
+        # This rig has no compiled graph, so the honest execution axis
         # is `+eager`. Until ie#655 this line read `+compiled` — the lane
         # table's compiled-only PLAN for the w8a8 body coerced an observed
         # eager posture, and the test encoded the over-claim.

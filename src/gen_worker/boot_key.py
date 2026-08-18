@@ -20,7 +20,7 @@ serve role can pass ``None`` and the import guard has nothing to catch.
 
 The result is a KEY SET — one ``cg-key-v1`` per declared graph class — so a
 PARTIAL resolve helps: a pod that resolves 30
-of 36 keys arms 30 classes and compiles 6, where a single cell key made that
+of 36 keys arms 30 classes and compiles 6, where a single compiled graph key made that
 same outcome a total miss and a full re-mint.
 
 Processes, not threads
@@ -516,7 +516,7 @@ def derive(
     and then RULES on what it held — the verify posture, never the default.
 
     ``declared_hint`` is the parent's read of the declaration's class-row count
-    — ``len(aot_declaration.cell_plans(decl))``, which needs no pipeline. It
+    — ``len(aot_declaration.compiled_graph_plans(decl))``, which needs no pipeline. It
     sizes K and NOTHING else: the adapter fork can double it, and the true
     class set is whatever the children enumerate off their own composed
     pipelines. A hint that sizes a pool cannot move a key.
@@ -529,7 +529,7 @@ def derive(
     if int(declared_hint) <= 0:
         raise BootKeyUnavailable(
             "no_classes",
-            f"family {family!r} declares no graph classes; a cell with no "
+            f"family {family!r} declares no graph classes; a compiled graph with no "
             f"class set has no identity (pgw#716/#758)")
 
     try:
@@ -627,7 +627,7 @@ def derive(
             "class_set_disagreement",
             f"the trace children do not agree on how many classes this "
             f"declaration produces ({declared!r}) — they composed different "
-            f"pipelines, so their graphs are not one cell's graphs")
+            f"pipelines, so their graphs are not one compiled graph's graphs")
     total = declared[0]
     duplicated = sum(len(r.declarations) for r in reports) - len(declarations)
     if len(declarations) != total or duplicated:

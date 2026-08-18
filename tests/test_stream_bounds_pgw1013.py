@@ -48,7 +48,7 @@ DECLARED_BYTES = 1 << 20
 # cannot be used to demonstrate anything — the excess never reaches our code.
 # The runaway that actually exists is the one these tests build: the transport
 # is honest about a large body, and it is the MANIFEST (the dataset entry, the
-# civitai `sizeBytes`, the cell entry's `size_bytes`) that says the file is
+# civitai `sizeBytes`, the compiled graph entry's `size_bytes`) that says the file is
 # small. That declaration is what the four sites compared against after the
 # loop and now compare against inside it.
 #
@@ -489,10 +489,10 @@ def test_civitai_sizeless_stream_is_still_bounded(rig: _Rig, tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# AOT cell artifacts
+# compiled graph artifacts
 # ---------------------------------------------------------------------------
 
-ARTIFACT = b"cell-tarball-bytes" * 64
+ARTIFACT = b"compiled graph-tarball-bytes" * 64
 ARTIFACT_DIGEST = "sha256:" + hashlib.sha256(ARTIFACT).hexdigest()
 
 
@@ -501,9 +501,9 @@ def _resolve_route(rig: _Rig, repo: str, entry: Dict[str, Any]) -> None:
     rig.routes[f"/api/v1/repos/{repo}/resolve"] = _Route(body)
 
 
-def _fetch_cell(rig: _Rig, cache: Path, entry: Dict[str, Any],
+def _fetch_compiled_graph(rig: _Rig, cache: Path, entry: Dict[str, Any],
                 digest: str) -> Optional[Path]:
-    """pgw#904: cell bytes arrive as the EXACT named artifact from the
+    """pgw#904: compiled graph bytes arrive as the EXACT named artifact from the
     grant's transport (`aot_delivery`), never a discovery fetch — the same
     bounded-read invariants, at the delivery seam that replaced it."""
     from types import SimpleNamespace
@@ -531,7 +531,7 @@ def _repo_for(family: str = "fam") -> str:
     return cc.system_repo(family)
 
 
-def test_cell_artifact_legitimate_transfer_is_unaffected(
+def test_graph_artifact_legitimate_transfer_is_unaffected(
     rig: _Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from gen_worker import aot_delivery
@@ -543,33 +543,33 @@ def test_cell_artifact_legitimate_transfer_is_unaffected(
     url = _serve(rig, "/cell.tar.gz", ARTIFACT)
     entry = {"path": "cell.tar.gz", "url": url,
              "digest": ARTIFACT_DIGEST, "size_bytes": len(ARTIFACT)}
-    out = _fetch_cell(rig, tmp_path, entry, ARTIFACT_DIGEST)
+    out = _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST)
     assert out is not None and out.read_bytes() == ARTIFACT
     assert (tmp_path / "objects").is_dir()
     assert not (tmp_path / "tensorfs").exists()
 
 
-def test_cell_artifact_without_size_bytes_is_a_typed_miss(rig: _Rig, tmp_path: Path) -> None:
+def test_graph_artifact_without_size_bytes_is_a_typed_miss(rig: _Rig, tmp_path: Path) -> None:
     """The chunked sibling branch passes this exact field to
     `download_chunked_file` as `total_size`; the whole-file branch had it and
     ignored it. An entry that cannot say how big it is now costs the pilot lane
-    a miss rather than an unbounded fetch — a cell miss self-mints, so failing
+    a miss rather than an unbounded fetch — a compiled graph miss self-mints, so failing
     closed here is free."""
-    url = _serve(rig, "/cell-nosize.tar.gz", ARTIFACT)
-    entry = {"path": "cell-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST}
-    assert _fetch_cell(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
-    assert _served(rig, "/cell-nosize.tar.gz") == 0, "no bytes fetched at all"
+    url = _serve(rig, "/compiled graph-nosize.tar.gz", ARTIFACT)
+    entry = {"path": "compiled graph-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST}
+    assert _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
+    assert _served(rig, "/compiled graph-nosize.tar.gz") == 0, "no bytes fetched at all"
 
 
-def test_cell_artifact_oversized_stream_is_abandoned_mid_transfer(
+def test_graph_artifact_oversized_stream_is_abandoned_mid_transfer(
     rig: _Rig, tmp_path: Path
 ) -> None:
-    url = _serve(rig, "/cell-big.tar.gz", b"\0" * BODY_BYTES)
-    entry = {"path": "cell-big.tar.gz", "url": url,
+    url = _serve(rig, "/compiled graph-big.tar.gz", b"\0" * BODY_BYTES)
+    entry = {"path": "compiled graph-big.tar.gz", "url": url,
              "digest": ARTIFACT_DIGEST, "size_bytes": DECLARED_BYTES}
 
-    assert _fetch_cell(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
-    _aborted_early(rig, "/cell-big.tar.gz")
+    assert _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
+    _aborted_early(rig, "/compiled graph-big.tar.gz")
     hexname = ARTIFACT_DIGEST.split(":", 1)[-1]
     assert not (tmp_path / "aot-cells" / f"{hexname}.tar.gz").exists()
     assert not (tmp_path / "aot-cells" / f"{hexname}.part").exists()

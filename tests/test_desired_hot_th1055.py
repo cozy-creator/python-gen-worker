@@ -3,10 +3,10 @@
 A fleet endpoint declares deploy-bound Slots with NO code default, so
 ``spec.models`` is EMPTY. An ``ensure_desired_instance`` that demands
 ``set(bindings) == set(spec.models)`` therefore refuses every hub hot intent
-(self-mint prewarm, slot-default seeding, compile-cell reload) with
+(self-mint prewarm, slot-default seeding, compiled graph reload) with
 ``ValidationError("must bind exactly []")``, swallowed by ``_reconcile_pass``
 as one pod-local warning: zero events, zero VRAM, no retry signal, and
-precompiled cells never arm fleet-wide.
+precompiled compiled graphs never arm fleet-wide.
 
 Pinned here:
   1. a slot-only (default-less) compile endpoint warms + arms from a
@@ -40,7 +40,7 @@ from gen_worker.executor import Executor
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.models import store as store_mod
 
 FAMILY = "th1055-fam"
@@ -138,7 +138,7 @@ def _snapshot(digest: str) -> pb.Snapshot:
         url="http://r2.invalid/presigned")])
 
 
-def _cell_artifact(tmp_path: Path) -> Path:
+def _graph_artifact(tmp_path: Path) -> Path:
     """Opaque carrier bytes for the fully stubbed compiled-enable boundary.
 
     The executor still downloads and selects this path, which is the behavior
@@ -158,7 +158,7 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
         sent.append(msg)
 
     ex = Executor(specs, _send)
-    artifact = _cell_artifact(tmp_path)
+    artifact = _graph_artifact(tmp_path)
 
     async def _fake_download(ref: str, **kwargs: Any) -> Path:
         p = tmp_path / ref.replace("/", "_").replace(":", "_").replace("#", "_")
@@ -190,11 +190,11 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
     return ex, sent, enables
 
 
-def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
+def _mint_enable(cg_ref: str, digest: str, artifact_path: Path):
     """pgw#904: an advertised identity now comes from the worker's OWN mint
-    (delivered-cell selection is deleted); stamp it the way the live fleet
+    (delivered-compiled graph selection is deleted); stamp it the way the live fleet
     policy does — an ArmOutcome carrying the finalized SelfMint."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     def _enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
                 delegate=None, delivered_ref="", delivered_digest=""):
@@ -209,8 +209,8 @@ def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
             "originals": [],
             "regional_mods": [],
         })
-        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, compiled_graph_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=fleet_compiled_graphs.SelfMint(
+            family=FAMILY, compiled_graph_key=cg_ref.rsplit("#", 1)[-1], ref=cg_ref,
             snapshot_digest=digest, artifact=artifact_path))
 
     return _enable
@@ -235,9 +235,9 @@ def test_slot_only_desired_instance_warms_and_arms(tmp_path, monkeypatch) -> Non
     setup_calls: List[Tuple[str, str]] = []
     ex, sent, enables = _harness(tmp_path, monkeypatch,
                                  [_slot_only_spec(setup_calls)])
-    from gen_worker import fleet_cells as fleet_cells_mod
+    from gen_worker import fleet_compiled_graphs as fleet_compiled_graphs_mod
     monkeypatch.setattr(
-        fleet_cells_mod, "enable_compiled",
+        fleet_compiled_graphs_mod, "enable_compiled",
         _mint_enable(CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
     ex.apply_model_resolutions(
         {AUTHORED_REF: (RESOLVED_REF, RESOLVED_CAST, "fp8-w8a8-dynamic+compiled")})

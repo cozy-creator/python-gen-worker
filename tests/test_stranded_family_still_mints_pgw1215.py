@@ -201,7 +201,7 @@ def test_the_fallback_asks_for_real_weights_and_still_never_places_them(
     monkeypatch.setattr(
         child, "export_declaration", lambda family: object())
     monkeypatch.setattr(
-        "gen_worker.fleet_cells.aot_export_spec",
+        "gen_worker.fleet_compiled_graphs.aot_export_spec",
         lambda pipe, cfg: type("S", (), {"family": cfg.family})())
 
     _build(_job(checkpoint, tmp_path))

@@ -13,12 +13,12 @@ eager-only reboot never fired, and the pod re-minted the same key and
 crash-looped.
 
 Measured 2026-08-14 on the standing master stack (pgw#1255): a z-image pod died
-in `probe_cell` -> `gate_cell_numerics` -> `arm_aot` and reported
+in `probe_compiled_graph` -> `gate_compiled_graph_numerics` -> `arm_aot` and reported
 `native_crash_streaks: {"generate": 1}` — the tenant's function, for a fault in
 the adopt.
 
 These tests drive the REAL `provision.arm_aot` and the REAL postmortem registry.
-The doubles are `aot_serve.enable`, `gate_cell_numerics` and the CUDA reading —
+The doubles are `aot_serve.enable`, `gate_compiled_graph_numerics` and the CUDA reading —
 the GPU work this box may not do (§4.33 local-rig bounds: the compile phase is
 stubbed, nothing is minted or compiled here).
 """
@@ -32,7 +32,7 @@ import pytest
 
 from gen_worker import activity as activity_mod
 from gen_worker import mint_workers, postmortem
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.models import provision
 
 
@@ -105,7 +105,7 @@ def _install(
     monkeypatch.setattr(aot_serve, "unwrap", lambda _p: None)
     monkeypatch.setattr(aot_serve, "disarm_entry", lambda *a, **k: None)
     monkeypatch.setattr(aot_serve, "entry_states", lambda _p: {})
-    monkeypatch.setattr(provision, "gate_cell_numerics", _gate)
+    monkeypatch.setattr(provision, "gate_compiled_graph_numerics", _gate)
     monkeypatch.setattr(activity_mod, "emit_event", lambda *a, **k: None)
 
 
@@ -144,7 +144,7 @@ def test_the_NUMERICS_GATE_span_holds_a_compile_marker(
     _arm(tmp_path, verify_numerics=True)
 
     assert seen and seen[0], (
-        "no compile marker was in flight during `gate_cell_numerics` — this is "
+        "no compile marker was in flight during `gate_compiled_graph_numerics` — this is "
         "the exact frame the z-image pod died in")
     assert seen[0][0]["function"] == "compile:adopt:z-image"
 

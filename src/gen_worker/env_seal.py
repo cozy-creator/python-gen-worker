@@ -34,7 +34,7 @@ namespaces wholesale and IMPOSES the declared configuration
   different graph and never a different key. The per-call serving window is
   covered by dynamo's GlobalStateGuard plus the guard-miss doctrine.
 
-The seal dict rides cell metadata verbatim (``artifact_metadata``) and is NOT
+The seal dict rides compiled graph metadata verbatim (``artifact_metadata``) and is NOT
 a key axis: the declaration digest and the loaded-libs digest fold into the
 ``toolchain`` axis instead (``compile_cache.toolchain_digest`` — "the compiler
 as we configure it"), so a deliberate settings change re-keys through the axis
@@ -64,7 +64,7 @@ import importlib.util
 logger = logging.getLogger(__name__)
 
 # Versions the seal DICT. Adding, changing or deleting a sealed fact bumps
-# THIS version only — never the key-axis set. A bump re-keys: every cell
+# THIS version only — never the key-axis set. A bump re-keys: every compiled graph
 # minted under the previous version stops matching and is re-minted once, per
 # (family, lane, sm), so state the re-key cost when bumping it.
 SEAL_VERSION = 4
@@ -167,10 +167,10 @@ _PORTABLE_VOLATILE = ("aot_inductor.metadata",)
 
 def inductor_config_digest() -> str:
     """Digest of torch's PORTABLE inductor config — the codegen surface a
-    cell's kernels were minted under (machine-specific entries excluded by
+    compiled graph's kernels were minted under (machine-specific entries excluded by
     torch itself, torch's own compile-side-effect entries excluded here).
     ``"absent"`` on a torchless worker — a declared fact, so the seal digest
-    stays meaningful for CPU cells."""
+    stays meaningful for CPU compiled graphs."""
     if not torch_capability.present():
         return torch_capability.ABSENT
     import torch._inductor.config as inductor_config
@@ -198,7 +198,7 @@ _LIB_BASENAME_PREFIXES = (
 # USERSPACE TOOLCHAIN libs only. The driver's userspace half (libcuda.so.*,
 # libnvidia-*, libcudadebugger) is mounted from the HOST at pod start —
 # it varies per machine and driver rollout, invisible to the image digest,
-# and sealing it fractures cell keys per driver cohort (two libcuda patch
+# and sealing it fractures compiled graph keys per driver cohort (two libcuda patch
 # levels split an L4 fleet and every worker kept self-minting). The driver
 # stays a recorded-only metadata axis
 # (`cuda_driver`); compiled kernels are driver-portable within a major.
@@ -597,7 +597,7 @@ def declaration_digest() -> str:
 
 def effective_seal() -> Dict[str, Any]:
     """The seal dict — a digest of the DECLARATION, recorded
-    verbatim in cell metadata. Its settings facts come from
+    verbatim in compiled graph metadata. Its settings facts come from
     ``settings_authority.declaration()``; ambient mutation cannot move them
     (it trips :func:`assert_seal_unchanged` instead). The one measured fact
     is ``loaded_libs`` (:func:`loaded_libs_digest`).
@@ -605,7 +605,7 @@ def effective_seal() -> Dict[str, Any]:
     The seal is NOT a key axis: its declaration and loaded-libs digests fold
     into the ``toolchain`` axis (``compile_cache.toolchain_digest``). This dict
     stays RECORDED on every artifact — the observable statement of the
-    declaration a cell was minted under — and its digest stays on the published
+    declaration a compiled graph was minted under — and its digest stays on the published
     identity-axis map because the hub's ``ArtifactIdentity.env_seal_digest``
     requires it (a wire fact, like ``graph_contract``)."""
     return {

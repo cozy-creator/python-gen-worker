@@ -1,6 +1,6 @@
 """The mint runs in its OWN OS process, and its death is not the worker's.
 
-WORKER-CONTRACTS §2: a compile-cell MISS must not put long-running GIL-holding
+WORKER-CONTRACTS §2: a compiled graph MISS must not put long-running GIL-holding
 Python on the loop that carries the 10s beat and eager serving. So the mint is a
 child process, and this file proves the SUPERVISOR half:
 
@@ -13,7 +13,7 @@ child process, and this file proves the SUPERVISOR half:
   never a wall clock and never a frame the child prints — a busy child is never
   killed however long it takes, a silent one is killed quickly;
 * abandonment reaps the whole process GROUP (inductor forks its own compile
-  workers, and a mint that leaks them keeps billing for a cell nobody adopts).
+  workers, and a mint that leaks them keeps billing for a compiled graph nobody adopts).
 
 The liveness proof itself — beats never missed while a >2min mint runs — is
 ``test_mint_liveness_pgw784.py``.
@@ -129,7 +129,7 @@ def test_a_minted_cell_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> None
     # asserts that arity rather than indexing past a set nobody checked.
     (only,) = out.artifacts
     assert only == tmp_path / "cell.tar.gz"
-    assert only.read_bytes() == b"stub-cell-bytes"
+    assert only.read_bytes() == b"stub-compiled graph-bytes"
     # The digest rides the ENTRY row, beside the key and the path —
     # a per-artifact fact belongs with its artifact, not on the report.
     assert out.report is not None

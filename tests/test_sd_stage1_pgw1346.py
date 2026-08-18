@@ -588,7 +588,7 @@ def test_sd2_is_a_declaration_and_not_an_instance_of_sd15() -> None:
 
     An instance is weights + tuned values + a ref label; these two do not share
     a traced class or even a weight SHAPE. Every number below is a different
-    cross-attention projection in the U-Net, so one compiled cell cannot serve
+    cross-attention projection in the U-Net, so one compiled graph cannot serve
     both and one exhaustive ``Literal`` must not name both.
     """
 
@@ -780,7 +780,7 @@ def test_the_ie740_serving_floors_migrated_by_value() -> None:
     ``vram6g`` is what both of its ``@endpoint``s declare.
 
     Also asserted: the floors do NOT ride the export digest. A serving floor is
-    a fact about the MACHINE and a cell's identity is graph x sm x toolchain,
+    a fact about the MACHINE and a compiled graph's identity is graph x sm x toolchain,
     so restating a floor must not re-key every artifact — which is why
     ``check_model_bindings.py`` stays byte-clean across this change.
     """

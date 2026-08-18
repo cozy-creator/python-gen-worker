@@ -11,7 +11,7 @@ cheapest way to stay inside it is to never fetch anything.
 So the checkpoint is *generated*: ``build_checkpoint`` seeds a generator, writes
 the state dict and a small ``config.json``, and the whole tree is under 20 MB.
 Two runs with the same seed produce byte-identical weights, which is what lets a
-cell key mean anything across processes.
+compiled graph key mean anything across processes.
 
 What is deliberately REAL here: the module is a ``torch.nn.Module`` with a
 cross-attention block and a timestep embedding, so ``torch.export`` traces
@@ -42,7 +42,7 @@ TEXT_LEN = 77
 #: enough that inductor has a real fusion decision to make.
 WIDTH = 64
 
-#: Fixed, so a checkpoint built twice is byte-identical and a cell key computed
+#: Fixed, so a checkpoint built twice is byte-identical and a compiled graph key computed
 #: on two boots agrees.
 SEED = 978
 
@@ -242,7 +242,7 @@ def example_inputs(
 SYNTHETIC_RUNTIME_ENV = "PGW978_SYNTHETIC_RUNTIME"
 
 #: The values it installs. Every one is a real fact of a real runtime (an L4 at
-#: sm_89, cuda 13.0) — nothing about how they are COMBINED into a cell key is
+#: sm_89, cuda 13.0) — nothing about how they are COMBINED into a compiled graph key is
 #: faked, which is the same seam the TCG compile-child tests use
 #: since pgw#723. sm_89 specifically because it is this box's own compute
 #: capability; the box simply cannot execute cu130 today (pgw#983).
@@ -255,9 +255,9 @@ SYNTHETIC_RUNTIME = {
 def install_synthetic_runtime_if_asked() -> bool:
     """Patch the runtime PROBES — and nothing else — when the env asks.
 
-    A cell key requires an ``sm``, and a box with no usable CUDA build can state
+    A compiled graph key requires an ``sm``, and a box with no usable CUDA build can state
     none: the mint refuses at seal with *"cannot state the compute capability
-    (sm) of this runtime; an exported cell has no identity without it"*. That
+    (sm) of this runtime; an exported compiled graph has no identity without it"*. That
     refusal is correct and must stay correct, so this does not weaken it — it
     supplies the one fact the box cannot measure, exactly the way pgw#723's
     tests have, and ONLY when explicitly asked.
@@ -265,8 +265,8 @@ def install_synthetic_runtime_if_asked() -> bool:
     What this buys: the seal, publish and adopt legs run at all. Those are where
     the hub wire and the cross-pod filter live, and skipping them would remove
     most of what is left after the export. What it costs is stated in the rig's
-    report and must never be implied away — the resulting cell's ``sm`` axis is
-    a claim about a runtime this process is not, so a cell minted this way is a
+    report and must never be implied away — the resulting compiled graph's ``sm`` axis is
+    a claim about a runtime this process is not, so a compiled graph minted this way is a
     PLUMBING artifact and must never reach a shared namespace.
 
     Called at endpoint-module import time, which is the only hook the mint child

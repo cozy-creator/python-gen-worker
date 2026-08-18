@@ -145,7 +145,7 @@ def test_env_seal_imposes_canonical_config_and_refuses_drift(monkeypatch) -> Non
 
         assert sa.DECLARED_TORCH.items() <= seal["config"].items()
 
-        # The digest is the env_seal cell-key axis: deterministic.
+        # The digest is the env_seal compiled graph-key axis: deterministic.
         digest = env_seal.seal_digest(seal)
         assert len(digest) == 16
         assert digest == env_seal.seal_digest(entrypoint._establish_env_seal())
@@ -440,7 +440,7 @@ def test_seal_order_is_settings_then_seal_then_probe(monkeypatch) -> None:
 
 def test_torchless_declared_knob_refuses_by_name(torchless) -> None:
     """Every canonical knob is a torch flag; honouring one on a torchless
-    worker would silently fork cell identity — refuse, naming the knob."""
+    worker would silently fork compiled graph identity — refuse, naming the knob."""
     from gen_worker import settings_authority as sa
 
     with pytest.raises(sa.SettingsImpositionError, match="cudnn_benchmark"):

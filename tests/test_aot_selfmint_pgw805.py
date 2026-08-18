@@ -1,4 +1,4 @@
-"""An AOT cell-discovery MISS must start a mint, or refuse BY NAME.
+"""An compiled graph-discovery MISS must start a mint, or refuse BY NAME.
 
 A miss that produces no mint, no `self_mint_abort` and no `self_mint_skipped`
 is the failure this pins. Three wires make it possible, and each gets a test:
@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from gen_worker import aot_mint, child_preflight, fleet_cells, mint_process, mint_supervisor
+from gen_worker import aot_mint, child_preflight, fleet_compiled_graphs, mint_process, mint_supervisor
 from gen_worker import config as gw_config
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
@@ -30,7 +30,7 @@ from gen_worker.api.export_contract import (
     register_export_declaration,
     reset_export_declarations,
 )
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.models import loading
 
 FAMILY = "sdxl"
@@ -95,7 +95,7 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
     def _sink(kind: str, detail: str, phase: str = "", duration_ms: int = 0, **_kw) -> None:
         seen.append((kind, phase, detail))
 
-    monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
+    monkeypatch.setattr(fleet_compiled_graphs.activity_mod, "emit_event", _sink)
     monkeypatch.setattr(mint_supervisor.activity_mod, "emit_event", _sink)
     return seen
 
@@ -105,38 +105,38 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A real AOT discovery MISS on a mint-capable pod.
 
     Everything the five measured pods had: the flag armed, a publisher, a
-    resolvable compile target, CUDA and a toolchain — and no cell.
+    resolvable compile target, CUDA and a toolchain — and no compiled graph.
     """
     gw_config.reload_for_test()
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
+        fleet_compiled_graphs.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_compiled_graph"))
-    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
-    monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(fleet_cells, "_PENDING", {})
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "has_compile_target", lambda p, c, **_kw: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "drop_lora_execution_lane", lambda p: None)
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs, "_PENDING", {})
     # No GPU on a dev box: the `sm` axis is a real-runtime fact, and this
     # test is about the RECIPE decision, not key computation.
     monkeypatch.setattr(
-        fleet_cells, "arm_identity",
+        fleet_compiled_graphs, "arm_identity",
         lambda *a, **k: type("_A", (), {
             "token": "arm1-" + "a" * 56,
             "facts_dict": lambda self: {}})())
     # w8a8 is the migration's first lane (pgw#704 parity); its mandatory
     # serving refusal is a separate policy, exercised in its own test.
-    monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "mandatory_serving", lambda p: False)
     monkeypatch.setattr(
-        fleet_cells.cc, "arm_jit_intake", lambda p, c, **_kw: None)
+        fleet_compiled_graphs.cc, "arm_jit_intake", lambda p, c, **_kw: None)
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     yield
     gw_config.reload_for_test()
 
 
 def _arm(**kw: Any) -> Any:
-    return fleet_cells.enable_compiled(
+    return fleet_compiled_graphs.enable_compiled(
         _Pipe(), _Cfg(), publisher=_Publisher(), **kw)  # type: ignore[arg-type]
 
 
@@ -154,7 +154,7 @@ def test_aot_discovery_miss_enqueues_an_aot_mint(
 ) -> None:
     """RED at HEAD: the pending's recipe was always the dynamo capture, whose
     artifact kind AOT discovery rejects — so a fleet
-    could never produce the cell it was looking for."""
+    could never produce the compiled graph it was looking for."""
     register_export_declaration(_declaration())
 
     outcome = _arm(delegate=True)
@@ -198,11 +198,11 @@ def test_a_family_with_no_export_declaration_refuses_by_name(
     _miss: None, _events: list[tuple[str, str, str]],
 ) -> None:
     """...and, since pgw#1010, mints NOTHING: the JIT intake arm serves this
-    pod and opens no obligation, because a dynamo cell has no consumer."""
+    pod and opens no obligation, because a dynamo compiled graph has no consumer."""
     outcome = _arm(delegate=True)
 
     assert export_declaration(FAMILY) is None
-    assert outcome.self_mint is None, "a JIT intake arm owes no cell"
+    assert outcome.self_mint is None, "a JIT intake arm owes no compiled graph"
     assert outcome.armed, "intake still SERVES — it compiles in this process"
     assert "no_export_declaration" in _phases(_events, "self_mint_skipped")
 
@@ -253,7 +253,7 @@ def test_every_execution_lane_a_pod_can_serve_reaches_the_aot_recipe(
     The composition this replaces, measured on `origin/dev` 2026-08-03:
     `aot_mint.PARITY_LANES` admitted exactly `"w8a8"`, and tensorhub's lane
     table makes `fp8-w8a8-dynamic` compiled-only — so the hub withholds it
-    from AUTO until a cell exists (th#1123 `applyCompileCellAvailability`,
+    from AUTO until a compiled graph exists (th#1123 `applyCompileContractAvailability`,
     th#1127 `applyPublishMintObligation`), and tensorhub's own comment says
     "only a worker's own self-mint can discharge it". The single admitted
     lane was the single lane no AUTO pod could ever be on, and the four lanes
@@ -267,7 +267,7 @@ def test_every_execution_lane_a_pod_can_serve_reaches_the_aot_recipe(
     """
     register_export_declaration(_declaration())
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: base_execution_lane)
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: base_execution_lane)
 
     pending = _arm(delegate=True).self_mint
 
@@ -288,7 +288,7 @@ def test_the_bucketed_lora_form_of_a_execution_lane_mints_too(
     must not be treated as an unknown string."""
     register_export_declaration(_declaration())
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane",
+        fleet_compiled_graphs.loading, "pipeline_weight_lane",
         lambda pipe: "fp8-hooks-lora64")
 
     pending = _arm(delegate=True).self_mint
@@ -316,7 +316,7 @@ def test_an_in_process_only_pod_declines_the_aot_recipe_by_name(
     outcome = _arm(delegate=False)
 
     assert outcome.self_mint is None, (
-        "a pod that cannot delegate cannot mint an AOT cell — and pgw#1010 "
+        "a pod that cannot delegate cannot mint an compiled graph — and pgw#1010 "
         "leaves it nothing else to mint, so it serves JIT intake")
     # The generic `aot_requires_delegation`
     # carried a hand-written either/or sentence and could not distinguish an
@@ -345,7 +345,7 @@ def test_degrading_to_eager_is_never_silent(
     a sentence. The token is also what the request row's `fallback_reason`
     carries, so the event stream and the request table join on one string.
     """
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: False)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "toolchain_present", lambda: False)
 
     outcome = _arm(delegate=True)
 
@@ -425,7 +425,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     from gen_worker import mint_child
 
     target = tmp_path / "cell.tar.gz"
-    # a `ck1` key names a 36-entry all-or-nothing cell, which this
+    # a `ck1` key names a 36-entry all-or-nothing compiled graph, which this
     # runtime cannot arm at all — `tcg.is_compiled_graph_key` refuses the prefix
     # deliberately, so a fixture keyed that way tests a shape nothing produces.
     key = "cg-key-v1-" + "a" * 56
@@ -445,7 +445,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         packed.parent.mkdir(parents=True, exist_ok=True)
         packed.write_bytes(b"tcg-artifact")
         # a mint returns N independently keyed entry artifacts plus a
-        # manifest digest, never "a cell". This declaration traces one class.
+        # manifest digest, never "a compiled graph". This declaration traces one class.
         return aot_mint.MintResult(
             entries=(aot_mint.MintedArtifact(
                 key=key, entry="unet/cfg", artifact=packed,
@@ -466,7 +466,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     # a real public declaration rather than patching a deleted mint-local loader.
     register_export_declaration(_declaration())
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
 
     from gen_worker.mint_process import MintRequest, cfg_spec
 
@@ -510,7 +510,7 @@ def test_a_named_export_refusal_is_a_refusal_not_a_crash(
     monkeypatch.setattr(aot_mint, "mint_graph_classes", _refuse)
     register_export_declaration(_declaration())
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
 
     from gen_worker.mint_process import MintRequest, cfg_spec
 
@@ -530,7 +530,7 @@ def test_a_named_export_refusal_is_a_refusal_not_a_crash(
 # ---------------------------------------------------------------------------
 
 
-def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
+def test_a_self_minted_aot_compiled_graph_arms_through_the_aot_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """RED at HEAD: `adopt_delegated_mint` always called `compile_cache.enable`
@@ -540,21 +540,21 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     yet."""
     calls: list[str] = []
     monkeypatch.setattr(
-        fleet_cells.provision, "arm_aot",
+        fleet_compiled_graphs.provision, "arm_aot",
         lambda *a, **k: (calls.append("aot"), AdoptOutcome.hit())[1])
     monkeypatch.setattr(
-        fleet_cells.cc, "enable",
+        fleet_compiled_graphs.cc, "enable",
         lambda *a, **k: (calls.append("dynamo"), True)[1])
     # `cc.enable` is not merely unused on this path — the branch that
     # called it is deleted, so a "dynamo" entry below would mean an inductor
-    # seed adopt has grown back for an exported cell.
+    # seed adopt has grown back for an exported compiled graph.
     monkeypatch.setattr(
-        fleet_cells, "_packed_metadata",
+        fleet_compiled_graphs, "_packed_metadata",
         lambda artifact: {"compiled_graph_key": "ck1-real", "kind": "aot-inductor"})
-    monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
-    monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
+    monkeypatch.setattr(fleet_compiled_graphs, "sha256_file", lambda p: "beef")
+    monkeypatch.setattr(fleet_compiled_graphs, "_unregister", lambda p: None)
 
-    # a READABLE envelope. This used to be `b"cell"` and worked only
+    # a READABLE envelope. This used to be `b"compiled graph"` and worked only
     # because `try_read_metadata` swallowed the error into `None`; an
     # unreadable envelope is now its own refusal before the arm, so a test
     # about the ARM has to supply one the adopt can read.
@@ -569,12 +569,12 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
         _info = _tarfile.TarInfo("metadata.json")
         _info.size = len(_payload)
         _tar.addfile(_info, _io.BytesIO(_payload))
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family=FAMILY, arm_token="ck1-handle", ref="root/family-sdxl#cg-key-v1-handle",
         cfg=_Cfg(), target=artifact,
         mint_root=tmp_path, publisher=None)
 
-    minted = fleet_cells.adopt_delegated_mint(_Pipe(), pending, [artifact])
+    minted = fleet_compiled_graphs.adopt_delegated_mint(_Pipe(), pending, [artifact])
 
     assert calls == ["aot"]
     assert minted is not None

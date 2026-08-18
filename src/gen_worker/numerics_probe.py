@@ -1,15 +1,15 @@
-"""The thing that MEASURES: does an armed cell reproduce the eager forward it
+"""The thing that MEASURES: does an armed compiled graph reproduce the eager forward it
 replaces?
 
-Every other gate refuses a cell for being UNUSABLE — wrong `sm`, wrong torch,
+Every other gate refuses a compiled graph for being UNUSABLE — wrong `sm`, wrong torch,
 unbound constants, ingress outside the declared envelope. This one refuses it
 for being WRONG. :mod:`gen_worker.numerics_ladder` owns the verdict and
 `Compile.numerics_floor` declares the bar, but ``gate()`` opens ``if comparison
-is None: return None``, so calling it with nothing to compare passes every cell
+is None: return None``, so calling it with nothing to compare passes every compiled graph
 while looking correct in the diff AND in the call graph. This module is the
 measurement that makes it real.
 
-It is built to ONE constraint first: **bisectability**. A whole-cell "fail"
+It is built to ONE constraint first: **bisectability**. A whole-compiled graph "fail"
 nobody can split is how two fuses burn at once and the diagnosis goes wrong.
 Every number here is taken against a single named :class:`ProbeAxis` — one
 packaged ENTRY, one shape ROW, one LANE, one recorded SEED — and every verdict
@@ -28,7 +28,7 @@ measurement move without a new implementation.
 **Parity by construction.** The probe feed comes from
 :func:`gen_worker.aot_inputs.builder_for` — the mint's OWN input builder,
 driven by an :class:`~gen_worker.aot_inputs.ExportSpec` reconstructed from
-the cell's own recorded entry coordinate. A probe that built its inputs some
+the compiled graph's own recorded entry coordinate. A probe that built its inputs some
 other way would measure a call the artifact was never traced for. It comes from
 ``aot_inputs`` and not ``aot_mint`` for a measured reason — see
 :func:`build_feed`.
@@ -37,7 +37,7 @@ other way would measure a call the artifact was never traced for. It comes from
 raises :class:`ProbeUnavailable` with a named reason, and the arm treats it
 exactly like a refusal: stay eager, say why on the wire. Staying eager is the
 ordinary miss policy for every other adopt gate, so the cost of a probe bug is
-an un-armed cell — never a silently-degraded one.
+an un-armed compiled graph — never a silently-degraded one.
 """
 
 from __future__ import annotations
@@ -67,8 +67,8 @@ _ADAPTER_INPUTS = ("lora_a", "lora_b")
 class ProbeUnavailable(RuntimeError):
     """The measurement could not be TAKEN — never that it passed.
 
-    ``reason`` is the phase a refusal reports, so an unmeasurable cell is as
-    countable fleet-wide as a failing one. The distinction matters: "this cell
+    ``reason`` is the phase a refusal reports, so an unmeasurable compiled graph is as
+    countable fleet-wide as a failing one. The distinction matters: "this compiled graph
     reproduces eager to 0.9997" and "nobody could ask" are different facts, and
     collapsing them is how an absent gate becomes an invisible one.
     """
@@ -78,8 +78,8 @@ class ProbeUnavailable(RuntimeError):
         self.reason = str(reason)
 
 
-class CellNumericsRefused(RuntimeError):
-    """This cell does not reproduce the eager forward it replaces."""
+class CompiledGraphNumericsRefused(RuntimeError):
+    """This compiled graph does not reproduce the eager forward it replaces."""
 
     reason = "compiled_graph_numerics_below_floor"
 
@@ -97,10 +97,10 @@ class CellNumericsRefused(RuntimeError):
 class ProbeAxis:
     """ONE named axis: one entry x one shape row x one lane.
 
-    Reconstructed from the cell's own ``metadata.entries`` block, so the axis
+    Reconstructed from the compiled graph's own ``metadata.entries`` block, so the axis
     names a coordinate the ARTIFACT declares rather than one the probe chose.
     :attr:`name` is stable across pods and processes, which is what makes a
-    verdict re-runnable by whoever reads it: ``probe_cell(..., only=name)``.
+    verdict re-runnable by whoever reads it: ``probe_compiled_graph(..., only=name)``.
     """
 
     entry: str
@@ -118,7 +118,7 @@ class ProbeAxis:
     def seed(self) -> int:
         """Deterministic per-axis RNG seed, derived from the axis itself.
 
-        Not a constant: two axes of one cell must not be fed the same random
+        Not a constant: two axes of one compiled graph must not be fed the same random
         latent, or a shape-independent bug looks like agreement. Not random
         either — a verdict nobody can reproduce is a verdict somebody
         re-litigates from a screenshot.
@@ -140,7 +140,7 @@ class ProbeAxis:
 
 
 def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
-    """Every probeable axis of one cell, read off its own metadata.
+    """Every probeable axis of one compiled graph, read off its own metadata.
 
     ONE axis, because one artifact is one graph class: the mint parity gate
     runs per entry, at the moment that entry exists, against the eager callable
@@ -153,7 +153,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     entry = aot_serve.entry_from_meta(dict(meta))
     entries = {str(entry.get("name") or ""): entry}
     execution_lane = str(meta.get("precision") or "")
-    cell_bucket = int(meta.get("lora_bucket") or 0)
+    compiled_graph_bucket = int(meta.get("lora_bucket") or 0)
     axes: List[ProbeAxis] = []
     for name in sorted(entries):
         block = entries[name]
@@ -163,7 +163,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
         # a refusal at ingress reads as an unmeasurable axis when it is really
         # a probe that built the wrong call. The contract discriminates;
         # nothing here guesses.
-        bucket = cell_bucket if all(
+        bucket = compiled_graph_bucket if all(
             n in declared for n in _ADAPTER_INPUTS) else 0
         axes.append(ProbeAxis(
             entry=str(name),
@@ -177,7 +177,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     if not axes:
         raise ProbeUnavailable(
             "no_probeable_axis",
-            "the cell packages no entry to compare against eager")
+            "the compiled graph packages no entry to compare against eager")
     return tuple(axes)
 
 
@@ -189,7 +189,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
 class _EagerView:
     """The module as it was BEFORE the wrap, for signature purposes only.
 
-    The arm has already swapped ``module.<attr>`` for the cell's dispatch by
+    The arm has already swapped ``module.<attr>`` for the compiled graph's dispatch by
     the time the gate runs, so ``aot_declaration._positionalize`` — which binds
     the declared feed to slots by reading ``inspect.signature`` of that
     attribute — would see the wrapper's ``(*args, **kwargs)`` and refuse every
@@ -198,7 +198,7 @@ class _EagerView:
     wrap retained.
 
     A facade rather than a temporary restore: un-swapping a live module to run
-    a probe would hand the cell's traffic back to eager for the duration, on a
+    a probe would hand the compiled graph's traffic back to eager for the duration, on a
     pod that is concurrently serving. Everything except ``attr``
     delegates to the real module, so config, parameters, buffers and dtype all
     come off the thing actually being measured.
@@ -227,7 +227,7 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
     The RNG is forked, not reseeded: a serving pod's tenant traffic owns the
     global generator (the tenant keeps being served throughout an arm), and a
     probe that shifted it would change a paying request's output to check a
-    cell.
+    compiled graph.
     """
     import torch
 
@@ -241,7 +241,7 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
     # `aot_inputs`, NEVER `aot_mint`: `provision` is a `static_code_closure`
     # entrypoint, the closure walk follows function-level imports, and the
     # closure memo records it on every artifact. Importing the mint DRIVER here
-    # would drag the mint's own transform chain into cell identity,
+    # would drag the mint's own transform chain into compiled graph identity,
     # and a compile-time transform must re-key nothing. The vocabulary lives in
     # a leaf module so the driver stays out.
     spec = aot_inputs.ExportSpec(
@@ -308,14 +308,14 @@ def measure_axis(
             "eager_forward_failed",
             f"{axis}: the EAGER reference forward raised "
             f"({type(exc).__name__}: {exc}) — with no reference there is "
-            f"nothing to compare the cell against") from exc
+            f"nothing to compare the compiled graph against") from exc
     try:
         with torch.no_grad():
             subject = compiled(*args)
     except Exception as exc:  # noqa: BLE001
         raise ProbeUnavailable(
             "compiled_graph_forward_failed",
-            f"{axis}: the ARMED CELL raised on its own declared feed "
+            f"{axis}: the ARMED COMPILED GRAPH raised on its own declared feed "
             f"({type(exc).__name__}: {exc})") from exc
     try:
         return numerics_ladder.compare_outputs(
@@ -383,7 +383,7 @@ class CompiledGraphNumerics:
         return tuple(v for v in self.verdicts if not v.measured)
 
     def worst(self) -> Optional[AxisVerdict]:
-        """The axis the whole-cell verdict is decided on — NAMED, always.
+        """The axis the whole-compiled graph verdict is decided on — NAMED, always.
 
         The gate judges the worst axis rather than a pooled number: pooling 36
         entries would let one destroyed graph class hide behind 35 intact ones,
@@ -413,7 +413,7 @@ class CompiledGraphNumerics:
         return f"{head} | per-axis: {rows}"
 
 
-def probe_cell(
+def probe_compiled_graph(
     pipeline: Any,
     cfg: Any,
     meta: Mapping[str, Any],
@@ -423,10 +423,10 @@ def probe_cell(
     """Measure an ARMED pipeline against the eager forward it replaced.
 
     ``only`` names one axis (``ProbeAxis.name``, i.e. the packaged entry name)
-    and is the bisection interface: a whole-cell refusal must be re-runnable
+    and is the bisection interface: a whole-compiled graph refusal must be re-runnable
     one axis at a time, from a hub row, without editing anything.
 
-    Raises :class:`ProbeUnavailable` when the cell cannot be probed at all —
+    Raises :class:`ProbeUnavailable` when the compiled graph cannot be probed at all —
     never returns a report that could be mistaken for a pass.
     """
 
@@ -441,7 +441,7 @@ def probe_cell(
         raise ProbeUnavailable(
             "not_armed",
             f"family={family}: the pipeline carries no armed AOT target, so "
-            f"there is no cell to compare against eager")
+            f"there is no compiled graph to compare against eager")
     axes = axes_from_meta(meta)
     if only:
         axes = tuple(a for a in axes if a.name == only)
@@ -502,9 +502,9 @@ _LAST: Optional[CompiledGraphNumerics] = None
 
 
 def last_report() -> Optional[CompiledGraphNumerics]:
-    """The most recent :func:`probe_cell` report in this process, or None.
+    """The most recent :func:`probe_compiled_graph` report in this process, or None.
 
-    The GATE (``provision.gate_cell_numerics``) answers yes/no and confesses
+    The GATE (``provision.gate_compiled_graph_numerics``) answers yes/no and confesses
     the numbers to the activity wire; a caller in the same process that needs
     the NUMBER — the author-CI harness, which has to write the measured cosine
     into an ``author-ci.toml`` ``[proof]`` block — would otherwise have
@@ -519,7 +519,7 @@ def last_report() -> Optional[CompiledGraphNumerics]:
 __all__ = [
     "AxisVerdict",
     "CompiledGraphNumerics",
-    "CellNumericsRefused",
+    "CompiledGraphNumericsRefused",
     "ProbeAxis",
     "ProbeUnavailable",
     "axes_from_meta",
@@ -527,5 +527,5 @@ __all__ = [
     "eager_view",
     "last_report",
     "measure_axis",
-    "probe_cell",
+    "probe_compiled_graph",
 ]

@@ -1,4 +1,4 @@
-"""Fleet self-mint compile cells (gw#587).
+"""Fleet self-mint compiled graphs (gw#587).
 
 The serving worker's boot warmup IS a perfect mint by construction: right
 SKU (its own card), right image (its own digest), right weight lane (its
@@ -9,39 +9,39 @@ replicate was discovered as a live production failure, one at a time.
 
 Under self-mint the arming policy for a compile-declared function becomes:
 
-  1. HIT (a published ``aot-inductor`` cell this runtime's axes select, or
-     the hub-attached artifact): arm through the delivered-cell path.
+  1. HIT (a published ``aot-inductor`` compiled graph this runtime's axes select, or
+     the hub-attached artifact): arm through the delivered-compiled graph path.
   2. MISS on a family that DECLARES an export: delegate an AOT mint to a
      child process (pgw#784/#805) while this pipeline serves eager, then
-     adopt the child's cell through the same gates a hub-delivered ``.pt2``
+     adopt the child's compiled graph through the same gates a hub-delivered ``.pt2``
      passes. Publish only what adopted — the hub's attested gate (th#910)
      decides accept/refuse, and publish failure never affects serving.
   3. MISS on a family with NO export declaration: **JIT intake** — arm the
      declared targets cold-allowed and guarded, let this pod's own warmup
      compile them, and produce NOTHING. This is pgw#1010's cut, and it is
      the ratified reuse ruling made structural: reuse is AOT-only, JIT is
-     intake with honest cold boots. A JIT cell had no possible consumer
+     intake with honest cold boots. A JIT graph had no possible consumer
      (only ``aot-inductor`` artifacts are ever adopted, by name), so every one
      minted was pod time and platform storage spent on an artifact nothing
      could ever adopt. There is no seal, no key, no publish and no
-     ``cell_store`` row on this path; the ONLY artifact class this module
+     ``compiled_graph_store`` row on this path; the ONLY artifact class this module
      produces is ``aot-inductor``.
 
 The publish transport reuses the existing repo-commit machinery
 (``hubio.client.HubClient``) with a capability token minted by
 ``POST /v1/worker/compiled-graphs/publish-intent`` (worker JWT) — the hub corroborates
 every claimed key axis against its own records and pins the token to
-exactly this cell key; the endpoint-scoped ``cell_store`` row is stamped
+exactly this compiled graph key; the endpoint-scoped ``compiled_graph_store`` row is stamped
 hub-side from the token claim, never from anything this module sends.
 
 cozy-local USES this module since pgw#1127, through ``local_serve``, with
 ``publisher=None`` — one arming brain, two sinks. What it never has is a
 PUBLISHER: user-controlled hardware is untrusted tier by definition, so its
-cells land in ``local_cell_store`` (``no_publish_sink_reason`` -> ``no_publish_sink``)
+compiled graphs land in ``local_compiled_graph_store`` (``no_publish_sink_reason`` -> ``no_publish_sink``)
 and its obligation ends at :func:`keep_self_mint_local`. That absence is
 pinned structurally by ``tests/test_local_serve_no_publisher_pgw1127.py``,
 not by this paragraph: before pgw#1127 the local CLI armed JIT through
-``local_cells`` and never reached the local store at all.
+``local_compiled_graphs`` and never reached the local store at all.
 
 Mint failures keep the pre-self-mint miss policy: plain lanes serve eager,
 quantized (w8a8/w4a4) lanes keep their typed fail-closed refusal.
@@ -74,13 +74,13 @@ from . import (
     artifact_meta,
     env_seal,
     graph_facts,
-    local_cell_store,
+    local_compiled_graph_store,
     serve_posture,
 )
 from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .api.export_contract import blocker_refusal, export_declaration, open_blockers
-from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
+from .compiled_graph_adopt import AdoptOutcome, CompiledGraphAdoption, EagerPhase
 from .file_hash import sha256_file
 from .hubio.client import HubPublishError
 
@@ -121,13 +121,13 @@ RECIPE_AOT = "aot"
 
 @dataclass(frozen=True)
 class SelfMint:
-    """Identity of one successfully adopted, FINALIZED self-minted cell.
+    """Identity of one successfully adopted, FINALIZED self-minted compiled graph.
 
-    Produced only by :func:`adopt_delegated_mint`, after the child's cell
+    Produced only by :func:`adopt_delegated_mint`, after the child's compiled graph
     passes the same arm gates a hub-delivered one does. The serving-bootstrap
     half of gw#587/th#910: the minting worker ADVERTISES this identity — the
     key STAMPED on the bytes it serves — so ``active_compile_artifacts``
-    accounting treats the mint exactly like a hub-delivered cell; the warmup
+    accounting treats the mint exactly like a hub-delivered compiled graph; the warmup
     proof, not the artifact source, gates serving.
 
     pgw#1032: the hub fence this feeds is the one that verifies the ADVERTISED
@@ -169,12 +169,12 @@ ARM_DIGEST_HEX = 64
 
 @dataclass(frozen=True)
 class ArmIdentity:
-    """The PRE-TRACE identity of one owed AOT mint — NOT a cell key.
+    """The PRE-TRACE identity of one owed AOT mint — NOT a compiled graph key.
 
     pgw#1059: the ck1 key is four axes (graph x envelope x sm x toolchain)
     and its ``graph`` axis is the traced-graph digest, which does not exist
     until the export finishes — so an obligation opened BEFORE any trace
-    structurally cannot state a cell key, and pretending otherwise is the
+    structurally cannot state a compiled graph key, and pretending otherwise is the
     attempt-28 phantom (one axis name, two derivations, read as "the child
     computed a different key"). This type is what an obligation CAN state:
     every pre-trace-knowable fact, each produced by the SAME derivation the
@@ -185,7 +185,7 @@ class ArmIdentity:
     ``token`` (``arm1-<56hex>``) is a process-local ledger key and event
     label only: the pending/finalized/quarantine ledgers key on it, and the
     ``self_mint_*`` events print it as ``arm_key=``. It never selects a
-    cell, never reaches a store row, and never matches ``IsCellKey``.
+    compiled graph, never reaches a store row, and never matches ``IsCompiledGraphKey``.
     """
 
     facts: tuple  # sorted ((name, value), ...)
@@ -204,7 +204,7 @@ class ArmIdentity:
 
 
 #: The ENVIRONMENT half of an :class:`ArmIdentity` — the facts a delegated
-#: child re-derives in its own process and RECORDS on the cell it hands back.
+#: child re-derives in its own process and RECORDS on the compiled graph it hands back.
 #: ``envelope`` and ``toolchain`` use the exported key's own derivations
 #: (``graph_facts.envelope_digest`` / ``graph_facts.facts_digest``), ``lane`` the
 #: one lane label (``cc.execution_lane_label``) — :func:`arm_axis_divergence`
@@ -222,20 +222,20 @@ class ArmIdentity:
 # the SAME reason `envelope` did one paragraph up, and the sweep that took
 # `envelope` should have taken them. Since pgw#1270 TCG mints every artifact
 # and `torchcg.artifact.validate_metadata` refuses metadata whose field set is
-# not exactly `artifact_meta.cell_metadata_fields()` — which has no `family`, no
+# not exactly `artifact_meta.compiled_graph_metadata_fields()` — which has no `family`, no
 # `weight_lane`/`lora_bucket` and no `env_seal`. So three of the six axes here
-# were read as `None` off every real cell and compared against a live runtime
+# were read as `None` off every real compiled graph and compared against a live runtime
 # fact: a seam that could only ever refuse.
 #
 # It was not theory. MEASURED on the standing `master` hub (2026-08-17):
-# `aot_entry_arm_failed key_axis_divergence — family: child cell states '',
+# `aot_entry_arm_failed key_axis_divergence — family: child compiled graph states '',
 # this runtime computed 'sd15'`, 224 rows on sd15 and 28 on ernie across wheels
 # 0.117.0 and 0.118.0. EVERY self-mint that reached the seam, none published,
 # each one paying ~25 minutes of L4 for the compile it then discarded — ~$1.00
 # per burst against 57.7 GPU-seconds of the inference it was meant to speed up.
 #
 # What is left is exactly the three axes TCG keys the artifact ON, which is
-# what makes them the three that can genuinely refuse a foreign cell.
+# what makes them the three that can genuinely refuse a foreign compiled graph.
 ARM_ENVIRONMENT_FACTS = (aot_serve.COMPILED_GRAPH_FORMAT_KEY, "sm", "toolchain")
 
 #: The SUBJECT half (pgw#1113): WHAT this obligation compiles, as opposed to
@@ -245,29 +245,29 @@ ARM_ENVIRONMENT_FACTS = (aot_serve.COMPILED_GRAPH_FORMAT_KEY, "sm", "toolchain")
 #: of ``cc.declared_compile_facts`` the token could not previously see.
 #:
 #: These are NOT compared at the handback seam, and that is the asymmetry
-#: this issue is about rather than an omission: a cell records no subject and
-#: must not, because one cell legally serves every checkpoint whose graph it
+#: this issue is about rather than an omission: a compiled graph records no subject and
+#: must not, because one compiled graph legally serves every checkpoint whose graph it
 #: is. The subject splits the OBLIGATION — which pipe owes which mint, which
-#: pending they may share, which memo row answers them — and the cell's own
+#: pending they may share, which memo row answers them — and the compiled graph's own
 #: key, which is the traced computation, is what says the computation matches.
 ARM_SUBJECT_FACTS = ("subject", "targets", "dynamic", "regional")
 
-#: Every fact the obligation states that a CELL never can, and therefore that
+#: Every fact the obligation states that a COMPILED GRAPH never can, and therefore that
 #: nothing compares across the handback boundary (pgw#1340). This is not a
 #: weaker check — it is the same check moved to the side of the boundary that
 #: can perform it. `family`, `lane` and `env_seal` are in the arm TOKEN, and
 #: the token is what splits the pending, the delegated child and the local
 #: store's memo row, so two families or two lanes still never share one mint.
-#: The cell's own `ck1` key is what says the COMPUTATION matches.
+#: The compiled graph's own `ck1` key is what says the COMPUTATION matches.
 ARM_OBLIGATION_FACTS = ("family", "lane", "env_seal") + ARM_SUBJECT_FACTS
 
 #: Every fact in the token, in report order.
 ARM_FACTS = ARM_ENVIRONMENT_FACTS + ARM_OBLIGATION_FACTS
 
-#: Each arm axis -> the CELL-METADATA fields its child-side derivation reads.
+#: Each arm axis -> the COMPILED GRAPH-METADATA fields its child-side derivation reads.
 #: The one table both :func:`arm_axis_divergence` and
 #: :func:`unstateable_arm_axes` consult, so "what this axis is read from" and
-#: "can a cell state it" can never be two answers.
+#: "can a compiled graph state it" can never be two answers.
 ARM_AXIS_CELL_SOURCES: Dict[str, Tuple[str, ...]] = {
     aot_serve.COMPILED_GRAPH_FORMAT_KEY: (aot_serve.COMPILED_GRAPH_FORMAT_KEY,),
     "sm": ("sm",),
@@ -281,7 +281,7 @@ ARM_AXIS_CELL_SOURCES: Dict[str, Tuple[str, ...]] = {
 def unstateable_arm_axes(
     compared: Sequence[str] = ARM_ENVIRONMENT_FACTS,
 ) -> Tuple[str, ...]:
-    """The compared axes a packed cell's metadata CANNOT state — the $0 answer.
+    """The compared axes a packed compiled graph's metadata CANNOT state — the $0 answer.
 
     A pure function of two compile-time constants: the axes this seam compares,
     and TCG's closed artifact vocabulary. So a seam that is unsatisfiable is
@@ -295,7 +295,7 @@ def unstateable_arm_axes(
     the field of its own name — so a NEW axis added without a source entry is
     checked, never silently admitted.
     """
-    vocabulary = artifact_meta.cell_metadata_fields()
+    vocabulary = artifact_meta.compiled_graph_metadata_fields()
     return tuple(
         axis for axis in compared
         if not set(ARM_AXIS_CELL_SOURCES.get(axis, (axis,))) <= vocabulary)
@@ -332,7 +332,7 @@ def stamp_arm_subject(
         setattr(pipe, ARM_SUBJECT_ATTR,
                 tuple(sorted(known.values(), key=lambda s: s.slot)))
     except Exception:  # noqa: BLE001 — a stamp is never worth a failed boot
-        logger.debug("fleet-cells: pipeline refused the arm subject stamp",
+        logger.debug("fleet-compiled graphs: pipeline refused the arm subject stamp",
                      exc_info=True)
 
 
@@ -354,7 +354,7 @@ def arm_identity(
     (family, lane) pair and nothing else, so two `@endpoint` classes sharing
     one ``Compile``, or two slots of one class bound to different
     checkpoints, computed ONE token — one pending, one child, one local-store
-    memo row — and the first of them to arm handed its cell to the others.
+    memo row — and the first of them to arm handed its compiled graph to the others.
 
     Raises :class:`ValueError` when the runtime cannot state a fact (no
     CUDA => no ``sm``): a worker that cannot state its obligation identity
@@ -404,7 +404,7 @@ class PendingSelfMint:
     ``enable_compiled`` returns this on a miss instead of an already-packed
     :class:`SelfMint`: the live pipeline keeps serving eager while the child
     exports, and ``adopt_delegated_mint`` swaps it through the ordinary
-    delivered-cell path once the child's cell earns adoption.
+    delivered-compiled graph path once the child's compiled graph earns adoption.
 
     One instance may be SHARED by several pipelines of one record whose
     facts compute the same obligation identity — which since pgw#1113
@@ -421,15 +421,15 @@ class PendingSelfMint:
 
     family: str
     #: The :class:`ArmIdentity` token (``arm1-…``) — the obligation's
-    #: process-local ledger key and event label, NEVER a cell key
-    #: (pgw#1059): the cell's key exists only once the child's export
+    #: process-local ledger key and event label, NEVER a compiled graph key
+    #: (pgw#1059): the compiled graph's key exists only once the child's export
     #: finishes, and it is the STAMP on the returned artifact.
     arm_token: str
     ref: str
     cfg: Any
     target: Path
     mint_root: Path
-    publisher: Optional["CellPublisher"]
+    publisher: Optional["CompiledGraphPublisher"]
     cache_dir: Optional[Path] = None
     #: pgw#1042/pgw#1059: the parent's computed pre-trace identity, facts
     #: and all. Every fact the parent could state (family, format, lane, sm,
@@ -441,14 +441,14 @@ class PendingSelfMint:
     #: pgw#784: this mint is built by a CHILD PROCESS, so the live pipeline
     #: was never armed and this process holds no capture. The live pipe stays
     #: plain eager until ``adopt_delegated_mint`` swaps it through the
-    #: ordinary delivered-cell path. Always true since pgw#1010 — the
-    #: in-process capture existed only to pack a dynamo cell.
+    #: ordinary delivered-compiled graph path. Always true since pgw#1010 — the
+    #: in-process capture existed only to pack a dynamo compiled graph.
     delegated: bool = True
     #: th#1355: when this mint was ARMED. arm -> finalize is the window the
-    #: compile happens in, so the elapsed time is this cell's mint cost. It is
-    #: reported to the hub at publish-intent and lands on the cell's own
-    #: `cell_store` row, because "what did this cell cost to build" was
-    #: previously answerable only from an activity event that carried no cell
+    #: compile happens in, so the elapsed time is this compiled graph's mint cost. It is
+    #: reported to the hub at publish-intent and lands on the compiled graph's own
+    #: `compiled_graph_store` row, because "what did this compiled graph cost to build" was
+    #: previously answerable only from an activity event that carried no compiled graph
     #: key. Monotonic: a wall-clock step must not turn a mint negative.
     armed_at: float = dataclasses.field(default_factory=time.monotonic)
     _state: Dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -460,24 +460,24 @@ class ArmOutcome:
 
     ``armed`` mirrors the old boolean; ``self_mint`` is set only when the
     arm was satisfied by this worker's OWN mint (never for a delivered
-    cell) — either a :class:`PendingSelfMint` (fresh arm, not yet proven)
+    compiled graph) — either a :class:`PendingSelfMint` (fresh arm, not yet proven)
     or, from callers that already hold a finalized identity, a
     :class:`SelfMint` — letting the executor synthesize the artifact
     selection it records/advertises.
 
-    ``selection_bug`` carries a caught :class:`CellSelectionBugError`
+    ``selection_bug`` carries a caught :class:`CompiledGraphSelectionBugError`
     (th#1031): the th#883 invariant is a self-requested, identity-verified
-    cell that never OUGHT to fail, so it stays a loud, wire-visible event —
-    but a seeded self-cell verdict rules on pre-trace facts only (the
+    compiled graph that never OUGHT to fail, so it stays a loud, wire-visible event —
+    but a seeded self-compiled graph verdict rules on pre-trace facts only (the
     traced graph is not knowable before the arm), so two structurally
     different graphs can legitimately share a verdict and a caught
     instance no longer aborts arming. The caller reports it (ModelEvent /
     pod_events, unchanged) while this same call proceeds to self-mint —
     the ordinary MISS recovery — instead of leaving the pipeline stuck
-    retrying the identical unusable cell on every subsequent request.
+    retrying the identical unusable compiled graph on every subsequent request.
 
     ``eager_reason`` (pgw#824) is the CLASSIFIED token for why this pipeline is
-    not serving from a cell — a :class:`~.cell_adopt.EagerPhase` member, which
+    not serving from a compiled graph — a :class:`~.compiled_graph_adopt.EagerPhase` member, which
     is where that vocabulary is spelled ONCE — the same token the decline's
     ``self_mint_skipped``/``self_mint_started`` event carries in ``phase``, so a
     request row's ``fallback_reason`` and the worker's activity events join on
@@ -489,13 +489,13 @@ class ArmOutcome:
 
     armed: bool
     self_mint: Optional[Any] = None
-    selection_bug: Optional["cc.CellSelectionBugError"] = None
+    selection_bug: Optional["cc.CompiledGraphSelectionBugError"] = None
     eager_reason: str = ""
     #: pgw#923: every ADOPTION attempt this policy made, in order, measured.
     #: A self-mint is not an adoption and never appears here. The caller turns
     #: these into the `ModelEvent{ADOPTED}` / `{FAILED}` the hub already stores
     #: as `kind=compile_cache_adopt` — the one place the wire is owned.
-    adoptions: Tuple[CellAdoption, ...] = ()
+    adoptions: Tuple[CompiledGraphAdoption, ...] = ()
 
     def __bool__(self) -> bool:
         return self.armed
@@ -508,7 +508,7 @@ _COMPLETE_TIMEOUT_S = 30
 # capture may be live at a time; same-token sibling pipes join it.
 _PENDING_LOCK = threading.Lock()
 _PENDING: Dict[str, "PendingSelfMint"] = {}
-# pgw#672: cells this process already finalized (packed + folded into the
+# pgw#672: compiled graphs this process already finalized (packed + folded into the
 # live cache root). A later same-obligation arm re-arms cache_ready from the
 # folded entries instead of opening a SECOND capture — which, with the first
 # mint's compiled code resident in dynamo's in-memory cache, would capture
@@ -516,18 +516,18 @@ _PENDING: Dict[str, "PendingSelfMint"] = {}
 #
 # pgw#1033/pgw#1059: keyed on the ARM TOKEN (`ArmIdentity.token`) — the
 # pre-trace obligation identity the miss path names its pending with — and
-# NOT on the cell's own stamped key, which does not exist until the export
+# NOT on the compiled graph's own stamped key, which does not exist until the export
 # finishes. A ledger written under the stamped key could never be read by
 # the only caller there is: an arm that has computed its obligation and not
 # yet minted anything. The VALUE carries the stamped identity
 # (`SelfMint.compiled_graph_key`/`.ref`) — this map IS the process's
-# arm-token -> stamped-cell index, and the quarantine gate below reads it
+# arm-token -> stamped-compiled graph index, and the quarantine gate below reads it
 # for exactly that.
 _FINALIZED: Dict[str, "SelfMint"] = {}
 
 
 def finalized_in_process(key: str) -> Optional["SelfMint"]:
-    """The cell this process already minted and adopted for ARM token
+    """The compiled graph this process already minted and adopted for ARM token
     ``key`` (:class:`ArmIdentity`; pgw#1033); the returned
     :class:`SelfMint` carries the artifact's own STAMPED key."""
     with _PENDING_LOCK:
@@ -546,7 +546,7 @@ ADOPTION_MARK = "equivalence_adopted"
 CREDENTIAL_EXPIRED_CODE = "worker_credential_expired"
 
 
-class CellPublishRefused(Exception):
+class CompiledGraphPublishRefused(Exception):
     """Typed hub refusal (attestation / trust tier / quota). Terminal for
     this publish attempt — never retried, never fatal to serving.
 
@@ -592,7 +592,7 @@ def _credential_lapse_s(token: str, *, now: float) -> float:
     return max(0.0, now - exp) if exp > 0 else 0.0
 
 
-# th#1645/pgw#987: the blocks a cell's envelope carries that are UNBOUNDED in
+# th#1645/pgw#987: the blocks a compiled graph's envelope carries that are UNBOUNDED in
 # the size of the model, and that the publish declare must therefore not
 # forward.
 #
@@ -600,17 +600,17 @@ def _credential_lapse_s(token: str, *, now: float) -> float:
 # .tar.gz) and is read from there — `guard_closure.load_manifest` opens the
 # tarball, `aot_serve` reads `entries` off the unpacked package. The copy in
 # the declare body had exactly one hub-side reader,
-# `api/cell_receipts.go:242-248`, which hashes it into two `omitempty` audit
+# `api/compiled_graph_receipts.go:242-248`, which hashes it into two `omitempty` audit
 # claims that nothing verifies against anything (the worker parses
 # `manifest_digest`/`fingerprint_digest` into a dataclass field and never
 # reads them) — and the content is already bound by `snapshot_digest`, as
 # that file's own header says.
 #
 # THE MEASUREMENT that makes this a bound and not a preference: on a REAL
-# published sdxl cell (checkpoint sha256:926bc9f5…, artifact 69,045,459 B),
+# published sdxl compiled graph (checkpoint sha256:926bc9f5…, artifact 69,045,459 B),
 # `guard_manifest` alone is 13,092,487 bytes of the 13,377,167-byte metadata
 # — 98%. Everything else together is 285 KB. The declare body therefore grew
-# with the ARTIFACT, and at ~200 MB (a real AOT cell) it crossed the 32 MiB
+# with the ARTIFACT, and at ~200 MB (a real compiled graph) it crossed the 32 MiB
 # route cap and the hub answered 413 thirty-two times.
 _UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
     "guard_manifest",   # JIT lane: per-graph guard closures
@@ -619,13 +619,13 @@ _UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
     "weight_contract",  # per-tensor weight rows
 })
 
-# pgw#904: the pgw#988 declare-contract assert died with `aot_cells`. The
+# pgw#904: the pgw#988 declare-contract assert died with `aot_compiled_graphs`. The
 # declare's worker-side CONSUMER (fetch-and-filter discovery) is deleted —
 # the hub now resolves the exact artifact and names it in `Arm.artifact`, so
 # the declare's reader is the hub, and its contract is enforced there.
 
-# The stated ceiling on a cell's CONTROL-plane declare (§4.24). Measured
-# basis: the same real cell's metadata minus the blocks above is 285 KB, and
+# The stated ceiling on a compiled graph's CONTROL-plane declare (§4.24). Measured
+# basis: the same real compiled graph's metadata minus the blocks above is 285 KB, and
 # the AOT lane's phase table adds tens of KB — so 4 MiB is roughly an order
 # of magnitude of headroom over anything observed, while staying far below
 # the route's 32 MiB.
@@ -634,7 +634,7 @@ _UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
 # re-creates th#1645 exactly — a publish that cannot succeed, discovered as a
 # 413 that names no key, ten minutes into a paid pod. This bound fails on the
 # POD, before the wire, and NAMES the block that broke it.
-CELL_DECLARE_MAX_BYTES = 4 << 20
+COMPILED_GRAPH_DECLARE_MAX_BYTES = 4 << 20
 
 #: The groupable phase a declare-bound refusal reports. Its own token, not the
 #: generic `refused`: this refusal means "someone added an unbounded block to
@@ -644,17 +644,17 @@ COMPILED_GRAPH_DECLARE_OVERSIZE_CODE = "compiled_graph_declare_oversize"
 
 
 def control_plane_metadata(meta: Mapping[str, Any]) -> Dict[str, Any]:
-    """The bounded subset of a cell envelope the publish declare may carry.
+    """The bounded subset of a compiled graph envelope the publish declare may carry.
 
-    The seam carries CONTROL, not DATA (pgw#763/#783). A cell's bulk envelope
+    The seam carries CONTROL, not DATA (pgw#763/#783). A compiled graph's bulk envelope
     is data: it rides the artifact, over presigned PUTs, digest-bound. What
-    the hub actually selects a cell on — family, key, sm, sku, image digest,
+    the hub actually selects a compiled graph on — family, key, sm, sku, image digest,
     gen_worker version, lane — reaches it on the publish-INTENT call and is
-    stored in `cell_store`'s own columns; none of it is read back out of this
+    stored in `compiled_graph_store`'s own columns; none of it is read back out of this
     dict.
 
-    Raises :class:`CellPublishRefused` when what survives still exceeds
-    :data:`CELL_DECLARE_MAX_BYTES`, naming the largest surviving key — a new
+    Raises :class:`CompiledGraphPublishRefused` when what survives still exceeds
+    :data:`COMPILED_GRAPH_DECLARE_MAX_BYTES`, naming the largest surviving key — a new
     unbounded block must be a named refusal here, not a 413 later.
     """
     kept = {
@@ -662,21 +662,21 @@ def control_plane_metadata(meta: Mapping[str, Any]) -> Dict[str, Any]:
         if v is not None and k not in _UNBOUNDED_ENVELOPE_BLOCKS
     }
     encoded = len(json.dumps(kept, sort_keys=True, default=str).encode())
-    if encoded > CELL_DECLARE_MAX_BYTES:
+    if encoded > COMPILED_GRAPH_DECLARE_MAX_BYTES:
         widest = max(
             kept,
             key=lambda k: len(json.dumps(kept[k], sort_keys=True, default=str)),
             default="")
-        raise CellPublishRefused(
-            f"cell declare is {encoded} bytes, over the "
-            f"{CELL_DECLARE_MAX_BYTES}-byte control-plane bound (th#1645); "
+        raise CompiledGraphPublishRefused(
+            f"compiled graph declare is {encoded} bytes, over the "
+            f"{COMPILED_GRAPH_DECLARE_MAX_BYTES}-byte control-plane bound (th#1645); "
             f"the largest block is {widest!r} — it belongs in the artifact, "
             "not in the declare",
             code=COMPILED_GRAPH_DECLARE_OVERSIZE_CODE)
     return kept
 
 
-#: The hub's bound on one intent batch (``maxCellPublishEntries``). Over it the
+#: The hub's bound on one intent batch (``maxCompiledGraphPublishEntries``). Over it the
 #: hub refuses the WHOLE batch by name, so splitting late would cost every
 #: entry's grant to learn the number.
 MAX_PUBLISH_ENTRIES = 256
@@ -746,7 +746,7 @@ class PublishIntentBatch:
     family: str
     grants: Tuple[PublishGrant, ...]
 
-class CellPublisher:
+class CompiledGraphPublisher:
     """The fleet publish sink: intent -> commit flow -> complete.
 
     ``base_url`` is the hub base the worker already uses for its other
@@ -788,17 +788,17 @@ class CellPublisher:
         # holds no worker JWT, so the parent makes the attested-intent call and
         # returns the KEY-PINNED capability token, which is a short-TTL,
         # least-authority grant the child is explicitly allowed to hold. The
-        # cell bytes still go child -> CAS directly under that token: the seam
+        # compiled graph bytes still go child -> CAS directly under that token: the seam
         # carries control, not data.
         # Read the credential ONCE: the bearer we present and the bearer whose
         # expiry we blame must be the same string, or a rotation landing
         # mid-call makes the diagnosis describe a token we never sent.
         bearer = self._worker_jwt()
-        # pgw#1087: the worker<->hub cell control-plane round trip, timed.
-        # There is NO worker-side key LOOKUP to measure — pgw#904 moved cell
+        # pgw#1087: the worker<->hub compiled graph control-plane round trip, timed.
+        # There is NO worker-side key LOOKUP to measure — pgw#904 moved compiled graph
         # resolution to the hub (`Arm.artifact`) and pgw#1032 deleted
         # `StateDelta.cell_lookups` — so these publish legs are the whole of
-        # the hub RTT a boot's cell path pays, and the issue's "hub key lookup
+        # the hub RTT a boot's compiled graph path pays, and the issue's "hub key lookup
         # round-trip" line is closed by naming that rather than by inventing a
         # phase with no producer (the pgw#924 rule).
         with boot_mod.span(
@@ -823,7 +823,7 @@ class CellPublisher:
         if resp.status_code in (403, 429):
             # Typed refusals (cell_publish_forged_axis, _untrusted_tier,
             # _quota_exceeded, _family_undeclared): terminal by design.
-            raise CellPublishRefused(
+            raise CompiledGraphPublishRefused(
                 f"{path} refused ({resp.status_code}): {resp.text[:300]}",
                 status=resp.status_code, code=code)
         if resp.status_code < 200 or resp.status_code >= 300:
@@ -861,19 +861,19 @@ class CellPublisher:
         differ between entries of one mint, and accepting them per entry would
         invite a body claiming two SKUs for one pod and make the hub choose.
 
-        Raises :class:`CellPublishRefused` / :class:`HubPublishError` for a
+        Raises :class:`CompiledGraphPublishRefused` / :class:`HubPublishError` for a
         WHOLE-BATCH refusal. A per-entry refusal is not a raise: it is a grant
         with ``status="condemned"``, so one quarantined key does not throw away
         35 siblings whose bytes have not moved.
         """
         asked = tuple(entries)
         if not family.strip():
-            raise CellPublishRefused("publish-intent requires a family")
+            raise CompiledGraphPublishRefused("publish-intent requires a family")
         if not asked:
-            raise CellPublishRefused(
+            raise CompiledGraphPublishRefused(
                 "publish-intent requires a non-empty entries[]")
         if len(asked) > MAX_PUBLISH_ENTRIES:
-            raise CellPublishRefused(
+            raise CompiledGraphPublishRefused(
                 f"this batch names {len(asked)} entries and the bound is "
                 f"{MAX_PUBLISH_ENTRIES}; split it rather than receiving a "
                 f"short answer that reads as entries nobody asked to publish")
@@ -881,18 +881,18 @@ class CellPublisher:
         for i, entry in enumerate(asked):
             key = entry.compiled_graph_key
             if not is_compiled_graph_key(key):
-                raise CellPublishRefused(
+                raise CompiledGraphPublishRefused(
                     f"entries[{i}].compiled_graph_key is {key!r}, which is not a "
                     f"compiled-graph key")
             if key in seen:
                 # Answers are positional; a collapsed duplicate would shift
                 # every later answer against its entry.
-                raise CellPublishRefused(
+                raise CompiledGraphPublishRefused(
                     f"entries[{i}] repeats entries[{seen[key]}]'s key {key}")
             seen[key] = i
             for axis in REQUIRED_AXES:
                 if not str(entry.identity_axes.get(axis) or "").strip():
-                    raise CellPublishRefused(
+                    raise CompiledGraphPublishRefused(
                         f"entries[{i}].identity_axes states no {axis!r}; an "
                         f"entry that cannot restate all of (graph, sm, "
                         f"toolchain) cannot restate its own key, and a row "
@@ -976,14 +976,14 @@ class CellPublisher:
             repo=repo, family=family, grants=tuple(grants))
 
     def publish(self, family: str, artifact: Path, meta: dict,
-                provenance: local_cell_store.MintProvenance,
+                provenance: local_compiled_graph_store.MintProvenance,
                 mint_duration_ms: int = 0) -> str:
         """Publish ONE self-minted compiled graph. Returns the checkpoint id.
 
         Steps: attested intent (worker JWT; hub corroborates the axes and mints
         a key-pinned capability token) -> the CHUNKED SHA-256 publish (declare
         -> {have, need} -> PUT -> complete; mode=replace, no release — the hub
-        refuses a release under the cell claim anyway) -> publish-complete
+        refuses a release under the compiled graph claim anyway) -> publish-complete
         bookkeeping. Raises on any failure; the caller treats every raise as
         non-fatal to serving.
 
@@ -1014,7 +1014,7 @@ class CellPublisher:
         """
         key = grant.compiled_graph_key
         if not grant.granted:
-            raise CellPublishRefused(
+            raise CompiledGraphPublishRefused(
                 grant.detail or f"the hub refused to admit {key}",
                 code="compiled_graph_publish_key_condemned")
         try:
@@ -1022,15 +1022,15 @@ class CellPublisher:
                 COMPILED_GRAPH_NO_RELEASE, CommitFile, HubClient)
 
             # th#1303/pgw#807 item 3 — THE FLIP, taken. Both gates that held
-            # it are discharged: th#1340 gave the v2 route the cell-publish
-            # claim (receipt + `cell_store` + `cell_receipts`, the same three
+            # it are discharged: th#1340 gave the v2 route the compiled graph-publish
+            # claim (receipt + `compiled_graph_store` + `compiled_graph_receipts`, the same three
             # writes v1 does), and the receipt reader dispatches on the
-            # receipt's OWN algorithm tag, so a sha256-bound cell resolves.
-            # The v1 (blake3) route is FROZEN hub-side — it answers a cell
+            # receipt's OWN algorithm tag, so a sha256-bound compiled graph resolves.
+            # The v1 (blake3) route is FROZEN hub-side — it answers a compiled graph
             # publish with 410 `unsupported_digest_algorithm` — so this is
-            # the only transport a cell can ship over at all.
+            # the only transport a compiled graph can ship over at all.
             #
-            # What v2 buys a 40 MB cell beyond being accepted: the digest is
+            # What v2 buys a 40 MB compiled graph beyond being accepted: the digest is
             # signed into each presigned PUT, so R2 itself refuses bytes that
             # do not hash to the key; and resume needs no client state — a
             # re-plan comes back with the landed objects already resident, so
@@ -1045,9 +1045,9 @@ class CellPublisher:
                 # selects it by the endpoint's compiled_graph_store row and
                 # answers `release_forbidden` to a body that names one.
                 release=COMPILED_GRAPH_NO_RELEASE,
-                # pgw#1159: the cell key is NOT a publish-body field. It is
-                # the capability token's cell claim (th#1340) — the hub
-                # derives the cell identity there and refuses a body that
+                # pgw#1159: the compiled graph key is NOT a publish-body field. It is
+                # the capability token's compiled graph claim (th#1340) — the hub
+                # derives the compiled graph identity there and refuses a body that
                 # states one.
                 # th#1645: CONTROL only. The bulk envelope is in the artifact.
                 metadata=control_plane_metadata(meta),
@@ -1080,7 +1080,7 @@ class CellPublisher:
             timeout=_COMPLETE_TIMEOUT_S,
         )
         logger.info(
-            "fleet-cells: published %s#%s (checkpoint %s, %.1f MB, "
+            "fleet-compiled graphs: published %s#%s (checkpoint %s, %.1f MB, "
             "%d uploaded / %d resident)",
             family, key, checkpoint_id, artifact.stat().st_size / 1e6,
             result.uploaded, result.deduped)
@@ -1088,7 +1088,7 @@ class CellPublisher:
 
 
 def intent_entry(
-    family: str, meta: dict, provenance: local_cell_store.MintProvenance,
+    family: str, meta: dict, provenance: local_compiled_graph_store.MintProvenance,
     mint_duration_ms: int = 0,
 ) -> Tuple[PublishEntry, str, str]:
     """One artifact + its mint provenance -> the entry and the two pod axes.
@@ -1104,16 +1104,16 @@ def intent_entry(
     somebody else's bytes.
     """
     # pgw#712 (kept under the exact-identity ruling as defense-in-depth): a
-    # cell whose metadata carries a foreign adoption provenance must never
+    # compiled graph whose metadata carries a foreign adoption provenance must never
     # republish under this worker's key. Nothing in-tree stamps the mark
     # anymore (equivalence adoption was deleted with exact identity); a marked
-    # cell can only be a foreign/hand-copied artifact — refuse it. It sits HERE
+    # compiled graph can only be a foreign/hand-copied artifact — refuse it. It sits HERE
     # because this is what every publisher runs BEFORE the intent: the fence
     # has to refuse before a byte moves and before the hub is even asked.
     mark = meta.get(ADOPTION_MARK)
     if mark:
-        raise CellPublishRefused(
-            f"cell carries adoption provenance {mark!r}; republishing "
+        raise CompiledGraphPublishRefused(
+            f"compiled graph carries adoption provenance {mark!r}; republishing "
             "it is fenced (pgw#712)")
     key = str(meta.get("compiled_graph_key") or "").strip()
     if not key:
@@ -1136,7 +1136,7 @@ def _publish_leg(family: str, key: str, stage: str, facts: Dict[str, Any]) -> No
     until now it emitted exactly two things: `started` and a terminus. "Ships
     40 MB" and "was refused before a byte moved" were therefore the same
     observation for as long as the thread lived — and the ONE run in program
-    history that reached a cell publish spent a whole L4 mint to learn that
+    history that reached a compiled graph publish spent a whole L4 mint to learn that
     distinction from a stack trace. Each leg is one wire event, so
     `worker_activity_events` can answer where a publish stopped.
     """
@@ -1167,14 +1167,14 @@ def _publish_failure_phase(exc: BaseException) -> str:
 #: pgw#1046: the published entry carrying the artifact's
 #: ``combined_graph_hash`` — the value pgw#903's pre-dlopen fence compares
 #: against ``Arm.graph_contract_digest``, and the key tensorhub's producer
-#: reads (``runattempt.ArmFromVerifiedCell``, `axisGraphContract`). Since
+#: reads (``runattempt.ArmFromVerifiedCompiledGraph``, `axisGraphContract`). Since
 #: pgw#1059 its value IS the ``graph`` key axis; the hub-consumed entry NAME
 #: is deliberately unchanged (a wire rename needs a paired tensorhub change).
 GRAPH_CONTRACT_AXIS = "graph_contract"
 
 #: pgw#1059: the published NON-KEY entry carrying the artifact's env-seal
 #: digest. The seal left the key (amendment 4 — its declaration folds into
-#: the ``toolchain`` axis), but the hub's ``ArtifactFromCellRecord`` reads
+#: the ``toolchain`` axis), but the hub's ``ArtifactFromCompiledGraphRecord`` reads
 #: this entry to build ``ArtifactIdentity.env_seal_digest``, which pgw#904's
 #: consumer requires — so it rides the map as a wire fact, exactly like
 #: ``graph_contract``.
@@ -1182,38 +1182,38 @@ ENV_SEAL_AXIS = "env_seal"
 
 
 def _recomputed_key(meta: Mapping[str, Any]) -> tcg_identity.CompiledGraphKey:
-    """The key this cell's OWN recorded facts describe.
+    """The key this compiled graph's OWN recorded facts describe.
 
-    One derivation for the whole publish path, so the key a cell is
+    One derivation for the whole publish path, so the key a compiled graph is
     published UNDER and the axes it is published WITH can never come from
     two different derivations of its metadata. Only exported
-    (``aot-inductor``) cells have identity (pgw#1010/pgw#1059) — any other
+    (``aot-inductor``) compiled graphs have identity (pgw#1010/pgw#1059) — any other
     kind is refused here by the derivation itself.
     """
     try:
         return tcg_identity.from_artifact_metadata(meta)
     except tcg_identity.IdentityError as exc:
-        raise CellPublishRefused(
-            f"cell states no computable identity ({exc}); publishing it under "
+        raise CompiledGraphPublishRefused(
+            f"compiled graph states no computable identity ({exc}); publishing it under "
             "partial axes would produce a row the fleet cannot arm from "
             "(pgw#1046)") from exc
 
 
 def _identity_axes(
-    family: str, meta: dict, provenance: local_cell_store.MintProvenance,
+    family: str, meta: dict, provenance: local_compiled_graph_store.MintProvenance,
 ) -> Dict[str, str]:
-    """The identity map the hub records for this cell: the artifact's own key
+    """The identity map the hub records for this compiled graph: the artifact's own key
     axes, plus the MINT's recorded provenance for everything else.
 
     This is not inventory. th#1457's producer builds the worker's
-    ``ExecutionSpec`` out of exactly this map: ``ArtifactFromCellRecord`` reads
-    ``toolchain`` and ``env_seal`` from it, ``ArmFromVerifiedCell`` reads
+    ``ExecutionSpec`` out of exactly this map: ``ArtifactFromCompiledGraphRecord`` reads
+    ``toolchain`` and ``env_seal`` from it, ``ArmFromVerifiedCompiledGraph`` reads
     ``graph_contract``, and pgw#904's landed consumer REFUSES an
     ``ArtifactIdentity`` missing any of them. A row published without them is a
-    cell the fleet can never arm.
+    compiled graph the fleet can never arm.
 
     So this FAILS CLOSED (pgw#1046): a mint that cannot name an axis raises
-    :class:`CellPublishRefused` here, before a byte moves.
+    :class:`CompiledGraphPublishRefused` here, before a byte moves.
 
     Contents (pgw#1176): the three cg-key-v1 key axes (``graph``, ``sm``,
     ``toolchain``) verbatim, plus the wire facts the hub requires by name
@@ -1230,31 +1230,31 @@ def _identity_axes(
 
     pgw#1341 — WHERE EACH HALF COMES FROM, and why it is two sources and not
     one. The three key axes are recomputed FROM THE ARTIFACT, because the
-    artifact is what the key is about and a cell must corroborate its own
-    identity. Everything else is read from :class:`~.local_cell_store.MintProvenance`,
+    artifact is what the key is about and a compiled graph must corroborate its own
+    identity. Everything else is read from :class:`~.local_compiled_graph_store.MintProvenance`,
     because TCG's closed vocabulary has no field for any of it — this function
     read ``env_seal``, ``manifest_digest``, ``family`` and ``weight_lane`` off
     the metadata dict, and since pgw#1270 mints every artifact through TCG,
-    that made the seal check raise for EVERY real cell, unconditionally: a pod
+    that made the seal check raise for EVERY real compiled graph, unconditionally: a pod
     that armed its own graph still could not hand it to the fleet, so every pod
     re-minted what one pod had already compiled.
     """
     key = _recomputed_key(meta)
     stamped = str(meta.get("compiled_graph_key") or "").strip()
     if stamped and stamped != key.value:
-        raise CellPublishRefused(
+        raise CompiledGraphPublishRefused(
             f"compiled_graph_key stamp {stamped} disagrees with the key its recorded "
             f"axes describe ({key.value}); refusing to publish an identity "
             "the artifact does not corroborate")
     if not provenance.stated:
         # NARROWED, not deleted (pgw#939: absence is a verdict). The refusal
-        # used to fire on a metadata field no cell can carry — i.e. always.
+        # used to fire on a metadata field no compiled graph can carry — i.e. always.
         # It now fires on the genuine case it was written for: this machine
         # holds bytes it cannot say anything about, which is what a publish
-        # under invented axes would hide. The hub's ArtifactFromCellRecord
+        # under invented axes would hide. The hub's ArtifactFromCompiledGraphRecord
         # requires the seal digest and pgw#904's consumer refuses an identity
-        # without it, so a row published here is a cell the fleet can never arm.
-        raise CellPublishRefused(
+        # without it, so a row published here is a compiled graph the fleet can never arm.
+        raise CompiledGraphPublishRefused(
             f"this machine recorded no mint provenance for {key.value}; the "
             "hub's ArtifactIdentity requires the env-seal digest "
             "(pgw#903/pgw#1046) and a TCG artifact carries none, so the "
@@ -1270,9 +1270,9 @@ def _identity_axes(
     return axes
 
 
-#: pgw#815: publishes currently in flight, keyed by cell key. A self-mint
+#: pgw#815: publishes currently in flight, keyed by compiled graph key. A self-mint
 #: publish is a fire-and-forget daemon thread, so an interrupted upload used
-#: to leave NO trace anywhere: no cell row, no receipt, no event, no error —
+#: to leave NO trace anywhere: no compiled graph row, no receipt, no event, no error —
 #: the pod paid a 24-minute compile and reported success. This registry makes
 #: an in-flight publish an observable fact that :func:`publishes_in_flight`
 #: (drain/shutdown) and the executor's terminus assertion can both see.
@@ -1282,16 +1282,16 @@ _IN_FLIGHT: Dict[str, Tuple[str, float]] = {}
 # th#1359's SETTLED half of this ledger (`_PUBLISHED` / `_REFUSED` and their
 # two accessors) is DELETED with the mint-only pod class (§4.28 / pgw#1092).
 # Its only reader was the mint-goal driver, which had to answer "did this pod
-# produce a cell for the fleet" before retiring itself; a serving pod never
+# produce a compiled graph for the fleet" before retiring itself; a serving pod never
 # retires and never asks. Every write it recorded is already a typed activity event the hub
 # receives (`self_mint_publish` / `self_mint_publish_failed` + `phase=`), so
 # nothing observable was lost — only an in-process duplicate of it.
 
 #: pgw#848 item 1 / th#1359: a monotonic counter of DURABLE publish progress.
-#: It advances when a NEW cell key begins uploading and when one lands — never
+#: It advances when a NEW compiled graph key begins uploading and when one lands — never
 #: on a retry, never on a failure, never on "a message arrived". That
 #: restriction is the whole design: the mint's activity stays RUNNING until the
-#: cell is durable, and a publish that fails and retries forever must therefore
+#: compiled graph is durable, and a publish that fails and retries forever must therefore
 #: read as NOT PROGRESSING, or the fix is worse than the bug it closes (a
 #: never-reap loop on a paid card with no attendant, which is exactly why
 #: `self_mint_publish` was refused as a podguard progress KIND).
@@ -1324,12 +1324,12 @@ def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
 
 
 def _publish_async(
-    publisher: CellPublisher, family: str, artifact: Path, meta: dict,
-    provenance: local_cell_store.MintProvenance,
+    publisher: CompiledGraphPublisher, family: str, artifact: Path, meta: dict,
+    provenance: local_compiled_graph_store.MintProvenance,
     compiled_graph_key_digest: str = "", mint_duration_ms: int = 0,
     arm_token: str = "",
 ) -> threading.Thread:
-    """Ship an ALREADY-DURABLE cell in the background (pgw#1183 / §1.5).
+    """Ship an ALREADY-DURABLE compiled graph in the background (pgw#1183 / §1.5).
 
     EVERY outcome is a typed event now (pgw#815), success included: this
     boundary used to emit only on failure, so "published" and "the thread was
@@ -1340,7 +1340,7 @@ def _publish_async(
     ever touched the only copy of a mint — the bytes lived under the mint root
     and a ``finally`` rmtree'd them on every exit path, so one
     ``connection reset`` destroyed a 1 h 37 m mint, and the event text conceded
-    it in as many words (*"this pod must survive the upload or the cell is
+    it in as many words (*"this pod must survive the upload or the compiled graph is
     lost"*). It is now a transfer FROM the local CAS: ``artifact`` is the
     store's own path, no path here is ever removed, the thread is not a daemon
     (the upload is bounded by the transport's own timeouts, so waiting for it
@@ -1371,18 +1371,18 @@ def _publish_async(
         try:
             checkpoint_id = publisher.publish(
                 family, artifact, meta, provenance, mint_duration_ms)
-        except CellPublishRefused as exc:
-            logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
+        except CompiledGraphPublishRefused as exc:
+            logger.warning("fleet-compiled graphs: publish refused (hub decision): %s", exc)
             # pgw#1096/§4.28: the hub has just ASSERTED this hardware's trust
             # class. Learn it — the worker never declares its own, the hub is
             # the only authority. pgw#1183 deleted the SALVAGE that stood here
-            # (a `store` racing the `finally`'s rmtree): the cell was already
+            # (a `store` racing the `finally`'s rmtree): the compiled graph was already
             # written to the local CAS before it armed, so an untrusted
             # machine's next boot finds it whatever the hub says, and th#1643's
             # SUNK case cannot recur through this path or any other.
-            local_cell_store.note_refusal(
+            local_compiled_graph_store.note_refusal(
                 str(getattr(exc, "code", "") or ""), str(exc))
-            _mark_publish(key, local_cell_store.SINK_REFUSED)
+            _mark_publish(key, local_compiled_graph_store.SINK_REFUSED)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: hub refused the publish: {exc}",
@@ -1397,13 +1397,13 @@ def _publish_async(
             # The bytes are durable, the record stays `pending`, and this
             # machine's next boot re-attempts the upload from them.
             logger.warning(
-                "fleet-cells: publish failed; the cell stays durable in this "
+                "fleet-compiled graphs: publish failed; the compiled graph stays durable in this "
                 "machine's local CAS and the upload is retried next boot",
                 exc_info=True)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: publish attempt failed: "
-                f"{type(exc).__name__}: {exc}; the cell is durable locally "
+                f"{type(exc).__name__}: {exc}; the compiled graph is durable locally "
                 f"and the upload is still owed",
                 # The hub's OWN code when it gave one, so a fleet-wide
                 # refusal is one `phase=` group instead of N prose strings.
@@ -1411,7 +1411,7 @@ def _publish_async(
             )
         else:
             _note_durable(key, "published")
-            _mark_publish(key, local_cell_store.SINK_DELIVERED)
+            _mark_publish(key, local_compiled_graph_store.SINK_DELIVERED)
             activity_mod.emit_event(
                 "self_mint_publish",
                 f"family={family} key={key} checkpoint={checkpoint_id}: "
@@ -1427,8 +1427,8 @@ def _publish_async(
     # with no unwinding, which is how an upload became "the pod must survive
     # it". Each publish call is bounded by the transport's own request
     # timeouts, so a graceful exit finishes the transfer instead of abandoning
-    # it — and a hard kill costs a retry, not the cell.
-    t = threading.Thread(target=run, name="cell-publish", daemon=False)
+    # it — and a hard kill costs a retry, not the compiled graph.
+    t = threading.Thread(target=run, name="compiled graph-publish", daemon=False)
     t.start()
     return t
 
@@ -1436,11 +1436,11 @@ def _publish_async(
 def _mark_publish(key: str, state: str) -> None:
     """Record an upload's outcome beside the bytes it uploaded (pgw#1183)."""
     if is_compiled_graph_key(key):
-        local_cell_store.mark(key, sink=state)
+        local_compiled_graph_store.mark(key, sink=state)
 
 
 def resume_owed_publishes(
-    publisher: Optional[CellPublisher],
+    publisher: Optional[CompiledGraphPublisher],
     cas_root: Optional[Path] = None,
 ) -> List[threading.Thread]:
     """Re-attempt every upload this machine still OWES (pgw#1183 / §1.5).
@@ -1448,10 +1448,10 @@ def resume_owed_publishes(
     The cross-boot half of "publish is a retryable background transfer from
     durable bytes, surviving process death and pod retirement". A pod that
     died mid-upload, was retired mid-upload, or hit a transport failure left
-    its cell ADMITTED and its record ``pending``; this reads them back and
+    its compiled graph ADMITTED and its record ``pending``; this reads them back and
     ships them, at boot, off the critical path.
 
-    A machine with no sink owes nothing — cozy-local's cells are recorded
+    A machine with no sink owes nothing — cozy-local's compiled graphs are recorded
     ``none`` at store time, so this is empty there by construction rather than
     by a check on the trust class.
     """
@@ -1459,21 +1459,21 @@ def resume_owed_publishes(
         return []
     threads: List[threading.Thread] = []
     in_flight = set(publishes_in_flight())
-    for cell in local_cell_store.cells_owed_to_sink():
+    for graph in local_compiled_graph_store.compiled_graphs_owed_to_sink():
         # The sink is rebuilt on every HelloAck, so this runs on reconnects
         # too. A key whose upload is already running is owed nothing more.
-        if cell.key in in_flight:
+        if graph.key in in_flight:
             continue
         # pgw#1283 criterion 5: the SCAN above is metadata-only — sidecar reads
-        # and nothing else — and the bytes are materialized only for the cells
+        # and nothing else — and the bytes are materialized only for the compiled graphs
         # this actually ships. An owed scan that exported every resident
         # artifact would make "is anything owed?" cost as much as sending it.
-        artifact = local_cell_store.materialize(cell.key, cas_root=cas_root)
+        artifact = local_compiled_graph_store.materialize(graph.key, cas_root=cas_root)
         if artifact is None:
             logger.warning(
-                "fleet-cells: %s is owed to the sink but its bytes are not "
+                "fleet-compiled graphs: %s is owed to the sink but its bytes are not "
                 "resolvable from this machine's CAS; the obligation stands and "
-                "a later boot re-attempts it", cell.key)
+                "a later boot re-attempts it", graph.key)
             continue
         meta = artifact_meta.try_read_metadata(artifact) or {}
         # pgw#1341: the MINT's own facts, read back from the sidecar the mint
@@ -1483,13 +1483,13 @@ def resume_owed_publishes(
         # refused by name inside the publish, not published under this
         # machine's guesses.
         threads.append(_publish_async(
-            publisher, cell.family,
-            artifact, dict(meta), cell.provenance,
-            compiled_graph_key_digest=cell.key,
-            arm_token=cell.arm_token))
+            publisher, graph.family,
+            artifact, dict(meta), graph.provenance,
+            compiled_graph_key_digest=graph.key,
+            arm_token=graph.arm_token))
     if threads:
         logger.info(
-            "fleet-cells: re-attempting %d owed cell upload(s) from this "
+            "fleet-compiled graphs: re-attempting %d owed compiled graph upload(s) from this "
             "machine's local CAS — each survived the process that minted it",
             len(threads))
     return threads
@@ -1512,7 +1512,7 @@ def delegation_refusal(pipe: Any, cfg: Any) -> str:
     a category error and it was the operative cause of AOT being unmintable on
     every lane: the plain lane is held on dynamo by #730, and w8a8 — the lane
     Paul ruled AOT-first — was refused a delegated minter here, so the miss
-    fell back to a dynamo cell that AOT discovery can never adopt. A w8a8
+    fell back to a dynamo compiled graph that AOT discovery can never adopt. A w8a8
     pipeline serves eager perfectly well (``_Fp8ScaledLinear.forward`` is a
     complete ``torch._scaled_mm`` forward; the fleet's own cold-boot ladder
     measures it; pgw#672/#673 already made mandatory lanes DEGRADE to eager
@@ -1522,7 +1522,7 @@ def delegation_refusal(pipe: Any, cfg: Any) -> str:
     `Compile.regional` (the dynamo/JIT per-block knob, ie#381) is NOT a
     refusal here: since pgw#846 the AOT mint is always whole-graph and
     ignores it. A family with no registered EXPORT declaration cannot mint an
-    aot-inductor cell at all, and ``mint_recipe`` declines that by its own
+    aot-compiled graph at all, and ``mint_recipe`` declines that by its own
     name.
     """
     try:
@@ -1542,8 +1542,8 @@ def _arm_candidate(
     ref: str,
     snapshot_digest: str,
     artifact_kind: str,
-) -> Tuple[AdoptOutcome, CellAdoption]:
-    """Arm ONE candidate cell, measured, and record the boot phase for it.
+) -> Tuple[AdoptOutcome, CompiledGraphAdoption]:
+    """Arm ONE candidate compiled graph, measured, and record the boot phase for it.
 
     pgw#923/#924. The `cell_arm` boot span and the adoption's `duration_ms`
     bracket the same interval, taken in the one place that does the arming, so
@@ -1551,7 +1551,7 @@ def _arm_candidate(
     what an arm cost. `cell_arm` was a DECLARED boot phase with no producer at
     all until this call site existed.
     """
-    # A CANDIDATE must exist for this to be a cell arm. `provision.
+    # A CANDIDATE must exist for this to be a compiled graph arm. `provision.
     # enable_compiled` with no artifact also covers the seeded and ALLOW_COLD
     # inductor lanes, and bracketing those would put a near-zero `cell_arm` row
     # on every compile-declaring boot — the same "a default that reads as a
@@ -1583,16 +1583,16 @@ def _arm_candidate(
         span.close()
     if outcome.armed:
         # pgw#1087: the SECOND user-visible timestamp. Deliberately NOT gated
-        # on `in_boot()` — a self-minted cell routinely arms twenty minutes
+        # on `in_boot()` — a self-minted compiled graph routinely arms twenty minutes
         # after the boot closed, and "how long did this pod serve eager before
-        # its cell arrived" is the question the compiled-serving campaign is
+        # its compiled graph arrived" is the question the compiled-serving campaign is
         # about. Recorded once per process: the interval is measured from
         # process start, so a re-arm hours later is not a second answer to it.
         boot_mod.mark_once(
             boot_mod.PHASE_COMPILED_SWAP,
             ref=ref, artifact_kind=artifact_kind, artifact_key=snapshot_digest,
             detail=outcome.identity)
-    return outcome, CellAdoption(
+    return outcome, CompiledGraphAdoption(
         ref=ref,
         snapshot_digest=snapshot_digest,
         artifact_kind=artifact_kind,
@@ -1609,7 +1609,7 @@ def enable_compiled(
     cfg: Any,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
-    publisher: Optional[CellPublisher] = None,
+    publisher: Optional[CompiledGraphPublisher] = None,
     delegate: Optional[bool] = None,
     delivered_ref: str = "",
     delivered_digest: str = "",
@@ -1627,14 +1627,14 @@ def enable_compiled(
     if serve_posture.eager_only():
         # pgw#1142 / §4.32 item 4. `arming_block` would refuse every arm below
         # anyway, but the policy would first resolve, download and materialize
-        # a cell to hand to a gate that has already decided — and on a MISS it
+        # a compiled graph to hand to a gate that has already decided — and on a MISS it
         # would open a self-mint whose child re-derives the refusal minutes and
         # a full compile later. The order is answered where it costs nothing,
         # and it is answered with a token, not a bare False.
-        logger.info("fleet-cells: %s", serve_posture.block())
+        logger.info("fleet-compiled graphs: %s", serve_posture.block())
         return ArmOutcome(
             armed=False, eager_reason=EagerPhase.OPERATOR_EAGER_ONLY)
-    adoptions: List[CellAdoption] = []
+    adoptions: List[CompiledGraphAdoption] = []
     outcome = _arming_policy(
         pipe, cfg, cache_dir, artifact,
         publisher=publisher, delegate=delegate,
@@ -1741,7 +1741,7 @@ def arm_ordered(
     if not receipts.configured():
         raise OrderedArmError(
             "receipt_gate_unconfigured",
-            "an ordered cell arm requires the hub receipt gate; this process "
+            "an ordered compiled graph arm requires the hub receipt gate; this process "
             "has no hub wiring to verify the publisher against")
     try:
         receipt = receipts.verify_delivered_artifact(Path(artifact), family)
@@ -1770,7 +1770,7 @@ def arm_ordered(
             cc.drop_lora_execution_lane(pipe)
         raise
     arm_ms = int(round(max(0.0, time.monotonic() - started) * 1000.0))
-    row = CellAdoption(
+    row = CompiledGraphAdoption(
         ref=delivered_ref,
         snapshot_digest=delivered_digest,
         artifact_kind=ARTIFACT_KIND,
@@ -1785,7 +1785,7 @@ def arm_ordered(
             cc.drop_lora_execution_lane(pipe)
         raise OrderedArmError(
             outcome.reason or "ordered_arm_refused",
-            f"the named cell did not arm: {outcome.detail or outcome.identity}")
+            f"the named compiled graph did not arm: {outcome.detail or outcome.identity}")
     return ArmOutcome(armed=True, adoptions=(row,))
 
 
@@ -1795,14 +1795,14 @@ def _arming_policy(
     cache_dir: Optional[Path],
     artifact: Optional[Path],
     *,
-    publisher: Optional[CellPublisher],
+    publisher: Optional[CompiledGraphPublisher],
     delegate: Optional[bool],
     delivered_ref: str,
     delivered_digest: str,
-    adoptions: List[CellAdoption],
+    adoptions: List[CompiledGraphAdoption],
     boot_local_key: str = "",
 ) -> ArmOutcome:
-    """Fleet arming policy (gw#587): delivered cell first, self-mint on miss.
+    """Fleet arming policy (gw#587): delivered compiled graph first, self-mint on miss.
 
     ``delivered_ref``/``delivered_digest`` name the HUB-attached candidate.
     They are the identity the hub fences an adoption on, they are known only to
@@ -1811,27 +1811,27 @@ def _arming_policy(
     appended to ``adoptions``, measured.
 
     Replaces the executor's bare ``provision.enable_compiled`` call. HIT
-    keeps today's semantics for a genuine match. A ``CellSelectionBugError``
-    (th#1031: a self-requested, identity-verified cell that STILL refuses to
+    keeps today's semantics for a genuine match. A ``CompiledGraphSelectionBugError``
+    (th#1031: a self-requested, identity-verified compiled graph that STILL refuses to
     arm — the seeded verdict rules on pre-trace facts, so two structurally
     different graphs can legitimately share one) no longer aborts arming: it
     is captured onto the returned :class:`ArmOutcome` for the caller to
     report loudly (unchanged wire event), and this call falls through to
     self-mint exactly like an ordinary miss — a live worker must recover
     into a working compiled state instead of retrying the identical
-    unusable cell forever. MISS self-mints and serves compiled; the ONLY
+    unusable compiled graph forever. MISS self-mints and serves compiled; the ONLY
     remaining eager/fail-closed exits are genuine mint impossibilities (no
     CUDA, no C toolchain, the mint itself failing), where plain lanes serve
     eager and quantized lanes keep their typed refusal — exactly the
     cozy-local store policy.
 
-    Returns :class:`ArmOutcome`; ``self_mint`` carries the minted cell's
+    Returns :class:`ArmOutcome`; ``self_mint`` carries the minted compiled graph's
     identity so the caller can record/advertise it (serving-bootstrap half
     of th#910 — the hub's self-attested fence needs the worker to claim its
     own key as the active compile ref).
     """
     family = str(getattr(cfg, "family", "") or "")
-    selection_bug: Optional[cc.CellSelectionBugError] = None
+    selection_bug: Optional[cc.CompiledGraphSelectionBugError] = None
     delegate_refusal = ""
     if delegate is None:
         # pgw#784: whether a miss mints out of process is a POLICY of the
@@ -1844,9 +1844,9 @@ def _arming_policy(
     elif not delegate:
         delegate_refusal = "caller_forced_in_process"
 
-    # pgw#904: catalog discovery (`aot_cells.discover` fetch-and-filter) is
+    # pgw#904: catalog discovery (`aot_compiled_graphs.discover` fetch-and-filter) is
     # DELETED. A connected worker never lists, ranks or chooses a published
-    # cell — the hub resolves the exact artifact and names it in
+    # compiled graph — the hub resolves the exact artifact and names it in
     # `Arm.artifact`, and `arm_ordered` is that path. What remains below is
     # the hub-less policy: the delivered artifact, then self-mint/intake.
     try:
@@ -1860,26 +1860,26 @@ def _arming_policy(
             # ONE rule, the same one `_arm_candidate` opens its boot span on: a
             # call with no delivered artifact is not an adoption ATTEMPT —
             # `compile_cache.enable` also covers the seeded and ALLOW_COLD
-            # lanes — so it must not manufacture a row for a cell that was
+            # lanes — so it must not manufacture a row for a compiled graph that was
             # never offered, in either direction.
             adoptions.append(delivered_row)
         if delivered_out.armed:
             return ArmOutcome(armed=True)
-        # Plain-lane miss: no cell delivered / artifact unusable. Fall
+        # Plain-lane miss: no compiled graph delivered / artifact unusable. Fall
         # through to the self-mint instead of the pre-gw#587 silent eager.
-    except cc.CellSelectionBugError as exc:
-        # Self-requested, identity-verified cell refused to arm — always
+    except cc.CompiledGraphSelectionBugError as exc:
+        # Self-requested, identity-verified compiled graph refused to arm — always
         # reported loudly (the caller sends the wire event), but no longer
-        # fatal: fall through and self-mint a cell this runtime can prove.
+        # fatal: fall through and self-mint a compiled graph this runtime can prove.
         logger.warning(
-            "fleet-cells: compiled_graph_selection_bug (%s); self-minting instead of "
-            "retrying the same unusable cell", exc)
+            "fleet-compiled graphs: compiled_graph_selection_bug (%s); self-minting instead of "
+            "retrying the same unusable compiled graph", exc)
         selection_bug = exc
     except cc.CompiledExecutionLaneUnavailableError:
         # Mandatory (w8a8/w4a4) miss: production used to fail closed here.
         # The whole point of self-mint is that this worker can produce the
-        # cell itself.
-        logger.info("fleet-cells: no delivered cell for mandatory lane; self-minting")
+        # compiled graph itself.
+        logger.info("fleet-compiled graphs: no delivered compiled graph for mandatory lane; self-minting")
 
     if not family:
         return _fail_closed(
@@ -1908,7 +1908,7 @@ def _arming_policy(
         pipe_refusal = delegation_refusal(pipe, cfg)
         if pipe_refusal:
             logger.info(
-                "fleet-cells: %s cannot mint out of process (%s) — no AOT "
+                "fleet-compiled graphs: %s cannot mint out of process (%s) — no AOT "
                 "mint is possible on this pipe (pgw#784)", family, pipe_refusal)
             delegate = False
             delegate_refusal = pipe_refusal
@@ -1921,20 +1921,20 @@ def _arming_policy(
     recipe = mint_recipe(
         pipe, cfg, delegate=delegate, delegate_refusal=delegate_refusal)
     if recipe != RECIPE_AOT:
-        # pgw#1010: a MANDATORY (w8a8/w4a4) lane is compiled-from-a-CELL by
+        # pgw#1010: a MANDATORY (w8a8/w4a4) lane is compiled-from-a-COMPILED GRAPH by
         # contract — the dispatch fence pins every request to an active
         # compile incarnation (th#910), and an intake arm has no identity to
         # pin. Arming it would compile a whole boot's worth of graphs for a
         # pod that then refuses every request `required_compile_missing`. So
         # it fails closed here, typed, exactly as a mandatory lane did before
         # self-mint existed: to serve a mandatory lane a family must declare
-        # an export, because an AOT cell is the only cell there is.
+        # an export, because an compiled graph is the only compiled graph there is.
         if cc.mandatory_serving(pipe):
             if bucket:
                 cc.drop_lora_execution_lane(pipe)
             # pgw#888: this exit is reached whenever the recipe is not AOT,
             # and only ONE of its causes is permanent. A family that declares
-            # no export can never have a cell on any pod, so a retry re-derives
+            # no export can never have a compiled graph on any pod, so a retry re-derives
             # one answer at full cost. The other causes — a delegation refusal,
             # a caller-forced in-process decline — can differ on the next
             # attempt, so they stay retryable. Asked of the DECLARATION rather
@@ -1943,11 +1943,11 @@ def _arming_policy(
             declares_export = export_declaration(family) is not None
             return _fail_closed(
                 pipe,
-                ("this lane serves only from a cell and the mint recipe is "
-                 f"{recipe!r}, not aot, so no cell can be minted for it here "
+                ("this lane serves only from a compiled graph and the mint recipe is "
+                 f"{recipe!r}, not aot, so no compiled graph can be minted for it here "
                  "(pgw#1010)") if declares_export else
-                ("this lane serves only from a cell and this family declares "
-                 "no export, so no cell can be minted for it (pgw#1010)"),
+                ("this lane serves only from a compiled graph and this family declares "
+                 "no export, so no compiled graph can be minted for it (pgw#1010)"),
                 selection_bug, phase=EagerPhase.MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH,
                 permanent=not declares_export)
         # INTAKE. Arm the declared targets and let this pod's own warmup
@@ -1958,26 +1958,26 @@ def _arming_policy(
         try:
             cc.arm_jit_intake(pipe, cfg)
         except Exception as exc:  # noqa: BLE001 — arm failure => miss policy
-            logger.warning("fleet-cells: JIT intake arm failed (%s)", exc)
+            logger.warning("fleet-compiled graphs: JIT intake arm failed (%s)", exc)
             if bucket:
                 cc.drop_lora_execution_lane(pipe)
             return _fail_closed(
                 pipe, f"jit intake arm failed: {exc}", selection_bug,
                 phase=EagerPhase.JIT_ARM_FAILED)
         logger.info(
-            "fleet-cells: JIT intake armed for %s (lane=%s) — this pod "
+            "fleet-compiled graphs: JIT intake armed for %s (lane=%s) — this pod "
             "compiles its own graphs and serves them for its own life; no "
-            "cell is minted, keyed or published (pgw#1010)",
+            "compiled graph is minted, keyed or published (pgw#1010)",
             family, loading.pipeline_weight_lane(pipe) or "plain")
         return ArmOutcome(armed=True, selection_bug=selection_bug)
 
     # --- AOT, and only AOT, from here down --------------------------------
-    # pgw#1059: an obligation opened before any trace has NO cell key (the
+    # pgw#1059: an obligation opened before any trace has NO compiled graph key (the
     # `graph` axis is the traced-graph digest). What it has is an
     # ArmIdentity: every pre-trace-knowable fact, computed with the same
     # derivations the child's recorded metadata uses — so the ledgers, the
     # events and the handback divergence check name the obligation without
-    # ever pretending to name a cell.
+    # ever pretending to name a compiled graph.
 
     try:
         arm_key = arm_identity(
@@ -1985,7 +1985,7 @@ def _arming_policy(
             subject=pipeline_arm_subject(pipe))
         key = arm_key.token
     except Exception as exc:  # noqa: BLE001 — obligation facts must be statable
-        logger.warning("fleet-cells: self-mint identity computation failed (%s)", exc)
+        logger.warning("fleet-compiled graphs: self-mint identity computation failed (%s)", exc)
         if bucket:
             cc.drop_lora_execution_lane(pipe)
         return _fail_closed(
@@ -1995,12 +1995,12 @@ def _arming_policy(
     # pgw#1340 / th#2098 — THE $0 PREFLIGHT, and it is sited here because this
     # is the last line before anything is spent. Everything below opens a
     # pending, spawns a child and buys 20-45 minutes of the card this pod is
-    # paying for; the question "can the cell that child returns ever satisfy
+    # paying for; the question "can the compiled graph that child returns ever satisfy
     # the seam that admits it" is answered by two compile-time constants and
     # costs nothing to ask.
     #
     # It is not hypothetical. pgw#1270 moved the artifact vocabulary to TCG and
-    # left three axes in the comparison that no cell can state, and the fleet
+    # left three axes in the comparison that no compiled graph can state, and the fleet
     # paid the full compile to rediscover it on every boot of every pod for two
     # wheels: 224 `sd15` rows and 28 `ernie` rows of
     # `aot_entry_arm_failed key_axis_divergence`, zero publishes, ~$1.00 of L4
@@ -2012,18 +2012,18 @@ def _arming_policy(
     if unstateable:
         named = ", ".join(unstateable)
         logger.error(
-            "fleet-cells: REFUSING to open a self-mint for %s — the handback "
-            "seam compares %s, which a packed cell cannot state (TCG's "
+            "fleet-compiled graphs: REFUSING to open a self-mint for %s — the handback "
+            "seam compares %s, which a packed compiled graph cannot state (TCG's "
             "artifact vocabulary is %s). Every mint under this seam would "
             "compile for 20-45 minutes and then refuse `key_axis_divergence`. "
             "Serving eager and spending nothing (pgw#1340)",
-            family, named, sorted(artifact_meta.cell_metadata_fields()))
+            family, named, sorted(artifact_meta.compiled_graph_metadata_fields()))
         if bucket:
             cc.drop_lora_execution_lane(pipe)
         activity_mod.emit_event(
             "self_mint_skipped",
             f"family={family} arm_key={key} axes={named}: the arm-axis "
-            f"comparison demands {named}, which no packed cell can state — "
+            f"comparison demands {named}, which no packed compiled graph can state — "
             f"this worker refuses the mint at ARM time rather than paying "
             f"for a compile that provably cannot arm. Nothing is spent, "
             f"serving stays eager, and this is a code defect (an axis outside "
@@ -2040,14 +2040,14 @@ def _arming_policy(
     # has to ask about both, because the ledger holds whatever ref actually
     # failed:
     #   * the ARM identity — an owed mint that died before it produced
-    #     anything has no cell of its own, so the pending's computed ref is
+    #     anything has no compiled graph of its own, so the pending's computed ref is
     #     what `executor._abandon_pending_mint`'s quarantine writes;
-    #   * the CELL identity — a serve/finalize proof fails on an ARMED
-    #     artifact, whose ref is the exported cell's STAMPED key. That is the
+    #   * the COMPILED GRAPH identity — a serve/finalize proof fails on an ARMED
+    #     artifact, whose ref is the exported compiled graph's STAMPED key. That is the
     #     ref the runtime-guard and boot-proof writers record, and the arm can
-    #     only reach it through `_FINALIZED`, this process's arm-key -> cell
+    #     only reach it through `_FINALIZED`, this process's arm-key -> compiled graph
     #     index. A mint is deterministic in its axes, so re-minting an arm
-    #     whose own cell was just disproven rebuilds the same disproven cell.
+    #     whose own compiled graph was just disproven rebuilds the same disproven compiled graph.
     key_ref = f"{cc.system_repo(family)}#{key}"
     finalized_prior = finalized_in_process(key)
     quarantined_ref = ""
@@ -2062,7 +2062,7 @@ def _arming_policy(
         # DEGRADE (explicit eager, mandatory lanes included): a broken
         # optimization must never kill a serving worker.
         logger.error(
-            "fleet-cells: declining self-mint for %s key=%s (quarantined "
+            "fleet-compiled graphs: declining self-mint for %s key=%s (quarantined "
             "ref=%s) — this identity was quarantined by a failed proof in "
             "this process; serving eager (pgw#672)",
             family, key, quarantined_ref)
@@ -2070,7 +2070,7 @@ def _arming_policy(
             cc.drop_lora_execution_lane(pipe)
         # pgw#824: the ONE eager exit in this function that never rode a typed
         # event — it returns before `_fail_closed` and only logged. A pod that
-        # quarantined its own cell serves eager for the rest of its life, which
+        # quarantined its own compiled graph serves eager for the rest of its life, which
         # is precisely the state the hub most needs named.
         activity_mod.emit_event(
             "self_mint_skipped",
@@ -2086,44 +2086,44 @@ def _arming_policy(
             armed=False, selection_bug=selection_bug,
             eager_reason=EagerPhase.COMPILED_GRAPH_QUARANTINED)
     if finalized_prior is not None:
-        # This process already minted and ADOPTED this exact cell — re-arm
+        # This process already minted and ADOPTED this exact compiled graph — re-arm
         # the same artifact through the same AOT gates instead of paying a
         # second export for bytes that are already on this disk.
         #
-        # pgw#1113: through `_arm_exported_cell`, which is THE gate every cell
+        # pgw#1113: through `_arm_exported_compiled_graph`, which is THE gate every compiled graph
         # this machine produced for itself passes, and not the bare
         # `provision.arm_aot` that stood here. This was the one branch that
         # armed a pipe from another pipe's artifact while skipping
         # `arm_axis_divergence` entirely — and since the arm token is what
-        # decides "this exact cell", a token that could not name its subject
+        # decides "this exact compiled graph", a token that could not name its subject
         # made "another pipe" and "this pipe" the same sentence. The token now
         # names the subject, so the branch is reached far less often; when it
         # is reached it now earns the arm the same way every other
-        # self-produced cell does.
+        # self-produced compiled graph does.
         try:
-            armed_ready, _meta, refusal = _arm_exported_cell(
+            armed_ready, _meta, refusal = _arm_exported_compiled_graph(
                 pipe, cfg, cache_dir, bucket,
                 Path(finalized_prior.artifact), arm_key)
             if not armed_ready:
                 logger.warning(
-                    "fleet-cells: the in-process finalized cell for key=%s "
+                    "fleet-compiled graphs: the in-process finalized compiled graph for key=%s "
                     "did not re-arm (%s%s); falling through to a fresh mint",
                     key, refusal[0], f": {refusal[1]}" if refusal[1] else "")
         except Exception as exc:  # noqa: BLE001 — fall back to a fresh mint
             logger.warning(
-                "fleet-cells: re-arm from the in-process finalized cell "
+                "fleet-compiled graphs: re-arm from the in-process finalized compiled graph "
                 "failed (%s); falling through to a fresh mint", exc)
             armed_ready = False
         if armed_ready:
             logger.info(
-                "fleet-cells: re-armed %s from this process's finalized "
-                "cell (key=%s) — no second mint (pgw#672)", family, key)
+                "fleet-compiled graphs: re-armed %s from this process's finalized "
+                "compiled graph (key=%s) — no second mint (pgw#672)", family, key)
             return ArmOutcome(
                 armed=True, self_mint=finalized_prior,
                 selection_bug=selection_bug)
 
     # §4.28 / pgw#1096: THIS MACHINE's own store, before any mint is opened.
-    # Sited after the in-process ledgers (a cell already resident in this
+    # Sited after the in-process ledgers (a compiled graph already resident in this
     # process costs no disk read) and after the quarantine gate (an identity
     # this process disproved must not be re-armed from any source), and
     # BEFORE the pending: compile-once-run-forever means the second boot never
@@ -2141,8 +2141,8 @@ def _arming_policy(
     # same runtime, same declaration AND same subject — the same slot resolved
     # to the same checkpoint — so there is one computation to buy and one
     # pending to open. pgw#1113 deleted the premise this comment used to
-    # state ("the qwen edit shape: two lanes, one family cell"): two lanes are
-    # one cell only when the graph says so, and the graph does not exist yet
+    # state ("the qwen edit shape: two lanes, one family compiled graph"): two lanes are
+    # one compiled graph only when the graph says so, and the graph does not exist yet
     # here. The obligation names its subject instead of assuming one.
     with _PENDING_LOCK:
         existing = _PENDING.get(key)
@@ -2170,25 +2170,25 @@ def _arming_policy(
     with _PENDING_LOCK:
         _PENDING.setdefault(key, pending)
     logger.info(
-        "fleet-cells: DELEGATED %s self-mint for %s (key=%s) — a child "
-        "process builds the cell while this process serves eager "
+        "fleet-compiled graphs: DELEGATED %s self-mint for %s (key=%s) — a child "
+        "process builds the compiled graph while this process serves eager "
         "(pgw#784/#805)", recipe, family, key)
     activity_mod.emit_event(
         "self_mint_started",
-        # pgw#1042: labeled `arm_key` — the cell the child returns carries a
+        # pgw#1042: labeled `arm_key` — the compiled graph the child returns carries a
         # STAMPED key in a disjoint space (kind/contract differ by formula),
         # so an unlabeled `key=` here invited reading the two as one
         # diverging key.
         f"family={family} recipe={recipe} arm_key={key} "
         f"lane={loading.pipeline_weight_lane(pipe) or 'plain'}: a "
-        f"compile-cell miss opened a delegated mint; this worker serves "
+        f"compiled graph miss opened a delegated mint; this worker serves "
         f"eager throughout",
         phase=recipe,
     )
     return ArmOutcome(
         armed=False, self_mint=pending, selection_bug=selection_bug,
         # pgw#824: eager RIGHT NOW, but for a reason with an end — the
-        # child is building the cell. A request row carrying
+        # child is building the compiled graph. A request row carrying
         # `mint_in_progress` is a fleet that is warming up; one carrying
         # `no_toolchain` is a fleet that never will. Reading them as the
         # same "" was the whole gap.
@@ -2196,14 +2196,14 @@ def _arming_policy(
 
 
 def _packed_metadata(artifact: Path) -> Dict[str, Any]:
-    """The stamped metadata inside a packed cell (metadata members only)."""
+    """The stamped metadata inside a packed compiled graph (metadata members only)."""
     return artifact_meta.read_metadata(artifact)
 
 
 def arm_axis_divergence(
     arm_key: ArmIdentity, meta: Mapping[str, Any],
 ) -> str:
-    """'' when the child's cell-metadata states the parent's obligation
+    """'' when the child's compiled graph-metadata states the parent's obligation
     identity on every ENVIRONMENT fact (:data:`ARM_ENVIRONMENT_FACTS`), else
     the FIRST diverging fact with both values (pgw#1042).
 
@@ -2219,12 +2219,12 @@ def arm_axis_divergence(
 
     :data:`ARM_OBLIGATION_FACTS` are equally deliberately NOT compared
     (pgw#1113 for the subject half, pgw#1340 for `family`/`lane`/`env_seal`).
-    A cell records no subject and must not: the key is the traced computation,
-    so one cell legally serves every checkpoint whose graph it is, and
-    demanding the cell restate the checkpoint it was minted from would refuse
+    A compiled graph records no subject and must not: the key is the traced computation,
+    so one compiled graph legally serves every checkpoint whose graph it is, and
+    demanding the compiled graph restate the checkpoint it was minted from would refuse
     exactly the reuse the membership axiom exists to allow. `family`, `lane`
     and `env_seal` are not in TCG's artifact vocabulary AT ALL, so comparing
-    them read `None` off every real cell — th#2098, one production burst at a
+    them read `None` off every real compiled graph — th#2098, one production burst at a
     time. The obligation facts split the obligation on THIS side of the
     boundary; what crosses it is compared here.
     """
@@ -2238,12 +2238,12 @@ def arm_axis_divergence(
     parent = arm_key.facts_dict()
     for fact in ARM_ENVIRONMENT_FACTS:
         if parent.get(fact, "") != child.get(fact, ""):
-            return (f"{fact}: child cell states {child.get(fact, '')!r}, "
+            return (f"{fact}: child compiled graph states {child.get(fact, '')!r}, "
                     f"this runtime computed {parent.get(fact, '')!r}")
     return ""
 
 
-#: pgw#1096: WHY a machine has nowhere to ship the cell it just minted. Each is
+#: pgw#1096: WHY a machine has nowhere to ship the compiled graph it just minted. Each is
 #: a fact about the SINK, and none of them is the worker deciding its own trust
 #: class — which stays what §4.28 makes it, the hub's call and only the hub's.
 KEEP_HUB_ASSERTED_UNTRUSTED = "hub_asserted_untrusted"
@@ -2251,11 +2251,11 @@ KEEP_NO_PUBLISHER = "no_publish_sink"
 KEEP_PUBLISH_DISARMED = "publish_disarmed"
 
 
-def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
-    """Why this machine cannot ship its cell, "" when it can.
+def no_publish_sink_reason(publisher: Optional[CompiledGraphPublisher]) -> str:
+    """Why this machine cannot ship its compiled graph, "" when it can.
 
     pgw#1183 RENAMED THIS AND SHRANK WHAT IT DECIDES. As ``local_keep_reason``
-    it gated ``local_cell_store.store`` — durability decided by a fact about
+    it gated ``local_compiled_graph_store.store`` — durability decided by a fact about
     the SINK, which is §1.5's inversion in one predicate: the pods that mint
     for the fleet are exactly the pods with a sink, so exactly they kept
     nothing. Storing is now unconditional and this answers only whether an
@@ -2269,10 +2269,10 @@ def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
 
     * :data:`KEEP_HUB_ASSERTED_UNTRUSTED` — the HUB refused a publish from this
       hardware (`compiled_graph_publish_untrusted_tier`; `cloudtier.PublishRefusal` on a
-      community/marketplace/unknown tier), recorded by `local_cell_store`. The
+      community/marketplace/unknown tier), recorded by `local_compiled_graph_store`. The
       community-cloud case, and the only one that is about trust at all.
     * :data:`KEEP_NO_PUBLISHER` — this process constructed no publisher. That
-      is **cozy-local**, which never has one (`fleet_cells` docstring) and never
+      is **cozy-local**, which never has one (`fleet_compiled_graphs` docstring) and never
       reaches a hub to be refused BY — so a design that waited for a hub verdict
       would leave the cozy-local half of §4.28 permanently unimplemented, which
       is the whole product promise. The fleet's `SELF_MINT_WITHOUT_PUBLISH_SINK`
@@ -2286,7 +2286,7 @@ def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
     decision anything makes — §1.5 keeps them always. Whether to UPLOAD them
     still is, and it is this.
     """
-    if local_cell_store.keeps_cells_locally():
+    if local_compiled_graph_store.keeps_compiled_graphs_locally():
         return KEEP_HUB_ASSERTED_UNTRUSTED
     if publisher is None or not publisher.enabled():
         return KEEP_NO_PUBLISHER
@@ -2297,30 +2297,30 @@ def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
     return ""
 
 
-def _arm_exported_cell(
+def _arm_exported_compiled_graph(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], bucket: int,
     artifact: Path, arm_key: Optional[ArmIdentity],
     *, verify_numerics: bool = False,
 ) -> Tuple[bool, Optional[Dict[str, Any]], Tuple[str, str]]:
-    """THE gate every cell this machine produced for itself must pass.
+    """THE gate every compiled graph this machine produced for itself must pass.
 
     ``verify_numerics`` (§4.32) is set by ONE caller —
     :func:`adopt_delegated_mint`, the pod that just minted these bytes and is
     about to publish them. The other three routes here are ADOPTIONS of bytes
-    already proven at their own mint (an in-process finalized cell, the local
+    already proven at their own mint (an in-process finalized compiled graph, the local
     store's, a fresh child mint being re-armed), and adoption runs no quality
     gate.
 
     pgw#1096 extracted this from :func:`adopt_delegated_mint` so the two
     self-produced sources — a child process's fresh mint, and this machine's
     OWN local store (§4.28) — pass through ONE gate rather than two that agree
-    today. A cell out of the local store is neither newer nor more trusted
+    today. A compiled graph out of the local store is neither newer nor more trusted
     than the child's: it is the same bytes the same machine minted, and it
     earns its arm the same way.
 
     Two checks, in this order:
 
-    1. **key-axis divergence** (pgw#1042) — the cell's recorded metadata must
+    1. **key-axis divergence** (pgw#1042) — the compiled graph's recorded metadata must
        state THIS runtime on every pre-trace environment axis
        (:data:`ARM_ENVIRONMENT_FACTS`), refused
        by fact name. This is what makes a toolchain/sm/envelope move an honest
@@ -2329,7 +2329,7 @@ def _arm_exported_cell(
        install, ``aot_serve.enable``, rollback on failure. Deliberately NOT
        ``provision.enable_compiled``, whose pgw#709 receipts gate drops any
        artifact the hub has not countersigned — which by construction is every
-       cell in this family.
+       compiled graph in this family.
 
     Returns ``(armed, meta, (reason, detail))``. ``reason`` is initialized to a
     NAMED unset rather than "" so a branch that forgets to classify shows up as
@@ -2339,7 +2339,7 @@ def _arm_exported_cell(
     refusal: Tuple[str, str] = ("unclassified_arm_refusal", "")
     # pgw#1098: UNREADABLE IS NOT ABSENT, and this is check 0.
     #
-    # `try_read_metadata` answers None for both "this cell has no envelope" and
+    # `try_read_metadata` answers None for both "this compiled graph has no envelope" and
     # "I refused to read the envelope it has", and every consumer here spent
     # that distinction on `meta is not None`. Measured on row 7: a 16 MiB bound
     # refused a 36-entry sdxl envelope, so check 1 below SILENTLY DID NOT RUN,
@@ -2350,16 +2350,16 @@ def _arm_exported_cell(
     # in one event's `compiled_graph_key=` field.
     #
     # An envelope this runtime cannot READ is refused here, by name, before any
-    # arm — the same class as a cell that does not describe us. It belongs in
+    # arm — the same class as a compiled graph that does not describe us. It belongs in
     # THIS function rather than at either call site, because pgw#1096's whole
-    # point is that the child's cell and the local store's earn their arm the
+    # point is that the child's compiled graph and the local store's earn their arm the
     # same way, and a store whose envelope cannot be read is exactly as
     # unarmable as a child's.
     try:
         meta: Optional[Dict[str, Any]] = artifact_meta.read_metadata(artifact)
     except artifact_meta.ArtifactMetadataError as exc:
         return False, None, ("compiled_graph_envelope_unreadable", (
-            f"the cell's {artifact_meta.METADATA_NAME} could not be read, so "
+            f"the compiled graph's {artifact_meta.METADATA_NAME} could not be read, so "
             f"no gate that reads it could run: {exc}"))
     divergence = ""
     if meta is not None and arm_key is not None:
@@ -2367,7 +2367,7 @@ def _arm_exported_cell(
     if divergence:
         stamped = str(meta.get("compiled_graph_key") or "") if meta else "MISSING"
         return False, meta, ("key_axis_divergence", (
-            f"the cell (stamped key {stamped}) does not describe this "
+            f"the compiled graph (stamped key {stamped}) does not describe this "
             f"runtime: {divergence}"))
     try:
         outcome = provision.arm_aot(
@@ -2377,16 +2377,16 @@ def _arm_exported_cell(
             return True, meta, ("", "")
         refusal = (outcome.reason or "unclassified_arm_refusal",
                    outcome.detail or outcome.identity)
-    except cc.CellSelectionBugError as exc:
-        # th#883: a cell whose axes describe exactly this runtime refused to
+    except cc.CompiledGraphSelectionBugError as exc:
+        # th#883: a compiled graph whose axes describe exactly this runtime refused to
         # arm. Loud — a bug in the one selection brain, not a compat miss.
         logger.error(
-            "fleet-cells: compiled_graph_selection_bug arming a self-produced cell "
+            "fleet-compiled graphs: compiled_graph_selection_bug arming a self-produced compiled graph "
             "(%s): %s", artifact, exc)
         refusal = ("compiled_graph_selection_bug", str(exc))
     except Exception as exc:  # noqa: BLE001 — adoption failure => eager
         logger.warning(
-            "fleet-cells: self-produced cell %s did not adopt (%s)",
+            "fleet-compiled graphs: self-produced compiled graph %s did not adopt (%s)",
             artifact, exc)
         # An `AdoptError` already carries the token; anything else is named by
         # its type rather than flattened into one word nobody can count.
@@ -2407,7 +2407,7 @@ def _sweep_superseded_memos_once() -> None:
     so every machine with a local store pays ONE re-mint per family, once.
     That cost is the point — an entry keyed by a token that could not state
     what it was compiling is exactly the row that could hand this pipeline
-    another checkpoint's cell — but it must be spent EXPLICITLY, in a counted
+    another checkpoint's compiled graph — but it must be spent EXPLICITLY, in a counted
     line, not discovered later as a store full of unreadable files.
     """
     global _MEMO_SWEPT
@@ -2415,12 +2415,12 @@ def _sweep_superseded_memos_once() -> None:
         return
     _MEMO_SWEPT = True
     try:
-        local_cell_store.sweep_superseded_memos(ARM_SCHEME)
+        local_compiled_graph_store.sweep_superseded_memos(ARM_SCHEME)
     except Exception:  # noqa: BLE001 — a cache sweep is never fatal
-        logger.debug("fleet-cells: memo sweep failed", exc_info=True)
+        logger.debug("fleet-compiled graphs: memo sweep failed", exc_info=True)
 
 
-#: pgw#1127: how this machine ADDRESSED the cell it armed. Two routes into one
+#: pgw#1127: how this machine ADDRESSED the compiled graph it armed. Two routes into one
 #: CAS, and the difference is what a refusal is allowed to do about it.
 ROUTE_MEMO = "memo"
 ROUTE_BOOT_KEY = "boot_key"
@@ -2437,57 +2437,57 @@ def arm_from_local_store(
     exactly as well as one online, which is what "fully offline-capable" means.
 
     TWO ROUTES, ONE CAS, ONE GATE (pgw#1127 S2). Both end at
-    :func:`_arm_exported_cell`, the gate a child's fresh mint also passes, so a
-    stored cell is never more trusted than a freshly minted one and never less.
+    :func:`_arm_exported_compiled_graph`, the gate a child's fresh mint also passes, so a
+    stored compiled graph is never more trusted than a freshly minted one and never less.
 
     * :data:`ROUTE_MEMO` — the pre-trace ``ArmIdentity`` (milliseconds), through
       the memo this machine's own mint wrote for that exact token. The fast
       path, and the only one before pgw#1127.
     * :data:`ROUTE_BOOT_KEY` — the ``ck1`` key §4.27's boot derivation produced
-      and ``local_cell_store`` answered on. This is what makes an arm-token
+      and ``local_compiled_graph_store`` answered on. This is what makes an arm-token
       SCHEME BUMP cost a trace instead of a mint: `sweep_superseded_memos`
-      deletes the shortcut and leaves the CELLS under their own keys, so after
-      the sweep the memo misses and the derived key still addresses the cell it
+      deletes the shortcut and leaves the COMPILED GRAPHS under their own keys, so after
+      the sweep the memo misses and the derived key still addresses the compiled graph it
       used to name. On a fleet pod both routes are one stat on an empty store.
 
     A refusal on the memo route DROPS the entry — this machine wrote that memo
-    for this exact identity, so a cell that will not arm under it is stale.
+    for this exact identity, so a compiled graph that will not arm under it is stale.
     A refusal on the boot-key route does NOT: that hit is an inference about
-    which pipe owns the bytes, and destroying another pipe's cell to punish a
+    which pipe owns the bytes, and destroying another pipe's compiled graph to punish a
     wrong guess would turn one honest re-mint into two.
 
-    ``None`` = no usable local cell; the caller mints, honestly.
+    ``None`` = no usable local compiled graph; the caller mints, honestly.
     """
     _sweep_superseded_memos_once()
     route = ROUTE_MEMO
     try:
-        local = local_cell_store.lookup_for_arm(arm_key.token, cas_root=cache_dir)
+        local = local_compiled_graph_store.lookup_for_arm(arm_key.token, cas_root=cache_dir)
         if local is None and boot_local_key:
             # The memo is a SHORTCUT, never an authority (§4.28) — so when it
             # has nothing to say, the address the boot derived is asked
             # directly. Same store, same key space, same gate below.
             route = ROUTE_BOOT_KEY
-            local = local_cell_store.lookup(boot_local_key, cas_root=cache_dir)
+            local = local_compiled_graph_store.lookup(boot_local_key, cas_root=cache_dir)
     except Exception as exc:  # noqa: BLE001 — a cache read must never be fatal
-        logger.warning("fleet-cells: local cell store unreadable (%s)", exc)
+        logger.warning("fleet-compiled graphs: local compiled graph store unreadable (%s)", exc)
         return None
     if local is None:
         return None
-    armed, meta, (reason, detail) = _arm_exported_cell(
+    armed, meta, (reason, detail) = _arm_exported_compiled_graph(
         pipe, cfg, cache_dir, bucket, local.artifact, arm_key)
     if not armed:
         dropped = route == ROUTE_MEMO
         logger.warning(
-            "fleet-cells: the local store's cell for %s (key=%s, route=%s) did "
+            "fleet-compiled graphs: the local store's compiled graph for %s (key=%s, route=%s) did "
             "not arm (%s%s); %s and minting", family, local.key, route, reason,
             f": {detail}" if detail else "",
             "dropping it" if dropped else "leaving it in place")
         if dropped:
-            local_cell_store.drop(local.key)
+            local_compiled_graph_store.drop(local.key)
         activity_mod.emit_event(
             "local_compiled_graph_refused",
             f"family={family} arm_key={arm_key.token} compiled_graph_key={local.key} "
-            f"route={route}: this machine's own stored cell did not arm "
+            f"route={route}: this machine's own stored compiled graph did not arm "
             f"({reason}{': ' + detail if detail else ''}); it has been "
             + ("dropped from the local store" if dropped else
                "LEFT in the local store — a boot-key hit is an inference "
@@ -2499,13 +2499,13 @@ def arm_from_local_store(
         return None
     key = str((meta or {}).get("compiled_graph_key") or "").strip() or local.key
     if route == ROUTE_BOOT_KEY:
-        # The shortcut, REPAIRED. The cell just proved it arms under this arm
+        # The shortcut, REPAIRED. The compiled graph just proved it arms under this arm
         # token, so the memo the sweep deleted (or that a re-keyed graph left
         # pointing elsewhere) can be rewritten from evidence instead of from a
         # mint. This is the whole cost argument for the derived-key route: with
         # it an arm-scheme bump costs one TRACE per family per machine; without
         # it, one MINT.
-        local_cell_store.note_memo(arm_key.token, local.key)
+        local_compiled_graph_store.note_memo(arm_key.token, local.key)
     # pgw#1152: the `note_aot_key(key)` that stood here is GONE, not moved. The
     # arm above already went through `aot_serve.load_and_wrap`, which registers
     # the key at the wrap (pgw#1141b) — this line was one of the two
@@ -2529,13 +2529,13 @@ def arm_from_local_store(
         # same record must re-arm these bytes rather than pay a second lookup.
         _FINALIZED[arm_key.token] = minted
     logger.info(
-        "fleet-cells: armed %s from THIS MACHINE's local cell store "
+        "fleet-compiled graphs: armed %s from THIS MACHINE's local compiled graph store "
         "(key=%s, %.1f MB, route=%s) — no mint, no hub, no network (§4.28)",
         family, key, local.bytes / 1e6, route)
     activity_mod.emit_event(
         "local_compiled_graph_armed",
         f"family={family} arm_key={arm_key.token} compiled_graph_key={key} "
-        f"route={route}: this machine minted this cell on an earlier boot and "
+        f"route={route}: this machine minted this compiled graph on an earlier boot and "
         f"stored it locally; it arms from disk with no mint and no publish "
         f"route"
         + (" — addressed by the key THIS BOOT derived, so the arm-token memo "
@@ -2550,13 +2550,13 @@ def adopt_delegated_mint(
     pipe: Any, pending: "PendingSelfMint", artifacts: Sequence[Path],
     manifest: str = "",
 ) -> Optional[SelfMint]:
-    """pgw#784: adopt a cell a CHILD PROCESS just built, then publish it.
+    """pgw#784: adopt a compiled graph a CHILD PROCESS just built, then publish it.
 
     There is nothing to pack here — the child already packed — so this is
-    exactly the DELIVERED-cell adoption the cache-HIT path runs. A child-built
-    cell EARNS adoption through the same gates a hub-delivered cell does, and
+    exactly the DELIVERED-compiled graph adoption the cache-HIT path runs. A child-built
+    compiled graph EARNS adoption through the same gates a hub-delivered compiled graph does, and
     when it cannot, the honest outcome is the one every miss already has:
-    unwrap, serve eager, leave the cell absent, publish nothing. A parity gap
+    unwrap, serve eager, leave the compiled graph absent, publish nothing. A parity gap
     degrades; it never poisons the store.
 
     pgw#1176: the child produces ONE ARTIFACT PER GRAPH CLASS, so this arms,
@@ -2570,7 +2570,7 @@ def adopt_delegated_mint(
 
     ``manifest`` is the mint's declaration-wide contract digest
     (``aot_mint.MintResult.manifest``). It is a PARAMETER rather than something
-    read back off a cell because a TCG artifact has no field for it — pgw#1341
+    read back off a compiled graph because a TCG artifact has no field for it — pgw#1341
     — and the caller is the only object that ever holds it.
     """
     state = pending._state
@@ -2580,7 +2580,7 @@ def adopt_delegated_mint(
     # byte is staged. Every row of one mint shares a family, a lane, a seal, a
     # card and a wheel by construction, so a per-row derivation could only ever
     # disagree with itself — and it is written with each row's sidecar so a
-    # crash between rows leaves no cell that cannot say what made it.
+    # crash between rows leaves no compiled graph that cannot say what made it.
     provenance = mint_provenance(pending, manifest=manifest)
     state["provenance"] = provenance
 
@@ -2591,7 +2591,7 @@ def adopt_delegated_mint(
         return None
     # The FIRST entry keeps the pending's canonical target path (the resume
     # bank and the local-store write address it); the rest sit beside it under
-    # their own keys. Nothing reads a cell-shaped single path any more.
+    # their own keys. Nothing reads a compiled graph-shaped single path any more.
     artifact = rows[0]
     if artifact != pending.target:
         try:
@@ -2615,9 +2615,9 @@ def adopt_delegated_mint(
     # sibling that armed.
     _durable_keys: Dict[Path, str] = {
         row: _stage_durable(pending, row, provenance) for row in rows}
-    # pgw#1096: ONE gate for every self-produced cell — the child's, and the
+    # pgw#1096: ONE gate for every self-produced compiled graph — the child's, and the
     # local store's (§4.28). pgw#999's classification, pgw#1042's pre-arm axis
-    # divergence and pgw#805's AOT-only arm all live in `_arm_exported_cell`;
+    # divergence and pgw#805's AOT-only arm all live in `_arm_exported_compiled_graph`;
     # the reasons this call site used to compute inline are unchanged, and the
     # $2.72 lesson (attempt 26: a 36/36 mint refused by three events that all
     # said "could not adopt") is kept there rather than repeated here.
@@ -2634,11 +2634,11 @@ def adopt_delegated_mint(
     # card's free figure already excluded, and it declined stickily. The arm
     # below is the measurement: `arm_entry` binds ONE class and a real device
     # OOM comes back as a typed `insufficient_adopt_vram` refusal through
-    # `_arm_exported_cell`'s ordinary classification.
+    # `_arm_exported_compiled_graph`'s ordinary classification.
     #
     # pgw#1176 sharpens that: the refusal now costs ONE graph class, so a card
     # that cannot hold entry 12 still serves entries 1-11 compiled — where the
-    # estimate, and the cell it guarded, discarded all 36.
+    # estimate, and the compiled graph it guarded, discarded all 36.
     #
     # pgw#1168: the accounting lives at `provision.arm_aot`, the one seam every
     # arm route passes.
@@ -2657,12 +2657,12 @@ def adopt_delegated_mint(
     adopted: List[Tuple[str, Path, Dict[str, Any]]] = []
     refusals: List[Tuple[str, str, str]] = []
     for row in rows:
-        row_armed, row_meta, row_refusal = _arm_exported_cell(
+        row_armed, row_meta, row_refusal = _arm_exported_compiled_graph(
             pipe, pending.cfg, pending.cache_dir,
             int(getattr(pending.cfg, "lora_bucket", 0) or 0),
             row, pending.arm_key, verify_numerics=True)
         # pgw#1176 DEFECT, found by lane 2 and it is production, not a
-        # fixture. `_arm_exported_cell` returns `(False, None, …)` with reason
+        # fixture. `_arm_exported_compiled_graph` returns `(False, None, …)` with reason
         # `compiled_graph_envelope_unreadable` PRECISELY WHEN `read_metadata` raised —
         # so re-reading the same artifact here re-raises, and
         # `ArtifactMetadataError` escapes a function documented to return
@@ -2720,7 +2720,7 @@ def adopt_delegated_mint(
         # which every reader already knew from the event kind.
         state["adopt_refusal"] = (reason, detail)
         # pgw#1042: BOTH identities, labeled. The parent's computed ARM key
-        # and the child's stamped cell key live in disjoint spaces by
+        # and the child's stamped compiled graph key live in disjoint spaces by
         # formula (pgw#1032/#1033); one unlabeled `key=` carrying the arm
         # key while the detail quoted the stamped one is what the pod lane
         # read as "the child computed a different key".
@@ -2728,7 +2728,7 @@ def adopt_delegated_mint(
         activity_mod.emit_event(
             "self_mint_abort",
             f"family={pending.family} arm_key={pending.arm_token} "
-            f"compiled_graph_key={stamped}: the child process produced a cell this "
+            f"compiled_graph_key={stamped}: the child process produced a compiled graph this "
             f"runtime could not adopt "
             f"({reason}{': ' + detail if detail else ''}); serving stays "
             f"eager, nothing is published, and the artifact is QUARANTINED in "
@@ -2753,11 +2753,11 @@ def adopt_delegated_mint(
 
     # The identity carried forward is the FIRST adopted entry's; the whole
     # adopted set rides `state["adopted_entries"]` so publish and the local
-    # store loop over it. pgw#1176: there is no cell-level identity to carry.
+    # store loop over it. pgw#1176: there is no compiled graph-level identity to carry.
     key, first_artifact, meta = adopted[0]
     if refusals:
         logger.warning(
-            "fleet-cells: %d of %d minted classes did not adopt (%s); the "
+            "fleet-compiled graphs: %d of %d minted classes did not adopt (%s); the "
             "rest are armed and will publish", len(refusals), len(rows),
             ", ".join(f"{n}:{r}" for n, r, _d in refusals[:4]))
     # §1.5 + pgw#1176: the DURABLE copy is each entry's address from here on.
@@ -2792,12 +2792,12 @@ def adopt_delegated_mint(
     state["adopted_entries"] = [
         (k, p, dict(m)) for k, p, m in adopted]
     # pgw#1152: pgw#1033's registration stood here and is GONE, not moved.
-    # `_arm_exported_cell` above already wrapped these bytes onto the pipe, and
+    # `_arm_exported_compiled_graph` above already wrapped these bytes onto the pipe, and
     # `aot_serve.load_and_wrap` registers the key AT the wrap (pgw#1141b) — the
     # one seam every arm route passes. This was the second of pgw#1033's two
     # SELF-PRODUCED feeders; both are deleted, so the registry has exactly one
     # writer and no route can inherit the convention that killed `arm_ordered`.
-    # th#1355: the mint cost, banked at the moment the cell becomes real.
+    # th#1355: the mint cost, banked at the moment the compiled graph becomes real.
     state["mint_duration_ms"] = max(
         0, int((time.monotonic() - pending.armed_at) * 1000))
     _unregister(pending)
@@ -2808,7 +2808,7 @@ def adopt_delegated_mint(
         # this process paid a second full export.
         _FINALIZED[pending.arm_token] = minted
     logger.info(
-        "fleet-cells: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
+        "fleet-compiled graphs: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
         "worker served eager throughout and now serves compiled",
         pending.family, key, artifact_path.stat().st_size / 1e6)
     return minted
@@ -2821,12 +2821,12 @@ def adopt_delegated_mint(
 
 def mint_provenance(
     pending: "PendingSelfMint", *, manifest: str = "",
-) -> local_cell_store.MintProvenance:
-    """The mint-time facts this cell's publish will need, stated ONCE (pgw#1341).
+) -> local_compiled_graph_store.MintProvenance:
+    """The mint-time facts this compiled graph's publish will need, stated ONCE (pgw#1341).
 
     Every one of them is knowable HERE — in the parent of the mint, on the pod
     that owns the card — and by NOBODY later: TCG's closed artifact vocabulary
-    has no field for any of them (:func:`artifact_meta.cell_metadata_fields`),
+    has no field for any of them (:func:`artifact_meta.compiled_graph_metadata_fields`),
     and ``resume_owed_publishes`` runs on a later boot in another process. So
     this is the one derivation, and its output is written beside the bytes.
 
@@ -2851,7 +2851,7 @@ def mint_provenance(
         version = cc.gen_worker_version()
     except Exception:  # noqa: BLE001
         version = ""
-    return local_cell_store.MintProvenance(
+    return local_compiled_graph_store.MintProvenance(
         env_seal=str(facts.get("env_seal") or ""),
         lane=str(facts.get("lane") or ""),
         graph_contract=str(manifest or ""),
@@ -2862,7 +2862,7 @@ def mint_provenance(
 
 def _stage_durable(
     pending: "PendingSelfMint", artifact: Path,
-    provenance: local_cell_store.MintProvenance,
+    provenance: local_compiled_graph_store.MintProvenance,
 ) -> str:
     """Write a freshly minted artifact to the local CAS, UNVERIFIED.
 
@@ -2886,12 +2886,12 @@ def _stage_durable(
     if not key or not is_compiled_graph_key(key):
         return ""
     sink_absent = no_publish_sink_reason(pending.publisher)
-    stored = local_cell_store.store(
+    stored = local_compiled_graph_store.store(
         artifact, key=key, family=pending.family,
         arm_token=pending.arm_token,
-        verdict=local_cell_store.VERDICT_UNVERIFIED,
-        sink=(local_cell_store.SINK_NONE if sink_absent
-              else local_cell_store.SINK_OWED),
+        verdict=local_compiled_graph_store.VERDICT_UNVERIFIED,
+        sink=(local_compiled_graph_store.SINK_NONE if sink_absent
+              else local_compiled_graph_store.SINK_OWED),
         provenance=provenance,
         cas_root=pending.cache_dir,
     )
@@ -2913,13 +2913,13 @@ def _stage_durable(
 def _quarantine_durable(key: str) -> None:
     """Keep a refused artifact addressable, and unservable (§1.3.4)."""
     if key:
-        local_cell_store.mark(
-            key, verdict=local_cell_store.VERDICT_QUARANTINED)
+        local_compiled_graph_store.mark(
+            key, verdict=local_compiled_graph_store.VERDICT_QUARANTINED)
 
 
 def _admit_durable(
     pending: "PendingSelfMint", key: str, staged_key: str,
-) -> Optional[local_cell_store.LocalCell]:
+) -> Optional[local_compiled_graph_store.LocalCompiledGraph]:
     """Promote a staged artifact to ADMITTED once its gate has passed.
 
     ``staged_key`` is what the pre-arm stamp read; ``key`` is what the armed
@@ -2930,9 +2930,9 @@ def _admit_durable(
     """
     if not key or staged_key != key:
         return None
-    local_cell_store.mark(key, verdict=local_cell_store.VERDICT_ADMITTED)
-    cell = local_cell_store.lookup(key, cas_root=pending.cache_dir)
-    if cell is None:
+    local_compiled_graph_store.mark(key, verdict=local_compiled_graph_store.VERDICT_ADMITTED)
+    graph = local_compiled_graph_store.lookup(key, cas_root=pending.cache_dir)
+    if graph is None:
         return None
     activity_mod.emit_event(
         "local_compiled_graph_stored",
@@ -2940,15 +2940,15 @@ def _admit_durable(
         f"compiled_graph_key={key}: durable in this machine's local CAS before it "
         f"armed, and admitted now that it has (§1.5); every later boot of "
         f"this machine arms it from disk with no mint"
-        + ("" if cell.sink != local_cell_store.SINK_OWED
+        + ("" if graph.sink != local_compiled_graph_store.SINK_OWED
            else ", and the fleet upload is owed from these bytes"),
-        phase=cell.sink,
+        phase=graph.sink,
     )
-    return cell
+    return graph
 
 
 def adopt_refusal(pending: "PendingSelfMint") -> Tuple[str, str]:
-    """Why :func:`adopt_delegated_mint` refused this pending's cell (pgw#999).
+    """Why :func:`adopt_delegated_mint` refused this pending's compiled graph (pgw#999).
 
     ``("", "")`` when it did not refuse — the mint adopted, or never got as
     far as arming. The classification lives on the pending's own state rather
@@ -2964,7 +2964,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
     """Ship a FINALIZED mint to the fleet store, once (gw#612 restructure).
 
     The executor calls this AFTER the whole warmup-proof pass, when sibling
-    coverage of the shared capture is known: a family cell is only published
+    coverage of the shared capture is known: a family compiled graph is only published
     when every sharer's graphs are inside it. Serve first, publish behind
     (gw#587: publish failure never blocks the request that triggered the
     miss); the hub's attested gate decides accept/refuse."""
@@ -2973,14 +2973,14 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         return
     if state.get("minted") is None:
         # pgw#815: this WAS a bare `return`. A caller that believed it had a
-        # finalized cell (the executor's publish gate runs only for pendings
+        # finalized compiled graph (the executor's publish gate runs only for pendings
         # it packed) and a caller that has nothing produced the identical
         # observation — nothing. Name it.
         state["publish_resolved"] = True
         activity_mod.emit_event(
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: the publish "
-            "gate ran with no finalized cell on this pending — nothing was "
+            "gate ran with no finalized compiled graph on this pending — nothing was "
             "packed, so nothing can ship",
             phase="nothing_to_publish",
         )
@@ -3001,20 +3001,20 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             # pgw#1341: THE SAME record the local store holds, so the immediate
             # publish and a later boot's `resume_owed_publishes` state
             # byte-identical axes for the same bytes.
-            state.get("provenance") or local_cell_store.MintProvenance(),
+            state.get("provenance") or local_compiled_graph_store.MintProvenance(),
             compiled_graph_key_digest=str(
                 getattr(state.get("minted"), "compiled_graph_key", "")
                 or pending.arm_token),
             mint_duration_ms=int(state.get("mint_duration_ms") or 0),
             # pgw#1096: the PRE-TRACE identity, carried so a hub refusal that
             # teaches this machine it is untrusted can also write the memo
-            # that lets its next boot find the salvaged cell without tracing.
+            # that lets its next boot find the salvaged compiled graph without tracing.
             arm_token=pending.arm_token)
         # The mint root is SCRATCH from here: the artifact is durable, so
         # cleaning up cannot reach a sole copy any more.
         shutil.rmtree(pending.mint_root, ignore_errors=True)
     else:
-        # Runtime assertion (gw#587): every fleet cell miss must produce a
+        # Runtime assertion (gw#587): every fleet compiled graph miss must produce a
         # publish attempt. A fleet worker minting with no usable sink is a
         # wiring defect (file_base_url/worker JWT absent at arming time),
         # not a policy choice — loud, greppable, alarm-adjacent. cozy-local
@@ -3023,13 +3023,13 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         # whole point is that a machine with no sink by design is not a
         # machine that lost its sink by accident.
         logger.warning(
-            "fleet-cells: SELF_MINT_WITHOUT_PUBLISH_SINK family=%s — cell "
+            "fleet-compiled graphs: SELF_MINT_WITHOUT_PUBLISH_SINK family=%s — compiled graph "
             "stays local to this pod; the fleet store gains nothing",
             pending.family)
         activity_mod.emit_event(
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: no publish "
-            "sink (file_base_url/worker JWT absent at arming time); the cell "
+            "sink (file_base_url/worker JWT absent at arming time); the compiled graph "
             "was kept in this machine's own store (§4.28/pgw#1096 — the "
             "sentence 'stays local to this pod' is now TRUE; before it was "
             "printed on the way to an rmtree) and this machine reuses it, but "
@@ -3043,7 +3043,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
 def keep_self_mint_local(pending: "PendingSelfMint") -> None:
     """§4.28 terminus for a machine that has NO sink by design (cozy-local).
 
-    The cell is already in this machine's own store — ``adopt_delegated_mint``
+    The compiled graph is already in this machine's own store — ``adopt_delegated_mint``
     put it there under its stamped ``ck1`` key before any publish could be
     attempted — so all that is left is to END the obligation (pgw#815: a
     pending that reaches the end of a boot carrying no terminus VANISHED) and
@@ -3067,20 +3067,20 @@ def keep_self_mint_local(pending: "PendingSelfMint") -> None:
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: this machine "
             f"has no publish sink and nothing was packed for this pending, so "
-            f"there is no cell to keep either",
+            f"there is no compiled graph to keep either",
             phase="nothing_to_publish",
         )
         mark_terminus(pending, TERMINUS_ABANDONED)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return
     logger.info(
-        "fleet-cells: %s stays on THIS MACHINE (key=%s) — it has no publish "
+        "fleet-compiled graphs: %s stays on THIS MACHINE (key=%s) — it has no publish "
         "sink by design, and its own store is where every later run finds it "
         "(§4.28)", pending.family, pending.arm_token)
     activity_mod.emit_event(
         "self_mint_publish_withheld",
         f"family={pending.family} key={pending.arm_token}: this machine mints "
-        f"for ITSELF (§4.28) — the cell is in its own store, addressed by the "
+        f"for ITSELF (§4.28) — the compiled graph is in its own store, addressed by the "
         f"same ck1 key the hub store would use, and no publish was attempted "
         f"because no sink exists to attempt one against",
         phase=KEEP_NO_PUBLISHER,
@@ -3090,28 +3090,28 @@ def keep_self_mint_local(pending: "PendingSelfMint") -> None:
 
 
 def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
-    """Refuse to publish a finalized-but-INCOMPLETE family cell (gw#612).
+    """Refuse to publish a finalized-but-INCOMPLETE family compiled graph (gw#612).
 
     A shared capture packs only the graphs the warmup actually compiled: a
     mandatory sibling lane the warmup never exercised contributes nothing,
-    and publishing that partial pack as the family cell bricks every
+    and publishing that partial pack as the family compiled graph bricks every
     adopting boot at the gw#607 per-object proof (the gw#611 qwen shape:
     hits=1/misses=1 -> compile_cell_failed -> release broken). The mint
     keeps serving THIS process (compiled callables live, identity
     advertised self-attested); only the store publish is withheld, so the
-    next boot re-mints instead of adopting a poisoned cell."""
+    next boot re-mints instead of adopting a poisoned compiled graph."""
     state = pending._state
     if state.get("publish_resolved"):
         return
     if state.get("minted") is None:
         # pgw#815: the twin of `publish_self_mint`'s bare return. A withhold
         # asked of a pending that packed nothing is not a no-op — it means the
-        # mint produced no cell at all, and that end must be named too.
+        # mint produced no compiled graph at all, and that end must be named too.
         state["publish_resolved"] = True
         activity_mod.emit_event(
             "self_mint_publish_withheld",
             f"family={pending.family} key={pending.arm_token}: {reason} — and "
-            "nothing was packed for this pending, so there was no cell to "
+            "nothing was packed for this pending, so there was no compiled graph to "
             "withhold either",
             phase="nothing_to_publish",
         )
@@ -3120,8 +3120,8 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
         return
     state["publish_resolved"] = True
     logger.error(
-        "fleet-cells: SELF_MINT_PUBLISH_WITHHELD family=%s key=%s — %s; "
-        "cell stays local to this pod",
+        "fleet-compiled graphs: SELF_MINT_PUBLISH_WITHHELD family=%s key=%s — %s; "
+        "compiled graph stays local to this pod",
         pending.family, pending.arm_token, reason)
     # pgw#677 reopen: the withhold decision is hub-relevant truth (the mint
     # obligation stays undischarged and every cold pod re-mints) — it must
@@ -3196,7 +3196,7 @@ _DELEGATION_DECLINE_PHASE = {
 }
 _DELEGATION_DECLINE_DETAIL = {
     "no_eager_tier":
-        "an armed non-eager backend (an AOTI cell) has replaced "
+        "an armed non-eager backend (an AOTI compiled graph) has replaced "
         "this pipeline's forward, so there is no eager tier to serve from",
     "caller_forced_in_process":
         "the caller passed delegate=False, and an AOTI export has no eager "
@@ -3212,7 +3212,7 @@ def mint_recipe(
 
     The AOT lane was a pure CONSUMER: discovery filtered for
     ``kind == "aot-inductor"`` artifacts and a miss fell through to the dynamo
-    self-mint, whose cell can never satisfy that filter. So a fleet missed,
+    self-mint, whose compiled graph can never satisfy that filter. So a fleet missed,
     re-minted the wrong kind (or nothing), and missed identically on every
     subsequent pod, forever. pgw#1010 finished that: the dynamo answer no
     longer mints anything at all — it is the JIT INTAKE posture, and every
@@ -3233,14 +3233,14 @@ def mint_recipe(
     family = str(getattr(cfg, "family", "") or "")
 
     def _decline(reason: str, detail: str) -> str:
-        logger.info("fleet-cells: AOT mint declined (%s): %s", reason, detail)
+        logger.info("fleet-compiled graphs: AOT mint declined (%s): %s", reason, detail)
         if emit:
             activity_mod.emit_event(
                 "self_mint_skipped",
                 f"family={family}: this miss cannot "
-                f"mint an aot-inductor cell — {detail}; this pod serves JIT "
+                f"mint an aot-compiled graph — {detail}; this pod serves JIT "
                 f"INTAKE instead (it compiles its own graphs and serves them "
-                f"for its own life) and MINTS NOTHING — no cell, no key, no "
+                f"for its own life) and MINTS NOTHING — no compiled graph, no key, no "
                 f"publish, no obligation (pgw#1010)",
                 phase=reason,
             )
@@ -3275,7 +3275,7 @@ def mint_recipe(
             "no_export_declaration",
             f"family {family!r} registered no export declaration (a "
             f"`compile=` block carrying graph classes, pgw#739/#758) — the "
-            f"class set a multi-graph cell covers is undeclared")
+            f"class set a multi-graph compiled graph covers is undeclared")
 
     # pgw#1115: the refusal, as DATA. A `Compile` carrying unresolved
     # `blockers=` declines here under its own phase, naming the ids — the one
@@ -3329,7 +3329,7 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
 
     The operator CLI reads these facts from a hand-written mint-request JSON.
     A serving pod has something strictly better: the composed pipeline and the
-    endpoint's own ``CompileCell``. Everything the request file carried is
+    endpoint's own ``CompileContract``. Everything the request file carried is
     either declared (shapes/text_lens/guidance/bucket/family), observed on the
     pipeline (weight lane, precision), or owned by the export DECLARATION
     (the class rows, coordinates, dynamic contracts and input bindings) — so
@@ -3371,11 +3371,11 @@ def _aot_export_spec(mint: Any, pipe: Any, cfg: Any) -> "Any":
 
 def _fail_closed(
     pipe: Any, reason: str,
-    selection_bug: Optional["cc.CellSelectionBugError"] = None,
+    selection_bug: Optional["cc.CompiledGraphSelectionBugError"] = None,
     *, phase: EagerPhase = EagerPhase.MINT_UNAVAILABLE,
     permanent: bool = False,
 ) -> ArmOutcome:
-    """The quantized-lane policy at every exit that cannot produce a cell:
+    """The quantized-lane policy at every exit that cannot produce a compiled graph:
     plain lanes serve eager (never-raise miss policy), w8a8/w4a4 keep the
     typed refusal (same as the cozy-local store / pre-gw#587 production).
     ``selection_bug``, when set, is a genuine mint-impossibility exit that
@@ -3399,14 +3399,14 @@ def _fail_closed(
             # declared this lane mandatory, so eager is not a posture they
             # sanctioned (see CompiledExecutionLaneImpossibleError).
             refusal: Exception = cc.CompiledExecutionLaneImpossibleError(
-                f"{lane} requires a compile cell and no cell can EVER exist for "
-                f"this family ({reason}). Not retryable: no pod can hold a cell "
+                f"{lane} requires a compiled graph and no compiled graph can EVER exist for "
+                f"this family ({reason}). Not retryable: no pod can hold a compiled graph "
                 f"the family declares no export for. Not served eager either: "
                 f"the {lane} lane is declared mandatory, so eager would serve "
                 f"numerics this endpoint never sanctioned")
         else:
             refusal = cc.CompiledExecutionLaneUnavailableError(
-                f"{lane} requires a compile cell and the self-mint "
+                f"{lane} requires a compiled graph and the self-mint "
                 f"is unavailable ({reason})")
         if selection_bug is not None:
             raise refusal from selection_bug
@@ -3423,10 +3423,10 @@ def _fail_closed(
     # is eager because there is no C toolchain" meant substring-matching a
     # sentence. It is the same token the request row's ``fallback_reason``
     # carries, so the two join.
-    logger.info("fleet-cells: serving eager (%s)", reason)
+    logger.info("fleet-compiled graphs: serving eager (%s)", reason)
     activity_mod.emit_event(
         "self_mint_skipped",
-        f"lane={execution_lane or 'plain'}: no cell and no mint — {reason}; this "
+        f"lane={execution_lane or 'plain'}: no compiled graph and no mint — {reason}; this "
         f"worker serves eager and publishes nothing",
         phase=phase,
     )
@@ -3440,8 +3440,8 @@ def _cuda_ready() -> bool:
 
 __all__ = [
     "ArmOutcome",
-    "CellPublishRefused",
-    "CellPublisher",
+    "CompiledGraphPublishRefused",
+    "CompiledGraphPublisher",
     "PendingSelfMint",
     "SelfMint",
     "abandon_self_mint",

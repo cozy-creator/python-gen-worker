@@ -43,7 +43,7 @@ from micro_diffusion.model_pad32 import (  # noqa: E402
     padded_length,
 )
 
-#: (grid, pad) — the three classes the gauntlet member serves from ONE cell.
+#: (grid, pad) — the three classes the gauntlet member serves from ONE compiled graph.
 PAD_CLASSES = ((12, 16), (14, 28), (16, 0))
 
 

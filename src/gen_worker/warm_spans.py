@@ -79,7 +79,7 @@ JIT_PARTITION_KEYS: Dict[str, Tuple[str, ...]] = {
     # generated module out and waiting for the kernels it names. This is where
     # a JIT compile's time actually is (63 % of the probe above).
     "kernel_compile_s": ("PyCodeCache.load_by_key_path",),
-    # Kept so a cell minted through an AOT-shaped inline call is not silently
+    # Kept so a compiled graph minted through an AOT-shaped inline call is not silently
     # unattributed; zero on the ordinary JIT path, which is itself a fact.
     "host_compile_s": ("AotCodeCompiler.compile",),
 }

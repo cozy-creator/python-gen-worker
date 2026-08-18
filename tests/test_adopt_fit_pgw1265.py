@@ -38,7 +38,7 @@ import pytest
 from gen_worker import activity as activity_mod
 from gen_worker import adopt_fit, mint_workers
 from gen_worker import compile_cache
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.models import provision
 
 _GIB = 1 << 30
@@ -171,7 +171,7 @@ def _install(
 
     monkeypatch.setattr(aot_serve, "disarm_entry", _disarm)
     monkeypatch.setattr(aot_serve, "entry_states", lambda _p: {})
-    monkeypatch.setattr(provision, "gate_cell_numerics", _gate)
+    monkeypatch.setattr(provision, "gate_compiled_graph_numerics", _gate)
     monkeypatch.setattr(
         provision, "flush_memory",
         lambda: trace.__setattr__("flushed", trace.flushed + 1))
@@ -218,7 +218,7 @@ def test_the_VERIFY_FORWARDS_are_refused_when_the_LOAD_ate_the_headroom(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, card: FakeCard,
 ) -> None:
     """The exact production shape: the card had room for the load, and the
-    §4.32 gate's two forwards — `probe_cell` -> `gate_cell_numerics`, the frame
+    §4.32 gate's two forwards — `probe_compiled_graph` -> `gate_compiled_graph_numerics`, the frame
     the z-image pod actually died in — no longer fit beside the runner."""
     trace = _install(monkeypatch, on_load=lambda: card.take(35 * _GIB))
 
@@ -336,7 +336,7 @@ def test_the_verdict_reads_no_BANK() -> None:
     live device plus this process's own forwards."""
     source = Path(adopt_fit.__file__).read_text()
     for forbidden in (
-        "device_peak", "mint_workers", "fleet_cells", "compile_cache",
+        "device_peak", "mint_workers", "fleet_compiled_graphs", "compile_cache",
         "vram_gb", "resources_vram",
     ):
         assert forbidden not in source.split('"""')[2], (

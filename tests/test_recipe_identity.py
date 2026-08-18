@@ -4,7 +4,7 @@ The key IS the recipe (pgw#1059): graph x envelope x sm x toolchain — the
 traced computation, its declared serving region, the GPU architecture, and
 the compiler stack as we configure it (binaries + settings declaration).
 No version axes, no relaxable axes, no cross-key candidates — a recipe
-change strands old cells by design. Kept from the equivalence arc as TRUST
+change strands old compiled graphs by design. Kept from the equivalence arc as TRUST
 (not versioning): pgw#711 publish digests, pgw#712 no-republish fence,
 pgw#710 toolchain digests. Plus the closure-completeness mint gate:
 executed ⊆ static, fail-loud naming the module.
@@ -21,10 +21,10 @@ import pytest
 # pgw#1181: `guard_closure.MANIFEST_KEY` went with `closure_manifest`, the
 # only writer of this block, when the `torch-inductor-cache` format was
 # deleted. The BLOCK NAME stays spelled out here because
-# `fleet_cells._UNBOUNDED_ENVELOPE_BLOCKS` still lists it as a literal:
+# `fleet_compiled_graphs._UNBOUNDED_ENVELOPE_BLOCKS` still lists it as a literal:
 # the control-plane cap is a defensive filter over whatever an envelope
 # carries, and what these rows prove — that an unbounded block is dropped
-# before the hub sees it, and that a 200 MB cell still publishes — is a
+# before the hub sees it, and that a 200 MB compiled graph still publishes — is a
 # property of the CAP, not of any one producer.
 GUARD_MANIFEST_BLOCK = "guard_manifest"
 
@@ -34,10 +34,10 @@ torch = pytest.importorskip("torch")
 from gen_worker._vendor.torchcg import identity as ck
 from gen_worker._vendor.torchcg import is_compiled_graph_key
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells as fc
+from gen_worker import fleet_compiled_graphs as fc
 from gen_worker import guard_closure as gc
-from gen_worker.registry import CompileCell
-from harness.cell_meta import exported_cell_meta, exported_cell_provenance
+from gen_worker.registry import CompileContract
+from harness.compiled_graph_meta import exported_compiled_graph_meta, exported_compiled_graph_provenance
 
 FAMILY = "toyfam"
 
@@ -49,14 +49,14 @@ def _fresh_dynamo() -> Iterator[None]:
     torch._dynamo.reset()
 
 
-def _cfg(**overrides: Any) -> CompileCell:
+def _cfg(**overrides: Any) -> CompileContract:
     base: Dict[str, Any] = dict(
         shapes=((64, 64),), targets=("transformer",), family=FAMILY,
         regional=False, text_len=None, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=(),
     )
     base.update(overrides)
-    return CompileCell(**base)
+    return CompileContract(**base)
 
 
 @pytest.fixture()
@@ -92,13 +92,13 @@ def test_static_closure_reaches_the_composition_code() -> None:
 
 def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
-    meta = exported_cell_meta()
+    meta = exported_compiled_graph_meta()
     key = ck.from_artifact_metadata(meta)
     assert key.value.startswith("cg-key-v1-")
     axes = key.as_dict()
     assert set(axes) == {"graph", "sm", "toolchain"}
     # Version strings and image identity are GONE from the key: a
-    # version-string bump alone can never re-key a cell (content digests
+    # version-string bump alone can never re-key a compiled graph (content digests
     # decide) — they are not even inputs to the derivation.
     bumped = dict(meta, gen_worker="99.0.0", torch="9.9.9",
                   image_digest="sha256:other")
@@ -110,7 +110,7 @@ def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
     for dead in ("ek1-", "ek2-", "cg-key-v2-"):
         assert is_compiled_graph_key(dead + "a" * 56)
         assert key.value != dead + "a" * 56
-    # pgw#1176: a ``ck`` key names a 36-entry all-or-nothing cell this runtime
+    # pgw#1176: a ``ck`` key names a 36-entry all-or-nothing compiled graph this runtime
     # cannot arm at all, so an orphaned ref must fail at the
     # comparison rather than late, inside a per-entry code path — and th#1897
     # moves WHERE that is enforced: the shared grammar refuses shape, never
@@ -128,7 +128,7 @@ def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
 
 
 def test_recipe_change_changes_the_key(pinned_runtime: None) -> None:
-    meta = exported_cell_meta()
+    meta = exported_compiled_graph_meta()
     base = ck.from_artifact_metadata(meta).value
     # Toolchain content change -> new identity.
     retooled = json.loads(json.dumps(meta))
@@ -144,10 +144,10 @@ def test_recipe_change_changes_the_key(pinned_runtime: None) -> None:
 def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     """Mint stamp == publish recompute, from the recorded recipe blocks —
     never trusted as a stamp."""
-    meta = exported_cell_meta()
+    meta = exported_compiled_graph_meta()
     want = ck.from_artifact_metadata(meta)
     assert meta["compiled_graph_key"] == want.value
-    # A cell with no toolchain block has no recipe identity.
+    # A compiled graph with no toolchain block has no recipe identity.
     legacy = {k: v for k, v in meta.items() if k != "toolchain"}
     with pytest.raises(ck.IdentityError, match="toolchain"):
         ck.from_artifact_metadata(legacy)
@@ -164,7 +164,7 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
 
 def test_toolchain_covers_the_compiler_and_not_the_model_libraries() -> None:
     """pgw#1050 INVERTS this test. It used to demand ``diffusers`` and
-    ``transformers`` in the axis; their whole effect on a cell arrives through
+    ``transformers`` in the axis; their whole effect on a compiled graph arrives through
     the traced ``graph`` axis, so folding them here re-keyed the fleet on every
     model-library bump for a computation that had not moved. Membership is the
     compiler — see ``tests/test_toolchain_membership_pgw1050.py``."""
@@ -202,23 +202,23 @@ def test_marked_cell_never_republishes(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(requests, "post", _post)
     artifact = tmp_path / "cell.tar.gz"
     artifact.write_bytes(b"bytes")
-    pub = fc.CellPublisher(
+    pub = fc.CompiledGraphPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
     meta = {"compiled_graph_key": "cg-key-v1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
-    with pytest.raises(fc.CellPublishRefused, match="pgw#712"):
-        pub.publish(FAMILY, artifact, meta, exported_cell_provenance())
+    with pytest.raises(fc.CompiledGraphPublishRefused, match="pgw#712"):
+        pub.publish(FAMILY, artifact, meta, exported_compiled_graph_provenance())
 
 
 def test_publish_complete_carries_only_what_the_hub_decodes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     posts: list = []
-    # pgw#1046: a real exported-cell envelope — publish recomputes the key from
-    # the recorded blocks and refuses a cell that cannot state one.
+    # pgw#1046: a real exported-compiled graph envelope — publish recomputes the key from
+    # the recorded blocks and refuses a compiled graph that cannot state one.
     # pgw#1341: the ARTIFACT half is TCG's; the unbounded block is added HERE,
     # visibly, because this test is about the declare bound stripping it —
-    # never hidden inside a fixture that could pretend a cell carries it.
-    meta = dict(exported_cell_meta(), **{GUARD_MANIFEST_BLOCK: _manifest()})
+    # never hidden inside a fixture that could pretend a compiled graph carries it.
+    meta = dict(exported_compiled_graph_meta(), **{GUARD_MANIFEST_BLOCK: _manifest()})
     key = meta["compiled_graph_key"]
 
     class _FakeResp:
@@ -264,12 +264,12 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
 
     monkeypatch.setattr(hub_mod, "HubClient", _FakeHub)
     artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"cell-bytes")
-    pub = fc.CellPublisher(
+    artifact.write_bytes(b"compiled graph-bytes")
+    pub = fc.CompiledGraphPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
     assert pub.publish(
         FAMILY, artifact, meta,
-        exported_cell_provenance(sku="l4", gen_worker="1.0.0")) == "cp-1"
+        exported_compiled_graph_provenance(sku="l4", gen_worker="1.0.0")) == "cp-1"
 
     complete_url, body = posts[-1]
     assert complete_url.endswith("/publish-complete")

@@ -80,7 +80,7 @@ def test_foreign_keys_in_dotenv_are_still_ignored(tmp_path: Path, monkeypatch: p
     """pgw#931: Scoped to the namespaces we own, deliberately."""
     monkeypatch.chdir(tmp_path)
     # A real environment variable outranks the dotenv, correctly — and pgw#1283
-    # made the suite set this one for every test (the local cell store's bytes
+    # made the suite set this one for every test (the local compiled graph store's bytes
     # live under it now, so it has to be isolated per run). Clear it so this
     # row still measures the dotenv it is about.
     monkeypatch.delenv("TENSORHUB_CACHE_DIR", raising=False)
@@ -402,8 +402,8 @@ def test_config_push_serves_next_request_pod_churn_free(
 
 
 # ============================================================================
-# pgw#846 — pgw#846 retirement semantics: regional cells are RETIRED, and a
-#   cell whose metadata still says ``mode='regional'`` is declined BY NAME —
+# pgw#846 — pgw#846 retirement semantics: regional compiled graphs are RETIRED, and a
+#   compiled graph whose metadata still says ``mode='regional'`` is declined BY NAME —
 #   never handed to the whole-graph ...
 # ============================================================================
 
@@ -421,7 +421,7 @@ def test_a_cell_whose_mode_has_no_arm_is_declined_by_name_and_stays_eager(
 
     def _never(*_a: Any, **_k: Any) -> bool:  # pragma: no cover - the defect
         raise AssertionError(
-            f"a mode={mode!r} cell must never reach the whole-graph arm")
+            f"a mode={mode!r} compiled graph must never reach the whole-graph arm")
 
     monkeypatch.setattr(aot_serve, "enable", _never)
 

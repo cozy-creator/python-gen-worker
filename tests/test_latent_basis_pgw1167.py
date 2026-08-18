@@ -2,7 +2,7 @@
 
 The class rows are derived by dividing declared PIXEL shapes by a latent
 divisor the author passes to `derive.cfg_image_classes(latent_scale=…)`. An
-unchecked divisor produces a whole cell of correctly-shaped, permanently
+unchecked divisor produces a whole compiled graph of correctly-shaped, permanently
 unusable artifacts — silent, and paid for at full mint price.
 
 WHY IT IS CHECKED IN THE COMPILE CHILD AND NOWHERE EARLIER
@@ -23,8 +23,8 @@ THE CARRIER
 The divisor is passed ONCE, to the deriver. `DerivedClasses` is a tuple
 subclass that carries it out with the rows it produced, and
 `Compile.__post_init__` transfers it to `Compile.latent_basis` BEFORE the row
-coercion rebuilds `classes` as a plain tuple. Transport, then a cell-level
-home — never a second declaration by the author, and never a cell-wide scalar
+coercion rebuilds `classes` as a plain tuple. Transport, then a compiled graph-level
+home — never a second declaration by the author, and never a compiled graph-wide scalar
 stamped on every row and read back off `rows[0]`: a label written beside a thing
 cannot be told from one describing it.
 """
@@ -115,14 +115,14 @@ def test_the_carrier_is_ABSENT_from_the_contract_digest() -> None:
     `latent_basis` is PROVENANCE — how the rows were computed — not a
     shape-contract axis; the latent extents it produced are already digested
     via `classes`. One line adding it to `contract_axes()` would silently
-    re-key every cell in the fleet.
+    re-key every compiled graph in the fleet.
     """
     assert "latent_basis" not in _decl(8).contract_axes()
 
 
 def test_declaring_the_basis_changes_NO_existing_digest() -> None:
     """The same rows, with and without the carrier, digest identically — so
-    every declaration that adopts the deriver keeps its cells."""
+    every declaration that adopts the deriver keeps its compiled graphs."""
     assert _decl(8).contract_axes() == _decl(8, derived=False).contract_axes()
 
 
@@ -139,7 +139,7 @@ def test_a_DIFFERENT_basis_still_changes_the_digest_through_the_ROWS() -> None:
 
 
 def test_a_WRONG_divisor_refuses_before_the_export_is_paid_for() -> None:
-    """RED on master: accepted, and the mint proceeded to build a whole cell
+    """RED on master: accepted, and the mint proceeded to build a whole compiled graph
     of correctly-shaped, unusable artifacts."""
     import pytest
 

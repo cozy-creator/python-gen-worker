@@ -27,8 +27,8 @@ comparison. That is torchcg G16's direction: the recipe ASSERTS against the
 declaration, it never becomes the source.
 
 **No checkpoint is downloaded, and that is the ruling, not a shortcut.**
-Cell identity is graph x sm x toolchain — checkpoint-free (DESIGN-RULINGS
-§4.27), which is exactly what lets one compiled cell serve sixteen fine-tunes.
+Compiled graph identity is graph x sm x toolchain — checkpoint-free (DESIGN-RULINGS
+§4.27), which is exactly what lets one compiled graph serve sixteen fine-tunes.
 The declaration builds the ARCHITECTURE inside a fake-tensor mode, the program
 carries fake constants, and the real weights arrive at ARM time by manifest FQN
 out of the constant store (pgw#1329's ``arm_compiled_graph_from_store``). So

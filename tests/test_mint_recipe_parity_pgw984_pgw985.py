@@ -6,7 +6,7 @@ Two properties, each a defect CLASS rather than a call site:
 declared modules directly and the handler is never called, so an AOT mint has no
 ``warmup_forward`` phase: a green mint proves the family's graphs export and
 says nothing about whether the forward those graphs serve can run. Unchecked, it
-seals and publishes a cell for an endpoint whose first real request dies.
+seals and publishes a compiled graph for an endpoint whose first real request dies.
 
 **A deterministic arm decline must not be a crash.** Two things go wrong when it
 is, and each is a class:
@@ -47,7 +47,7 @@ from gen_worker import compile_cache as cc
 from gen_worker import mint_child, mint_process
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 
 torch = pytest.importorskip("torch")
 
@@ -168,7 +168,7 @@ def _request(
     from harness import tiny_diffusion_endpoint as ep
 
     workdir.mkdir(parents=True, exist_ok=True)
-    cfg = CompileCell(
+    cfg = CompileContract(
         shapes=(ep.PIXEL_SHAPE,), targets=targets, family=ep.FAMILY,
         regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
@@ -266,7 +266,7 @@ def aot_without_the_export(
 
     The export + AOTInductor compile is the rig's job (and a LOCAL-ONLY row);
     what is under test here is the ORDER — whether the endpoint's own forward
-    has run by the time a cell can be sealed.
+    has run by the time a compiled graph can be sealed.
     """
     from harness import tiny_diffusion_endpoint as ep
 
@@ -320,7 +320,7 @@ def test_an_aot_mint_cannot_seal_for_a_handler_that_cannot_run(
     """pgw#969's crash class, made reachable on the recipe it was invisible on.
 
     RED at HEAD: this minted. ``torch.export`` does not care that the handler
-    raises, so the cell sealed, published, and every pod that adopted it hit
+    raises, so the compiled graph sealed, published, and every pod that adopted it hit
     the ValueError on its first real request instead.
     """
     from harness import tiny_diffusion_endpoint as ep

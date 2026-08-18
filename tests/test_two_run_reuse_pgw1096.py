@@ -2,9 +2,9 @@
 
 §4.28's product claim is not about one process: *"download model + code ONCE,
 compile ONCE, and every subsequent RUN of that code reuses the same compiled
-cell."* The unit tests in ``test_aot_local_mint_pgw1096`` prove the store and
-the gate inside one interpreter, where `fleet_cells._FINALIZED` — the
-in-process arm-token -> cell index — is warm and could mask a store that does
+compiled graph."* The unit tests in ``test_aot_local_mint_pgw1096`` prove the store and
+the gate inside one interpreter, where `fleet_compiled_graphs._FINALIZED` — the
+in-process arm-token -> compiled graph index — is warm and could mask a store that does
 not actually work.
 
 This one proves the claim it is: TWO fresh OS processes, sharing nothing but a
@@ -14,20 +14,20 @@ or the sidecar record were wrong in any way that a warm process papers over,
 run 2 opens a `PendingSelfMint` and this test says so.
 
 WHAT IS REAL HERE: the store (a real TCG envelope in a real tensorfs CAS, real
-atomic replace), the memo, `fleet_cells._arming_policy` — the actual production
+atomic replace), the memo, `fleet_compiled_graphs._arming_policy` — the actual production
 arming brain, entered the way the executor enters it — the ordering (local
 check before the pending), and process death between the runs.
 
 pgw#1283 — byte custody moved to TCG, and the third run below is what that
 buys. Corruption in the CAS is a TCG STORAGE quarantine, which is repairable;
 it is deliberately NOT this worker's verdict, so a repaired CAS arms again with
-no mint. On master the same rot dropped the cell and cost a full GPU pod run.
+no mint. On master the same rot dropped the compiled graph and cost a full GPU pod run.
 
 WHAT IS FAKED, and why: the COMPILE. Paul's standing rule (2026-08-10) is that
 no mint, compile or AOTI link runs on the shared dev box — those go to a pod.
 So the mint child is not spawned and `provision.arm_aot` is stubbed: this test
 is about the STORE and the REUSE DECISION, and it is honest about the fact that
-"a real AOTI cell arms on a real card" is a claim only a pod can make. That is
+"a real AOTI compiled graph arms on a real card" is a claim only a pod can make. That is
 the pod leg's job, and it is owed, not assumed.
 """
 
@@ -51,15 +51,15 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import tcg_artifacts
-from gen_worker import fleet_cells, local_cell_store
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker import fleet_compiled_graphs, local_compiled_graph_store
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 MODE = sys.argv[1]
 ARTIFACT = Path(os.environ["PGW1096_ARTIFACT"])
 SOURCE = Path(os.environ["PGW1096_SOURCE"])
 CAS = Path(os.environ["PGW1096_CAS"])
 KEY = tcg_artifacts.key_of(SOURCE)
-ARM = fleet_cells.ARM_SCHEME + "-" + "9" * fleet_cells.ARM_DIGEST_HEX
+ARM = fleet_compiled_graphs.ARM_SCHEME + "-" + "9" * fleet_compiled_graphs.ARM_DIGEST_HEX
 FAMILY = "micro-diffusion"
 
 
@@ -87,14 +87,14 @@ class Arm:
 
 # --- the compile is FAKED; everything below it is production code ------------
 opened_mints = []
-fleet_cells.provision.arm_aot = (            # type: ignore[assignment]
+fleet_compiled_graphs.provision.arm_aot = (            # type: ignore[assignment]
     lambda *a, **k: AdoptOutcome.hit(KEY))
-fleet_cells.artifact_meta.try_read_metadata = (  # type: ignore[assignment]
+fleet_compiled_graphs.artifact_meta.try_read_metadata = (  # type: ignore[assignment]
     lambda p: {"compiled_graph_key": KEY, "family": FAMILY})
-fleet_cells.arm_axis_divergence = lambda arm, meta, **_kw: ""   # type: ignore[assignment]
-fleet_cells.activity_mod.emit_event = lambda *a, **k: None  # type: ignore[assignment]
+fleet_compiled_graphs.arm_axis_divergence = lambda arm, meta, **_kw: ""   # type: ignore[assignment]
+fleet_compiled_graphs.activity_mod.emit_event = lambda *a, **k: None  # type: ignore[assignment]
 
-_real_pending = fleet_cells.PendingSelfMint
+_real_pending = fleet_compiled_graphs.PendingSelfMint
 
 
 def _spy(*a: Any, **k: Any) -> Any:
@@ -102,19 +102,19 @@ def _spy(*a: Any, **k: Any) -> Any:
     return _real_pending(*a, **k)
 
 
-fleet_cells.PendingSelfMint = _spy           # type: ignore[assignment]
+fleet_compiled_graphs.PendingSelfMint = _spy           # type: ignore[assignment]
 
 if MODE == "mint":
-    # Stand in for the child's packed cell. On a pod this comes out of a real
+    # Stand in for the child's packed compiled graph. On a pod this comes out of a real
     # AOTI link; here it is a real TCG envelope built without torch, because
     # since pgw#1283 the store hands its bytes to `Engine.import_artifact` and
     # an artifact that does not unpack and restate its own key is refused.
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     ARTIFACT.write_bytes(SOURCE.read_bytes())
-    reason = fleet_cells.no_publish_sink_reason(None)
-    stored = local_cell_store.store(
+    reason = fleet_compiled_graphs.no_publish_sink_reason(None)
+    stored = local_compiled_graph_store.store(
         ARTIFACT, key=KEY, family=FAMILY, arm_token=ARM, cas_root=CAS)
-    materialized = local_cell_store.materialize(KEY, cas_root=CAS)
+    materialized = local_compiled_graph_store.materialize(KEY, cas_root=CAS)
     print("RESULT " + json.dumps({
         "run": 1, "keep_reason": reason,
         "stored": stored is not None,
@@ -125,8 +125,8 @@ if MODE == "mint":
 else:
     # A COLD process: no `_FINALIZED`, no pending, nothing warm. The only
     # thing that exists is what run 1 wrote to disk.
-    assert not fleet_cells._FINALIZED, "a fresh process must start with no index"
-    minted = fleet_cells.arm_from_local_store(
+    assert not fleet_compiled_graphs._FINALIZED, "a fresh process must start with no index"
+    minted = fleet_compiled_graphs.arm_from_local_store(
         Pipe(), Cfg(), CAS, 0, Arm(), FAMILY)
     print("RESULT " + json.dumps({
         "run": 2,
@@ -134,8 +134,8 @@ else:
         "compiled_graph_key": getattr(minted, "compiled_graph_key", ""),
         "artifact": str(getattr(minted, "artifact", "")),
         "mints_opened": len(opened_mints),
-        "resident": [c.key for c in local_cell_store.stored_cells()],
-        "verdict": local_cell_store.verdict_of(KEY),
+        "resident": [c.key for c in local_compiled_graph_store.stored_compiled_graphs()],
+        "verdict": local_compiled_graph_store.verdict_of(KEY),
     }))
 '''
 
@@ -179,7 +179,7 @@ def test_run_one_mints_and_keeps_run_two_reuses_with_no_mint(
     tmp_path: Path,
 ) -> None:
     """Paul's compile-once-run-forever, across process death, measured."""
-    store = tmp_path / "cozy-cells"
+    store = tmp_path / "cozy-compiled graphs"
     cas = tmp_path / "cas"
     artifact = tmp_path / "mint" / "cell.tar.gz"
     source = _source(tmp_path)
@@ -197,7 +197,7 @@ def test_run_one_mints_and_keeps_run_two_reuses_with_no_mint(
     artifact.unlink()
 
     two = _run("reuse", store, artifact, source, cas)
-    assert two["armed"] is True, "the second run did not reuse the stored cell"
+    assert two["armed"] is True, "the second run did not reuse the stored compiled graph"
     assert two["mints_opened"] == 0, (
         "the second run opened a mint — compile-once-run-forever is the whole "
         "product promise and this is what breaking it looks like")
@@ -224,18 +224,18 @@ def test_cas_rot_refuses_the_arm_WITHOUT_becoming_this_workers_verdict(
 ) -> None:
     """pgw#1283 criterion 4, across process death — the repairable case.
 
-    Run 1 keeps a cell. The bytes rot IN THE CAS, which is a fact about a
+    Run 1 keeps a compiled graph. The bytes rot IN THE CAS, which is a fact about a
     storage record: TCG quarantines it and no cold run may arm it. What must
     NOT happen is the worker recording its own :data:`VERDICT_QUARANTINED` —
     that verdict means "a parity/arm gate refused these bytes", it is terminal
-    by design (§1.3.4 keeps such a cell for forensics and never serves it), and
-    writing it here would strand a cell forever on a defect a re-store fixes.
+    by design (§1.3.4 keeps such a compiled graph for forensics and never serves it), and
+    writing it here would strand a compiled graph forever on a defect a re-store fixes.
 
     Run 3 proves the repair: the same artifact is stored again, TCG repairs its
-    own record, and the cell arms — with no mint, because the worker's
+    own record, and the compiled graph arms — with no mint, because the worker's
     admission was never destroyed.
     """
-    store = tmp_path / "cozy-cells"
+    store = tmp_path / "cozy-compiled graphs"
     cas = tmp_path / "cas"
     artifact = tmp_path / "mint" / "cell.tar.gz"
     source = _source(tmp_path)
@@ -251,10 +251,10 @@ def test_cas_rot_refuses_the_arm_WITHOUT_becoming_this_workers_verdict(
     (store / "aot-cells" / one["key"] / "cell.tar.gz").unlink()
 
     two = _run("reuse", store, artifact, source, cas)
-    assert two["armed"] is False, "a cell TCG cannot verify armed on a cold boot"
+    assert two["armed"] is False, "a compiled graph TCG cannot verify armed on a cold boot"
     assert two["verdict"] == "admitted", (
         "a CAS-storage quarantine was written into this worker's verdict; a "
-        "repair can then never bring the cell back")
+        "repair can then never bring the compiled graph back")
     assert two["resident"] == [one["key"]], (
         "the worker's own record must survive rot it did not cause")
 

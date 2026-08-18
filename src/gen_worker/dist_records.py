@@ -18,7 +18,7 @@ Two consumers, ONE derivation:
 **The digest is byte-identical to the hash it replaces.** RECORD stores
 ``sha256=<urlsafe-b64 of the 32 raw bytes>``; decoding to hex and truncating
 to 16 chars reproduces ``hashlib.sha256(content).hexdigest()[:16]`` exactly. So
-this is a pure COST move: no seal value changes, no cell re-keys.
+this is a pure COST move: no seal value changes, no compiled graph re-keys.
 
 **What RECORD trust is, precisely:**
 

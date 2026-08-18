@@ -4,20 +4,20 @@ version = "0.2.0"
 description = "The fleet's smallest REAL endpoint family — three export entries over a deterministically generated toy checkpoint, so a full AOT mint cycle costs minutes"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    # Hard-pinned per th#1098 fleet policy: compile cells verify() EXACT on
-    # the gen-worker version, so a range would make an adopted cell's identity
+    # Hard-pinned per th#1098 fleet policy: compiled graphs verify() EXACT on
+    # the gen-worker version, so a range would make an adopted compiled graph's identity
     # depend on what the build happened to resolve.
     #
     # ⚠️ THIS FAMILY'S SERVE PATH REQUIRES pgw#994 (`2165c2d5`): it declares a
     # `repeat=` container input with a plain input after it, and on <0.93.4 the
-    # cell MINTS and SEALS and then refuses at ingress on its first served
+    # compiled graph MINTS and SEALS and then refuses at ingress on its first served
     # call. Never pin below that.
     #
     # This example is outside the `inference-endpoints` relock train, so the pin
     # is moved here by hand at each cut to keep the micro gauntlet on the SAME
     # wheel the fleet serves — which is the whole reason the gauntlet is a
     # usable probe. Floor facts still in force: pgw#1059's four-axis `ck1`
-    # (0.97.0), so every cell minted from this pin is a live-scheme cell.
+    # (0.97.0), so every compiled graph minted from this pin is a live-scheme compiled graph.
     "gen-worker==0.112.0",
     "msgspec>=0.18",
     "safetensors>=0.4",
@@ -38,10 +38,10 @@ dependencies = [
 # defect in place for every other family, which is why it is NOT here.
 #
 # The pin is 0.111.0 because the reuse circle cannot close below it: pgw#1141
-# (`0dbf68e5`) deletes the warmup barrier that DISARMED every boot-adopted cell
+# (`0dbf68e5`) deletes the warmup barrier that DISARMED every boot-adopted compiled graph
 # on 0.106.0 (POD PROOF #3, twice, identically), and pgw#1132 (`8867baac`) arms
 # the lifted forward in the boot-key loop. Below 0.111.0 an adopting pod resolves,
-# materializes and then throws the cell away.
+# materializes and then throws the compiled graph away.
 
 [dependency-groups]
 local = [

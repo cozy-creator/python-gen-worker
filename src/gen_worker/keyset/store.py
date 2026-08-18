@@ -42,7 +42,7 @@ down. th#1813 has the hub place ``GEN_WORKER_LOCAL_CELLS_DIR`` on EVERY create,
 pointing at the most durable storage the provider can back: the endpoint
 NETWORK volume (survives the pod, shared by every pod of the endpoint) when one
 is attached, else the pod's volume disk (survives a container restart). A key
-set is the same KIND of artifact as the cells beside it — derived by a trace
+set is the same KIND of artifact as the compiled graphs beside it — derived by a trace
 this hardware ran, addressed by a digest that fails safe on drift, worthless to
 anyone whose closure differs — so it belongs on the same root, in its own
 subtree.
@@ -98,10 +98,10 @@ __all__ = [
 ENV_KEYSET_PATH = "GEN_WORKER_CG_KEYSET"
 
 #: th#1813's platform-placed durable store root. RESTATED, never imported from
-#: :mod:`gen_worker.local_cell_store`, for the same reason
+#: :mod:`gen_worker.local_compiled_graph_store`, for the same reason
 #: :data:`IMAGE_KEYSET_DIR` is restated: that module imports the vendored TCG
 #: package, and reading a key set must not drag a tracer's import graph onto a
-#: serve pod. ``test_the_durable_root_name_matches_the_cell_store`` pins the two
+#: serve pod. ``test_the_durable_root_name_matches_the_compiled_graph_store`` pins the two
 #: spellings together so the restatement cannot drift.
 #:
 #: A PATH, chosen by the party that knows the hardware (th#1813: *"where an
@@ -111,7 +111,7 @@ ENV_KEYSET_PATH = "GEN_WORKER_CG_KEYSET"
 ENV_LOCAL_CELLS_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"
 
 #: The key set's own subtree under the durable root. NAMESPACED rather than
-#: sharing the root directly: ``local_cell_store`` owns ``aot-cells/`` there and
+#: sharing the root directly: ``local_compiled_graph_store`` owns ``aot-cells/`` there and
 #: addresses it by ``ck1`` key, and two tiers writing sibling files into one
 #: mount is how an operator ends up unable to say which tier a stray file
 #: belongs to.

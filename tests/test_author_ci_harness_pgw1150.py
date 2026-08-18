@@ -8,7 +8,7 @@ a rented pod. This wires its already-shipped primitives into one command:
 WHAT IS REAL HERE: the endpoint load and function selection (`cli.run`'s own),
 the dispatch, `ctx.stage` -> `stage_ms` timing, the serve-posture order and its
 release, `Compile.blockers` read through `export_contract.open_blockers`, the
-parity gate (`provision.gate_cell_numerics` against pgw#868's real armed cell,
+parity gate (`provision.gate_compiled_graph_numerics` against pgw#868's real armed compiled graph,
 real ladder, real declared floor), the record's TOML, and — where the sibling
 repo is checked out — `serverless-endpoints/scripts/lint_author_ci.py` itself,
 imported and run against what this harness emitted.
@@ -19,7 +19,7 @@ So `run_setup` is stubbed to hand back pgw#868's armed probe pipeline — the
 same seam `test_two_run_reuse_pgw1096.py` fakes — and `assert_fleet_line` is
 stubbed in the rows that are not about the preflight (this box HAS a driver and
 no usable CUDA, so the real assertion refuses it, which two rows below assert
-rather than work around). "A real AOTI cell arms on a real card and is faster"
+rather than work around). "A real AOTI compiled graph arms on a real card and is faster"
 is a claim only a pod can make; that is the first author's run, and it is owed.
 """
 
@@ -99,7 +99,7 @@ def invoke(record: Path, cls: str, *extra: str) -> Tuple[int, Any]:
     return author_ci.run(args)
 
 
-def armed_cell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
+def armed_compiled_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
                cosine: float, *, verify_numerics: bool) -> Any:
     """pgw#868's REAL arm, returned as the slot a stubbed `setup()` loads."""
     packages = {rig.entry_name(h, w): rig.ProbePackage(cosine=cosine)
@@ -125,7 +125,7 @@ def test_a_rig_off_the_fleet_line_exits_90_and_a_dead_host_exits_91(
     The numbers are rigcheck's own (`python -m gen_worker.rigcheck` exits 0/90/
     91). An author who wraps this must not have to learn a second table for the
     same preflight, and a wrapper that mapped both onto 1 would make "your card
-    cannot run this wheel" indistinguishable from "your cell is slow".
+    cannot run this wheel" indistinguishable from "your compiled graph is slow".
     """
     record = record_file(tmp_path)
     base = ["--module", MODULE, "--class", "Fast", "--record", str(record)]
@@ -209,7 +209,7 @@ def test_the_compiled_arm_runs_first_then_the_order_engages_and_releases(
     Engaged through `serve_posture.apply_command`, never the hub route: the
     author's pod may have no hub at all.
     """
-    armed_cell(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
+    armed_compiled_graph(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
     record = record_file(tmp_path)
     code, report = invoke(record, "Fast")
 
@@ -231,7 +231,7 @@ def test_the_order_is_released_even_when_a_leg_raises(
         tmp_path, monkeypatch, declared, on_the_line):
     """An abandoned eager-only order would silently un-compile the pod for
     every later run in the same process."""
-    armed_cell(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
+    armed_compiled_graph(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
     boom = RuntimeError("the handler died mid-arm")
     calls: List[int] = []
 
@@ -258,11 +258,11 @@ def test_parity_uses_the_familys_own_declared_floor_and_refuses_below_it(
     row cannot tell the two apart. That is the whole of ie#664's *"the bar is
     the family's own numerics_floor, never a number typed into a harness"*.
 
-    The cell is armed WITHOUT the mint gate (an adopt), so the harness takes
+    The compiled graph is armed WITHOUT the mint gate (an adopt), so the harness takes
     the verdict through the gate itself — the same function, never a
     comparison re-implemented here.
     """
-    armed_cell(tmp_path, monkeypatch, declared, 0.99, verify_numerics=False)
+    armed_compiled_graph(tmp_path, monkeypatch, declared, 0.99, verify_numerics=False)
     record = record_file(tmp_path)
     code, report = invoke(record, "Fast")
 
@@ -278,7 +278,7 @@ def test_parity_uses_the_familys_own_declared_floor_and_refuses_below_it(
 
 def test_a_healthy_cell_records_the_gates_own_cosine(
         tmp_path, monkeypatch, declared, on_the_line):
-    armed_cell(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
+    armed_compiled_graph(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
     record = record_file(tmp_path)
     _code, report = invoke(record, "Fast")
 
@@ -297,8 +297,8 @@ def test_the_declared_numerics_floor_reaches_the_gate_at_all(declared):
     """RED on master, and it is why this issue has a prerequisite.
 
     `numerics_ladder.declared_thresholds` has exactly ONE caller
-    (`numerics_probe.probe_cell`) and its `cfg` is always a `registry
-    .CompileCell` — which carried no `numerics_floor` field at all. So every
+    (`numerics_probe.probe_compiled_graph`) and its `cfg` is always a `registry
+    .CompileContract` — which carried no `numerics_floor` field at all. So every
     gate on every path scored against the SDK default, `threshold_source` said
     `sdk-default` everywhere, and `Compile.numerics_floor` (pgw#812/#814,
     sdxl's measured 0.995/0.999) was a declaration nothing read.
@@ -307,19 +307,19 @@ def test_the_declared_numerics_floor_reaches_the_gate_at_all(declared):
     from gen_worker.registry import extract_specs
 
     spec = extract_specs(endpoints.Fast)[0]
-    cell = spec.compile_cell()
-    assert cell is not None
+    graph = spec.compile_contract()
+    assert graph is not None
 
-    assert cell.numerics_floor == endpoints.FLOOR
-    assert cell.numerics_warn == endpoints.WARN
-    bar = numerics_ladder.declared_thresholds(cell)
+    assert graph.numerics_floor == endpoints.FLOOR
+    assert graph.numerics_warn == endpoints.WARN
+    bar = numerics_ladder.declared_thresholds(graph)
     assert bar.floor == endpoints.FLOOR
     assert bar != numerics_ladder.DEFAULT_THRESHOLDS
 
     # A numerics band is not a graph axis: declaring one must never move a
-    # cell key, or every family that states its floor re-mints the fleet.
-    assert "numerics_floor" not in cell.contract_facts()
-    assert "numerics_warn" not in cell.contract_facts()
+    # compiled graph key, or every family that states its floor re-mints the fleet.
+    assert "numerics_floor" not in graph.contract_facts()
+    assert "numerics_warn" not in graph.contract_facts()
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +336,7 @@ def test_a_below_bar_speedup_is_a_FAILURE_and_never_a_proof(
     be relabelled `never-run`: that is a measured gap becoming an unmeasured
     one.
     """
-    armed_cell(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
+    armed_compiled_graph(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
     record = record_file(tmp_path)
     code, report = invoke(record, "Regressed")
 
@@ -477,7 +477,7 @@ def _through_the_lint(lint: Any, tmp_path: Path, record: Path) -> int:
 def test_a_proven_record_passes_the_real_lint(
         tmp_path, monkeypatch, declared, on_the_line):
     lint = _lint()
-    armed_cell(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
+    armed_compiled_graph(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
     record = record_file(tmp_path)
     _code, report = invoke(record, "Fast")
     assert report.status == author_ci.STATUS_PROVEN
@@ -499,7 +499,7 @@ def test_a_failed_record_is_REFUSED_by_the_real_lint(
     """The point of recording a failure: it stays red until the code (or the
     declaration) is fixed, and it cannot be skimmed as a proof."""
     lint = _lint()
-    armed_cell(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
+    armed_compiled_graph(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
     record = record_file(tmp_path)
     _code, report = invoke(record, "Regressed")
     assert report.status == author_ci.STATUS_FAILED
@@ -521,7 +521,7 @@ def test_the_lint_DISCRIMINATES_proven_from_failed(
     re-breaks the fixture cannot hide behind an assertion that only ever
     checks the failing direction.
     """
-    armed_cell(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
+    armed_compiled_graph(tmp_path, monkeypatch, declared, 1.0, verify_numerics=False)
     lint = _lint()
 
     (tmp_path / "ok").mkdir()

@@ -216,7 +216,7 @@ class Runner:
     #: Empty means "this runner has no eager equivalent" — a legitimate state
     #: for a runner that only ever exists as a compiled graph class. Such a
     #: runner simply does not appear in the eager backing, and a call to it
-    #: with no armed cell refuses by name rather than running the wrong thing.
+    #: with no armed compiled graph refuses by name rather than running the wrong thing.
     component: str = ""
 
     def __post_init__(self) -> None:

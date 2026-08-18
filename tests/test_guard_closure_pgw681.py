@@ -19,7 +19,7 @@ torch = pytest.importorskip("torch")
 
 from gen_worker import compile_cache as cc
 from gen_worker import guard_closure as gc
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 
 
 @pytest.fixture(autouse=True)
@@ -29,14 +29,14 @@ def _fresh_dynamo() -> Iterator[None]:
     torch._dynamo.reset()
 
 
-def _cfg(**overrides: Any) -> CompileCell:
+def _cfg(**overrides: Any) -> CompileContract:
     base: Dict[str, Any] = dict(
         shapes=((64, 64),), targets=("transformer",), family="toyfam",
         regional=False, text_len=None, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=(),
     )
     base.update(overrides)
-    return CompileCell(**base)
+    return CompileContract(**base)
 
 
 def _entries(fn: Any) -> int:
@@ -192,9 +192,9 @@ def test_out_of_envelope_scalar_is_recorded_naming_the_variable() -> None:
 
     # read the classification off `audit_armed`, the live view of an
     # armed pipeline, instead of `closure_manifest` — the MINT-side wrapper
-    # that embedded it in a `torch-inductor-cache` cell and is deleted with
+    # that embedded it in a `torch-inductor-cache` compiled graph and is deleted with
     # that format. The classifier under test is the same one; only the
-    # serialize-into-a-cell step is gone.
+    # serialize-into-a-compiled graph step is gone.
     leaks = "\n".join(gc.audit_armed(pipe, _cfg()).leaks)
     assert "L['scale']" in leaks
     assert "3.25" in leaks
@@ -208,9 +208,9 @@ def test_out_of_envelope_scalar_is_recorded_naming_the_variable() -> None:
 # pgw#1181 REMOVED `test_gate_refuses_when_nothing_is_extractable` and
 # `test_the_packed_cell_records_the_manifest_leaking_or_clean`. Both are about
 # `closure_manifest` — the mint-side wrapper that refused an empty capture and
-# wrote the classification into a cell's metadata. It is deleted with the
+# wrote the classification into a compiled graph's metadata. It is deleted with the
 # `torch-inductor-cache` format, whose last writer died in pgw#1178: there is
-# no cell for a guard manifest to ride on and no mint for the empty-capture
+# no compiled graph for a guard manifest to ride on and no mint for the empty-capture
 # refusal to fail. The CLASSIFIER those rows reached through it is untouched
 # and is driven directly above, via `audit_armed`.
 
@@ -325,7 +325,7 @@ def _toy_manifest(**mutate: Any) -> Dict[str, Any]:
 # pgw#1181 REMOVED the three `consolidate` rows and
 # `test_cli_zero_miss_check_exit_codes`. `guard_closure.consolidate`,
 # `load_manifest`, `FleetAudit` and the `python -m gen_worker.guard_closure`
-# CLI compared the guard manifests of N cells — a cross-pod audit over a block
-# that no cell carries any more, since `closure_manifest` was its only writer.
+# CLI compared the guard manifests of N compiled graphs — a cross-pod audit over a block
+# that no compiled graph carries any more, since `closure_manifest` was its only writer.
 # `load_manifest` could only ever raise "carries no guard manifest", so the CLI
 # was a tool that could not succeed. Deleted with their subject (§4.34).

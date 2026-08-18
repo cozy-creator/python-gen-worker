@@ -39,7 +39,7 @@ serving. A boot-only switch would mean recycling the pod to use it, which is
 the cost the switch exists to avoid.
 
 **Reversible — and that decides the enforcement point.** ``suppress`` must not
-unwrap an armed cell: unwrapping is destructive (``aot_serve.unwrap`` restores
+unwrap an armed compiled graph: unwrapping is destructive (``aot_serve.unwrap`` restores
 the captured forward and the arm is gone for the boot), so a worker that
 un-suppressed would serve eager anyway until something re-armed it. Instead the
 suppression is read AT THE CALL — ``aot_serve``'s wrapper answers from the
@@ -54,16 +54,16 @@ Same posture, two triggers, and they must never be read as each other:
 ===================  ==========================  ==========================
                      §4.31 sticky de-arm         §4.32 eager-only command
 ===================  ==========================  ==========================
-trigger              a cell-attributable serve   an operator, explicitly
+trigger              a compiled graph-attributable serve   an operator, explicitly
                      failure (guard refusal,
                      artifact crash)
-scope                THAT cell                   the whole worker
+scope                THAT compiled graph                   the whole worker
 lifetime             sticky for the boot         until released
 reversible           no — it is evidence         yes — it is policy
 token                ``compiled_degraded`` &c.   ``operator_eager_only``
 ===================  ==========================  ==========================
 
-Releasing the command deliberately does NOT resurrect a de-armed cell. A
+Releasing the command deliberately does NOT resurrect a de-armed compiled graph. A
 de-arm recorded that this artifact failed on this machine; policy has no
 standing to overrule evidence.
 """
@@ -76,7 +76,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from .cell_adopt import EagerPhase
+from .compiled_graph_adopt import EagerPhase
 
 logger = logging.getLogger(__name__)
 
@@ -169,13 +169,13 @@ def apply_command(
     if current.active:
         logger.warning(
             "serve-posture: EAGER ONLY by order — %s. Nothing will arm or "
-            "mint, and armed cells stay armed but are not called; releasing "
+            "mint, and armed compiled graphs stay armed but are not called; releasing "
             "the order resumes compiled serving without a re-arm.",
             current.describe())
     else:
         logger.warning(
-            "serve-posture: eager-only order RELEASED — %s. Armed cells serve "
-            "compiled again from the next request; cells de-armed for cause "
+            "serve-posture: eager-only order RELEASED — %s. Armed compiled graphs serve "
+            "compiled again from the next request; compiled graphs de-armed for cause "
             "(§4.31) stay de-armed.", current.describe())
     _emit_transition(current)
     return True
@@ -198,7 +198,7 @@ def _emit_transition(current: EagerOnlyOrder) -> None:
            "(§4.32 item 4); every request serves eager and the posture token "
            f"is {REASON}"
            if current.active else
-           "the operator's eager-only order is released; armed cells serve "
+           "the operator's eager-only order is released; armed compiled graphs serve "
            "compiled again and arming decisions run normally")
     )
     try:

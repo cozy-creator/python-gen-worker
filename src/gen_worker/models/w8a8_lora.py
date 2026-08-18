@@ -25,7 +25,7 @@ B copy.
 The branch-bearing pipeline stamps ``_cozy_weight_lane =
 "<base-lane>-lora<bucket>"`` (``w8a8-lora32``, ``fp8-hooks-lora32``,
 ``lora32`` for plain bf16) so the SYMMETRIC ``compile_cache.lane_drift``
-guard keeps LoRA-bearing pipelines and branchless compile cells apart in
+guard keeps LoRA-bearing pipelines and branchless compiled graphs apart in
 both directions.
 
 **Branch targets are PER-COMPONENT.** A pipeline's denoiser is a
@@ -266,7 +266,7 @@ def branch_bucket(model: Any) -> int:
 
 def lora_execution_lane(bucket: int, sparse: bool = False, base: str = "w8a8") -> str:
     # Sparse (eager-only) placement is a different graph per coverage
-    # pattern — the "-sparse" suffix can never match a produced cell label.
+    # pattern — the "-sparse" suffix can never match a produced compiled graph label.
     # ``base`` is the branchless lane the branch rides on ("w8a8",
     # "fp8-hooks", or "" for plain resident).
     prefix = f"{base}-" if base else ""
@@ -755,7 +755,7 @@ def _settle_bucket(
             raise ValidationError(
                 f"active LoRA set needs rank bucket {want} but the compiled "
                 f"pipeline traced bucket {current or 'none'} — recompile at "
-                "swap time is never allowed; publish a matching lora cell"
+                "swap time is never allowed; publish a matching lora compiled graph"
             )
         for model in models:
             enable_lora_branches(model, want)
@@ -1004,14 +1004,14 @@ def apply_branch_adapter_set(
 
 
 def effective_base_execution_lane(pipe: Any) -> str:
-    """The branchless base weight lane CELL IDENTITY rides on — the ONE
+    """The branchless base weight lane COMPILED GRAPH IDENTITY rides on — the ONE
     resolution :func:`stamp_lane` memoizes: the memoized base, else the
     pipeline's stamped/probed lane, else the denoiser's own lane markers
     (:func:`branch_lane`), which see the w8a8 GEMM mode
     (``_cozy_w8a8_mode``) that ``loading.pipeline_weight_lane`` cannot.
 
-    The advertised requested cell key and the minted/published cell key MUST
-    resolve the base lane identically. When they don't, the published cell is
+    The advertised requested compiled graph key and the minted/published compiled graph key MUST
+    resolve the base lane identically. When they don't, the published compiled graph is
     never requested by any worker, adoption is structurally impossible, and
     every cold pod re-mints."""
     base = getattr(pipe, "_cozy_lora_base_lane", None)
@@ -1035,7 +1035,7 @@ def stamp_execution_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None)
     The stamp is per PIPELINE, over its whole denoiser set: the
     components always carry the same bucket, and how many experts a family
     has is a property of the pipeline class, not of the lane — so the lane
-    STRING (and therefore every published cell key) is unchanged by MoE
+    STRING (and therefore every published compiled graph key) is unchanged by MoE
     support."""
     tg = branch_targets(pipe) if targets is None else dict(targets)
     models = list(tg.values())

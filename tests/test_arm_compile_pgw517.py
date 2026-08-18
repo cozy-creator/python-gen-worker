@@ -28,10 +28,10 @@ from gen_worker.api.errors import RetryableError
 from gen_worker.executor import Executor
 from gen_worker.models.store import ModelStore
 from gen_worker.models import provision
-from gen_worker import fleet_cells
+from gen_worker import fleet_compiled_graphs
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec, extract_specs
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.models import store as store_mod
 
 FAMILY = "wan-2.2-t2v-a14b"
@@ -254,8 +254,8 @@ def test_executor_arms_self_loaded_pipeline_via_arm_compile(
         pipeline, cfg, cache_ready = applied[0]
         assert pipeline is inst.pipe
         # SDK v2: the executor hands the compile machinery the enriched
-        # CompileCell derived from the spec, never the raw Compile.
-        assert cfg == spec.compile_cell()
+        # CompileContract derived from the spec, never the raw Compile.
+        assert cfg == spec.compile_contract()
         # no hub-attached artifact / no local cache seeded -> stays eager.
         assert cache_ready is False
 
@@ -382,19 +382,19 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
             return _Out()
 
     monkeypatch.setattr(provision, "enable_compiled", _fake_enable)
-    cell_ref = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
+    cg_ref = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
 
     def _mint_enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
                      delegate=None, delivered_ref="", delivered_digest=""):
         # The advertised identity comes from the worker's OWN mint
-        # (delivered-cell selection is deleted).
+        # (delivered-compiled graph selection is deleted).
         _fake_enable(pipe, cfg, cache_dir, artifact)
-        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, compiled_graph_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=fleet_compiled_graphs.SelfMint(
+            family=FAMILY, compiled_graph_key=cg_ref.rsplit("#", 1)[-1], ref=cg_ref,
             snapshot_digest="blake3:" + "b" * 64,
             artifact=tmp_path / "cell.tar.gz"))
 
-    monkeypatch.setattr(fleet_cells, "enable_compiled", _mint_enable)
+    monkeypatch.setattr(fleet_compiled_graphs, "enable_compiled", _mint_enable)
     compile_cfg = Compile(family=FAMILY, shapes=((768, 768),), text_len=0)
     spec = EndpointSpec(
         name="wan-w8a8", method=Endpoint.run, kind="inference",
@@ -419,7 +419,7 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
     ex = asyncio.run(_go())
     (target,) = ex.compile_targets()
     assert target.pipeline_weight_lane == "w8a8"
-    assert target.active_compile_ref == cell_ref
+    assert target.active_compile_ref == cg_ref
     assert target.active_compile_snapshot_digest == "blake3:" + "b" * 64
     assert list(target.function_names) == ["wan-w8a8"]
     assert [

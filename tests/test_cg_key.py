@@ -1,11 +1,11 @@
-"""gw#581/th#883 (redefined by pgw#1059): the ONE worker-owned cell-key
-brain + the local-cell verdict invariants.
+"""gw#581/th#883 (redefined by pgw#1059): the ONE worker-owned compiled graph-key
+brain + the local-compiled graph verdict invariants.
 
 Outcome-level: a key is deterministic and axis-sensitive on exactly the
 four ck1 axes; the local (torch-inductor-cache) store verdict compares
-recorded facts with the producer's own derivations; a SELF-VERIFIED cell
+recorded facts with the producer's own derivations; a SELF-VERIFIED compiled graph
 that fails to arm surfaces as compiled_graph_selection_bug (never a silent eager
-fallback); foreign cells keep the compatibility-miss policy.
+fallback); foreign compiled graphs keep the compatibility-miss policy.
 
 The redefinition's own invariants (membership axiom, one-derivation fence,
 old/new non-collision, envelope canonicalization) live in
@@ -22,7 +22,7 @@ from gen_worker import compile_cache as cc
 
 
 class _ContractCfg:
-    """Duck-typed declared-compile-contract source (registry.CompileCell)."""
+    """Duck-typed declared-compile-contract source (registry.CompileContract)."""
 
     def __init__(
         self, *, shapes=((768, 768),), targets=("transformer",), text_len=0,
@@ -122,7 +122,7 @@ def test_the_grammar_refuses_shape_never_scheme():
 def test_execution_lane_canonicalization():
     """fp8-hooks and w8a16 are one lane label; buckets fold into it. The
     lane is store metadata + discovery scoping since pgw#1059 — the
-    one-derivation rule stands so a cell is scoped under the same spelling
+    one-derivation rule stands so a compiled graph is scoped under the same spelling
     it was stamped with."""
     assert (cc.execution_lane_label("fp8-hooks")
             == cc.execution_lane_label("w8a16"))
@@ -131,7 +131,7 @@ def test_execution_lane_canonicalization():
     assert cc.execution_lane_label("w8a8") != cc.execution_lane_label("")
 
 
-# pgw#1181 REMOVED the six local-cell-verdict rows:
+# pgw#1181 REMOVED the six local-compiled graph-verdict rows:
 # `test_local_cell_has_no_key_stamp`, `test_local_verdict_ignores_sku_and_pins_sm`,
 # `test_declared_contract_fences_newer_contract`,
 # `test_self_requested_drift_is_selection_bug`,
@@ -139,11 +139,11 @@ def test_execution_lane_canonicalization():
 # `test_foreign_cell_drift_stays_eager`.
 #
 # Their subject is the `torch-inductor-cache` store verdict —
-# `compile_cache.local_cell_mismatch` over `artifact_metadata`, and the
-# `compiled_graph_selection_bug` a self-requested cell of that format raised when it then
+# `compile_cache.local_compiled_graph_mismatch` over `artifact_metadata`, and the
+# `compiled_graph_selection_bug` a self-requested compiled graph of that format raised when it then
 # refused to arm. The format has had no writer since pgw#1178 deleted
 # `mint_artifact`, and pgw#1181 deleted the format: there is no local kind, no
-# verdict to render on one, and `enable` no longer takes a cell to reject.
+# verdict to render on one, and `enable` no longer takes a compiled graph to reject.
 #
 # Every property they fenced survives on the exported lane BY CONSTRUCTION
 # rather than by comparison, which is the point of a content-addressed key:

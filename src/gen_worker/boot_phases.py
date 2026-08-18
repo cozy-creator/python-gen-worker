@@ -1,8 +1,8 @@
 """Per-phase BOOT telemetry.
 
 The hub can see a boot from OUTSIDE — pod create -> worker hello -> first
-assignment — but those bounds say nothing about which of weights fetch, cell
-fetch, cell load or warmup owns the seconds INSIDE. Only the worker knows.
+assignment — but those bounds say nothing about which of weights fetch, compiled graph
+fetch, compiled graph load or warmup owns the seconds INSIDE. Only the worker knows.
 
 This module is the boot-time analogue of :mod:`gen_worker.stage_timing` (the
 per-REQUEST measurement spine), and it deliberately copies that module's two
@@ -67,14 +67,14 @@ PHASE_HELLO = "hello"
 PHASE_WEIGHTS_FETCH = "weights_fetch"
 PHASE_PIPELINE_LOAD = "pipeline_load"
 #: The warmup forwards, split OUT of `pipeline_load` and nested under it, so
-#: `pipeline_load` becomes weights->VRAM by subtraction and "what does a cell
+#: `pipeline_load` becomes weights->VRAM by subtraction and "what does a compiled graph
 #: save on warmup" is a column instead of an estimate.
 #:
 #: Emitted ONLY when warm work actually runs: a skipped warmup emits no row,
 #: because "nobody warmed" and "warming was free" are different answers.
 PHASE_WARMUP = "warmup"
 PHASE_CELL_FETCH = "cell_fetch"
-#: The arm of ONE delivered or discovered cell. Its duration is the same
+#: The arm of ONE delivered or discovered compiled graph. Its duration is the same
 #: quantity the hub stores as the adoption's `duration_ms`, measured once, in
 #: the one place that does the arming.
 PHASE_CELL_ARM = "cell_arm"
@@ -113,12 +113,12 @@ PHASE_DECLARATION_COMPOSE = "declaration_compose"
 PHASE_TRACE_FOR_KEY = "trace_for_key"
 #: Per-class hashing + the fold into `combined_graph_hash`.
 PHASE_KEY_FOLD = "key_fold"
-#: One worker->hub cell control-plane round trip (publish-intent /
+#: One worker->hub compiled graph control-plane round trip (publish-intent /
 #: publish-complete). `function` names the leg. NOTE: there is no worker-side
 #: key LOOKUP to time (the hub resolves the arm), so this is the whole of the
-#: hub RTT the cell path actually pays on a boot.
+#: hub RTT the compiled graph path actually pays on a boot.
 PHASE_CELL_HUB_RTT = "cell_hub_rtt"
-#: Staging + contract verification of a downloaded cell, before the first
+#: Staging + contract verification of a downloaded compiled graph, before the first
 #: dlopen. The first half of admission.
 PHASE_CELL_VERIFY = "cell_verify"
 #: ONE entry's admission: contract parse, constant bind, ingress-assertion
@@ -129,9 +129,9 @@ PHASE_ENTRY_ADMIT = "entry_admit"
 #: CUMULATIVE. The first instant this worker could have served a request at
 #: all, compiled or not — the first of the two user-visible timestamps.
 PHASE_EAGER_READY = "eager_ready"
-#: CUMULATIVE. The instant a compiled cell became the served path. The second
+#: CUMULATIVE. The instant a compiled graph became the served path. The second
 #: user-visible timestamp, and the only honest measure of how long a pod serves
-#: eager before its cell arrives. May land AFTER the boot closes, which is
+#: eager before its compiled graph arrives. May land AFTER the boot closes, which is
 #: exactly the fact worth having.
 PHASE_COMPILED_SWAP = "compiled_swap"
 
@@ -154,7 +154,7 @@ CUMULATIVE_PHASES = frozenset({
 # stage_timing's GPU_BUSY/SMALL_GPU/GPU_IDLE intent at boot scale.
 CLASS_FETCH = "fetch"      # network / disk bytes
 CLASS_COMPILE = "compile"  # inductor / AOT compile
-CLASS_LOAD = "load"        # weights -> VRAM, cell load+arm
+CLASS_LOAD = "load"        # weights -> VRAM, compiled graph load+arm
 CLASS_SETUP = "setup"      # probes, seals, manifests, handshake
 
 _CLASS_BY_PHASE: Dict[str, str] = {
@@ -425,7 +425,7 @@ class BootSpan:
     def classify(self, reason: str, detail: str = "") -> None:
         """Attach the countable reason token WITHOUT calling this a refusal.
 
-        `memo hit` / `memo miss` and `cell cached` / `cell fetched`
+        `memo hit` / `memo miss` and `compiled graph cached` / `compiled graph fetched`
         are the two branches of a SUCCESSFUL phase, and both are the fact worth
         counting. Before this the only way to put a token on a row was
         :meth:`refused`, which sets ``outcome=refused`` — so a hub-side count of
@@ -730,7 +730,7 @@ def mark(
         # Every cumulative milestone is remembered, not just the servable one:
         # `eager_ready` and `compiled_swap` are the two user-visible timestamps
         # and the interval between them is how long a pod served eager while
-        # its cell arrived.
+        # its compiled graph arrived.
         with _lock:
             _milestone_ms.setdefault(phase, duration_ms)
     if phase in SERVABLE_PHASES:
@@ -966,7 +966,7 @@ def reconciliation(
         if phase in milestones:
             out["milestone." + phase + "_ms"] = milestones[phase]
     if PHASE_EAGER_READY in milestones and PHASE_COMPILED_SWAP in milestones:
-        # The interval a pod served EAGER while its cell was being made or
+        # The interval a pod served EAGER while its compiled graph was being made or
         # fetched. The single number the compiled-serving campaign is about.
         out["eager_serving_ms"] = max(
             0, milestones[PHASE_COMPILED_SWAP] - milestones[PHASE_EAGER_READY])
@@ -1103,13 +1103,13 @@ SHAPE_EAGER: frozenset = frozenset({
 SHAPE_ENTRYPOINT: frozenset = SHAPE_EAGER | frozenset({
     PHASE_ENV_ESTABLISH, PHASE_LIB_MEMO,
 })
-#: A boot that ADOPTED a cell the hub named: no trace, no fold — it pays a
+#: A boot that ADOPTED a compiled graph the hub named: no trace, no fold — it pays a
 #: download and an admission instead.
 SHAPE_ADOPT: frozenset = SHAPE_ENTRYPOINT | frozenset({
     PHASE_CELL_FETCH, PHASE_CELL_VERIFY, PHASE_ENTRY_ADMIT, PHASE_CELL_ARM,
     PHASE_COMPILED_SWAP,
 })
-#: A boot that MINTED its own cell: declaration, per-class trace, fold, the
+#: A boot that MINTED its own compiled graph: declaration, per-class trace, fold, the
 #: publish round trips, then the same admission as an adopt.
 SHAPE_SELF_MINT: frozenset = SHAPE_ADOPT | frozenset({
     PHASE_DECLARATION_COMPOSE, PHASE_TRACE_FOR_KEY, PHASE_KEY_FOLD,

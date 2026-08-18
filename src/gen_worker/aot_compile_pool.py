@@ -1,6 +1,6 @@
-"""pgw#809: compile a cell's entries K-wide instead of one at a time.
+"""pgw#809: compile a compiled graph's entries K-wide instead of one at a time.
 
-A pgw#758 cell is N independent graph-class entries; an sdxl cell is 18.
+A pgw#758 compiled graph is N independent graph-class entries; an sdxl compiled graph is 18.
 ``aot_mint`` exports them from the live pipeline (serial by construction —
 one pipeline, one card, and the branch arm is toggled once for the whole
 branchless group) and then AOTI-compiles each one at ~420 s. The compiles
@@ -48,10 +48,10 @@ what stops being possible when there is one program.
 
 What this does NOT change
 -------------------------
-Cell identity. Parallelism is not sealed (pgw#757 established
+Compiled graph identity. Parallelism is not sealed (pgw#757 established
 ``compile_threads`` as non-identity by the same argument, and the digest check
 is re-run here): the pool changes WHEN entries compile, never what they
-compile. Assembly is ordered by ENTRY NAME, not completion, so a cell minted
+compile. Assembly is ordered by ENTRY NAME, not completion, so a compiled graph minted
 at K=4 is byte-identical to one minted at K=1.
 """
 
@@ -113,7 +113,7 @@ def _code_digest() -> str:
     can legitimately be a different one — a ``PYTHONPATH`` entry, a ``gen_worker``
     in the cwd, a second checkout, a stale wheel in the interpreter's
     site-packages, or the same tree edited between the parent's import and the
-    child's spawn. The child then compiles the very files the cell publishes
+    child's spawn. The child then compiles the very files the compiled graph publishes
     with code the parent never ran, and the parent believes the report.
 
     Taken at import (not at read time) on purpose: a tree edited mid-run must
@@ -326,7 +326,7 @@ class PoolWidth:
     @property
     def underwidth(self) -> int:
         """Workers the pod would have run had the binding constraint not
-        bound — 0 when K is already the most this cell can use."""
+        bound — 0 when K is already the most this compiled graph can use."""
         return max(0, min(self.entries, self.ceiling) - self.workers)
 
     def facts(self) -> Dict[str, Any]:
@@ -457,9 +457,9 @@ def entry_workers(
     child that genuinely runs out of device memory dies in its own process and
     is classified there — the attempt is the signal, and it costs ~2 minutes.
 
-    ``device_lock=False`` FORCES K=1 on a GPU cell: without torch's
+    ``device_lock=False`` FORCES K=1 on a GPU compiled graph: without torch's
     ``set_gpu_benchmark_lock_context`` hook the pool cannot stop two entries
-    benchmarking at once, and a cell whose kernel configs were chosen under
+    benchmarking at once, and a compiled graph whose kernel configs were chosen under
     self-inflicted contention publishes under an unchanged key. Refusing to
     widen is the only safe answer. This is a CORRECTNESS bound on the artifact
     and has nothing to do with capacity — it is why the card is still asked
@@ -468,7 +468,7 @@ def entry_workers(
     pgw#842: every bound records the READING behind it (:class:`CpuFacts`,
     :class:`MemoryFacts`) and the returned width names the constraint that
     actually bound. K is the mint's only multiplicative lever — two mints of
-    one cell differed 5-vs-3 with nothing recorded to say why — so an
+    one compiled graph differed 5-vs-3 with nothing recorded to say why — so an
     unexplained K is a defect in itself.
 
     §4.30 / pgw#1137: both bounds are posture-aware. The ``goals`` above answer
@@ -483,7 +483,7 @@ def entry_workers(
     # §4.28 / pgw#1092: both of this policy's reserves are UNCONDITIONAL. They
     # used to be relaxed to zero on a pod holding no serve goal, and §4.28
     # deleted that pod class: the only mint left is the one a SERVING pod runs
-    # in the background on a cell miss (pgw#784), so there is always a tenant
+    # in the background on a compiled graph miss (pgw#784), so there is always a tenant
     # to protect. `SERVING_HEADROOM_CPUS` keeps cores for an eager forward and
     # a heartbeat; `ENTRY_RSS_RESERVE_BYTES` keeps host RAM so a request
     # arriving mid-mint does not meet the OOM killer.
@@ -561,7 +561,7 @@ def entry_workers(
             reason=(
                 "serial: this torch has no GPU-benchmark lock hook, so a wide "
                 "pool would let entries benchmark against each other and bake "
-                "contention-chosen kernel configs into a cell whose key would "
+                "contention-chosen kernel configs into a compiled graph whose key would "
                 "not move"))
     binding = min(
         (cpu_workers, "cpu"), (mem_workers, "host-memory"),
@@ -629,7 +629,7 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     #: artifacts, from an earlier attempt of the same mint. A child skips them
     #: before it exports — not after, and not at pack time — so a retry pays
     #: neither the trace nor the compile for work that is already on disk.
-    #: This is the whole of what the deleted ``mint_delegate.build_cell``
+    #: This is the whole of what the deleted ``mint_delegate.build_compiled_graph``
     #: retry loop got wrong: it re-ran every attempt in a FRESH ``child-N``
     #: directory, so attempt 2 of a 36-class mint re-paid 35 finished classes
     #: to retry one. Named by CLASS, because that is what a child can match
@@ -927,7 +927,7 @@ def child_env(
       mean "whatever gen_worker this interpreter resolves": the cwd first, then
       any inherited ``PYTHONPATH``, then site-packages. On a box with more than
       one checkout that is a coin flip, and the child that wins compiles the
-      files the cell publishes. Pinning the root makes the child the parent's
+      files the compiled graph publishes. Pinning the root makes the child the parent's
       OWN code by construction; ``PYTHONSAFEPATH`` removes the cwd, which would
       otherwise still outrank it. The digest check in ``_collect`` is the
       backstop that proves it rather than assuming it.
@@ -952,7 +952,7 @@ def _terminate_group(proc: subprocess.Popen, *, grace_s: float = _KILL_GRACE_S) 
     The GROUP, not the process: an entry child spawns inductor's own compile
     workers and g++ underneath it, and a pool that killed only the direct
     children would leave orphan cc1plus processes burning a serving pod's CPU
-    against a cell nobody will adopt. Every child is started with
+    against a compiled graph nobody will adopt. Every child is started with
     ``start_new_session=True`` precisely so this call has a group to aim at.
     """
     if proc.poll() is not None:
@@ -1205,7 +1205,7 @@ class EntryCompilePool:
         self.peak_device_bytes = 0
         #: pgw#1205: the same reading, kept PER ENTRY instead of collapsed.
         #: `peak_device_bytes` above answers "how big was the biggest compile"
-        #: — one number for a whole cell, which is the wrong granularity for
+        #: — one number for a whole compiled graph, which is the wrong granularity for
         #: the only question anyone asks of it ("what does THIS graph class
         #: cost a card"). Both survive: the max is what the existing phase-table
         #: field publishes, and these rows are what gets banked with their
@@ -1228,7 +1228,7 @@ class EntryCompilePool:
         #: pgw#1215: share -> the graph classes a REFUSING child had already
         #: packed before it refused. They exist on disk; recording them is how
         #: "this share produced nothing" and "this share produced most of a
-        #: cell and then hit one bad class" stop reading the same.
+        #: compiled graph and then hit one bad class" stop reading the same.
         self.refused_classes: Dict[str, List[PackedGraphClass]] = {}
         #: pgw#1215: graph class -> that class's OWN `export_s`/`compile_s`
         #: and inductor phase split, as the child measured them. The pool's
@@ -1478,7 +1478,7 @@ class EntryCompilePool:
         same declared count and the union has exactly that many rows. Without
         this a child whose share came back empty — a stale declaration, a
         shard-index bug, a family whose fork differs per child — publishes a
-        SHORT cell that verifies, arms, and is missing a class.
+        SHORT compiled graph that verifies, arms, and is missing a class.
 
         ``have`` (pgw#1215 step 4) is how many classes the children were told
         to SKIP because this pod already holds their artifacts. They are part
@@ -1508,7 +1508,7 @@ class EntryCompilePool:
                 + (f"beside {have} already held " if have else "")
                 + f"but every child reported {want} declared — "
                 f"rows[i::{width}] did not partition the declaration and this "
-                f"cell would be short")
+                f"compiled graph would be short")
 
     def _seed_seal_memo(self) -> None:
         """pgw#832: write the parent's toolchain digests where every entry
@@ -1658,7 +1658,7 @@ class EntryCompilePool:
             # and returns; everything after is interpreter teardown, and a
             # process that has just traced and AOTI-compiled has plenty that
             # can hang there — a non-daemon thread, a subproc pool, CUDA. Two
-            # production mints packed and reported an entire cell and then sat
+            # production mints packed and reported an entire compiled graph and then sat
             # in `finalize` for 78.9 and 62 minutes while the tier above them
             # waited on an exit that never came. Everything this pool needs is
             # in the report; the corpse is not part of the contract.
@@ -1815,7 +1815,7 @@ class EntryCompilePool:
         # the raise for pgw#848's reason — the attempt that FAILED is exactly
         # the attempt the next one has to size against — and `refused_classes`
         # names what exists so a caller is never told the share produced
-        # nothing when it produced most of a cell.
+        # nothing when it produced most of a compiled graph.
         if report is not None and report.classes:
             for packed in report.classes:
                 self.class_spans[packed.name] = dict(packed.spans or {})
@@ -1862,7 +1862,7 @@ class EntryCompilePool:
           shape as "the OOM killer far more often than a compiler bug" since
           pgw#809; one retry at a narrower K is the right response to a
           "far more often", and a wrong guess costs one retry rather than a
-          permanently unmintable cell.
+          permanently unmintable compiled graph.
 
         A child that wrote a report classified ITSELF and is believed: a
         named refusal is deterministic no matter how it exited.
@@ -1881,7 +1881,7 @@ class EntryCompilePool:
         """pgw#840: the child that compiled this entry must BE the parent.
 
         Not a telemetry check. The child produces the loose files
-        ``package_aoti`` packs and the cell publishes, while every gate runs in
+        ``package_aoti`` packs and the compiled graph publishes, while every gate runs in
         the parent against the parent's program — an assignment that is only
         sound while both are the same code. A skewed child was invisible: it
         compiled successfully, returned files that exist, and differed only in
@@ -1893,7 +1893,7 @@ class EntryCompilePool:
         the child was not from that tree.
 
         Refused, not warned: an artifact compiled by unknown code must not be
-        packed into a cell whose identity claims the parent's.
+        packed into a compiled graph whose identity claims the parent's.
         """
         if not CODE_DIGEST:
             return  # no source to compare (zipimport) — cannot prove either way
@@ -1909,7 +1909,7 @@ class EntryCompilePool:
             f"whatever the interpreter's path yields (a second checkout, an "
             f"inherited PYTHONPATH, a stale wheel, or this tree edited between "
             f"the parent's import and this spawn), and that child compiled the "
-            f"files this cell would publish while every gate ran against the "
+            f"files this compiled graph would publish while every gate ran against the "
             f"parent's program")
 
     def _close_entry_partition(

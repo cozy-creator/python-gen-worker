@@ -180,7 +180,7 @@ def _fresh_receipt_gate():
 @pytest.fixture(autouse=True)
 def _fresh_cell_ledgers():
     from gen_worker import compile_cache as _cc
-    from gen_worker import fleet_cells as _fc
+    from gen_worker import fleet_compiled_graphs as _fc
 
     def _clear() -> None:
         with _cc._PROVEN_CELLS_LOCK:

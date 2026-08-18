@@ -55,7 +55,7 @@ def test_declared_execution_lane_executes_and_ctx_execution_lane_reports_it() ->
         body = _decode(res)
         # ctx.lane carried the executing lane into the author branch...
         # The instruction owns the BODY (the author kernel branches on
-        # it) and never the execution axis — this worker has no compiled cell,
+        # it) and never the execution axis — this worker has no compiled graph,
         # so `+eager` is what ran and `+eager` is what is reported. Before
         # ie#655 both lines read `+compiled` because the hub had asked for it.
         assert body["response"] == "author-kernel:fp8-w8a8-dynamic+eager"

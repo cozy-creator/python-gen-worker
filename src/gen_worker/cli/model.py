@@ -15,7 +15,7 @@ and different cadences:
 
 ``mint``      compiles the declaration's graph classes into packed AOTI
               artifacts (pgw#1331). Needs a GPU and a real toolchain; needs no
-              weights and no network, because cell identity is checkpoint-free
+              weights and no network, because compiled graph identity is checkpoint-free
               (§4.27) and the constants arrive at ARM time from the store.
               **Runs on a pod, never on a shared box** — it is a real compile.
 

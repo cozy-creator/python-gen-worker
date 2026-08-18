@@ -200,7 +200,7 @@ def test_a_virtualized_target_holds_zero_real_parameter_bytes() -> None:
 def test_real_buffers_on_a_virtual_target_are_NOT_a_breach() -> None:
     """A structure-only component's buffers stay real by construction — they
     are config-derived tables and a literal-bearing family ships them inside
-    the cell. Counting them would make the fence refuse every correct trace."""
+    the compiled graph. Counting them would make the fence refuse every correct trace."""
     target = nn.Linear(8, 8)
     target.register_buffer("rope", torch.ones(64, dtype=torch.bfloat16))
     # On the host: a buffer is REALLY moved by `virtualize`, so building this
@@ -417,15 +417,15 @@ def _job(micro_tree: Path, report: Path, *, extra_targets: tuple = ()) -> Any:
 
     specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main"])
     spec = next(s for s in specs if s.name == "generate")
-    cell = spec.compile_cell()
+    graph = spec.compile_contract()
     cfg = CompileSpec(
         shapes=tuple(
-            tuple(int(v) for v in row) for row in (cell.shapes or ())),
-        targets=tuple(str(t) for t in (cell.targets or ())) + extra_targets,
-        family=str(cell.family or ""),
-        lora_bucket=int(cell.lora_bucket or 0),
-        guidance_scales=tuple(float(v) for v in (cell.guidance_scales or ())),
-        text_lens=tuple(int(v) for v in (cell.text_lens or ())),
+            tuple(int(v) for v in row) for row in (graph.shapes or ())),
+        targets=tuple(str(t) for t in (graph.targets or ())) + extra_targets,
+        family=str(graph.family or ""),
+        lora_bucket=int(graph.lora_bucket or 0),
+        guidance_scales=tuple(float(v) for v in (graph.guidance_scales or ())),
+        text_lens=tuple(int(v) for v in (graph.text_lens or ())),
     )
     return boot_key.TraceJob(
         function="generate",

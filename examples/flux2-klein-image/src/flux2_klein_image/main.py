@@ -98,7 +98,7 @@ def _generate(pipe: Flux2KleinPipeline, ctx: RequestContext, p: KleinTurboInput)
     # Opt into torch.compile (#384). Safe by construction: the worker arms
     # Plain lanes compile only when Tensorhub attaches a verified per-(family,
     # SKU, torch, triton) artifact and otherwise remain eager. A W8A8 binding
-    # is stricter: the worker fails retryably unless its exact cell is attached
+    # is stricter: the worker fails retryably unless its exact compiled graph is attached
     # and proven; it never serves dequantized/eager W8A8.
     # text_len pins the token axis (ie#544): the Qwen3-based text encoder's
     # sequence dim is padded to 512 so prompt length never mints a new graph.

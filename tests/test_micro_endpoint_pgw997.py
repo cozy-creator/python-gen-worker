@@ -65,7 +65,7 @@ def tree(tmp_path_factory) -> Path:
 
 def test_declares_exactly_three_entries(declaration) -> None:
     """The whole premise. sdxl declares 36 and costs ~95 min a cycle."""
-    names = sorted(ad.plan_entry_name(p) for p in ad.cell_plans(declaration))
+    names = sorted(ad.plan_entry_name(p) for p in ad.compiled_graph_plans(declaration))
     assert names == EXPECTED_ENTRIES
 
 
@@ -77,7 +77,7 @@ def test_the_two_latent_rows_collapse_rather_than_multiply(declaration) -> None:
     seed row.
     """
     assert len(declaration.shapes) == 2
-    for plan in ad.cell_plans(declaration):
+    for plan in ad.compiled_graph_plans(declaration):
         assert len(plan.rows) == 2, ad.plan_entry_name(plan)
         spans = {(d.input_name, d.axis): (d.min, d.max) for d in plan.dynamic}
         assert spans, (
@@ -92,7 +92,7 @@ def test_every_traced_extent_is_linear_in_one_symbol(declaration) -> None:
     ``torch.export.save``/``load`` hand-off to its compile child. The
     declaration avoids it by taking token sequences, and this test fails if a
     later edit puts two dynamic axes back on one input."""
-    for plan in ad.cell_plans(declaration):
+    for plan in ad.compiled_graph_plans(declaration):
         per_input: dict = {}
         for row in plan.dynamic:
             per_input.setdefault(row.input_name, []).append(row.axis)
@@ -111,9 +111,9 @@ def test_the_decoder_is_a_second_target_with_its_own_dims(declaration) -> None:
     by_name = {d.name: d for d in declaration.dims}
     assert ("x", 0) in by_name["T"].carried_by
     assert ("latent", 1) in by_name["T"].carried_by
-    denoiser = [d for d in ad.cell_plans(declaration)
+    denoiser = [d for d in ad.compiled_graph_plans(declaration)
                 if d.target == "transformer"]
-    decoder = [d for d in ad.cell_plans(declaration) if d.target == "decoder"]
+    decoder = [d for d in ad.compiled_graph_plans(declaration) if d.target == "decoder"]
     assert len(denoiser) == 2 and len(decoder) == 1
 
 
@@ -205,7 +205,7 @@ def test_the_graph_is_conv_free(declaration) -> None:
 
 def test_the_frequency_table_is_a_buffer_not_a_plain_attribute() -> None:
     """pgw#857: a plain attribute is lifted as a graph LITERAL and its bytes
-    ship inside every compiled cell."""
+    ship inside every compiled graph."""
     embed = MicroDenoiser(MicroConfig()).time_embed
     assert "freqs" in dict(embed.named_buffers())
     assert "freqs" not in embed.__dict__

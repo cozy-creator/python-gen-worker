@@ -10,7 +10,7 @@ be, so it is a table.
 What the failure scenario is really testing is the thing that makes a pool
 dangerous: K children, one dies, and the others plus every ``cc1plus`` they
 spawned have to go with it. A leak there is a serving pod that keeps burning
-CPU against a cell nobody will ever adopt — so the assertion is a PROCESS SWEEP
+CPU against a compiled graph nobody will ever adopt — so the assertion is a PROCESS SWEEP
 of the real process table, not a mocked call count.
 
 ⚠️ **The child's INTERIOR is not exercised here, and since pgw#1215 it cannot
@@ -119,7 +119,7 @@ def test_the_pool_dispatches_shares_and_assembles_by_class_name(
 
     assert set(out) == {f"cls/dim={i}" for i in range(_DECLARED)}
     assert list(out) == sorted(out), (
-        "the cell must assemble by graph-class NAME; a dict ordered by "
+        "the compiled graph must assemble by graph-class NAME; a dict ordered by "
         "completion makes the artifact depend on which child finished first")
     for name, packed in out.items():
         assert packed.key and packed.artifact
@@ -152,7 +152,7 @@ def test_a_share_that_comes_back_short_fails_the_run(
     The parent holds no pipeline, so the only evidence that ``rows[i::K]``
     partitioned the declaration is that every child reported the same declared
     count and the union has exactly that many rows. Without this check a share
-    that came back empty publishes a SHORT cell that verifies, arms, and is
+    that came back empty publishes a SHORT compiled graph that verifies, arms, and is
     missing a class.
     """
     monkeypatch.setenv("PGW_FAKE_CHILD", "short")
@@ -324,7 +324,7 @@ _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3, device_lock=True)
         ("host-RAM-bound", dict(available_bytes=10 * 1024**3), 2),
         # Never wider than there are entries to compile.
         ("3 entries", dict(entries=3), 3),
-        # A single-entry cell never pays for a pool.
+        # A single-entry compiled graph never pays for a pool.
         ("1 entry", dict(entries=1), 1),
         # pgw#1175: a MEASURED per-entry RSS narrower than the 3 GiB default
         # buys width — the one per-entry footprint that still divides.
@@ -360,8 +360,8 @@ def test_without_the_gpu_benchmark_lock_a_gpu_cell_stays_serial() -> None:
 
     An AOTI compile picks kernel configs by timing them on the card. Two
     children timing at once measure each other's contention and bake the loser
-    into an artifact whose cell key does not move — a silently slower cell
-    under a good cell's identity. If torch cannot serialize those timings, the
+    into an artifact whose compiled graph key does not move — a silently slower compiled graph
+    under a good compiled graph's identity. If torch cannot serialize those timings, the
     only safe width is 1.
     """
     kwargs = dict(_ROOMY)
@@ -376,7 +376,7 @@ def test_without_the_gpu_benchmark_lock_a_gpu_cell_stays_serial() -> None:
         assert pool.entry_workers(18, **kwargs).workers == 1  # type: ignore[arg-type]
         assert "benchmark" in pool.entry_workers(
             18, **kwargs).reason                              # type: ignore[arg-type]
-        # ... and a card-less (CPU) cell is not held back by it: there is no
+        # ... and a card-less (CPU) compiled graph is not held back by it: there is no
         # device to benchmark on and nothing to perturb.
         pool._has_card = lambda: False
         assert pool.entry_workers(
@@ -395,7 +395,7 @@ def test_the_cap_narrows_and_never_widens() -> None:
 
 def test_the_width_and_its_inputs_ride_the_telemetry() -> None:
     """pgw#809 constraint 6: a mint's wall clock is uninterpretable without
-    the K it ran at — two mints of the same cell legitimately differ 4x."""
+    the K it ran at — two mints of the same compiled graph legitimately differ 4x."""
     facts = pool.entry_workers(18, **_ROOMY).facts()      # type: ignore[arg-type]
     assert facts["entry_workers"] >= 1
     for key in ("entries", "vcpus", "cpu_workers", "mem_workers",
@@ -500,7 +500,7 @@ def test_compiler_policy_is_not_a_worker_wire_surface() -> None:
 
 
 def test_parallelism_is_not_sealed(tmp_path: Path) -> None:
-    """pgw#757 established ``compile_threads`` as outside cell identity; the
+    """pgw#757 established ``compile_threads`` as outside compiled graph identity; the
     same argument covers K, and the digest check is how it is VERIFIED rather
     than argued. The pool changes WHEN classes compile, never what."""
     from gen_worker import env_seal
@@ -510,4 +510,4 @@ def test_parallelism_is_not_sealed(tmp_path: Path) -> None:
     assert env["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "cache")
     assert env_seal.inductor_config_digest() == base, (
         "the shared inductor cache dir is a LOCATION, not a recipe; if it "
-        "reached the seal, every pod would key its own cells")
+        "reached the seal, every pod would key its own compiled graphs")

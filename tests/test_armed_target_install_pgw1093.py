@@ -47,7 +47,7 @@ from gen_worker import (
     Resources,
     Slot,
     activity,
-    cell_adopt,
+    compiled_graph_adopt,
     endpoint,
     worker_function,
 )
@@ -278,20 +278,20 @@ def test_an_armed_object_that_resolves_no_target_is_typed_not_silent(
         # THE INVARIANT: an arm that returned True and owns no installed
         # target is a typed, wire-visible refusal — never a bare `continue`.
         assert rec.eager_posture == (
-            cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value), (
+            compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value), (
             "0.98.0 records NOTHING here: the boot compiles graphs it can "
             "never dispatch to and every request reports `uncompiled`"
         )
-        assert cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value in _postures(events)
+        assert compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value in _postures(events)
         assert any(
-            phase == cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value
+            phase == compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value
             and kind == activity.KIND_SERVE_DEGRADE
             for kind, phase, _d in events
         ), "the terminus must ALSO ride the degrade stream, not only a posture"
         # And the request path names the real cause instead of the terminal
         # fallback token.
         assert ex._eager_posture(eff, rec) == (
-            cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value)
+            compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value)
 
     asyncio.run(_go())
 
@@ -341,14 +341,14 @@ def test_a_boot_warmup_degrade_is_named_not_reported_as_uncompiled(
         assert cc.is_compile_armed(pipe) is False, "the guard degraded it"
         assert "fa3 kernel refuses" in compile_facts.degrade_reason(pipe)
 
-        assert rec.eager_posture == cell_adopt.EagerPhase.COMPILED_DEGRADED.value, (
+        assert rec.eager_posture == compiled_graph_adopt.EagerPhase.COMPILED_DEGRADED.value, (
             "0.98.0 leaves this EMPTY, so `_eager_posture` falls through to "
             "the generic `uncompiled` and an installed-then-degraded target "
             "reads exactly like one that was never installed"
         )
         assert ex._eager_posture(eff, rec) == (
-            cell_adopt.EagerPhase.COMPILED_DEGRADED.value)
-        assert ex._eager_posture(eff, rec) != cell_adopt.EagerPhase.UNCOMPILED.value
+            compiled_graph_adopt.EagerPhase.COMPILED_DEGRADED.value)
+        assert ex._eager_posture(eff, rec) != compiled_graph_adopt.EagerPhase.UNCOMPILED.value
 
         # And it is a dated, greppable row — not a log line on a pod whose
         # stdout nobody can reach.

@@ -71,7 +71,7 @@ never calls `.to("cuda")`, `enable_model_cpu_offload()`, or `empty_cache()`.
 
 ## The tensor-binding contract: `register_buffer`, never a plain attribute (pgw#857)
 
-A compiled cell rebinds tensors **by name** at load, which is what lets one cell
+A compiled graph rebinds tensors **by name** at load, which is what lets one compiled graph
 serve every fine-tune of a family. That only holds if every tensor your model
 needs is reachable through `state_dict()`. **The tensor-binding contract**
 (formerly "weight-binding") is that rule — the artifact's LINKING rule for
@@ -79,10 +79,10 @@ tensors. A tensor your module holds is either:
 
 - **bound by name at load** (DYNAMIC) — a named `state_dict` entry the CAS
   delivers and rebinds. It is an opaque slot the compiler must never
-  value-specialize, and that opacity is exactly what makes a cell
+  value-specialize, and that opacity is exactly what makes a compiled graph
   CHECKPOINT-AGNOSTIC;
 - **a baked literal** (STATIC) — its value folds into the artifact's identity,
-  so two checkpoints differing only in that value need different cells. This
+  so two checkpoints differing only in that value need different compiled graphs. This
   case is driven to zero;
 - for GB-scale derived data, neither: a **named CAS component** (corollary
   below), bound by name exactly like a weight.
@@ -129,12 +129,12 @@ wrong test to carry away.
 **Why it matters beyond tidiness.** A tensor outside `state_dict` is not a
 weight the CAS delivers and rebinds at load. `torch.export` lifts it as an
 anonymous `_tensor_constant{N}` **literal**, and a literal's bytes ship *inside*
-the compiled cell — so it becomes part of the artifact rather than part of the
+the compiled graph — so it becomes part of the artifact rather than part of the
 checkpoint. Two checkpoints of your family that differ only in the config that
-derives that table then need *different* cells. The cell key handles this
+derives that table then need *different* compiled graphs. The compiled graph key handles this
 correctly today (pgw#857 folds literal VALUES into the identity), so nothing
 breaks — but you have moved several MB out of the deduplicated weight store and
-into every compiled artifact, and you have coupled your cell identity to a
+into every compiled artifact, and you have coupled your compiled graph identity to a
 number you probably meant to be a cache.
 
 A registered buffer costs nothing and stays a weight.
@@ -146,7 +146,7 @@ issue, a property nothing checked. Inductor does not read the contract: with
 constant folding left at torch's default, `GraphLowering.get_attr`
 renders a lifted tensor's VALUES straight into the kernel source whenever its
 **shape** meets either rule, 0-dim or `len(shape) == 1 and shape[0] <= 8`. The
-tensor then appears in no table anyone can rebind, so the cell carries the
+tensor then appears in no table anyone can rebind, so the compiled graph carries the
 minting checkpoint's copy and every other fine-tune of the family silently gets
 the wrong numbers. It is a shape rule, not a value rule: small norms, group-norm
 scales, `logit_scale`-style learned scalars and short conv biases are the whole
@@ -160,7 +160,7 @@ Two things close it, and you need neither in your model code:
 - ⚠️ **the per-entry PROOF is not verifiable in this repo.** This bullet named
   `aot_package.folded_weights`, deleted by pgw#1270; no such check exists in
   `src/` today. Treat the deferral flag above as the whole of what this repo
-  enforces until the arm is re-pointed (pgw#1304). A cell minted before the fence is refused at adoption
+  enforces until the arm is re-pointed (pgw#1304). A compiled graph minted before the fence is refused at adoption
   too — `constant_folding_fenced` is a declared axis, like
   `package_constants_in_so`.
 
@@ -188,7 +188,7 @@ plus config plus the safetensors header, no tensor bytes. A module that does
 REAL tensor computation in `__init__` breaks that silently. A gate is coming
 that detects materialized real tensors at instantiation and refuses with
 authoring guidance, so the violation is caught at mint time instead of after a
-cell ships. Write `__init__` so it allocates shapes and dtypes, never values.
+compiled graph ships. Write `__init__` so it allocates shapes and dtypes, never values.
 
 ## Imports go at module top — including torch
 
@@ -274,7 +274,7 @@ serves is deploy CONFIG, not a literal you pick here (th#980, th#1803).
 > candidate COMPATIBLE / CONVERTIBLE / PRODUCIBLE / INCOMPATIBLE ahead of time.
 > `#flavor` refs, flavored tag rows and the flavor columns are GONE, with no
 > alias. A ref that carries a `#` fragment is refused BY THE PARSER
-> (`RefFragmentRemoved`, th#2031) unless it names a compile cell on
+> (`RefFragmentRemoved`, th#2031) unless it names a compiled graph on
 > `root/family-<f>`; narrow a release with the `?<lane-spec>` tail, and address
 > one exact checkpoint as `owner/repo@sha256:<hex>`.
 
@@ -986,7 +986,7 @@ def setup(self, pipeline: Pipe) -> None:
 
 `metrics.lane` / `ctx.lane` then report `fp8-w8a8-dynamic+compiled` instead of
 the binding's `bf16-w16a16`. This matters because the lane id is a KEY: quality
-verdicts, compile cells, serving floors and pricing all join on it, and
+verdicts, compiled graphs, serving floors and pricing all join on it, and
 minimax-h3 spent four issues being priced as bf16 while serving a 21.7 GiB fp8
 DiT.
 

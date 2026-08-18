@@ -23,7 +23,7 @@ impossible:
 What this module deliberately does NOT do: compile, quantize, place anything on
 a device, or decide which bucket serves a live call. The first three are the
 mint's (and DESIGN-RULINGS §4.30 puts them on the machine that will use the
-cell); the fourth is ``ingress_selection_v1``'s.
+compiled graph); the fourth is ``ingress_selection_v1``'s.
 """
 
 from __future__ import annotations

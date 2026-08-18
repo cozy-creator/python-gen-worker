@@ -40,9 +40,9 @@ from gen_worker._vendor.torchcg import (
 from gen_worker._vendor.torchcg import identity as tcg_identity
 from gen_worker._vendor.torchcg import is_compiled_graph_key
 
-from gen_worker import fleet_cells, graph_facts
+from gen_worker import fleet_compiled_graphs, graph_facts
 
-from harness.cell_meta import exported_cell_meta
+from harness.compiled_graph_meta import exported_compiled_graph_meta
 import sys
 
 # pgw#1310: one home for "which subtrees a guard may not judge" —
@@ -130,7 +130,7 @@ _DERIVATION_ALLOWLIST = {
     # is outside src/gen_worker — so the worker now has exactly ONE call site
     # and no definition to fence.
     "from_artifact_metadata(": {
-        "fleet_cells.py",  # _recomputed_key (the publish recompute)
+        "fleet_compiled_graphs.py",  # _recomputed_key (the publish recompute)
     },
     # the declared-envelope digest.
     "envelope_digest(": {
@@ -142,7 +142,7 @@ _DERIVATION_ALLOWLIST = {
     # restates the axis from a recorded block must come through it or the
     # two ends can disagree about membership.
     "toolchain_axis_digest(": {
-        "fleet_cells.py",  # arm_identity + arm_axis_divergence
+        "fleet_compiled_graphs.py",  # arm_identity + arm_axis_divergence
         # pgw#1327: the boot fold MOVED, it did not multiply. `boot_key.py` no
         # longer names this — `keyset/fold.py` is the single place a graph axis
         # meets this pod's runtime axes, and every route into it (a shipped
@@ -158,13 +158,13 @@ _DERIVATION_ALLOWLIST = {
         #
         # It is the right call rather than merely the available one. A banked
         # reading says "this graph class cost this much under THIS toolchain",
-        # and the only useful meaning of "this toolchain" is the one the CELL
+        # and the only useful meaning of "this toolchain" is the one the COMPILED GRAPH
         # uses — same membership, same digest. A second notion computed
-        # locally would drift from the cell's exactly where it matters (the
+        # locally would drift from the compiled graph's exactly where it matters (the
         # header above: "the two ends can disagree about membership"), and the
         # bank would then be keyed on a toolchain nothing else recognises.
         #
-        # It derives NO KEY: nothing compares this value against a cell key,
+        # It derives NO KEY: nothing compares this value against a compiled graph key,
         # an arm key or a boot key. It is a bank axis, and the bank sizes
         # nothing (`test_device_peak_bank_pgw1205` fences that structurally).
         "aot_mint.py",
@@ -252,7 +252,7 @@ def _old_schema_digest(meta: dict) -> str:
         # of this helper is to reconstruct a key the tree can no longer
         # produce. It read an `entries` MAP and a `declared_envelope`; an
         # entry artifact records neither, which is itself the structural
-        # reason an orphaned cell can never be re-derived.
+        # reason an orphaned compiled graph can never be re-derived.
         "targets": [str(
             (meta.get(GRAPH_CLASS_BLOCK) or {}).get("target") or "")],
         "shapes": [[1024, 1024]],
@@ -298,7 +298,7 @@ def test_old_and_new_keys_cannot_collide():
     NAME SETS, so equal digests would require a SHA-256 collision. This is
     the verification the purge note rests on: old dev-stack rows are
     unreachable by new derivations, so the purge is hygiene."""
-    meta = exported_cell_meta()
+    meta = exported_compiled_graph_meta()
     new_key = tcg_identity.from_artifact_metadata(meta).value
     old_key = _old_schema_digest(meta)
     assert old_key != new_key
@@ -314,12 +314,12 @@ def test_old_and_new_keys_cannot_collide():
 
 def _current_worker_meta() -> dict:
     """A current worker publish projection, keyed from its recorded facts."""
-    return exported_cell_meta()
+    return exported_compiled_graph_meta()
 
 
 def test_pre_redefinition_artifact_is_structurally_refused():
     """An artifact recording the OLD blocks (an ``entries`` MAP and a
-    ``combined_graph_hash``, the 36-entry-cell era) cannot restate a
+    ``combined_graph_hash``, the 36-entry-compiled graph era) cannot restate a
     per-entry identity: the retained publish projection refuses typed before
     anything can move. That is what makes the ck1 corpus purge hygiene rather
     than a correctness precondition."""
@@ -328,7 +328,7 @@ def test_pre_redefinition_artifact_is_structurally_refused():
     entry = old.pop(GRAPH_CLASS_BLOCK)
     old["entries"] = {entry["name"]: entry}
     # fence-symbol-exempt: the pre-atom artifact shape, on purpose — this
-    # row proves a format-2 cell cannot restate a per-entry identity.
+    # row proves a format-2 compiled graph cannot restate a per-entry identity.
     old["combined_graph_hash"] = "0" * 16
     old["format"] = 2
     with pytest.raises(tcg_identity.IdentityError, match="graph_class"):
@@ -434,7 +434,7 @@ def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
     graph — re-keys through that class's own hash, which is the honest
     channel, rather than through a union digest that punishes its siblings.
     """
-    meta = exported_cell_meta()
+    meta = exported_compiled_graph_meta()
     key = tcg_identity.from_artifact_metadata(meta).value
 
     # The envelope is not an input to identity at all any more: there is no
@@ -452,7 +452,7 @@ def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
 
 
 # ---------------------------------------------------------------------------
-# 5. The arm token is NOT a cell key
+# 5. The arm token is NOT a compiled graph key
 # ---------------------------------------------------------------------------
 
 
@@ -465,28 +465,28 @@ class _Cfg:
 
 def test_arm_token_never_passes_is_key(monkeypatch):
     monkeypatch.setattr(
-        fleet_cells.cc, "runtime_key",
+        fleet_compiled_graphs.cc, "runtime_key",
         lambda: {"sm": "sm_89", "sku": "l4", "torch": "t", "triton": "",
                  "cuda": "", "image_digest": ""})
     monkeypatch.setattr(
-        fleet_cells.cc, "toolchain_digest", lambda: (("torch", "x" * 16),))
-    identity = fleet_cells.arm_identity("fam", "", 0, _Cfg())
+        fleet_compiled_graphs.cc, "toolchain_digest", lambda: (("torch", "x" * 16),))
+    identity = fleet_compiled_graphs.arm_identity("fam", "", 0, _Cfg())
     token = identity.token
     # pgw#1113: the scheme digit is the token's FACT SET, and the fact set
     # gained the compile SUBJECT — so the prefix moved with it, which is what
     # makes a predecessor memo row unaddressable rather than misreadable.
-    assert token.startswith(fleet_cells.ARM_SCHEME + "-")
+    assert token.startswith(fleet_compiled_graphs.ARM_SCHEME + "-")
     assert not token.startswith("ck")
     # th#1897/pgw#1213: disjointness is carried by the DIGEST WIDTH now, not by
     # the prefix. The shared grammar is scheme-agnostic, so `arm2-` buys no
     # separation at all — any scheme followed by 56 hex is a key to BOTH
     # validators. A 64-hex tail is not, on either side.
     assert not is_compiled_graph_key(token)
-    assert len(token.split("-", 1)[1]) == fleet_cells.ARM_DIGEST_HEX != 56
+    assert len(token.split("-", 1)[1]) == fleet_compiled_graphs.ARM_DIGEST_HEX != 56
     # the compared facts are exactly the pre-trace set — graph is absent, and
     # so is `envelope`: pgw#1176 dropped it from ARM_ENVIRONMENT_FACTS because
     # a per-entry artifact records no declared envelope, so comparing it would
     # refuse every child handback by construction.
-    assert set(identity.facts_dict()) == set(fleet_cells.ARM_FACTS)
-    assert "envelope" not in fleet_cells.ARM_FACTS
+    assert set(identity.facts_dict()) == set(fleet_compiled_graphs.ARM_FACTS)
+    assert "envelope" not in fleet_compiled_graphs.ARM_FACTS
     assert "graph" not in identity.facts_dict()

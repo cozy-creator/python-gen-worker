@@ -235,8 +235,8 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "CLAUDE.md; explicitly out of scope for every env sweep.",
     ("src/gen_worker/procsplit/actions.py", "GEN_WORKER_PROBE"):
         "SECURITY BOUNDARY (pgw#980). Marks the pod a live-edit probe and "
-        "DISARMS cell publish in the parent's action allowlist. Threat: a probe "
-        "pod publishing a cell minted from hand-edited source into the fleet "
+        "DISARMS compiled graph publish in the parent's action allowlist. Threat: a probe "
+        "pod publishing a compiled graph minted from hand-edited source into the fleet "
         "store. Deliberately NOT a Settings field: `authorize` is the boundary, "
         "and a guard that depends on a config load having succeeded has an "
         "unarmed window.",
@@ -518,7 +518,7 @@ def check_behaviour_gates() -> List[str]:
             f"{path}:{found[key]} reads {name} from the environment and feeds it "
             f"to a CONDITIONAL. Env vars are for CONFIG and SECRETS, never logic "
             f"or behaviour switches (Paul, standing rule). GEN_WORKER_PREFER_AOT "
-            f"was exactly this: it gated the mint recipe and cell discovery, "
+            f"was exactly this: it gated the mint recipe and compiled graph discovery, "
             f"silently disarmed on a release rebuild, and cost three pod attempts "
             f"before anyone noticed the AOT path was dark.\n"
             f"    Fix it: make the branch unconditional (if its default is ON and "

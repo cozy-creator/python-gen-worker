@@ -60,7 +60,7 @@ from .sdxl_serve import (
 )
 
 #: SDXL's U-Net architecture. Every SDXL fine-tune shares it, which is exactly
-#: why one compiled cell serves all of them.
+#: why one compiled graph serves all of them.
 UNET: Final[Mapping[str, Any]] = {
     "sample_size": 128,
     "in_channels": 4,

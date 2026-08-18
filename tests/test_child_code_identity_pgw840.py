@@ -6,7 +6,7 @@ gen_worker off ``sys.path``. The visible symptom is attribution (an entry table
 with no child spans, the whole compile falling into ``reap_lag_s``) while the
 compile itself succeeds and returns files that exist.
 
-The defect is that the process which compiles the files a cell publishes was
+The defect is that the process which compiles the files a compiled graph publishes was
 chosen by ``sys.path``, while every gate runs in the parent against the
 parent's program. Two assertions: the child RESOLVES to the parent's code, and
 a child that did not is REFUSED by name rather than believed.
@@ -64,7 +64,7 @@ def test_the_child_resolves_the_parents_own_gen_worker(tmp_path: Path) -> None:
     assert resolved == Path(pool.PACKAGE_ROOT) / "gen_worker" / "__init__.py", (
         f"the entry child resolved gen_worker to {resolved} while the parent "
         f"runs from {pool.PACKAGE_ROOT}. That child compiles the loose files "
-        f"the cell publishes, and every gate runs in the parent against the "
+        f"the compiled graph publishes, and every gate runs in the parent against the "
         f"parent's program — the assignment is only sound while both are the "
         f"same code (pgw#840)")
 

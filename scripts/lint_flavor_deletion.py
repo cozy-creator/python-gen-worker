@@ -18,7 +18,7 @@ a label. So this file no longer holds an allowance at a size; it asserts that
 the axis names nothing at all, and the former residue paths get NO exemption.
 
 Three rules, all AST — a grep cannot tell `X.flavor` from `flavor_label(...)`
-from `cgroup_flavor`, and this axis is a four-way homonym (the compile-cell
+from `cgroup_flavor`, and this axis is a four-way homonym (the compiled graph
 `#`-fragment is the one that must NOT move).
 
   1. DELETED names stay deleted. Nothing in `src/` binds or reads a name the
@@ -177,7 +177,7 @@ def _selftest() -> int:
         ("new_reader", "def f(x):\n    return x.flavor\n", True),
         ("new_classifier", "def f(t):\n    return classify_flavor_token(t)\n", True),
         # Homonyms that must stay GREEN.
-        ("cell_label", "def flavor_label(sku, torch_version):\n    return sku\n", False),
+        ("graph_label", "def flavor_label(sku, torch_version):\n    return sku\n", False),
         ("cgroup", "def f(d):\n    d['cgroup_flavor'] = 'v2'\n", False),
         ("publish_list", "def publish_flavors(ctx, flavors):\n    return list(flavors)\n", False),
         ("param_named_flavor", "def g(flavor):\n    return flavor\n", False),

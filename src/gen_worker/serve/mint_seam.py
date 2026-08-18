@@ -5,7 +5,7 @@ Three modules used to name the mint lane directly:
 * ``executor`` — ``from . import mint_supervisor`` at MODULE scope (:186 on
   ``7d33f3d0``), for exactly one region: ``_supervise_mint``'s
   ``supervise(MintTask(...))`` and its ``ABANDONED`` comparison.
-* ``fleet_cells`` — three function-local imports: ``mint_supervisor.
+* ``fleet_compiled_graphs`` — three function-local imports: ``mint_supervisor.
   delegation_refusal()``, ``aot_mint.declaration_module_gaps(...)`` and the
   ``aot_mint.ExportSpec`` construction.
 

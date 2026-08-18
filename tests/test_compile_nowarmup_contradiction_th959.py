@@ -1,8 +1,8 @@
 """th#959: ``compile=`` + ``warmup=NoWarmup`` is refused at decoration.
 
-Compile cells are minted and proven by warmup execution (self-mint boots a
+compiled graphs are minted and proven by warmup execution (self-mint boots a
 warmup; adoption proof requires the warmup to hit the compiled graph). A
-NoWarmup class therefore can never arm a cell — live, the combination struck
+NoWarmup class therefore can never arm a compiled graph — live, the combination struck
 a qwen-edit release broken in 3 pods while the auto lane kept picking the
 mandatory w8a8+compiled rung. The contradiction now fails at import, the
 earliest possible moment. A custom ``warmup()`` method resolves it (proof
@@ -77,7 +77,7 @@ def test_custom_warmup_method_resolves_the_contradiction() -> None:
         models={"pipeline": Slot(str)},
         resources=Resources(gpu=True),
         compile=_compile(),
-        warmup=NoWarmup("derived plan opted out; custom warmup proves cells"),
+        warmup=NoWarmup("derived plan opted out; custom warmup proves compiled graphs"),
     )
     class CustomWarmup:
         def setup(self, pipeline: str) -> None:

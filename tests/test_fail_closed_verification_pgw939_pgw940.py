@@ -2,7 +2,7 @@
 
 **pgw#939 (supply chain).** `if expected { compare }` — so an absent expected
 value ADMITS. The artifact in every case is bytes that will subsequently be
-safetensors-loaded or armed as a compiled cell, and `DESIGN-RULINGS.md` §1.22
+safetensors-loaded or armed as a compiled graph, and `DESIGN-RULINGS.md` §1.22
 decides all of them the same way: missing evidence is an integrity verdict,
 not a disabled check.
 
@@ -95,14 +95,14 @@ def test_tcg_refuses_an_absent_graph_witness() -> None:
 # pgw#1181 REMOVED the four `_ptx_jit_gaps` rows (pgw#939 site 2: an unreadable
 # cubin must be a GAP, not a skip). The gate they cover ran inside
 # `compile_cache.pack`, over the inductor/triton capture a
-# `torch-inductor-cache` cell was built from — a completeness check on kernels
+# `torch-inductor-cache` compiled graph was built from — a completeness check on kernels
 # packed into that artifact. The format has had no writer since pgw#1178 and is
 # deleted here, so there is no capture to walk and no pack to refuse.
 #
 # The pgw#939 PRINCIPLE this file exists for is untouched and the other 19 rows
 # still assert it on live sites: absent evidence is an integrity verdict, never
 # a disabled check. On the exported lane the same principle is enforced by the
-# key — a cell that cannot state an axis has no identity and never resolves.
+# key — a compiled graph that cannot state an axis has no identity and never resolves.
 
 
 # ---------------------------------------------------------------------------

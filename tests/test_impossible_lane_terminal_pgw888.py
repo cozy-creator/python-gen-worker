@@ -1,12 +1,12 @@
 """A refusal whose cause CANNOT change must not be retryable.
 
-A MANDATORY quantized lane with no cell fails closed: §4.31's in-request eager
+A MANDATORY quantized lane with no compiled graph fails closed: §4.31's in-request eager
 fallback governs the case where eager is a valid POSTURE, and an author who
 declared the lane mandatory has not sanctioned eager numerics.
 
 That settles WHETHER to refuse, not whether the refusal is retryable.
 `CompiledExecutionLaneUnavailableError` extending `RetryableError` means "this
-family declares no export, so no cell can be minted for it" — a fact that cannot
+family declares no export, so no compiled graph can be minted for it" — a fact that cannot
 change for the life of the release — spends the orchestrator's whole attempt
 budget re-deriving one answer, and the user waits five times as long for the
 identical refusal.
@@ -16,7 +16,7 @@ The distinction this pins is PERMANENCE, not severity:
   * no CUDA on this pod / arm failed / identity computation raised
         -> cause can change, another pod can serve -> RETRYABLE (unchanged)
   * the family declares no export
-        -> no pod can ever hold a cell            -> TERMINAL
+        -> no pod can ever hold a compiled graph            -> TERMINAL
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def test_it_does_not_INHERIT_the_retryable_refusal() -> None:
 
 
 def test_the_TRANSIENT_refusal_stays_retryable() -> None:
-    """Unchanged and deliberately so: a cell that is merely absent HERE can
+    """Unchanged and deliberately so: a compiled graph that is merely absent HERE can
     exist elsewhere, and a requeue is how the request reaches that pod."""
     exc = cc.CompiledExecutionLaneUnavailableError("no C toolchain")
     assert isinstance(exc, RetryableError)
@@ -80,11 +80,11 @@ def test_it_maps_to_a_TERMINAL_wire_status() -> None:
 
 
 def test_the_refusal_names_why_EAGER_was_not_the_answer() -> None:
-    """A refusal that says only "needs a cell" invites exactly the reading
+    """A refusal that says only "needs a compiled graph" invites exactly the reading
     pgw#888 was filed under — that the pod should have served eager. The
     message has to carry the reason it did not, because the pod ships no logs
     and this string is the whole explanation the hub receives."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     class _Pipe:
         pass
@@ -93,13 +93,13 @@ def test_the_refusal_names_why_EAGER_was_not_the_answer() -> None:
     try:
         monkey.setattr(cc, "mandatory_serving", lambda pipe: True)
         monkey.setattr(
-            fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
+            fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
         with pytest.raises(cc.CompiledExecutionLaneImpossibleError) as err:
-            fleet_cells._fail_closed(
+            fleet_compiled_graphs._fail_closed(
                 _Pipe(),
-                "this lane serves only from a cell and this family declares "
-                "no export, so no cell can be minted for it (pgw#1010)",
-                phase=fleet_cells.EagerPhase.MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH,
+                "this lane serves only from a compiled graph and this family declares "
+                "no export, so no compiled graph can be minted for it (pgw#1010)",
+                phase=fleet_compiled_graphs.EagerPhase.MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH,
                 permanent=True)
     finally:
         monkey.undo()
@@ -133,7 +133,7 @@ def test_permanence_is_asked_of_the_DECLARATION_not_the_code_path() -> None:
 def test_a_non_permanent_exit_still_raises_the_RETRYABLE_class() -> None:
     """The default is unchanged: only the exit that opts in becomes terminal,
     so nothing that could succeed on another pod stops being requeued."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     class _Pipe:
         pass
@@ -142,11 +142,11 @@ def test_a_non_permanent_exit_still_raises_the_RETRYABLE_class() -> None:
     try:
         monkey.setattr(cc, "mandatory_serving", lambda pipe: True)
         monkey.setattr(
-            fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
+            fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
         with pytest.raises(cc.CompiledExecutionLaneUnavailableError) as err:
-            fleet_cells._fail_closed(
+            fleet_compiled_graphs._fail_closed(
                 _Pipe(), "CUDA unavailable",
-                phase=fleet_cells.EagerPhase.NO_CUDA)
+                phase=fleet_compiled_graphs.EagerPhase.NO_CUDA)
     finally:
         monkey.undo()
 

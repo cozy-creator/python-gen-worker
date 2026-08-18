@@ -7,7 +7,7 @@ novel signature to the EAGER original immediately and warm the compiled
 callable concurrently in one background thread with a zero-filled dummy
 batch of the same signature (same weights in VRAM); a successful warm
 atomically marks the signature warm so later calls take the compiled path.
-The executor's ``on_warmed`` hook republishes the grown cell so the fleet
+The executor's ``on_warmed`` hook republishes the grown compiled graph so the fleet
 never compiles that (shape, GPU, lane) again.
 
 Sequential (today's compile-then-serve) is kept when: concurrency is not
@@ -274,7 +274,7 @@ class Router:
         # Seeds that could NOT enqueue their background compile (vocabulary
         # overflow / dummy failure). A nonzero count means the mint's capture
         # would be incomplete — the driver aborts loudly instead of
-        # finalizing/publishing a partial cell.
+        # finalizing/publishing a partial compiled graph.
         self.seed_dropped = 0
         # Executor-provided background-turn factory. Every warm job for this
         # router executes inside a turn; the warm thread ensures VRAM headroom
@@ -335,14 +335,14 @@ class Router:
         A warm job outlives the call that enqueued it: it sits in the
         process-global queue and then compiles for as long as inductor takes.
         So whoever is about to destroy the state the job runs against — the
-        mint capture directory (``fleet_cells.abandon_self_mint`` rmtree's
+        mint capture directory (``fleet_compiled_graphs.abandon_self_mint`` rmtree's
         it), the guarded wrappers (``compile_cache.unwrap``) — has to say so,
         or the job reports its own teardown as a fleet-wide fact.
 
         Queued jobs are dropped at pickup; the one already compiling runs to
         its own end (an inductor compile is not interruptible) but its RESULT
         is disowned: it never marks a signature warm, never republishes a
-        cell, never books a coverage gap, and never emits a ``serve_degrade``.
+        compiled graph, never books a coverage gap, and never emits a ``serve_degrade``.
         Measured (pgw#1311): abandoning a mint left its in-flight warm compile
         writing into the capture directory the abandonment had just deleted,
         and the resulting ``FileNotFoundError`` reached the hub as a
@@ -867,7 +867,7 @@ def _run_warm_compile(job: _WarmJob) -> None:
     if router.disowned(job):
         # Same cancellation, winning end: marking the signature warm would
         # route later requests into a compiled path whose pipeline has been
-        # unwrapped, and `on_warmed` would republish a cell for a mint whose
+        # unwrapped, and `on_warmed` would republish a compiled graph for a mint whose
         # capture is already gone.
         with router.lock:
             router.pending.discard(job.sig)
@@ -887,11 +887,11 @@ def _run_warm_compile(job: _WarmJob) -> None:
             callback()
         except Exception as exc:
             logger.warning("hot-swap: on_warmed callback failed", exc_info=True)
-            # on_warmed republishes the grown cell — a swallowed failure means
+            # on_warmed republishes the grown compiled graph — a swallowed failure means
             # the fleet re-compiles this shape forever.
             activity_mod.emit_event(
                 activity_mod.KIND_SERVE_DEGRADE,
-                f"target={job.label}: on_warmed (cell republish) callback "
+                f"target={job.label}: on_warmed (compiled graph republish) callback "
                 f"failed: {type(exc).__name__}: {exc}",
                 phase="republish_failed",
             )

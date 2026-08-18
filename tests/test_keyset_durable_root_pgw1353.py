@@ -53,8 +53,8 @@ from typing import Any, Dict, Iterator, List, Tuple, cast
 
 import pytest
 
-from gen_worker import boot_adopt, cell_resolve, compile_cache as cc, keyset
-from gen_worker import local_cell_store
+from gen_worker import boot_adopt, compiled_graph_resolve, compile_cache as cc, keyset
+from gen_worker import local_compiled_graph_store
 from gen_worker.child_contract import CompileSpec
 from gen_worker.keyset import document as doc_mod, store as keyset_store
 
@@ -141,7 +141,7 @@ def _place(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Place the durable root the way th#1813's hub does — as a PATH in the env.
 
     Returns the key-set subtree, which is what the store owns; the caller's
-    ``root`` is the mount, and ``aot-cells/`` is the cell store's neighbour in
+    ``root`` is the mount, and ``aot-cells/`` is the compiled graph store's neighbour in
     it.
     """
     monkeypatch.setenv(keyset_store.ENV_LOCAL_CELLS_DIR, str(root))
@@ -231,22 +231,22 @@ class _RefusingDeriver:
             "the durable root — this is the 805 s the issue exists to delete")
 
 
-class _Cell:
+class _Graph:
     publisher_org = "org-a"
     publisher_tier = "platform"
     content_digest = "sha256:" + "ab" * 32
 
     def __init__(self, key: str) -> None:
-        self.cell_ref = f"root/family-{FAMILY}#{key}"
+        self.cg_ref = f"root/family-{FAMILY}#{key}"
 
 
 def _hub(seen: List[str]) -> Any:
     def _resolve_batch(family: str, keys: Any, **_kw: Any) -> Any:
         seen.extend(str(k) for k in keys)
         return tuple(
-            cell_resolve.ResolveAnswer(
+            compiled_graph_resolve.ResolveAnswer(
                 compiled_graph_key=str(key), status="hit",
-                cell=cast(Any, _Cell(str(key))))
+                graph=cast(Any, _Graph(str(key))))
             for key in keys)
     return _resolve_batch
 
@@ -261,9 +261,9 @@ def _boot(
     """
     cache = tmp_path / pod / "cache"
     cache.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(cell_resolve, "resolve_batch", _hub([]))
+    monkeypatch.setattr(compiled_graph_resolve, "resolve_batch", _hub([]))
     monkeypatch.setattr(
-        cell_resolve, "materialize", lambda cell, **_kw: tmp_path / "artifact.pt2")
+        compiled_graph_resolve, "materialize", lambda graph, **_kw: tmp_path / "artifact.pt2")
     return boot_adopt.attempt(
         function=FUNCTION, modules=MODULES, cfg=_Cfg(), slots={},
         declared_hint=2, work_root=tmp_path / pod / "work",
@@ -651,24 +651,24 @@ def test_a_rootless_write_still_reaches_the_cache_only(tmp_path: Path) -> None:
     assert keyset_store.invalidate(None, _digest()) is False
 
 
-def test_the_durable_root_name_matches_the_cell_store(tmp_path: Path) -> None:
+def test_the_durable_root_name_matches_the_compiled_graph_store(tmp_path: Path) -> None:
     """``keyset.store`` RESTATES the env name rather than importing
-    ``local_cell_store`` — that module imports the vendored TCG package, and
+    ``local_compiled_graph_store`` — that module imports the vendored TCG package, and
     reading a key set must not drag a tracer's import graph onto a serve pod.
     A restatement that drifts is a root the hub places and nothing reads."""
-    assert keyset_store.ENV_LOCAL_CELLS_DIR == local_cell_store.ENV_STORE_DIR
+    assert keyset_store.ENV_LOCAL_CELLS_DIR == local_compiled_graph_store.ENV_STORE_DIR
     assert keyset_store.ENV_LOCAL_CELLS_DIR == "GEN_WORKER_LOCAL_CELLS_DIR", (
         "th#1813 owns this spelling on every create "
         "(localcompiledgraphs.EnvName); changing it goes dark on the hub")
 
 
-def test_the_keyset_subtree_does_not_collide_with_the_cell_store(
+def test_the_keyset_subtree_does_not_collide_with_the_compiled_graph_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Namespaced, so an operator reading a mount can say which tier owns what."""
     volume = _place(tmp_path / "vol", monkeypatch)
     assert volume.name == keyset_store.DURABLE_KEYSET_DIRNAME
-    assert volume.name != local_cell_store.CELLS_DIRNAME
+    assert volume.name != local_compiled_graph_store.COMPILED_GRAPHS_DIRNAME
     assert volume.parent == tmp_path / "vol"
 
 
@@ -678,11 +678,11 @@ def test_an_expanduser_root_is_honoured(
     """cozy-local exports this variable from its own ``workerEnv`` and a ``~``
     path is what an operator types there."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv(keyset_store.ENV_LOCAL_CELLS_DIR, "~/cells")
+    monkeypatch.setenv(keyset_store.ENV_LOCAL_CELLS_DIR, "~/compiled graphs")
     root = keyset_store.durable_root()
     assert root is not None
     assert not str(root).startswith("~")
-    assert root == tmp_path / "home" / "cells" / keyset_store.DURABLE_KEYSET_DIRNAME
+    assert root == tmp_path / "home" / "compiled graphs" / keyset_store.DURABLE_KEYSET_DIRNAME
 
 
 def test_a_blank_env_is_the_same_as_an_absent_one(

@@ -51,7 +51,7 @@ def test_job_metrics_carry_the_serving_dimensions_on_the_wire() -> None:
 
     assert res.status == pb.JOB_STATUS_OK
     m = res.metrics
-    # This endpoint declares no compile cell, so the honest answer is eager —
+    # This endpoint declares no compiled graph, so the honest answer is eager —
     # and it must be the WORD "eager", not an empty string. "" is
     # indistinguishable from "a worker too old to report", which is exactly the
     # ambiguity that made the aggregate unusable.

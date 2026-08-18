@@ -1,4 +1,4 @@
-"""The ONE reader of the ``metadata.json`` packed at the root of a cell tarball.
+"""The ONE reader of the ``metadata.json`` packed at the root of a compiled graph tarball.
 
 Every artifact kind this worker handles — AOT (``aot_serve``) and
 inductor-cache (``compile_cache``) — packs its envelope as a
@@ -40,17 +40,17 @@ METADATA_NAME = "metadata.json"
 #: header cannot yield a larger ``.read()``.
 #:
 #: WHY THIS IS NOT SIZED OFF THE DECLARE BOUND. "4x
-#: ``fleet_cells.CELL_DECLARE_MAX_BYTES``" sizes an ARTIFACT-plane read off the
+#: ``fleet_compiled_graphs.COMPILED_GRAPH_DECLARE_MAX_BYTES``" sizes an ARTIFACT-plane read off the
 #: CONTROL-plane bound. Those are deliberately different planes:
 #: ``_UNBOUNDED_ENVELOPE_BLOCKS``
 #: (``entries``/``guard_manifest``/``composition``/``weight_contract``) are
 #: STRIPPED from the declare precisely because they "belong in the artifact,
 #: not in the declare" — so this member is by design the place the unbounded
 #: blocks live, and bounding it at the declare's scale refuses the shape the
-#: design demands. Measured, in this tree: a real published sdxl cell's
+#: design demands. Measured, in this tree: a real published sdxl compiled graph's
 #: metadata is 13,377,167 bytes on a 69 MB artifact (see
-#: ``fleet_cells._UNBOUNDED_ENVELOPE_BLOCKS``), and it grows with the
-#: artifact — a 36-entry ~141 MB AOT cell's envelope did not fit 16 MiB, and
+#: ``fleet_compiled_graphs._UNBOUNDED_ENVELOPE_BLOCKS``), and it grows with the
+#: artifact — a 36-entry ~141 MB compiled graph's envelope did not fit 16 MiB, and
 #: the 92-minute mint that produced it was discarded.
 #:
 #: This is a MEMORY-SAFETY bound and nothing else: what a pod can decode into
@@ -58,9 +58,9 @@ METADATA_NAME = "metadata.json"
 #: envelope may be — the artifact's own digest is that.
 #:
 #: THE NUMBER, and its honest margin: 64 MiB is ~4.8x the largest envelope
-#: anyone has measured (the 13,377,167-byte sdxl cell above), so this is a
+#: anyone has measured (the 13,377,167-byte sdxl compiled graph above), so this is a
 #: margin, not a fit. Acceptable because exceeding it is not silent:
-#: `fleet_cells.adopt_delegated_mint` refuses `compiled_graph_envelope_unreadable` naming
+#: `fleet_compiled_graphs.adopt_delegated_mint` refuses `compiled_graph_envelope_unreadable` naming
 #: this constant and the byte count, so the next envelope that outgrows it
 #: costs one typed event, not a mint. Raise it on that evidence; do not raise
 #: it on a guess.
@@ -72,7 +72,7 @@ class ArtifactMetadataError(ValueError):
 
 
 def read_metadata(artifact: Union[str, Path]) -> Dict[str, Any]:
-    """The packed envelope of ``artifact``, WITHOUT unpacking the cell.
+    """The packed envelope of ``artifact``, WITHOUT unpacking the compiled graph.
 
     Reads the one member and stops — kind sniffing and every metadata-only
     gate (host ISA, runtime key, store verdict) run off this, so none of them
@@ -122,14 +122,14 @@ def try_read_metadata(artifact: Union[str, Path]) -> Optional[Dict[str, Any]]:
         return None
 
 
-def cell_metadata_fields() -> FrozenSet[str]:
-    """TCG's CLOSED artifact-metadata vocabulary — what a cell can state.
+def compiled_graph_metadata_fields() -> FrozenSet[str]:
+    """TCG's CLOSED artifact-metadata vocabulary — what a compiled graph can state.
 
     ``torchcg.artifact.validate_metadata`` refuses any metadata whose field set
     is not exactly this, so it is not a convention a consumer may extend. That
     makes it the answer to a question worth $1.00 a burst: **can this axis be
-    compared across the handback boundary at all?** ``fleet_cells``
-    ``unstateable_arm_axes`` asks it at obligation-open, so a seam no cell could
+    compared across the handback boundary at all?** ``fleet_compiled_graphs``
+    ``unstateable_arm_axes`` asks it at obligation-open, so a seam no compiled graph could
     ever satisfy is refused for $0 instead of after a 25-minute paid compile
     (th#2098 / pgw#1340).
 
@@ -149,7 +149,7 @@ def cell_metadata_fields() -> FrozenSet[str]:
     validator goes red THERE, before it can reach a pod as a $1.00-a-burst
     unstateable-axis bug.
 
-    Still sited HERE, in the one first-party module that owns cell-metadata
+    Still sited HERE, in the one first-party module that owns compiled graph-metadata
     reads, so the coupling has exactly one address.
 
     Refuses loudly rather than answering an empty set: an empty vocabulary
@@ -163,7 +163,7 @@ def cell_metadata_fields() -> FrozenSet[str]:
         raise ArtifactMetadataError(
             "the vendored torchcg states no artifact-metadata vocabulary "
             "(`ARTIFACT_METADATA_FIELDS`, public since tcg#40); nothing can "
-            "decide which arm axes a cell is able to state, and guessing would "
+            "decide which arm axes a compiled graph is able to state, and guessing would "
             "either refuse every mint or admit a comparison that can never "
             "succeed")
     return frozenset(str(name) for name in fields)
@@ -173,7 +173,7 @@ __all__ = [
     "MAX_METADATA_BYTES",
     "METADATA_NAME",
     "ArtifactMetadataError",
-    "cell_metadata_fields",
+    "compiled_graph_metadata_fields",
     "read_metadata",
     "try_read_metadata",
 ]

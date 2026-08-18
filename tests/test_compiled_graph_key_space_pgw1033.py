@@ -1,10 +1,10 @@
-"""The TCG key is the cell's identity; the ARM TOKEN names an obligation.
+"""The TCG key is the compiled graph's identity; the ARM TOKEN names an obligation.
 Comparing one against the other silently disarms a protection.
 
 The two values have different semantic owners even though TCG deliberately
 accepts future key schemes by grammar rather than by a closed prefix list:
 
-* the **arm token** (``fleet_cells.arm_identity``, ``arm2-<56 hex>``) — the
+* the **arm token** (``fleet_compiled_graphs.arm_identity``, ``arm2-<56 hex>``) — the
   pre-trace obligation identity. It exists before anything is compiled,
   which is exactly why it can name a pending mint. It never selects bytes;
 * the **TCG key** (``cg-key-v1-<56 hex>``) — what one exported graph class
@@ -18,7 +18,7 @@ silently stopped firing. The two that matter:
    hit, and every same-key re-arm in a process paid a second full export;
 2. the quarantine gate read the computed ref while the two writers that fire on
    a real proof failure (``executor``'s runtime guard and boot proof) record the
-   STAMPED ref of the armed cell — so the churn-loop gate was blind to the refs
+   STAMPED ref of the armed compiled graph — so the churn-loop gate was blind to the refs
    that actually fail;
 
 Plus the dead-attribute guard: ``_selection_for`` tested ``mint.recipe ==
@@ -33,20 +33,20 @@ from typing import Any, List, Tuple
 
 import pytest
 
-from gen_worker import compile_cache, fleet_cells
+from gen_worker import compile_cache, fleet_compiled_graphs
 from gen_worker import config as gw_config
 from gen_worker import mint_supervisor
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
     register_export_declaration, reset_export_declarations,
 )
-from gen_worker.cell_adopt import AdoptOutcome, EagerPhase
+from gen_worker.compiled_graph_adopt import AdoptOutcome, EagerPhase
 
 FAMILY = "sdxl"
 #: What this runtime's facts COMPUTE — the arm token, known before any
 #: compile has run. An obligation never selects compiled-graph bytes.
-ARM_KEY = fleet_cells.ARM_SCHEME + "-" + "a" * fleet_cells.ARM_DIGEST_HEX
-#: What the child's envelope is STAMPED with — the cell identity, unknowable
+ARM_KEY = fleet_compiled_graphs.ARM_SCHEME + "-" + "a" * fleet_compiled_graphs.ARM_DIGEST_HEX
+#: What the child's envelope is STAMPED with — the compiled graph identity, unknowable
 #: until the export finishes. A different digest, always.
 STAMPED_KEY = "cg-key-v1-" + "b" * 56
 
@@ -104,56 +104,56 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     def _sink(kind: str, detail: str, phase: str = "", duration_ms: int = 0, **_kw) -> None:
         seen.append((kind, phase, detail))
 
-    monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
+    monkeypatch.setattr(fleet_compiled_graphs.activity_mod, "emit_event", _sink)
     monkeypatch.setattr(mint_supervisor.activity_mod, "emit_event", _sink)
     return seen
 
 
 @pytest.fixture()
 def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """A mint-capable pod with no cell: the pgw#805 miss shape, one lane."""
+    """A mint-capable pod with no compiled graph: the pgw#805 miss shape, one lane."""
     gw_config.reload_for_test()
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
+        fleet_compiled_graphs.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_compiled_graph"))
-    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "has_compile_target", lambda p, c, **_kw: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "mandatory_serving", lambda p: False)
     monkeypatch.setattr(
-        fleet_cells.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
+        fleet_compiled_graphs.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
     monkeypatch.setattr(
-        fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(fleet_cells, "_PENDING", {})
+        fleet_compiled_graphs.cc, "drop_lora_execution_lane", lambda p: None)
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs, "_PENDING", {})
     # No GPU on a dev box: `sm` is a real-runtime fact and this suite is about
     # identity SPACES, not identity computation.
     monkeypatch.setattr(
-        fleet_cells, "arm_identity",
-        lambda *a, **k: fleet_cells.ArmIdentity(
+        fleet_compiled_graphs, "arm_identity",
+        lambda *a, **k: fleet_compiled_graphs.ArmIdentity(
             facts=(("family", FAMILY), ("token_pin", ARM_KEY))))
     monkeypatch.setattr(
-        fleet_cells.ArmIdentity, "token", property(lambda self: ARM_KEY))
+        fleet_compiled_graphs.ArmIdentity, "token", property(lambda self: ARM_KEY))
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     register_export_declaration(_declaration())
     yield
     gw_config.reload_for_test()
 
 
 def _arm() -> Any:
-    return fleet_cells.enable_compiled(
+    return fleet_compiled_graphs.enable_compiled(
         _Pipe(), _Cfg(), publisher=_Publisher(), delegate=True)  # type: ignore[arg-type]
 
 
 def _adopt(
     monkeypatch: pytest.MonkeyPatch, pending: Any, *, stamped: str = STAMPED_KEY,
 ) -> Any:
-    """Run the real ``adopt_delegated_mint`` over a child cell stamped with a
-    key of the cell's OWN space — the production shape, in one line."""
+    """Run the real ``adopt_delegated_mint`` over a child compiled graph stamped with a
+    key of the compiled graph's OWN space — the production shape, in one line."""
     # a REAL readable envelope carrying the stamp. This used to be
-    # `b"packed-cell"` plus a `_packed_metadata` patch, which worked only
+    # `b"packed-compiled-graph"` plus a `_packed_metadata` patch, which worked only
     # because the pre-arm read swallowed its own failure into `None`. An
-    # unreadable envelope is now refused before the arm, so the cell has to
+    # unreadable envelope is now refused before the arm, so the compiled graph has to
     # actually carry the key this test is about.
     import io as _io
     import json as _json
@@ -167,13 +167,13 @@ def _adopt(
         info.size = len(payload)
         tar.addfile(info, _io.BytesIO(payload))
     monkeypatch.setattr(
-        fleet_cells.provision, "arm_aot",
+        fleet_compiled_graphs.provision, "arm_aot",
         lambda *a, **k: AdoptOutcome.hit(f"key={stamped}"))
     # The pgw#1042 divergence gate now genuinely runs on this fixture (it was
     # silently skipped while `meta` was `None`). Its verdict is
     # `test_handback_key_axes_pgw1042`'s subject, not this file's.
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m, **_kw: "")
-    return fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target])
+    monkeypatch.setattr(fleet_compiled_graphs, "arm_axis_divergence", lambda a, m, **_kw: "")
+    return fleet_compiled_graphs.adopt_delegated_mint(_Pipe(), pending, [pending.target])
 
 
 # ---------------------------------------------------------------------------
@@ -193,11 +193,11 @@ def test_the_memo_is_keyed_on_the_arm_key_the_next_arm_can_look_up(
     minted = _adopt(monkeypatch, pending)
     assert minted is not None and minted.compiled_graph_key == STAMPED_KEY
 
-    prior = fleet_cells.finalized_in_process(ARM_KEY)
+    prior = fleet_compiled_graphs.finalized_in_process(ARM_KEY)
     assert prior is minted, (
         "the arm identity this process just minted for cannot find its own "
-        "cell — every same-key re-arm pays a second full export")
-    # The VALUE still carries the cell's own identity; only the INDEX is the
+        "compiled graph — every same-key re-arm pays a second full export")
+    # The VALUE still carries the compiled graph's own identity; only the INDEX is the
     # arm key. Nothing looks the ledger up by the stamped key.
     assert prior.compiled_graph_key == STAMPED_KEY
     assert prior.ref.endswith("#" + STAMPED_KEY)
@@ -208,7 +208,7 @@ def test_a_second_arm_of_the_same_identity_re_arms_instead_of_minting_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The protection ITSELF, at its own call site: the second arm must serve
-    from the finalized cell and open no second mint."""
+    from the finalized compiled graph and open no second mint."""
     pending = _arm().self_mint
     assert pending is not None
     minted = _adopt(monkeypatch, pending)
@@ -216,11 +216,11 @@ def test_a_second_arm_of_the_same_identity_re_arms_instead_of_minting_again(
 
     again = _arm()
 
-    assert again.armed, "the re-arm did not serve from the finalized cell"
+    assert again.armed, "the re-arm did not serve from the finalized compiled graph"
     assert again.self_mint is minted, (
         "the second arm opened a FRESH mint for an identity this process has "
         "already minted and adopted — the pgw#672 churn loop")
-    assert not isinstance(again.self_mint, fleet_cells.PendingSelfMint)
+    assert not isinstance(again.self_mint, fleet_compiled_graphs.PendingSelfMint)
     starts = [phase for kind, phase, _ in _events if kind == "self_mint_started"]
     assert starts == ["aot"], (
         f"expected exactly ONE mint for this identity, saw {len(starts)}")
@@ -237,7 +237,7 @@ def test_a_quarantined_STAMPED_ref_declines_the_next_arm_of_that_identity(
 ) -> None:
     """RED at HEAD: the two writers that fire on a real proof failure
     (``executor`` runtime guard `:4160`, boot proof `:7333`) record the ARMED
-    cell's STAMPED ref, and the gate only ever asked about the computed one —
+    compiled graph's STAMPED ref, and the gate only ever asked about the computed one —
     so the churn-loop gate was blind to every ref that actually fails."""
     pending = _arm().self_mint
     assert pending is not None
@@ -251,8 +251,8 @@ def test_a_quarantined_STAMPED_ref_declines_the_next_arm_of_that_identity(
 
     assert not again.armed
     assert again.eager_reason == EagerPhase.COMPILED_GRAPH_QUARANTINED, (
-        "the arm re-minted an identity whose own cell was disproven seconds "
-        "ago — a deterministic recipe rebuilds the same disproven cell")
+        "the arm re-minted an identity whose own compiled graph was disproven seconds "
+        "ago — a deterministic recipe rebuilds the same disproven compiled graph")
     skipped = [
         detail for kind, phase, detail in _events
         if kind == "self_mint_skipped" and phase == EagerPhase.COMPILED_GRAPH_QUARANTINED
@@ -313,7 +313,7 @@ def test_an_owed_mint_advertises_no_artifact_identity(
     sel = executor._selection_for(delivered, minted)
     assert sel is not None and sel.self_mint
     assert sel.ref == minted.ref, (
-        "an ADOPTED cell advertises the key stamped on the bytes it serves")
+        "an ADOPTED compiled graph advertises the key stamped on the bytes it serves")
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +323,7 @@ def test_an_owed_mint_advertises_no_artifact_identity(
 # (`test_a_healthy_self_minted_AOT_boot_logs_no_key_divergence`,
 # `test_a_divergence_inside_one_key_space_is_still_loud`) are gone with
 # `requested_cell_key` itself. This issue's fix was the INTERIM it announced:
-# silencing a warning whose whole premise — that a self-minted cell's key
+# silencing a warning whose whole premise — that a self-minted compiled graph's key
 # should equal the key this runtime computes — is false for every mint there
 # is. With the computed key no longer produced there is no divergence left to
 # judge, loudly or quietly. The disjointness the warning kept tripping over is

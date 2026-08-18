@@ -1,7 +1,7 @@
 """Parent-side authorization for child-requested hub actions (pgw#763 delta 1).
 
 The worker JWT is the pod's signing identity: it authenticates the gRPC stream,
-mints per-job capability tokens, publishes cells, and authorizes the platform
+mints per-job capability tokens, publishes compiled graphs, and authorizes the platform
 C2PA signing oracle. Before this it was handed to the compute child on every
 rotation (the deleted ``T_TOKEN`` frame) and read straight out of the child's
 environment — which is to say it was handed to tenant endpoint code, since that
@@ -106,7 +106,7 @@ ACTIONS: Dict[str, HubAction] = {
             r"^/v1/worker/c2pa/sign$",
             body=("alg", "claim_b64"),
         ),
-        # pgw#709 cell-receipt gate: fetch one receipt, fetch the revocation
+        # pgw#709 compiled graph-receipt gate: fetch one receipt, fetch the revocation
         # list. Read-only, and the gate fails closed without them.
         # ``artifact_digest`` is ONE algorithm-tagged digest (pgw#1034 collapsed
         # the multi-algorithm ceremony; the bare ``blake3`` key had already gone
@@ -127,7 +127,7 @@ ACTIONS: Dict[str, HubAction] = {
         # Self-mint publish (gw#587/th#910). publish-intent returns a
         # key-pinned capability token — a short-TTL, least-authority grant, the
         # one credential shape the child is explicitly allowed to hold.
-        # The body enumerations are the LIVE payloads `fleet_cells.publish`
+        # The body enumerations are the LIVE payloads `fleet_compiled_graphs.publish`
         # sends, and nothing else. An unlisted key is an ActionRefused, not a
         # silent drop — so a publisher that grows a field the table does not
         # know refuses the whole publish under the split (the only execution
@@ -204,7 +204,7 @@ ACTIONS: Dict[str, HubAction] = {
             body=("family", "compiled_graph_key", "checkpoint_id", "ok", "error"),
             timeout_s=60.0,
         ),
-        # AOT cell discovery: list a system repo's checkpoints, resolve one
+        # compiled graph discovery: list a system repo's checkpoints, resolve one
         # manifest. The manifest's artifact URL is PRESIGNED, so the bytes are
         # fetched by the child directly — the seam carries control, not data.
         _a(
@@ -257,7 +257,7 @@ _MAX_JSON_BYTES = 256 * 1024
 CONTROL_BODY_CEILING_BYTES = _MAX_JSON_BYTES
 
 
-#: pgw#980: the two actions that WRITE a cell into a shared family namespace.
+#: pgw#980: the two actions that WRITE a compiled graph into a shared family namespace.
 #: Every other action in the table reads, renews or reports.
 PUBLISH_ACTIONS = frozenset({"compiled_graphs.publish_intent", "compiled_graphs.publish_complete"})
 
@@ -281,7 +281,7 @@ def probe_pod() -> bool:
 
 
 def publish_disarmed() -> bool:
-    """Whether cell publish is disarmed for this pod.
+    """Whether compiled graph publish is disarmed for this pod.
 
     Read in the PARENT, which is the point. The compute child is where the
     swapped code runs and where a tenant endpoint executes; the parent holds
@@ -322,10 +322,10 @@ def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[
     if match.name in PUBLISH_ACTIONS and publish_disarmed():
         # Refused, not dropped: the parent counts, logs and dials every
         # ActionRefused, so a probe whose operator MEANT to publish learns it
-        # from a named refusal rather than from a cell that never appeared.
+        # from a named refusal rather than from a compiled graph that never appeared.
         raise ActionRefused(
             f"{match.name} is disarmed on this pod: {_PROBE_ENV} marks it a "
-            f"live-edit probe running rsync'd code, whose cells carry a "
+            f"live-edit probe running rsync'd code, whose compiled graphs carry a "
             f"`gen_worker` version that does not describe them and a "
             f"`code_closure` no other pod can reproduce. Set "
             f"{_PROBE_PUBLISH_ARM_ENV}=1 to arm it deliberately (pgw#980)."

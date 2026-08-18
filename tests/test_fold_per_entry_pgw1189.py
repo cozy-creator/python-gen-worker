@@ -16,7 +16,7 @@ residual" was answered by inference: the split was never on the wire.
 
 pgw#848 had already written the rule this violates, for the ledger, one line
 away: *"A mint killed at entry 30 of 36 then leaves 30 entries' worth of
-measurement on disk instead of one bare 'no cell produced' row."*
+measurement on disk instead of one bare 'no compiled graph produced' row."*
 
 **pgw#1215 moved WHERE the property lives, and it is stronger there.** There is
 no fold any more, because there is nothing to fold onto: a compile child traces,

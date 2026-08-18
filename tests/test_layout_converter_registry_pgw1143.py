@@ -1,5 +1,5 @@
 """The layout converter registry (§1.33), and the fence that keeps conversion
-out of cell identity.
+out of compiled graph identity.
 
 What is proven here, in the order the ruling puts it:
 
@@ -14,7 +14,7 @@ What is proven here, in the order the ruling puts it:
    its order become a preference;
 5. the derived-artifact identity is stable across PROCESSES, which is the whole
    basis of convert-once-into-the-CAS;
-6. **no cell re-keys**: no cell-key axis can read the layout vocabulary
+6. **no compiled graph re-keys**: no compiled graph-key axis can read the layout vocabulary
    (structural, via the shipped gate) and a slot's demand does not move the
    compile contract (behavioural, through `extract_specs`).
 
@@ -602,7 +602,7 @@ def test_the_fence_covers_every_module_that_computes_a_compiled_graph_key() -> N
     # `keyset/fold.py` — the fence is derived from who calls an axis producer,
     # so it followed the arithmetic without anyone editing a list. That is the
     # property this test exists to keep.
-    assert {"fleet_cells.py", "fold.py", "aot_mint.py",
+    assert {"fleet_compiled_graphs.py", "fold.py", "aot_mint.py",
             "compile_cache.py"} <= fenced
     assert "boot_key.py" not in fenced, (
         "the tracer states declarations; it no longer folds a key")
@@ -673,7 +673,7 @@ def test_the_fence_does_not_fire_on_prose(tmp_path: Path) -> None:
     themselves, and has already cost this repo a lane-day."""
     (tmp_path / "graph_facts.py").write_text(textwrap.dedent(
         '''
-        """The cell key. Deliberately blind to Slot.layouts and to any
+        """The compiled graph key. Deliberately blind to Slot.layouts and to any
         LayoutId or conversion chain — see classify_layout for why."""
 
 
@@ -690,7 +690,7 @@ def test_the_shipped_tree_passes_the_fence() -> None:
         [sys.executable, str(REPO / "scripts" / "lint_compiled_graph_key_layout_fence.py")],
         capture_output=True, text=True, timeout=180)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "no cell re-keys on a conversion" in proc.stdout
+    assert "no compiled graph re-keys on a conversion" in proc.stdout
 
 
 # ── the behavioural half of point 5: a demand does not move the contract ─────
@@ -761,7 +761,7 @@ def _spec_for(slot: Slot):
 
 def test_declaring_a_layout_demand_does_not_move_the_compile_contract() -> None:
     """§1.33 point 5, behaviourally: the demand is upstream of compute, so
-    adding it to a slot must not move ANY cell-key input. The compile contract
+    adding it to a slot must not move ANY compiled graph-key input. The compile contract
     digest is what an endpoint's declaration actually reaches, and this goes RED
     the moment someone folds `layouts` into `contract_facts()` — which is the
     placement §1.33 point 5 rules out and the reason the demand lives on `Slot`

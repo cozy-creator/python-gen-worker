@@ -1,4 +1,4 @@
-"""A REAL cell-receipt hub: real RSA keys, real JWS, real HTTP on localhost.
+"""A REAL compiled graph-receipt hub: real RSA keys, real JWS, real HTTP on localhost.
 
 Promoted out of the pgw#709 receipt tests (now ``tests/test_receipts_trust.py``)
 by pgw#1152, unchanged. The signer mirrors the hub's production format byte-for-byte (RS256 PKCS1v15/SHA256
@@ -78,7 +78,7 @@ def make_claims(
     ``legacy_blake3_only`` reproduces a receipt minted before pgw#807: the
     bare-hex ``blake3`` claim and no ``digest`` at all. It exists so the tests
     can prove that shape is now REFUSED — the v1 protocol that minted it is
-    gone from this SDK, so a cell it names is re-minted, never armed.
+    gone from this SDK, so a compiled graph it names is re-minted, never armed.
     """
     algo, _, hex_part = artifact_digest.partition(":")
     artifact: Dict[str, Any] = {"path": "cell.tar.gz", "size_bytes": size_bytes}
@@ -176,7 +176,7 @@ class HubStub:
                         if jws is not None:
                             break
                     if jws is None:
-                        self._json(404, {"error": "cell_receipt_not_found"})
+                        self._json(404, {"error": "compiled_graph_receipt_not_found"})
                     else:
                         self._json(200, {"receipt": jws, "snapshot_digest": SNAPSHOT})
                 elif parsed.path == receipts.REVOCATIONS_PATH:
@@ -232,7 +232,7 @@ def worker_jwt_for(endpoint_id: str, org_id: str = "") -> str:
     """A hub-shaped worker credential naming the endpoint this pod serves.
 
     th#1657: the pod's own identity comes from the `cell_read_endpoint_id` the
-    hub stamps on the cell-read grant (th#1335), so the test builds the same
+    hub stamps on the compiled graph-read grant (th#1335), so the test builds the same
     thing. The signature is never checked — this is our OWN bearer token, not an
     input — so an unsigned third segment is faithful to what the gate reads.
     """

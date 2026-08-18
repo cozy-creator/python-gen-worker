@@ -16,7 +16,7 @@ whole path:
 * ``micro_escape::silu_scale`` — a hand-written Triton kernel through
   ``torch.library.triton_op`` + ``wrap_triton``, the sanctioned authoring
   surface: the kernel is visible to inductor, compiled and baked into the
-  cell like any generated kernel.
+  compiled graph like any generated kernel.
 * a RAW ``@triton.jit`` call in the forward — the unsanctioned-but-real form
   authors actually write. Dynamo captures it as a triton HOP.
 

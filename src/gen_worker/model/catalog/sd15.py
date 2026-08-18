@@ -20,7 +20,7 @@ text tower                       CLIP-L          OpenCLIP-H
 Every cross-attention projection in the U-Net is a different SHAPE, and the
 attention head partition differs on top of it. An instance is "weights + tuned
 values + a ref label" (``model/runtime.py`` draws that line); these two do not
-share a traced class, a compiled cell, or even a weight shape, so calling them
+share a traced class, a compiled graph, or even a weight shape, so calling them
 one model would put two incompatible graphs behind one exhaustive ``Literal``
 and the fake backing would be the only thing that ever worked.
 

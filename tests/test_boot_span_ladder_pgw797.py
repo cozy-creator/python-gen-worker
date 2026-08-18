@@ -236,7 +236,7 @@ def test_warmup_is_a_span_nested_inside_pipeline_load(ladder) -> None:
 def test_a_warmup_row_says_whether_a_cell_was_armed(ladder) -> None:
     """"Warmup before arm" and "warmup after arm" must be separable ROWS —
     otherwise they are two code paths that happen to share a name and the
-    "what does a cell save" question stays unanswerable."""
+    "what does a compiled graph save" question stays unanswerable."""
     warms = _terminal(ladder, boot_phases.PHASE_WARMUP)
     assert warms
     for w in warms:

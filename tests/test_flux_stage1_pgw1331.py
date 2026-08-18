@@ -328,7 +328,7 @@ def test_the_mint_bridge_declares_torchcg_classes_from_the_declaration_alone() -
 
     Everything below ``Engine.compile`` runs on CPU under fake tensors, which is
     the whole reason a family can be minted without downloading a checkpoint:
-    cell identity is checkpoint-free (§4.27) and the constants arrive at ARM
+    compiled graph identity is checkpoint-free (§4.27) and the constants arrive at ARM
     time from the store (pgw#1329).
     """
 
@@ -746,7 +746,7 @@ def test_mint_family_packs_one_artifact_per_declared_variant(
     )
 
     minted = family_mint.mint_model(
-        FLUX1_DEV, out_dir=tmp_path / "cells", work=tmp_path / "work", only=("decoder",)
+        FLUX1_DEV, out_dir=tmp_path / "compiled graphs", work=tmp_path / "work", only=("decoder",)
     )
 
     assert [row.graph_class for row in minted] == [
@@ -906,7 +906,7 @@ def test_serving_mode_does_not_import_the_arming_brain() -> None:
 def test_the_compile_facts_are_one_definition_not_two() -> None:
     """``compile_cache`` re-exports them; it does not re-implement them.
 
-    Two copies of ``runtime_key`` is two cell identities (pgw#824's drift rule
+    Two copies of ``runtime_key`` is two compiled graph identities (pgw#824's drift rule
     applied to a probe rather than to a list), and every test that monkeypatches
     ``compile_cache.runtime_key`` would silently stop covering the real caller.
     """

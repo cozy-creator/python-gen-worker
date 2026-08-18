@@ -22,7 +22,7 @@ derived warm plan and ``ensure_setup`` for the boot):
    an AOT-armed pipeline carries no ``compile_cache`` ``failure_signal``
    marker at all.  Every AOT arm therefore answered "no runtime guard
    revocation signal" and had its ``active_compile_ref`` cleared — a compiled
-   AOT serve was structurally unreachable on the boot path even with a cell
+   AOT serve was structurally unreachable on the boot path even with a compiled graph
    that dispatches perfectly.
 
 ``boot_ended_uncompiled`` now means "nothing is dispatchable", never
@@ -78,7 +78,7 @@ CHANNELS = 320
 TEXT_LEN = 77
 
 #: sdxl's nine declared aspect buckets, as LATENT extents (pixels // 8) —
-#: exactly the rows attempt eleven's cell was minted over.
+#: exactly the rows attempt eleven's compiled graph was minted over.
 SDXL_BUCKETS: Tuple[Tuple[int, int], ...] = (
     (128, 128),
     (152, 104), (104, 152),
@@ -211,7 +211,7 @@ def test_the_collapsed_declaration_dispatches_every_bucket_uniquely():
 
 
 # ---------------------------------------------------------------------------
-# 2. The boot: a partially dispatchable cell keeps the compiled lane
+# 2. The boot: a partially dispatchable compiled graph keeps the compiled lane
 # ---------------------------------------------------------------------------
 
 _LATENT = {"1:1": (128, 128), "16:9": (192, 80), "9:16": (80, 192)}
@@ -269,7 +269,7 @@ class _SdxlRegional:
 def _arm(pipe: _Pipe, *_args: Any) -> Any:
     """The compile-arm LEAF, faked exactly as far as the ``.pt2`` load: the
     dispatch, the wrap, the marker and the refusal path are real."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     meta = {"family": FAMILY, "sku": "l4", "torch": str(torch.__version__),
             "precision": "w8a8"}
@@ -289,7 +289,7 @@ def _arm(pipe: _Pipe, *_args: Any) -> Any:
             "module": pipe.unet, "attr": "forward",
             "state": module_marker.get("state", {})}},
     })
-    return fleet_cells.ArmOutcome(armed=True)
+    return fleet_compiled_graphs.ArmOutcome(armed=True)
 
 
 def _cell_snapshot(tmp_path: Path) -> Path:
@@ -312,7 +312,7 @@ def _arm_dynamo(pipe: _Pipe, *_args: Any) -> Any:
     """
     import threading
 
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     signal = {
         "callback": None, "lock": threading.Lock(),
@@ -332,7 +332,7 @@ def _arm_dynamo(pipe: _Pipe, *_args: Any) -> Any:
         return hidden
 
     unet.forward = wrapped
-    return fleet_cells.ArmOutcome(armed=True)
+    return fleet_compiled_graphs.ArmOutcome(armed=True)
 
 
 def _boot(
@@ -344,12 +344,12 @@ def _boot(
         lambda kind, detail, phase="", duration_ms=0, **_kw: events.append(
             (kind, phase, detail)))
     # An `aot_serve.note_aot_key(COMPILED_GRAPH_KEY)` stood here, with a comment
-    # arguing this process is "TOLD the flavor is an AOT cell exactly as a
+    # arguing this process is "TOLD the flavor is an compiled graph exactly as a
     # Plan's `Arm.artifact` tells a pod". Production is told no such thing — it
     # LEARNS at the wrap (`arm_entry`, pgw#1141b), and the route that
     # believed the convention instead is what cost four pods. The line is
     # deleted rather than moved: `_arm` below publishes the pipeline-level
-    # marker `arm_entry` publishes, so `holds_exported_cell` answers the
+    # marker `arm_entry` publishes, so `holds_exported_compiled_graph` answers the
     # lane question off the OBJECT and the registry is not consulted at all.
     artifact = _cell_snapshot(tmp_path)
     model_dir = tmp_path / "sdxl-model"
@@ -363,10 +363,10 @@ def _boot(
     async def _send(_msg: Any) -> None:
         return None
 
-    cell_ref = CELL_REF if exported else DYNAMO_REF
+    cg_ref = CELL_REF if exported else DYNAMO_REF
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == cell_ref else model_dir
+        return artifact.parent if ref == cg_ref else model_dir
 
     ex = Executor(specs, _send)
     ex.store._cache_dir = tmp_path / "cas"
@@ -377,12 +377,12 @@ def _boot(
     monkeypatch.setattr(
         ex, "_enable_compiled", _arm if exported else _arm_dynamo)
 
-    # The cell is an exact ORDER (Arm.artifact), never a snapshot
+    # The compiled graph is an exact ORDER (Arm.artifact), never a snapshot
     # entry the worker scans for.
     arm_order = executor_mod._ArmOrder(
         backend="aot_cell",
         selection=executor_mod._CompileArtifactSelection(
-            path=artifact, ref=cell_ref, snapshot_digest=CELL_DIGEST))
+            path=artifact, ref=cg_ref, snapshot_digest=CELL_DIGEST))
     asyncio.run(ex.ensure_setup(generate, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
     }, arm=arm_order))
@@ -395,7 +395,7 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
     """THE pgw#844 assertion, on the real derived warm plan.
 
     Three declared aspect classes; two of them (192x80 / 80x192) share a token
-    count and are ``entry_ambiguous``, one (128x128) is unique.  The armed cell
+    count and are ``entry_ambiguous``, one (128x128) is unique.  The armed compiled graph
     must survive: the target keeps its active identity, the boot does not end
     uncompiled, and the two eager classes are NAMED rather than inferred from
     a healthy-looking silence.
@@ -439,7 +439,7 @@ def test_the_exported_lane_boots_on_the_eager_warm_plan(
     past the first bought nothing but wall clock.
 
     RED on unmodified master: `the boot ran 3 full warm generates against an
-    ARMED exported cell (1 dispatched, 2 refused at ingress), want 1`.
+    ARMED exported compiled graph (1 dispatched, 2 refused at ingress), want 1`.
     """
     _ex, _generate, pipe, _events = _boot(tmp_path, monkeypatch)
 
@@ -447,7 +447,7 @@ def test_the_exported_lane_boots_on_the_eager_warm_plan(
     refused = aot_serve.ingress_refusals(pipe)
     assert dispatched + refused == 1, (
         f"the boot ran {dispatched + refused} full warm generates against an "
-        f"ARMED exported cell ({dispatched} dispatched, {refused} refused at "
+        f"ARMED exported compiled graph ({dispatched} dispatched, {refused} refused at "
         f"ingress), want 1")
 
 

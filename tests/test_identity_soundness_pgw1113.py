@@ -2,13 +2,13 @@
 the advertisement names what armed, and the key names the placement.
 THE GOVERNING PRINCIPLE, which is why these five changes are one change:
 
-    The CELL KEY is the computation and must not OVER-split (the membership
+    The COMPILED GRAPH KEY is the computation and must not OVER-split (the membership
     axiom, ``tcg.identity``).  The ARM TOKEN is a mint obligation and a cache
     lookup and must not UNDER-split.  Over-splitting an obligation costs one
-    re-mint; under-splitting one binds a pipeline to a cell nobody proved is
+    re-mint; under-splitting one binds a pipeline to a compiled graph nobody proved is
     its computation.
 
-The tree applied the first axiom to both, so every key downstream of the cell
+The tree applied the first axiom to both, so every key downstream of the compiled graph
 key named a (family, lane, runtime) triple and nothing about WHAT was being
 compiled. Each test below is red on the parent commit.
 
@@ -27,7 +27,7 @@ import pytest
 
 from harness.slot_facts import TEST_FACTS as _TEST_FACTS
 
-from gen_worker import boot_key, fleet_cells, graph_facts, keyset, local_cell_store
+from gen_worker import boot_key, fleet_compiled_graphs, graph_facts, keyset, local_compiled_graph_store
 from gen_worker.keyset import document as keyset_doc, store as keyset_store
 
 
@@ -50,7 +50,7 @@ EDIT = Hub("qwen/qwen-image-edit-2511")
 
 
 class _Cfg:
-    """A ``registry.CompileCell`` duck — the declaration both slots share."""
+    """A ``registry.CompileContract`` duck — the declaration both slots share."""
 
     family = "qwen-image"
     targets = ("transformer",)
@@ -71,19 +71,19 @@ def _stable_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """One fixed runtime, so every token difference below is a SUBJECT
     difference and cannot be an environment one."""
     monkeypatch.setattr(
-        fleet_cells.cc, "runtime_key",
+        fleet_compiled_graphs.cc, "runtime_key",
         lambda: {"sm": "sm_89", "sku": "l4", "torch": "t", "triton": "",
                  "cuda": "", "image_digest": ""})
     monkeypatch.setattr(
-        fleet_cells.cc, "toolchain_digest", lambda: (("torch", "x" * 16),))
+        fleet_compiled_graphs.cc, "toolchain_digest", lambda: (("torch", "x" * 16),))
     monkeypatch.setattr(
-        fleet_cells.env_seal, "effective_seal", lambda: {"v": 4})
+        fleet_compiled_graphs.env_seal, "effective_seal", lambda: {"v": 4})
 
 
 def _token(pipe: Any, cfg: Any = None) -> str:
-    return fleet_cells.arm_identity(
+    return fleet_compiled_graphs.arm_identity(
         "qwen-image", "", 0, cfg or _Cfg(),
-        subject=fleet_cells.pipeline_arm_subject(pipe)).token
+        subject=fleet_compiled_graphs.pipeline_arm_subject(pipe)).token
 
 
 # --------------------------------------------------------------------------
@@ -97,13 +97,13 @@ def test_two_slots_bound_to_two_checkpoints_owe_two_mints() -> None:
     Qwen-Image) makes the two graphs structurally different forever.
 
     Before pgw#1113 both computed ONE token: one pending, one child, one
-    local-store memo row, and the first slot to arm handed its cell to the
+    local-store memo row, and the first slot to arm handed its compiled graph to the
     other — "correct by backstop, not by design", the backstop being
     ``_bind_compile_guard`` returning False on an unarmed pipe.
     """
     t2i, edit = _Pipe(), _Pipe()
-    fleet_cells.stamp_arm_subject(t2i, "pipeline", ["qwen/qwen-image"])
-    fleet_cells.stamp_arm_subject(edit, "edit", ["qwen/qwen-image-edit-2511"])
+    fleet_compiled_graphs.stamp_arm_subject(t2i, "pipeline", ["qwen/qwen-image"])
+    fleet_compiled_graphs.stamp_arm_subject(edit, "edit", ["qwen/qwen-image-edit-2511"])
     assert _token(t2i) != _token(edit)
 
 
@@ -117,8 +117,8 @@ def test_two_endpoint_classes_sharing_one_compile_owe_two_mints() -> None:
     EARNED by the graph, never ASSUMED by the obligation token.
     """
     base, turbo = _Pipe(), _Pipe()
-    fleet_cells.stamp_arm_subject(base, "pipeline", ["flux2/klein-4b"])
-    fleet_cells.stamp_arm_subject(turbo, "pipeline", ["flux2/klein-4b-turbo"])
+    fleet_compiled_graphs.stamp_arm_subject(base, "pipeline", ["flux2/klein-4b"])
+    fleet_compiled_graphs.stamp_arm_subject(turbo, "pipeline", ["flux2/klein-4b-turbo"])
     assert _token(base) != _token(turbo)
 
 
@@ -128,7 +128,7 @@ def test_the_same_slot_at_the_same_checkpoint_still_shares_one_mint() -> None:
     compile. Over-splitting is cheap, not free."""
     one, two = _Pipe(), _Pipe()
     for pipe in (one, two):
-        fleet_cells.stamp_arm_subject(
+        fleet_compiled_graphs.stamp_arm_subject(
             pipe, "pipeline", ["qwen/qwen-image"], "sha256:aa")
     assert _token(one) == _token(two)
 
@@ -138,16 +138,16 @@ def test_a_component_override_is_part_of_the_subject() -> None:
     different set of bytes and can be a different graph, so it is a different
     obligation."""
     plain, overridden = _Pipe(), _Pipe()
-    fleet_cells.stamp_arm_subject(plain, "pipeline", ["qwen/qwen-image"])
-    fleet_cells.stamp_arm_subject(
+    fleet_compiled_graphs.stamp_arm_subject(plain, "pipeline", ["qwen/qwen-image"])
+    fleet_compiled_graphs.stamp_arm_subject(
         overridden, "pipeline", ["qwen/qwen-image", "qwen/other-vae"])
     assert _token(plain) != _token(overridden)
 
 
 def test_a_snapshot_digest_move_is_a_different_obligation() -> None:
     old, new = _Pipe(), _Pipe()
-    fleet_cells.stamp_arm_subject(old, "pipeline", ["q/img"], "sha256:aa")
-    fleet_cells.stamp_arm_subject(new, "pipeline", ["q/img"], "sha256:bb")
+    fleet_compiled_graphs.stamp_arm_subject(old, "pipeline", ["q/img"], "sha256:aa")
+    fleet_compiled_graphs.stamp_arm_subject(new, "pipeline", ["q/img"], "sha256:bb")
     assert _token(old) != _token(new)
 
 
@@ -164,7 +164,7 @@ def test_the_token_states_the_declaration_facts_it_could_not_see(
     three. Two declarations that compile different programs must not share one
     obligation."""
     pipe = _Pipe()
-    fleet_cells.stamp_arm_subject(pipe, "pipeline", ["q/img"])
+    fleet_compiled_graphs.stamp_arm_subject(pipe, "pipeline", ["q/img"])
     other = type("_Other", (_Cfg,), {field: value})
     assert _token(pipe) != _token(pipe, other())
 
@@ -174,47 +174,47 @@ def test_an_unstamped_pipeline_states_no_subject_and_says_so() -> None:
     calls ``arm_compile()`` — nothing in this process saw a resolution for it.
     ``""`` is the honest answer and it UNDER-splits, which is why the executor
     stamps every subject it can (including, for that path, all of them)."""
-    assert fleet_cells.pipeline_arm_subject(_Pipe()) == ()
+    assert fleet_compiled_graphs.pipeline_arm_subject(_Pipe()) == ()
     assert graph_facts.subject_digest(()) == ""
-    facts = fleet_cells.arm_identity("f", "", 0, _Cfg()).facts_dict()
+    facts = fleet_compiled_graphs.arm_identity("f", "", 0, _Cfg()).facts_dict()
     assert facts["subject"] == ""
 
 
 def test_the_stamp_accumulates_and_is_order_free() -> None:
     a, b = _Pipe(), _Pipe()
-    fleet_cells.stamp_arm_subject(a, "pipeline", ["r1"])
-    fleet_cells.stamp_arm_subject(a, "refiner", ["r2"])
-    fleet_cells.stamp_arm_subject(b, "refiner", ["r2"])
-    fleet_cells.stamp_arm_subject(b, "pipeline", ["r1"])
+    fleet_compiled_graphs.stamp_arm_subject(a, "pipeline", ["r1"])
+    fleet_compiled_graphs.stamp_arm_subject(a, "refiner", ["r2"])
+    fleet_compiled_graphs.stamp_arm_subject(b, "refiner", ["r2"])
+    fleet_compiled_graphs.stamp_arm_subject(b, "pipeline", ["r1"])
     assert _token(a) == _token(b)
 
 
 def test_the_arm_facts_split_into_environment_and_obligation() -> None:
     """The two halves are different axioms, so they are different tuples.
 
-    ``ARM_ENVIRONMENT_FACTS`` is what a delegated child RECORDS on the cell it
+    ``ARM_ENVIRONMENT_FACTS`` is what a delegated child RECORDS on the compiled graph it
     hands back, and is therefore comparable across the process boundary.
-    ``ARM_OBLIGATION_FACTS`` is not on the cell and must not be. For the
+    ``ARM_OBLIGATION_FACTS`` is not on the compiled graph and must not be. For the
     subject half (pgw#1113) that is an axiom: the key is the computation, so
-    one cell legally serves every checkpoint whose graph it is, and demanding
-    the cell restate its minting checkpoint would refuse exactly the reuse the
+    one compiled graph legally serves every checkpoint whose graph it is, and demanding
+    the compiled graph restate its minting checkpoint would refuse exactly the reuse the
     membership axiom exists to allow. For ``family``/``lane``/``env_seal``
     (pgw#1340) it is a fact about TCG's closed artifact vocabulary, which has
     no field for any of them — and comparing them anyway is what made every
     `sd15` self-mint refuse after a 25-minute compile.
     """
-    assert set(fleet_cells.ARM_FACTS) == (
-        set(fleet_cells.ARM_ENVIRONMENT_FACTS)
-        | set(fleet_cells.ARM_OBLIGATION_FACTS))
-    assert not (set(fleet_cells.ARM_ENVIRONMENT_FACTS)
-                & set(fleet_cells.ARM_OBLIGATION_FACTS))
-    assert set(fleet_cells.ARM_SUBJECT_FACTS) <= set(
-        fleet_cells.ARM_OBLIGATION_FACTS)
-    # The environment half is exactly what a cell can state — the invariant
+    assert set(fleet_compiled_graphs.ARM_FACTS) == (
+        set(fleet_compiled_graphs.ARM_ENVIRONMENT_FACTS)
+        | set(fleet_compiled_graphs.ARM_OBLIGATION_FACTS))
+    assert not (set(fleet_compiled_graphs.ARM_ENVIRONMENT_FACTS)
+                & set(fleet_compiled_graphs.ARM_OBLIGATION_FACTS))
+    assert set(fleet_compiled_graphs.ARM_SUBJECT_FACTS) <= set(
+        fleet_compiled_graphs.ARM_OBLIGATION_FACTS)
+    # The environment half is exactly what a compiled graph can state — the invariant
     # pgw#1340's preflight refuses a mint on, asserted here on the constants.
-    assert fleet_cells.unstateable_arm_axes() == ()
-    identity = fleet_cells.arm_identity("f", "", 0, _Cfg())
-    assert set(identity.facts_dict()) == set(fleet_cells.ARM_FACTS)
+    assert fleet_compiled_graphs.unstateable_arm_axes() == ()
+    identity = fleet_compiled_graphs.arm_identity("f", "", 0, _Cfg())
+    assert set(identity.facts_dict()) == set(fleet_compiled_graphs.ARM_FACTS)
     assert "graph" not in identity.facts_dict()
 
 
@@ -307,15 +307,15 @@ def test_the_arm_token_scheme_is_its_fact_set(tmp_path: Path) -> None:
     an ``arm1-`` memo row is an answer to a question no reader asks — and the
     cost of that, one re-mint per family per machine, is spent explicitly and
     counted rather than discovered later as a store of unreadable files."""
-    memo_dir = local_cell_store.cells_root(tmp_path) / local_cell_store.MEMO_DIRNAME
+    memo_dir = local_compiled_graph_store.compiled_graphs_root(tmp_path) / local_compiled_graph_store.MEMO_DIRNAME
     memo_dir.mkdir(parents=True)
     stale = memo_dir / ("arm1-" + "a" * 56 + ".json")
-    current = memo_dir / (fleet_cells.ARM_SCHEME + "-" + "b" * fleet_cells.ARM_DIGEST_HEX + ".json")
+    current = memo_dir / (fleet_compiled_graphs.ARM_SCHEME + "-" + "b" * fleet_compiled_graphs.ARM_DIGEST_HEX + ".json")
     for entry in (stale, current):
         entry.write_text(json.dumps({"compiled_graph_key": "cg-key-v1-" + "c" * 56}))
 
-    dropped = local_cell_store.sweep_superseded_memos(
-        fleet_cells.ARM_SCHEME, tmp_path)
+    dropped = local_compiled_graph_store.sweep_superseded_memos(
+        fleet_compiled_graphs.ARM_SCHEME, tmp_path)
     assert dropped == 1
     assert not stale.exists() and current.exists()
-    assert fleet_cells.ARM_SCHEME != "arm1"
+    assert fleet_compiled_graphs.ARM_SCHEME != "arm1"

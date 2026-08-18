@@ -183,7 +183,7 @@ def unpack_for_vae(latents: Tensor, *, width: int, height: int) -> Tensor:
     only nine token counts (1184x880 and 880x1184 are both 4070 tokens), so a
     token bucket cannot tell the decoder its output shape, and keying the
     decoder on (rows, cols) would oblige a variant at every one of the 15x15
-    cross-product cells. The VAE therefore stays EAGER — which is also what the
+    cross-product compiled graphs. The VAE therefore stays EAGER — which is also what the
     endpoint already does (``Compile(targets=("transformer",))``) — and the
     learned BatchNorm affine and unpatchify are applied by the holder of those
     weights.

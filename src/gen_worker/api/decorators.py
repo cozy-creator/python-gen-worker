@@ -459,7 +459,7 @@ class WorkerFunctionDecl(msgspec.Struct, frozen=True, kw_only=True):
     passing through already-distilled ones).
 
     ``text_len`` — this handler's pinned text-sequence length,
-    overriding the class ``Compile.text_len`` for its lane. The class cell
+    overriding the class ``Compile.text_len`` for its lane. The class compiled graph
     contract digests the UNION of all lanes' pins, so a dual-pin class
     (qwen: 512 t2i / 1024 edit) describes both.
 
@@ -887,7 +887,7 @@ class Compile(msgspec.Struct, frozen=True):
     # whole-graph inductor planning co-materializes per-layer bf16 upcast
     # buffers and OOMs at the largest shapes; per-block graphs bound that to
     # one block. Also much faster cold compile (one block graph per shape,
-    # reused across blocks). Cells record the mode — a mode drift consumer
+    # reused across blocks). Compiled graphs record the mode — a mode drift consumer
     # stays eager (cache would miss anyway).
     regional: bool = False
     # ------------------------------------------------------------------
@@ -913,7 +913,7 @@ class Compile(msgspec.Struct, frozen=True):
     warm_changes_key: Optional[bool] = None
     # Declared-eager lanes: recorded decision, not an omission.
     eager: tuple[str, ...] = ()
-    # This family's ADOPTION numerics tolerance. A cell about to arm is run
+    # This family's ADOPTION numerics tolerance. A compiled graph about to arm is run
     # against the eager forward it replaces and judged on the shared verdict
     # ladder; below `numerics_floor` it REFUSES to arm. None = the SDK default
     # (0.98 / 0.999) — see `numerics_ladder.NUMERICS_FLOOR` for the derivation.
@@ -928,7 +928,7 @@ class Compile(msgspec.Struct, frozen=True):
     # against the author's bar and holds none of its own. Undeclared (the
     # default) resolves `bar_undeclared` at publish — a named refusal, never a
     # default number. A PAIR: see `validate_speed_bar`. Deliberately NOT a
-    # contract axis — declaring or raising a bar must not re-key a cell — but
+    # contract axis — declaring or raising a bar must not re-key a compiled graph — but
     # it IS a `derive.OVERRIDE_FACTS` entry, so a migration cannot drop it
     # silently.
     speed_metric: str = ""
@@ -938,11 +938,11 @@ class Compile(msgspec.Struct, frozen=True):
     # callable, so a folded refusal would simply vanish). While any blocker is
     # unresolved the mint fails CLOSED and names the ids; serving is untouched.
     # Deliberately NOT a contract axis (`contract_axes()`): resolving a blocker
-    # must not re-key a cell.
+    # must not re-key a compiled graph.
     blockers: tuple[MintBlocker, ...] = ()
     #: The latent divisor the CLASS ROWS were derived at, carried so the mint
     #: can reconcile it against the pipeline's real `vae_scale_factor` before
-    #: it spends an export. CELL-LEVEL: one divisor per declaration, not a
+    #: it spends an export. COMPILED GRAPH-LEVEL: one divisor per declaration, not a
     #: fact about any single row.
     #:
     #: NEVER AUTHORED. It is transferred off `derive.cfg_image_classes`'s
@@ -954,7 +954,7 @@ class Compile(msgspec.Struct, frozen=True):
     #: DELIBERATELY ABSENT FROM :meth:`contract_axes`: it is a provenance fact
     #: about how the rows were COMPUTED, not a shape-contract axis (the latent
     #: extents it produced are already digested, via `classes`). Adding it
-    #: there would re-key every cell in the fleet.
+    #: there would re-key every compiled graph in the fleet.
     latent_basis: Optional[int] = None
 
     def __post_init__(self) -> None:
@@ -1055,9 +1055,9 @@ class Compile(msgspec.Struct, frozen=True):
         return None
 
     def contract_axes(self) -> Dict[str, Any]:
-        """The canonical shape-contract facts (feeds the cell key's contract
+        """The canonical shape-contract facts (feeds the compiled graph key's contract
         digest: a worker on a newer contract must never consume an older
-        cell)."""
+        compiled graph)."""
         axes: Dict[str, Any] = {
             "shapes": [list(s) for s in self.shapes],
             "targets": list(self.targets),
@@ -1117,7 +1117,7 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # DECORATOR (it shapes the graph family and the resident branch buffers
     # whether or not compile= is present). The worker serves the branch-bearing
     # graph family: canonical zeroed rank-<bucket> branches enabled at load,
-    # only `<lane>-lora<bucket>` cells adopt, and adapter swaps stay buffer
+    # only `<lane>-lora<bucket>` compiled graphs adopt, and adapter swaps stay buffer
     # copies — never a recompile. 0 = branchless.
     lora_bucket: int = 0
     # None = the DERIVED warm plan (defaults + axis cross-product +

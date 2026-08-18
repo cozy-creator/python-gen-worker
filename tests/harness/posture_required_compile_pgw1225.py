@@ -1,6 +1,6 @@
 """th#1871 P1 harness endpoint: the DECLARED-COMPILED / RAN-EAGER shape.
 
-minimax-h3's specimen, minus the GPU: the hub demands a compiled cell, the
+minimax-h3's specimen, minus the GPU: the hub demands a compiled graph, the
 worker serves eager, and for hours nothing in any schema could say so. The
 worker's own half of that fact is `compile_state_wanted`, and on the
 ModelResolution dispatch path (`RunJob.lane` empty — "" = policy) the ONLY thing

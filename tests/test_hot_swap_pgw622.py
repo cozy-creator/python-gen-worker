@@ -4,8 +4,8 @@ A novel input signature serves eager immediately, warms the compiled path
 in a background thread, and atomically hot-swaps; tight headroom does NOT
 degrade to a sequential compile (pgw#1215 step 4 deleted the ungated arm that
 could, and the warm thread ensures headroom inside its own turn); a
-preexisting warm signature (cell/boot-warmed) short-circuits everything; the
-completed warm republishes the grown cell.
+preexisting warm signature (compiled graph/boot-warmed) short-circuits everything; the
+completed warm republishes the grown compiled graph.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, hot_swap
+from gen_worker import fleet_compiled_graphs, hot_swap
 
 
 def _gate(kind: str):
@@ -213,7 +213,7 @@ def test_an_ungated_router_cannot_route_concurrently(monkeypatch):
 
 
 def test_prewarmed_signature_short_circuits():
-    """Boot-warmed / cell-covered shapes never enter the eager+bg path."""
+    """Boot-warmed / compiled graph-covered shapes never enter the eager+bg path."""
     router = _router()
     wrapper = _wrapper(lambda x: "eager", lambda x: "compiled", router)
     x = torch.zeros(2, 8)
@@ -332,7 +332,7 @@ def test_real_compile_eager_while_compiling_roundtrip():
 
 
 # ---------------------------------------------------------------------------
-# Cell republish after a background warm
+# Compiled graph republish after a background warm
 # ---------------------------------------------------------------------------
 
 
@@ -373,7 +373,7 @@ def _pin_identity(monkeypatch):
     # closure unprovable and refuse the republish.
     # The pgw#681 mint gate this simmed is deleted.
     # `guard_closure.closure_manifest` classified every compiled graph at
-    # the MINT and wrote the result into the cell's metadata; it went with
+    # the MINT and wrote the result into the compiled graph's metadata; it went with
     # the `torch-inductor-cache` format that carried it, so a rig whose
     # compiles never touch dynamo has no gate left to satisfy.
 
@@ -381,12 +381,12 @@ def _pin_identity(monkeypatch):
 def test_the_shape_warm_has_no_republish_backend_since_pgw1010() -> None:
     """A background novel-shape warm still GROWS this pod's live cache — the
     three tests that used to stand here proved it then republished the grown
-    cell for the fleet. That cell was a dynamo artifact with no consumer
-    (`aot_cells` adopts `aot-inductor` only), so pgw#1010 deleted the
+    compiled graph for the fleet. That compiled graph was a dynamo artifact with no consumer
+    (`aot_compiled_graphs` adopts `aot-inductor` only), so pgw#1010 deleted the
     republish outright rather than leaving it to ship bytes nothing adopts.
     The growth itself is unchanged; what is gone is the shipping.
     """
-    assert not hasattr(fleet_cells, "republish_after_shape_warm")
+    assert not hasattr(fleet_compiled_graphs, "republish_after_shape_warm")
 
 
 # ---------------------------------------------------------------------------

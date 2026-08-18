@@ -1,10 +1,10 @@
-"""pgw#1096 / §4.28 — this machine's OWN cells: TCG holds the bytes, this holds the POLICY.
+"""pgw#1096 / §4.28 — this machine's OWN compiled graphs: TCG holds the bytes, this holds the POLICY.
 
 DESIGN-RULINGS §4.28 (Paul, 2026-08-10): *"Untrusted hardware (community
-cloud, cozy-local) mints for ITSELF: local cell, local repo-CAS, reused
+cloud, cozy-local) mints for ITSELF: local compiled graph, local repo-CAS, reused
 across its own boots — never uploaded, never requested."* And the UX
 elaboration: *"download model + code ONCE, compile ONCE, and every
-subsequent run of that code reuses the same compiled cell — same ck1 key
+subsequent run of that code reuses the same compiled graph — same ck1 key
 derivation, same memo shortcut, fully offline-capable."*
 
 pgw#1283 — THE SPLIT. This module used to keep a SECOND copy of bytes TCG had
@@ -22,41 +22,41 @@ the key, admits its host ISA, and files it under the exact-key ref.
 verifies the CAS record and the envelope before it hands over a path. This
 module contains no ``sha256`` and copies no artifact.
 
-**PERMISSION is this module's.** A cell's ``verdict`` and its ``sink``
+**PERMISSION is this module's.** A compiled graph's ``verdict`` and its ``sink``
 obligation are worker policy — facts about a gate this worker ran and an upload
 this worker owes — and TCG has no concept of either. They live in a small
 sidecar record beside the export, and nothing else here is load-bearing.
 
 The rule that falls out, and the one to keep: **bytes are the authority on
-whether a cell EXISTS; the sidecar is the authority on whether it may be
+whether a compiled graph EXISTS; the sidecar is the authority on whether it may be
 SERVED.** So a record with no bytes is a clean miss, bytes with no record are a
 clean miss, and both heal on the next :func:`store` of the same mint rather
 than needing a repair pass.
 
 TWO QUARANTINES, DELIBERATELY NOT ONE (pgw#1283 criterion 4). TCG quarantines
 a key because its CAS record failed verification; this module quarantines a
-cell because a parity/arm gate refused it. Collapsing them was the reviewed
+compiled graph because a parity/arm gate refused it. Collapsing them was the reviewed
 NO-SHIP defect in both directions: a TCG CAS repair would leave worker state
 stuck at :data:`VERDICT_QUARANTINED` forever, and — the sharper half, created
-by this very cutover — a worker-quarantined cell's bytes now live in the CAS
+by this very cutover — a worker-quarantined compiled graph's bytes now live in the CAS
 that ``aot_serve.arm_compiled_graph`` loads runners from, so the load path
-would happily arm a cell this worker refused. :func:`is_quarantined` is the
+would happily arm a compiled graph this worker refused. :func:`is_quarantined` is the
 seam that stops it, and ``aot_serve`` asks it before it resolves.
 
 TRUST BOUNDARY — inherited verbatim from the JIT-era store this replaces
-(``local_cells``). A compile cell is user-generated EXECUTABLE code
+(``local_compiled_graphs``). A compiled graph is user-generated EXECUTABLE code
 (compiled kernels + generated C++/Triton sources); accepting one from a user
 machine into shared storage would let any user ship arbitrary code into other
 people's GPU workers. Enforcement is STRUCTURAL, not a flag: this module has
 no publish path — it imports no upload/transport machinery and writes only
 under the store root and the worker's one CAS. ``tests/
 test_aot_local_mint_pgw1096.py`` pins that structurally, the way
-``test_local_cells`` pins it for the module this succeeds.
+``test_local_compiled_graphs`` pins it for the module this succeeds.
 
 WHO DECIDES a machine is untrusted: **the hub, and only the hub**. There is no
 worker-side self-declaration and no env flag — §1.18/§4.28. The class is
 LEARNED from the hub's own typed publish refusal (``compiled_graph_publish_untrusted_tier``,
-403, ``tensorhub internal/orchestrator/http/worker_cell_publish.go``) and
+403, ``tensorhub internal/orchestrator/http/worker_compiled_graph_publish.go``) and
 persisted here so the next boot does not have to pay a mint to rediscover it.
 
 pgw#1183 / §1.5 — THE DURABILITY ORDERING IS UNCHANGED by the split: **pack ->
@@ -64,20 +64,20 @@ here -> verify -> arm -> publish**, on every tier. Two facts ride the sidecar
 record and carry it:
 
 * :data:`VERDICT_UNVERIFIED` -> :data:`VERDICT_ADMITTED` / :data:`VERDICT_QUARANTINED`
-  — a cell is durable BEFORE it is proven, so only an ADMITTED one may be
+  — a compiled graph is durable BEFORE it is proven, so only an ADMITTED one may be
   armed by a later boot. A crash between the two costs one re-compile; a
   quarantined one is kept for forensics and never served.
 * :data:`SINK_OWED` -> :data:`SINK_DELIVERED` / :data:`SINK_REFUSED`
   — the upload obligation, recorded beside the bytes rather than held in a
   thread, so it survives process death and pod retirement
-  (:func:`cells_owed_to_sink` is what the next boot reads).
+  (:func:`compiled_graphs_owed_to_sink` is what the next boot reads).
 * :class:`MintProvenance` (pgw#1341) — the mint-time facts a TCG artifact has
   no field for (env seal, lane, manifest digest, sku, gen_worker). An owed
   upload is discharged by a LATER boot, so the publish must read the facts of
   the mint that produced the bytes, never the runtime that happens to be
   shipping them.
 
-LAYOUT (one directory per cell, so a cell and the facts about it move as a
+LAYOUT (one directory per compiled graph, so a compiled graph and the facts about it move as a
 unit)::
 
     <root>/aot-cells/<ck1-…>/record.json   the POLICY sidecar {verdict, sink, …}
@@ -85,22 +85,22 @@ unit)::
     <root>/aot-cells/.memo/<arm1-…>.json   the MEMO: pre-trace identity -> ck1 key
     <root>/trust-class.json                the learned trust class
 
-The layout is preserved on purpose: cozy-local's ``cozy cells`` CLI and
+The layout is preserved on purpose: cozy-local's ``cozy compiled graphs`` CLI and
 tensorhub's runtime-env contract both name it, and the cutover changes byte
 CUSTODY, not the cross-repo path contract.
 
 THE MEMO, and why a content-addressed store needs one. The ck1 key's ``graph``
 axis is the traced-graph digest, which does not exist until an export
 finishes — so a boot that has not traced cannot address the CAS directly.
-What it CAN state in milliseconds is ``fleet_cells.ArmIdentity``: every
+What it CAN state in milliseconds is ``fleet_compiled_graphs.ArmIdentity``: every
 pre-trace-knowable fact (family, format, lane, sm, envelope, env_seal,
 toolchain). The memo maps that token to the ck1 key the last mint of it
 produced. It is a SHORTCUT, never an authority: the artifact it points at is
-verified by TCG and then passes the identical arm gate a child-minted cell
+verified by TCG and then passes the identical arm gate a child-minted compiled graph
 passes, so a wrong memo can only cost one re-mint.
 
 EVICTION: there is none, deliberately (pre-launch). What accumulates is one
-cell per (graph x sm x toolchain). :func:`stored_cells` enumerates the sidecar
+compiled graph per (graph x sm x toolchain). :func:`stored_compiled_graphs` enumerates the sidecar
 records with no digest recomputation and no materialization, so a future sweep
 has a fact base that costs a listdir.
 """
@@ -128,18 +128,18 @@ logger = logging.getLogger(__name__)
 #: A path relocation, never a behavior knob (§1.18, and the same rule
 #: ``TENSORHUB_CACHE_DIR`` follows). cozy-local exports it from its own
 #: ``workerEnv`` (``cozy-local/internal/paths/paths.go``) and the ``cozy
-#: cells`` CLI reads the same root, so the NAME and the DEFAULT are a
+#: compiled graphs`` CLI reads the same root, so the NAME and the DEFAULT are a
 #: cross-repo contract: changing either goes dark on that CLI.
 ENV_STORE_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"
 
-CELLS_DIRNAME = "aot-cells"
+COMPILED_GRAPHS_DIRNAME = "aot-cells"
 MEMO_DIRNAME = ".memo"
 ARTIFACT_NAME = "cell.tar.gz"
 RECORD_NAME = "record.json"
 TRUST_CLASS_NAME = "trust-class.json"
 
 #: The hub's typed 403 that ASSERTS this machine may not publish. One string,
-#: from ``tensorhub``'s ``worker_cell_publish.go``; a refusal the worker does
+#: from ``tensorhub``'s ``worker_compiled_graph_publish.go``; a refusal the worker does
 #: not recognize is left unlearned rather than guessed at, because guessing
 #: "untrusted" from an unrelated failure would make a transient hub error
 #: permanently change how this pod behaves.
@@ -147,14 +147,14 @@ UNTRUSTED_REFUSAL_CODE = "compiled_graph_publish_untrusted_tier"
 
 TRUST_UNTRUSTED = "untrusted"
 
-#: pgw#1183: whether this cell has passed the gate that lets it SERVE. The
+#: pgw#1183: whether this compiled graph has passed the gate that lets it SERVE. The
 #: store is written before the gate runs (§1.5), so "durable" and "provable"
 #: are two facts and the sidecar records both.
 VERDICT_UNVERIFIED = "unverified"
 VERDICT_ADMITTED = "admitted"
 VERDICT_QUARANTINED = "quarantined"
 
-#: pgw#1183: this cell's standing with the fleet SINK, durable beside the
+#: pgw#1183: this compiled graph's standing with the fleet SINK, durable beside the
 #: bytes. A transfer that dies mid-flight leaves :data:`SINK_OWED`, which the
 #: next boot re-attempts from these bytes — the property that makes a failed
 #: transfer cost a retry rather than the mint. :data:`SINK_NONE` is the honest
@@ -180,12 +180,12 @@ def store_root() -> Path:
     return Path.home() / ".cache" / "cozy" / "compile-cells"
 
 
-def cells_root(root: Optional[Path] = None) -> Path:
-    return (root or store_root()) / CELLS_DIRNAME
+def compiled_graphs_root(root: Optional[Path] = None) -> Path:
+    return (root or store_root()) / COMPILED_GRAPHS_DIRNAME
 
 
-def cell_dir(key: str, root: Optional[Path] = None) -> Path:
-    """The directory holding the sidecar for the cell keyed ``key``.
+def compiled_graph_dir(key: str, root: Optional[Path] = None) -> Path:
+    """The directory holding the sidecar for the compiled graph keyed ``key``.
 
     Refuses anything that is not a ``ck1`` key rather than sanitizing it: a
     store addressed by a key-shaped string it did not verify is a store whose
@@ -193,16 +193,16 @@ def cell_dir(key: str, root: Optional[Path] = None) -> Path:
     """
     if not is_compiled_graph_key(key):
         raise ValueError(
-            f"the local cell store addresses {KEY_SCHEME} keys only; "
+            f"the local compiled graph store addresses {KEY_SCHEME} keys only; "
             f"{key!r} is not one")
-    return cells_root(root) / key
+    return compiled_graphs_root(root) / key
 
 
 def memo_path(arm_token: str, root: Optional[Path] = None) -> Path:
     token = str(arm_token or "").strip()
     if not token or "/" in token or token.startswith("."):
         raise ValueError(f"not an arm-identity token: {arm_token!r}")
-    return cells_root(root) / MEMO_DIRNAME / f"{token}.json"
+    return compiled_graphs_root(root) / MEMO_DIRNAME / f"{token}.json"
 
 
 def _engine(cas_root: Optional[Path] = None) -> "Engine":
@@ -223,19 +223,19 @@ class MintProvenance:
     """What the MINT knew and the ARTIFACT cannot say (pgw#1341).
 
     ``torchcg.artifact.validate_metadata`` refuses metadata outside its closed
-    vocabulary (``artifact_meta.cell_metadata_fields``), which holds the three
+    vocabulary (``artifact_meta.compiled_graph_metadata_fields``), which holds the three
     key axes and the host facts and NOTHING else. Every remaining fact the
     fleet publish must state — the env seal the mint ran under, the execution
     lane, the declaration-wide manifest digest, and the two pod axes the hub
-    attests — is therefore unstateable BY the cell, exactly as pgw#1340 found
+    attests — is therefore unstateable BY the compiled graph, exactly as pgw#1340 found
     for the arm seam. The answer is the same one: state it on the side of the
     boundary that can, and make it durable there.
 
-    DURABLE is the load-bearing word. ``fleet_cells.resume_owed_publishes``
-    ships an owed cell on a LATER BOOT, in a different process, possibly on a
+    DURABLE is the load-bearing word. ``fleet_compiled_graphs.resume_owed_publishes``
+    ships an owed compiled graph on a LATER BOOT, in a different process, possibly on a
     different pod, so re-deriving these from the live runtime would publish one
     machine's facts about another machine's mint. They are written beside the
-    bytes at store time, read back by whoever ships them, and a cell that has
+    bytes at store time, read back by whoever ships them, and a compiled graph that has
     none is REFUSED rather than published under invented axes.
 
     Empty strings are honest absences, not defaults: :func:`stated` is what
@@ -260,7 +260,7 @@ class MintProvenance:
         """True when this record can carry a publish at all.
 
         The env seal is the criterion because it is the one the hub REQUIRES:
-        ``ArtifactFromCellRecord`` builds ``ArtifactIdentity.env_seal_digest``
+        ``ArtifactFromCompiledGraphRecord`` builds ``ArtifactIdentity.env_seal_digest``
         from it and pgw#904's consumer refuses an identity without it. The
         others degrade a row; this one makes it unarmable.
         """
@@ -293,10 +293,10 @@ class MintProvenance:
 
 
 @dataclass(frozen=True)
-class CellRecord:
-    """The POLICY facts this worker recorded about one cell. No bytes.
+class CompiledGraphRecord:
+    """The POLICY facts this worker recorded about one compiled graph. No bytes.
 
-    What :func:`stored_cells` yields: a listdir and a small JSON read per
+    What :func:`stored_compiled_graphs` yields: a listdir and a small JSON read per
     entry, with nothing materialized and nothing hashed. pgw#1283 criterion 5
     — an owed-upload scan must cost a scan.
     """
@@ -316,8 +316,8 @@ class CellRecord:
 
 
 @dataclass(frozen=True)
-class LocalCell:
-    """A recorded cell whose bytes TCG has verified and materialized."""
+class LocalCompiledGraph:
+    """A recorded compiled graph whose bytes TCG has verified and materialized."""
 
     key: str
     artifact: Path
@@ -397,8 +397,8 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     return loaded
 
 
-def _record_of(key: str, raw: Dict[str, Any]) -> CellRecord:
-    return CellRecord(
+def _record_of(key: str, raw: Dict[str, Any]) -> CompiledGraphRecord:
+    return CompiledGraphRecord(
         key=key,
         family=str(raw.get("family") or ""),
         arm_token=str(raw.get("arm_token") or ""),
@@ -410,14 +410,14 @@ def _record_of(key: str, raw: Dict[str, Any]) -> CellRecord:
     )
 
 
-def _record_payload(record: CellRecord) -> Dict[str, Any]:
+def _record_payload(record: CompiledGraphRecord) -> Dict[str, Any]:
     return {
         "compiled_graph_key": record.key,
         "family": record.family,
         "arm_token": record.arm_token,
         "bytes": record.bytes,
         "stored_at": record.stored_at,
-        # TCG owns this string; pgw#1010/pgw#1059: an exported cell is the only
+        # TCG owns this string; pgw#1010/pgw#1059: an exported compiled graph is the only
         # kind with an identity, so it is the only kind this store can hold.
         "kind": ARTIFACT_KIND,
         "verdict": record.verdict,
@@ -428,14 +428,14 @@ def _record_payload(record: CellRecord) -> Dict[str, Any]:
     }
 
 
-def read_record(key: str, root: Optional[Path] = None) -> Optional[CellRecord]:
+def read_record(key: str, root: Optional[Path] = None) -> Optional[CompiledGraphRecord]:
     """This worker's recorded policy for ``key``, without touching the bytes.
 
     ``None`` when nothing was ever recorded. Raises :class:`RecordUnreadable`
     when a record file exists and cannot be used, so each caller decides.
     """
     try:
-        target = cell_dir(key, root)
+        target = compiled_graph_dir(key, root)
     except ValueError:
         return None
     raw = _read_json(target / RECORD_NAME)
@@ -446,7 +446,7 @@ def verdict_of(key: str, root: Optional[Path] = None) -> str:
     """``key``'s recorded verdict, or ``""`` when this worker recorded none.
 
     ``""`` is NOT a verdict: it is "this worker has no policy for these bytes",
-    which is the honest answer for a cell that arrived by any route other than
+    which is the honest answer for a compiled graph that arrived by any route other than
     this machine's own mint. Callers that gate on it must gate on the
     QUARANTINED value they refuse, never on the absence of an admission.
     """
@@ -454,9 +454,9 @@ def verdict_of(key: str, root: Optional[Path] = None) -> str:
         record = read_record(key, root)
     except RecordUnreadable as exc:
         # An unreadable record cannot ASSERT a quarantine, and inventing one
-        # would strand a cell no gate ever refused. It is loud instead.
+        # would strand a compiled graph no gate ever refused. It is loud instead.
         logger.error(
-            "local-cell-store: %s has an unreadable policy record (%s); this "
+            "local-compiled-graph-store: %s has an unreadable policy record (%s); this "
             "worker states no verdict for it", key, exc)
         return ""
     return "" if record is None else record.verdict
@@ -466,14 +466,14 @@ def is_quarantined(key: str, root: Optional[Path] = None) -> bool:
     """True when THIS WORKER refused ``key`` at a parity/arm gate (§1.3.4).
 
     pgw#1283 criterion 4, and the guard the cutover made necessary. Before it,
-    a quarantined cell's bytes lived only here, so nothing else could reach
+    a quarantined compiled graph's bytes lived only here, so nothing else could reach
     them; now they are in the CAS ``aot_serve.arm_compiled_graph`` loads
-    runners from, and a load path that does not ask this question arms a cell
+    runners from, and a load path that does not ask this question arms a compiled graph
     this worker already refused.
 
     Deliberately NOT true for a TCG storage quarantine. That is a statement
     about a CAS record, it is repairable by re-storing the bytes, and reading
-    it as a worker refusal is exactly how a repair would leave a cell stranded
+    it as a worker refusal is exactly how a repair would leave a compiled graph stranded
     forever.
     """
     return verdict_of(key, root) == VERDICT_QUARANTINED
@@ -484,7 +484,7 @@ def store(
     verdict: str = VERDICT_ADMITTED, sink: str = SINK_NONE,
     provenance: Optional[MintProvenance] = None,
     root: Optional[Path] = None, cas_root: Optional[Path] = None,
-) -> Optional[CellRecord]:
+) -> Optional[CompiledGraphRecord]:
     """Admit ``artifact`` to TCG under its STAMPED ``key`` and record the policy.
 
     TCG does the byte work: ``import_artifact`` unpacks the envelope, checks
@@ -493,12 +493,12 @@ def store(
     the sink obligation, which TCG has no concept of.
 
     ``verdict`` defaults to :data:`VERDICT_ADMITTED` — "the caller vouches for
-    these bytes", which is what every route that finds an already-proven cell
+    these bytes", which is what every route that finds an already-proven compiled graph
     means. The MINT route (pgw#1183) writes :data:`VERDICT_UNVERIFIED` and
     promotes with :func:`mark` once its own gate passes, because §1.5 makes the
     store write happen BEFORE the proof.
 
-    Returns the recorded cell, or ``None`` when the store failed: a local store
+    Returns the recorded compiled graph, or ``None`` when the store failed: a local store
     is a cache, and failing to fill it must never take down a worker that is
     already serving compiled.
 
@@ -507,14 +507,14 @@ def store(
     there, from an earlier attempt that died before the sidecar) still rewrites
     the record and still rewrites the memo. Skipping them because "it is
     already stored" is the crash-retry alias loss — the bytes survive, the
-    arm-token alias does not, and every later boot re-mints a cell it is
+    arm-token alias does not, and every later boot re-mints a compiled graph it is
     holding. Which of TCG's three success outcomes came back is a fact for the
     log, never a branch that skips work.
     """
     from gen_worker._vendor.torchcg.storage import StoreOutcome
 
     try:
-        target_dir = cell_dir(key, root)
+        target_dir = compiled_graph_dir(key, root)
         outcome = _engine(cas_root).import_artifact(key, artifact).outcome
         if outcome == StoreOutcome.DIVERGENT:
             # TCG already binds this exact key to DIFFERENT admitted bytes, and
@@ -522,12 +522,12 @@ def store(
             # Recording a sidecar now would file worker policy against bytes
             # nothing will resolve.
             logger.error(
-                "local-cell-store: REFUSING %s — this machine's CAS already "
+                "local-compiled-graph-store: REFUSING %s — this machine's CAS already "
                 "binds that key to different admitted bytes; the artifact just "
                 "offered is quarantined by TCG and nothing is recorded here",
                 key)
             return None
-        record = CellRecord(
+        record = CompiledGraphRecord(
             key=key, family=str(family or ""), arm_token=str(arm_token or ""),
             bytes=Path(artifact).stat().st_size, stored_at=time.time(),
             verdict=str(verdict), sink=str(sink),
@@ -536,20 +536,20 @@ def store(
         _write_json_atomic(target_dir / RECORD_NAME, _record_payload(record))
     except Exception as exc:  # noqa: BLE001 — a cache miss must never be fatal
         logger.warning(
-            "local-cell-store: could not store %s (%s); this boot serves "
+            "local-compiled-graph-store: could not store %s (%s); this boot serves "
             "compiled anyway and the next one re-mints", key, exc)
         return None
     # pgw#1283 — EVERYTHING BELOW THIS LINE IS BEST-EFFORT. The bytes are in
-    # the CAS and the record is durable, which means the cell IS stored and
+    # the CAS and the record is durable, which means the compiled graph IS stored and
     # `lookup` will find it; anything that fails from here must not be able to
     # turn that into a reported failure. The memo write used to sit inside the
     # `try` above, so a failure to write a shortcut returned ``None`` while the
-    # cell sat on disk — `fleet_cells._stage_durable` then emitted
-    # `local_compiled_graph_store_failed` for a cell that was, in fact, stored.
+    # compiled graph sat on disk — `fleet_compiled_graphs._stage_durable` then emitted
+    # `local_compiled_graph_store_failed` for a compiled graph that was, in fact, stored.
     if arm_token:
         note_memo(arm_token, key, root)
     logger.info(
-        "local-cell-store: stored %s (%s, %.1f MB, tcg=%s) — this machine "
+        "local-compiled-graph-store: stored %s (%s, %.1f MB, tcg=%s) — this machine "
         "reuses it on every later boot with the same key, offline",
         key, record.family, record.bytes / 1e6, outcome.value)
     return record
@@ -559,17 +559,17 @@ def mark(
     key: str, *, verdict: Optional[str] = None, sink: Optional[str] = None,
     root: Optional[Path] = None,
 ) -> bool:
-    """Move a stored cell's ``verdict`` and/or ``sink`` state (pgw#1183).
+    """Move a stored compiled graph's ``verdict`` and/or ``sink`` state (pgw#1183).
 
     The two transitions the mint flow makes after the bytes are already
     durable: unverified -> admitted/quarantined once the parity gate and the
     arm answer, and owed -> delivered/refused once the upload does. Never
     fatal: a record that cannot be rewritten leaves the previous state, which
-    is the conservative one in both directions (an unpromoted cell is
+    is the conservative one in both directions (an unpromoted compiled graph is
     re-minted; an unresolved upload is re-attempted).
     """
     try:
-        target_dir = cell_dir(key, root)
+        target_dir = compiled_graph_dir(key, root)
     except ValueError:
         return False
     try:
@@ -577,9 +577,9 @@ def mark(
     except RecordUnreadable as exc:
         # pgw#1283: the transition is LOST, and that costs money in both
         # directions — a dropped ADMITTED re-mints, a dropped DELIVERED
-        # re-uploads. It used to be indistinguishable from "no such cell".
+        # re-uploads. It used to be indistinguishable from "no such compiled graph".
         logger.error(
-            "local-cell-store: LOSING a state transition for %s — verdict=%r "
+            "local-compiled-graph-store: LOSING a state transition for %s — verdict=%r "
             "sink=%r were not applied because its record is unreadable (%s). "
             "The previous state stands, which is conservative but not free",
             key, verdict, sink, exc)
@@ -594,7 +594,7 @@ def mark(
         _write_json_atomic(target_dir / RECORD_NAME, raw)
     except OSError as exc:
         logger.warning(
-            "local-cell-store: could not re-record %s (%s)", key, exc)
+            "local-compiled-graph-store: could not re-record %s (%s)", key, exc)
         return False
     return True
 
@@ -618,7 +618,7 @@ def materialize(
     from gen_worker._vendor.torchcg.storage import QuarantinedArtifact, StorageError
 
     try:
-        destination = cell_dir(key, root) / ARTIFACT_NAME
+        destination = compiled_graph_dir(key, root) / ARTIFACT_NAME
     except ValueError:
         return None
     engine = _engine(cas_root)
@@ -634,15 +634,15 @@ def materialize(
             # record, not custody of it, so a rotted or half-written export is
             # discarded and re-materialized from bytes that are still intact.
             # Without this the refusal is TERMINAL — every later lookup
-            # re-refuses the same stale file — and a cell the CAS is holding
+            # re-refuses the same stale file — and a compiled graph the CAS is holding
             # perfectly would cost a re-mint on every boot.
             if discarded_stale_copy:
                 logger.error(
-                    "local-cell-store: %s cannot be materialized even after "
+                    "local-compiled-graph-store: %s cannot be materialized even after "
                     "its stale copy was discarded (%s)", key, exc)
                 return None
             logger.warning(
-                "local-cell-store: %s's materialized copy is not the artifact "
+                "local-compiled-graph-store: %s's materialized copy is not the artifact "
                 "TCG selected (%s); discarding it and re-exporting from the "
                 "CAS, which still holds the bytes", key, exc)
             try:
@@ -651,46 +651,46 @@ def materialize(
                 return None
         except QuarantinedArtifact as exc:
             logger.error(
-                "local-cell-store: TCG holds %s QUARANTINED in its CAS (%s) — "
+                "local-compiled-graph-store: TCG holds %s QUARANTINED in its CAS (%s) — "
                 "that is a fact about the stored record, not this worker's "
                 "verdict, so the verdict is left exactly as it stands and "
                 "re-storing the bytes repairs it", key, exc)
             return None
         except StorageError as exc:
-            logger.debug("local-cell-store: TCG cannot serve %s (%s)", key, exc)
+            logger.debug("local-compiled-graph-store: TCG cannot serve %s (%s)", key, exc)
             return None
         except OSError as exc:
             logger.warning(
-                "local-cell-store: could not materialize %s (%s)", key, exc)
+                "local-compiled-graph-store: could not materialize %s (%s)", key, exc)
             return None
     return None
 
 
 def lookup(
     key: str, root: Optional[Path] = None, cas_root: Optional[Path] = None,
-) -> Optional[LocalCell]:
-    """The resident, ADMITTED cell for ``key``, with its bytes on disk.
+) -> Optional[LocalCompiledGraph]:
+    """The resident, ADMITTED compiled graph for ``key``, with its bytes on disk.
 
-    pgw#1183: a cell whose verdict is not :data:`VERDICT_ADMITTED` is absent
-    HERE and enumerable elsewhere (:func:`quarantined_cells`,
-    :func:`stored_cells`). Durability made the bytes exist before the proof
+    pgw#1183: a compiled graph whose verdict is not :data:`VERDICT_ADMITTED` is absent
+    HERE and enumerable elsewhere (:func:`quarantined_compiled_graphs`,
+    :func:`stored_compiled_graphs`). Durability made the bytes exist before the proof
     did, so this is the seam that keeps "we kept it" from meaning "we serve
     it".
 
     The permission is checked BEFORE the bytes are materialized: an unverified
-    or quarantined cell must not even be unpacked by the serving path, and
+    or quarantined compiled graph must not even be unpacked by the serving path, and
     exporting first would make the refusal cost an export.
     """
     try:
         record = read_record(key, root)
     except RecordUnreadable as exc:
         # pgw#1283. The bytes may well be intact in the CAS, but the permission
-        # to serve them lived in this record, and a cell is user-generated
+        # to serve them lived in this record, and a compiled graph is user-generated
         # EXECUTABLE code (module docstring). So the answer is "absent" — what
         # changes is that it is now SAID, and that the unusable sidecar goes so
         # the next store can rewrite it.
         logger.error(
-            "local-cell-store: DROPPING the policy record for %s — it is "
+            "local-compiled-graph-store: DROPPING the policy record for %s — it is "
             "unreadable (%s); the bytes stay in the CAS, but nothing vouches "
             "for arming them, so this costs one honest re-mint rather than a "
             "silent one", key, exc)
@@ -703,15 +703,15 @@ def lookup(
         return None
     # NOT a place to rebuild the memo, and a test caught the attempt (pgw#1283,
     # `test_an_arm_scheme_bump_costs_a_TRACE_and_not_a_MINT`). The record names
-    # the token this cell was STORED for, which may belong to a superseded
+    # the token this compiled graph was STORED for, which may belong to a superseded
     # arm-token scheme that :func:`sweep_superseded_memos` has deliberately
     # invalidated — rewriting it here resurrects dead vocabulary and silently
     # undoes the sweep. The alias is rebuilt by the route that just PROVED it,
-    # in the CURRENT scheme's token: `fleet_cells.arm_from_local_store` calls
+    # in the CURRENT scheme's token: `fleet_compiled_graphs.arm_from_local_store` calls
     # :func:`note_memo` on the boot-key route, which is the whole cost argument
     # of pgw#1127 §5. Crash-retry alias loss is closed in :func:`store`
     # instead, by making every step run on every call.
-    return LocalCell(
+    return LocalCompiledGraph(
         key=record.key, artifact=artifact, family=record.family,
         arm_token=record.arm_token, bytes=artifact.stat().st_size,
         stored_at=record.stored_at, verdict=record.verdict, sink=record.sink,
@@ -724,7 +724,7 @@ def note_memo(
     """Bind a pre-trace ``arm_token`` to a ``ck1`` key that PROVED it arms.
 
     pgw#1127. :func:`store` writes this at mint time; this writes it when the
-    cell was found by another route and then passed the arm gate — which is the
+    compiled graph was found by another route and then passed the arm gate — which is the
     only other moment the binding is known to be true. It is what makes an
     arm-token scheme bump (:func:`sweep_superseded_memos`) cost a trace instead
     of a mint.
@@ -745,7 +745,7 @@ def note_memo(
         return True
     except Exception as exc:  # noqa: BLE001 — a shortcut is never load-bearing
         logger.warning(
-            "local-cell-store: could not memo %s -> %s (%s); the cell is "
+            "local-compiled-graph-store: could not memo %s -> %s (%s); the compiled graph is "
             "stored and addressable by key, and the next boot pays a derive "
             "instead of a lookup", arm_token, key, exc)
         return False
@@ -764,12 +764,12 @@ def sweep_superseded_memos(
     meaning nobody can reconstruct, so the invalidation is EXPLICIT and
     counted rather than implicit and silent.
 
-    Only the memo is swept. The CELLS keep their ``ck1`` keys, which did not
+    Only the memo is swept. The COMPILED GRAPHS keep their ``ck1`` keys, which did not
     move: an arm-token change re-derives the shortcut, never the identity.
     Returns the number of entries removed.
     """
     prefix = str(scheme or "").strip() + "-"
-    memo_dir = cells_root(root) / MEMO_DIRNAME
+    memo_dir = compiled_graphs_root(root) / MEMO_DIRNAME
     if len(prefix) < 2 or not memo_dir.is_dir():
         return 0
     removed = 0
@@ -780,11 +780,11 @@ def sweep_superseded_memos(
             entry.unlink()
             removed += 1
         except OSError:
-            logger.debug("local-cell-store: could not drop %s", entry,
+            logger.debug("local-compiled-graph-store: could not drop %s", entry,
                          exc_info=True)
     if removed:
         logger.info(
-            "local-cell-store: dropped %d memo entry/entries written under a "
+            "local-compiled-graph-store: dropped %d memo entry/entries written under a "
             "superseded arm-token schema (current %s) — this machine re-mints "
             "each affected family ONCE and memoizes the answer again",
             removed, prefix.rstrip("-"))
@@ -794,12 +794,12 @@ def sweep_superseded_memos(
 def lookup_for_arm(
     arm_token: str, root: Optional[Path] = None,
     cas_root: Optional[Path] = None,
-) -> Optional[LocalCell]:
-    """The cell this machine last minted for pre-trace identity ``arm_token``.
+) -> Optional[LocalCompiledGraph]:
+    """The compiled graph this machine last minted for pre-trace identity ``arm_token``.
 
     The memo is a shortcut, never an authority (module docstring): the answer
     it names is verified by TCG in :func:`lookup` and then passes the same arm
-    gate a freshly child-minted cell passes. A stale memo costs one re-mint.
+    gate a freshly child-minted compiled graph passes. A stale memo costs one re-mint.
     """
     try:
         memo = _read_json(memo_path(arm_token, root))
@@ -809,11 +809,11 @@ def lookup_for_arm(
         # pgw#1283. A memo is a shortcut, never an authority, so an unreadable
         # one is genuinely equivalent to no memo — but leaving the file there
         # means paying that read on every boot, and it is only rewritten once a
-        # cell arms. Delete it so the shortcut is rebuilt from evidence rather
+        # compiled graph arms. Delete it so the shortcut is rebuilt from evidence rather
         # than shadowed by garbage.
         logger.warning(
-            "local-cell-store: discarding an unreadable memo for %s (%s); the "
-            "next cell that arms rewrites it", arm_token, exc)
+            "local-compiled-graph-store: discarding an unreadable memo for %s (%s); the "
+            "next compiled graph that arms rewrites it", arm_token, exc)
         try:
             memo_path(arm_token, root).unlink()
         except OSError:
@@ -828,36 +828,36 @@ def lookup_for_arm(
 
 
 def drop(key: str, root: Optional[Path] = None) -> None:
-    """Forget this worker's POLICY for one cell. The CAS keeps its bytes.
+    """Forget this worker's POLICY for one compiled graph. The CAS keeps its bytes.
 
     pgw#1283 — a deliberate narrowing. This used to delete the only copy of an
     artifact; the bytes now live in the content-addressed store, where they may
     be the same bytes another key or another route resolves, so a worker
     decision about ONE arm identity must not delete them. What this removes is
     the sidecar that grants permission to serve, and the materialized export
-    beside it, which is exactly what "this cell is stale for us" means. A later
+    beside it, which is exactly what "this compiled graph is stale for us" means. A later
     :func:`store` of the same artifact re-records it against bytes TCG will
     report ``PRESENT``, at no mint cost.
     """
     try:
-        target = cell_dir(key, root)
+        target = compiled_graph_dir(key, root)
     except ValueError:
         return
     shutil.rmtree(target, ignore_errors=True)
 
 
-def stored_cells(root: Optional[Path] = None) -> List[CellRecord]:
-    """Every cell this worker recorded, cheaply — NO bytes, NO digests.
+def stored_compiled_graphs(root: Optional[Path] = None) -> List[CompiledGraphRecord]:
+    """Every compiled graph this worker recorded, cheaply — NO bytes, NO digests.
 
-    The accounting surface for what accumulates (module docstring: one cell
+    The accounting surface for what accumulates (module docstring: one compiled graph
     per graph x sm x toolchain, so every toolchain upgrade leaves its
-    predecessor behind), and the scan :func:`cells_owed_to_sink` filters.
+    predecessor behind), and the scan :func:`compiled_graphs_owed_to_sink` filters.
     pgw#1283 criterion 5: it reads sidecars and nothing else — it does not ask
     TCG to export, verify or hash anything, so listing costs a listdir even
-    when every resident cell is a gigabyte.
+    when every resident compiled graph is a gigabyte.
     """
-    out: List[CellRecord] = []
-    base = cells_root(root)
+    out: List[CompiledGraphRecord] = []
+    base = compiled_graphs_root(root)
     if not base.is_dir():
         return out
     for entry in sorted(base.iterdir()):
@@ -867,11 +867,11 @@ def stored_cells(root: Optional[Path] = None) -> List[CellRecord]:
             raw = _read_json(entry / RECORD_NAME)
         except RecordUnreadable as exc:
             # pgw#1283: skip the entry, never the LISTING. This is what a
-            # `cozy cells`-style CLI reads, and one bad file must not blank the
-            # inventory — but a cell missing from the accounting surface is
+            # `cozy compiled graphs`-style CLI reads, and one bad file must not blank the
+            # inventory — but a compiled graph missing from the accounting surface is
             # exactly the kind of thing nobody notices, so it is logged.
             logger.warning(
-                "local-cell-store: %s has an unreadable record (%s); it is "
+                "local-compiled-graph-store: %s has an unreadable record (%s); it is "
                 "absent from this listing", entry.name, exc)
             continue
         if raw is None:
@@ -881,10 +881,10 @@ def stored_cells(root: Optional[Path] = None) -> List[CellRecord]:
             # A record REFUSES rather than borrowing the directory it sits in.
             # `_record_payload` always writes the key, so a sidecar without one
             # is not something this store wrote — and a fabricated identity is
-            # worse than an absent one here, because `cells_owed_to_sink` reads
+            # worse than an absent one here, because `compiled_graphs_owed_to_sink` reads
             # this listing and would hand the invented key to an upload.
             logger.warning(
-                "local-cell-store: %s holds a record with no "
+                "local-compiled-graph-store: %s holds a record with no "
                 "compiled_graph_key; it is absent from this listing",
                 entry.name)
             continue
@@ -892,29 +892,29 @@ def stored_cells(root: Optional[Path] = None) -> List[CellRecord]:
     return out
 
 
-def quarantined_cells(root: Optional[Path] = None) -> List[CellRecord]:
-    """Every cell kept for FORENSICS: it existed, and it failed OUR gate.
+def quarantined_compiled_graphs(root: Optional[Path] = None) -> List[CompiledGraphRecord]:
+    """Every compiled graph kept for FORENSICS: it existed, and it failed OUR gate.
 
     §1.3.4 — *"do not arm, do not publish, keep the artifact quarantined-local
     for forensics"*. These are worker verdicts, never TCG's storage
-    quarantine: a cell whose CAS record failed verification is not a cell a
+    quarantine: a compiled graph whose CAS record failed verification is not a compiled graph a
     gate refused, and listing the two together is how a repair would look like
     a refusal (pgw#1283 criterion 4).
     """
-    return [c for c in stored_cells(root) if c.verdict == VERDICT_QUARANTINED]
+    return [c for c in stored_compiled_graphs(root) if c.verdict == VERDICT_QUARANTINED]
 
 
-def cells_owed_to_sink(root: Optional[Path] = None) -> List[CellRecord]:
-    """Every ADMITTED cell whose upload is still owed — the cross-boot retry.
+def compiled_graphs_owed_to_sink(root: Optional[Path] = None) -> List[CompiledGraphRecord]:
+    """Every ADMITTED compiled graph whose upload is still owed — the cross-boot retry.
 
     This is what makes publish a retryable background transfer from durable
     bytes rather than a daemon thread the pod must outlive. Only admitted
-    cells are listed: an unverified or quarantined artifact is not something
+    compiled graphs are listed: an unverified or quarantined artifact is not something
     any other pod may adopt, so it is not something to upload. The caller
     materializes the ones it actually ships (:func:`materialize`), so an owed
     scan never pays for bytes it does not send.
     """
-    return [c for c in stored_cells(root)
+    return [c for c in stored_compiled_graphs(root)
             if c.verdict == VERDICT_ADMITTED and c.sink == SINK_OWED]
 
 
@@ -929,7 +929,7 @@ def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bo
     ``True`` when the refusal was the untrusted-tier one and the class is
     now recorded. Every other code — a forged axis, a quota, an unknown
     family, a transport failure — leaves the class untouched: those say
-    something about the CELL or the moment, not about the hardware, and a
+    something about the COMPILED GRAPH or the moment, not about the hardware, and a
     worker that concluded "untrusted" from a 429 would permanently mis-file
     itself off one bad minute.
     """
@@ -944,12 +944,12 @@ def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bo
         })
     except OSError as exc:
         logger.warning(
-            "local-cell-store: could not record the hub's untrusted-tier "
+            "local-compiled-graph-store: could not record the hub's untrusted-tier "
             "verdict (%s); this machine will re-learn it next boot", exc)
         return False
     logger.warning(
-        "local-cell-store: the hub asserts this hardware may not publish "
-        "(%s) — cells minted here are kept LOCALLY and reused on every later "
+        "local-compiled-graph-store: the hub asserts this hardware may not publish "
+        "(%s) — compiled graphs minted here are kept LOCALLY and reused on every later "
         "boot of this machine; nothing is uploaded and nothing is requested "
         "(§4.28)", UNTRUSTED_REFUSAL_CODE)
     return True
@@ -970,7 +970,7 @@ def trust_class(root: Optional[Path] = None) -> str:
         # refusal. That is one wasted attempt, not a wrong trust decision, so
         # it is a warning rather than a refusal.
         logger.warning(
-            "local-cell-store: the trust class is unreadable (%s); treating "
+            "local-compiled-graph-store: the trust class is unreadable (%s); treating "
             "this machine as not-yet-known, which re-learns from the hub",
             exc)
         return ""
@@ -979,8 +979,8 @@ def trust_class(root: Optional[Path] = None) -> str:
     return str(recorded.get("class") or "")
 
 
-def keeps_cells_locally(root: Optional[Path] = None) -> bool:
-    """Whether a cell this machine mints should be kept in the local store.
+def keeps_compiled_graphs_locally(root: Optional[Path] = None) -> bool:
+    """Whether a compiled graph this machine mints should be kept in the local store.
 
     True exactly when the hub has ASSERTED this hardware may not publish. The
     cozy-local CLI serve path does not consult this — it has no publisher and
@@ -991,10 +991,10 @@ def keeps_cells_locally(root: Optional[Path] = None) -> bool:
 
 __all__ = [
     "ARTIFACT_NAME",
-    "CELLS_DIRNAME",
-    "CellRecord",
+    "COMPILED_GRAPHS_DIRNAME",
+    "CompiledGraphRecord",
     "ENV_STORE_DIR",
-    "LocalCell",
+    "LocalCompiledGraph",
     "MEMO_DIRNAME",
     "MintProvenance",
     "RECORD_NAME",
@@ -1009,12 +1009,12 @@ __all__ = [
     "VERDICT_ADMITTED",
     "VERDICT_QUARANTINED",
     "VERDICT_UNVERIFIED",
-    "cell_dir",
-    "cells_owed_to_sink",
-    "cells_root",
+    "compiled_graph_dir",
+    "compiled_graphs_owed_to_sink",
+    "compiled_graphs_root",
     "drop",
     "is_quarantined",
-    "keeps_cells_locally",
+    "keeps_compiled_graphs_locally",
     "lookup",
     "lookup_for_arm",
     "mark",
@@ -1022,11 +1022,11 @@ __all__ = [
     "memo_path",
     "note_memo",
     "note_refusal",
-    "quarantined_cells",
+    "quarantined_compiled_graphs",
     "read_record",
     "store",
     "store_root",
-    "stored_cells",
+    "stored_compiled_graphs",
     "sweep_superseded_memos",
     "trust_class",
     "verdict_of",

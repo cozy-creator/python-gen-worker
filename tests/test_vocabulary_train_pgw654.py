@@ -86,8 +86,8 @@ class ToyEndpoint:
 
 def test_sibling_functions_share_one_compile_contract() -> None:
     specs = {s.attr_name: s for s in extract_specs(ToyEndpoint)}
-    a = specs["generate"].compile_cell()
-    b = specs["generate_turbo"].compile_cell()
+    a = specs["generate"].compile_contract()
+    b = specs["generate_turbo"].compile_contract()
     assert a.guidance_scales == b.guidance_scales == (0.0, 5.0)
     assert a.contract_digest() == b.contract_digest()
 
@@ -108,11 +108,11 @@ def test_union_is_class_scoped_not_cross_class() -> None:
             return Out(y="t")
 
     specs = {s.attr_name: s for s in extract_specs(TurboOnly)}
-    assert specs["generate_turbo"].compile_cell().guidance_scales == ()
+    assert specs["generate_turbo"].compile_contract().guidance_scales == ()
 
 
 # ---------------------------------------------------------------------------
-# gap #6: per-function text pins union into the cell contract
+# gap #6: per-function text pins union into the compiled graph contract
 # ---------------------------------------------------------------------------
 
 
@@ -139,12 +139,12 @@ class DualPin:
 
 def test_per_function_text_pins_digest_as_one_dual_pin_contract() -> None:
     specs = {s.attr_name: s for s in extract_specs(DualPin)}
-    a = specs["generate"].compile_cell()
-    b = specs["edit_image"].compile_cell()
+    a = specs["generate"].compile_contract()
+    b = specs["edit_image"].compile_contract()
     # Each function keeps ITS effective pin (warm calls trace through it)...
     assert a.text_len == 512
     assert b.text_len == 1024
-    # ...but the contract digests the class UNION, so the cell is shared.
+    # ...but the contract digests the class UNION, so the compiled graph is shared.
     assert a.contract_text_lens() == b.contract_text_lens() == (512, 1024)
     assert a.contract_digest() == b.contract_digest()
 

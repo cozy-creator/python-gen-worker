@@ -10,7 +10,7 @@ resolve`` never fired, the pod fell straight through to self-mint, and the whole
 compile-once-reuse-forever circle stayed open (measured on the 2026-08-11 2-pod
 run: POD B re-minted, ZERO resolve calls, no ``trace_for_key``/``key_fold``).
 
-The readiness that IS correct mirrors ``fleet_cells.CellPublisher``: a base URL
+The readiness that IS correct mirrors ``fleet_compiled_graphs.CompiledGraphPublisher``: a base URL
 AND (a local bearer OR the control seam being up, ``broker.active()``).
 """
 
@@ -35,7 +35,7 @@ class _Cfg:
 class _Spec:
     name = "generate"
 
-    def compile_cell(self) -> _Cfg:
+    def compile_contract(self) -> _Cfg:
         return _Cfg()
 
 
@@ -57,19 +57,19 @@ def wired(monkeypatch, tmp_path):
     calls: list[Dict[str, Any]] = []
 
     # The pre-derive gate now asks whether ANYBODY could answer, and
-    # this machine's own cell store is one of the two answerers. Pin it to an
+    # this machine's own compiled graph store is one of the two answerers. Pin it to an
     # empty tmp root so the gate under test reads a fact about the test and not
-    # about whatever the developer's `~/.cache/cozy/compile-cells` happens to
+    # about whatever the developer's `~/.cache/cozy/compiled graphs` happens to
     # hold — the ambient-input class of flake this repo has been bitten by.
-    from gen_worker import local_cell_store
+    from gen_worker import local_compiled_graph_store
 
     monkeypatch.setenv(
-        local_cell_store.ENV_STORE_DIR, str(tmp_path / "empty-cells"))
+        local_compiled_graph_store.ENV_STORE_DIR, str(tmp_path / "empty-compiled graphs"))
 
     def _attempt(**kw: Any) -> Any:
         calls.append(kw)
         # `attempt` returns ONE outcome per declared graph class.
-        # `cell_plans` above sizes exactly one, so the double returns a
+        # `compiled_graph_plans` above sizes exactly one, so the double returns a
         # one-element TUPLE — a double still handing back a bare outcome would
         # let this suite pass against a contract production does not have.
         return (executor_mod.boot_adopt.BootAdoptOutcome(reason="miss"),)
@@ -77,7 +77,7 @@ def wired(monkeypatch, tmp_path):
     # Everything before the gate: a declaration exists and sizes one class.
     monkeypatch.setattr(export_contract_mod, "export_declaration",
                         lambda family: object())
-    monkeypatch.setattr(executor_mod.aot_declaration, "cell_plans",
+    monkeypatch.setattr(executor_mod.aot_declaration, "compiled_graph_plans",
                         lambda decl: [object()])
     monkeypatch.setattr(executor_mod, "_mint_modules", lambda spec: ("m",))
     monkeypatch.setattr(executor_mod.boot_adopt, "attempt", _attempt)
@@ -117,7 +117,7 @@ def test_split_child_with_seam_up_resolves_though_it_holds_no_jwt(wired):
 
 def test_no_bearer_and_no_seam_degrades_without_deriving(wired):
     """The gate must STILL protect the genuinely-nobody case: no local bearer,
-    no seam AND an empty local cell store means nobody to ask, so no
+    no seam AND an empty local compiled graph store means nobody to ask, so no
     derive/resolve, no attempt.
 
     it degrades by NAMING itself, never by returning a bare None — a

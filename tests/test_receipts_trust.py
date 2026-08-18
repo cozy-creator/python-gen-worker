@@ -1,4 +1,4 @@
-"""Cell receipts and the trust gate: who signed it, who may arm it.
+"""Compiled graph receipts and the trust gate: who signed it, who may arm it.
 
 Sections keep their incident id; the full narratives live in the tracker.
 """
@@ -54,9 +54,9 @@ from gen_worker import (
     artifact_meta,
     author_ci,
     boot_adopt,
-    cell_adopt,
+    compiled_graph_adopt,
     compile_cache,
-    fleet_cells,
+    fleet_compiled_graphs,
     keyset,
     lifecycle,
     mint_supervisor,
@@ -73,7 +73,7 @@ from gen_worker import (
 )
 from gen_worker._vendor.torchcg import GRAPH_CLASS_BLOCK
 from gen_worker.api.errors import ArtifactTransferError
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.hubio.transport import TransportError
 from gen_worker.keyset import document as keyset_doc
 from gen_worker.keyset import store as keyset_store
@@ -87,7 +87,7 @@ from gen_worker.procsplit import actions, broker
 from gen_worker.topology import TopologyError
 
 # ============================================================================
-# pgw#709 — cell-receipt verification — REAL signatures, REAL HTTP,
+# pgw#709 — compiled graph-receipt verification — REAL signatures, REAL HTTP,
 #   no mocks.
 # ============================================================================
 
@@ -110,7 +110,7 @@ class TestVerifyReceiptJWS:
             assert not hasattr(receipt, dropped), dropped
 
     def test_tampered_payload_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
-        # RED: re-point the signed payload at a different cell key — the
+        # RED: re-point the signed payload at a different compiled graph key — the
         # poisoning move receipts exist to prevent.
         jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096))
         head, _, sig = jws.split(".")
@@ -143,7 +143,7 @@ class TestVerifyReceiptJWS:
         # pgw#1278: the version the hub signed BEFORE the compiled-graph
         # wire cut. It must refuse, not be read as a v1 one.
         jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096,
-                                                crv="cell-receipt-v2"))
+                                                crv="compiled graph-receipt-v2"))
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(jws, pub_map)
         assert exc.value.reason == "receipt_version_unsupported"
@@ -167,7 +167,7 @@ class TestGateDeliveredArtifact:
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
 
     def test_missing_receipt_refused(self, tmp_path: Path, hub: HubStub) -> None:
-        # The pre-receipt-cell rollout path: hub has no receipt -> refuse,
+        # The pre-receipt-compiled graph rollout path: hub has no receipt -> refuse,
         # the miss policy self-mints.
         artifact = make_artifact(tmp_path)
         _configure(hub)
@@ -298,7 +298,7 @@ class TestProvisionHook:
 
 
 class TestAlgorithmAgnosticReceipts:
-    """pgw#709: The guards that let the cell self-mint producer publish over v2."""
+    """pgw#709: The guards that let the compiled graph self-mint producer publish over v2."""
 
     def test_v2_receipt_arms_a_v2_cell(self, tmp_path: Path, hub: HubStub) -> None:
         artifact = make_artifact(tmp_path)
@@ -387,7 +387,7 @@ class TestAlgorithmAgnosticReceipts:
 
 
 class TestPublisherTrustTh1657:
-    """pgw#709: A cell must have come from THIS endpoint, or from a publisher the platform vouches for."""
+    """pgw#709: A compiled graph must have come from THIS endpoint, or from a publisher the platform vouches for."""
 
     def test_another_endpoints_org_cell_is_refused(
         self, tmp_path: Path, hub: HubStub
@@ -405,7 +405,7 @@ class TestPublisherTrustTh1657:
         # And the arm hook refuses rather than raising into the boot.
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
 
-    def test_our_own_org_cell_arms(self, tmp_path: Path, hub: HubStub) -> None:
+    def test_our_own_org_compiled_graph_arms(self, tmp_path: Path, hub: HubStub) -> None:
         """pgw#709: THE CONTROL."""
         artifact = make_artifact(tmp_path)
         hub.serve_receipt_for(
@@ -478,7 +478,7 @@ class TestPublisherTrustTh1657:
     ) -> None:
         """pgw#709: The trust fields are load-bearing, so a receipt minted under an older version must not be re..."""
         artifact = make_artifact(tmp_path)
-        hub.serve_receipt_for(artifact, crv="cell-receipt-v2")
+        hub.serve_receipt_for(artifact, crv="compiled graph-receipt-v2")
         _configure(hub, endpoint_id=SELF_ENDPOINT)
 
         with pytest.raises(receipts.ReceiptError) as excinfo:
@@ -514,13 +514,13 @@ TH1680_ADOPTION_TABLE = [
     ("platform tier, no publisher org", "platform", "", "org-b", True,
      "platform tier needs no publisher identity — the tier IS the identity"),
     ("platform tier, no viewer", "platform", "org-a", "", True,
-     "a caller we cannot name still may adopt platform cells"),
+     "a caller we cannot name still may adopt platform compiled graphs"),
     ("org tier, same org", "org", "org-a", "org-a", True,
      "th#1680: same org adopts across its OWN endpoints — the case th#1657 refused"),
     ("org tier, foreign org", "org", "org-a", "org-b", False,
      "THE THREAT: cross-tenant native-code execution"),
     ("org tier, no publisher org", "org", "", "org-a", False,
-     "a cell whose publisher is unresolvable is adoptable by nobody"),
+     "a compiled graph whose publisher is unresolvable is adoptable by nobody"),
     ("org tier, no viewer org", "org", "org-a", "", False,
      "an identity we cannot establish is not an identity that matches everyone"),
     ("org tier, both unresolvable", "org", "", "", False,
@@ -564,7 +564,7 @@ class TestSharedAdoptionTableTh1680:
         assert got is want, (
             f"{name}: adoptable={got}, want {want} — {why}. "
             "If you changed this rule, change tensorhub's "
-            "internal/authz/cell_adoption_table_th1680_test.go too.")
+            "internal/authz/compiled_graph_adoption_table_th1680_test.go too.")
 
     def test_table_covers_both_verdicts(self) -> None:
         """pgw#709: A guard on the TABLE, not the code: an all-true or all-false table would pass every row abov..."""
@@ -629,7 +629,7 @@ class TestOrgWideningTh1680:
     def test_same_endpoint_still_adopts_without_org(
         self, tmp_path: Path, hub: HubStub
     ) -> None:
-        """pgw#709: The endpoint rule survives untouched — an old hub's pods keep adopting their own cells."""
+        """pgw#709: The endpoint rule survives untouched — an old hub's pods keep adopting their own compiled graphs."""
         artifact = make_artifact(tmp_path)
         hub.serve_receipt_for(
             artifact, owning_endpoint_id=SELF_ENDPOINT,
@@ -644,7 +644,7 @@ class TestOrgWideningTh1680:
 
 
 # ============================================================================
-# pgw#1122 — the cell RECEIPT TRUST GATE runs in the process that
+# pgw#1122 — the compiled graph RECEIPT TRUST GATE runs in the process that
 #   holds no credential — so it must not answer "who am I?" by decoding one.
 # ============================================================================
 
@@ -723,7 +723,7 @@ def test_the_compute_child_names_itself_without_holding_a_credential(
     assert answer == f"endpoint={POD_ENDPOINT} org={POD_ORG}", (
         "a compute child could not name the endpoint/org it serves "
         f"({answer!r}) — the pgw#1122 gate reads exactly this and refuses "
-        "every org-tier cell when it comes back empty")
+        "every org-tier compiled graph when it comes back empty")
 
 
 def test_the_relay_carries_the_claims_and_never_the_credential(
@@ -806,7 +806,7 @@ def _child_gate(stub: HubStub, parent: Optional[_FakeParent]) -> None:
 def test_the_child_arms_an_org_tier_cell_it_is_entitled_to(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
-    """pgw#1122: THE POD FAILURE, reproduced: a resolved, materialized, correctly-owned org-tier cell reaching t..."""
+    """pgw#1122: THE POD FAILURE, reproduced: a resolved, materialized, correctly-owned org-tier compiled graph reaching t..."""
     artifact = make_artifact(tmp_path)
     hub.serve_receipt_for(
         artifact, owning_endpoint_id=POD_ENDPOINT,
@@ -820,7 +820,7 @@ def test_the_child_arms_an_org_tier_cell_it_is_entitled_to(
     assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
     assert parent.asks.count(actions.ACTION_VIEWER_IDENTITY) == 1, (
         "identity does not change for the life of a pod; asking per arm puts a "
-        "seam round trip on every cell")
+        "seam round trip on every compiled graph")
 
 
 def test_a_sibling_endpoint_in_the_same_org_arms_from_the_child(
@@ -876,7 +876,7 @@ def test_no_identity_at_all_refuses_LOUDLY_and_by_its_own_name(
 def test_a_platform_tier_cell_still_arms_with_no_identity(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
-    """pgw#1122: The refusal must stay scoped to the org-tier decision it is about: a platform-tier cell needs n..."""
+    """pgw#1122: The refusal must stay scoped to the org-tier decision it is about: a platform-tier compiled graph needs n..."""
     artifact = make_artifact(tmp_path)
     hub.serve_receipt_for(
         artifact, owning_endpoint_id="", publisher_tier="platform",
@@ -890,7 +890,7 @@ def test_a_platform_tier_cell_still_arms_with_no_identity(
 def test_a_hub_that_stamped_no_claims_is_an_ANSWER_not_a_failure(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
-    """pgw#1122: ``cellgrant.Stamp`` omits both claims when the hub cannot resolve them, which legally narrows t..."""
+    """pgw#1122: ``cggrant.Stamp`` omits both claims when the hub cannot resolve them, which legally narrows t..."""
     _child_gate(hub, _FakeParent("", ""))
     me = worker_identity.viewer()
     assert not me.named
@@ -946,11 +946,11 @@ class _Cfg:
 
 def _refusing_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     def _raise(*a: Any, **k: Any) -> Any:
-        raise fleet_cells.OrderedArmError(
+        raise fleet_compiled_graphs.OrderedArmError(
             "artifact_receipt_refused",
             "publisher_untrusted: this pod cannot name its own endpoint or org")
 
-    monkeypatch.setattr(fleet_cells, "arm_ordered", _raise)
+    monkeypatch.setattr(fleet_compiled_graphs, "arm_ordered", _raise)
 
 
 def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
@@ -960,8 +960,8 @@ def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
     events = _Events(monkeypatch)
     _refusing_arm(monkeypatch)
     monkeypatch.setattr(
-        fleet_cells, "enable_compiled",
-        lambda *a, **k: fleet_cells.ArmOutcome(armed=False))
+        fleet_compiled_graphs, "enable_compiled",
+        lambda *a, **k: fleet_compiled_graphs.ArmOutcome(armed=False))
     monkeypatch.setattr(
         executor_mod.compile_cache,  # type: ignore[attr-defined]
         "mandatory_serving", lambda pipe: False)
@@ -973,7 +973,7 @@ def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
                                   None, order)
 
     assert outcome.armed is False
-    assert outcome.eager_reason == cell_adopt.EagerPhase.ADOPTED_COMPILED_GRAPH_REFUSED
+    assert outcome.eager_reason == compiled_graph_adopt.EagerPhase.ADOPTED_COMPILED_GRAPH_REFUSED
 
     # ...and it says so ON THE WIRE, under the kind that already carries the
     # rest of this journey, with the refusing gate named (pgw#1116's shape).
@@ -993,7 +993,7 @@ def test_a_HUB_ordered_arm_stays_terminal(
     ex = _executor(tmp_path)
     order = executor_mod._ArmOrder(backend="aot_cell", publisher_org=POD_ORG)
 
-    with pytest.raises(fleet_cells.OrderedArmError) as exc:
+    with pytest.raises(fleet_compiled_graphs.OrderedArmError) as exc:
         ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
                             None, order)
     assert exc.value.reason == "artifact_receipt_refused"
@@ -1002,7 +1002,7 @@ def test_a_HUB_ordered_arm_stays_terminal(
 def test_a_mandatory_lane_still_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pgw#1122: A w8a8/w4a4 lane serves ONLY from a cell, so "boot as yesterday" is not available: degrading th..."""
+    """pgw#1122: A w8a8/w4a4 lane serves ONLY from a compiled graph, so "boot as yesterday" is not available: degrading th..."""
     _Events(monkeypatch)
     _refusing_arm(monkeypatch)
     monkeypatch.setattr(
@@ -1012,12 +1012,12 @@ def test_a_mandatory_lane_still_fails_closed(
     order = executor_mod._ArmOrder(
         backend="aot_cell", publisher_org=POD_ORG, adopt=_hit())
 
-    with pytest.raises(fleet_cells.OrderedArmError):
+    with pytest.raises(fleet_compiled_graphs.OrderedArmError):
         ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
                             None, order)
 
 
-def test_the_degrade_reruns_the_ordinary_policy_with_no_delivered_cell(
+def test_the_degrade_reruns_the_ordinary_policy_with_no_delivered_compiled_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """pgw#1122: "Boot as this pod booted yesterday" is a claim with a mechanism: the order is dropped and the F..."""
@@ -1032,9 +1032,9 @@ def test_the_degrade_reruns_the_ordinary_policy_with_no_delivered_cell(
                 **kw: Any) -> Any:
         seen.append((artifact, kw.get("delivered_ref"),
                      kw.get("delivered_digest")))
-        return fleet_cells.ArmOutcome(armed=True)
+        return fleet_compiled_graphs.ArmOutcome(armed=True)
 
-    monkeypatch.setattr(fleet_cells, "enable_compiled", _policy)
+    monkeypatch.setattr(fleet_compiled_graphs, "enable_compiled", _policy)
     ex = _executor(tmp_path)
     order = executor_mod._ArmOrder(
         backend="aot_cell", publisher_org=POD_ORG, adopt=_hit())
@@ -1117,7 +1117,7 @@ def _entry_block(*, dim: int = 64) -> Dict[str, Any]:
 
 
 class _Cfg_pgw1271:
-    """The parent's `CompileCell`, as `cfg_spec` reads it."""
+    """The parent's `CompileContract`, as `cfg_spec` reads it."""
 
     family = "tiny"
     targets = ("unet",)
@@ -1500,7 +1500,7 @@ class TestReceiptTrustGate:
 
 
 # ============================================================================
-# pgw#1098 — An UNREADABLE cell envelope must refuse BY NAME, not vanish.
+# pgw#1098 — An UNREADABLE compiled graph envelope must refuse BY NAME, not vanish.
 # ============================================================================
 
 def _cell(path: Path, meta: Dict[str, Any], *, pad_to: int = 0) -> Path:
@@ -1544,9 +1544,9 @@ def test_a_36_entry_sdxl_scale_envelope_is_readable(tmp_path: Path) -> None:
 
 def test_the_bound_is_a_memory_bound_not_the_declare_bound() -> None:
     """pgw#1098: The derivation, pinned."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
-    assert artifact_meta.MAX_METADATA_BYTES >= 16 * fleet_cells.CELL_DECLARE_MAX_BYTES
+    assert artifact_meta.MAX_METADATA_BYTES >= 16 * fleet_compiled_graphs.COMPILED_GRAPH_DECLARE_MAX_BYTES
     # Still bounded, and still well under a decompression bomb's scale:
     # pgw#1013's OOM threat is real and must not be reopened.
     assert artifact_meta.MAX_METADATA_BYTES < (128 << 20)
@@ -1567,7 +1567,7 @@ def test_an_oversized_envelope_still_refuses_before_decompressing(
 
 
 def test_there_is_ONE_envelope_reader_and_it_is_BOUNDED(tmp_path: Path) -> None:
-    """pgw#1098: RED pre-fix: `aot_serve.unpack_metadata` kept its own UNBOUNDED scan, so on row 7's cell the bo..."""
+    """pgw#1098: RED pre-fix: `aot_serve.unpack_metadata` kept its own UNBOUNDED scan, so on row 7's compiled graph the bo..."""
     from gen_worker import aot_serve
 
     artifact = _cell(tmp_path / "cell.tar.gz", _ROW7_META, pad_to=20 << 20)
@@ -1628,7 +1628,7 @@ def test_adopt_delegated_mint_refuses_an_unreadable_envelope_by_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """RED pre-fix: `meta=None` flowed past the pgw#1042 divergence check into an arm that could not succeed, an..."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     armed_calls: list = []
 
@@ -1636,7 +1636,7 @@ def test_adopt_delegated_mint_refuses_an_unreadable_envelope_by_name(
         armed_calls.append(a)
         return AdoptOutcome.miss("x", "y")
 
-    monkeypatch.setattr(fleet_cells.provision, "arm_aot", _record_arm)
+    monkeypatch.setattr(fleet_compiled_graphs.provision, "arm_aot", _record_arm)
 
     target = tmp_path / "adopted.tar.gz"
     mint_root = tmp_path / "mint-root"
@@ -1647,15 +1647,15 @@ def test_adopt_delegated_mint_refuses_an_unreadable_envelope_by_name(
     _cell(produced, _ROW7_META,
           pad_to=artifact_meta.MAX_METADATA_BYTES + (1 << 20))
 
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family="sdxl", arm_token="arm1-" + "b" * 40,
         ref="repo#arm1", cfg=_Cfg_pgw1098(), target=target, mint_root=mint_root,
         publisher=None, cache_dir=tmp_path / "cache", arm_key=None)
 
-    minted = fleet_cells.adopt_delegated_mint(object(), pending, [produced])
+    minted = fleet_compiled_graphs.adopt_delegated_mint(object(), pending, [produced])
 
     assert minted is None
-    reason, why = fleet_cells.adopt_refusal(pending)
+    reason, why = fleet_compiled_graphs.adopt_refusal(pending)
     assert reason == "compiled_graph_envelope_unreadable"
     assert artifact_meta.METADATA_NAME in why
     # (b): refused BEFORE the arm, so no gate downstream of the read can be

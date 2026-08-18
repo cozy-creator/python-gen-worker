@@ -33,7 +33,7 @@ from . import adopt_fit
 from . import aot_declaration, aot_identity
 from . import boot_adopt
 from . import boot_phases as boot_mod
-from . import cell_adopt
+from . import compiled_graph_adopt
 from . import dispatch
 from . import handler_proof
 from . import procsplit
@@ -143,7 +143,7 @@ _PUBLISH_SETTLE_POLL_S = 2.0
 
 if typing.TYPE_CHECKING:
     from . import compile_cache
-    from . import fleet_cells
+    from . import fleet_compiled_graphs
     from .models.serve_fit import ServePlan
 from .request_context import JobContext, RequestContext
 from .request_context._helpers import _decode_unverified_jwt_claims
@@ -186,9 +186,9 @@ from .models.loading import composition_compute_dtype
 from .runtimes.server import ServerHandle
 from .models.lane_residency_gate import LaneResidencyGate, arm_lane_residency_gate
 from .models.memory import rearm_offload
-from . import fleet_cells
+from . import fleet_compiled_graphs
 from . import aot_serve, numerics_ladder, shape_growth
-from . import fleet_cells as fleet_cells_mod
+from . import fleet_compiled_graphs as fleet_compiled_graphs_mod
 from . import hot_swap
 from .serve import boot_miss as serve_boot_miss
 from .serve import mint_seam
@@ -310,11 +310,11 @@ _CANCEL_UNWIND_RECYCLE_S = 300.0
 # transition, so a permit handed off between them can never read as leaked.
 _PERMIT_PROBE_S = 0.1
 _GiB = 1024 ** 3
-# gw#587: a store-served boot (a compile cell was ATTACHED, not self-minted)
+# gw#587: a store-served boot (a compiled graph was ATTACHED, not self-minted)
 # must pay ~0 inductor compile wall time — the whole point of a delivered
-# cell is that the graph is already compiled. This is seconds, not ms: a
+# compiled graph is that the graph is already compiled. This is seconds, not ms: a
 # trivial guard recompile is noise, a real cold compile burns the economic
-# claim the cell system exists to avoid (see gw#587's boot-to-ready value
+# claim the compiled graph system exists to avoid (see gw#587's boot-to-ready value
 # proposition). Fixed floor rather than a learned per-fleet baseline —
 # simple, robust, and every real cold compile clears it by a wide margin.
 _STORE_SERVED_COMPILE_ALARM_S = 30.0
@@ -476,19 +476,19 @@ def _exported_arm(pipeline: Any, ref: str = "") -> bool:
     pgw#1141b, and it is the whole issue: the answer decides which failure
     detector applies. The dynamo lane keeps a per-class cache-hit ledger with
     teeth (§4.31 — a dynamo arm that misses RECOMPILES silently, so the ledger
-    is its only detector); the exported lane has none, because an AOTI cell
+    is its only detector); the exported lane has none, because an AOTI compiled graph
     that cannot serve RAISES and the wrapper answers eager in-request. Score an
-    exported cell on the dynamo ledger and it is disproven by construction: an
+    exported compiled graph on the dynamo ledger and it is disproven by construction: an
     artifact performs no FX lookup, so its hit count is permanently zero.
 
     That is exactly what happened on a real pod. The question used to be asked
     of the ref STRING through ``aot_serve.is_aot_ref``, which consults keys
     this process was TOLD about — and the ordered/boot-adopt arm route told it
-    nothing. The object is asked first now: a wrapped cell is a fact about the
+    nothing. The object is asked first now: a wrapped compiled graph is a fact about the
     object, not about who announced it. The ref remains a second route in
-    (a cell whose wrap this frame cannot see still names itself).
+    (a compiled graph whose wrap this frame cannot see still names itself).
     """
-    return aot_serve.holds_exported_cell(pipeline) or (
+    return aot_serve.holds_exported_compiled_graph(pipeline) or (
         bool(ref) and aot_serve.is_aot_ref(ref))
 
 
@@ -824,7 +824,7 @@ def _is_corrupt_load_error(exc: BaseException) -> bool:
 
 @dataclass
 class _CompileTargetRecord:
-    """One exact live pipeline object eligible for compile-cell adoption."""
+    """One exact live pipeline object eligible for compiled graph adoption."""
 
     incarnation_id: str
     spec: EndpointSpec
@@ -842,7 +842,7 @@ class _CompileTargetRecord:
     model_bindings: Tuple[Tuple[str, str, str], ...] = ()
     # Runtime guard failure is signaled from a handler thread. Guard every
     # mutable advertised field so StateDelta never observes a half-revoked
-    # cell identity.
+    # compiled graph identity.
     state_lock: threading.Lock = dc_field(
         default_factory=threading.Lock, repr=False, compare=False)
 
@@ -856,7 +856,7 @@ class _ArmOrder:
     fallback exists on this path — a failed exact arm is a typed refusal.
 
     ``adopt`` (pgw#1122) marks the ONE order the hub did not give: §4.27
-    boot-adopt builds an identical order out of a cell this pod resolved by its
+    boot-adopt builds an identical order out of a compiled graph this pod resolved by its
     OWN derived key. Nothing named that arm, so its refusal is a degrade to
     eager with a typed event, not a dead function — carrying the journey's
     ``BootAdoptOutcome`` here is what lets the degrade report itself under the
@@ -896,7 +896,7 @@ class _ArmOrder:
         ONE route builds this object today — ``_setup_locked_inner``'s §4.27
         BOOT-ADOPT order — after pgw#1206 D deleted the Plan head that built
         the other. The constructor stays because the duplication it prevents is
-        the same mapping pgw#1150 found between ``compile_cell()`` and ``cli.run``: a
+        the same mapping pgw#1150 found between ``compile_contract()`` and ``cli.run``: a
         field ADDED here that one site sets and the other forgets silently
         diverges the two arm routes, which is this repo's most expensive defect
         shape: pgw#1108, pgw#1122, pgw#1141 and pgw#1141b were all "a rule the
@@ -948,7 +948,7 @@ class _JobOrder:
     accelerator: str = ""  # "" = unstated (the spec decides), "cuda" | "none"
     gpu_index: int = 0
     lane_report: str = ""  # instruction surfaced to ctx.lane/metrics only
-    # th#1871 P1: the hub DEMANDED a compiled cell for this dispatch. Carried on
+    # th#1871 P1: the hub DEMANDED a compiled graph for this dispatch. Carried on
     # the order because that is where the RunJob is read; copied onto the job
     # below, where the terminal posture is stamped.
     compile_required: bool = False
@@ -960,7 +960,7 @@ class _JobOrder:
 class _CompileArtifactSelection:
     """One immutable compiled-artifact identity active on a pipeline.
 
-    ``self_mint=False``: a hub-attached (store-served) cell selected before
+    ``self_mint=False``: a hub-attached (store-served) compiled graph selected before
     model setup — the gw#577 digest receipt governs it. ``self_mint=True``:
     this worker's OWN boot-warmup mint (gw#587 serving bootstrap) — ref is
     the worker's self-computed key ref and the digest is self-attested; the
@@ -984,13 +984,13 @@ def _selection_for(
     minted instead, recording the delivered identity would advertise bytes
     this object does not serve (the gw#586 defect shape).
 
-    ``mint`` is a finalized ``fleet_cells.SelfMint`` — an adopted cell, whose
+    ``mint`` is a finalized ``fleet_compiled_graphs.SelfMint`` — an adopted compiled graph, whose
     ``artifact`` is packed on this disk and whose ``ref`` carries the key
     STAMPED on that envelope. That is the only identity this function will
     hand back for a mint.
 
-    A ``fleet_cells.PendingSelfMint`` yields the ``delivered`` selection (or
-    nothing): pgw#805 — an exported cell's key folds the COMBINED GRAPH HASH
+    A ``fleet_compiled_graphs.PendingSelfMint`` yields the ``delivered`` selection (or
+    nothing): pgw#805 — an exported compiled graph's key folds the COMBINED GRAPH HASH
     of its class set, so it does not exist until the export finishes, and the
     pending's own ``ref`` is a COMPUTED ``kind="inductor"`` key that no
     artifact will ever carry. Advertising it would publish a self-attested ref
@@ -1031,7 +1031,7 @@ class _WarmupEvidence:
     functions_by_object: Dict[int, set[str]] = dc_field(default_factory=dict)
     #: pgw#677 reopen: non-empty when the warm plan was CUT SHORT (OOM
     #: backoff) — names the truncation. A truncated plan must never publish
-    #: its partial capture as the family cell.
+    #: its partial capture as the family compiled graph.
     aborted: str = ""
 
 
@@ -1168,14 +1168,14 @@ class _ClassRecord:
     # pgw#671 eager-first boot: the in-flight background self-mint for this
     # record's live instance, when the boot went READY(eager) with the mint
     # deferred. Cleared when the mint completes, is disproven, or is
-    # abandoned (peer-cell adoption, vacate, shutdown).
+    # abandoned (peer-compiled graph adoption, vacate, shutdown).
     background_mint: Optional["_BackgroundMint"] = None
-    # pgw#824: WHY this record is not serving from a cell, as the arming
-    # brain's own classified token (fleet_cells.ArmOutcome.eager_reason /
+    # pgw#824: WHY this record is not serving from a compiled graph, as the arming
+    # brain's own classified token (fleet_compiled_graphs.ArmOutcome.eager_reason /
     # serving_mode.POSTURE_*). Every request served eager reports it as
     # `fallback_reason`, so "why is this fleet eager right now" is one GROUP BY
     # over request rows that joins the worker's own `self_mint_skipped` events
-    # on the same string. "" once a cell is armed.
+    # on the same string. "" once a compiled graph is armed.
     eager_posture: str = ""
 
 
@@ -1203,7 +1203,7 @@ class _BackgroundMint:
     spec: EndpointSpec
     instance: Any
     snapshots: Optional[Dict[WireRef, "pb.Snapshot"]]
-    # id(pipeline) -> fleet_cells.PendingSelfMint (same objects the arming
+    # id(pipeline) -> fleet_compiled_graphs.PendingSelfMint (same objects the arming
     # scope produced; shared captures keep their sharing structure).
     pendings: Dict[int, Any]
     # id(pipeline) -> the actual pipeline object (id() keys alone cannot
@@ -1325,13 +1325,13 @@ class _InjectionResult:
     # Installed only after the setup warmup completes.
     active_compile_artifacts: Dict[int, _CompileArtifactSelection] = dc_field(
         default_factory=dict)
-    # gw#587 CORRECT FIX: id(pipeline) -> fleet_cells.PendingSelfMint for
+    # gw#587 CORRECT FIX: id(pipeline) -> fleet_compiled_graphs.PendingSelfMint for
     # objects armed from a fresh self-mint capture, not yet proven or
     # packed. The warmup-proof loop finalizes (packs + publishes) exactly
     # the proven entries and abandons the rest — never before the proof.
     pending_self_mints: Dict[int, Any] = dc_field(default_factory=dict)
     # pgw#824: the arming brain's classified reason for every compile object
-    # that ended this setup WITHOUT an armed cell. Carried into the record, so
+    # that ended this setup WITHOUT an armed compiled graph. Carried into the record, so
     # the reason outlives the function that computed it.
     eager_postures: List[str] = dc_field(default_factory=list)
     # pgw#923: every measured adoption ATTEMPT this injection made, in order.
@@ -1339,7 +1339,7 @@ class _InjectionResult:
     # returns, so the terminal wire event is sent once BOTH halves are known —
     # which is exactly why the boot-attached adoption never had a measured row
     # while the hub-commanded one (arm and warm in a single frame) did.
-    adoptions: List["fleet_cells.CellAdoption"] = dc_field(default_factory=list)
+    adoptions: List["fleet_compiled_graphs.CompiledGraphAdoption"] = dc_field(default_factory=list)
 
     def add_compile_object(
         self, pipeline: Any, slots: typing.Iterable[str],
@@ -1390,7 +1390,7 @@ class _Job:
     # ie#655: the hub's lane instruction, kept so the terminal composition can
     # honor a declared (handles=) body without re-reading the dispatch order.
     lane_report: str = ""
-    # th#1871 P1: the hub DEMANDED a compiled cell for this dispatch. It is a
+    # th#1871 P1: the hub DEMANDED a compiled graph for this dispatch. It is a
     # second, independent statement of the compile axis and both are needed:
     # `lane_report` is empty whenever the lane rides HelloAck's ModelResolution
     # instead of the per-request override (`scheduler_dispatch.go:1037` — "" =
@@ -1410,7 +1410,7 @@ class _Job:
     # as the last execution fence before the GPU turn), so a degrade that
     # persists across both would confess twice and double every hub-side count
     # of it. One request, one confession.
-    pinned_cell_degrade_reported: bool = False
+    pinned_compiled_graph_degrade_reported: bool = False
     # pgw#789: (steps, width, height) of the EXECUTED payload, defaults
     # applied — the axes latency is a function of. Stamped beside `lane`,
     # where the resolved payload is in scope; 0 means "not applicable"
@@ -1889,7 +1889,7 @@ class Executor:
         # pgw#797: warm forwards counted by the in-flight `warmup` span.
         self._warm_iterations: int = 0
         # pgw#923: the boot warmup's measured cost, joined onto the
-        # adoption event for every cell this boot attached.
+        # adoption event for every compiled graph this boot attached.
         self._boot_warm_ms: int = 0
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
@@ -2682,7 +2682,7 @@ class Executor:
     def _refresh_compile_target(target: _CompileTargetRecord) -> None:
         """Refresh compatibility evidence after an in-place lane mutation."""
 
-        cfg = target.spec.compile_cell()
+        cfg = target.spec.compile_contract()
         assert cfg is not None
         contract_digest = compile_cache.execution_contract_digest(
             target.pipeline, cfg)
@@ -2707,7 +2707,7 @@ class Executor:
         or force a reload here — the guard wrapper degrades the object to
         explicit eager serving and this revocation flips the wire tier; the
         failed identity is quarantined process-wide so it is never re-adopted
-        or re-minted this boot (`fleet_cells` reads that quarantine on the arm
+        or re-minted this boot (`fleet_compiled_graphs` reads that quarantine on the arm
         path).
 
         pgw#1032: the per-target `failed_compile_identities` set and the causal
@@ -2726,13 +2726,13 @@ class Executor:
         out_of_range = compile_facts.declared_range_refusal(target.pipeline)
         if broke:
             self._note_eager_posture(
-                rec, cell_adopt.EagerPhase.GRAPH_BREAK.value,
+                rec, compiled_graph_adopt.EagerPhase.GRAPH_BREAK.value,
                 f"the declared regional target did not trace WHOLE under "
                 f"fullgraph; serving eager rather than eager-glued fragments "
                 f"reported as compiled: {broke}")
         elif out_of_range:
             self._note_eager_posture(
-                rec, cell_adopt.EagerPhase.DECLARED_RANGE_EXCEEDED.value,
+                rec, compiled_graph_adopt.EagerPhase.DECLARED_RANGE_EXCEEDED.value,
                 out_of_range)
         elif detail:
             # pgw#1082: ANY permanent guard degrade must reach the request
@@ -2741,7 +2741,7 @@ class Executor:
             # only JIT lane the fleet has — so before this, a degraded
             # intake pod recorded nothing at all and served eager silently.
             self._note_eager_posture(
-                rec, cell_adopt.EagerPhase.JIT_ARM_FAILED.value, detail)
+                rec, compiled_graph_adopt.EagerPhase.JIT_ARM_FAILED.value, detail)
         with target.state_lock:
             if not (
                 target.active_compile_ref
@@ -2837,7 +2837,7 @@ class Executor:
         pending = inj.pending_self_mints.pop(id(pipe), None)
         if pending is not None:
 
-            fleet_cells_mod.abandon_self_mint(pending)
+            fleet_compiled_graphs_mod.abandon_self_mint(pending)
 
     def _bind_compile_guard(
         self, rec: _ClassRecord, target: _CompileTargetRecord,
@@ -2893,25 +2893,25 @@ class Executor:
         THIS class is healing in background). The typed event rides the
         activity stream so the hub can count misses per (release, SKU,
         guard-reason): kind=guard_miss, phase=reason class, detail=the
-        verbatim torch reason + shape identity + cell key + request id."""
+        verbatim torch reason + shape identity + compiled graph key + request id."""
 
         with target.state_lock:
-            cell = target.active_compile_ref
+            graph = target.active_compile_ref
             digest = target.active_compile_snapshot_digest
         reason_class = compile_cache.guard_miss_reason_class(miss.reason)
         request_id = postmortem.current_inflight_request()
         detail = (
             f"fn={sorted(target.function_names)} target={miss.target} "
-            f"cell={cell or '<none>'} digest={digest[:16] or '<none>'} "
+            f"compiled_graph={graph or '<none>'} digest={digest[:16] or '<none>'} "
             f"request={request_id or '<unknown>'} heal={miss.heal} "
             f"miss_n={miss.misses} sig={miss.sig[:400]} "
             f"reason={miss.reason}"
         )
         logger.warning(
             "guard_miss (pgw#680): compiled %s served eager for request %s "
-            "— reason class %r, heal=%s, cell=%s",
+            "— reason class %r, heal=%s, compiled_graph=%s",
             miss.target, request_id or "<unknown>", reason_class, miss.heal,
-            cell or "<none>",
+            graph or "<none>",
         )
         activity_mod.emit_event(
             activity_mod.KIND_GUARD_MISS, detail, phase=reason_class)
@@ -2941,7 +2941,7 @@ class Executor:
         JobMetrics, which is the different question: an eager latency sample
         tagged `serving_mode=aot_cell` argues against the optimization that is
         working for every other shape. It matters now precisely because a
-        partially dispatchable cell stays armed instead of costing the pod its
+        partially dispatchable compiled graph stays armed instead of costing the pod its
         whole compiled lane — the eager shapes must be subtractable from the
         compiled measurement, by name.
 
@@ -2981,7 +2981,7 @@ class Executor:
         self, rec: _ClassRecord, token: str, detail: str = "",
         *, override: bool = False,
     ) -> None:
-        """pgw#824: record (and, once, confess) WHY this record has no cell.
+        """pgw#824: record (and, once, confess) WHY this record has no compiled graph.
 
         First token wins: the earliest honest cause outranks a later generic
         one. The typed event fires only on the transition, so a decline that
@@ -3024,16 +3024,16 @@ class Executor:
         reason = compile_facts.degrade_reason(pipeline)
         if broke:
             self._note_eager_posture(
-                rec, cell_adopt.EagerPhase.GRAPH_BREAK.value,
+                rec, compiled_graph_adopt.EagerPhase.GRAPH_BREAK.value,
                 f"the declared regional target did not trace WHOLE under "
                 f"fullgraph during the boot warmup: {broke}")
         elif out_of_range:
             self._note_eager_posture(
-                rec, cell_adopt.EagerPhase.DECLARED_RANGE_EXCEEDED.value,
+                rec, compiled_graph_adopt.EagerPhase.DECLARED_RANGE_EXCEEDED.value,
                 out_of_range)
         elif reason:
             self._note_eager_posture(
-                rec, cell_adopt.EagerPhase.COMPILED_DEGRADED.value,
+                rec, compiled_graph_adopt.EagerPhase.COMPILED_DEGRADED.value,
                 f"the compiled target was ARMED and a call during the boot "
                 f"warmup failed permanently, so this instance is eager for "
                 f"the rest of its life: {reason}")
@@ -3065,7 +3065,7 @@ class Executor:
         detail = "; ".join(
             f"{type(p).__name__} armed={compile_cache.is_compile_armed(p)} "
             f"targets_resolve="
-            f"{compile_cache.has_compile_target(p, spec.compile_cell())} "
+            f"{compile_cache.has_compile_target(p, spec.compile_contract())} "
             f"degrade={compile_facts.degrade_reason(p) or '-'}"
             for p in orphans
         )
@@ -3074,7 +3074,7 @@ class Executor:
             "boot compiled graphs nothing can dispatch to (%s)",
             spec.name, len(orphans), detail)
         self._note_eager_posture(
-            rec, cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value,
+            rec, compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value,
             f"{len(orphans)} object(s) armed during setup own no installed "
             f"compile target, so the compiled graphs this boot paid for are "
             f"undispatchable: {detail}",
@@ -3084,7 +3084,7 @@ class Executor:
             detail=(
                 f"fn={spec.name}: {len(orphans)} ARMED compile object(s) own "
                 f"no installed target after setup — {detail}"),
-            phase=cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value,
+            phase=compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value,
         )
 
     def _install_compile_targets(
@@ -3097,7 +3097,7 @@ class Executor:
     ) -> None:
         """Mint one incarnation for every compile-capable object just set up."""
 
-        cfg = spec.compile_cell()
+        cfg = spec.compile_contract()
         rec.compile_targets = {}
         if cfg is None:
             return
@@ -3138,7 +3138,7 @@ class Executor:
             # tokens can fire — the exact shape that reached pgw#1093 as zero
             # rows and a generic `uncompiled` on every request.
             self._note_eager_posture(
-                rec, cell_adopt.EagerPhase.NO_COMPILE_CANDIDATES.value,
+                rec, compiled_graph_adopt.EagerPhase.NO_COMPILE_CANDIDATES.value,
                 f"setup produced no compile-capable object for declared "
                 f"family {str(getattr(cfg, 'family', '') or '?')!r} "
                 f"targets={[str(t) for t in (getattr(cfg, 'targets', ()) or ())]} "
@@ -3168,9 +3168,9 @@ class Executor:
                 # nothing at all, and this issue burned a $1.15 pod because of
                 # it.
                 self._note_eager_posture(
-                    rec, cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value
+                    rec, compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value
                     if compile_cache.is_compile_armed(pipeline)
-                    else cell_adopt.EagerPhase.NO_COMPILE_TARGET.value,
+                    else compiled_graph_adopt.EagerPhase.NO_COMPILE_TARGET.value,
                     f"{type(pipeline).__name__} owning slots "
                     f"{sorted(candidate.slots)} resolves none of the declared "
                     f"targets "
@@ -3194,18 +3194,18 @@ class Executor:
             # installed target may serve, so an object the boot warmup happened
             # not to dispatch through was handed `permitted_names=set()` ->
             # `function_names=()` -> `target_applicability_incomplete` -> a pod
-            # that had just verified its cell at `cos=1.00000` served eager for
+            # that had just verified its compiled graph at `cos=1.00000` served eager for
             # life. An AOTI artifact is ahead-of-time machine code for this
             # exact sm/toolchain: the first call is full speed, and the warm
-            # pass never made it faster — it only checked it. What the cell
+            # pass never made it faster — it only checked it. What the compiled graph
             # advertises is what it may serve; a class it does not carry is
             # refused BY NAME at ingress and served eager per request
-            # (pgw#844), and a cell-attributable failure revokes the arm
+            # (pgw#844), and a compiled graph-attributable failure revokes the arm
             # in-request through the wrapper's own fallback.
             #
             # The DYNAMO lane keeps the ledger, and the difference is the
             # failure MODE, not the vintage: a dynamo arm that does not serve
-            # its cell RECOMPILES — correct output, silently slower, no
+            # its compiled graph RECOMPILES — correct output, silently slower, no
             # exception for try-serve to catch and no numerics gate on that
             # lane at all. Its per-class cache-hit ledger is the only detector
             # that exists, so deleting it would remove a detector with no
@@ -3223,14 +3223,14 @@ class Executor:
                 # is named here.
                 detail = (
                     f"{type(pipeline).__name__} owning slots "
-                    f"{sorted(candidate.slots)} holds a REVOKED exported cell "
+                    f"{sorted(candidate.slots)} holds a REVOKED exported compiled graph "
                     f"({active_selection.ref if active_selection else '?'}): "
                     f"the artifact de-armed itself during boot, so every call "
                     f"serves eager and no compiled target may advertise it")
                 logger.warning("compile target omitted for %s: %s",
                                spec.name, detail)
                 self._note_eager_posture(
-                    rec, cell_adopt.EagerPhase.COMPILED_DEGRADED.value, detail)
+                    rec, compiled_graph_adopt.EagerPhase.COMPILED_DEGRADED.value, detail)
                 continue
             permitted_names = (
                 contract_names if exported_arm
@@ -3261,7 +3261,7 @@ class Executor:
             # cannot inherit this target's immutable applicability.
             compatible_names: set[str] = set()
             for alias in rec.specs:
-                alias_cfg = alias.compile_cell()
+                alias_cfg = alias.compile_contract()
                 if alias_cfg is None:
                     continue
                 if (
@@ -3376,10 +3376,10 @@ class Executor:
                 continue
             if mandatory_quant and not active_ref:
                 # pgw#672: a quantized-lane object without a proven exact
-                # cell used to fail closed here. It now registers as an
+                # compiled graph used to fail closed here. It now registers as an
                 # ADDRESSABLE, active-less target — serving_tier projects
                 # "eager" for its aliases and the hub sees the degrade; the
-                # incarnation stays adoptable so a later armed cell can
+                # incarnation stays adoptable so a later armed compiled graph can
                 # restore the compiled tier without a reload.
                 logger.error(
                     "%s compile target for %r has no proven active compiled "
@@ -3398,7 +3398,7 @@ class Executor:
                     active_selection, "self_mint", False))
             rec.compile_targets[incarnation_id] = target
             # pgw#1010: bind the guards for anything ARMED, not only for a
-            # target that names a cell. A JIT INTAKE arm is compiled code with
+            # target that names a compiled graph. A JIT INTAKE arm is compiled code with
             # no artifact, and it is now the only dynamo lane there is — gating
             # the pgw#680 guard-miss confession on `active_ref` would take
             # every guard miss on the platform off the wire.
@@ -3420,7 +3420,7 @@ class Executor:
                 # the compiled path warms in the background.
                 #
                 # pgw#1010: no republish callback. A grown JIT cache belongs
-                # to this pod alone now — the cell it used to republish was a
+                # to this pod alone now — the compiled graph it used to republish was a
                 # dynamo artifact nothing could adopt.
                 if hot_swap.enable(pipeline):
                     logger.info(
@@ -3458,7 +3458,7 @@ class Executor:
                 continue
             for target in rec.compile_targets.values():
                 with target.state_lock:
-                    cfg = target.spec.compile_cell()
+                    cfg = target.spec.compile_contract()
                     family = str(getattr(cfg, "family", "") or "").strip()
                     if not family:
                         continue
@@ -3564,14 +3564,14 @@ class Executor:
           model binding. A mismatch is a different object, there is nothing
           correct to serve, and it still requeues.
         - **Is the pinned COMPILED GRAPH still what this pod serves?** — the
-          cell ref/digest half. A cell that de-armed for cause (§4.31), was
+          compiled graph ref/digest half. A compiled graph that de-armed for cause (§4.31), was
           revoked, or was replaced by a newer one is a SPEED fact, not a
           correctness one: the pipeline, its weights and its lane are exactly
           what the hub picked. Refusing there is what burned 11 real requests
           through five retries each. It now serves and confesses.
 
         The mandatory-quantized carve-out stands: `w8a8`/`w4a4` is a lane the
-        author declared serves only from a cell, so a dispatch that cannot
+        author declared serves only from a compiled graph, so a dispatch that cannot
         name one is still refused rather than answered with numerics the
         endpoint never sanctioned.
         """
@@ -3595,7 +3595,7 @@ class Executor:
         )
         if not all(identity):
             raise RetryableError(
-                "required_compile_invalid: target, cell ref/digest, and "
+                "required_compile_invalid: target, compiled graph ref/digest, and "
                 "contract digest must all be nonempty"
             )
         found = self._compile_target(identity[0])
@@ -3626,7 +3626,7 @@ class Executor:
                 f"{spec.name!r}"
             )
         if target_active[2] != identity[3]:
-            # The EXECUTION CONTRACT, not the cell. A changed contract digest
+            # The EXECUTION CONTRACT, not the compiled graph. A changed contract digest
             # means the target's call ingress is not the one the hub validated
             # this dispatch against, so serving it would run a different
             # function signature — an identity fault, not a degrade.
@@ -3664,13 +3664,13 @@ class Executor:
             if want_execution_lane:
                 raise RetryableError(
                     f"required_compile_identity_mismatch: {want_execution_lane.upper()} "
-                    "dispatch pinned a compile cell this target no longer "
+                    "dispatch pinned a compiled graph this target no longer "
                     "serves, and the lane is declared mandatory — eager would "
                     "serve numerics this endpoint never sanctioned"
                 )
-            self._report_pinned_cell_unavailable(spec, run, identity, target_active)
+            self._report_pinned_compiled_graph_unavailable(spec, run, identity, target_active)
 
-    def _report_pinned_cell_unavailable(
+    def _report_pinned_compiled_graph_unavailable(
         self,
         spec: EndpointSpec,
         run: pb.RunJob,
@@ -3689,28 +3689,28 @@ class Executor:
         Two distinguishable degrades share this exit, and conflating them
         would be the exact `serving_mode` contamination pgw#764 exists to
         prevent: nothing armed means this request really is served EAGER and
-        the latency sample must be subtractable; a DIFFERENT armed cell still
-        serves compiled, and `serving_mode` reports the cell it actually used.
+        the latency sample must be subtractable; a DIFFERENT armed compiled graph still
+        serves compiled, and `serving_mode` reports the compiled graph it actually used.
         """
         job = self.jobs.get((run.request_id, int(run.attempt)))
         if job is not None:
-            if job.pinned_cell_degrade_reported:
+            if job.pinned_compiled_graph_degrade_reported:
                 return  # the intake fence already confessed this one
-            job.pinned_cell_degrade_reported = True
+            job.pinned_compiled_graph_degrade_reported = True
         served_eager = not active[0]
         detail = (
             f"fn={spec.name} request={run.request_id or '<unknown>'} "
             f"attempt={int(run.attempt)} "
-            f"pinned_cell={identity[1]} pinned_digest={identity[2][:16]} "
-            f"active_cell={active[0] or '<none>'} "
+            f"pinned_compiled_graph={identity[1]} pinned_digest={identity[2][:16]} "
+            f"active_compiled_graph={active[0] or '<none>'} "
             f"active_digest={active[1][:16] or '<none>'} "
             f"cause=the pinned compiled graph is not armed on this target "
             f"(de-armed for cause, revoked, or superseded); serving "
-            f"{'eager' if served_eager else 'the armed cell'} instead of "
+            f"{'eager' if served_eager else 'the armed compiled graph'} instead of "
             f"refusing (pgw#888)"
         )
         logger.warning(
-            "serving request %s DEGRADED: the hub pinned compile cell %s and "
+            "serving request %s DEGRADED: the hub pinned compiled graph %s and "
             "this target serves %s — answering it anyway",
             run.request_id or "<unknown>", identity[1], active[0] or "eager",
         )
@@ -3863,13 +3863,13 @@ class Executor:
         forward on rank 0 only, outside that gate, and hang the group. "Eager
         only at degree>1" is therefore enforced by construction: no compile
         selection is fetched, no arming scope opens, no targets install, no
-        cell adopts. This is the code the a08a3bd commit message claimed.
+        compiled graph adopts. This is the code the a08a3bd commit message claimed.
 
         pgw#1113/pgw#819: the condition is ``degree > 1``, FULL STOP — it used
         to be ``degree > 1 and parallel == "sequence"``, an allowlist by mode
         NAME, and every mode not on the list inherited a hole. ``internal``
         was the measured one (a model that spans its cards by its own device
-        map bakes that placement into its kernels, so its cell keyed
+        map bakes that placement into its kernels, so its compiled graph keyed
         byte-identically to the single-GPU one, in both directions), and
         ``cfg`` — the platform's next declared sharding mode
         (``topology.PARALLEL_CFG``) — would have inherited the same hole the
@@ -3878,8 +3878,8 @@ class Executor:
 
         This costs nothing today (no ``internal``-parallel release compiles)
         and it is SUPERSEDED, not contradicted, by the ``placement`` keying
-        fact (``aot_serve.class_hash``): once a cell can state which cards it
-        was baked for, cells at degree>1 become servable and this gate can
+        fact (``aot_serve.class_hash``): once a compiled graph can state which cards it
+        was baked for, compiled graphs at degree>1 become servable and this gate can
         narrow again to the modes whose collectives genuinely forbid an
         ungated forward.
         """
@@ -3888,7 +3888,7 @@ class Executor:
             return (
                 f"eager only at {topo}: compile/hot-swap/self-mint are "
                 f"disabled at degree>1 (pgw#775/pgw#819) — under "
-                f"{topo.parallel or 'internal placement'} a compile cell "
+                f"{topo.parallel or 'internal placement'} a compiled graph "
                 f"cannot state the {topo.degree}-card placement it would be "
                 f"baked for, and under platform sharding any forward outside "
                 f"the parallelism gate would hang the group"
@@ -4038,7 +4038,7 @@ class Executor:
 
         `_served_lane` already reports `...+compiled`, but that axis is BINARY
         platform-wide: it cannot tell an AOT `.pt2` replay from a JIT dynamo
-        cell and it names no artifact, so "AOT vs JIT p50 on 4090s for sdxl
+        compiled graph and it names no artifact, so "AOT vs JIT p50 on 4090s for sdxl
         w8a8" was unanswerable over our own production traffic even though the
         worker knew the answer for every request. The discriminator is the
         ARMED artifact (`aot_serve` owns it), never the lane string.
@@ -4078,7 +4078,7 @@ class Executor:
         )
 
     def _eager_posture(self, spec: EndpointSpec, rec: "_ClassRecord") -> str:
-        """pgw#824: the classified reason this record has no armed cell.
+        """pgw#824: the classified reason this record has no armed compiled graph.
 
         Read LIVE rather than only from the stored token, because the two
         transient postures are properties of right now, not of the arming
@@ -4102,7 +4102,7 @@ class Executor:
         # land after boot on a target whose guard callback was never bound.
         for target in rec.compile_targets.values():
             if compile_facts.degrade_reason(target.pipeline):
-                return cell_adopt.EagerPhase.COMPILED_DEGRADED.value
+                return compiled_graph_adopt.EagerPhase.COMPILED_DEGRADED.value
         if not any(
             s.compile is not None and s.compile.family for s in rec.specs
         ):
@@ -4247,7 +4247,7 @@ class Executor:
         tag (empty flavor) and quantizes 300 Linears to w8a8 fp8 inside
         setup(), so a binding-only derivation priced, verdicted and "proved" a
         37.4 GiB bf16 lane against a 21.7 GiB fp8 one that was really running.
-        The lane id is a KEY (th#935 verdicts, compile cells, floors,
+        The lane id is a KEY (th#935 verdicts, compiled graphs, floors,
         pricing), so it follows the WEIGHTS AS EXECUTED — reported by the
         recipe that converted them, never sniffed off tensor subclasses."""
         handled = self._handled_execution_lane_body(spec, instructed)
@@ -4705,7 +4705,7 @@ class Executor:
             rec.ready = True
             # pgw#1087: the FIRST user-visible timestamp. A ready record is an
             # instance that can answer a request — armed or eager — and on the
-            # pgw#671 eager-first boot below it is reached long before any cell
+            # pgw#671 eager-first boot below it is reached long before any compiled graph
             # exists. Paired with `compiled_swap` it gives the eager-serving
             # window, which is the interval the compiled-serving campaign is
             # trying to shrink and which nothing measured. Distinct from
@@ -4747,7 +4747,7 @@ class Executor:
                 # pgw#797: WARM-COMPLETE on the non-deferred paths. pgw#789 put
                 # this milestone in `_background_mint`'s finally only, and
                 # `rec.background_mint` is set ONLY under eager-first — so a
-                # boot that minted inline, adopted a delivered cell, or served
+                # boot that minted inline, adopted a delivered compiled graph, or served
                 # eager without minting emitted no `warm_complete` at all. That
                 # is most boots, and it was read as "compiled serving never
                 # reached" when the truth was "never measured". Reached here,
@@ -4793,7 +4793,7 @@ class Executor:
         # pgw#805: a boot that DECLARED a compile target and ends with no
         # artifact and no mint in flight must say so. This is the terminal
         # backstop for the whole miss policy — the individual declines
-        # (fleet_cells._fail_closed, mint_recipe, mint_supervisor) each name
+        # (fleet_compiled_graphs._fail_closed, mint_recipe, mint_supervisor) each name
         # themselves, and this one catches whatever route a future decline
         # takes. Five real L4 pods reached exactly this state and emitted
         # nothing at all, which reads identically to a hung worker.
@@ -4805,8 +4805,8 @@ class Executor:
             "self_mint_skipped",
             f"fn={function}: setup finished with a declared compile target, "
             f"no compiled artifact armed and no mint in flight — this worker "
-            f"serves eager for the rest of its life and publishes no cell",
-            phase=cell_adopt.EagerPhase.BOOT_ENDED_UNCOMPILED.value,
+            f"serves eager for the rest of its life and publishes no compiled graph",
+            phase=compiled_graph_adopt.EagerPhase.BOOT_ENDED_UNCOMPILED.value,
         )
 
     @contextmanager
@@ -4817,7 +4817,7 @@ class Executor:
 
         The armed/unarmed tag is the point of the row, not decoration: an
         UNARMED warm pays the compile, an ARMED one pays only the call, and the
-        difference between the two IS what a cell saves on warmup. They are
+        difference between the two IS what a compiled graph saves on warmup. They are
         separate ROWS here rather than two code paths that happen to share a
         name, so the question is a `GROUP BY`.
 
@@ -4962,7 +4962,7 @@ class Executor:
         proof_objects: typing.Iterable[Any] = (),
         cold_proof_ids: typing.Collection[int] = (),
         allow_contract_skip: bool = False,
-        armed_cell_refs: typing.Iterable[str] = (),
+        armed_compiled_graph_refs: typing.Iterable[str] = (),
     ) -> _WarmupEvidence:
         """Run the declared per-handler warmup contract pre-READY.
 
@@ -4974,17 +4974,17 @@ class Executor:
         ``cold_proof_ids`` (gw#587 CORRECT FIX): object ids armed from a
         FRESH self-mint capture — for them a successful compiled call is the
         proof (there is nothing pre-existing on disk to HIT against; the
-        capture this very call populates becomes the cell). Delivered cells
+        capture this very call populates becomes the compiled graph). Delivered compiled graphs
         keep requiring a real cache hit.
 
         ``allow_contract_skip`` (pgw#654 warm-tax fix, setup path only):
         permit the contract-keyed run memory to collapse this warmup to a
         single verification job when every planned run already executed in
         this process for the same warm contract. Inheritance is refused
-        when a self-mint capture is pending (its cell must trace every
-        graph) or when any armed cell is not yet proven in-process (a
-        1-job run must never disprove a cell the full plan would have
-        proven). The hot-adopt path never passes it: a NEW cell on a live
+        when a self-mint capture is pending (its compiled graph must trace every
+        graph) or when any armed compiled graph is not yet proven in-process (a
+        1-job run must never disprove a compiled graph the full plan would have
+        proven). The hot-adopt path never passes it: a NEW compiled graph on a live
         instance requires its own full proof.
         """
 
@@ -5001,7 +5001,7 @@ class Executor:
         objects = tuple({id(obj): obj for obj in proof_objects}.values())
         memory = self._warm_contract_runs.setdefault(
             self._warm_contract_key(spec), set())
-        armed_refs = tuple(armed_cell_refs)
+        armed_refs = tuple(armed_compiled_graph_refs)
         # Tracing == some object under proof still needs the full class x
         # bucket cross-product, because its graphs must trace INTO something:
         # a dynamo lane whose per-class FX cache-hit ledger is its only
@@ -5011,7 +5011,7 @@ class Executor:
         # pgw#1184 CUTS THE EXPORTED LANE OUT OF IT (th#1834 Phase 4). An
         # armed `.pt2` is ahead-of-time machine code for this exact
         # sm x toolchain: it performs no FX lookup, there is no ledger to
-        # move, and §4.31 already ruled that warmup "never made a cell faster,
+        # move, and §4.31 already ruled that warmup "never made a compiled graph faster,
         # it only checked it." The 18 runs sdxl was paying per handler bought
         # exactly one thing the arm did not already have — a BOOT-TIME census
         # of which declared classes the dispatcher could route to — and that
@@ -5021,7 +5021,7 @@ class Executor:
         # typed, at the ingress that already refuses a class BY NAME and
         # charges the request `fallback_reason=ingress_refused`.
         tracing = bool(cold_proof_ids) or any(
-            not aot_serve.holds_exported_cell(obj) for obj in objects)
+            not aot_serve.holds_exported_compiled_graph(obj) for obj in objects)
         skip_ok = (
             allow_contract_skip
             and not cold_proof_ids
@@ -5040,7 +5040,7 @@ class Executor:
         evidence = _WarmupEvidence()
         # pgw#735: two compiled backends, two proofs. Dynamo proves by FX
         # cache hits, an EXPORTED artifact by its own
-        # invocations — an exported cell performs no FX lookup at all, so a
+        # invocations — an exported compiled graph performs no FX lookup at all, so a
         # cache-hit requirement would score every honest .pt2 adoption as a
         # failure. Never synthesize a hit counter for it: this is the one path
         # whose whole job is to detect a lie about serving compiled.
@@ -5068,7 +5068,7 @@ class Executor:
         # attribution below still does with it is attribute every alias
         # (§4.31: the arm has no warm prerequisite).
         exported_proof_ids: set = {
-            id(obj) for obj in objects if aot_serve.holds_exported_cell(obj)
+            id(obj) for obj in objects if aot_serve.holds_exported_compiled_graph(obj)
         }
 
         async def _one(wj: Any, build: Any, mode: str, *, variant: bool) -> bool:
@@ -5127,7 +5127,7 @@ class Executor:
                         wj.spec.name, exc)
                     # pgw#677 reopen: a truncated plan is recorded — the
                     # caller withholds any pending mint's publish (the
-                    # partial cell would brick adopters) — and, when this
+                    # partial compiled graph would brick adopters) — and, when this
                     # boot IS minting, the truncation reaches the hub as a
                     # typed event instead of dying in pod logs.
                     evidence.aborted = (
@@ -5253,7 +5253,7 @@ class Executor:
             proven = proven_keys.get(obj_id, set())
             # pgw#844's ORIGINAL FINDING, now answered at the lane instead of
             # per class (pgw#1184). The measured shape (attempt twelve, pod
-            # o0legpgj5olhic): a regional sdxl cell armed all 72 entries,
+            # o0legpgj5olhic): a regional sdxl compiled graph armed all 72 entries,
             # dispatched 1024x1024 correctly, and refused the other eight
             # aspect buckets `entry_ambiguous`. Those eight classes went
             # unproven, the all-or-nothing rule attributed NO alias, the
@@ -5523,13 +5523,13 @@ class Executor:
             slot: res.path for slot, res in resolved_slots.items()}
         topology_eager = self._eager_only_reason()
         # pgw#1142 / §4.32 item 4. The order joins the topology reason for
-        # every "do not go looking for a cell" decision below — this is the
+        # every "do not go looking for a compiled graph" decision below — this is the
         # gate that runs BEFORE the hub round trip and the materialize, so an
         # operator who says "stop compiling" is obeyed at the first boot phase
         # rather than at the arm, having paid for a download in between.
         #
         # It deliberately does NOT join the REFUSAL two blocks down. The two
-        # are different in kind: a degree>1 topology CANNOT run the named cell
+        # are different in kind: a degree>1 topology CANNOT run the named compiled graph
         # (the collectives would hang), so a spec naming one is unsatisfiable
         # and must fail typed; an operator order is a decision that the pod
         # serve eager, and `arm_ordered` obeys it by arming nothing and
@@ -5542,22 +5542,22 @@ class Executor:
         # The ONLY source of a pre-materialized artifact is §4.27 boot-adopt
         # (pgw#1206 D deleted the Plan head that was the other one). The
         # connected snapshot scan that used to run here is deleted — the hub
-        # no longer attaches cells to snapshots, and a worker that could pick
+        # no longer attaches compiled graphs to snapshots, and a worker that could pick
         # one would be a second resolver.
         if arm is not None and arm.backend == "aot_cell" and topology_eager:
             raise compile_cache.CompiledExecutionLaneUnavailableError(
-                f"the spec names an exact cell but this pod cannot arm one: "
+                f"the spec names an exact compiled graph but this pod cannot arm one: "
                 f"{topology_eager}")
         compile_selection = arm.selection if arm is not None else None
         compile_artifact = compile_selection.path if compile_selection else None
         # §4.27 steps 1-3 (pgw#1089/pgw#1090): with no Plan-named artifact, this
-        # pod derives its OWN cell key from code alone and asks the hub by that
+        # pod derives its OWN compiled graph key from code alone and asks the hub by that
         # key BEFORE `setup()` puts a weight in this process. On a hit the
-        # answer becomes an ordinary `_ArmOrder`, so the adopted cell runs the
+        # answer becomes an ordinary `_ArmOrder`, so the adopted compiled graph runs the
         # Plan path's gates and not one gate fewer.
         #
         # This is what makes boot-time adoption possible at all: the hub's other
-        # resolver only VERIFIES a cell the worker already armed, so a cold pod
+        # resolver only VERIFIES a compiled graph the worker already armed, so a cold pod
         # advertises nothing, is named nothing, and never adopts.
         #
         # OWED (pgw#1091's overlap box): the derivation runs HERE, after
@@ -5566,11 +5566,11 @@ class Executor:
         # request path — no dispatch has occurred — and moving it earlier is a
         # restructure of this method's await order, not of the derivation.
         # pgw#1127 S2: the `ck1` key THIS MACHINE's own store answered on. Not
-        # an `_ArmOrder`: a self-minted cell carries no hub receipt and no
+        # an `_ArmOrder`: a self-minted compiled graph carries no hub receipt and no
         # publisher org, so `arm_ordered` would refuse it
         # `receipt_gate_unconfigured`. It is an ADDRESS, handed to the arming
         # brain as a second lookup route into the same CAS the arm-token memo
-        # addresses — one key, two routes, and `_arm_exported_cell` is the one
+        # addresses — one key, two routes, and `_arm_exported_compiled_graph` is the one
         # gate at the end of both.
         boot_local_key = ""
         if arm is None and spec.compile is not None and not eager_only:
@@ -5599,14 +5599,14 @@ class Executor:
                     path=got.artifact, ref=got.ref,
                     snapshot_digest=got.snapshot_digest,
                     expected=got.expected,
-                    publisher_org=got.cell.publisher_org,
+                    publisher_org=got.graph.publisher_org,
                     # pgw#1122: this order is the POD's, not the hub's.
                     adopt=adopt,
                     # pgw#1176: every OTHER class this boot resolved, armed
                     # into the same registry after this one.
                     extra=tuple(
                         (got_other.artifact, got_other.expected,
-                         got_other.cell.publisher_org)
+                         got_other.graph.publisher_org)
                         for got_other in (
                             o.adoption for o in resolved[1:]
                             if o.adoption is not None)))
@@ -5706,11 +5706,11 @@ class Executor:
                 # reaches the same cache-artifact-gated policy. No-op when
                 # spec.compile is None.
                 arming_scope = provision.ArmingScope(
-                    # pgw#775: a None cell makes the scope a no-op, so an
+                    # pgw#775: a None compiled graph makes the scope a no-op, so an
                     # endpoint's own `gen_worker.arm_compile(pipe)` inside
                     # setup() cannot arm a compile — and cannot self-mint —
                     # on a context-parallel pod.
-                    None if eager_only else spec.compile_cell(),
+                    None if eager_only else spec.compile_contract(),
                     self.store._cache_dir, compile_artifact,
                     enable=functools.partial(
                         self._arming_enable,
@@ -5761,9 +5761,9 @@ class Executor:
                 scope_mints = arming_scope.self_mints
                 for bug in arming_scope.selection_bugs.values():
                     # th#1031: the fleet policy already self-minted a working
-                    # cell instead of aborting — still report the th#883
+                    # compiled graph instead of aborting — still report the th#883
                     # invariant loudly.
-                    await self._report_cell_selection_bug(
+                    await self._report_compiled_graph_selection_bug(
                         spec, compile_selection, bug)
                 for pipe, armed in arming_scope.objects:
                     if armed:
@@ -5811,7 +5811,7 @@ class Executor:
             # of this block then follows the plain-eager shape naturally:
             # no active artifacts => no exclusive-GPU window, eager warm
             # selection, no proof loop, targets registered active-less
-            # (advertising the requested cell key for peer adoption).
+            # (advertising the requested compiled graph key for peer adoption).
             # §4.33 / pgw#1175: a `mint_budget.probe` gate stood here and
             # could turn a boot's eager-first capture off on an arithmetic
             # whose activation term was a quarter of the RESIDENT SET — a
@@ -5824,13 +5824,13 @@ class Executor:
             if delegated_mints and not eager_first:
                 # pgw#784: nothing is armed on these pipes, so the foreground
                 # compile-then-serve path below cannot drive them. Discard the
-                # obligation and serve eager with the cell absent — the honest
+                # obligation and serve eager with the compiled graph absent — the honest
                 # miss policy — rather than run a warmup proof against an
-                # unarmed pipeline. (fleet_cells.delegation_refusal already
+                # unarmed pipeline. (fleet_compiled_graphs.delegation_refusal already
                 # refused to delegate anything that MUST serve compiled, so
                 # this is the custom-warmup / mixed-delivered-artifact
                 # remainder.)
-                from . import fleet_cells as _fc_undelegate
+                from . import fleet_compiled_graphs as _fc_undelegate
 
                 for _pid, _mint in list(inj.pending_self_mints.items()):
                     if not getattr(_mint, "delegated", False):
@@ -5839,7 +5839,7 @@ class Executor:
                         "%s: delegated mint discarded — this boot is not "
                         "eager-first, so there is no eager tier to serve "
                         "from while a child compiles; serving eager with the "
-                        "cell absent", spec.name)
+                        "compiled graph absent", spec.name)
                     _fc_undelegate.abandon_self_mint(_mint)
                     inj.pending_self_mints.pop(_pid, None)
             if eager_first:
@@ -5854,7 +5854,7 @@ class Executor:
                     # this pipe and it never entered
                     # `active_compile_artifacts`; the arm-time placeholder
                     # selection this loop used to stash was the pending's
-                    # COMPUTED `kind="inductor"` ref, which the cell the child
+                    # COMPUTED `kind="inductor"` ref, which the compiled graph the child
                     # is exporting will never carry — and the only consumer of
                     # the stash was a `_BackgroundMint` field nothing read.
                     # The pipe serves eager until `adopt_delegated_mint` reads
@@ -5888,12 +5888,12 @@ class Executor:
             # arm — delivered (store-served) AND self-minted alike. Only the
             # artifact SOURCE differs; a self-mint that does not actually
             # serve its own warmup graphs must fail closed below exactly
-            # like a delivered cell that doesn't (never silent eager).
+            # like a delivered compiled graph that doesn't (never silent eager).
             # pgw#735: EXPORTED artifacts prove themselves by executing,
             # not by an FX cache hit — only the dynamo lane is scored by
             # hits below.
             # pgw#1141b: the lane split is decided per OBJECT (`_exported_arm`),
-            # never off the ref string alone. A boot-adopted cell wraps a live
+            # never off the ref string alone. A boot-adopted compiled graph wraps a live
             # pipeline through the ordered arm, which taught `is_aot_ref`
             # nothing — so on a real pod every adopted artifact landed in
             # `proof_before` (the DYNAMO ledger), scored calls=0 against
@@ -5930,7 +5930,7 @@ class Executor:
             }
             # pgw#722 finding 2 (the #735 boot-proof gap): the proof loop
             # below used to run only under `proves_inductor`, so a worker
-            # whose ONLY arm is an exported cell (the F1 adopt shape — the
+            # whose ONLY arm is an exported compiled graph (the F1 adopt shape — the
             # dynamo artifact is skipped) stayed armed UNPROVEN through
             # boot. An exported arm demands the same fail-closed boot proof
             # as a dynamo arm; only the per-object scoring differs.
@@ -5940,7 +5940,7 @@ class Executor:
             # block below reads it — a pending that reaches readiness having
             # touched none of {sealed, publishing, withheld, aborted,
             # abandoned} was never resolved by anything, which is exactly the
-            # 24-minute L4 mint that ended `finalize completed` with no cell,
+            # 24-minute L4 mint that ended `finalize completed` with no compiled graph,
             # no receipt, no local arm and no error.
             mint_obligations = list(inj.pending_self_mints.values())
             warmup = getattr(instance, "warmup", None)
@@ -5984,7 +5984,7 @@ class Executor:
                     # already-warmed contract collapses to one verification
                     # job (setup path only; hot-adopt keeps full proof).
                     allow_contract_skip=True,
-                    armed_cell_refs=tuple(
+                    armed_compiled_graph_refs=tuple(
                         sel.ref
                         for sel in inj.active_compile_artifacts.values()
                     ),
@@ -6021,7 +6021,7 @@ class Executor:
             # them" was unanswerable over our telemetry until this sample.
             graph_audit_before = compile_cache.graph_audit()
             # pgw#797: THE warmup split. `pipeline_load` used to be
-            # load+warmup as one number, so "what does a cell save on warmup"
+            # load+warmup as one number, so "what does a compiled graph save on warmup"
             # was only ever an estimate (`pipeline_load` minus a guessed
             # load). This span nests under the open `pipeline_load` — parent
             # named EXPLICITLY, not inferred — so the ladder still reconciles
@@ -6065,7 +6065,7 @@ class Executor:
                 compile_cache.compile_wall_seconds() - compile_seconds_before)
             # id(pipeline) -> (calls, cache_hits, cache_misses) observed across
             # this setup's warmup. Declared out here because pgw#923's adoption
-            # report reads it whether or not this boot proved anything: a cell
+            # report reads it whether or not this boot proved anything: a compiled graph
             # that armed and then warmed to zero hits is exactly the adoption
             # the measurement lane exists to price.
             proof_by_obj: Dict[int, Tuple[int, int, int]] = {}
@@ -6089,7 +6089,7 @@ class Executor:
             if proves_inductor or proves_exported:
                 # gw#595 per-object provability: the proof scopes to objects
                 # the warmup actually EXERCISED (calls>0). An exercised object
-                # must serve its own cache hit or it disproves the cell. An
+                # must serve its own cache hit or it disproves the compiled graph. An
                 # unexercised object (the warmup has no modality for it, e.g.
                 # an edit lane needing an input image) neither proves nor
                 # disproves — with a proven sibling it must not block
@@ -6128,16 +6128,16 @@ class Executor:
                             if proved_sel is not None:
                                 compile_cache.record_compiled_graph_proven(proved_sel.ref)
                             continue
-                        # pgw#1141 / §4.31 + §4.32: an adopted cell arms BEFORE
+                        # pgw#1141 / §4.31 + §4.32: an adopted compiled graph arms BEFORE
                         # setup, so no dispatch can have landed by now, and
                         # nothing measures it here either — quality was proven
                         # once, on the pod that MINTED it, and adoption runs no
                         # quality gate. The absence of a dispatch is therefore
                         # not a verdict: the arm stands, the first real request
-                        # is the proof, and a cell-attributable failure de-arms
+                        # is the proof, and a compiled graph-attributable failure de-arms
                         # it in-request.
                         arm_without_dispatch[id(pipe)] = (
-                            "adoption runs no quality gate (§4.32) — this cell "
+                            "adoption runs no quality gate (§4.32) — this compiled graph "
                             "was proven at its mint")
                         unexercised.append(candidate)
                         continue
@@ -6171,24 +6171,24 @@ class Executor:
                         and compile_cache.has_inmemory_compiled_code(pipe)
                     ):
                         # pgw#637: calls>0 with ZERO counter movement against
-                        # a cell this process ALREADY proved, AND dynamo
+                        # a compiled graph this process ALREADY proved, AND dynamo
                         # confirming live compiled code for this object's
                         # targets, is torch 2.13's in-memory dynamo code
                         # cache serving a sibling checkpoint's compiled code
-                        # — a legitimate third serving surface (cell keys are
+                        # — a legitimate third serving surface (compiled graph keys are
                         # checkpoint-free by design), not silent eager.
                         # Disproving it bricked the compiled lane on every
                         # 2nd same-family pick. Both conditions are load-
                         # bearing: the registry alone would let a SIBLING
                         # object's hit certify this object's silence, which
                         # gw#603/gw#611 forbid; the dynamo probe alone would
-                        # credit a cell never proven anywhere.
+                        # credit a compiled graph never proven anywhere.
                         proven += 1
                         if callable(warmup):
                             function_proofs[id(pipe)] = {spec.name}
                         logger.info(
                             "compile-cache: %s served warmup from dynamo's "
-                            "in-memory code cache (cell %s already proven "
+                            "in-memory code cache (compiled graph %s already proven "
                             "in-process; calls=%d) — counted as serving "
                             "evidence (pgw#637)",
                             spec.name, inmem_sel.ref, calls,
@@ -6209,7 +6209,7 @@ class Executor:
                     Every emission the old disarm produced described its
                     wreckage two frames later (`target_applicability_
                     incomplete`, then `armed_target_unresolved`), so a reader
-                    had to infer that an armed, resolvable cell had been thrown
+                    had to infer that an armed, resolvable compiled graph had been thrown
                     away. The decision is the opposite one now — the arm STANDS
                     — and it is still a row, because an unannounced posture is
                     indistinguishable from a gate that never ran."""
@@ -6218,50 +6218,50 @@ class Executor:
                         return
                     activity_mod.emit_event(
                         activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
-                        f"{spec.name}: the exported cell on slots "
+                        f"{spec.name}: the exported compiled graph on slots "
                         f"{sorted(candidate.slots)} took no warm dispatch — "
                         f"{reason}. It STAYS ARMED and serves; a "
-                        f"cell-attributable failure revokes it in-request",
+                        f"compiled graph-attributable failure revokes it in-request",
                         phase=numerics_ladder.PHASE_ARMED_UNDISPATCHED,
                     )
 
                 # pgw#1141 (Paul's ruling, 2026-08-11), and it is a DELETION:
                 # *"skip the warmup/arm check, so we can serve right away; try
-                # to serve, and if an error is encountered and it is the cell's
-                # fault, de-arm the cell and serve eager instead. If our cell is
+                # to serve, and if an error is encountered and it is the compiled graph's
+                # fault, de-arm the compiled graph and serve eager instead. If our compiled graph is
                 # correct this adds zero cost."* An ABSENCE of warm evidence is
-                # no longer a verdict about the artifact — an adopted cell arms
+                # no longer a verdict about the artifact — an adopted compiled graph arms
                 # before setup, so nothing has dispatched through it BY
-                # CONSTRUCTION, and disarming on that destroyed cells verified
+                # CONSTRUCTION, and disarming on that destroyed compiled graphs verified
                 # at cos=1.00000 on two real pods while the self-mint arm (which
                 # gets its dispatch from the warmup that drives its own capture)
                 # sailed through. The two arms are symmetrical now: neither is
                 # disarmed for want of a dispatch.
                 #
                 # SCOPED TO THE EXPORTED LANE, because the difference is the
-                # failure MODE. An AOTI cell that cannot serve RAISES, and the
+                # failure MODE. An AOTI compiled graph that cannot serve RAISES, and the
                 # wrapper answers that request eager; a DYNAMO arm that does not
-                # serve its cell RECOMPILES — correct output, silently slower,
+                # serve its compiled graph RECOMPILES — correct output, silently slower,
                 # no exception for try-serve to catch and no numerics gate on
                 # that lane at all — so its per-class cache-hit ledger is the
                 # only detector in existence and keeps its teeth.
                 #
                 # What still has teeth, unchanged:
-                #   * the pgw#868 numerics gate REFUSES a cell that does not
-                #     reproduce eager — the only detector for a cell that runs
+                #   * the pgw#868 numerics gate REFUSES a compiled graph that does not
+                #     reproduce eager — the only detector for a compiled graph that runs
                 #     cleanly and returns a WRONG image, which try-serve cannot
                 #     see;
                 #   * EVIDENCE AGAINST still disarms (`disproven`: the object was
                 #     exercised and demonstrably did not serve its own graph —
                 #     a measured fault, not a missing measurement);
-                #   * a cell-attributable failure at serve time revokes the arm
+                #   * a compiled graph-attributable failure at serve time revokes the arm
                 #     IN-REQUEST (`aot_serve.wrap_module` / the pgw#680
                 #     guard-miss doctrine): the tenant still gets a correct eager
                 #     answer, the disarm is sticky for the process, and it is
                 #     typed on the wire.
                 #   * PUBLISHING to the fleet stays evidence-gated below —
                 #     serving optimistically costs this pod one eager fallback,
-                #     publishing an unverified cell costs every pod that adopts
+                #     publishing an unverified compiled graph costs every pod that adopts
                 #     it.
                 unproven = list(disproven)
                 # The DYNAMO lane's silent-recompile detector, unchanged: with
@@ -6342,7 +6342,7 @@ class Executor:
                     # saved their entries into the live cache dir, so the
                     # report says how many keys exist and what extern-libs key
                     # this process presents.
-                    # pgw#1200 removed the CELL side and the B1/B2
+                    # pgw#1200 removed the COMPILED GRAPH side and the B1/B2
                     # classification with it — every class was a difference
                     # against FX entries read from a `torch-inductor-cache`
                     # tarball, and that format has no writer and is deleted, so
@@ -6400,18 +6400,18 @@ class Executor:
                         # unwrap the artifact, drop the lifted lanes, pop the
                         # active selection and abandon the mint — for an object
                         # the warm plan simply never dispatched through, which
-                        # is EVERY boot-adopted cell by construction. It keeps
+                        # is EVERY boot-adopted compiled graph by construction. It keeps
                         # the arm now and says so; the publish half is the only
                         # decision an absent measurement may still make.
                         logger.warning(
                             "compile object (slots=%s) armed with no warm "
                             "dispatch (calls=0); it SERVES, and a "
-                            "cell-attributable failure revokes it in-request "
+                            "compiled graph-attributable failure revokes it in-request "
                             "(pgw#1141)", sorted(candidate.slots))
                         _confess_arm_without_dispatch(candidate)
                         # NOTE the publish is NOT withheld here any more. §4.32
                         # moves that authority to the mint-time gate on this
-                        # same pod (`fleet_cells.adopt_delegated_mint` ->
+                        # same pod (`fleet_compiled_graphs.adopt_delegated_mint` ->
                         # `provision.arm_aot(verify_numerics=True)`), which runs
                         # the freshly compiled artifact against the eager
                         # forward it was traced from and refuses to publish
@@ -6422,8 +6422,8 @@ class Executor:
                         _MANDATORY_EXECUTION_LANES)
                     if mandatory:
                         # Eager is not a lane for it and a proven sibling
-                        # vouches for the cell: stays armed unproven. Its
-                        # own graphs, absent from the cell by design, fail
+                        # vouches for the compiled graph: stays armed unproven. Its
+                        # own graphs, absent from the compiled graph by design, fail
                         # loud at first use instead of at every boot.
                         logger.warning(
                             "compile object (slots=%s) armed unproven: no "
@@ -6450,20 +6450,20 @@ class Executor:
                     and compile_selection is not None
                     and compile_seconds >= _STORE_SERVED_COMPILE_ALARM_S
                 ):
-                    # gw#587 runtime assertion: this boot ATTACHED a cell
+                    # gw#587 runtime assertion: this boot ATTACHED a compiled graph
                     # (compile_selection is set — store-served; a MINTING
                     # boot has compile_selection=None and legitimately
                     # compiles, so it is exempt by the explicit gate above)
                     # and at least one candidate proved a warm
                     # cache hit, yet the process burned real inductor compile
-                    # wall time getting there. A delivered cell should cost
+                    # wall time getting there. A delivered compiled graph should cost
                     # ~0 here; this is the gw#586 defect class generalized —
-                    # a cell that claims to serve while the boot silently
+                    # a compiled graph that claims to serve while the boot silently
                     # recompiles (stale/shape-mismatched artifact, or the
-                    # wrong cell attested through th#910). Loud, greppable,
+                    # wrong compiled graph attested through th#910). Loud, greppable,
                     # and mirrored onto the wire via the existing ADOPTED
                     # ModelEvent shape (gw#391) so it is visible hub-side —
-                    # boot-attached cells never sent this event before;
+                    # boot-attached compiled graphs never sent this event before;
                     # duration_ms carries the measured compile wall here
                     # specifically (not the ordinary hot-adopt op-wall
                     # meaning) since this call site only fires on alarm.
@@ -6474,7 +6474,7 @@ class Executor:
                         if compile_selection else "")
                     logger.error(
                         "compile-cache: STORE_SERVED_BOOT_COMPILED family=%s "
-                        "cell=%s digest=%s compile_seconds=%.1fs (>= alarm "
+                        "compiled_graph=%s digest=%s compile_seconds=%.1fs (>= alarm "
                         "threshold %.1fs) — a store-served boot should pay "
                         "~0 compile time (cache_hits=%d cache_misses=%d)",
                         family, ref, digest, compile_seconds,
@@ -6497,11 +6497,11 @@ class Executor:
                     # arm, always, and this alarm keeps its own number.
                     activity_mod.emit_event(
                         "store_served_boot_compiled",
-                        f"family={family} cell={ref} digest={digest}: a "
+                        f"family={family} compiled_graph={ref} digest={digest}: a "
                         f"store-served boot burned {compile_seconds:.1f}s of "
                         f"inductor compile wall (alarm threshold "
                         f"{_STORE_SERVED_COMPILE_ALARM_S:.0f}s, cache_hits="
-                        f"{hits} cache_misses={misses}) — the delivered cell "
+                        f"{hits} cache_misses={misses}) — the delivered compiled graph "
                         f"is not serving the graphs this boot compiled",
                         phase="alarm",
                         duration_ms=int(compile_seconds * 1000),
@@ -6640,7 +6640,7 @@ class Executor:
         # Rank 0 DECIDES; every rank obeys. Nothing below rank 0 ever measures
         # its own card and adapts (pgw#748 §5.4).
         plan = GroupPlan(
-            precision_execution_lane=compile_cache.cell_base_execution_lane(pipe),
+            precision_execution_lane=compile_cache.compiled_graph_base_execution_lane(pipe),
             gemm_mode=w8a8_gemm_mode(pipe),
             sp_degree=topo.degree,
         )
@@ -7660,7 +7660,7 @@ class Executor:
                         # cannot name its subject dedups two checkpoints into
                         # one pending, one child and one memo row.
                         if binding is not None:
-                            fleet_cells.stamp_arm_subject(
+                            fleet_compiled_graphs.stamp_arm_subject(
                                 pipe, slot, [wire_ref(binding)],
                                 (slot_identities or {}).get(slot, ("", 0))[0],
                             )
@@ -7684,7 +7684,7 @@ class Executor:
                         try:
                             outcome = await _to_thread_complete(
                                 self._enable_compiled,
-                                pipe, spec.compile_cell(), compile_artifact,
+                                pipe, spec.compile_contract(), compile_artifact,
                                 compile_selection, arm, boot_local_key,
                             )
                         except compile_cache.CompiledExecutionLaneUnavailableError as exc:
@@ -7695,8 +7695,8 @@ class Executor:
                             # lane refusal must not silently swallow the
                             # loud invariant event.
                             bug = exc.__cause__
-                            if isinstance(bug, compile_cache.CellSelectionBugError):
-                                await self._report_cell_selection_bug(
+                            if isinstance(bug, compile_cache.CompiledGraphSelectionBugError):
+                                await self._report_compiled_graph_selection_bug(
                                     spec, compile_selection, bug)
                             raise
                         armed = outcome.armed
@@ -7718,7 +7718,7 @@ class Executor:
                             # already fell through to self-mint (or, for a
                             # plain lane, eager); still reported loudly so
                             # the th#883 invariant stays wire-visible.
-                            await self._report_cell_selection_bug(
+                            await self._report_compiled_graph_selection_bug(
                                 spec, compile_selection, outcome.selection_bug)
 
                         if compile_cache.has_compile_target(pipe, spec.compile):
@@ -7872,12 +7872,12 @@ class Executor:
         )
         return True
 
-    def _cell_publisher(self) -> "fleet_cells.CellPublisher":
-        """The fleet publish sink for self-minted cells (gw#587/th#910).
+    def _compiled_graph_publisher(self) -> "fleet_compiled_graphs.CompiledGraphPublisher":
+        """The fleet publish sink for self-minted compiled graphs (gw#587/th#910).
         Built per call: file_base_url arrives with HelloAck and the worker
         JWT rotates (#561). ``enabled()`` is false until both exist."""
 
-        return fleet_cells.CellPublisher(
+        return fleet_compiled_graphs.CompiledGraphPublisher(
             base_url=self.file_base_url,
             worker_jwt=self.worker_jwt_provider,
             image_digest=str(
@@ -7893,7 +7893,7 @@ class Executor:
         dynamo router, which is every AOT arm by construction —
         ``provision.enable_compiled`` returns as soon as ``arm_aot`` succeeds,
         so ``compile_cache.enable`` (the only thing that installs the router)
-        is never reached.  The consequence is total: a class the cell does not
+        is never reached.  The consequence is total: a class the compiled graph does not
         cover serves eager for the life of the pod, every pod, forever.
 
         Until this existed the ONLY named observable was a success log line
@@ -7907,17 +7907,17 @@ class Executor:
         if aot_serve.is_armed(pipeline):
             arm = shape_growth.ARM_AOT
         with target.state_lock:
-            cell = target.active_compile_ref
+            graph = target.active_compile_ref
         logger.warning(
             "shape-growth: %s is armed on arm=%s with NO serve-window growth "
-            "path (pgw#916); every declared class the cell does not cover "
+            "path (pgw#916); every declared class the compiled graph does not cover "
             "serves eager for the life of this pod", spec.name, arm)
         activity_mod.emit_event(
             activity_mod.KIND_SHAPE_GAP,
             f"arm={arm} fn={sorted(target.function_names)} "
-            f"cell={cell or '<none>'}: this armed target has no serve-window "
-            f"shape-growth path — a request at a class the cell does not "
-            f"cover is served eager and NOTHING will grow the cell, on this "
+            f"compiled_graph={graph or '<none>'}: this armed target has no serve-window "
+            f"shape-growth path — a request at a class the compiled graph does not "
+            f"cover is served eager and NOTHING will grow the compiled graph, on this "
             f"pod or any other",
             phase="no_growth_path",
         )
@@ -7930,7 +7930,7 @@ class Executor:
         """Whether this setup may go READY(eager) with the mint deferred.
 
         Eager-first applies ONLY to a boot whose every armed artifact is a
-        fresh self-mint on an eager-compatible lane: delivered cells keep
+        fresh self-mint on an eager-compatible lane: delivered compiled graphs keep
         their sequential proof window (they pay ~0 compile), custom object
         warmups have no derived plan for the driver to seed, and regional
         targets have no separable eager callable to route to.
@@ -7964,11 +7964,11 @@ class Executor:
             return False
         if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
             return False
-        cfg = spec.compile_cell()
+        cfg = spec.compile_contract()
         if cfg is None or bool(getattr(cfg, "regional", False)):
             return False
         # Any armed artifact that is NOT a pending self-mint (a delivered
-        # cell) keeps today's foreground proof for the whole
+        # compiled graph) keeps today's foreground proof for the whole
         # record — mixing tiers inside one proof window is not worth it.
         if set(inj.active_compile_artifacts) - set(inj.pending_self_mints):
             return False
@@ -8017,7 +8017,7 @@ class Executor:
             return
 
         for pending in obligations:
-            if fleet_cells_mod.terminus_of(pending):
+            if fleet_compiled_graphs_mod.terminus_of(pending):
                 continue
             if driver_owns_delegated and getattr(pending, "delegated", False):
                 # The supervisor owns it; `_supervise_mint` resolves it and is
@@ -8034,13 +8034,13 @@ class Executor:
                 "self_mint_abort",
                 f"family={family} key={key}: this boot opened a mint capture "
                 f"and reached readiness without packing, publishing, "
-                f"withholding or abandoning it — no cell, no receipt, no "
+                f"withholding or abandoning it — no compiled graph, no receipt, no "
                 f"local arm and no refusal. The capture is discarded so the "
                 f"next pod re-mints instead of inheriting a phantom.",
                 phase="no_terminus",
             )
             try:
-                fleet_cells_mod.abandon_self_mint(pending)
+                fleet_compiled_graphs_mod.abandon_self_mint(pending)
             except Exception:  # noqa: BLE001 — the confession is the point
                 logger.debug("abandoning the unresolved mint failed",
                              exc_info=True)
@@ -8055,10 +8055,10 @@ class Executor:
 
         The tier is NOT ``serving_mode`` at a coarser grain, and pgw#1032
         deliberately did not merge them. The tier answers *"is this worker
-        serving from a CELL"* — the hub reads it as adoption evidence
-        (``WorkerServingCompiledTier`` -> ``WorkerAdoptedDeliveredCell``,
+        serving from a COMPILED GRAPH"* — the hub reads it as adoption evidence
+        (``WorkerServingCompiledTier`` -> ``WorkerAdoptedDeliveredCompiledGraph``,
         th#1216), so a JIT-intake pod reporting ``compiled`` would testify that
-        the cell exchange worked on a pod that adopted nothing. ``serving_mode``
+        the compiled graph exchange worked on a pod that adopted nothing. ``serving_mode``
         answers *"what code ran this request"*, where an intake arm is honestly
         ``jit_cell`` (pgw#1010). Two questions, two answers; the apparent
         divergence is the design.
@@ -8138,7 +8138,7 @@ class Executor:
                 router.cancel_warm()
         for pending in {id(p): p for p in bg.pendings.values()}.values():
             try:
-                fleet_cells_mod.abandon_self_mint(pending)
+                fleet_compiled_graphs_mod.abandon_self_mint(pending)
             except Exception:
                 logger.exception("background mint capture cleanup failed")
         if rec.background_mint is bg:
@@ -8245,12 +8245,12 @@ class Executor:
             self._on_state_change()
 
     async def _await_publish_durable(self, act: Any) -> None:
-        """Keep the mint's activity RUNNING until its cell is DURABLE.
+        """Keep the mint's activity RUNNING until its compiled graph is DURABLE.
 
         pgw#848 item 1. This method's docstring used to be a lie by omission:
         the activity "stays RUNNING for the whole background build" and
         terminates COMPLETED on ARM — but the publish is a background thread
-        that outlives the arm, so the window in which the cell EXISTS AND IS
+        that outlives the arm, so the window in which the compiled graph EXISTS AND IS
         NOT YET DURABLE had no running activity at all. For a pod nobody is
         watching that window is unprotected, and a mint reaped there has paid
         its entire cost and produced nothing.
@@ -8268,7 +8268,7 @@ class Executor:
         activity's `UpdatedAt` remains "last PROGRESS", not "last poll".
         """
         try:
-            from . import fleet_cells as fc
+            from . import fleet_compiled_graphs as fc
 
             last = fc.publish_durable_progress()
             while fc.publishes_in_flight():
@@ -8298,7 +8298,7 @@ class Executor:
         module's question — the supervisor answers only "which compiled graphs
         exist and did they arm".
 
-        pgw#1113: ``finalized`` holds exactly the pipes that ARMED the cell.
+        pgw#1113: ``finalized`` holds exactly the pipes that ARMED the compiled graph.
         The caller no longer expands it across every pid that happened to hold
         the same pending — an advertisement is a claim about what a target
         serves, and a pipe that never had the bytes installed serves eager
@@ -8307,7 +8307,7 @@ class Executor:
 
         act.phase(activity_mod.PHASE_FINALIZE)
         # pgw#824: the eager posture is DISCHARGED — this record now serves
-        # from a cell. Left behind, a stale token would misattribute a later,
+        # from a compiled graph. Left behind, a stale token would misattribute a later,
         # unrelated un-arm (guard revocation) to whatever declined at boot.
         rec.eager_posture = ""
         for pid, outcome in finalized.items():
@@ -8435,7 +8435,7 @@ class Executor:
         for pid, pending in bg.pendings.items():
             holders.setdefault(id(pending), []).append(pid)
         if not holders:
-            raise RuntimeError("supervised mint has no pending cell to build")
+            raise RuntimeError("supervised mint has no pending compiled graph to build")
 
         #: id(pipeline) -> the compiled graphs its OWN pipeline armed.
         #: pgw#1113 deleted the "sharers" fiction that used to fill this for
@@ -8464,7 +8464,7 @@ class Executor:
                     function=spec.name,
                     modules=bg.modules or _mint_modules(spec),
                     slots=dict(bg.slots),
-                    weight_lane=compile_cache.cell_base_execution_lane(pipe),
+                    weight_lane=compile_cache.compiled_graph_base_execution_lane(pipe),
                     execution_lane=self._served_execution_lane(spec),
                     configs={spec.name: self._effective_config(spec)},
                     device=mint_workers.device_of(pipe),
@@ -8491,7 +8491,7 @@ class Executor:
                 # `continue` here left the pending with no terminus and no wire
                 # trace whenever a SIBLING pending succeeded (the
                 # `if not finalized: raise` below never fires then).
-                fleet_cells_mod.abandon_self_mint(pending)
+                fleet_compiled_graphs_mod.abandon_self_mint(pending)
                 # pgw#999: `phase` carries the CLASSIFIED reason when the
                 # compiled graphs were built and then refused arming; it falls
                 # back to the call-site token only when there is genuinely no
@@ -8538,11 +8538,11 @@ class Executor:
         for pids in holders.values():
             pending = bg.pendings[pids[0]]
             if id(pending) not in discharged:
-                fleet_cells_mod.withhold_self_mint_publish(
+                fleet_compiled_graphs_mod.withhold_self_mint_publish(
                     pending,
                     "the supervised mint produced nothing for this obligation")
             else:
-                fleet_cells_mod.publish_self_mint(pending)
+                fleet_compiled_graphs_mod.publish_self_mint(pending)
 
         self._advertise_compiled_graphs(rec, bg, act, finalized)
         logger.info(
@@ -8551,13 +8551,13 @@ class Executor:
             "cadence for the whole mint (th#1834 Phase 3)",
             spec.name, len(finalized))
 
-    async def _report_cell_selection_bug(
+    async def _report_compiled_graph_selection_bug(
         self,
         spec: EndpointSpec,
         compile_selection: Optional["_CompileArtifactSelection"],
         exc: BaseException,
     ) -> None:
-        """th#883 invariant: a SELF-REQUESTED, identity-verified cell failed
+        """th#883 invariant: a SELF-REQUESTED, identity-verified compiled graph failed
         to arm — by construction a bug in the one selection brain. Loud
         event class on the wire (th#1031: no longer fatal to serving — the
         fleet policy already fell through to self-mint; this only makes
@@ -8593,7 +8593,7 @@ class Executor:
         None of them is fatal, and none of them is new behaviour: every non-hit
         outcome still means "boot as this pod booted yesterday".
         """
-        cfg = spec.compile_cell()
+        cfg = spec.compile_contract()
         family = str(getattr(cfg, "family", "") or "")
         fn = str(spec.name or "")
         # pgw#1107: a registry read, not an evaluation. The pgw#853 thunk that
@@ -8607,10 +8607,10 @@ class Executor:
             return (boot_adopt.refused(
                 "no_export_declaration",
                 f"family {family!r} has no registered export declaration, so "
-                f"this boot cannot state the class set a cell key names",
+                f"this boot cannot state the class set a compiled graph key names",
                 family=family, function=fn),)
         try:
-            declared_hint = len(list(aot_declaration.cell_plans(decl)))
+            declared_hint = len(list(aot_declaration.compiled_graph_plans(decl)))
         except Exception as exc:  # noqa: BLE001 — never fatal
             return (boot_adopt.refused(
                 "declaration_unreadable",
@@ -8628,7 +8628,7 @@ class Executor:
         # circle stayed open. The seam being up (`broker.active()`) is the child's
         # honest "there is somebody to ask": the resolve is a parent-mediated
         # action (`compiled_graphs.resolve`), so the parent supplies base_url + bearer and
-        # ignores what the child passes. Mirrors `fleet_cells.CellPublisher`'s
+        # ignores what the child passes. Mirrors `fleet_compiled_graphs.CompiledGraphPublisher`'s
         # own readiness (base_url AND (local bearer OR broker.active())).
         hub_absent = ""
         if not base_url or (not bearer and not procsplit_broker.active()):
@@ -8638,15 +8638,15 @@ class Executor:
         # pgw#1127 S2: this used to RETURN here, before the derivation, on the
         # premise that "deriving a key nobody will answer is pure boot latency".
         # The premise is false on exactly the machines §4.28 is about: the
-        # derived `ck1` key IS `local_cell_store`'s own address, so an offline
-        # box holding the exact cell it needs was being told there was nobody
+        # derived `ck1` key IS `local_compiled_graph_store`'s own address, so an offline
+        # box holding the exact compiled graph it needs was being told there was nobody
         # to ask. The gate survives in its honest form — refuse only when BOTH
         # answerers are absent — and `attempt` decides the rest, after the
         # local store has been asked.
         if boot_adopt.no_compiled_graph_source(hub_absent):
             return (boot_adopt.refused(
                 "no_compiled_graph_source",
-                f"{hub_absent}, and this machine's own cell store is empty",
+                f"{hub_absent}, and this machine's own compiled graph store is empty",
                 family=family, function=fn),)
         work_root = Path(
             self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
@@ -8677,7 +8677,7 @@ class Executor:
             declared_hint=declared_hint,
             work_root=work_root,
             derive=deriver,
-            # The memo lives beside the cell cache and OUTLIVES one boot on a
+            # The memo lives beside the compiled graph cache and OUTLIVES one boot on a
             # pod with a volume — which is the whole point (§4.28's
             # compile-once-run-forever promise for cozy-local reads the same
             # memo through the same closure digest).
@@ -8693,21 +8693,21 @@ class Executor:
         delivered: Optional["_CompileArtifactSelection"] = None,
         arm: Optional[_ArmOrder] = None,
         boot_local_key: str = "",
-    ) -> "fleet_cells.ArmOutcome":
+    ) -> "fleet_compiled_graphs.ArmOutcome":
         """Arm the best available compiled path for a freshly loaded pipeline.
 
-        gw#587: delivered cell first — a th#1031 ``compiled_graph_selection_bug``
-        (self-requested cell fails contract_drift) is reported loudly but no
+        gw#587: delivered compiled graph first — a th#1031 ``compiled_graph_selection_bug``
+        (self-requested compiled graph fails contract_drift) is reported loudly but no
         longer fatal: this falls through to SELF-MINT exactly like an
         ordinary miss. The boot warmup compiles the real serving graphs
         once, serves compiled immediately, and publishes through the hub's
         attested gate so the next worker on this key is store-served. Eager
-        fallback and the fail-closed cell wait are gone for reachable mints;
+        fallback and the fail-closed compiled graph wait are gone for reachable mints;
         genuine mint impossibilities keep the old miss policy (plain=eager,
         quantized=typed refusal).
 
         Returns the fleet ``ArmOutcome``; a ``self_mint`` result is recorded
-        into ``active_compile_artifacts`` exactly like a cell this pod
+        into ``active_compile_artifacts`` exactly like a compiled graph this pod
         DISCOVERED and pulled, so the warmup proof runs and the target
         advertises the key STAMPED on the bytes it serves.
 
@@ -8724,14 +8724,14 @@ class Executor:
 
         pgw#1122: with ONE exception, and it is the exception that keeps a
         refusal from costing a pod. §4.27 boot-adopt builds the same
-        ``_ArmOrder`` shape out of a cell this pod resolved by its own derived
+        ``_ArmOrder`` shape out of a compiled graph this pod resolved by its own derived
         key — the hub ordered nothing — so a typed refusal there drops the
         order and runs the ordinary policy, instead of failing the function and
         leaving the pod to be reaped and replaced."""
 
         if arm is not None:
             try:
-                outcome = fleet_cells.arm_ordered(
+                outcome = fleet_compiled_graphs.arm_ordered(
                     pipe, cfg, self.store._cache_dir,
                     backend=arm.backend,
                     artifact=artifact,
@@ -8748,7 +8748,7 @@ class Executor:
                 # to eager is the design's normal state, not a fallback.
                 for extra_path, extra_expected, extra_org in arm.extra:
                     try:
-                        fleet_cells.arm_ordered(
+                        fleet_compiled_graphs.arm_ordered(
                             pipe, cfg, self.store._cache_dir,
                             backend=arm.backend, artifact=extra_path,
                             delivered_ref="", delivered_digest="",
@@ -8758,7 +8758,7 @@ class Executor:
                     except Exception as extra_exc:  # noqa: BLE001
                         activity_mod.emit_event(
                             "aot_entry_arm_failed",
-                            f"a sibling entry of an armed cell would not arm "
+                            f"a sibling entry of an armed compiled graph would not arm "
                             f"({type(extra_exc).__name__}: {extra_exc}); that "
                             f"CLASS serves eager and every armed sibling keeps "
                             f"serving compiled",
@@ -8769,21 +8769,21 @@ class Executor:
                                 getattr(extra_expected, "compiled_graph_key", "") or ""),
                         )
                 return outcome
-            except fleet_cells.OrderedArmError as exc:
+            except fleet_compiled_graphs.OrderedArmError as exc:
                 # pgw#1122: a HUB-ordered arm stays terminal (pgw#904 — the hub
                 # named one exact artifact and a substitute would not be it).
                 # A BOOT-ADOPTED one was ordered by nobody: this pod derived the
                 # key, asked, and was answered, so a refusal here means what
                 # every other boot-adopt refusal means — boot as this pod booted
                 # yesterday. Measured cost of not distinguishing them: three
-                # pods that resolved and materialized a cell correctly, then
-                # reported `worker_function_unavailable reason=compile_cell_
+                # pods that resolved and materialized a compiled graph correctly, then
+                # reported `worker_function_unavailable reason=compile_contract_
                 # failed`, never served, were reaped `state_blocked_idle`, and
                 # had replacements bought.
                 if arm.adopt is None:
                     raise
                 if compile_cache.mandatory_serving(pipe):
-                    # A mandatory (w8a8/w4a4) lane serves ONLY from a cell
+                    # A mandatory (w8a8/w4a4) lane serves ONLY from a compiled graph
                     # (pgw#1010), so "boot as yesterday" is not available here
                     # and the refusal is genuinely terminal. Fail closed, named.
                     raise
@@ -8792,7 +8792,7 @@ class Executor:
                 # Drop the order and run the ORDINARY fleet policy with no
                 # delivered artifact — bit for bit the call this method makes
                 # when boot-adopt returns a MISS, which is the boot every pod
-                # did before §4.27 existed. The refused cell is not retried: it
+                # did before §4.27 existed. The refused compiled graph is not retried: it
                 # is not passed back in.
                 outcome = self._enable_compiled(
                     pipe, cfg, None, boot_local_key=boot_local_key)
@@ -8800,10 +8800,10 @@ class Executor:
                     return outcome
                 return dc_replace(
                     outcome,
-                    eager_reason=cell_adopt.EagerPhase.ADOPTED_COMPILED_GRAPH_REFUSED)
-        return fleet_cells.enable_compiled(
+                    eager_reason=compiled_graph_adopt.EagerPhase.ADOPTED_COMPILED_GRAPH_REFUSED)
+        return fleet_compiled_graphs.enable_compiled(
             pipe, cfg, self.store._cache_dir, artifact,
-            publisher=self._cell_publisher(),
+            publisher=self._compiled_graph_publisher(),
             delivered_ref=delivered.ref if delivered else "",
             delivered_digest=delivered.snapshot_digest if delivered else "",
             # pgw#1127 S2: the boot's own derived `ck1`, when THIS MACHINE's
@@ -8816,9 +8816,9 @@ class Executor:
         self, pipe: Any, cfg: Any, cache_dir: Optional[Path],
         artifact: Optional[Path],
         subject: Tuple[graph_facts.SlotSubject, ...] = (),
-    ) -> "fleet_cells.ArmOutcome":
+    ) -> "fleet_compiled_graphs.ArmOutcome":
         """ArmingScope adapter: a self-loaded pipeline's ``arm_compile()``
-        gets the same fleet policy (delivered cell first, self-mint on miss)
+        gets the same fleet policy (delivered compiled graph first, self-mint on miss)
         as a worker-loaded slot. ``cache_dir`` comes from the scope, which
         the executor constructed with its own store cache dir.
 
@@ -8826,15 +8826,15 @@ class Executor:
         slots, so nothing here can say which of them it read. The obligation
         therefore names EVERY slot this setup resolved. That over-splits when
         the endpoint used only one of them — which costs one re-mint — and
-        the alternative under-splits, which binds a pipeline to a cell nobody
+        the alternative under-splits, which binds a pipeline to a compiled graph nobody
         proved is its computation.
         """
         for sub in subject:
-            fleet_cells.stamp_arm_subject(
+            fleet_compiled_graphs.stamp_arm_subject(
                 pipe, sub.slot, sub.refs, sub.snapshot_digest)
-        return fleet_cells.enable_compiled(
+        return fleet_compiled_graphs.enable_compiled(
             pipe, cfg, cache_dir, artifact,
-            publisher=self._cell_publisher(),
+            publisher=self._compiled_graph_publisher(),
         )
 
     @property
@@ -8865,23 +8865,23 @@ class Executor:
 
         This is the producer the `compile_cache_adopt` measurement lane never
         had. th#1329/th#1352 gave the hub a durable, indexed, percentile-backed
-        home for "what did arming this cell cost, and what does it still cost
+        home for "what did arming this compiled graph cost, and what does it still cost
         at warm time" — and both live stacks held ZERO rows in it, because the
         only worker-side sender was the hub-commanded `ADOPT_COMPILE_CACHE`
         handler and no stack has ever issued that operation. Every adoption
         that actually happens is armed at boot — "boot attach" names WHEN, not
         a hub push; since th#1702 nothing is pushed to a pod at all and the
-        cell arrives as a Plan's exact `Arm.artifact` (pgw#904) — and that arm
+        compiled graph arrives as a Plan's exact `Arm.artifact` (pgw#904) — and that arm
         reported itself in prose (`aot_adopt`, `duration_ms=0`) on a lane with
         no numbers in it. Two builders, one fact, and only the unmeasured builder
         reached the consumer.
 
         `operation_id` is empty by construction here: the wire contract already
-        specifies empty as "boot-attached cell", so the hub stores these
+        specifies empty as "boot-attached compiled graph", so the hub stores these
         without being taught a second spelling.
 
         Telemetry only. A send failure never changes what this worker serves —
-        the cell is already armed or already refused by the time this runs.
+        the compiled graph is already armed or already refused by the time this runs.
         """
         if not inj.adoptions:
             return
@@ -8890,7 +8890,7 @@ class Executor:
             if not adoption.ref:
                 # pgw#1176: THIS DROP INVERTED AND IS NOW A REPORT.
                 #
-                # Under ck1 it was sound: one cell, one ref, and no ref meant
+                # Under ck1 it was sound: one compiled graph, one ref, and no ref meant
                 # there was nothing anyone could attribute. Under a resolved
                 # KEY SET it swallows the commonest per-entry outcome there
                 # is — an entry that MISSED has no artifact ref BY
@@ -8906,7 +8906,7 @@ class Executor:
                 activity_mod.emit_event(
                     "aot_entry_missed",
                     f"this pod derived the key and nothing entitled answered "
-                    f"it ({adoption.reason or 'no_cell'}"
+                    f"it ({adoption.reason or 'no_compiled_graph'}"
                     f"{': ' + adoption.detail if adoption.detail else ''}); "
                     f"the class serves EAGER and is queued to compile",
                     phase=adoption.reason or "no_compiled_graph",
@@ -8921,7 +8921,7 @@ class Executor:
                     ref=adoption.ref,
                     snapshot_digest=adoption.snapshot_digest,
                     # Empty: the wire contract's own name for a boot-attached
-                    # cell, so the hub stores these without a second spelling.
+                    # compiled graph, so the hub stores these without a second spelling.
                     operation_id="",
                     target_incarnation_id="",
                     state=pb.MODEL_STATE_ADOPTED,
@@ -8941,11 +8941,11 @@ class Executor:
                     # path uses, so one `kind=compile_cache_adopt` query
                     # returns the whole outcome distribution rather than two
                     # half-populations that have to be unioned by hand.
-                    error=f"adopt_failed:{adoption.reason or 'no_cell'}",
+                    error=f"adopt_failed:{adoption.reason or 'no_compiled_graph'}",
                     duration_ms=adoption.arm_ms,
                 )
             logger.info(
-                "cell adoption %s ref=%s digest=%s arm_ms=%d warmup_s=%.3f "
+                "compiled graph adoption %s ref=%s digest=%s arm_ms=%d warmup_s=%.3f "
                 "calls=%d hits=%d misses=%d%s",
                 "ADOPTED" if adoption.armed else "FAILED",
                 adoption.ref, adoption.snapshot_digest, adoption.arm_ms,
@@ -8964,7 +8964,7 @@ class Executor:
         if job is None:
             return
         # pgw#1324: the fork. A JOB skips the whole serving apparatus — no
-        # instance, no setup, no lanes, no compile cell, because a `@job`
+        # instance, no setup, no lanes, no compiled graph, because a `@job`
         # declares none of them — and goes straight to the one run-once
         # harness. Both arms keep the pgw#738 never-silent supervision.
         runner: Callable[[], Awaitable[None]] = (
@@ -9692,7 +9692,7 @@ class Executor:
         """Execute ONE dispatched ``@job`` and report its terminal outcome.
 
         The whole difference from the serving path is what a job DOESN'T have:
-        no instance, no ``setup()``, no execution lanes, no compile cell, no
+        no instance, no ``setup()``, no execution lanes, no compiled graph, no
         slots — a ``JobSpec`` declares none of them, so resolving any of them
         here would be inventing a contract the decorator does not offer. What
         it does have is the same admission, the same context surface, the same

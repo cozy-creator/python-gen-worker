@@ -20,7 +20,7 @@ Three axes, and they do not cross:
 
 * **class** — buckets, graph classes, signatures, the loop, the scheduler.
   Checkpoint-free by construction (DESIGN-RULINGS §4.27), which is what lets
-  one compiled cell serve sixteen fine-tunes.
+  one compiled graph serve sixteen fine-tunes.
 * **checkpoint** — the weights binding, ``inst.tuned``, the ref label. This is
   the INSTANCE, and it is what a handler parameter receives.
 * **request** — cancellation, logging, progress, seed, assets. This is ``ctx``,

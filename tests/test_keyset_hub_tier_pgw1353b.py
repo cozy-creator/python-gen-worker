@@ -39,7 +39,7 @@ from typing import Any, Dict, Iterator, List, Tuple, cast
 
 import pytest
 
-from gen_worker import boot_adopt, cell_resolve, compile_cache as cc, keyset
+from gen_worker import boot_adopt, compiled_graph_resolve, compile_cache as cc, keyset
 from gen_worker.child_contract import CompileSpec
 from gen_worker.keyset import document as doc_mod, hub as keyset_hub
 from gen_worker.keyset import store as keyset_store
@@ -256,20 +256,20 @@ class _TracingDeriver:
         )
 
 
-class _Cell:
+class _Graph:
     publisher_org = "org-a"
     publisher_tier = "platform"
     content_digest = "sha256:" + "ab" * 32
 
     def __init__(self, key: str) -> None:
-        self.cell_ref = f"root/family-{FAMILY}#{key}"
+        self.cg_ref = f"root/family-{FAMILY}#{key}"
 
 
 def _resolve_stub(family: str, keys: Any, **_kw: Any) -> Any:
     return tuple(
-        cell_resolve.ResolveAnswer(
+        compiled_graph_resolve.ResolveAnswer(
             compiled_graph_key=str(key), status="hit",
-            cell=cast(Any, _Cell(str(key))))
+            graph=cast(Any, _Graph(str(key))))
         for key in keys)
 
 
@@ -285,9 +285,9 @@ def _boot(
     """
     cache = tmp_path / pod / "cache"
     cache.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(cell_resolve, "resolve_batch", _resolve_stub)
+    monkeypatch.setattr(compiled_graph_resolve, "resolve_batch", _resolve_stub)
     monkeypatch.setattr(
-        cell_resolve, "materialize", lambda cell, **_kw: tmp_path / "artifact.pt2")
+        compiled_graph_resolve, "materialize", lambda graph, **_kw: tmp_path / "artifact.pt2")
     return boot_adopt.attempt(
         function=FUNCTION, modules=MODULES, cfg=_Cfg(), slots={},
         declared_hint=2, work_root=tmp_path / pod / "work",
@@ -926,10 +926,10 @@ def test_the_allowlisted_address_grammar_is_the_closure_digests_pgw1353b() -> No
 
 
 def test_a_keyset_publish_is_not_a_PUBLISH_ACTION_pgw1353b() -> None:
-    """A key set is not a cell, and the probe disarm must not swallow it.
+    """A key set is not a compiled graph, and the probe disarm must not swallow it.
 
     pgw#980 disarms `PUBLISH_ACTIONS` on a live-edit probe because a probe
-    writing a CELL into a shared family namespace poisons every pod that later
+    writing a COMPILED GRAPH into a shared family namespace poisons every pod that later
     adopts from it. A key set carries no artifact and no signature — it is a
     statement about a closure the writer can already compute — and its address
     is a pure function of the code being run, so a probe's document lands at a

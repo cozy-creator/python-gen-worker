@@ -1,4 +1,4 @@
-"""pgw#1340 / th#2098 — the handback seam compares axes a REAL cell cannot state.
+"""pgw#1340 / th#2098 — the handback seam compares axes a REAL compiled graph cannot state.
 
 MEASURED IN PRODUCTION (standing `master` hub `a35434eb14`, 2026-08-17), and it
 is the whole of th#2098: every `tensorhub/sd15` pod bought for a burst spent
@@ -7,7 +7,7 @@ GPU per burst for zero artifacts against 57.7 GPU-seconds of actual inference.
 The wire says exactly which axis, on every single row::
 
     aot_entry_arm_failed  key_axis_divergence
-      family: child cell states '', this runtime computed 'sd15'
+      family: child compiled graph states '', this runtime computed 'sd15'
 
 224 occurrences on `sd15`, 28 on `ernie`, wheels 0.117.0 and 0.118.0 — every
 self-mint that reached the seam, zero exceptions, zero publishes.
@@ -30,17 +30,17 @@ block over (the worker read an `entry` block TCG never writes) and recorded the
 reason it survived CI verbatim: *"CI stayed green because every fixture built
 the obsolete shape."* `tests/test_handback_key_axes_pgw1042.py::_envelope` is
 that fixture — it hand-writes `family`, `weight_lane`, `lora_bucket` and
-`env_seal` into a dict no packed cell can contain. So the fence here is not
+`env_seal` into a dict no packed compiled graph can contain. So the fence here is not
 another assertion about the same fixture; it is the fixture built by
 `torchcg.artifact.build_metadata`, through `tests/tcg_artifacts.py`, which has
 existed since pgw#1283.
 
 The two halves this file pins:
 
-1. a cell TCG actually minted ARMS — the axes compared at the seam are exactly
-   the axes a cell can state, and a real one agrees with its own runtime;
+1. a compiled graph TCG actually minted ARMS — the axes compared at the seam are exactly
+   the axes a compiled graph can state, and a real one agrees with its own runtime;
 2. the divergence is knowable for $0 BEFORE the compile.
-   :func:`fleet_cells.unstateable_arm_axes` is a pure function of two
+   :func:`fleet_compiled_graphs.unstateable_arm_axes` is a pure function of two
    compile-time constants, so a seam that can never agree is a refusal at
    obligation-open — not a 25-minute receipt.
 """
@@ -51,24 +51,24 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_serve, env_seal, fleet_cells, graph_facts
+from gen_worker import aot_serve, env_seal, fleet_compiled_graphs, graph_facts
 from gen_worker._vendor.torchcg import identity as tcg_identity
 
 import tcg_artifacts
 
 
-def _real_cell_metadata(**kw: Any) -> Dict[str, Any]:
-    """Metadata from TCG's own builder — the only shape a cell can carry."""
+def _real_compiled_graph_metadata(**kw: Any) -> Dict[str, Any]:
+    """Metadata from TCG's own builder — the only shape a compiled graph can carry."""
     return tcg_artifacts.metadata(**kw)
 
 
-def _runtime_arm_key(meta: Dict[str, Any], family: str = "sd15") -> fleet_cells.ArmIdentity:
-    """The parent's obligation identity for the runtime that cell was minted on.
+def _runtime_arm_key(meta: Dict[str, Any], family: str = "sd15") -> fleet_compiled_graphs.ArmIdentity:
+    """The parent's obligation identity for the runtime that compiled graph was minted on.
 
     Every OBLIGATION fact is stated exactly as production states it: the family
     the release declares, the serving lane, this machine's env seal. The
-    ENVIRONMENT facts are taken from the cell's own metadata, because that is
-    the claim under test — a cell minted on this runtime describes it.
+    ENVIRONMENT facts are taken from the compiled graph's own metadata, because that is
+    the claim under test — a compiled graph minted on this runtime describes it.
     """
     facts = {
         "family": family,
@@ -82,17 +82,17 @@ def _runtime_arm_key(meta: Dict[str, Any], family: str = "sd15") -> fleet_cells.
         "dynamic": "{}",
         "regional": "0",
     }
-    return fleet_cells.ArmIdentity(facts=tuple(sorted(facts.items())))
+    return fleet_compiled_graphs.ArmIdentity(facts=tuple(sorted(facts.items())))
 
 
 def test_a_cell_TCG_MINTED_arms_on_the_runtime_that_minted_it() -> None:
     """THE PRODUCTION RED. Before pgw#1340 this returned
-    ``family: child cell states '', this runtime computed 'sd15'`` — the exact
+    ``family: child compiled graph states '', this runtime computed 'sd15'`` — the exact
     string 224 `sd15` rows carry — and $1.00/burst of L4 went to a compile
     that could never arm.
     """
-    meta = _real_cell_metadata()
-    assert fleet_cells.arm_axis_divergence(_runtime_arm_key(meta), meta) == ""
+    meta = _real_compiled_graph_metadata()
+    assert fleet_compiled_graphs.arm_axis_divergence(_runtime_arm_key(meta), meta) == ""
 
 
 @pytest.mark.parametrize("axis", ["family", "lane", "env_seal"])
@@ -107,8 +107,8 @@ def test_an_axis_no_cell_can_state_is_not_compared_at_this_seam(axis: str) -> No
     artifact has no field for. This is pgw#1176's own ruling about `envelope`,
     applied to the axes that cut was not swept for.
     """
-    assert axis not in fleet_cells.ARM_ENVIRONMENT_FACTS
-    assert axis in fleet_cells.ARM_OBLIGATION_FACTS
+    assert axis not in fleet_compiled_graphs.ARM_ENVIRONMENT_FACTS
+    assert axis in fleet_compiled_graphs.ARM_OBLIGATION_FACTS
 
 
 def test_every_compared_axis_is_stateable_by_a_cell() -> None:
@@ -118,14 +118,14 @@ def test_every_compared_axis_is_stateable_by_a_cell() -> None:
     every mint under it compiles for 20-45 minutes and refuses. That must be
     a refusal before the child is spawned, never a discovery after the bill.
     """
-    assert fleet_cells.unstateable_arm_axes() == ()
+    assert fleet_compiled_graphs.unstateable_arm_axes() == ()
 
 
 def test_the_preflight_names_an_axis_that_left_the_vocabulary() -> None:
     """The fence proves it can go RED — this is what would have caught pgw#1270
     on a laptop instead of on eight L4s.
     """
-    got = fleet_cells.unstateable_arm_axes(("sm", "family", "env_seal"))
+    got = fleet_compiled_graphs.unstateable_arm_axes(("sm", "family", "env_seal"))
     assert got == ("family", "env_seal")
 
 
@@ -137,20 +137,20 @@ def test_a_REAL_divergence_is_still_refused_by_name(
     field: str, value: Any, axis: str,
 ) -> None:
     """The positive control. Narrowing the compared set must not disarm it:
-    a cell minted on another card or another compiler is exactly what this
+    a compiled graph minted on another card or another compiler is exactly what this
     seam exists to refuse, and it still is.
     """
-    meta = _real_cell_metadata()
+    meta = _real_compiled_graph_metadata()
     arm = _runtime_arm_key(meta)
     diverged = dict(meta, **{field: value})
-    got = fleet_cells.arm_axis_divergence(arm, diverged)
+    got = fleet_compiled_graphs.arm_axis_divergence(arm, diverged)
     assert got.startswith(f"{axis}: "), got
 
 
 def test_the_vocabulary_IS_what_a_real_cell_carries() -> None:
     """pgw#1345 — the accessor is pinned to BEHAVIOUR, not to a restatement.
 
-    `artifact_meta.cell_metadata_fields()` reads the vendored torchcg's
+    `artifact_meta.compiled_graph_metadata_fields()` reads the vendored torchcg's
     `ARTIFACT_METADATA_FIELDS`. That name is PUBLIC as of tcg#40, which is the
     end pgw#1345 named for itself (*"when the public name is wanted it is added
     UPSTREAM and re-vendored"*) after pgw#1340's hand-patch of the snapshot
@@ -165,15 +165,15 @@ def test_the_vocabulary_IS_what_a_real_cell_carries() -> None:
     """
     from gen_worker import artifact_meta
 
-    assert artifact_meta.cell_metadata_fields() == frozenset(
-        _real_cell_metadata())
+    assert artifact_meta.compiled_graph_metadata_fields() == frozenset(
+        _real_compiled_graph_metadata())
 
 
 def test_the_compared_set_is_not_empty() -> None:
-    """A comparison narrowed to nothing would pass every cell and read green.
+    """A comparison narrowed to nothing would pass every compiled graph and read green.
 
     The three that survive are the runtime axes TCG keys the artifact ON, so
-    they are the three that can genuinely refuse a foreign cell.
+    they are the three that can genuinely refuse a foreign compiled graph.
     """
-    assert set(fleet_cells.ARM_ENVIRONMENT_FACTS) == {
+    assert set(fleet_compiled_graphs.ARM_ENVIRONMENT_FACTS) == {
         aot_serve.COMPILED_GRAPH_FORMAT_KEY, "sm", "toolchain"}

@@ -96,7 +96,7 @@ Recorded here so the next lane does not pay again.
   rig). This repo has none of those files, so `--fleet-line` is required for
   `mint` unless the image already carries one. The rig refuses **before**
   renting.
-- **A mint downloads no checkpoint.** Cell identity is checkpoint-free (§4.27):
+- **A mint downloads no checkpoint.** Compiled graph identity is checkpoint-free (§4.27):
   the declaration builds its architecture under fake tensors and the constants
   arrive at arm time from the store. A per-family mint pod costs a card and a
   compile, never 24 GB.

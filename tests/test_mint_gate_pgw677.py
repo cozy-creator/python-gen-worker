@@ -45,7 +45,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, hot_swap
+from gen_worker import fleet_compiled_graphs, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
 from gen_worker.models.store import ModelStore
@@ -85,15 +85,15 @@ class _Pipe:
 def _clean_process_registries() -> Any:
     with cc._PROVEN_CELLS_LOCK:
         cc._PROVEN_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     for pipe in list(cc._armed_pipelines()):
         cc._armed_pipelines().discard(pipe)
     yield
     with cc._PROVEN_CELLS_LOCK:
         cc._PROVEN_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     for pipe in list(cc._armed_pipelines()):
         cc._armed_pipelines().discard(pipe)
 
@@ -186,10 +186,10 @@ class _Harness:
 
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
-            fleet_cells, "enable_compiled", self._fake_enable_compiled)
+            fleet_compiled_graphs, "enable_compiled", self._fake_enable_compiled)
         # The pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
-        # the MINT and wrote the result into the cell's metadata; it went with
+        # the MINT and wrote the result into the compiled graph's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
         # compiles never touch dynamo has no gate left to satisfy.
         self.ex = Executor(self.specs, _send, store=store)
@@ -199,11 +199,11 @@ class _Harness:
     def _fake_enable_compiled(
         self, pipe: Any, cfg: Any, cache_dir: Any = None,
         artifact: Any = None, publisher: Any = None,
-    ) -> fleet_cells.ArmOutcome:
+    ) -> fleet_compiled_graphs.ArmOutcome:
         mint_root = self.tmp_path / f"mint-{id(pipe)}"
         capture = mint_root / "capture"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
-        pending = fleet_cells.PendingSelfMint(
+        pending = fleet_compiled_graphs.PendingSelfMint(
             family=FAMILY, arm_token="cg-key-v1-" + "a" * 56,
             ref=f"{cc.system_repo(FAMILY)}#cg-key-v1-{'a' * 56}",
             cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
@@ -253,7 +253,7 @@ class _Harness:
         pipe.transformer.forward = cc._guarded(
             original, compiled, "transformer", failure_signal=signal)
         cc._armed_pipelines().add(pipe)
-        return fleet_cells.ArmOutcome(armed=True, self_mint=pending)
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=pending)
 
     # -- drive ---------------------------------------------------------------
 
@@ -324,7 +324,7 @@ _CLOCK_SLOP_MS = 25.0
 # `test_tenant_serves_at_serving_latency_during_mint_and_red_verifies`
 # stood here. Its mechanism is the mint SEED WINDOW — preemptible in-process
 # seed units holding the instance gate while a tenant request arrives — and the
-# in-process mint is deleted (it only ever built a dynamo cell). A delegated
+# in-process mint is deleted (it only ever built a dynamo compiled graph). A delegated
 # mint compiles in a CHILD PROCESS, so there is no seed unit in the serving
 # interpreter for a tenant to preempt; what bounds the child against the tenant
 # is the pgw#737 co-residency budget, which has its own coverage. The doctrine

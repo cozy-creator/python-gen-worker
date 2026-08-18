@@ -952,7 +952,7 @@ def test_every_vector_is_what_this_sdk_serializes(
     assert _wire_json(posture) == wire, (
         f"{vector['name']}: this SDK serializes a posture differently than the "
         f"ledger tensorhub digests. That re-keys the measurement relation "
-        f"silently — every affected cell forks. ({vector['why']})")
+        f"silently — every affected compiled graph forks. ({vector['why']})")
 
 
 @pytest.mark.parametrize("vector", _vectors(), ids=lambda v: str(v["name"]))

@@ -9,7 +9,7 @@ terminal, all at `assignment_attempt_epoch=5` — five retries burned per
 request because the dispatch fence refused a pod whose pipeline, weights and
 lane were exactly what the hub picked and whose only defect was that the
 PINNED COMPILED GRAPH had gone (de-armed for cause per §4.31, revoked, or
-superseded). A missing cell is a speed fact, not a correctness one.
+superseded). A missing compiled graph is a speed fact, not a correctness one.
 
 Drives the real production fence — `Executor._validate_required_compile`, the
 callable wired as `_JobOrder.fence` and invoked at both intake and the last
@@ -41,7 +41,7 @@ INCARNATION = "incarnation-7"
 CONTRACT = "contract-digest-1"
 
 #: What the hub pinned.
-PINNED_CELL = "cell:sdxl-1024-sm89"
+PINNED_CELL = "cg:sdxl-1024-sm89"
 PINNED_DIGEST = "sha256:" + "c3" * 32
 
 
@@ -66,7 +66,7 @@ class _LiveJob:
         self.finished = False
         self.served_eager_fallback = False
         self.fallback_reason = ""
-        self.pinned_cell_degrade_reported = False
+        self.pinned_compiled_graph_degrade_reported = False
 
 
 class _Fence:
@@ -84,7 +84,7 @@ class _Fence:
     _mandatory_execution_lane_of_bound = Executor._mandatory_execution_lane_of_bound
     _compile_target = Executor._compile_target
     _mark_request_eager_fallback = Executor._mark_request_eager_fallback
-    _report_pinned_cell_unavailable = Executor._report_pinned_cell_unavailable
+    _report_pinned_compiled_graph_unavailable = Executor._report_pinned_compiled_graph_unavailable
     _validate_required_compile = Executor._validate_required_compile
     _setup_slots = staticmethod(Executor._setup_slots)
 
@@ -110,7 +110,7 @@ def _spec() -> EndpointSpec:
 
 
 def _target(
-    weight_lane: str, active_cell: str, active_digest: str,
+    weight_lane: str, active_compiled_graph: str, active_digest: str,
     *, held_ref: str = PICK,
 ) -> _CompileTargetRecord:
     return _CompileTargetRecord(
@@ -120,7 +120,7 @@ def _target(
         pipeline_weight_lane=weight_lane,
         lora_bucket=0,
         contract_digest=CONTRACT,
-        active_compile_ref=active_cell,
+        active_compile_ref=active_compiled_graph,
         active_compile_snapshot_digest=active_digest,
         function_names=("generate",),
         model_bindings=(("checkpoint", held_ref, SNAPSHOT),),
@@ -128,7 +128,7 @@ def _target(
 
 
 def _run(
-    *, cell_ref: str = PINNED_CELL, digest: str = PINNED_DIGEST,
+    *, cg_ref: str = PINNED_CELL, digest: str = PINNED_DIGEST,
     contract: str = CONTRACT,
 ) -> pb.RunJob:
     run = pb.RunJob(
@@ -138,7 +138,7 @@ def _run(
         models=[pb.ModelBinding(slot="checkpoint", ref=PICK)],
         required_compile=pb.RequiredCompileExecution(
             target_incarnation_id=INCARNATION,
-            cell_ref=cell_ref,
+            cell_ref=cg_ref,
             cell_snapshot_digest=digest,
             contract_digest=contract,
         ),
@@ -158,13 +158,13 @@ def events() -> Iterator[List[pb.ActivityUpdate]]:
         activity_mod._sink = previous  # noqa: SLF001
 
 
-def test_pinned_cell_gone_serves_instead_of_refusing(
+def test_pinned_compiled_graph_gone_serves_instead_of_refusing(
     events: List[pb.ActivityUpdate],
 ) -> None:
     """RED on master: `required_compile_identity_mismatch` -> RetryableError
     -> `JOB_STATUS_RETRYABLE` -> the hub's five-retry loop. The pipeline is
     the right one on the plain lane; nothing about it is wrong except that
-    the cell it was pinned to is not armed."""
+    the compiled graph it was pinned to is not armed."""
     fence = _Fence("fp8-w8a16+compiled", _target("fp8-w8a16", "", ""))
     job = _LiveJob("req-888")
     fence.jobs[("req-888", 1)] = job
@@ -204,13 +204,13 @@ def test_the_degraded_event_carries_graph_key_mode_and_cause(
 def test_a_superseded_cell_serves_compiled_and_is_not_an_eager_sample(
     events: List[pb.ActivityUpdate],
 ) -> None:
-    """The pod holds a DIFFERENT armed cell. Still degraded — the hub's pin
+    """The pod holds a DIFFERENT armed compiled graph. Still degraded — the hub's pin
     was not honoured — but the request is not an eager latency sample, and
     charging it one would be the exact `serving_mode` contamination pgw#764
     exists to prevent."""
     fence = _Fence(
         "fp8-w8a16+compiled",
-        _target("fp8-w8a16", "cell:sdxl-1024-sm89-v2", "sha256:" + "d4" * 32),
+        _target("fp8-w8a16", "cg:sdxl-1024-sm89-v2", "sha256:" + "d4" * 32),
     )
     job = _LiveJob("req-888")
     fence.jobs[("req-888", 1)] = job
@@ -221,8 +221,8 @@ def test_a_superseded_cell_serves_compiled_and_is_not_an_eager_sample(
     assert job.fallback_reason == ""
     degrades = [e for e in events if e.kind == activity_mod.KIND_SERVE_DEGRADE]
     assert len(degrades) == 1
-    assert "serving the armed cell" in degrades[0].detail
-    assert "cell:sdxl-1024-sm89-v2" in degrades[0].detail
+    assert "serving the armed compiled graph" in degrades[0].detail
+    assert "cg:sdxl-1024-sm89-v2" in degrades[0].detail
 
 
 def test_mandatory_quantized_lane_still_refuses(
@@ -261,7 +261,7 @@ def test_a_changed_execution_contract_still_requeues(
 def test_a_different_model_binding_still_requeues(
     events: List[pb.ActivityUpdate],
 ) -> None:
-    """pgw#888 acceptance box 2: the identity fence is SPLIT from cell
+    """pgw#888 acceptance box 2: the identity fence is SPLIT from compiled graph
     availability, and its half keeps requeuing. A merely same-family pipeline
     is not the model the hub picked."""
     fence = _Fence(
@@ -279,7 +279,7 @@ def test_an_exactly_matching_pin_is_silent(
     events: List[pb.ActivityUpdate],
 ) -> None:
     """The optimization fence still fences: a request the pod can serve on
-    the exact pinned cell must produce no degrade event at all."""
+    the exact pinned compiled graph must produce no degrade event at all."""
     fence = _Fence(
         "fp8-w8a16+compiled", _target("fp8-w8a16", PINNED_CELL, PINNED_DIGEST))
     job = _LiveJob("req-888")
@@ -306,7 +306,7 @@ def test_one_request_confesses_once(events: List[pb.ActivityUpdate]) -> None:
         [e for e in events if e.kind == activity_mod.KIND_SERVE_DEGRADE]) == 1
 
 
-def test_pinned_cell_unavailable_is_a_wire_fallback_class() -> None:
+def test_pinned_compiled_graph_unavailable_is_a_wire_fallback_class() -> None:
     """A token `resolve()` does not recognise never reaches `metrics.
     fallback_reason` — the request would report the degrade nowhere."""
     served = serving_mode_mod.resolve(

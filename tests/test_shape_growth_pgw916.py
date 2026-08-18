@@ -6,7 +6,7 @@ pipeline carries a **dynamo** router, and an AOT-armed pipeline never has one
 so ``compile_cache.enable`` — the only thing that installs a router — is never
 reached).  Every one of the executor's three growth call sites is therefore a
 silent no-op on an AOT arm, the ``_shape_warm_republisher`` closure is built
-and discarded, and ``fleet_cells.republish_after_shape_warm`` has no reachable
+and discarded, and ``fleet_compiled_graphs.republish_after_shape_warm`` has no reachable
 caller — leaving 16 of 18 declared graph classes serving eager, permanently, on
 every pod.
 

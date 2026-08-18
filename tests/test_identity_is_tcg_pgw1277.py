@@ -7,7 +7,7 @@ artifact since pgw#1270 — writes ``graph_class``. Nothing in ``src/`` has
 written an ``entry`` block since that cut; only fixtures did. So every
 production consumer of the block was reading a shape that no longer exists:
 
-* ``fleet_cells._identity_axes`` raised ``CellPublishRefused`` on every real
+* ``fleet_compiled_graphs._identity_axes`` raised ``CompiledGraphPublishRefused`` on every real
   artifact — self-mint publish was broken outright;
 * ``mint_supervisor`` counted every already-packed graph class as NOT held and
   recompiled it, because the ``KeyError`` landed in a broad ``except`` that
@@ -32,7 +32,7 @@ import pytest
 from gen_worker._vendor.torchcg import identity as tcg_identity
 from gen_worker._vendor.torchcg import is_compiled_graph_key
 
-from gen_worker import env_seal, fleet_cells, graph_facts, local_cell_store
+from gen_worker import env_seal, fleet_compiled_graphs, graph_facts, local_compiled_graph_store
 
 #: Exactly the metadata shape ``aot_mint`` records for a minted graph class:
 #: TCG's ``graph_class`` block, never an ``entry`` block.
@@ -52,7 +52,7 @@ TCG_METADATA: dict[str, Any] = {
 #: vocabulary has none. It rides the mint provenance the local store holds, and
 #: the publish path fails closed without it, which is a separate refusal from
 #: the identity one this file is about.
-PROVENANCE = local_cell_store.MintProvenance(
+PROVENANCE = local_compiled_graph_store.MintProvenance(
     env_seal=env_seal.seal_digest({"v": 4, "matmul_precision": "high"}),
     lane="bf16-w16a16", sku="l4", gen_worker="0.123.0")
 
@@ -81,7 +81,7 @@ def test_the_worker_publish_path_keys_a_real_tcg_artifact() -> None:
     Mutate ``graph_class`` back to ``entry`` and this fails — which is the
     regression, stated as a test rather than as a comment.
     """
-    axes = fleet_cells._identity_axes("toy", dict(TCG_METADATA), PROVENANCE)
+    axes = fleet_compiled_graphs._identity_axes("toy", dict(TCG_METADATA), PROVENANCE)
     expected = tcg_identity.from_artifact_metadata(TCG_METADATA)
     assert axes["graph"] == "a" * 16
     assert axes["sm"] == "sm_89"

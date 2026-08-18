@@ -93,7 +93,7 @@ Two things that are not refusals but must be priced:
   forward through the sharded modules issues collectives, and the only
   participant-supplying seam is the pipeline-level SP gate — a warm compile, a
   mint seed or a probe forward would hang the group. So no compile selection is
-  fetched, no target installs, no cell adopts. Cells and `sp_degree` in the key
+  fetched, no target installs, no compiled graph adopts. Compiled graphs and `sp_degree` in the key
   are a later phase.
 - **The degraded ladder is refused, not adapted.** It picks an offload rung
   from one card's free VRAM; two ranks that OOM differently execute different

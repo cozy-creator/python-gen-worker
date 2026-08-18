@@ -104,7 +104,7 @@ def packed_shape(width: int, height: int) -> int:
 
     The pgw#1346 K9 workaround, reused verbatim from B2's ``sdxl``: a runner's
     variants are the CROSS PRODUCT of its axes, so ``width`` x ``height`` would
-    demand a traced class at every cell of a grid whose diagonal is the only
+    demand a traced class at every compiled graph of a grid whose diagonal is the only
     part anyone serves. ``1280x720`` reads as ``12800720`` in the generated
     ``Literal`` and ``720x1280`` as ``7201280`` — two coordinates, not four.
 
@@ -112,7 +112,7 @@ def packed_shape(width: int, height: int) -> int:
     K9's video question.** ``frames`` is a SEPARATE declared axis and it
     composes honestly: Wan's served set is one frame count per family (81 on
     A14B, 121 on TI2V-5B), so ``shape`` x ``frames`` is 2x1 and 1x1
-    respectively — TOTAL, with no phantom cell. The packed trick is still owed
+    respectively — TOTAL, with no phantom compiled graph. The packed trick is still owed
     a real fix (a tuple-valued bucket axis), but it is owed for the same two
     numbers it was owed for in B2, not for three.
     """

@@ -3,7 +3,7 @@
 ``us -> pytorch settings``, never ``[us, ambient world] -> pytorch settings``:
 every torch/dynamo/inductor process setting this worker runs under is DECLARED
 in this module's tables, imposed from here, and verified against the
-declaration. Cell identity (``env_seal``) derives from :func:`declaration` —
+declaration. Compiled graph identity (``env_seal``) derives from :func:`declaration` —
 the seal digests what WE declared, never a read-back of whatever the process
 happens to hold — so ambient mutation is structurally unable to move identity.
 It can only trip the drift tripwire (kept in ``env_seal`` as the runtime
@@ -70,7 +70,7 @@ AUTHORITY_MODULES: Tuple[str, ...] = (
 #: ``expandable_segments``.
 #:
 #: TORCHINDUCTOR_AUTOGRAD_CACHE=0: the AOTAutogradCache key embeds a process
-#: address (ASLR) and can never hit across pods; cell portability needs the
+#: address (ASLR) and can never hit across pods; compiled graph portability needs the
 #: portable FxGraphCache to be the lookup surface.
 #:
 #: NCCL_NVLS_ENABLE=0: NVLS multicast cannot be bound in our containers
@@ -136,7 +136,7 @@ def declaration(
     else:
         # Knob names are still validated (torch-free contract); a DECLARED
         # knob on a torchless image refuses — honouring it silently would
-        # fork cell identity.
+        # fork compiled graph identity.
         validated_table(overrides)
         if overrides:
             raise SettingsImpositionError(
@@ -379,7 +379,7 @@ def impose_dynamo() -> Dict[str, str]:
 def disable_autograd_cache() -> None:
     """The AOTAutogradCache key hashes ``fx_kwargs[get_decomp_fn]`` via the
     function's REPR — a process memory address (ASLR), so AOT keys can NEVER
-    match across processes/pods. Cell portability requires the
+    match across processes/pods. Compiled graph portability requires the
     (portable) FxGraphCache to be the lookup surface: disable the AOT layer
     symmetrically for producer capture and consumer seeding.
 

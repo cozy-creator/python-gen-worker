@@ -264,8 +264,8 @@ def sm_probe(
     --vehicle micro` runs the FULL production cycle against
     `examples/micro-diffusion` — resolve, `MintSlot` handoff, a real child
     interpreter, warmup, `torch.export` + AOTInductor, seal, publish, and a
-    SECOND OS process adopting the exact named cell and comparing every arm to
-    eager — and its publish leg goes to `harness.cell_hub.LocalCellHub`,
+    SECOND OS process adopting the exact named compiled graph and comparing every arm to
+    eager — and its publish leg goes to `harness.compiled_graph_hub.LocalCompiledGraphHub`,
     IN-PROCESS. So one pod proves compile AND re-use AND parity on that card,
     with nothing external to be blocked on.
 
@@ -301,7 +301,7 @@ def sm_probe(
         ),
         uploads=uploads + (Upload(local=archive),),
         artifacts=(report, f"{POD_ROOT}/{name}.log", f"{POD_ROOT}/rigboot.json"),
-        # A cell that was never written is not a cleared sm, whatever the log says.
+        # A compiled graph that was never written is not a cleared sm, whatever the log says.
         required_artifacts=(report,),
         progress_paths=(root, "/root/.cache/torchinductor_root", "/root/.triton", POD_REPO),
         env={"TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor_root"},
@@ -320,13 +320,13 @@ def mint_model(
     """pgw#1331's owed leg as a workload value.
 
     `gen-worker model mint` needs a GPU and a real toolchain and needs NO
-    weights and NO network for the model — cell identity is checkpoint-free
+    weights and NO network for the model — compiled graph identity is checkpoint-free
     (§4.27) and the constants arrive at arm time from the store. That is what
     makes a per-model mint pod cheap enough to be routine, and it is why this
     workload ships no checkpoint machinery at all.
     """
     only = " ".join(f"--runner {r}" for r in runners)
-    out = f"{POD_ROOT}/cells"
+    out = f"{POD_ROOT}/compiled graphs"
     # THE FLEET-LINE AUTHORITY HAS TO BE SHIPPED, and finding that out cost a
     # pod. RIG-ENV §2: rigcheck reads endpoint.toml / fleet-floors.toml /
     # ENDPOINT dist metadata, and deliberately does NOT accept `gen-worker`'s own
@@ -355,7 +355,7 @@ def mint_model(
         artifacts=(f"{POD_ROOT}/minted.json", f"{POD_ROOT}/{name}.log", f"{POD_ROOT}/rigboot.json"),
         # A mint that produced no row produced nothing, whatever the log claims.
         required_artifacts=(f"{POD_ROOT}/minted.json",),
-        # The AOTI object cache and the packed cells both grow throughout the
+        # The AOTI object cache and the packed compiled graphs both grow throughout the
         # compile; the log can be silent for minutes while they do.
         progress_paths=(out, f"{POD_ROOT}/work", "/root/.cache/torchinductor_root", "/root/.triton"),
         env=env,

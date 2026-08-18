@@ -469,7 +469,7 @@ def test_a_stamped_recipe_decodes_onto_an_eager_instance() -> None:
 def test_an_external_binary_model_has_no_backing_for_adopt_to_fold() -> None:
     """MEASURED, and it is what B5's MIGRATION half still owes (not this one).
 
-    ``Model.adopt`` folds an eager module map and an armed compiled cell into
+    ``Model.adopt`` folds an eager module map and an armed compiled graph into
     one ``DualBacking``, and refuses when both are absent. An external-binary
     model has NEITHER by definition: llama-server owns the weights in another
     process, and vLLM in another still. W1b-2 supplies the eager half from

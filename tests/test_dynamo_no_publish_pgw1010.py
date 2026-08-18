@@ -1,13 +1,13 @@
 """The JIT recipe serves, and produces nothing.
 
-Reuse is AOT cells only; JIT is intake mode with honest cold boots.
-``aot_cells._candidates`` rejects ``kind="torch-inductor-cache"`` BY NAME and
-nothing else adopts one, so a dynamo cell has zero possible consumers and every
+Reuse is compiled graphs only; JIT is intake mode with honest cold boots.
+``aot_compiled_graphs._candidates`` rejects ``kind="torch-inductor-cache"`` BY NAME and
+nothing else adopts one, so a dynamo compiled graph has zero possible consumers and every
 one minted is pod time and platform storage spent on an unadoptable artifact.
 
 The dynamo recipe KEEPS its serving role (intake for a family with no export
 declaration). What it loses is the artifact: no seal, no key, no publish, no
-``cell_store`` row, no mint obligation.
+``compiled_graph_store`` row, no mint obligation.
 
 Two guards, because either alone is weak:
 
@@ -30,9 +30,9 @@ from typing import Any, Dict, List, Tuple
 import pytest
 
 from gen_worker import activity as activity_mod
-from gen_worker import cell_adopt
+from gen_worker import compiled_graph_adopt
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells as fc
+from gen_worker import fleet_compiled_graphs as fc
 from gen_worker import serving_mode
 from gen_worker.models import provision
 
@@ -41,7 +41,7 @@ from gen_worker.models import provision
 # source guard
 # ---------------------------------------------------------------------------
 
-#: Every name that seals a cell, publishes one, or records one hub-side. A
+#: Every name that seals a compiled graph, publishes one, or records one hub-side. A
 #: call to any of these from the intake branch is the defect this file exists
 #: to make impossible.
 _SEAL_PUBLISH_VOCABULARY = frozenset({
@@ -106,7 +106,7 @@ def test_the_intake_branch_returns_before_a_compiled_graph_key_exists() -> None:
             func = node.func
             if isinstance(func, ast.Attribute) and func.attr == "compute":
                 raise AssertionError(
-                    "the intake branch computes a cell key — intake names no "
+                    "the intake branch computes a compiled graph key — intake names no "
                     "artifact, so it must not claim an identity")
     assert any(isinstance(node, ast.Return) for node in ast.walk(branch)), (
         "the intake branch must RETURN — falling through into the AOT mint is "
@@ -114,7 +114,7 @@ def test_the_intake_branch_returns_before_a_compiled_graph_key_exists() -> None:
 
 
 def test_the_dynamo_seal_surface_is_deleted_not_gated() -> None:
-    """§4.24 hardcut: the functions that packed and republished a JIT cell are
+    """§4.24 hardcut: the functions that packed and republished a JIT graph are
     gone. A flag that re-enables them is exactly what this issue refuses."""
     for name in ("finish_fleet_mint", "begin_fleet_mint"):
         assert not hasattr(cc, name), (
@@ -124,8 +124,8 @@ def test_the_dynamo_seal_surface_is_deleted_not_gated() -> None:
         "the intake ARM is what survived the cut — serving is untouched")
     for name in ("finalize_self_mint", "republish_after_shape_warm"):
         assert not hasattr(fc, name), (
-            f"fleet_cells.{name} is back — the in-process capture packed a "
-            "dynamo cell and the shape-warm republish shipped one")
+            f"fleet_compiled_graphs.{name} is back — the in-process capture packed a "
+            "dynamo compiled graph and the shape-warm republish shipped one")
 
 
 def test_every_pending_is_a_delegated_aot_mint() -> None:
@@ -146,12 +146,12 @@ def test_the_retired_capture_tokens_are_gone_from_the_vocabulary() -> None:
     inductor cache-dir move die with it — a token nobody can reach is a cause
     a reader hunts for and never finds (pgw#813's rule, applied to a deletion).
     """
-    values = {member.value for member in cell_adopt.EagerPhase}
+    values = {member.value for member in compiled_graph_adopt.EagerPhase}
     assert values.isdisjoint({
-        "delivered_cell_seeded", "capture_conflict", "multi_group_in_process",
+        "delivered_compiled_graph_seeded", "capture_conflict", "multi_group_in_process",
         "capture_arm_failed",
     })
-    assert cell_adopt.EagerPhase.JIT_ARM_FAILED.value == "jit_arm_failed"
+    assert compiled_graph_adopt.EagerPhase.JIT_ARM_FAILED.value == "jit_arm_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -202,21 +202,21 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     return seen
 
 
-def _publisher(calls: List[Any]) -> fc.CellPublisher:
-    class _Pub(fc.CellPublisher):
+def _publisher(calls: List[Any]) -> fc.CompiledGraphPublisher:
+    class _Pub(fc.CompiledGraphPublisher):
         def publish(self, family: str, artifact: Path, meta: Dict[str, Any],
                     mint_duration_ms: int = 0) -> str:  # pragma: no cover
             calls.append((family, artifact))
             raise AssertionError(
-                "a JIT intake arm published a cell (pgw#1010)")
+                "a JIT intake arm published a compiled graph (pgw#1010)")
 
     return _Pub(base_url="http://hub", worker_jwt=lambda: "jwt",
                 image_digest="sha256:img")
 
 
 def _miss_with_no_declaration(monkeypatch: pytest.MonkeyPatch) -> List[str]:
-    """A compile-cell MISS on a family that declares no export: the exact
-    shape that used to mint, pack and publish a dynamo cell."""
+    """A compiled graph MISS on a family that declares no export: the exact
+    shape that used to mint, pack and publish a dynamo compiled graph."""
     armed: List[str] = []
     monkeypatch.setattr(
         provision, "enable_compiled",
@@ -260,12 +260,12 @@ def test_a_dynamo_miss_serves_intake_and_publishes_nothing(
 
 def test_an_intake_armed_pipeline_reports_jit_not_eager() -> None:
     """The measurement half. An intake pod serves COMPILED and names no
-    artifact, so classifying it by the (absent) cell ref would report every
+    artifact, so classifying it by the (absent) compiled graph ref would report every
     JIT request as eager and delete the JIT arm of the AOT-vs-JIT comparison.
 
     ...and a pipeline whose guard permanently degraded it back to eager must
     say EAGER again, wrapper or no wrapper — reporting a degraded lane as
-    compiled is the same lie as reporting an unproven cell as adopted.
+    compiled is the same lie as reporting an unproven compiled graph as adopted.
     """
     pipe = _Pipe()
     assert serving_mode.classify_mode("", pipe) == serving_mode.MODE_EAGER

@@ -62,7 +62,7 @@ CFG_BATCH: Final = 2
 #: SD1.5's cross-attention width (CLIP-L) and SD2's (OpenCLIP-H). These two
 #: numbers are the whole reason SD2 is not an INSTANCE of SD1.5: they size the
 #: U-Net's every cross-attention projection, so the two are different graphs
-#: carrying different weight shapes, and one compiled cell cannot serve both.
+#: carrying different weight shapes, and one compiled graph cannot serve both.
 SD15_TEXT_WIDTH: Final = 768
 SD2_TEXT_WIDTH: Final = 1024
 

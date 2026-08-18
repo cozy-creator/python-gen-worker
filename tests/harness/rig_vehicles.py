@@ -16,10 +16,10 @@ A vehicle answers six questions and nothing else:
 
     which modules the mint child imports, and which function it warms
     where its checkpoint comes from (always GENERATED, never fetched)
-    which ``CompileCell`` the parent hands across the delegation boundary
+    which ``CompileContract`` the parent hands across the delegation boundary
     which hub ref names the checkpoint
     which sys.path entries both interpreters need
-    how a SECOND process rebuilds enough pipeline to adopt the cell
+    how a SECOND process rebuilds enough pipeline to adopt the compiled graph
 """
 
 from __future__ import annotations
@@ -53,10 +53,10 @@ class Vehicle:
     build_checkpoint: Callable[[Path], Path]
     #: (tree) -> total bytes on disk.
     checkpoint_bytes: Callable[[Path], int]
-    #: () -> the ``registry.CompileCell`` the delegation boundary carries.
-    compile_cell: Callable[[], Any]
+    #: () -> the ``registry.CompileContract`` the delegation boundary carries.
+    compile_contract: Callable[[], Any]
     #: (base_url, cache_dir, published checkpoint id) -> python source for
-    #: the adopting process (pgw#904: told the exact cell, never listing).
+    #: the adopting process (pgw#904: told the exact compiled graph, never listing).
     adopt_source: Callable[[str, Path, str], str]
     #: What this vehicle proves that the other does not — printed, so a
     #: reported cycle time is never read against the wrong vehicle.
@@ -73,8 +73,8 @@ class Vehicle:
     #: refuses — so a cardless run of these is NOT-RUN, never a red.
     gpu_only: bool = False
     #: pgw#1042: (tree, device) -> (pipe, cfg) for the PARENT-side handback —
-    #: the rig process that opened the mint adopting its own child's cell
-    #: through `fleet_cells.adopt_delegated_mint`, exactly as a pod does
+    #: the rig process that opened the mint adopting its own child's compiled graph
+    #: through `fleet_compiled_graphs.adopt_delegated_mint`, exactly as a pod does
     #: BEFORE anything publishes. None skips the leg (the tiny plumbing
     #: vehicle has no loadable pipeline class).
     parent_pipe: Any = None
@@ -85,12 +85,12 @@ class Vehicle:
 # ---------------------------------------------------------------------------
 
 
-def _tiny_cell() -> Any:
-    from gen_worker.registry import CompileCell
+def _tiny_graph() -> Any:
+    from gen_worker.registry import CompileContract
 
     from harness import tiny_diffusion_endpoint as ep
 
-    return CompileCell(
+    return CompileContract(
         shapes=(ep.PIXEL_SHAPE,), targets=("unet",), family=ep.FAMILY,
         regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
@@ -102,19 +102,19 @@ sys.path.insert(0, %(tests)r)
 sys.path.insert(0, %(src)r)
 from pathlib import Path
 from types import SimpleNamespace
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 from harness import tiny_diffusion_endpoint as ep
 from harness.tiny_diffusion import TinyUNet
 
-cfg = CompileCell(
+cfg = CompileContract(
     shapes=(ep.PIXEL_SHAPE,), targets=("unet",), family=ep.FAMILY,
     regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
     guidance_scales=(), text_lens=())
 pipe = SimpleNamespace(unet=TinyUNet().eval())
-from harness.rig_fetch import fetch_named_cell
+from harness.rig_fetch import fetch_named_compiled_graph
 
 try:
-    artifact = fetch_named_cell(
+    artifact = fetch_named_compiled_graph(
         %(base)r, ep.FAMILY, %(checkpoint)r, Path(%(cache)r))
 except Exception:
     artifact = None
@@ -161,7 +161,7 @@ TINY = Vehicle(
     syspath=(),
     build_checkpoint=_tiny_checkpoint,
     checkpoint_bytes=_tiny_checkpoint_bytes,
-    compile_cell=_tiny_cell,
+    compile_contract=_tiny_graph,
     adopt_source=_tiny_adopt_source,
     covers="plumbing: one target, one entry, no container inputs, no packaging",
 )
@@ -172,12 +172,12 @@ TINY = Vehicle(
 # ---------------------------------------------------------------------------
 
 
-def _micro_cell(bucket: int = 0) -> Any:
-    from gen_worker.registry import CompileCell
+def _micro_graph(bucket: int = 0) -> Any:
+    from gen_worker.registry import CompileContract
 
     from micro_diffusion.aot_declaration import COND_LEN, PIXEL_ROWS
 
-    return CompileCell(
+    return CompileContract(
         shapes=PIXEL_ROWS, targets=("transformer", "decoder"),
         family="micro-diffusion", regional=False, text_len=COND_LEN,
         dynamic=(), lora_bucket=int(bucket), guidance_scales=(), text_lens=())
@@ -188,32 +188,32 @@ import json, logging, os, sys
 for p in %(paths)r:
     sys.path.insert(0, p)
 # A MISS is not a crash and its reason lives in the typed `aot-cells` events.
-# Without a configured handler they go nowhere and the rig reports "no cell"
+# Without a configured handler they go nowhere and the rig reports "no compiled graph"
 # for a filter that rejected twelve of them on one axis (pgw#824).
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 # The SAME runtime hook the mint child imported. `aot_serve.verify` compares
-# the cell's stamped sm/torch/cuda against THIS runtime's, so a second process
-# that did not get the same supplied probes rejects the cell the first one just
+# the compiled graph's stamped sm/torch/cuda against THIS runtime's, so a second process
+# that did not get the same supplied probes rejects the compiled graph the first one just
 # minted — and reports it as a filter miss, which is the wrong diagnosis.
 import harness.rig_runtime  # noqa: F401
 import torch
 from pathlib import Path
 from gen_worker import aot_serve
 from gen_worker.models import provision
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 from micro_diffusion.aot_declaration import (
     CFG_ARITY, COND_LEN, PIXEL_ROWS, TOKEN_ROWS)
 from micro_diffusion.pipeline import MicroPipeline
 
 torch.set_num_threads(2)
-cfg = CompileCell(
+cfg = CompileContract(
     shapes=PIXEL_ROWS, targets=("transformer", "decoder"),
     family="micro-diffusion", regional=False, text_len=COND_LEN,
     dynamic=(), lora_bucket=%(bucket)d, guidance_scales=(), text_lens=())
 # The adopting process rebuilds the pipeline from the SAME generated tree,
 # which is the whole point of deterministic weights: a second machine with the
 # seed has the bytes, and the snapshot digest agrees without a download.
-# The cell is minted for the device the mint ran on, and a code-only cell
+# The compiled graph is minted for the device the mint ran on, and a code-only compiled graph
 # binds its constants from RESIDENT weights — so the adopting pipeline must
 # live on that device or the bind fails inside AOTI itself
 # (`update_constant_buffer_func_ ... API call failed`). Measured the first
@@ -222,10 +222,10 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 pipe = MicroPipeline.from_pretrained(os.environ["PGW978_CHECKPOINT"]).to(DEVICE)
 config = pipe.config
 
-# pgw#999: a BUCKET-bearing cell is keyed on the branch-bearing lane, so the
+# pgw#999: a BUCKET-bearing compiled graph is keyed on the branch-bearing lane, so the
 # adopting side puts itself on the same lane the mint was on — what a serving
 # pod with this endpoint's declared bucket does at boot — or `arm_aot` refuses
-# the very cell it was told to arm.
+# the very compiled graph it was told to arm.
 if int(getattr(cfg, "lora_bucket", 0) or 0):
     from gen_worker import compile_cache as _cc
     _cc.apply_lora_execution_lane(pipe, int(cfg.lora_bucket))
@@ -268,34 +268,34 @@ with torch.no_grad():
         eager[name] = (ref.decoder(lat) if name == "decoder"
                        else ref.transformer(x, t, cond)).clone()
 
-# pgw#904: the adopting process is TOLD the exact cell (checkpoint id from
+# pgw#904: the adopting process is TOLD the exact compiled graph (checkpoint id from
 # the publish leg) — discovery is deleted, and a serving pod is told by
 # `Arm.artifact` the same way.
-from harness.rig_fetch import fetch_named_cell as _fetch_cell
-from types import SimpleNamespace as _CellNS
+from harness.rig_fetch import fetch_named_compiled_graph as _fetch_compiled_graph
+from types import SimpleNamespace as _GraphNS
 import hashlib as _hl
 from gen_worker import compile_cache as _syscc
 try:
-    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+    _art = _fetch_compiled_graph(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
 except Exception as _exc:
-    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
-    cell = None
+    print("rig-fetch: named compiled graph unavailable: %%s" %% (_exc,), file=sys.stderr)
+    graph = None
 else:
     _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
-    cell = _CellNS(
+    graph = _GraphNS(
         artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
-out = {"pid": os.getpid(), "ok": cell is not None}
-if cell is not None:
-    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+out = {"pid": os.getpid(), "ok": compiled graph is not None}
+if compiled graph is not None:
+    meta = aot_serve.unpack_metadata(Path(graph.artifact))
     out.update({
-        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
-        "snapshot_digest": cell.snapshot_digest,
-        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "compiled_graph_key": graph.compiled_graph_key, "family": graph.family, "ref": graph.ref,
+        "snapshot_digest": graph.snapshot_digest,
+        "artifact_bytes": Path(graph.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
     })
-    # PARITY. Adoption that is never CALLED proves the filter, not the cell —
+    # PARITY. Adoption that is never CALLED proves the filter, not the compiled graph —
     # and the serve-side call is exactly where pgw#994 lives: a container
     # input expands to N leaves and every contract position after it shifts.
     #
@@ -304,9 +304,9 @@ if cell is not None:
     # route, the lifted-LoRA install for a bucket-bearing cfg, and the
     # numerics gate. Arming via `enable` left every one of those uncovered —
     # which is why a cycle could be green while the path that refused sdxl's
-    # 36/36 cell had never run locally at all.
+    # 36/36 compiled graph had never run locally at all.
     outcome = provision.arm_aot(
-        pipe, cfg, Path(%(cache)r), Path(cell.artifact),
+        pipe, cfg, Path(%(cache)r), Path(graph.artifact),
         int(getattr(cfg, "lora_bucket", 0) or 0))
     out["armed"] = bool(outcome)
     out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
@@ -331,7 +331,7 @@ if cell is not None:
     else:
         # pgw#999, in the rig's own code: a leg that reports OK while the arm
         # REFUSED is the same defect this issue is about, one layer out. An
-        # unarmed cell has served nothing and proved nothing.
+        # unarmed compiled graph has served nothing and proved nothing.
         out["ok"] = False
 print("RIG_ADOPT " + json.dumps(out))
 '''
@@ -341,9 +341,9 @@ def _micro_adopt_source_for(bucket: int) -> Any:
     """The adopt child's source for ONE bucket.
 
     A factory rather than a constant: the adopting process must construct the
-    SAME `CompileCell` the mint was keyed on, and a hardcoded `lora_bucket=0`
+    SAME `CompileContract` the mint was keyed on, and a hardcoded `lora_bucket=0`
     made a bucket-bearing vehicle's adopter compute `lane=plain` and reject
-    its own cell with `lane_mismatch` before arming (measured, pgw#999).
+    its own compiled graph with `lane_mismatch` before arming (measured, pgw#999).
     """
 
     def _source(base: str, cache: Path, checkpoint: str) -> str:
@@ -356,7 +356,7 @@ def _micro_adopt_source_for(bucket: int) -> Any:
 
 
 def _micro_parent_for(bucket: int, pipeline_cls: str = "MicroPipeline",
-                      cell: Any = None) -> Any:
+                      graph: Any = None) -> Any:
     """(tree, device) -> (pipe, cfg): the mint-opening parent's own pipeline,
     on the mint's lane — what `adopt_delegated_mint` arms on a pod
     (pgw#1042). Mirrors the adopt sources: same class, same device rule,
@@ -377,7 +377,7 @@ def _micro_parent_for(bucket: int, pipeline_cls: str = "MicroPipeline",
             pipe._cozy_weight_lane = "w8a8"
         if bucket:
             cc.apply_lora_execution_lane(pipe, bucket)
-        cfg = cell() if cell is not None else _micro_cell(bucket)
+        cfg = graph() if graph is not None else _micro_graph(bucket)
         return pipe, cfg
 
     return _build
@@ -411,7 +411,7 @@ MICRO = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=_micro_cell,
+    compile_contract=_micro_graph,
     adopt_source=_micro_adopt_source_for(0),
     parent_pipe=_micro_parent_for(0),
     covers=("org-worker packaging: 3 export entries (2 fork arms + a second "
@@ -422,7 +422,7 @@ MICRO = Vehicle(
 
 # ---------------------------------------------------------------------------
 # micro-lora — pgw#999's diagnosis vehicle. The SAME family on the
-# BRANCH-BEARING graph, which is the axis sdxl's refused cell differs on.
+# BRANCH-BEARING graph, which is the axis sdxl's refused compiled graph differs on.
 # ---------------------------------------------------------------------------
 
 #: sdxl's stamp at the refused mint was `w8a8-lora64`. The w8a8 half cannot be
@@ -442,7 +442,7 @@ MICRO_LORA = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=lambda: _micro_cell(MICRO_LORA_BUCKET),
+    compile_contract=lambda: _micro_graph(MICRO_LORA_BUCKET),
     adopt_source=_micro_adopt_source_for(MICRO_LORA_BUCKET),
     parent_pipe=_micro_parent_for(MICRO_LORA_BUCKET),
     covers=(f"everything `micro` covers, on the BRANCH-BEARING graph "
@@ -457,10 +457,10 @@ MICRO_LORA = Vehicle(
 # micro-lora-plain-parent — pgw#999's design question, as a standing leg
 # ---------------------------------------------------------------------------
 
-#: A `lora64` cell offered to a parent that boots on the PLAIN lane. This is
+#: A `lora64` compiled graph offered to a parent that boots on the PLAIN lane. This is
 #: A1 step 8's "boot a SECOND pod cold and adopt", and it is EXPECTED to be
 #: refused. pgw#904 moved the refusal from discovery's lane filter (deleted)
-#: to the arm gate itself: the plain-lane parent fetches the exact named cell
+#: to the arm gate itself: the plain-lane parent fetches the exact named compiled graph
 #: and `arm_aot` refuses it on lane drift. Standing here so the day it
 #: silently starts passing is visible.
 MICRO_LORA_PLAIN_PARENT = Vehicle(
@@ -472,17 +472,17 @@ MICRO_LORA_PLAIN_PARENT = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=lambda: _micro_cell(MICRO_LORA_BUCKET),
+    compile_contract=lambda: _micro_graph(MICRO_LORA_BUCKET),
     # The MINT is bucket 64; the ADOPTER is bucket 0. That mismatch is the
     # whole point of the leg. The HANDBACK parent carries the mint's own
     # bucket — the pod that opened the mint always matches its own request.
     adopt_source=_micro_adopt_source_for(0),
     parent_pipe=_micro_parent_for(MICRO_LORA_BUCKET),
-    covers=("the pgw#999 design question: a bucket-bearing cell offered to a "
+    covers=("the pgw#999 design question: a bucket-bearing compiled graph offered to a "
             "parent on the plain lane"),
     expect="red",
-    expect_note=("the arm gate refuses the exact named cell on lane drift — "
-                 "the adopting pod must carry the cell's own lora bucket "
+    expect_note=("the arm gate refuses the exact named compiled graph on lane drift — "
+                 "the adopting pod must carry the compiled graph's own lora bucket "
                  "(required line in attempt 27's choreography)"),
 )
 
@@ -494,12 +494,12 @@ MICRO_LORA_PLAIN_PARENT = Vehicle(
 # ---------------------------------------------------------------------------
 
 
-def _micro_4d_cell() -> Any:
-    from gen_worker.registry import CompileCell
+def _micro_4d_graph() -> Any:
+    from gen_worker.registry import CompileContract
 
     from micro_diffusion.aot_declaration_4d import COND_LEN, PIXEL_ROWS
 
-    return CompileCell(
+    return CompileContract(
         shapes=PIXEL_ROWS, targets=("transformer",), family="micro-4d",
         regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
@@ -515,13 +515,13 @@ import torch
 from pathlib import Path
 from gen_worker import aot_serve
 from gen_worker.models import provision
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 from micro_diffusion.aot_declaration_4d import ARITY, COND_LEN, LATENT_ROWS, PIXEL_ROWS
 from micro_diffusion.pipeline import MicroGridPipeline
 
 torch.set_num_threads(2)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-cfg = CompileCell(
+cfg = CompileContract(
     shapes=PIXEL_ROWS, targets=("transformer",), family="micro-4d",
     regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
     guidance_scales=(), text_lens=())
@@ -548,34 +548,34 @@ with torch.no_grad():
         x, t, cond = _feed(grid)
         eager[name] = pipe.transformer(x, t, cond).clone()
 
-# pgw#904: the adopting process is TOLD the exact cell (checkpoint id from
+# pgw#904: the adopting process is TOLD the exact compiled graph (checkpoint id from
 # the publish leg) — discovery is deleted, and a serving pod is told by
 # `Arm.artifact` the same way.
-from harness.rig_fetch import fetch_named_cell as _fetch_cell
-from types import SimpleNamespace as _CellNS
+from harness.rig_fetch import fetch_named_compiled_graph as _fetch_compiled_graph
+from types import SimpleNamespace as _GraphNS
 import hashlib as _hl
 from gen_worker import compile_cache as _syscc
 try:
-    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+    _art = _fetch_compiled_graph(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
 except Exception as _exc:
-    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
-    cell = None
+    print("rig-fetch: named compiled graph unavailable: %%s" %% (_exc,), file=sys.stderr)
+    graph = None
 else:
     _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
-    cell = _CellNS(
+    graph = _GraphNS(
         artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
-out = {"pid": os.getpid(), "ok": cell is not None}
-if cell is not None:
-    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+out = {"pid": os.getpid(), "ok": compiled graph is not None}
+if compiled graph is not None:
+    meta = aot_serve.unpack_metadata(Path(graph.artifact))
     out.update({
-        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
-        "snapshot_digest": cell.snapshot_digest,
-        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "compiled_graph_key": graph.compiled_graph_key, "family": graph.family, "ref": graph.ref,
+        "snapshot_digest": graph.snapshot_digest,
+        "artifact_bytes": Path(graph.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
     })
-    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), 0)
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(graph.artifact), 0)
     out["armed"] = bool(outcome)
     out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
     out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
@@ -611,9 +611,9 @@ MICRO_4D = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=_micro_4d_cell,
+    compile_contract=_micro_4d_graph,
     adopt_source=_micro_4d_adopt_source,
-    parent_pipe=_micro_parent_for(0, "MicroGridPipeline", _micro_4d_cell),
+    parent_pipe=_micro_parent_for(0, "MicroGridPipeline", _micro_4d_graph),
     covers=("pgw#998's shape — a 4-D latent with BOTH spatial axes dynamic, so "
             "every matmul's M extent is NONLINEAR in the traced symbols. This "
             "is z-image's declaration, and the seam that was unlowerable "
@@ -625,7 +625,7 @@ MICRO_4D = Vehicle(
 
 # ---------------------------------------------------------------------------
 # micro-lora16 — pgw#1073: a SECOND rank bucket. The bucket is a KEY axis
-# (`<base>-lora<bucket>`), so two buckets are two lanes and two cells; a
+# (`<base>-lora<bucket>`), so two buckets are two lanes and two compiled graphs; a
 # single standing bucket (64) means the axis itself is never varied. This
 # member re-proves that the lane label, the branch allocation and the arm
 # gate all follow the NUMBER rather than merely following "lora on".
@@ -648,12 +648,12 @@ MICRO_LORA16 = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=lambda: _micro_cell(MICRO_LORA16_BUCKET),
+    compile_contract=lambda: _micro_graph(MICRO_LORA16_BUCKET),
     adopt_source=_micro_adopt_source_for(MICRO_LORA16_BUCKET),
     parent_pipe=_micro_parent_for(MICRO_LORA16_BUCKET),
     covers=(f"pgw#1073: everything `micro-lora` covers at a SECOND rank "
             f"bucket (lora_bucket={MICRO_LORA16_BUCKET}) — the bucket is a "
-            f"key axis, so this cell's lane is `lora16`, disjoint from "
+            f"key axis, so this compiled graph's lane is `lora16`, disjoint from "
             f"`lora64`'s, and the arm gate must follow the number"),
 )
 
@@ -666,12 +666,12 @@ MICRO_LORA16 = Vehicle(
 # ---------------------------------------------------------------------------
 
 
-def _micro_conv_cell() -> Any:
-    from gen_worker.registry import CompileCell
+def _micro_conv_graph() -> Any:
+    from gen_worker.registry import CompileContract
 
     from micro_diffusion.aot_declaration_conv import COND_LEN, PIXEL_ROWS
 
-    return CompileCell(
+    return CompileContract(
         shapes=PIXEL_ROWS, targets=("unet",), family="micro-conv",
         regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
@@ -687,7 +687,7 @@ import torch
 from pathlib import Path
 from gen_worker import aot_serve
 from gen_worker.models import provision
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 from micro_diffusion.aot_declaration_conv import (
     CFG_ARITY, COND_LEN, LATENT_ROWS, PIXEL_ROWS)
 from micro_diffusion.model_conv import NUM_TRAIN_TIMESTEPS
@@ -695,7 +695,7 @@ from micro_diffusion.pipeline import MicroConvPipeline
 
 torch.set_num_threads(2)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-cfg = CompileCell(
+cfg = CompileContract(
     shapes=PIXEL_ROWS, targets=("unet",), family="micro-conv",
     regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
     guidance_scales=(), text_lens=())
@@ -728,31 +728,31 @@ with torch.no_grad():
         sample, timestep, cond = _feed(batch, grid)
         eager[name] = ref.unet(sample, timestep, cond).clone()
 
-from harness.rig_fetch import fetch_named_cell as _fetch_cell
-from types import SimpleNamespace as _CellNS
+from harness.rig_fetch import fetch_named_compiled_graph as _fetch_compiled_graph
+from types import SimpleNamespace as _GraphNS
 import hashlib as _hl
 from gen_worker import compile_cache as _syscc
 try:
-    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+    _art = _fetch_compiled_graph(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
 except Exception as _exc:
-    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
-    cell = None
+    print("rig-fetch: named compiled graph unavailable: %%s" %% (_exc,), file=sys.stderr)
+    graph = None
 else:
     _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
-    cell = _CellNS(
+    graph = _GraphNS(
         artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
-out = {"pid": os.getpid(), "ok": cell is not None}
-if cell is not None:
-    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+out = {"pid": os.getpid(), "ok": compiled graph is not None}
+if compiled graph is not None:
+    meta = aot_serve.unpack_metadata(Path(graph.artifact))
     out.update({
-        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
-        "snapshot_digest": cell.snapshot_digest,
-        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "compiled_graph_key": graph.compiled_graph_key, "family": graph.family, "ref": graph.ref,
+        "snapshot_digest": graph.snapshot_digest,
+        "artifact_bytes": Path(graph.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
     })
-    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), 0)
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(graph.artifact), 0)
     out["armed"] = bool(outcome)
     out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
     out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
@@ -804,9 +804,9 @@ MICRO_CONV = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=_micro_conv_cell,
+    compile_contract=_micro_conv_graph,
     adopt_source=_micro_conv_adopt_source,
-    parent_pipe=_micro_parent_for(0, "MicroConvPipeline", _micro_conv_cell),
+    parent_pipe=_micro_parent_for(0, "MicroConvPipeline", _micro_conv_graph),
     covers=("pgw#1073: the STATIC-ROWS class at micro scale — conv-bearing "
             "(so #730 forces the strategy), 4 static entries (2 rows x cfg "
             "fork, the sdxl generator), an INT64 timestep indexing an "
@@ -831,14 +831,14 @@ import torch
 from pathlib import Path
 from gen_worker import aot_serve, compile_cache as cc
 from gen_worker.models import provision
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 from micro_diffusion.aot_declaration import CFG_ARITY, COND_LEN, PIXEL_ROWS, TOKEN_ROWS
 from micro_diffusion.pipeline import MicroW8a8Pipeline
 
 torch.set_num_threads(2)
 DEVICE = "cuda"
 BUCKET = %(bucket)d
-cfg = CompileCell(
+cfg = CompileContract(
     shapes=PIXEL_ROWS, targets=("transformer", "decoder"),
     family="micro-diffusion", regional=False, text_len=COND_LEN,
     dynamic=(), lora_bucket=BUCKET, guidance_scales=(), text_lens=())
@@ -889,35 +889,35 @@ with torch.no_grad():
         eager[name] = (ref.decoder(lat) if name == "decoder"
                        else ref.transformer(x, t, cond)).clone()
 
-# pgw#904: the adopting process is TOLD the exact cell (checkpoint id from
+# pgw#904: the adopting process is TOLD the exact compiled graph (checkpoint id from
 # the publish leg) — discovery is deleted, and a serving pod is told by
 # `Arm.artifact` the same way.
-from harness.rig_fetch import fetch_named_cell as _fetch_cell
-from types import SimpleNamespace as _CellNS
+from harness.rig_fetch import fetch_named_compiled_graph as _fetch_compiled_graph
+from types import SimpleNamespace as _GraphNS
 import hashlib as _hl
 from gen_worker import compile_cache as _syscc
 try:
-    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+    _art = _fetch_compiled_graph(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
 except Exception as _exc:
-    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
-    cell = None
+    print("rig-fetch: named compiled graph unavailable: %%s" %% (_exc,), file=sys.stderr)
+    graph = None
 else:
     _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
-    cell = _CellNS(
+    graph = _GraphNS(
         artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
-out = {"pid": os.getpid(), "ok": cell is not None}
-if cell is not None:
-    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+out = {"pid": os.getpid(), "ok": compiled graph is not None}
+if compiled graph is not None:
+    meta = aot_serve.unpack_metadata(Path(graph.artifact))
     out.update({
-        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
-        "snapshot_digest": cell.snapshot_digest,
-        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "compiled_graph_key": graph.compiled_graph_key, "family": graph.family, "ref": graph.ref,
+        "snapshot_digest": graph.snapshot_digest,
+        "artifact_bytes": Path(graph.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
         "precision": meta.get("precision"),
     })
-    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), BUCKET)
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(graph.artifact), BUCKET)
     out["armed"] = bool(outcome)
     out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
     out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
@@ -980,7 +980,7 @@ def _w8a8_vehicle(name: str, bucket: int) -> Vehicle:
         syspath=(str(MICRO_SRC),),
         build_checkpoint=_micro_w8a8_checkpoint,
         checkpoint_bytes=_micro_checkpoint_bytes,
-        compile_cell=lambda: _micro_cell(bucket),
+        compile_contract=lambda: _micro_graph(bucket),
         adopt_source=_micro_w8a8_adopt_source_for(bucket),
         parent_pipe=_micro_parent_for(bucket, "MicroW8a8Pipeline"),
         gpu_only=True,
@@ -1005,12 +1005,12 @@ MICRO_W8A8_LORA = _w8a8_vehicle("micro-w8a8-lora", MICRO_LORA_BUCKET)
 # ---------------------------------------------------------------------------
 
 
-def _micro_escape_cell() -> Any:
-    from gen_worker.registry import CompileCell
+def _micro_escape_graph() -> Any:
+    from gen_worker.registry import CompileContract
 
     from micro_diffusion.aot_declaration_escape import COND_LEN, PIXEL_ROWS
 
-    return CompileCell(
+    return CompileContract(
         shapes=PIXEL_ROWS, targets=("transformer",), family="micro-escape",
         regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
@@ -1026,14 +1026,14 @@ import torch
 from pathlib import Path
 from gen_worker import aot_serve
 from gen_worker.models import provision
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 from micro_diffusion.aot_declaration_escape import (
     ARITY, COND_LEN, PIXEL_ROWS, TOKEN_ROWS)
 from micro_diffusion.pipeline import MicroEscapePipeline
 
 torch.set_num_threads(2)
 DEVICE = "cuda"  # gpu_only vehicle: the ops in the graph require the card
-cfg = CompileCell(
+cfg = CompileContract(
     shapes=PIXEL_ROWS, targets=("transformer",), family="micro-escape",
     regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
     guidance_scales=(), text_lens=())
@@ -1061,31 +1061,31 @@ with torch.no_grad():
         x, t, cond = _feed(tokens)
         eager[name] = ref.transformer(x, t, cond).clone()
 
-from harness.rig_fetch import fetch_named_cell as _fetch_cell
-from types import SimpleNamespace as _CellNS
+from harness.rig_fetch import fetch_named_compiled_graph as _fetch_compiled_graph
+from types import SimpleNamespace as _GraphNS
 import hashlib as _hl
 from gen_worker import compile_cache as _syscc
 try:
-    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+    _art = _fetch_compiled_graph(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
 except Exception as _exc:
-    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
-    cell = None
+    print("rig-fetch: named compiled graph unavailable: %%s" %% (_exc,), file=sys.stderr)
+    graph = None
 else:
     _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
-    cell = _CellNS(
+    graph = _GraphNS(
         artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
-out = {"pid": os.getpid(), "ok": cell is not None}
-if cell is not None:
-    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+out = {"pid": os.getpid(), "ok": compiled graph is not None}
+if compiled graph is not None:
+    meta = aot_serve.unpack_metadata(Path(graph.artifact))
     out.update({
-        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
-        "snapshot_digest": cell.snapshot_digest,
-        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "compiled_graph_key": graph.compiled_graph_key, "family": graph.family, "ref": graph.ref,
+        "snapshot_digest": graph.snapshot_digest,
+        "artifact_bytes": Path(graph.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
     })
-    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), 0)
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(graph.artifact), 0)
     out["armed"] = bool(outcome)
     out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
     out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
@@ -1121,9 +1121,9 @@ MICRO_ESCAPE = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=_micro_escape_cell,
+    compile_contract=_micro_escape_graph,
     adopt_source=_micro_escape_adopt_source,
-    parent_pipe=_micro_parent_for(0, "MicroEscapePipeline", _micro_escape_cell),
+    parent_pipe=_micro_parent_for(0, "MicroEscapePipeline", _micro_escape_graph),
     gpu_only=True,
     covers=("pgw#1062 (pgw#1059 amendment 7's escape hatch): author-defined "
             "ops through the WHOLE mint — a torch.library custom op with a "
@@ -1156,7 +1156,7 @@ def _declaration_module(module: str, family: str) -> Any:
     at module scope), so the second import of the same module is a no-op — and
     dozens of test modules call ``reset_export_declarations()``, which empties
     the registry that import populated. The two compose into an order-dependent
-    silent failure: ``compile_cell()`` returns a cell whose family nothing has
+    silent failure: ``compile_contract()`` returns a compiled graph whose family nothing has
     declared, and it surfaces much later and elsewhere as
     ``export_declaration(family) -> None``.
 
@@ -1172,8 +1172,8 @@ def _declaration_module(module: str, family: str) -> Any:
     return mod
 
 
-def _micro_pad32_cell(family: str = "micro-pad32") -> Any:
-    """The cell, AND the declaration registration the parent needs.
+def _micro_pad32_graph(family: str = "micro-pad32") -> Any:
+    """The compiled graph, AND the declaration registration the parent needs.
 
     Importing the family's declaration module is the registration (it calls
     `register_export_declaration` at import), and the parent-side numerics gate
@@ -1182,7 +1182,7 @@ def _micro_pad32_cell(family: str = "micro-pad32") -> Any:
     `no_input_contract` — measured, and the reason this takes a family rather
     than reading one module.
     """
-    from gen_worker.registry import CompileCell
+    from gen_worker.registry import CompileContract
 
     mod = _declaration_module(
         "micro_diffusion.aot_declaration_pad32_branchy"
@@ -1190,7 +1190,7 @@ def _micro_pad32_cell(family: str = "micro-pad32") -> Any:
         else "micro_diffusion.aot_declaration_pad32",
         family)
 
-    return CompileCell(
+    return CompileContract(
         shapes=mod.PIXEL_ROWS, targets=("transformer",), family=family,
         regional=False, text_len=mod.COND_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
@@ -1206,7 +1206,7 @@ import torch
 from pathlib import Path
 from gen_worker import aot_serve
 from gen_worker.models import provision
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 from %(decl)s import (
     ARITY, COND_LEN, LATENT_ROWS, PIXEL_ROWS, UNDECLARED_ROW)
 from micro_diffusion.model_pad32 import SEQ_MULTIPLE_OF, padded_length
@@ -1214,7 +1214,7 @@ from micro_diffusion.pipeline import %(cls)s
 
 torch.set_num_threads(2)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-cfg = CompileCell(
+cfg = CompileContract(
     shapes=PIXEL_ROWS, targets=("transformer",), family=%(family)r,
     regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
     guidance_scales=(), text_lens=())
@@ -1251,32 +1251,32 @@ with torch.no_grad():
         x, t, cond = _feed(grid)
         eager[name] = pipe.transformer(x, t, cond).clone()
 
-from harness.rig_fetch import fetch_named_cell as _fetch_cell
-from types import SimpleNamespace as _CellNS
+from harness.rig_fetch import fetch_named_compiled_graph as _fetch_compiled_graph
+from types import SimpleNamespace as _GraphNS
 import hashlib as _hl
 from gen_worker import compile_cache as _syscc
 try:
-    _art = _fetch_cell(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
+    _art = _fetch_compiled_graph(%(base)r, cfg.family, %(checkpoint)r, Path(%(cache)r))
 except Exception as _exc:
-    print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
-    cell = None
+    print("rig-fetch: named compiled graph unavailable: %%s" %% (_exc,), file=sys.stderr)
+    graph = None
 else:
     _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
-    cell = _CellNS(
+    graph = _GraphNS(
         artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
-out = {"pid": os.getpid(), "ok": cell is not None, "pad_classes": pads,
+out = {"pid": os.getpid(), "ok": compiled graph is not None, "pad_classes": pads,
        "distinct_pads": sorted({v["pad"] for v in pads.values()})}
-if cell is not None:
-    meta = aot_serve.unpack_metadata(Path(cell.artifact))
+if compiled graph is not None:
+    meta = aot_serve.unpack_metadata(Path(graph.artifact))
     out.update({
-        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
-        "snapshot_digest": cell.snapshot_digest,
-        "artifact_bytes": Path(cell.artifact).stat().st_size,
+        "compiled_graph_key": graph.compiled_graph_key, "family": graph.family, "ref": graph.ref,
+        "snapshot_digest": graph.snapshot_digest,
+        "artifact_bytes": Path(graph.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
     })
-    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(cell.artifact), 0)
+    outcome = provision.arm_aot(pipe, cfg, Path(%(cache)r), Path(graph.artifact), 0)
     out["armed"] = bool(outcome)
     out["arm_reason"] = str(getattr(outcome, "reason", "") or "")
     out["arm_detail"] = str(getattr(outcome, "detail", "") or "")[:400]
@@ -1290,7 +1290,7 @@ if cell is not None:
         out["parity_max_abs"] = deltas
         out["execution_count"] = int(aot_serve.execution_count(pipe))
         out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
-        # A cell that served only ONE of the three rows is not a pass, however
+        # A compiled graph that served only ONE of the three rows is not a pass, however
         # small its delta on that row: the whole question is the OTHER rows.
         out["ok"] = (bool(out["parity_ok"])
                      and out["execution_count"] >= len(ARMS)
@@ -1327,9 +1327,9 @@ MICRO_PAD32 = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=_micro_pad32_cell,
+    compile_contract=_micro_pad32_graph,
     adopt_source=_micro_pad32_adopt_source_for("micro-pad32"),
-    parent_pipe=_micro_parent_for(0, "MicroPad32Pipeline", _micro_pad32_cell),
+    parent_pipe=_micro_parent_for(0, "MicroPad32Pipeline", _micro_pad32_graph),
     covers=("ie#637's surviving watch item — a dynamic dim carrying the exact "
             "pad-expression class `32*FloorDiv(L+31,32)` over a token count "
             "that is itself a product of two declared symbols, served at three "
@@ -1347,11 +1347,11 @@ MICRO_PAD32_BRANCHY = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=lambda: _micro_pad32_cell("micro-pad32-branchy"),
+    compile_contract=lambda: _micro_pad32_graph("micro-pad32-branchy"),
     adopt_source=_micro_pad32_adopt_source_for("micro-pad32-branchy"),
     parent_pipe=_micro_parent_for(
         0, "MicroPad32BranchyPipeline",
-        lambda: _micro_pad32_cell("micro-pad32-branchy")),
+        lambda: _micro_pad32_graph("micro-pad32-branchy")),
     expect="green",
     expect_note="",
     covers=("the CONTROL for `micro-pad32` — same declaration, same rows, "
@@ -1376,12 +1376,12 @@ MICRO_PAD32_BRANCHY = Vehicle(
 # ---------------------------------------------------------------------------
 
 
-def _micro_rope_cell() -> Any:
-    from gen_worker.registry import CompileCell
+def _micro_rope_graph() -> Any:
+    from gen_worker.registry import CompileContract
 
     from micro_diffusion.aot_declaration_rope import COND_LEN, PIXEL_ROWS
 
-    return CompileCell(
+    return CompileContract(
         shapes=PIXEL_ROWS, targets=("transformer",), family="micro-rope",
         regional=False, text_len=COND_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
@@ -1391,7 +1391,7 @@ _MICRO_ROPE_ADOPT = """
 import json, os, sys
 out = {"pid": os.getpid(), "ok": False,
        "detail": "micro-rope is a REFUSAL vehicle: the mint never publishes a "
-                 "cell, so there is nothing to adopt"}
+                 "compiled graph, so there is nothing to adopt"}
 print("RIG_ADOPT " + json.dumps(out))
 """
 
@@ -1409,7 +1409,7 @@ MICRO_ROPE = Vehicle(
     syspath=(str(MICRO_SRC),),
     build_checkpoint=_micro_checkpoint,
     checkpoint_bytes=_micro_checkpoint_bytes,
-    compile_cell=_micro_rope_cell,
+    compile_contract=_micro_rope_graph,
     adopt_source=_micro_rope_adopt_source,
     expect="red",
     expect_note=(

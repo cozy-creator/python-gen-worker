@@ -15,7 +15,7 @@ The lane the SDK ships must be:
    module-only walk cannot see it;
 5. exportable, where the hook lane is REFUSED by ``torch.export``;
 6. a DIFFERENT traced graph, visible as a different
-   ``compile_cache.execution_contract`` signature (new cell keys — intended)
+   ``compile_cache.execution_contract`` signature (new compiled graph keys — intended)
    while the ``fp8-hooks`` wire lane value is unchanged;
 7. still a LoRA branch target, with ``_Fp8ScaledLinear``'s
    ``lora_a``/``lora_b`` as DECLARED buffer slots that ``register_buffer``
@@ -267,7 +267,7 @@ def test_execution_lane_value_kept_and_graph_contract_changed(execution_lanes: D
     hook_sig, hook_contract = execution_contract(hooked_pipe, _Cfg())
     new_sig, new_contract = execution_contract(pipe, _Cfg())
     assert hook_contract["lane"] == new_contract["lane"] == "fp8-hooks"
-    assert hook_sig != new_sig, "restructured graphs must not adopt hook cells"
+    assert hook_sig != new_sig, "restructured graphs must not adopt hook compiled graphs"
 
 
 def test_idempotent_and_refuses_to_compose_with_hooks() -> None:

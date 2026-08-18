@@ -165,7 +165,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument(
         "--eager-only", dest="eager_only", action="store_true",
         help=(
-            "Serve EAGER ONLY: never arm a compiled cell and never mint one "
+            "Serve EAGER ONLY: never arm a compiled graph and never mint one "
             "(DESIGN-RULINGS §4.32). For a broken compile, or a machine whose "
             "owner does not want minutes of it spent compiling. Reversible "
             "while the serve runs — send {\"posture\":{\"eager_only\":false}} "
@@ -419,7 +419,7 @@ class _Endpoint:
                 run_mod.run_setup(
                     inst, resolved, device=self.device,
                     # Naming the function here is what lets the first run mint
-                    # an AOT cell into this machine's own store and every later
+                    # an compiled graph into this machine's own store and every later
                     # run arm it from disk.
                     selected=served.selected)
                 measured = max(0, memory.cuda_allocated_bytes() - before)
@@ -915,7 +915,7 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
             pass
         return
     if frame["kind"] == "posture":
-        # The RUNTIME half: a warm serve holding a broken cell can be told to
+        # The RUNTIME half: a warm serve holding a broken compiled graph can be told to
         # stop using it without being restarted, and told to use it again
         # afterwards. The reply reports the posture that now stands, so a client
         # never has to infer it.

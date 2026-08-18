@@ -1,4 +1,4 @@
-"""A graph class belongs to a TARGET, not to the whole cell.
+"""A graph class belongs to a TARGET, not to the whole compiled graph.
 
 No fleet family compiles anything but its denoiser, and the reason is not
 policy: without target-scoped ``classes`` the vocabulary cannot EXPRESS a second
@@ -11,7 +11,7 @@ text-encoder graphs under 18 entry names, each compiled and paid for), or
 declare dims the text encoder cannot receive.
 
 The unscoped path is pinned too, because it is what protects every published
-cell: a declaration that does not scope must serialise byte-identically, or
+compiled graph: a declaration that does not scope must serialise byte-identically, or
 ``Compile.contract_axes`` re-keys artifacts that did not change.
 """
 
@@ -100,7 +100,7 @@ def test_each_target_mints_only_its_own_coordinates() -> None:
     assert len(aot_declaration.mint_plans(decl, "vae.decode")) == 3
     assert len(aot_declaration.mint_plans(decl, "text_encoder")) == 1
 
-    plans = aot_declaration.cell_plans(decl)
+    plans = aot_declaration.compiled_graph_plans(decl)
     assert len(plans) == 10
     names = {aot_declaration.plan_entry_name(p) for p in plans}
     assert "text_encoder/B_txt=1,T_txt=77" in names
@@ -115,7 +115,7 @@ def test_each_target_mints_only_its_own_coordinates() -> None:
 def test_unscoped_declaration_is_unchanged_and_serialises_identically() -> None:
     """The no-re-key guarantee. A declaration that does not scope keeps the
     old rule (every row states every dim and fork) and emits no `targets` key,
-    so `Compile.contract_axes` — which feeds the cell key's contract digest —
+    so `Compile.contract_axes` — which feeds the compiled graph key's contract digest —
     is byte-identical to what it was before scoping existed."""
     row = GraphClass(dims={"B": 2, "T_txt": 77}, fork={"cfg": True})
     assert row.as_row() == {"dims": {"B": 2, "T_txt": 77}, "fork": {"cfg": True}}
@@ -168,7 +168,7 @@ def test_a_scoped_row_may_not_carry_a_dim_its_target_cannot_receive() -> None:
 
 def test_a_target_with_no_class_row_is_refused_by_name() -> None:
     """A declared target nobody gave coordinates to is a declaration defect,
-    not an empty plan list that silently drops the target from the cell."""
+    not an empty plan list that silently drops the target from the compiled graph."""
     decl = Compile(
         family="orphan-target",
         targets=("unet", "vae.decode"),
@@ -186,7 +186,7 @@ def test_a_target_with_no_class_row_is_refused_by_name() -> None:
         warm_changes_key=False,
     )
     with pytest.raises(aot_declaration.MintRefused, match="no graph class scoped"):
-        aot_declaration.cell_plans(decl)
+        aot_declaration.compiled_graph_plans(decl)
 
 
 def test_a_class_row_may_not_name_an_undeclared_target() -> None:
@@ -283,7 +283,7 @@ def _sdxl_with_decoder() -> Compile:
     * ``vae.decoder`` is the raw ``Decoder`` module: a real named signature
       (``forward(sample, latent_embeds=None)``), a plain-Tensor return, no
       hook, no dispatch. Tiling still works — ``tiled_decode`` calls
-      ``self.decoder`` per tile, at tile shapes the cell does not declare, so
+      ``self.decoder`` per tile, at tile shapes the compiled graph does not declare, so
       an offloaded pod misses the entry and degrades to eager observably
       instead of serving a graph that skipped its own onload.
 
@@ -353,7 +353,7 @@ def _sdxl_with_decoder() -> Compile:
 
 
 def test_the_proposed_sdxl_declaration_costs_nine_entries_not_eighteen() -> None:
-    """A4's bill, exactly: the cell goes 36 -> 45 entries, +25%.
+    """A4's bill, exactly: the compiled graph goes 36 -> 45 entries, +25%.
 
     36 = 18 UNet classes x 2 adapter arms (pgw#790's branchless/lora64 fork,
     synthesized by the SDK). The decoder is not lift-capable, so it forks into
@@ -367,7 +367,7 @@ def test_the_proposed_sdxl_declaration_costs_nine_entries_not_eighteen() -> None
     assert len(unet) == 18
     assert len(dec) == 9
     assert all(p.dynamic == () for p in (*unet, *dec))
-    assert len(aot_declaration.cell_plans(decl)) == 27
+    assert len(aot_declaration.compiled_graph_plans(decl)) == 27
 
     names = {aot_declaration.plan_entry_name(p) for p in dec}
     assert names == {

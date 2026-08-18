@@ -34,7 +34,7 @@ from gen_worker._vendor.torchcg import CallIngress
 from gen_worker import (
     aot_declaration,
     aot_mint,
-    fleet_cells,
+    fleet_compiled_graphs,
 )
 from gen_worker.api.decorators import Compile
 from gen_worker.api.export_contract import (
@@ -224,7 +224,7 @@ def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
     decl = _declare()
     pipe = _container_only_pipe()
     plan, arm = aot_mint.adapter_arm_plans(
-        aot_declaration.cell_plans(decl), pipe, _spec())[0]
+        aot_declaration.compiled_graph_plans(decl), pipe, _spec())[0]
     assert arm is True
     with pytest.raises(aot_mint.MintRefused, match="carries no lifted forward"):
         aot_mint._export_entry(pipe, _spec(), plan, decl)
@@ -292,11 +292,11 @@ def test_the_parent_declines_the_mint_by_name_instead_of_renting(monkeypatch) ->
 
     events: list = []
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
+        fleet_compiled_graphs.activity_mod, "emit_event",
         lambda kind, detail, **kw: events.append((kind, detail, kw)))
 
-    recipe = fleet_cells.mint_recipe(pipe, cfg, delegate=True)
-    assert recipe == fleet_cells.RECIPE_DYNAMO
+    recipe = fleet_compiled_graphs.mint_recipe(pipe, cfg, delegate=True)
+    assert recipe == fleet_compiled_graphs.RECIPE_DYNAMO
     assert len(events) == 1
     kind, detail, kw = events[0]
     assert kind == "self_mint_skipped"

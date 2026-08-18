@@ -5,7 +5,7 @@ main = "micro_diffusion.main"
 [runtime]
 language = "python"
 
-# One profile, matching the fleet's current cuda/python/torch tuple, so a cell
+# One profile, matching the fleet's current cuda/python/torch tuple, so a compiled graph
 # minted here is adoptable by the same pool every other family serves from.
 # The image is small because the package pulls no diffusers/transformers.
 [[build.profiles]]

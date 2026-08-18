@@ -243,9 +243,9 @@ def test_compile_with_dynamic_sequence_passes_and_batch_axis_supported():
             return _Out()
 
     (spec,) = extract_specs(Gen)
-    cell = spec.compile_cell()
-    assert cell is not None
-    facts = cell.contract_facts()
+    graph = spec.compile_contract()
+    assert graph is not None
+    facts = graph.contract_facts()
     assert facts["dynamic"] == [
         {"dim": "sequence", "min": 64, "max": 512},
         {"dim": "batch", "min": 2, "max": 16},
@@ -259,7 +259,7 @@ def test_dynamic_dim_min_must_respect_01_specialization():
 
 
 def test_contract_digest_changes_with_the_contract():
-    def cell(**kw):
+    def graph(**kw):
         @endpoint(compile=Compile(shapes=((1024, 1024),), family="v2fam", **kw))
         class Gen:
             def setup(self) -> None:
@@ -269,14 +269,14 @@ def test_contract_digest_changes_with_the_contract():
                 return _Out()
 
         (spec,) = extract_specs(Gen)
-        cell = spec.compile_cell()
-        assert cell is not None
-        return cell.contract_digest()
+        graph = spec.compile_contract()
+        assert graph is not None
+        return graph.contract_digest()
 
-    a = cell(text_len=77)
-    b = cell(text_len=512)
-    c = cell(text_len=0)
-    assert len({a, b, c}) == 3  # pre-fix and post-fix cells key differently
+    a = graph(text_len=77)
+    b = graph(text_len=512)
+    c = graph(text_len=0)
+    assert len({a, b, c}) == 3  # pre-fix and post-fix compiled graphs key differently
 
 
 def test_resources_v2_deleted_fields_raise():
@@ -965,7 +965,7 @@ def test_jobs_ride_the_manifest_beside_functions(manifest_pkg: Path) -> None:
     # be a second copy that can only drift).
     assert bake["source_file"] == "manifest_job/main.py"
     assert "source" not in bake
-    # A job declares no lanes, no compile cell, no slots — deliberately.
+    # A job declares no lanes, no compiled graph, no slots — deliberately.
     assert not {"execution_lanes", "compile", "slots"} & set(bake)
 
     assert jobs[0]["publishes"] is False   # never omitted; see below

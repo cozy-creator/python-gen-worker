@@ -885,7 +885,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         if es.env:
             fn["env"] = list(es.env)
         # Declared compute-time formula — the hub learns the constants per
-        # physics cell; the source string is the contract.
+        # physics compiled graph; the source string is the contract.
         if es.runtime_formula is not None:
             fn["runtime_formula"] = es.runtime_formula.source
         if slots_block:
@@ -894,8 +894,8 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["delta_type"] = _type_id(es.delta_type)
             fn["delta_schema_sha256"] = delta_sha
             fn["delta_output_schema"] = delta_schema
-        ccell = es.compile_cell()
-        if es.compile is not None and ccell is not None:
+        ccontract = es.compile_contract()
+        if es.compile is not None and ccontract is not None:
             # Hub keys family-cache lookups off this block.
             fn["compile"] = {
                 "family": es.compile.family,
@@ -903,32 +903,32 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 "targets": list(es.compile.targets),
             }
             # Shape contract: the declared text axis and dynamic ranges ride to
-            # the hub's cell producer, and the contract digest is the ck2
-            # cell-key axis.
-            if ccell.text_len is not None:
+            # the hub's compiled graph producer, and the contract digest is the ck2
+            # compiled graph-key axis.
+            if ccontract.text_len is not None:
                 # THIS function's effective pin (a @worker_function
                 # text_len= override wins over the class Compile's).
-                fn["compile"]["text_len"] = int(ccell.text_len)
-            if ccell.contract_text_lens():
-                # The CLASS's per-lane pin union — what the shared cell contract
+                fn["compile"]["text_len"] = int(ccontract.text_len)
+            if ccontract.contract_text_lens():
+                # The CLASS's per-lane pin union — what the shared compiled graph contract
                 # digests (dual-pin classes describe both lanes).
                 fn["compile"]["text_lens"] = [
-                    int(v) for v in ccell.contract_text_lens()
+                    int(v) for v in ccontract.contract_text_lens()
                 ]
             if es.compile.dynamic:
                 fn["compile"]["dynamic"] = [
                     {"dim": d.dim, "min": d.min, "max": d.max}
                     for d in es.compile.dynamic
                 ]
-            if ccell.guidance_scales:
+            if ccontract.guidance_scales:
                 # Warm representatives derived from the payload's CompileAxis
                 # classes.
-                fn["compile"]["guidance_scales"] = list(ccell.guidance_scales)
-            fn["compile"]["shape_contract_digest"] = ccell.contract_digest()
+                fn["compile"]["guidance_scales"] = list(ccontract.guidance_scales)
+            fn["compile"]["shape_contract_digest"] = ccontract.contract_digest()
             # The primary binding's weight-storage lane (fp8 layerwise casting)
-            # rides along so the hub's cell producer builds from an
+            # rides along so the hub's compiled graph producer builds from an
             # identically-loaded pipeline — the cast hooks are traced INTO the
-            # FX graphs; a bf16-built cell for an fp8-served model misses on
+            # FX graphs; a bf16-built compiled graph for an fp8-served model misses on
             # every request.
             primary = next(iter(es.models.values()), None)
             storage = str(getattr(primary, "storage_dtype", "") or "")
@@ -937,7 +937,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             if getattr(es.compile, "regional", False):
                 fn["compile"]["regional"] = True
             # Dynamic-LoRA endpoints trace the branch-bearing graph family; the
-            # hub's producer must build `-lora<bucket>` cells.
+            # hub's producer must build `-lora<bucket>` compiled graphs.
             if es.lora_bucket:
                 fn["compile"]["lora_bucket"] = int(es.lora_bucket)
             # The AUTHOR's declared bar and refusals, so the hub's publish-time

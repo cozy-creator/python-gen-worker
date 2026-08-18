@@ -48,7 +48,7 @@ def steady_e2e(arm):
     re-specializes on each distinct prompt shape, so most rows carry a
     ~175 s compile. The repeat rows re-render ONE prompt against an
     already-warm graph, which is what a served request sees (production
-    pins shapes through the cell store). Eager arms have no such split, so
+    pins shapes through the compiled graph store). Eager arms have no such split, so
     both paths agree there."""
     reps = [r["e2e_s"] for r in arm.get("repeats") or []]
     compiled = bool((arm.get("runtime") or {}).get("compiled"))

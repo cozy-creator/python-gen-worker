@@ -1,7 +1,7 @@
-"""pgw#686: requested cell key and published cell key must resolve the base
-lane identically, or a published cell is never requested by ANY worker and
+"""pgw#686: requested compiled graph key and published compiled graph key must resolve the base
+lane identically, or a published compiled graph is never requested by ANY worker and
 every cold pod re-mints — the ie#546 16-checkpoint burst stampede (10 pods,
-9 simultaneous mints, 0 adoptions, 1,608 hub `cell not attached` resolves).
+9 simultaneous mints, 0 adoptions, 1,608 hub `compiled graph not attached` resolves).
 
 The constants below are the LIVE burst evidence, byte-exact (hub
 `cozyhub-e2e112-34f3e64fe2`, sdxl release `b266454e92a9000c4c0c13f4`,
@@ -10,7 +10,7 @@ gen-worker 0.67.1, L4/sm_89, 2026-07-26):
 * the two keys every worker ADVERTISED (and the hub tried to resolve 974x
   each, `status=tag_not_found`) come from the speculative/probed base lanes
   ``""`` and ``"fp8-hooks"``;
-* the ONE key both L4 workers PUBLISHED (`cell_store` row, obligation
+* the ONE key both L4 workers PUBLISHED (`compiled_graph_store` row, obligation
   discharged) is the same identity on the ``"w8a8"`` base lane — the lane
   `w8a8_lora.branch_lane` sees on the denoiser (`_cozy_w8a8_mode`) but
   `loading.pipeline_weight_lane` cannot.
@@ -31,7 +31,7 @@ from gen_worker import compile_cache as cc
 from gen_worker import env_seal
 from gen_worker.models import w8a8_lora
 
-# --- the burst's recorded artifact metadata (cell_store checkpoint
+# --- the burst's recorded artifact metadata (compiled_graph_store checkpoint
 # 9167d89b..., trimmed to the axes from_artifact_metadata consumes) ---------
 
 _SHAPE_CONTRACT: Dict[str, Any] = {
@@ -122,7 +122,7 @@ def burst_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _BurstCfg:
-    """Duck of the burst release's declaration (registry.CompileCell)."""
+    """Duck of the burst release's declaration (registry.CompileContract)."""
 
     shapes = tuple(tuple(r) for r in _SHAPE_CONTRACT["shapes"])
     targets = ("unet",)
@@ -135,14 +135,14 @@ class _BurstCfg:
 
 
 def _lane(weight_lane: str) -> str:
-    """The cell-identity LANE label a worker on ``weight_lane`` would ask for.
+    """The compiled graph-identity LANE label a worker on ``weight_lane`` would ask for.
 
     pgw#1181: the adoption verdict this used to call —
-    `compile_cache.local_cell_mismatch`, the fact-by-fact check a delivered
-    `torch-inductor-cache` cell was admitted by — is deleted with that format.
+    `compile_cache.local_compiled_graph_mismatch`, the fact-by-fact check a delivered
+    `torch-inductor-cache` compiled graph was admitted by — is deleted with that format.
     The burst's mechanism does not need it: the divergence WAS the lane, and
-    the lane label is the axis every cell-identity surface is keyed on.
-    A worker asking on the wrong lane asks for a different cell — which is the
+    the lane label is the axis every compiled graph-identity surface is keyed on.
+    A worker asking on the wrong lane asks for a different compiled graph — which is the
     same conclusion the verdict used to reach one step later, reached by
     construction instead of by comparison."""
     return cc.execution_lane_label(weight_lane, _BurstCfg.lora_bucket)
@@ -173,8 +173,8 @@ class _Pipe:
 
 def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) -> None:
     """All three observed identities were ONE identity varying only the
-    lane: the advertised lanes named cells nobody publishes; the published
-    lane named a cell nobody advertised. Adoption was structurally
+    lane: the advertised lanes named compiled graphs nobody publishes; the published
+    lane named a compiled graph nobody advertised. Adoption was structurally
     impossible. Re-asserted post-pgw#1059 on the fact-by-fact verdict: the
     lane fact alone flips the verdict, and the refusal NAMES the lane."""
     published = _lane("w8a8")
@@ -196,27 +196,27 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
         ck.from_artifact_metadata(_BURST_META)
 
 
-# --- the fix: one base-lane resolution for every cell-identity surface -----
+# --- the fix: one base-lane resolution for every compiled graph-identity surface -----
 
 
-def test_cell_base_execution_lane_sees_w8a8_mode(burst_runtime: None) -> None:
+def test_compiled_graph_base_execution_lane_sees_w8a8_mode(burst_runtime: None) -> None:
     pipe = _Pipe()
     assert w8a8_lora.effective_base_execution_lane(pipe) == "w8a8"
-    assert cc.cell_base_execution_lane(pipe) == "w8a8"
+    assert cc.compiled_graph_base_execution_lane(pipe) == "w8a8"
     # An identical worker now asks on exactly the lane the mint published on
     # — one lane derivation on both sides, which is the whole of pgw#686.
-    assert _lane(cc.cell_base_execution_lane(pipe)) == _lane("w8a8")
+    assert _lane(cc.compiled_graph_base_execution_lane(pipe)) == _lane("w8a8")
 
 
-def test_cell_base_execution_lane_precedence() -> None:
+def test_compiled_graph_base_execution_lane_precedence() -> None:
     # Explicit pipeline stamp wins.
     pipe = _Pipe()
     pipe._cozy_weight_lane = "w8a8-lora64"
-    assert cc.cell_base_execution_lane(pipe) == "w8a8-lora64"
+    assert cc.compiled_graph_base_execution_lane(pipe) == "w8a8-lora64"
     # fp8-hooks marker (w8a16 storage lane) wins over the denoiser fallback.
     pipe2 = _Pipe()
     pipe2.unet._cozy_fp8_storage_applied = True
-    assert cc.cell_base_execution_lane(pipe2) == "fp8-hooks"
+    assert cc.compiled_graph_base_execution_lane(pipe2) == "fp8-hooks"
     # Plain pipeline stays plain.
     class _PlainDenoiser:
         def named_modules(self) -> Iterator[Any]:
@@ -226,7 +226,7 @@ def test_cell_base_execution_lane_precedence() -> None:
         def __init__(self) -> None:
             self.unet = _PlainDenoiser()
 
-    assert cc.cell_base_execution_lane(_PlainPipe()) == ""
+    assert cc.compiled_graph_base_execution_lane(_PlainPipe()) == ""
 
 
 def test_stamp_execution_lane_memoizes_the_same_base() -> None:

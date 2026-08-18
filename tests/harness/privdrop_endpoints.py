@@ -106,7 +106,7 @@ class PrivProbe:
         pgw#1349: it CREATES A SUBDIRECTORY too, because that is the operation
         that actually died in production. Every child-side writer under a
         granted root reaches it through
-        ``path.parent.mkdir(parents=True, exist_ok=True)`` — the local cell
+        ``path.parent.mkdir(parents=True, exist_ok=True)`` — the local compiled graph
         store's memo and sidecar writes are exactly that — and a probe that
         only writes a file into a directory the PARENT made would have gone
         green on the tree where the child could not make one."""

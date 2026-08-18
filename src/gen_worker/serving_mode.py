@@ -5,7 +5,7 @@ and for a long time that looked like enough. It is not, for two reasons:
 
 1. **``+compiled`` is a BINARY axis platform-wide** — ``precision.ExecCompiled``,
    ``lanes.EXEC_COMPILED``, ``serving_tier`` — so it cannot tell an AOT ``.pt2``
-   replay from a JIT dynamo cell, and it names no artifact. The worker knows
+   replay from a JIT dynamo compiled graph, and it names no artifact. The worker knows
    the difference on every single request; the fact dies on the pod. So
    "AOT vs JIT per-request latency on 4090s for sdxl w8a8" is unanswerable
    over our own production traffic, which is the only traffic that matters.
@@ -37,7 +37,7 @@ from . import aot_serve
 # module whose own docstring promises it needs no pipeline, GPU or hub.
 from . import compile_facts
 from . import serve_posture
-from .cell_adopt import EagerPhase
+from .compiled_graph_adopt import EagerPhase
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,10 @@ FALLBACK_GUARD_MISS = "guard_miss"
 FALLBACK_INGRESS_REFUSED = "ingress_refused"
 FALLBACK_HEALING = "healing"
 FALLBACK_VOLATILE = "volatile"
-#: pgw#888: the hub PINNED an exact compile cell and this target no longer
+#: pgw#888: the hub PINNED an exact compiled graph and this target no longer
 #: serves it (de-armed for cause, revoked, superseded). The other four classes
-#: all describe a cell that is armed and was skipped for one request; this one
-#: describes a cell that is not here at all — and until the pgw#888 ruling it
+#: all describe a compiled graph that is armed and was skipped for one request; this one
+#: describes a compiled graph that is not here at all — and until the pgw#888 ruling it
 #: was not a fallback reason but a refusal, so the request had no serving mode
 #: to report. It rides here so an eager sample charged to a dispatch the hub
 #: believed was compiled stays subtractable from the compiled measurement.
@@ -67,7 +67,7 @@ _PER_REQUEST_FALLBACKS = frozenset({
 })
 
 # --- eager POSTURE reason classes (pgw#824, wire-shared) ---------------------
-# The four classes above answer "a cell was armed and this request did not use
+# The four classes above answer "a compiled graph was armed and this request did not use
 # it". They cannot answer the much commoner case: NOTHING is armed at all. That
 # request reported `serving_mode=eager, fallback_reason=""` — indistinguishable
 # from a release that never declared a compile target, from a pod whose mint is
@@ -78,7 +78,7 @@ _PER_REQUEST_FALLBACKS = frozenset({
 # `self_mint_started` activity event carries in `phase`, so a request row and
 # the worker's own event stream join on one string instead of on a sentence.
 #
-# pgw#1035: these are ALIASES of :class:`cell_adopt.EagerPhase`, not a second
+# pgw#1035: these are ALIASES of :class:`compiled_graph_adopt.EagerPhase`, not a second
 # spelling of it. They used to be bare literals here while the arming lane's own
 # tokens lived in the enum — two lists of the same wire vocabulary, which is the
 # drift channel `EagerPhase` exists to close, and only `mint_in_progress` was
@@ -125,14 +125,14 @@ class ServedIdentity:
 def classify_mode(active_compile_ref: str, pipeline: Any = None) -> str:
     """``eager`` | ``jit_cell`` | ``aot_cell``.
 
-    The discriminator is the ARMED artifact, never the lane string: both cell
-    kinds set ``active_compile_ref``, and stamped cell keys are string-shape
+    The discriminator is the ARMED artifact, never the lane string: both compiled graph
+    kinds set ``active_compile_ref``, and stamped compiled graph keys are string-shape
     identical, so the ref alone cannot be pattern-matched. ``aot_serve`` owns
     the answer (``is_aot_ref`` for the recorded kind, the ``_cozy_aot`` marker
     for what is live on the pipeline right now).
 
     pgw#1010: a ref is no longer NECESSARY for ``jit_cell``. JIT intake arms a
-    pipeline that compiles its own graphs and names no artifact — a cell ref is
+    pipeline that compiles its own graphs and names no artifact — a compiled graph ref is
     exactly what it does not have — and reporting those requests as ``eager``
     would delete the whole JIT arm of the AOT-vs-JIT latency comparison this
     module exists to make answerable. The armed pipeline itself is the
@@ -170,8 +170,8 @@ def normalize_sm(raw: str) -> str:
 def detect_sm() -> str:
     """This device's compute capability, or "" when there is no CUDA device.
 
-    Reads ``compile_facts.runtime_key()`` — the same source the cell key is
-    built from, so a request's ``sm`` and the cell it ran is keyed by can never
+    Reads ``compile_facts.runtime_key()`` — the same source the compiled graph key is
+    built from, so a request's ``sm`` and the compiled graph it ran is keyed by can never
     disagree.
 
     Memoized (pgw#789): this is called on every request terminal now, and
@@ -236,7 +236,7 @@ def resolve(
     eager by a compiled lane, which is exactly the sample that must not be
     counted as compiled.
 
-    ``eager_posture`` (pgw#824) answers the OTHER eager case — no cell armed at
+    ``eager_posture`` (pgw#824) answers the OTHER eager case — no compiled graph armed at
     all — with the arming brain's own classified token. It applies only when
     the mode is already ``eager``: a per-request fallback on a compiled lane
     always outranks it, and it never sets ``served_eager_fallback`` (nothing
@@ -257,7 +257,7 @@ def resolve(
     if not reason and mode == MODE_EAGER:
         reason = str(eager_posture or "").strip()
     if serve_posture.eager_only():
-        # pgw#1142 / §4.32 item 4: an operator ordered eager. The cell may
+        # pgw#1142 / §4.32 item 4: an operator ordered eager. The compiled graph may
         # still be ARMED — deliberately, so the order can be taken back
         # without a re-arm — and `classify_mode` reads exactly that armed
         # artifact, so without this the request would report `aot_cell` for a

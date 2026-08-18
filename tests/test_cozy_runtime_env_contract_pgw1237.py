@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from gen_worker import aot_delivery, config, local_cell_store
+from gen_worker import aot_delivery, config, local_compiled_graph_store
 from gen_worker.cli.local_context import _save_local_bytes
 from gen_worker.models.cache_paths import (
     open_worker_cas,
@@ -71,14 +71,14 @@ def test_runtime_env_semantics_match_pgw1237(
     assert expected.read_bytes() == b"pgw#1237"
 
     compiled = rows["compiled_graph_root"]
-    assert compiled["name"] == local_cell_store.ENV_STORE_DIR
+    assert compiled["name"] == local_compiled_graph_store.ENV_STORE_DIR
     compiled_root = tmp_path / "compiled-graph-root"
     monkeypatch.setenv(compiled["name"], os.fspath(compiled_root))
-    assert local_cell_store.store_root() == compiled_root
-    assert local_cell_store.cells_root() == (
+    assert local_compiled_graph_store.store_root() == compiled_root
+    assert local_compiled_graph_store.compiled_graphs_root() == (
         compiled_root / compiled["consumer_relative_path"]
     )
-    assert compiled["consumer_relative_path"] == local_cell_store.CELLS_DIRNAME
+    assert compiled["consumer_relative_path"] == local_compiled_graph_store.COMPILED_GRAPHS_DIRNAME
 
     hub_url = rows["hub_url"]
     assert hub_url == {
@@ -123,7 +123,7 @@ def test_aot_default_uses_the_canonical_worker_cas(
     try:
         with pytest.raises(aot_delivery.NamedArtifactUnavailable, match="no transport"):
             aot_delivery._materialize_named_artifact(
-                "cell-v1",
+                "compiled graph-v1",
                 "sha256:" + "0" * 64,
                 None,
                 cache_dir=None,

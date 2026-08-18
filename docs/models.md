@@ -226,11 +226,11 @@ The same body runs against a compiled backing, an eager one, or `Flux1Dev.fake()
 
 ```
 gen-worker model mint gen_worker.model.catalog.flux1_dev:FLUX1_DEV \
-    --out-dir ./cells --runner decoder --runner clip --json minted.json
+    --out-dir ./compiled graphs --runner decoder --runner clip --json minted.json
 ```
 
 A real compile: **run it on a pod, never on a shared box.** It needs a GPU and a
-toolchain; it needs no weights and no network, because cell identity is
+toolchain; it needs no weights and no network, because compiled graph identity is
 checkpoint-free (§4.27) and the constants arrive at arm time from the store.
 The trace is the declaration's own, so a minted class's ingress digest is the
 committed export's by construction — `family.mint.assert_matches_export` states

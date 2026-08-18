@@ -66,10 +66,10 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     "implicit_reexport": (15, 34),
     # test modules still dirty at the relaxed test posture.
     # 170 of 486 were already clean and are checked from that commit on.
-    # 314 -> 312: PR 8 took the two HARNESS doubles — `tests.harness.cell_hub`
+    # 314 -> 312: PR 8 took the two HARNESS doubles — `tests.harness.compiled_graph_hub`
     # and `tests.harness.adopt_rig`. These are the modules the "Protocols for
     # test doubles" item exists for, and they were wholly unchecked: a bogus
-    # attribute plus a `reveal_type` injected into cell_hub.py still produced
+    # attribute plus a `reveal_type` injected into compiled_graph_hub.py still produced
     # `Success: no issues found`.
     # 312 -> 309: pgw#1215 deleted `tests.test_meta_roundtrip_pgw1111`,
     # `tests.test_shape_hints_pgw998` and

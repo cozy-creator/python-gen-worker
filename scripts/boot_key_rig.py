@@ -90,13 +90,13 @@ def _declared_hint(family: str) -> int:
     decl = aot_mint.export_declaration(family)
     if decl is None:
         raise SystemExit(f"family {family!r} has no export declaration")
-    return len(list(aot_declaration.cell_plans(decl)))
+    return len(list(aot_declaration.compiled_graph_plans(decl)))
 
 
 def _spec(veh: Any) -> Any:
     from gen_worker.child_contract import CompileSpec
 
-    cfg = veh.compile_cell()
+    cfg = veh.compile_contract()
     return CompileSpec(
         shapes=tuple(tuple(int(v) for v in row) for row in (cfg.shapes or ())),
         targets=tuple(str(t) for t in (cfg.targets or ())),
@@ -114,7 +114,7 @@ def derive_once(
 ) -> Any:
     from gen_worker import boot_key
 
-    cfg = veh.compile_cell()
+    cfg = veh.compile_contract()
     work = root / f"work-{label}"
     work.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
@@ -149,12 +149,12 @@ def real_weight_class_hashes(veh: Any, tree: Path) -> Dict[str, str]:
     A mismatch here would mean the derived key can never equal the stamped key,
     and it would say so for **$0** instead of on a pod.
     """
-    from gen_worker import aot_mint, boot_key, fleet_cells
+    from gen_worker import aot_mint, boot_key, fleet_compiled_graphs
     from gen_worker.cli.run import run_setup
     from gen_worker.child_preflight import pick_compile_target
     from gen_worker.registry import collect_endpoints
 
-    cfg = veh.compile_cell()
+    cfg = veh.compile_contract()
     specs = collect_endpoints(list(veh.modules))
     chosen = next(s for s in specs if s.name == veh.function)
     instance = chosen.cls()
@@ -163,7 +163,7 @@ def real_weight_class_hashes(veh: Any, tree: Path) -> Dict[str, str]:
         instance, {"pipeline": str(tree)}, arm_compile=False,
         return_loaded=True) or {}
     _slot, pipeline = pick_compile_target(loaded, cfg)
-    export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
+    export_spec = fleet_compiled_graphs.aot_export_spec(pipeline, cfg)
     decl = aot_mint.export_declaration(export_spec.family)
     blocks: Dict[str, Any] = {}
     for traced in aot_mint.trace_for_key(pipeline, export_spec, decl):

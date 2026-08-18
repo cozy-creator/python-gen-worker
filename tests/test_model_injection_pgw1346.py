@@ -79,7 +79,7 @@ def test_the_component_path_finds_every_declared_runner_in_a_loaded_tree() -> No
 def test_a_runner_with_no_component_declared_simply_has_no_eager_module() -> None:
     """A legitimate state, not an error: a runner that only ever exists as a
     compiled graph class. It is absent from the eager backing, and calling it
-    with no armed cell refuses BY NAME rather than running something else.
+    with no armed compiled graph refuses BY NAME rather than running something else.
     """
 
     from dataclasses import replace
@@ -94,7 +94,7 @@ def test_a_runner_with_no_component_declared_simply_has_no_eager_module() -> Non
 def test_an_adopt_only_pod_has_no_declaration_and_that_is_not_a_failure() -> None:
     """`SPEC` is None where importing the declaration would acquire a model
     library the serve role forbids (pgw#1328). Such a pod serves compiled
-    cells, so an empty eager map is the correct answer.
+    compiled graphs, so an empty eager map is the correct answer.
     """
 
     assert eager_modules(None, toy_loaded_tree()) == {}
@@ -187,7 +187,7 @@ def test_a_malformed_catalog_stamp_refuses_rather_than_serving_neutral_values(
 # ---------------------------------------------------------------------------
 
 
-def test_a_model_with_neither_an_eager_module_nor_an_armed_cell_refuses_by_name(
+def test_a_model_with_neither_an_eager_module_nor_an_armed_compiled_graph_refuses_by_name(
     toy_binding: Any,
 ) -> None:
     with pytest.raises(ModelError) as caught:

@@ -29,7 +29,7 @@ import pytest
 
 from gen_worker._vendor.torchcg import identity as tcg_identity
 from gen_worker._vendor.torchcg import is_compiled_graph_key
-from gen_worker.compile_cache import parse_cell_ref
+from gen_worker.compile_cache import parse_compiled_graph_ref
 from gen_worker.models.refs import parse_model_ref
 from gen_worker.refgrammar import MAX_FRAGMENT_LEN
 
@@ -155,12 +155,12 @@ def test_a_pod_can_name_the_family_of_what_it_just_armed() -> None:
 
     A compiled-graph key travels as the ``#fragment`` of
     ``root/family-<f>#<key>``. Under the 64-byte cap ``parse_model_ref``
-    raised, ``parse_cell_ref`` swallowed that into ``("", "")``, and
+    raised, ``parse_compiled_graph_ref`` swallowed that into ``("", "")``, and
     ``aot_serve.is_aot_ref`` therefore returned False for an artifact the
     process had armed itself.
     """
     key = f"{tcg_identity.KEY_SCHEME}-{HEX56}"
-    assert parse_cell_ref(f"root/family-sdxl#{key}") == ("sdxl", key)
+    assert parse_compiled_graph_ref(f"root/family-sdxl#{key}") == ("sdxl", key)
 
 
 # ---------------------------------------------------------------------------

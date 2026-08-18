@@ -1,4 +1,4 @@
-"""pgw#1090 (DESIGN-RULINGS §4.29): ask the hub for a cell BY DERIVED KEY.
+"""pgw#1090 (DESIGN-RULINGS §4.29): ask the hub for a compiled graph BY DERIVED KEY.
 
 ``POST /v1/worker/compiled-graphs/resolve`` — the worker half of th#1750 (hub side merged
 ``26275ff8``). The worker derives its key from code alone (§4.27 step 1,
@@ -9,12 +9,12 @@ would re-open it through a smaller aperture.
 
 The circularity this closes
 ---------------------------
-The hub's OTHER cell resolver only VERIFIES a cell the worker already armed
-(``hubVerifiedCompileTargetForCellLaneLocked``: *"the worker's advertisement is
+The hub's OTHER compiled graph resolver only VERIFIES a compiled graph the worker already armed
+(``hubVerifiedCompileTargetForCompiledGraphLaneLocked``: *"the worker's advertisement is
 what got us here"*). **A cold pod arms nothing, so it advertises nothing, so the
 hub names nothing, so it never adopts.** Boot-time adopt is what SEEDS the
 advertisement the dispatch-time resolver requires — which is why cross-pod
-adoption has been structurally impossible since 0.97.0 deleted ``aot_cells.py``.
+adoption has been structurally impossible since 0.97.0 deleted ``aot_compiled_graphs.py``.
 
 NEVER a second admission brain
 ------------------------------
@@ -28,8 +28,8 @@ answer's field set is not arbitrary; it is exactly ``ExpectedIdentity``'s five
 axes plus ``materialize_named_artifact``'s two arguments.
 
 **The receipt rides the answer deliberately, and must not be re-fetched.**
-``handleWorkerCellReceipt`` scopes by ENDPOINT while resolve scopes by ORG
-(§4.26), so a second fetch for the same cell could 403 what resolve just offered
+``handleWorkerCompiledGraphReceipt`` scopes by ENDPOINT while resolve scopes by ORG
+(§4.26), so a second fetch for the same compiled graph could 403 what resolve just offered
 — th#1680 exactly.
 
 A MISS is one shape
@@ -37,7 +37,7 @@ A MISS is one shape
 ``{"status": "miss", "found": false}``, byte-identical whether the key is
 absent, scoped out or quarantined. That indistinguishability is the point: a
 distinguishable refusal is an existence oracle across tenants. Refusals are
-TYPED and are NOT misses — a pod that read ``incomplete`` as "no cell" would go
+TYPED and are NOT misses — a pod that read ``incomplete`` as "no compiled graph" would go
 pay for a full cold mint believing the hub holds nothing, which is false and
 expensive.
 
@@ -102,7 +102,7 @@ RESOLVE_PATH = "/v1/worker/compiled-graphs/resolve"
 #: is a boot that never serves.
 RESOLVE_TIMEOUT_S = 30.0
 
-#: The hub's bound on one batch (``maxCellResolveKeys``). Mirrored rather than
+#: The hub's bound on one batch (``maxCompiledGraphResolveKeys``). Mirrored rather than
 #: discovered: over it the hub answers a NAMED 400 for the WHOLE batch, so a
 #: caller that split late would lose every key's answer to learn the number.
 MAX_RESOLVE_KEYS = 256
@@ -149,7 +149,7 @@ REFUSAL_CODES = (
 
 #: Every field an accepted answer must NAME, and why. An answer omitting one
 #: states an expectation nothing downstream can check — and the gate that
-#: would catch it sits AFTER the whole cell is downloaded.
+#: would catch it sits AFTER the whole compiled graph is downloaded.
 #: ``compiled_graph_resolve_incomplete`` is the hub's own code for this fact: the pod
 #: reaches the same verdict from the same evidence, so it reports it under the
 #: same name rather than inventing a second word for one condition.
@@ -160,7 +160,8 @@ _REQUIRED: Tuple[Tuple[str, str], ...] = (
     ("graph_contract", "the admission expectation's graph axis"),
     ("publisher_org", "an artifact whose producer is unnamed is trusted by no "
                       "rule, and 'unknown publisher' is not a tier"),
-    ("cell_ref", "the address the bytes are fetched from"),
+    # dataclass field; the wire spelling is `cell_ref` (proto-lane vocabulary)
+    ("cg_ref", "the address the bytes are fetched from"),
     ("content_digest", "what the fetched bytes are verified against"),
     # pgw#1224: the per-ANSWER signature. Under the batch wire this is the only
     # thing that makes an answer stand on its own — there is no signature over
@@ -172,7 +173,7 @@ _REQUIRED: Tuple[Tuple[str, str], ...] = (
 )
 
 
-class CellResolveRefused(RuntimeError):
+class CompiledGraphResolveRefused(RuntimeError):
     """The hub refused to answer, typed. Distinct from a MISS by construction."""
 
     def __init__(self, code: str, detail: str, *, status: int = 0) -> None:
@@ -213,12 +214,12 @@ class Transport:
 
 
 @dataclass(frozen=True)
-class ResolvedCell:
+class ResolvedCompiledGraph:
     """The hub's answer for one derived key — ONE artifact, fully stated."""
 
     family: str
     compiled_graph_key: str
-    cell_ref: str
+    cg_ref: str
     checkpoint_id: str
     content_digest: str
     artifact_path: str
@@ -250,9 +251,9 @@ class ResolvedCell:
 class ResolveAnswer:
     """ONE key's answer out of a batch — the unit the caller acts on.
 
-    It is a distinct type from :class:`ResolvedCell` because a batch answers
+    It is a distinct type from :class:`ResolvedCompiledGraph` because a batch answers
     every key, and three of the five outcomes name no artifact at all. Folding
-    them into ``Optional[ResolvedCell]`` is exactly the collapse this wire
+    them into ``Optional[ResolvedCompiledGraph]`` is exactly the collapse this wire
     exists to prevent: ``None`` would make "the hub holds nothing" and "the hub
     holds something it could not deliver" the same observation, and the pod
     answers the first by minting and must not answer the second that way.
@@ -261,7 +262,7 @@ class ResolveAnswer:
     compiled_graph_key: str
     status: str
     #: The artifact, on ``hit`` and only on ``hit``.
-    cell: Optional[ResolvedCell] = None
+    graph: Optional[ResolvedCompiledGraph] = None
     #: The typed code for a per-answer HUB FAULT — the same string the fault
     #: carried when it was a whole-request refusal. Empty on hit and on miss.
     refusal_code: str = ""
@@ -269,7 +270,7 @@ class ResolveAnswer:
 
     @property
     def hit(self) -> bool:
-        return self.cell is not None
+        return self.graph is not None
 
     @property
     def miss(self) -> bool:
@@ -301,12 +302,12 @@ def _transport_from(body: Mapping[str, Any]) -> Transport:
     )
 
 
-def _cell_from(body: Mapping[str, Any]) -> ResolvedCell:
+def _compiled_graph_from(body: Mapping[str, Any]) -> ResolvedCompiledGraph:
     axes = body.get("identity_axes") or {}
-    return ResolvedCell(
+    return ResolvedCompiledGraph(
         family=str(body.get("family") or ""),
         compiled_graph_key=str(body.get("compiled_graph_key") or ""),
-        cell_ref=str(body.get("cell_ref") or ""),
+        cg_ref=str(body.get("cell_ref") or ""),
         checkpoint_id=str(body.get("checkpoint_id") or ""),
         content_digest=str(body.get("content_digest") or ""),
         artifact_path=str(body.get("artifact_path") or ""),
@@ -335,7 +336,7 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
     """
     fam = str(family or "").strip()
     if not fam:
-        raise CellResolveRefused(
+        raise CompiledGraphResolveRefused(
             "invalid_request", "resolve requires the compiled graph's family "
                                "namespace")
     asked: List[str] = []
@@ -343,7 +344,7 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
     for i, raw in enumerate(keys):
         key = str(raw or "").strip()
         if not is_compiled_graph_key(key):
-            raise CellResolveRefused(
+            raise CompiledGraphResolveRefused(
                 "invalid_request",
                 f"keys[{i}] is {key!r}, which is not a compiled-graph key; "
                 f"the resolve route addresses compiled graphs by "
@@ -355,7 +356,7 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
             # and so does this: collapsing it would shift every later answer
             # against its request, and answering it twice is work nobody asked
             # for.
-            raise CellResolveRefused(
+            raise CompiledGraphResolveRefused(
                 "compiled_graph_resolve_duplicate_key",
                 f"keys[{i}] repeats {key}; answers come back in REQUEST ORDER "
                 f"and a collapsed duplicate would shift every later answer "
@@ -363,10 +364,10 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
         seen.add(key)
         asked.append(key)
     if not asked:
-        raise CellResolveRefused(
+        raise CompiledGraphResolveRefused(
             "invalid_request", "resolve requires a non-empty key set")
     if len(asked) > MAX_RESOLVE_KEYS:
-        raise CellResolveRefused(
+        raise CompiledGraphResolveRefused(
             "compiled_graph_resolve_too_many_keys",
             f"this batch names {len(asked)} keys and the bound is "
             f"{MAX_RESOLVE_KEYS}; split it rather than receiving a short "
@@ -392,14 +393,14 @@ def _answer_from(
             refusal_code=_STATUS_REFUSAL_CODE[status],
             detail=str(raw.get("detail") or ""))
     if status != STATUS_HIT or not bool(raw.get("found")):
-        raise CellResolveRefused(
+        raise CompiledGraphResolveRefused(
             "compiled_graph_resolve_unknown_status",
             f"the answer for {key} carries status {status!r} "
             f"(found={raw.get('found')!r}), which this worker cannot act on; "
             f"reading it as a miss would send this pod to a full cold mint "
             f"over a fact it did not understand")
-    cell = _cell_from(raw)
-    missing = [(f, why) for f, why in _REQUIRED if not getattr(cell, f)]
+    graph = _compiled_graph_from(raw)
+    missing = [(f, why) for f, why in _REQUIRED if not getattr(graph, f)]
     if missing:
         # PER ANSWER, not per batch. Refused HERE rather than at the identity
         # gate, which runs after `materialize` has already paid for the whole
@@ -412,12 +413,12 @@ def _answer_from(
             detail="the answer names no " + "; no ".join(
                 f"{f} ({why})" for f, why in missing))
     logger.info(
-        "cell-resolve: HIT %s -> %s (%s tier, %d bytes)",
-        key, cell.cell_ref, cell.publisher_tier, cell.size_bytes)
+        "compiled graph-resolve: HIT %s -> %s (%s tier, %d bytes)",
+        key, graph.cg_ref, graph.publisher_tier, graph.size_bytes)
     return ResolveAnswer(
-        compiled_graph_key=key, status=STATUS_HIT, cell=cell,
-        detail=f"family={family} tier={cell.publisher_tier} "
-               f"checkpoint={cell.checkpoint_id}")
+        compiled_graph_key=key, status=STATUS_HIT, graph=graph,
+        detail=f"family={family} tier={graph.publisher_tier} "
+               f"checkpoint={graph.checkpoint_id}")
 
 
 #: Top-level names that would make the COLLECTION the unit of trust. The hub
@@ -443,7 +444,7 @@ def resolve_batch(
     length; a caller may zip them without checking, because this function has
     already refused every batch where that would not hold.
 
-    Raises :class:`CellResolveRefused` for a WHOLE-BATCH fault — a malformed
+    Raises :class:`CompiledGraphResolveRefused` for a WHOLE-BATCH fault — a malformed
     request, a caller-scoped hub failure, or an answer set that does not
     answer the question asked. A PER-KEY fault is not a raise: it is an answer
     with a ``refusal_code``, so one bad row costs one graph class.
@@ -469,7 +470,7 @@ def resolve_batch(
             detail = str((body or {}).get("message") or resp.text)[:400]
             if span is not None:
                 span.refused(code or f"http_{resp.status_code}", detail)
-            raise CellResolveRefused(
+            raise CompiledGraphResolveRefused(
                 code or f"http_{resp.status_code}", detail,
                 status=resp.status_code)
         answers = _answers_of(body, asked)
@@ -488,7 +489,7 @@ def _answers_of(
     raw = (body or {}) if isinstance(body, Mapping) else {}
     for field in _BATCH_SIGNATURE_FIELDS:
         if raw.get(field):
-            raise CellResolveRefused(
+            raise CompiledGraphResolveRefused(
                 "compiled_graph_resolve_batch_signature",
                 f"the batch carries a top-level {field!r}; every answer is "
                 f"signed on its own and there is deliberately no signature "
@@ -496,14 +497,14 @@ def _answers_of(
                 f"COLLECTION the unit of trust")
     rows = raw.get("answers")
     if not isinstance(rows, list):
-        raise CellResolveRefused(
+        raise CompiledGraphResolveRefused(
             "compiled_graph_resolve_short_answer",
             f"asked {len(asked)} keys and the reply names no answers[] at all")
     if len(rows) != len(asked):
         # An omission is indistinguishable from a truncation, and the pod
         # answers a missing answer by paying for a full cold mint. So a short
         # batch is not a smaller reply — it is a wrong one.
-        raise CellResolveRefused(
+        raise CompiledGraphResolveRefused(
             "compiled_graph_resolve_short_answer",
             f"asked {len(asked)} keys, got {len(rows)} answers; answers are "
             f"positional and a batch that does not answer every key is "
@@ -513,41 +514,41 @@ def _answers_of(
     for i, key in enumerate(asked):
         row = rows[i]
         if not isinstance(row, Mapping):
-            raise CellResolveRefused(
+            raise CompiledGraphResolveRefused(
                 "compiled_graph_resolve_short_answer",
                 f"answers[{i}] is {type(row).__name__}, not an answer")
         echoed = str(row.get("compiled_graph_key") or "").strip()
         if echoed != key:
             # POSITION and ECHO both, because either alone admits a batch
             # transposed by something that preserved the other.
-            raise CellResolveRefused(
+            raise CompiledGraphResolveRefused(
                 "compiled_graph_resolve_answer_out_of_order",
                 f"answers[{i}] answers {echoed!r} and keys[{i}] asked {key}; "
                 f"answers are consumed positionally, so a transposed batch "
                 f"would arm every class with a sibling's kernels")
         answer = _answer_from(row, key, str(raw.get("family") or ""))
-        if answer.cell is not None:
-            seen_for = receipts.get(answer.cell.receipt)
+        if answer.graph is not None:
+            seen_for = receipts.get(answer.graph.receipt)
             if seen_for is not None:
                 # One receipt covering two answers is a batch-level signature
                 # wearing a per-answer field name: the receipt is the hub's
                 # signature over ONE compiled graph, so two keys sharing one
                 # means at least one answer is being vouched for by the other's
                 # proof.
-                raise CellResolveRefused(
+                raise CompiledGraphResolveRefused(
                     "compiled_graph_resolve_shared_receipt",
                     f"{key} and {seen_for} were answered with the SAME "
                     f"receipt; a receipt signs one compiled graph, and reusing "
                     f"it makes the collection the unit of trust")
-            receipts[answer.cell.receipt] = key
+            receipts[answer.graph.receipt] = key
         out.append(answer)
     return tuple(out)
 
 
 def materialize(
-    cell: ResolvedCell, *, cache_dir: Optional[Path], what: str = "",
+    graph: ResolvedCompiledGraph, *, cache_dir: Optional[Path], what: str = "",
 ) -> Path:
-    """Fetch the resolved cell's bytes through the EXISTING delivery path.
+    """Fetch the resolved compiled graph's bytes through the EXISTING delivery path.
 
     Deliberately a two-line function: everything it could have added —
     digest verification, chunk assembly, the cache, the ``cell_fetch`` span —
@@ -557,11 +558,11 @@ def materialize(
     from . import aot_delivery
 
     return aot_delivery.materialize_named_artifact(
-        cell.cell_ref,
-        cell.content_digest,
-        cell.transport,
+        graph.cg_ref,
+        graph.content_digest,
+        graph.transport,
         cache_dir=cache_dir,
-        what=what or f"boot adopt of {cell.compiled_graph_key}",
+        what=what or f"boot adopt of {graph.compiled_graph_key}",
     )
 
 
@@ -575,8 +576,8 @@ __all__ = [
     "REFUSAL_CODES",
     "RESOLVE_PATH",
     "RESOLVE_TIMEOUT_S",
-    "CellResolveRefused",
-    "ResolvedCell",
+    "CompiledGraphResolveRefused",
+    "ResolvedCompiledGraph",
     "Transport",
     "TransportChunk",
     "TransportFile",

@@ -112,7 +112,7 @@ def test_the_generated_checkpoint_stays_under_the_carve_out_ceiling(
     tree = build_checkpoint(tmp_path / "ckpt")
     size = checkpoint_bytes(tree)
     assert 0 < size < rig.MAX_WEIGHTS_BYTES
-    # Deterministic: two builds agree, which is what lets a cell key mean
+    # Deterministic: two builds agree, which is what lets a compiled graph key mean
     # anything across the two processes the rig runs.
     again = build_checkpoint(tmp_path / "ckpt2")
     assert checkpoint_bytes(again) == size
@@ -220,7 +220,7 @@ def test_the_full_machinery_cycle_runs_on_this_box(tmp_path: Path) -> None:
     # here would be asserting a phase this recipe does not have.
     assert float(phases.get("trace_graph", 0.0)) > 0.0
     assert float(phases.get("seal_publish", 0.0)) > 0.0
-    assert mint.facts["compiled_graph_key"], "the child sealed no cell key"
+    assert mint.facts["compiled_graph_key"], "the child sealed no compiled graph key"
 
     publish = next(leg for leg in result.legs if leg.name == "publish")
     routes = publish.facts["routes"]
@@ -229,14 +229,14 @@ def test_the_full_machinery_cycle_runs_on_this_box(tmp_path: Path) -> None:
     assert any(r.endswith("/publishes") for r in routes)
     assert any(r.endswith("/complete") for r in routes)
     assert any(r.endswith("/publish-complete") for r in routes)
-    assert publish.facts["cas_bytes"] > 0, "no cell bytes reached the store"
+    assert publish.facts["cas_bytes"] > 0, "no compiled graph bytes reached the store"
 
     adopt = next(leg for leg in result.legs if leg.name == "adopt")
     assert adopt.facts["pid"] != os.getpid(), (
         "the adopt must run in a SECOND process — in-process adoption proves "
-        "nothing about a cell crossing pods")
+        "nothing about a compiled graph crossing pods")
     assert adopt.facts["compiled_graph_key"] == mint.facts["compiled_graph_key"], (
-        "the cell the second process adopted is not the cell the first minted")
+        "the compiled graph the second process adopted is not the compiled graph the first minted")
 
 
 # ---------------------------------------------------------------------------
