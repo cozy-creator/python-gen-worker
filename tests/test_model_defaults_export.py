@@ -31,6 +31,8 @@ def test_the_document_names_the_launch_set() -> None:
     doc = export_document()
     assert doc["names"] == [
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
+        # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b).
+        "flux1", "flux2-klein",
         "sdxl.lora", "sd15.lora",
     ]
     schemas = doc["schemas"]
@@ -106,9 +108,20 @@ def test_the_cli_classifies_contract_stamps(
 ) -> None:
     assert cli_main(["models", "classify", "sdxl.clip-g-fused-qkv@1"]) == 0
     assert capsys.readouterr().out.strip() == "sdxl"
-    # Unrecognized = unclassified, visibly — the row stays NULL.
-    assert cli_main(["models", "classify", "minimax.h3-dit-native@1"]) == 1
+    # Both packaged H3 layouts classify to the one H3 vocabulary — its
+    # fingerprint is `minimax.h3-*`, which `test_model_defaults.py` has
+    # asserted since pgw#1386. This file still expected the pre-#1386
+    # "unclassified" answer, so the two contradicted each other and this
+    # assertion was red on master; corrected in passing (pgw#1393).
+    assert cli_main(["models", "classify", "minimax.h3-dit-native@1"]) == 0
+    assert capsys.readouterr().out.strip() == "minimax-h3"
+    # Unrecognized = unclassified, visibly — the row stays NULL. The SHARED
+    # flux/timm block-spelling fragment is deliberately one of these: it
+    # names no single family, so it classifies nothing (pgw#1393).
+    assert cli_main(["models", "classify", "dit.blocks-fused-qkv@1"]) == 1
     assert capsys.readouterr().out.strip() == "unclassified"
+    assert cli_main(["models", "classify", "flux1.diffusers-bf16@1"]) == 0
+    assert capsys.readouterr().out.strip() == "flux1"
 
 
 def test_the_cli_decodes_a_row_with_the_worker_verdict(
