@@ -42,6 +42,8 @@ from .models.cache_paths import tensorhub_cas_dir
 from .models.cozy_snapshot import snapshot_dir_key
 from .models.disk_gc import tree_bytes
 from .models.projection import SNAPSHOTS_DIR
+from .discovery.names import slugify_name
+from .procsplit import is_compute_child
 from .pb import worker_scheduler_pb2 as pb
 from .serving.context import DeployBinding
 from .serving.entrypoints import ENTRYPOINT_ATTR, EntrypointSpec
@@ -131,15 +133,23 @@ def harvest_entrypoints(module_names: List[str]) -> LoadedEndpoint:
                 continue
             if spec.fn.__module__ != module.__name__:
                 continue  # re-exported from elsewhere: not this module's surface
-            prior = owners.get(spec.name)
+            # THE WIRE ROUTE IS THE SLUG, not the python name. The hub
+            # dispatches `RunJob.function_name` as `slugify_name(name)` — the
+            # same normalization `discovery.validation` checks for collisions
+            # against — so `steal_credentials` is reached as
+            # `steal-credentials`. Keying this table on the raw name made every
+            # multi-word entrypoint unroutable while single-word ones worked,
+            # which is the shape of bug that ships.
+            route = slugify_name(spec.name)
+            prior = owners.get(route)
             if prior is not None and prior != module.__name__:
                 raise DuplicateEntrypoint(
-                    f"entrypoint {spec.name!r} is declared by both {prior} and "
-                    f"{module.__name__}; a dispatch carries only the name, so "
-                    f"the two are unroutable"
+                    f"entrypoint route {route!r} is declared by both {prior} "
+                    f"and {module.__name__}; a dispatch carries only the name, "
+                    f"so the two are unroutable"
                 )
-            entrypoints[spec.name] = spec
-            owners[spec.name] = module.__name__
+            entrypoints[route] = spec
+            owners[route] = module.__name__
             for cls in spec.model_classes:
                 models.setdefault(cls)
     if not entrypoints:
@@ -418,13 +428,25 @@ class Worker:
             lane_handle(lane) for lane in self.serve.lanes.values() if lane is not None
         )
 
-        self.transport = Transport(
-            settings,
-            self,
-            queue_maxsize=queue_maxsize,
-            backoff_base_s=backoff_base_s,
-            backoff_cap_s=backoff_cap_s,
-        )
+        # pgw#763: IN THE SPLIT'S COMPUTE CHILD THE PARENT OWNS THE gRPC
+        # STREAM. This process speaks frames to it over the child socket and
+        # never dials the orchestrator — a child that constructed the real
+        # Transport would dial the placeholder address the parent passes it
+        # (`127.0.0.1:1`) and hang there forever, never reaching hello, which
+        # is exactly what it did. Same handler contract either way, so the
+        # only thing that changes is which object carries the frames.
+        if is_compute_child():
+            from .procsplit.child import ChildTransport
+
+            self.transport: Any = ChildTransport(settings, self)
+        else:
+            self.transport = Transport(
+                settings,
+                self,
+                queue_maxsize=queue_maxsize,
+                backoff_base_s=backoff_base_s,
+                backoff_cap_s=backoff_cap_s,
+            )
 
         # pgw#763 delta 1: this process is the COMPUTE CHILD and holds no
         # credential, so reading a bootstrap JWT for identity refuses on every
