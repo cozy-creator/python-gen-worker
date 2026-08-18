@@ -603,3 +603,27 @@ def _run_main() -> int:
 
 if __name__ == "__main__":
     sys.exit(_run_main())
+
+
+# ---------------------------------------------------------------------------
+# pgw#1370 INTERIM (name collision, flagged for pgw#1372/#1373): the reviewed
+# author surface spells `from gen_worker import entrypoint` for the DECORATOR
+# (gen_worker.api.entrypoint), while THIS module is the worker process entry
+# (`python -m gen_worker.entrypoint`, pinned in every fleet Dockerfile).
+# Renaming the module is a fleet-wide coordinated change; until that ruling,
+# this module is made CALLABLE and delegates to the decorator, so both
+# spellings work at runtime. Type checkers see the module; author repos type
+# against gen_worker.api.entrypoint directly.
+import sys as _sys
+import types as _types
+from typing import Any as _Any
+
+
+class _CallableEntrypointModule(_types.ModuleType):
+    def __call__(self, fn: _Any) -> _Any:
+        from .api.entrypoint import entrypoint as _decorator
+
+        return _decorator(fn)
+
+
+_sys.modules[__name__].__class__ = _CallableEntrypointModule

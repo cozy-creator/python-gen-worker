@@ -385,8 +385,15 @@ def test_no_deleted_project_is_required_from_an_index() -> None:
             in {"hashrepo", "tensorfs", "torch-compiled-graphs", "torchcg"}]
     assert dead == [], f"deleted PyPI projects required from an index: {dead}"
     assert "[tool.uv.sources]" in text
-    # retired-name: same denylist, same reason.
-    for name in ("hashrepo =", "torch-compiled-graphs =", "tensorfs =", "torchcg ="):
+    # pgw#1370 carve-out: `torchcg` may appear as a PEP 735 DEPENDENCY GROUP
+    # requirement + a git source pin. Groups are NOT published in wheel
+    # metadata, so no index consumer ever resolves it — the property this
+    # fence exists for holds — while the release-derive tests get the real
+    # library (the derive imports torchcg from the env it runs in; the
+    # standalone-package decision is tcg#41 open question 3, Paul's).
+    # The [project] tables above stay fenced for it unchanged.
+    # retired-name: the source-pin denylist itself, minus the carved-out row.
+    for name in ("hashrepo =", "torch-compiled-graphs =", "tensorfs ="):
         assert name not in text, (
             f"a `{name}` source pin is back in pyproject.toml. A source pin is "
             f"workspace-only metadata — it is stripped from the published wheel "

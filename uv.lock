@@ -625,6 +625,11 @@ vision = [
     { name = "torchvision", version = "0.28.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "torchcg" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'dev'", specifier = ">=1.9" },
@@ -669,6 +674,9 @@ requires-dist = [
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.4.20250913" },
 ]
 provides-extras = ["torch", "vision", "images", "audio", "video", "signing", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "torchcg", git = "https://github.com/cozy-creator/torchcg?rev=7102d60e2786fe1f78c75b10b0edb8dabdddc7e0" }]
 
 [[package]]
 name = "gguf"
@@ -1961,6 +1969,11 @@ wheels = [
 ]
 
 [[package]]
+name = "tensorfs"
+version = "0.1.0"
+source = { git = "https://github.com/cozy-creator/tensorfs#bb03d4822e6861f8fa1b2727ce351c6e7f120d9d" }
+
+[[package]]
 name = "tokenizers"
 version = "0.22.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2069,6 +2082,15 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:20:00Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315t-manylinux_2_28_aarch64.whl", upload-time = "2026-07-08T11:20:04Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315t-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:20:04Z" },
+]
+
+[[package]]
+name = "torchcg"
+version = "0.1.0"
+source = { git = "https://github.com/cozy-creator/torchcg?rev=7102d60e2786fe1f78c75b10b0edb8dabdddc7e0#7102d60e2786fe1f78c75b10b0edb8dabdddc7e0" }
+dependencies = [
+    { name = "safetensors" },
+    { name = "tensorfs" },
 ]
 
 [[package]]

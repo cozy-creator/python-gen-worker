@@ -124,6 +124,16 @@ dev = [
     "types-requests>=2.32.4.20250913",
 ]
 
+# pgw#1370: the release-derive tests drive REAL torchcg discovery — the derive
+# imports torchcg from the env it RUNS IN (in production, the release env's
+# own pin; never a gen-worker dependency). A PEP 735 dependency GROUP, not an
+# extra: groups are NOT published in wheel metadata, so `pip install
+# gen-worker[dev]` from an index never asks PyPI for the deleted project —
+# which is the exact wound pgw#1310's fence guards. uv installs the `dev`
+# group by default on every `uv sync`.
+[dependency-groups]
+dev = ["torchcg"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -676,6 +686,8 @@ torch = [
 torchvision = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+# pgw#1370: dev-only (see the dev extra) — release envs pin their own torchcg.
+torchcg = { git = "https://github.com/cozy-creator/torchcg", rev = "7102d60e2786fe1f78c75b10b0edb8dabdddc7e0" }
 # Saying which pins were deleted requires naming them.
 # retired-name: historical rationale, not a live reference.
 # pgw#1310 deleted the `hashrepo` / `torch-compiled-graphs` git pins that stood
