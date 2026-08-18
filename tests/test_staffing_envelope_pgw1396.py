@@ -169,6 +169,48 @@ def test_the_undeclared_control_is_unchanged(rows: dict[str, dict]) -> None:
     assert rows["control"]["resources"] == {"gpu": True, "requires": {"min_vram_gb": 78.0}}
 
 
+def test_the_block_reaches_the_real_manifest(tmp_path: Path) -> None:
+    """The whole `cozy build` discovery path, not just `discover_entrypoints`.
+
+    `discover_manifest` is what writes `endpoint.lock`; the two lines between
+    it and this block (`manifest["entrypoints"] = entrypoints_block(rows)`)
+    transform nothing, but "transforms nothing" is a claim worth a test when
+    the whole issue is a fact that was declarable and unreachable.
+
+    The rows this produces are the ones tensorhub th#2166 parses verbatim.
+    """
+    from gen_worker.discovery.discover import discover_manifest
+
+    root = tmp_path / "staffing_e2e"
+    package = root / "src" / "staffing_e2e"
+    package.mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "staffing-e2e"\nversion = "0.1.0"\n\n'
+        '[tool.gen_worker]\nmain = "staffing_e2e.main"\n'
+    )
+    (root / "endpoint.toml").write_text(
+        'schema_version = 1\nmain = "staffing_e2e.main"\n\n'
+        '[[build.profiles]]\naccelerator = "cuda"\n'
+    )
+    (package / "__init__.py").write_text("")
+    (package / "main.py").write_text((FIXTURES / f"{MODULE}.py").read_text())
+
+    sys.path.insert(0, str(root / "src"))
+    try:
+        manifest = discover_manifest(root)
+    finally:
+        sys.path.remove(str(root / "src"))
+
+    blocks = {row["name"]: row.get("resources") for row in manifest["entrypoints"]}
+    assert blocks["generate"]["vcpus"] == 16
+    assert blocks["generate"]["max_gpu_count"] == 4
+    assert blocks["generate"]["max_gpus_per_execution_group"] == 4
+    assert list(blocks["generate"]["parallel"]) == ["sequence"]
+    assert blocks["generate"]["requires"]["recommended"]["min_host_ram_gb"] == 96.0
+    assert blocks["analyze"] == {"vcpus": 4}
+    assert blocks["control"] == {"gpu": True, "requires": {"min_vram_gb": 78.0}}
+
+
 def test_absent_stays_absent(staffing: ModuleType) -> None:
     """No model slot AND no `resources=` means no claim: the key is omitted
     entirely and the hub falls back to release-level resolution. A
