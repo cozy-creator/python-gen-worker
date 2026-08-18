@@ -24,7 +24,7 @@ from .lane import LaneError, require_contract_ref, require_targets
 DOCUMENT_FORMAT = 1
 _DOCUMENT_FIELDS = frozenset(("v", "closure", "lanes"))
 _LANE_FIELDS = frozenset(("contract", "targets", "graphs", "unobserved_targets"))
-_GRAPH_FIELDS = frozenset(("graph", "target", "ingress"))
+_GRAPH_FIELDS = frozenset(("graph", "target", "ingress", "program"))
 
 
 class DocumentError(ValueError):
@@ -38,6 +38,13 @@ class GraphRecord:
     graph: str
     target: str
     ingress: CallIngress
+    #: CAS digest of this graph class's SERIALIZED ExportedProgram. The NAME
+    #: is the contract with the mint lane, which reads it as
+    #: ``PROGRAM_DIGEST_FIELD = "program"`` (pgw#962) and raises
+    #: ``MissingProgramDigest`` on an empty one. Produced by the publish
+    #: derive (pgw#1370); the miner downloads the blob and runs inductor on
+    #: it rather than re-tracing author code.
+    program: str = ""
 
     def __post_init__(self) -> None:
         if not is_graph_hash(self.graph):
@@ -46,12 +53,15 @@ class GraphRecord:
             raise DocumentError("graph record must name its target module path")
         if not isinstance(self.ingress, CallIngress):
             raise DocumentError("graph record must carry its CallIngress contract")
+        if not isinstance(self.program, str):
+            raise DocumentError("graph program digest must be a string")
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "graph": self.graph,
             "target": self.target,
             "ingress": self.ingress.as_dict(),
+            "program": self.program,
         }
 
 
@@ -214,6 +224,7 @@ class GraphSetDocument:
                         graph=raw_record["graph"],
                         target=raw_record["target"],
                         ingress=ingress,
+                        program=raw_record["program"],
                     )
                 )
             lanes.append(
