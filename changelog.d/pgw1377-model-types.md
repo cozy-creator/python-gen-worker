@@ -3,7 +3,11 @@
   set (`SDXL`, `SD15`, `SD2`, `HiDreamO1`, `Wan22`, plus `SDXL.Lora` /
   `SD15.Lora` overlays) — each a name + frozen `Defaults` struct whose field
   defaults ARE the platform fallback values (zero-arg = servable trace fixture)
-  + a tensorfs contract-pattern ingest fingerprint. `Knob` is the one reusable
+  + a tensorfs contract-pattern ingest fingerprint. `SDXL.Recipe`/`SD15.Recipe`
+  carry the five independent serving axes (cfg, steps, guidance, schedule,
+  timesteps — cfg and few-step are separate facts; schedule None = keep the
+  checkpoint's own scheduler) and BOTH defaults types inherit them, so an
+  endpoint annotates `recipe: SDXL.Recipe` — one nominal type, no union. `Knob` is the one reusable
   min/max/default triple: `d.steps.resolve(value, ctx)` defaults on None and
   clamps caller-visibly through `RequestContext.clamp` — it never rejects (the
   endpoint's API Meta bounds rejected upstream). `decode_model_defaults` is the

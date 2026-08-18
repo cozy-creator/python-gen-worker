@@ -33,6 +33,7 @@ from typing import (
     Generic,
     Literal,
     Protocol,
+    TypeAlias,
     TypeVar,
 )
 
@@ -189,68 +190,89 @@ to diffusers scheduler construction stays CODE-side in the endpoint."""
 # ── the launch defaults structs (field defaults = PLATFORM VALUES) ───────────
 
 
-class SdxlDefaults(msgspec.Struct, frozen=True):
-    """Values: steps 28 / guidance 6.0 from the live sdxl.schema.json registry
-    entry; [lo, hi] soft ranges mirror the contract file's endpoint envelope
-    (``main_v2.py``: steps 1..80, guidance 1.5..15.0). ``positive_preamble``
-    carries the quality vocabulary (Paul's ruling, pgw#1376 point 2 — the old
-    endpoint ``_QUALITY_MARKERS`` "masterpiece, best quality" vocabulary lives
-    HERE, banned from endpoint code); ``negative_preamble`` is its symmetric
-    counterpart.
+class SdxlRecipe(msgspec.Struct, frozen=True):
+    """The SERVING RECIPE — the five axes both SDXL defaults types share, as
+    ONE nominal type (Paul's refinement: the endpoint annotates
+    ``recipe: SDXL.Recipe``, never a union). The axes are INDEPENDENT:
+    ``cfg`` (CFG on/off) and few-step are separate facts — guidance-distilled
+    models are cfg-off at FULL steps, Hyper-SD CFG-preserving LoRAs are
+    few-step with CFG ON at 5-8. ``schedule=None`` means KEEP the
+    checkpoint's own scheduler untouched (no swap), never a fallback.
+    ``timesteps`` empty = derive from steps (a pinned ladder like DMD2's
+    999/749/499/249 goes here).
 
-    ``schedule``/``timesteps`` (Paul review addition): a FULL step-distilled
-    checkpoint (fused DMD2/Lightning merge — ``cfg=False``, no adapter)
-    carries its own serving recipe in the same three fields the LoRA overlay
-    declares (``steps``/``schedule``/``timesteps``, same names and types, so
-    endpoint code may type a turbo recipe as
-    ``SDXL.Lora.Defaults | SDXL.Defaults``). Platform ``schedule`` is None —
-    endpoint code falls back to euler_trailing."""
+    Platform values: steps 28 / guidance 6.0 from the live sdxl.schema.json
+    registry entry; [lo, hi] soft ranges mirror the contract file's endpoint
+    envelope (``main_v2.py``: steps 1..80, guidance 1.5..15.0)."""
 
     steps: Knob[int] = Knob(28, lo=1, hi=80, name="steps")
     guidance: Knob[float] = Knob(6.0, lo=1.5, hi=15.0, name="guidance")
     cfg: bool = True
-    positive_preamble: str = "masterpiece, best quality"
-    negative_preamble: str = "worst quality, low quality"
     schedule: LoraSchedule | None = None
     timesteps: tuple[int, ...] = ()
 
 
-class SdxlLoraDefaults(msgspec.Struct, frozen=True):
-    """Zero-arg = Lightning-4-step-ish platform values (a servable trace
-    fixture, pgw#1377 point 7). ``strength`` range from the one shipped
-    precedent, Civitai min/maxStrength (sdxl.lora.schema.json
-    recommended_weight −4..4); steps bound from the same file (1..150).
-    ``timesteps`` empty = derive from steps (a pinned ladder like DMD2's
-    999/749/499/249 goes here)."""
+class SdxlDefaults(SdxlRecipe, frozen=True):
+    """The checkpoint row: the recipe plus the prompt vocabulary.
+    ``positive_preamble`` carries the quality vocabulary (Paul's ruling,
+    pgw#1376 point 2 — the old endpoint ``_QUALITY_MARKERS``
+    "masterpiece, best quality" vocabulary lives HERE, banned from endpoint
+    code); ``negative_preamble`` is its symmetric counterpart. A fused
+    step-distilled merge (DMD2/Lightning full checkpoint) carries its recipe
+    in the inherited fields (cfg=False, schedule, pinned timesteps)."""
 
-    trigger_words: tuple[str, ...] = ()
-    strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
+    positive_preamble: str = "masterpiece, best quality"
+    negative_preamble: str = "worst quality, low quality"
+
+
+class SdxlLoraDefaults(SdxlRecipe, frozen=True):
+    """The adapter row: the recipe (platform overrides = Lightning-4-step-ish
+    servable trace fixture: cfg off, euler_trailing, 4 steps) plus the
+    adapter's own facts. ``guidance`` inherits the base platform knob — inert
+    while cfg=False, sane if a CFG-preserving adapter row (Hyper-SD) flips
+    cfg on and narrows the range to its recommended 5-8. ``strength`` range
+    from the one shipped precedent, Civitai min/maxStrength
+    (sdxl.lora.schema.json recommended_weight −4..4); steps bound from the
+    same file (1..150)."""
+
     steps: Knob[int] = Knob(4, lo=1, hi=150, name="steps")
-    schedule: LoraSchedule = "euler_trailing"
-    timesteps: tuple[int, ...] = ()
+    cfg: bool = False
+    schedule: LoraSchedule | None = "euler_trailing"
+    strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
+    trigger_words: tuple[str, ...] = ()
 
 
-class Sd15Defaults(msgspec.Struct, frozen=True):
-    """Values from the live sd15.schema.json registry entry: steps 30
-    (bounds 1..80, the family payload envelope), guidance 7.0 (schema
-    minimum 0, no declared max)."""
+class Sd15Recipe(msgspec.Struct, frozen=True):
+    """SD1.x serving recipe — same five axes and semantics as
+    :class:`SdxlRecipe` (``schedule=None`` = keep the checkpoint's own
+    scheduler). Platform values from the live sd15.schema.json registry
+    entry: steps 30 (bounds 1..80, the family payload envelope), guidance
+    7.0 (schema minimum 0, no declared max)."""
 
     steps: Knob[int] = Knob(30, lo=1, hi=80, name="steps")
     guidance: Knob[float] = Knob(7.0, lo=0.0, name="guidance")
+    cfg: bool = True
+    schedule: LoraSchedule | None = None
+    timesteps: tuple[int, ...] = ()
 
 
-class Sd15LoraDefaults(msgspec.Struct, frozen=True):
-    """Zero-arg = LCM-LoRA-SD1.5-ish 4-step platform values
+class Sd15Defaults(Sd15Recipe, frozen=True):
+    """The checkpoint row — the recipe alone (no ruled SD1.x prompt
+    vocabulary; fields stay additive if one is ruled)."""
+
+
+class Sd15LoraDefaults(Sd15Recipe, frozen=True):
+    """The adapter row. Zero-arg = LCM-LoRA-SD1.5-ish 4-step platform values
     (sd15.lora.schema.json records the 4-step distilled recipe shape;
     Hyper-SD15's ``ddim_trailing`` is outside the ruled schedule vocabulary —
     flagged in the pgw#1377 tracker section, not invented here). Bounds from
     the same file (recommended_weight −4..4, num_inference_steps 1..80)."""
 
-    trigger_words: tuple[str, ...] = ()
-    strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
     steps: Knob[int] = Knob(4, lo=1, hi=80, name="steps")
-    schedule: LoraSchedule = "lcm"
-    timesteps: tuple[int, ...] = ()
+    cfg: bool = False
+    schedule: LoraSchedule | None = "lcm"
+    strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
+    trigger_words: tuple[str, ...] = ()
 
 
 class Sd2Defaults(msgspec.Struct, frozen=True):
@@ -290,6 +312,8 @@ class SDXL(ModelType[SdxlDefaults]):
     name = "sdxl"
     contracts = ("sdxl.*",)
     canonical_contract = SDXL_DIFFUSERS_BF16
+    # TypeAlias so `recipe: SDXL.Recipe` is a valid annotation (main_v2.py).
+    Recipe: TypeAlias = SdxlRecipe
     Defaults = SdxlDefaults
 
     class Lora(LoraOverlay):
@@ -303,6 +327,7 @@ class SD15(ModelType[Sd15Defaults]):
     name = "sd15"
     contracts = ("sd15.*",)
     canonical_contract = SD15_DIFFUSERS_BF16
+    Recipe: TypeAlias = Sd15Recipe
     Defaults = Sd15Defaults
 
     class Lora(LoraOverlay):
@@ -439,9 +464,11 @@ __all__ = [
     "SDXL_DIFFUSERS_BF16",
     "Sd15Defaults",
     "Sd15LoraDefaults",
+    "Sd15Recipe",
     "Sd2Defaults",
     "SdxlDefaults",
     "SdxlLoraDefaults",
+    "SdxlRecipe",
     "SupportsClamp",
     "TensorLayoutContract",
     "WAN22_DIFFUSERS_BF16",

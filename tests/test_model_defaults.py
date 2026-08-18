@@ -49,6 +49,21 @@ def test_sdxl_zero_arg_is_the_platform_opinion() -> None:
     assert d.timesteps == ()
 
 
+def test_sdxl_lora_zero_arg_is_lightning_shaped() -> None:
+    d = SDXL.Lora.Defaults()
+    assert d.cfg is False
+    assert d.schedule == "euler_trailing"
+    assert d.steps.default == 4
+    assert d.timesteps == ()
+    assert d.strength == Knob(1.0, lo=-4.0, hi=4.0, name="strength")
+    # Inert while cfg=False; the base platform knob, so a row that flips cfg
+    # on without narrowing still serves sanely.
+    assert d.guidance == SDXL.Defaults().guidance
+    # Both defaults types ARE the one nominal recipe type.
+    assert isinstance(d, SDXL.Recipe)
+    assert isinstance(SDXL.Defaults(), SDXL.Recipe)
+
+
 def test_every_zero_arg_defaults_is_servable() -> None:
     """Zero-arg constructions double as trace fixtures (pgw#1377 point 7):
     every knob default must sit inside its own [lo, hi]."""
@@ -267,13 +282,16 @@ def test_resolve_never_rejects_inside_the_envelope() -> None:
     assert ctx.adjustments[0]["field"] == "steps"
 
 
-# ── the contract-file (main_v2.py) usage, against a fixture row ──────────────
+# ── the contract-file (main_v2.py) usage, against fixture rows ───────────────
 
 
 def test_the_contract_files_exact_usage_holds() -> None:
-    """Every ``main_v2.py`` defaults expression, line for line, over a fixture
-    hub row: the generate path (cfg gate, resolve, symmetric preambles) and
-    the turbo path (adapter defaults, schedule branch, timesteps)."""
+    """Every ``main_v2.py`` defaults expression over fixture hub rows: the
+    recipe-driven single entrypoint — ``recipe: SDXL.Recipe`` from the
+    distillation adapter's defaults when one rides, else the checkpoint's own;
+    ``recipe.cfg`` gates guidance/negatives, ``recipe.schedule`` gates the
+    scheduler swap (None = keep the checkpoint's own), pinned timesteps ride
+    the cfg-off arm."""
     ctx: RequestContext[GenerationDefaults] = RequestContext("req-main-v2")
     d = decode_model_defaults(
         SDXL,
@@ -281,11 +299,18 @@ def test_the_contract_files_exact_usage_holds() -> None:
         defaults={"guidance": {"default": 5.0, "hi": 9.0}},
     )
 
-    assert d.cfg  # `if not d.cfg: raise ValidationError(...)`
+    # The stacking gate: an adapter may not ride an already-distilled base.
+    assert d.cfg  # `if turbo is not None and not d.cfg: raise ...`
 
-    steps = d.steps.resolve(None, ctx)  # payload sent None
-    guidance = d.guidance.resolve(14.0, ctx)  # inside the API envelope
-    assert (steps, guidance) == (28, 9.0)
+    # No adapter: the recipe is the checkpoint's own Defaults — one nominal
+    # type, both Defaults inherit SDXL.Recipe.
+    recipe: SDXL.Recipe = d
+    assert isinstance(recipe, SDXL.Recipe)
+    steps = recipe.steps.resolve(None, ctx)  # payload sent None
+    assert steps == 28
+    assert recipe.cfg
+    guidance = recipe.guidance.resolve(14.0, ctx)  # inside the API envelope
+    assert guidance == 9.0  # clamped to the row's narrowed hi
 
     prompt = "a cat"
     negative = ""
@@ -301,20 +326,33 @@ def test_the_contract_files_exact_usage_holds() -> None:
         again = f"{d.positive_preamble}, {again}"
     assert again == prompt
 
-    # Turbo: `d = adapter.defaults if adapter else SDXL.Lora.Defaults()`.
-    turbo = SDXL.Lora.Defaults()
-    sched = "lcm" if turbo.schedule == "lcm" else "euler_trailing"
-    assert sched == "euler_trailing"
-    assert turbo.steps.resolve(None, ctx) == 4
-    assert (list(turbo.timesteps) or None) is None
+    # schedule=None means: keep the checkpoint's own scheduler (nullcontext).
+    assert recipe.schedule is None
 
-    pinned = decode_model_defaults(
+    # A distillation adapter rides: its defaults ARE the recipe.
+    turbo = decode_model_defaults(
         SDXL.Lora,
         model="sdxl.lora",
         defaults={"schedule": "lcm", "timesteps": [999, 749, 499, 249]},
     )
-    assert pinned.schedule == "lcm"
-    assert list(pinned.timesteps) == [999, 749, 499, 249]
+    recipe = turbo
+    assert not recipe.cfg  # the cfg-off arm: no guidance, no negatives
+    assert recipe.schedule == "lcm"  # -> LCMScheduler swap
+    assert list(recipe.timesteps) == [999, 749, 499, 249]  # pinned ladder
+    assert recipe.steps.resolve(None, ctx) == 4
+
+    # The independent-axes counterexample: a Hyper-SD-style CFG-preserving
+    # few-step adapter row — few-step AND cfg on at its recommended 5-8.
+    hyper = decode_model_defaults(
+        SDXL.Lora,
+        model="sdxl.lora",
+        defaults={"cfg": True, "guidance": {"default": 6.5, "lo": 5.0, "hi": 8.0},
+                  "steps": {"default": 8}},
+    )
+    assert hyper.cfg
+    assert hyper.guidance.resolve(None, ctx) == 6.5
+    assert hyper.guidance.resolve(14.0, ctx) == 8.0
+    assert hyper.steps.resolve(None, ctx) == 8
 
 
 # ── the vocabulary registry + ingest fingerprint seam ────────────────────────

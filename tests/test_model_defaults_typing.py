@@ -21,7 +21,7 @@ import msgspec
 
 from gen_worker.models import Knob, ModelType, SDXL
 from gen_worker.models.defaults_decode import CarriesDefaults, decode_model_defaults
-from gen_worker.models.model_types import SdxlDefaults, SdxlLoraDefaults
+from gen_worker.models.model_types import SdxlDefaults, SdxlLoraDefaults, SdxlRecipe
 from gen_worker.families import GenerationDefaults
 from gen_worker.request_context import RequestContext
 
@@ -81,27 +81,41 @@ def test_knob_resolution_is_typed_per_instantiation() -> None:
     assert steps == 28 and guidance == 14.0
 
 
-def test_the_turbo_union_access_resolves() -> None:
-    """main_v2.py types the turbo recipe as
-    ``SDXL.Lora.Defaults | SDXL.Defaults`` and reads the shared
-    steps/schedule/timesteps fields on the union."""
-    rctx: RequestContext[GenerationDefaults] = RequestContext("typed-2")
-    adapter_bound = False
-    recipe: SdxlLoraDefaults | SdxlDefaults = (
-        SDXL.Lora.Defaults() if adapter_bound else SDXL.Defaults()
-    )
+class _FakeAdapter:
+    """The ``turbo: Adapter | None`` shape main_v2.py reads defaults from."""
 
+    def __init__(self, defaults: SdxlLoraDefaults) -> None:
+        self.defaults = defaults
+
+
+def test_the_recipe_is_one_nominal_type() -> None:
+    """main_v2.py annotates ``recipe: SDXL.Recipe`` — both Defaults types
+    inherit it, so ``turbo.defaults if turbo else d`` needs no union."""
+    rctx: RequestContext[GenerationDefaults] = RequestContext("typed-2")
+    d = SDXL.Defaults()
+    turbo: _FakeAdapter | None = _FakeAdapter(SDXL.Lora.Defaults())
+
+    recipe: SdxlRecipe = turbo.defaults if turbo is not None else d
+    assert_type(recipe, SdxlRecipe)
+    assert SDXL.Recipe is SdxlRecipe  # the contract-file spelling
+
+    assert_type(recipe.cfg, bool)
     assert_type(recipe.steps, Knob[int])
+    assert_type(recipe.guidance, Knob[float])
+    assert_type(recipe.timesteps, tuple[int, ...])
+    schedule: Literal["euler_trailing", "lcm"] | None = recipe.schedule
+
     steps = recipe.steps.resolve(None, rctx)
     assert_type(steps, int)
+    guidance = recipe.guidance.resolve(None, rctx)
+    assert_type(guidance, float)
 
-    schedule: Literal["euler_trailing", "lcm"] | None = recipe.schedule
-    timesteps: tuple[int, ...] = recipe.timesteps
-    assert schedule is None and timesteps == ()
+    assert recipe.cfg is False and schedule == "euler_trailing"
+    assert (steps, guidance) == (4, 6.0)
+    assert turbo is not None
+    assert isinstance(d, SdxlRecipe) and isinstance(turbo.defaults, SdxlRecipe)
 
     lora = SDXL.Lora.Defaults()
     assert_type(lora, SdxlLoraDefaults)
-    assert_type(lora.schedule, Literal["euler_trailing", "lcm"])
     assert_type(lora.strength, Knob[float])
-    assert lora.schedule == "euler_trailing"
-    assert steps == 28
+    assert_type(lora.trigger_words, tuple[str, ...])
