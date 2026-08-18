@@ -167,16 +167,12 @@ class LoadProgressReporter:
     def _progress(self) -> str:
         """This phase's byte line, in words that say what the numbers ARE.
 
-        pgw#1334: it used to read ``staged 0.55 GiB of 6.31 GiB``, and a pod's
-        blocker was filed as "the loader ran against a 9%-staged tree". Neither
-        number is a staging fraction. The left is this PROCESS's resident anon
-        memory (or its /proc read delta, whichever is smaller —
-        :meth:`_tick`); the right is ``os.walk`` over the tree that is ALREADY
-        on disk, measured after staging finished. Their ratio is a
-        memory-residency observation about a complete tree, and it cannot go
-        to 100% for a load that mmaps. Reading it as progress-toward-complete
-        is reading a number that does not exist, so the row no longer offers
-        the words for it.
+        pgw#1334: NEITHER number is a staging fraction, and the row deliberately
+        offers no words that suggest one. The left is this PROCESS's resident anon
+        memory (or its /proc read delta, whichever is smaller — :meth:`_tick`); the
+        right is ``os.walk`` over the tree ALREADY on disk. Their ratio is a
+        memory-residency observation about a complete tree and cannot reach 100%
+        for a load that mmaps.
         """
         return (f"resident {_gib(self._staged)} anon; tree on disk "
                 f"{_gib(self.total_bytes)}")

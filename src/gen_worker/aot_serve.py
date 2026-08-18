@@ -99,12 +99,11 @@ AOTI_ALIGNMENT = tcg_selection.AOTI_ALIGNMENT
 #: resolve/publish route. A future artifact v2 does not make the key grammar
 #: v2.
 #:
-#: HARD CUT, not compatibility: formats 1/2/3 of the deleted compiled graph/bundle
-#: implementations have no reader here. There is no 3->1 mapping and no
-#: accepted set: TCG Engine validates the artifact format while importing and
-#: resolving it, so this worker cannot consume a retired package by accident.
-#: The window is real and was measured before this shipped: the old store held
-#: 0 rows and no `cg-key-v1` object existed anywhere durable.
+#: HARD CUT, not compatibility: formats 1/2/3 of the deleted compiled
+#: graph/bundle implementations have no reader here. There is no 3->1 mapping
+#: and no accepted set — TCG Engine validates the artifact format while
+#: importing and resolving it, so this worker cannot consume a retired package
+#: by accident.
 #:
 #: The name is QUALIFIED on purpose. §1.38b: *"use qualified names such as
 #: `compiled_graph_format`, never the generic `format` that let pgw#1230
@@ -811,12 +810,9 @@ def no_entry_detail(
 ) -> str:
     """The ``no_entry_admits`` sentence, CLOSEST ENTRY FIRST (pgw#1074).
 
-    The refusal this replaces said "36 tried" and then listed six in iteration
-    order — and the one entry whose dims matched the call was not among them,
-    so diagnosing a live refusal meant pulling the published compiled graph apart off-pod
-    to find out what the covering entry actually objected to. A refusal that
-    hides the one relevant miss is the pgw#1058 lesson repeating one layer up,
-    in the diagnostics.
+    A refusal that names N tried and then lists the first few in iteration
+    order hides the one entry whose dims matched the call — the pgw#1058 lesson
+    repeating one layer up, in the diagnostics.
 
     So: rank by :func:`miss_distance`, name the closest entry and its FULL
     reason first (it survives any downstream truncation), then account for
@@ -2055,11 +2051,9 @@ def enable(
     pgw#1176: a miss here is a miss for ONE graph class. Nothing about it
     un-arms a sibling, and the caller's retry/mint policy is per class too.
 
-    pgw#923: the outcome is RETURNED rather than narrated. The classified
-    refusal reason used to leave this function only as the ``phase`` of a
-    free-text ``aot_adopt`` event, which is why the adoption that actually
-    happens on every boot had no measured row anywhere — the caller could not
-    see what it had just been told.
+    pgw#923: the outcome is RETURNED rather than narrated. A classified refusal
+    that leaves this function only as the ``phase`` of a free-text
+    ``aot_adopt`` event is one the caller cannot act on.
     """
     if artifact is None:
         return AdoptOutcome.miss("no_artifact")
@@ -2095,13 +2089,11 @@ def enable(
 def _marker_states(subject: Any) -> List[Dict[str, Any]]:
     """Every wrapped target's state dict on a marker — PIPELINE or MODULE.
 
-    pgw#1176, CORRECTED. I first deleted the single-``state`` branch here as
-    "a legacy shape only tests build". That was half right and the wrong
-    half: a bare ``state`` on a PIPELINE is indeed a shape nothing produces
-    (and no fixture builds one any more), but this function is also called
-    with a MODULE, and a bare ``state`` is exactly what :func:`wrap_module`
-    writes there — on every arm, in production. Deleting it made
-    `execution_count(module)` answer 0 for a module that had served.
+    pgw#1176: the single-``state`` branch is NOT a legacy shape. A bare
+    ``state`` on a PIPELINE is indeed a shape nothing produces, but this
+    function is also called with a MODULE, and a bare ``state`` is exactly what
+    :func:`wrap_module` writes there — on every arm, in production. Deleting it
+    makes `execution_count(module)` answer 0 for a module that has served.
 
     So the branch is not legacy and stays; what it reads is named. The two
     markers are different objects and always were: :func:`wrap_module` writes
@@ -2246,12 +2238,8 @@ def armed_entries(pipeline: Any) -> Dict[str, str]:
 def is_armed(pipeline: Any) -> bool:
     """Whether this pipeline is serving ANY compiled graph class right now.
 
-    pgw#1176 DELETED the every-target rule ("one revoked target means the
-    compiled graph no longer serves the contract its key advertises"). That rule was
-    the arming half of the wrong atom: a key that advertised 36 classes made
-    partial service a lie, so the guard was locally correct — and it is what
-    forbade the incremental compile-and-adopt this design exists to deliver.
-    A key now advertises ONE class, an entry arms whole or not at all, and a
+    pgw#1176: there is NO every-target rule. A key advertises ONE class, an
+    entry arms whole or not at all, and a
     de-armed entry costs itself. Mixed compiled/eager service is not a
     degraded state; it is the design's normal one, and it is numerically as
     proven as full coverage because every armed entry passed the same mint

@@ -1743,11 +1743,9 @@ class _PublisherMixin:
         self._candidate_path = str(path) if path else None
 
     # pgw#1242/te#185: the fifth reserved model input — a previously PUBLISHED
-    # checkpoint to CONTINUE from. `save_checkpoint` already publishes; before
-    # this there was no way to hand one back to a handler, so a training
-    # endpoint could not resume across pod loss at all and a multi-hour run
-    # restarted from zero. Absent on every existing payload struct — stays {}
-    # and is a no-op.
+    # checkpoint to CONTINUE from, which is what lets a training endpoint resume
+    # across pod loss instead of restarting a multi-hour run from zero. Absent on
+    # every existing payload struct — stays {} and is a no-op.
     @property
     def resume_from(self) -> dict[str, Any]:
         return dict(self._resume_from_info)
@@ -2159,10 +2157,9 @@ class JobContext(_PublisherMixin, RequestContext[GenerationDefaults]):
     ``@endpoint`` and priced, with zero body edits. It is enforced by a test
     that registers one body both ways and runs it under both harnesses.
 
-    This class is the MERGE of what used to be three sibling contexts, one per
-    producer KIND (pgw#1294 merged them, pgw#1306 deleted the names). It is now
-    the ONLY producer context: no kind selects a different class, because no
-    kind decides what a body may write — the ``@job``/``@endpoint`` declaration
+    The ONLY producer context (pgw#1294 / pgw#1306): no kind selects a
+    different class, because no kind decides what a body may write — the
+    ``@job``/``@endpoint`` declaration
     does (``publishes`` / ``emits_media``), and the hub mints the write grant
     off that declaration. It carries:
 

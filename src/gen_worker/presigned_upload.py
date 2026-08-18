@@ -795,12 +795,11 @@ def _typed_presigned_put(
     and the ``phase == "put"`` + ``status_code == 403`` pair is what
     :func:`presigned_upload_file` re-plans an expired presign on.
 
-    This helper exists because the conversion used to live only in the
-    MULTIPART leg. The direct-final PUT — the leg production always takes,
-    since ``_stream`` always sends ``sha256`` and the hub therefore always
-    mints ``put_url`` — raised ``TransportError`` raw: it never matched the
-    re-plan's ``except ArtifactTransferError``, so an expired presign lost a
-    whole completed render as an untyped ``RuntimeError``.
+    BOTH legs convert, not just the multipart one. The direct-final PUT is the
+    leg production always takes (``_stream`` always sends ``sha256``, so the
+    hub always mints ``put_url``), and a raw ``TransportError`` there never
+    matches the re-plan's ``except ArtifactTransferError`` — an expired presign
+    then loses a whole completed render as an untyped ``RuntimeError``.
     """
     try:
         with _presigned_put_slot():

@@ -49,10 +49,8 @@ class ProducedFlavor(msgspec.Struct):
       - extra_files: rare escape hatch — sibling artifacts attached to the
         same flavor (e.g. a tokenizer.json next to a non-tree output).
 
-    **A18 / §1.32(d), pgw#1319: there is no ``flavor`` field.** It was the last
-    of the axis — a producer-local label that named no catalog row but still
-    decided the ``precision_class`` stamp through
-    ``classify_flavor_token``, which is deleted with it. What the bytes ARE is
+    **A18 / §1.32(d), pgw#1319: there is no ``flavor`` field**, and no
+    producer-local label decides a ``precision_class`` stamp. What the bytes ARE is
     stated by the ``dtype`` attribute and, when the producer knows it, an
     ``artifact_contract`` attribute (``ns.name@N``, PROVEN hub-side against the
     safetensors header — §1.33); what LANE they are on is stated by a
@@ -61,8 +59,8 @@ class ProducedFlavor(msgspec.Struct):
     sub-16-bit bytes that declares none is a refusal, not an unstamped publish.
 
     A job that emits several artifacts hands over several ``ProducedFlavor``
-    entries: N publishes joining ONE tag group. There is no flavor-label set
-    on a single publish (``flavors`` was deleted with the wire field).
+    entries: N publishes joining ONE tag group. A single publish carries no
+    flavor-label set.
     """
 
     path: _PathField

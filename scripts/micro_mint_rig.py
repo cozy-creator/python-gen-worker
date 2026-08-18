@@ -601,12 +601,12 @@ def _first_artifact(outcome: Any) -> Path:
 def _publish(hub: Any, request: Any, artifact: Path, report: Any = None) -> str:
     """The real `CompiledGraphPublisher`, against the local hub.
 
-    pgw#1341 made PROVENANCE a required argument: the env seal, the lane, the
+    pgw#1341 makes PROVENANCE a required argument: the env seal, the lane, the
     manifest digest and the two pod axes are facts the ARTIFACT cannot state
     (torchcg's metadata vocabulary is closed), so the publisher takes them
-    alongside the bytes and REFUSES a compiled graph that has none. This rig had not been
-    updated and was calling the four-argument form; nothing noticed, because
-    `scripts/` is off mypy's shared path and the rig never runs in CI.
+    alongside the bytes and REFUSES a compiled graph that has none. Nothing
+    catches a stale call site here — `scripts/` is off mypy's shared path and
+    this rig never runs in CI.
 
     The record is built from what the MINT reported, not re-derived here: a
     stand-in would publish this process's facts about the child's mint.

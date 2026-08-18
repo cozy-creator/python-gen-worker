@@ -13,8 +13,7 @@ the orchestrator-backed bits with local-mode equivalents:
   set (no tensorhub upload).
 - ``materialize_blob`` on ``LocalJobContext`` falls back to the local CAS
   unless ``--allow-publish`` delegates to the real implementation. ONE answer
-  for every producer kind — before pgw#1306 there were three, and two of them
-  were wrong (see that class's docstring).
+  for every producer kind (pgw#1306).
   (Checkpoint publishing goes through ``gen_worker.convert.publish_flavors``,
   which talks to tensorhub directly and fails loudly without credentials.)
 - ``_canceled`` is toggled by the installed SIGINT handler in ``run.py``.
@@ -161,17 +160,12 @@ class LocalJobContext(LocalRequestContextMixin, JobContext):
     ``--allow-publish`` was passed (in which case we delegate to the real
     implementation — useful for round-tripping against a dev tensorhub).
 
-    **pgw#1306 collapsed three classes into this one, and the collapse fixed a
-    live defect rather than tidying names.** There used to be a
-    `LocalConversionContext` / `LocalDatasetContext` / `LocalTrainingContext`,
-    selected by kind, and the three disagreed about the same question. Measured
-    on `b7a9345a`: `conversion` honored `--allow-publish`; `dataset` had a
-    near-copy of this stub that IGNORED it; `training` overrode nothing at all,
-    so `gen-worker run --offline` on a training endpoint reached
-    `_PublisherMixin.materialize_blob` — the REAL hub-backed implementation —
-    in the loop whose entire purpose is to not have a hub. Nobody chose that;
-    it was inherited from whichever producer-kind class each local subclass
-    happened to sit on. One class cannot disagree with itself.
+    **ONE class for every producer kind (pgw#1306), and that is the defect
+    fix.** Three kind-selected classes disagreed about whether
+    ``--allow-publish`` was honored, so ``gen-worker run --offline`` on a
+    training endpoint reached the REAL hub-backed ``materialize_blob`` in the
+    loop whose entire purpose is to not have a hub. One class cannot disagree
+    with itself.
     """
 
     def materialize_blob(

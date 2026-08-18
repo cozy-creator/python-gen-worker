@@ -7,13 +7,9 @@ elaboration: *"download model + code ONCE, compile ONCE, and every
 subsequent run of that code reuses the same compiled graph — same ck1 key
 derivation, same memo shortcut, fully offline-capable."*
 
-pgw#1283 — THE SPLIT. This module used to keep a SECOND copy of bytes TCG had
-already admitted to its CAS: ``aot_compile_child`` packs with
-``Engine.export_artifact``, and this module then hashed that file, copied it to
-``<root>/aot-cells/<key>/cell.tar.gz``, and re-hashed it on every lookup. Three
-digest passes over a multi-hundred-megabyte artifact, all of them re-deriving
-what the CAS derived when it ingested the bytes. That duplication is deleted.
-The two concerns that were tangled in it are now stated separately:
+pgw#1283 — THE SPLIT. This module keeps NO second copy of bytes TCG has
+already admitted to its CAS, and re-derives no digest the CAS derived when it
+ingested them. The two concerns are stated separately:
 
 **EXISTENCE is TCG's.** :func:`store` hands the artifact to
 ``Engine.import_artifact``, which unpacks it, checks that its metadata restates
@@ -333,14 +329,11 @@ class LocalCompiledGraph:
 def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
     """Replace ``path`` with ``payload``, atomically and collision-safely.
 
-    pgw#1283 criterion 6. The temp name used to be keyed on the pid alone,
-    which is not a distinct name for two THREADS of one process — and the memo
-    is written from the mint path and from the arm path, which do run
-    concurrently. Two writers then shared one temp file and could publish a
-    torn interleaving of both payloads under a name that says it is atomic.
-    The random suffix makes the name distinct per WRITE, not per process, and
-    the ``os.replace`` makes the publication atomic; the fsyncs make it
-    survive the crash the ordering is designed around.
+    pgw#1283 criterion 6. The random suffix makes the temp name distinct per
+    WRITE, not per process: the memo is written from the mint path and from the
+    arm path, which run concurrently, so a pid-keyed name lets two threads
+    interleave two payloads into one file. ``os.replace`` makes the publication
+    atomic; the fsyncs make it survive the crash the ordering is designed around.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}")
@@ -361,13 +354,11 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
 class RecordUnreadable(Exception):
     """A store file EXISTS but its bytes are not a usable record.
 
-    pgw#1283. Absence and corruption used to collapse into one ``None`` here,
-    and every caller then read that ``None`` as "nothing was ever stored". They
-    are not the same fact and they do not have the same cost: absence is the
-    normal empty-store case, while corruption means a file this store wrote is
-    no longer the file it wrote. Each caller now decides for itself, and every
-    one of them says so in the log — a store that silently re-mints is a store
-    that quietly bills a GPU pod for a defect nobody can see.
+    pgw#1283. Absence and corruption must not collapse into one ``None``: absence
+    is the normal empty-store case, while corruption means a file this store wrote
+    is no longer the file it wrote. Each caller decides for itself and says so in
+    the log — a store that silently re-mints quietly bills a GPU pod for a defect
+    nobody can see.
 
     Raising is safe precisely because every call site catches it: the module's
     rule that a cache miss must never be fatal is unchanged.
@@ -540,12 +531,11 @@ def store(
             "compiled anyway and the next one re-mints", key, exc)
         return None
     # pgw#1283 — EVERYTHING BELOW THIS LINE IS BEST-EFFORT. The bytes are in
-    # the CAS and the record is durable, which means the compiled graph IS stored and
-    # `lookup` will find it; anything that fails from here must not be able to
-    # turn that into a reported failure. The memo write used to sit inside the
-    # `try` above, so a failure to write a shortcut returned ``None`` while the
-    # compiled graph sat on disk — `fleet_compiled_graphs._stage_durable` then emitted
-    # `local_compiled_graph_store_failed` for a compiled graph that was, in fact, stored.
+    # the CAS and the record is durable, which means the compiled graph IS stored
+    # and `lookup` will find it; anything that fails from here must not be able to
+    # turn that into a reported failure. A memo write inside the `try` above would
+    # report `local_compiled_graph_store_failed` for a compiled graph that is, in
+    # fact, stored.
     if arm_token:
         note_memo(arm_token, key, root)
     logger.info(
@@ -576,8 +566,7 @@ def mark(
         raw = _read_json(target_dir / RECORD_NAME)
     except RecordUnreadable as exc:
         # pgw#1283: the transition is LOST, and that costs money in both
-        # directions — a dropped ADMITTED re-mints, a dropped DELIVERED
-        # re-uploads. It used to be indistinguishable from "no such compiled graph".
+        # directions — a dropped ADMITTED re-mints, a dropped DELIVERED re-uploads.
         logger.error(
             "local-compiled-graph-store: LOSING a state transition for %s — verdict=%r "
             "sink=%r were not applied because its record is unreadable (%s). "
@@ -830,10 +819,10 @@ def lookup_for_arm(
 def drop(key: str, root: Optional[Path] = None) -> None:
     """Forget this worker's POLICY for one compiled graph. The CAS keeps its bytes.
 
-    pgw#1283 — a deliberate narrowing. This used to delete the only copy of an
-    artifact; the bytes now live in the content-addressed store, where they may
-    be the same bytes another key or another route resolves, so a worker
-    decision about ONE arm identity must not delete them. What this removes is
+    pgw#1283 — a deliberate narrowing. The bytes live in the content-addressed
+    store, where they may be the same bytes another key or another route resolves,
+    so a worker decision about ONE arm identity must not delete them. What this
+    removes is
     the sidecar that grants permission to serve, and the materialized export
     beside it, which is exactly what "this compiled graph is stale for us" means. A later
     :func:`store` of the same artifact re-records it against bytes TCG will

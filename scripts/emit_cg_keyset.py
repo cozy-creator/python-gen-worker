@@ -283,10 +283,9 @@ def derive(
         # THE MINT LANE'S EMITTER DOES NOT NEED A CARD. The document is
         # machine-INDEPENDENT — TCG class hashes, nothing folded — while the
         # tail of `derive` folds this process's `sm` into keys THIS script never
-        # uses. On a cardless box that fold refuses `no_runtime_sm` and used to
-        # discard a complete, correct set of traces at the last step. The traces
-        # are recorded before the fold (pgw#1353), so the honest thing here is to
-        # look for what landed rather than to treat the exception as the answer.
+        # uses, and on a cardless box that fold refuses `no_runtime_sm`. The traces
+        # are recorded BEFORE the fold (pgw#1353), so look for what landed rather than
+        # treating the exception as the answer.
         folded = f"not folded ({type(exc).__name__}: {exc})"
     try:
         document = keyset_store.read_document(cache / keyset.KEYSET_FILENAME)

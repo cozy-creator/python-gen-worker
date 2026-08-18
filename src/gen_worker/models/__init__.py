@@ -1,12 +1,11 @@
 """Models layer: refs, download (ensure_local), memory decisions, residency.
 
 **The package index is LAZY, and that is a serve-path guarantee (pgw#1331).**
-This file used to eagerly re-export ``residency``, which imports ``loading``,
-which constructs diffusers and transformers objects. So *any* ``from .models
-import x`` — ``aot_serve`` asking for ``lora_lifted``, ``aot_constants``'
-tensor reader asking for a header parser — executed the whole eager weight
-loader, and the adopt-only serve role could not be asserted model-free through
-a package root it never wanted. PEP 562: importing this package costs nothing,
+An eager re-export of ``residency`` pulls in ``loading``, which constructs
+diffusers and transformers objects — so *any* ``from .models import x`` would
+execute the whole eager weight loader and the adopt-only serve role could not
+be asserted model-free through a package root it never wanted. PEP 562:
+importing this package costs nothing,
 and asking for a name costs exactly the one submodule that defines it. Same
 shape as ``gen_worker/__init__`` and ``gen_worker/model/__init__``, same
 reason.

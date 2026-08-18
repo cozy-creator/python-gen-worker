@@ -573,13 +573,10 @@ def reached(d: Definition, reach: Reach) -> bool:
 # ---------------------------------------------------------------------------
 
 # DIRECTORY names, and this list being CLOSED is the fence. A NAMED sibling that
-# is not on disk is a REFUSAL that prints the path, never a skip — the loop below
-# used to `continue` past it, which is how the 2026-08-16 rename made this scan
-# read 5 corpora while printing "across 6 siblings, 0 unlisted consumers"
-# (pgw#1323). Renaming the entry fixed that instance; refusing fixes the class.
-#
-# `inference-endpoints` became `serverless-endpoints` on 2026-08-16 and
-# `training-endpoints` became `jobs` on 2026-08-17; both directory moves are done.
+# is not on disk is a REFUSAL that prints the path, never a skip: a `continue`
+# there is how a repo rename made this scan read 5 corpora while printing
+# "across 6 siblings, 0 unlisted consumers" (pgw#1323). Renaming an entry fixes
+# one instance; refusing fixes the class.
 SIBLINGS = ("jobs", "serverless-endpoints",
             "private-inference-endpoints", "tensorhub", "e2e", "cozy-local")
 def _workspace() -> Path:
@@ -612,8 +609,8 @@ def _sibling_texts(
     ``corpus`` is ``(repo, where, text)`` over every sibling checkout, and
     optionally over the content of every REMOTE BRANCH — a call site can live on
     an unmerged branch and is a consumer just the same. ``scanned`` is the repos
-    actually READ, which is the number the report prints; ``len(SIBLINGS)`` is
-    the number it used to print, and the gap between them is the whole defect.
+    actually READ, and it — never ``len(SIBLINGS)`` — is the number the report
+    prints; the gap between them is the whole defect.
 
     **A named sibling that is not on disk is a REFUSAL, not a skip.** So is a
     ``git grep`` that fails for any reason other than "no match" (rc 1). This
@@ -725,9 +722,8 @@ def siblings_selftest() -> int:
             bad += 1
 
         # ARM 2 — one named sibling absent: a REFUSAL that names the path, and a
-        # `scanned` count that is smaller than the declared list. This is the
-        # exact shape the 2026-08-16/17 repo renames created, and before this
-        # change it was a `continue` under a printed "across 6 siblings".
+        # `scanned` count smaller than the declared list. This is the shape a repo
+        # rename creates.
         gone = ws / "jobs"
         corpus, scanned, refusals = _sibling_texts(False, (), (*present, "jobs"), ws)
         if not refusals:

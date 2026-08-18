@@ -8,14 +8,9 @@ partial indexes and a p50/p95/max admin surface. The other description was a
 free-text ``aot_adopt`` activity event that put ``family=… key=… sku=…`` in
 prose and no numbers anywhere.
 
-Only the free-text one was ever reachable from the path adoptions actually take
-(arming at boot, through ``fleet_compiled_graphs`` — historically called "boot attach",
-which names WHEN the compiled graph is armed, never a hub push); the typed one was
-reachable only from the
-hub-commanded ``ADOPT_COMPILE_CACHE`` operation, which no stack has ever
-dispatched. So the measured lane had zero rows on both live stacks while every
-real adoption landed at ``duration_ms=0``, and the percentile endpoint
-aggregated a population with no members.
+Adoptions take exactly one path — arming at boot, through
+``fleet_compiled_graphs``. The hub-commanded ``ADOPT_COMPILE_CACHE`` operation
+no stack has ever dispatched is not a second one.
 
 pgw#1032 finished the argument: ``ADOPT_COMPILE_CACHE`` is GONE on both sides.
 Its hub-side push was keyed off the COMPUTED (``kind="inductor"``) compiled graph key,
@@ -48,11 +43,10 @@ __all__ = ["AdoptOutcome", "CompiledGraphAdoption", "EagerPhase"]
 class EagerPhase(StrEnum):
     """Why a compile-declaring pipeline is serving EAGER — one token, shared.
 
-    pgw#824 gave the arming policy's declines a classified token instead of the
-    single ``mint_unavailable`` constant they used to share; the token rides
-    ``self_mint_skipped``/``self_mint_started`` as ``phase`` and rides out of
-    the decision as ``ArmOutcome.eager_reason``, so the hub's activity rows and
-    the request row's ``fallback_reason`` join on one string.
+    pgw#824: every arming-policy decline carries a classified token. It rides
+    ``self_mint_skipped``/``self_mint_started`` as ``phase`` and rides out of the
+    decision as ``ArmOutcome.eager_reason``, so the hub's activity rows and the
+    request row's ``fallback_reason`` join on one string.
 
     The tokens lived as bare literals at each ``return``, and the pgw#824 audit
     re-spelled the same nine strings in a second list to check they were all
@@ -69,13 +63,8 @@ class EagerPhase(StrEnum):
     """
 
     #: The mint-impossibility exits, each a distinct `_fail_closed` cause.
-    #: pgw#1010 retired three of the original nine with the in-process
-    #: capture that produced them — ``delivered_compiled_graph_seeded``,
-    #: ``capture_conflict`` and ``multi_group_in_process`` all named hazards
-    #: of moving the process-global inductor cache dir, and nothing moves it
-    #: any more; ``capture_arm_failed`` became ``jit_arm_failed``, which is
-    #: what it always measured (this process cannot arm its declared
-    #: targets), minus a capture that no longer exists.
+    #: Nothing moves the process-global inductor cache dir any more, so the
+    #: capture hazards that used to live here are gone (pgw#1010).
     NO_FAMILY = "no_family"
     NO_CUDA = "no_cuda"
     NO_TOOLCHAIN = "no_toolchain"
@@ -92,12 +81,10 @@ class EagerPhase(StrEnum):
     #: identity must not be re-minted) and was the one that only logged.
     COMPILED_GRAPH_QUARANTINED = "compiled_graph_quarantined"
 
-    #: pgw#1340 / th#2098: the handback seam compares an axis a packed compiled graph
-    #: structurally cannot state, so the arm can only ever refuse. The mint is
-    #: declined at obligation-open, for $0, instead of after 20-45 minutes of
-    #: paid GPU — which is what it cost on `sd15` for two wheels running:
-    #: `family: child compiled graph states '', this runtime computed 'sd15'`, every
-    #: mint, nothing published, ~$1.00 of L4 per burst.
+    #: pgw#1340 / th#2098: the handback seam compares an axis a packed compiled
+    #: graph structurally cannot state, so the arm can only ever refuse. The mint
+    #: is declined at obligation-open for $0, instead of after 20-45 minutes of
+    #: paid GPU (~$1.00 of L4 per burst, measured on `sd15`).
     #:
     #: A pod reporting this is reporting a CODE defect with a named owner
     #: (an axis outside `artifact_meta.compiled_graph_metadata_fields()`), never a
@@ -160,8 +147,7 @@ class EagerPhase(StrEnum):
 
     #: pgw#1093: an arm SUCCEEDED inside `setup()` and `_install_compile_targets`
     #: then resolved no declared target on the same object — the boot compiled
-    #: graphs it can never dispatch to. The pgw#1078 D2 class, one layer up,
-    #: and previously a bare `continue` with no note, no counter, no event.
+    #: graphs it can never dispatch to (the pgw#1078 D2 class, one layer up).
     ARMED_TARGET_UNRESOLVED = "armed_target_unresolved"
 
     #: pgw#1093: the record ended setup owning ZERO compile-capable candidate
@@ -198,10 +184,9 @@ class EagerPhase(StrEnum):
 class AdoptOutcome:
     """The result of arming ONE candidate artifact on ONE pipeline.
 
-    Truthy exactly when the compiled graph armed, so the many ``if enable_compiled(...)``
-    call sites read unchanged while the classified refusal — previously
-    reachable only as the ``phase`` of a free-text event — becomes a value the
-    caller can act on and put on the wire.
+    Truthy exactly when the compiled graph armed, so the many
+    ``if enable_compiled(...)`` call sites read unchanged while the classified
+    refusal is a value the caller can act on and put on the wire.
 
     ``reason`` is the short, stable, countable token (an ``AdoptError.reason``,
     a lane-gate refusal, ``no_compiled_graph``); ``detail`` is the human sentence.

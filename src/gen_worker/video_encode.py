@@ -114,12 +114,9 @@ def detect_encoder(*, refresh: bool = False) -> EncoderChoice:
     with _detect_lock:
         if _detected is not None and not refresh:
             return _detected
-        # th#1887: the GEN_WORKER_VIDEO_ENCODER switch is deleted. Its default
-        # was this probe, and neither other value could reach an encoder the
-        # probe would not: `x264` only SKIPPED the probe, and `nvenc` already
-        # fell back to x264 when the probe failed. So the probe was always the
-        # decision — the env could only make a pod encode on CPU while its
-        # NVENC ASIC sat idle, and never report the gap.
+        # th#1887: there is no encoder switch. The PROBE is always the decision — an
+        # env could only make a pod encode on CPU while its NVENC ASIC sat idle, and
+        # never report the gap.
         if _probe_nvenc():
             _detected = EncoderChoice("h264_nvenc", dict(NVENC_OPTIONS), hardware=True)
         else:

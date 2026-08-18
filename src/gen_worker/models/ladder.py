@@ -22,18 +22,12 @@ vocabulary those declarations are checked against: one home, and the publish
 gate refuses a value outside it rather than forwarding prose the hub cannot
 read.
 
-pgw#1300 / th#2055: the PLACEMENT half of this module is deleted. ``Placement``,
-``default_placement`` and ``placement_to_metadata`` stamped an SM allow-list, an
-SM floor and an engine list into that same block, and the hub read them to admit
-or refuse a card. **Pod purchase now depends only on the endpoint owner's
-(GPU, lane) ladder**, so the hub deleted every reader (`PlacementFromMetadata`,
-`defaultPlacement`, `admitted()`, `AdmitLiteral`'s sm/engine arms) and
-`StoredPrecisionOf` reads `precision_class` and nothing else. The stamp was not
-merely unread — it was WRONG and vetoing: `sm_allowed=(120, 121)` plus
-`engines=("nunchaku",)` for svdq-fp4 described a kernel window and a wheel the
-native engine has not needed since pgw#685, so a B200 (sm_100) could not bind a
-variant it serves. Correcting it was rejected: a correct allow-list still vetoes
-an owner's own rung. There is no local walk and no local AUTO fp8 fold; locally,
+pgw#1300 / th#2055: the PLACEMENT half of this module is deleted — no SM
+allow-list, no SM floor, no engine list. **Pod purchase depends only on the
+endpoint owner's (GPU, lane) ladder**, so the hub reads `precision_class` and
+nothing else. Correcting the stamp was REJECTED rather than attempted: a
+correct allow-list still vetoes an owner's own rung. There is no local walk and
+no local AUTO fp8 fold; locally,
 fit is the loading layer's job and selection within a tag group is §1.33
 contract compatibility.
 """

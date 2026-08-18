@@ -1,10 +1,8 @@
 """The repackage declaration schema — typed maps the SDK engine executes.
 
-``convert/`` used to be the one package with no
-registration hook, so every family's layout knowledge lived as a module-level
-private constant inside the SDK — ~430 lines of hand-ported per-family tensor
-surgery, four overlapping detection ladders, and two copies of the SDXL
-signature that disagreed with each other.
+``convert/`` carries a registration hook like every other package, so a
+family's layout knowledge is declared by the family rather than living as a
+module-level private constant inside the SDK.
 
 This module defines the *vocabulary*; :mod:`gen_worker.convert.repack_registry`
 holds the registrations; :mod:`gen_worker.convert.repack_engine` executes them.

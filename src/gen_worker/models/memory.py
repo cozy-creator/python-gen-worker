@@ -82,12 +82,10 @@ def mark_shared_components(components: Optional[Dict[str, Any]]) -> int:
     `mat1 is on cuda:0, mat2 on cpu` in the middle of a generate — measured on
     krea-2, qwen-image, z-image and hidream-o1-image (ie#480 finding 12).
 
-    Until th#1867 this was enforced by `Resources.strict_vram`, an author
-    declaration that the endpoint could not tolerate CPU-touching rungs. The
-    declaration deserved to go (it was a card-size claim in softer words) but it
-    was ALSO the only enforcer of an invariant `provision`'s docstring still
-    states. This restores the invariant from a MEASURED fact — this object was
-    injected as a shared component — instead of from an author's word.
+    The invariant `provision`'s docstring states, enforced from a MEASURED fact
+    — this object was injected as a shared component — instead of from an
+    author's word. th#1867 deleted `Resources.strict_vram`, which was a
+    card-size claim in softer words but was also this invariant's only enforcer.
 
     Returns how many modules were marked, so a caller can assert on it.
     """
@@ -128,11 +126,9 @@ def shared_component_names(pipeline: Any) -> List[str]:
 GPU_VRAM_OVERHEAD_GB = 1.0
 
 
-# th#1867 deleted `effective_vram_requirement_gb`. It translated a DECLARED
-# `vram_gb` recommendation into a probed-VRAM floor, and its only caller was
-# `hub_policy.variant_fit`'s size arm — so with the declaration gone it had
-# nothing left to translate. `GPU_VRAM_OVERHEAD_GB` survives below because the
-# other use subtracts it from a MEASURED total, which is arithmetic on a fact.
+# th#1867 deleted `effective_vram_requirement_gb` with the declaration it
+# translated. `GPU_VRAM_OVERHEAD_GB` survives below because the other use
+# subtracts it from a MEASURED total, which is arithmetic on a fact.
 
 # The ladder itself lives in rung.py (pgw#1206 A2): one ordered Rung, one
 # walk, one price. This module keeps the probes and the appliers.
@@ -1334,12 +1330,10 @@ def place_pipeline(
     """
     log = logger or _LOG
     if not cuda_ready():
-        # pgw#1315: the CPU rung is APPLIED here, not merely described. The
-        # bare `{"mode": "cpu"}` this used to return left `low_vram_mode()`
-        # reading `""` — the ladder's own view of the pipeline was "never
-        # placed", so a later transition could not tell the bottom rung from an
-        # unprepped object. Plan time and the reactive descent now stamp ONE
-        # token.
+        # pgw#1315: the CPU rung is APPLIED here, not merely described — a bare
+        # `{"mode": "cpu"}` leaves `low_vram_mode()` reading `""`, so a later
+        # transition cannot tell the bottom rung from an unprepped object. Plan time
+        # and the reactive descent stamp ONE token.
         return apply_low_vram_config(pipeline, mode="cpu", logger=log)
     effective = select_auto_mode(pipeline=pipeline) if mode == "auto" else mode
     if mode == "auto":

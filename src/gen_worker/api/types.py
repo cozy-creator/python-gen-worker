@@ -21,9 +21,8 @@ class Asset(msgspec.Struct):
         returns just ``ref`` + the immutable bytes-attestation fields
         (``sha256``, ``blake3``, ``size_bytes``, ``mime_type``,
         ``media_id``). gen-orchestrator re-presigns the download URL on
-        every client read via tensorhub's ``POST /api/v1/media/urls``.
-        gen-orchestrator issue #318 deleted the upload-time URL caching
-        and the asset-receipt JWT.
+        every client read via tensorhub's ``POST /api/v1/media/urls``; there is
+        no upload-time URL caching and no asset-receipt JWT.
       - Inline ``inline_bytes``: the worker SKIPPED the tensorhub upload
         and returned the raw bytes directly. Used when the client asked
         for ``Prefer: bytes=inline`` and the payload fits under the

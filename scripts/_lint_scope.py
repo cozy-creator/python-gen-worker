@@ -1,7 +1,7 @@
 """Which subtrees of `src/gen_worker` a repo guard may not judge, and why.
 
-ONE HOME for that fact. Each guard used to spell its own exclusion (or forget
-to), so a new such subtree meant finding every scanner by running them.
+ONE HOME for that fact: a guard that spells its own exclusion (or forgets to)
+makes a new such subtree a hunt through every scanner.
 
 A directory belongs here only when the code in it is NOT OURS TO CHANGE:
 

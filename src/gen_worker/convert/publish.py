@@ -214,11 +214,9 @@ def destination_ref(ctx: Any, explicit: str = "") -> str:
     struct's key is ``ref``, and tag/flavor/checkpoint selectors are stripped
     so a caller that passed ``owner/repo:tag`` still addresses the repo.
 
-    pgw#1305: this used to read the retired ``destination.repo`` key and
-    nothing else, so an invoke carrying the ``destination={ref, release}``
-    that :func:`destination_release`'s own refusal asks for was told
-    ``destination_repo is required`` — the two halves of one reserved struct
-    disagreed about its key.
+    pgw#1305: it reads the SAME ``destination={ref, release}`` shape
+    :func:`destination_release`'s refusal asks for — the two halves of one
+    reserved struct may not disagree about its key.
     """
     ref = str(explicit or "").strip()
     if not ref:

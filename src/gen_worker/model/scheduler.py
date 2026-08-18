@@ -382,9 +382,9 @@ class FlowMatchEulerDiscrete:
 # is the same property ``initial_latents`` cites for CPU-seeding the noise, and
 # it is what lets a receipt's seed mean the same thing on two pods.
 #
-# The bar was 1 float32 ULP (pgw#1331), and three CI cycles established that a
-# ULP bound is the wrong INSTRUMENT rather than the wrong number: the measured
-# cross-machine spread of the REFERENCE is 85 float32 ULP. What is asserted is
+# A ULP bound is the wrong INSTRUMENT here, not the wrong number (pgw#1331):
+# the measured cross-machine spread of the REFERENCE is 85 float32 ULP. What is
+# asserted is
 # RELATIVE agreement within 2e-4 on sigmas and ``init_noise_sigma`` (~20x
 # tighter than one bf16 ULP, the precision the denoiser computes in), EXACT
 # agreement on the timestep grid (integer arithmetic), and — the claim that

@@ -67,15 +67,11 @@ class CompileSpec(msgspec.Struct, frozen=True, kw_only=True):
 class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
     """One setup slot, as the parent resolved it. Present and complete, or absent.
 
-    pgw#974. This used to be parallel slot-keyed dicts on ``MintRequest`` —
-    ``snapshots`` (bytes) and ``slot_bindings`` (identity, pgw#969) — written
-    by separate statements, each independently allowed to be empty. Some of
-    the combinations that describes are incoherent, and one of them cost two
-    L40S pods: ``{"pipeline": "/tmp/x"}`` with no binding decoded, type-checked
-    and looked complete, and the child died 0.0 s into ``warmup_forward`` at
-    ``ctx.slots["pipeline"]``. ``ref`` and ``path`` therefore carry no
-    defaults: a slot with bytes and no identity cannot be constructed and
-    cannot be decoded.
+    pgw#974: ONE type, so bytes and identity cannot be written by separate
+    statements and independently left empty. ``ref`` and ``path`` carry no
+    defaults — a slot with bytes and no identity cannot be constructed and cannot
+    be decoded, which is the combination that used to type-check, look complete
+    and kill the child 0.0 s into ``warmup_forward``.
 
     A slot the parent did not resolve is ABSENT from the map — never a present
     one with a hole in it. ``child_preflight.assert_slots_resolvable`` still

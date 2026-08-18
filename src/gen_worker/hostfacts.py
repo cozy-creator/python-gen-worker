@@ -466,9 +466,8 @@ class HostFacts(msgspec.Struct, frozen=True, kw_only=True):
     gpu_sm: str = ""
     torch_version: str = ""
     #: The CUDA runtime torch was BUILT against. Measured by
-    #: `models.hub_policy.detect_worker_capabilities` and, until pgw#896,
-    #: dropped on the floor here while `gate_functions` read a dict key
-    #: nothing ever wrote — so the capability always went out as "".
+    #: `models.hub_policy.detect_worker_capabilities` and carried through to
+    #: `gate_functions` (pgw#896).
     cuda_version: str = ""
     #: The HOST driver, read from NVML: it must stay readable when the CUDA
     #: runtime is not.

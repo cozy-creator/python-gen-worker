@@ -296,11 +296,10 @@ def _refuse_artifact_lanes(root: Path, component: str, cls: Any) -> None:
 def _init_empty_weights(component: str = "") -> Any:
     """The meta-init seam, PROVEN on this process before it is used.
 
-    pgw#1123: this used to import ``accelerate`` — undeclared, absent from the
-    fleet's own probe image, and refusing under the same token a stranded
-    family refuses under. Both halves are fixed: the mechanism is owned
-    (:mod:`.meta_init`), and if it is ever unavailable anyway the refusal names
-    the missing CAPABILITY under its own token.
+    pgw#1123: the mechanism is OWNED (:mod:`.meta_init`) rather than an
+    undeclared ``accelerate`` import absent from the fleet's own probe image, and
+    if it is ever unavailable the refusal names the missing CAPABILITY under its
+    own token rather than the one a stranded family refuses under.
     """
     from . import meta_init
 
@@ -818,53 +817,27 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# pgw#1111: the META round-trip is DELETED (pgw#1215)
+# TWO THINGS THAT MUST NOT COME BACK HERE
 # ---------------------------------------------------------------------------
 #
-# `to_meta_for_save` / `as_meta_for_save` / `has_meta_params` /
-# `revirtualize_from_meta` existed for exactly one reason: the entry-compile
-# pool handed each ExportedProgram to a child by `torch.export.save` in the
-# parent and `torch.export.load` in the child (pgw#809), and a structure-only
-# program's PARAMETERS are FAKE tensors, which have no storage to serialize.
-# Casting them to META let the metadata cross and re-virtualizing on the far
-# side restored `aot_compile`'s one-fake-mode precondition.
+# 1. A META round-trip (pgw#1111, deleted by pgw#1215). It existed because an
+#    ExportedProgram crossed a process boundary by `torch.export.save`/`.load`
+#    and a structure-only program's PARAMETERS are FAKE tensors with no storage
+#    to serialize. th#1834 Phase 3 deleted the crossing — the process that
+#    traces a graph class is the process that compiles it — so machinery that
+#    repairs a round trip nobody takes is a second, silent way to hold a
+#    program.
 #
-# th#1834 Phase 3's keystone deleted the crossing. The process that traces a
-# graph class is the process that compiles it (`aot_compile_child`), so the
-# fake tensors never leave the mode they were born in and there is nothing to
-# re-cast, serialize, or repair. Machinery that repairs a round trip nobody
-# takes is not "harmless if left" — it is a second, silent way to hold a
-# program, and the next reader has to disprove that it is live.
-
-
-# ---------------------------------------------------------------------------
-# pgw#1199: what USED to live here, and why it does not any more
-# ---------------------------------------------------------------------------
-#
-# `materialize_random` / `restore_virtual` / `stray_real_tensors` gave every
-# virtual parameter REAL random values so the mint child could run the pgw#984
-# does-it-run proof, then took them away again. That is one full checkpoint at
-# compute dtype, allocated in the process this module exists to keep empty,
-# concurrently with the parent's resident copy — 56.2 GB on wan-2.2 against
-# 15.5 GiB free, measured on pod `729431an6ugbvq`. It is also the number
-# §4.33's "a mint costs ~8 GiB" was really measuring: this walk, for an
-# sdxl-sized family.
-#
-# The proof did not need to be here. §4.33 steps 4-5 put verification on the
-# LIVE pipeline that already holds the weights, and `gen_worker.handler_proof`
-# is that: one warm forward through the endpoint's own handler, on the resident
-# pipeline, with REAL checkpoint values — strictly stronger than a random-value
-# re-run, and free on the fleet path where the executor's boot warm plan has
-# already run every declared handler before a mint is delegated.
-#
-# `stray_real_tensors` went with them, and this is the part worth stating
-# plainly rather than quietly: it hunted a REAL tensor cached on a plain
-# attribute by a lazily-built device-pinned table (ie#628's call-time class).
-# That residue existed *because* a real forward had just run here. With no real
-# values in this process the same lazy build fires inside the export's fake
-# mode and produces a FAKE constant, which the packer cannot pack — the
-# failure is still loud, it just arrives at pack time instead of at a stray
-# walk. Nothing silently ships.
+# 2. Real random values (pgw#1199): `materialize_random` / `restore_virtual` /
+#    `stray_real_tensors` allocated one full checkpoint at compute dtype IN
+#    THE PROCESS THIS MODULE EXISTS TO KEEP EMPTY — 56.2 GB on wan-2.2 against
+#    15.5 GiB free, and the number §4.33's "a mint costs ~8 GiB" was really
+#    measuring. §4.33 steps 4-5 put verification on the LIVE pipeline instead
+#    (`gen_worker.handler_proof`: one warm forward through the endpoint's own
+#    handler with REAL checkpoint values), which is strictly stronger. Without
+#    real values here a lazily-built device-pinned table (ie#628's call-time
+#    class) produces a FAKE constant the packer cannot pack — still loud, just
+#    at pack time rather than at a stray walk.
 
 
 __all__ = [

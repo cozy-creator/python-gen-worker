@@ -4,13 +4,11 @@ name: master health
 #
 # THE FAILURE THIS EXISTS FOR, AND IT HAPPENED HERE. A REQUIRED context can sit
 # RED on `master` with no PR responsible, and every merge-queue entry behind it
-# pays. Live 2026-08-13 in THIS repository: the required `fast gates` context
-# was red on master from a dead `typing.Literal` import left by an unrelated
-# merge. Queue entries that had nothing to do with it were blocked until
-# another session happened to notice. Nobody owned the red, because no PR
-# caused it. The nightly at 09:17 would have re-run the gate within 24h — and
-# would have said nothing to anyone, because a red run in the Actions tab is
-# not loud. That gap is what this file closes.
+# pays — measured live in this repository, `fast gates` red on master from a
+# dead import left by an unrelated merge, blocking entries that had nothing to
+# do with it until another session happened to notice. The 09:17 nightly would
+# have re-run the gate within 24h and said nothing to anyone, because a red run
+# in the Actions tab is not loud. That gap is what this file closes.
 #
 # THIS IS NOT A MERGE GATE AND MUST NEVER BECOME ONE. The job is named
 # `master_health` so it can never be confused with this repository's one
@@ -19,22 +17,18 @@ name: master health
 # can never be the skipped-required-check hazard that GitHub scores as
 # satisfied.
 #
-# WHY A SCHEDULE AND NOT `push: [master]` (measured 2026-08-14).
-# A push-triggered run is attributable to the merge commit, which is why it was
-# the first choice. Two things sank it here:
+# WHY A SCHEDULE AND NOT `push: [master]`, measured — two things sink the push
+# trigger even though it is attributable to a merge commit:
 #
 #   * REDUNDANCY. The merge queue re-runs `fast gates` against the exact tree
 #     that becomes `master`, immediately before it becomes `master`. A push
-#     re-run can only disagree with the queue through drift that is TIME-based
-#     rather than merge-based — a released dependency, a runner-image bump, a
-#     peer repo at `@master`. Time-based drift is precisely what a schedule
-#     catches and a push structurally cannot.
-#   * VOLUME. `master` takes ~38 merges/day (266 first-parent merges over 7
-#     days). A full CI pass bills ~17 job-minutes (measured run 31832283855:
-#     `fast gates` 115s, `tests` 861s, each rounded UP to the minute). This
-#     repository is PUBLIC, so standard-runner minutes are free and unmetered
-#     — the cost is not billing, it is ~646 runner-minutes/day of concurrency
-#     competing with the repo's own PR CI, for a verdict the queue already gave.
+#     re-run can only disagree with the queue through TIME-based drift — a
+#     released dependency, a runner-image bump, a peer repo at `@master` —
+#     which is precisely what a schedule catches and a push structurally cannot.
+#   * VOLUME. `master` takes ~38 merges/day and a full CI pass is ~17
+#     job-minutes, so a push trigger is ~646 runner-minutes/day of concurrency
+#     competing with the repo's own PR CI for a verdict the queue already gave.
+#     (The repo is PUBLIC, so the cost is concurrency, never billing.)
 #
 # 4x/day bounds detection at 6h for four extra CI passes a day.
 #

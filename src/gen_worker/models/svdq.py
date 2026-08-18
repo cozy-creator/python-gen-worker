@@ -46,12 +46,9 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 SVDQ_METHOD = "svdquant"
-# pgw#1300: `SVDQ_FP4_SMS` / `SVDQ_INT4_SMS` are DELETED. They were nunchaku's
-# kernel windows, kept alive past pgw#1298 by two consumers that are now both
-# gone — `models/ladder.py`'s placement stamp (deleted here) and tensorhub's
-# `WORKER_PARSED_CONSTANTS` peer pin (deleted by th#2055 `65f0882f2`, whose
-# manifest no longer names this file). The only SM window this stack still
-# serves by is the native engine's own `svdq_native.SVDQ_NATIVE_FP4_SMS`.
+# pgw#1300: nunchaku's `SVDQ_FP4_SMS` / `SVDQ_INT4_SMS` kernel windows are
+# DELETED with both their consumers. The only SM window this stack serves by is
+# the native engine's own `svdq_native.SVDQ_NATIVE_FP4_SMS`.
 
 
 class SvdqError(RuntimeError):

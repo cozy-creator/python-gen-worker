@@ -7,15 +7,12 @@ merge path, so nothing in the REQUIRED context (`fast gates`) would have an
 opinion about the flavor axis. A rename that regrows a reader merges green and
 is found on a pod. This runs where the merge is decided.
 
-THE RESIDUE IS GONE (pgw#1319, 2026-08-17). `ProducedFlavor.flavor`,
-the `label = flavor.flavor or ...` read and `classify_flavor_token` are all
-DELETED. The cross-repo condition that held them alive is discharged: te#225
-and te#227 made `precision_class` a DECLARATION at every training-endpoints
-producer that publishes a non-base row (eight sites — the census was wrong
-twice before it was made from the tree), and `convert.publish` now REFUSES a
-publish of sub-16-bit bytes that declares no class instead of guessing one from
-a label. So this file no longer holds an allowance at a size; it asserts that
-the axis names nothing at all, and the former residue paths get NO exemption.
+THE RESIDUE IS ZERO (pgw#1319). `ProducedFlavor.flavor`, the
+`label = flavor.flavor or ...` read and `classify_flavor_token` are DELETED;
+`precision_class` is a DECLARATION at every producer that publishes a non-base
+row, and `convert.publish` REFUSES sub-16-bit bytes that declare no class
+rather than guessing one from a label. So this file holds no allowance at a
+size: it asserts the axis names nothing at all, with NO exemption.
 
 Three rules, all AST — a grep cannot tell `X.flavor` from `flavor_label(...)`
 from `cgroup_flavor`, and this axis is a four-way homonym (the compiled graph

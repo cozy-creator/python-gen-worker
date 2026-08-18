@@ -133,14 +133,10 @@ def compiled_graph_metadata_fields() -> FrozenSet[str]:
     ever satisfy is refused for $0 instead of after a 25-minute paid compile
     (th#2098 / pgw#1340).
 
-    THE PUBLIC NAME EXISTS NOW, and it is read here. pgw#1340 first exported
-    ``ARTIFACT_METADATA_FIELDS`` by editing the vendored snapshot, which
-    pgw#1310's digest fence refuses by design (*"a vendored snapshot is fixed
-    upstream and re-vendored, never patched here"*) and which turned master red;
-    pgw#1345 repaired that by reading the private ``_TOP_LEVEL_FIELDS`` and said
-    what the real fix was: *"when the public name is wanted it is added UPSTREAM
-    and re-vendored."* tcg#40 (torchcg#42, vendored here at pgw#1342) did exactly
-    that, so this reads the public name and the ``getattr`` shim is gone.
+    It reads torchcg's PUBLIC ``ARTIFACT_METADATA_FIELDS``, added upstream and
+    re-vendored (tcg#40 / torchcg#42, vendored at pgw#1342). A vendored snapshot
+    is fixed upstream and re-vendored, never patched here — pgw#1310's digest
+    fence refuses that by design.
 
     That matters beyond tidiness. A private name is a name upstream owes nobody
     anything about; a public one is fenced upstream against the behaviour it

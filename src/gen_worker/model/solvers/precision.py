@@ -6,13 +6,11 @@ ladder that agrees with ``diffusers`` *algebraically* does not agree with it
 stage, with a double accumulator inside ``cumprod`` — that the obvious float64
 reading of the same formulae is 201 float32 ULP away from.
 
-B2 carried those primitives privately inside ``model/scheduler.py`` because
-``euler_discrete`` was the only consumer. It no longer is: ``dpmsolver_multistep``
-and ``unipc_multistep`` descend from the SAME trained beta table, and a second
-copy of ``_sigma_table`` would be a second declaration of the fleet's noise
-schedule — the drift ``check_model_bindings.py`` exists to refuse one level up,
-reappearing one level down. So the primitives live here and every solver imports
-them.
+``euler_discrete``, ``dpmsolver_multistep`` and ``unipc_multistep`` all descend
+from the SAME trained beta table, and a second copy of ``_sigma_table`` would be
+a second declaration of the fleet's noise schedule — the drift
+``check_model_bindings.py`` exists to refuse one level up, reappearing one level
+down. So the primitives live here and every solver imports them.
 
 **No array library, ever.** ``struct`` performs the one float32 round trip and
 ``math`` performs the rest. The adopt-only serve role (pgw#1328) holds this

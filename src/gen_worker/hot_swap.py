@@ -427,12 +427,10 @@ class Router:
                     return EAGER, sig
                 return COMPILED, sig
             device = _first_cuda_device(args, kwargs)
-            # pgw#1215 step 4: the degrade-to-inline-compile fallback that
-            # stood here is DELETED with the ungated mode it belonged to. The
-            # warm thread owns the device while it compiles and ensures its
-            # own headroom inside the exclusive turn (`_ensure_headroom`), so
-            # tight headroom is no longer a reason to pay an inline compile on
-            # the serving thread.
+            # pgw#1215 step 4: there is no degrade-to-inline-compile fallback. The warm
+            # thread owns the device while it compiles and ensures its own headroom inside
+            # the exclusive turn (`_ensure_headroom`), so tight headroom is never a reason
+            # to pay an inline compile on the serving thread.
             turn = self.turn_gate
             if turn is None:
                 # Unreachable in production: `route` only gets here when the

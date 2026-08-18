@@ -93,13 +93,12 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 FIT_FITS = "fits"
 FIT_INCOMPATIBLE = "incompatible"
 
-# th#1867 (§1.35) deleted the SIZE verdicts this module used to return —
-# `fp8`, `nvfp4`, `svdq_fp4`, `svdq_int4`, `emergency_fp8`, `gguf_quant`,
-# `offload`. Every one of them was derived from `Resources.vram_gb_hint`, an
-# author DECLARATION, compared against free VRAM: a prediction made before
-# anything is measured, which §4.33 forbids from acting as a floor and §1.35
-# forbids from acting at all. The rungs themselves did not go anywhere — they
-# are chosen at LOAD time by `models/memory.select_auto_mode` from the
+# th#1867 (§1.35): this module returns NO size verdicts. Every one of them was
+# derived from an author DECLARATION compared against free VRAM — a prediction
+# made before anything is measured, which §4.33 forbids from acting as a floor
+# and §1.35 forbids from acting at all. The rungs themselves did not go
+# anywhere — they are chosen at LOAD time by `models/memory.select_auto_mode`
+# from the
 # pipeline's real size against the card's real free VRAM, and reported as they
 # happen (`serve_fit.replan` -> FnDegraded). What is deleted is the guess, not
 # the ladder.

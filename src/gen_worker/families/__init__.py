@@ -8,10 +8,8 @@ discovery walk runs. The old free-standing ``@family("...")`` class decorator
 is gone (pgw#1332): it held the word ``family`` for a defaults vocabulary while
 the typed ModelSpec SDK needed it for the family itself.
 
-``SdxlDefaults`` / ``WanDefaults`` used to ship here. No SDK code
-ever consumed them, and a vocabulary in the library is a vocabulary that needs a
-wheel release to change — they now live in inference-endpoints/sdxl and
-inference-endpoints/wan-2.2 respectively.
+A defaults vocabulary lives with the ENDPOINT that uses it, never here: a
+vocabulary in the library is one that needs a wheel release to change.
 """
 
 from __future__ import annotations

@@ -305,11 +305,10 @@ def _download_url_streamed(url: str, dest: Path, *, expected_digest: str,
     removes the shared object entirely; the rename stays atomic, and two
     winners simply publish the same verified bytes.
 
-    the size comparison used to sit after the loop, where the bytes
-    are already on disk and the only thing it can report is how far past the
-    declaration the shard went. The declared size is known before the first
-    byte, so it caps the stream; an entry that declares none falls back to the
-    destination filesystem, which is what an unbounded shard exhausts.
+    The declared size is known BEFORE the first byte, so it caps the stream
+    rather than reporting after the loop how far past the declaration the shard
+    already went. An entry that declares none falls back to the destination
+    filesystem, which is what an unbounded shard exhausts.
     """
 
     # ONE verified-download discipline (`hubio.fetch.fetch_once`)

@@ -13,18 +13,14 @@ Kind/phase strings are wire-shared with tensorhub
 Without a bound transport sink (cozy-local, tests) reports land on the
 logger, which IS the local progress UI.
 
-ie#522 (2026-07-21): the watchdog's default liveness evidence was process
-CPU seconds ONLY. Two real activities are honestly alive while burning
-near-zero CPU on the reporting process: (1) an I/O-bound network model
-fill (large composite checkpoints, tens of GB, minutes over a real link —
-CPU-light by design); (2) inductor compile phases that fork subprocess
-compile workers (torch's async_compile) — their CPU burn never showed up
-in this process's own `time.process_time()`. Both read as "stalled" to the
-hub's th#965 layer-3 rule after 10 minutes of no heartbeat, even mid
-genuine progress. Reproduced live twice (ie#522 wan-2.2 animegen boot
-warmup, two different RunPod hosts, identical ~9.5min self_mint_compile
-CancelledError at phase=load). Fixed two ways below: `_process_cpu_evidence`
-now sums live (not just reaped) child-process CPU via psutil, and
+ie#522: process CPU seconds alone are NOT liveness evidence. Two real
+activities are honestly alive while burning near-zero CPU on the reporting
+process: (1) an I/O-bound network model fill (tens of GB over a real link —
+CPU-light by design); (2) inductor compile phases that fork subprocess compile
+workers (torch's async_compile), whose burn never reaches this process's own
+`time.process_time()`. Both read as "stalled" to the hub's th#965 layer-3 rule
+after 10 minutes, mid genuine progress. So `_process_cpu_evidence` sums live
+(not just reaped) child-process CPU via psutil, and
 `note_progress()` lets an I/O callback (model-download byte ticks) heartbeat
 the current activity directly — proof-of-life from genuine external
 progress, independent of the CPU-sampling watchdog thread entirely.
@@ -134,10 +130,9 @@ KIND_COMPONENT_MISS = "component_miss"
 # frame_std_min, so ie#634's "corr 0.29 was uploaded and billed" is countable
 # hub-side instead of invisible.
 KIND_OUTPUT_INTEGRITY = "output_integrity"
-# pgw#1117 / th#1777: the pre-stage envelope precondition refused a slot load.
-# th#1867 deleted KIND_ENVELOPE_REFUSAL with the precondition that emitted it
-# (pgw#1117/th#1777): it compared the bound artifact against the release's
-# declared `vram_gb` under `strict_vram`, and both declarations are gone. The
+# th#1867 deleted KIND_ENVELOPE_REFUSAL with the pre-stage envelope
+# precondition that emitted it (pgw#1117/th#1777): it compared the bound
+# artifact against a declared `vram_gb`, and that declaration is gone. The
 # question it was really asking — "is this slot bound to the wrong artifact?" —
 # is th#1913's, and it is answered against the CATALOG, not a card size.
 KIND_ROTATION_PRELOAD = "rotation_preload"
@@ -190,10 +185,10 @@ KIND_ADOPT_REFUSED = "adopt_refused"
 # `phase` is `memo_dishonest` / `memo_unrulable`; `detail` carries
 # `assert_memo_honest`'s own sentence, which names every disagreeing class.
 KIND_BOOT_MEMO = "boot_memo_honesty"
-# th#1322: JIT (dynamo/inductor) compile duration, as a typed numeric event.
-# It used to be `logger.info("compiled %s in %.0fs")` and nothing else, so on a
-# hub-spawned pod (no stdout, pgw#760) the one number an AOT-vs-JIT comparison
-# needs did not exist anywhere. Same shape as `aot_mint_phases` deliberately:
+# th#1322: JIT (dynamo/inductor) compile duration, as a typed numeric event —
+# never a log line, because a hub-spawned pod has no reachable stdout (pgw#760)
+# and this is the one number an AOT-vs-JIT comparison needs. Same shape as
+# `aot_mint_phases` deliberately:
 # `phase=minted` carries the mint's roll-up in `duration_ms`, `phase=shape:<WxH>`
 # / `phase=child:<phase>` carry the spans inside it, so comparing the two mint
 # routes is ONE grouped query over worker_activity_events rather than a regex
@@ -266,9 +261,7 @@ PHASE_MINTED = "minted"
 PHASE_LOAD = "load"
 PHASE_TRACE_GRAPH = "trace_graph"
 PHASE_INDUCTOR_COMPILE = "inductor_compile"
-# pgw#989: the dynamo mint used to report its router drain under
-# PHASE_INDUCTOR_COMPILE, next to a `warmup_forward` row holding every compile
-# it ever ran. Re-exported (defined in `warm_spans`, which the mint child can
+# pgw#989. Re-exported (defined in `warm_spans`, which the mint child can
 # import without protobuf) so the vocabulary is enumerable from one module.
 PHASE_ROUTER_DRAIN = warm_spans.PHASE_ROUTER_DRAIN
 PHASE_WARMUP_FORWARD = "warmup_forward"

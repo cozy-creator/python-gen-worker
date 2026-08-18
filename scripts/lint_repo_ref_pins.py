@@ -11,12 +11,10 @@ quoted string, in Python, JSON, TOML, YAML and Markdown. The owner segment may
 not contain a `.`, which keeps a registry-qualified OCI ref (`docker.io/x:1`,
 `ghcr.io/y:v2`) out.
 
-An earlier version of this paragraph also claimed "image tags never match the
-shape at all". **That was wrong**, and pgw#1347 found it: a Docker Hub image in
-a user namespace — `pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime` — is
-`<owner>/<repo>:<tag>` exactly, with no dot in the owner. The shape genuinely
-cannot separate a hub model ref from a container image ref, so the separation
-has to be STATED.
+**Image tags DO match the shape**: a Docker Hub image in a user namespace —
+`pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime` — is `<owner>/<repo>:<tag>`
+exactly, with no dot in the owner (pgw#1347). The shape cannot separate a hub
+model ref from a container image ref, so the separation has to be STATED.
 
 THERE IS NO PATH ALLOWLIST, and the design point is that it needs none. The
 three places a `:tag` string legitimately survives are recognised by what they

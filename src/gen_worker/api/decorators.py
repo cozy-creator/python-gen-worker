@@ -97,13 +97,10 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     planner / economics gate — all of which have measurements the endpoint
     author does not.
 
-    th#1867 (DESIGN-RULINGS §1.35) deleted the LAST THREE VRAM markers this
-    struct carried — ``vram_gb_hint``, ``min_vram_gb`` and ``strict_vram`` —
-    and they went as ONE change because §2.4 ruling 4 measured what a partial
-    cut does: the hub builder folds an absent ``min_vram_gb`` from ``vram_gb``,
-    so deleting one of them silently drops a floor. Paul's ruling in one line:
-    *"We should be able to run any model on any GPU. The challenge is not IF it
-    can run — it's: is it an EFFICIENT choice?"* A card that looks too small is
+    th#1867 (DESIGN-RULINGS §1.35): this struct carries NO VRAM marker. Paul's
+    ruling in one line: *"We should be able to run any model on any GPU. The
+    challenge is not IF it can run — it's: is it an EFFICIENT choice?"* A card
+    that looks too small is
     a card whose best (GPU, lane) pair sits further down the operator's ladder,
     and the RUNTIME picks that rung from what it MEASURES (``models/memory.py``
     ``select_auto_mode``), never from what the author guessed. §1.2 measured the
@@ -129,25 +126,18 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     Declaring ``min_sm`` or ``min_vram_gb`` implies ``gpu=True``;
     ``min_host_ram_gb`` does not, and is declarable at ``recommended`` only.
 
-    It SUBSUMES the two axes deleted with it. ``compute_capability`` (pgw#660)
-    was the hard GPU-architecture floor — a producer whose kernel is
+    It SUBSUMES the two axes deleted with it. ``min_sm`` is the hard
+    GPU-architecture floor (pgw#660) — a producer whose kernel is
     ``torch._scaled_mm`` cannot run below sm_89 at any precision, on any rung,
     ever, and with no carrier the scheduler placed the fp8 producer on sm_80
-    A100s (th#1155 six times; te#125 again). That floor survives verbatim as
-    ``min_sm``, in tensorhub's own BARE spelling (89, 100), which is the one
-    wire spelling for the axis on both sides; the dotted 8.9 is gone rather
-    than kept as a second form. ``ram_gb_hint`` (pgw#670, sized at 64 GB from
-    ie#484's 179-301 s host-starved encode tails) survives as
-    ``min_host_ram_gb``, at the recommended level: Paul 2026-07-11 ruled that
-    RunPod GPU pods cannot select or guarantee host RAM, so a host-RAM
-    MINIMUM is unenforceable theater. Unmet, it is a degrade warning, which is
-    what the offload rungs already do.
+    A100s. It is spelled BARE (89, 100), tensorhub's own spelling and the one
+    wire spelling on both sides. ``min_host_ram_gb`` (pgw#670) is declarable at
+    the RECOMMENDED level only: Paul 2026-07-11 ruled that RunPod GPU pods
+    cannot select or guarantee host RAM, so a host-RAM MINIMUM is unenforceable
+    theater. Unmet, it is a degrade warning, like the offload rungs.
 
-    There is no disk axis. ``min_disk_gb`` (pgw#732) existed for two releases
-    and no endpoint in any repo ever declared it — th#1233 sizes a pod's
-    container disk from the bytes the job will materialize, which covers every
-    live case — so HARDCUT C3 deleted the emitter rather than keep an unused
-    author-facing knob.
+    There is no disk axis: th#1233 sizes a pod's container disk from the bytes
+    the job will materialize, which covers every live case.
 
     ``vcpus`` declares the host-side vCPU ask (CPU-heavy encode);
     it does not imply ``gpu=True``. ``gpu_count`` declares how many devices
@@ -1227,10 +1217,10 @@ def _validate_handler_shape(
             "prefix non-handler methods with an underscore."
         )
     if is_method and len(params) > 2:
-        # pgw#1332 reopens this, for FAMILIES and nothing else. What SDK v2
-        # rejected was a per-handler MODEL argument: a slot injected per call
-        # made one live instance able to serve bindings it was not routed for,
-        # which is why `setup()` owns model state instead.
+        # pgw#1332 admits a per-handler parameter for FAMILIES and nothing
+        # else. What SDK v2 rejected was a per-handler MODEL argument: a slot
+        # injected per call makes one live instance able to serve bindings it
+        # was not routed for, which is why `setup()` owns model state.
         #
         # A family instance is the opposite shape and closes the same hole a
         # different way. It is not a slot, it is not a path, and it is not

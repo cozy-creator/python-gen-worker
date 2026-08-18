@@ -1,96 +1,40 @@
 name: CI
 
-# pgw#952 — this workflow is split into two PARALLEL jobs, and runs the full
-# suite on every PR. pgw#977 (2026-08-05) narrowed the trigger back to `master`
-# alone, because `dev` was deleted when the three-tier flow retired — lanes now
-# PR straight to `master`, so `[master]` IS the every-lane trigger. Both jobs
-# are the master ruleset's required contexts (`fast gates`, `tests`).
-#
-# ─── THE GAP THIS CLOSES, AND WHY IT STAYS CLOSED ──────────────────────────────
-#
-# Until pgw#952 a lane PR in this repository could run NO CI AT ALL. Verified on
-# PR #466 (`950-legacy-hardcut`, 215+/178-): `statusCheckRollup` was `[]`. Not a
-# check that passed — no check ran. At the time the cause was `ci.yaml` naming
-# only `master` while lanes targeted `dev`; the branch names have since swapped
-# roles, and the invariant that matters is the one to preserve:
+# pgw#952 — this workflow is split into two PARALLEL jobs and runs the full
+# suite on every PR.
 #
 #   **THIS WORKFLOW MUST TRIGGER ON WHATEVER BRANCH LANES ACTUALLY PR INTO.**
 #
 # If that branch is ever renamed or a second one added, change the list here in
 # the same commit. A lane merging with an empty check rollup is the failure this
 # file exists to make impossible, and a reader cannot tell it apart from "CI is
-# broken". pgw#949 is the same failure already written down: the integration
-# branch sat RED on two gw#666 guard tests since PR #455 and nothing said so.
+# broken" — it has happened (pgw#952, `statusCheckRollup: []`; pgw#949, a branch
+# red on two guard tests with nothing saying so).
 #
 # ─── WHY THE FULL SUITE IS PRE-MERGE HERE, UNLIKE TENSORHUB ────────────────────
 #
-# An older header said "CI spend is metered (WORKSPACE-GIT-POLICY.md)". That is
-# true of tensorhub, which is PRIVATE — and it is why tensorhub's `verify` moved
-# to a post-merge `push: [master]` trigger (th#1621/th#1114, ~24 runner-hours/day
-# at lane volume). **This repository is PUBLIC**
-# (`gh repo view --json visibility` -> PUBLIC), and GitHub Actions on standard
-# runners is free and unmetered for public repositories. `ubuntu-latest` is a
-# standard runner. That constraint does not exist on this repo, so the suite
-# stays pre-merge where it can actually block a defect.
-#
-# What remains real is LATENCY, not spend. That is what the two jobs below are
-# for: a lane gets the cheap verdict in ~1m35s and does not wait 15m to learn
-# that mypy is unhappy.
+# Tensorhub's `verify` moved to a post-merge `push: [master]` trigger because it
+# is PRIVATE and metered (th#1621/th#1114, ~24 runner-hours/day at lane volume).
+# **This repository is PUBLIC**, and GitHub Actions on standard runners is free
+# and unmetered for public repositories — so the suite stays pre-merge where it
+# can actually block a defect. What remains real is LATENCY, not spend, which is
+# what the two jobs are for: the cheap verdict in ~1m40s instead of 15m.
 #
 # ─── MEASURED, ON THE RUNNER ───────────────────────────────────────────────────
 #
-# Not extrapolated from this 32-core box — a 4-core `ubuntu-latest` behaves
+# Never extrapolate from this 32-core box — a 4-core `ubuntu-latest` behaves
 # nothing like it, which is the trap th#1572's lane fell into by a factor of 40.
-# Left column: run 30847566437, the last green run of the old single-job shape,
-# re-attributed to the two jobs below. Right column: this workflow's OWN PR
-# (#467, head 91c73388) — the shape as it actually ships. Both cold; there is no
-# cache in either.
-#
-#                                    old shape   THIS workflow (PR #467)
-#   Set up job + checkout                   4s      4s   both jobs
-#   Install uv + Set up Python 3.12         3s      2s   both jobs
-#   uv sync --locked --extra dev           21s  21-28s   both jobs
-#   ------------------------------------------------------- gates
-#   Type check (mypy)                      60s     58s
-#   Lint (ruff)                             0s      1s
-#   HTTP timeout guard                      1s      1s
-#   unreached public surface guard          2s      2s
-#   config reads guard                      2s      2s
-#   Build package                           2s      1s
-#                                       -------  ------
-#   gates JOB WALL                      1m 35s  1m 42s   observed GREEN, twice
-#   ------------------------------------------------------- tests
-#   Install llama-server (pinned, CPU)      1s      1s
-#   Run tests (v1)                     10m 59s 11m 13s   3092 passed, 2 failed
-#   Run tests (v2)                      3m 47s   3m 54s   21 passed
-#                                       -------  ------
-#   tests JOB WALL                     15m 15s 15m 37s
-#
-# `tests/` runtime is the only noisy line — 10m 17s and 11m 13s on two runs of
-# the same tree. That is runner variance on a 4-core box, not a signal; size the
-# 40-minute timeout against the upper figure, not the lower.
-#
-# The two jobs run concurrently, so a full run is ~15m 40s of WALL time against
-# the old serial 16m 22s, while returning the cheap half TEN times sooner
-# (1m 42s). The split costs one extra ~25s install and buys that.
-#
-# NOTE ON THE `Run tests (v2)` LINE. Its first run on this PR reported `skipped`,
-# not a duration, because `tests/` was red and a failing step skips every later
-# step by default — so the two-step split had never once delivered the property
-# its own comment claimed for it since pgw#808 ("a collection error in either
-# must not erase the other's answer"). `if: !cancelled()` at the step is the fix,
-# and the 3m 54s / 21 passed above is the proof: same red `tests/`, v2 reported
-# anyway.
+# Cold, no cache: `gates` 1m 42s · `tests` 15m 37s, of which `uv sync --locked
+# --extra dev` is ~21s and mypy ~58s. `tests/` is the only noisy line (10m 17s
+# vs 11m 13s on the same tree) — runner variance, so size the 40-minute timeout
+# against the upper figure.
 #
 # NO CACHE STEP, deliberately, and this is the one place the tensorhub precedent
-# (th#1572) does NOT transfer. There, `setup-go`'s cache key was shared across
-# workflows, a cheap sibling won the save, and that job paid a 224s compile every
-# run — so two explicit `actions/cache` steps were load-bearing. The Python
-# equivalent does not bite: `uv sync --locked --extra dev` is 21 SECONDS cold, on
-# a runner with no warm cache at all. An `actions/cache` restore of a uv cache
-# large enough to matter would cost more than it saves, and would add a key that
-# can go stale against `uv.lock`. If this line ever stops being true, measure the
-# install step first — it is step 5 in every run.
+# (th#1572) does NOT transfer: there `setup-go`'s cache key was shared across
+# workflows and the job paid a 224s compile every run. `uv sync` is 21 SECONDS
+# cold, so an `actions/cache` restore large enough to matter would cost more
+# than it saves and would add a key that can go stale against `uv.lock`. If that
+# ever stops being true, measure the install step first.
 #
 # ─── NO `paths:` / `paths-ignore:` FILTER ──────────────────────────────────────
 #
@@ -138,22 +82,15 @@ name: CI
 # script guards would every one of them have passed it. That is why the full
 # suite is on the PR trigger and not just the cheap half.
 #
-# pgw#977 (2026-08-05): `dev` is retired and lanes PR straight to `master`, so
-# the trigger names `master` alone.
+# pgw#1264 (2026-08-14, Paul's ruling): `fast gates` is the master ruleset's
+# ONLY required context. `tests` gates nothing and no longer runs on
+# `merge_group` at all — measured over ~300 runs, `CI` on `merge_group` was p50
+# 911s of which `tests` was 868s, so the suite WAS the queue's wall clock while
+# proving nothing about the merge, and ten speculative entries would hold ten
+# concurrent 14-minute runners in front of the required job.
 #
-# pgw#1264 (2026-08-14, Paul's ruling — SUPERSEDES the paragraph above about both
-# jobs being required): `fast gates` is now the master ruleset's ONLY required
-# context. `tests` gates nothing, and it no longer runs on `merge_group` at all.
-# Measured over ~300 runs before this change: `CI` on `merge_group` p50 911s, of
-# which `fast gates` was 122s and `tests` 868s — so the suite WAS the queue's
-# wall clock while proving nothing about the merge. With the queue widened to ten
-# speculative entries it would also hold ten concurrent 14-minute runners, and
-# the required job would queue behind its own workflow.
-#
-# What replaces it, so nothing is actually lost: `tests` still runs on EVERY PR
-# push (a lane sees its own regression before merging), on `workflow_dispatch`,
-# and NIGHTLY on `master` via the `schedule:` below. Pre-launch, a regression
-# found by tonight's nightly is cheaper than fifteen minutes on every merge.
+# What replaces it, so nothing is lost: `tests` still runs on EVERY PR push, on
+# `workflow_dispatch`, and NIGHTLY on `master` via the `schedule:` below.
 # pgw#1209 (2026-08-13): `master` has a MERGE QUEUE. A queued PR is validated on
 # a `gh-readonly-queue/master/...` ref carrying master's tip plus every entry
 # ahead of it — which is the only place the "two PRs green alone, red together"
@@ -176,24 +113,19 @@ name: CI
 # The trigger is deliberately bare (no `branches:`/`paths:` filter). A filter
 # that excludes a merge group is indistinguishable from case 1.
 #
-# TWO THINGS MEASURED WHILE TURNING THIS ON, both of which cost a live queue
-# stall and neither of which is in the obvious write-ups:
+# TWO THINGS THAT COST A LIVE QUEUE STALL, neither in the obvious write-ups:
 #
-#   * **GitHub reads workflows from the MERGE-GROUP ref, not from `master`.**
-#     Verified: with the queue switched on before this trigger had landed, four
-#     entries were queued and exactly ONE run existed — the group for the entry
-#     that carried this file's own edit. The three ahead of it showed
-#     `statusCheckRollup: none` and would have sat until the 60-minute timeout
-#     evicted them. So **enable the queue only AFTER the `merge_group:` trigger
-#     is already on `master`**, or the first entries queued cannot pass.
-#     (Corollary, and the reason the ordering is easy to get wrong: a PR that
-#     ADDS the trigger can validate itself in the queue, because its own group
-#     contains its own edit. That works and still leaves everyone else stuck.)
+#   * **GitHub reads workflows from the MERGE-GROUP ref, not from `master`**, so
+#     **enable the queue only AFTER the `merge_group:` trigger is already on
+#     `master`** — entries queued before it produce no run at all and sit until
+#     the 60-minute timeout evicts them. The ordering is easy to get wrong
+#     because a PR that ADDS the trigger validates itself: its own group carries
+#     its own edit, while everyone else is stuck.
 #   * **The repo setting "Allow auto-merge" must be ON.** `gh pr merge <n>`
 #     routes a queue merge through `enablePullRequestAutoMerge`, so with it off
-#     the enqueue fails outright with
-#     `Auto merge is not allowed for this repository`. It is a repository
-#     setting, not part of the ruleset, so enabling the queue does not turn it on.
+#     the enqueue fails with `Auto merge is not allowed for this repository`. It
+#     is a repository setting, not part of the ruleset, so enabling the queue
+#     does not turn it on.
 on:
   workflow_dispatch: {}
   merge_group:
@@ -229,25 +161,20 @@ jobs:
     name: fast gates
     # pgw#1268: this job has NO `if:` and must never grow one. It is the repo's
     # only required context, and GitHub scores a SKIPPED required check as
-    # SATISFIED — so any condition here is a false-green generator. Measured on
-    # th#1223 (2026-08-14): a run triggered while the PR was a draft evaluated
+    # SATISFIED, so any condition here is a false-green generator. Measured on
+    # th#1223: a run triggered while the PR was a draft evaluated
     # `github.event.pull_request.draft == false` as false, the job skipped, and
-    # the PR read fully green having run nothing. Undrafting produced no new run
-    # (the sha already had one) and re-running replays the original draft=true
-    # payload, so the lane escaped only by force-pushing a no-op amend.
+    # the PR read fully green having run nothing — undrafting produced no new
+    # run and re-running replays the draft=true payload, so the lane escaped
+    # only by force-pushing a no-op amend.
     #
-    # It is NOT, contrary to the version of this comment that landed with the
-    # guard removal, also false on `merge_group`. `null == false` is TRUE:
-    # GitHub coerces both sides of `==` to a number, so it reads `0 == 0`
-    # (measured te#199 round 2 on training-endpoints queue ref run 31833225624,
-    # where a job guarded by exactly that clause RAN). The explicit
-    # `merge_group` / `schedule` / `workflow_dispatch` arms this line used to
-    # carry were therefore redundant — they defended a mechanism that does not
-    # exist, while the draft failure that does went unnoticed behind them. That
-    # is the second argument for no condition at all rather than a carefully
-    # armed one: a guard whose behaviour turns on an expression-coercion rule is
-    # a guard nobody reads correctly.
-    # At ~1m35s the draft guard saved a rounding error; unconditional is the fix.
+    # A draft guard is NOT also false on `merge_group`: `null == false` is TRUE,
+    # because GitHub coerces both sides of `==` to a number and reads `0 == 0`
+    # (measured te#199 round 2, queue-ref run 31833225624). So explicit
+    # `merge_group` / `schedule` / `workflow_dispatch` arms defend a mechanism
+    # that does not exist while the draft failure that does goes unnoticed
+    # behind them — which is the second argument for no condition at all. At
+    # ~1m40s the draft guard saves a rounding error.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -255,16 +182,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # pgw#1264: `@v6` HERE ONLY, and the version bump is the point rather than
-      # hygiene. The dependency install is 19-21s of this job's ~128s and the
-      # rest is mypy, so the download cache is the only cheap win left — but
-      # `@v4` bundles `@actions/cache` v3, which speaks the cache API GitHub
-      # retired, and asking v4 to cache MEASURABLY fails:
-      #   ##[warning]Failed to restore: Cache service responded with 400
-      # with nothing saved and no step turning red. So `enable-cache: true` on
-      # `@v4` is dead config that reads as a working cache. The other three
-      # workflows stay on `@v4` deliberately: none of them is the required
-      # context, and an unused action bump is risk without a payoff.
+      # pgw#1264: `@v6` HERE ONLY, and the version is the point. `@v4` bundles
+      # `@actions/cache` v3, which speaks the cache API GitHub retired, so
+      # `enable-cache: true` on `@v4` is dead config that reads as a working
+      # cache — it warns `Failed to restore: Cache service responded with 400`,
+      # saves nothing, and turns no step red. The other three workflows stay on
+      # `@v4`: none is the required context, so an unused bump is risk with no
+      # payoff.
       #
       # Cache scope note: Actions caches are branch-scoped, and a merge-group ref
       # is nobody's child — so the entry that makes queue runs fast is the one
@@ -299,10 +223,8 @@ jobs:
       # module added tomorrow is born strict. 101 modules carry a named
       # single-flag exemption; the guard below is what stops that list growing.
       #
-      # pgw#1202 PR 2: the TEST tree is checked too. Before that it was not
-      # merely unchecked — `mypy tests` REFUSED TO START on a duplicate
-      # `conftest` module, so 486 test modules had zero static coverage, which
-      # is where the doubles that lied about production contracts lived.
+      # pgw#1202 PR 2: the TEST tree is checked too — that is where the doubles
+      # that lie about production contracts live.
       - name: Type check (mypy, strict by default, src + tests)
         run: uv run mypy src/gen_worker tests tests_v2
 
@@ -401,11 +323,10 @@ jobs:
 
       # GATING (pgw#1299): TCG owns the compiled-graph metadata vocabulary and
       # exports it. A respelled `"graph_class"` / `"aot-inductor"` does not fail
-      # at import when TCG renames the key — it returns None from a `.get()` on
-      # an artifact-metadata dict, the arm reads an un-armed compiled graph as a cache
-      # miss, and the fleet silently re-mints. Filed three times (pgw#1288,
-      # pgw#1299); remembering failed. AST-based, so prose is not a finding, and
-      # a genuinely different vocabulary is classified at the line.
+      # at import when TCG renames the key — it returns None from a `.get()`,
+      # the arm reads an un-armed compiled graph as a cache miss, and the fleet
+      # silently re-mints. AST-based, so prose is not a finding, and a genuinely
+      # different vocabulary is classified at the line.
       - name: pgw#1299 guard - nobody respells TCG's metadata vocabulary
         run: |
           uv run python scripts/lint_tcg_vocabulary.py --selftest
@@ -413,18 +334,13 @@ jobs:
 
       # GATING (pgw#1297): the CAS and compiled-graph libraries were renamed to
       # `tensorfs` and `torchcg`, and BOTH old PyPI projects are permanently
-      # deleted — so an old spelling never points at anything that exists. This
-      # rename half-landed twice (pgw#1310 repointed every import and left the
-      # vendored directory and a dozen docstrings behind), which is why it is a
-      # fence and not a sweep. Text-based on purpose, unlike the AST fence
-      # above: here the prose IS the defect, because a docstring naming a module
-      # nobody can import sends the reader nowhere. `_vendor/` is exempt
-      # structurally: a vendored file is fixed upstream and re-vendored, never
-      # respelled here, and the digest fence refuses a hand-patch. pgw#1342: the
-      # vendored ref namespace is `torchcg/v1` now — the re-key that renaming it
-      # would have caused was taken deliberately under tcg#39 and is frozen
-      # upstream, so this exemption no longer stands in for an old spelling.
-      # The script's own spellings are listed in `RETIRED`; see its docstring.
+      # deleted — so an old spelling never points at anything that exists. A
+      # fence and not a sweep, because this rename half-landed twice. Text-based
+      # on purpose, unlike the AST fence above: here the prose IS the defect,
+      # because a docstring naming a module nobody can import sends the reader
+      # nowhere. `_vendor/` is exempt structurally — a vendored file is fixed
+      # upstream and re-vendored, never respelled here, and the digest fence
+      # refuses a hand-patch.
       - name: pgw#1297 guard - no retired package name survives
         run: |
           uv run python scripts/lint_retired_package_names.py --selftest
@@ -451,16 +367,12 @@ jobs:
           uv run python scripts/lint_repo_ref_pins.py --selftest
           uv run python scripts/lint_repo_ref_pins.py
 
-      # GATING (A18 / §1.32(d), pgw#1307 -> pgw#1319): the flavor axis is
-      # deleted and the residue is now ZERO — `ProducedFlavor.flavor`, the
-      # `label` read and `classify_flavor_token` are gone, the class is
-      # DECLARED, and the former residue paths get no exemption.
-      # `tests/test_flavor_deletion_pgw1148.py` asserts the same deletion and is
-      # NOT skipped (its one skipping row died at pgw#1167), but it runs in
-      # `tests`, which pgw#1264 took off the merge path — so without this step
-      # the required context would have no opinion about the axis at all.
-      # Selftest first: the fence must prove it goes red before its green means
-      # anything, and its last arm regrows the residue in its own former files.
+      # GATING (A18 / §1.32(d), pgw#1319): the flavor axis is deleted and the
+      # residue is ZERO — the class is DECLARED and the former residue paths get
+      # no exemption. It runs HERE because the equivalent test lives in `tests`,
+      # which pgw#1264 took off the merge path, so without this step the
+      # required context would have no opinion about the axis at all. Selftest
+      # first: the fence must prove it goes red before its green means anything.
       - name: A18 guard - the flavor is deleted and its residue is zero
         run: |
           uv run python scripts/lint_flavor_deletion.py --selftest
@@ -588,13 +500,12 @@ jobs:
         run: uv run python scripts/lint_credential_identity.py
 
       # GATING (pgw#1152): the ADOPT-PATH half of the same class. Four gates in
-      # a row — pgw#1108, pgw#1122, pgw#1141, pgw#1141b — were one defect: a
-      # rule written against the SELF-MINT path that the boot-adopt path does
-      # not take. `aot_serve._KNOWN_AOT_KEYS` had two feeders, both
-      # self-produced routes, so a compiled graph that resolved, materialized and armed
-      # was scored on the dynamo ledger and thrown away on a real pod. The rule
-      # is structural now (registration happens inside `load_and_wrap`), and
-      # this fence keeps it: a production feeder off the seam is red, a stale
+      # a row were one defect — a rule written against the SELF-MINT path that
+      # the boot-adopt path does not take, so a compiled graph that resolved,
+      # materialized and armed was scored on the dynamo ledger and thrown away
+      # on a real pod. The rule is structural now (registration happens inside
+      # `load_and_wrap`), and this fence keeps it: a production feeder off the
+      # seam is red, a stale
       # row is red, a SECOND map into a fenced object is red, and a TEST that
       # hand-feeds one or stubs a lane accessor is red — it drives
       # tests/harness/adopt_rig.py instead. There is no CONVENTION class.
@@ -642,15 +553,14 @@ jobs:
       - name: Build package
         run: uv build
 
-      # pgw#1310 / ie#738. BUILDING the wheel is not INSTALLING it, and the
-      # difference is a whole class of defect this workflow could not see: for
-      # Naming what WAS required is the whole point of the sentence below.
-      # retired-name: historical rationale, not a live reference.
-      # two published releases `gen-worker`'s metadata required `hashrepo`, a
-      # PyPI project that had been DELETED, so every unlocked consumer install
-      # died at resolution while every check here stayed green. `uv sync
-      # --locked` cannot catch it — a lock resolves from sources (git pins
-      # included) that a published wheel does not carry.
+      # pgw#1310 / ie#738. BUILDING the wheel is not INSTALLING it, and that
+      # difference is a whole class of defect this workflow could not see.
+      # retired-name: historical rationale, not a live reference —
+      # `gen-worker`'s metadata once required `hashrepo`, a PyPI project that
+      # had been DELETED, so every unlocked consumer install died at resolution
+      # while every check here stayed green. `uv sync --locked` cannot catch it:
+      # a lock resolves from sources (git pins included) that a published wheel
+      # does not carry.
       #
       # Deliberately in `fast gates` and not in `tests`: `tests` is neither
       # required nor run on the queue ref, so a wheel gate living there proves
@@ -705,13 +615,12 @@ jobs:
   # merge path.
   tests:
     name: tests
-    # pgw#1264: `!= 'merge_group'` is the whole change. This job proved nothing
-    # about a merge (it is not required) while costing the queue ~868s of its
-    # ~911s p50, and ten speculative entries would have held ten 14-minute
-    # runners in front of the required `fast gates`. It still runs on every PR
-    # push, on `workflow_dispatch`, and nightly on `master` via `schedule:`.
-    # `schedule` is named explicitly for the same null-`pull_request` reason
-    # `merge_group` was: without it the nightly would skip this job silently.
+    # pgw#1264: `!= 'merge_group'` keeps this job off the queue — it proves
+    # nothing about a merge (it is not required) and cost ~868s of the queue's
+    # ~911s p50. It still runs on every PR push, on `workflow_dispatch`, and
+    # nightly on `master` via `schedule:`. `schedule` is named explicitly for
+    # the same null-`pull_request` reason `merge_group` was: without it the
+    # nightly would skip this job silently.
     if: github.event_name != 'merge_group' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -762,13 +671,11 @@ jobs:
       # `-v` is dropped: xdist's per-worker interleaving makes it unreadable,
       # and failures print in full either way.
       #
-      # pgw#966: `-rs` and `--skip-census-out=` are not decoration. Until this
-      # issue, a skipped row and a passing row were the same character of
-      # nothing in this log, and the pgw#858 container row had been skipping
-      # here since it landed — reading as coverage, executing only on developer
-      # boxes, which is how the pgw#956 flake reached `dev` behind a green CI.
-      # `-rs` puts the reasons in the log for a human; the JSON feeds the guard
-      # at the end of this job, which is what makes the NEXT one fail a build.
+      # pgw#966: `-rs` and `--skip-census-out=` are not decoration. A skipped
+      # row and a passing row are otherwise the same character of nothing in
+      # this log, which is how a row reads as coverage while executing only on
+      # developer boxes. `-rs` puts the reasons in the log for a human; the JSON
+      # feeds the guard at the end of this job, which fails the NEXT build.
       - name: Run tests (v1)
         run: uv run pytest tests/ -n 4 --dist loadfile -rs --skip-census-out=.skip-census-v1.json
 
@@ -787,15 +694,13 @@ jobs:
       # erase the other's answer. The flip (pgw#808: point CI at `tests_v2/`,
       # `git rm -r tests/`) deletes the step above and this comment with it.
       #
-      # pgw#952: `if: !cancelled()` is what makes the paragraph above TRUE. It
-      # never was — a failing step skips every later step by default, so a red
-      # `tests/` silently erased the `tests_v2/` answer, which is exactly the
-      # outcome the two-step split was written to prevent. Observed on this
-      # workflow's own PR: `tests/` failed on pgw#949's two guards and
-      # `tests_v2/` reported `skipped`, telling a reader nothing about the
-      # zero-based suite. `!cancelled()` rather than `always()` so a cancelled
-      # run (the concurrency group above cancels superseded pushes) does not
-      # spend four more minutes on a result nobody will read.
+      # pgw#952: `if: !cancelled()` is what makes the paragraph above TRUE. A
+      # failing step skips every later step by default, so without it a red
+      # `tests/` silently erases the `tests_v2/` answer — exactly the outcome
+      # the two-step split was written to prevent. `!cancelled()` rather than
+      # `always()` so a cancelled run (the concurrency group above cancels
+      # superseded pushes) does not spend four more minutes on a result nobody
+      # will read.
       - name: Run tests (v2, zero-based — pgw#808)
         if: ${{ !cancelled() }}
         run: uv run pytest tests_v2/ -n 4 --dist loadfile -rs --skip-census-out=.skip-census-v2.json

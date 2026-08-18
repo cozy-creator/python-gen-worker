@@ -2,14 +2,11 @@
 statement that nobody said anything.
 
 pgw#1333. The three serving facts (``objective`` / ``distilled`` /
-``distilled_status``) used to travel as three loose scalars on
-``dispatch.SlotOrder``, every one of them defaulted, and every consumer read
-them with ``.get(name, "")``. That shape has exactly one failure mode and it
-cost a paid pod: a code path that never received the facts is
-INDISTINGUISHABLE from a checkpoint the catalog classified as nothing, so
-``api.slot._finish_resolved`` refused an ``epsilon`` checkpoint by saying
-"resolved checkpoint carries no training objective" — and the refusal was
-read, correctly given its text, as a catalog defect. It was a wire gap.
+``distilled_status``) travel as ONE struct, never as loose defaulted scalars
+read with ``.get(name, "")``. That shape has one failure mode and it cost a
+paid pod: a code path that never received the facts is INDISTINGUISHABLE from
+a checkpoint the catalog classified as nothing, so a wire gap is reported as a
+catalog defect.
 
 So the facts get a TYPE, and the gap gets a type of its own:
 

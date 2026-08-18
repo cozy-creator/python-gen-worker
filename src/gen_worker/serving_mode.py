@@ -54,10 +54,10 @@ FALLBACK_HEALING = "healing"
 FALLBACK_VOLATILE = "volatile"
 #: pgw#888: the hub PINNED an exact compiled graph and this target no longer
 #: serves it (de-armed for cause, revoked, superseded). The other four classes
-#: all describe a compiled graph that is armed and was skipped for one request; this one
-#: describes a compiled graph that is not here at all — and until the pgw#888 ruling it
-#: was not a fallback reason but a refusal, so the request had no serving mode
-#: to report. It rides here so an eager sample charged to a dispatch the hub
+#: all describe a compiled graph that is armed and was skipped for one request;
+#: this one describes a compiled graph that is not here at all, which pgw#888
+#: ruled is a FALLBACK REASON and not a refusal. It rides here so an eager
+#: sample charged to a dispatch the hub
 #: believed was compiled stays subtractable from the compiled measurement.
 FALLBACK_PINNED_CELL_UNAVAILABLE = "pinned_cell_unavailable"
 _PER_REQUEST_FALLBACKS = frozenset({
@@ -78,12 +78,10 @@ _PER_REQUEST_FALLBACKS = frozenset({
 # `self_mint_started` activity event carries in `phase`, so a request row and
 # the worker's own event stream join on one string instead of on a sentence.
 #
-# pgw#1035: these are ALIASES of :class:`compiled_graph_adopt.EagerPhase`, not a second
-# spelling of it. They used to be bare literals here while the arming lane's own
-# tokens lived in the enum — two lists of the same wire vocabulary, which is the
-# drift channel `EagerPhase` exists to close, and only `mint_in_progress` was
-# ever pinned across. Values are unchanged; the hub's grouped history is
-# untouched.
+# pgw#1035: these are ALIASES of :class:`compiled_graph_adopt.EagerPhase`, not
+# a second spelling of it. Bare literals here beside the arming lane's own enum
+# tokens are two lists of one wire vocabulary — the drift channel `EagerPhase`
+# exists to close.
 #: The arming brain has not answered yet (boot in flight, setup not finished).
 POSTURE_ARM_PENDING = EagerPhase.ARM_PENDING.value
 #: A mint is being built right now (delegated child, background driver); this

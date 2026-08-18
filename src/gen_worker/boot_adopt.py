@@ -88,7 +88,7 @@ from .keyset import store as keyset_store
 logger = logging.getLogger(__name__)
 
 #: Gates that refuse BEFORE :func:`attempt` is entered — the executor's own
-#: preconditions. These are the ones that used to be a bare ``return None``.
+#: preconditions. None of them may be a bare ``return None``.
 GATE_REASONS: Tuple[str, ...] = (
     # `aot_mint.export_declaration(family)` answered None: this family ships no
     # export declaration, so no key can name its class set.
@@ -130,9 +130,8 @@ LOCAL_REASONS: Tuple[str, ...] = (
     # capable as a property and as an accident of the arm-token memo.
     "local_hit",
     # Derived, asked this machine's own store, and it does not hold this key —
-    # and there is no hub to ask either. The honest successor to a `no_hub`
-    # that used to fire BEFORE the derivation and therefore before the local
-    # store had an address to be asked at.
+    # and there is no hub to ask either. Reported AFTER the derivation, because
+    # before it the local store has no address to be asked at.
     "local_miss_no_hub",
 )
 
@@ -180,12 +179,10 @@ DERIVE_REASONS: Tuple[str, ...] = (
 ASK_REASONS: Tuple[str, ...] = (
     "invalid_request", "resolve_unreachable",
     "miss", "materialize_failed", "hit",
-    # pgw#1122 — the LAST terminus, and the one the journey previously ran off
-    # the end of. `hit` was reported at resolve+materialize, and everything
-    # after it (the receipt gate, the publisher check, the arm itself) was
-    # somebody else's exception. So three pods emitted `boot_adopt=hit` and
-    # then failed their function, and the event that promised to name the gate
-    # named the gate BEFORE the one that refused.
+    # pgw#1122 — the LAST terminus. Reporting `hit` at resolve+materialize leaves
+    # the receipt gate, the publisher check and the arm itself as somebody else's
+    # exception, so a pod emits `boot_adopt=hit` and then fails its function —
+    # the event names a gate BEFORE the one that refused.
     "arm_refused",
 ) + tuple(compiled_graph_resolve.REFUSAL_CODES)
 

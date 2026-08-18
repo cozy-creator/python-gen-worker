@@ -625,14 +625,11 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
         # to know who we are — and asking anyway would make a seam hiccup
         # refuse the one class that never needed an identity.
         #
-        # pgw#1271: this branch used to call `refuse_untrusted_publisher(
-        # receipt, "", "")` here — INSIDE that callee's own early-return
-        # condition (`if not needs_viewer_identity(receipt): return`), so it
-        # executed exactly zero checks, immediately before the caller dlopens
-        # the artifact. A call that reads as the last gate before native-code
-        # execution and is structurally incapable of refusing is worse than no
-        # call: it answers the reader's question wrongly. What actually clears
-        # this tier is the SIGNATURE, and it ran above.
+        # pgw#1271: what clears this tier is the SIGNATURE, and it ran above. Do NOT
+        # add a `refuse_untrusted_publisher(receipt, "", "")` call here: it lands
+        # inside that callee's own early return and executes zero checks immediately
+        # before the caller dlopens the artifact. A call that reads as the last gate
+        # before native-code execution and cannot refuse is worse than no call.
         return receipt
     try:
         viewer = _self_viewer()

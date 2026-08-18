@@ -675,11 +675,8 @@ class IntentRegistry:
         a request is what an intent gets BLOCKED on (``IntentState
         .blocker_request``), never an intent itself.
 
-        **A JOB is no longer one of them** (pgw#1336 / th#2052). The docstring
-        that stood here said these cover "a RunJob (the wire lacks a job intent
-        kind/owner field)"; the wire grew that field, so a job dispatch arrives
-        owning a hub-authored carrier and goes through
-        :meth:`adopt_dispatch_intent` instead.
+        **A JOB is NOT one of them** (pgw#1336 / th#2052): a job dispatch arrives
+        owning a hub-authored carrier and goes through :meth:`adopt_dispatch_intent`.
 
         Their IDs are deterministic for one operation identity, but they never
         impersonate a hub-authored DesiredIntent.

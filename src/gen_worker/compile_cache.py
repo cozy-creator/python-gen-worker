@@ -6,20 +6,13 @@ dirs, published as a repo flavor; workers that opt in via
 ``@endpoint(compile=Compile(...))`` seed those dirs before load and hit the
 cache with no compiler and no stall.
 
-**Who produces one, as of 2026-08-11 (th#1800).** The worker itself, and
-nobody else. The out-of-process producer this module was designed around —
-training-endpoints ``produce-inductor-cache`` — was DELETED by te#179 (it
-minted ``kind="torch-inductor-cache"``, and th#1788 made ``aot-inductor`` the
-only class the hub adopts, so its publishes were refused before entering the
-store), and DESIGN-RULINGS §4.28/§4.30 make that permanent: there is no
-central compile service, no mint request and no compile fleet, and compilation
-runs on the machine that will USE the compiled graph. A family too large to self-mint beside its own server is a
-PLACEMENT question — boot its serving pod on a card that fits, per §4.28's
-"pre-warming a release/SKU = boot an ordinary serving pod there". pgw#1175
-deleted the ``card_bytes`` figure that used to answer it: it was
-``resident + need`` where ``need`` already re-charged ``resident``, and the
-49-113 GiB card classes it produced are retracted (§4.33). A mint costs ~8 GiB;
-what a family needs is measured by attempting it.
+**Who produces one: the worker itself, and nobody else** (DESIGN-RULINGS
+§4.28/§4.30). There is no central compile service, no mint request and no
+compile fleet — compilation runs on the machine that will USE the compiled
+graph. A family too large to self-mint beside its own server is a PLACEMENT
+question: boot its serving pod on a card that fits, per §4.28's "pre-warming a
+release/SKU = boot an ordinary serving pod there". A mint costs ~8 GiB; what a
+family needs is measured by attempting it, never predicted (§4.33).
 
 Policy: cache miss / key mismatch / no artifact leaves ordinary lanes eager,
 never causing a boot stall or a runtime compile attempt in prod. A declared
@@ -116,13 +109,8 @@ logger = logging.getLogger(__name__)
 # ingredient of the semantic cache tag (`_semantic_cache_tag`) and is not the
 # compiled-graph metadata schema, which is `aot_serve.COMPILED_GRAPH_FORMAT`.
 #
-# pgw#1230 RENAMED it from `ARTIFACT_FORMAT`. Two different facts shared that
-# name across two modules; `fleet_compiled_graphs.arm_identity` read THIS one to compute
-# the `format` axis it compares against what the child stamped from
-# `aot_serve`'s. They were both 2, so the comparison passed by coincidence
-# until pgw#1176 moved the compiled graph schema to 3 — after which every freshly minted
-# compiled graph failed to arm with `key_axis_divergence`. The value is unchanged, so no
-# cache tag moves; only the name that made the confusion possible does.
+# pgw#1230 RENAMED it from the generic `ARTIFACT_FORMAT`, which two modules
+# shared for two different facts. The value is unchanged, so no cache tag moves.
 #
 # 2 (gw#391): key gained the producer gen-worker version. ie#496 extends its
 # metadata with the canonical module graph, shape/target table and weight-lane
@@ -143,10 +131,9 @@ _LOCK_TYPE = type(threading.Lock())
 # the class ``__code__`` dynamo already compiled — on torch 2.13 (inlined
 # nn-modules) the cached entry's guards match the new instance and the
 # warmup call runs COMPILED with zero FX/AOT counter movement
-# (calls>0, hits=0, misses=0). That signature against a compiled graph this process
-# already proved is service, not silence: disproving it bricked the
-# compiled lane fleet-wide on every multi-checkpoint session (2026-07-24
-# incident, 6/6 workers). The registry below records every compiled graph proven in
+# (calls>0, hits=0, misses=0). That signature is service, not silence:
+# disproving it bricked the compiled lane fleet-wide on every multi-checkpoint
+# session. The registry below records every compiled graph proven in
 # this process (a real FX/AOT hit, or a finalized self-mint); crediting the
 # in-memory surface additionally requires DIRECT evidence from dynamo that
 # compiled code for this object's targets is live
@@ -357,22 +344,21 @@ def reset_target_code(pipeline: Any) -> int:
 # ---------------------------------------------------------------------------
 # pgw#680: guard-miss doctrine — fail-on-recompile at serve time.
 #
-# The 187s incident class: a tenant request whose inputs miss every cached
-# guard set used to pay dynamo's INLINE recompile inside the request (and,
-# single-flight, stall every request queued behind it). Doctrine: tenant
+# A tenant request whose inputs miss every cached guard set used to pay dynamo's
+# INLINE recompile inside the request and, single-flight, stall every request
+# queued behind it — the 187s incident class. Doctrine: tenant
 # requests on compiled lanes run under a fail-on-recompile stance; the raise
 # is caught in the guard wrappers, THIS request serves eager immediately, the
 # guard-failure reason is recorded verbatim (Activity event + hub-countable),
 # and the exact input class is healed by the existing background warm driver
 # so the SECOND request of that shape is compiled.
 #
-# Stance choice (deliberate, torch 2.13): ``torch._dynamo.config
-# .error_on_recompile`` scoped via ``config.patch`` around the guarded
-# compiled call — NOT ``torch.compiler.set_stance("fail_on_recompile")``.
-# Two reasons, both verified against torch 2.13.0:
-#   1. Scope. ConfigModule user overrides are ContextVars, i.e. THREAD-LOCAL
-#      (the same mechanics gw#608 measured for ``enable_autograd_cache``).
-#      The stance therefore arms exactly the serving thread's guarded call;
+# Stance choice (deliberate, verified against torch 2.13.0):
+# ``torch._dynamo.config.error_on_recompile`` scoped via ``config.patch``
+# around the guarded compiled call — NOT
+# ``torch.compiler.set_stance("fail_on_recompile")``.
+#   1. Scope. ConfigModule user overrides are ContextVars, i.e. THREAD-LOCAL,
+#      so the stance arms exactly the serving thread's guarded call;
 #      the hot-swap shape-warm thread and the background mint driver — which
 #      run CONCURRENTLY with tenant requests by design (pgw#671) — keep
 #      compiling freely. ``set_stance`` mutates a module-global and swaps the
@@ -451,16 +437,13 @@ GRAPH_BREAK_TOKEN = "graph_break"
 #: pgw#1082: the declaration named a dynamic range its own inputs leave.
 DECLARED_RANGE_TOKEN = "declared_range_exceeded"
 
-#: pgw#1093: the CATCH-ALL permanent degrade. A regional/whole-graph target
-#: that raised anything OTHER than a graph break, a declared-range refusal or
-#: a recompile miss used to degrade to eager on a `logger.warning` alone —
-#: and a hub-spawned pod has no reachable stdout, so the degrade was invisible
-#: (pgw#824's own ruling). Worse, `is_compile_armed` then reads False, which
-#: makes an INSTALLED-THEN-DEGRADED target byte-identical on the wire to a
-#: NEVER-INSTALLED one: same `metrics.lane=…+eager`, same
-#: `fallback_reason=uncompiled`, same `boot_ended_uncompiled`, zero other
-#: rows. Two different defects, one indistinguishable reading — which is
-#: exactly how pgw#1093 spent a pod attributing the wrong cause.
+#: pgw#1093: the CATCH-ALL permanent degrade, for a regional/whole-graph
+#: target that raised anything OTHER than a graph break, a declared-range
+#: refusal or a recompile miss. It must reach the WIRE: `is_compile_armed`
+#: then reads False, which without this row makes an INSTALLED-THEN-DEGRADED
+#: target byte-identical to a NEVER-INSTALLED one — same
+#: `metrics.lane=…+eager`, same `fallback_reason=uncompiled`, same
+#: `boot_ended_uncompiled`. Two different defects, one reading.
 COMPILED_DEGRADE_TOKEN = "compiled_degraded"
 
 
@@ -750,13 +733,9 @@ def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
     inside it (``("w8a8", 128)`` -> ``"w8a8-lora128"``). A bucket the lane
     string already carries wins — it is what was actually traced.
 
-    pgw#1040: this body existed twice, byte for byte, as
-    ``graph_facts``'s canonical execution lane and
-    ``aot_contract.ExportSpec.execution_lane_label``; both were folded here.
-    Since pgw#1059 the lane is store METADATA + discovery scoping, never a
-    key axis — but the one-derivation rule stands for the same reason: a
-    lane stamped under one spelling and scoped under another is a compiled graph
-    discovery can never find.
+    ONE derivation (pgw#1040), even though the lane is store METADATA +
+    discovery scoping and never a key axis: a lane stamped under one spelling
+    and scoped under another is a compiled graph discovery can never find.
     """
     base, observed = execution_lane_bucket(str(weight_lane or ""))
     bucket = observed or int(lora_bucket or 0)
@@ -1007,16 +986,16 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     CONFIGURE IT", per component — the ``toolchain`` key axis's whole input.
 
     THE COMPILER, and not the model libraries (pgw#1050): ``diffusers`` /
-    ``transformers`` / ``peft`` rode this axis until 2026-08-11 and were
-    evicted because their whole effect on a compiled graph arrives through the traced
-    graph, which the ``graph`` axis hashes node-for-node since pgw#1031 —
-    see ``torchcg.identity``'s membership rules for the channel-by-channel argument
-    and for the two fences (B1 code-only + the pgw#1097 folding fence;
-    ``env_seal.assert_seal_unchanged``) that close the routes around it.
-    Folded here, every model-library patch release re-keyed every compiled graph in
-    the fleet for a graph that had not moved. ``tcg.identity.toolchain_axis_digest``
-    is the READER of the same membership, and the pair is what keeps one
-    axis one derivation. Their versions stay RECORDED for forensics
+    ``transformers`` / ``peft`` are excluded because their whole effect on a
+    compiled graph arrives through the traced graph, which the ``graph`` axis
+    hashes node-for-node — see ``torchcg.identity``'s membership rules for the
+    channel-by-channel argument and for the two fences (B1 code-only + the
+    pgw#1097 folding fence; ``env_seal.assert_seal_unchanged``) that close the
+    routes around it. Folded here, every model-library patch release re-keyed
+    every compiled graph in the fleet for a graph that had not moved.
+    ``tcg.identity.toolchain_axis_digest`` is the READER of the same
+    membership, and the pair is what keeps one axis one derivation. Their
+    versions stay RECORDED for forensics
     (:func:`_lib_versions`, ``artifact_metadata``'s ``libs`` block) — an
     observability fact, exactly like ``sku``.
 
@@ -1432,19 +1411,10 @@ def fx_cache_failure_report() -> str:
     diagnosed.
 
     **pgw#1200 deleted the COMPILED GRAPH side, and with it the three-way
-    classification.** The report used to name B1 (*"the boot computed
-    different keys"*), B2 (*"the keys matched and the miss is in torch's
-    candidate-load path"*) or *"unreadable artifact"* — every one of them a
-    difference measured against FX entries read out of a
-    `torch-inductor-cache` tarball's `inductor/fxgraph/` tree. pgw#1178
-    deleted that format's last writer and pgw#1181 deleted the format, so the
-    tar walk could only ever yield nothing, and the arithmetic did not degrade
-    gracefully — it INVERTED. `fresh = live_keys - seeded` became EVERY live
-    key, so **B1 was named on every boot with any FX entry at all**, while B2
-    was structurally unreportable and `compiled_graph_keys=0` (*"unreadable"*) was the
-    normal case. Measured on the real function: handed an exported compiled graph — what
-    the caller passes today — the output was byte-identical to passing
-    ``None``, which is the shortest proof the argument carried no information.
+    classification.** It measured this boot's FX keys against entries read out
+    of a `torch-inductor-cache` tarball, a format pgw#1181 deleted — so the
+    walk could only yield nothing, and `fresh = live_keys - seeded` then
+    INVERTED into "every live key is fresh" on every boot.
 
     A diagnostic that always names one class is worse than none, because it is
     read as evidence. What survives is what the dynamo lane can actually
@@ -1612,12 +1582,10 @@ class CompileArmRefused(RuntimeError):
     """A NAMED, deterministic reason this process cannot arm this pipeline.
 
     pgw#985: what decides whether a second pod gets bought is the
-    CLASSIFICATION, not the message. ``arm_jit_intake`` used to raise a bare
-    ``RuntimeError`` for every decline — which the mint child let out as exit
-    1 (``CRASHED``, retryable) while the AOT recipe typed the identical
-    condition as a refusal (``EXIT_REFUSED``, terminal). Same fact, two
-    vocabularies, and the retryable one billed a second mint that could not
-    possibly succeed.
+    CLASSIFICATION, not the message. An untyped decline leaves the mint child
+    as exit 1 (``CRASHED``, retryable) while the AOT recipe types the identical
+    condition as a refusal (``EXIT_REFUSED``, terminal) — one fact, two
+    vocabularies, and the retryable one bills a mint that cannot succeed.
     """
 
 
@@ -1628,9 +1596,8 @@ def resolve_targets(
 
     ``(declared name, owner, attribute, eager callable)`` per resolvable
     target, in declaration order. :func:`has_compile_target`, :func:`apply`
-    and :func:`arm_jit_intake` all read THIS list (§1.29, one relation) —
-    it used to be scanned independently by the first two, which is how a
-    reader of the third could not tell which scan had spoken.
+    and :func:`arm_jit_intake` all read THIS list (§1.29, one relation), so a
+    reader can never be left wondering which independent scan had spoken.
 
     Whether the pipeline OWNS a declared target is the only question answered
     here. Whether this process can ARM the targets it owns is a different
@@ -1909,11 +1876,9 @@ def _mark_regional_blocks(owner: Any, dynamic_dims: tuple) -> int:
 class DeclaredRangeExceeded(RuntimeError):
     """A declared dynamic axis met an extent OUTSIDE its declared range.
 
-    pgw#1082: this used to be a ``ConstraintViolationError`` raised from
-    inside dynamo, caught by the guard as "some compiled target failed", and
-    swallowed into a permanent eager degrade that the wire still reported as
-    ``jit_cell``. It is an ENDPOINT DECLARATION defect — the declaration
-    named a range its own inputs leave — and it now says so by name.
+    pgw#1082: an ENDPOINT DECLARATION defect — the declaration named a range
+    its own inputs leave — typed so it cannot arrive as a dynamo-internal
+    ``ConstraintViolationError`` swallowed into a silent eager degrade.
     """
 
 
@@ -1945,22 +1910,12 @@ def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callabl
     """Wrap a compiled callable so every call marks the DECLARED dynamic
     axes COHERENTLY across its whole argument tree before dynamo sees them.
 
-    pgw#1082 rewrote this. The old mapping marked one dim of one KIND of
-    tensor — dim 0 of every float for ``batch``, dim 1 of every rank-3 float
-    for ``sequence`` — and that is not what an axis is. Every sibling tensor
-    indexed by the same axis (integer index tensors, rotary tables inside a
-    tuple) stayed STATIC, so dynamo specialized the symbol on them and then
-    raised ``ConstraintViolationError`` against the mark on the float:
-
-        You marked L['hidden_states'].size()[1] as dynamic but your code
-        specialized it to be a constant
-
-    On minimax-h3 that fired on the FIRST call of every regional block, the
-    guard degraded the target to eager for the life of the pod, and (because
-    the regional guard forgot to raise the degraded flag) the wire still
-    reported ``serving_mode=jit_cell`` with an empty ``fallback_reason``. A
-    20.1B denoiser served 100% eager while every telemetry axis said
-    compiled — measured at 6.27 s/step against the rig's 4.31 (pgw#1078).
+    pgw#1082: marking one dim of one KIND of tensor is not what an axis is.
+    Every sibling tensor indexed by the same axis (integer index tensors,
+    rotary tables inside a tuple) stayed STATIC, so dynamo specialized the
+    symbol on them and raised ``ConstraintViolationError`` against the mark on
+    the float — degrading the target to eager for the life of the pod while the
+    wire still reported it compiled.
 
     So: find the axis EXTENT at its primary dim, then mark that extent
     wherever it appears in the argument tree, integer tensors included. An
@@ -1975,11 +1930,9 @@ def _with_declared_marks(fn: Callable[..., Any], dynamic_dims: tuple) -> Callabl
     ``ConstraintViolationError`` — a permanent eager degrade — even when the
     narrowing carries no correctness content. Inductor's index-dtype choice is
     exactly such a narrowing: ``can_use_32bit_indexing`` elects int32 from the
-    FIRST call's size hint and then installs ``check_leq(numel, INT32_MAX)``
-    (``_inductor/codegen/simd.py``), so on minimax-h3 the 5 s cold call
-    (38,015 rows x a 28,672 inner dim) pinned int32 and its guard,
-    ``sequence <= 74,898``, contradicted the declared max. Every width above
-    that took a hard refusal, which is why 11-15 s served 100% eager.
+    FIRST call's size hint and installs ``check_leq(numel, INT32_MAX)``
+    (``_inductor/codegen/simd.py``), whose guard then contradicts a wider
+    declared max and takes a hard refusal.
     Marking without bounds yields a ``RelaxedUnspecConstraint`` instead: the
     axis still may not specialize to a constant (the pgw#1082 failure this
     function exists to prevent), but the compiler may split the range, so the
@@ -2207,11 +2160,9 @@ def _guarded(
             # eager fallback: the tier flips to explicit eager on the wire.
             revoke(state["detail"])
             # pgw#672/pgw#673 posture: a broken optimization must never kill a
-            # serving worker. Mandatory lanes used to raise here (and the
-            # setup/dispatch paths then disabled every declared function —
-            # sm120 CantSplit retired the pod for $0.25 of nothing). They now
-            # degrade like every other lane, LOUDLY: the revocation above is
-            # the wire-visible tier flip, never silent eager (gw#586).
+            # serving worker. Mandatory lanes degrade like every other lane,
+            # LOUDLY: the revocation above is the wire-visible tier flip, never
+            # silent eager (gw#586).
             log = logger.error if fail_closed else logger.warning
             log(
                 "compile-cache: compiled %s failed (%s: %s); serving eager for "
@@ -2350,8 +2301,7 @@ def _guarded_regional(
                             str(exc), 600)
                     _emit_declared_range_event(label, exc)
                 else:
-                    # pgw#1093: the catch-all that used to reach the wire as
-                    # NOTHING. Without it an installed-then-degraded target
+                    # pgw#1093: without this row an installed-then-degraded target
                     # and a never-installed one are the same reading.
                     _emit_compiled_degrade_event(
                         label, exc, lane="regional", fail_closed=fail_closed)
@@ -2467,10 +2417,8 @@ def eager_tier_available(pipeline: Any) -> bool:
 
     This is the question a background/out-of-process mint actually asks, and
     it is NOT :func:`mandatory_serving`. Using the latter as a serveability
-    proxy is a category error, and it is the one that left AOT unmintable on
-    every lane: the plain lane declines by #730's measured hold, and the w8a8
-    lane — the lane the AOT program exists to serve — declined because
-    "executes quantized activations" was read as "cannot serve eager".
+    proxy is a category error that leaves AOT unmintable on every lane — it
+    reads "executes quantized activations" as "cannot serve eager".
 
     A quantized lane serves eager fine. ``_Fp8ScaledLinear.forward`` and
     ``_W4A4Linear.forward`` are complete eager forwards (``torch._scaled_mm``
@@ -2636,11 +2584,9 @@ def apply(
             owner.compile_repeated_blocks(dynamic=None, fullgraph=True)
             # pgw#1078: the declared marks are applied at the BLOCK ingress,
             # which is where this lane's graphs are traced. Without them
-            # `regional=True` + `dynamic=(...)` used to DECLINE and send the
-            # target to the whole-forward branch — silently serving a 20B
-            # denoiser by the one lane its author declared regional to avoid,
-            # then guard-missing to eager on every request whose sequence
-            # differed from the boot warmup's (minimax-h3, ie#632).
+            # `regional=True` + `dynamic=(...)` DECLINES and sends the target
+            # to the whole-forward branch — the one lane its author declared
+            # regional to avoid.
             if declared_dynamic:
                 _mark_regional_blocks(owner, declared_dynamic)
             # pgw#681: regional entry crosses the same canonical boundary as
@@ -2816,16 +2762,11 @@ def enable(pipeline: Any, cfg: Any) -> bool:
     """The one consumer entry point (executor + local CLI) for the JIT lane:
     arm compile under the safety policy.
 
-    It used to also SEED a delivered ``torch-inductor-cache`` artifact —
-    stage it, verify its recorded axes against this runtime, and merge its
-    inductor tree into the live cache — and pgw#1181 deleted that whole half
-    with the format. Nothing has produced such an artifact since pgw#1178
-    removed `mint_artifact`, its last writer, so every parameter of that
-    branch (`cache_dir`, `artifact`) named a file that could not exist.
-    Delivered compiled graphs arrive as AOT ``.pt2`` entries or TRT engines, and
-    `models.provision.arm_compiled` dispatches those on `metadata.json`'s
-    `kind` BEFORE this call; what reaches here is the no-artifact lane, which
-    is JIT intake (§4.34 keeps that) and cold compile.
+    NOTHING is seeded here: the ``torch-inductor-cache`` format is deleted
+    (pgw#1181). Delivered compiled graphs arrive as AOT ``.pt2`` entries or TRT
+    engines and `models.provision.arm_compiled` dispatches those on
+    `metadata.json`'s `kind` BEFORE this call; what reaches here is the
+    no-artifact lane, which is JIT intake (§4.34 keeps that) and cold compile.
 
     A W8A8 refusal names its exact cause (gw#577): the raise IS the
     wire-visible job error, and serve pods expose no logs, so a generic
@@ -2925,14 +2866,10 @@ def arm_jit_intake(pipe: Any, cfg: Any) -> None:
     class with no consumer (only ``aot-inductor`` compiled graphs are ever adopted), so
     every honest cold boot re-compiles and that is the contract, not a gap.
 
-    This used to be ``begin_fleet_mint``, which additionally re-pointed the
-    PROCESS-GLOBAL ``TORCHINDUCTOR_CACHE_DIR``/``TRITON_CACHE_DIR`` at a fresh
-    capture dir so the compile could be packed afterwards. With no artifact to
-    pack, that move has no purpose — and its removal deletes gw#608's whole
-    root-cause class (a capture dir stealing the process cache dir from a
-    sibling's seeded compiled graph), pgw#777's multi-execution-group refusal, and the
-    one-capture-per-process conflict, along with the env-restore transaction
-    they needed.
+    Nothing re-points the PROCESS-GLOBAL ``TORCHINDUCTOR_CACHE_DIR`` /
+    ``TRITON_CACHE_DIR``: with no artifact to pack there is nothing to capture,
+    which is what keeps a capture dir from stealing the process cache dir from
+    a sibling's seeded compiled graph (gw#608, pgw#777).
 
     Raises :class:`CompileArmRefused` — typed and deterministic. pgw#985: the
     two facts that can refuse here are DIFFERENT and are named as such. A

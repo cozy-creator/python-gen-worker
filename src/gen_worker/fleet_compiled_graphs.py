@@ -40,8 +40,7 @@ PUBLISHER: user-controlled hardware is untrusted tier by definition, so its
 compiled graphs land in ``local_compiled_graph_store`` (``no_publish_sink_reason`` -> ``no_publish_sink``)
 and its obligation ends at :func:`keep_self_mint_local`. That absence is
 pinned structurally by ``tests/test_local_serve_no_publisher_pgw1127.py``,
-not by this paragraph: before pgw#1127 the local CLI armed JIT through
-``local_compiled_graphs`` and never reached the local store at all.
+not by this paragraph.
 
 Mint failures keep the pre-self-mint miss policy: plain lanes serve eager,
 quantized (w8a8/w4a4) lanes keep their typed fail-closed refusal.
@@ -130,11 +129,8 @@ class SelfMint:
     accounting treats the mint exactly like a hub-delivered compiled graph; the warmup
     proof, not the artifact source, gates serving.
 
-    pgw#1032: the hub fence this feeds is the one that verifies the ADVERTISED
-    active ref against the hub's own store. The old self-attested spelling
-    (``ActiveCompileRef == KeyRef(family, requested_cell_key)``) compared a
-    stamped key against a COMPUTED one — disjoint spaces since pgw#1010, so it
-    could never match — and is retired with the requested key itself.
+    pgw#1032: the hub fence this feeds verifies the ADVERTISED active ref
+    against the hub's own store — a STAMPED key, never a computed one.
     """
 
     family: str
@@ -213,26 +209,13 @@ class ArmIdentity:
 #: ``graph`` is deliberately absent: it exists only after the export, and
 #: comparing a declared-facts stand-in against the traced fact is the
 #: phantom divergence this type retires.
-# pgw#1176: ``envelope`` LEFT this comparison with the key. A per-entry
-# artifact records no DECLARED ENVELOPE — that is a manifest fact about the
-# whole declaration, not about one graph class — so comparing it here would
-# compare a value the child can no longer state against one the parent can,
-# and refuse every handback by construction.
-# pgw#1340 / th#2098: `family`, `lane` and `env_seal` LEFT this comparison for
-# the SAME reason `envelope` did one paragraph up, and the sweep that took
-# `envelope` should have taken them. Since pgw#1270 TCG mints every artifact
-# and `torchcg.artifact.validate_metadata` refuses metadata whose field set is
-# not exactly `artifact_meta.compiled_graph_metadata_fields()` — which has no `family`, no
-# `weight_lane`/`lora_bucket` and no `env_seal`. So three of the six axes here
-# were read as `None` off every real compiled graph and compared against a live runtime
-# fact: a seam that could only ever refuse.
-#
-# It was not theory. MEASURED on the standing `master` hub (2026-08-17):
-# `aot_entry_arm_failed key_axis_divergence — family: child compiled graph states '',
-# this runtime computed 'sd15'`, 224 rows on sd15 and 28 on ernie across wheels
-# 0.117.0 and 0.118.0. EVERY self-mint that reached the seam, none published,
-# each one paying ~25 minutes of L4 for the compile it then discarded — ~$1.00
-# per burst against 57.7 GPU-seconds of the inference it was meant to speed up.
+# `envelope` (pgw#1176) and `family`/`lane`/`env_seal` (pgw#1340 / th#2098) are
+# deliberately NOT here: `torchcg.artifact.validate_metadata` refuses metadata
+# whose field set is not exactly
+# `artifact_meta.compiled_graph_metadata_fields()`, which carries none of them,
+# so comparing one reads `None` off every real compiled graph against a live
+# runtime fact — a seam that could only ever refuse. MEASURED before the fix:
+# every self-mint that reached the seam refused, ~$1.00 of L4 per burst.
 #
 # What is left is exactly the three axes TCG keys the artifact ON, which is
 # what makes them the three that can genuinely refuse a foreign compiled graph.
@@ -606,12 +589,10 @@ def _credential_lapse_s(token: str, *, now: float) -> float:
 # reads them) — and the content is already bound by `snapshot_digest`, as
 # that file's own header says.
 #
-# THE MEASUREMENT that makes this a bound and not a preference: on a REAL
-# published sdxl compiled graph (checkpoint sha256:926bc9f5…, artifact 69,045,459 B),
-# `guard_manifest` alone is 13,092,487 bytes of the 13,377,167-byte metadata
-# — 98%. Everything else together is 285 KB. The declare body therefore grew
-# with the ARTIFACT, and at ~200 MB (a real compiled graph) it crossed the 32 MiB
-# route cap and the hub answered 413 thirty-two times.
+# THE MEASUREMENT that makes this a bound and not a preference (th#1645): on a
+# real published sdxl compiled graph `guard_manifest` alone is 98% of the
+# 13.4 MB metadata and everything else is 285 KB, so the declare body grew with
+# the ARTIFACT and crossed the route's 32 MiB cap.
 _UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
     "guard_manifest",   # JIT lane: per-graph guard closures
     "entries",          # AOT lane: per-class contracts + constant manifests
@@ -619,10 +600,8 @@ _UNBOUNDED_ENVELOPE_BLOCKS = frozenset({
     "weight_contract",  # per-tensor weight rows
 })
 
-# pgw#904: the pgw#988 declare-contract assert died with `aot_compiled_graphs`. The
-# declare's worker-side CONSUMER (fetch-and-filter discovery) is deleted —
-# the hub now resolves the exact artifact and names it in `Arm.artifact`, so
-# the declare's reader is the hub, and its contract is enforced there.
+# The declare's only reader is the HUB — it resolves the exact artifact and
+# names it in `Arm.artifact` — so the declare's contract is enforced there.
 
 # The stated ceiling on a compiled graph's CONTROL-plane declare (§4.24). Measured
 # basis: the same real compiled graph's metadata minus the blocks above is 285 KB, and
@@ -1247,9 +1226,8 @@ def _identity_axes(
             f"axes describe ({key.value}); refusing to publish an identity "
             "the artifact does not corroborate")
     if not provenance.stated:
-        # NARROWED, not deleted (pgw#939: absence is a verdict). The refusal
-        # used to fire on a metadata field no compiled graph can carry — i.e. always.
-        # It now fires on the genuine case it was written for: this machine
+        # NARROWED, not deleted (pgw#939: absence is a verdict). It fires on the
+        # genuine case it was written for: this machine
         # holds bytes it cannot say anything about, which is what a publish
         # under invented axes would hide. The hub's ArtifactFromCompiledGraphRecord
         # requires the seal digest and pgw#904's consumer refuses an identity
@@ -1336,12 +1314,8 @@ def _publish_async(
     killed mid-upload when the pod retired" were the same observation —
     silence.
 
-    pgw#1183 changed what this function IS. It used to be the last thing that
-    ever touched the only copy of a mint — the bytes lived under the mint root
-    and a ``finally`` rmtree'd them on every exit path, so one
-    ``connection reset`` destroyed a 1 h 37 m mint, and the event text conceded
-    it in as many words (*"this pod must survive the upload or the compiled graph is
-    lost"*). It is now a transfer FROM the local CAS: ``artifact`` is the
+    pgw#1183: this is a transfer FROM the local CAS and never the last thing
+    touching the only copy of a mint. ``artifact`` is the
     store's own path, no path here is ever removed, the thread is not a daemon
     (the upload is bounded by the transport's own timeouts, so waiting for it
     at interpreter exit is finishing work, not hanging on it), and a failure
@@ -1507,17 +1481,13 @@ def delegation_refusal(pipe: Any, cfg: Any) -> str:
     child compiles: nothing is armed here, so a pipe with no eager tier has
     nothing to serve at all until the child finishes.
 
-    pgw#813 CORRECTION. This used to refuse ``mandatory_serving(pipe)`` — i.e.
-    it read "executes quantized activations" as "cannot serve eager". That is
-    a category error and it was the operative cause of AOT being unmintable on
-    every lane: the plain lane is held on dynamo by #730, and w8a8 — the lane
-    Paul ruled AOT-first — was refused a delegated minter here, so the miss
-    fell back to a dynamo compiled graph that AOT discovery can never adopt. A w8a8
-    pipeline serves eager perfectly well (``_Fp8ScaledLinear.forward`` is a
-    complete ``torch._scaled_mm`` forward; the fleet's own cold-boot ladder
-    measures it; pgw#672/#673 already made mandatory lanes DEGRADE to eager
-    loudly rather than raise). ``compile_cache.eager_tier_available`` is the
-    honest predicate and this is now its only caller-side use.
+    pgw#813: NEVER refuse on ``mandatory_serving(pipe)`` — reading "executes
+    quantized activations" as "cannot serve eager" is a category error, and it is
+    what left AOT unmintable on every lane. A w8a8 pipeline serves eager perfectly
+    well (``_Fp8ScaledLinear.forward`` is a complete ``torch._scaled_mm``
+    forward), and pgw#672/#673 make mandatory lanes DEGRADE to eager loudly rather
+    than raise. ``compile_cache.eager_tier_available`` is the honest predicate and
+    this is its only caller-side use.
 
     `Compile.regional` (the dynamo/JIT per-block knob, ie#381) is NOT a
     refusal here: since pgw#846 the AOT mint is always whole-graph and
@@ -1619,10 +1589,8 @@ def enable_compiled(
 
     pgw#923: the policy has a dozen exits and an adoption attempt can precede
     any of them, so the measured attempts are collected in ONE place rather
-    than threaded through each ``return``. That is the shape that lets a
-    refusal be reported: the old code could only announce an adoption from the
-    frame that made it, which is why the successful ones were narrated and the
-    measured ones never sent.
+    than threaded through each ``return`` — which is what lets a REFUSAL be
+    reported and not only a success.
     """
     if serve_posture.eager_only():
         # pgw#1142 / §4.32 item 4. `arming_block` would refuse every arm below
@@ -1999,13 +1967,6 @@ def _arming_policy(
     # the seam that admits it" is answered by two compile-time constants and
     # costs nothing to ask.
     #
-    # It is not hypothetical. pgw#1270 moved the artifact vocabulary to TCG and
-    # left three axes in the comparison that no compiled graph can state, and the fleet
-    # paid the full compile to rediscover it on every boot of every pod for two
-    # wheels: 224 `sd15` rows and 28 `ernie` rows of
-    # `aot_entry_arm_failed key_axis_divergence`, zero publishes, ~$1.00 of L4
-    # per burst against 57.7 GPU-seconds of the inference it was accelerating.
-    #
     # DEGRADE, never fail the worker (§4.33): the pod serves eager, which is
     # what it was doing anyway — the only thing this removes is the bill.
     unstateable = unstateable_arm_axes()
@@ -2140,10 +2101,9 @@ def _arming_policy(
     # Pipes whose obligation identity is the SAME token share one child mint:
     # same runtime, same declaration AND same subject — the same slot resolved
     # to the same checkpoint — so there is one computation to buy and one
-    # pending to open. pgw#1113 deleted the premise this comment used to
-    # state ("the qwen edit shape: two lanes, one family compiled graph"): two lanes are
-    # one compiled graph only when the graph says so, and the graph does not exist yet
-    # here. The obligation names its subject instead of assuming one.
+    # pending to open. Two lanes are one compiled graph only when the GRAPH says
+    # so, and the graph does not exist yet here — so the obligation names its
+    # subject instead of assuming one (pgw#1113).
     with _PENDING_LOCK:
         existing = _PENDING.get(key)
     if existing is not None:
@@ -2341,13 +2301,10 @@ def _arm_exported_compiled_graph(
     #
     # `try_read_metadata` answers None for both "this compiled graph has no envelope" and
     # "I refused to read the envelope it has", and every consumer here spent
-    # that distinction on `meta is not None`. Measured on row 7: a 16 MiB bound
-    # refused a 36-entry sdxl envelope, so check 1 below SILENTLY DID NOT RUN,
-    # `arm_aot` was handed None and skipped the lifted-binding install, and the
-    # refusal that reached the wire named a downstream contract gate
-    # (`lifted_inputs_unbindable`) with no root. 36/36 entries, 92 minutes and
-    # $1.584 discarded; the only trace of the cause was the word `unreadable`
-    # in one event's `compiled_graph_key=` field.
+    # that distinction on `meta is not None`. MEASURED: a size bound refusing a
+    # 36-entry sdxl envelope made check 1 below SILENTLY NOT RUN, `arm_aot` was
+    # handed None and skipped the lifted-binding install, and the wire named a
+    # downstream contract gate (`lifted_inputs_unbindable`) with no root.
     #
     # An envelope this runtime cannot READ is refused here, by name, before any
     # arm — the same class as a compiled graph that does not describe us. It belongs in
@@ -2618,9 +2575,7 @@ def adopt_delegated_mint(
     # pgw#1096: ONE gate for every self-produced compiled graph — the child's, and the
     # local store's (§4.28). pgw#999's classification, pgw#1042's pre-arm axis
     # divergence and pgw#805's AOT-only arm all live in `_arm_exported_compiled_graph`;
-    # the reasons this call site used to compute inline are unchanged, and the
-    # $2.72 lesson (attempt 26: a 36/36 mint refused by three events that all
-    # said "could not adopt") is kept there rather than repeated here.
+    # and the reasons live there rather than being recomputed at this call site.
     # §4.32 THE MINT-TIME GATE, and this is the only site that arms it: this
     # process compiled these bytes and is about to publish them to every pod
     # that will ever adopt this key. It runs the freshly compiled artifact and
@@ -3181,15 +3136,10 @@ def _unregister(pending: "PendingSelfMint") -> None:
 
 
 #: pgw#813: the typed `self_mint_skipped` phase each delegation refusal
-#: declines under. The old single `aot_requires_delegation` phase carried a
-#: hand-written either/or sentence ("GEN_WORKER_MINT_IN_PROCESS or eager-first
-#: off") that named two causes which were BOTH false on the measured pod while
-#: the true cause — the pipeline-side mandatory-lane misclassification — was
-#: not named at all. A refusal that cannot name its own cause is the defect.
-#: pgw#995 dropped `eager_first_disabled`: eager-first is unconditional, so
-#: that cause can no longer arise and a reason nobody can reach is dead prose.
-#: pgw#1010 dropped `mint_in_process_forced` with the env that produced it —
-#: there is no in-process mint shape to force.
+#: declines under. One phase per CAUSE — a refusal that cannot name its own
+#: cause is the defect, and a hand-written either/or sentence in the detail is
+#: how a refusal names two causes that are both false. A cause that can no
+#: longer arise is deleted rather than left as dead prose.
 _DELEGATION_DECLINE_PHASE = {
     "no_eager_tier": "aot_no_eager_tier",
     "caller_forced_in_process": "aot_mint_forced_in_process",
@@ -3262,12 +3212,10 @@ def mint_recipe(
                 "out-of-process minting is unavailable and an AOTI export "
                 "has no eager tier to serve from while it compiles"))
 
-    # pgw#853 put the refusal HERE rather than at import, because a refusal to
-    # MINT is not a refusal to IMPORT. pgw#1107 retired the thunk that carried
-    # it: the accessor is now a registry read that cannot raise, and the
-    # refusal arrives below as DATA (`open_blockers`) under its own phase. The
-    # `try/except` that used to wrap this call went with it — a gate that can
-    # no longer fire is a decorative one.
+    # pgw#853: a refusal to MINT is not a refusal to IMPORT. The accessor is a
+    # registry read that cannot raise, and the refusal arrives below as DATA
+    # (`open_blockers`) under its own phase — so there is no `try/except` here,
+    # because a gate that can no longer fire is a decorative one.
     decl = export_declaration(family)
 
     if decl is None:
@@ -3411,18 +3359,14 @@ def _fail_closed(
         if selection_bug is not None:
             raise refusal from selection_bug
         raise refusal
-    # pgw#805: this exit used to be a bare `logger.info` — and a serve pod
-    # exposes no logs (pgw#760), so "declared a compile target, minted
-    # nothing, refused nothing" was the whole observable behaviour of five
-    # real L4 pods. A plain lane DEGRADING to eager is a legitimate policy
+    # pgw#805: a serve pod exposes no logs (pgw#760), so this exit must reach
+    # the wire. A plain lane DEGRADING to eager is a legitimate policy
     # outcome; being unable to say so is not.
     #
-    # pgw#824: the phase is the CLASSIFIED cause, not the constant
-    # ``mint_unavailable`` every one of the nine exits used to share. The cause
-    # was only ever in the free-text detail, so counting "how much of this fleet
-    # is eager because there is no C toolchain" meant substring-matching a
-    # sentence. It is the same token the request row's ``fallback_reason``
-    # carries, so the two join.
+    # pgw#824: the phase is the CLASSIFIED cause, never one constant shared by
+    # every exit — counting "how much of this fleet is eager because there is no C
+    # toolchain" must not mean substring-matching a sentence. It is the same token
+    # the request row's ``fallback_reason`` carries, so the two join.
     logger.info("fleet-compiled graphs: serving eager (%s)", reason)
     activity_mod.emit_event(
         "self_mint_skipped",

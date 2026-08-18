@@ -1,11 +1,10 @@
 """``cg-keyset-v1`` — the derived key set, as DATA.
 
-pgw#1327. A serve pod used to learn its own ``cg-key-v1`` set by running
-``torch.export`` in child processes at boot ("< 60 s, every time, ~99 % of it
-the traces"), which made torch, diffusers and the endpoint's model code a hard
-dependency of a pod that will never compile anything. Every input to those
-traces is code the mint lane already ran, so the OUTPUT — one TCG ``class_hash``
-per declared graph class — is shipped instead.
+pgw#1327. A serve pod must not learn its own ``cg-key-v1`` set by running
+``torch.export`` at boot — that makes torch, diffusers and the endpoint's model
+code a hard dependency of a pod that will never compile anything. Every input
+to those traces is code the mint lane already ran, so the OUTPUT — one TCG
+``class_hash`` per declared graph class — is shipped instead.
 
 What the document holds, and what it deliberately does not
 ---------------------------------------------------------
