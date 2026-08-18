@@ -1,0 +1,99 @@
+"""The trace-time RequestContext (pgw#1370).
+
+The publish derive runs the author's ``setup`` and handlers AS-IS, so it must
+answer the ctx surface those methods actually touch -- with trace semantics:
+config-only checkpoint tree, platform-fallback defaults, no adapter, no-op
+egress. ``ctx.is_trace`` is True and author code may branch on it (the
+contract file does, to skip the adapter refusal).
+
+This is NOT the serving context: real checkpoint resolution, adopt/boot and
+the deploy-state defaults read are pgw#1372's surface. The two share the
+SPELLING of the members below; that spelling is frozen by the Paul-reviewed
+``main_v2.py``.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+
+class TraceRequestContext:
+    """What ``setup``/handlers see under ``gen-worker release derive``."""
+
+    is_trace: bool = True
+
+    def __init__(
+        self,
+        *,
+        lane: Any,
+        checkpoint_dir: Path,
+        checkpoint_ref: str = "",
+    ) -> None:
+        self.lane = lane
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_ref = checkpoint_ref or f"trace:{self.checkpoint_dir.name}"
+        #: The hub-resolved distillation adapter -- never bound at trace time.
+        self.adapter: Optional[Any] = None
+        self.log = logging.getLogger("gen_worker.release.trace")
+        #: Every type the author asked defaults for -- the derive exports its
+        #: schema (the successor of the hub-embedded family registry).
+        self.requested_defaults_types: list[type] = []
+
+    # -- defaults -----------------------------------------------------------
+    def checkpoint_defaults(self, model_type: type) -> Any:
+        """The PLATFORM-FALLBACK defaults instance for ``model_type``.
+
+        Per-checkpoint values are mutable platform deploy state (hub rows,
+        validated against the schema this release exports); at trace time the
+        zero-arg construction IS the fallback row. A model type carries its
+        schema as ``.Defaults``; a bare struct type is its own schema.
+        """
+        if model_type not in self.requested_defaults_types:
+            self.requested_defaults_types.append(model_type)
+        defaults_type = getattr(model_type, "Defaults", model_type)
+        return defaults_type()
+
+    # -- knobs / control ----------------------------------------------------
+    def clamp(
+        self,
+        field: str,
+        requested: float,
+        *,
+        lo: Optional[float] = None,
+        hi: Optional[float] = None,
+        reason: str = "",
+    ) -> float:
+        """Same arithmetic as the serving ctx; trace records nothing."""
+        del reason
+        applied = float(requested)
+        if lo is not None and applied < lo:
+            applied = float(lo)
+        if hi is not None and applied > hi:
+            applied = float(hi)
+        return applied
+
+    def raise_if_cancelled(self, message: str = "request cancelled") -> None:
+        del message
+
+    # -- egress -------------------------------------------------------------
+    def step_callback(self, total_steps: int) -> Callable[..., dict]:
+        """A no-op diffusers ``callback_on_step_end``."""
+        del total_steps
+
+        def callback(_pipe: Any, _index: Any, _timestep: Any, callback_kwargs: Any = None, **_: Any) -> dict:
+            del callback_kwargs
+            return {}
+
+        return callback
+
+    def save_image(self, image: Any, *, format: str = "webp", **_: Any) -> Any:
+        """A stub asset: nothing is encoded or uploaded at trace time."""
+        del image
+        from ..api.types import ImageAsset
+
+        return ImageAsset(ref=f"trace://image.{format}")
+
+
+__all__ = ["TraceRequestContext"]

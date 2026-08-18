@@ -122,6 +122,13 @@ dev = [
     "pytest-xdist>=3.8.0",
     "types-PyYAML>=6.0.12.20250915",
     "types-requests>=2.32.4.20250913",
+    # pgw#1370: the release-derive tests drive REAL torchcg discovery (the
+    # derive imports torchcg from the env it runs in — in production that is
+    # the RELEASE env's own pin, never a gen-worker dependency). DEV-ONLY by
+    # design: the pin below is stripped from the published wheel, and that is
+    # correct here — the wheel must NOT carry torchcg (pgw#1310's lesson
+    # applies to runtime deps; this one is a test dependency).
+    "torchcg",
 ]
 
 [build-system]
@@ -676,6 +683,8 @@ torch = [
 torchvision = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+# pgw#1370: dev-only (see the dev extra) — release envs pin their own torchcg.
+torchcg = { git = "https://github.com/cozy-creator/torchcg", rev = "116e4a48f7037ed8c0e3794d4534f220de3273b4" }
 # Saying which pins were deleted requires naming them.
 # retired-name: historical rationale, not a live reference.
 # pgw#1310 deleted the `hashrepo` / `torch-compiled-graphs` git pins that stood

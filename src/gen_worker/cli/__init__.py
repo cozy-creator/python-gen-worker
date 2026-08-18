@@ -66,6 +66,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from . import job as _job_mod
     _job_mod.add_subparser(sub)
 
+    from . import release as _release_mod
+    _release_mod.add_subparser(sub)
+
     return parser
 
 

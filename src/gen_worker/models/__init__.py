@@ -52,6 +52,8 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
 #: cannot say different things without mypy noticing.
 _EXPORTS: Final[dict[str, str]] = {
     "HuggingFaceRef": "refs",
+    "Knob": "model_types",
+    "SDXL": "model_types",
     "LoadedComponentKey": "residency",
     "ParsedModelRef": "refs",
     "RefFragmentRemoved": "refs",
@@ -87,6 +89,8 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "Knob",
+    "SDXL",
     "tensorhub_cache_dir",
     "tensorhub_cas_dir",
     "ensure_local",

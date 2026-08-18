@@ -1140,6 +1140,15 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # a request lands; `ModelSpec.instance(ref)` inside a handler is the dynamic
     # escape hatch, and it is the one parse-don't-validate boundary.
     families: Mapping[str, "Bind[Any]"] = msgspec.field(default_factory=dict)
+    # pgw#1370 (ship-code-as-is, 2026-08-18 ruling): the whole author compile
+    # surface — code + lanes, nothing else. Each lane is a torchcg ``Lane``
+    # (compile-target attribute paths + the tensor-layout contract + load
+    # dtype). Trace coverage is AUTO-ENUMERATED from the handlers' payload
+    # schemas at publish time; shapes the schema cannot express are
+    # discovered at first live request (eager + background mint). Duck-typed
+    # here: gen-worker does not import torchcg — the release env brings it,
+    # and `gen-worker release derive` consumes it.
+    lanes: Tuple[Any, ...] = ()
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -1724,6 +1733,74 @@ def _validate_family_params(
             )
 
 
+def _validate_lanes(owner: str, lanes: Any) -> Tuple[Any, ...]:
+    """Shape-check the ship-code-as-is lane surface, duck-typed.
+
+    A lane is whatever torchcg's ``Lane`` says it is — gen-worker refuses to
+    re-declare that vocabulary (the release env pins torchcg; two definitions
+    would drift). What IS checked here is the part the derive depends on:
+    name / compile / contract present and canonical, names unique.
+    """
+    out = tuple(lanes)
+    if not out:
+        raise ValueError(f"@endpoint {owner}: lanes= must declare at least one lane")
+    names = []
+    for lane in out:
+        name = getattr(lane, "name", None)
+        compile_paths = getattr(lane, "compile", None)
+        contract = getattr(lane, "contract", None)
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"@endpoint {owner}: a lane must carry a canonical name")
+        if not isinstance(compile_paths, tuple) or not all(
+            isinstance(p, str) and p.strip() for p in compile_paths
+        ):
+            raise ValueError(
+                f"@endpoint {owner}: lane {name!r} must carry compile= as a "
+                f"tuple of attribute paths"
+            )
+        if not isinstance(contract, str) or not contract.strip():
+            raise ValueError(
+                f"@endpoint {owner}: lane {name!r} must carry its tensor-layout "
+                f"contract"
+            )
+        names.append(name)
+    if len(set(names)) != len(names):
+        raise ValueError(f"@endpoint {owner}: lane names must be unique, got {names!r}")
+    return out
+
+
+def _decorate_lane_class(
+    cls: type,
+    *,
+    kind: str,
+    resources: Resources,
+    lanes: Any,
+) -> type:
+    """The ship-code-as-is surface (pgw#1370): code + lanes, nothing else.
+
+    Author code is the serve host as-is; there is no catalog, no models=
+    migration and no library-known family on this path. Serving wiring for
+    this shape is pgw#1372's; what decoration guarantees is that the class
+    imports clean and that `gen-worker release derive` can find its lanes
+    and handlers (trace payloads are auto-enumerated from the handlers'
+    payload schemas — there is no samples surface).
+    """
+    if kind != "inference":
+        raise ValueError(
+            f"@endpoint class {cls.__name__!r}: lanes= is an inference surface, "
+            f"got kind={kind!r}"
+        )
+    handlers = _find_handler_methods(cls)
+    decl = EndpointDecl(
+        kind=kind,
+        resources=resources,
+        lanes=_validate_lanes(f"class {cls.__name__!r}", lanes),
+    )
+    setattr(cls, ATTR, decl)
+    setattr(cls, "__gen_worker_handlers__", handlers)
+    return cls
+
+
 def _decorate_class(
     cls: type,
     *,
@@ -1893,6 +1970,7 @@ def endpoint(
     env: Optional[Sequence[str]] = ...,
     publishes: bool = ...,
     families: Optional[Mapping[str, "type[Model] | Bind[Any]"]] = ...,
+    lanes: Optional[Sequence[Any]] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -1915,6 +1993,7 @@ def endpoint(
     env: Optional[Sequence[str]] = None,
     publishes: bool = False,
     families: Optional[Mapping[str, "type[Model] | Bind[Any]"]] = None,
+    lanes: Optional[Sequence[Any]] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -1979,6 +2058,24 @@ def endpoint(
     engine_runtime, runtime_formulas = _split_runtime_kwarg(owner, runtime)
 
     def apply(obj: Any) -> Any:
+        if lanes is not None:
+            # The ship-code-as-is surface is disjoint from the catalog-era
+            # kwargs by construction: lanes REPLACE the model/compile
+            # vocabulary, they do not compose with it.
+            if not inspect.isclass(obj):
+                raise TypeError(
+                    "@endpoint lanes= applies to class endpoints (setup + "
+                    "handler methods)"
+                )
+            if model is not None or models is not None or compile is not None \
+                    or families is not None:
+                raise ValueError(
+                    "@endpoint lanes= is the whole compile/model surface; it "
+                    "does not compose with model=/models=/compile=/families="
+                )
+            return _decorate_lane_class(
+                obj, kind=kind, resources=resources_value, lanes=lanes,
+            )
         if inspect.isclass(obj):
             if name is not None:
                 raise ValueError("@endpoint name= applies to functions only; "
