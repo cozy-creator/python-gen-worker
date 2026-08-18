@@ -1,10 +1,11 @@
 """The declaration rows of a baked ``endpoint.lock``.
 
-ONE walk over BOTH publishable shapes. A release may declare ``@endpoint``
-functions, ``@job`` functions, or both, and a release with jobs and ZERO
-functions is legal (th#2049) — so every reader that asks "what did this image
-declare" must ask it of both blocks, or it goes blind on the shape it was not
-written for.
+ONE walk over EVERY publishable shape. A release may declare ``@entrypoint``
+handlers, ``@endpoint`` functions, ``@job`` functions, or any mix, and a
+release with jobs and ZERO functions is legal (th#2049), as is an
+entrypoints-only release (pgw#1387) — so every reader that asks "what did this
+image declare" must ask it of every block, or it goes blind on the shape it was
+not written for.
 
 pgw#1354 is what blindness costs: ``entrypoint.get_modules_from_manifest`` and
 ``cuda_probe.should_probe_cuda`` each walked ``functions[]`` alone, both
@@ -31,7 +32,16 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional
 
 #: Every manifest block carrying declaration rows, in wire order.
-DECLARATION_BLOCKS = ("functions", "jobs")
+#:
+#: pgw#1395 (th#2161 D0 / G14): ``entrypoints`` was missing here. It is
+#: ``functions``' SUCCESSOR SPELLING (th#2146) carrying the identical item
+#: shape — ``name``, ``module``, ``resources`` — and it is the ONLY block a
+#: post-pgw#1382 endpoint declares. Bake time folded it (``validation.py``);
+#: boot time did not, so a v2-only image imported zero user modules, was never
+#: CUDA-probed, and died naming the wrong gap ("declares no functions and no
+#: jobs"). Exactly pgw#1354's jobs-only failure, one hardcut later. The header
+#: rule holds: every reader asking "what did this image declare" asks it here.
+DECLARATION_BLOCKS = ("functions", "entrypoints", "jobs")
 
 
 def declaration_rows(manifest: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -62,5 +72,17 @@ def block_counts(manifest: Optional[Mapping[str, Any]]) -> Dict[str, int]:
 
 
 def declared_row_count(manifest: Optional[Mapping[str, Any]]) -> int:
-    """How many declarations this image carries, across both blocks."""
+    """How many declarations this image carries, across every block."""
     return sum(block_counts(manifest).values())
+
+
+def declared_block_summary(manifest: Optional[Mapping[str, Any]]) -> str:
+    """``"0 functions, 3 entrypoints, 0 jobs"`` — what a refusal quotes.
+
+    Derived from :data:`DECLARATION_BLOCKS` so a refusal can never name a
+    subset of the blocks the walk reads: that mismatch is what made the
+    pgw#1395 boot failure say "declares no functions and no jobs" over a
+    manifest declaring three entrypoints.
+    """
+    counts = block_counts(manifest)
+    return ", ".join(f"{counts[block]} {block}" for block in DECLARATION_BLOCKS)

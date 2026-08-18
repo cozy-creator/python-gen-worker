@@ -81,6 +81,7 @@ from .manifest_blocks import (
     DECLARATION_BLOCKS,
     block_counts,
     declaration_rows,
+    declared_block_summary,
     declared_row_count,
 )
 from .models.cache_paths import tensorhub_cas_dir
@@ -444,7 +445,9 @@ def _run_main() -> int:
             manifest_path=str(manifest_path),
             function_count=counts["functions"],
             # A boot log that counted only functions read "0 declarations" on
-            # the images the jobs program exists to run (pgw#1354).
+            # the images the jobs program exists to run (pgw#1354), and again
+            # on every v2 entrypoints-only image (pgw#1395).
+            entrypoint_count=counts["entrypoints"],
             job_count=counts["jobs"],
             module_count=len(user_modules),
         )
@@ -546,20 +549,19 @@ def _run_main() -> int:
         # different owners: no manifest at all is a Dockerfile that never ran
         # discovery, while declarations-without-modules is a manifest this wheel
         # cannot read (a block it does not walk, or rows with no `module`).
-        counts = block_counts(manifest)
         declared = declared_row_count(manifest)
         if manifest and declared:
             reason = (
                 f"the manifest at {manifest_path} declares "
-                f"{counts['functions']} function(s) and {counts['jobs']} job(s) "
-                f"but no row carries a `module`, so this image has nothing to "
-                f"import. Declaration blocks this build walks: "
-                f"{', '.join(DECLARATION_BLOCKS)}."
+                f"{declared_block_summary(manifest)} but no row carries a "
+                f"`module`, so this image has nothing to import. Declaration "
+                f"blocks this build walks: {', '.join(DECLARATION_BLOCKS)}."
             )
         elif manifest:
             reason = (
-                f"the manifest at {manifest_path} declares no functions and no "
-                f"jobs — this image publishes nothing and cannot serve."
+                f"the manifest at {manifest_path} declares nothing in any "
+                f"declaration block ({', '.join(DECLARATION_BLOCKS)}) — this "
+                f"image publishes nothing and cannot serve."
             )
         else:
             reason = (
