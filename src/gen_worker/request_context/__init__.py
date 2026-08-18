@@ -635,8 +635,8 @@ class RequestContext(Generic[D]):
         if not self._file_api_base_url:
             raise RuntimeError(
                 "file API base URL is not configured for this request — "
-                "no HelloAck has carried `file_base_url` yet "
-                "(executor.file_base_url is empty)"
+                "neither this dispatch's `RunJob.file_base_url` nor any "
+                "HelloAck has carried one (executor.file_base_url is empty)"
             )
         return self._file_api_base_url.rstrip("/")
 
