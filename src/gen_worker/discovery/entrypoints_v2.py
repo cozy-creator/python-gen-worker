@@ -199,7 +199,7 @@ def _merge_floors(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return merged
 
 
-def _resources(specs: List[Any]) -> Dict[str, Any]:
+def _resources(specs: List[Any]) -> Dict[str, Any] | None:
     """The function's `resources` block: THE FUNCTION SCOPE of the one
     requirement vocabulary (`internal/builder/function_requirements.go`).
 
@@ -213,20 +213,50 @@ def _resources(specs: List[Any]) -> Dict[str, Any]:
     1. **An EMPTY block is an explicit CPU declaration** on the hub side
        ("a present-but-empty block is an explicit CPU declaration"), so a
        model-bearing entrypoint must never emit `{}`. It emits `gpu: true`.
-    2. **Absent stays absent for a slotless entrypoint.** No model slot means
-       no claim, and the hub falls back to release-level resolution exactly as
-       it does today.
+    2. **Absent stays absent for a slotless entrypoint that declares
+       nothing.** No model slot and no `resources=` means no claim, and the
+       hub falls back to release-level resolution exactly as it does today.
 
     `gpu: true` is also a fix in its own right: a v2 release previously
     declared NO accelerator anywhere (its only machine signal was the
     `layout_requirements` the hub was refusing), which is the
     `[runpod] no GPU constraint declared; buying with NO VRAM bound` path.
+
+    THE REST OF THE BLOCK — se#755/pgw#1396. This used to hand-build
+    `{gpu, requires}` from the model slots alone, so five of `Resources`'
+    eight fields could never appear in a v2 manifest no matter what an author
+    wrote: `vcpus`, `gpu_count`, `libraries`, `max_gpu_count`,
+    `max_gpus_per_execution_group`, `parallel`. Every one of them is read by
+    the hub already — `vcpus` becomes `min_vcpus` and reaches the RunPod
+    inventory query and the Vast offer filter; the last three are
+    `extractStaffingEnvelope` — so they were declared-but-unreachable, not
+    unread. `Resources.manifest_dict()` is the projection and this function
+    stops second-guessing it.
+
+    `requires` can now arrive from BOTH scopes: the model class header's
+    lane-keyed `requires=` and the function's own
+    `Resources(requires=)` (te#209's scope, and the only one a weightless
+    function has). They FOLD by `_merge_floors` — the strictest of everything
+    declared for this function — rather than one silently shadowing the other.
     """
     from ..serving import model_requires
 
     floors: List[Dict[str, Any]] = []
     has_model_slot = False
+    has_declaration = False
+    declared: Dict[str, Any] = {}
     for spec in specs:
+        resources = getattr(spec, "resources", None)
+        if resources is not None:
+            has_declaration = True
+            # `manifest_dict()` renders `requires` as a manifest ROW, the same
+            # shape `_merge_floors` folds, so it joins the lane floors rather
+            # than overwriting them.
+            block = resources.manifest_dict()
+            row = block.pop("requires", None)
+            if row:
+                floors.append(row)
+            declared.update(block)
         for slot in spec.slots:
             if slot.kind != "model":
                 continue
@@ -236,9 +266,14 @@ def _resources(specs: List[Any]) -> Dict[str, Any]:
                 for row in model_requires(slot.annotation).values()
                 if row.declared()
             )
-    if not has_model_slot:
-        return {}
-    out: Dict[str, Any] = {"gpu": True}
+    if not has_model_slot and not has_declaration:
+        return None
+    out: Dict[str, Any] = dict(declared)
+    if has_model_slot:
+        # A model-bearing entrypoint always declares the accelerator, even
+        # when the author's `Resources(...)` left `gpu` at its False default
+        # and `omit_defaults` elided it.
+        out["gpu"] = True
     merged = _merge_floors(floors)
     if merged:
         out["requires"] = merged
@@ -282,7 +317,12 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # ratified surface, so the cardinality fact is stated, never omitted.
         "incremental_output": False,
         "slots": slots,
-        **({"resources": resources} if resources else {}),
+        # `None` is ABSENT (no model slot, no `resources=`); a dict is
+        # PRESENT, and a present-but-empty block is the hub's explicit CPU
+        # declaration — so an author who writes a bare `Resources()` on a
+        # weightless entrypoint gets that meaning rather than a silent
+        # fall-back to release-level class resolution.
+        **({"resources": resources} if resources is not None else {}),
     }
 
 
