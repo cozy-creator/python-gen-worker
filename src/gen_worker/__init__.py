@@ -182,6 +182,7 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
     )
     from .serving.context import (
         Adapter,
+        DistillationAdapter,
         LoadContext,
         RequestContext,
     )
@@ -237,6 +238,7 @@ _EXPORTS: Final[dict[str, str]] = {
     # moment); Adapter slots are explicit entrypoint parameters.
     "Adapter": "serving.context",
     "Dim": "api.export_contract",
+    "DistillationAdapter": "serving.context",
     "Done": "api.streaming",
     "DynamicDim": "api.decorators",
     "Error": "api.streaming",
@@ -346,6 +348,7 @@ def __dir__() -> list[str]:
 __all__ = [
     # pgw#1382: the Model/Endpoint split author surface.
     "Adapter",
+    "DistillationAdapter",
     "ImageFormat",
     "LoadContext",
     "Model",

@@ -76,6 +76,18 @@ class Adapter:
     ref: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class DistillationAdapter(Adapter):
+    """A distillation adapter — runtime-identical to :class:`Adapter`; its
+    MEANING is the SLOT KIND (Paul's structural guard). A param annotated
+    ``DistillationAdapter | None`` is a distillation-adapter slot: release
+    metadata records the kind, the hub refuses envelope picks whose adapter
+    row lacks the distillation marker (typed 400 naming the adapter), and
+    resolution constructs THIS class for marked rows. Takeover power over
+    the serving config used to be positional; now it is typed — a style
+    LoRA cannot seize the config even on a misconfigured deployment."""
+
+
 @dataclass(slots=True)
 class DeployBinding:
     """One deployment's checkpoint binding — hub deploy state, rebindable.
@@ -285,6 +297,7 @@ class RequestContext(_BaseRequestContext[D]):
 __all__ = [
     "Adapter",
     "DefaultsError",
+    "DistillationAdapter",
     "DeployBinding",
     "LoadContext",
     "LoaderEngine",

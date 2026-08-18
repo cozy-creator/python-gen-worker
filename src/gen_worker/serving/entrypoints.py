@@ -41,7 +41,7 @@ from typing import Any, Callable, Dict, Literal, Tuple, Type, TypeVar, get_type_
 
 import msgspec
 
-from .context import Adapter
+from .context import Adapter, DistillationAdapter
 from .model import Model
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -59,12 +59,15 @@ class SlotSpec:
     """One declared slot parameter, in signature order after the payload.
 
     Kinds: ``model`` (a Model subclass — required), ``adapter``
-    (``Adapter`` required / ``Adapter | None`` optional), ``adapters``
+    (``Adapter``/``DistillationAdapter`` required, ``| None`` optional —
+    the ANNOTATION records which adapter KIND the slot takes; the hub
+    enforces it at pick time, the worker at resolution), ``adapters``
     (``list[Adapter]`` — the request's picks, empty when none ride)."""
 
     name: str
     kind: Literal["model", "adapter", "adapters"]
-    #: The model class for a model slot; :class:`Adapter` for adapter slots.
+    #: The model class for a model slot; :class:`Adapter` or
+    #: :class:`DistillationAdapter` for adapter slots (the slot's KIND).
     annotation: type
     #: ``Adapter | None`` and ``list[Adapter]`` slots are not required.
     required: bool = True
@@ -118,12 +121,14 @@ def _slot_of(fn: Callable[..., Any], name: str, annotation: Any) -> SlotSpec:
     origin = typing.get_origin(annotation)
     if origin in (typing.Union, types.UnionType):
         arms = [arm for arm in typing.get_args(annotation) if arm is not type(None)]
-        if len(arms) == 1 and arms[0] is Adapter:
-            return SlotSpec(name=name, kind="adapter", annotation=Adapter, required=False)
+        if len(arms) == 1 and arms[0] in (Adapter, DistillationAdapter):
+            return SlotSpec(
+                name=name, kind="adapter", annotation=arms[0], required=False)
         raise _refuse(
             fn,
-            f"parameter {name!r}: the only optional slot form is "
-            f"`Adapter | None`, got {annotation!r}",
+            f"parameter {name!r}: the only optional slot forms are "
+            f"`Adapter | None` and `DistillationAdapter | None`, got "
+            f"{annotation!r}",
         )
     if origin is list:
         (item,) = typing.get_args(annotation) or (None,)
@@ -136,8 +141,9 @@ def _slot_of(fn: Callable[..., Any], name: str, annotation: Any) -> SlotSpec:
             f"`list[Adapter]` (the request's adapter picks), got {annotation!r}",
         )
     concrete = _annotation_class(annotation)
-    if concrete is Adapter:
-        return SlotSpec(name=name, kind="adapter", annotation=Adapter, required=True)
+    if concrete in (Adapter, DistillationAdapter):
+        assert concrete is not None
+        return SlotSpec(name=name, kind="adapter", annotation=concrete, required=True)
     if concrete is Model:
         raise _refuse(
             fn,

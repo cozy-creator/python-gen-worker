@@ -21,11 +21,13 @@ from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar
 
 import msgspec
 
-#: The PLATFORM-WIDE sampler vocabulary — types checkpoint METADATA (the
-#: hub-row `sampler` field, written platform-wide). An endpoint serves its
-#: own subset (its request field is its own Literal); a metadata value an
-#: endpoint doesn't serve warns and falls through to the tree's scheduler.
-SamplerName = Literal[
+#: The PLATFORM-WIDE scheduler vocabulary. It appears only on ADAPTER
+#: metadata (an applied distillation demands its scheduler); checkpoints
+#: carry NO scheduler metadata — their tree ships it (ingest-guaranteed,
+#: synthesizing the model type's canonical config for trees without one).
+#: An endpoint serves its own subset (its request field is its own
+#: Literal); a demand an endpoint doesn't serve warns and falls through.
+SchedulerName = Literal[
     "dpmpp_2m_karras", "dpmpp_2m", "dpmpp_sde", "dpmpp_sde_karras",
     "euler", "euler_trailing", "euler_a", "heun", "unipc", "ddim",
     "ddpm", "lcm", "pndm", "deis",
@@ -110,25 +112,24 @@ class ModelType(Generic[DT_co]):
 class SDXL(ModelType["SDXL.Defaults"]):
     name = "sdxl"
 
-    class Recipe(msgspec.Struct, frozen=True):
-        """The SERVING RECIPE — the typed fields that drive an entrypoint's
-        behavior, whichever source they came from (the checkpoint's own row
-        or a distillation adapter's overlay): both Defaults types INHERIT
-        this, so an entrypoint holds ONE type, never a union (Paul's
-        recipe-not-mode-flag ruling). Fields are independent axes: ``cfg``
-        (batch-2 guidance vs none), ``sampler`` (``None`` = keep the
-        checkpoint's own scheduler; name -> scheduler construction stays
-        endpoint code), ``steps``/``guidance`` knobs, pinned ``timesteps``."""
+    class Config(msgspec.Struct, frozen=True):
+        """The ACTIVE SERVING CONFIG — the typed fields that drive an
+        entrypoint's behavior, whichever source they came from (the
+        checkpoint's own row or a distillation adapter's overlay): both
+        Defaults types INHERIT this, so an entrypoint holds ONE type, never
+        a union (Paul's config-not-mode-flag ruling). Fields are independent
+        axes: ``cfg`` (batch-2 guidance vs none), ``steps``/``guidance``
+        knobs, pinned ``timesteps`` (when active, the ladder owns the step
+        count). Scheduler demands live on ADAPTER metadata only
+        (``SDXL.Lora.Defaults.scheduler``) — a checkpoint's tree IS its
+        scheduler choice."""
 
         steps: Knob[int] = Knob(30, lo=15, hi=60, field="num_inference_steps")
         guidance: Knob[float] = Knob(6.0, lo=1.5, hi=12.0, field="guidance_scale")
         cfg: bool = True
         timesteps: tuple[int, ...] = ()
-        #: The checkpoint-metadata sampler preference (platform vocabulary);
-        #: None = the checkpoint tree's shipped scheduler stands.
-        sampler: SamplerName | None = None
 
-    class Defaults(Recipe, frozen=True):
+    class Defaults(Config, frozen=True):
         """SDXL per-checkpoint serving defaults (pgw#1377 point 2): the
         Recipe axes plus checkpoint-only facts and the prompt-enhancement
         vocabulary. Zero-arg construction is the platform fallback AND the
@@ -153,14 +154,16 @@ class SDXL(ModelType["SDXL.Defaults"]):
         Defaults: ClassVar[type["SdxlLoraDefaults"]]
 
 
-class SdxlLoraDefaults(SDXL.Recipe, frozen=True):
-    """``SDXL.Lora.Defaults`` — a :class:`SDXL.Recipe` (the adapter's
-    distillation recipe; zero-arg = Lightning-4-step-ish servable
-    trace-fixture values) plus adapter-only fields (pgw#1377 point 7)."""
+class SdxlLoraDefaults(SDXL.Config, frozen=True):
+    """``SDXL.Lora.Defaults`` — a :class:`SDXL.Config` (the adapter's
+    distillation config; zero-arg = Lightning-4-step-ish servable
+    trace-fixture values) plus adapter-only fields (pgw#1377 point 7).
+    ``scheduler`` is the applied distillation's DEMAND — the base
+    checkpoint's tree cannot know a LoRA needs trailing-Euler/LCM."""
 
     steps: Knob[int] = Knob(4, lo=1, hi=12, field="num_inference_steps")
     cfg: bool = False
-    sampler: SamplerName | None = "euler_trailing"
+    scheduler: SchedulerName | None = "euler_trailing"
     trigger_words: tuple[str, ...] = ()
     strength: Knob[float] = Knob(1.0, lo=0.0, hi=2.0, field="strength")
 
@@ -172,6 +175,6 @@ __all__ = [
     "Knob",
     "ModelType",
     "SDXL",
-    "SamplerName",
+    "SchedulerName",
     "SupportsAdjust",
 ]

@@ -20,6 +20,7 @@ import pytest
 
 from gen_worker import (
     Adapter,
+    DistillationAdapter,
     LoadContext,
     Model,
     RequestContext,
@@ -30,6 +31,7 @@ from gen_worker.serving import (
     DefaultsError,
     DeployBinding,
     EndpointHost,
+    ServeDispatchError,
     EntrypointDeclarationError,
     ModelDeclarationError,
     load_endpoint,
@@ -81,6 +83,11 @@ def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
         ("turbo", "adapter", False),
         ("loras", "adapters", False),
     ]
+    # The annotation records the slot KIND (Paul's structural guard): the
+    # turbo slot takes only distillation-marked adapters; the request list
+    # takes any Adapter.
+    assert spec.slots[1].annotation is DistillationAdapter
+    assert spec.slots[2].annotation is Adapter
     assert spec.model_classes == (SdxlModel,)
     assert loaded.models == (SdxlModel,)
 
@@ -223,11 +230,13 @@ def test_load_context_defaults_decode_matrix(tmp_path: Path) -> None:
     assert fallback.cfg is True and fallback.steps.default == 30
 
     # Partial row -> field-level overlay; untouched fields keep fallbacks.
+    # (No scheduler field: checkpoints carry no scheduler metadata — the
+    # tree IS their choice; scheduler demands are ADAPTER metadata.)
     decoded = ctx_for(
-        {"cfg": False, "sampler": "lcm", "timesteps": [8, 6, 4, 2]}
+        {"cfg": False, "step_distilled": True, "timesteps": [8, 6, 4, 2]}
     ).defaults()
     assert decoded.cfg is False
-    assert decoded.sampler == "lcm"
+    assert decoded.step_distilled is True
     assert decoded.timesteps == (8, 6, 4, 2)
     assert decoded.guidance == SDXL.Defaults().guidance
 
@@ -298,9 +307,9 @@ def test_scheduler_and_adapter_scopes_restore_after_a_turbo_request(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
             defaults=binding.defaults,
-            adapter=Adapter(
+            adapter=DistillationAdapter(
                 name="lcm-lora", path=tmp_path / "lora",
-                defaults=SDXL.Lora.Defaults(sampler="lcm"),
+                defaults=SDXL.Lora.Defaults(scheduler="lcm"),
                 ref="cozy/lcm-lora@1",
             ),
         )
@@ -332,7 +341,7 @@ def test_scopes_restore_even_when_the_request_raises(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
             defaults=binding.defaults,
-            adapter=Adapter(
+            adapter=DistillationAdapter(
                 name="x", path=tmp_path / "lora", defaults=SDXL.Lora.Defaults(),
             ),
         )
@@ -357,9 +366,9 @@ def test_stacking_on_a_step_distilled_checkpoint_warns_and_ignores(
         DeployBinding(
             checkpoint_ref="ckpt:distilled@1",
             checkpoint_dir=make_checkpoint(tmp_path),
-            defaults={"cfg": False, "step_distilled": True, "sampler": "lcm",
+            defaults={"cfg": False, "step_distilled": True,
                       "steps": {"default": 4, "lo": 1, "hi": 8}},
-            adapter=Adapter(
+            adapter=DistillationAdapter(
                 name="x", path=tmp_path / "lora", defaults=SDXL.Lora.Defaults(),
                 ref="cozy/x@1",
             ),
@@ -384,7 +393,8 @@ def test_distilled_checkpoint_serves_turbo_without_an_adapter(
             checkpoint_ref="ckpt:distilled@1",
             checkpoint_dir=binding.checkpoint_dir,
             defaults={
-                "cfg": False, "sampler": "lcm", "timesteps": [8, 6, 4, 2],
+                "cfg": False, "step_distilled": True,
+                "timesteps": [8, 6, 4, 2],
                 "steps": {"default": 4, "lo": 1, "hi": 8},
             },
         ),
@@ -523,7 +533,7 @@ def test_per_request_loras_ride_the_list_slot_and_restore(
     assert model.pipe.active_adapters == []
 
 
-def test_sampler_precedence_request_beats_metadata_and_unsupported_warns(
+def test_scheduler_precedence_and_the_distillation_slot_kind_guard(
     host: EndpointHost, tmp_path: Path
 ) -> None:
     model = fixture_model(host)
@@ -531,30 +541,60 @@ def test_sampler_precedence_request_beats_metadata_and_unsupported_warns(
 
     # Layer 1: the request's pick swaps the scheduler for the call, restored.
     out = host.dispatch(
-        "generate", {"prompt": "x", "sampler": "lcm"}, request_id="r1")
+        "generate", {"prompt": "x", "scheduler": "lcm"}, request_id="r1")
     assert out.model == "ckpt:tiny@1"
     assert model.pipe.scheduler is baseline  # restored after the request
 
-    # Unsupported REQUEST sampler: typed 400 at the API boundary.
+    # Unsupported REQUEST scheduler: typed 400 at the API boundary.
     with pytest.raises(msgspec.ValidationError):
         host.dispatch(
-            "generate", {"prompt": "x", "sampler": "not-a-sampler"},
+            "generate", {"prompt": "x", "scheduler": "not-a-scheduler"},
             request_id="r2")
 
-    # Layer 2/3: checkpoint-metadata pick this endpoint does not serve —
-    # warn and fall through to the tree's shipped scheduler.
+    # Layer 2: the applied distillation adapter's DEMAND — and a demand this
+    # endpoint does not serve warns and falls through to the checkpoint's.
     binding = host.binding
-    fresh = EndpointHost(
+    demanding = EndpointHost(
         host.loaded,
         DeployBinding(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
-            defaults={**dict(binding.defaults), "sampler": "heun"},
+            defaults=binding.defaults,
+            adapter=DistillationAdapter(
+                name="odd", path=tmp_path / "lora",
+                defaults=SDXL.Lora.Defaults(scheduler="heun"),
+                ref="cozy/odd@1",
+            ),
         ),
         lane_contract=LANE,
-        output_dir=tmp_path / "outputs-sampler",
+        output_dir=tmp_path / "outputs-sched",
     )
-    fresh.setup()
-    ctx = fresh.make_context("r3")
-    fresh.dispatch("generate", {"prompt": "x"}, request_id="r3", ctx=ctx)
+    demanding.setup()
+    ctx = demanding.make_context("r3")
+    demanding.dispatch("generate", {"prompt": "x"}, request_id="r3", ctx=ctx)
     assert [w for w in ctx.warnings if "does not serve" in w]
+    # Relay check: the adapter's decoded overlay is SDXL.Lora.Defaults,
+    # reached through the DistillationAdapter subclass.
+    assert isinstance(demanding.binding.adapter, DistillationAdapter)
+    assert isinstance(demanding.binding.adapter.defaults, SDXL.Lora.Defaults)
+
+    # THE SLOT-KIND GUARD: a plain (style) Adapter bound where the
+    # entrypoint declares a DistillationAdapter slot is a typed refusal
+    # BEFORE author code runs — takeover power is typed, not positional.
+    misdeployed = EndpointHost(
+        host.loaded,
+        DeployBinding(
+            checkpoint_ref=binding.checkpoint_ref,
+            checkpoint_dir=binding.checkpoint_dir,
+            defaults=binding.defaults,
+            adapter=Adapter(
+                name="style", path=tmp_path / "style",
+                defaults=SDXL.Lora.Defaults(), ref="me/style@1",
+            ),
+        ),
+        lane_contract=LANE,
+        output_dir=tmp_path / "outputs-guard",
+    )
+    misdeployed.setup()
+    with pytest.raises(ServeDispatchError, match="not distillation-marked"):
+        misdeployed.dispatch("generate", {"prompt": "x"}, request_id="r4")

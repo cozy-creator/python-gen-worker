@@ -31,8 +31,8 @@ from gen_worker._vendor.torchcg.graph_identity import EnvIdentity, closure_hash
 from gen_worker._vendor.torchcg.requirements import RequirementsManifest
 from gen_worker._vendor.torchcg.store import LocalGraphStore, StoreError
 from gen_worker.serving import (
-    Adapter,
     DeployBinding,
+    DistillationAdapter,
     EndpointHost,
     EndpointLoadError,
     ServeDispatchError,
@@ -158,7 +158,7 @@ def test_the_deployment_decides_the_mode(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
             defaults=binding.defaults,
-            adapter=Adapter(
+            adapter=DistillationAdapter(
                 name="lightning-4step", path=tmp_path / "lora",
                 defaults=SDXL.Lora.Defaults(), ref="cozy/lightning-4step@1",
             ),

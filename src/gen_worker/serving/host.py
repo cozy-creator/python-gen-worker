@@ -312,13 +312,25 @@ class EndpointHost:
     def _resolve_adapter(self, function: str, slot: Any) -> Any:
         """Fill one declared adapter slot from deploy state (hub-resolved).
         A required slot with nothing bound is a typed refusal BEFORE author
-        code runs; an optional (`Adapter | None`) slot passes None — the
-        author owns that branch."""
+        code runs; an optional (`... | None`) slot passes None — the author
+        owns that branch. The slot's ANNOTATION is its KIND (Paul's
+        structural guard): a `DistillationAdapter` slot takes only a
+        distillation-marked adapter — a style LoRA cannot seize the serving
+        config even on a misconfigured deployment."""
         bound = self.binding.adapter
-        if bound is None and slot.required:
+        if bound is None:
+            if slot.required:
+                raise ServeDispatchError(
+                    f"{function!r} requires adapter slot {slot.name!r} and "
+                    "this deployment binds no adapter"
+                )
+            return None
+        if not isinstance(bound, slot.annotation):
             raise ServeDispatchError(
-                f"{function!r} requires adapter slot {slot.name!r} and this "
-                "deployment binds no adapter"
+                f"{function!r} slot {slot.name!r} takes "
+                f"{slot.annotation.__name__}; the bound adapter "
+                f"{bound.ref or bound.name!r} is not distillation-marked "
+                "(a misdeploy the hub should have refused)"
             )
         return bound
 

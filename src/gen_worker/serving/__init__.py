@@ -24,6 +24,7 @@ the background mint (pgw#1371).
 from .context import (
     Adapter,
     DefaultsError,
+    DistillationAdapter,
     DeployBinding,
     LoadContext,
     LoaderEngine,
@@ -57,6 +58,7 @@ __all__ = [
     "Adapter",
     "DefaultsError",
     "DeployBinding",
+    "DistillationAdapter",
     "EndpointHost",
     "EndpointLoadError",
     "EntrypointDeclarationError",
