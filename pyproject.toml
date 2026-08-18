@@ -116,6 +116,9 @@ dev = [
     # and `@example(...)` puts the seed corpus in the source as ordinary
     # always-run cases instead of opaque corpus blobs.
     "hypothesis>=6.100",
+    # pgw#1377: the models export acceptance validates the emitted defaults
+    # schemas as real draft-2020-12 documents and round-trips rows through them.
+    "jsonschema>=4.20",
     # pgw#796: the suite is ~190 files of independent processes/sockets/temp
     # dirs; `--dist loadfile` keeps each file (and its module/session fixtures)
     # on one worker, so nothing shares state that did not already share it.
