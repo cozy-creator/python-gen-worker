@@ -144,7 +144,7 @@ def _hollow() -> ModuleType:
     return importlib.import_module("torchcg.hollow")
 
 
-def _graph_artifact_sink(cas_root: Optional[Path]) -> Optional[Any]:
+def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
     """Store each discovered graph's SERIALIZED ExportedProgram in the CAS.
 
     Paul's ruling (2026-08-20): the derive keeps THE WHOLE TRACED GRAPH, not
@@ -983,7 +983,7 @@ def _derive_lane(
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]],
     checkpoint_dir: Path,
     warnings: list[str],
-    artifact_sink: Optional[Any] = None,
+    program_sink: Optional[Any] = None,
 ) -> Any:
     """One lane's instrumented runs, merged across defaults variants.
 
@@ -1112,7 +1112,7 @@ def _derive_lane(
 
             try:
                 lane_graphs = torchcg.discover_modules(
-                    handle, modules, drive, artifact_sink=artifact_sink
+                    handle, modules, drive, program_sink=program_sink
                 )
                 if set(lane_graphs.targets) - {
                     record.target for record in lane_graphs.graphs
@@ -1122,7 +1122,7 @@ def _derive_lane(
                     # before calling it unobserved.
                     request_ctx.step_budget = None
                     lane_graphs = torchcg.discover_modules(
-                        handle, modules, drive, artifact_sink=artifact_sink
+                        handle, modules, drive, program_sink=program_sink
                     )
             except DeriveError:
                 raise
@@ -1167,7 +1167,7 @@ def derive_release(
     """Derive the release metadata document for one endpoint module."""
 
     torchcg = _torchcg()
-    artifact_sink = _graph_artifact_sink(graph_cas)
+    program_sink = _program_sink(graph_cas)
 
     if lockfile is not None:
         closure = torchcg.closure_hash(_closure_entries_from_lockfile(lockfile))
@@ -1207,7 +1207,7 @@ def derive_release(
         for lane in model_lanes(cls):
             lane_graphs = _derive_lane(
                 torchcg, cls, lane, plans, checkpoint_dir, warnings,
-                artifact_sink=artifact_sink,
+                program_sink=program_sink,
             )
             lanes.append(lane_graphs)
             entry: dict[str, Any] = {
