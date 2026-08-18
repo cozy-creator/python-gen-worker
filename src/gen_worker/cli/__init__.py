@@ -63,6 +63,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from . import model as _model_mod
     _model_mod.add_subparser(sub)
 
+    from . import models_export as _models_mod
+    _models_mod.add_subparser(sub)
+
     from . import job as _job_mod
     _job_mod.add_subparser(sub)
 
