@@ -1,0 +1,302 @@
+"""pgw#1391: the vendored pure-Python contract reader agrees with tensorfs.
+
+`_vendor/tensorfs/contract.py` is a PORT of the Rust validator and canonical
+rendering (pgw#1310 rules the compiled extension out of a source-vendored
+wheel — the same reason `planner.py` is a port, pgw#1365). A port is worth
+nothing asserted, so it is pinned to the language-neutral corpus upstream
+released with tensorfs#114, `spec/v1/contract-vectors`, which Rust and Go both
+satisfy: every golden digest, every typed refusal.
+
+The golden LIBRARY vectors are resolved against the DOCUMENTS THIS REPO
+VENDORS, not against a copy shipped beside the corpus — so the test proves the
+bytes gen-worker actually publishes, and a bad re-vendor fails here.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from gen_worker._vendor.tensorfs.contract import (
+    CONTRACT_FORMAT,
+    Contract,
+    ContractError,
+    MissingDtype,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+VECTORS = ROOT / "tests" / "testdata" / "contract-vectors"
+DOCUMENTS = ROOT / "src" / "gen_worker" / "_vendor" / "tensorfs" / "_contracts"
+UPSTREAM = ROOT.parent.parent.parent / "tensorfs"
+
+CORPUS = json.loads((VECTORS / "contract-vectors.json").read_text())
+
+
+def _document_of(case: dict) -> str:
+    """A golden vector's document: inline for the anonymous customs, and for a
+    library entry the VENDORED file of that name."""
+
+    if "document" in case:
+        return case["document"]
+    return (DOCUMENTS / Path(case["file"]).name).read_text(encoding="utf-8")
+
+
+def test_the_corpus_is_the_shape_this_test_assumes() -> None:
+    assert CORPUS["format"] == "tensorfs-contract-vectors-v1"
+    assert len(CORPUS["golden"]) >= 13
+    assert len(CORPUS["refusals"]) >= 19
+
+
+@pytest.mark.parametrize("case", CORPUS["golden"], ids=lambda case: case["name"])
+def test_every_golden_vector_digests_identically(case: dict) -> None:
+    """THE proof the canonical rendering is byte-identical to Rust's: a
+    SHA-256 over it cannot agree by luck."""
+
+    contract = Contract.from_document(_document_of(case))
+    assert contract.digest == case["digest"]
+    assert contract.stamp == case["stamp"]
+
+
+@pytest.mark.parametrize("case", CORPUS["refusals"], ids=lambda case: case["name"])
+def test_every_refusal_vector_refuses_with_the_shared_reason(case: dict) -> None:
+    with pytest.raises(ContractError) as caught:
+        Contract.from_document(case["document"])
+    assert caught.value.reason == case["reason"]
+
+
+def test_the_vendored_documents_are_exactly_the_corpus_library() -> None:
+    """No document may be added to the vendored library without a golden
+    vector pinning its digest — otherwise a hand-edited contract publishes."""
+
+    vendored = {path.name for path in DOCUMENTS.glob("*.json")}
+    pinned = {Path(case["file"]).name for case in CORPUS["golden"] if "file" in case}
+    assert vendored == pinned
+
+
+def test_the_library_loads_and_names_what_the_corpus_names() -> None:
+    from gen_worker._vendor.tensorfs import contracts
+
+    assert {contract.stamp for contract in contracts.all()} == {
+        case["stamp"] for case in CORPUS["golden"] if "file" in case
+    }
+    assert contracts.SDXL_DIFFUSERS_BF16.dtype == "bfloat16"
+    # tensorfs#121 authored the four se#757 blocker-A documents, so these now
+    # resolve where they used to be MissingContract sentinels.
+    for constant in (
+        "SD15_DIFFUSERS_BF16",
+        "SD2_DIFFUSERS_BF16",
+        "HIDREAM_O1_DIFFUSERS_BF16",
+        "WAN22_DIFFUSERS_BF16",
+        "FLUX2_KLEIN_DIFFUSERS_BF16",
+    ):
+        assert getattr(contracts, constant).dtype == "bfloat16"
+    assert contracts.SD15_DIFFUSERS_BF16.digest != contracts.SD2_DIFFUSERS_BF16.digest
+    with pytest.raises(AttributeError, match="no contract constant"):
+        contracts.NOPE_NOT_A_DOCUMENT  # noqa: B018 -- the refusal IS the assertion
+
+
+def test_a_document_declaring_no_dtype_raises_rather_than_answering_none() -> None:
+    """`release/derive.py` and `Model.__init_subclass__` both rely on this
+    being a RAISE: a `None` would be read as "no opinion" and travel.
+
+    `dit.blocks-fused-qkv@1` is a FRAGMENT — a family-shared block spelling no
+    `lanes=` header names on its own — so it is deliberately dtype-less
+    upstream and is the standing example.
+    """
+
+    from gen_worker._vendor.tensorfs import contracts
+
+    with pytest.raises(MissingDtype):
+        contracts.DIT_BLOCKS_FUSED_QKV.dtype
+
+
+def test_the_h3_dtype_waiver_deletes_itself_when_upstream_lands_the_dtype() -> None:
+    """pgw#1391 ordering waiver, SELF-DELETING BY CONSTRUCTION — AND IT DID.
+
+    The waiver briefly held `minimax.h3-dit-diffusers@1`, which was live on
+    deploy lane `ab56185761f1597f1` while its document declared no top-level
+    dtype. tensorfs#121 gave it `bfloat16`; re-vendoring made this test fail,
+    and the entry was deleted. That is the fence working, not a hypothetical.
+
+    It stays because the next such ordering hazard gets the same treatment: a
+    waiver is a fact about the vendored document, never a preference, so it
+    cannot outlive its reason.
+    """
+
+    from gen_worker.serving.model import DTYPELESS_UPSTREAM_LANES
+
+    still_dtypeless = set()
+    for path in DOCUMENTS.glob("*.json"):
+        contract = Contract.from_document(path.read_text(encoding="utf-8"))
+        try:
+            contract.dtype
+        except MissingDtype:
+            still_dtypeless.add(contract.stamp)
+
+    assert not DTYPELESS_UPSTREAM_LANES or DTYPELESS_UPSTREAM_LANES <= still_dtypeless, (
+        "a vendored contract GAINED its top-level dtype: delete it from "
+        "DTYPELESS_UPSTREAM_LANES — the waiver's whole reason is gone "
+        f"(now declared: {sorted(DTYPELESS_UPSTREAM_LANES - still_dtypeless)})"
+    )
+
+
+def test_the_document_property_is_the_canonical_json_string() -> None:
+    """`release/derive.py::_contract_document` parses this; a dict would have
+    shipped `"document": null` on every lane."""
+
+    from gen_worker._vendor.tensorfs import contracts
+
+    document = contracts.SDXL_DIFFUSERS_BF16.document
+    assert isinstance(document, str)
+    parsed = json.loads(document)
+    assert parsed["format"] == CONTRACT_FORMAT
+    assert parsed["name"] == "sdxl.diffusers-bf16"
+    assert document == json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+
+
+def test_the_corpus_matches_the_sibling_tensorfs_checkout() -> None:
+    """The vendored corpus is a SNAPSHOT; when the real repo is beside us,
+    prove the snapshot has not drifted from it."""
+
+    upstream = UPSTREAM / "spec" / "v1" / "contract-vectors" / "contract-vectors.json"
+    if not upstream.exists():
+        pytest.skip("no sibling tensorfs checkout")
+    ours = (VECTORS / "contract-vectors.json").read_bytes()
+    assert hashlib.sha256(upstream.read_bytes()).hexdigest() == hashlib.sha256(ours).hexdigest()
+
+
+def test_the_vendored_documents_match_the_sibling_tensorfs_checkout() -> None:
+    upstream = UPSTREAM / "spec" / "v1" / "contracts"
+    if not upstream.exists():
+        pytest.skip("no sibling tensorfs checkout")
+    for path in DOCUMENTS.glob("*.json"):
+        theirs = upstream / path.name
+        assert theirs.exists(), f"{path.name} is not an upstream document"
+        assert path.read_bytes() == theirs.read_bytes(), f"{path.name} drifted from upstream"
+
+
+def test_the_contract_plane_rev_is_recorded_in_vendored_toml() -> None:
+    manifest = tomllib.loads(
+        (ROOT / "src" / "gen_worker" / "_vendor" / "VENDORED.toml").read_text()
+    )
+    spec = manifest["packages"]["tensorfs"]
+    assert len(spec["contract_plane_rev"]) == 40
+    recorded = set(spec["contract_plane_files"])
+    assert "contracts.py" in recorded
+    assert {f"_contracts/{path.name}" for path in DOCUMENTS.glob("*.json")} <= recorded
+
+
+def test_a_dtypeless_FRAGMENT_is_importable_but_refuses_as_a_serve_lane() -> None:
+    """pgw#1393's `dit.blocks-fused-qkv@1` is the standing case, and both
+    halves matter.
+
+    It is a real library document and `Flux1.canonical_contract` points at it,
+    so `gen_worker.models` must import and that attribute must be readable —
+    refusing at import would break master. But it declares no top-level dtype
+    BECAUSE IT IS A FRAGMENT (a family-plural block spelling), and it matches
+    zero of the 169 tensors in the real Klein transformer header. So claiming
+    it as a serve lane must refuse, whether by omitting `lanes=` or by naming
+    it explicitly — the refusal is the point, not a gap to be waived.
+    """
+
+    from gen_worker.models import SDXL
+    from gen_worker.models.model_types import DIT_BLOCKS_FUSED_QKV
+    from gen_worker.serving import Model, ModelDeclarationError
+
+    assert DIT_BLOCKS_FUSED_QKV.stamp == "dit.blocks-fused-qkv@1"
+    with pytest.raises(MissingDtype):
+        DIT_BLOCKS_FUSED_QKV.dtype
+
+    with pytest.raises(ModelDeclarationError, match="declares no load dtype"):
+
+        class ExplicitFragment(Model[SDXL], lanes=(DIT_BLOCKS_FUSED_QKV,)):
+            def load(self, ctx: object) -> None: ...
+
+
+def test_flux1_points_at_no_document_rather_than_one_that_cannot_match() -> None:
+    """tensorfs#124's finding, and the reason the sentinel machinery stayed.
+
+    `Flux1.canonical_contract` used to be `dit.blocks-fused-qkv@1`, which
+    declares `blocks.{i}.attn.qkv.weight` REQUIRED and matches 0 of the 169
+    tensors in a real Flux transformer header (the tree is
+    `transformer_blocks.*` / `single_transformer_blocks.*`). That is a
+    GUARANTEED refusal wearing a resolved lane's clothes — the pgw#1391 bug
+    exactly. Pointing at a document that does not exist yet is strictly safer,
+    because it refuses by NAME and says what is owed.
+    """
+
+    from gen_worker.models import Flux1, Flux2Klein
+    from gen_worker.models.model_types import MissingContract, MissingContractError
+    from gen_worker.serving import Model, ModelDeclarationError
+
+    assert isinstance(Flux1.canonical_contract, MissingContract)
+    with pytest.raises(MissingContractError, match="flux1.diffusers-bf16@1"):
+        Flux1.canonical_contract.stamp
+
+    with pytest.raises(ModelDeclarationError, match="DOES NOT EXIST"):
+
+        class Flux1Model(Model[Flux1]):
+            def load(self, ctx: object) -> None: ...
+
+    # Klein DOES have its own document now, so it must resolve.
+    assert Flux2Klein.canonical_contract.stamp == "flux2-klein.diffusers-bf16@1"
+    assert Flux2Klein.canonical_contract.dtype == "bfloat16"
+
+    class KleinModel(Model[Flux2Klein]):
+        def load(self, ctx: object) -> None: ...
+
+    assert KleinModel.__cozy_model_type__ is Flux2Klein
+
+
+def test_a_lane_naming_no_document_refuses_at_declaration() -> None:
+    """The seam the DISCOVERY guarantee rides on now that pgw#1394 has removed
+    lane enumeration from `discovery/entrypoints_v2.py`: discovery imports the
+    author module, so `__init_subclass__` is what refuses."""
+
+    from gen_worker.models import SDXL
+    from gen_worker.models.model_types import MissingContract
+    from gen_worker.serving import Model, ModelDeclarationError
+
+    nope = MissingContract("nope.not-a-document", 1)
+    with pytest.raises(ModelDeclarationError, match="DOES NOT EXIST"):
+
+        class Claimed(Model[SDXL], lanes=(nope,)):
+            def load(self, ctx: object) -> None: ...
+
+    # ...and a `requires=` floor keyed to a stamp this model does not serve,
+    # which used to be accepted outright whenever `lanes=` was omitted.
+    with pytest.raises(ModelDeclarationError, match="does not declare"):
+
+        class Floored(Model[SDXL], requires={"nope.not-a-document@1": "vram12g"}):
+            def load(self, ctx: object) -> None: ...
+
+
+def test_no_vendored_stamp_ties_between_two_model_types() -> None:
+    """tensorfs#124 warned that eleven documents sharing component spellings
+    could make family detection TIE. It does not, and this pins it.
+
+    `model_type_for_contract` returns the FIRST matching type, so a tie would
+    be resolved by declaration order — a silent, order-dependent
+    classification. `dit.blocks-fused-qkv@1` matching nothing is the correct
+    answer for a family-plural fragment: unclassified is legal and visible.
+    """
+
+    from fnmatch import fnmatchcase
+
+    from gen_worker._vendor.tensorfs import contracts
+    from gen_worker.models.model_types import MODEL_TYPES
+
+    ties = {}
+    for contract in contracts.all():
+        hits = [
+            mt.name
+            for mt in MODEL_TYPES
+            if any(fnmatchcase(contract.stamp, pattern) for pattern in mt.contracts)
+        ]
+        if len(hits) > 1:
+            ties[contract.stamp] = hits
+    assert not ties, f"stamps claimed by more than one model type: {ties}"
