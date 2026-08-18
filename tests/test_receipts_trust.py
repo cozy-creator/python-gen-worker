@@ -890,7 +890,7 @@ def test_a_platform_tier_cell_still_arms_with_no_identity(
 def test_a_hub_that_stamped_no_claims_is_an_ANSWER_not_a_failure(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
-    """pgw#1122: ``cggrant.Stamp`` omits both claims when the hub cannot resolve them, which legally narrows t..."""
+    """pgw#1122: ``compiledgraphgrant.Stamp`` omits both claims when the hub cannot resolve them, which legally narrows t..."""
     _child_gate(hub, _FakeParent("", ""))
     me = worker_identity.viewer()
     assert not me.named

@@ -30,7 +30,7 @@ HOW IT RESOLVES
    conflation is what makes a missing answer read as an attack.
 
 An identity that resolves but names nothing IS an answer, and a legal one: the
-hub stamps the claims only when it can (``cggrant.Stamp``), and their absence
+hub stamps the claims only when it can (``compiledgraphgrant.Stamp``), and their absence
 narrows the pod to platform-tier compiled graphs. "The hub declined to name us" and "we
 could not ask anyone" must never share a value.
 """
@@ -47,7 +47,7 @@ from .request_context._helpers import _decode_unverified_jwt_claims
 
 logger = logging.getLogger(__name__)
 
-#: The hub-stamped viewer claims. ``cggrant.Stamp`` writes
+#: The hub-stamped viewer claims. ``compiledgraphgrant.Stamp`` writes
 #: them from the hub's OWN record of the release — never from anything the
 #: worker says — which is why they are the identity both ends of the compiled graph
 #: exchange scope by.
@@ -136,7 +136,7 @@ def viewer() -> ViewerIdentity:
 
     Cached after the first successful resolution: the endpoint a pod serves and
     the org that owns it do not change for the life of the process, and a
-    credential rotation carries the same two claims (``cggrant.Stamp`` runs
+    credential rotation carries the same two claims (``compiledgraphgrant.Stamp`` runs
     on both mint sites).
 
     Raises :class:`IdentityUnavailable` when nothing can answer. Callers must
