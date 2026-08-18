@@ -30,33 +30,36 @@ class TraceRequestContext:
         *,
         lane: Any,
         checkpoint_dir: Path,
+        model_type: Optional[type] = None,
         checkpoint_ref: str = "",
     ) -> None:
         self.lane = lane
+        self.model_type = model_type
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_ref = checkpoint_ref or f"trace:{self.checkpoint_dir.name}"
         #: The hub-resolved distillation adapter -- never bound at trace time.
         self.adapter: Optional[Any] = None
         self.log = logging.getLogger("gen_worker.release.trace")
-        #: Every type the author asked defaults for -- the derive exports its
-        #: schema (the successor of the hub-embedded family registry).
-        self.requested_defaults_types: list[type] = []
         #: Modules the author marked via ctx.compile() -- discovery hooks
         #: exactly these during the payload drives.
         self.marked_modules: list[Any] = []
 
     # -- defaults -----------------------------------------------------------
-    def checkpoint_defaults(self, model_type: type) -> Any:
-        """The PLATFORM-FALLBACK defaults instance for ``model_type``.
+    def defaults(self) -> Any:
+        """The PLATFORM-FALLBACK defaults for the class-header model type.
 
-        Per-checkpoint values are mutable platform deploy state (hub rows,
-        validated against the schema this release exports); at trace time the
-        zero-arg construction IS the fallback row. A model type carries its
-        schema as ``.Defaults``; a bare struct type is its own schema.
+        ``Endpoint[SDXL]`` is the single source of the type; at serve the
+        checkpoint's hub row decodes as ``SDXL.Defaults`` with missing
+        fields filled from platform values, and at trace the zero-arg
+        construction IS the platform row. Typed via the generic.
         """
-        if model_type not in self.requested_defaults_types:
-            self.requested_defaults_types.append(model_type)
-        defaults_type = getattr(model_type, "Defaults", model_type)
+        if self.model_type is None:
+            raise TypeError(
+                "ctx.defaults() reads the model type off the class header "
+                "(class X(Endpoint[SDXL])); this endpoint's base is "
+                "unparameterized"
+            )
+        defaults_type = getattr(self.model_type, "Defaults", self.model_type)
         return defaults_type()
 
     # -- compile marking ----------------------------------------------------

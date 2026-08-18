@@ -86,6 +86,20 @@ class SDXL:
     #: The canonical layout contract (what omitting lanes= means).
     CANONICAL_CONTRACT = "sdxl.diffusers-bf16@1"
 
+    class Lora:
+        """SDXL adapter metadata (distillation LoRAs et al.)."""
+
+        class Defaults(msgspec.Struct, frozen=True):
+            # The turbo recipe is the ADAPTER'S metadata; endpoint code only
+            # maps schedule -> scheduler construction (main_v2 pattern).
+            schedule: str = "euler_trailing"  # "euler_trailing" | "lcm"
+            steps: Knob = msgspec.field(
+                default_factory=lambda: Knob(
+                    default=4, lo=1, hi=12, name="num_inference_steps"
+                )
+            )
+            timesteps: tuple[int, ...] = ()
+
     class Defaults(msgspec.Struct, frozen=True):
         # cfg=False marks a distilled checkpoint (guidance-off serving).
         cfg: bool = True

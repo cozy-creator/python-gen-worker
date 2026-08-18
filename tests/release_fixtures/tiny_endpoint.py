@@ -5,7 +5,7 @@ Deliberately spelled like the Paul-reviewed sdxl ``main_v2.py``: code as-is
 ``lanes=`` of contract references as the whole decorator surface, IMPERATIVE
 compile marking in setup (``self.pipe.unet = ctx.compile(self.pipe.unet)``),
 trace coverage auto-enumerated from the payload schemas (the ``Size`` enum is
-this fixture's aspect-ratio analogue), ``ctx.checkpoint_defaults(SDXL)`` +
+this fixture's aspect-ratio analogue), the generic ``Endpoint[SDXL]`` header + no-arg ``ctx.defaults()`` +
 ``Knob.resolve`` for serving values, no models=, no catalog.
 """
 
@@ -56,13 +56,13 @@ class ImageOutput(msgspec.Struct):
     # Trace coverage auto-enumerates the Size enum through both handlers:
     # 2 CFG batch-2 graphs + 2 batch-1 graphs = 4 graph classes.
 )
-class TinyDiffusion(Endpoint):
+class TinyDiffusion(Endpoint[SDXL]):
     def setup(self, ctx: RequestContext) -> None:
         self.pipe = StableDiffusionPipeline.from_pretrained(
             ctx.checkpoint_dir, torch_dtype=ctx.lane.dtype
         ).to("cuda")
         self.pipe.unet = ctx.compile(self.pipe.unet)
-        self.defaults = ctx.checkpoint_defaults(SDXL)
+        self.defaults = ctx.defaults()
 
     def _run(self, ctx: RequestContext, *, steps: int, seed: Optional[int],
              **call_kwargs) -> ImageAsset:

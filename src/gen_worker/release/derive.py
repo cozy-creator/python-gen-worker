@@ -38,6 +38,7 @@ from types import ModuleType
 from typing import Any, Optional
 
 from ..api.decorators import ATTR, EndpointDecl, lane_contract_handle
+from ..api.endpoint_base import endpoint_model_type
 from .trace_context import TraceRequestContext
 
 DOCUMENT_KIND = "gen-worker.release-metadata@1"
@@ -285,26 +286,21 @@ def _closure_entries_from_lockfile(lockfile: Path) -> dict[str, str]:
     return entries
 
 
-def _defaults_schema(requested: list[type]) -> Optional[dict[str, Any]]:
-    """msgspec JSON Schema of the endpoint's ONE defaults struct, if any.
+def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
+    """msgspec JSON Schema of the class-header model type's Defaults.
 
-    This replaces the hub-embedded per-family defaults registry: the
-    endpoint release EXPORTS the schema its code reads, and the hub
-    validates deploy-state rows against it (storage half: th#2133).
+    ``Endpoint[SDXL]`` is the single, statically-extractable source of the
+    endpoint's model type; the schema of ``SDXL.Defaults`` is what the hub
+    validates per-checkpoint deploy rows against. This replaces the
+    hub-embedded per-family defaults registry (storage half: th#2133).
     """
 
-    if not requested:
+    if model_type is None:
         return None
-    types_seen = {getattr(t, "Defaults", t) for t in requested}
-    if len(types_seen) > 1:
-        raise DeriveError(
-            f"endpoint requested checkpoint defaults of "
-            f"{sorted(t.__name__ for t in types_seen)!r}; a release exports "
-            f"ONE defaults schema"
-        )
+    defaults_type = getattr(model_type, "Defaults", model_type)
     import msgspec
 
-    return msgspec.json.schema(types_seen.pop())
+    return msgspec.json.schema(defaults_type)
 
 
 #: safetensors dtype spellings -> torch dtypes (tensorfs#113 carries the
@@ -383,13 +379,15 @@ def _derive_lane(
     lane: Any,
     plans: list[tuple[str, tuple[Any, ...]]],
     checkpoint_dir: Path,
-) -> tuple[Any, list[type]]:
+) -> Any:
     """One lane's instrumented run: fresh instance, setup, drive, discover."""
 
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
     instance = cls()
     ctx = TraceRequestContext(
-        lane=_resolve_lane(torchcg, cls, lane), checkpoint_dir=checkpoint_dir
+        lane=_resolve_lane(torchcg, cls, lane),
+        checkpoint_dir=checkpoint_dir,
+        model_type=endpoint_model_type(cls),
     )
     with torchcg.hollow_session():
         try:
@@ -438,7 +436,7 @@ def _derive_lane(
             f".decoder, not the vae, when only .decode() runs) -- silent "
             f"zero-graph discovery is not an outcome."
         )
-    return lane_graphs, list(ctx.requested_defaults_types)
+    return lane_graphs
 
 
 def derive_release(
@@ -461,7 +459,6 @@ def derive_release(
 
     lanes: list[Any] = []
     lane_contracts: dict[str, Any] = {}
-    requested_defaults: list[type] = []
     warnings: list[str] = []
     if cls is not None:
         plans: list[tuple[str, tuple[Any, ...]]] = []
@@ -479,15 +476,12 @@ def derive_release(
 
         decl: EndpointDecl = getattr(cls, ATTR)
         for lane in decl.lanes:
-            lane_graphs, lane_defaults = _derive_lane(
-                torchcg, cls, lane, plans, checkpoint_dir
-            )
+            lane_graphs = _derive_lane(torchcg, cls, lane, plans, checkpoint_dir)
             lanes.append(lane_graphs)
             lane_contracts[lane_graphs.contract] = {
                 "stamp": lane_graphs.contract,
                 "document": _contract_document(lane),
             }
-            requested_defaults.extend(lane_defaults)
 
     graphs_document = torchcg.GraphSetDocument(closure=closure, lanes=tuple(lanes))
     payload_dict: dict[str, Any] = {
@@ -496,7 +490,14 @@ def derive_release(
         "endpoint": endpoint_name,
         "graphs": graphs_document.as_dict(),
         "lane_contracts": lane_contracts,
-        "checkpoint_defaults_schema": _defaults_schema(requested_defaults),
+        "checkpoint_defaults_schema": _defaults_schema(
+            endpoint_model_type(cls) if cls is not None else None
+        ),
+        "model_type": (
+            getattr(endpoint_model_type(cls), "__name__", None)
+            if cls is not None
+            else None
+        ),
     }
     document = json.dumps(
         payload_dict, sort_keys=True, separators=(",", ":"), ensure_ascii=True
