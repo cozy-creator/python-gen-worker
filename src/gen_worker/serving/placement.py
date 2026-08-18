@@ -107,11 +107,18 @@ def device_facts(index: int = 0) -> DeviceFacts:
     A CPU-only host (cozy-local) is exactly that case and is not special-cased:
     0 GiB of VRAM is under every floor, so it warns, and then it runs.
     """
+    from ..hostfacts import cuda_ready
+
     try:
+        # `cuda_ready()` is the ONE `torch.cuda.is_available()` site in `src/`
+        # (fenced by tests/test_hostfacts_pgw896.py), and it is the right
+        # question here: this is a CAPABILITY check — "may I read a card?" —
+        # for which degrading on a device that will not answer is correct,
+        # because an unreadable device is under every floor anyway.
+        if not cuda_ready():
+            return DeviceFacts(name="cpu (no CUDA device)", vram_gib=0.0, sm=0)
         import torch
 
-        if not torch.cuda.is_available():  # noqa: SIM103
-            return DeviceFacts(name="cpu (no CUDA device)", vram_gib=0.0, sm=0)
         properties = torch.cuda.get_device_properties(index)
         major, minor = torch.cuda.get_device_capability(index)
         return DeviceFacts(
