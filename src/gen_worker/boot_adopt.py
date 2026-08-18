@@ -114,12 +114,24 @@ GATE_REASONS: Tuple[str, ...] = (
     # command can lift, and this one is a decision that can be taken back —
     # the same pod, re-asked after the order is released, adopts normally.
     "operator_eager_only",
+    # pgw#1372 / the 2026-08-18 trace-once-at-publish ruling: the §4.27
+    # boot-time derive+resolve ladder is DELETED from the boot flow. Identity
+    # is derived at PUBLISH; compiled artifacts arrive via the adopt-first
+    # release pull (`gen_worker.serving`), and a compiled family with no
+    # stamped release document boots EAGER and self-mints per fleet policy
+    # (§4.28/§4.31 restored). Emitted once per compiled-family boot so the
+    # fleet-wide cutover stays a query, not a story.
+    "boot_derive_deleted",
 )
 
 #: The reason token for :data:`GATE_REASONS`' operator entry. Named so the
 #: executor references the vocabulary instead of re-typing the literal — the
 #: drift channel `EagerPhase` was created to close, one module over.
 OPERATOR_EAGER_ONLY = "operator_eager_only"
+
+#: The reason token for the pgw#1372 cut, referenced by the executor the same
+#: way `OPERATOR_EAGER_ONLY` is.
+BOOT_DERIVE_DELETED = "boot_derive_deleted"
 
 #: Step 1.5 (pgw#1127 S2) — THIS MACHINE's own store, addressed by the DERIVED
 #: key, before the hub is asked at all. §4.28: *"local compiled graph, local repo-CAS,

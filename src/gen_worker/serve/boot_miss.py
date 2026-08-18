@@ -56,6 +56,10 @@ BOOT_MISS_KINDS: Dict[str, Optional[MissKind]] = {
     # which run in every role.
     "no_export_declaration": MissKind.NOT_ADOPTABLE,
     "declaration_unreadable": MissKind.NOT_ADOPTABLE,
+    # pgw#1372: the boot derive is deleted; until the adopt-first release
+    # pull is wired for this release there is no artifact ANY pod of this
+    # image could adopt — same answer fleet-wide, so it routes nowhere.
+    "boot_derive_deleted": MissKind.NOT_ADOPTABLE,
 
     # This pod's own posture forbids arming. A pod without it can serve.
     "eager_only": MissKind.ARM_FORBIDDEN,
