@@ -21,8 +21,8 @@ from pathlib import Path
 # crash-registry / fault-dump siblings) ONCE at import from this variable.
 #
 # Doing it here rather than only in a fixture covers the case a fixture cannot:
-# tests that spawn a REAL child (`gen_worker.entrypoint`, the SIGSEGV boot in
-# test_native_crash_streak_pgw676) inherit os.environ, and a child that records
+# tests that spawn a REAL child (`gen_worker.entrypoint`, the pgw#676 SIGSEGV
+# boot in test_child_faults.py) inherit os.environ, and a child that records
 # a native-crash streak into the shared /tmp registry refuses `generate` at
 # every later boot in EVERY lane's suite. Harnesses that build a replacement
 # env still set it explicitly (see tests/harness/subprocess_runner.py).
