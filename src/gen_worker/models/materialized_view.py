@@ -68,7 +68,35 @@ _SCRATCH = itertools.count()
 
 VIEWS_DIR = "materialized"
 
-__all__ = ["VIEWS_DIR", "third_party_dir", "view_root_for"]
+#: Set once the pgw#1380 streaming loader is bound in this process. From that
+#: moment a materialization is a DEFECT rather than a burn-down row: Paul's
+#: 2026-08-19 ruling narrowed tier 3 to external-binary runtimes and AOT `.so`
+#: delivery, and a serving pytorch endpoint reaches it for NO reason — its
+#: weights stream store->VRAM and its configs are real files in the projected
+#: tree. Nothing is blocked (a refusal here would turn a wrong-but-working pod
+#: into a dead one); the log simply stops reading as normal.
+_no_fill_serving = False
+
+__all__ = [
+    "VIEWS_DIR",
+    "no_fill_serving",
+    "serving_streams_weights",
+    "third_party_dir",
+    "view_root_for",
+]
+
+
+def no_fill_serving(active: bool = True) -> None:
+    """Declare that this process serves with the streaming loader bound."""
+
+    global _no_fill_serving
+    _no_fill_serving = bool(active)
+
+
+def serving_streams_weights() -> bool:
+    """True when a materialization here would be a pgw#1380 defect."""
+
+    return _no_fill_serving
 
 
 def view_root_for(snapshot_root: Path | str) -> Path:
@@ -174,9 +202,20 @@ def third_party_dir(path: Path | str, *, why: str) -> Path:
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    _log.info(
-        "materialized_view snapshot=%s rel=%s bytes=%d files=%d why=%s "
-        "(pgw#1303 tier 3: the last resort of the access ladder)",
-        root.name, rel or "(whole tree)", written, len(wanted), why,
-    )
+    if _no_fill_serving:
+        _log.error(
+            "DEFECT materialized_view snapshot=%s rel=%s bytes=%d files=%d "
+            "why=%s — this process serves with the pgw#1380 streaming loader "
+            "bound, so a serving pytorch endpoint reached tier 3 for weights "
+            "it already has in the chunk store. The 2026-08-19 no-fill ruling "
+            "leaves tier 3 to external binaries and AOT .so delivery only; "
+            "this copy is a bug in the caller, not a burn-down row.",
+            root.name, rel or "(whole tree)", written, len(wanted), why,
+        )
+    else:
+        _log.info(
+            "materialized_view snapshot=%s rel=%s bytes=%d files=%d why=%s "
+            "(pgw#1303 tier 3: the last resort of the access ladder)",
+            root.name, rel or "(whole tree)", written, len(wanted), why,
+        )
     return out
