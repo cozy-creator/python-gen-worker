@@ -64,8 +64,7 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
     assert document["endpoint"].endswith(":TinyDiffusion")
 
     (lane,) = document["graphs"]["lanes"]
-    assert lane["name"] == "fp32"
-    assert lane["contract"] == "plain.fp32@1"
+    assert lane["contract"] == "tiny.diffusers-fp32@1"
     assert lane["unobserved_targets"] == []
     # 2 Size values x {CFG batch-2 generate, batch-1 turbo} = 4 graph classes.
     assert len(lane["graphs"]) == 4

@@ -330,6 +330,7 @@ def __dir__() -> list[str]:
 
 __all__ = [
     # The decorators + bindings.
+    "Endpoint",
     "endpoint",
     # pgw#1294: run-once submitted functions. Same (ctx, payload) -> Struct
     # contract as @endpoint, so one body promotes between them unchanged.

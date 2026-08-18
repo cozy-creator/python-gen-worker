@@ -37,7 +37,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Optional
 
-from ..api.decorators import ATTR, EndpointDecl
+from ..api.decorators import ATTR, EndpointDecl, lane_contract_handle
 from .trace_context import TraceRequestContext
 
 DOCUMENT_KIND = "gen-worker.release-metadata@1"
@@ -199,34 +199,65 @@ def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], boo
     return tuple(payloads), capped
 
 
-def _roots_of(instance: Any) -> dict[str, object]:
-    """The author namespace discovery resolves compile paths against.
+def _named_marked_modules(
+    instance: Any, marked: list[Any]
+) -> dict[str, Any]:
+    """Deterministic provenance names for the author's ctx.compile marks.
 
-    Instance attributes first (``self.pipe``), then each attribute's
-    ``.components`` mapping (the diffusers convention) so the contract file's
-    short spelling (``"unet"``) resolves. A component name shared by two
-    different objects is dropped from the bare namespace -- the qualified
-    path (``"pipe.unet"``) stays unambiguous.
+    The author marks REAL objects; the document needs stable names. Names
+    come from where the module actually lives on the instance: component
+    names of any ``.components``-bearing attribute (the diffusers
+    convention), then bare attribute names, then dotted
+    ``attribute.component`` as the disambiguated spelling. A marked module
+    that cannot be named on the instance is refused -- provenance is part of
+    the release row.
     """
 
-    roots: dict[str, object] = {}
-    ambiguous: set[str] = set()
+    candidates: dict[int, str] = {}
+
+    def offer(module: Any, name: str) -> None:
+        identity = id(module)
+        if identity not in candidates or len(name) < len(candidates[identity]):
+            candidates[identity] = name
+
     for attr, value in sorted(vars(instance).items()):
         if value is None:
             continue
-        roots[attr] = value
+        offer(value, attr)
         components = getattr(value, "components", None)
         if isinstance(components, Mapping):
             for name, component in sorted(components.items()):
                 if component is None or not isinstance(name, str):
                     continue
-                if name in roots and roots[name] is not component:
-                    ambiguous.add(name)
-                else:
-                    roots.setdefault(name, component)
-    for name in ambiguous:
-        roots.pop(name, None)
-    return roots
+                offer(component, name if _unique_component(instance, name, component) else f"{attr}.{name}")
+
+    named: dict[str, Any] = {}
+    for module in marked:
+        name = candidates.get(id(module))
+        if name is None:
+            raise DeriveError(
+                f"a module marked via ctx.compile() "
+                f"({type(module).__name__}) is not reachable as an instance "
+                f"attribute or pipeline component; the release document "
+                f"cannot name its provenance"
+            )
+        if name in named and named[name] is not module:
+            raise DeriveError(
+                f"two marked modules both resolve to provenance name {name!r}"
+            )
+        named[name] = module
+    return named
+
+
+def _unique_component(instance: Any, name: str, component: Any) -> bool:
+    seen = 0
+    for value in vars(instance).values():
+        components = getattr(value, "components", None)
+        if isinstance(components, Mapping) and components.get(name) is not None:
+            if components.get(name) is not component:
+                return False
+            seen += 1
+    return seen <= 1
 
 
 def _closure_entries_from_lockfile(lockfile: Path) -> dict[str, str]:
@@ -276,6 +307,33 @@ def _defaults_schema(requested: list[type]) -> Optional[dict[str, Any]]:
     return msgspec.json.schema(types_seen.pop())
 
 
+def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
+    """The resolved lane object author code reads as ``ctx.lane``.
+
+    A contract OBJECT (tensorfs registry entry / inline Contract) is its own
+    resolution -- ``ctx.lane`` IS it, dtype and layout included. A bare
+    handle string resolves through the model-type pointer table
+    (``gen_worker.models.model_types.CONTRACT_DTYPES`` -- the interim home
+    until the canonical per-model-type entries land in tensorfs
+    ``spec/v1/contracts``).
+    """
+
+    handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
+    if not isinstance(lane, str):
+        return lane
+    from ..models.model_types import CONTRACT_DTYPES
+
+    dtype = CONTRACT_DTYPES.get(handle)
+    if dtype is None:
+        raise DeriveError(
+            f"lane {handle!r}: no dtype resolution -- the contract is not a "
+            f"registry object and the model-type pointer table "
+            f"(gen_worker.models.model_types.CONTRACT_DTYPES) does not know "
+            f"it. Import the contract object, or register the handle."
+        )
+    return torchcg.LaneRef(handle, dtype=dtype)
+
+
 def _derive_lane(
     torchcg: ModuleType,
     cls: type,
@@ -285,20 +343,28 @@ def _derive_lane(
 ) -> tuple[Any, list[type]]:
     """One lane's instrumented run: fresh instance, setup, drive, discover."""
 
+    handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
     instance = cls()
-    ctx = TraceRequestContext(lane=lane, checkpoint_dir=checkpoint_dir)
+    ctx = TraceRequestContext(
+        lane=_resolve_lane(torchcg, cls, lane), checkpoint_dir=checkpoint_dir
+    )
     with torchcg.hollow_session():
         try:
-            setup = getattr(instance, "setup", None)
-            if setup is not None:
-                setup(ctx)
+            instance.setup(ctx)
         except torchcg.HollowError as exc:
-            raise DeriveError(f"lane {lane.name!r}: {exc}") from exc
+            raise DeriveError(f"lane {handle!r}: {exc}") from exc
         except Exception as exc:
             raise DeriveError(
-                f"lane {lane.name!r}: setup() failed under the trace "
+                f"lane {handle!r}: setup() failed under the trace "
                 f"session: {type(exc).__name__}: {exc}"
             ) from exc
+        if not ctx.marked_modules:
+            raise DeriveError(
+                f"lane {handle!r}: setup() marked nothing via ctx.compile(). "
+                f"A lane-declaring endpoint compiles SOMETHING; an endpoint "
+                f"that wants eager-forever declares no lanes instead."
+            )
+        modules = _named_marked_modules(instance, ctx.marked_modules)
 
         def drive() -> None:
             for attr, payloads in plans:
@@ -307,28 +373,27 @@ def _derive_lane(
                         getattr(instance, attr)(ctx, payload)
                     except Exception as exc:
                         raise DeriveError(
-                            f"lane {lane.name!r}: handler {attr!r} failed on "
+                            f"lane {handle!r}: handler {attr!r} failed on "
                             f"auto-enumerated payload {index} "
                             f"({payload!r}) under the trace session: "
                             f"{type(exc).__name__}: {exc}"
                         ) from exc
 
-        roots = _roots_of(instance)
         try:
-            lane_graphs = torchcg.discover_lane(lane, roots, drive)
+            lane_graphs = torchcg.discover_modules(handle, modules, drive)
         except DeriveError:
             raise
         except torchcg.DiscoveryError as exc:
-            raise DeriveError(f"lane {lane.name!r}: {exc}") from exc
+            raise DeriveError(f"lane {handle!r}: {exc}") from exc
     if lane_graphs.unobserved_targets:
         total = sum(len(payloads) for _, payloads in plans)
         raise DeriveError(
-            f"lane {lane.name!r}: compile target(s) "
+            f"lane {handle!r}: marked module(s) "
             f"{list(lane_graphs.unobserved_targets)!r} were never CALLED "
-            f"while driving {total} auto-enumerated payload(s). A lane path "
-            f"must name the module the code actually calls (e.g. "
-            f"'vae.decoder', not 'vae') -- silent zero-graph discovery is "
-            f"not an outcome."
+            f"while driving {total} auto-enumerated payload(s). ctx.compile "
+            f"must mark the module the code actually CALLS (e.g. the vae's "
+            f".decoder, not the vae, when only .decode() runs) -- silent "
+            f"zero-graph discovery is not an outcome."
         )
     return lane_graphs, list(ctx.requested_defaults_types)
 
@@ -392,7 +457,7 @@ def derive_release(
         digest=hashlib.sha256(document).hexdigest(),
         endpoint=endpoint_name,
         lane_graphs={
-            lane.name: tuple(record.graph for record in lane.graphs)
+            lane.contract: tuple(record.graph for record in lane.graphs)
             for lane in graphs_document.lanes
         },
         warnings=tuple(warnings),

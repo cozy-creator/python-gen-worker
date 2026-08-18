@@ -663,7 +663,7 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.0.0" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'torch'", specifier = ">=2.13.0" },
-    { name = "torchcg", marker = "extra == 'dev'", git = "https://github.com/cozy-creator/torchcg?rev=116e4a48f7037ed8c0e3794d4534f220de3273b4" },
+    { name = "torchcg", marker = "extra == 'dev'", git = "https://github.com/cozy-creator/torchcg?rev=7102d60e2786fe1f78c75b10b0edb8dabdddc7e0" },
     { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'vision') or (sys_platform == 'win32' and extra == 'vision')", specifier = ">=0.28.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'vision'", specifier = ">=0.28.0" },
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.13" },
@@ -2081,7 +2081,7 @@ wheels = [
 [[package]]
 name = "torchcg"
 version = "0.1.0"
-source = { git = "https://github.com/cozy-creator/torchcg?rev=116e4a48f7037ed8c0e3794d4534f220de3273b4#116e4a48f7037ed8c0e3794d4534f220de3273b4" }
+source = { git = "https://github.com/cozy-creator/torchcg?rev=7102d60e2786fe1f78c75b10b0edb8dabdddc7e0#7102d60e2786fe1f78c75b10b0edb8dabdddc7e0" }
 dependencies = [
     { name = "safetensors" },
     { name = "tensorfs" },

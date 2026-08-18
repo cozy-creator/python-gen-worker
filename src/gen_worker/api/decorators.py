@@ -71,7 +71,7 @@ SlotLike = Union[Binding, "Slot[D]"]
 
 KINDS = ("inference", "training", "dataset", "conversion", "eval")
 
-RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
+RESERVED_METHODS = frozenset({"setup", "teardown", "warmup", "shutdown"})
 
 
 # pgw#1313: `compute_capability` and `ram_gb_hint` are GONE as separate axes.
@@ -1733,39 +1733,43 @@ def _validate_family_params(
             )
 
 
-def _validate_lanes(owner: str, lanes: Any) -> Tuple[Any, ...]:
-    """Shape-check the ship-code-as-is lane surface, duck-typed.
+def lane_contract_handle(owner: str, lane: Any) -> str:
+    """One lane's contract HANDLE (``<producer>.<format>@<major>``), duck-typed.
 
-    A lane is whatever torchcg's ``Lane`` says it is — gen-worker refuses to
-    re-declare that vocabulary (the release env pins torchcg; two definitions
-    would drift). What IS checked here is the part the derive depends on:
-    name / compile / contract present and canonical, names unique.
+    A lane IS a tensorfs layout-contract reference (Paul's main_v2 review
+    ruling): an imported registry object, an inline ``tensorfs.Contract``,
+    or the bare handle string. gen-worker refuses to re-declare the contract
+    vocabulary — it reads the handle off whichever shape arrives (the
+    contract-objects design lane owns the object's final form).
     """
+    if isinstance(lane, str):
+        handle = lane
+    else:
+        handle = getattr(lane, "handle", None)
+        if not isinstance(handle, str):
+            name = getattr(lane, "name", None)
+            version = getattr(lane, "version", None)
+            if isinstance(name, str) and isinstance(version, int):
+                handle = f"{name}@{version}"
+    if not isinstance(handle, str) or "@" not in handle or not handle.strip():
+        raise ValueError(
+            f"@endpoint {owner}: a lane must be a tensorfs layout-contract "
+            f"reference (registry object or '<producer>.<format>@<major>' "
+            f"handle); got {lane!r}"
+        )
+    return handle
+
+
+def _validate_lanes(owner: str, lanes: Any) -> Tuple[Any, ...]:
+    """Shape-check the ship-code-as-is lane surface: contract references."""
     out = tuple(lanes)
     if not out:
         raise ValueError(f"@endpoint {owner}: lanes= must declare at least one lane")
-    names = []
-    for lane in out:
-        name = getattr(lane, "name", None)
-        compile_paths = getattr(lane, "compile", None)
-        contract = getattr(lane, "contract", None)
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError(f"@endpoint {owner}: a lane must carry a canonical name")
-        if not isinstance(compile_paths, tuple) or not all(
-            isinstance(p, str) and p.strip() for p in compile_paths
-        ):
-            raise ValueError(
-                f"@endpoint {owner}: lane {name!r} must carry compile= as a "
-                f"tuple of attribute paths"
-            )
-        if not isinstance(contract, str) or not contract.strip():
-            raise ValueError(
-                f"@endpoint {owner}: lane {name!r} must carry its tensor-layout "
-                f"contract"
-            )
-        names.append(name)
-    if len(set(names)) != len(names):
-        raise ValueError(f"@endpoint {owner}: lane names must be unique, got {names!r}")
+    handles = [lane_contract_handle(owner, lane) for lane in out]
+    if len(set(handles)) != len(handles):
+        raise ValueError(
+            f"@endpoint {owner}: lane contracts must be unique, got {handles!r}"
+        )
     return out
 
 
@@ -1783,13 +1787,37 @@ def _decorate_lane_class(
     this shape is pgw#1372's; what decoration guarantees is that the class
     imports clean and that `gen-worker release derive` can find its lanes
     and handlers (trace payloads are auto-enumerated from the handlers'
-    payload schemas — there is no samples surface).
+    payload schemas — there is no samples surface; compile marking is
+    imperative, `ctx.compile(...)` in setup).
     """
+    from .endpoint_base import Endpoint
+
     if kind != "inference":
         raise ValueError(
             f"@endpoint class {cls.__name__!r}: lanes= is an inference surface, "
             f"got kind={kind!r}"
         )
+    if not issubclass(cls, Endpoint):
+        raise TypeError(
+            f"@endpoint class {cls.__name__!r}: a lanes-surface endpoint must "
+            f"inherit gen_worker.Endpoint"
+        )
+    for hook in ("setup", "teardown"):
+        fn = inspect.getattr_static(cls, hook, None)
+        if fn is None or not inspect.isfunction(fn):
+            continue
+        parameters = [
+            parameter
+            for parameter in inspect.signature(fn).parameters.values()
+            if parameter.name != "self"
+            and parameter.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        ]
+        if len(parameters) != 1:
+            raise TypeError(
+                f"@endpoint class {cls.__name__!r}: {hook}() must accept exactly "
+                f"(self, ctx); got {len(parameters) + 1} parameters"
+            )
     handlers = _find_handler_methods(cls)
     decl = EndpointDecl(
         kind=kind,

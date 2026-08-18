@@ -1,9 +1,11 @@
 """A main_v2-shaped lanes endpoint over the tiny pipeline (derive fixture).
 
 Deliberately spelled like the Paul-reviewed sdxl ``main_v2.py``: code as-is
-(stock diffusers serve host), ``lanes=`` as the whole compile surface, trace
-coverage auto-enumerated from the payload schemas (the ``Size`` enum is this
-fixture's aspect-ratio analogue), ``ctx.checkpoint_defaults(SDXL)`` +
+(stock diffusers serve host) on the required ``gen_worker.Endpoint`` base,
+``lanes=`` of contract references as the whole decorator surface, IMPERATIVE
+compile marking in setup (``self.pipe.unet = ctx.compile(self.pipe.unet)``),
+trace coverage auto-enumerated from the payload schemas (the ``Size`` enum is
+this fixture's aspect-ratio analogue), ``ctx.checkpoint_defaults(SDXL)`` +
 ``Knob.resolve`` for serving values, no models=, no catalog.
 """
 
@@ -16,9 +18,12 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import ImageAsset, RequestContext, endpoint
+from gen_worker import Endpoint, ImageAsset, RequestContext, endpoint
 from gen_worker.models import SDXL
-from torchcg import Lane
+from gen_worker.models.model_types import register_contract_dtype
+
+LANE = "tiny.diffusers-fp32@1"
+register_contract_dtype(LANE, torch.float32)
 
 
 class Size(StrEnum):
@@ -47,18 +52,16 @@ class ImageOutput(msgspec.Struct):
 
 
 @endpoint(
-    lanes=(
-        Lane("fp32", compile=("unet",), contract="plain.fp32@1",
-             dtype=torch.float32),
-    ),
+    lanes=(LANE,),
     # Trace coverage auto-enumerates the Size enum through both handlers:
     # 2 CFG batch-2 graphs + 2 batch-1 graphs = 4 graph classes.
 )
-class TinyDiffusion:
+class TinyDiffusion(Endpoint):
     def setup(self, ctx: RequestContext) -> None:
         self.pipe = StableDiffusionPipeline.from_pretrained(
             ctx.checkpoint_dir, torch_dtype=ctx.lane.dtype
         ).to("cuda")
+        self.pipe.unet = ctx.compile(self.pipe.unet)
         self.defaults = ctx.checkpoint_defaults(SDXL)
 
     def _run(self, ctx: RequestContext, *, steps: int, seed: Optional[int],

@@ -37,7 +37,7 @@ class Knob(msgspec.Struct, frozen=True):
     def resolve(self, value: Optional[Number], ctx: Any) -> Number:
         if value is None:
             return self.default
-        clamped = ctx.clamp(
+        clamped: Any = ctx.clamp(
             self.name or "value",
             value,
             lo=self.lo,
@@ -47,11 +47,44 @@ class Knob(msgspec.Struct, frozen=True):
         # ctx.clamp answers float; keep an int knob's integer arithmetic.
         if isinstance(self.default, int) and float(clamped).is_integer():
             return int(clamped)
-        return clamped
+        return float(clamped)
+
+
+#: INTERIM dtype resolution for lanes spelled as bare contract HANDLES.
+#: A lane is a tensorfs layout contract; when the author imports the
+#: contract OBJECT (``tensorfs.contracts.*``), dtype rides on it and this
+#: table is not consulted. Bare handles resolve here until the canonical
+#: per-model-type entries land in tensorfs ``spec/v1/contracts``
+#: (coordinate: pgw#1376/pgw#1377 defaults+model-type design lane).
+CONTRACT_DTYPES: dict[str, Any] = {}
+
+
+def register_contract_dtype(handle: str, dtype: Any) -> None:
+    known = CONTRACT_DTYPES.get(handle)
+    if known is not None and known != dtype:
+        raise ValueError(
+            f"contract {handle!r} already resolves to {known!r}; refusing to "
+            f"re-register it as {dtype!r}"
+        )
+    CONTRACT_DTYPES[handle] = dtype
+
+
+def _seed_sdxl_contracts() -> None:
+    try:
+        import torch
+    except ImportError:  # pragma: no cover - torch-less installs never derive
+        return
+    register_contract_dtype("sdxl.diffusers-bf16@1", torch.bfloat16)
+    # The fp8-rowwise lane LOADS bf16 (the quantized artifact path is the fp8
+    # pipeline's; the serve host's from_pretrained dtype stays bf16).
+    register_contract_dtype("cozy.sdxl-fp8-rowwise@1", torch.bfloat16)
 
 
 class SDXL:
     """The SDXL model type: today, its checkpoint-defaults schema."""
+
+    #: The canonical layout contract (what omitting lanes= means).
+    CANONICAL_CONTRACT = "sdxl.diffusers-bf16@1"
 
     class Defaults(msgspec.Struct, frozen=True):
         # cfg=False marks a distilled checkpoint (guidance-off serving).
@@ -70,4 +103,12 @@ class SDXL:
         negative_preamble: str = ""
 
 
-__all__ = ["Knob", "Number", "SDXL"]
+_seed_sdxl_contracts()
+
+__all__ = [
+    "CONTRACT_DTYPES",
+    "Knob",
+    "Number",
+    "SDXL",
+    "register_contract_dtype",
+]

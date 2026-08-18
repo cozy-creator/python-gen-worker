@@ -1,4 +1,9 @@
-"""Red fixture: a lane naming an attribute path that does not exist."""
+"""Red fixture: ctx.compile of an attribute that does not exist.
+
+The imperative marking is typed by construction -- a typo is a real
+AttributeError at the author's own line, surfaced by the derive with the
+failing name in the message.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +11,11 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import RequestContext, endpoint
-from torchcg import Lane
+from gen_worker import Endpoint, RequestContext, endpoint
+from gen_worker.models.model_types import register_contract_dtype
+
+LANE = "tiny.diffusers-fp32@1"
+register_contract_dtype(LANE, torch.float32)
 
 
 class In(msgspec.Struct):
@@ -18,17 +26,13 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-@endpoint(
-    lanes=(
-        Lane("fp32", compile=("does_not_exist",), contract="plain.fp32@1",
-             dtype=torch.float32),
-    ),
-)
-class BadLane:
+@endpoint(lanes=(LANE,))
+class BadMark(Endpoint):
     def setup(self, ctx: RequestContext) -> None:
         self.pipe = StableDiffusionPipeline.from_pretrained(
             ctx.checkpoint_dir, torch_dtype=ctx.lane.dtype
         )
+        self.pipe.does_not_exist = ctx.compile(self.pipe.does_not_exist)
 
     def generate(self, ctx: RequestContext, payload: In) -> Out:
         self.pipe(

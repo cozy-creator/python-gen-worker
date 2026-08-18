@@ -15,6 +15,7 @@ SPELLING of the members below; that spelling is frozen by the Paul-reviewed
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -40,6 +41,9 @@ class TraceRequestContext:
         #: Every type the author asked defaults for -- the derive exports its
         #: schema (the successor of the hub-embedded family registry).
         self.requested_defaults_types: list[type] = []
+        #: Modules the author marked via ctx.compile() -- discovery hooks
+        #: exactly these during the payload drives.
+        self.marked_modules: list[Any] = []
 
     # -- defaults -----------------------------------------------------------
     def checkpoint_defaults(self, model_type: type) -> Any:
@@ -54,6 +58,38 @@ class TraceRequestContext:
             self.requested_defaults_types.append(model_type)
         defaults_type = getattr(model_type, "Defaults", model_type)
         return defaults_type()
+
+    # -- compile marking ----------------------------------------------------
+    def compile(self, target: Any) -> Any:
+        """torch.compile-style marking, trace half (pgw#1370/#1372 contract).
+
+        At DERIVE this records the marked module (discovery hooks it during
+        the payload drives) and returns it unchanged. At SERVE (pgw#1372) it
+        returns the adopted compiled graph for this (graph, lane, sm) when
+        the store has it, else the module unchanged while the hole mints in
+        the background -- the author's marked line IS the swap point.
+
+        A non-module with ``.components`` (a diffusers pipeline) is sugar:
+        every nn.Module component is marked ("compile everything
+        compilable"). Typos are real AttributeErrors at the author's line --
+        no strings, no self-structure assumptions.
+        """
+        import torch
+
+        if isinstance(target, torch.nn.Module):
+            if all(existing is not target for existing in self.marked_modules):
+                self.marked_modules.append(target)
+            return target
+        components = getattr(target, "components", None)
+        if isinstance(components, Mapping):
+            for component in components.values():
+                if isinstance(component, torch.nn.Module):
+                    self.compile(component)
+            return target
+        raise TypeError(
+            f"ctx.compile() marks nn.Modules (or a pipeline-like object "
+            f"whose .components carries them); got {type(target).__name__}"
+        )
 
     # -- knobs / control ----------------------------------------------------
     def clamp(
@@ -78,11 +114,14 @@ class TraceRequestContext:
         del message
 
     # -- egress -------------------------------------------------------------
-    def step_callback(self, total_steps: int) -> Callable[..., dict]:
+    def step_callback(self, total_steps: int) -> Callable[..., dict[str, Any]]:
         """A no-op diffusers ``callback_on_step_end``."""
         del total_steps
 
-        def callback(_pipe: Any, _index: Any, _timestep: Any, callback_kwargs: Any = None, **_: Any) -> dict:
+        def callback(
+            _pipe: Any, _index: Any, _timestep: Any,
+            callback_kwargs: Any = None, **_: Any,
+        ) -> dict[str, Any]:
             del callback_kwargs
             return {}
 

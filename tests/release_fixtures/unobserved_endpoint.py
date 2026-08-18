@@ -1,8 +1,8 @@
-"""Red fixture: a lane naming a module the code never CALLS.
+"""Red fixture: a marked module the code never CALLS.
 
-``vae`` exists, but the pipeline calls ``vae.decode()``, which bypasses
-``Module.__call__`` -- the hook observes nothing. The derive must refuse
-with the path in the message, never emit a silent zero-graph lane.
+``vae`` is real and markable, but the pipeline calls ``vae.decode()``, which
+bypasses ``Module.__call__`` -- the hook observes nothing. The derive must
+refuse with the name in the message, never emit a silent zero-graph lane.
 """
 
 from __future__ import annotations
@@ -11,8 +11,11 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import RequestContext, endpoint
-from torchcg import Lane
+from gen_worker import Endpoint, RequestContext, endpoint
+from gen_worker.models.model_types import register_contract_dtype
+
+LANE = "tiny.diffusers-fp32@1"
+register_contract_dtype(LANE, torch.float32)
 
 
 class In(msgspec.Struct):
@@ -23,17 +26,14 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-@endpoint(
-    lanes=(
-        Lane("fp32", compile=("unet", "vae"), contract="plain.fp32@1",
-             dtype=torch.float32),
-    ),
-)
-class UnobservedTarget:
+@endpoint(lanes=(LANE,))
+class UnobservedMark(Endpoint):
     def setup(self, ctx: RequestContext) -> None:
         self.pipe = StableDiffusionPipeline.from_pretrained(
             ctx.checkpoint_dir, torch_dtype=ctx.lane.dtype
         )
+        self.pipe.unet = ctx.compile(self.pipe.unet)
+        self.pipe.vae = ctx.compile(self.pipe.vae)  # .decode() bypasses __call__
 
     def generate(self, ctx: RequestContext, payload: In) -> Out:
         self.pipe(
