@@ -87,9 +87,14 @@ def test_executor_setup_emits_monotonic_activity_phases():
     # read as "one activity" only because the two used to share a kind.
     # pgw#1309's boot row (this process's pid and role) rides the same bind
     # and is likewise not part of the phase envelope.
+    # pgw#1355's boot_stages roll-up is the same shape as pgw#1309's boot row:
+    # a self-contained event under its own kind, emitted on the same bind, and
+    # deliberately NOT part of this activity's phase envelope. It joins the
+    # list; it is not folded into the envelope. The envelope's real content is
+    # asserted below, over KIND_WARMUP alone.
     assert {u.kind for u in ups} <= {
         activity.KIND_WARMUP, activity.KIND_WARMUP_SUMMARY,
-        activity.KIND_PROCESS_ROLE}
+        activity.KIND_PROCESS_ROLE, activity.KIND_BOOT_STAGES}
     ups = [u for u in ups if u.kind == activity.KIND_WARMUP]
     seqs = [u.seq for u in ups]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
