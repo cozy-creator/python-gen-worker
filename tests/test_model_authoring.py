@@ -224,10 +224,10 @@ def test_load_context_defaults_decode_matrix(tmp_path: Path) -> None:
 
     # Partial row -> field-level overlay; untouched fields keep fallbacks.
     decoded = ctx_for(
-        {"cfg": False, "schedule": "lcm", "timesteps": [8, 6, 4, 2]}
+        {"cfg": False, "sampler": "lcm", "timesteps": [8, 6, 4, 2]}
     ).defaults()
     assert decoded.cfg is False
-    assert decoded.schedule == "lcm"
+    assert decoded.sampler == "lcm"
     assert decoded.timesteps == (8, 6, 4, 2)
     assert decoded.guidance == SDXL.Defaults().guidance
 
@@ -300,7 +300,7 @@ def test_scheduler_and_adapter_scopes_restore_after_a_turbo_request(
             defaults=binding.defaults,
             adapter=Adapter(
                 name="lcm-lora", path=tmp_path / "lora",
-                defaults=SDXL.Lora.Defaults(schedule="lcm"),
+                defaults=SDXL.Lora.Defaults(sampler="lcm"),
                 ref="cozy/lcm-lora@1",
             ),
         )
@@ -357,7 +357,7 @@ def test_stacking_on_a_step_distilled_checkpoint_warns_and_ignores(
         DeployBinding(
             checkpoint_ref="ckpt:distilled@1",
             checkpoint_dir=make_checkpoint(tmp_path),
-            defaults={"cfg": False, "step_distilled": True, "schedule": "lcm",
+            defaults={"cfg": False, "step_distilled": True, "sampler": "lcm",
                       "steps": {"default": 4, "lo": 1, "hi": 8}},
             adapter=Adapter(
                 name="x", path=tmp_path / "lora", defaults=SDXL.Lora.Defaults(),
@@ -384,7 +384,7 @@ def test_distilled_checkpoint_serves_turbo_without_an_adapter(
             checkpoint_ref="ckpt:distilled@1",
             checkpoint_dir=binding.checkpoint_dir,
             defaults={
-                "cfg": False, "schedule": "lcm", "timesteps": [8, 6, 4, 2],
+                "cfg": False, "sampler": "lcm", "timesteps": [8, 6, 4, 2],
                 "steps": {"default": 4, "lo": 1, "hi": 8},
             },
         ),

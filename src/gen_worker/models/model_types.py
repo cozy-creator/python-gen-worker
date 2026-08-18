@@ -21,10 +21,6 @@ from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar
 
 import msgspec
 
-#: The declared schedule vocabulary for step-distilled recipes; schedule ->
-#: scheduler-class construction stays endpoint code (the main_v2 pattern).
-Schedule = Literal["euler_trailing", "lcm"]
-
 #: The PLATFORM-WIDE sampler vocabulary — types checkpoint METADATA (the
 #: hub-row `sampler` field, written platform-wide). An endpoint serves its
 #: own subset (its request field is its own Literal); a metadata value an
@@ -120,14 +116,13 @@ class SDXL(ModelType["SDXL.Defaults"]):
         or a distillation adapter's overlay): both Defaults types INHERIT
         this, so an entrypoint holds ONE type, never a union (Paul's
         recipe-not-mode-flag ruling). Fields are independent axes: ``cfg``
-        (batch-2 guidance vs none), ``schedule`` (``None`` = keep the
-        checkpoint's own scheduler; construction stays endpoint code),
-        ``steps``/``guidance`` knobs, pinned ``timesteps``."""
+        (batch-2 guidance vs none), ``sampler`` (``None`` = keep the
+        checkpoint's own scheduler; name -> scheduler construction stays
+        endpoint code), ``steps``/``guidance`` knobs, pinned ``timesteps``."""
 
         steps: Knob[int] = Knob(30, lo=15, hi=60, field="num_inference_steps")
         guidance: Knob[float] = Knob(6.0, lo=1.5, hi=12.0, field="guidance_scale")
         cfg: bool = True
-        schedule: Schedule | None = None
         timesteps: tuple[int, ...] = ()
         #: The checkpoint-metadata sampler preference (platform vocabulary);
         #: None = the checkpoint tree's shipped scheduler stands.
@@ -165,7 +160,7 @@ class SdxlLoraDefaults(SDXL.Recipe, frozen=True):
 
     steps: Knob[int] = Knob(4, lo=1, hi=12, field="num_inference_steps")
     cfg: bool = False
-    schedule: Schedule | None = "euler_trailing"
+    sampler: SamplerName | None = "euler_trailing"
     trigger_words: tuple[str, ...] = ()
     strength: Knob[float] = Knob(1.0, lo=0.0, hi=2.0, field="strength")
 
@@ -178,6 +173,5 @@ __all__ = [
     "ModelType",
     "SDXL",
     "SamplerName",
-    "Schedule",
     "SupportsAdjust",
 ]
