@@ -188,7 +188,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "983ca710f449fa2ba495a9c5e38446fd7d6d4969"
+rev = "66cd2f1a1ba2296217afcfbb8bf47e977c2975fb"
 subdir = "src/torchcg"
 # pgw#1372 BUMP: takes upstream's tcg#41 wave — execution lanes (`lane.py`),
 # two-level identity (`graph_identity.py`), the release graph-set document
@@ -200,8 +200,9 @@ subdir = "src/torchcg"
 # (`adopt.py::AdoptSession`, torchcg PR #44). These are what the adopt-only
 # boot (`gen_worker/serving/`) consumes; the older cg-key surfaces below are
 # untouched by the bump and still serve the pre-cutover mint path. `rev`
-# above is torchcg PR #44's branch head; bump it to the squash-merge SHA on
-# master when that PR lands (content is byte-identical).
+# above is upstream MASTER at torchcg PR #47's squash merge (the #44 adopt
+# wave plus its two fix-forwards: contract-keyed AdoptSession, and hollow
+# off the package root so the serve-role closure stays model-free).
 # THE REV THAT FROZE THE ADDRESS AND GAVE THE METADATA VOCABULARY ITS HOME —
 # torchcg PR #41 (tcg#39) then PR #42 (tcg#40). The first is why one rev is safe
 # at all: upstream now fences `_REF_PREFIX`, both emitted ref shapes, the
