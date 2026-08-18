@@ -191,6 +191,15 @@ WAN22_DIFFUSERS_BF16: Final = PendingContract("wan22.diffusers-bf16", 1)
 #: the H3 contract file names it in ``lanes=``. Still a PendingContract only
 #: because the vendored tensorfs snapshot predates the ``contracts`` module.
 MINIMAX_H3_DIT_DIFFUSERS: Final = PendingContract("minimax.h3-dit-diffusers", 1)
+#: Also already a real tensorfs library contract — and the ONLY shipped one
+#: whose own ``description`` names the Flux family (pgw#1393). It is a
+#: family-PLURAL block-spelling FRAGMENT, not a lane document: no top-level
+#: ``dtype`` (so ``ctx.lane.dtype`` reads None on it, pgw#970) and its
+#: patterns are the timm/native ``blocks.{i}.attn.qkv`` spelling. Flux's own
+#: ``flux1.*``/``flux2-klein.*`` lane documents are OWED (tracked pgw#1393);
+#: until then this is the honest placeholder, and every migrating flux
+#: endpoint spells ``lanes=`` explicitly anyway.
+DIT_BLOCKS_FUSED_QKV: Final = PendingContract("dit.blocks-fused-qkv", 1)
 
 
 # ── bases ────────────────────────────────────────────────────────────────────
@@ -433,6 +442,104 @@ class RifeDefaults(msgspec.Struct, frozen=True):
     knob is ever ruled."""
 
 
+class Flux1Defaults(msgspec.Struct, frozen=True):
+    """FLUX.1 — BFL's rectified-flow DiT (dev, schnell, and the Flex.2-preview
+    redistill). Values are SOURCED from the shipped flux endpoints, which are
+    the family owner's own code; the citations live in the pgw#1393 tracker
+    section and are repeated here field by field.
+
+    ``steps`` 28 / ``guidance`` 3.5 are the BFL FLUX.1 base card numbers both
+    endpoints already register (``flux.1-dev/main.py:69-71`` and
+    ``flux.1-schnell/main.py:61-63`` call ``register_family("flux1", ...)``
+    with a byte-identical schema — the family owner saying dev and schnell are
+    ONE vocabulary). ``steps`` bounds 1..100 are the WIDEST envelope any
+    ``flux1`` lane declares (``flux.1-schnell/main.py:267``, the Flex.2 lane);
+    the platform knob must be the widest because ``defaults_decode`` only ever
+    NARROWS — dev's ``le=50`` (``flux.1-dev/main.py:276``) and schnell's
+    ``le=4`` (``flux.1-schnell/main.py:254``) are CHECKPOINT rows narrowing
+    into it. ``guidance`` bounds 1.0..10.0 from ``flux.1-dev/main.py:281``.
+
+    ``cfg`` is False because FLUX.1's ``guidance`` is NOT CFG: it is the
+    guidance-distillation EMBEDDING, a DiT input tensor, so batch stays 1 and
+    true-CFG is unreachable on the served path (``flux.1-dev/main.py:168-176``
+    and ``:277-280``); schnell pins ``guidance_scale=0.0``
+    (``flux.1-schnell/main.py:388-389``). A Flex.2 row flips it on.
+
+    DELIBERATELY ABSENT: ``canonical_scheduler_config`` (Flux is flow-matching
+    — no beta schedule to record, and ``FlowMatchEulerDiscreteScheduler``'s
+    shift parameters are RESOLUTION-dependent; BFL's own
+    ``scheduler/scheduler_config.json`` is HF-gated and unfetchable from the
+    workspace, so it stays ``{}`` like SD2/HiDreamO1/Wan22 rather than being
+    invented); no ``.Lora`` overlay (no flux endpoint registers a lora
+    vocabulary, so there is no strength range or scheduler demand to source);
+    no ``timesteps`` ladder (no flux endpoint passes one).
+    """
+
+    steps: Knob[int] = Knob(28, lo=1, hi=100, name="steps")
+    guidance: Knob[float] = Knob(3.5, lo=1.0, hi=10.0, name="guidance")
+    #: FLUX.1's guidance is the DISTILLATION EMBEDDING, not CFG — both BFL
+    #: checkpoints serve cfg-off; the Flex.2 redistill runs a real CFG walk
+    #: (``flux.1-schnell/main.py:109-113``) and its row sets True.
+    cfg: bool = False
+    #: schnell IS a 1-4 step timestep distillation
+    #: (``flux.1-schnell/main.py:106-107``) and its row sets True; dev is not.
+    #: Same checkpoint-level fact as ``SdxlDefaults.step_distilled``.
+    step_distilled: bool = False
+    #: The T5 text-sequence pin. A plain int, NOT a Knob (the MiniMaxH3 idiom):
+    #: no endpoint exposes it on the wire, so there is nothing to clamp
+    #: caller-visibly. 512 for dev/Flex.2 (``flux.1-dev/main.py:117``,
+    #: ``flux.1-schnell/main.py:104``); schnell's row sets 256, BFL's own
+    #: reference-snippet value (``flux.1-schnell/main.py:93``, ``:103``).
+    max_sequence_length: int = 512
+
+
+class Flux2KleinDefaults(msgspec.Struct, frozen=True):
+    """FLUX.2 Klein — 4B and 9B under ONE vocabulary root (their endpoint
+    modules diff to nothing but the type name and one VRAM floor, ``vram30g``
+    vs ``vram44g``; a per-lane VRAM floor is a ``requires=`` fact on the model
+    CLASS, never ModelType state). Same one-root precedent as :class:`Wan22`.
+
+    A SEPARATE type from :class:`Flux1`, on the endpoints' own evidence: rope
+    coordinates are ``(B, T, 4)`` int64 here
+    (``flux.2-klein-4b/main.py:235-236``) against FLUX.1's batchless
+    ``(T, 3)`` (``flux.1-dev/main.py:244-245``, which states the contrast
+    outright at ``:211-212``), the pipeline class is ``Flux2KleinPipeline``,
+    and — the one that matters to a defaults vocabulary — Klein Base is a
+    CFG-MECHANISM model: it passes ``guidance=None`` to the transformer always
+    (``:239-241``) and runs a real second uncond forward, batch-2 on every
+    legal request (``:123-129``, ``:307``). One ``cfg`` bool cannot be the
+    platform default for both families.
+
+    Values: ``steps`` 28 / ``guidance`` 4.0 are BFL's Base card numbers
+    (``flux.2-klein-4b/main.py:84-86``). The bounds deliberately do NOT copy
+    the Base HANDLER's wire envelope (``ge=12``/``ge=1.5``, ``:306``/``:310``):
+    the platform knob must admit the Turbo checkpoint's published four-step
+    guidance-1.0 recipe (``:94-95``), and ``_merge_int_knob`` clamps a row's
+    default INTO the platform range — a floor of 12 would silently serve a
+    Turbo row at 12 steps. So 1..50 and 1.0..10.0, with the endpoint keeping
+    its own narrower wire bounds. Upper bounds are the endpoint's (``:306``,
+    ``:310``).
+
+    DELIBERATELY ABSENT, same reasons as :class:`Flux1Defaults`: the noise
+    schedule, a ``.Lora`` overlay, a ``timesteps`` ladder. Also absent: the
+    preset grids / megapixel tiers and the 1..4 ordered-reference bound
+    (``flux.2-klein-4b/main.py:136-137``, ``:357-360``) — those are endpoint
+    PAYLOAD vocabulary, and a ModelType is name + Defaults + fingerprint,
+    nothing else.
+    """
+
+    steps: Knob[int] = Knob(28, lo=1, hi=50, name="steps")
+    guidance: Knob[float] = Knob(4.0, lo=1.0, hi=10.0, name="guidance")
+    #: Klein Base is a CFG-mechanism model (second uncond forward); the Turbo
+    #: distillation's row sets False.
+    cfg: bool = True
+    #: Turbo rows set True — ``flux.2-klein-4b/main.py:93-95``, ``:418-431``.
+    step_distilled: bool = False
+    #: ``flux.2-klein-4b/main.py:121``. Plain int for the same reason as
+    #: :class:`Flux1Defaults`.
+    max_sequence_length: int = 512
+
+
 # ── the model types (launch set, pgw#1376 point 1) ───────────────────────────
 
 
@@ -522,6 +629,44 @@ class Rife(ModelType[RifeDefaults]):
     Defaults = RifeDefaults
 
 
+class Flux1(ModelType[Flux1Defaults]):
+    """FLUX.1 — dev, schnell and the Flex.2-preview redistill under ONE root.
+
+    Not a judgement call: ``flux.1-dev`` and ``flux.1-schnell`` both call
+    ``register_family("flux1", Flux1Defaults)`` with a byte-identical schema,
+    and schnell's docstring says so ("the SAME family vocabulary flux.1-dev
+    declares"). schnell's 1-4 step distillation is handled as a caller-visible
+    CLAMP against that shared schema (``flux.1-schnell/main.py:356-371``) —
+    a ``Defaults`` fact, not a second vocabulary. Flex.2-preview registers no
+    family of its own and reads the same ``ctx.defaults`` (``:436-441``).
+
+    The fingerprint is ``flux1.*`` — the future flux-specific contract names,
+    mirroring how ``sdxl.*`` matches ``sdxl.diffusers-bf16@1``.
+    ``dit.blocks-fused-qkv*`` is deliberately NOT a fingerprint pattern: that
+    document is family-PLURAL ("shared by Flux-family and timm-derived
+    transformers"), so matching on it would classify every timm ViT as Flux.
+    An unmatched stamp is legal and visible (see
+    :func:`model_type_for_contract`).
+    """
+
+    name = "flux1"
+    contracts = ("flux1.*",)
+    canonical_contract = DIT_BLOCKS_FUSED_QKV
+    Defaults = Flux1Defaults
+
+
+class Flux2Klein(ModelType[Flux2KleinDefaults]):
+    """FLUX.2 Klein — 4B and 9B, Base and Turbo, under one vocabulary root
+    (see :class:`Flux2KleinDefaults` for the architecture evidence separating
+    it from :class:`Flux1`, and for why the 4B/9B split is a ``requires=``
+    fact rather than a type)."""
+
+    name = "flux2-klein"
+    contracts = ("flux2-klein.*",)
+    canonical_contract = DIT_BLOCKS_FUSED_QKV
+    Defaults = Flux2KleinDefaults
+
+
 MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     SDXL,
     SD15,
@@ -530,6 +675,8 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     Wan22,
     MiniMaxH3,
     Rife,
+    Flux1,
+    Flux2Klein,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
@@ -565,6 +712,8 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Wan22.name: Wan22.Defaults,
         MiniMaxH3.name: MiniMaxH3.Defaults,
         Rife.name: Rife.Defaults,
+        Flux1.name: Flux1.Defaults,
+        Flux2Klein.name: Flux2Klein.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }
@@ -608,6 +757,11 @@ _seed_sdxl_contracts()
 
 __all__ = [
     "CONTRACT_DTYPES",
+    "DIT_BLOCKS_FUSED_QKV",
+    "Flux1",
+    "Flux1Defaults",
+    "Flux2Klein",
+    "Flux2KleinDefaults",
     "HIDREAM_O1_DIFFUSERS_BF16",
     "HiDreamO1",
     "HiDreamO1Defaults",
