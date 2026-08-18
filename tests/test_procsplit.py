@@ -547,10 +547,28 @@ def test_signal_death_consumes_the_inflight_marker_and_records_the_streak(
         h.close()
 
 
-def test_starved_compile_is_held_while_a_dead_child_is_still_killed(
+def test_a_starving_handler_no_longer_starves_the_worker_loop_pgw1373(
     tmp_path, captured_dials,
 ):
-    """pgw#771: loop silence ARMS the hang verdict; the open activity DECIDES."""
+    """pgw#771's hazard is GONE under pgw#1373, so its verdict cannot fire.
+
+    The original case asserted `compute_hang_verdict_held`: an async handler
+    that burns CPU without yielding starved the worker's OWN event loop, the
+    parent's watchdog ARMED on the resulting silence, and the open activity
+    then HELD the verdict instead of killing a live pod.
+
+    The v2 serve path runs author code on a worker thread
+    (`asyncio.to_thread` -> `ServeLoop.invoke`), so a starving handler cannot
+    reach the loop that answers pings. Nothing arms, so nothing can be held —
+    asserting the hold would be asserting a verdict that no longer has a
+    trigger. What this now measures is the property that REPLACED it: the same
+    9-second non-yielding handler completes, the child is never killed, and no
+    hang verdict is reached at all.
+
+    The hold machinery itself is untouched and still covered by the parent-side
+    unit that drives the verdict directly; what changed is that the compute
+    child no longer produces the silence it defers to.
+    """
     h = SplitHarness(tmp_path, watchdog_budget_s=3.0)
     try:
         conn = h.scheduler.wait_connection(0)
@@ -565,9 +583,6 @@ def test_starved_compile_is_held_while_a_dead_child_is_still_killed(
         assert h.pc._spawn_count == 1
         assert not any("watchdog_hang" in d for d in captured_dials), captured_dials
         assert not any("compute_process_exit" in d for d in captured_dials)
-        # ...and the hold is legible, not silent tolerance.
-        assert any("compute_hang_verdict_held" in d for d in captured_dials), captured_dials
-        assert any("activity=self_mint_compile" in d for d in captured_dials)
     finally:
         h.close()
 

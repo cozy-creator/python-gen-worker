@@ -43,6 +43,7 @@ from .models.cozy_snapshot import snapshot_dir_key
 from .models.disk_gc import tree_bytes
 from .models.projection import SNAPSHOTS_DIR
 from .discovery.names import slugify_name
+from . import postmortem
 from .procsplit import is_compute_child
 from .pb import worker_scheduler_pb2 as pb
 from .serving.context import DeployBinding
@@ -597,12 +598,20 @@ class Worker:
     def _on_cancel_job(self, cancel: pb.CancelJob) -> None:
         key = (str(cancel.request_id), int(cancel.attempt))
         self._canceled.add(key)
-        if key in self._jobs:
-            # The serve loop runs author code on a worker thread; nothing in
-            # the v2 surface can interrupt it. Marked, and said out loud.
+        task = self._jobs.get(key)
+        if task is not None and not task.done():
+            # CANCEL THE AWAITING TASK, which is what makes the CANCELED result
+            # prompt. It does NOT interrupt the author's code: the serve loop
+            # runs it on a worker thread and no v2 surface can stop a thread
+            # mid-call — exactly as the v1 executor could not stop a CPU-bound
+            # sync handler either. What the hub gets back is the terminal it
+            # asked for, on time, instead of nothing until the handler happens
+            # to finish. Marking without cancelling produced NO job_result at
+            # all, which reads to the hub as a hung pod.
+            task.cancel()
             logger.warning(
-                "cancel for in-flight %s attempt=%d: the v2 serve path has no "
-                "interruption hook; the request runs to completion",
+                "cancel for in-flight %s attempt=%d: terminal shipped now; the "
+                "author's call keeps running on its worker thread to completion",
                 *key,
             )
 
@@ -656,12 +665,25 @@ class Worker:
             envelope = self._envelope_of(run)
             _DISPATCH.set(_picks_of(run))
             started = time.monotonic()
-            outcome = await asyncio.to_thread(
-                self.serve.invoke,
-                str(run.function_name),
-                envelope,
-                request_id=str(run.request_id),
+            # pgw#676: STAMP THE IN-FLIGHT MARKER around tenant execution. A
+            # SIGKILL mid-handler leaves this marker behind, and it is the only
+            # thing that lets the supervisor's post-mortem attribute the death
+            # to a FUNCTION and build the native-crash streak that eventually
+            # refuses it. Without it a signal death is charged to nothing, the
+            # streak never forms, and a reliably-crashing handler is served
+            # forever.
+            inflight = postmortem.note_inflight(
+                "request", str(run.function_name), request_id=str(run.request_id)
             )
+            try:
+                outcome = await asyncio.to_thread(
+                    self.serve.invoke,
+                    str(run.function_name),
+                    envelope,
+                    request_id=str(run.request_id),
+                )
+            finally:
+                postmortem.clear_inflight(inflight)
             inline = msgspec.msgpack.encode(outcome.result)
             adjustments = outcome.adjustments
             status = pb.JOB_STATUS_OK
@@ -742,6 +764,18 @@ class Worker:
                 )
             except (NotImplementedError, RuntimeError):
                 pass
+        # ROUTE ACTIVITY AND BOOT-PHASE REPORTS ONTO THE STREAM. This is not
+        # telemetry decoration: the control parent's hang watchdog HOLDS its
+        # verdict while an activity is open, so a child that publishes none is
+        # a child whose long-but-healthy work reads as a hang. pgw#771's
+        # `compute_hang_verdict_held` never fired without it — the parent had
+        # nothing to hold on.
+        from . import activity as activity_mod
+        from . import boot_phases as boot_mod
+
+        activity_mod.bind_sink(self._send, loop)
+        boot_mod.bind_sink(self._send, loop)
+
         heartbeat = asyncio.create_task(self._heartbeat(), name="heartbeat")
         transport_task = asyncio.create_task(self.transport.run(), name="transport")
         try:
