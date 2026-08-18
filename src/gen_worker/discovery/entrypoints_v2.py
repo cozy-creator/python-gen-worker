@@ -323,6 +323,22 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # weightless entrypoint gets that meaning rather than a silent
         # fall-back to release-level class resolution.
         **({"resources": resources} if resources is not None else {}),
+        # pgw#1406, the PRODUCER declarations. Both keys are already decoded
+        # by the hub ON A FUNCTION ROW — `manifestFunction.Publishes` /
+        # `.Env` (`internal/builder/manifest_contract.go`) — and
+        # `entrypoints[]` folds into `Functions` at ParseManifest's one decode
+        # site, so `publishes` reaches `ReleaseFunctionSchema.Publishes` ->
+        # the capability JWT's `publishes` claim -> `callerDeclaresHubWrite`
+        # WITHOUT A HUB CHANGE. Emitted only when declared, so every existing
+        # v2 row stays byte-identical (the hub's own tags are `omitempty`).
+        #
+        # `emits_media` is NOT here, deliberately: the request path grants
+        # `upload_media` unconditionally (`capability_subject_th2068.go:124`),
+        # so the hub has no decoder for it on a function row and emitting it
+        # would be exactly the mirror-with-no-reader th#2087's fence exists to
+        # catch. It is enforced SDK-side instead — see the decorator.
+        **({"publishes": True} if spec.publishes else {}),
+        **({"env": list(spec.env)} if spec.env else {}),
     }
 
 
