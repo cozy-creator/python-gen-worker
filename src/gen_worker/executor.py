@@ -30,14 +30,13 @@ import msgspec
 
 from . import activity as activity_mod
 from . import adopt_fit
-from . import aot_declaration, aot_identity
+from . import aot_identity
 from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import compiled_graph_adopt
 from . import dispatch
 from . import handler_proof
 from . import procsplit
-from .procsplit import broker as procsplit_broker
 from . import cpu_budget
 from . import measured_posture as posture_mod
 from . import mint_workers
@@ -5550,90 +5549,32 @@ class Executor:
                 f"{topology_eager}")
         compile_selection = arm.selection if arm is not None else None
         compile_artifact = compile_selection.path if compile_selection else None
-        # §4.27 steps 1-3 (pgw#1089/pgw#1090): with no Plan-named artifact, this
-        # pod derives its OWN compiled graph key from code alone and asks the hub by that
-        # key BEFORE `setup()` puts a weight in this process. On a hit the
-        # answer becomes an ordinary `_ArmOrder`, so the adopted compiled graph runs the
-        # Plan path's gates and not one gate fewer.
-        #
-        # This is what makes boot-time adoption possible at all: the hub's other
-        # resolver only VERIFIES a compiled graph the worker already armed, so a cold pod
-        # advertises nothing, is named nothing, and never adopts.
-        #
-        # OWED (pgw#1091's overlap box): the derivation runs HERE, after
-        # `_materialize_local` finished the weights download, so it does not yet
-        # RACE the fetch the way §4.27 step 4 asks. It is already off the
-        # request path — no dispatch has occurred — and moving it earlier is a
-        # restructure of this method's await order, not of the derivation.
-        # pgw#1127 S2: the `ck1` key THIS MACHINE's own store answered on. Not
-        # an `_ArmOrder`: a self-minted compiled graph carries no hub receipt and no
-        # publisher org, so `arm_ordered` would refuse it
-        # `receipt_gate_unconfigured`. It is an ADDRESS, handed to the arming
-        # brain as a second lookup route into the same CAS the arm-token memo
-        # addresses — one key, two routes, and `_arm_exported_compiled_graph` is the one
-        # gate at the end of both.
+        # pgw#1372 (trace-once-at-publish ruling, 2026-08-18): the §4.27
+        # boot-time derive+resolve ladder is DELETED from the boot flow.
+        # Identity is derived at PUBLISH time; compiled artifacts arrive via
+        # the adopt-first release pull (`gen_worker.serving`). A compiled
+        # family with no adopt path wired here boots EAGER and self-mints per
+        # fleet policy (§4.28/§4.31 stand restored) — stated on the wire per
+        # boot, so the fleet-wide cutover is a query rather than a story.
+        # `boot_local_key` survives only as the local-store second route for
+        # artifacts an order names.
         boot_local_key = ""
         boot_holes: Tuple[str, ...] = ()
         if arm is None and spec.compile is not None and not eager_only:
-            adopts = await asyncio.to_thread(
-                self._boot_adopt, spec, resolved_slots)
-            # pgw#1371 holes-only: every per-class MISS is a named HOLE, and
-            # the self-mint this boot may open is SCOPED to exactly those —
-            # a full miss names the whole declaration (the pre-holes mint),
-            # a partial hit names the remainder. Empty when the outcomes
-            # carry no names (a pre-derive refusal): the mint then covers
-            # the whole declaration, which is the only honest reading of
-            # "this boot could not say what is missing".
-            boot_holes = tuple(sorted({
-                str(name)
-                for outcome in adopts if outcome.adoption is None
-                for name in (outcome.graph_classes or ())}))
-            # pgw#1176: the boot resolves ONE outcome per declared graph class.
-            # Coverage accretes, so several hits are the expected shape and
-            # each is armed on its own.
-            #
-            # UNFINISHED, AND LOUD RATHER THAN SILENT (owner: pgw#1176; expiry:
-            # before this branch opens a PR). This call site still builds ONE
-            # `_ArmOrder`, so only the first hit is armed here. The remaining
-            # hits are NOT dropped quietly — they are named on the wire below,
-            # and the fix is to carry them on the order so `_enable_compiled`
-            # arms each into the same registry after the pipeline is up, which
-            # is what `aot_serve.arm_entry` already supports. A silent subset
-            # here would be the exact defect this whole change deletes.
-            resolved = [o for o in adopts if o.adoption is not None]
-            adopt = resolved[0] if resolved else (
-                adopts[0] if adopts else boot_adopt.BootAdoptOutcome())
-            boot_local_key = adopt.local_key
-            if adopt.adoption is not None:
-                got = adopt.adoption
-                compile_artifact = got.artifact
-                arm = _ArmOrder.for_artifact(
-                    path=got.artifact, ref=got.ref,
-                    snapshot_digest=got.snapshot_digest,
-                    expected=got.expected,
-                    publisher_org=got.graph.publisher_org,
-                    # pgw#1122: this order is the POD's, not the hub's.
-                    adopt=adopt,
-                    # pgw#1176: every OTHER class this boot resolved, armed
-                    # into the same registry after this one.
-                    extra=tuple(
-                        (got_other.artifact, got_other.expected,
-                         got_other.graph.publisher_org)
-                        for got_other in (
-                            o.adoption for o in resolved[1:]
-                            if o.adoption is not None)))
-                compile_selection = arm.selection
-            elif serve_role.adopt_only():
-                # pgw#1328: §4.28's answer to a miss — serve eager, mint in
-                # the background — is not available to this role, so the miss
-                # becomes the pod's ANSWER. `serve.boot_miss` maps every
-                # `boot_adopt` reason to refuse-or-route (total, no default),
-                # `report` puts it on the wire, and `_map_exception` turns the
-                # disposition into the job status the hub places on.
+            adopt = boot_adopt.refused(
+                boot_adopt.BOOT_DERIVE_DELETED,
+                "boot-time key derivation is deleted (pgw#1372); compiled "
+                "artifacts arrive via the release adopt pull",
+                family=str(getattr(spec.compile_contract(), "family", "") or ""),
+                function=str(spec.name or ""))
+            if serve_role.adopt_only():
+                # pgw#1328: this role has no eager tier to absorb the miss,
+                # and pre-cutover there is no artifact ANY pod of this image
+                # could adopt — refuse typed, same answer fleet-wide.
                 raise serve_refusal.report(
                     serve_boot_miss.refusal_for(adopt)
                     or serve_refusal.AdoptOnlyRefusal(
-                        kind=serve_refusal.MissKind.ARTIFACT_MISS,
+                        kind=serve_refusal.MissKind.NOT_ADOPTABLE,
                         function=str(spec.name or ""))).error()
         elif arm is None and spec.compile is not None:
             # pgw#1116: a compiled family that boots WITHOUT asking is a fact
@@ -8591,117 +8532,6 @@ class Executor:
                 error=f"compiled_graph_selection_bug: {str(exc)[:300]}",
             )
         ))
-
-    def _boot_adopt(
-        self, spec: EndpointSpec, slots: Dict[str, MintSlot],
-    ) -> "Tuple[boot_adopt.BootAdoptOutcome, ...]":
-        """§4.27 steps 1-3 for one boot, off the event loop.
-
-        ALWAYS an outcome, never ``None`` (pgw#1116). The three gates below
-        used to return a bare ``None`` — "this pod cannot even attempt the
-        derivation" — which is a true statement that names nothing: no family,
-        no gate, no event, and a caller unable to tell it from a pod that asked
-        the hub and was told no. Three real pods on 0.103.0 called
-        ``/v1/worker/compiled-graphs/resolve`` ZERO times and no artifact anywhere said
-        which of these gates did it. Each one now names itself and emits.
-
-        None of them is fatal, and none of them is new behaviour: every non-hit
-        outcome still means "boot as this pod booted yesterday".
-        """
-        cfg = spec.compile_contract()
-        family = str(getattr(cfg, "family", "") or "")
-        fn = str(spec.name or "")
-        # pgw#1107: a registry read, not an evaluation. The pgw#853 thunk that
-        # could raise out of here (and, uncaught, failed the whole model setup)
-        # is retired; a blocked family carries its refusal as
-        # `Compile.blockers` and the mint gate reads it.
-        from .api.export_contract import export_declaration
-
-        decl = export_declaration(family)
-        if decl is None:
-            return (boot_adopt.refused(
-                "no_export_declaration",
-                f"family {family!r} has no registered export declaration, so "
-                f"this boot cannot state the class set a compiled graph key names",
-                family=family, function=fn),)
-        try:
-            declared_hint = len(list(aot_declaration.compiled_graph_plans(decl)))
-        except Exception as exc:  # noqa: BLE001 — never fatal
-            return (boot_adopt.refused(
-                "declaration_unreadable",
-                f"family {family!r} has a declaration this boot cannot "
-                f"enumerate: {type(exc).__name__}: {exc}",
-                family=family, function=fn),)
-        base_url = str(self.file_base_url or "")
-        bearer = str(self.worker_jwt_provider() or "")
-        # pgw#1108: the credential lives in the PARENT under the split (pgw#783),
-        # which is the only execution model. This executor runs in the compute
-        # child, whose `worker_jwt_provider` returns "" BY CONSTRUCTION (it holds
-        # no credential — pgw#763 delta 1), so a `not bearer` gate here refused
-        # boot-adopt on EVERY real serving pod: derive never ran, resolve never
-        # fired, and the pod fell straight through to self-mint — the whole reuse
-        # circle stayed open. The seam being up (`broker.active()`) is the child's
-        # honest "there is somebody to ask": the resolve is a parent-mediated
-        # action (`compiled_graphs.resolve`), so the parent supplies base_url + bearer and
-        # ignores what the child passes. Mirrors `fleet_compiled_graphs.CompiledGraphPublisher`'s
-        # own readiness (base_url AND (local bearer OR broker.active())).
-        hub_absent = ""
-        if not base_url or (not bearer and not procsplit_broker.active()):
-            hub_absent = "nobody to ask: base_url={} bearer={} seam={}".format(
-                base_url or "<unset>", "set" if bearer else "<unset>",
-                "up" if procsplit_broker.active() else "down")
-        # pgw#1127 S2: this used to RETURN here, before the derivation, on the
-        # premise that "deriving a key nobody will answer is pure boot latency".
-        # The premise is false on exactly the machines §4.28 is about: the
-        # derived `ck1` key IS `local_compiled_graph_store`'s own address, so an offline
-        # box holding the exact compiled graph it needs was being told there was nobody
-        # to ask. The gate survives in its honest form — refuse only when BOTH
-        # answerers are absent — and `attempt` decides the rest, after the
-        # local store has been asked.
-        if boot_adopt.no_compiled_graph_source(hub_absent):
-            return (boot_adopt.refused(
-                "no_compiled_graph_source",
-                f"{hub_absent}, and this machine's own compiled graph store is empty",
-                family=family, function=fn),)
-        work_root = Path(
-            self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
-        ) / "boot-key" / (spec.name or "endpoint")
-        # pgw#1327: the key set is DATA first. `derive` is the mint-lane
-        # fallback and it is INJECTED, never imported by `boot_adopt` — the
-        # import is local to this call so the serve-role extraction (pgw#1328)
-        # cuts HERE, at one line, rather than inside the adopt path. An
-        # adopt-only pod injects nothing and its key-set miss is a typed
-        # refusal.
-        #
-        # pgw#1328 is where that becomes real, and it is ONE branch: the
-        # adopt-only role imports no tracer, so `serve.guard`'s blocker is
-        # never even consulted here — the promise is kept by the code and only
-        # ENFORCED by the blocker. Deliberately NOT an env knob, which would be
-        # a second answer to "may this pod compile" beside the role the worker
-        # already declares (`serve.role`, refining `process_role`, pgw#1309).
-        deriver: Optional[boot_adopt.KeyDeriver] = None
-        if not serve_role.adopt_only():
-            from . import boot_key
-
-            deriver = boot_key.derive
-        return boot_adopt.attempt(
-            function=spec.name,
-            modules=_mint_modules(spec),
-            cfg=cfg,
-            slots=slots,
-            declared_hint=declared_hint,
-            work_root=work_root,
-            derive=deriver,
-            # The memo lives beside the compiled graph cache and OUTLIVES one boot on a
-            # pod with a volume — which is the whole point (§4.28's
-            # compile-once-run-forever promise for cozy-local reads the same
-            # memo through the same closure digest).
-            memo_dir=Path(self.store._cache_dir) if self.store._cache_dir else None,
-            cache_dir=self.store._cache_dir,
-            base_url=base_url,
-            bearer=bearer,
-            hub_absent=hub_absent,
-        )
 
     def _enable_compiled(
         self, pipe: Any, cfg: Any, artifact: Optional[Path],

@@ -484,30 +484,6 @@ def test_the_adopt_only_role_refuses_even_when_the_lane_is_registered() -> None:
     assert isinstance(mint_seam.supervision(), mint_seam.NoMint)
 
 
-def test_the_key_deriver_is_not_injected_in_the_adopt_only_role() -> None:
-    """pgw#1327 handed this over by name: *"an adopt-only role states its
-    posture by passing no deriver"*. Read off the source, because the branch
-    is what keeps `boot_key` out of the process at all."""
-    source = (SRC / "gen_worker" / "executor.py").read_text()
-    tree = ast.parse(source)
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "_boot_adopt")
-    guarded = False
-    for node in ast.walk(fn):
-        if not isinstance(node, ast.If):
-            continue
-        if "adopt_only" not in ast.unparse(node.test):
-            continue
-        if any(isinstance(inner, (ast.Import, ast.ImportFrom))
-               and "boot_key" in ast.unparse(inner)
-               for inner in ast.walk(node)):
-            guarded = True
-    assert guarded, (
-        "the tracer import in _boot_adopt is not behind the role branch — an "
-        "adopt-only pod would import boot_key and blow up on the blocker "
-        "instead of simply not tracing")
-
-
 def test_the_role_declaration_is_not_readable_from_the_environment() -> None:
     """§1.17 / Paul's standing rule: an env may carry a VALUE, never a
     DECISION. pgw#1327 already refused a `GEN_WORKER_ADOPT_ONLY` knob for this

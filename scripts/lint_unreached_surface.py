@@ -164,6 +164,17 @@ EXEMPT_TARGETS: dict[str, str] = {
         "Model primitives",
     "gen_worker.serving.residency.ResidencyManager.tier_of":
         "operator/telemetry read; wired with the same dispatch-loop follow-up",
+    # pgw#1372 CUT the boot-time derive+resolve ladder out of the executor
+    # (boot_derive_deleted): these three entries are the ladder's now-caller-
+    # less mouths, kept ONE release because the module-level suites and the
+    # mint-lane tooling still exercise them. THE DELETION IS OWED BY pgw#1373
+    # (rows 1-2 of its inventory name boot_adopt/boot_key/keyset explicitly).
+    "gen_worker.boot_adopt.attempt":
+        "the deleted boot ladder's entry; dies in pgw#1373 rows 1-2",
+    "gen_worker.boot_adopt.no_compiled_graph_source":
+        "the deleted boot ladder's gate; dies in pgw#1373 rows 1-2",
+    "gen_worker.boot_key.derive":
+        "the deleted boot ladder's deriver; dies in pgw#1373 rows 1-2",
     # pgw#1372: the adopt-first boot's hub store. Its LIFECYCLE caller is the
     # vendored torchcg adopt path (`_vendor/torchcg/adopt.py` calls
     # `store.fetch_artifact` through the GraphStore protocol), which this
