@@ -588,6 +588,36 @@ def _emit_abort(
     )
 
 
+def _adopt_landed(task: "MintTask", pending: Any, row: Any) -> None:
+    """pgw#1371: the per-class adopt/publish sink, run as each class LANDS.
+
+    Called from the pool's supervision thread while sibling classes are still
+    compiling — the same concurrency the terminus adopt already has with live
+    serving. Never raises: a failed incremental adopt costs nothing but the
+    incremental property for that class, because the terminus
+    ``adopt_delegated_mint`` still sees the artifact on disk and runs the
+    ordinary batch path over it.
+    """
+    from . import fleet_compiled_graphs
+
+    try:
+        fleet_compiled_graphs.adopt_minted_class(
+            task.pipe, pending, Path(str(row.artifact)))
+    except Exception:  # noqa: BLE001 — the terminus adopt is the backstop
+        logger.warning(
+            "mint-supervisor: mid-mint adopt of %s failed; the class stays "
+            "packed on disk and the terminus adopt will retry it",
+            getattr(row, "name", "?"), exc_info=True)
+
+
+def _incremental_covered(pending: Any) -> int:
+    """How many classes `adopt_minted_class` has ARMED so far (pgw#1371)."""
+    try:
+        return len(pending._state.get("incremental") or {})
+    except Exception:  # noqa: BLE001 — a double without state answers 0
+        return 0
+
+
 def graph_dir(pending: Any) -> Path:
     """Where this obligation's packed graph classes accrete."""
     return Path(pending.mint_root) / GRAPH_DIRNAME
@@ -720,6 +750,16 @@ async def supervise(
                 detail="abandoned before attempt")
         held = held_graph_classes(out_dir)
         have = tuple(sorted(str(row.entry) for row in held))
+        # pgw#1371 holes-only: the obligation may be SCOPED — the opener named
+        # the classes with no artifact for this (lane x sm), and this mint
+        # produces those and nothing else. The class goal, the width and the
+        # completion test all shrink to the holes; the wider declaration is
+        # someone else's coverage (adopted at boot, or another pod's publish).
+        holes = tuple(
+            str(h) for h in (getattr(pending, "holes", ()) or ()))
+        todo = (
+            len(set(holes) - set(have)) if holes
+            else max(0, declared - len(have)))
         # §4.33 / pgw#1175: NOTHING IS BUDGETED. A `mint_budget.co_residency`
         # gate stood at the top of this loop and charged a weight-free child
         # for the PARENT's resident weights, already excluded from the free
@@ -728,7 +768,7 @@ async def supervise(
         # separate processes, crash-isolated, and a real shortfall comes back
         # classified from the card itself.
         width = aot_compile_pool.entry_workers(
-            max(1, declared - len(have)),
+            max(1, todo),
             # The one banked measurement that survives: what a previous
             # compile child on this pod really peaked at, in HOST RSS. K's
             # divisor and nothing else.
@@ -741,18 +781,25 @@ async def supervise(
         terminus = ""
         retryable = False
         try:
-            if len(have) >= declared:
-                # Every declared class is already on disk. The attempt is a
-                # no-op and saying so is cheaper than proving it with a pool.
+            if todo <= 0:
+                # Everything this obligation is scoped to is already on disk.
+                # The attempt is a no-op and saying so is cheaper than proving
+                # it with a pool.
                 result = aot_mint.fold_held_graph_classes(held, spec=spec)
             else:
                 result = await asyncio.to_thread(
                     aot_mint.mint_graph_classes,
-                    msgspec.structs.replace(template, have_classes=have),
+                    msgspec.structs.replace(
+                        template, have_classes=have, hole_classes=holes),
                     workdir=Path(pending.mint_root) / "compile-pool",
                     width=width,
                     spec=spec,
                     on_progress=_progress,
+                    # pgw#1371: adopt-and-publish EACH class the moment its
+                    # artifact lands — runs on the pool's supervision thread,
+                    # beside the still-compiling siblings, so a killed pod
+                    # keeps (and the fleet store holds) every completed graph.
+                    on_landed=lambda row: _adopt_landed(task, pending, row),
                     # pgw#848: rewritten on every beat, so a mint this pod is
                     # KILLED still leaves its measurements on disk.
                     phase_snapshot=snapshot,
@@ -790,7 +837,11 @@ async def supervise(
         if terminus == ABANDONED:
             return SupervisedResult(
                 status=ABANDONED, detail=last, attempts=attempts,
-                covered=len(have), declared=declared)
+                # pgw#1371: the classes `adopt_minted_class` armed before the
+                # abandon are REAL coverage — armed on this pipe, durable in
+                # the local CAS, and (with a sink) already uploaded.
+                covered=len(have) + _incremental_covered(pending),
+                declared=declared)
 
         if not last:
             act.phase(activity_mod.PHASE_SEAL_PUBLISH)

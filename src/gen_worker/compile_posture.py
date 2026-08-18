@@ -67,6 +67,14 @@ import msgspec
 #: a niced compile still runs at full speed on an otherwise idle box.
 USER_MACHINE_NICE = 19
 
+#: pgw#1371: the FLEET mint tree's priority increment — the serving-reserve
+#: half that core arithmetic cannot buy (see :meth:`CompilePosture.nice_level`
+#: for the run-7 measurement that calibrated this away from 0). 10, not 19: a
+#: fleet mint is the pod's own owed work, and the only thing that outranks it
+#: is the serving process — it should win every contended slice without the
+#: mint being starved by, say, a co-tenant container at default priority.
+FLEET_MINT_NICE = 10
+
 #: The share of the pod's core budget a mint may take on a user's machine.
 #: See :meth:`CompilePosture.cpu_budget_cores` for the derivation.
 USER_MACHINE_CPU_SHARE = 2
@@ -106,11 +114,24 @@ class CompilePosture(msgspec.Struct, frozen=True, kw_only=True):
 
         Applied by the mint child TO ITSELF and inherited by every descendant
         — the entry-pool children, inductor's compile workers, and every
-        ``cc1plus`` under them. 0 on a pod: a mint there competes with a tenant
-        whose reserves are already held back explicitly, and de-prioritising it
-        on top of that would slow paid work for no gain.
+        ``cc1plus`` under them.
+
+        pgw#1371 (was 0 on a pod, *"de-prioritising it on top of the tenant's
+        reserves would slow paid work for no gain"* — FALSIFIED by e2e#1892
+        run 7): a 36-class sdxl runtime mint at K=2 on 7 vCPU left the SERVING
+        process so starved that an invocation which completes in 15m50s with
+        no mint never returned in 65 minutes. The reserves cannot protect the
+        tenant, because they bound the AVERAGE while each entry child's
+        inductor bursts ``compile_threads`` workers the K-formula deliberately
+        overcommits — and this module's own doctrine already states the
+        mechanism that does work: *"priority says who yields, at microsecond
+        granularity, in the kernel."* So the FLEET mint tree yields to the
+        serving process exactly as the user-machine tree yields to its owner —
+        a niced mint still runs flat out on an idle pod, and gets out of the
+        way the moment paid work arrives. The serving process itself is never
+        niced; only the mint tree is.
         """
-        return USER_MACHINE_NICE if self.user_machine else 0
+        return USER_MACHINE_NICE if self.user_machine else FLEET_MINT_NICE
 
     def cpu_budget_cores(self, vcpus: int, *, headroom: int) -> int:
         """Cores the pool may size itself against.
@@ -180,6 +201,7 @@ def current() -> CompilePosture:
 
 
 __all__ = [
+    "FLEET_MINT_NICE",
     "USER_MACHINE_MAX_ENTRY_WORKERS",
     "USER_MACHINE_NICE",
     "USER_MACHINE_RSS_RESERVE_BYTES",

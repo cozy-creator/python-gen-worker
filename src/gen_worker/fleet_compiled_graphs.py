@@ -451,6 +451,14 @@ class PendingSelfMint:
     #: previously answerable only from an activity event that carried no compiled graph
     #: key. Monotonic: a wall-clock step must not turn a mint negative.
     armed_at: float = dataclasses.field(default_factory=time.monotonic)
+    #: pgw#1371 holes-only: the ORDERED graph-class names this obligation is
+    #: scoped to — the classes with no artifact for this pod's (lane x sm)
+    #: anywhere the opener could see. Empty = the whole declaration (a full
+    #: miss, and the pre-holes behaviour). This is the handoff shape the
+    #: adopt-first boot (pgw#1372) fills: a boot that adopts 30 of 36 classes
+    #: opens its background mint with the 6 misses here, and the supervisor
+    #: mints ONLY those.
+    holes: Tuple[str, ...] = ()
     _state: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -1614,8 +1622,14 @@ def enable_compiled(
     delivered_ref: str = "",
     delivered_digest: str = "",
     boot_local_key: str = "",
+    holes: Sequence[str] = (),
 ) -> ArmOutcome:
     """Fleet arming policy, plus the adoption ledger every exit shares.
+
+    ``holes`` (pgw#1371) scopes a MISS's self-mint obligation to the named
+    graph classes — the caller's list of classes with no artifact for this
+    (lane x sm). Empty means the whole declaration. It rides the returned
+    ``PendingSelfMint`` and changes nothing about arming itself.
 
     pgw#923: the policy has a dozen exits and an adoption attempt can precede
     any of them, so the measured attempts are collected in ONE place rather
@@ -1640,6 +1654,7 @@ def enable_compiled(
         publisher=publisher, delegate=delegate,
         delivered_ref=delivered_ref, delivered_digest=delivered_digest,
         adoptions=adoptions, boot_local_key=boot_local_key,
+        holes=holes,
     )
     if not adoptions:
         return outcome
@@ -1801,6 +1816,7 @@ def _arming_policy(
     delivered_digest: str,
     adoptions: List[CompiledGraphAdoption],
     boot_local_key: str = "",
+    holes: Sequence[str] = (),
 ) -> ArmOutcome:
     """Fleet arming policy (gw#587): delivered compiled graph first, self-mint on miss.
 
@@ -2166,6 +2182,7 @@ def _arming_policy(
         cfg=cfg, target=target,
         mint_root=mint_root, publisher=publisher, cache_dir=cache_dir,
         arm_key=arm_key,
+        holes=tuple(str(h) for h in holes),
     )
     with _PENDING_LOCK:
         _PENDING.setdefault(key, pending)
@@ -2546,6 +2563,110 @@ def arm_from_local_store(
     return minted
 
 
+def adopt_minted_class(
+    pipe: Any, pending: "PendingSelfMint", artifact: Path,
+) -> bool:
+    """pgw#1371: adopt ONE freshly minted graph class THE MOMENT it lands.
+
+    The per-class half of :func:`adopt_delegated_mint`, run while the mint's
+    other classes are still compiling — durable first, then the §4.32 arm +
+    strict parity gate, then the per-class publish. This is what turns the
+    36-at-once "seal at the end or lose everything" shape into pgw#1372's
+    contract (*"arm each as it lands"*): a pod killed mid-mint has already
+    ARMED and PUBLISHED every class this accepted, so its successor adopts
+    them from the store and mints only the remainder.
+
+    Ordering is §4.32-preserving by construction: nothing is published before
+    it has passed the same arm + numerics gate the batch adopt runs, because
+    an adopter runs no gate that could re-check what ships. A class that
+    refuses costs itself: its bytes are quarantined in the local CAS for
+    forensics and its siblings are untouched.
+
+    Returns True when the class ARMED (whether or not a publish sink exists).
+    Every outcome is recorded on the pending's state, and the terminus
+    :func:`adopt_delegated_mint` folds those records instead of re-arming or
+    re-publishing — one arm, one upload, per class, however the mint ends.
+    """
+    state = pending._state
+    incremental: Dict[str, Tuple[str, Path, Dict[str, Any]]] = \
+        state.setdefault("incremental", {})
+    inc_refused: Dict[str, Tuple[str, str]] = \
+        state.setdefault("incremental_refused", {})
+    # EXACTLY ONCE per class: the stream and the share report can both
+    # deliver the same landing, and a settled class must not be re-armed,
+    # re-staged or re-shipped.
+    try:
+        stamped = dict(artifact_meta.try_read_metadata(Path(artifact)) or {})
+        stamped_name = str(
+            (stamped.get(GRAPH_CLASS_BLOCK) or {}).get("name") or "")
+    except Exception:  # noqa: BLE001 — an unreadable stamp is refused below
+        stamped_name = ""
+    if stamped_name and stamped_name in incremental:
+        return True
+    if stamped_name and stamped_name in inc_refused:
+        return False
+    # Provenance with NO manifest: the declaration-wide contract digest folds
+    # only once every class is traced, and `mint_provenance` documents the
+    # absent manifest as honest coverage telemetry, never identity. The
+    # terminus recomputes the full record for its own bookkeeping.
+    provenance = state.get("incremental_provenance")
+    if provenance is None:
+        provenance = mint_provenance(pending, manifest="")
+        state["incremental_provenance"] = provenance
+    staged_key = _stage_durable(pending, artifact, provenance)
+    bucket = int(getattr(pending.cfg, "lora_bucket", 0) or 0)
+    row_armed, row_meta, row_refusal = _arm_exported_compiled_graph(
+        pipe, pending.cfg, pending.cache_dir, bucket,
+        Path(artifact), pending.arm_key, verify_numerics=True)
+    if row_meta is not None:
+        row_meta = dict(row_meta)
+    elif row_armed:
+        row_meta = _packed_metadata(Path(artifact))
+    else:
+        row_meta = {}
+    row_key = str(row_meta.get("compiled_graph_key") or "").strip()
+    entry_name = str(
+        (row_meta.get(GRAPH_CLASS_BLOCK) or {}).get("name") or "")
+    if not row_armed or not row_key:
+        if row_armed and not row_key:
+            row_refusal = (
+                "compiled_graph_key_missing",
+                "the child's entry carries no stamped compiled_graph_key")
+        inc_refused[entry_name or stamped_name or Path(artifact).name] = (
+            str(row_refusal[0]), str(row_refusal[1]))
+        _quarantine_durable(staged_key)
+        activity_mod.emit_event(
+            "aot_entry_arm_failed",
+            f"arm_key={pending.arm_token}: this class does not arm mid-mint "
+            f"({row_refusal[0]}"
+            f"{': ' + row_refusal[1] if row_refusal[1] else ''}); it serves "
+            f"EAGER, its bytes are quarantined, and its siblings — landed and "
+            f"still compiling — are unaffected.",
+            phase=str(row_refusal[0]),
+            family=pending.family,
+            compiled_graph_key=row_key,
+            graph_class=entry_name or Path(artifact).name,
+        )
+        return False
+    durable = _admit_durable(pending, row_key, staged_key)
+    durable_path = durable.artifact if durable is not None else Path(artifact)
+    incremental[entry_name or stamped_name or row_key] = (
+        row_key, durable_path, row_meta)
+    publisher = pending.publisher
+    if publisher is not None and publisher.enabled():
+        published: set = state.setdefault("published_keys", set())
+        if row_key not in published:
+            published.add(row_key)
+            _publish_async(
+                publisher, pending.family, durable_path, row_meta,
+                provenance,
+                compiled_graph_key_digest=row_key,
+                mint_duration_ms=max(
+                    0, int((time.monotonic() - pending.armed_at) * 1000)),
+                arm_token=pending.arm_token)
+    return True
+
+
 def adopt_delegated_mint(
     pipe: Any, pending: "PendingSelfMint", artifacts: Sequence[Path],
     manifest: str = "",
@@ -2585,21 +2706,46 @@ def adopt_delegated_mint(
     state["provenance"] = provenance
 
     rows = [Path(a) for a in artifacts]
-    if not rows:
+    # pgw#1371: classes already adopted (or refused) MID-MINT by
+    # `adopt_minted_class`. Their records fold straight into the outcome
+    # below — one arm, one durable write, one upload per class, however the
+    # mint ends — and the per-row machinery skips them entirely.
+    incremental: Dict[str, Tuple[str, Path, Dict[str, Any]]] = dict(
+        state.get("incremental") or {})
+    inc_refused: Dict[str, Tuple[str, str]] = dict(
+        state.get("incremental_refused") or {})
+
+    def _stamped_name(row: Path) -> str:
+        try:
+            meta = artifact_meta.try_read_metadata(row) or {}
+        except Exception:  # noqa: BLE001 — an unreadable row is not settled
+            return ""
+        return str((meta.get(GRAPH_CLASS_BLOCK) or {}).get("name") or "")
+
+    settled_names = set(incremental) | set(inc_refused)
+    row_names: Dict[Path, str] = (
+        {row: _stamped_name(row) for row in rows} if settled_names else {})
+    if not rows and not incremental:
         state["adopt_refusal"] = (
             "no_entry_artifact", "the child reported no entry artifact")
         return None
     # The FIRST entry keeps the pending's canonical target path (the resume
     # bank and the local-store write address it); the rest sit beside it under
     # their own keys. Nothing reads a compiled graph-shaped single path any more.
-    artifact = rows[0]
-    if artifact != pending.target:
-        try:
-            pending.target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(artifact, pending.target)
-        except OSError:
-            shutil.copy2(artifact, pending.target)
-    rows[0] = pending.target
+    # pgw#1371: with every row settled mid-mint, `rows` can be empty and the
+    # canonical-path dance has nothing to do — the durable CAS copies are the
+    # addresses from here on.
+    if rows:
+        artifact = rows[0]
+        if artifact != pending.target:
+            try:
+                pending.target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(artifact, pending.target)
+            except OSError:
+                shutil.copy2(artifact, pending.target)
+        if row_names.get(rows[0], ""):
+            row_names[pending.target] = row_names.pop(rows[0])
+        rows[0] = pending.target
     # §1.5 / §4.33 step 3 — DURABLE FIRST, and this is the whole ordering
     # change. The bytes go to the local CAS BEFORE anything verifies, arms,
     # publishes or cleans up, on EVERY tier, because the alternative is what
@@ -2614,7 +2760,11 @@ def adopt_delegated_mint(
     # than the set, and a class that refuses is quarantined without touching a
     # sibling that armed.
     _durable_keys: Dict[Path, str] = {
-        row: _stage_durable(pending, row, provenance) for row in rows}
+        row: _stage_durable(pending, row, provenance) for row in rows
+        # pgw#1371: a mid-mint-settled row is already durable (admitted or
+        # quarantined) under its own key; re-staging it would downgrade the
+        # verdict `adopt_minted_class` already earned.
+        if row_names.get(row, "") not in settled_names}
     # pgw#1096: ONE gate for every self-produced compiled graph — the child's, and the
     # local store's (§4.28). pgw#999's classification, pgw#1042's pre-arm axis
     # divergence and pgw#805's AOT-only arm all live in `_arm_exported_compiled_graph`;
@@ -2656,7 +2806,22 @@ def adopt_delegated_mint(
     # class costing a whole mint.
     adopted: List[Tuple[str, Path, Dict[str, Any]]] = []
     refusals: List[Tuple[str, str, str]] = []
+    folded: set = set()
     for row in rows:
+        settled = row_names.get(row, "")
+        if settled and settled in incremental:
+            # pgw#1371: armed, gated, made durable and published the moment it
+            # landed — fold the record, do not arm twice.
+            key_p, path_p, meta_p = incremental[settled]
+            adopted.append((
+                key_p, path_p if Path(path_p).exists() else row,
+                dict(meta_p)))
+            folded.add(settled)
+            continue
+        if settled and settled in inc_refused:
+            refusals.append((settled, *inc_refused[settled]))
+            folded.add(settled)
+            continue
         row_armed, row_meta, row_refusal = _arm_exported_compiled_graph(
             pipe, pending.cfg, pending.cache_dir,
             int(getattr(pending.cfg, "lora_bucket", 0) or 0),
@@ -2708,6 +2873,17 @@ def adopt_delegated_mint(
                 "the child's entry carries no stamped compiled_graph_key"))
             continue
         adopted.append((row_key, row, row_meta))
+
+    # pgw#1371: an incrementally settled class whose artifact never reached
+    # this call's `artifacts` list (the share died before its report; the
+    # streamed row was the only witness) still counts — its bytes are durable
+    # and, on the publish path, already uploaded.
+    for name, (key_p, path_p, meta_p) in incremental.items():
+        if name not in folded and all(k != key_p for k, _p, _m in adopted):
+            adopted.append((key_p, Path(path_p), dict(meta_p)))
+    for name, (reason_p, detail_p) in inc_refused.items():
+        if name not in folded and all(n != name for n, _r, _d in refusals):
+            refusals.append((name, reason_p, detail_p))
 
     armed = bool(adopted)
     meta = adopted[0][2] if adopted else None
@@ -2988,6 +3164,15 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         return
     state["publish_resolved"] = True
     publisher = pending.publisher
+    minted_key = str(
+        getattr(state.get("minted"), "compiled_graph_key", "") or "")
+    if minted_key and minted_key in (state.get("published_keys") or set()):
+        # pgw#1371: this class shipped the moment it armed
+        # (`adopt_minted_class`); the terminus only closes the books. One
+        # upload per key, however the mint ends.
+        mark_terminus(pending, TERMINUS_PUBLISHING)
+        shutil.rmtree(pending.mint_root, ignore_errors=True)
+        return
     if publisher is not None and publisher.enabled():
         mark_terminus(pending, TERMINUS_PUBLISHING)
         _publish_async(

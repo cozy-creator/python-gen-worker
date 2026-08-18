@@ -5573,9 +5573,21 @@ class Executor:
         # addresses — one key, two routes, and `_arm_exported_compiled_graph` is the one
         # gate at the end of both.
         boot_local_key = ""
+        boot_holes: Tuple[str, ...] = ()
         if arm is None and spec.compile is not None and not eager_only:
             adopts = await asyncio.to_thread(
                 self._boot_adopt, spec, resolved_slots)
+            # pgw#1371 holes-only: every per-class MISS is a named HOLE, and
+            # the self-mint this boot may open is SCOPED to exactly those —
+            # a full miss names the whole declaration (the pre-holes mint),
+            # a partial hit names the remainder. Empty when the outcomes
+            # carry no names (a pre-derive refusal): the mint then covers
+            # the whole declaration, which is the only honest reading of
+            # "this boot could not say what is missing".
+            boot_holes = tuple(sorted({
+                str(name)
+                for outcome in adopts if outcome.adoption is None
+                for name in (outcome.graph_classes or ())}))
             # pgw#1176: the boot resolves ONE outcome per declared graph class.
             # Coverage accretes, so several hits are the expected shape and
             # each is armed on its own.
@@ -5696,7 +5708,8 @@ class Executor:
                     compile_selection=compile_selection,
                     snapshots=snapshots,
                     slot_identities=slot_identities,
-                    arm=arm, boot_local_key=boot_local_key)
+                    arm=arm, boot_local_key=boot_local_key,
+                    boot_holes=boot_holes)
                 rec.shared_keys.extend(inj.shared_keys)
                 # pgw#517: a self-loading (str/Path-slot) endpoint builds its
                 # own pipeline inside setup() and the executor never sees it
@@ -7467,6 +7480,7 @@ class Executor:
         slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
         arm: Optional[_ArmOrder] = None,
         boot_local_key: str = "",
+        boot_holes: Tuple[str, ...] = (),
     ) -> "_InjectionResult":
         """Typed injection: each slot receives exactly what its ``setup``
         annotation says — a ``str``/``Path`` local path, or a constructed
@@ -7686,6 +7700,7 @@ class Executor:
                                 self._enable_compiled,
                                 pipe, spec.compile_contract(), compile_artifact,
                                 compile_selection, arm, boot_local_key,
+                                boot_holes,
                             )
                         except compile_cache.CompiledExecutionLaneUnavailableError as exc:
                             # Mandatory (w8a8/w4a4) lane: self-mint also hit a
@@ -8693,6 +8708,7 @@ class Executor:
         delivered: Optional["_CompileArtifactSelection"] = None,
         arm: Optional[_ArmOrder] = None,
         boot_local_key: str = "",
+        boot_holes: Tuple[str, ...] = (),
     ) -> "fleet_compiled_graphs.ArmOutcome":
         """Arm the best available compiled path for a freshly loaded pipeline.
 
@@ -8795,7 +8811,8 @@ class Executor:
                 # did before §4.27 existed. The refused compiled graph is not retried: it
                 # is not passed back in.
                 outcome = self._enable_compiled(
-                    pipe, cfg, None, boot_local_key=boot_local_key)
+                    pipe, cfg, None, boot_local_key=boot_local_key,
+                    boot_holes=boot_holes)
                 if outcome.armed or outcome.eager_reason:
                     return outcome
                 return dc_replace(
@@ -8810,6 +8827,9 @@ class Executor:
             # store answered on it. Empty on the fleet path, where the store is
             # empty and the lookup is one stat.
             boot_local_key=boot_local_key,
+            # pgw#1371: the boot's per-class misses, so a self-mint opened on
+            # this path is SCOPED to the holes instead of the declaration.
+            holes=boot_holes,
         )
 
     def _arming_enable(

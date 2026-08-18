@@ -55,6 +55,21 @@ if mode == "wedged-no-report":
 
 declared = int(os.environ.get("PGW_FAKE_DECLARED", "6"))
 mine = [f"cls/dim={{i}}" for i in range(index, declared, count)]
+# pgw#1371 holes-only: intersect the share with the job's hole list before
+# the have filter, exactly as `aot_mint.trace_for_key` does, and report how
+# many rows the holes matched (`targeted_classes`).
+holes = [str(h) for h in (job.get("hole_classes") or [])]
+targeted = -1
+if holes:
+    mine = [n for n in mine if n in holes]
+    targeted = len(mine)
+if os.environ.get("PGW_FAKE_OMIT_TARGETED"):
+    # A child that filtered to the holes but cannot PROVE it — the shape the
+    # pool must refuse rather than read as "covered".
+    targeted = -1
+have = [str(h) for h in (job.get("have_classes") or [])]
+if have:
+    mine = [n for n in mine if n not in have]
 if mode == "short" and index == 0:
     names = []
 elif mode == "collide":
@@ -129,6 +144,7 @@ report.write_bytes(json.dumps({{
     "entry": share, "status": "refused" if refused else "compiled",
     "classes": classes,
     "declared_classes": declared,
+    "targeted_classes": targeted,
     "detail": (
         f"{{len(classes)}} graph class(es) packed before the share refused: "
         f"graph class {{mine[1] if len(mine) > 1 else '?'}} refused"

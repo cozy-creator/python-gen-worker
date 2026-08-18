@@ -355,16 +355,28 @@ def test_a_user_machine_mint_child_NICES_ITSELF(
     assert compile_posture.current() == USER_MACHINE
 
 
-def test_a_FLEET_mint_child_never_nices_itself(
+def test_a_FLEET_RIG_mint_child_does_not_nice_itself(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The serving pod compiles exactly as fast as it did. A pod's mint already
-    competes with a tenant whose reserves are held back explicitly; de-
-    prioritising it on top of that would slow paid work for no gain."""
+    """The RIG mint child (a pod bought to mint, nothing co-resident) still
+    compiles at full priority — `mint_child._install_posture` is user-machine
+    only.
+
+    pgw#1371 narrowed what this pins: the RUNTIME mint's ENTRY children DO
+    nice themselves on FLEET now (`compile_posture.FLEET_MINT_NICE`, applied
+    in `aot_compile_child._install_posture` — see
+    `test_runtime_mint_holes_and_serving_reserve`), because e2e#1892 run 7
+    measured a serving process starved to a 65-minute non-return by a mint the
+    core reserves were supposed to protect it from. The rig path has no
+    co-resident to protect and keeps full priority."""
     nice, armed = _drive_child_posture(monkeypatch, FLEET)
     assert nice.levels == []
     assert armed == []
     assert compile_posture.current() == FLEET
+    assert compile_posture.FLEET.nice_level() == \
+        compile_posture.FLEET_MINT_NICE == 10, (
+        "the fleet ENTRY-child tree yields to the serving process (pgw#1371); "
+        "only the rig mint child stays at full priority")
 
 
 def test_a_kernel_that_refuses_the_nice_leaves_a_RUDE_mint_not_a_DEAD_one(
@@ -724,7 +736,11 @@ def test_the_posture_module_holds_POLICY_and_nothing_else() -> None:
     assert posture.cpu_budget_cores(4, headroom=2) == 2
 
     fleet = CompilePosture()
-    assert fleet.nice_level() == 0
+    # pgw#1371: the fleet MINT TREE yields to the serving process — run 7 of
+    # e2e#1892 measured the core reserves failing to protect it (65-minute
+    # non-return beside a 2-on-7 mint). Applied by the ENTRY children to
+    # themselves; the serving process is never niced.
+    assert fleet.nice_level() == compile_posture.FLEET_MINT_NICE == 10
     assert fleet.entry_ceiling(8) == 8
     assert fleet.rss_reserve_bytes(4 * 1024**3) == 4 * 1024**3
     assert fleet.cpu_budget_cores(32, headroom=2) == 30

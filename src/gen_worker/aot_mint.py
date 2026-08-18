@@ -1562,6 +1562,8 @@ def mint_graph_classes(
     spec: ExportSpec,
     python: str = "",
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
+    on_landed: Optional[
+        Callable[[aot_compile_pool.PackedGraphClass], None]] = None,
     phase_snapshot: Optional[Path] = None,
     held: Sequence[MintedArtifact] = (),
     should_abandon: Optional[Callable[[], bool]] = None,
@@ -1632,6 +1634,11 @@ def mint_graph_classes(
             template,
             on_class=lambda name, done, total: progress.beat(
                 PHASE_INDUCTOR_COMPILE, done, max(total, goal), name),
+            # pgw#1371: the per-class adopt/publish seam — the caller receives
+            # each packed row the moment its artifact is on disk, so a mint
+            # killed later has already banked (and, on the supervisor's path,
+            # armed and published) every class this delivered.
+            on_row=on_landed,
             should_abandon=should_abandon)
     except aot_compile_pool.EntryCompileAbandoned:
         # Not a failure and not this mint's fault: the ledger still has to
@@ -2195,6 +2202,32 @@ def declared_class_rows(pipeline: Any, spec: ExportSpec, decl: Any) -> List[Any]
     return rows
 
 
+def share_targeted(
+    pipeline: Any, spec: ExportSpec, decl: Any,
+    *,
+    share_index: int = 0,
+    share_count: int = 1,
+    hole_classes: Sequence[str] = (),
+) -> int:
+    """How many of ONE share's rows a hole list matches (pgw#1371).
+
+    Counted over the SAME order and the SAME ``rows[i::K]`` slice
+    :func:`trace_for_key` mints from, and BEFORE any ``have`` filter, so the
+    parent can prove hole coverage by summing the children's reports —
+    ``sum(share_targeted) == |declaration ∩ holes|`` over a whole partition —
+    without ever enumerating class names itself. A second enumeration here is
+    cheap (declaration plans, no tracing) and cannot drift from the mint loop
+    because both read :func:`declared_class_rows`' one order.
+    """
+    ordered = declared_class_rows(pipeline, spec, decl)
+    count = max(1, int(share_count))
+    rows = ordered[max(0, int(share_index)) % count::count] if count > 1 \
+        else ordered
+    holes = {str(n) for n in hole_classes}
+    return sum(
+        1 for row in rows if _decl.plan_entry_name(row[0]) in holes)
+
+
 def trace_for_key(
     pipeline: Any,
     spec: ExportSpec,
@@ -2203,6 +2236,7 @@ def trace_for_key(
     share_index: int = 0,
     share_count: int = 1,
     have_classes: Sequence[str] = (),
+    hole_classes: Sequence[str] = (),
 ) -> Iterator[TracedClass]:
     """Export the named declared graph classes and yield each one's KEYING
     facts — §4.27 step 1's unit of work (pgw#1089).
@@ -2243,6 +2277,17 @@ def trace_for_key(
     count = max(1, int(share_count))
     rows = ordered[max(0, int(share_index)) % count::count] if count > 1 \
         else ordered
+    # pgw#1371 holes-only: when the caller names the HOLES — the classes with
+    # no artifact for this pod's (lane x sm) anywhere it could see — the
+    # share is intersected with them BEFORE the have filter, in the same
+    # post-shard position, so `rows[i::K]` stays the same partition of the
+    # same order and a filtered class never moves its siblings between
+    # children. `declared` is still the whole declaration's size; the pool's
+    # coverage proof for a holes mint reconciles against
+    # :func:`share_targeted` sums instead.
+    holes = {str(n) for n in hole_classes}
+    if holes:
+        rows = [row for row in rows if _decl.plan_entry_name(row[0]) in holes]
     # pgw#1215 step 4: a class this pod already holds as a packed artifact is
     # dropped from the share BEFORE the export, so a retry pays neither the
     # trace nor the compile for it. `declared` is unchanged — it is the size
