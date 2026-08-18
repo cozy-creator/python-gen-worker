@@ -1,18 +1,14 @@
-"""pgw#1415 — the hub's per-checkpoint defaults row reaches the entrypoint.
+"""One hub ``ModelBinding`` becoming one worker ``DeployBinding``.
 
-The defect was pure plumbing with a wire cause. tensorhub's th#2140 landed
-`ModelBinding.model = 9`; this repo's vendored copy still called 9
-`manifest_digest` (th#1941, a field NOTHING has ever sent), so the hub stamped
-a model NAME into a slot the worker read as a fetch POINTER, `DeployBinding`
-was built without `model=`, and `decode_model_defaults` warned "unclassified"
-and served type fallbacks for every classified checkpoint in the fleet. On
-FLUX.2 Klein Turbo that is 28 steps with CFG on for a 4-step guidance-free
-checkpoint: a different image at ~7x the cost.
+The subject is the seam itself: what the dispatch says about a checkpoint —
+its wire vocabulary, its classification, its defaults row — and what survives
+into ``ctx.defaults()`` and, from there, into author code.
 
-Everything here drives the REAL chain — a real `pb.RunJob`, the real
-`HubBindingResolver`, the real `ServeLoop` over the real fixture endpoint —
-because the defect lived exactly in the gap between the parts, and every
-piece in isolation was already correct.
+Everything drives the REAL chain — a real ``pb.RunJob``, the real
+``HubBindingResolver``, the real ``ServeLoop`` over the real fixture endpoint.
+That is deliberate: this seam's failures live in the GAP between parts that
+are each correct in isolation, so a test that stops at one part proves the
+half that was never broken.
 """
 
 from __future__ import annotations
@@ -92,6 +88,7 @@ def _dispatch(
 
 
 def test_the_classification_column_is_on_the_wire_at_the_hubs_number() -> None:
+    # pgw#1415: tag 9 meant `model` in tensorhub and `manifest_digest` here.
     """These numbers are TENSORHUB's, and tensorhub is the only SENDER.
 
     `mb.Model` is stamped on every dispatch (`scheduler_dispatch.go`), while
@@ -113,6 +110,7 @@ def test_the_classification_column_is_on_the_wire_at_the_hubs_number() -> None:
 def test_resolve_carries_the_hubs_classification_onto_the_binding(
     tmp_path: Path,
 ) -> None:
+    # pgw#1415: `resolve` built DeployBinding without `model=`, fleet-wide.
     """RED before the fix: `resolve` parsed the row and dropped the name."""
     resolver = _dispatch(
         tmp_path, ref=KLEIN, model="flux2-klein", row=TURBO_CHECKPOINT_ROW
@@ -125,6 +123,7 @@ def test_resolve_carries_the_hubs_classification_onto_the_binding(
 def test_an_unclassified_checkpoint_still_binds_with_no_name(
     tmp_path: Path,
 ) -> None:
+    # pgw#1377: the read-side decode matrix's unclassified arm, unchanged.
     """The arm that was always CORRECT: no name and no row is a genuinely
     unclassified checkpoint, and it binds to platform fallbacks under
     pgw#1377's named warning rather than to a guess."""
@@ -139,7 +138,8 @@ def test_an_unclassified_checkpoint_still_binds_with_no_name(
 def test_a_row_without_its_name_is_refused_not_silently_downgraded(
     tmp_path: Path,
 ) -> None:
-    """The fence (acceptance 4). The hub's `model` column is NOT NULL beside
+    # pgw#1415: the fence, so a broken (model, defaults) pair cannot recur quietly.
+    """The fence. The hub's `model` column is NOT NULL beside
     the defaults JSONB (th#2140 migration 0104), so a row arriving WITHOUT a
     name is a pair that broke in transit — which is this defect's exact
     signature. It refuses loudly instead of serving fallbacks while holding
@@ -155,6 +155,7 @@ def test_a_row_without_its_name_is_refused_not_silently_downgraded(
 def test_the_turbo_row_reaches_ctx_defaults_and_flips_the_measurement(
     tmp_path: Path,
 ) -> None:
+    # pgw#1415: the umbrella's measured 28/True -> 4/False, on the shipped chain.
     """hub row -> resolver -> DeployBinding -> decode -> ctx.defaults().
 
     The umbrella's numbers, reproduced on the shipped chain rather than on a
@@ -180,6 +181,7 @@ def test_the_turbo_row_reaches_ctx_defaults_and_flips_the_measurement(
 def test_the_row_reaches_what_an_entrypoint_actually_receives(
     tmp_path: Path,
 ) -> None:
+    # pgw#1415: every wave-2 endpoint's precedence logic reads this value.
     """The whole stack: real RunJob -> real HubBindingResolver -> ServeLoop ->
     the fixture endpoint's `@entrypoint`.
 
