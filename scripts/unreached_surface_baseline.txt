@@ -405,15 +405,8 @@ gen_worker.worker_goals.install()
 gen_worker.mint_process.build_request()
 gen_worker.mint_process.run_mint()
 
-# pgw#1380's native tensorfs weight source — the chunk-store->VRAM path lands
-# behind LoadContext's LoaderEngine seam, and until the vendored tensorfs
-# store ships on the pod the serve path still takes the eager bridge, so
-# nothing in src/ reaches these three yet.
-#     OWNER:  pgw#1380's follow-up — wire `native_available()` into the
-#             LoaderEngine selection on the serve host so the native store is
-#             the default source when the vendored tensorfs is present.
-#     EXPIRY: the first deploy that loads a checkpoint through the native
-#             store. All three lines come out together.
-gen_worker.serving.streaming.source.NativeWeightStore
-gen_worker.serving.streaming.source.containers_for()
-gen_worker.serving.streaming.source.native_available()
+# pgw#1380's native weight source came out of this file on 2026-08-18: the
+# follow-up the OWNER row named is done — `store_for` calls `native_available()`
+# and constructs `NativeWeightStore`, so both are reached from src/. The third
+# line, `containers_for()`, was reached by nothing anywhere and was deleted
+# rather than re-baselined. All three came out together, as the row said.

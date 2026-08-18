@@ -28,7 +28,6 @@ import logging
 from pathlib import Path
 from typing import (
     Any,
-    Iterator,
     Mapping,
     Optional,
     Protocol,
@@ -383,14 +382,6 @@ def native_available() -> bool:
     return True
 
 
-def containers_for(store: WeightStore, prefix: str) -> Iterator[str]:
-    """Every container of ``store`` under a checkpoint-relative directory."""
-    root = prefix.strip("/")
-    for path in store.containers():
-        if not root or path == root or path.startswith(root + "/"):
-            yield path
-
-
 def component_of(container: str) -> str:
     """The pipeline component a container belongs to: its parent directory,
     or ``""`` for a container at the checkpoint root (single-file pipelines)."""
@@ -408,7 +399,6 @@ __all__ = [
     "WeightStore",
     "WeightStoreUnavailable",
     "component_of",
-    "containers_for",
     "native_available",
     "store_for",
 ]
