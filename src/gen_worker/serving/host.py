@@ -84,7 +84,18 @@ class EndpointHost:
         }
         self.instances: Dict[type, ModelInstance] = {}
         self.adoption: Any = None
-        if engine is None:
+        #: pgw#1392: "has boot run" is the real question. `instances` used to
+        #: stand in for it, which a WEIGHTLESS endpoint falsifies forever —
+        #: it references no Model class, so it is never resident and has
+        #: nothing to make resident.
+        self._booted = False
+        if engine is None and not loaded.models:
+            # pgw#1392: a WEIGHTLESS endpoint references no Model class, so
+            # nothing will ever be built through the loader engine. Probing
+            # the binding's tree for a chunk store would be work done to
+            # answer a question nobody asks.
+            engine = None
+        elif engine is None:
             # pgw#1380: the native store->VRAM engine, bound off the
             # checkpoint tree the worker already resolved — a projected
             # snapshot carries its own chunk store, so nothing extra is
@@ -251,6 +262,7 @@ class EndpointHost:
                 unclaimed=len(session.unclaimed),
             )
         self.adoption = session
+        self._booted = True
 
     # -- eviction -----------------------------------------------------------
 
@@ -277,6 +289,7 @@ class EndpointHost:
         """Evict every resident instance (reverse residency order)."""
         for model_cls in list(reversed(list(self.instances))):
             self.evict(model_cls)
+        self._booted = False
 
     def rebind(self, binding: DeployBinding) -> None:
         """Swap the deploy binding (hub deploy state changed). Contexts made
@@ -308,14 +321,16 @@ class EndpointHost:
         it decodes against the entrypoint's own msgspec schema, so a payload
         that does not fit is a typed ``msgspec.ValidationError`` naming the
         field, before author code runs. The call runs under every slot
-        model's admission, acquired in slot-name order."""
+        model's admission, acquired in slot-name order — a WEIGHTLESS
+        entrypoint (pgw#1392) declares no slot, so it acquires nothing and
+        is called directly; there is no residency to admit it to."""
         spec = self.loaded.entrypoints.get(function)
         if spec is None:
             raise ServeDispatchError(
                 f"{self.loaded.module_name} serves no function {function!r} "
                 f"(functions: {sorted(self.loaded.entrypoints)})"
             )
-        if not self.instances:
+        if not self._booted:
             raise RuntimeError("dispatch(): boot the endpoint first (setup())")
         missing = [
             cls.__name__ for cls in spec.model_classes if cls not in self.instances

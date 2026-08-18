@@ -15,14 +15,22 @@ ruling, 2026-08-17 — one parameter-order rule across the SDK, matching
                  model: SdxlModel, turbo: Adapter | None,
                  loras: list[Adapter]) -> ImageOutput: ...
 
+    @entrypoint                       # WEIGHTLESS (pgw#1392): no slot at all
+    def transform(ctx: RequestContext, payload: TransformInput
+                  ) -> TransformOutput: ...
+
 * first: ``ctx`` annotated :class:`~gen_worker.serving.context.RequestContext`
 * second: the payload, a ``msgspec.Struct`` — the wire schema
-* remaining, in any order: model SLOTS (params annotated with a
-  :class:`~gen_worker.serving.model.Model` subclass — at least one) and
+* remaining, in any order and **possibly none**: model SLOTS (params
+  annotated with a :class:`~gen_worker.serving.model.Model` subclass) and
   adapter SLOTS (``Adapter`` / ``Adapter | None`` single, ``list[Adapter]``
   the request's picks; the hub resolves what rides per deployment/request
   into them). The PARAMETER NAME is the slot name the request envelope
   keys per-slot picks on (``{"model": ref, "loras": [{"ref":…, "scale":…}]}``).
+  **Zero slots is a valid declaration (pgw#1392)** — a CPU workflow helper
+  has no weights to type, so it declares none, its envelope carries no model
+  field, and nothing is ever made resident for it. Zero slots is legal;
+  junk slots are not — a declared parameter must still BE a valid slot.
 * return: a ``msgspec.Struct``
 
 The decorator validates at import (typed refusal names the exact defect) and
@@ -194,12 +202,13 @@ def entrypoint(fn: F) -> F:
                 f"parameter {parameter.name!r} is {parameter.kind.description}; "
                 "the signature is plain positional: (ctx, payload, *slots)",
             )
-    if len(parameters) < 3:
+    if len(parameters) < 2:
         raise _refuse(
             fn,
             f"takes {len(parameters)} parameters; the contract is "
-            "(ctx: RequestContext, payload: msgspec.Struct, "
-            "<slot>: <Model subclass or Adapter>, ...)",
+            "(ctx: RequestContext, payload: msgspec.Struct) followed by "
+            "ZERO OR MORE slots (<Model subclass or Adapter>) — pgw#1392: a "
+            "weightless entrypoint declares no slot at all",
         )
 
     ctx_parameter, payload_parameter, slot_parameters = (
@@ -228,12 +237,12 @@ def entrypoint(fn: F) -> F:
         _slot_of(fn, parameter.name, hints.get(parameter.name))
         for parameter in slot_parameters
     )
-    if not any(slot.kind == "model" for slot in slots):
-        raise _refuse(
-            fn,
-            "declares no model slot; at least one parameter must be "
-            "annotated with a gen_worker.Model subclass",
-        )
+    # pgw#1392: ZERO model slots is a valid declaration. A weightless
+    # entrypoint (a CPU workflow helper — dj-utils, music-analysis) has no
+    # weights to type, so it declares none; the envelope then has no model
+    # field at all and nothing is ever resident for it. Zero slots is legal,
+    # JUNK slots are not — `_slot_of` above still refuses every parameter
+    # that is neither a Model subclass nor an adapter form.
 
     return_type = _annotation_class(hints.get("return"))
     if return_type is None or not issubclass(return_type, msgspec.Struct):

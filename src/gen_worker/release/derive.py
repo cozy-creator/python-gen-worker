@@ -111,6 +111,10 @@ class ReleaseDeriveResult:
     endpoint: str
     lane_graphs: dict[str, tuple[str, ...]]  # lane contract -> graph hashes
     warnings: tuple[str, ...] = ()
+    #: pgw#1392: NO model class anywhere, so there is nothing to hold at all.
+    #: Distinct from eager-permanent, which holds a model and compiles none —
+    #: both land on "no lanes", and a log that conflates them lies.
+    weightless: bool = False
 
     @property
     def eager_permanent(self) -> bool:
@@ -268,7 +272,9 @@ class _Entrypoint:
     fn: Any
     payload_param: str
     payload_type: type
-    model_param: str
+    #: ``None`` for a WEIGHTLESS entrypoint (pgw#1392) — no model, no lane,
+    #: nothing traced; it is never a trace subject.
+    model_param: Optional[str]
     ctx_param: str
     #: (param name, annotation, base trace value) per platform-injected fact.
     injected: tuple[tuple[str, Any, Any], ...]
@@ -306,7 +312,18 @@ def _injected_trace_value(name: str, parameter_name: str, annotation: Any) -> An
 _SLOT_ORDER = ("ctx", "payload", "model", "adapter")
 
 
-def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
+def _entrypoints(
+    module: ModuleType, model_cls: Optional[type]
+) -> list[_Entrypoint]:
+    """The module's entrypoints bound to ``model_cls``.
+
+    ``model_cls`` is ``None`` for a module that declares no lane-bearing
+    Model class. Two disjoint cases live behind that: an eager-permanent
+    (``lanes=()``) module — whose entrypoints DO carry model slots and
+    derive no lane, exactly as before — and a WEIGHTLESS module (pgw#1392),
+    whose entrypoints carry ZERO model slots. Only the latter derive here,
+    so an eager-permanent release is byte-identical to what it was.
+    """
     import msgspec
 
     from ..request_context import RequestContext
@@ -342,7 +359,13 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
             else:
                 rest.append((parameter.name, hints.get(parameter.name)))
                 roles.append((parameter.name, "adapter"))
-        if model_param is None:
+        if model_cls is None:
+            # No lane-bearing class: only a WEIGHTLESS entrypoint (pgw#1392)
+            # derives. One that declares slots belongs to a lane this module
+            # does not have (eager-permanent) — unchanged, skipped.
+            if model_slots:
+                continue
+        elif model_param is None:
             continue
         if payload_param is None:
             raise DeriveError(
@@ -385,7 +408,7 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
                 model_slots=tuple(model_slots),
             )
         )
-    if not out:
+    if not out and model_cls is not None:
         raise DeriveError(
             f"no @entrypoint function binds model class {model_cls.__name__!r} "
             f"(the model parameter's annotation is the binding)"
@@ -1181,10 +1204,17 @@ def derive_release(
     lane_contracts: dict[str, Any] = {}
     entrypoints: dict[str, Any] = {}
     warnings: list[str] = []
-    if cls is not None:
-        plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
-        for plan in _entrypoints(module, cls):
-            owner = f"@entrypoint {plan.name}"
+    plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
+    for plan in _entrypoints(module, cls):
+        owner = f"@entrypoint {plan.name}"
+        if cls is None:
+            # pgw#1392: a WEIGHTLESS entrypoint has no lane, so there is no
+            # trace subject and no pass is ever run. `traced_passes` says 0
+            # because 0 is the truth, not because the enumeration was
+            # skipped. It still publishes its envelope schema — the hub's
+            # auto-generated API docs are the point of this block.
+            payloads: tuple[Any, ...] = ()
+        else:
             payloads, capped = _auto_payloads(owner, plan.payload_type)
             if capped:
                 warnings.append(
@@ -1193,16 +1223,19 @@ def derive_release(
                     f"rest is first-encounter discovery (eager + background "
                     f"mint)"
                 )
-            plans.append((plan, payloads))
-            entrypoints[plan.name] = {
-                "envelope_schema": _envelope_schema(plan),
-                "model_slots": {
-                    slot_name: slot_cls.__name__
-                    for slot_name, slot_cls in plan.model_slots
-                },
-                "traced_passes": len(payloads),
-            }
+        plans.append((plan, payloads))
+        entrypoints[plan.name] = {
+            "envelope_schema": _envelope_schema(plan),
+            # Renders EMPTY for a weightless entrypoint — an honest {}, never
+            # a fabricated slot.
+            "model_slots": {
+                slot_name: slot_cls.__name__
+                for slot_name, slot_cls in plan.model_slots
+            },
+            "traced_passes": len(payloads),
+        }
 
+    if cls is not None:
         requires = model_requires(cls)
         for lane in model_lanes(cls):
             lane_graphs = _derive_lane(
@@ -1264,6 +1297,10 @@ def derive_release(
             for lane in graphs_document.lanes
         },
         warnings=tuple(warnings),
+        # No lane class AND entrypoints still derived => every one of them
+        # declared zero model slots. An eager-permanent module also has no
+        # lane class, but its entrypoints carry slots and derive no plan.
+        weightless=cls is None and bool(plans),
     )
 
 

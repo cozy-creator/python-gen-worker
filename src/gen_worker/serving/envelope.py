@@ -176,7 +176,17 @@ def decode_envelope(
     if parsed.model is not None and parsed.models is not None:
         raise EnvelopeError('an envelope carries "model" or "models", never both')
     picks: Dict[str, str] = {}
-    if len(model_slots) == 1:
+    if not model_slots:
+        # pgw#1392: a WEIGHTLESS entrypoint. Its envelope has NO model field
+        # — not a null one, not an empty one — so a pick is a typed refusal
+        # naming the real reason instead of advising the other spelling.
+        if parsed.model is not None or parsed.models is not None:
+            raise EnvelopeError(
+                f"{spec.name!r} declares no model slot; its envelope carries "
+                f'no "model"/"models" key at all (nothing is resident for a '
+                f"weightless entrypoint)"
+            )
+    elif len(model_slots) == 1:
         (only_slot,) = model_slots
         if parsed.models is not None:
             raise EnvelopeError(

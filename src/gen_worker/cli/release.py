@@ -105,10 +105,15 @@ def _run_derive(args: argparse.Namespace) -> int:
     for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     if result.eager_permanent:
-        print(
-            f"{result.endpoint}: no lanes -- explicit eager-permanent document",
-            file=sys.stderr,
+        # pgw#1392: two different reasons reach "no lanes" and the log must
+        # not conflate them — a model held eagerly (`lanes=()`), or NO MODEL
+        # AT ALL (a weightless endpoint: nothing to hold).
+        why = (
+            "no model class -- weightless endpoint, nothing to compile"
+            if result.weightless
+            else "no lanes -- explicit eager-permanent document"
         )
+        print(f"{result.endpoint}: {why}", file=sys.stderr)
     for lane_name, hashes in result.lane_graphs.items():
         print(f"lane {lane_name}: {len(hashes)} graph class(es)", file=sys.stderr)
         for graph in hashes:
