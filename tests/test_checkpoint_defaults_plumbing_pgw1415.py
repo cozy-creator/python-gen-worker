@@ -95,9 +95,10 @@ def test_the_classification_column_is_on_the_wire_at_the_hubs_number() -> None:
     """These numbers are TENSORHUB's, and tensorhub is the only SENDER.
 
     `mb.Model` is stamped on every dispatch (`scheduler_dispatch.go`), while
-    `manifest_digest` has never had a sender in any repo (th#2116 still owes
-    it). When the two protos disagreed on tag 9, the field with a live writer
-    won — which is why `manifest_digest` is 10 here and must be 10 there.
+    `manifest_digest` has never had a sender in any repo — th#1941's hub leg
+    is a parked draft. When the two protos disagreed on tag 9, the field with
+    a live writer won, which is why `manifest_digest` is 10 here and must be
+    10 there.
     """
     fields = pb.ModelBinding.DESCRIPTOR.fields_by_name
     assert fields["model"].number == 9

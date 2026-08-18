@@ -3,7 +3,7 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-3a71e8f1587cceb624c5097ceb2e2567ccb4034454ee57a39dcbbedcf6f7de64
+2770efb29eb60c9495c8bd2c12314f15f422ad774af14117654d77dbd13ac8ab
 
 # th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
 # `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
@@ -41,6 +41,7 @@
 #
 # The collision breaks toward the hub: it is the only SENDER of either field
 # (`scheduler_dispatch.go` stamps `mb.Model` on every dispatch; nothing has
-# ever stamped `manifest_digest` — th#2116 still owes it). So th#1941's
-# `manifest_digest` moves 9 -> 10 here, and tensorhub's th#2116 leg must land
-# the sender at 10.
+# ever stamped `manifest_digest` — th#1941's hub leg is a PARKED DRAFT,
+# tensorhub PR #1219, whose proto hunk predates th#2140 and would RE-ADD the
+# collision at 9). So th#1941's `manifest_digest` moves 9 -> 10 here, and that
+# leg must land its sender at 10.

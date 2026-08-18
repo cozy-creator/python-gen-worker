@@ -949,15 +949,18 @@ message ModelBinding {
   // same tag — the hub stamped a model name that this worker read as a fetch
   // pointer. The tie breaks toward the field that has a SENDER: tensorhub
   // stamps `model` on every dispatch (scheduler_dispatch.go, `mb.Model`),
-  // and NOTHING has ever sent `manifest_digest` (th#2116, still owed). So this
-  // side moves, and the hub's number stands.
+  // and NOTHING has ever sent `manifest_digest` — th#1941's hub leg is still a
+  // PARKED DRAFT (tensorhub PR #1219). So this side moves, and the hub's
+  // number stands.
   string model = 9;
   // The composed manifest digest this slot fetches (th#1941). Key into
   // DesiredResidency.snapshots / RunJob.snapshots. `ref` above survives as
   // the display/audit label; THIS is the fetch pointer.
   //
   // pgw#1415: moved 9 -> 10 (see above). tensorhub owes the SENDER at THIS
-  // number — th#2116. Until it lands, a v2 dispatch carries no fetch pointer
+  // number — th#1941, whose parked draft PR #1219 predates th#2140 and would
+  // RE-ADD the collision at 9 if it ever landed as authored. Until it lands a
+  // v2 dispatch carries no fetch pointer at all
   // and `HubBindingResolver` refuses naming it, which is the correct state:
   // the alternative was reading the hub's `model` string as a digest.
   string manifest_digest = 10;
