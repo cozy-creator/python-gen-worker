@@ -125,10 +125,6 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 # ---------------------------------------------------------------------------
 # pgw#1373: `probe_hardware` LIVES HERE NOW. It came from the deleted
 # `lifecycle.py`, and its obvious home looked like `hostfacts` — it returns a
@@ -277,3 +273,20 @@ def _worst_group_free_vram_bytes() -> int:
 
     groups = delivered_topology().all_groups()
     return int(min((g.free_vram_bytes() for g in groups), default=0))
+
+
+# ---------------------------------------------------------------------------
+# LAST IN THE FILE, DELIBERATELY.
+#
+# pgw#1414: this block used to sit above `probe_hardware` and its helpers, and
+# `python -m gen_worker.procsplit.measure` — which is how the control parent
+# actually runs this module — executes top to bottom, so `main()` ran BEFORE
+# the definitions below were bound. The census died with
+# `NameError: name 'gpu_devices_present' is not defined`, printed nothing on
+# stdout, and the parent read an EMPTY measurement: the very cpu-class Hello
+# this issue exists to prevent, caused by the fix for it.
+#
+# It survived an `import`-based check because importing binds every definition
+# before anything calls them. Only the `-m` path — the production one — fails.
+if __name__ == "__main__":
+    sys.exit(main())
