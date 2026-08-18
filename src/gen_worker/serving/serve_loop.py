@@ -199,8 +199,13 @@ class ServeLoop:
         model_slots = dict(spec.model_params)
         # Adapter overlays decode against the PRIMARY model type's adapter
         # schema (pgw#1377 adapter-of-base scoping: SDXL.Lora.Defaults).
-        primary_type = model_type(spec.model_params[0][1])
-        lora_scope = getattr(primary_type, "Lora", None)
+        # pgw#1392: a WEIGHTLESS entrypoint has no primary model and so no
+        # adapter vocabulary to overlay against — absent, never invented.
+        lora_scope = (
+            getattr(model_type(spec.model_params[0][1]), "Lora", None)
+            if spec.model_params
+            else None
+        )
         decoded: DecodedRequest = decode_envelope(
             spec,
             envelope,
@@ -218,6 +223,10 @@ class ServeLoop:
             primary_binding: Optional[DeployBinding] = None
             # STABLE SLOT-NAME ORDER — the multi-model deadlock rule: every
             # request over the same slot set acquires in one global order.
+            # pgw#1392: a WEIGHTLESS entrypoint's slot set is EMPTY, so this
+            # loop does not run — no lease, no admission, no load, and no
+            # compile subject. That is the whole of its serve path, and it
+            # is deliberate: there are no weights to make resident.
             for slot_name in sorted(model_slots):
                 model_cls = model_slots[slot_name]
                 binding = self._resolver.resolve(model_cls, picks[slot_name])
