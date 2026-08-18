@@ -34,6 +34,7 @@ mutable state (G13).
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Final
 
 from .._vendor.torchcg.recipe import ParameterKind, SignatureParameter
@@ -176,16 +177,33 @@ def _method(export: ModelExport, runner: ExportedRunner) -> list[str]:
     return parts
 
 
-def _aliases(export: ModelExport) -> list[str]:
-    """The closed types: one per bucket axis, one for the layout set.
+def _aliases(export: ModelExport, implemented: Mapping[str, str]) -> list[str]:
+    """The closed types: one per bucket axis, one for the layout set, and —
+    when the family declares more than one — one for the SAMPLER set.
 
-    Both are exhaustive by construction — bucket coverage is total per layout
-    (G6) and a runner's layouts are a closed set (G15) — so a ``match`` over
-    either is complete and a value outside it cannot be spelled.
+    The first two are exhaustive by construction — bucket coverage is total per
+    layout (G6) and a runner's layouts are a closed set (G15) — so a ``match``
+    over either is complete and a value outside it cannot be spelled.
+
+    The sampler alias is deliberately NOT the family's tuned ``scheduler``
+    Literal and is deliberately not named like it. The tuned one says what a
+    checkpoint may be STAMPED with (a hub-visible contract tensorhub generates
+    a schema from); this one says what this SDK can SERVE. They are allowed to
+    differ — that difference is exactly the staged gap pgw#1346 K10 records —
+    and a handler passing ``name=`` is bounded by the servable one.
     """
 
     family = str(export.family)
     lines: list[str] = []
+    if len(implemented) > 1:
+        lines.append(
+            "#: Every sampler this family declares AND this SDK implements. Total: "
+            "every value resolves."
+        )
+        lines.append(
+            f"{_alias(family, 'declared_sampler')} = {_literal_strs(tuple(implemented))}"
+        )
+        lines.append("")
     for axis, values in export.buckets:
         lines.append(f"#: Every declared {str(axis)} bucket. Exhaustive: every value resolves.")
         lines.append(f"{_alias(family, str(axis))} = {_literal_ints(values)}")
@@ -210,7 +228,6 @@ def _class_facts(export: ModelExport) -> list[str]:
         + "),"
         for stage in loop.stages
     ]
-    scheduler = export.scheduler
     lines = [
         f'{_INDENT}FAMILY: ClassVar[str] = {family!r}',
         f'{_INDENT}EXPORT_DIGEST: ClassVar[str] = {export.digest()!r}',
@@ -225,17 +242,32 @@ def _class_facts(export: ModelExport) -> list[str]:
         f'{_INDENT}LOOP_KIND: ClassVar[str] = {loop.kind.value!r}',
         f'{_INDENT}SESSION_STATE: ClassVar[str] = {loop.session_state.value!r}',
     ]
-    if scheduler is not None:
-        kind = parse_kind(str(scheduler.name))
+    if export.schedulers:
         lines.append(
-            f"{_INDENT}SCHEDULER: ClassVar[SchedulerKind] = SchedulerKind.{kind.name}"
+            f"{_INDENT}#: Every SAMPLER this family declares a scheduler for, and the KIND"
         )
         lines.append(
-            f"{_INDENT}SCHEDULER_PARAMETERS: ClassVar[SchedulerBlock] = MappingProxyType({{"
+            f"{_INDENT}#: each one names. Keyed by the value a checkpoint is stamped with."
+        )
+        lines.append(
+            f"{_INDENT}SCHEDULERS: ClassVar[Mapping[str, SchedulerKind]] = MappingProxyType({{"
         )
         lines.extend(
-            f"{_INDENT * 2}{str(name)!r}: {value!r}," for name, value in scheduler.parameters
+            f"{_INDENT * 2}{str(row.sampler)!r}: "
+            f"SchedulerKind.{parse_kind(str(row.name)).name},"
+            for row in export.schedulers
         )
+        lines.append(f"{_INDENT}}})")
+        lines.append(
+            f"{_INDENT}SCHEDULER_PARAMETERS: ClassVar[Mapping[str, SchedulerBlock]] = "
+            "MappingProxyType({"
+        )
+        for row in export.schedulers:
+            lines.append(f"{_INDENT * 2}{str(row.sampler)!r}: MappingProxyType({{")
+            lines.extend(
+                f"{_INDENT * 3}{str(name)!r}: {value!r}," for name, value in row.parameters
+            )
+            lines.append(f"{_INDENT * 2}}}),")
         lines.append(f"{_INDENT}}})")
     lines.append(
         f"{_INDENT}#: Declared loop counts: (name, minimum, maximum), inclusive bounds."
@@ -249,27 +281,95 @@ def _class_facts(export: ModelExport) -> list[str]:
     return lines
 
 
-def _scheduler_method(implementation: str) -> list[str]:
-    """The typed accessor for a family whose scheduler the SDK implements.
+def _scheduler_method(export: ModelExport, implemented: dict[str, str]) -> list[str]:
+    """The typed accessor for the schedulers the SDK implements for a family.
 
-    The return type is the CONCRETE class, so a handler reaches flow-match
-    Euler's own API — ``schedule()``, ``step()`` — through the type checker
-    rather than through a name it typed. There is no registry lookup at request
-    time and no scheduler object: what comes back is a frozen dataclass of the
-    family's own declared constants (pgw#1331).
+    Two shapes, and which one is emitted is decided by the DECLARATION rather
+    than by taste (pgw#1346 K10):
+
+    * **one declared sampler** — no argument, and the return type is that ONE
+      concrete class. A handler reaches flow-match Euler's own API through the
+      type checker rather than through a name it typed, exactly as pgw#1331
+      shipped it. Nothing about a single-sampler family changes;
+    * **several** — the sampler is a CHECKPOINT fact, so it is read off
+      ``inst.tuned.scheduler`` and resolved against the declared set. The
+      return type is the closed UNION of the declared kinds' classes, an
+      undeclared stamp is a refusal naming both sides, and an explicit
+      ``name=`` argument is typed by the generated ``…DeclaredSampler``
+      literal — so a handler that spells a sampler this family does not
+      implement is a STATIC error on the author's machine.
+
+    There is no registry lookup at request time and no scheduler object: what
+    comes back is a frozen dataclass of the family's own declared constants.
     """
 
-    return [
-        "",
-        f"{_INDENT}def scheduler(self) -> {implementation}:",
-        f'{_INDENT * 2}"""This family\'s declared scheduler, as bare typed math.',
-        "",
-        f"{_INDENT * 2}Built from ``SCHEDULER_PARAMETERS`` above, which rides the export",
-        f"{_INDENT * 2}digest — so a re-declared schedule changes this family's identity",
-        f"{_INDENT * 2}instead of silently changing every request.",
-        f'{_INDENT * 2}"""',
-        f"{_INDENT * 2}return {implementation}.from_block(self.SCHEDULER_PARAMETERS)",
+    family = str(export.family)
+    tuned = export.tuned.qualname
+    rows = [
+        (str(row.sampler), implemented[str(row.sampler)])
+        for row in export.schedulers
+        if str(row.sampler) in implemented
     ]
+    if len(rows) == 1:
+        sampler, implementation = rows[0]
+        return [
+            "",
+            f"{_INDENT}def scheduler(self) -> {implementation}:",
+            f'{_INDENT * 2}"""This family\'s declared scheduler, as bare typed math.',
+            "",
+            f"{_INDENT * 2}Built from ``SCHEDULER_PARAMETERS`` above, which rides the export",
+            f"{_INDENT * 2}digest — so a re-declared schedule changes this family's identity",
+            f"{_INDENT * 2}instead of silently changing every request.",
+            "",
+            f"{_INDENT * 2}No argument: this family declares exactly one sampler",
+            f"{_INDENT * 2}({sampler!r}), so there is nothing for a checkpoint to choose.",
+            f'{_INDENT * 2}"""',
+            f"{_INDENT * 2}return {implementation}.from_block(",
+            f"{_INDENT * 3}self.SCHEDULER_PARAMETERS[{sampler!r}]",
+            f"{_INDENT * 2})",
+        ]
+    union = " | ".join(sorted({implementation for _, implementation in rows}))
+    alias = _alias(family, "declared_sampler")
+    lines = [
+        "",
+        f"{_INDENT}def scheduler(self, name: {alias} | None = None) -> {union}:",
+        f'{_INDENT * 2}"""The scheduler this checkpoint\'s SAMPLER names, as bare typed math.',
+        "",
+        f"{_INDENT * 2}``name`` defaults to ``self.tuned.scheduler`` — the value the",
+        f"{_INDENT * 2}catalog stamped for THIS checkpoint — because the sampler is a",
+        f"{_INDENT * 2}checkpoint fact and not a family constant. Pass it explicitly only",
+        f"{_INDENT * 2}to override, and only with a sampler this family declares: the",
+        f"{_INDENT * 2}parameter's type is the closed declared set, so anything else is a",
+        f"{_INDENT * 2}type error before it is a runtime one.",
+        "",
+        f"{_INDENT * 2}A STAMPED sampler outside the declared set is refused, never",
+        f"{_INDENT * 2}substituted. The tuned schema may admit more names than the SDK",
+        f"{_INDENT * 2}implements schedulers for, and serving one of the others in its",
+        f"{_INDENT * 2}place would render a different image than the recipe asked for,",
+        f"{_INDENT * 2}silently and plausibly.",
+        f'{_INDENT * 2}"""',
+        f'{_INDENT * 2}chosen = cast("{tuned}", self.tuned).scheduler if name is None else name',
+    ]
+    # One arm per sampler and a trailing refusal, rather than a table lookup
+    # with a default arm: a family may DECLARE a kind this SDK implements no
+    # math for, and a default arm would serve the last implemented kind in its
+    # place. There is nothing sensible to fall through to, so nothing does.
+    for sampler, implementation in rows:
+        lines.append(f"{_INDENT * 2}if chosen == {sampler!r}:")
+        lines.append(f"{_INDENT * 3}return {implementation}.from_block(")
+        lines.append(f"{_INDENT * 4}self.SCHEDULER_PARAMETERS[{sampler!r}]")
+        lines.append(f"{_INDENT * 3})")
+    lines.extend(
+        [
+            f"{_INDENT * 2}raise ModelError(",
+            f"{_INDENT * 3}ModelRefusal.SCHEDULER_UNDECLARED,",
+            f'{_INDENT * 3}f"{family} is stamped with sampler {{chosen!r}}, which this SDK "',
+            f'{_INDENT * 3}f"implements no scheduler for; it serves "',
+            f"{_INDENT * 3}f\"{sorted(sampler for sampler, _ in rows)!r}\",",
+            f"{_INDENT * 2})",
+        ]
+    )
+    return lines
 
 
 def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -> str:
@@ -299,21 +399,24 @@ def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -
             (ParameterKind.MAPPING, "Mapping"),
             (ParameterKind.SEQUENCE, "Sequence"),
         )
-        if kind in kinds
+        # `SCHEDULERS` and `SCHEDULER_PARAMETERS` are annotated `Mapping[...]`,
+        # so a family with a scheduler needs the alias whether or not any
+        # runner takes a mapping parameter.
+        if kind in kinds or (name == "Mapping" and export.schedulers)
     ]
-    scheduler = export.scheduler
-    #: The concrete bare-math class this family's declared scheduler resolves
-    #: to, or empty when the SDK implements no math for the declared name. The
-    #: miss is silent HERE and loud at the call site: the generated class simply
-    #: has no ``scheduler()``, so a handler that wants one gets an
+    #: Sampler -> the concrete bare-math class its declared KIND resolves to.
+    #: A sampler whose kind the SDK implements no math for is simply ABSENT
+    #: here, and the miss is silent in this table and loud at the call site:
+    #: a family whose every declared kind is unimplemented gets no
+    #: ``scheduler()`` method at all, so a handler that wants one gets an
     #: ``AttributeError`` from its own type checker rather than a fallback that
     #: quietly puts a model library back on the request path (pgw#1331).
-    scheduler_impl = (
-        IMPLEMENTED.get(parse_kind(str(scheduler.name))) if scheduler is not None else None
-    )
-    scheduler_names = sorted(
-        {"SchedulerBlock", "SchedulerKind", *([scheduler_impl] if scheduler_impl else [])}
-    )
+    implemented = {
+        str(row.sampler): implementation
+        for row in export.schedulers
+        if (implementation := IMPLEMENTED.get(parse_kind(str(row.name)))) is not None
+    }
+    scheduler_names = sorted({"SchedulerBlock", "SchedulerKind", *implemented.values()})
     imports = sorted(
         {
             "from gen_worker.model.runtime import Model",
@@ -323,7 +426,14 @@ def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -
         }
         | (
             {"from gen_worker.model.scheduler import " + ", ".join(scheduler_names)}
-            if scheduler is not None
+            if export.schedulers
+            else set()
+        )
+        # The refusal is reachable only from the several-samplers accessor:
+        # with one sampler there is nothing for a checkpoint to name wrongly.
+        | (
+            {"from gen_worker.model.errors import ModelError, ModelRefusal"}
+            if len(implemented) > 1
             else set()
         )
     )
@@ -334,7 +444,7 @@ def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -
     # a single-valued block would name the wrong one), and every generated
     # module before them happened to declare one.
     stdlib = ["from importlib import resources"]
-    if scheduler is not None:
+    if export.schedulers:
         stdlib.append("from types import MappingProxyType")
     if containers:
         # Imported at RUNTIME, not under TYPE_CHECKING: `collections.abc` is
@@ -377,7 +487,7 @@ def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -
     ]
     lines.extend(_lazy_declaration(spec_module, spec_attr))
     lines.append("")
-    lines.extend(_aliases(export))
+    lines.extend(_aliases(export, implemented))
     lines.extend(
         [
             "",
@@ -399,13 +509,15 @@ def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -
         ]
     )
     lines.extend(_class_facts(export))
-    if scheduler_impl:
-        lines.extend(_scheduler_method(scheduler_impl))
+    if implemented:
+        lines.extend(_scheduler_method(export, implemented))
     for runner in export.runners:
         lines.append("")
         lines.extend(_method(export, runner))
     aliases = [_alias(family, str(axis)) for axis, _ in export.buckets]
     aliases.append(_alias(family, "layout"))
+    if len(implemented) > 1:
+        aliases.append(_alias(family, "declared_sampler"))
     exported = ", ".join(repr(item) for item in [name, *sorted(aliases)])
     lines.extend(["", "", f"__all__ = [{exported}]", ""])
     return "\n".join(lines)

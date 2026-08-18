@@ -76,12 +76,34 @@ def choice(block: SchedulerBlock, name: str, default: str, allowed: tuple[str, .
     return value
 
 
+def only(block: SchedulerBlock, known: tuple[str, ...]) -> SchedulerBlock:
+    """Refuse a block carrying a parameter this scheduler does not read.
+
+    The failure this prevents is silent and specific: ``EulerAncestralDiscrete``
+    has no ``final_sigmas_type`` and ``Ddim`` has no ``final_sigmas_type``
+    either, so a per-sampler block copied from the euler one keeps a key that
+    changes nothing — the declaration says one thing and the ladder does
+    another, with no error anywhere. Every reader below is total over its own
+    parameters, so an unknown key can only be a mistake (pgw#1346 K10).
+    """
+
+    unknown = sorted(set(block) - set(known))
+    if unknown:
+        raise ModelError(
+            ModelRefusal.SCHEDULER_INVALID,
+            f"scheduler parameter {unknown[0]!r} is not read by this scheduler; it reads "
+            f"{list(known)!r}",
+        )
+    return block
+
+
 __all__ = [
     "SchedulerBlock",
     "SchedulerValue",
     "choice",
     "count",
     "flag",
+    "only",
     "real",
     "refuse",
 ]

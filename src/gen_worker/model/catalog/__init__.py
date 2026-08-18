@@ -70,9 +70,9 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
     from ._generated.qwen36_27b_mtp import Qwen3627bMtp
     from ._generated.qwen36_35b_a3b import Qwen3635bA3b
     from ._generated.qwen_image import QwenImage, QwenImageLayout, QwenImageShape
-    from ._generated.sd2 import Sd2, Sd2Layout, Sd2Shape
-    from ._generated.sd15 import Sd15, Sd15Layout, Sd15Shape
-    from ._generated.sdxl import Sdxl, SdxlLayout, SdxlShape
+    from ._generated.sd2 import Sd2, Sd2DeclaredSampler, Sd2Layout, Sd2Shape
+    from ._generated.sd15 import Sd15, Sd15DeclaredSampler, Sd15Layout, Sd15Shape
+    from ._generated.sdxl import Sdxl, SdxlDeclaredSampler, SdxlLayout, SdxlShape
     from ._generated.stable_audio_open import StableAudioOpen
     from ._generated.trellis_3d import Trellis3d
     from ._generated.z_image import ZImage, ZImageBranches, ZImageLayout
@@ -136,12 +136,15 @@ _FAMILIES: Final[dict[str, str]] = {
     "Ltx23Layout": "ltx23",
     "Ltx23VideoTokens": "ltx23",
     "Sd2": "sd2",
+    "Sd2DeclaredSampler": "sd2",
     "Sd2Layout": "sd2",
     "Sd2Shape": "sd2",
     "Sd15": "sd15",
+    "Sd15DeclaredSampler": "sd15",
     "Sd15Layout": "sd15",
     "Sd15Shape": "sd15",
     "Sdxl": "sdxl",
+    "SdxlDeclaredSampler": "sdxl",
     "SdxlLayout": "sdxl",
     "SdxlShape": "sdxl",
     "StableAudioOpen": "stable_audio_open",
@@ -212,12 +215,15 @@ __all__ = [
     "Ltx23Layout",
     "Ltx23VideoTokens",
     "Sd2",
+    "Sd2DeclaredSampler",
     "Sd2Layout",
     "Sd2Shape",
     "Sd15",
+    "Sd15DeclaredSampler",
     "Sd15Layout",
     "Sd15Shape",
     "Sdxl",
+    "SdxlDeclaredSampler",
     "SdxlLayout",
     "SdxlShape",
     "StableAudioOpen",

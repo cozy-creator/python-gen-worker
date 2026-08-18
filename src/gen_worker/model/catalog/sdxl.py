@@ -41,9 +41,9 @@ from ..spec import (
     Loop,
     Parameter,
     Runner,
-    Scheduler,
     Stage,
 )
+from .sd_samplers import sd_schedulers
 from .sdxl_serve import (
     CFG_BATCH,
     CLIP_G_WIDTH,
@@ -235,7 +235,7 @@ CLIP_G_TEXT: Final[Mapping[str, Any]] = {
 #: parameter would resolve to a schedule this family was never trained on.
 #: ``steps_offset=1`` and ``timestep_spacing="leading"`` are what every SDXL
 #: checkpoint's own ``scheduler/scheduler_config.json`` carries.
-SCHEDULER: Final[Mapping[str, bool | int | float | str]] = {
+TRAINED: Final[Mapping[str, bool | int | float | str]] = {
     "num_train_timesteps": 1000,
     "beta_start": 0.00085,
     "beta_end": 0.012,
@@ -243,8 +243,30 @@ SCHEDULER: Final[Mapping[str, bool | int | float | str]] = {
     "prediction_type": "epsilon",
     "timestep_spacing": "leading",
     "steps_offset": 1,
+}
+
+#: The trained schedule under the ``euler`` sampler — i.e. with the one
+#: parameter that is ``EulerDiscrete``'s and not the checkpoint's. Kept as its
+#: own name because it is the block every measurement in
+#: ``tests/test_sd_stage1_pgw1346.py`` differences against.
+SCHEDULER: Final[Mapping[str, bool | int | float | str]] = {
+    **TRAINED,
     "final_sigmas_type": "zero",
 }
+
+#: The scheduler SET, keyed by the sampler a checkpoint is stamped with
+#: (pgw#1346 K10). These are the three names in ``SdxlSampler`` that map onto
+#: a scheduler this SDK implements; the other three (``dpmpp_2m_karras``,
+#: ``dpmpp_2m_sde_karras``, ``lcm``) are MULTISTEP solvers owed to B3/B4 and
+#: are refused BY NAME rather than served under a neighbouring schedule.
+#:
+#: ``euler_a`` is the one that matters most: it is ``SdxlTuned.scheduler``'s
+#: DEFAULT, so before K10 the family's single declared ``euler_discrete``
+#: block was its trained schedule and not the one most requests asked for.
+SCHEDULERS: Final = sd_schedulers(
+    TRAINED,
+    ("ddim_trailing", "dpmpp_2m_karras", "dpmpp_2m_sde_karras", "euler_a", "euler_trailing"),
+)
 
 
 def _arm_hidden_state_capture(model: Any) -> Any:
@@ -382,13 +404,15 @@ SDXL: Final = GraphModelSpec(
         )
     ),
     parameters=(Parameter("steps", minimum=1, maximum=100),),
-    scheduler=Scheduler("euler_discrete", SCHEDULER),
+    schedulers=SCHEDULERS,
 )
 
 __all__ = [
     "CLIP_G_TEXT",
     "CLIP_L_TEXT",
     "SCHEDULER",
+    "SCHEDULERS",
+    "TRAINED",
     "SDXL",
     "UNET",
     "VAE",

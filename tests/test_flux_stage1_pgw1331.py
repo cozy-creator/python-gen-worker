@@ -187,14 +187,31 @@ def test_every_declarable_scheduler_now_has_math_behind_it() -> None:
     unimplemented" impossible to reach rather than merely absent today. The
     absent-method MECHANISM is still fenced, at the generator, in
     ``tests/test_sd_stage1_pgw1346.py``.
+
+    pgw#1346 K10 added ``euler_ancestral_discrete`` and ``ddim`` to the closed
+    set WITH their math, so ``IMPLEMENTED`` is still total — which is the
+    property this test actually asserts, and it is now four names rather than
+    two. ``ddim`` is therefore no longer unparseable; the name that stands in
+    for "declarable but absent" is one nobody has implemented.
     """
 
-    assert Flux1Dev.SCHEDULER is SchedulerKind.FLOW_MATCH_EULER_DISCRETE
-    assert Sdxl.SCHEDULER is SchedulerKind.EULER_DISCRETE
+    # A SET of one, keyed by sampler (pgw#1346 K10). One entry is exactly what
+    # a family with a single schedule declares, and `scheduler()` keeps taking
+    # no argument because there is nothing for a checkpoint to choose.
+    assert dict(Flux1Dev.SCHEDULERS) == {
+        "flow_match_euler": SchedulerKind.FLOW_MATCH_EULER_DISCRETE
+    }
+    assert {name: kind.value for name, kind in Sdxl.SCHEDULERS.items()} == {
+        "ddim_trailing": "ddim",
+        "dpmpp_2m_karras": "dpmsolver_multistep",
+        "dpmpp_2m_sde_karras": "dpmsolver_multistep",
+        "euler_a": "euler_ancestral_discrete",
+        "euler_trailing": "euler_discrete",
+    }
     assert isinstance(Flux1Dev.fake().scheduler(), FlowMatchEulerDiscrete)
     assert set(IMPLEMENTED) == set(SchedulerKind)
     with pytest.raises(ModelError):
-        parse_kind("ddim")
+        parse_kind("lcm")
 
 
 def test_the_declared_block_is_the_scheduler_s_only_source_of_constants() -> None:
@@ -206,7 +223,7 @@ def test_the_declared_block_is_the_scheduler_s_only_source_of_constants() -> Non
     assert scheduler.max_image_seq_len == SCHEDULER["max_image_seq_len"]
     # …and the block rides the export digest, so re-declaring it re-identifies
     # the family rather than silently changing every request.
-    assert dict(Flux1Dev.SCHEDULER_PARAMETERS) == dict(SCHEDULER)
+    assert dict(Flux1Dev.SCHEDULER_PARAMETERS["flow_match_euler"]) == dict(SCHEDULER)
 
 
 # ------------------------------------------------------- the whole composition

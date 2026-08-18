@@ -52,9 +52,9 @@ from ..spec import (
     Loop,
     Parameter,
     Runner,
-    Scheduler,
     Stage,
 )
+from .sd_samplers import sd_schedulers
 from .sd15_serve import (
     CFG_BATCH,
     LATENT_CHANNELS,
@@ -161,7 +161,7 @@ SD2_TEXT: Final[Mapping[str, Any]] = {
 #: identical to SDXL's — the three share a noise schedule and share nothing
 #: else. Stated in full for the reason ``sdxl.SCHEDULER`` is: EulerDiscrete
 #: defaults to diffusers' class defaults, which no Stable Diffusion uses.
-SCHEDULER: Final[Mapping[str, bool | int | float | str]] = {
+TRAINED: Final[Mapping[str, bool | int | float | str]] = {
     "num_train_timesteps": 1000,
     "beta_start": 0.00085,
     "beta_end": 0.012,
@@ -169,8 +169,36 @@ SCHEDULER: Final[Mapping[str, bool | int | float | str]] = {
     "prediction_type": "epsilon",
     "timestep_spacing": "leading",
     "steps_offset": 1,
+}
+
+#: The trained schedule under the ``euler`` sampler. Kept as its own name
+#: because it is the block the B2 measurements difference against.
+SCHEDULER: Final[Mapping[str, bool | int | float | str]] = {
+    **TRAINED,
     "final_sigmas_type": "zero",
 }
+
+#: The scheduler SET, keyed by the sampler a checkpoint is stamped with
+#: (pgw#1346 K10). Four of the nine names ``Sd15Sampler`` admits map onto a
+#: scheduler this SDK implements. The five absent ones (``dpmpp_2m``,
+#: ``dpmpp_2m_karras`` — which is `Sd15Tuned`'s DEFAULT — ``dpmpp_2m_sde_karras``,
+#: ``unipc``, ``lcm``) are MULTISTEP solvers owed to B3/B4, and a checkpoint
+#: stamped with one is refused BY NAME rather than served under a neighbouring
+#: schedule. Both SD1.5 and SD2 offer the same four: `Sd2Tuned` shares
+#: `Sd15Sampler` and defaults to ``euler_a``, which IS covered.
+SCHEDULERS: Final = sd_schedulers(
+    TRAINED,
+    (
+        "ddim",
+        "ddim_trailing",
+        "dpmpp_2m",
+        "dpmpp_2m_karras",
+        "dpmpp_2m_sde_karras",
+        "euler",
+        "euler_a",
+        "unipc",
+    ),
+)
 
 
 def _make_denoiser(config: Mapping[str, Any]) -> Any:
@@ -334,7 +362,7 @@ SD15: Final = GraphModelSpec(
         stages=(Stage("clip"), Stage("denoiser", repeat="steps"), Stage("decoder"))
     ),
     parameters=(Parameter("steps", minimum=1, maximum=100),),
-    scheduler=Scheduler("euler_discrete", SCHEDULER),
+    schedulers=SCHEDULERS,
 )
 
 #: Stable Diffusion 2.x, which is also SD-Turbo's architecture.
@@ -367,11 +395,12 @@ SD2: Final = GraphModelSpec(
         stages=(Stage("clip"), Stage("denoiser", repeat="steps"), Stage("decoder"))
     ),
     parameters=(Parameter("steps", minimum=1, maximum=100),),
-    scheduler=Scheduler("euler_discrete", SCHEDULER),
+    schedulers=SCHEDULERS,
 )
 
 __all__ = [
     "SCHEDULER",
+    "SCHEDULERS",
     "SD2",
     "SD2_TEXT",
     "SD2_UNET",

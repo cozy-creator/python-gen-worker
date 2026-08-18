@@ -11,6 +11,7 @@ against that export; it does not produce it.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib import resources
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
@@ -77,7 +78,7 @@ class Ltx23(Model):
     __slots__ = ()
 
     FAMILY: ClassVar[str] = 'ltx23'
-    EXPORT_DIGEST: ClassVar[str] = '85c89d59fbd4cccd5a51a873d2e1e737'
+    EXPORT_DIGEST: ClassVar[str] = 'ef0ed3beda290449b0443066c2e27eac'
     EXPORT: ClassVar[ModelExport] = _EXPORT
     Tuned: ClassVar[type[Ltx23Tuned]] = Ltx23Tuned
     SPEC: ClassVar[ModelSpec | None] = _SPEC
@@ -89,9 +90,15 @@ class Ltx23(Model):
     )
     LOOP_KIND: ClassVar[str] = 'staged'
     SESSION_STATE: ClassVar[str] = 'none'
-    SCHEDULER: ClassVar[SchedulerKind] = SchedulerKind.FLOW_MATCH_EULER_DISCRETE
-    SCHEDULER_PARAMETERS: ClassVar[SchedulerBlock] = MappingProxyType({
-        'num_train_timesteps': 1000,
+    #: Every SAMPLER this family declares a scheduler for, and the KIND
+    #: each one names. Keyed by the value a checkpoint is stamped with.
+    SCHEDULERS: ClassVar[Mapping[str, SchedulerKind]] = MappingProxyType({
+        'flow_match_euler': SchedulerKind.FLOW_MATCH_EULER_DISCRETE,
+    })
+    SCHEDULER_PARAMETERS: ClassVar[Mapping[str, SchedulerBlock]] = MappingProxyType({
+        'flow_match_euler': MappingProxyType({
+            'num_train_timesteps': 1000,
+        }),
     })
     #: Declared loop counts: (name, minimum, maximum), inclusive bounds.
     PARAMETERS: ClassVar[tuple[tuple[str, int, int], ...]] = (
@@ -105,8 +112,13 @@ class Ltx23(Model):
         Built from ``SCHEDULER_PARAMETERS`` above, which rides the export
         digest — so a re-declared schedule changes this family's identity
         instead of silently changing every request.
+
+        No argument: this family declares exactly one sampler
+        ('flow_match_euler'), so there is nothing for a checkpoint to choose.
         """
-        return FlowMatchEulerDiscrete.from_block(self.SCHEDULER_PARAMETERS)
+        return FlowMatchEulerDiscrete.from_block(
+            self.SCHEDULER_PARAMETERS['flow_match_euler']
+        )
 
     def denoiser(
         self,

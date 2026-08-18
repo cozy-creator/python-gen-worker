@@ -499,6 +499,7 @@ def test_the_declaration_exposes_one_runner_and_one_loop_stage() -> None:
     assert tuple(row.name for row in Z_IMAGE.runners) == ("denoiser",)
     assert Z_IMAGE.loop is not None
     assert tuple(stage.runner for stage in Z_IMAGE.loop.stages) == ("denoiser",)
-    assert Z_IMAGE.scheduler is not None
-    assert Z_IMAGE.scheduler.name == "flow_match_euler_discrete"
+    # A set of ONE, keyed by sampler (pgw#1346 K10).
+    assert list(Z_IMAGE.schedulers) == ["flow_match_euler"]
+    assert Z_IMAGE.schedulers["flow_match_euler"].name == "flow_match_euler_discrete"
     assert SCHEDULER["use_dynamic_shifting"] is False

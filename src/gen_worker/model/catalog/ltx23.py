@@ -355,9 +355,14 @@ LTX23: Final = GraphModelSpec(
         Parameter("stage1_steps", minimum=1, maximum=50),
         Parameter("stage2_steps", minimum=1, maximum=50),
     ),
-    scheduler=Scheduler(
-        "flow_match_euler_discrete", {"num_train_timesteps": NUM_TRAIN_TIMESTEPS}
-    ),
+    # A set of ONE (pgw#1346 K10): this family's tuned schema names no sampler
+    # because it serves exactly this schedule, so `inst.scheduler()` still
+    # takes no argument and still returns the concrete class.
+    schedulers={
+        "flow_match_euler": Scheduler(
+            "flow_match_euler_discrete", {"num_train_timesteps": NUM_TRAIN_TIMESTEPS}
+        )
+    },
 )
 
 __all__ = [

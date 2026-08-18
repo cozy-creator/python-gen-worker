@@ -15,9 +15,17 @@ one-way.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeAlias, cast
 
-from ..scheduler import DiscreteSchedule, EulerDiscrete
+from ..scheduler import (
+    AncestralSchedule,
+    DdimSchedule,
+    DiscreteSchedule,
+    DpmSolverSchedule,
+    MultistepHistory,
+    UniPcHistory,
+    UniPcSchedule,
+)
 from ..spec import TunedValues
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -206,18 +214,25 @@ def token_ids(ids: Sequence[int], *, device: Any) -> Tensor:
     return torch.tensor([row], device=device, dtype=torch.long)
 
 
+#: Every schedule an SD1.5 / SD2 request can resolve to. See the sdxl entry
+#: for why this is a union rather than a base class.
+AnySchedule = (
+    DiscreteSchedule | AncestralSchedule | DdimSchedule | DpmSolverSchedule | UniPcSchedule
+)
+
+
 def schedule_for(
     instance: AnySd, *, steps: int, objective: str = "epsilon"
-) -> DiscreteSchedule:
-    """The sigma ladder for one request, from the family's OWN declared block.
+) -> AnySchedule:
+    """The schedule for one request, from the SAMPLER this checkpoint names.
 
     ``objective`` arrives per request: the SD2 768-v rows are v-prediction and
     the rest are epsilon, under ONE declaration — a checkpoint fact, so it
-    cannot live in the family's block.
+    cannot live in the family's block. The sampler is the same kind of fact and
+    arrives the same way, off ``inst.tuned.scheduler`` (pgw#1346 K10).
     """
 
-    scheduler: EulerDiscrete = instance.scheduler()
-    return scheduler.objective(objective).schedule(steps)
+    return instance.scheduler().objective(objective).schedule(steps)
 
 
 def encode_prompt(instance: AnySd, *, positive: Tensor, negative: Tensor) -> Tensor:
@@ -245,14 +260,60 @@ def initial_latents(
     return (noise * sigma).to(device=device, dtype=dtype)
 
 
+#: The keying that makes an ANCESTRAL sampler reproducible (pgw#1346 K10).
+#:
+#: ``euler_a`` consumes a fresh noise tensor at every step, so "same seed, same
+#: image" is a claim about that noise stream and not only about the initial
+#: latents. Two properties are wanted and they pull against each other:
+#: reproducibility across pods, and independence from the loop's shape.
+#:
+#: A running generator gives the first and not the second — step ``k``'s noise
+#: then depends on every draw before it, so a resumed loop, a preview pass or a
+#: reordered call site silently re-rolls the tail. So the stream is KEYED
+#: instead: step ``k`` draws from its own CPU generator seeded by mixing the
+#: request seed with ``k``. The mix is the 64-bit splitmix64 finalizer, chosen
+#: because adjacent seeds must not produce correlated streams and
+#: ``seed + k`` does exactly that — it makes step ``k`` of seed ``s`` identical
+#: to step ``k-1`` of seed ``s+1``.
+#:
+#: CPU-seeded for the reason ``initial_latents`` gives: a CUDA generator's
+#: stream is a property of the device, so a receipt replayed on another card
+#: would resolve different noise. On the CPU it cannot.
+_MIX: Final = 0x9E3779B97F4A7C15
+_MASK: Final = 0xFFFFFFFFFFFFFFFF
+
+
+def step_seed(seed: int, index: int) -> int:
+    """The seed step ``index`` of request ``seed`` draws its noise from."""
+
+    value = (seed + _MIX * (index + 1)) & _MASK
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _MASK
+    return (value ^ (value >> 31)) & _MASK
+
+
+def step_noise(*, shape: int, seed: int, index: int, device: Any, dtype: Any) -> Tensor:
+    """The ancestral noise for ONE step. Keyed by ``(seed, index)`` — see above."""
+
+    import torch
+
+    rows, cols = latent_shape(shape)
+    generator = torch.Generator(device="cpu").manual_seed(step_seed(seed, index))
+    noise = torch.randn(
+        1, LATENT_CHANNELS, rows, cols, generator=generator, dtype=torch.float32
+    )
+    return noise.to(device=device, dtype=dtype)
+
+
 def denoise(
     instance: AnySd,
     *,
     shape: AnyShape,
     latents: Tensor,
     prompt_embeds: Tensor,
-    schedule: DiscreteSchedule,
+    schedule: AnySchedule,
     guidance: float,
+    seed: int = 0,
 ) -> Iterator[tuple[int, Tensor]]:
     """The denoising loop, yielding ``(step index, latents)`` after each step.
 
@@ -262,8 +323,28 @@ def denoise(
 
     import torch
 
+    def _noise(index: int, like: Tensor) -> Tensor:
+        return step_noise(
+            shape=int(shape), seed=seed, index=index, device=like.device, dtype=like.dtype
+        )
+
+    history: object = (
+        schedule.begin() if isinstance(schedule, DpmSolverSchedule | UniPcSchedule) else None
+    )
+
     for index, timestep in enumerate(schedule.timesteps):
-        batched = schedule.scale_model_input(index, torch.cat([latents] * CFG_BATCH))
+        stacked = torch.cat([latents] * CFG_BATCH)
+        # The pre-scale is the euler/ddim family's, NOT the multistep solvers'.
+        # DPM-Solver++ and UniPC integrate in the unscaled parameterisation —
+        # their `init_noise_sigma` is 1.0 — so dividing their latents by
+        # `sqrt(sigma**2+1)` would be a wrong image and never an error. The
+        # union type is what makes the omission a TYPE error rather than a
+        # discovery on a pod.
+        batched = (
+            schedule.scale_model_input(index, stacked)
+            if isinstance(schedule, DiscreteSchedule | AncestralSchedule | DdimSchedule)
+            else stacked
+        )
         prediction = instance.denoiser(
             shape=shape,
             sample=batched,
@@ -271,7 +352,32 @@ def denoise(
             encoder_hidden_states=prompt_embeds,
         )
         uncond, cond = prediction.chunk(2)
-        latents = schedule.step(index, uncond + guidance * (cond - uncond), latents)
+        guided = uncond + guidance * (cond - uncond)
+        if isinstance(schedule, AncestralSchedule):
+            # An ancestral step CONSUMES noise; the parameter is required, and
+            # the noise is CPU-seeded and keyed by (seed, index) — see above.
+            latents = schedule.step(index, guided, latents, _noise(index, latents))
+        elif isinstance(schedule, DpmSolverSchedule):
+            # A MULTISTEP solver carries history between steps, so the loop
+            # threads it rather than the schedule holding it: a schedule that
+            # kept `self._model_outputs` is one two concurrent requests share.
+            latents, history = schedule.step(
+                index,
+                guided,
+                latents,
+                cast("MultistepHistory", history),
+                noise=(
+                    _noise(index, latents)
+                    if schedule.algorithm_type == "sde-dpmsolver++"
+                    else None
+                ),
+            )
+        elif isinstance(schedule, UniPcSchedule):
+            latents, history = schedule.step(
+                index, guided, latents, cast("UniPcHistory", history)
+            )
+        else:
+            latents = schedule.step(index, guided, latents)
         yield index, latents
 
 
@@ -312,6 +418,7 @@ def generate(
         prompt_embeds=prompt_embeds,
         schedule=schedule,
         guidance=guidance,
+        seed=seed,
     ):
         if on_step is not None:
             on_step(index, len(schedule))
@@ -327,6 +434,9 @@ __all__ = [
     "generate",
     "initial_latents",
     "schedule_for",
+    "step_noise",
+    "step_seed",
+    "AnySchedule",
     "token_ids",
     "LATENT_CHANNELS",
     "SD15_SHAPES",

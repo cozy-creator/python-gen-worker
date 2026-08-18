@@ -352,12 +352,21 @@ class Parameter:
 
 @dataclass(frozen=True, slots=True)
 class Scheduler:
-    """The named scheduler and its finite-scalar parameter block.
+    """One named scheduler KIND and its finite-scalar parameter block.
 
     Neither this package nor torchcg interprets it: the host implements the
     named scheduler. It rides in the declaration because two otherwise
     identical compositions under different schedulers are different pipelines,
     so it must be inside the digest a consumer pins.
+
+    **A family declares a SET of these, keyed by the sampler name its tuned
+    schema admits** — ``GraphModelSpec.schedulers`` (pgw#1346 K10). The sampler
+    is a CHECKPOINT fact, stamped per release slot into ``inst.tuned.scheduler``
+    and not a family constant, so a single-valued field could only ever be the
+    family's trained schedule while every request asked for something else:
+    SDXL's declared kind was ``euler_discrete`` while its default sampler is
+    ``euler_a``. A family with one sampler declares a set of one and nothing
+    about it changes.
     """
 
     name: str
@@ -607,10 +616,14 @@ class GraphModelSpec(ModelSpec):
     buckets: tuple[Bucket, ...] = ()
     loop: Loop | None = None
     parameters: tuple[Parameter, ...] = ()
-    scheduler: Scheduler | None = None
+    #: The scheduler SET, keyed by the SAMPLER NAME a checkpoint is stamped
+    #: with — i.e. by a value of this family's ``tuned.scheduler`` field
+    #: (pgw#1346 K10). Empty when the family declares no scheduler at all.
+    schedulers: Mapping[str, Scheduler] = field(default_factory=dict)
 
     def _validate(self) -> None:
         ModelSpec._validate(self)
+        self._validate_schedulers()
         if self.tuned is None:
             raise ModelError(
                 ModelRefusal.TUNED_INVALID,
@@ -687,6 +700,27 @@ class GraphModelSpec(ModelSpec):
                 ModelRefusal.PARAMETER_INVALID,
                 f"parameter {idle[0]!r} is declared but no counted stage reads it",
             )
+
+    def _validate_schedulers(self) -> None:
+        """The scheduler set: sampler-keyed, sorted, and never silently empty.
+
+        The KEY is a sampler name — a value the family's tuned schema admits —
+        and not a scheduler kind, which is why two keys may name the same kind
+        with different blocks (``euler`` and ``euler_trailing`` are one class
+        under two spacings) and why one key may not name two.
+        """
+
+        rows: dict[str, Scheduler] = {}
+        for raw_name, scheduler in self.schedulers.items():
+            sampler = _identifier("sampler", raw_name, parse_parameter_name)
+            if not isinstance(scheduler, Scheduler):
+                raise ModelError(
+                    ModelRefusal.SCHEDULER_INVALID,
+                    f"family {self.name!r} sampler {sampler!r} must name a Scheduler(...), "
+                    f"got {scheduler!r}",
+                )
+            rows[sampler] = scheduler
+        object.__setattr__(self, "schedulers", dict(sorted(rows.items())))
 
     @property
     def axis_values(self) -> dict[str, tuple[int, ...]]:

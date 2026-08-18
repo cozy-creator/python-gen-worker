@@ -313,8 +313,11 @@ def test_klein_takes_no_guidance_embedding() -> None:
 def test_the_scheduler_block_is_the_checkpoints_own() -> None:
     """Declared, so it rides the export digest rather than the math."""
 
-    assert FLUX2_KLEIN_4B.scheduler is not None
-    assert FLUX2_KLEIN_4B.scheduler.name == "flow_match_euler_discrete"
+    # A set of ONE, keyed by sampler (pgw#1346 K10): this family serves exactly
+    # one schedule, so there is nothing for a checkpoint to choose.
+    assert {name: entry.name for name, entry in FLUX2_KLEIN_4B.schedulers.items()} == {
+        "flow_match_euler": "flow_match_euler_discrete"
+    }
     assert SCHEDULER["use_dynamic_shifting"] is True
     assert SCHEDULER["base_image_seq_len"] == 256
     assert SCHEDULER["max_image_seq_len"] == 4096

@@ -1470,19 +1470,83 @@
       ]
     }
   ],
-  "scheduler": {
-    "name": "euler_discrete",
-    "parameters": {
-      "beta_end": 0.012,
-      "beta_schedule": "scaled_linear",
-      "beta_start": 0.00085,
-      "final_sigmas_type": "zero",
-      "num_train_timesteps": 1000,
-      "prediction_type": "epsilon",
-      "steps_offset": 1,
-      "timestep_spacing": "leading"
+  "schedulers": [
+    {
+      "name": "ddim",
+      "parameters": {
+        "beta_end": 0.012,
+        "beta_schedule": "scaled_linear",
+        "beta_start": 0.00085,
+        "clip_sample": false,
+        "num_train_timesteps": 1000,
+        "prediction_type": "epsilon",
+        "set_alpha_to_one": false,
+        "steps_offset": 0,
+        "timestep_spacing": "trailing"
+      },
+      "sampler": "ddim_trailing"
+    },
+    {
+      "name": "dpmsolver_multistep",
+      "parameters": {
+        "beta_end": 0.012,
+        "beta_schedule": "scaled_linear",
+        "beta_start": 0.00085,
+        "final_sigmas_type": "zero",
+        "num_train_timesteps": 1000,
+        "prediction_type": "epsilon",
+        "solver_order": 2,
+        "steps_offset": 1,
+        "timestep_spacing": "leading",
+        "use_karras_sigmas": true
+      },
+      "sampler": "dpmpp_2m_karras"
+    },
+    {
+      "name": "dpmsolver_multistep",
+      "parameters": {
+        "algorithm_type": "sde-dpmsolver++",
+        "beta_end": 0.012,
+        "beta_schedule": "scaled_linear",
+        "beta_start": 0.00085,
+        "final_sigmas_type": "zero",
+        "num_train_timesteps": 1000,
+        "prediction_type": "epsilon",
+        "solver_order": 2,
+        "steps_offset": 1,
+        "timestep_spacing": "leading",
+        "use_karras_sigmas": true
+      },
+      "sampler": "dpmpp_2m_sde_karras"
+    },
+    {
+      "name": "euler_ancestral_discrete",
+      "parameters": {
+        "beta_end": 0.012,
+        "beta_schedule": "scaled_linear",
+        "beta_start": 0.00085,
+        "num_train_timesteps": 1000,
+        "prediction_type": "epsilon",
+        "steps_offset": 1,
+        "timestep_spacing": "leading"
+      },
+      "sampler": "euler_a"
+    },
+    {
+      "name": "euler_discrete",
+      "parameters": {
+        "beta_end": 0.012,
+        "beta_schedule": "scaled_linear",
+        "beta_start": 0.00085,
+        "final_sigmas_type": "zero",
+        "num_train_timesteps": 1000,
+        "prediction_type": "epsilon",
+        "steps_offset": 0,
+        "timestep_spacing": "trailing"
+      },
+      "sampler": "euler_trailing"
     }
-  },
+  ],
   "tuned": {
     "module": "gen_worker.model.catalog.sdxl_serve",
     "qualname": "SdxlTuned"

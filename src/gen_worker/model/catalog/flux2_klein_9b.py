@@ -239,7 +239,10 @@ FLUX2_KLEIN_9B: Final = GraphModelSpec(
     ),
     loop=Loop(stages=(Stage("denoiser", repeat="steps"),)),
     parameters=(Parameter("steps", minimum=1, maximum=50),),
-    scheduler=Scheduler("flow_match_euler_discrete", SCHEDULER),
+    # A set of ONE (pgw#1346 K10): this family's tuned schema names no sampler
+    # because it serves exactly this schedule, so `inst.scheduler()` still
+    # takes no argument and still returns the concrete class.
+    schedulers={"flow_match_euler": Scheduler("flow_match_euler_discrete", SCHEDULER)},
 )
 
 __all__ = [

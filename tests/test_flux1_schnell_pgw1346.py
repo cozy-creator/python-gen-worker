@@ -243,8 +243,9 @@ def test_the_scheduler_block_is_the_releases_own_and_is_static() -> None:
         assert SCHEDULER[field] == value, field
     assert SCHEDULER["use_dynamic_shifting"] is False
     assert SCHEDULER["shift"] == 1.0
-    assert FLUX1_SCHNELL.scheduler is not None
-    assert FLUX1_SCHNELL.scheduler.name == "flow_match_euler_discrete"
+    # A set of ONE, keyed by sampler (pgw#1346 K10).
+    assert list(FLUX1_SCHNELL.schedulers) == ["flow_match_euler"]
+    assert FLUX1_SCHNELL.schedulers["flow_match_euler"].name == "flow_match_euler_discrete"
 
 
 # ----------------------------------------------------------------- the buckets

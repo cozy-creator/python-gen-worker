@@ -47,6 +47,11 @@ class ModelRefusal(StrEnum):
     PARAMETER_INVALID = "parameter_invalid"
     #: The scheduler block is not a name plus finite JSON scalars.
     SCHEDULER_INVALID = "scheduler_invalid"
+    #: A checkpoint is stamped with a SAMPLER this family's declaration does
+    #: not carry a scheduler for (pgw#1346 K10). Never a fallback: serving the
+    #: family's other schedule would silently render a different image than the
+    #: recipe asked for, which is the whole reason the set is exhaustive.
+    SCHEDULER_UNDECLARED = "scheduler_undeclared"
     #: The declaration-time export could not produce a ``CallIngress``.
     EXPORT_FAILED = "export_failed"
     #: Two variants of one runner project onto different call signatures

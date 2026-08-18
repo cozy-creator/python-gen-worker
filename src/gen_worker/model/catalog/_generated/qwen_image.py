@@ -11,6 +11,7 @@ against that export; it does not produce it.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib import resources
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
@@ -74,7 +75,7 @@ class QwenImage(Model):
     __slots__ = ()
 
     FAMILY: ClassVar[str] = 'qwen_image'
-    EXPORT_DIGEST: ClassVar[str] = '2737764f8a0c7d44bada4df584353fae'
+    EXPORT_DIGEST: ClassVar[str] = '09310b1a8c8bd43bd0f8ce9a7d7c238b'
     EXPORT: ClassVar[ModelExport] = _EXPORT
     Tuned: ClassVar[type[QwenImageTuned]] = QwenImageTuned
     SPEC: ClassVar[ModelSpec | None] = _SPEC
@@ -85,17 +86,23 @@ class QwenImage(Model):
     )
     LOOP_KIND: ClassVar[str] = 'staged'
     SESSION_STATE: ClassVar[str] = 'none'
-    SCHEDULER: ClassVar[SchedulerKind] = SchedulerKind.FLOW_MATCH_EULER_DISCRETE
-    SCHEDULER_PARAMETERS: ClassVar[SchedulerBlock] = MappingProxyType({
-        'base_image_seq_len': 256,
-        'base_shift': 0.5,
-        'max_image_seq_len': 8192,
-        'max_shift': 0.9,
-        'num_train_timesteps': 1000,
-        'shift': 1.0,
-        'shift_terminal': 0.02,
-        'time_shift_type': 'exponential',
-        'use_dynamic_shifting': True,
+    #: Every SAMPLER this family declares a scheduler for, and the KIND
+    #: each one names. Keyed by the value a checkpoint is stamped with.
+    SCHEDULERS: ClassVar[Mapping[str, SchedulerKind]] = MappingProxyType({
+        'flow_match_euler': SchedulerKind.FLOW_MATCH_EULER_DISCRETE,
+    })
+    SCHEDULER_PARAMETERS: ClassVar[Mapping[str, SchedulerBlock]] = MappingProxyType({
+        'flow_match_euler': MappingProxyType({
+            'base_image_seq_len': 256,
+            'base_shift': 0.5,
+            'max_image_seq_len': 8192,
+            'max_shift': 0.9,
+            'num_train_timesteps': 1000,
+            'shift': 1.0,
+            'shift_terminal': 0.02,
+            'time_shift_type': 'exponential',
+            'use_dynamic_shifting': True,
+        }),
     })
     #: Declared loop counts: (name, minimum, maximum), inclusive bounds.
     PARAMETERS: ClassVar[tuple[tuple[str, int, int], ...]] = (
@@ -108,8 +115,13 @@ class QwenImage(Model):
         Built from ``SCHEDULER_PARAMETERS`` above, which rides the export
         digest — so a re-declared schedule changes this family's identity
         instead of silently changing every request.
+
+        No argument: this family declares exactly one sampler
+        ('flow_match_euler'), so there is nothing for a checkpoint to choose.
         """
-        return FlowMatchEulerDiscrete.from_block(self.SCHEDULER_PARAMETERS)
+        return FlowMatchEulerDiscrete.from_block(
+            self.SCHEDULER_PARAMETERS['flow_match_euler']
+        )
 
     def denoiser(
         self,

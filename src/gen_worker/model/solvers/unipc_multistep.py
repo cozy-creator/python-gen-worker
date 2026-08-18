@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, ClassVar, Self
 
 from ..errors import ModelError, ModelRefusal
 from . import ladders
-from .block import SchedulerBlock, choice, count, flag, real, refuse
+from .block import SchedulerBlock, choice, count, flag, only, real, refuse
 from .precision import f32, round_half_even, sigma_table, truncate_to_int
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -374,6 +374,28 @@ class UniPCMultistep:
     use_flow_sigmas: bool = False
     flow_shift: float = 1.0
 
+    #: Every parameter this kind reads. A block naming anything else is a
+    #: declaration that says one thing and schedules another (pgw#1346 K10).
+    PARAMETERS: ClassVar[tuple[str, ...]] = (
+        "beta_end",
+        "beta_schedule",
+        "beta_start",
+        "final_sigmas_type",
+        "flow_shift",
+        "lower_order_final",
+        "num_train_timesteps",
+        "predict_x0",
+        "prediction_type",
+        "rescale_betas_zero_snr",
+        "solver_order",
+        "solver_type",
+        "steps_offset",
+        "timestep_spacing",
+        "use_exponential_sigmas",
+        "use_flow_sigmas",
+        "use_karras_sigmas",
+    )
+
     BETA_SCHEDULES: ClassVar[tuple[str, ...]] = ("linear", "scaled_linear")
     PREDICTION_TYPES: ClassVar[tuple[str, ...]] = (
         "epsilon",
@@ -433,6 +455,7 @@ class UniPCMultistep:
     def from_block(cls, block: SchedulerBlock) -> Self:
         """Build one from a declaration's scheduler parameter block."""
 
+        only(block, cls.PARAMETERS)
         return cls(
             num_train_timesteps=count(block, "num_train_timesteps", 1000),
             beta_start=real(block, "beta_start", 0.0001),

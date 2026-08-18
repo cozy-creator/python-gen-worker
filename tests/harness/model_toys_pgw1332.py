@@ -36,6 +36,12 @@ class ToyTuned(TunedValues, frozen=True):
 
     steps: int = 4
     guidance: float = 3.5
+    #: The SAMPLER this checkpoint is stamped with. Present because pgw#1346
+    #: K10 keys the declared scheduler SET by exactly this field, and the toy
+    #: declares two — so this schema is what makes the generated `scheduler()`
+    #: resolvable at all. `hypothetical` is deliberately absent from the
+    #: declaration, so the refusal arm has something to refuse.
+    scheduler: str = "euler"
 
 
 def _torch() -> Any:
@@ -110,7 +116,13 @@ TOY_DIFFUSION = GraphModelSpec(
     ),
     loop=Loop(stages=(Stage("denoiser", repeat="steps"), Stage("decoder"))),
     parameters=(Parameter("steps", minimum=1, maximum=100),),
-    scheduler=Scheduler("euler_discrete", {"shift": 3.0}),
+    # A SET of two (pgw#1346 K10), so the toy exercises the several-samplers
+    # accessor rather than only the single-sampler one the catalog's Flux
+    # entry covers. Two names, two kinds, one trained table.
+    schedulers={
+        "euler": Scheduler("euler_discrete", {"timestep_spacing": "trailing"}),
+        "euler_a": Scheduler("euler_ancestral_discrete", {"timestep_spacing": "trailing"}),
+    },
 )
 
 
