@@ -639,6 +639,17 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     share: str = ""
     share_index: int = 0
     share_count: int = 1
+    #: pgw#1371 holes-only: the ORDERED graph-class names this mint exists to
+    #: produce — the HOLES, i.e. the classes with no artifact for this pod's
+    #: (lane x sm) anywhere the caller could see (store, boot adopt, disk).
+    #: Empty means "the whole declaration" (the pre-holes behaviour, and the
+    #: full-miss case). A child intersects its share with this list BEFORE the
+    #: ``have_classes`` filter, and reports how many of its share's rows were
+    #: targeted so the parent can prove hole coverage without ever enumerating
+    #: the class names itself. Names that match nothing in the declaration are
+    #: reported loudly (a stale hole list) and never fail the mint — coverage
+    #: accretes, and a short holes mint is a smaller mint, not a short publish.
+    hole_classes: Tuple[str, ...] = ()
     #: pgw#1215 step 4: declared graph classes this pod ALREADY HAS as packed
     #: artifacts, from an earlier attempt of the same mint. A child skips them
     #: before it exports — not after, and not at pack time — so a retry pays
@@ -694,6 +705,12 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     #: without the parent ever enumerating it (``boot_key``'s rule, same
     #: sharding).
     declared_classes: int = 0
+    #: pgw#1371 holes-only: how many of THIS SHARE's rows matched the job's
+    #: ``hole_classes`` (counted before the ``have_classes`` filter). -1 when
+    #: the job named no holes — absent evidence, not zero. The parent sums
+    #: these across shares to prove the holes were covered, the same way
+    #: ``declared_classes`` proves the whole set.
+    targeted_classes: int = -1
     detail: str = ""
     elapsed_s: float = 0.0
     peak_rss_bytes: int = 0
@@ -1288,6 +1305,15 @@ class EntryCompilePool:
         #: `child_cpu_s` at the terminus.
         self._on_class: Optional[Callable[[str, int, int], None]] = None
         self._share_cpu_s: Dict[str, float] = {}
+        #: pgw#1371: the full-row landing callback (`on_row`), fired EXACTLY
+        #: ONCE per packed class — from the live harvest when the child
+        #: streams, from the report otherwise — so the supervisor's
+        #: per-class adopt/publish can never double-adopt one class.
+        self._on_row: Optional[Callable[[PackedGraphClass], None]] = None
+        self._rows_fired: set[str] = set()
+        #: share -> how many of its rows matched the job's hole list
+        #: (``EntryReport.targeted_classes``); -1 = the child reported none.
+        self.entry_targeted: Dict[str, int] = {}
         # pgw#830: parent-side per-share spans (writing the job + spawn) and
         # the pool-level idle split. Kept separate from `entry_phases` because
         # they are NOT inside `compile_s`: they happen in the parent while
@@ -1377,6 +1403,7 @@ class EntryCompilePool:
         self, template: EntryJob,
         *, on_share: Optional[Callable[[str, int, int], None]] = None,
         on_class: Optional[Callable[[str, int, int], None]] = None,
+        on_row: Optional[Callable[[PackedGraphClass], None]] = None,
         should_abandon: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, PackedGraphClass]:
         """Dispatch this mint's declared classes K-wide and collect what the
@@ -1406,6 +1433,15 @@ class EntryCompilePool:
         fleet meant the first beat arrived ~an hour in; per-class beats are
         what keep the hub's stall rule honest for the whole mint.
 
+        ``on_row(packed)`` (pgw#1371) is the same landing with the FULL row —
+        name, key, artifact path, envelope — fired EXACTLY ONCE per class
+        whichever way it arrives (live stream, or the report of a child too
+        old to stream). It is the seam the supervisor's per-class
+        adopt-and-publish hangs off: the artifact is on disk when this fires,
+        so a mint killed later has still banked every class this reported.
+        Best-effort like every callback here — a raising sink is logged and
+        never costs the mint.
+
         ``should_abandon()`` (pgw#1215 step 4) is polled in the same drain loop
         and raises :class:`EntryCompileAbandoned`, so the ``finally`` below
         group-kills every live child. The supervisor drives this pool from a
@@ -1428,6 +1464,7 @@ class EntryCompilePool:
         self._seed_seal_memo()
         self.ledger.entries = width
         self._on_class = on_class
+        self._on_row = on_row
 
         def _cb(name: str) -> None:
             if on_share is not None:
@@ -1511,8 +1548,11 @@ class EntryCompilePool:
                 charge("idle_other_s", width - len(running))
             if failure is not None:
                 raise failure
-            self._assert_shares_whole(
-                declared, done, width, have=len(template.have_classes))
+            if template.hole_classes:
+                self._assert_holes_covered(template, done, width)
+            else:
+                self._assert_shares_whole(
+                    declared, done, width, have=len(template.have_classes))
         finally:
             self.ledger.wall_s = round(time.monotonic() - pool_t0, 3)
             self.ledger.busy_s = round(sum(self.entry_seconds.values()), 3)
@@ -1581,6 +1621,66 @@ class EntryCompilePool:
                 + f"but every child reported {want} declared — "
                 f"rows[i::{width}] did not partition the declaration and this "
                 f"compiled graph would be short")
+
+    def _assert_holes_covered(
+        self, template: EntryJob, done: Mapping[str, Any], width: int,
+    ) -> None:
+        """The holes-only twin of :meth:`_assert_shares_whole` (pgw#1371).
+
+        A holes mint packs ``(declaration ∩ holes) − have``, and the parent
+        can enumerate neither the declaration nor its intersection with the
+        holes — only the children can, and each reports how many of its
+        share's rows the hole list matched (``targeted_classes``, counted
+        before the ``have`` filter). Summing those across a partition of the
+        declaration IS the intersection's size, so the proof is::
+
+            len(done) == sum(targeted) − |have ∩ holes|
+
+        A hole name that matched NOTHING (the sum falls short of the hole
+        list) is a stale hole list — loud, wire-visible, and deliberately not
+        fatal: coverage accretes, and a smaller mint than asked for is a
+        smaller mint, not a short publish. A child that cannot report its
+        targeted count at all is refused — without it there is no evidence
+        the holes were covered rather than silently dropped.
+        """
+        missing = [
+            share for share, count in
+            ((s, self.entry_targeted.get(s, -1)) for s in self.entry_targeted)
+            if count < 0]
+        if len(self.entry_targeted) < width or missing:
+            raise EntryCompileFailed(
+                "pool",
+                f"this mint named {len(template.hole_classes)} hole(s) but "
+                f"{len(missing) or width - len(self.entry_targeted)} of "
+                f"{width} compile child(ren) reported no targeted count — "
+                f"there is no evidence the holes were covered rather than "
+                f"silently dropped")
+        targeted = sum(max(0, int(v)) for v in self.entry_targeted.values())
+        skipped = len(set(template.have_classes) & set(template.hole_classes))
+        if len(done) != targeted - skipped:
+            raise EntryCompileFailed(
+                "pool",
+                f"the {width} share(s) packed {len(done)} graph class(es) "
+                f"but their shares matched {targeted} of the "
+                f"{len(template.hole_classes)} named hole(s)"
+                + (f" ({skipped} already held)" if skipped else "")
+                + " — the hole shares do not reconcile and some named class "
+                  "is missing")
+        stale = len(set(template.hole_classes)) - targeted
+        if stale > 0:
+            detail = (
+                f"{stale} of {len(set(template.hole_classes))} named hole(s) "
+                f"matched NO declared graph class on any child's pipeline — "
+                f"the hole list is stale against this declaration; the "
+                f"{len(done)} matched class(es) minted normally")
+            logger.warning("aot-pool: %s", detail)
+            try:
+                from . import activity as activity_mod
+
+                activity_mod.emit_event(
+                    activity_mod.KIND_AOT_MINT, detail, phase="stale_holes")
+            except Exception:  # pragma: no cover — telemetry never fails a mint
+                logger.debug("aot-pool: stale-hole event failed", exc_info=True)
 
     def _seed_seal_memo(self) -> None:
         """pgw#832: write the parent's toolchain digests where every entry
@@ -1792,6 +1892,7 @@ class EntryCompilePool:
                 except Exception:  # noqa: BLE001 — telemetry never fails a mint
                     logger.debug(
                         "entry-pool class callback failed", exc_info=True)
+            self._fire_row(packed)
         try:
             position = (slot / POSITION_NAME).read_text()
         except OSError:
@@ -1800,6 +1901,25 @@ class EntryCompilePool:
             row.position = position
             advanced = True
         return advanced
+
+    def _fire_row(self, packed: PackedGraphClass) -> None:
+        """Deliver one packed class to ``on_row`` EXACTLY ONCE (pgw#1371).
+
+        Deduplicated by class name across both arrival routes — the live
+        stream and the share report — because the sink is the supervisor's
+        per-class adopt/publish, and adopting one class twice would arm and
+        upload the same bytes twice.
+        """
+        if self._on_row is None or packed.name in self._rows_fired:
+            return
+        self._rows_fired.add(packed.name)
+        try:
+            self._on_row(packed)
+        except Exception:  # noqa: BLE001 — a sink never fails a mint
+            logger.warning(
+                "aot-pool: on_row sink failed for %s; the class stays packed "
+                "on disk and the terminus adopt still sees it",
+                packed.name, exc_info=True)
 
     def _judge_entry_liveness(
         self, row: _Running, *, progressed: bool = False,
@@ -1946,6 +2066,9 @@ class EntryCompilePool:
                     f"out_dir {row.job.out_dir!r} is not visible to this "
                     f"process")
             self.entry_declared[row.entry] = int(report.declared_classes or 0)
+            self.entry_targeted[row.entry] = int(report.targeted_classes)
+            for packed in report.classes:
+                self._fire_row(packed)
             self.entry_phases[row.entry] = self._close_entry_partition(
                 row, report, elapsed=elapsed, reap_epoch=reap_epoch)
             self.entry_overlays[row.entry] = dict(report.overlays or {})
@@ -1971,6 +2094,9 @@ class EntryCompilePool:
                 1 for c in report.classes if c.name not in self.class_spans)
             for packed in report.classes:
                 self.class_spans[packed.name] = dict(packed.spans or {})
+                # A share that refused at class k still PACKED k-1 classes,
+                # and each is a durable artifact the per-class sink may adopt.
+                self._fire_row(packed)
             self.refused_classes[row.entry] = list(report.classes)
             self.entry_declared[row.entry] = int(report.declared_classes or 0)
         elif report is None and row.classes_landed:

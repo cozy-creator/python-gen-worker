@@ -570,7 +570,8 @@ class _Rig:
             pass
         monkeypatch.setattr(
             self.ex, "_enable_compiled",
-            lambda p, cfg, artifact, delivered=None, arm=None, boot_local_key="":
+            lambda p, cfg, artifact, delivered=None, arm=None, boot_local_key="",
+                   boot_holes=():
                 fleet_compiled_graphs.enable_compiled(
                     p, cfg, self.ex.store._cache_dir, artifact,
                     publisher=None))

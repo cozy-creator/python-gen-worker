@@ -527,7 +527,7 @@ def _trace_share(
     declaration: Any,
     job: EntryJob,
 ) -> Any:
-    """Apply the retry filter before export and request no worker compile."""
+    """Apply the holes and retry filters before export; no worker compile."""
     return aot_mint.trace_for_key(
         pipeline,
         export_spec,
@@ -535,6 +535,7 @@ def _trace_share(
         share_index=int(job.share_index),
         share_count=int(job.share_count),
         have_classes=tuple(job.have_classes),
+        hole_classes=tuple(job.hole_classes),
     )
 
 
@@ -701,6 +702,22 @@ def run(job: EntryJob) -> int:
         except Exception:  # noqa: BLE001 — the pool refuses on 0, loudly
             logger.exception("aot-compile: could not enumerate declared rows")
 
+    # pgw#1371 holes-only: how many of THIS share's rows the hole list
+    # matched, before the have filter — the number the parent sums to prove
+    # hole coverage. -1 (no evidence) on a plain mint, and on a share that
+    # cannot enumerate — the pool refuses that loudly rather than treating
+    # it as zero.
+    targeted = -1
+    if job.hole_classes:
+        try:
+            targeted = aot_mint.share_targeted(
+                pipeline, spec, decl,
+                share_index=int(job.share_index),
+                share_count=int(job.share_count),
+                hole_classes=tuple(job.hole_classes))
+        except Exception:  # noqa: BLE001 — the pool refuses -1, loudly
+            logger.exception("aot-compile: could not count targeted rows")
+
     ledger.mark("child_trace_s", trace_s)
     ledger.mark("compile_wall_s", compile_s)
     ledger.mark("child_pack_s", pack_s)
@@ -709,6 +726,7 @@ def run(job: EntryJob) -> int:
         _write(report_path, EntryReport(
             entry=job.share, status=REFUSED, classes=packed,
             declared_classes=declared,
+            targeted_classes=targeted,
             phases=dict(partition),
             detail=(
                 f"{len(packed)} graph class(es) packed before the share "
@@ -723,6 +741,7 @@ def run(job: EntryJob) -> int:
     _write(report_path, EntryReport(
         entry=job.share, status=COMPILED, classes=packed,
         declared_classes=declared,
+        targeted_classes=targeted,
         phases=dict(partition),
         detail=f"{len(packed)} packed graph class(es), {declared} declared",
         elapsed_s=round(time.monotonic() - started, 2),

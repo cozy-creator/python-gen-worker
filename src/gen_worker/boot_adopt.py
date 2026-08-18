@@ -73,7 +73,7 @@ an answer this module is able to give.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dc_replace
 from pathlib import Path
 from typing import (
     Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple)
@@ -263,6 +263,12 @@ class BootAdoptOutcome:
     #: fleet still trace at boot" a query rather than an inference, and it is the
     #: fleet-side half of the zero-export acceptance.
     key_source: Optional[keyset.KeySource] = None
+    #: pgw#1371 holes-only: the declared graph-class NAME(S) behind
+    #: ``derived_key`` (several classes legitimately share one key after the
+    #: ingress merge). This is what turns a per-key MISS into a HOLE the mint
+    #: can be scoped to — the miss's key is an address, but the mint's unit is
+    #: the class name. Empty on outcomes that never derived a key set.
+    graph_classes: Tuple[str, ...] = ()
 
     @property
     def adopted(self) -> bool:
@@ -786,20 +792,31 @@ def attempt(
             logger.debug("boot-adopt: resolve call failed", exc_info=True)
             refused = ("resolve_unreachable", f"{type(exc).__name__}: {exc}")
 
+    # pgw#1371: the class NAMES behind each key, so a miss can be named as a
+    # HOLE. Inverted once — `entry_keys` is name -> key, and several names
+    # legitimately share one key after the ingress merge.
+    names_by_key: Dict[str, List[str]] = {}
+    for entry_name, entry_key in sorted(derived.entry_keys.items()):
+        names_by_key.setdefault(str(entry_key), []).append(str(entry_name))
+
+    def _named(outcome: BootAdoptOutcome) -> BootAdoptOutcome:
+        names = tuple(names_by_key.get(outcome.derived_key, ()))
+        return dc_replace(outcome, graph_classes=names) if names else outcome
+
     out: List[BootAdoptOutcome] = []
     for key in keys:
         done = settled.get(key)
         if done is not None:
-            out.append(done)
+            out.append(_named(done))
             continue
         if refused[0]:
-            out.append(report(BootAdoptOutcome(
+            out.append(_named(report(BootAdoptOutcome(
                 reason=refused[0], detail=refused[1], derived_key=key,
                 derive_ms=derived.wall_ms, family=family, function=fn,
-                key_source=derived.source)))
+                key_source=derived.source))))
             continue
-        out.append(_adopt_answer(
-            answers[key], derived, family=family, fn=fn, cache_dir=cache_dir))
+        out.append(_named(_adopt_answer(
+            answers[key], derived, family=family, fn=fn, cache_dir=cache_dir)))
     return tuple(out)
 
 

@@ -236,7 +236,8 @@ def _seeded_enable(ex, artifact, ref=None, digest=None):
     warmup proof run unchanged."""
     from gen_worker import fleet_compiled_graphs
 
-    def _enable(pipe, cfg, art, delivered=None, arm=None, boot_local_key=""):
+    def _enable(pipe, cfg, art, delivered=None, arm=None, boot_local_key="",
+                boot_holes=()):
         return fleet_compiled_graphs.enable_compiled(
             pipe, cfg, ex.store._cache_dir, Path(artifact),
             delivered_ref=ref or CACHE_REF,
