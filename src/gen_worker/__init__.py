@@ -67,8 +67,9 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         variant_of,
         worker_function,
     )
-    from .api.endpoint_base import (
-        Endpoint,
+    from .api.model_base import (
+        LoadContext,
+        Model,
     )
     from .api.derive import (
         DeclarationMismatch,
@@ -229,10 +230,13 @@ _EXPORTS: Final[dict[str, str]] = {
     "ConfigParam": "api.decorators",
     "DeclarationMismatch": "api.derive",
     "Dim": "api.export_contract",
+    "Model": "api.model_base",
     "Done": "api.streaming",
     "DynamicDim": "api.decorators",
-    # pgw#1372: the REQUIRED minimal endpoint base (Paul ruling 2026-08-18).
+    # pgw#1372's serving.endpoint base predates the ratified Model/entrypoint
+    # split; it stays exported until that lane cuts over.
     "Endpoint": "serving.endpoint",
+    "LoadContext": "api.model_base",
     "Error": "api.streaming",
     "ExpectedOutput": "api.types",
     "FamilyGeometry": "geometry",
@@ -333,7 +337,8 @@ def __dir__() -> list[str]:
 
 __all__ = [
     # The decorators + bindings.
-    "Endpoint",
+    "LoadContext",
+    "Model",
     "endpoint",
     # pgw#1294: run-once submitted functions. Same (ctx, payload) -> Struct
     # contract as @endpoint, so one body promotes between them unchanged.

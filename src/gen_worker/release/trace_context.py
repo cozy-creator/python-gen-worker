@@ -1,15 +1,15 @@
-"""The trace-time RequestContext (pgw#1370).
+"""The trace-time contexts (pgw#1370).
 
-The publish derive runs the author's ``setup`` and handlers AS-IS, so it must
-answer the ctx surface those methods actually touch -- with trace semantics:
-config-only checkpoint tree, platform-fallback defaults, no adapter, no-op
-egress. ``ctx.is_trace`` is True and author code may branch on it (the
-contract file does, to skip the adapter refusal).
+The publish derive runs the author's ``Model.load`` and entrypoints AS-IS,
+so it must answer exactly the ctx surface that code touches -- with trace
+semantics: config-only checkpoint tree, hollow instantiation, platform-
+fallback defaults, no adapter, no-op egress. ``ctx.is_trace`` is True and
+author code may branch on it (the contract file does, to skip the adapter
+refusal).
 
-This is NOT the serving context: real checkpoint resolution, adopt/boot and
-the deploy-state defaults read are pgw#1372's surface. The two share the
-SPELLING of the members below; that spelling is frozen by the Paul-reviewed
-``main_v2.py``.
+These are NOT the serving contexts: chunk-store streaming, adopt/boot and
+the deploy-state defaults read are pgw#1372's surface. The two sides share
+the SPELLING; that spelling is frozen by the Paul-reviewed ``main_v2.py``.
 """
 
 from __future__ import annotations
@@ -19,9 +19,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..api.model_base import LoadContext
 
-class TraceRequestContext:
-    """What ``setup``/handlers see under ``gen-worker release derive``."""
+
+class TraceLoadContext(LoadContext[Any]):
+    """What ``Model.load`` sees under ``gen-worker release derive``."""
 
     is_trace: bool = True
 
@@ -31,38 +33,35 @@ class TraceRequestContext:
         lane: Any,
         checkpoint_dir: Path,
         model_type: Optional[type] = None,
-        checkpoint_ref: str = "",
     ) -> None:
         self.lane = lane
-        self.model_type = model_type
         self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_ref = checkpoint_ref or f"trace:{self.checkpoint_dir.name}"
-        #: The hub-resolved distillation adapter -- never bound at trace time.
-        self.adapter: Optional[Any] = None
+        self.model_type = model_type
         self.log = logging.getLogger("gen_worker.release.trace")
         #: Modules the author marked via ctx.compile() -- discovery hooks
         #: exactly these during the payload drives.
         self.marked_modules: list[Any] = []
 
-    # -- defaults -----------------------------------------------------------
-    def defaults(self) -> Any:
-        """The PLATFORM-FALLBACK defaults for the class-header model type.
+    def load(self, loader: Any) -> Any:
+        """Hollow-materialize the CONFIG-ONLY tree through the author's loader.
 
-        ``Endpoint[SDXL]`` is the single source of the type; at serve the
-        checkpoint's hub row decodes as ``SDXL.Defaults`` with missing
-        fields filled from platform values, and at trace the zero-arg
-        construction IS the platform row. Typed via the generic.
+        At serve, ``ctx.load`` streams tensors from the chunk store straight
+        to VRAM in the lane contract's layout (pgw#1372). At trace there are
+        no tensors at all: the loader's own ``from_pretrained`` runs against
+        the config-only subset snapshot inside the ambient
+        ``torchcg.hollow_session`` (fake parameters, real buffers), and the
+        lane's registry-derived dtype stands in for the layout's.
         """
-        if self.model_type is None:
+        from_pretrained = getattr(loader, "from_pretrained", None)
+        if from_pretrained is None:
             raise TypeError(
-                "ctx.defaults() reads the model type off the class header "
-                "(class X(Endpoint[SDXL])); this endpoint's base is "
-                "unparameterized"
+                f"ctx.load() needs a loader with from_pretrained "
+                f"(a diffusers/transformers class); got {loader!r}"
             )
-        defaults_type = getattr(self.model_type, "Defaults", self.model_type)
-        return defaults_type()
+        return from_pretrained(
+            self.checkpoint_dir, torch_dtype=getattr(self.lane, "dtype", None)
+        )
 
-    # -- compile marking ----------------------------------------------------
     def compile(self, target: Any) -> Any:
         """torch.compile-style marking, trace half (pgw#1370/#1372 contract).
 
@@ -93,6 +92,41 @@ class TraceRequestContext:
             f"ctx.compile() marks nn.Modules (or a pipeline-like object "
             f"whose .components carries them); got {type(target).__name__}"
         )
+
+    def defaults(self) -> Any:
+        """The PLATFORM-FALLBACK defaults for the class-header model type.
+
+        ``Model[SDXL]`` is the single source of the type; at serve the
+        checkpoint's hub row decodes as ``SDXL.Defaults`` with missing
+        fields filled from platform values, and at trace the zero-arg
+        construction IS the platform row. Typed via the generic.
+        """
+        if self.model_type is None:
+            raise TypeError(
+                "ctx.defaults() reads the model type off the class header "
+                "(class X(Model[SDXL], ...)); this model's base is "
+                "unparameterized"
+            )
+        defaults_type = getattr(self.model_type, "Defaults", self.model_type)
+        return defaults_type()
+
+
+class TraceRequestContext:
+    """What entrypoints see under ``gen-worker release derive``."""
+
+    is_trace: bool = True
+
+    def __init__(
+        self,
+        *,
+        lane: Any,
+        checkpoint_ref: str = "",
+    ) -> None:
+        self.lane = lane
+        self.checkpoint_ref = checkpoint_ref or "trace:config-only"
+        #: The hub-resolved distillation adapter -- never bound at trace time.
+        self.adapter: Optional[Any] = None
+        self.log = logging.getLogger("gen_worker.release.trace")
 
     # -- knobs / control ----------------------------------------------------
     def clamp(
@@ -138,4 +172,4 @@ class TraceRequestContext:
         return ImageAsset(ref=f"trace://image.{format}")
 
 
-__all__ = ["TraceRequestContext"]
+__all__ = ["TraceLoadContext", "TraceRequestContext"]

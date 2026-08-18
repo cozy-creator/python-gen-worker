@@ -13,7 +13,7 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import Endpoint, endpoint
+from gen_worker import Model, entrypoint
 from gen_worker.models.model_types import register_contract_dtype
 
 LANE = "tiny.diffusers-fp32@1"
@@ -28,17 +28,16 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-@endpoint(lanes=(LANE,))
-class BadMark(Endpoint):
-    def setup(self, ctx: Any) -> None:
-        self.pipe = StableDiffusionPipeline.from_pretrained(
-            ctx.checkpoint_dir, torch_dtype=ctx.lane.dtype
-        )
+class BadMark(Model[Any], lanes=(LANE,)):
+    def load(self, ctx: Any) -> None:
+        self.pipe = ctx.load(StableDiffusionPipeline)
         self.pipe.does_not_exist = ctx.compile(self.pipe.does_not_exist)
 
-    def generate(self, ctx: Any, payload: In) -> Out:
-        self.pipe(
-            prompt=payload.prompt, num_inference_steps=2, guidance_scale=0.0,
-            height=32, width=32, output_type="pil",
-        )
-        return Out(model_used=ctx.checkpoint_ref)
+
+@entrypoint  # type: ignore[operator]
+def generate(payload: In, model: BadMark, ctx: Any) -> Out:
+    model.pipe(
+        prompt=payload.prompt, num_inference_steps=2, guidance_scale=0.0,
+        height=32, width=32, output_type="pil",
+    )
+    return Out(model_used=ctx.checkpoint_ref)

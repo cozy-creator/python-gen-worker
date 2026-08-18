@@ -61,7 +61,7 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
     assert _derive("tiny_endpoint", config_only_tree, out) == 0
     document = json.loads(out.read_bytes())
     assert document["kind"] == "gen-worker.release-metadata@1"
-    assert document["endpoint"].endswith(":TinyDiffusion")
+    assert document["endpoint"].endswith(":TinyModel")
 
     (lane,) = document["graphs"]["lanes"]
     assert lane["contract"] == "tiny.diffusers-fp32@1"

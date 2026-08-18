@@ -1,14 +1,15 @@
 """The publish-time instrumented derive (pgw#1370).
 
 Per declared execution lane, inside the release env, on CPU: instantiate the
-endpoint class, run the author's ``setup`` and handlers AS-IS against a
-CONFIG-ONLY checkpoint tree under ``torchcg.hollow_session``, drive them with
-AUTO-ENUMERATED trace payloads under instrumented discovery, and stamp the
-observed graph set -- plus the endpoint's checkpoint-defaults schema -- as
-the static release metadata document.
+author's ``Model`` subclass, run its ``load`` AS-IS against a CONFIG-ONLY
+checkpoint tree under ``torchcg.hollow_session``, drive the module's
+``@entrypoint`` functions with AUTO-ENUMERATED trace payloads under
+instrumented discovery, and stamp the observed graph set -- plus the lane
+contracts and the model type's checkpoint-defaults schema -- as the static
+release metadata document.
 
 **Coverage is auto-enumerated from the payload schemas** (Paul ruling,
-2026-08-18): one pass per handler per enum-typed field value, every other
+2026-08-19): one pass per entrypoint per enum-typed field value, every other
 field at its default, required non-defaulted fields synthesized minimally by
 type. The author surface is exactly CODE + LANES -- there is no samples
 surface. Shapes a schema cannot express are discovered at the first live
@@ -37,9 +38,14 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Optional
 
-from ..api.decorators import ATTR, EndpointDecl, lane_contract_handle
-from ..api.endpoint_base import endpoint_model_type
-from .trace_context import TraceRequestContext
+from ..api.entrypoint import ENTRYPOINT_ATTR
+from ..api.model_base import (
+    Model,
+    lane_contract_handle,
+    model_lanes,
+    model_model_type,
+)
+from .trace_context import TraceLoadContext, TraceRequestContext
 
 DOCUMENT_KIND = "gen-worker.release-metadata@1"
 
@@ -60,7 +66,7 @@ class ReleaseDeriveResult:
     document: bytes
     digest: str
     endpoint: str
-    lane_graphs: dict[str, tuple[str, ...]]  # lane name -> graph hashes
+    lane_graphs: dict[str, tuple[str, ...]]  # lane contract -> graph hashes
     warnings: tuple[str, ...] = ()
 
     @property
@@ -81,46 +87,57 @@ def _torchcg() -> ModuleType:
     return torchcg
 
 
-def _lane_endpoint_class(module: ModuleType) -> Optional[type]:
-    """The ONE lanes-declaring endpoint class in the module, or None."""
+def _lane_model_class(module: ModuleType) -> Optional[type]:
+    """The ONE lanes-declaring Model subclass in the module, or None."""
 
     found: list[type] = []
     for value in vars(module).values():
-        if inspect.isclass(value) and getattr(value, "__module__", None) == module.__name__:
-            decl = getattr(value, ATTR, None)
-            if isinstance(decl, EndpointDecl) and decl.lanes:
-                found.append(value)
+        if (
+            inspect.isclass(value)
+            and issubclass(value, Model)
+            and value is not Model
+            and getattr(value, "__module__", None) == module.__name__
+            and model_lanes(value)
+        ):
+            found.append(value)
     if len(found) > 1:
         raise DeriveError(
             f"module {module.__name__!r} declares lanes on "
             f"{[cls.__name__ for cls in found]!r}; a release derives ONE "
-            f"endpoint class"
+            f"model class"
         )
     return found[0] if found else None
 
 
-def _handler_payload_types(cls: type) -> list[tuple[str, type]]:
-    """(handler attr, payload struct type) in deterministic handler order."""
+def _entrypoints(module: ModuleType, model_cls: type) -> list[tuple[str, Any, type]]:
+    """(name, function, payload type) for every @entrypoint bound to the model.
 
-    out: list[tuple[str, type]] = []
-    for attr, fn in getattr(cls, "__gen_worker_handlers__", ()):
-        parameters = [
-            parameter
-            for parameter in inspect.signature(fn).parameters.values()
-            if parameter.name != "self"
-        ]
-        if len(parameters) < 2:
+    Binding is by the MODEL parameter's annotation: an entrypoint whose
+    second parameter annotates a different model class belongs to a
+    different release. Deterministic order: definition-name sort.
+    """
+
+    out: list[tuple[str, Any, type]] = []
+    for name, fn in sorted(vars(module).items()):
+        if not (inspect.isfunction(fn) and getattr(fn, ENTRYPOINT_ATTR, False)):
             continue
         hints = typing.get_type_hints(fn)
-        payload_type = hints.get(parameters[1].name)
+        parameters = list(inspect.signature(fn).parameters.values())
+        payload_type = hints.get(parameters[0].name)
+        bound_model = hints.get(parameters[1].name)
         if payload_type is None:
             raise DeriveError(
-                f"{cls.__name__}.{attr}: the payload parameter "
-                f"{parameters[1].name!r} carries no resolvable type annotation"
+                f"@entrypoint {name}: the payload parameter "
+                f"{parameters[0].name!r} carries no resolvable type annotation"
             )
-        out.append((attr, payload_type))
+        if bound_model is not model_cls:
+            continue
+        out.append((name, fn, payload_type))
     if not out:
-        raise DeriveError(f"{cls.__name__}: no routable (self, ctx, payload) handlers")
+        raise DeriveError(
+            f"no @entrypoint function binds model class {model_cls.__name__!r} "
+            f"(the model parameter's annotation is the binding)"
+        )
     return out
 
 
@@ -152,7 +169,7 @@ def _synthesize_field(owner: str, name: str, annotation: Any) -> Any:
 
 
 def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], bool]:
-    """Auto-enumerated trace payloads for one handler, plus the capped flag.
+    """Auto-enumerated trace payloads for one entrypoint, plus the capped flag.
 
     One payload per cross-product entry over the struct's ENUM-typed fields
     (field declaration order x enum declaration order -- deterministic);
@@ -200,14 +217,12 @@ def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], boo
     return tuple(payloads), capped
 
 
-def _named_marked_modules(
-    instance: Any, marked: list[Any]
-) -> dict[str, Any]:
+def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
     """Deterministic provenance names for the author's ctx.compile marks.
 
     The author marks REAL objects; the document needs stable names. Names
-    come from where the module actually lives on the instance: component
-    names of any ``.components``-bearing attribute (the diffusers
+    come from where the module actually lives on the model instance:
+    component names of any ``.components``-bearing attribute (the diffusers
     convention), then bare attribute names, then dotted
     ``attribute.component`` as the disambiguated spelling. A marked module
     that cannot be named on the instance is refused -- provenance is part of
@@ -230,7 +245,8 @@ def _named_marked_modules(
             for name, component in sorted(components.items()):
                 if component is None or not isinstance(name, str):
                     continue
-                offer(component, name if _unique_component(instance, name, component) else f"{attr}.{name}")
+                unique = _unique_component(instance, name, component)
+                offer(component, name if unique else f"{attr}.{name}")
 
     named: dict[str, Any] = {}
     for module in marked:
@@ -238,7 +254,7 @@ def _named_marked_modules(
         if name is None:
             raise DeriveError(
                 f"a module marked via ctx.compile() "
-                f"({type(module).__name__}) is not reachable as an instance "
+                f"({type(module).__name__}) is not reachable as a model "
                 f"attribute or pipeline component; the release document "
                 f"cannot name its provenance"
             )
@@ -289,7 +305,7 @@ def _closure_entries_from_lockfile(lockfile: Path) -> dict[str, str]:
 def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
     """msgspec JSON Schema of the class-header model type's Defaults.
 
-    ``Endpoint[SDXL]`` is the single, statically-extractable source of the
+    ``Model[SDXL]`` is the single, statically-extractable source of the
     endpoint's model type; the schema of ``SDXL.Defaults`` is what the hub
     validates per-checkpoint deploy rows against. This replaces the
     hub-embedded per-family defaults registry (storage half: th#2133).
@@ -377,44 +393,48 @@ def _derive_lane(
     torchcg: ModuleType,
     cls: type,
     lane: Any,
-    plans: list[tuple[str, tuple[Any, ...]]],
+    plans: list[tuple[str, Any, tuple[Any, ...]]],
     checkpoint_dir: Path,
 ) -> Any:
-    """One lane's instrumented run: fresh instance, setup, drive, discover."""
+    """One lane's instrumented run: fresh model, load, drive, discover."""
 
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
-    instance = cls()
-    ctx = TraceRequestContext(
-        lane=_resolve_lane(torchcg, cls, lane),
+    resolved = _resolve_lane(torchcg, cls, lane)
+    model = cls()
+    load_ctx = TraceLoadContext(
+        lane=resolved,
         checkpoint_dir=checkpoint_dir,
-        model_type=endpoint_model_type(cls),
+        model_type=model_model_type(cls),
+    )
+    request_ctx = TraceRequestContext(
+        lane=resolved, checkpoint_ref=f"trace:{checkpoint_dir.name}"
     )
     with torchcg.hollow_session():
         try:
-            instance.setup(ctx)
+            model.load(load_ctx)
         except torchcg.HollowError as exc:
             raise DeriveError(f"lane {handle!r}: {exc}") from exc
         except Exception as exc:
             raise DeriveError(
-                f"lane {handle!r}: setup() failed under the trace "
+                f"lane {handle!r}: load() failed under the trace "
                 f"session: {type(exc).__name__}: {exc}"
             ) from exc
-        if not ctx.marked_modules:
+        if not load_ctx.marked_modules:
             raise DeriveError(
-                f"lane {handle!r}: setup() marked nothing via ctx.compile(). "
-                f"A lane-declaring endpoint compiles SOMETHING; an endpoint "
-                f"that wants eager-forever declares no lanes instead."
+                f"lane {handle!r}: load() marked nothing via ctx.compile(). "
+                f"A lane-declaring model compiles SOMETHING; a model that "
+                f"wants eager-forever declares no lanes instead."
             )
-        modules = _named_marked_modules(instance, ctx.marked_modules)
+        modules = _named_marked_modules(model, load_ctx.marked_modules)
 
         def drive() -> None:
-            for attr, payloads in plans:
+            for name, fn, payloads in plans:
                 for index, payload in enumerate(payloads):
                     try:
-                        getattr(instance, attr)(ctx, payload)
+                        fn(payload, model, request_ctx)
                     except Exception as exc:
                         raise DeriveError(
-                            f"lane {handle!r}: handler {attr!r} failed on "
+                            f"lane {handle!r}: entrypoint {name!r} failed on "
                             f"auto-enumerated payload {index} "
                             f"({payload!r}) under the trace session: "
                             f"{type(exc).__name__}: {exc}"
@@ -427,7 +447,7 @@ def _derive_lane(
         except torchcg.DiscoveryError as exc:
             raise DeriveError(f"lane {handle!r}: {exc}") from exc
     if lane_graphs.unobserved_targets:
-        total = sum(len(payloads) for _, payloads in plans)
+        total = sum(len(payloads) for _, _, payloads in plans)
         raise DeriveError(
             f"lane {handle!r}: marked module(s) "
             f"{list(lane_graphs.unobserved_targets)!r} were never CALLED "
@@ -454,16 +474,16 @@ def derive_release(
     else:
         closure = torchcg.closure_hash(torchcg.installed_closure())
 
-    cls = _lane_endpoint_class(module)
+    cls = _lane_model_class(module)
     endpoint_name = f"{module.__name__}:{cls.__name__ if cls else ''}".rstrip(":")
 
     lanes: list[Any] = []
     lane_contracts: dict[str, Any] = {}
     warnings: list[str] = []
     if cls is not None:
-        plans: list[tuple[str, tuple[Any, ...]]] = []
-        for attr, payload_type in _handler_payload_types(cls):
-            owner = f"{cls.__name__}.{attr}"
+        plans: list[tuple[str, Any, tuple[Any, ...]]] = []
+        for name, fn, payload_type in _entrypoints(module, cls):
+            owner = f"@entrypoint {name}"
             payloads, capped = _auto_payloads(owner, payload_type)
             if capped:
                 warnings.append(
@@ -472,10 +492,9 @@ def derive_release(
                     f"rest is first-encounter discovery (eager + background "
                     f"mint)"
                 )
-            plans.append((attr, payloads))
+            plans.append((name, fn, payloads))
 
-        decl: EndpointDecl = getattr(cls, ATTR)
-        for lane in decl.lanes:
+        for lane in model_lanes(cls):
             lane_graphs = _derive_lane(torchcg, cls, lane, plans, checkpoint_dir)
             lanes.append(lane_graphs)
             lane_contracts[lane_graphs.contract] = {
@@ -491,10 +510,10 @@ def derive_release(
         "graphs": graphs_document.as_dict(),
         "lane_contracts": lane_contracts,
         "checkpoint_defaults_schema": _defaults_schema(
-            endpoint_model_type(cls) if cls is not None else None
+            model_model_type(cls) if cls is not None else None
         ),
         "model_type": (
-            getattr(endpoint_model_type(cls), "__name__", None)
+            getattr(model_model_type(cls), "__name__", None)
             if cls is not None
             else None
         ),
