@@ -98,3 +98,36 @@ def test_the_cli_emits_the_document(
     assert cli_main(["models", "export", "--out", str(dest)]) == 0
     written: Any = json.loads(dest.read_text())
     assert written == export_document()
+
+
+def test_the_cli_classifies_contract_stamps(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli_main(["models", "classify", "sdxl.clip-g-fused-qkv@1"]) == 0
+    assert capsys.readouterr().out.strip() == "sdxl"
+    # Unrecognized = unclassified, visibly — the row stays NULL.
+    assert cli_main(["models", "classify", "minimax.h3-dit-native@1"]) == 1
+    assert capsys.readouterr().out.strip() == "unclassified"
+
+
+def test_the_cli_decodes_a_row_with_the_worker_verdict(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    row = '{"steps": {"default": 8}, "cfg": false}'
+    assert cli_main(["models", "decode", "sdxl", "--row", row]) == 0
+    decoded: Any = json.loads(capsys.readouterr().out)
+    assert decoded["steps"]["default"] == 8
+    assert decoded["cfg"] is False
+    assert decoded["positive_preamble"] == "masterpiece, best quality"
+
+    # The LoRA overlay decodes through the same surface.
+    assert cli_main(["models", "decode", "sdxl.lora", "--row", '{"schedule": "lcm"}']) == 0
+    assert json.loads(capsys.readouterr().out)["schedule"] == "lcm"
+
+    # A typed refusal names the field and exits 1.
+    assert cli_main(["models", "decode", "sdxl", "--row", '{"steps": "fast"}']) == 1
+    assert "steps" in capsys.readouterr().err
+
+    # An unrecognized name is a usage error naming the recognized set.
+    assert cli_main(["models", "decode", "flux"]) == 2
+    assert "sdxl.lora" in capsys.readouterr().err
