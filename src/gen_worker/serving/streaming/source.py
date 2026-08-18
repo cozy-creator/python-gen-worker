@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 #: to the projected tree, where it is a symlink costing nothing.
 TENSOR_PLANNERS = frozenset({"safetensors-v1", "gguf-v1"})
 
+#: The same fact spelled for a TFM1 manifest, which carries no planner: a
+#: vendored ``FileEntry`` says only where the bytes are, so the suffix is all
+#: there is to ask. Used on both sides so one store never sees a container
+#: the other would skip.
+TENSOR_SUFFIXES = (".safetensors", ".gguf")
+
 
 class StreamedTensor(Protocol):
     """One tensor's geometry: the container's own dtype spelling, its shape,
@@ -102,24 +108,28 @@ class WeightStoreUnavailable(RuntimeError):
 # -- the native store (tensorfs#115, via the tensorfs#57 wheel) -------------
 
 
-def _native_stream_reader() -> Any:
-    """``tensorfs.native.TensorStreamReader``, resolved at call time.
+def _native_module() -> Any:
+    """:mod:`tensorfs.native`, resolved at call time.
 
     Resolved through :mod:`importlib` rather than a module-level import
     because ``tensorfs`` is not yet a declared dependency of this package
     (tensorfs#57 is the wheel-publish lane). A static import would make every
-    torchless boot pay an ImportError for a class only the serving path uses.
+    torchless boot pay an ImportError for a module only the serving path uses.
     """
     import importlib
 
     try:
-        module = importlib.import_module("tensorfs.native")
+        return importlib.import_module("tensorfs.native")
     except ImportError as exc:
         raise WeightStoreUnavailable(
             "the tensorfs wheel (tensorfs#57) is not installed, so the "
             "native store->VRAM stream surface is unavailable in this image"
         ) from exc
-    return getattr(module, "TensorStreamReader")
+
+
+def _native_stream_reader() -> Any:
+    """``tensorfs.native.TensorStreamReader``, or a loud refusal."""
+    return getattr(_native_module(), "TensorStreamReader")
 
 
 class NativeWeightStore:
@@ -130,9 +140,38 @@ class NativeWeightStore:
     which snapshot serve is a worker decision, exactly as placement is.
     """
 
+    #: What a `LoadReport` calls this plane, so a GB/s number is never read
+    #: as the other one's.
+    KIND = "native"
+
     def __init__(self, store: Any, records: Mapping[str, Sequence[Any]]) -> None:
         self._store = store
         self._records = dict(records)
+
+    @classmethod
+    def from_manifest(cls, root: Path | str, manifest: Any) -> "NativeWeightStore":
+        """The native reader over the store the worker ALREADY wrote.
+
+        The two planes share their on-disk layout exactly —
+        ``objects/sha256/aa/bb/<hex>`` — so nothing is copied, converted or
+        re-ingested here: the same chunk objects are simply mapped by Rust
+        instead of by Python. Only the manifest spelling differs, and a
+        record run is the whole of what the reader wanted from it.
+
+        This is the path production actually takes. ``from_snapshot`` is for a
+        store whose refs are native snapshots; the worker's projection plane
+        still writes TFM1 manifests, and it is the manifest that resolves.
+        """
+        native = _native_module()
+        records: dict[str, Sequence[Any]] = {}
+        for entry in manifest.files:
+            if not entry.path.endswith(TENSOR_SUFFIXES):
+                continue
+            records[entry.path] = [
+                native.FileRecord.data(ref.digest, length)
+                for ref, length in entry.objects()
+            ]
+        return cls(native.ObjectStore(Path(root)), records)
 
     @classmethod
     def from_snapshot(cls, store: Any, snapshot: Any) -> "NativeWeightStore":
@@ -232,8 +271,10 @@ class BridgeWeightStore:
     wheel; :class:`NativeWeightStore` already does everything it does.
     """
 
+    KIND = "bridge"
+
     #: What the vendored reader knows how to parse a header out of.
-    SUFFIXES = (".safetensors", ".gguf")
+    SUFFIXES = TENSOR_SUFFIXES
 
     def __init__(self, cas: Any, manifest: Any, *, verify: bool = False) -> None:
         self._cas = cas
@@ -279,7 +320,9 @@ class BridgeWeightStore:
         self._open.clear()
 
 
-def store_for(checkpoint_dir: Path | str) -> Optional[WeightStore]:
+def store_for(
+    checkpoint_dir: Path | str, *, native: Optional[bool] = None
+) -> Optional[WeightStore]:
     """The byte source backing a projected checkpoint tree, or ``None``.
 
     ``None`` means the tree is not a snapshot this worker projected — a bare
@@ -290,12 +333,38 @@ def store_for(checkpoint_dir: Path | str) -> Optional[WeightStore]:
     The resolution is the same one :mod:`gen_worker.models.projection` already
     performs for every other consumer, so the engine needs no store handle
     plumbed to it: the DIRECTORY the worker resolved carries its own store.
+
+    **Which store is a CAPABILITY question, not a configuration one.** The
+    native reader is strictly better at the one job both stores have, so the
+    only thing worth asking is whether this image carries it — and se#756
+    ships a real ``tensorfs`` to the endpoint image, so in production it does.
+    ``native=`` forces the answer for a caller that wants to measure one plane
+    against the other; nothing reads an environment variable to decide.
     """
     from ...models import projection
 
     projected = projection.resolve_projection(checkpoint_dir)
     if projected is None:
         return None
+    if native is None:
+        native = native_available()
+    if native:
+        try:
+            return NativeWeightStore.from_manifest(
+                projected.cas.root, projected.manifest
+            )
+        except Exception:
+            # The bridge reads the SAME objects, so a native store that will
+            # not build costs speed and nothing else. Serving a request slowly
+            # beats refusing it — but say so loudly, because a silent fallback
+            # is how a ~10x regression hides.
+            logger.warning(
+                "ctx.load: the native tensorfs store would not open over %s "
+                "— falling back to the GIL-bound bridge, which is ~10x "
+                "slower (tensorfs#115)",
+                projected.cas.root,
+                exc_info=True,
+            )
     return BridgeWeightStore(projected.cas, projected.manifest)
 
 
@@ -331,6 +400,7 @@ def component_of(container: str) -> str:
 
 __all__ = [
     "TENSOR_PLANNERS",
+    "TENSOR_SUFFIXES",
     "BridgeWeightStore",
     "NativeWeightStore",
     "StreamedTensor",

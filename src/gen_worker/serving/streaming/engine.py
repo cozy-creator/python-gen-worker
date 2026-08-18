@@ -78,6 +78,9 @@ class LoadReport:
 
     weights_streamed_bytes: int = 0
     weights_stream_gbps: float = 0.0
+    #: Which byte source produced the number above — ``native`` or ``bridge``.
+    #: Unlabelled, the two differ by ~10x and read as the same measurement.
+    source: str = "bridge"
     staging: str = "pageable"
     io: str = "buffered"
     containers: int = 0
@@ -90,6 +93,7 @@ class LoadReport:
         return {
             "weights_streamed_bytes": self.weights_streamed_bytes,
             "weights_stream_gbps": round(self.weights_stream_gbps, 3),
+            "weights_stream_source": self.source,
             "staging": self.staging,
             "io": self.io,
             "containers": self.containers,
@@ -224,7 +228,10 @@ class StreamingLoader:
         started = time.perf_counter()
         device = torch.device(self._device)
         built = _skeleton.build(pipeline_cls, Path(checkpoint_dir))
-        report = LoadReport(io=self._io)
+        report = LoadReport(
+            io=self._io,
+            source=str(getattr(self._store, "KIND", type(self._store).__name__)),
+        )
 
         with StagingPool(
             device,
