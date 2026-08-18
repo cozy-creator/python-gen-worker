@@ -308,7 +308,6 @@ _SLOT_ORDER = ("ctx", "payload", "model", "adapter")
 def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
     import msgspec
 
-    from ..api.model_base import Model
     from ..request_context import RequestContext
 
     out: list[_Entrypoint] = []
