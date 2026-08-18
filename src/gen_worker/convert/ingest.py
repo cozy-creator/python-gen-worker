@@ -360,6 +360,78 @@ class CivitaiSourcePlan:
         return sorted(out)
 
 
+# `detect_huggingface_source_layout` touches disk for exactly one file
+# (``model_index.json``); every plan-time caller below has already established
+# there is none to read, so a path that cannot exist is the honest argument.
+_NO_REPO_DIR = Path("/nonexistent/clone-source-plan")
+
+
+@dataclass(frozen=True)
+class PlannedSourceFacts:
+    """A clone source's layout, family and ingest strategy — the three facts
+    the flavor decision turns on — derived from PROVIDER METADATA ALONE."""
+
+    source_layout: str
+    model_family: str
+    strategy: str
+
+
+def plan_source_facts(plan: Any) -> Optional[PlannedSourceFacts]:
+    """The three facts above, or ``None`` when they cannot be derived as
+    faithfully as the post-download read (jobs#294).
+
+    Callers use this to refuse an impossible request BEFORE paying for the
+    download — a 6.9 GB CivitAI checkpoint bought its whole fetch to learn its
+    requested layout had no repackage route. That is only sound while this
+    stays IDENTICAL to what :func:`ingest_huggingface` / :func:`ingest_civitai`
+    stamp from the downloaded tree, so it calls the same detector on the same
+    listing and returns ``None`` wherever the bytes could still change the
+    answer. A refusal the real ingest would not have made is worse than a
+    late one.
+    """
+    if isinstance(plan, CivitaiSourcePlan):
+        names = [str(f.get("name") or "") for f in plan.files]
+        names = [n for n in names if n]
+        if not names:
+            return None
+        info = detect_huggingface_source_layout(repo_dir=_NO_REPO_DIR, files=names)
+        base_raw = str((plan.payload or {}).get("baseModel") or "").strip()
+        base_family = ""
+        try:
+            from .base_model_families import civitai_to_family
+
+            base_family = civitai_to_family(base_raw) or ""
+        except Exception:
+            base_family = ""
+        # A civitai version is CLASSIFIED for exactly one shape — gguf-only.
+        # Every other one reaches the flavor builder with no strategy at all,
+        # which is why its layout request is taken literally.
+        strategy = "gguf" if all(n.lower().endswith(".gguf") for n in names) else ""
+        family = _resolve_civitai_family(base_family, str(info.model_family or ""))
+        return PlannedSourceFacts(
+            source_layout=str(info.source_layout),
+            model_family=family or "unknown",
+            strategy=strategy,
+        )
+    if isinstance(plan, HFSourcePlan):
+        # The family can come out of ``model_index.json``'s own ``_class_name``
+        # / ``_name_or_path``, and a file LISTING does not carry file CONTENT.
+        # For those repos only the post-download read is trustworthy.
+        if any(_norm_plan_path(p) == "model_index.json" for p in plan.paths):
+            return None
+        info = detect_huggingface_source_layout(repo_dir=_NO_REPO_DIR, files=list(plan.paths))
+        return PlannedSourceFacts(
+            source_layout=str(info.source_layout),
+            model_family=str(info.model_family or ""),
+            strategy=str(plan.classification.strategy),
+        )
+    return None
+
+
+def _norm_plan_path(path: str) -> str:
+    return str(path or "").strip().lstrip("./").lower()
+
+
 def _civitai_manifest_revision(file_names: list[str]) -> str:
     """The clone-side civitai 'revision': a hash over the downloaded file
     listing (civitai has no commit sha). MUST stay identical between
@@ -821,9 +893,11 @@ __all__ = [
     "CloneDownloadError",
     "HFSourcePlan",
     "IngestedSource",
+    "PlannedSourceFacts",
     "ingest_civitai",
     "ingest_huggingface",
     "plan_civitai",
     "plan_huggingface",
+    "plan_source_facts",
     "resolve_hf_identity",
 ]
