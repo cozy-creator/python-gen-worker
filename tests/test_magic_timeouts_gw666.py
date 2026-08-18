@@ -668,7 +668,7 @@ _ELAPSED_ASSERT_BURNDOWN = {
     # the floor sat at 100. It came in at 90 on a loaded runner and turned a
     # correct tree red on the release path. The property is causal (the tenant
     # waited for the instance) and is asserted as ordering now.
-    "test_procsplit_pgw763.py",               # hang bound: cancel across the seam
+    "test_procsplit.py",                      # hang bound: cancel across the seam
                                               # << 3s against a 50ms handler poll
 }
 

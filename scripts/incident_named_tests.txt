@@ -168,7 +168,6 @@ tests/test_hf_fp8_blockwise_th1803.py
 tests/test_hf_pickle_refusal_pgw1273.py
 tests/test_hidream_o1_pgw1346.py
 tests/test_host_isa_pgw754.py
-tests/test_host_move_guard_pgw763.py
 tests/test_host_ram_probe_pgw752.py
 tests/test_hostfacts_pgw896.py
 tests/test_hot_gpu_pgw636.py
@@ -251,14 +250,10 @@ tests/test_payload_ref_provenance_th1259.py
 tests/test_per_stage_staging_pgw1026.py
 tests/test_pickle_weight_refused_th1313.py
 tests/test_pod_mint_rig_pgw1347.py
-tests/test_pod_privilege_isolation_pgw858.py
 tests/test_pod_projected_load_pgw1330.py
 tests/test_pod_vram_truth_pgw776.py
 tests/test_pool_sizing_pgw842.py
 tests/test_post_connect_resolution_gate_pgw891.py
-tests/test_procsplit_oom_rank_pgw975.py
-tests/test_procsplit_pgw763.py
-tests/test_procsplit_security_pgw763.py
 tests/test_producer_context_cut_pgw1306.py
 tests/test_producer_no_shards_th1362.py
 tests/test_production_entrypoints_pgw849.py

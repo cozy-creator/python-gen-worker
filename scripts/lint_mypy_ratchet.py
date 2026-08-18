@@ -91,7 +91,10 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 242 -> 238: wave 2 did the same to the cli/config/sdk cluster (9 modules
     # -> 3, plus one rename), taking four more off.
     # 238 -> 235: wave 3a folded the child-fault modules (5 -> 1), taking three.
-    "ignore_errors": (235, 2016),
+    # 235 -> 231: pgw#1362 wave 3b folded the procsplit group (5 -> 2) and
+    # hoisted its shared rig into tests/harness/split.py; all three are typed
+    # clean, so four more unchecked modules came off with none added.
+    "ignore_errors": (231, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted

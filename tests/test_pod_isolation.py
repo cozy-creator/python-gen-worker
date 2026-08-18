@@ -1,91 +1,73 @@
-"""pgw#858 / th#1380: the compute child runs as an unprivileged uid.
+"""What the compute child may touch on the host: its uid, its OOM rank, its RAM.
 
-**Why this file hosts its own root.** A privilege drop cannot be measured by a
-suite running as uid 1000: every ``/proc`` read the fix is supposed to deny is
-*already* denied, so every row would pass green on a tree with the fix reverted.
-That is the exact shape of a guard that cannot fail. So when this file is not
-root it re-executes itself inside a container — repo and interpreter
-bind-mounted, ``--init`` so PID 1 is a root process carrying a ``RUNPOD_API_KEY``
-exactly as a RunPod pod does — and asserts the inner run. Nothing here needs a
-GPU, a pod, or a paid resource.
-
-**Why every row carries its own red control.** The same probe is run a second
-time through a parent whose drop has been removed, and it must SUCCEED. So each
-row proves on every run both that the boundary holds and that the measurement
-can see it not holding — rather than a revert-and-look-once done by hand.
-
-The attacks are run by REAL endpoint handlers in a REAL compute child, because
-that is the threat model: tenant code is imported into that process.
-
-Run: uv run pytest tests/test_pod_privilege_isolation_pgw858.py -q
+Sections keep their incident id; the full narratives live in the tracker.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Optional, Any, Dict
 
 import msgspec
 import pytest
+import torch
+from harness.hub_double import is_ready, is_result_for  # noqa: E402
+from harness.progress_wait import Cadence, await_progress  # noqa: E402
+from harness.split import (  # noqa: E402,F401 — fixtures come with it
+    SplitHarness,
+    _payload,
+    captured_dials,
+    isolated_postmortem,
+)
 
+from gen_worker import (
+    host_move_guard,
+    local_compiled_graph_store,  # noqa: E402
+    postmortem,
+)
+from gen_worker.api.errors import HostRamMoveRefusedError
 from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.procsplit import (
+    oom_rank,
+    privdrop,  # noqa: E402
+)
+
+# ============================================================================
+# pgw#858 — pgw#858 / th#1380: the compute child runs as an unprivileged
+#   uid.
+# ============================================================================
 
 TESTS_DIR = Path(__file__).resolve().parent
+
+
 REPO = TESTS_DIR.parent
 
-# The two credentials th#1380 measured, given sentinel values so a leak is
-# unmistakable in an assertion message.
+
 RUNPOD_KEY = "rpa_PGW858_ACCOUNT_AUTHORITY_SENTINEL"
+
+
 PUBLIC_KEY = "ssh-ed25519 AAAAPGW858OPERATORKEYSENTINEL operator@cozy"
+
+
 WORKER_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ3LTg1OCJ9.pgw858-sentinel"
+
 
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-# ==========================================================================
-# the outer half: get root, honestly, without a pod
-# ==========================================================================
-
-
-# Mounting anything in here over the image replaces its userland rather than
-# adding to it, which is a different test than the one this file is running.
 _TOO_BROAD = {Path("/"), Path("/usr"), Path("/usr/local"), Path("/etc"),
               Path("/lib"), Path("/opt"), Path("/var"), Path("/home")}
 
 
 def _interpreter_mounts() -> list[Path]:
-    """Every prefix the container must see in order to exec THIS interpreter.
-
-    What ``execve`` follows is a symlink's stored TEXT, not its resolution, and
-    on a uv-managed venv four different paths can each name a different place:
-
-      sys.prefix            the venv
-      sys.base_prefix       the base install, as CPython's getpath resolved it
-      sys._base_executable  the base interpreter as the venv's `bin/python`
-                            symlink actually NAMES it
-      ...and each of those resolved.
-
-    pgw#966 measured the gap on the runner. `ubuntu-latest`:
-
-      base_prefix      .../uv/python/cpython-3.12.13-linux-x86_64-gnu
-      base_executable  .../uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12
-                                              ^^^^ no patch component
-
-    uv keeps a patch-less alias beside the versioned install and the venv's
-    symlink names the ALIAS, so mounting `base_prefix` alone put the resolved
-    directory in the container and left the path the symlink points at absent —
-    `[FATAL tini (7)] exec .../.venv/bin/python failed: No such file or
-    directory`. The row did not fail there; it SKIPPED, reading as coverage,
-    from the day it landed. Reproduced exactly by building a venv against an
-    alias symlink and mounting only the versioned dir; green with the alias
-    prefix added.
-    """
+    """pgw#858: Every prefix the container must see in order to exec THIS interpreter."""
     roots = {Path(sys.prefix), Path(sys.prefix).resolve(),
              Path(sys.base_prefix), Path(sys.base_prefix).resolve()}
     base_exe = getattr(sys, "_base_executable", None)
@@ -107,11 +89,7 @@ def _interpreter_mounts() -> list[Path]:
 
 @pytest.mark.skipif(IS_ROOT, reason="already root — the rows below run directly")
 def test_privilege_isolation_rows_under_a_real_root_parent():
-    """Run every row below inside a container whose PID 1 is root and carries
-    the RunPod key, which is the only faithful stand-in for a pod.
-
-    A failure here is a failure of one of the rows; the inner output is
-    relayed verbatim."""
+    """pgw#858: Run every row below inside a container whose PID 1 is root and carries the RunPod key, which is ..."""
     if shutil.which("docker") is None:
         pytest.skip(
             "docker is required: pgw#858 is a uid boundary and a non-root "
@@ -178,13 +156,6 @@ def test_privilege_isolation_rows_under_a_real_root_parent():
     )
 
 
-# ==========================================================================
-# the rows themselves — root parent, unprivileged compute child.
-#
-# Skipped rather than absent when not root: the run says out loud that the
-# boundary was NOT measured here, instead of a green tick that means nothing.
-# ==========================================================================
-
 root_only = pytest.mark.skipif(
     not IS_ROOT,
     reason="pgw#858 is a uid boundary — the containerised row above measures it",
@@ -192,7 +163,7 @@ root_only = pytest.mark.skipif(
 
 from harness.hub_double import is_ready, is_result_for  # noqa: E402
 from harness.progress_wait import Cadence, await_progress  # noqa: E402
-from test_procsplit_pgw763 import (  # noqa: E402,F401 — fixtures come with it
+from harness.split import (  # noqa: E402,F401 — fixtures come with it
     SplitHarness,
     _payload,
     captured_dials,
@@ -211,12 +182,11 @@ def pod_shaped_env(monkeypatch):
     monkeypatch.setenv("WORKER_JWT", WORKER_JWT)
 
 
-def _split(tmp_path, *, drop: bool, monkeypatch=None) -> SplitHarness:
-    """A real split whose child imports the pgw#858 probe handlers.
-
-    ``drop=False`` is the RED control: the identical harness with the privilege
-    drop removed, i.e. the tree as it was before this issue."""
+def _split(tmp_path: Path, *, drop: bool,
+           monkeypatch: Optional[pytest.MonkeyPatch] = None) -> SplitHarness:
+    """A real split whose child imports the pgw#858 probe handlers."""
     if not drop:
+        assert monkeypatch is not None
         monkeypatch.setattr(privdrop, "plan_drop", lambda home: None)
     return SplitHarness(
         tmp_path,
@@ -250,16 +220,12 @@ def dropped(tmp_path, captured_dials, pod_shaped_env):
 
 @pytest.fixture()
 def undropped(tmp_path, captured_dials, monkeypatch, pod_shaped_env):
-    """The pre-pgw#858 tree, alive in the same run, so every denial below is
-    measured against a control that proves the probe works."""
+    """The pre-pgw#858 tree, alive in the same run, so every denial below is measured against a control that pro..."""
     h = _split(tmp_path / "red", drop=False, monkeypatch=monkeypatch)
     try:
         yield h
     finally:
         h.close()
-
-
-# ---- the boundary itself -------------------------------------------------
 
 
 @root_only
@@ -286,8 +252,7 @@ def test_child_execs_as_an_unprivileged_uid_and_cannot_climb_back(dropped, undro
 
 @root_only
 def test_the_child_cannot_climb_back_through_a_setuid_binary(dropped, undropped):
-    """#858's "confirm no setuid escalation path in the base images" — answered
-    by imposing the property rather than by auditing images we do not build."""
+    """#858's "confirm no setuid escalation path in the base images" — answered by imposing the property rather ..."""
     got = _json_probe(dropped, "escalation-surface")
     assert got["no_new_privs"] == "1", (
         f"NoNewPrivs is not set on the compute child: {got} — a stock base "
@@ -301,8 +266,7 @@ def test_the_child_cannot_climb_back_through_a_setuid_binary(dropped, undropped)
 
 @root_only
 def test_child_cannot_read_pid1_environ_where_the_runpod_key_lives(dropped, undropped):
-    """th#1380 D1: RunPod injects an account-authority key into every pod and
-    the create call cannot suppress it. PID 1's environ is where it sits."""
+    """th#1380 D1: RunPod injects an account-authority key into every pod and the create call cannot suppress it."""
     # Positive control on the FIXTURE: there is genuinely something to steal.
     pid1 = Path("/proc/1/environ").read_bytes().decode("utf-8", "replace")
     assert RUNPOD_KEY in pid1, (
@@ -325,8 +289,7 @@ def test_child_cannot_read_pid1_environ_where_the_runpod_key_lives(dropped, undr
 
 @root_only
 def test_child_cannot_read_the_control_parents_environ(dropped, undropped):
-    """th#1380 D2: the delta-1 strip deletes WORKER_JWT from the child's env,
-    and at a shared uid tenant code read it straight back out of the parent."""
+    """th#1380 D2: the delta-1 strip deletes WORKER_JWT from the child's env, and at a shared uid tenant code re..."""
     got = _json_probe(dropped, "steal-parent-environ")
     assert got["outcome"] == "denied", (
         f"tenant code read the control parent's environment: {got} — the "
@@ -364,14 +327,9 @@ def test_child_cannot_read_root_home(dropped, undropped):
         Path("/root/pgw858-secret").unlink(missing_ok=True)
 
 
-# ---- positive controls: a drop that breaks serving is not a fix ----------
-
-
 @root_only
 def test_the_dropped_child_still_boots_reaches_hello_and_serves(dropped):
-    """Reaching Hello and answering a dispatch IS the positive control: the
-    child imported torch, wired its executor, connected on a socket it could
-    only reach because the parent handed it over, and returned a result."""
+    """pgw#858: Reaching Hello and answering a dispatch IS the positive control: the child imported torch, wired..."""
     got = _json_probe(dropped, "report-identity")
     assert got["uid"] != 0
     home = _json_probe(dropped, "home-probe")
@@ -380,8 +338,7 @@ def test_the_dropped_child_still_boots_reaches_hello_and_serves(dropped):
 
 @root_only
 def test_the_dropped_child_can_write_every_path_it_was_granted(dropped, tmp_path):
-    """The grant list, checked from inside the child rather than asserted from
-    the parent's side of the boundary."""
+    """pgw#858: The grant list, checked from inside the child rather than asserted from the parent's side of the..."""
     home = _json_probe(dropped, "home-probe")
     assert home["home"].startswith("/var/lib/gen-worker"), home
     assert home["user"] and home["user"] != "root", home
@@ -436,10 +393,7 @@ def test_the_dropped_child_can_write_a_RELOCATED_local_compiled_graph_store(drop
 
 @root_only
 def test_the_dropped_child_can_still_write_the_config_snapshot(dropped):
-    """The one child-side writer that RAISES rather than degrades, and the only
-    thing the child writes inside the root-owned image tree. It has no coverage
-    in the split suite — a config push is the first thing that would have found
-    this, in production."""
+    """pgw#858: The one child-side writer that RAISES rather than degrades, and the only thing the child writes ..."""
     got = _probe(dropped, "config-snapshot-probe")
     assert got.startswith("ok:"), (
         f"the compute child cannot rewrite the th#1087 config snapshot: {got} "
@@ -448,28 +402,7 @@ def test_the_dropped_child_can_still_write_the_config_snapshot(dropped):
 
 
 def _reap_state(proc: Any, pid: int, *, parent_alive: bool) -> str:
-    """``running`` -> ``reaped``, with THIS process doing the collecting once
-    nothing else can.
-
-    ``proc.returncode`` is asyncio bookkeeping delivered to the parent's
-    loop by the child watcher, and the watcher DROPS that delivery once the loop
-    has closed. So it can confirm a reap and never deny one, and this helper must
-    read the process table instead.
-
-    pgw#1024 measured where that lands under CPU starvation: the parent thread
-    exits, its loop closes with the child's exit still undelivered, and from then
-    on there is no reaper left in this process at all — the child sits as a
-    zombie for the rest of the run and a poll on the process table reports
-    ``exited`` forever. Waiting longer cannot fix a delivery that can never
-    arrive, and a longer window would only be tolerance for it.
-
-    So: while the parent lives, its loop owns the child and we LOOK (``WNOWAIT``
-    leaves the status for it). Once the parent is gone this process is the only
-    reaper there is, so it reaps. That keeps the property this row measures — the
-    child, running at another uid, really died when root signalled it, and a
-    child that ignored the signal still reads ``running`` and still fails — and
-    drops only the bookkeeping question of which thread called wait().
-    """
+    """pgw#858: ``running`` -> ``reaped``, with THIS process doing the collecting once nothing else can."""
     if proc.returncode is not None:
         return "reaped"
     if parent_alive:
@@ -492,16 +425,7 @@ class _UndeliveredExit:
 
 
 def test_a_zombie_no_loop_can_report_is_collected_here_rather_than_waited_on():
-    """pgw#1024's mechanism and its fix, without having to lose the coin flip.
-
-    The row below could only be measured on a runner that happened to starve, so
-    build the end state directly: a child NO child-watcher is tracking, i.e. what
-    a parent loop that closed before the exit arrived leaves behind. Nothing in
-    this process will ever call ``wait()`` on it, so ``exited`` is not a stage it
-    passes through — it is where it stops, and the previous helper's wait could
-    only end in its staleness window. The fix is that once the parent can no
-    longer deliver, this process collects.
-    """
+    """pgw#1024's mechanism and its fix, without having to lose the coin flip."""
     proc = _UndeliveredExit()
     pid = os.posix_spawn("/bin/sleep", ["sleep", "600"], {})
     try:
@@ -530,9 +454,7 @@ def test_a_zombie_no_loop_can_report_is_collected_here_rather_than_waited_on():
 
 @root_only
 def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
-    """pgw#845's bounded shutdown across the new uid boundary: root can signal
-    any uid, and that direction is the only one that has to work (the child
-    never signals the parent — liveness is a pipe)."""
+    """pgw#845's bounded shutdown across the new uid boundary: root can signal any uid, and that direction is th..."""
     _probe(dropped, "report-identity")           # a live, serving child
     proc = dropped.pc._proc
     assert proc is not None and proc.returncode is None
@@ -559,14 +481,9 @@ def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
     )
 
 
-# ---- the pieces, exercised directly --------------------------------------
-
-
 @root_only
 def test_a_drop_that_did_not_take_refuses_rather_than_execs_tenant_code():
-    """The assertion inside the preexec hook is the last line of defence: if
-    setuid silently no-ops on some future kernel/container combination, the
-    child must die, not run tenant code as root."""
+    """pgw#858: The assertion inside the preexec hook is the last line of defence: if setuid silently no-ops on ..."""
     lying = privdrop.DropPlan(
         uid=os.getuid() + 1, gid=os.getgid(), groups=(), user="x", home="/tmp")
     with pytest.raises(RuntimeError, match="privilege drop did not take"):
@@ -581,10 +498,314 @@ def test_the_uid_selector_refuses_zero():
 
 @root_only
 def test_a_shared_system_directory_is_never_granted(tmp_path):
-    """The post-mortem marker dir defaults to /tmp when TENSORHUB_CACHE_DIR is
-    unset; a recursive chown of it would hand a shared tree to tenant code."""
+    """pgw#858: The post-mortem marker dir defaults to /tmp when TENSORHUB_CACHE_DIR is unset; a recursive chown..."""
     plan = privdrop.plan_drop(str(tmp_path / "home"))
     assert plan is not None
     granted = privdrop.grant_paths(plan, ["/tmp", "/", str(tmp_path / "ok")])
     assert granted == [str(tmp_path / "ok")], granted
     assert os.stat("/tmp").st_uid == 0
+
+
+# ============================================================================
+# pgw#975 — pgw#975: the pgw#763 split's OOM victim order, declared instead
+#   of emergent.
+# ============================================================================
+
+GIB = 1024 ** 3
+
+
+linux_only = pytest.mark.skipif(
+    sys.platform != "linux", reason="oom_score_adj is a Linux /proc interface"
+)
+
+
+def _read_oom_score_adj(pid: int) -> int:
+    return int(Path(f"/proc/{pid}/oom_score_adj").read_text().strip())
+
+
+@pytest.fixture()
+def split(tmp_path, captured_dials):  # noqa: F811
+    h = SplitHarness(tmp_path)
+    try:
+        yield h
+    finally:
+        h.close()
+
+
+@linux_only
+def test_a_real_compute_child_outranks_the_control_parent(split):
+    """pgw#975: RED before this issue: the child inherited the parent's value exactly, so the reporter's surviva..."""
+    split.scheduler.wait_connection(0).wait_for(is_ready)
+    proc = split.pc._proc
+    assert proc is not None, "no compute child was spawned"
+
+    child_adj = _read_oom_score_adj(proc.pid)
+    parent_adj = _read_oom_score_adj(os.getpid())
+
+    delta = oom_rank.score_adj_delta_for_domain(
+        oom_rank.oom_domain_bytes(), oom_rank.parent_ceiling_bytes()
+    )
+    assert child_adj == min(1000, parent_adj + delta), (
+        f"child oom_score_adj={child_adj}, expected parent({parent_adj}) + "
+        f"{delta} — read back off /proc/{proc.pid}/oom_score_adj"
+    )
+    assert child_adj > parent_adj, (
+        f"the compute child ({child_adj}) does not outrank the control parent "
+        f"({parent_adj}); a kernel OOM can take the reporter"
+    )
+
+
+@linux_only
+def test_the_whole_compute_subtree_inherits_it(tmp_path):
+    """pgw#975: The mint child and the AOT pool's entry children are spawned BELOW a compute child and get no ca..."""
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import subprocess, sys\n"
+        "from gen_worker.procsplit.oom_rank import raise_own_oom_score_adj\n"
+        "rank = raise_own_oom_score_adj()\n"
+        "assert rank.applied, rank.format()\n"
+        "grand = subprocess.run(\n"
+        "    [sys.executable, '-c',\n"
+        "     'print(open(\"/proc/self/oom_score_adj\").read().strip())'],\n"
+        "    capture_output=True, text=True, check=True)\n"
+        "print(open('/proc/self/oom_score_adj').read().strip())\n"
+        "print(grand.stdout.strip())\n"
+    )
+    out = subprocess.run(
+        [sys.executable, str(child)],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(
+            [str(Path(__file__).resolve().parent.parent / "src"),
+             os.environ.get("PYTHONPATH", "")])},
+    )
+    mine, grandchild = (int(v) for v in out.stdout.split())
+    delta = oom_rank.score_adj_delta_for_domain(
+        oom_rank.oom_domain_bytes(), oom_rank.parent_ceiling_bytes()
+    )
+    assert mine == min(1000, _read_oom_score_adj(os.getpid()) + delta)
+    assert grandchild == mine, (
+        "a grandchild did not inherit the rank — the mint child and every "
+        "inductor entry child would be unranked"
+    )
+
+
+def test_the_parent_ceiling_still_matches_the_constants_it_was_derived_from():
+    """pgw#975: `oom_rank` writes the reship buffer out literally so it can run before grpc exists in the child."""
+    from gen_worker.procsplit.seam import CONTROL_FRAME_CEILING_BYTES
+    from gen_worker.transport import RESHIP_WINDOW
+
+    assert oom_rank._PARENT_BUFFER_BYTES == (
+        RESHIP_WINDOW * CONTROL_FRAME_CEILING_BYTES
+    )
+
+
+@pytest.mark.parametrize(
+    "domain_gib, expected, shape",
+    [
+        (755.07, 1, "RunPod CPU pod, measured live 2026-07-30"),
+        (124.91, 2, "RunPod 4090 SECURE, measured live 2026-07-30"),
+        (14.9, 15, "tightest cgroup cap observed (0.56.2 ram_total_gb report)"),
+        (2.0, 110, "a hypothetical 2 GiB container"),
+    ],
+)
+def test_the_value_is_derived_from_the_domain_not_picked(domain_gib, expected, shape):
+    """pgw#975: §4.24: the number has to be re-derivable."""
+    got = oom_rank.score_adj_delta_for_domain(
+        int(domain_gib * GIB), oom_rank.parent_ceiling_bytes()
+    )
+    assert got == expected, f"{shape}: expected {expected}, got {got}"
+
+
+def test_the_margin_always_covers_the_parents_whole_ceiling_twice():
+    """pgw#975: The property the table is an instance of: one point is 0.1% of the domain, so `adj` points must ..."""
+    ceiling = oom_rank.parent_ceiling_bytes()
+    for domain in (1 * GIB, 8 * GIB, 15 * GIB, 64 * GIB, 125 * GIB, 755 * GIB):
+        adj = oom_rank.score_adj_delta_for_domain(domain, ceiling)
+        assert adj * (domain / 1000) >= 2 * ceiling, (
+            f"domain={domain / GIB:.0f}GiB adj={adj} buys "
+            f"{adj * domain / 1000 / 1024 ** 2:.0f}MiB against a "
+            f"{ceiling / 1024 ** 2:.0f}MiB parent ceiling"
+        )
+
+
+def test_an_unreadable_domain_degrades_toward_protecting_the_reporter():
+    """pgw#975: Guessing the roomiest host would silently produce adj=1 on a tight container."""
+    tight = oom_rank.score_adj_delta_for_domain(0, oom_rank.parent_ceiling_bytes())
+    assert tight == oom_rank.score_adj_delta_for_domain(
+        oom_rank._TIGHTEST_OBSERVED_DOMAIN_BYTES, oom_rank.parent_ceiling_bytes()
+    )
+    assert tight > oom_rank.score_adj_delta_for_domain(755 * GIB,
+                                                 oom_rank.parent_ceiling_bytes())
+
+
+@linux_only
+def test_a_failed_set_is_a_named_degradation_never_a_silent_pass(
+    monkeypatch, tmp_path, caplog,
+):
+    """pgw#975: A hardened container with a read-only /proc must not leave us believing the guarantee holds."""
+    unwritable = tmp_path / "nonexistent-dir" / "oom_score_adj"
+    monkeypatch.setattr(oom_rank, "_SELF_OOM_SCORE_ADJ", unwritable)
+
+    with caplog.at_level(logging.ERROR, logger=oom_rank.__name__):
+        rank = oom_rank.raise_own_oom_score_adj()
+
+    assert not rank.applied
+    assert rank.unprotected, "the degradation did not name what is unprotected"
+    assert "control parent" in rank.unprotected
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert oom_rank.DEGRADE_PHASE in logged, "the failure was not logged typed"
+    assert "errno" in rank.reason
+
+
+@linux_only
+def test_the_gap_is_cut_over_whatever_baseline_was_inherited(monkeypatch, tmp_path):
+    """pgw#975: The bug a real spawn caught: `oom_score_adj` is INHERITED, so the value the child reads is the p..."""
+    fake = tmp_path / "oom_score_adj"
+    fake.write_text("200\n")
+    monkeypatch.setattr(oom_rank, "_SELF_OOM_SCORE_ADJ", fake)
+
+    rank = oom_rank.raise_own_oom_score_adj()
+    delta = oom_rank.score_adj_delta_for_domain(
+        oom_rank.oom_domain_bytes(), oom_rank.parent_ceiling_bytes()
+    )
+
+    assert rank.applied
+    assert int(fake.read_text()) == 200 + delta > 200
+    assert rank.previous == 200
+
+
+@linux_only
+def test_a_baseline_already_at_the_kernel_maximum_is_reported_unprotected(
+    monkeypatch, tmp_path, caplog,
+):
+    """pgw#975: At 1000 the parent is already maximally killable and no child can be ranked above it."""
+    fake = tmp_path / "oom_score_adj"
+    fake.write_text("1000\n")
+    monkeypatch.setattr(oom_rank, "_SELF_OOM_SCORE_ADJ", fake)
+
+    with caplog.at_level(logging.ERROR, logger=oom_rank.__name__):
+        rank = oom_rank.raise_own_oom_score_adj()
+
+    assert not rank.applied
+    assert rank.reason == "baseline_at_kernel_maximum"
+    assert rank.unprotected
+    assert oom_rank.DEGRADE_PHASE in "\n".join(
+        r.getMessage() for r in caplog.records
+    )
+
+
+def test_the_container_facts_now_carry_memory_oom_group():
+    """pgw#975: Read off this box's real cgroup chain."""
+    facts = postmortem.container_limits()
+    assert "memory_oom_group" in facts
+    assert facts["memory_oom_group"] in (0, 1, None)
+
+
+def test_a_group_kill_is_called_out_in_the_death_dial():
+    detail = postmortem.format_detail(
+        phase="compute_process_exit",
+        verdict={"exit_code": None, "signaled": True, "signal": 9,
+                 "signal_name": "SIGKILL", "core_dumped": False},
+        limits={"memory_oom_group": 1},
+    )
+    assert "memory.oom.group=1" in detail
+    assert "GROUP KILL" in detail
+
+    benign = postmortem.format_detail(
+        phase="compute_process_exit",
+        verdict={"exit_code": 1, "signaled": False},
+        limits={"memory_oom_group": 0},
+    )
+    assert "memory.oom.group=0" in benign
+    assert "GROUP KILL" not in benign
+
+
+def test_the_entrypoint_ranks_the_child_before_its_heavy_imports():
+    """pgw#975: The harness enters one layer below `entrypoint`, so the placement itself is asserted on the sour..."""
+    src = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "gen_worker" / "entrypoint.py"
+    ).read_text()
+    call = src.index("raise_own_oom_score_adj()")
+    assert src.index("is_compute_child") < call
+    for heavy in ("from .worker import Worker", "import msgspec"):
+        assert call < src.index(heavy), (
+            f"the OOM rank is declared after {heavy!r}"
+        )
+
+
+# ============================================================================
+# pgw#763 — pgw#763: an oversized ``.to("cpu")`` is refused typed, not
+#   cgroup-killed.
+# ============================================================================
+
+_GIB = 1 << 30
+
+
+def _cgroup(tmp_path: Path, *, limit: int, current: int) -> tuple[Path, Path]:
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "memory.max").write_text(str(limit))
+    (root / "memory.current").write_text(str(current))
+    (root / "memory.stat").write_text(
+        "anon {a}\nfile 0\nactive_file 0\ninactive_file 0\nshmem 0\n"
+        "file_dirty 0\nfile_writeback 0\n".format(a=current))
+    proc = tmp_path / "self_cgroup"
+    proc.write_text("0::/\n")
+    return root, proc
+
+
+@pytest.fixture()
+def guard(tmp_path, monkeypatch):
+    """Arm the real guard against a synthetic 8GiB cgroup with 6GiB held (te#138's proportions: the resident pip..."""
+    monkeypatch.delenv("GEN_WORKER_HOST_MOVE_GUARD", raising=False)
+    root, proc = _cgroup(tmp_path, limit=8 * _GIB, current=6 * _GIB)
+    monkeypatch.setattr(host_move_guard, "_probe_root", root)
+    monkeypatch.setattr(host_move_guard, "_probe_self", proc)
+    assert host_move_guard.install()
+    return host_move_guard
+
+
+def _big_meta_module() -> torch.nn.Module:
+    # ~3.2GiB of fp32 weights that exist only as metadata: device.type="meta"
+    # counts as incoming (not CPU-resident), and no RAM is ever allocated.
+    with torch.device("meta"):
+        return torch.nn.Linear(20480, 41984, bias=False)
+
+
+def test_oversized_cpu_move_is_refused_typed(guard: Any) -> None:
+    """te#138's ``_free()``: a module bigger than the remaining budget asks for CPU."""
+    module = _big_meta_module()
+    with pytest.raises(HostRamMoveRefusedError) as exc:
+        module.to("cpu")
+    msg = str(exc.value)
+    assert "host-RAM move refused" in msg
+    assert exc.value.incoming_bytes >= 3 * _GIB
+    # ~2GiB available (8 limit - 6 held), floored — the numbers are named.
+    assert exc.value.available_bytes <= 3 * _GIB
+
+    # .cpu() is the same door.
+    with pytest.raises(HostRamMoveRefusedError):
+        _big_meta_module().cpu()
+
+
+def test_small_and_non_cpu_moves_pass_through(guard: Any) -> None:
+    """pgw#763: The guard must not tax or break ordinary moves: under-threshold modules skip the probe entirely,..."""
+    small = torch.nn.Linear(64, 64)  # CPU-resident already, tiny
+    out = small.to("cpu")
+    assert out is small
+    # dtype-only .to() on a big meta module: not a CPU landing, no refusal.
+    _big_meta_module().to(dtype=torch.bfloat16)
+
+
+def test_kill_switch_disables(guard: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEN_WORKER_HOST_MOVE_GUARD", "0")
+    module = _big_meta_module()
+    # Guard steps aside; torch itself then refuses to materialize meta
+    # tensors via .to() — any non-HostRamMoveRefusedError shape is fine.
+    try:
+        module.to("cpu")
+    except HostRamMoveRefusedError:  # pragma: no cover
+        pytest.fail("kill switch did not disable the guard")
+    except Exception:
+        pass

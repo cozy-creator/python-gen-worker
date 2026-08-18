@@ -241,7 +241,7 @@ def test_the_mediated_action_ceiling_is_the_allowlists_own() -> None:
     """`_ACTION_HARD_TIMEOUT_S = 120.0` sat in a `min()` beside
     `action.timeout_s`, whose largest declared value is 60 s — so the third
     term could only ever reject nothing (§4.24 item 1). Behaviour is proven on
-    the real mediation path in `test_procsplit_security_pgw763`."""
+    the real mediation path in `test_procsplit.py`."""
     from gen_worker.procsplit import actions, parent
 
     assert not hasattr(parent, "_ACTION_HARD_TIMEOUT_S")
