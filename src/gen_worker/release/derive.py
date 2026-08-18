@@ -109,36 +109,82 @@ def _lane_model_class(module: ModuleType) -> Optional[type]:
     return found[0] if found else None
 
 
-def _entrypoints(module: ModuleType, model_cls: type) -> list[tuple[str, Any, type]]:
-    """(name, function, payload type) for every @entrypoint bound to the model.
+@dataclass(frozen=True)
+class _Entrypoint:
+    """One entrypoint, bound BY ANNOTATION ROLE, order-agnostic.
 
-    Binding is by the MODEL parameter's annotation: an entrypoint whose
-    second parameter annotates a different model class belongs to a
-    different release. Deterministic order: definition-name sort.
+    The payload parameter is the msgspec Struct; the model parameter is the
+    ``Model`` subclass (its annotation IS the model declaration, its NAME is
+    the slot name); the remaining parameter is ctx. The derive calls by
+    KEYWORD, so the author owns the order.
     """
 
-    out: list[tuple[str, Any, type]] = []
+    name: str
+    fn: Any
+    payload_param: str
+    payload_type: type
+    model_param: str
+    ctx_param: str
+
+
+def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
+    import msgspec
+
+    out: list[_Entrypoint] = []
     for name, fn in sorted(vars(module).items()):
         if not (inspect.isfunction(fn) and getattr(fn, ENTRYPOINT_ATTR, False)):
             continue
         hints = typing.get_type_hints(fn)
         parameters = list(inspect.signature(fn).parameters.values())
-        payload_type = hints.get(parameters[0].name)
-        bound_model = hints.get(parameters[1].name)
-        if payload_type is None:
-            raise DeriveError(
-                f"@entrypoint {name}: the payload parameter "
-                f"{parameters[0].name!r} carries no resolvable type annotation"
-            )
-        if bound_model is not model_cls:
+        payload_param = model_param = None
+        payload_type: Any = None
+        for parameter in parameters:
+            annotation = _strip_annotated(hints.get(parameter.name))
+            if isinstance(annotation, type) and issubclass(annotation, msgspec.Struct):
+                payload_param, payload_type = parameter.name, annotation
+            elif annotation is model_cls:
+                model_param = parameter.name
+        if model_param is None:
             continue
-        out.append((name, fn, payload_type))
+        if payload_param is None:
+            raise DeriveError(
+                f"@entrypoint {name}: no parameter annotates a msgspec "
+                f"payload struct"
+            )
+        ctx_candidates = [
+            parameter.name
+            for parameter in parameters
+            if parameter.name not in (payload_param, model_param)
+        ]
+        if len(ctx_candidates) != 1:
+            raise DeriveError(
+                f"@entrypoint {name}: expected exactly one ctx parameter "
+                f"beside payload and model; got {ctx_candidates!r}"
+            )
+        out.append(
+            _Entrypoint(
+                name=name,
+                fn=fn,
+                payload_param=payload_param,
+                payload_type=payload_type,
+                model_param=model_param,
+                ctx_param=ctx_candidates[0],
+            )
+        )
     if not out:
         raise DeriveError(
             f"no @entrypoint function binds model class {model_cls.__name__!r} "
             f"(the model parameter's annotation is the binding)"
         )
     return out
+
+
+def _strip_annotated(annotation: Any) -> Any:
+    """``Annotated[T, ...]`` carries wire metadata; the trace wants T."""
+
+    while typing.get_origin(annotation) is typing.Annotated:
+        annotation = typing.get_args(annotation)[0]
+    return annotation
 
 
 def _optional_none(annotation: Any) -> bool:
@@ -151,6 +197,7 @@ def _optional_none(annotation: Any) -> bool:
 def _synthesize_field(owner: str, name: str, annotation: Any) -> Any:
     """A minimal trace value for a REQUIRED non-enum field, by type."""
 
+    annotation = _strip_annotated(annotation)
     if annotation is str:
         return "trace"
     if annotation is int:
@@ -189,7 +236,7 @@ def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], boo
     enum_axes: list[tuple[str, list[Any]]] = []
     base: dict[str, Any] = {}
     for field in struct_fields:
-        annotation = field.type
+        annotation = _strip_annotated(field.type)
         if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
             values = list(annotation)
             if not values:
@@ -393,7 +440,7 @@ def _derive_lane(
     torchcg: ModuleType,
     cls: type,
     lane: Any,
-    plans: list[tuple[str, Any, tuple[Any, ...]]],
+    plans: list[tuple[_Entrypoint, tuple[Any, ...]]],
     checkpoint_dir: Path,
 ) -> Any:
     """One lane's instrumented run: fresh model, load, drive, discover."""
@@ -428,14 +475,18 @@ def _derive_lane(
         modules = _named_marked_modules(model, load_ctx.marked_modules)
 
         def drive() -> None:
-            for name, fn, payloads in plans:
+            for plan, payloads in plans:
                 for index, payload in enumerate(payloads):
                     try:
-                        fn(payload, model, request_ctx)
+                        plan.fn(**{
+                            plan.payload_param: payload,
+                            plan.model_param: model,
+                            plan.ctx_param: request_ctx,
+                        })
                     except Exception as exc:
                         raise DeriveError(
-                            f"lane {handle!r}: entrypoint {name!r} failed on "
-                            f"auto-enumerated payload {index} "
+                            f"lane {handle!r}: entrypoint {plan.name!r} failed "
+                            f"on auto-enumerated payload {index} "
                             f"({payload!r}) under the trace session: "
                             f"{type(exc).__name__}: {exc}"
                         ) from exc
@@ -447,7 +498,7 @@ def _derive_lane(
         except torchcg.DiscoveryError as exc:
             raise DeriveError(f"lane {handle!r}: {exc}") from exc
     if lane_graphs.unobserved_targets:
-        total = sum(len(payloads) for _, _, payloads in plans)
+        total = sum(len(payloads) for _, payloads in plans)
         raise DeriveError(
             f"lane {handle!r}: marked module(s) "
             f"{list(lane_graphs.unobserved_targets)!r} were never CALLED "
@@ -481,10 +532,10 @@ def derive_release(
     lane_contracts: dict[str, Any] = {}
     warnings: list[str] = []
     if cls is not None:
-        plans: list[tuple[str, Any, tuple[Any, ...]]] = []
-        for name, fn, payload_type in _entrypoints(module, cls):
-            owner = f"@entrypoint {name}"
-            payloads, capped = _auto_payloads(owner, payload_type)
+        plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
+        for plan in _entrypoints(module, cls):
+            owner = f"@entrypoint {plan.name}"
+            payloads, capped = _auto_payloads(owner, plan.payload_type)
             if capped:
                 warnings.append(
                     f"{owner}: enum cross-product exceeds the cap "
@@ -492,7 +543,7 @@ def derive_release(
                     f"rest is first-encounter discovery (eager + background "
                     f"mint)"
                 )
-            plans.append((name, fn, payloads))
+            plans.append((plan, payloads))
 
         for lane in model_lanes(cls):
             lane_graphs = _derive_lane(torchcg, cls, lane, plans, checkpoint_dir)

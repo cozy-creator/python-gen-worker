@@ -123,6 +123,21 @@ class LoadContext(Generic[M]):
         raise NotImplementedError
 
 
+class Adapter:
+    """A hub-resolved adapter FACT on ctx (distillation LoRA et al.).
+
+    Serving resolution (pgw#1372) fills these from the deployment binding;
+    at trace no adapter is ever bound. ``defaults`` is the adapter's own
+    metadata struct (e.g. ``SDXL.Lora.Defaults``) -- the recipe belongs to
+    the ADAPTER, never to endpoint vocabulary.
+    """
+
+    def __init__(self, *, name: str, path: Any, defaults: Any = None) -> None:
+        self.name = name
+        self.path = path
+        self.defaults = defaults
+
+
 def model_lanes(cls: type) -> tuple[Any, ...]:
     return tuple(getattr(cls, MODEL_LANES_ATTR, ()))
 
@@ -143,6 +158,7 @@ def model_model_type(cls: type) -> Optional[type]:
 
 
 __all__ = [
+    "Adapter",
     "LoadContext",
     "MODEL_LANES_ATTR",
     "Model",

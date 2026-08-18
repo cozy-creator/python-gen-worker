@@ -68,6 +68,7 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         worker_function,
     )
     from .api.model_base import (
+        Adapter,
         LoadContext,
         Model,
     )
@@ -236,6 +237,7 @@ _EXPORTS: Final[dict[str, str]] = {
     # pgw#1372's serving.endpoint base predates the ratified Model/entrypoint
     # split; it stays exported until that lane cuts over.
     "Endpoint": "serving.endpoint",
+    "Adapter": "api.model_base",
     "LoadContext": "api.model_base",
     "Error": "api.streaming",
     "ExpectedOutput": "api.types",
@@ -337,6 +339,7 @@ def __dir__() -> list[str]:
 
 __all__ = [
     # The decorators + bindings.
+    "Adapter",
     "LoadContext",
     "Model",
     "endpoint",
