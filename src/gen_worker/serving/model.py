@@ -57,16 +57,33 @@ class LaneContract(Protocol):
 
 
 def lane_handle(lane: Any) -> str:
-    """The lane's stable string handle — ``contract`` (``name@version``) now;
-    tensorfs#111's digest stamp joins the fallback chain when it ships."""
+    """The lane's stable string handle, read off the SHIPPED tensorfs surface.
 
-    for attribute in ("contract", "digest"):
+    tensorfs#111 landed and its ``Contract`` spells the handle ``stamp``
+    (``name@version`` for a library contract, ``sha256:<hex>`` for an
+    anonymous one). ``digest`` is a BARE 64-hex string — a real attribute,
+    but not a handle: reading it as one produced
+    ``f1455f56…`` where ``sdxl.diffusers-bf16@1`` belonged, and torchcg
+    refused the lane. So ``stamp`` leads, ``contract`` stays for objects that
+    spell it that way, ``name``+``version`` is the structural fallback, and
+    ``digest`` is only ever used PREFIXED.
+    """
+
+    for attribute in ("stamp", "contract"):
         value = getattr(lane, attribute, None)
         if isinstance(value, str) and value:
             return value
+    name = getattr(lane, "name", None)
+    version = getattr(lane, "version", None)
+    if isinstance(name, str) and name and isinstance(version, int):
+        return f"{name}@{version}"
+    digest = getattr(lane, "digest", None)
+    if isinstance(digest, str) and digest:
+        return digest if digest.startswith("sha256:") else f"sha256:{digest}"
     raise ModelDeclarationError(
-        f"lane {lane!r} carries no string handle (`contract` or `digest`); "
-        "a lane is a tensorfs layout contract object"
+        f"lane {lane!r} carries no string handle (`stamp`, `contract`, "
+        "`name`+`version` or `digest`); a lane is a tensorfs layout contract "
+        "object"
     )
 
 
