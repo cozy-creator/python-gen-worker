@@ -72,6 +72,8 @@ class EndpointHost:
         *,
         lane_contract: str = "",
         engine: Optional[LoaderEngine] = None,
+        device: str = "cuda",
+        io: str = "buffered",
         output_dir: Optional[Path] = None,
         context_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
@@ -82,9 +84,28 @@ class EndpointHost:
         }
         self.instances: Dict[type, ModelInstance] = {}
         self.adoption: Any = None
+        if engine is None:
+            # pgw#1380: the native store->VRAM engine, bound off the
+            # checkpoint tree the worker already resolved — a projected
+            # snapshot carries its own chunk store, so nothing extra is
+            # plumbed here. `None` back means this tree has no store behind
+            # it (a bare download, a fixture) and `ctx.load` keeps the eager
+            # bridge; PLACEMENT is decided here, by the worker, never by
+            # author code.
+            from .streaming import engine_for
+
+            engine = engine_for(binding.checkpoint_dir, device=device, io=io)
         self._engine = engine
         self._output_dir = output_dir
         self._context_kwargs = dict(context_kwargs or {})
+
+    def _stream_attributes(self) -> Dict[str, Any]:
+        """The streamed load's own numbers, or nothing when no engine ran."""
+        report = getattr(self._engine, "last_report", None)
+        if report is None:
+            return {}
+        attributes: Dict[str, Any] = report.attributes()
+        return attributes
 
     # -- contexts -----------------------------------------------------------
 
@@ -195,11 +216,17 @@ class EndpointHost:
             )
             model.load(load_context)
             self.instances[model_cls] = ModelInstance(model, load_context)
+            # pgw#1380: `model_load` IS the streaming span now. The fill's
+            # write-then-reread time did not move to a new stage — it left
+            # the boot, and what remains here is store->VRAM. The attributes
+            # say how fast and through what, so a regression is legible
+            # without a second measurement.
             boot_stages.record_ending_now(
                 boot_stages.Stage.MODEL_LOAD,
                 duration_ms=int((time.monotonic() - load_started) * 1000),
                 label=f"{self.loaded.module_name}:{model_cls.__name__}",
                 checkpoint=self.binding.checkpoint_ref,
+                **self._stream_attributes(),
             )
         if session is not None:
             # The mint-written requirements manifest is an AUDIT assertion
