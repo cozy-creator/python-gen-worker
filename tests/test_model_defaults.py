@@ -466,9 +466,16 @@ def test_the_serving_interaction_matrix(
 def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert [mt.name for mt in MODEL_TYPES] == [
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
+        "flux1", "flux2-klein",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
+    # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b) are TWO
+    # roots, and neither is spelled bare "flux".
+    from gen_worker.models import Flux1, Flux2Klein
+
+    assert model_type_by_name("flux1") is Flux1
+    assert model_type_by_name("flux2-klein") is Flux2Klein
     assert model_type_by_name("flux") is None
 
 
@@ -484,6 +491,15 @@ def test_contract_stamps_classify_through_the_fingerprint() -> None:
     assert model_type_for_contract("rife.flownet@1") is Rife
     # Unrecognized = unclassified, legal and visible — never a guess.
     assert model_type_for_contract("flux.diffusers-bf16@1") is None
+    # pgw#1393: the two flux roots fingerprint separately, and the SHARED
+    # block-spelling fragment classifies NOTHING — its own description says it
+    # is "shared by Flux-family and timm-derived transformers", so matching on
+    # it would claim every timm ViT for Flux.
+    from gen_worker.models import Flux1, Flux2Klein
+
+    assert model_type_for_contract("flux1.diffusers-bf16@1") is Flux1
+    assert model_type_for_contract("flux2-klein.diffusers-bf16@1") is Flux2Klein
+    assert model_type_for_contract("dit.blocks-fused-qkv@1") is None
 
 
 def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
@@ -513,10 +529,98 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     assert Wan22.canonical_scheduler_config == {}
     assert MiniMaxH3.canonical_scheduler_config == {}
     assert Rife.canonical_scheduler_config == {}
+    # pgw#1393: Flux is FLOW-MATCHING — there is no beta schedule to record at
+    # all, and FlowMatchEulerDiscreteScheduler's shift parameters are
+    # resolution-dependent. BFL's own scheduler_config.json is HF-gated and
+    # could not be fetched, so this stays empty rather than borrowing SDXL's
+    # scaled_linear betas.
+    from gen_worker.models import Flux1, Flux2Klein
+
+    assert Flux1.canonical_scheduler_config == {}
+    assert Flux2Klein.canonical_scheduler_config == {}
     # Rife is the one AUXILIARY type: no canonical lane, and inventing a
     # tensorfs contract name for its diffusers-layout artifact would be a guess.
     assert Rife.canonical_contract is None
     assert MiniMaxH3.canonical_contract is not None
+
+
+# ── the flux family (pgw#1393) ───────────────────────────────────────────────
+
+
+def test_flux_platform_values_are_the_shipped_endpoint_numbers() -> None:
+    """Every value cited to the flux endpoints' own source (pgw#1393)."""
+    from gen_worker.models import Flux1, Flux2Klein
+
+    f1 = Flux1.Defaults()
+    # flux.1-dev/main.py:69-70 == flux.1-schnell/main.py:61-62, both under
+    # register_family("flux1", ...) — the family owner saying dev and schnell
+    # are ONE vocabulary.
+    assert f1.steps == Knob(28, lo=1, hi=100, name="steps")
+    assert f1.guidance == Knob(3.5, lo=0.0, hi=10.0, name="guidance")
+    # flux.1-dev/main.py:277-280: guidance is the DISTILLATION EMBEDDING, a
+    # DiT input tensor — not CFG. Both BFL checkpoints serve cfg-off.
+    assert f1.cfg is False
+    assert f1.step_distilled is False
+    assert f1.max_sequence_length == 512  # :117
+
+    k = Flux2Klein.Defaults()
+    assert k.steps == Knob(28, lo=1, hi=50, name="steps")  # :84, :306
+    assert k.guidance == Knob(4.0, lo=1.0, hi=10.0, name="guidance")  # :85, :310
+    # flux.2-klein-4b/main.py:123-129, :307 — Klein Base runs a real second
+    # uncond forward. The opposite of Flux1, which is why these are two types.
+    assert k.cfg is True
+    assert k.max_sequence_length == 512  # :121
+
+    # Sourcing rule: no knob was invented where none could be sourced.
+    for d in (f1, k):
+        assert not hasattr(d, "scheduler")
+        assert not hasattr(d, "timesteps")
+    # No flux endpoint registers a lora vocabulary, so there is no overlay.
+    assert not hasattr(Flux1, "Lora")
+    assert not hasattr(Flux2Klein, "Lora")
+
+
+def test_flux_platform_floors_admit_the_distilled_checkpoints() -> None:
+    """The floors are the ENDPOINTS' checkpoint facts, not their wire bounds.
+
+    ``_merge_*_knob`` only ever NARROWS and clamps a row's default into the
+    platform range, so a platform floor copied from a Base handler's payload
+    envelope silently rewrites the distilled checkpoint's own recipe. Both
+    cases below were MEASURED failing before the floors were corrected.
+    """
+    from gen_worker.models import Flux1, Flux2Klein
+
+    # flux.1-schnell/main.py:388-389 pins guidance_scale=0.0. Under dev's wire
+    # ge=1.0 (flux.1-dev/main.py:281) this decoded to lo=1.0, hi=0.0 — empty.
+    schnell = decode_model_defaults(Flux1, model="flux1", defaults={
+        "steps": {"default": 4, "hi": 4},
+        "guidance": {"default": 0.0, "lo": 0.0, "hi": 0.0},
+        "step_distilled": True,
+        "max_sequence_length": 256,
+    })
+    assert schnell.guidance == Knob(0.0, lo=0.0, hi=0.0, name="guidance")
+    assert schnell.steps.default == 4 and schnell.steps.hi == 4
+    assert schnell.step_distilled is True
+    assert schnell.max_sequence_length == 256
+
+    # flux.2-klein-4b/main.py:94-95: Turbo's published recipe is 4 steps at
+    # guidance 1.0. The Base HANDLER declares ge=12 / ge=1.5 (:306, :310).
+    turbo = decode_model_defaults(Flux2Klein, model="flux2-klein", defaults={
+        "steps": {"default": 4},
+        "guidance": {"default": 1.0},
+        "cfg": False,
+        "step_distilled": True,
+    })
+    assert turbo.steps.default == 4
+    assert turbo.guidance.default == 1.0
+    assert turbo.cfg is False and turbo.step_distilled is True
+
+    # flux.1-schnell/main.py:267 — the Flex.2 lane's le=100 is why the platform
+    # ceiling is 100 and not dev's 50: the merge cannot widen.
+    flex2 = decode_model_defaults(Flux1, model="flux1", defaults={
+        "steps": {"default": 28, "hi": 100}, "cfg": True,
+    })
+    assert flex2.steps.hi == 100 and flex2.cfg is True
 
 
 def test_model_types_are_vocabularies_not_values() -> None:

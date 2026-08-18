@@ -457,7 +457,14 @@ class Flux1Defaults(msgspec.Struct, frozen=True):
     the platform knob must be the widest because ``defaults_decode`` only ever
     NARROWS — dev's ``le=50`` (``flux.1-dev/main.py:276``) and schnell's
     ``le=4`` (``flux.1-schnell/main.py:254``) are CHECKPOINT rows narrowing
-    into it. ``guidance`` bounds 1.0..10.0 from ``flux.1-dev/main.py:281``.
+    into it. ``guidance`` hi 10.0 from ``flux.1-dev/main.py:281``; its lo is
+    0.0, NOT dev's wire ``ge=1.0``, and that floor is load-bearing — schnell
+    PINS ``guidance_scale=0.0`` (``flux.1-schnell/main.py:388-389``), and
+    since the knob merge only narrows, a platform floor of 1.0 makes the
+    schnell checkpoint's own row unreachable (MEASURED: it decoded to
+    ``lo=1.0, hi=0.0``, an empty range). The endpoint keeps its narrower wire
+    bound; the platform envelope has to admit the family's real checkpoints.
+    Same shape as ``Sd15Config.guidance`` (``Knob(7.0, lo=0.0)``).
 
     ``cfg`` is False because FLUX.1's ``guidance`` is NOT CFG: it is the
     guidance-distillation EMBEDDING, a DiT input tensor, so batch stays 1 and
@@ -476,7 +483,7 @@ class Flux1Defaults(msgspec.Struct, frozen=True):
     """
 
     steps: Knob[int] = Knob(28, lo=1, hi=100, name="steps")
-    guidance: Knob[float] = Knob(3.5, lo=1.0, hi=10.0, name="guidance")
+    guidance: Knob[float] = Knob(3.5, lo=0.0, hi=10.0, name="guidance")
     #: FLUX.1's guidance is the DISTILLATION EMBEDDING, not CFG — both BFL
     #: checkpoints serve cfg-off; the Flex.2 redistill runs a real CFG walk
     #: (``flux.1-schnell/main.py:109-113``) and its row sets True.
