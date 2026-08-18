@@ -12,3 +12,8 @@
   parses the string; a lane that CLAIMS a document must produce a readable one (typed refusal —
   a stamp with an unreadable layout behind it is worse than no row), and a lane object exposing
   none at all travels stamp-only with a WARNING naming it, never silently.
+
+- **The lane entry carries the producer's OWN digest of that document** (`lane_contracts[…].digest`,
+  always `sha256:`-prefixed). The hub interns the layout and derives its own digest (th#2146);
+  carrying the producer's lets it ASSERT the two agree rather than trusting that a serialization
+  round-trip stayed canonical.

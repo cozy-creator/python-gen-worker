@@ -934,6 +934,21 @@ def _contract_document(
     return None
 
 
+def _contract_digest(lane: Any) -> str:
+    """The contract object's OWN digest of its layout document.
+
+    The hub interns the document and computes its own digest (th#2146); the
+    producer's digest travels beside it so a mismatch is an assertion rather
+    than a silent divergence in canonical serialization. Always the
+    ``sha256:``-prefixed spelling, whatever the object stores.
+    """
+
+    digest = getattr(lane, "digest", None)
+    if not isinstance(digest, str) or not digest:
+        return ""
+    return digest if digest.startswith("sha256:") else f"sha256:{digest}"
+
+
 def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
     """The resolved ``ctx.lane``: always a LaneRef with a REAL torch dtype.
 
@@ -1200,6 +1215,12 @@ def derive_release(
                 "document": _contract_document(
                     f"class {cls.__name__!r}", lane, warnings
                 ),
+                # The PRODUCER's own digest of that document. The hub interns
+                # the layout and derives its own digest (th#2146); carrying
+                # this lets it ASSERT the two agree instead of trusting a
+                # re-serialization round-trip. Empty when the lane object
+                # states none.
+                "digest": _contract_digest(lane),
             }
             # ie#740 placement floor for THIS lane, read off the class header
             # (`requires=`). Absent = undeclared, and the platform default is
