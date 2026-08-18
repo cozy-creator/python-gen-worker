@@ -107,12 +107,11 @@ class _SdxlRecipe(msgspec.Struct, frozen=True):
             default=6.0, lo=1.0, hi=15.0, name="guidance_scale"
         )
     )
-    # None = keep the checkpoint's own scheduler untouched.
-    schedule: Optional[str] = None  # "euler_trailing" | "lcm" | None
-    timesteps: tuple[int, ...] = ()
     # Checkpoint metadata sampler preference, platform vocabulary; None =
-    # the tree's shipped scheduler.
+    # the tree's shipped scheduler stands.
     sampler: Optional[SamplerName] = None
+    # Pinned denoising ladder (belongs to the recipe's sampler).
+    timesteps: tuple[int, ...] = ()
 
 
 class _SdxlDefaults(_SdxlRecipe, frozen=True):
@@ -121,6 +120,10 @@ class _SdxlDefaults(_SdxlRecipe, frozen=True):
 
     positive_preamble: str = ""
     negative_preamble: str = ""
+    # A STEP-distilled checkpoint refuses a stacked step-distillation
+    # adapter (cfg is a separate axis: guidance-distilled full-step
+    # checkpoints have cfg off but step_distilled False).
+    step_distilled: bool = False
 
 
 class _SdxlLoraDefaults(_SdxlRecipe, frozen=True):
@@ -133,7 +136,7 @@ class _SdxlLoraDefaults(_SdxlRecipe, frozen=True):
             default=4, lo=1, hi=12, name="num_inference_steps"
         )
     )
-    schedule: Optional[str] = "euler_trailing"
+    sampler: Optional[SamplerName] = "euler_trailing"
 
 
 class SDXL:

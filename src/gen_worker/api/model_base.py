@@ -133,12 +133,20 @@ class Adapter:
     """
 
     def __init__(
-        self, *, name: str, path: Any, defaults: Any = None, scale: float = 1.0
+        self,
+        *,
+        name: str,
+        path: Any,
+        defaults: Any = None,
+        scale: float = 1.0,
+        ref: str = "",
     ) -> None:
         self.name = name
         self.path = path
         self.defaults = defaults
         self.scale = scale
+        #: The fully-pinned hub identity it was resolved from (org/repo@release).
+        self.ref = ref or name
 
 
 def model_lanes(cls: type) -> tuple[Any, ...]:

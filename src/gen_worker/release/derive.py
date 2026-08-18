@@ -343,6 +343,7 @@ def _fake_adapter(model_type: Optional[type]) -> Any:
         name="trace-adapter",
         path=Path("/nonexistent/trace-adapter"),
         defaults=defaults_type() if defaults_type is not None else None,
+        ref="trace/adapter@0",
     )
 
 
