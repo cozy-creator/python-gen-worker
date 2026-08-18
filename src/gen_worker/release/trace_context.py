@@ -138,6 +138,20 @@ def _noop(*_args: Any, **_kwargs: Any) -> None:
     return None
 
 
+class StepBudgetReached(Exception):
+    """The trace has seen every shape this denoise loop produces.
+
+    A diffusers denoise loop runs the SAME shapes on every step -- step 3 of
+    28 teaches the trace nothing step 1 did not. The derive therefore runs
+    each enumerated pass under a STEP BUDGET and lets the author's own
+    ``callback_on_step_end`` raise this once the budget is spent; the drive
+    treats it as a completed pass. Modules that run AFTER the loop (a marked
+    VAE decoder) never execute under a budget, so the derive re-drives
+    unbudgeted whenever a marked module is still unobserved -- honesty is
+    preserved, the redundant 27 steps are not paid.
+    """
+
+
 class TraceRequestContext:
     """What entrypoints see under ``gen-worker release derive``.
 
@@ -150,8 +164,11 @@ class TraceRequestContext:
         *,
         lane: Any,
         checkpoint_ref: str = "",
+        step_budget: Optional[int] = None,
     ) -> None:
         self.lane = lane
+        #: None = run the author's full step count.
+        self.step_budget = step_budget
         self.checkpoint_ref = checkpoint_ref or "trace:config-only"
         self.log = logging.getLogger("gen_worker.release.trace")
 
@@ -183,14 +200,20 @@ class TraceRequestContext:
 
     # -- egress -------------------------------------------------------------
     def step_callback(self, total_steps: int) -> Callable[..., dict[str, Any]]:
-        """A no-op diffusers ``callback_on_step_end``."""
+        """A diffusers ``callback_on_step_end`` that enforces the step budget."""
         del total_steps
+        seen = 0
+        budget = self.step_budget
 
         def callback(
             _pipe: Any, _index: Any, _timestep: Any,
             callback_kwargs: Any = None, **_: Any,
         ) -> dict[str, Any]:
             del callback_kwargs
+            nonlocal seen
+            seen += 1
+            if budget is not None and seen >= budget:
+                raise StepBudgetReached
             return {}
 
         return callback
@@ -203,4 +226,4 @@ class TraceRequestContext:
         return ImageAsset(ref=f"trace://image.{format}")
 
 
-__all__ = ["TraceLoadContext", "TraceRequestContext"]
+__all__ = ["StepBudgetReached", "TraceLoadContext", "TraceRequestContext"]

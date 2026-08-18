@@ -98,6 +98,18 @@ CHILD_ONLY: Dict[str, str] = {
         "this module. The export here is fake-tensor shape arithmetic (the "
         "model.export precedent), not inductor orchestration."
     ),
+    "release.derive": (
+        "the publish-time instrumented derive (pgw#1370). `torch.export.save` "
+        "here SERIALIZES an already-traced ExportedProgram into the tensorfs "
+        "CAS (Paul, 2026-08-20: the derive stores the whole traced graph, and "
+        "the runtime miner downloads it and runs inductor rather than "
+        "re-tracing). It runs at PUBLISH, inside the release image, on CPU, "
+        "under fake tensors — the same pass that already owns "
+        "`_vendor.torchcg.discovery`'s export. A serving pod never reaches it: "
+        "the only entry is `gen-worker release derive` (cli/release.py), and "
+        "no boot or dispatch path imports `gen_worker.release`. Serialization "
+        "is not inductor orchestration — it holds no GIL-bound compile."
+    ),
     "model.export": (
         "pgw#1332's DECLARATION-TIME export. It is not reached from a serving "
         "process at all, and the claim is structural rather than a promise: "
