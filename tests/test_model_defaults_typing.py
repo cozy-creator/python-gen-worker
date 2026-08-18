@@ -15,11 +15,11 @@ statically, no cast caller-side.
 
 from __future__ import annotations
 
-from typing import Generic, Literal, Mapping, TypeVar, assert_type, cast
+from typing import Generic, Mapping, TypeVar, assert_type, cast
 
 import msgspec
 
-from gen_worker.models import Knob, ModelType, SDXL
+from gen_worker.models import Knob, ModelType, SamplerName, SDXL
 from gen_worker.models.defaults_decode import CarriesDefaults, decode_model_defaults
 from gen_worker.models.model_types import SdxlDefaults, SdxlLoraDefaults, SdxlRecipe
 from gen_worker.families import GenerationDefaults
@@ -103,14 +103,14 @@ def test_the_recipe_is_one_nominal_type() -> None:
     assert_type(recipe.steps, Knob[int])
     assert_type(recipe.guidance, Knob[float])
     assert_type(recipe.timesteps, tuple[int, ...])
-    schedule: Literal["euler_trailing", "lcm"] | None = recipe.schedule
+    sampler: SamplerName | None = recipe.sampler
 
     steps = recipe.steps.resolve(None, rctx)
     assert_type(steps, int)
     guidance = recipe.guidance.resolve(None, rctx)
     assert_type(guidance, float)
 
-    assert recipe.cfg is False and schedule == "euler_trailing"
+    assert recipe.cfg is False and sampler == "euler_trailing"
     assert (steps, guidance) == (4, 6.0)
     assert turbo is not None
     assert isinstance(d, SdxlRecipe) and isinstance(turbo.defaults, SdxlRecipe)

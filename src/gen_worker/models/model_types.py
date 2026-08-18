@@ -182,9 +182,23 @@ class LoraOverlay:
         raise TypeError(f"{type(self).__name__} is a vocabulary, not a value")
 
 
-LoraSchedule = Literal["euler_trailing", "lcm"]
-"""The declared few-step schedule vocabulary (pgw#1377 point 7). The mapping
-to diffusers scheduler construction stays CODE-side in the endpoint."""
+SamplerName = Literal[
+    "dpmpp_2m_karras",
+    "dpmpp_2m",
+    "euler",
+    "euler_trailing",
+    "euler_a",
+    "unipc",
+    "ddim",
+    "lcm",
+]
+"""The PLATFORM-WIDE sampler-name vocabulary (Paul's three-layer sampler
+ruling, pgw#1376 point 6): checkpoint metadata rows write these names; the
+additive-only evolution rule applies (a new community sampler is a new
+member, never a changed one). Endpoints own their SUPPORTED SUBSET and the
+name→scheduler-constructor tables (author code, like lanes — never here);
+a metadata name an endpoint doesn't serve warns and falls through to the
+tree's shipped scheduler."""
 
 
 # ── the launch defaults structs (field defaults = PLATFORM VALUES) ───────────
@@ -196,8 +210,10 @@ class SdxlRecipe(msgspec.Struct, frozen=True):
     ``recipe: SDXL.Recipe``, never a union). The axes are INDEPENDENT:
     ``cfg`` (CFG on/off) and few-step are separate facts — guidance-distilled
     models are cfg-off at FULL steps, Hyper-SD CFG-preserving LoRAs are
-    few-step with CFG ON at 5-8. ``schedule=None`` means KEEP the
-    checkpoint's own scheduler untouched (no swap), never a fallback.
+    few-step with CFG ON at 5-8. ``sampler`` is the checkpoint-metadata layer
+    of the three-layer sampler chain (request > this > the tree's shipped
+    scheduler config > endpoint load-time default): ``None`` = trust the tree;
+    a distill recipe expresses euler_trailing/lcm through the same field.
     ``timesteps`` empty = derive from steps (a pinned ladder like DMD2's
     999/749/499/249 goes here).
 
@@ -208,7 +224,7 @@ class SdxlRecipe(msgspec.Struct, frozen=True):
     steps: Knob[int] = Knob(28, lo=1, hi=80, name="steps")
     guidance: Knob[float] = Knob(6.0, lo=1.5, hi=15.0, name="guidance")
     cfg: bool = True
-    schedule: LoraSchedule | None = None
+    sampler: SamplerName | None = None
     timesteps: tuple[int, ...] = ()
 
 
@@ -219,7 +235,7 @@ class SdxlDefaults(SdxlRecipe, frozen=True):
     "masterpiece, best quality" vocabulary lives HERE, banned from endpoint
     code); ``negative_preamble`` is its symmetric counterpart. A fused
     step-distilled merge (DMD2/Lightning full checkpoint) carries its recipe
-    in the inherited fields (cfg=False, schedule, pinned timesteps)."""
+    in the inherited fields (cfg=False, sampler, pinned timesteps)."""
 
     positive_preamble: str = "masterpiece, best quality"
     negative_preamble: str = "worst quality, low quality"
@@ -237,14 +253,14 @@ class SdxlLoraDefaults(SdxlRecipe, frozen=True):
 
     steps: Knob[int] = Knob(4, lo=1, hi=150, name="steps")
     cfg: bool = False
-    schedule: LoraSchedule | None = "euler_trailing"
+    sampler: SamplerName | None = "euler_trailing"
     strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
     trigger_words: tuple[str, ...] = ()
 
 
 class Sd15Recipe(msgspec.Struct, frozen=True):
     """SD1.x serving recipe — same five axes and semantics as
-    :class:`SdxlRecipe` (``schedule=None`` = keep the checkpoint's own
+    :class:`SdxlRecipe` (``sampler=None`` = trust the tree's shipped
     scheduler). Platform values from the live sd15.schema.json registry
     entry: steps 30 (bounds 1..80, the family payload envelope), guidance
     7.0 (schema minimum 0, no declared max)."""
@@ -252,7 +268,7 @@ class Sd15Recipe(msgspec.Struct, frozen=True):
     steps: Knob[int] = Knob(30, lo=1, hi=80, name="steps")
     guidance: Knob[float] = Knob(7.0, lo=0.0, name="guidance")
     cfg: bool = True
-    schedule: LoraSchedule | None = None
+    sampler: SamplerName | None = None
     timesteps: tuple[int, ...] = ()
 
 
@@ -264,13 +280,13 @@ class Sd15Defaults(Sd15Recipe, frozen=True):
 class Sd15LoraDefaults(Sd15Recipe, frozen=True):
     """The adapter row. Zero-arg = LCM-LoRA-SD1.5-ish 4-step platform values
     (sd15.lora.schema.json records the 4-step distilled recipe shape;
-    Hyper-SD15's ``ddim_trailing`` is outside the ruled schedule vocabulary —
+    Hyper-SD15's ``ddim_trailing`` is outside the launch SamplerName vocabulary —
     flagged in the pgw#1377 tracker section, not invented here). Bounds from
     the same file (recommended_weight −4..4, num_inference_steps 1..80)."""
 
     steps: Knob[int] = Knob(4, lo=1, hi=80, name="steps")
     cfg: bool = False
-    schedule: LoraSchedule | None = "lcm"
+    sampler: SamplerName | None = "lcm"
     strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
     trigger_words: tuple[str, ...] = ()
 
@@ -452,11 +468,11 @@ __all__ = [
     "Knob",
     "LORA_OVERLAYS",
     "LoraOverlay",
-    "LoraSchedule",
     "MODEL_TYPES",
     "ModelType",
     "PendingContract",
     "SD15",
+    "SamplerName",
     "SD15_DIFFUSERS_BF16",
     "SD2",
     "SD2_DIFFUSERS_BF16",

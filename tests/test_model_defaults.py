@@ -43,16 +43,15 @@ def test_sdxl_zero_arg_is_the_platform_opinion() -> None:
     # Paul's ruling: the quality vocabulary lives HERE, not in endpoint code.
     assert d.positive_preamble == "masterpiece, best quality"
     assert d.negative_preamble == "worst quality, low quality"
-    # Full step-distilled checkpoints carry their recipe in these fields;
-    # the platform default is "no opinion".
-    assert d.schedule is None
+    # sampler None = trust the tree's shipped scheduler config (layer 3).
+    assert d.sampler is None
     assert d.timesteps == ()
 
 
 def test_sdxl_lora_zero_arg_is_lightning_shaped() -> None:
     d = SDXL.Lora.Defaults()
     assert d.cfg is False
-    assert d.schedule == "euler_trailing"
+    assert d.sampler == "euler_trailing"
     assert d.steps.default == 4
     assert d.timesteps == ()
     assert d.strength == Knob(1.0, lo=-4.0, hi=4.0, name="strength")
@@ -118,7 +117,7 @@ def test_full_row_overrides_every_field() -> None:
         "cfg": False,
         "positive_preamble": "",
         "negative_preamble": "",
-        "schedule": "lcm",
+        "sampler": "lcm",
         "timesteps": [999, 749, 499, 249],
     }
     d = decode_model_defaults(SDXL, model="sdxl", defaults=row)
@@ -126,7 +125,7 @@ def test_full_row_overrides_every_field() -> None:
     assert d.guidance == Knob(2.0, lo=1.5, hi=3.0, name="guidance")
     assert d.cfg is False
     assert d.positive_preamble == ""
-    assert d.schedule == "lcm"
+    assert d.sampler == "lcm"
     assert d.timesteps == (999, 749, 499, 249)
 
 
@@ -156,7 +155,7 @@ def test_a_row_default_outside_the_merged_range_is_pulled_inside() -> None:
         ({"steps": "fast"}, "steps"),
         ({"steps": {"default": 8.5}}, "steps"),
         ({"cfg": "yes"}, "cfg"),
-        ({"schedule": "ddim_trailing"}, "schedule"),
+        ({"sampler": "ddim_trailing"}, "sampler"),
         ({"timesteps": ["a"]}, "timesteps"),
     ],
 )
@@ -199,14 +198,14 @@ def test_a_lora_row_decodes_through_the_adapter_surface() -> None:
             "trigger_words": ["dmd2"],
             "strength": {"default": 0.8},
             "steps": {"default": 4},
-            "schedule": "lcm",
+            "sampler": "lcm",
             "timesteps": [999, 749, 499, 249],
         },
     )
     assert d.trigger_words == ("dmd2",)
     assert d.strength.default == 0.8
     assert (d.strength.lo, d.strength.hi) == (-4.0, 4.0)
-    assert d.schedule == "lcm"
+    assert d.sampler == "lcm"
     assert d.timesteps == (999, 749, 499, 249)
 
 
@@ -289,7 +288,7 @@ def test_the_contract_files_exact_usage_holds() -> None:
     """Every ``main_v2.py`` defaults expression over fixture hub rows: the
     recipe-driven single entrypoint — ``recipe: SDXL.Recipe`` from the
     distillation adapter's defaults when one rides, else the checkpoint's own;
-    ``recipe.cfg`` gates guidance/negatives, ``recipe.schedule`` gates the
+    ``recipe.cfg`` gates guidance/negatives, ``recipe.sampler`` gates the
     scheduler swap (None = keep the checkpoint's own), pinned timesteps ride
     the cfg-off arm."""
     ctx: RequestContext[GenerationDefaults] = RequestContext("req-main-v2")
@@ -327,17 +326,17 @@ def test_the_contract_files_exact_usage_holds() -> None:
     assert again == prompt
 
     # schedule=None means: keep the checkpoint's own scheduler (nullcontext).
-    assert recipe.schedule is None
+    assert recipe.sampler is None
 
     # A distillation adapter rides: its defaults ARE the recipe.
     turbo = decode_model_defaults(
         SDXL.Lora,
         model="sdxl.lora",
-        defaults={"schedule": "lcm", "timesteps": [999, 749, 499, 249]},
+        defaults={"sampler": "lcm", "timesteps": [999, 749, 499, 249]},
     )
     recipe = turbo
     assert not recipe.cfg  # the cfg-off arm: no guidance, no negatives
-    assert recipe.schedule == "lcm"  # -> LCMScheduler swap
+    assert recipe.sampler == "lcm"  # -> LCMScheduler swap
     assert list(recipe.timesteps) == [999, 749, 499, 249]  # pinned ladder
     assert recipe.steps.resolve(None, ctx) == 4
 
