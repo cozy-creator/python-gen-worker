@@ -90,7 +90,8 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # that were unchecked came off the list and nothing went back on.
     # 242 -> 238: wave 2 did the same to the cli/config/sdk cluster (9 modules
     # -> 3, plus one rename), taking four more off.
-    "ignore_errors": (238, 2016),
+    # 238 -> 235: wave 3a folded the child-fault modules (5 -> 1), taking three.
+    "ignore_errors": (235, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted
