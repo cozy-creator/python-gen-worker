@@ -204,11 +204,39 @@ class LoadContext(Generic[MT_co]):
             "ctx.load: eager from_pretrained bridge for %s (pgw#1380's "
             "native loader engine is not bound)", pipeline_cls.__name__,
         )
-        if self._lane is not None and getattr(self._lane, "dtype", None) is not None:
-            bridged: P = from_pretrained(self.checkpoint_dir, torch_dtype=self._lane.dtype)
+        dtype = self._lane_dtype()
+        if dtype is not None:
+            bridged: P = from_pretrained(self.checkpoint_dir, torch_dtype=dtype)
             return bridged
         no_lane: P = from_pretrained(self.checkpoint_dir)
         return no_lane
+
+    def _lane_dtype(self) -> Any:
+        """The lane's load dtype, or None when the contract declares none.
+
+        pgw#1386, measured on se#754's minimax-h3: tensorfs' ``Contract.dtype``
+        RAISES (``MissingDtype``) for a document with no top-level ``dtype``
+        rather than answering None — a deliberate "never guess" refusal on
+        tensorfs' side. That is a LEGAL state for a lane
+        (``minimax.h3-dit-diffusers@1`` declares per-tensor dtypes only, while
+        ``sdxl.diffusers-bf16@1`` declares ``"dtype": "bfloat16"``), and this
+        bridge already HAS a no-dtype arm — so the read must not be able to
+        kill the load before reaching it. ``getattr(lane, "dtype", None)`` does
+        NOT swallow a non-AttributeError, which is why the plain read did.
+        Any other error still propagates.
+        """
+        if self._lane is None:
+            return None
+        try:
+            return self._lane.dtype
+        except AttributeError:
+            return None
+        except Exception:
+            logger.info(
+                "ctx.load: lane %r declares no load dtype; the eager bridge "
+                "takes the checkpoint's own", self._lane,
+            )
+            return None
 
     def compile(self, target: Any) -> Any:
         """Imperative module marking, the torch.compile idiom (Paul ruling)::
