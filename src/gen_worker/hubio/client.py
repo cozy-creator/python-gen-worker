@@ -346,8 +346,25 @@ class HubClient:
         self.base_url = str(base_url or "").strip().rstrip("/")
         self.token = str(token or "").strip()
         self.timeout_s = timeout_s
-        if not self.base_url or not self.token:
-            raise HubPublishError("missing tensorhub base URL or capability token")
+        # th#2148: NAME THE HALF THAT IS MISSING, and call it what it is —
+        # INFRA. One message covering two values could not be acted on: the
+        # held-open-pod failure spent three runs and a real pod before anyone
+        # could say which of the two was empty. And a platform credential the
+        # PLATFORM failed to deliver is not the tenant's code failing, so it is
+        # retryable — a requeue lands on a pod that has one.
+        if not self.base_url and not self.token:
+            raise HubPublishError(
+                "the dispatch carried neither a tensorhub base URL nor a "
+                "capability token", code="worker_credentials_missing",
+                retryable=True)
+        if not self.base_url:
+            raise HubPublishError(
+                "the dispatch carried a capability token but no tensorhub "
+                "base URL", code="worker_hub_url_missing", retryable=True)
+        if not self.token:
+            raise HubPublishError(
+                "the dispatch carried a tensorhub base URL but no capability "
+                "token", code="worker_capability_token_missing", retryable=True)
 
     @classmethod
     def from_ctx(cls, ctx: Any) -> "HubClient":

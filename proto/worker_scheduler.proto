@@ -853,6 +853,15 @@ message RunJob {
   // carried this value to the wire boundary and dropped it here for want of a
   // field; the hub remains the kill authority either way.
   int64 phase_budget_s = 21;
+  // th#2148: THE HUB'S OWN BASE URL, on the dispatch that needs it. The
+  // capability token above is half a credential — the other half is the
+  // address it authenticates to, and that half used to ride HelloAck, i.e.
+  // pod-lifetime state. A job's compute child EXITS after every job
+  // (run-once lifecycle), and the respawned child never sees another
+  // HelloAck, so the SECOND job on a held-open pod arrived with a token and
+  // no address and died `missing tensorhub base URL` at 0 GPU-seconds.
+  // Both halves now travel together on the dispatch that spends them.
+  string file_base_url = 22;
 }
 
 message InputAsset {
