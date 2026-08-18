@@ -60,6 +60,7 @@ from ..serving.model import (
     ModelDeclarationError,
     lane_handle,
     model_lanes,
+    model_requires,
 )
 from ..serving.model import model_type as _strict_model_type
 from .trace_context import (
@@ -1154,16 +1155,25 @@ def derive_release(
                 "traced_passes": len(payloads),
             }
 
+        requires = model_requires(cls)
         for lane in model_lanes(cls):
             lane_graphs = _derive_lane(
                 torchcg, cls, lane, plans, checkpoint_dir, warnings,
                 artifact_sink=artifact_sink,
             )
             lanes.append(lane_graphs)
-            lane_contracts[lane_graphs.contract] = {
+            entry: dict[str, Any] = {
                 "stamp": lane_graphs.contract,
                 "document": _contract_document(lane),
             }
+            # ie#740 placement floor for THIS lane, read off the class header
+            # (`requires=`). Absent = undeclared, and the platform default is
+            # what the deployment gets — the honest state, never an invented
+            # floor.
+            floor = requires.get(lane_graphs.contract)
+            if floor is not None:
+                entry["requires"] = floor.render()
+            lane_contracts[lane_graphs.contract] = entry
 
     graphs_document = torchcg.GraphSetDocument(closure=closure, lanes=tuple(lanes))
     payload_dict: dict[str, Any] = {
