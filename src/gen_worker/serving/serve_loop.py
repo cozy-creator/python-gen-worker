@@ -27,6 +27,8 @@ cozy-local implement it over local trees.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import threading
 from contextlib import ExitStack
@@ -289,6 +291,20 @@ class ServeLoop:
                 for slot in spec.slots
             ]
             result = spec.fn(ctx, decoded.payload, *arguments)
+            if inspect.iscoroutine(result):
+                # AN `async def` ENTRYPOINT IS DRIVEN HERE, INSIDE ITS LEASE.
+                # `@entrypoint` accepts one (an async function IS a function),
+                # and returning the coroutine unawaited made the result a
+                # coroutine OBJECT — msgpack then failed the job with
+                # "Encoding objects of type coroutine is unsupported", after
+                # the leases had already been released. Awaiting it anywhere
+                # above this line would run author code outside its residency
+                # lease, which is the one thing the lease exists to prevent.
+                #
+                # `asyncio.run` is correct rather than lucky: `invoke` is
+                # called from `asyncio.to_thread`, so this thread has no
+                # running loop of its own to conflict with.
+                result = asyncio.run(result)
         return InvokeOutcome(
             result=result,
             warnings=ctx.warnings,

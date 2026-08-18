@@ -387,7 +387,7 @@ implicit_reexport = true
 # CONTRADICTING production stays on: arg-type, attr-defined, return-value,
 # call-arg, assignment, union-attr.
 [[tool.mypy.overrides]]
-module = ["tests.*", "tests_v2.*"]
+module = ["tests.*"]
 disallow_untyped_defs = false
 disallow_untyped_calls = false
 disallow_any_generics = false
@@ -630,10 +630,6 @@ module = [
   "tests.test_weight_free_premise_pgw1173",
   "tests.test_wrapper_subclass_virtuality_pgw1198",
   "tests.test_zero_bubble_meter_pgw1154",
-  "tests_v2.catalog",
-  "tests_v2.conftest",
-  "tests_v2.test_boot",
-  "tests_v2.test_dispatch",
 ]
 ignore_errors = true
 

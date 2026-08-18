@@ -28,12 +28,12 @@ video *latent* upsampler), so the stage is a no-op and
 from __future__ import annotations
 
 import math
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 import msgspec
 
 from .api.errors import ValidationError
-from .api.types import StringEnum
 
 if TYPE_CHECKING:  # Pillow is a real dependency but lazily imported (see io.py).
     from PIL import Image as _PILImage
@@ -57,7 +57,7 @@ __all__ = [
 ]
 
 
-class FitMode(StringEnum):
+class FitMode(StrEnum):
     """What the output geometry is FOR."""
 
     #: The user's framing is the contract: pad in, crop back out.
@@ -66,7 +66,7 @@ class FitMode(StringEnum):
     COMPOSE = "compose"
 
 
-class OutputSize(StringEnum):
+class OutputSize(StrEnum):
     """The caller-facing geometry policy on an edit lane."""
 
     #: Fit to native for the edit, restore the caller's framing (default).

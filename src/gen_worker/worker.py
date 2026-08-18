@@ -1,111 +1,355 @@
-"""Worker wiring: registry -> executor -> lifecycle -> transport, one asyncio
-loop. See transport.py / executor.py / lifecycle.py for the moving parts and
-proto/CONTRACT.md for the wire semantics.
+"""v2 worker wiring (pgw#1373): ``@entrypoint`` modules -> ServeLoop -> hub stream.
+
+The connector the hardcut left missing. One asyncio loop owns three things:
+
+* the **surface** — the author modules are imported and their ``@entrypoint``
+  declarations harvested exactly the way :mod:`gen_worker.serving.loader`
+  reads one endpoint directory, only driven by MODULE NAMES;
+* the **serve stack** — one :class:`~gen_worker.serving.serve_loop.ServeLoop`
+  over a :class:`~gen_worker.serving.residency.ResidencyManager`, with a
+  :class:`BindingResolver` that materializes the hub's own per-dispatch
+  ``ModelBinding`` rows against this pod's local snapshot store;
+* the **wire** — :class:`gen_worker.transport.Transport`, unchanged, driven
+  by the handler contract in its docstring.
+
+Nothing here guesses. A pick with no binding, no manifest digest or no local
+tree is a typed refusal naming the pick; modules with no ``@entrypoint`` (or
+with a v1 declaration still stamped on them) refuse at boot naming the
+migration.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import importlib
+import json
 import logging
+import os
 import signal
-import threading
 import time
-from typing import Any, Dict, List, Optional
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from . import boot_phases
+import msgspec
+
+from . import hostfacts
 from .config import Settings
-from .executor import Executor
-from .models.store import ModelStore
-from .lifecycle import Lifecycle
+from .host_move_guard import install as _install_host_move_guard
+from .models.cache_paths import tensorhub_cas_dir
+from .models.cozy_snapshot import snapshot_dir_key
+from .models.disk_gc import tree_bytes
+from .models.projection import SNAPSHOTS_DIR
+from .discovery.names import slugify_name
+from . import postmortem
+from .procsplit import is_compute_child
 from .pb import worker_scheduler_pb2 as pb
-from .registry import collect_endpoints, collect_jobs
-from .topology import ExecutionTopology, delivered_topology
+from .serving.context import DeployBinding
+from .serving.entrypoints import ENTRYPOINT_ATTR, EntrypointSpec
+from .serving.envelope import EnvelopeError
+from .serving.host import ServeDispatchError
+from .serving.loader import EndpointLoadError, LoadedEndpoint
+from .serving.model import ModelDeclarationError, lane_handle, model_lanes, model_type
+from .serving.residency import NeverFits, ResidencyError, ResidencyManager
+from .serving.serve_loop import ServeLoop
 from .transport import (
     DEFAULT_QUEUE_MAXSIZE as _DEFAULT_QUEUE_MAXSIZE,
     FatalTransportError,
+    PROTOCOL_VERSION,
     Transport,
 )
-from .host_move_guard import install as _install_host_move_guard
-from .procsplit import is_compute_child
+from .v1_deleted import MIGRATION, refuse_module
 
 logger = logging.getLogger(__name__)
 
-# This bounds only the SHUTDOWN half — NOT in-flight tenant work, which is
-# bounded by progress (`lifecycle._await_tenant_idle`). It is the floor under the
-# result FLUSH and the deadline the worker reports to the hub, so the two agree
-# about when the pod stops answering. A drain is a command and a command may
-# carry a deadline; the work underneath may not.
+#: Promised in Hello; the hub reaps after 6 consecutive misses (~60s). The
+#: cadence the deleted lifecycle promised — unchanged, because the hub-side
+#: reaper was tuned against it.
+HEARTBEAT_INTERVAL_MS = 10_000
+
+#: Bounds only the SHUTDOWN half of a signal drain, never tenant work.
 _SIGNAL_DRAIN_DEADLINE_MS = 30_000
+
+#: Activation reservation alongside the weights, as a divisor of weight bytes.
+#: The same estimate ``python -m gen_worker.serving`` reserves locally; the
+#: exact per-(model type, resolution class) number rides the pgw#1380 sizer.
+_HEADROOM_DIVISOR = 4
+
+#: v1 decorator stamps. A module still carrying one is a build failure with a
+#: name attached, never an empty manifest.
+_V1_ATTRS: Tuple[str, ...] = (
+    "__gen_worker_endpoint__",
+    "__gen_worker_job__",
+    "__gen_worker_function__",
+    "__gen_worker_variant__",
+)
+
+
+class WorkerBootError(RuntimeError):
+    """This process cannot state a serve surface."""
+
+
+class NoEntrypointsDeclared(WorkerBootError):
+    """The imported modules declare no ``@entrypoint``."""
+
+
+class DuplicateEntrypoint(WorkerBootError):
+    """Two modules declare the same entrypoint name."""
+
+
+class CheckpointUnresolved(RuntimeError):
+    """A checkpoint pick could not be turned into a local binding."""
 
 
 class UnexpectedWorkerExit(RuntimeError):
     """The run loop ended without a hub Drain or a shutdown signal."""
 
 
-class _LoopStallWatchdog:
-    """Forensics: a host in RAM reclaim-thrash stalls the whole
-    process — the event loop AND the gRPC C threads that answer h2 keepalive
-    pings — and the hub reaps the worker as dead within ~30s. This thread
-    pings the loop and logs LOUDLY (with available host RAM) when the ping
-    isn't serviced within ``warn_after_s``, so the stall episode is visible
-    in worker logs instead of only as a hub-side disconnect."""
+# --------------------------------------------------------------------------
+# surface harvesting
+# --------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        *,
-        interval_s: float = 5.0,
-        warn_after_s: float = 10.0,
-    ) -> None:
-        self._loop = loop
-        self._interval = interval_s
-        self._warn_after = warn_after_s
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run, name="loop-stall-watchdog", daemon=True
+
+def harvest_entrypoints(module_names: List[str]) -> LoadedEndpoint:
+    """Import the author modules and state their combined serve surface.
+
+    Mirrors ``serving.loader._surface_of`` per module: read
+    :data:`ENTRYPOINT_ATTR` off every module-level object, keep only the
+    declarations this module owns, and collect the ``Model`` classes the
+    specs reference.
+    """
+    entrypoints: Dict[str, EntrypointSpec] = {}
+    owners: Dict[str, str] = {}
+    models: Dict[type, None] = {}
+    for name in module_names:
+        module = importlib.import_module(name)
+        for attr in _V1_ATTRS:
+            if any(hasattr(v, attr) for v in vars(module).values()):
+                raise refuse_module(module.__name__, attr)
+        for value in vars(module).values():
+            spec = getattr(value, ENTRYPOINT_ATTR, None)
+            if not isinstance(spec, EntrypointSpec):
+                continue
+            if spec.fn.__module__ != module.__name__:
+                continue  # re-exported from elsewhere: not this module's surface
+            # THE WIRE ROUTE IS THE SLUG, not the python name. The hub
+            # dispatches `RunJob.function_name` as `slugify_name(name)` — the
+            # same normalization `discovery.validation` checks for collisions
+            # against — so `steal_credentials` is reached as
+            # `steal-credentials`. Keying this table on the raw name made every
+            # multi-word entrypoint unroutable while single-word ones worked,
+            # which is the shape of bug that ships.
+            route = slugify_name(spec.name)
+            prior = owners.get(route)
+            if prior is not None and prior != module.__name__:
+                raise DuplicateEntrypoint(
+                    f"entrypoint route {route!r} is declared by both {prior} "
+                    f"and {module.__name__}; a dispatch carries only the name, "
+                    f"so the two are unroutable"
+                )
+            entrypoints[route] = spec
+            owners[route] = module.__name__
+            for cls in spec.model_classes:
+                models.setdefault(cls)
+    if not entrypoints:
+        raise NoEntrypointsDeclared(
+            f"modules {list(module_names)!r} declare no @entrypoint — an "
+            f"entrypoint is a module-level @entrypoint function "
+            f"(ctx: RequestContext, payload: msgspec.Struct) plus zero or more "
+            f"slots. {MIGRATION}."
+        )
+    for cls in models:
+        try:
+            model_type(cls)
+            model_lanes(cls)
+        except ModelDeclarationError as exc:
+            raise WorkerBootError(str(exc)) from exc
+    return LoadedEndpoint(
+        module_name=", ".join(module_names),
+        entrypoints=entrypoints,
+        models=tuple(models),
+    )
+
+
+# --------------------------------------------------------------------------
+# per-dispatch binding resolution
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Pick:
+    """One hub-resolved ``ModelBinding`` row, as the resolver needs it."""
+
+    slot: str
+    ref: str
+    manifest_digest: str
+    inference_defaults: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DispatchPicks:
+    by_ref: Mapping[str, _Pick]
+    by_slot: Mapping[str, str]
+
+
+_EMPTY_PICKS = _DispatchPicks(by_ref={}, by_slot={})
+
+#: The dispatch a resolution belongs to. Set per job Task; ``asyncio.to_thread``
+#: copies the context, so the serve thread reads the same dispatch.
+_DISPATCH: contextvars.ContextVar[_DispatchPicks] = contextvars.ContextVar(
+    "gen_worker_dispatch_picks", default=_EMPTY_PICKS
+)
+
+
+def _picks_of(run: pb.RunJob) -> _DispatchPicks:
+    by_ref: Dict[str, _Pick] = {}
+    by_slot: Dict[str, str] = {}
+    for binding in run.models:
+        pick = _Pick(
+            slot=str(binding.slot),
+            ref=str(binding.ref),
+            manifest_digest=str(binding.manifest_digest),
+            inference_defaults=str(binding.inference_defaults),
+        )
+        by_ref[pick.ref] = pick
+        by_slot[pick.slot] = pick.ref
+    return _DispatchPicks(by_ref=by_ref, by_slot=by_slot)
+
+
+class HubBindingResolver:
+    """The hub's half of the deploy state, per dispatch.
+
+    ``resolve`` materializes a pick the hub already validated: the dispatch's
+    own ``ModelBinding`` row names the composed manifest digest, and this
+    worker's snapshot store either holds that tree or it does not. There is no
+    fallback — a miss names the pick and the path it looked for.
+    """
+
+    def __init__(self, snapshots_root: Optional[Path] = None) -> None:
+        self.snapshots_root = (
+            Path(snapshots_root)
+            if snapshots_root is not None
+            else tensorhub_cas_dir() / SNAPSHOTS_DIR
         )
 
-    def start(self) -> None:
-        self._thread.start()
+    def _pick(self, model_cls: type, checkpoint_ref: str) -> _Pick:
+        picks = _DISPATCH.get()
+        pick = picks.by_ref.get(checkpoint_ref)
+        if pick is None:
+            raise CheckpointUnresolved(
+                f"{model_cls.__name__}: this dispatch carries no ModelBinding "
+                f"for checkpoint {checkpoint_ref!r} "
+                f"(bound refs: {sorted(picks.by_ref) or '[]'})"
+            )
+        if not pick.manifest_digest:
+            raise CheckpointUnresolved(
+                f"{model_cls.__name__}: binding for {checkpoint_ref!r} carries "
+                f"no manifest_digest; the worker has no other fetch pointer"
+            )
+        return pick
 
-    def stop(self) -> None:
-        self._stop.set()
+    def tree_for(self, model_cls: type, checkpoint_ref: str) -> Path:
+        pick = self._pick(model_cls, checkpoint_ref)
+        digest = pick.manifest_digest.split(":", 1)[-1]
+        tree = self.snapshots_root / snapshot_dir_key(digest)
+        if not tree.is_dir():
+            raise CheckpointUnresolved(
+                f"{model_cls.__name__}: checkpoint {checkpoint_ref!r} "
+                f"(manifest {pick.manifest_digest}) is not materialized on this "
+                f"worker — no tree at {tree}"
+            )
+        return tree
 
-    def _run(self) -> None:
-        while not self._stop.wait(self._interval):
-            ping = threading.Event()
-            t0 = time.monotonic()
+    def resolve(self, model_cls: type, checkpoint_ref: str) -> DeployBinding:
+        pick = self._pick(model_cls, checkpoint_ref)
+        defaults: Mapping[str, Any] = {}
+        if pick.inference_defaults.strip():
             try:
-                self._loop.call_soon_threadsafe(ping.set)
-            except RuntimeError:
-                return  # loop closed
-            while not ping.wait(self._warn_after):
-                if self._stop.is_set() or self._loop.is_closed():
-                    return
-                lag = time.monotonic() - t0
-                avail_gb = 0.0
-                try:
-                    from .models.memory import get_available_ram_gb
-
-                    avail_gb = get_available_ram_gb()
-                except Exception:
-                    pass
-                logger.warning(
-                    "event loop stalled for %.1fs (available host RAM %.1fGiB) — "
-                    "host under memory/IO pressure; hub keepalive may lapse (gw#407)",
-                    lag, avail_gb,
+                parsed = json.loads(pick.inference_defaults)
+            except ValueError as exc:
+                raise CheckpointUnresolved(
+                    f"{model_cls.__name__}: inference_defaults for "
+                    f"{checkpoint_ref!r} is not JSON: {exc}"
+                ) from None
+            if not isinstance(parsed, dict):
+                raise CheckpointUnresolved(
+                    f"{model_cls.__name__}: inference_defaults for "
+                    f"{checkpoint_ref!r} is {type(parsed).__name__}, not an object"
                 )
+            defaults = parsed
+        return DeployBinding(
+            checkpoint_ref=pick.ref,
+            checkpoint_dir=self.tree_for(model_cls, checkpoint_ref),
+            defaults=defaults,
+        )
+
+    def default_pick(self, model_cls: type, slot_name: str) -> str:
+        """The dispatch's own per-slot ref. '' = this dispatch bound nothing
+        to the slot, which decode refuses naming the slot."""
+        return _DISPATCH.get().by_slot.get(slot_name, "")
+
+
+class SnapshotSizer:
+    """Weight bytes from the materialized tree's tensorfs manifest.
+
+    ``tree_bytes`` sizes a PROJECTED tree from its manifest rather than
+    walking stubs, so this is the exact resident cost, known before any byte
+    moves — which is what admission requires.
+    """
+
+    def __init__(self, resolver: HubBindingResolver) -> None:
+        self._resolver = resolver
+        self._cache: Dict[str, int] = {}
+
+    def _bytes(self, checkpoint_ref: str) -> int:
+        cached = self._cache.get(checkpoint_ref)
+        if cached is not None:
+            return cached
+        picks = _DISPATCH.get()
+        pick = picks.by_ref.get(checkpoint_ref)
+        if pick is None:
+            raise CheckpointUnresolved(
+                f"admission asked for the size of {checkpoint_ref!r}, which "
+                f"this dispatch does not bind "
+                f"(bound refs: {sorted(picks.by_ref) or '[]'})"
+            )
+        digest = pick.manifest_digest.split(":", 1)[-1]
+        tree = self._resolver.snapshots_root / snapshot_dir_key(digest)
+        if not tree.is_dir():
+            raise CheckpointUnresolved(
+                f"admission needs the size of {checkpoint_ref!r}; no "
+                f"materialized tree at {tree}"
+            )
+        size = int(tree_bytes(tree))
+        self._cache[checkpoint_ref] = size
+        return size
+
+    def resident_bytes(self, checkpoint_ref: str, lane: str) -> int:
+        return self._bytes(checkpoint_ref)
+
+    def activation_headroom_bytes(self, checkpoint_ref: str, lane: str) -> int:
+        return max(self._bytes(checkpoint_ref) // _HEADROOM_DIVISOR, 1)
+
+
+# --------------------------------------------------------------------------
+# the worker
+# --------------------------------------------------------------------------
 
 
 class Worker:
+    """Serve-stack + transport for one pod, in one event loop."""
+
     def __init__(
         self,
         settings: Settings,
         user_module_names: List[str],
         *,
         manifest: Optional[Dict[str, Any]] = None,
-        gpu_slots: Optional[int] = None,
-        topology: Optional["ExecutionTopology"] = None,
+        vram_budget_bytes: int = 0,
+        lane: str = "",
+        output_dir: Optional[Path] = None,
         queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
         backoff_base_s: float = 1.0,
         backoff_cap_s: float = 30.0,
@@ -113,13 +357,9 @@ class Worker:
         if not (settings.orchestrator_public_addr or "").strip():
             raise ValueError("Settings.orchestrator_public_addr is required")
         self.settings = settings
-        # An endpoint-authored oversized `.to("cpu")` becomes a typed job error
+        # An author-side oversized `.to("cpu")` becomes a typed job error
         # instead of a cgroup OOM SIGKILL of the whole worker.
         _install_host_move_guard()
-        # The delivered `G×D` packing. Absent env == one slot. A malformed one is
-        # a typed refusal raised here — booting one slot on a pod the hub is
-        # dispatching G jobs to is worse than not booting.
-        self.topology = topology if topology is not None else delivered_topology()
 
         if manifest:
             from .models.download import (
@@ -129,71 +369,440 @@ class Worker:
 
             set_provider_index(build_provider_index_from_manifest(manifest))
 
-        specs = collect_endpoints(list(user_module_names))
-        # pgw#1324: the SAME walk, at the same place, for the other publishable
-        # shape. te#218 re-authored every conversion package as jobs-only, so a
-        # boot that demands an `@endpoint` refuses the packages the jobs program
-        # exists to run.
-        jobs = collect_jobs(list(user_module_names))
-        if not specs and not jobs:
-            raise ValueError(
-                f"no @endpoint classes and no @job functions found in modules "
-                f"{list(user_module_names)!r}"
-            )
-        store = ModelStore(
-            self._send, hf_home=settings.hf_home, hf_token=settings.hf_token
-        )
-        self.executor = Executor(
-            specs, self._send, settings=settings, store=store,
-            gpu_slots=gpu_slots, topology=self.topology, jobs=jobs,
-        )
-        if (settings.config_snapshot_path or "").strip():
-            from .runtime_config import ConfigStore
+        self.loaded = harvest_entrypoints(list(user_module_names))
+        self.resolver = HubBindingResolver()
+        # THE RESIDENCY BUDGET, in the order the answers are trustworthy:
+        # a stated budget (a CONFIG the caller owns), then the card's own
+        # headroom, then — on a host with NO CUDA at all — available host RAM.
+        #
+        # The CPU arm is not a fallback papering over a missing reading; it is
+        # the correct budget for a machine that serves on the CPU, which
+        # cozy-local, CI and every fake-weights drive are. Refusing here made
+        # the worker unbootable on all three while `python -m gen_worker.serving`
+        # served happily beside it — the two paths must not disagree about
+        # whether this host can serve. What stays a refusal is the case that is
+        # genuinely unknown: a host that HAS a card whose memory cannot be read.
+        budget = int(vram_budget_bytes)
+        if not budget:
+            headroom = hostfacts.headroom_bytes()
+            if headroom:
+                budget = int(headroom)
+            elif hostfacts.cuda_ready():
+                raise WorkerBootError(
+                    "this host has CUDA but no VRAM reading "
+                    "(torch.cuda.mem_get_info gave nothing) and no "
+                    "vram_budget_bytes was stated: residency admits before it "
+                    "allocates, and it cannot make that decision against an "
+                    "unknown budget on a card it can see"
+                )
+            else:
+                from .models.memory import get_available_ram_gb
 
-            self.executor.runtime_config = ConfigStore(
-                settings.config_snapshot_path.strip()
+                budget = int(get_available_ram_gb() * (1024 ** 3))
+                logger.warning(
+                    "no CUDA on this host: sizing the residency budget from "
+                    "AVAILABLE HOST RAM (%.1f GiB). This is a CPU serving "
+                    "process — correct for cozy-local and CI, and never what a "
+                    "GPU pod should be doing.", budget / (1024 ** 3),
+                )
+        if not budget:
+            raise WorkerBootError(
+                "no VRAM reading and no readable host RAM: residency admits "
+                "before it allocates and has no budget to admit against"
             )
-        self.lifecycle = Lifecycle(settings, self.executor)
-        self.executor._on_state_change = self.lifecycle.state_changed
-        # In the split's COMPUTE CHILD, the "transport" speaks frames
-        # to the control parent (which owns the real gRPC stream + SendQueue).
-        # Lifecycle/Executor wiring is identical either way.
+        self.residency = ResidencyManager(int(budget), SnapshotSizer(self.resolver))
+        try:
+            # The deploy's active lane. A single-lane model needs none; a
+            # multi-lane one has no boot-time wire field yet (RunJob.lane is
+            # per-dispatch), so it refuses below naming the lanes it declares.
+            self.serve = ServeLoop(
+                self.loaded, residency=self.residency, resolver=self.resolver,
+                lane_contract=lane, output_dir=output_dir,
+            )
+        except EndpointLoadError as exc:
+            # A multi-lane model needs the deploy's lane pick, which no wire
+            # field delivers to boot yet — refuse naming it.
+            raise WorkerBootError(str(exc)) from exc
+        #: Declared lane handles, so a RunJob naming a lane this release does
+        #: not serve refuses instead of silently serving another one.
+        self.lanes: frozenset[str] = frozenset(
+            lane_handle(lane) for lane in self.serve.lanes.values() if lane is not None
+        )
 
+        # pgw#763: IN THE SPLIT'S COMPUTE CHILD THE PARENT OWNS THE gRPC
+        # STREAM. This process speaks frames to it over the child socket and
+        # never dials the orchestrator — a child that constructed the real
+        # Transport would dial the placeholder address the parent passes it
+        # (`127.0.0.1:1`) and hang there forever, never reaching hello, which
+        # is exactly what it did. Same handler contract either way, so the
+        # only thing that changes is which object carries the frames.
         if is_compute_child():
             from .procsplit.child import ChildTransport
 
-            self.transport: Any = ChildTransport(settings, self.lifecycle)
+            self.transport: Any = ChildTransport(settings, self)
         else:
             self.transport = Transport(
                 settings,
-                self.lifecycle,
+                self,
                 queue_maxsize=queue_maxsize,
                 backoff_base_s=backoff_base_s,
                 backoff_cap_s=backoff_cap_s,
             )
-        self.lifecycle.transport = self.transport
-        # Capability renewal presents the freshest worker JWT (contract §1
-        # rotation), not the boot-time settings token.
-        self.executor.worker_jwt_provider = lambda: self.transport.current_worker_jwt
-        # Process start -> SDK ready. Everything before this line is interpreter
-        # startup, `import torch`, endpoint-module import and executor
-        # construction — a window no span can cover, because the recorder itself
-        # is part of what is being imported. Naming it lets `reconciliation()`
-        # subtract it from the residual instead of leaving the biggest unmeasured
-        # slice unattributed.
-        boot_phases.mark_once(
-            boot_phases.PHASE_SDK_READY,
-            detail=f"endpoints={len(specs)} jobs={len(jobs)} "
-                   f"modules={len(user_module_names)}")
+
+        # pgw#763 delta 1: this process is the COMPUTE CHILD and holds no
+        # credential, so reading a bootstrap JWT for identity refuses on every
+        # real serving pod. The parent RELAYS the two claims as WORKER_ID /
+        # WORKER_RELEASE_ID; those are the identity, and their absence is a
+        # named pid fallback rather than a silent empty string.
+        self.worker_id = (
+            settings.worker_id.strip() or f"py-worker-{os.getpid()}"
+        )
+        self.release_id = settings.worker_release_id.strip()
+        self.worker_session_id = uuid.uuid4().hex
+        self.file_base_url = ""
+
+        self.phase = pb.WORKER_PHASE_READY
+        self.draining = False
+        self.drained = asyncio.Event()
+        self._jobs: Dict[Tuple[str, int], asyncio.Task[None]] = {}
+        self._canceled: set[Tuple[str, int]] = set()
+        self._drain_task: Optional[asyncio.Task[None]] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stop_requested = False
+
+    # ---- state snapshots --------------------------------------------------
+
+    @property
+    def functions(self) -> List[str]:
+        return sorted(self.loaded.entrypoints)
+
+    def _state_delta(self) -> pb.StateDelta:
+        delta = pb.StateDelta(
+            phase=self.phase,
+            available_functions=self.functions,
+        )
+        # 0 is the wire's "unmeasured"; only a real reading is reported.
+        free = hostfacts.free_vram_bytes()
+        if free is not None:
+            delta.free_vram_bytes = int(free)
+        return delta
+
+    def build_hello(self) -> pb.Hello:
+        # NO `resources`: the split parent measures the silicon in a process
+        # that imported no tenant code and stamps every relayed Hello, so
+        # anything measured here would be replaced before the hub saw it.
+        # NO `models`/`lifecycle_snapshot`: this build carries no residency
+        # ledger and no intent registry, and an invented one is worse than an
+        # absent one.
+        return pb.Hello(
+            protocol_version=PROTOCOL_VERSION,
+            worker_id=self.worker_id,
+            release_id=self.release_id,
+            state=self._state_delta(),
+            in_flight=[
+                pb.InFlightJob(request_id=rid, attempt=att)
+                for rid, att in sorted(self._jobs)
+            ],
+            heartbeat_interval_ms=HEARTBEAT_INTERVAL_MS,
+            worker_session_id=self.worker_session_id,
+        )
+
+    # ---- transport handlers ------------------------------------------------
+
+    async def on_hello_ack(self, ack: pb.HelloAck) -> None:
+        self.file_base_url = str(ack.file_base_url or "")
+        logger.info(
+            "hello acked: functions=%s file_base_url=%s",
+            self.functions, self.file_base_url or "(none)",
+        )
+
+    async def on_disconnect(self) -> None:
+        logger.warning("hub stream disconnected; %d job(s) in flight", len(self._jobs))
+
+    async def on_message(self, msg: pb.SchedulerMessage) -> None:
+        which = msg.WhichOneof("msg")
+        if which == "run_job":
+            await self._on_run_job(msg.run_job)
+        elif which == "cancel_job":
+            self._on_cancel_job(msg.cancel_job)
+        elif which == "drain":
+            self.start_drain(int(msg.drain.deadline_ms))
+        else:
+            # Named, not swallowed: this build implements no residency
+            # reconciliation (model_op) and no posture command.
+            logger.warning("no handler for SchedulerMessage.%s; ignored", which)
+
+    # ---- dispatch ----------------------------------------------------------
 
     async def _send(self, msg: pb.WorkerMessage) -> None:
         await self.transport.send(msg)
 
+    async def _send_result(
+        self,
+        request_id: str,
+        attempt: int,
+        status: "pb.JobStatus",
+        *,
+        inline: Optional[bytes] = None,
+        safe_message: str = "",
+        metrics: Optional[pb.JobMetrics] = None,
+        adjustments: Tuple[Dict[str, str], ...] = (),
+    ) -> None:
+        result = pb.JobResult(
+            request_id=request_id,
+            attempt=attempt,
+            status=status,
+            safe_message=safe_message[:512],
+        )
+        if inline is not None:
+            result.inline = inline
+        if metrics is not None:
+            result.metrics.CopyFrom(metrics)
+        for adj in adjustments:
+            result.adjustments.add(
+                field=str(adj.get("field", "")),
+                requested=str(adj.get("requested", "")),
+                applied=str(adj.get("applied", "")),
+                reason=str(adj.get("reason", "")),
+            )
+        await self._send(pb.WorkerMessage(job_result=result))
+
+    async def _on_run_job(self, run: pb.RunJob) -> None:
+        key = (str(run.request_id), int(run.attempt))
+        if key in self._jobs:
+            # Retransmit of an accepted attempt: re-ack, never re-run.
+            await self._send(
+                pb.WorkerMessage(
+                    job_accepted=pb.JobAccepted(request_id=key[0], attempt=key[1])
+                )
+            )
+            return
+        if self.draining:
+            await self._send_result(
+                *key, pb.JOB_STATUS_RETRYABLE, safe_message="worker draining"
+            )
+            return
+        await self._send(
+            pb.WorkerMessage(
+                job_accepted=pb.JobAccepted(request_id=key[0], attempt=key[1])
+            )
+        )
+        task = asyncio.create_task(self._run_one(run, key), name=f"job-{key[0]}")
+        self._jobs[key] = task
+
+        def _retire(_done: "asyncio.Task[None]", k: Tuple[str, int] = key) -> None:
+            self._jobs.pop(k, None)
+
+        task.add_done_callback(_retire)
+
+    def _on_cancel_job(self, cancel: pb.CancelJob) -> None:
+        key = (str(cancel.request_id), int(cancel.attempt))
+        self._canceled.add(key)
+        task = self._jobs.get(key)
+        if task is not None and not task.done():
+            # CANCEL THE AWAITING TASK, which is what makes the CANCELED result
+            # prompt. It does NOT interrupt the author's code: the serve loop
+            # runs it on a worker thread and no v2 surface can stop a thread
+            # mid-call — exactly as the v1 executor could not stop a CPU-bound
+            # sync handler either. What the hub gets back is the terminal it
+            # asked for, on time, instead of nothing until the handler happens
+            # to finish. Marking without cancelling produced NO job_result at
+            # all, which reads to the hub as a hung pod.
+            task.cancel()
+            logger.warning(
+                "cancel for in-flight %s attempt=%d: terminal shipped now; the "
+                "author's call keeps running on its worker thread to completion",
+                *key,
+            )
+
+    def _envelope_of(self, run: pb.RunJob) -> Dict[str, Any]:
+        """The signature-derived envelope for this dispatch.
+
+        ``input_payload`` is the caller's input; the checkpoint picks come off
+        the hub's own ``ModelBinding`` rows, which is where deploy state lives.
+        """
+        payload: Any = {}
+        if run.input_payload:
+            payload = msgspec.msgpack.decode(run.input_payload)
+        spec = self.loaded.entrypoints.get(str(run.function_name))
+        envelope: Dict[str, Any] = {"input": payload}
+        if spec is None:
+            return envelope  # invoke() refuses naming the function
+        picks = {b.slot: b.ref for b in run.models if b.slot and b.ref}
+        slots = [name for name, _ in spec.model_params]
+        if len(slots) == 1:
+            if picks.get(slots[0]):
+                envelope["model"] = picks[slots[0]]
+        elif slots:
+            named = {s: picks[s] for s in slots if picks.get(s)}
+            if named:
+                envelope["models"] = named
+        return envelope
+
+    def _check_lane(self, run: pb.RunJob) -> None:
+        lane = str(run.lane or "").strip()
+        if lane and lane not in self.lanes:
+            raise ServeDispatchError(
+                f"dispatch names lane {lane!r}; this release serves "
+                f"{sorted(self.lanes) or '[]'} — never a silent fallback"
+            )
+
+    async def _run_one(self, run: pb.RunJob, key: Tuple[str, int]) -> None:
+        accepted_at = time.monotonic()
+        if key in self._canceled:
+            self._canceled.discard(key)
+            await self._send_result(
+                *key, pb.JOB_STATUS_CANCELED, safe_message="canceled before start"
+            )
+            return
+        status = pb.JOB_STATUS_FATAL
+        inline: Optional[bytes] = None
+        message = ""
+        adjustments: Tuple[Dict[str, str], ...] = ()
+        started = accepted_at
+        try:
+            self._check_lane(run)
+            envelope = self._envelope_of(run)
+            _DISPATCH.set(_picks_of(run))
+            started = time.monotonic()
+            # pgw#676: STAMP THE IN-FLIGHT MARKER around tenant execution. A
+            # SIGKILL mid-handler leaves this marker behind, and it is the only
+            # thing that lets the supervisor's post-mortem attribute the death
+            # to a FUNCTION and build the native-crash streak that eventually
+            # refuses it. Without it a signal death is charged to nothing, the
+            # streak never forms, and a reliably-crashing handler is served
+            # forever.
+            inflight = postmortem.note_inflight(
+                "request", str(run.function_name), request_id=str(run.request_id)
+            )
+            try:
+                outcome = await asyncio.to_thread(
+                    self.serve.invoke,
+                    str(run.function_name),
+                    envelope,
+                    request_id=str(run.request_id),
+                )
+            finally:
+                postmortem.clear_inflight(inflight)
+            inline = msgspec.msgpack.encode(outcome.result)
+            adjustments = outcome.adjustments
+            status = pb.JOB_STATUS_OK
+        except asyncio.CancelledError:
+            await self._send_result(*key, pb.JOB_STATUS_CANCELED, safe_message="canceled")
+            raise
+        except (EnvelopeError, ServeDispatchError, msgspec.ValidationError) as exc:
+            status, message = pb.JOB_STATUS_INVALID, f"{type(exc).__name__}: {exc}"
+            logger.warning("job %s attempt=%d rejected: %s", *key, exc)
+        except NeverFits as exc:
+            status, message = pb.JOB_STATUS_FATAL, f"{type(exc).__name__}: {exc}"
+            logger.error("job %s attempt=%d cannot ever fit: %s", *key, exc)
+        except (CheckpointUnresolved, ResidencyError) as exc:
+            status, message = pb.JOB_STATUS_RETRYABLE, f"{type(exc).__name__}: {exc}"
+            logger.error("job %s attempt=%d unplaceable: %s", *key, exc)
+        except Exception as exc:  # noqa: BLE001 — the terminal must still ship
+            status, message = pb.JOB_STATUS_FATAL, f"{type(exc).__name__}: {exc}"
+            logger.exception("job %s attempt=%d failed", *key)
+        finally:
+            self._canceled.discard(key)
+        now = time.monotonic()
+        await self._send_result(
+            *key,
+            status,
+            inline=inline,
+            safe_message=message,
+            metrics=pb.JobMetrics(
+                runtime_ms=int((now - started) * 1000),
+                queue_ms=int((started - accepted_at) * 1000),
+            ),
+            adjustments=adjustments,
+        )
+
+    # ---- drain / shutdown --------------------------------------------------
+
+    def start_drain(self, deadline_ms: int = 0) -> None:
+        if self._drain_task is None:
+            self._drain_task = asyncio.create_task(
+                self._drain(int(deadline_ms)), name="drain"
+            )
+
+    async def _drain(self, deadline_ms: int) -> None:
+        self.draining = True
+        logger.info(
+            "draining: %d job(s) in flight, deadline_ms=%d", len(self._jobs), deadline_ms
+        )
+        # The hub's deadline is a COMMAND budget, not a stall detector: 0 waits
+        # for the work itself.
+        budget = (deadline_ms / 1000.0) if deadline_ms > 0 else None
+        if self._jobs:
+            await asyncio.wait(set(self._jobs.values()), timeout=budget)
+        await self.transport.close_after_flush(budget)
+        self.drained.set()
+
+    def stop(self) -> None:
+        """Thread-safe stop (tests / embedding); production exits via Drain."""
+        self._stop_requested = True
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self.transport.stop)
+
+    # ---- run loop ----------------------------------------------------------
+
+    async def _heartbeat(self) -> None:
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_MS / 1000.0)
+            try:
+                await self._send(pb.WorkerMessage(state_delta=self._state_delta()))
+            except Exception:  # a missed beat must not kill the loop
+                logger.warning("heartbeat send failed", exc_info=True)
+
+    async def arun(self) -> int:
+        loop = self._loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(
+                    sig, self.start_drain, _SIGNAL_DRAIN_DEADLINE_MS
+                )
+            except (NotImplementedError, RuntimeError):
+                pass
+        # ROUTE ACTIVITY AND BOOT-PHASE REPORTS ONTO THE STREAM. This is not
+        # telemetry decoration: the control parent's hang watchdog HOLDS its
+        # verdict while an activity is open, so a child that publishes none is
+        # a child whose long-but-healthy work reads as a hang. pgw#771's
+        # `compute_hang_verdict_held` never fired without it — the parent had
+        # nothing to hold on.
+        from . import activity as activity_mod
+        from . import boot_phases as boot_mod
+
+        activity_mod.bind_sink(self._send, loop)
+        boot_mod.bind_sink(self._send, loop)
+
+        heartbeat = asyncio.create_task(self._heartbeat(), name="heartbeat")
+        transport_task = asyncio.create_task(self.transport.run(), name="transport")
+        try:
+            await transport_task
+        except FatalTransportError as exc:
+            logger.error("worker exiting: %s", exc)
+            raise
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+        if self.drained.is_set():
+            logger.info("worker drained; exiting 0")
+            return 0
+        if self._stop_requested:
+            return 0
+        # Falling out of the reconnect loop any other way ended the process
+        # clean with NOTHING on the wire; the hub saw only a young-worker
+        # death. An unexplained exit is a fatal.
+        raise UnexpectedWorkerExit(
+            "transport loop ended without a Drain command or shutdown signal "
+            f"(connected={self.transport.connected} draining={self.draining})"
+        )
+
     def run(self) -> int:
-        """Always returns an exit code. A fatal end to the run loop is
-        reported to the HUB here (sync context, own loop) before returning —
-        pod stdout is unreadable on RunPod, so this is the only channel that
-        survives the process."""
+        """Always returns an exit code. A fatal end to the run loop is reported
+        to the HUB here — pod stdout is unreadable on RunPod, so this is the
+        only channel that survives the process."""
         try:
             return asyncio.run(self.arun())
         except (FatalTransportError, UnexpectedWorkerExit) as exc:
@@ -203,51 +812,16 @@ class Worker:
             report_worker_fatal(self.settings, "run_loop", exc, exit_code=1)
             return 1
 
-    _loop: Optional[asyncio.AbstractEventLoop] = None
-    _stop_requested: bool = False
 
-    def stop(self) -> None:
-        """Thread-safe stop (tests / embedding); production exits via Drain."""
-        self._stop_requested = True
-        loop = self._loop
-        if loop is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(self.transport.stop)
-
-    async def arun(self) -> int:
-        loop = self._loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                loop.add_signal_handler(
-                    sig, self.lifecycle.start_drain, _SIGNAL_DRAIN_DEADLINE_MS
-                )
-            except (NotImplementedError, RuntimeError):
-                pass
-
-        watchdog = _LoopStallWatchdog(loop)
-        watchdog.start()
-        startup = asyncio.create_task(self.lifecycle.startup(), name="startup")
-        transport_task = asyncio.create_task(self.transport.run(), name="transport")
-        try:
-            await transport_task
-        except FatalTransportError as exc:
-            # surfaced to the entrypoint so the cause reaches the hub
-            # instead of only this pod's stdout.
-            logger.error("worker exiting: %s", exc)
-            raise
-        finally:
-            watchdog.stop()
-            startup.cancel()
-            await asyncio.gather(startup, return_exceptions=True)
-        if self.lifecycle.drained.is_set():
-            logger.info("worker drained; exiting 0")
-            return 0
-        if self._stop_requested:
-            return 0
-        # The reconnect loop is supposed to run until a hub Drain or a
-        # signal. Falling out of it any other way ended the process with a
-        # clean exit 0 and NOTHING on the wire — the hub saw only a stream
-        # close and a young-worker death. An unexplained exit is a fatal.
-        raise UnexpectedWorkerExit(
-            "transport loop ended without a Drain command or shutdown signal "
-            f"(connected={self.transport.connected} draining={self.lifecycle.draining})"
-        )
+__all__ = [
+    "CheckpointUnresolved",
+    "DuplicateEntrypoint",
+    "HEARTBEAT_INTERVAL_MS",
+    "HubBindingResolver",
+    "NoEntrypointsDeclared",
+    "SnapshotSizer",
+    "UnexpectedWorkerExit",
+    "Worker",
+    "WorkerBootError",
+    "harvest_entrypoints",
+]

@@ -94,7 +94,8 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 235 -> 231: pgw#1362 wave 3b folded the procsplit group (5 -> 2) and
     # hoisted its shared rig into tests/harness/split.py; all three are typed
     # clean, so four more unchecked modules came off with none added.
-    "ignore_errors": (231, 2016),
+    # 231 -> 227: pgw#1373 deleted the v1 SDK and its test corpus.
+    "ignore_errors": (227, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted
@@ -106,7 +107,6 @@ DECLARED_WILDCARDS: Dict[str, str] = {
                             "an in-place fix (pgw#1310)",
     "gen_worker.convert.*": "inherited from cozy_convert; bodies ARE checked",
     "tests.*": "test fns may be `def test_x():`; contract checks stay on",
-    "tests_v2.*": "test fns may be `def test_x():`; contract checks stay on",
 }
 
 #: Every strict-implied option that costs zero errors today and is therefore
@@ -205,7 +205,9 @@ def check(pyproject: Path) -> List[str]:
         # failure this exists for is `tests tests_v2` disappearing, and dropping
         # them from ALL invocations still goes red.
         covered = " ".join(invocations)
-        for required in ("src/gen_worker", "tests", "tests_v2"):
+        # pgw#1373 deleted `tests_v2/` — it was the v1 executor/transport suite
+        # (`@endpoint`, `Slot`, `registry`), not the pgw#1382 v2 SDK its name reads as.
+        for required in ("src/gen_worker", "tests"):
             if required not in covered:
                 problems.append(
                     f"no mypy step in {workflow.name} checks `{required}`; the "

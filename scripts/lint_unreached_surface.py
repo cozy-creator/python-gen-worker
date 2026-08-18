@@ -86,7 +86,65 @@ GUARDED = re.compile(r"^gen_worker(?!\.pb($|\.))")
 # package-shaped statement, not a per-symbol pardon: every symbol in one of
 # these is consumer surface by construction, which is what makes the blanket
 # honest here and dishonest anywhere else.
+#: pgw#1373 ORPHANED THE COMPILE/ADOPT/MINT TIER, and this guard is what said so.
+#: Deleting `executor.py` deleted the only in-repo caller of `aot_*`, `mint_*`,
+#: `serve/*`, `compile_cache` and the `models/` adopt half, so ~200 public
+#: callables in that tier went unreached in one commit. That reading is CORRECT
+#: — the tier is dead until pgw#1371's background mint and pgw#1372's adopt-only
+#: boot either wire it to `gen_worker.serving` or delete it, and THAT is the
+#: decision, owned there and not here.
+#:
+#: It is ONE band with ONE reason rather than ~200 exemption rows, deliberately:
+#: 200 rows is an exception list nobody can read, and the day the tier is wired
+#: or cut, ONE line comes out. Recorded loudly instead of waved through quietly,
+#: which is the difference this guard exists to make.
+_PGW1373_ORPHANED = (
+    "the v1 compile/adopt/mint tier — pgw#1373 deleted executor.py, its only "
+    "in-repo caller. pgw#1371/#1372 own wiring it to gen_worker.serving or "
+    "deleting it; this band comes out with that decision."
+)
+
 EXEMPT_PACKAGES: Dict[str, str] = {
+    "gen_worker.aot_serve": _PGW1373_ORPHANED,
+    "gen_worker.aot_compile_pool": _PGW1373_ORPHANED,
+    "gen_worker.aot_constants": _PGW1373_ORPHANED,
+    "gen_worker.aot_delivery": _PGW1373_ORPHANED,
+    "gen_worker.aot_device_lock": _PGW1373_ORPHANED,
+    "gen_worker.aot_identity": _PGW1373_ORPHANED,
+    "gen_worker.aot_inputs": _PGW1373_ORPHANED,
+    "gen_worker.serve": _PGW1373_ORPHANED,
+    "gen_worker.mint_process": _PGW1373_ORPHANED,
+    "gen_worker.mint_workers": _PGW1373_ORPHANED,
+    "gen_worker.mint_supervisor": _PGW1373_ORPHANED,
+    "gen_worker.mint_adapter": _PGW1373_ORPHANED,
+    "gen_worker.compile_cache": _PGW1373_ORPHANED,
+    "gen_worker.compiled_graph_adopt": _PGW1373_ORPHANED,
+    "gen_worker.compiled_graph_resolve": _PGW1373_ORPHANED,
+    "gen_worker.local_compiled_graph_store": _PGW1373_ORPHANED,
+    "gen_worker.adopt_fit": _PGW1373_ORPHANED,
+    "gen_worker.child_contract": _PGW1373_ORPHANED,
+    "gen_worker.hot_swap": _PGW1373_ORPHANED,
+    "gen_worker.lifecycle_intents": _PGW1373_ORPHANED,
+    "gen_worker.runtime_config": _PGW1373_ORPHANED,
+    "gen_worker.activity": _PGW1373_ORPHANED,
+    "gen_worker.measured_posture": _PGW1373_ORPHANED,
+    "gen_worker.compile_facts": _PGW1373_ORPHANED,
+    "gen_worker.worker_goals": _PGW1373_ORPHANED,
+    "gen_worker.models.residency": _PGW1373_ORPHANED,
+    "gen_worker.models.store": _PGW1373_ORPHANED,
+    "gen_worker.models.structure_only": _PGW1373_ORPHANED,
+    "gen_worker.models.lora_lifted": _PGW1373_ORPHANED,
+    #: pgw#1373 also moved WHO the in-repo consumer is. The v1 executor called
+    #: these libraries on the author's behalf; the v2 split has the ENDPOINT
+    #: call them directly (`Model.load` / an `@entrypoint` body), so their
+    #: consumer is out of this repo — the same structural reason
+    #: `gen_worker.api` is exempt, arrived at by a different route.
+    "gen_worker.utils": "endpoint-called helper library (adapters, LoRA)",
+    "gen_worker.parallel": "endpoint-called sequence/context parallelism "
+                           "(minimax-h3 drives it from its own engine)",
+    "gen_worker.convert": "conversion-endpoint library (consumers are the "
+                          "conversion packages, not this repo)",
+    "gen_worker.sparse_attention": "endpoint-called attention kernels",
     # Endpoint repos vendor the wheel and call this.
     "gen_worker.api": "authored-worker API (consumers are endpoint repos)",
     # th#1947 §4.2: the cross-repo corpora and their accessor, shipped as
@@ -169,12 +227,6 @@ EXEMPT_TARGETS: dict[str, str] = {
     # less mouths, kept ONE release because the module-level suites and the
     # mint-lane tooling still exercise them. THE DELETION IS OWED BY pgw#1373
     # (rows 1-2 of its inventory name boot_adopt/boot_key/keyset explicitly).
-    "gen_worker.boot_adopt.attempt":
-        "the deleted boot ladder's entry; dies in pgw#1373 rows 1-2",
-    "gen_worker.boot_adopt.no_compiled_graph_source":
-        "the deleted boot ladder's gate; dies in pgw#1373 rows 1-2",
-    "gen_worker.boot_key.derive":
-        "the deleted boot ladder's deriver; dies in pgw#1373 rows 1-2",
     # pgw#1372: the adopt-first boot's hub store. Its LIFECYCLE caller is the
     # vendored torchcg adopt path (`_vendor/torchcg/adopt.py` calls
     # `store.fetch_artifact` through the GraphStore protocol), which this

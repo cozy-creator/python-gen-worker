@@ -232,28 +232,20 @@ jobs:
       # pgw#1202 PR 2: the TEST tree is checked too — that is where the doubles
       # that lie about production contracts live.
       - name: Type check (mypy, strict by default, src + tests)
-        run: uv run mypy src/gen_worker tests tests_v2
+        run: uv run mypy src/gen_worker tests
 
-      # pgw#1347: the pod driver is control-plane code that must NOT ship in the
-      # wheel (no pod needs the thing that rents pods), but it spends money, so
-      # it is born strict like everything else. It gets its OWN invocation with
-      # `MYPYPATH=scripts` rather than joining `mypy_path` in pyproject: that
-      # path is shared, and adding `scripts` to it makes mypy resolve every
-      # other scripts/*.py a test imports, which drags 18 unrelated pre-existing
-      # errors into this gate. Same hardness, isolated blast radius.
-      - name: Type check the pod mint-rig (pgw#1347)
-        run: MYPYPATH=scripts uv run mypy scripts/mint_rig scripts/micro_mint_rig.py tests/test_pod_mint_rig_pgw1347.py
+      # pgw#1373: the pgw#1347 pod mint-rig (`scripts/mint_rig/`,
+      # `micro_mint_rig.py`, `pod_rig.py`, `boot_key_rig.py`) is DELETED with the
+      # v1 SDK. It drove `@endpoint` declarations through `gen_worker.model`,
+      # `api.export_contract`, `aot_declaration` and `fleet_compiled_graphs` —
+      # every one of them gone — so it had no tree left to type-check.
 
-      # GATING (pgw#1202): `strict = true` cannot silently stop being true, but
-      # a per-module exemption list can grow one reasonable-looking name at a
-      # time until the gate means nothing. This refuses that mechanically,
-      # because the alternative is remembering, and remembering fails.
       - name: pgw#1202 guard - the mypy strictness ratchet only turns one way
         run: uv run python scripts/lint_mypy_ratchet.py
 
       - name: Lint
         continue-on-error: true  # Lint debt (mostly worker.py, being rewritten) — visible in logs, doesn't block CI.
-        run: uv run ruff check src/gen_worker scripts/mint_rig
+        run: uv run ruff check src/gen_worker
 
       # GATING (no continue-on-error): a bare HTTP call site is the gw#456
       # forever-hang reintroduced. hf_hub network use goes through
@@ -435,20 +427,17 @@ jobs:
       - name: pgw#1176 guard - every symbol a fence names still exists
         run: uv run python scripts/lint_fence_symbols.py
 
-      # GATING (pgw#740 + pgw#1143): the shipped wheel's registries are bare
-      # by design and a consumer's declarations populate all six.
-      - name: pgw#740 guard - registry contract
-        run: uv run python scripts/check_registry_contract.py
+      # pgw#1373: the pgw#740 registry-contract gate is DELETED. It asserted
+      # that the shipped wheel's SIX declaration registries are bare and that a
+      # consumer's `@endpoint` declarations populate them. There are no
+      # declaration registries any more — `api/export_contract`, `registry` and
+      # the catalog are gone — so the property it guarded no longer exists.
 
-      # GATING (pgw#1332): the catalog commits two halves per family — the
-      # declaration-time export and the bindings generated from it — and an
-      # endpoint compiles against the second while a pod arms what the first
-      # describes. Codegen is a pure function of the document, so proving they
-      # still agree is a byte comparison with no torch, no GPU and no network:
-      # sub-second, which is why it belongs in the REQUIRED job rather than
-      # behind the fifteen-minute one.
-      - name: pgw#1332 guard - family bindings match their exports
-        run: uv run python scripts/check_model_bindings.py
+      # pgw#1373: the pgw#1332 family-bindings gate is DELETED. It compared a
+      # catalog family's declaration-time export against the bindings codegen
+      # produced from it — `gen_worker.model.codegen`, `model/catalog/` and
+      # `model/catalog/_generated/` — and all three are gone. There are no two
+      # halves left to disagree.
 
       # GATING (th#1914 / pgw#1237 / cl#56): this public corpus is the
       # authority both sides bind to real path behavior. PGW pins it offline;
@@ -707,10 +696,6 @@ jobs:
       # `always()` so a cancelled run (the concurrency group above cancels
       # superseded pushes) does not spend four more minutes on a result nobody
       # will read.
-      - name: Run tests (v2, zero-based — pgw#808)
-        if: ${{ !cancelled() }}
-        run: uv run pytest tests_v2/ -n 4 --dist loadfile -rs --skip-census-out=.skip-census-v2.json
-
       # GATING (pgw#966). Two rules: every skip this run took is CLASSIFIED in
       # scripts/skip_census.txt, and no row classified CI-MUST-RUN was among
       # them. The first stops the skip set growing invisibly; the second is the
@@ -720,4 +705,7 @@ jobs:
       # since a red suite is exactly when the skip set tends to move.
       - name: pgw#966 guard - the skip census
         if: ${{ !cancelled() }}
-        run: uv run python scripts/lint_skip_census.py --ci .skip-census-v1.json .skip-census-v2.json
+        # pgw#1373: `.skip-census-v2.json` came from the `tests_v2/` run, and
+        # that suite is deleted — asking for a census file nothing writes is
+        # a gate that fails on its own missing input.
+        run: uv run python scripts/lint_skip_census.py --ci .skip-census-v1.json

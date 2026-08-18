@@ -484,12 +484,19 @@ def selftest() -> int:
             "The fence would then be reading something other than the role.",
             file=sys.stderr)
         return 1
-    # pgw#1331's half: a family DECLARATION is a model-library module, so
-    # rooting the walk there must produce a forbidden-library violation. The
-    # declaration reaches diffusers exclusively through FUNCTION-LOCAL imports,
-    # so this proves the library check follows lazy imports too — the same
-    # shape the mint-lane half is proven against, one layer up.
-    declaration = "gen_worker.model.catalog.flux1_dev"
+    # pgw#1331's half: rooting the walk at a module that reaches a model
+    # library must produce a forbidden-library violation. The root reaches
+    # diffusers exclusively through a FUNCTION-LOCAL import, so this proves the
+    # library check follows lazy imports too — the same shape the mint-lane
+    # half is proven against, one layer up.
+    #
+    # pgw#1373 moved this root off `gen_worker.model.catalog.flux1_dev`, which
+    # the SDK hardcut deleted. `view.for_request` is the same SHAPE and a
+    # better root: its `import diffusers` sits inside the function
+    # (`view.py:172`), it is on the serve path rather than in a fixture, and it
+    # cannot quietly stop reaching a model library the way a catalog entry
+    # could.
+    declaration = "gen_worker.view"
     library_problems = [
         line
         for line in check_model_free((declaration,), libraries, ())
@@ -507,7 +514,11 @@ def selftest() -> int:
         return 1
     # …and a guarded edge to an unlisted module must be refused, or the hatch
     # is not a list, it is a door.
-    binding = "gen_worker.model.catalog._generated.flux1_dev"
+    # pgw#1373: was `gen_worker.model.catalog._generated.flux1_dev`. The
+    # container entrypoint reaches `gen_worker.worker` through a real
+    # `try: ... except ImportError` — the exact edge shape this arm exists to
+    # refuse, now taken from the production boot instead of generated bindings.
+    binding = "gen_worker.entrypoint"
     if not [line for line in check_model_free((binding,), libraries, ()) if "guarded" in line]:
         print(
             f"SELFTEST FAILED: {binding} reaches its declaration through an "

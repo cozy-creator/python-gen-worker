@@ -22,7 +22,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from gen_worker import activity, capability_renewal, hot_swap, preload
+from gen_worker import activity, capability_renewal, hot_swap
 from gen_worker.models import lane_residency_gate, residency
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.utils import lora
@@ -185,33 +185,9 @@ def test_lora_deactivate_failure_rides_typed_event(
     assert "req-9" in got[0].detail
 
 
-# ---------------------------------------------------------------------------
-# rotation preload — a stage failure abandons the hub's desired plan
-# ---------------------------------------------------------------------------
-
-
-class _ExecutorStub:
-    draining = False
-
-
-def test_preload_stage_failure_rides_typed_event(
-    events: List[Any], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    loader = preload.Preloader(_ExecutorStub())  # type: ignore[arg-type]
-    loader._generation = 7
-    loader._hot = (pb.DesiredInstance(function_name="generate"),)
-
-    async def boom(self: Any, instance: Any) -> bool:
-        raise OSError("disk full")
-
-    monkeypatch.setattr(preload.Preloader, "_stage_instance", boom)
-    assert asyncio.run(loader._pass()) is False  # fail-soft: pass completes
-
-    got = _by_kind(events, activity.KIND_ROTATION_PRELOAD)
-    assert [e.phase for e in got] == ["stage_failed"]
-    assert "fn=generate" in got[0].detail
-    assert "generation=7" in got[0].detail
-    assert "disk full" in got[0].detail
+# pgw#1373: the rotation-preload case is DELETED with `preload.Preloader` —
+# it staged the hub's desired plan for the v1 executor, and there is no
+# executor. The other seven typed-event cases here are unaffected.
 
 
 # ---------------------------------------------------------------------------

@@ -724,7 +724,7 @@ def test_the_entrypoint_ranks_the_child_before_its_heavy_imports():
     """pgw#975: The harness enters one layer below `entrypoint`, so the placement itself is asserted on the sour..."""
     src = (
         Path(__file__).resolve().parent.parent
-        / "src" / "gen_worker" / "worker_main.py"
+        / "src" / "gen_worker" / "entrypoint.py"
     ).read_text()
     call = src.index("raise_own_oom_score_adj()")
     assert src.index("is_compute_child") < call

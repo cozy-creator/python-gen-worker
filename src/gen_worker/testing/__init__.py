@@ -1,6 +1,8 @@
 """Test helpers for authoring gen-worker endpoints.
 
-Every ``Slot``-declared endpoint needs a ``ctx.slots["<name>"]`` stub to
+pgw#1373 deleted ``ctx.slots`` with the ``Slot`` surface, so ``fake_context``
+no longer takes ``slots=``: a v2 handler receives its model as an entrypoint
+PARAMETER, and a unit test passes one directly. What survives here is
 unit-test its handler without a live hub, so that no endpoint hand-rolls its
 own ``FakeCtx``. :func:`fake_context` builds a real
 :class:`~gen_worker.request_context.RequestContext` (or a producer-kind
@@ -21,7 +23,7 @@ Pass a :class:`Recorder` to assert what the handler SAVED and LOGGED
 and land in an inspectable list::
 
     rec = Recorder()
-    ctx = fake_context(slots={...}, recorder=rec)
+    ctx = fake_context()
     Generate().generate(ctx, TextToImage(prompt="a cat"))
 
     assert rec.refs == ["outputs/test-request/image.webp"]
@@ -62,7 +64,6 @@ from typing import (
 import msgspec
 
 from ..api.binding import ModelRef
-from ..api.slot import ResolvedSlot
 from ..api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 from ..families.base import GenerationDefaults
 from ..request_context import RequestContext
@@ -73,15 +74,6 @@ if TYPE_CHECKING:  # heavy optional deps — imported only for signature fidelit
     from PIL import Image
 
 C = TypeVar("C", bound="RequestContext[Any]")
-
-
-def stub_slots(
-    slots: Mapping[str, Tuple[ModelRef, GenerationDefaults]],
-) -> Dict[str, "ResolvedSlot[GenerationDefaults]"]:
-    """``{slot_name: (ref, defaults)}`` -> ``{slot_name: ResolvedSlot}`` —
-    the same shape ``ctx.slots`` hands a handler in production, built
-    directly instead of via the repo-metadata resolution chain."""
-    return {name: ResolvedSlot(ref=ref, defaults=defaults) for name, (ref, defaults) in slots.items()}
 
 
 class SavedArtifact(msgspec.Struct, frozen=True, kw_only=True):
@@ -130,7 +122,7 @@ class Recorder:
     Hold one per test and read it after the handler returns::
 
         rec = Recorder()
-        ctx = fake_context(slots={...}, recorder=rec)
+        ctx = fake_context(recorder=rec)
         out = Generate().generate(ctx, payload)
         assert rec.images[0].call["format"] == "png"
 
@@ -303,18 +295,14 @@ def _recording_class(cls: type) -> type:
 def fake_context(
     *,
     request_id: str = "test-request",
-    slots: Mapping[str, Tuple[ModelRef, GenerationDefaults]] = {},
     cls: Type[C] = RequestContext,  # type: ignore[assignment]
     recorder: Optional[Recorder] = None,
     **kwargs: Any,
 ) -> C:
     """Build a :class:`RequestContext` (or ``cls=JobContext``, the producer
     context every ``@job`` body and producer-kind handler receives) for a
-    handler unit test, with ``ctx.slots`` pre-populated.
+    handler unit test.
 
-    ``slots`` maps slot name -> ``(ref, defaults)`` — exactly what a
-    ``Slot``-declared endpoint's handler reads via
-    ``ctx.slots["<name>"].ref`` / ``.defaults``. Every other
     :class:`RequestContext` constructor kwarg (``owner``, ``invoker_id``,
     ...) passes through via ``**kwargs``.
 
@@ -328,7 +316,6 @@ def fake_context(
     if recorder is None:
         return cls(
             request_id=request_id,
-            resolved_slots=stub_slots(slots),
             **kwargs,
         )
 
@@ -342,7 +329,6 @@ def fake_context(
     kwargs.setdefault("local_output_dir", str(recorder.output_dir))
     ctx = _recording_class(cls)(
         request_id=request_id,
-        resolved_slots=stub_slots(slots),
         emitter=_emit,
         **kwargs,
     )
@@ -356,5 +342,4 @@ __all__ = [
     "Recorder",
     "SavedArtifact",
     "fake_context",
-    "stub_slots",
 ]

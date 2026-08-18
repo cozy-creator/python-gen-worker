@@ -76,17 +76,6 @@ BANNED_CALLS: Tuple[Tuple[str, ...], ...] = (
 #: claim that the module never executes on the serving parent's loop — make it
 #: deliberately.
 CHILD_ONLY: Dict[str, str] = {
-    "aot_mint": (
-        "the export + AOTI recipe itself; reached from the compile child "
-        "(`aot_compile_child`) and the trace child (`boot_trace_child`). "
-        "pgw#1215 step 4 made the serving parent CALL into this module — "
-        "`mint_supervisor` drives `mint_graph_classes`, `declared_class_rows` "
-        "and `fold_held_graph_classes` on the serving process — so the claim "
-        "this row makes is narrower than it looks and is worth restating: "
-        "every one of those is supervision, enumeration or folding. The "
-        "banned calls all sit under `_export_entry`, which only "
-        "`trace_for_key` reaches and only a child calls."
-    ),
     "_vendor.torchcg.discovery": (
         "the trace-once-at-publish instrumented derive (tcg#41/pgw#1370): "
         "torch.export runs per OBSERVED call to hash graph classes into the "
@@ -122,20 +111,6 @@ CHILD_ONLY: Dict[str, str] = {
         "The split is why a wedged compile is KILLABLE at all, which is what "
         "makes the progress guard's condemnation actionable."
     ),
-    "model.export": (
-        "pgw#1332's DECLARATION-TIME export. It is not reached from a serving "
-        "process at all, and the claim is structural rather than a promise: "
-        "`gen_worker.model`'s facade does not import it, the generated "
-        "bindings do not import it, and `cli/model.py` imports it inside the "
-        "`export` handler — so the only way to run it is to type "
-        "`gen-worker model export`, which is a catalog BUILD step whose output "
-        "is committed. `tests/test_model_sdk.py::"
-        "test_the_family_facade_does_not_import_the_exporter` executes that "
-        "claim instead of restating it. The trace is fake-tensor only: no "
-        "weights, no GPU, no compile, so even run by hand it is shape "
-        "arithmetic rather than the GIL-holding inductor orchestration this "
-        "fence exists to keep off the beat."
-    ),
 }
 
 #: Modules a SUPERVISING parent calls into, asserted to hold no banned call of
@@ -156,19 +131,6 @@ CHILD_ONLY: Dict[str, str] = {
 #: it is a CHECKED claim, and a serving module that starts importing one of
 #: these goes red here even though the probe itself never changed.
 STANDALONE_ENTRY: Dict[str, str] = {
-    "benchmarks.adopt_only_serve": (
-        "pgw#1328's GPU bar. Its FIRST phase mints one small graph so its "
-        "SECOND — a child process that declared the adopt-only role and "
-        "installed the import blocker — has something to adopt; the compile "
-        "IS the fixture, and the process serves no tenant. The claim this row "
-        "makes is narrow and checked: the export lives in the eager-capable "
-        "parent, and no serving-package module imports this probe."
-    ),
-    "benchmarks.store_arm_parity": (
-        "pgw#1329's GPU parity probe. It mints one small graph and arms it "
-        "twice to compare bytes; the compile IS the measurement, and the "
-        "process serves nothing. Not CHILD_ONLY: no serving parent spawns it."
-    ),
 }
 
 SUPERVISED: Dict[str, str] = {
@@ -176,17 +138,6 @@ SUPERVISED: Dict[str, str] = {
         "the K-wide pool. `mint_supervisor` constructs and drives it on the "
         "serving process (in a worker thread); it spawns, reaps and collects, "
         "and it must never itself export or compile."
-    ),
-    "mint_supervisor": (
-        "the serving parent's own mint driver. Supervision only: enumerate, "
-        "spawn, collect, adopt, publish."
-    ),
-    "mint_adapter": (
-        "pgw#1328's eager-capable side of the serve/mint seam. It is the one "
-        "module whose job is to NAME the mint lane, so it is the obvious place "
-        "for an export to grow — and it must never hold one: every method is "
-        "supervision or declaration reading, delegated to `mint_supervisor` "
-        "and `aot_mint`, which carry their own rows here."
     ),
 }
 

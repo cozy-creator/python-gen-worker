@@ -565,7 +565,9 @@ def arm_aot(
         _abandon_adopt(pipe, meta, _no_room, entry="")
         return AdoptOutcome.miss(adopt_fit.REASON, _no_room)
     with postmortem.compile_inflight(_adopt_label):
-        outcome = aot_serve.enable(
+        # Annotated because `aot_serve` is a deferred import (it must stay off
+        # the `import gen_worker` path), so mypy sees Any across the seam.
+        outcome: AdoptOutcome = aot_serve.enable(
             pipe, cfg, cache_dir, artifact, expected=expected, declared=declared)
     _, _peak_after_load = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = max(0, _peak_after_load - _resident_before)
@@ -1258,33 +1260,18 @@ def resolve_bindings(
     *,
     offline: bool,
     emit: EmitFn,
-    slots: Optional[Mapping[str, Any]] = None,
-    payload: Any = None,
 ) -> Dict[str, str]:
     """Resolve every binding to a local path / loader-ready string.
 
-    ``slots``/``payload`` (pgw#520): when a binding's slot is Slot-declared
-    with a ``selected_by`` field, and this hub-less run has no hub to
-    resolve a curated/BYOM pick against, a payload that actually NAMES a
-    model (a non-empty ``selected_by`` field value) is a clear usage error
-    instead of silently running the slot's default — ``cozy run`` only ever
-    runs a Slot's ``default_checkpoint`` ref locally.
+    pgw#1373: the ``slots``/``payload`` pgw#520 arm is GONE with ``Slot``.
+    It refused a hub-less run whose payload named a model through
+    ``Slot(selected_by=...)``; there is no such declaration any more, so the
+    branch could only ever read an empty string. The v2 pick travels in the
+    request ENVELOPE and the hub validates it against ``allowed_checkpoints``.
     """
 
     out: Dict[str, str] = {}
     for param_name, binding in bindings.items():
-        slot = (slots or {}).get(param_name)
-        selected_by = str(getattr(slot, "selected_by", "") or "") if slot is not None else ""
-        if selected_by and payload is not None:
-            picked = str(getattr(payload, selected_by, "") or "").strip()
-            if picked:
-                raise ModelResolutionError(
-                    f"slot {param_name!r}: payload names model {picked!r} via "
-                    f"{selected_by!r}, but no hub is configured — "
-                    "hub-less mode (`cozy run` / `gen-worker run`) only runs "
-                    "a Slot's default_checkpoint= ref; configure HUB= (or "
-                    f"drop the {selected_by!r} field) to run against a hub."
-                )
         if not isinstance(binding, ModelRef):
             raise ModelResolutionError(
                 f"unknown binding type for param {param_name!r}: "

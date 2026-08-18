@@ -1229,7 +1229,7 @@ class ParentControl:
         self._child_cmd = list(
             child_cmd
             if child_cmd is not None
-            else (shlex.split(env_cmd) if env_cmd else [sys.executable, "-m", "gen_worker.worker_main"])
+            else (shlex.split(env_cmd) if env_cmd else [sys.executable, "-m", "gen_worker.entrypoint"])
         )
         self._child_env = dict(child_env or {})
         # `Settings` owns the value; the child_env override stays because it is

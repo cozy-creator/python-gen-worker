@@ -60,7 +60,6 @@ from ..api.errors import (
     DatasetNotFoundError,
     DeclaredSlotResolutionError,
 )
-from ..api.slot import ResolvedSlot
 
 # Ref provenance: a resolve boundary must say WHERE the address came from —
 # that, not the HTTP status or message text, decides whether a terminal miss is
@@ -94,47 +93,6 @@ from ..api.types import (
     Tensors,
     VideoAsset,
 )
-
-
-class _SlotTable(Mapping[str, "ResolvedSlot[Any]"]):
-    """``ctx.slots`` — a read-only mapping of slot name -> ResolvedSlot.
-
-    Built once at context construction; resolution FAILURES are stored per-key
-    and raised lazily on ``__getitem__``, so an endpoint whose handler never
-    touches an unresolved slot still dispatches.
-
-    ``declared`` names the failed slots whose ref is the RELEASE'S OWN fixed
-    declaration; those raise the typed ``DeclaredSlotResolutionError`` so the
-    hub can classify the FATAL by origin. A ``Slot(selected_by=...)`` slot
-    keeps the bare ``ValueError`` — the payload participates in picking it, so
-    its failure is not evidence about the release."""
-
-    __slots__ = ("_resolved", "_errors", "_declared")
-
-    def __init__(
-        self,
-        resolved: Mapping[str, "ResolvedSlot[Any]"],
-        errors: Mapping[str, str],
-        declared: Iterable[str] = (),
-    ) -> None:
-        self._resolved = dict(resolved)
-        self._errors = dict(errors)
-        self._declared = frozenset(declared)
-
-    def __getitem__(self, key: str) -> "ResolvedSlot[Any]":
-        if key in self._resolved:
-            return self._resolved[key]
-        if key in self._errors:
-            if key in self._declared:
-                raise DeclaredSlotResolutionError(self._errors[key])
-            raise ValueError(self._errors[key])
-        raise KeyError(key)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter({**self._resolved, **self._errors})
-
-    def __len__(self) -> int:
-        return len(set(self._resolved) | set(self._errors))
 
 
 def _copy_context_metadata(value: _MetaT) -> _MetaT:
@@ -308,10 +266,6 @@ class RequestContext(Generic[D]):
         execution_hints: Optional[Dict[str, Any]] = None,
         models: Optional[Dict[str, Any]] = None,
         loras: Optional[Dict[str, Any]] = None,
-        resolved_slots: Optional[Mapping[str, "ResolvedSlot[Any]"]] = None,
-        slot_errors: Optional[Mapping[str, str]] = None,
-        declared_slot_errors: Optional[Iterable[str]] = None,
-        root_slot: str = "",
         boot_warmup: bool = False,
         publishes: bool = False,
         emits_media: Optional[bool] = None,
@@ -353,9 +307,6 @@ class RequestContext(Generic[D]):
         self._repo_scope_parse_reported = False
         self._models = _copy_context_metadata(models or {})
         self._loras = _copy_context_metadata(loras or {})
-        self._slots = _SlotTable(
-            resolved_slots or {}, slot_errors or {}, declared_slot_errors or ())
-        self._root_slot_name = str(root_slot or "").strip()
         # Caller-visible adjustment warnings: rows the merge/clamp layer emits
         # whenever a requested value is modified. They ride the RESULT ENVELOPE
         # (JobResult.adjustments) + the hub's request record/events stream; pod
@@ -447,78 +398,6 @@ class RequestContext(Generic[D]):
         call; this surface is read-only metadata."""
         return _copy_context_metadata(self._loras)
 
-    @property
-    def slots(self) -> Mapping[str, "ResolvedSlot[Any]"]:
-        """One entry per ``Slot``-declared model slot:
-        ``ctx.slots["pipeline"].ref`` / ``.defaults`` / ``.objective`` /
-        ``.distilled`` — the catalog-resolved recipe decoded against the
-        handler's derived config schema (``ctx.defaults`` is the root-slot
-        shortcut). A slot that failed resolution raises on access, not at
-        dispatch — read it only when your handler needs it."""
-        return self._slots
-
-    def _set_resolved_slots(
-        self,
-        resolved: Mapping[str, "ResolvedSlot[Any]"],
-        errors: Optional[Mapping[str, str]] = None,
-        root_slot: str = "",
-        declared_slot_errors: Optional[Iterable[str]] = None,
-    ) -> None:
-        """CLI-only mutator (``gen-worker run``/``serve``): the hub-less
-        resolve step runs after context construction."""
-        self._slots = _SlotTable(resolved, errors or {}, declared_slot_errors or ())
-        if root_slot:
-            self._root_slot_name = str(root_slot).strip()
-
-    def _root_slot(self, slot: str = "") -> "ResolvedSlot[Any]":
-        """The named slot's resolution, or the ROOT slot:
-        the declared ``Slot(root=True)`` when present, else the slot named
-        "pipeline", else the single resolved slot. Ambiguity RAISES — a
-        multi-slot class is already a decoration-time error unless it marks
-        a root, and handlers on non-root lanes pass ``slot=`` explicitly."""
-        resolved = self._slots._resolved
-        if slot:
-            return self._slots[slot]
-        if self._root_slot_name and (
-            self._root_slot_name in resolved
-            or self._root_slot_name in self._slots._errors
-        ):
-            return self._slots[self._root_slot_name]
-        if "pipeline" in resolved:
-            return self._slots["pipeline"]
-        if len(resolved) == 1:
-            return next(iter(resolved.values()))
-        if not resolved and self._slots._errors:
-            # Surface the deferred resolution error, not a KeyError.
-            name = next(iter(self._slots._errors))
-            return self._slots[name]
-        raise ValueError(
-            f"ctx has {len(resolved)} resolved slots ({sorted(resolved)}); "
-            "ctx.defaults/ctx.for_request need an unambiguous root — mark "
-            "one Slot(root=True), or pass slot=/read ctx.slots[name] "
-            "explicitly"
-        )
-
-    @property
-    def defaults(self) -> D:
-        """The resolved per-model config for this request's ROOT slot,
-        typed as the handler's ``RequestContext[D]`` annotation: the
-        catalog-resolved recipe decoded against the derived
-        schema, with per-lora field overrides applied. Payload
-        values still win over these — that precedence is handler logic.
-        Non-root lanes of a multi-slot class read
-        ``ctx.slots[name].defaults`` explicitly."""
-        # `_root_slot()` erases to ResolvedSlot[Any]; the ctx's own D is what
-        # the root slot resolves to. Stating Optional[D] keeps the runtime
-        # guard below load-bearing AND lets the return be D rather than Any.
-        d: Optional[D] = self._root_slot().defaults
-        if d is None:
-            raise ValueError(
-                "ctx.defaults: no config schema derived for this handler — "
-                "annotate the context parameter as RequestContext[YourDefaults]"
-            )
-        return d
-
     def adjusted(
         self, field: str, requested: Any, applied: Any, reason: str,
     ) -> None:
@@ -600,10 +479,6 @@ class RequestContext(Generic[D]):
         """
 
         objective = ""
-        resolved = None
-        if self._slots._resolved or self._slots._errors:
-            resolved = self._root_slot(slot)
-            objective = resolved.objective
         gen = generator
         if gen is None and seed is not None:
             gen = self.generator(seed)

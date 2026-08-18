@@ -1,4 +1,4 @@
-"""Real ``python -m gen_worker.worker_main`` subprocess boot harness.
+"""Real ``python -m gen_worker.entrypoint`` subprocess boot harness.
 
 Extracted from ``tests/test_boot_smoke_gw591.py`` (gw#591) per th#960/pgw#609:
 a real subprocess re-imports the package fresh, catching import-time
@@ -92,7 +92,7 @@ def run_entrypoint(
     env.update(env_overrides or {})
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "gen_worker.worker_main"],
+        [sys.executable, "-m", "gen_worker.entrypoint"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     # A caller's number is a FLOOR on tolerated silence, never a cap: it can

@@ -405,19 +405,15 @@ def assert_manifest_advertises_something(manifest: Dict[str, Any]) -> None:
     0, spent 9m20s baking, pushed, and only then did hub admission refuse. The
     refusal is correct; discovering it after the build is the defect.
     """
-    if (
-        (manifest.get("functions") or [])
-        or (manifest.get("jobs") or [])
-        or (manifest.get("entrypoints") or [])
-    ):
+    if manifest.get("entrypoints") or []:
         return
     raise EntrypointDiscoveryError(
         "this endpoint advertises NOTHING: discovery found no @entrypoint "
-        "functions (pgw#1382), no @endpoint functions and no @job functions. "
-        "A release with an empty manifest is refused at hub admission, so the "
-        "build stops here rather than after the image bake. Check that the "
-        "module named by [tool.gen_worker] main is the one carrying the "
-        "declarations, and that its decorators are gen_worker's."
+        "functions. A release with an empty manifest is refused at hub "
+        "admission, so the build stops here rather than after the image "
+        "bake. Check that the module named by [tool.gen_worker] main is the "
+        "one carrying the declarations, and that its decorator is "
+        "gen_worker's @entrypoint (pgw#1373: @endpoint/@job are deleted)."
     )
 
 

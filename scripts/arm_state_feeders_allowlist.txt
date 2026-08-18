@@ -8,14 +8,8 @@
 # PROJECTION a canonical object built from a genuinely different source shape.
 
 # Serve/adoption verdicts.
-src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_compiled_graph_proven  VERDICT  boot proof concluded this object served its own warmup graph
-src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_compiled_graph_quarantined  VERDICT  boot proof concluded the selected graph failed here
-src/gen_worker/executor.py::Executor._compile_guard_failed::compile_cache.record_compiled_graph_quarantined  VERDICT  serve-time graph-attributable failure observed by the guard
-src/gen_worker/executor.py::Executor._supervise_mint::compile_cache.record_compiled_graph_proven  VERDICT  supervised mint finalize proved its own graph
-src/gen_worker/fleet_compiled_graphs.py::arm_from_local_store::local_compiled_graph_store.note_memo  VERDICT  local arm evidence established the arm-token to key memo
 
 # The local durable store's one producer write path.
-src/gen_worker/fleet_compiled_graphs.py::_stage_durable::local_compiled_graph_store.store  OWNER  this machine minted these bytes and stages them durably before arming
 # pgw#1283 made this feed VISIBLE rather than new: store() always wrote the
 # mint-time memo, but did it by inlining _write_json_atomic, which this guard
 # does not match. Routing it through note_memo -- so a shortcut failure can no
@@ -24,4 +18,3 @@ src/gen_worker/fleet_compiled_graphs.py::_stage_durable::local_compiled_graph_st
 src/gen_worker/local_compiled_graph_store.py::store::local_compiled_graph_store.note_memo  OWNER  the mint that produced these bytes is what binds this arm token to this key, before any arm verdict exists
 
 # A different source shape, not a duplicate map of the materialized artifact.
-src/gen_worker/executor.py::_selection_for::_CompileArtifactSelection()  PROJECTION  built from a SelfMint rather than a materialized artifact triple

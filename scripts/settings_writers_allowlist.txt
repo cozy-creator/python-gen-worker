@@ -21,6 +21,4 @@ src/gen_worker/host_canary.py::os.environ[<dynamic>]  SCOPED  the probe's restor
 # Cache-dir redirects: where compile bytes land, never what bytes are
 # generated (inductor entries are content-addressed). The sanctioned window
 # is post-scrub (env_seal docstring).
-src/gen_worker/worker_main.py::os.environ[<dynamic>]  PLUMBING  pgw#783 per-group inductor/triton cache isolation dirs
-src/gen_worker/benchmarks/adopt_only_serve.py::os.environ[TORCHINDUCTOR_CACHE_DIR]  PLUMBING  pgw#1328's GPU bar points inductor at its own scratch dir so the mint phase cannot inherit a warm cache and make "the adopt-only child armed the graph this run compiled" an assumption; where bytes land, never which bytes
-src/gen_worker/benchmarks/store_arm_parity.py::os.environ[TORCHINDUCTOR_CACHE_DIR]  PLUMBING  pgw#1329's GPU parity probe points inductor at its own scratch dir so a warm inherited cache cannot make "both arms compiled the same graph" an assumption; where bytes land, never which bytes
+src/gen_worker/entrypoint.py::os.environ[<dynamic>]  PLUMBING  pgw#783 per-group inductor/triton cache isolation dirs

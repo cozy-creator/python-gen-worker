@@ -22,7 +22,6 @@
 
 # --- CONNECTED: the two real second resolvers, both deletion-gated ------------
 
-src/gen_worker/executor.py::parse_execution_lane_spec  CONNECTED  pgw#904 CUT the ladder twin: _refuse_unservable_lane PARSES a RunJob lane instruction only to REFUSE anything that would need worker-side expansion (bf16 family and declared handles= pass; everything else is a typed refusal). No binding is rebound, no cast lane is chosen — the parse is the refusal's vocabulary, not resolution. Dies with RunJob at th#1457's cut.
 
 # --- STANDALONE: hub-less / CLI only ------------------------------------------
 # All four reach resolution only through models/provision.py::resolve_bindings,
@@ -30,7 +29,6 @@ src/gen_worker/executor.py::parse_execution_lane_spec  CONNECTED  pgw#904 CUT th
 # The executor's bytes come from orchestrator-resolved snapshots via
 # ModelStore.ensure_local." Verified 2026-08-07: no connected path reaches them.
 
-src/gen_worker/cli/run.py::parse_execution_lane_spec  STANDALONE  `cozy run --lane` is an operator naming a lane locally, which is §1.31 layer 3 (per-invoke override) exercised by hand, not the worker authoring one.
 src/gen_worker/models/provision.py::resolve_repo  STANDALONE  _local_flavor_fold's own resolve, same containment.
 
 # --- PUBLISH ------------------------------------------------------------------
