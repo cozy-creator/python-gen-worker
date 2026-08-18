@@ -22,10 +22,26 @@ surface, and the v1 path is byte-identical when it does not.
 as ``{stamp, document}`` on the release-derive document's ``lane_contracts``,
 where the hub interns the document content-addressed and needs no prior
 knowledge of the layout (th#2146's `docs/lane-vocabulary.md`). Making that
-``document`` non-null is pgw#964's, not this module's. What DOES belong on a
-slot is the ie#740 floor `requires=` declares, in the machinereq term shape
-the hub's one parser reads — and because the hub refuses a requirement over a
-handle the slot does not accept, the accepted set is emitted beside it.
+``document`` non-null is pgw#964's, not this module's.
+
+**AND THEY WERE HERE ANYWAY, WHICH MADE EVERY v2 ENDPOINT UNPUBLISHABLE
+(pgw#1394).** The paragraph above was written before the code and the code
+disagreed with it: ``_model_slot`` emitted the lane stamps as the slot's
+``layouts`` and keyed ``layout_requirements`` by them. Those are the hub's
+ARTIFACT-layout fields — quant x topology, registered in
+``internal/tensorlayout``, resolved to descriptor digests for the conversion
+ladder — so the hub refused the publish with
+``artifact_contract_unregistered`` after a full image build and registry push.
+The two fields existed only to carry the ie#740 floor, because the hub refuses
+a ``layout_requirements`` handle the slot does not accept; the accepted set was
+manufactured to make the floor legal, and manufactured out of the one
+vocabulary that could not be.
+
+The floor now travels where a floor belongs: ``functions[].resources.requires``,
+THE FUNCTION SCOPE of the one requirement vocabulary, parsed by the SAME
+``machinereq`` parser. Same terms, same parser, correct field — and a
+model-bearing entrypoint now also declares ``gpu: true``, which a v2 release
+never did.
 """
 
 from __future__ import annotations
@@ -43,13 +59,6 @@ from .schema import type_schema_and_hash
 #: (`validation._KNOWN_KINDS`); the v2 surface declares no other kind today,
 #: and inventing one here would be a value space no hub reader names.
 ENTRYPOINT_KIND = "inference"
-
-#: The component path a whole-model lane declaration lands under. The v1 slot
-#: vocabulary is per-component (`pipeline`, `pipeline.vae`, …); a v2 `lanes=`
-#: is a statement about the WHOLE pipeline, so it declares exactly the root and
-#: never invents a component tree the author did not write.
-PIPELINE_PATH = "pipeline"
-
 
 class EntrypointDiscoveryError(ValueError):
     """A v2 endpoint package does not yield an extractable surface."""
@@ -107,15 +116,30 @@ def _pipeline_class(model_cls: type) -> str:
     return ""
 
 
-def _lane_stamps(model_cls: type) -> List[str]:
-    from ..serving import lane_handle, model_lanes
-
-    return [lane_handle(lane) for lane in model_lanes(model_cls)]
-
-
 def _model_slot(slot: Any) -> Dict[str, Any]:
-    """A model slot in the hub's `functions[].slots[]` vocabulary."""
-    from ..serving import model_requires, model_type
+    """A model slot in the hub's `functions[].slots[]` vocabulary.
+
+    NO `layouts` / `layout_requirements` KEY IS EMITTED HERE, and that is the
+    whole of pgw#1394. Those two fields are the hub's ARTIFACT-layout
+    vocabulary — the quant x topology axes registered in
+    `internal/tensorlayout` — and `slot_layouts.go` resolves every handle in
+    them to a descriptor digest so the conversion ladder can walk
+    `(axis, from, to)` edges. A SERVING LANE is not a point on either axis and
+    has no descriptor digest, so writing lane stamps here made the hub refuse
+    the publish outright:
+
+        slot_layout_demand_invalid: artifact_contract_unregistered —
+        function "generate" slot "model" path "pipeline"
+        demands "sdxl.diffusers-bf16@1"
+
+    after the image build and the registry push. The two repos were never
+    drifted: `models/tensor_layout_contract.py` already lists exactly the
+    handles the hub registers. It was the wrong vocabulary in the right field.
+
+    The lane itself already has its own channel and does not belong here at
+    all — see this module's header, which said so before the code did.
+    """
+    from ..serving import model_type
 
     model_cls = slot.annotation
     out: Dict[str, Any] = {
@@ -128,19 +152,96 @@ def _model_slot(slot: Any) -> Dict[str, Any]:
     family = getattr(declared, "name", "") or ""
     if family:
         out["family"] = family
-    stamps = _lane_stamps(model_cls)
-    if stamps:
-        # The accepted layout set. `layout_requirements` below is refused by
-        # the hub for a handle absent from here, which is the same rule the
-        # class header already enforces on `requires=`.
-        out["layouts"] = {PIPELINE_PATH: stamps}
-    requirements = {
-        stamp: row.manifest_row()
-        for stamp, row in model_requires(model_cls).items()
-        if row.declared()
-    }
-    if requirements:
-        out["layout_requirements"] = requirements
+    return out
+
+
+def _stricter(term: str, left: Any, right: Any) -> Any:
+    """The tighter of two floors for one term, by THE evaluator.
+
+    `term_meets` is the vocabulary's single comparator at both ends — the
+    declaration check and the runtime machine-fit check — and picking the
+    stricter floor is that same question asked once. A hand-rolled `max()`
+    here would be a second implementation, and this file would be where the
+    two ends start disagreeing about what "meets" means (`min_cuda` and
+    `min_torch` are version tuples, not floats).
+    """
+    from ..models.tensor_layout_contract import term_meets
+
+    return left if term_meets(term, left, right) else right
+
+
+def _merge_floors(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fold per-lane floors into the ONE floor the function must be placed on.
+
+    A function is placed on a single machine before anything knows which lane
+    it will serve, so the honest function-scope floor is the strictest across
+    the lanes it may serve. Every endpoint in the repo declares one lane
+    today, which makes this the identity; it is written as a fold anyway
+    because collapsing several floors by taking the LAST one would be a silent
+    under-declaration, and the buy path cannot detect one.
+
+    `recommended` nests and folds by the same rule as the flat minimum.
+    """
+    merged: Dict[str, Any] = {}
+    for row in rows:
+        for term, value in row.items():
+            if term == "recommended":
+                continue
+            merged[term] = _stricter(term, value, merged[term]) if term in merged else value
+    recommended: Dict[str, Any] = {}
+    for row in rows:
+        for term, value in (row.get("recommended") or {}).items():
+            recommended[term] = (
+                _stricter(term, value, recommended[term]) if term in recommended else value
+            )
+    if recommended:
+        merged["recommended"] = recommended
+    return merged
+
+
+def _resources(specs: List[Any]) -> Dict[str, Any]:
+    """The function's `resources` block: THE FUNCTION SCOPE of the one
+    requirement vocabulary (`internal/builder/function_requirements.go`).
+
+    This is where a `requires=` floor travels now that it no longer rides the
+    artifact-layout field. The hub parses `resources.requires` with the SAME
+    `machinereq` parser it used for `layout_requirements`, so the terms cross
+    the wire unchanged — only the field they arrive in is corrected.
+
+    TWO THINGS THIS IS CAREFUL ABOUT:
+
+    1. **An EMPTY block is an explicit CPU declaration** on the hub side
+       ("a present-but-empty block is an explicit CPU declaration"), so a
+       model-bearing entrypoint must never emit `{}`. It emits `gpu: true`.
+    2. **Absent stays absent for a slotless entrypoint.** No model slot means
+       no claim, and the hub falls back to release-level resolution exactly as
+       it does today.
+
+    `gpu: true` is also a fix in its own right: a v2 release previously
+    declared NO accelerator anywhere (its only machine signal was the
+    `layout_requirements` the hub was refusing), which is the
+    `[runpod] no GPU constraint declared; buying with NO VRAM bound` path.
+    """
+    from ..serving import model_requires
+
+    floors: List[Dict[str, Any]] = []
+    has_model_slot = False
+    for spec in specs:
+        for slot in spec.slots:
+            if slot.kind != "model":
+                continue
+            has_model_slot = True
+            floors.extend(
+                row.manifest_row()
+                for row in model_requires(slot.annotation).values()
+                if row.declared()
+            )
+    if not has_model_slot:
+        return {}
+    out: Dict[str, Any] = {"gpu": True}
+    merged = _merge_floors(floors)
+    if merged:
+        out["requires"] = merged
     return out
 
 
@@ -160,6 +261,7 @@ def _adapter_slot(slot: Any) -> Dict[str, Any]:
 
 
 def _entrypoint_row(spec: Any) -> Dict[str, Any]:
+    resources = _resources([spec])
     input_schema, input_sha = type_schema_and_hash(spec.payload_type)
     output_schema, output_sha = type_schema_and_hash(spec.return_type)
     slots: List[Dict[str, Any]] = []
@@ -180,6 +282,7 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # ratified surface, so the cardinality fact is stated, never omitted.
         "incremental_output": False,
         "slots": slots,
+        **({"resources": resources} if resources else {}),
     }
 
 
