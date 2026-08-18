@@ -226,7 +226,16 @@ def _bad_return(ctx: RequestContext, payload: _In, model: _M) -> int:
     return 0
 
 
-def _too_few(ctx: RequestContext, payload: _In) -> _Out:
+def _too_few(ctx: RequestContext) -> _Out:
+    return _Out()
+
+
+def _weightless(ctx: RequestContext, payload: _In) -> _Out:
+    """pgw#1392: the shipped `(ctx, payload) -> Out` workflow-helper shape."""
+    return _Out()
+
+
+def _junk_slot(ctx: RequestContext, payload: _In, junk: int) -> _Out:
     return _Out()
 
 
@@ -243,18 +252,37 @@ def test_malformed_entrypoint_signatures_refuse_typed() -> None:
     cases: list[tuple[Callable[..., Any], str]] = [
         (_payload_first, "ctx comes FIRST"),   # old payload-first order
         (_bad_payload, "payload"),
-        (_no_model, "declares no model slot"),
         (_bare_model, "bare Model base"),
         (_optional_model, r"`Adapter \| None`"),
         (_bad_list, r"`list\[Adapter\]`"),
         (_bad_return, "return type"),
-        (_too_few, "takes 2 parameters"),
+        (_too_few, "takes 1 parameters"),
         (_kw_only, "keyword"),
         (_Grouping.method, "MODULE-LEVEL"),
     ]
     for fn, pattern in cases:
         with pytest.raises(EntrypointDeclarationError, match=pattern):
             entrypoint(fn)
+
+
+def test_zero_model_slots_is_legal_pgw1392() -> None:
+    """pgw#1392: model-less entrypoints are LEGAL (se#757 blocker C).
+
+    `_no_model` used to be a refusal case here ("declares no model slot").
+    Ten shipped production functions have that signature, so the floor
+    dropped to zero. Junk slots did NOT become legal -- the loop above
+    still pins every other refusal, `_junk_slot` included."""
+
+    spec = getattr(entrypoint(_no_model), "__cozy_entrypoint__")
+    assert [slot.kind for slot in spec.slots] == ["adapter"]
+    assert spec.model_params == ()
+
+    spec = getattr(entrypoint(_weightless), "__cozy_entrypoint__")
+    assert spec.slots == ()
+    assert spec.model_classes == ()
+
+    with pytest.raises(EntrypointDeclarationError, match="must be a model slot"):
+        entrypoint(_junk_slot)
 
 
 # --- the ctx split ----------------------------------------------------------

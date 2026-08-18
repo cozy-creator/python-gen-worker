@@ -89,7 +89,13 @@ class EndpointHost:
         #: it references no Model class, so it is never resident and has
         #: nothing to make resident.
         self._booted = False
-        if engine is None:
+        if engine is None and not loaded.models:
+            # pgw#1392: a WEIGHTLESS endpoint references no Model class, so
+            # nothing will ever be built through the loader engine. Probing
+            # the binding's tree for a chunk store would be work done to
+            # answer a question nobody asks.
+            engine = None
+        elif engine is None:
             # pgw#1380: the native store->VRAM engine, bound off the
             # checkpoint tree the worker already resolved — a projected
             # snapshot carries its own chunk store, so nothing extra is

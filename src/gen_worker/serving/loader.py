@@ -89,7 +89,8 @@ def _surface_of(module: ModuleType) -> tuple[Dict[str, EntrypointSpec], Tuple[ty
         raise EndpointLoadError(
             f"{module.__name__} declares no entrypoints: an entrypoint is a "
             "module-level @entrypoint function "
-            "(ctx: RequestContext, payload: msgspec.Struct, <slot>: <Model>)"
+            "(ctx: RequestContext, payload: msgspec.Struct) plus zero or "
+            "more slots"
         )
     for cls in models:
         try:
