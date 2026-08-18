@@ -29,7 +29,6 @@ from diffusers import (
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
     LCMScheduler,
-    UniPCMultistepScheduler,
 )
 
 from gen_worker import (
@@ -67,7 +66,7 @@ _BUCKETS: dict[AspectRatio, tuple[int, int]] = {
 # no scheduler metadata at all — their tree ships it (ingest-guaranteed).
 SdxlScheduler = Literal[
     "dpmpp_2m_karras", "dpmpp_2m", "euler", "euler_trailing",
-    "euler_a", "unipc", "ddim", "lcm",
+    "euler_a", "ddim", "lcm",
 ]
 # diffusers' lazy top-level exports defeat mypy's subclass view of the
 # scheduler classes; the rows are real SchedulerMixin subclasses at runtime.
@@ -78,7 +77,6 @@ _SCHEDULERS: dict[SdxlScheduler, _SchedulerRow] = {
     "euler": (EulerDiscreteScheduler, {}),
     "euler_trailing": (EulerDiscreteScheduler, {"timestep_spacing": "trailing"}),
     "euler_a": (EulerAncestralDiscreteScheduler, {}),
-    "unipc": (UniPCMultistepScheduler, {}),
     "ddim": (DDIMScheduler, {}),
     "lcm": (LCMScheduler, {}),
 }

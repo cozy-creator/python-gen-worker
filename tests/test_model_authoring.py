@@ -564,7 +564,7 @@ def test_scheduler_precedence_and_the_distillation_slot_kind_guard(
             defaults=binding.defaults,
             adapter=DistillationAdapter(
                 name="odd", path=tmp_path / "lora",
-                defaults=SDXL.Lora.Defaults(scheduler="heun"),
+                defaults=SDXL.Lora.Defaults(scheduler="unipc"),
                 ref="cozy/odd@1",
             ),
         ),

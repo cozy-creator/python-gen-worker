@@ -25,6 +25,10 @@ class Out(msgspec.Struct):
 
 
 class UnobservedMark(Model[Any], lanes=(TINY_DIFFUSERS_FP32,)):
+    # diffusers pipelines compose their components dynamically; the static
+    # class carries no `unet`/`vae`.
+    pipe: Any
+
     def load(self, ctx: LoadContext[Any]) -> None:
         self.pipe = ctx.load(StableDiffusionPipeline)
         self.pipe.unet = ctx.compile(self.pipe.unet)

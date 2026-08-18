@@ -59,6 +59,8 @@ class ImageOutput(msgspec.Struct):
 
 
 class TinyModel(Model[SDXL], lanes=(TINY_DIFFUSERS_FP32,)):
+    pipe: Any
+
     def load(self, ctx: LoadContext[SDXL]) -> None:
         self.pipe = ctx.load(StableDiffusionPipeline)
         self.pipe.unet = ctx.compile(self.pipe.unet)

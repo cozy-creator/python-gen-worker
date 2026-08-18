@@ -25,6 +25,8 @@ class Out(msgspec.Struct):
 
 
 class BadMark(Model[Any], lanes=(TINY_DIFFUSERS_FP32,)):
+    pipe: Any
+
     def load(self, ctx: LoadContext[Any]) -> None:
         self.pipe = ctx.load(StableDiffusionPipeline)
         self.pipe.does_not_exist = ctx.compile(self.pipe.does_not_exist)

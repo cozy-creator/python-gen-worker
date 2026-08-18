@@ -26,7 +26,7 @@ def tiny_pipeline_class() -> type:
         def __init__(self, unet: Any, vae: Any, text_encoder: Any,
                      text_encoder_2: Any, scheduler: Any) -> None:
             super().__init__()
-            self.register_modules(
+            self.register_modules(  # type: ignore[attr-defined]
                 unet=unet, vae=vae, text_encoder=text_encoder,
                 text_encoder_2=text_encoder_2, scheduler=scheduler,
             )
