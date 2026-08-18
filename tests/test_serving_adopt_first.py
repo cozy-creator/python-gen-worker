@@ -26,7 +26,7 @@ from gen_worker import boot_stages
 from gen_worker._vendor.tensorfs import LocalCAS
 from gen_worker._vendor.torchcg import EnvironmentMismatch
 from gen_worker._vendor.torchcg.discovery import discover_lane
-from gen_worker._vendor.torchcg.document import GraphSetDocument
+from gen_worker._vendor.torchcg.document import GraphRecord, GraphSetDocument
 from gen_worker._vendor.torchcg.graph_identity import EnvIdentity, closure_hash
 from gen_worker._vendor.torchcg.requirements import RequirementsManifest
 from gen_worker._vendor.torchcg.store import LocalGraphStore, StoreError
@@ -384,14 +384,19 @@ class StubTransport:
         return self.blobs[url]
 
 
-def _adopt_answer(document, hit, hole, payload: bytes) -> dict:
+def _adopt_answer(
+    document: GraphSetDocument,
+    hit: GraphRecord,
+    hole: GraphRecord,
+    payload: bytes,
+) -> dict[str, Any]:
     """One th#2133 answer: `hit` minted for this env, `hole` not."""
     import hashlib
 
     lane = document.lanes[0]
 
-    def row(record, status: str) -> dict:
-        base = {
+    def row(record: GraphRecord, status: str) -> dict[str, Any]:
+        base: dict[str, Any] = {
             "graph_hash": record.graph,
             "graph_class": "",
             "program": record.program,
