@@ -44,6 +44,16 @@ from .entrypoints import (
     entrypoint,
 )
 from .host import EndpointHost, ModelInstance, ServeDispatchError
+from .mint import (
+    BackgroundMint,
+    MintCondemned,
+    MintFailure,
+    MintOutcome,
+    MintProgress,
+    MintedHole,
+    MissingProgramDigest,
+    mint_holes,
+)
 from .loader import (
     EndpointLoadError,
     LoadedEndpoint,
@@ -90,6 +100,7 @@ __all__ = [
     "AdapterRow",
     "ENTRYPOINT_ATTR",
     "Adapter",
+    "BackgroundMint",
     "DefaultsError",
     "DeployBinding",
     "DistillationAdapter",
@@ -101,6 +112,12 @@ __all__ = [
     "LoadContext",
     "LoadedEndpoint",
     "LoaderEngine",
+    "MintCondemned",
+    "MintFailure",
+    "MintOutcome",
+    "MintProgress",
+    "MintedHole",
+    "MissingProgramDigest",
     "Model",
     "ModelDeclarationError",
     "ModelInstance",
@@ -111,6 +128,7 @@ __all__ = [
     "lane_handle",
     "load_endpoint",
     "load_endpoint_module",
+    "mint_holes",
     "model_lanes",
     "model_type",
 ]

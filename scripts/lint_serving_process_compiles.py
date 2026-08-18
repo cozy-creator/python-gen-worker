@@ -110,6 +110,18 @@ CHILD_ONLY: Dict[str, str] = {
         "no boot or dispatch path imports `gen_worker.release`. Serialization "
         "is not inductor orchestration — it holds no GIL-bound compile."
     ),
+    "serving.mint_child": (
+        "pgw#1371's runtime-mint COMPILE CHILD. Its `torch.export.load` + "
+        "`Engine.compile` are the whole point of the module, and it is a "
+        "process entry (`python -m gen_worker.serving.mint_child`) spawned "
+        "one-per-graph by `serving.mint._child_compiler` — the serving parent "
+        "supervises it and never imports it. Structural, not a promise: "
+        "`serving/__init__.py` does not import it, `serving/mint.py` names it "
+        "only as an argv string to a subprocess, and the parent's whole "
+        "interface to it is an exit status plus an artifact path on disk. "
+        "The split is why a wedged compile is KILLABLE at all, which is what "
+        "makes the progress guard's condemnation actionable."
+    ),
     "model.export": (
         "pgw#1332's DECLARATION-TIME export. It is not reached from a serving "
         "process at all, and the claim is structural rather than a promise: "
