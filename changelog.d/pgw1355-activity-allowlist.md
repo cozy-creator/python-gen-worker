@@ -8,3 +8,12 @@
   under its own kind, deliberately NOT part of the activity's phase envelope, whose real content is
   asserted below over `KIND_WARMUP` alone. **Red-verified both ways:** shrinking the list back
   reddens the test, restoring it greens it, so the allowlist is still load-bearing.
+- **A SECOND master red, from pgw#1363's `cell` → `compiled graph` rename:**
+  `test_pod_privilege_isolation_pgw858` still reached `local_compiled_graph_store.CELLS_DIRNAME`,
+  an attribute the rename replaced with `COMPILED_GRAPHS_DIRNAME` — an `AttributeError` on every CI
+  run. It skips on a developer box (it needs docker + root), so only CI saw it.
+- **Why mypy did not catch it, and the argument that makes:** that module sits on the
+  `ignore_errors` mypy burn-down, so it was wholly unchecked. The pgw#1362 consolidation took it
+  OFF the list on its way through, and mypy then flagged the stale attribute immediately. **A test
+  module exempt from type checking is a test module that can silently stop running** — which is the
+  whole case for the burn-down.
