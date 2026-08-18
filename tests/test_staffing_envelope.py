@@ -165,10 +165,21 @@ def test_both_requires_scopes_fold_rather_than_shadow(rows: dict[str, dict]) -> 
 
 
 def test_the_undeclared_control_is_unchanged(rows: dict[str, dict]) -> None:
-    """An entrypoint with no `resources=` emits EXACTLY what it emitted
-    before pgw#1396 — the sdxl deploy pins this shape."""
+    """An entrypoint with no `resources=` emits the class header's floor and
+    nothing of its own — the sdxl deploy pins this shape.
 
-    assert rows["control"]["resources"] == {"gpu": True, "requires": {"min_vram_gb": 78.0}}
+    pgw#1404 added `min_sm` beside it, DERIVED from the lane contract's own
+    load dtype (H3_LANE is bf16 -> sm80) rather than hand-annotated. Paul,
+    2026-08-18: "the sm_x compute floor should fall out of the contract
+    itself... Only the VRAM requirement needs a separate annotation." So the
+    author wrote `lanes={H3_LANE: "vram78g"}` and the hub receives BOTH floors:
+    one producer per fact, and the capability floor can never drift from the
+    weights it describes.
+    """
+
+    assert rows["control"]["resources"] == {
+        "gpu": True, "requires": {"min_sm": 80, "min_vram_gb": 78.0},
+    }
 
 
 def test_the_block_reaches_the_real_manifest(tmp_path: Path) -> None:
@@ -210,7 +221,11 @@ def test_the_block_reaches_the_real_manifest(tmp_path: Path) -> None:
     assert list(blocks["generate"]["parallel"]) == ["sequence"]
     assert blocks["generate"]["requires"]["recommended"]["min_host_ram_gb"] == 96.0
     assert blocks["analyze"] == {"vcpus": 4}
-    assert blocks["control"] == {"gpu": True, "requires": {"min_vram_gb": 78.0}}
+    # pgw#1404: the DERIVED capability floor reaches the real manifest too —
+    # `min_sm` beside `min_vram_gb`, in the term the hub already reads.
+    assert blocks["control"] == {
+        "gpu": True, "requires": {"min_sm": 80, "min_vram_gb": 78.0},
+    }
 
 
 def test_absent_stays_absent(staffing: ModuleType) -> None:

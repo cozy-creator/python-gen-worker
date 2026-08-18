@@ -165,48 +165,143 @@ def lane_dtype(lane: Any, *, where: str) -> Any:
     return dtype
 
 
-def _parse_requires(
-    cls: type, requires: Mapping[Any, Any], lanes: tuple[Any, ...] | None
-) -> dict[str, Any]:
-    """``requires={contract: "vram12g, sm80+"}`` -> ``{handle: LayoutRequirements}``.
+def _parse_lanes(
+    cls: type, lanes: tuple[Any, ...] | Mapping[Any, Any]
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """``lanes=`` -> ``(lane contracts, {handle: LayoutRequirements})``.
 
-    Keyed by LANE, because what a deployment needs of a machine is a property
-    of the weight format it runs: the bf16 lane's VRAM floor is not the fp8
-    lane's. Values speak the ie#740 requirement grammar (``"vram12g"``,
-    ``"sm90+, vram80g"``, ``{"minimum": ..., "recommended": ...}``), parsed
-    HERE so the refusal names the author's own class header, and statically
-    extractable at publish so placement never has to run author code.
+    ONE declaration, two readings. The mapping form states each lane WITH the
+    machine floor that lane needs::
+
+        lanes={contracts.MINIMAX_H3_DIT_DIFFUSERS: "vram78g"}
+
+    and the tuple form states lanes with no floor at all::
+
+        lanes=(contracts.SDXL_DIFFUSERS_BF16,)
+
+    A floor belongs to the lane and cannot be written anywhere else, which is
+    the point of the merge: the two structures used to be keyed by the same
+    contract objects and could disagree — a floor could guard a lane the model
+    did not declare, and the check for that is now impossible to need.
+    ``None``/``""`` is a legal mapping value for a floor-less lane, so a model
+    with a floor on one lane and none on another writes ONE dict.
+
+    The value carries **VRAM ONLY** (Paul, 2026-08-18): *"the sm_x compute
+    floor should fall out of the contract itself, rather than being a separate
+    annotation. Only the VRAM requirement needs a separate annotation, because
+    it's not clear, based on the contract, how much VRAM is needed."* So
+    ``min_sm`` is DERIVED from the lane contract's own load dtype
+    (:func:`capability_floor_for_dtype`) and merged in here, and an author who
+    writes it by hand is refused rather than allowed to create a second
+    producer of one fact. It is parsed HERE so the refusal names the author's
+    own class header, and statically extractable at publish so placement never
+    has to run author code.
     """
-    from ..models.tensor_layout_contract import parse_layout_requirements
+    from ..models.tensor_layout_contract import (
+        RequirementTerms,
+        capability_floor_for_dtype,
+        parse_layout_requirements,
+    )
+    import msgspec
 
-    where = f"{cls.__qualname__} requires="
-    if not isinstance(requires, Mapping):
+    where = f"{cls.__qualname__}: lanes="
+    if isinstance(lanes, Mapping):
+        items = list(lanes.items())
+    elif isinstance(lanes, tuple):
+        items = [(lane, None) for lane in lanes]
+    else:
         raise ModelDeclarationError(
-            f"{where} must be a mapping of lane contract -> requirement, "
-            f"got {type(requires).__name__}"
+            f"{where} must be a tuple of tensorfs contract objects, or a "
+            f"mapping of contract -> machine floor, got "
+            f"{type(lanes).__name__}"
         )
-    if not requires:
-        raise ModelDeclarationError(
-            f"{where}{{}} declares nothing. Omit it to leave placement "
-            "UNDECLARED; an empty mapping is not a statement that this model "
-            "runs anywhere."
-        )
-    # `lanes=()` IS a declaration, and every floor over it guards nothing.
-    # `None` reaches here only when the model type declares no canonical
-    # contract either, so there is genuinely nothing to check the keys against.
-    declared = None if lanes is None else {lane_handle(lane) for lane in lanes}
-    out: dict[str, Any] = {}
-    for lane, value in requires.items():
-        handle = lane if isinstance(lane, str) else lane_handle(lane)
-        if declared is not None and handle not in declared:
+
+    contracts: list[Any] = []
+    floors: dict[str, Any] = {}
+    for lane, floor in items:
+        if not isinstance(lane, LaneContract):
             raise ModelDeclarationError(
-                f"{where}[{handle!r}] guards a lane this model does not "
-                f"declare. Its lanes are {sorted(declared)} — add the "
-                "contract to lanes= or drop the requirement; a requirement "
-                "over nothing is never checked."
+                f"{cls.__qualname__}: lane {lane!r} is not a layout "
+                "contract (no `dtype`); a lane is an imported "
+                "tensorfs contract object, never a name string"
             )
-        out[handle] = parse_layout_requirements(value, where=f"{where}[{handle!r}]")
-    return out
+        # The isinstance above only proves the ATTRIBUTE exists; this
+        # READS it, which is the pgw#1391 difference.
+        dtype = lane_dtype(lane, where=cls.__qualname__)
+        contracts.append(lane)
+        handle = lane_handle(lane)
+        site = f"{where}[{handle!r}]"
+
+        declared = None
+        if floor is not None and floor != "":
+            declared = parse_layout_requirements(floor, where=site)
+            _refuse_non_vram_terms(declared, where=site)
+
+        # A lane with no dtype cannot state a capability floor, and a floor is
+        # the one place failing OPEN is invisible: an absent `min_sm` reads to
+        # the resolver as "runs anywhere", which is th#1754's shape with a new
+        # cause. `lane_dtype` already refuses a dtypeless contract — EXCEPT for
+        # a handle in `DTYPELESS_UPSTREAM_LANES`, where it answers None. That
+        # escape hatch predates the derivation and would now buy silence rather
+        # than the loud load crash it was traded for, so a floor closes it
+        # here: fail closed, exactly as the tuple-vs-dict hardcut does.
+        if not dtype:
+            raise ModelDeclarationError(
+                f"{site}: lane {handle} declares no load dtype, so no "
+                "compute-capability floor can be derived for it. A lane that "
+                "cannot state `min_sm` would publish a floor the resolver "
+                "reads as 'runs anywhere' — silently, which is worse than the "
+                "load crash a dtypeless contract used to cause. Declare the "
+                "dtype on the tensorfs contract document (a fused-QKV or "
+                "text-encoder COMPONENT layout is usually not a serve lane at "
+                "all, and the fix is then to name the real lane document)."
+            )
+
+        # The capability floor falls out of the CONTRACT, never the header.
+        min_sm = capability_floor_for_dtype(dtype)
+        if declared is None and not min_sm:
+            continue  # nothing declared, nothing derived
+        minimum = declared.min_terms() if declared is not None else RequirementTerms()
+        if min_sm:
+            minimum = msgspec.structs.replace(minimum, min_sm=min_sm)
+        floors[handle] = (
+            msgspec.structs.replace(declared, minimum=minimum)
+            if declared is not None
+            else parse_layout_requirements(minimum, where=site)
+        )
+    return tuple(contracts), floors
+
+
+#: The lane annotation states VRAM and nothing else. `min_sm` is derived from
+#: the contract; the other axes are not lane facts at all (a CUDA/torch floor
+#: is a property of the IMAGE, and host RAM of the function).
+_LANE_FLOOR_TERMS: frozenset[str] = frozenset({"min_vram_gb"})
+
+
+def _refuse_non_vram_terms(requirements: Any, *, where: str) -> None:
+    """A lane floor that states anything but VRAM is refused at declaration."""
+    for level, terms in (
+        ("", requirements.min_terms()),
+        (" recommended", requirements.recommended_terms()),
+    ):
+        extra = sorted(set(terms.declared_terms()) - _LANE_FLOOR_TERMS)
+        if not extra:
+            continue
+        if "min_sm" in extra:
+            raise ModelDeclarationError(
+                f"{where}{level}: min_sm is DERIVED from the lane contract's "
+                "own load dtype, never written here — an 8-bit lane needs "
+                "8-bit kernels because of what it IS, and two producers of "
+                "one fact is how they drift apart. Drop the sm term; if the "
+                "derived floor is wrong for this dtype, fix the table in "
+                "`gen_worker.models.tensor_layout_contract.DTYPE_MIN_SM`."
+            )
+        raise ModelDeclarationError(
+            f"{where}{level}: a lane floor states VRAM only, got {extra}. "
+            "VRAM is the one floor the contract cannot imply, which is why it "
+            "is annotated; the rest are not lane facts (a CUDA/torch floor "
+            "belongs to the image, host RAM to the function's Resources)."
+        )
 
 
 def _declared_model_type(cls: type) -> type | None:
@@ -239,20 +334,27 @@ class Model(Generic[MT]):
             def load(self, ctx: LoadContext[SDXL]) -> None: ...
 
     ``lanes=`` omitted means one lane — the model type's canonical contract;
-    ``lanes=()`` states eager-permanent explicitly. ``requires=`` states what
-    each lane needs of the machine in the ie#740 grammar, keyed by the same
-    contract objects::
+    ``lanes=()`` states eager-permanent explicitly.
 
-        class SdxlModel(
-            Model[SDXL],
-            lanes=(contracts.SDXL_DIFFUSERS_BF16,),
-            requires={contracts.SDXL_DIFFUSERS_BF16: "vram12g"},
-        ): ...
+    The MAPPING form declares each lane together with what that lane needs of
+    a machine, in the ie#740 grammar — one line, one place::
 
-    Omitting it leaves placement UNDECLARED, and the platform's default floor
-    is what a deployment then gets. ``__init__`` stays FREE
-    (no GPU, no weights): construction and loading are separate moments, and
-    derive/introspection instantiate without weights.
+        class H3Model(Model[MiniMaxH3],
+                      lanes={contracts.MINIMAX_H3_DIT_DIFFUSERS: "vram78g"}):
+            ...
+
+    ``None``/``""`` is a legal floor, so a mixed model still writes one dict.
+    Declaring no floor leaves placement UNDECLARED, and the platform's default
+    is what a deployment then gets.
+
+    A declared floor INFORMS, it does not permit (Paul, 2026-08-18): the hub
+    filters placement on it, and a worker that ends up under it warns loudly
+    and serves anyway. Any model runs on any machine — a poor match is slow
+    and says so, never refused, so cozy-local can run anything it has the
+    patience for.
+
+    ``__init__`` stays FREE (no GPU, no weights): construction and loading are
+    separate moments, and derive/introspection instantiate without weights.
     """
 
     __cozy_model_type__: ClassVar[Any] = None
@@ -262,10 +364,18 @@ class Model(Generic[MT]):
     def __init_subclass__(
         cls,
         *,
-        lanes: tuple[Any, ...] | None = None,
-        requires: Mapping[Any, Any] | None = None,
+        lanes: tuple[Any, ...] | Mapping[Any, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        if "requires" in kwargs:
+            raise ModelDeclarationError(
+                f"{cls.__qualname__}: `requires=` is DELETED — a lane and its "
+                "machine floor are ONE declaration now. Write "
+                "`lanes={contract: \"vram78g\"}` instead of "
+                "`lanes=(contract,), requires={contract: \"vram78g\"}`. The "
+                "mapping value is the lane's VRAM floor (None/\"\" for none); "
+                "the sm floor is derived from the contract, not written."
+            )
         super().__init_subclass__(**kwargs)
         if Model in cls.__bases__ and _declared_model_type(cls) is None and not any(
             isinstance(parameter, TypeVar)
@@ -281,29 +391,13 @@ class Model(Generic[MT]):
         declared = _declared_model_type(cls)
         if declared is not None:
             cls.__cozy_model_type__ = declared
-        # The lanes this class actually serves — declared, or the model type's
-        # canonical contract when `lanes=` is omitted. `requires=` is checked
-        # against THESE, not against the raw kwarg (pgw#1391): with `lanes=`
-        # omitted the old check had nothing to compare keys to and accepted a
-        # floor keyed to any stamp at all, including one naming no document.
-        effective_lanes: tuple[Any, ...] | None = lanes
+        # The lanes this class actually serves, and their floors, from the ONE
+        # `lanes=` declaration — or the model type's canonical contract when
+        # `lanes=` is omitted (which declares no floor).
         if lanes is not None:
-            if not isinstance(lanes, tuple):
-                raise ModelDeclarationError(
-                    f"{cls.__qualname__}: lanes= must be a tuple of tensorfs "
-                    f"contract objects, got {type(lanes).__name__}"
-                )
-            for lane in lanes:
-                if not isinstance(lane, LaneContract):
-                    raise ModelDeclarationError(
-                        f"{cls.__qualname__}: lane {lane!r} is not a layout "
-                        "contract (no `dtype`); a lane is an imported "
-                        "tensorfs contract object, never a name string"
-                    )
-                # The isinstance above only proves the ATTRIBUTE exists; this
-                # READS it, which is the pgw#1391 difference.
-                lane_dtype(lane, where=cls.__qualname__)
-            cls.__cozy_lanes__ = tuple(lanes)
+            contracts, floors = _parse_lanes(cls, lanes)
+            cls.__cozy_lanes__ = contracts
+            cls.__cozy_requires__ = floors
         elif declared is not None:
             # pgw#1391: OMITTING `lanes=` IS THE se#757 TRAP, so it is checked
             # here too. `model_lanes()` falls through to the model type's
@@ -319,9 +413,6 @@ class Model(Generic[MT]):
             canonical = getattr(declared, "canonical_contract", None)
             if canonical is not None:
                 lane_dtype(canonical, where=f"{cls.__qualname__} (lanes= omitted)")
-                effective_lanes = (canonical,)
-        if requires is not None:
-            cls.__cozy_requires__ = _parse_requires(cls, requires, effective_lanes)
 
     # -- lifecycle hooks (the load/unload contract, pgw#1382) ---------------
 

@@ -267,11 +267,21 @@ def test_a_lane_naming_no_document_refuses_at_declaration() -> None:
         class Claimed(Model[SDXL], lanes=(nope,)):
             def load(self, ctx: object) -> None: ...
 
-    # ...and a `requires=` floor keyed to a stamp this model does not serve,
-    # which used to be accepted outright whenever `lanes=` was omitted.
-    with pytest.raises(ModelDeclarationError, match="does not declare"):
+    # A floor keyed to a lane the model does not serve is now UNREACHABLE
+    # rather than refused: pgw#1404 merged the two kwargs, so a floor is
+    # written as the VALUE of its own lane and cannot name a second stamp.
+    # `requires=` is deleted, and the refusal names the spelling that replaces
+    # it — a silently-ignored floor is exactly what this class of bug was.
+    with pytest.raises(ModelDeclarationError, match="requires.*is DELETED"):
 
         class Floored(Model[SDXL], requires={"nope.not-a-document@1": "vram12g"}):
+            def load(self, ctx: object) -> None: ...
+
+    # ...and the same missing document refuses through the merged spelling,
+    # so folding the kwargs did not cost this fence anything.
+    with pytest.raises(ModelDeclarationError, match="DOES NOT EXIST"):
+
+        class ClaimedWithFloor(Model[SDXL], lanes={nope: "vram12g"}):
             def load(self, ctx: object) -> None: ...
 
 
@@ -300,3 +310,57 @@ def test_no_vendored_stamp_ties_between_two_model_types() -> None:
         if len(hits) > 1:
             ties[contract.stamp] = hits
     assert not ties, f"stamps claimed by more than one model type: {ties}"
+
+
+def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
+    """pgw#1404: the derivation FAILS CLOSED on a contract with no dtype.
+
+    The h3 lane audited all eleven vendored documents against the new
+    dtype->min_sm derivation and found three with no top-level dtype —
+    `dit.blocks-fused-qkv@1` and both `sdxl.clip-g-*-qkv@1`. They are
+    component/sub-tree layouts, so they arguably never belong in a `lanes=` at
+    all — but "arguably never" is an assumption, not a fence.
+
+    Note how the hazard MUTATES under the derivation, which is why this test
+    exists rather than a comment: a dtypeless contract used to be a LOUD load
+    crash (`MissingDtype`). Deriving 0 from it would turn the same gap into a
+    SILENT floor of none, which the resolver reads as "runs anywhere" —
+    th#1754's shape with a new cause, and strictly worse because nothing
+    raises. A floor is the one place failing open is invisible.
+    """
+
+    from gen_worker._vendor.tensorfs import contracts
+    from gen_worker.models.model_types import SDXL
+    from gen_worker.serving import Model, ModelDeclarationError
+    from gen_worker.serving import model as model_module
+
+    dtypeless = [c for c in contracts.all() if getattr(c, "_dtype", None) is None]
+    assert {c.stamp for c in dtypeless} == {
+        "dit.blocks-fused-qkv@1",
+        "sdxl.clip-g-fused-qkv@1",
+        "sdxl.clip-g-split-qkv@1",
+    }, "the dtypeless set moved; re-audit the derivation against it"
+
+    for contract in dtypeless:
+        with pytest.raises(ModelDeclarationError, match="no load dtype"):
+
+            class Floored(Model[SDXL], lanes={contract: "vram12g"}):  # noqa: B903
+                def load(self, ctx: object) -> None: ...
+
+    # ...and the one path that could still buy silence is closed too.
+    # `lane_dtype` answers None instead of raising for a handle listed in
+    # `DTYPELESS_UPSTREAM_LANES` (an empty escape hatch today). If anything is
+    # ever added to it, the lane would clear declaration AND derive no floor.
+    # A floor declaration refuses on the dtype itself, so the hatch cannot
+    # reopen this hole behind someone's back.
+    original = model_module.DTYPELESS_UPSTREAM_LANES
+    try:
+        model_module.DTYPELESS_UPSTREAM_LANES = frozenset({"sdxl.clip-g-fused-qkv@1"})
+        with pytest.raises(ModelDeclarationError, match="no load dtype"):
+
+            class Hatched(
+                Model[SDXL], lanes={contracts.SDXL_CLIP_G_FUSED_QKV: "vram12g"}
+            ):
+                def load(self, ctx: object) -> None: ...
+    finally:
+        model_module.DTYPELESS_UPSTREAM_LANES = original

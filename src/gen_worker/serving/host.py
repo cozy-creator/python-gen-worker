@@ -27,7 +27,7 @@ import threading
 import time
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
@@ -36,6 +36,7 @@ from .context import DeployBinding, LoadContext, LoaderEngine, RequestContext
 from .entrypoints import EntrypointSpec
 from .loader import LoadedEndpoint
 from .model import Model, model_type
+from .placement import warn_if_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,10 @@ class EndpointHost:
             cls: loaded.lane(cls, lane_contract) for cls in loaded.models
         }
         self.instances: Dict[type, ModelInstance] = {}
+        #: Per class, the unmet machine floors measured at residency-admit.
+        #: Non-empty = this endpoint serves DEGRADED, and says so on every
+        #: request rather than only in the boot log.
+        self.degraded: Dict[type, Tuple[str, ...]] = {}
         self.adoption: Any = None
         #: pgw#1392: "has boot run" is the real question. `instances` used to
         #: stand in for it, which a WEIGHTLESS endpoint falsifies forever —
@@ -125,7 +130,16 @@ class EndpointHost:
         if self._output_dir is not None:
             kwargs.setdefault("local_output_dir", str(self._output_dir))
         kwargs.update(overrides)
-        return RequestContext(request_id, binding=self.binding, **kwargs)
+        ctx: RequestContext[Any] = RequestContext(
+            request_id, binding=self.binding, **kwargs
+        )
+        # Degradation is a LOAD-time fact, so it rides every request the
+        # degraded instance serves — a caller must not have to read the pod's
+        # boot log to learn why its request took ten minutes.
+        for warnings in self.degraded.values():
+            for warning in warnings:
+                ctx.warn(warning)
+        return ctx
 
     def _load_context(
         self, model_cls: type, *, compile_sink: Any = None
@@ -220,6 +234,14 @@ class EndpointHost:
 
         for model_cls in self.loaded.models:
             load_started = time.monotonic()
+            # Residency-admit: the machine meets the lane's declared floors,
+            # or it is told loudly that it does not and loads anyway (Paul,
+            # 2026-08-18 — any model on any machine). Measured before the
+            # first weight moves; the warning rides every request this
+            # instance serves via `make_context`.
+            self.degraded[model_cls] = warn_if_degraded(
+                model_cls, self.lanes[model_cls]
+            )
             model: Model[Any] = model_cls()  # cheap __init__ — no GPU, by contract
             load_context = self._load_context(
                 model_cls,

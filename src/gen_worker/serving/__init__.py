@@ -83,8 +83,14 @@ from .model import (
     model_requires,
     model_type,
 )
+from .placement import DeviceFacts, Shortfall, device_facts, shortfalls, warn_if_degraded
 
 __all__ = [
+    "DeviceFacts",
+    "Shortfall",
+    "device_facts",
+    "shortfalls",
+    "warn_if_degraded",
     "manifest_sizer",
     "decode_envelope",
     "ServeLoop",

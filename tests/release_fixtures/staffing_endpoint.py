@@ -65,9 +65,10 @@ class AnalyzeOutput(msgspec.Struct):
 
 class H3Model(
     Model[MiniMaxH3],
-    lanes=(H3_LANE,),
-    # The per-LANE placement floor — a property of the weight format.
-    requires={H3_LANE: "vram78g"},
+    # pgw#1404: the lane and its per-LANE placement floor are ONE declaration —
+    # the floor is a property of the weight format, so it is written as the
+    # lane's own value. VRAM only; the sm floor is derived from the contract.
+    lanes={H3_LANE: "vram78g"},
 ):
     def load(self, ctx: Any) -> None:
         self.pipe = ctx.load(H3Pipeline)
