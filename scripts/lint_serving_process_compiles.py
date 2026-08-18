@@ -95,7 +95,7 @@ CHILD_ONLY: Dict[str, str] = {
         "bindings do not import it, and `cli/model.py` imports it inside the "
         "`export` handler — so the only way to run it is to type "
         "`gen-worker model export`, which is a catalog BUILD step whose output "
-        "is committed. `tests/test_model_sdk_pgw1332.py::"
+        "is committed. `tests/test_model_sdk.py::"
         "test_the_family_facade_does_not_import_the_exporter` executes that "
         "claim instead of restating it. The trace is fake-tensor only: no "
         "weights, no GPU, no compile, so even run by hand it is shape "

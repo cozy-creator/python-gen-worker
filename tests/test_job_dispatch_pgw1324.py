@@ -20,7 +20,7 @@ Each section names the one-line edit that turns it RED:
    BOTH is refused at boot. AMENDED by pgw#1336: th#2052 grew
    `RunJob.intent_kind`, so the head reads one table per kind and the refusal
    names one inventory instead of the union — see
-   `tests/test_runjob_intent_pgw1336.py` for the routing fence. RED by
+   `tests/test_sdk_authoring.py` for the routing fence. RED by
    allowing the collision, or by making a refusal name the wrong inventory.
 3. **The declaration is the RELEASE's.** `execute_job._stamp_declaration` — not
    the dispatch head — projects `publishes`/`emits_media` onto the context, so
@@ -261,7 +261,7 @@ def test_a_name_in_neither_table_names_THAT_kind_s_inventory() -> None:
     refusal names THAT one — the ambiguity the union was compensating for is
     gone. What pgw#1324 actually bought (a good job name is never "unknown")
     is proven by the headline test above and by the crossed-name case in
-    `tests/test_runjob_intent_pgw1336.py`.
+    `tests/test_sdk_authoring.py`.
     """
 
     async def scenario() -> Tuple[pb.JobResult, pb.JobResult]:
