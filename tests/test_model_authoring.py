@@ -138,6 +138,38 @@ def test_model_header_declarations_and_refusals() -> None:
     assert canonical is SDXL.canonical_contract
     assert lane_handle(canonical) == "sdxl.diffusers-bf16@1"
 
+    # The SHIPPED tensorfs Contract's attribute shape: `stamp` + `digest`,
+    # and NO `contract` (tensorfs#111). Every stand-in above spells `contract`,
+    # which short-circuits before `digest` is ever reached — so none of them
+    # can catch the defect that actually shipped: reading the bare 64-hex
+    # `digest` as the handle, which put `f1455f56…` where
+    # `sdxl.diffusers-bf16@1` belonged and made torchcg refuse the lane. This
+    # is the producer half of a cross-repo wire agreement, so the shape is
+    # pinned here rather than left to the one consumer that noticed.
+    class ShippedContract:
+        __slots__ = ("digest", "dtype", "name", "stamp", "version")
+
+        def __init__(self) -> None:
+            self.name = "sdxl.diffusers-bf16"
+            self.version = 1
+            self.stamp = "sdxl.diffusers-bf16@1"
+            self.digest = "f1455f56321d1f268772912c223170f015564ac0" + "0" * 24
+            self.dtype = None
+
+    assert lane_handle(ShippedContract()) == "sdxl.diffusers-bf16@1"
+
+    # A digest-only object still yields a STAMP, never a bare hex string:
+    # an anonymous custom contract's digest IS its stamp (tensorfs#112's third
+    # Stamp arm), and that spelling carries the `sha256:` prefix.
+    class AnonymousContract:
+        __slots__ = ("digest", "dtype")
+
+        def __init__(self) -> None:
+            self.digest = "a" * 64
+            self.dtype = None
+
+    assert lane_handle(AnonymousContract()) == "sha256:" + "a" * 64
+
     # A floor over a lane this model does not declare guards nothing.
     with pytest.raises(ModelDeclarationError, match="does not.*declare"):
         class StrayFloor(Model[SDXL], lanes=(), requires={"sdxl.other@1": "vram8g"}):
