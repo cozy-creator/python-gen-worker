@@ -26,8 +26,8 @@ ruling, 2026-08-17 — one parameter-order rule across the SDK, matching
     def generate(ctx: RequestContext, payload: GenerateInput,
                  video: H3Model) -> GenerateOutput: ...
 
-    @entrypoint(publishes=True,       # a PRODUCER (pgw#1406)
-                env=("HF_TOKEN", "CIVITAI_API_KEY"))
+    @entrypoint(kind="conversion",    # a PRODUCER (pgw#1406)
+                publishes=True, env=("HF_TOKEN", "CIVITAI_API_KEY"))
     def cast_dtype(ctx: RequestContext, payload: CastDtypeInput
                    ) -> PublishResult: ...
 
@@ -57,11 +57,12 @@ beyond import.
 
 **THE KWARG RULE (pgw#1406).** Decorator kwargs are declarations about
 PLACEMENT AND AUTHORITY; the signature carries MODEL SLOTS. ``resources=``
-(pgw#1396) is placement; ``publishes=`` / ``env=`` / ``emits_media=`` are
-authority, and they are the producer plane's whole declaration set — pgw#983
-deleted ``@job`` and this is where its 27 conversion producers land
-(th#2173). The "``resources=`` is the ONE kwarg" sentence described the
-surface on the day it had one; it was never the principle.
+(pgw#1396) and ``kind=`` are placement; ``publishes=`` / ``env=`` /
+``emits_media=`` are authority, and together they are the producer plane's
+whole declaration set — pgw#983 deleted ``@job`` and this is where its 27
+conversion producers land (th#2173). The "``resources=`` is the ONE kwarg"
+sentence described the surface on the day it had one; it was never the
+principle.
 """
 
 from __future__ import annotations
@@ -141,6 +142,13 @@ class EntrypointSpec:
     #: an explicit opt-OUT, which the SDK enforces at the media surface. See
     #: the decorator docstring for why this one does not reach the hub.
     emits_media: bool | None = None
+    #: pgw#1406: the WORKLOAD KIND, the hub's own vocabulary
+    #: (``internal/functionkind``: inference | training | conversion | dataset
+    #: | eval). ``""`` is undeclared and means ``inference``. NOT a write
+    #: declaration — th#2052 cut that and ``publishes=`` replaced it — but the
+    #: hub still derives three PLACEMENT facts from it, which is why a producer
+    #: cannot leave it at the default. See the decorator docstring.
+    kind: str = ""
     #: The class the author annotated on ``ctx``. The serve loop constructs
     #: THIS class, so a producer that annotates ``JobContext`` receives the
     #: publisher surface and an inference entrypoint is unchanged.
@@ -225,6 +233,12 @@ def _slot_of(fn: Callable[..., Any], name: str, annotation: Any) -> SlotSpec:
 
 _ENV_NAME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
+#: The hub's workload-kind vocabulary, verbatim from
+#: `internal/functionkind/functionkind.go:All`. NOT invented here — every value
+#: is one the hub normalizes and reads, and `""` is the undeclared default that
+#: `Normalize` maps onto `inference`.
+KINDS = ("inference", "training", "conversion", "dataset", "eval")
+
 
 def _validate_env_decl(fn: Callable[..., Any], env: Any) -> Tuple[str, ...]:
     """The declared env-var NAMES, validated at decoration.
@@ -270,6 +284,7 @@ def entrypoint(fn: F) -> F: ...
 def entrypoint(
     *,
     resources: Any = ...,
+    kind: str = ...,
     publishes: bool = ...,
     env: Any = ...,
     emits_media: bool | None = ...,
@@ -280,6 +295,7 @@ def entrypoint(
     fn: F | None = None,
     *,
     resources: Any = None,
+    kind: str = "",
     publishes: bool = False,
     env: Any = None,
     emits_media: bool | None = None,
@@ -315,6 +331,27 @@ def entrypoint(
     ``requires=`` term, at ``recommended`` only) is deliberate: vCPUs are
     selectable and filterable at both providers, host RAM on a RunPod GPU pod
     is neither, so a host-RAM MINIMUM stays forbidden (Paul, 2026-07-11).
+
+    ``kind=`` is the second PLACEMENT kwarg, and a producer CANNOT leave it at
+    the default. The vocabulary is the hub's own — `internal/functionkind`:
+    ``inference`` (the default) | ``training`` | ``conversion`` | ``dataset``
+    | ``eval`` — so nothing is invented here. th#2052 cut kind from deciding
+    WRITES and ``publishes=`` replaced it for that, but ``functionkind.go``
+    itself draws the remaining line: *"Naming a ref is a READ; writing one is
+    the function's `publishes` declaration and is not derived here."* The hub
+    still derives three PLACEMENT facts from kind, and all three are wrong for
+    a producer that leaves it at ``inference``:
+
+    * ``NamesReservedRefs(kind) != inference`` — an inference row gets NO
+      preflight resolution and NO dispatch-time read grant for the reserved
+      ``source`` / ``text_encoder`` / ``destination`` / dataset-pin payload
+      fields. A ported conversion producer would reach its body with
+      ``ctx.source_path is None`` and raise on its own first line.
+    * ``WorkerCapabilityTokenTTL`` — 1h for inference, 24h for conversion. A
+      multi-hour quantization would spend its life renewing.
+    * ``SizesDiskFromSource`` — true for conversion and eval only. An
+      inference-kind row sizes a pod's disk without looking at the 13.9 GB
+      source it is about to download.
 
     ``publishes=`` / ``env=`` / ``emits_media=`` are the AUTHORITY kwargs
     (pgw#1406) — the producer plane's declaration set, carried over verbatim
@@ -354,6 +391,7 @@ def entrypoint(
             return entrypoint(  # type: ignore[call-overload,no-any-return]
                 inner,
                 resources=resources,
+                kind=kind,
                 publishes=publishes,
                 env=env,
                 emits_media=emits_media,
@@ -381,6 +419,14 @@ def entrypoint(
             fn,
             f"emits_media= is a bool or None (undeclared), got "
             f"{type(emits_media).__name__}",
+        )
+    declared_kind = str(kind or "").strip().lower()
+    if declared_kind and declared_kind not in KINDS:
+        raise _refuse(
+            fn,
+            f"kind= must be one of {KINDS}, got {kind!r} — the vocabulary is "
+            "the hub's (internal/functionkind), so a value it does not "
+            "normalize would silently become 'inference'",
         )
     declared_env = _validate_env_decl(fn, env)
     if resources is not None:
@@ -477,6 +523,7 @@ def entrypoint(
         slots=slots,
         return_type=return_type,
         resources=resources,
+        kind=declared_kind,
         publishes=bool(publishes),
         env=declared_env,
         emits_media=emits_media,

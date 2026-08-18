@@ -77,6 +77,41 @@ def test_env_is_normalized_to_a_tuple(producers: ModuleType) -> None:
     assert spec(producers.cast_dtype).env == ()
 
 
+def test_kind_reaches_the_spec_and_the_row(
+    producers: ModuleType, rows: dict[str, dict]
+) -> None:
+    """The fourth gap, and the one the three ruled kwargs do not cover.
+
+    A producer that leaves `kind` at `inference` gets
+    `NamesReservedRefs(kind) == false` hub-side, so the reserved `source`
+    payload field it depends on is never resolved and never granted — the body
+    raises on its own first line. The vocabulary is copied verbatim from
+    `internal/functionkind.All`."""
+    assert spec(producers.cast_dtype).kind == "conversion"
+    assert spec(producers.score_bench).kind == "eval"
+    assert spec(producers.describe).kind == ""
+
+    assert rows["cast_dtype"]["kind"] == "conversion"
+    assert rows["score_bench"]["kind"] == "eval"
+    # Undeclared is the hub's own default, unchanged.
+    assert rows["describe"]["kind"] == "inference"
+
+
+def test_an_unknown_kind_is_refused() -> None:
+    """A value the hub does not normalize would silently become `inference`
+    — the exact silence this kwarg exists to end."""
+    with pytest.raises(EntrypointDeclarationError, match="kind= must be one of"):
+        _probe(
+            "import msgspec\n"
+            "from gen_worker import RequestContext, entrypoint\n"
+            "class I(msgspec.Struct): pass\n"
+            "class O(msgspec.Struct): pass\n"
+            "@entrypoint(kind='quantization')\n"
+            "def f(ctx: RequestContext, payload: I) -> O: ...\n",
+            "pgw1406_bad_kind",
+        )
+
+
 def test_emits_media_is_tri_state(producers: ModuleType) -> None:
     """DELIBERATE DELTA 1 from `@job`, which defaulted to False.
 

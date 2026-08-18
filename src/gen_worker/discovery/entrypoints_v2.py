@@ -55,9 +55,13 @@ from typing import Any, Dict, List, Set
 
 from .schema import type_schema_and_hash
 
-#: A v2 entrypoint is an inference handler. The vocabulary is the hub's
-#: (`validation._KNOWN_KINDS`); the v2 surface declares no other kind today,
-#: and inventing one here would be a value space no hub reader names.
+#: The DEFAULT kind: an entrypoint that declares nothing is an inference
+#: handler, which is also what the hub's `functionkind.Normalize("")` returns.
+#: pgw#1406 gave `@entrypoint` a `kind=` kwarg so a PRODUCER can say otherwise
+#: — the sentence that used to sit here ("the v2 surface declares no other kind
+#: today, and inventing one here would be a value space no hub reader names")
+#: was right about the second half and is why `KINDS` is copied verbatim from
+#: `internal/functionkind.All` rather than invented.
 ENTRYPOINT_KIND = "inference"
 
 class EntrypointDiscoveryError(ValueError):
@@ -308,7 +312,14 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         "module": spec.fn.__module__,
         "declared_module": spec.fn.__module__,
         "class_name": "",
-        "kind": ENTRYPOINT_KIND,
+        # pgw#1406: the author's `kind=` when declared, else the inference
+        # default. `manifestFunction.Kind` already decodes it and the hub
+        # derives three PLACEMENT facts from it — reserved-ref resolution,
+        # capability TTL, source-sized disk — none of which a conversion
+        # producer can get from the `inference` default. Nothing is invented:
+        # the value space is `internal/functionkind.All`, validated at
+        # decoration against `serving.entrypoints.KINDS`.
+        "kind": getattr(spec, "kind", "") or ENTRYPOINT_KIND,
         "input_schema": input_schema,
         "payload_schema_sha256": input_sha,
         "output_schema": output_schema,

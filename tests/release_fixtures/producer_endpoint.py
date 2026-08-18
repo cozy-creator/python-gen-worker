@@ -68,27 +68,30 @@ class DescribeResult(msgspec.Struct):
     summary: str
 
 
-@entrypoint(publishes=True)
+@entrypoint(kind="conversion", publishes=True)
 def cast_dtype(ctx: RequestContext, payload: CastDtypeInput) -> PublishResult:
     """`conversion/src/conversion/transform.py:137`, re-decorated."""
     return PublishResult(published=list(payload.dtypes))
 
 
-@entrypoint(publishes=True, env=("HF_TOKEN", "CIVITAI_API_KEY"))
+@entrypoint(kind="conversion", publishes=True,
+            env=("HF_TOKEN", "CIVITAI_API_KEY"))
 def clone_repo(ctx: RequestContext, payload: CloneInput) -> PublishResult:
     """`conversion/src/conversion/mirror.py:194`, re-decorated."""
     return PublishResult(published=[payload.destination_repo])
 
 
 @entrypoint(
-    resources=Resources(gpu=True), publishes=True, emits_media=True
+    kind="conversion", resources=Resources(gpu=True),
+    publishes=True, emits_media=True,
 )
 def quality_matrix(ctx: RequestContext, payload: MatrixInput) -> MatrixResult:
     """`conversion/src/conversion/quality_matrix.py:389`, re-decorated."""
     return MatrixResult(rows=len(payload.prompts))
 
 
-@entrypoint(resources=Resources(gpu=True, vcpus=8), emits_media=True)
+@entrypoint(kind="eval", resources=Resources(gpu=True, vcpus=8),
+            emits_media=True)
 def score_bench(ctx: RequestContext, payload: BenchInput) -> BenchResult:
     """`conversion/src/conversion/score_bench.py:383`: media, NO repo."""
     return BenchResult(score=float(len(payload.prompts)))
