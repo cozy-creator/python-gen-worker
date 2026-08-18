@@ -3,10 +3,10 @@
   set (`SDXL`, `SD15`, `SD2`, `HiDreamO1`, `Wan22`, plus `SDXL.Lora` /
   `SD15.Lora` overlays) — each a name + frozen `Defaults` struct whose field
   defaults ARE the platform fallback values (zero-arg = servable trace fixture)
-  + a tensorfs contract-pattern ingest fingerprint. `SDXL.Recipe`/`SD15.Recipe`
+  + a tensorfs contract-pattern ingest fingerprint. `SDXL.Config`/`SD15.Config`
   carry the shared independent serving axes (cfg, steps, guidance,
   timesteps — cfg and few-step are separate facts) and BOTH defaults types
-  inherit them, so an endpoint annotates `recipe: SDXL.Recipe` — one nominal
+  inherit them, so an endpoint annotates `config: SDXL.Config` — one nominal
   type, no union. `SchedulerName` is the platform-wide scheduler vocabulary —
   ADAPTER metadata only: checkpoints carry NO scheduler metadata (the tree IS
   their choice), while `SDXL.Lora.Defaults.scheduler` is the riding

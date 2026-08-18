@@ -29,6 +29,7 @@ from gen_worker.models import (
     model_type_for_contract,
 )
 from gen_worker.families import GenerationDefaults
+from gen_worker.models.model_types import SdxlLoraDefaults
 from gen_worker.request_context import RequestContext
 
 
@@ -62,9 +63,9 @@ def test_sdxl_lora_zero_arg_is_lightning_shaped() -> None:
     # Inert while cfg=False; the base platform knob, so a row that flips cfg
     # on without narrowing still serves sanely.
     assert d.guidance == SDXL.Defaults().guidance
-    # Both defaults types ARE the one nominal recipe type.
-    assert isinstance(d, SDXL.Recipe)
-    assert isinstance(SDXL.Defaults(), SDXL.Recipe)
+    # Both defaults types ARE the one nominal config type.
+    assert isinstance(d, SDXL.Config)
+    assert isinstance(SDXL.Defaults(), SDXL.Config)
 
 
 def test_every_zero_arg_defaults_is_servable() -> None:
@@ -305,11 +306,11 @@ def test_resolve_never_rejects_inside_the_envelope() -> None:
 
 def test_the_contract_files_exact_usage_holds() -> None:
     """Every ``main_v2.py`` defaults expression over fixture hub rows: the
-    recipe-driven single entrypoint — ``recipe: SDXL.Recipe`` from the
-    distillation adapter's defaults when one rides, else the checkpoint's own;
-    ``recipe.cfg`` gates guidance/negatives; the scheduler chain is
-    request > adapter demand > the tree stands (checkpoints carry no
-    scheduler metadata); pinned timesteps ride the cfg-off arm."""
+    config-driven single entrypoint — ``config: SDXL.Config`` from the
+    distillation adapter's defaults when one rides, else the checkpoint's
+    own; positive preamble applies in EVERY mode while negatives exist only
+    under CFG; the scheduler chain is request > adapter demand > the tree
+    stands; a pinned ladder belongs to the config's own scheduler."""
     ctx: RequestContext[GenerationDefaults] = RequestContext("req-main-v2")
     d = decode_model_defaults(
         SDXL,
@@ -317,10 +318,9 @@ def test_the_contract_files_exact_usage_holds() -> None:
         defaults={"guidance": {"default": 5.0, "hi": 9.0}},
     )
 
-    # The stacking gate is step_distilled, NOT cfg (`if turbo is not None and
-    # d.step_distilled: ctx.warn(...); turbo = None` — warn-and-serve, never
-    # an error): a guidance-distilled full-step checkpoint (cfg=False,
-    # step_distilled=False) MAY take a turbo LoRA.
+    # The stacking gate is step_distilled, NOT cfg — and it WARNS-AND-IGNORES
+    # the adapter (`turbo = None`), never an error: a guidance-distilled
+    # full-step checkpoint (cfg=False, step_distilled=False) MAY take one.
     assert not d.step_distilled
     guidance_distilled = decode_model_defaults(
         SDXL, model="sdxl", defaults={"cfg": False}
@@ -330,37 +330,39 @@ def test_the_contract_files_exact_usage_holds() -> None:
         SDXL, model="sdxl",
         defaults={"cfg": False, "step_distilled": True},
     )
-    assert fused_merge.step_distilled  # -> the adapter is ignored with a warn
+    assert fused_merge.step_distilled  # -> adapter ignored with a ctx.warn
 
-    # No adapter: the recipe is the checkpoint's own Defaults — one nominal
-    # type, both Defaults inherit SDXL.Recipe.
-    recipe: SDXL.Recipe = d
-    assert isinstance(recipe, SDXL.Recipe)
-    steps = recipe.steps.resolve(None, ctx)  # payload sent None
+    # No adapter: the config is the checkpoint's own Defaults — one nominal
+    # type, both Defaults inherit SDXL.Config.
+    config: SDXL.Config = d
+    assert isinstance(config, SDXL.Config)
+    steps = config.steps.resolve(None, ctx)  # payload sent None
     assert steps == 28
-    assert recipe.cfg
-    guidance = recipe.guidance.resolve(14.0, ctx)  # inside the API envelope
+    assert config.cfg
+    guidance = config.guidance.resolve(14.0, ctx)  # inside the API envelope
     assert guidance == 9.0  # clamped to the row's narrowed hi
 
+    # Positive preamble: EVERY mode (the positive prompt always exists);
+    # skipped when already present. Negative preamble: CFG arm only.
     prompt = "a cat"
-    negative = ""
     if d.positive_preamble and d.positive_preamble not in prompt:
         prompt = f"{d.positive_preamble}, {prompt}"
-    if d.negative_preamble and d.negative_preamble not in negative:
-        negative = f"{d.negative_preamble}, {negative}" if negative else d.negative_preamble
     assert prompt == "masterpiece, best quality, a cat"
-    assert negative == "worst quality, low quality"
-    # Skipped when already present — no double preamble.
     again = prompt
     if d.positive_preamble and d.positive_preamble not in again:
         again = f"{d.positive_preamble}, {again}"
     assert again == prompt
+    negative = ""
+    if config.cfg and d.negative_preamble and d.negative_preamble not in negative:
+        negative = f"{d.negative_preamble}, {negative}" if negative else d.negative_preamble
+    assert negative == "worst quality, low quality"
 
     # _pick_scheduler chain, no adapter: request None + no demand -> None,
-    # the tree's shipped scheduler stands (nullcontext arm).
-    assert not hasattr(recipe, "scheduler")
+    # the tree's shipped scheduler stands (nullcontext arm); checkpoints
+    # carry no scheduler field at all.
+    assert not hasattr(config, "scheduler")
 
-    # A distillation adapter rides: its defaults ARE the recipe, and its
+    # A distillation adapter rides: its defaults ARE the config, and its
     # scheduler DEMAND drives the swap (the base tree cannot know it).
     turbo = decode_model_defaults(
         SDXL.Lora,
@@ -368,12 +370,12 @@ def test_the_contract_files_exact_usage_holds() -> None:
         defaults={"scheduler": "lcm", "timesteps": [999, 749, 499, 249],
                   "distillation": True},
     )
-    recipe = turbo
-    assert not recipe.cfg  # the cfg-off arm: no guidance, no negatives
+    config = turbo
+    assert not config.cfg  # the cfg-off arm: no guidance, no negatives
     assert turbo.scheduler == "lcm"  # adapter demand -> LCMScheduler swap
     assert turbo.distillation  # the distillation-slot marker (hub-validated)
-    assert list(recipe.timesteps) == [999, 749, 499, 249]  # pinned ladder
-    assert recipe.steps.resolve(None, ctx) == 4
+    assert list(config.timesteps) == [999, 749, 499, 249]  # pinned ladder
+    assert config.steps.resolve(None, ctx) == 4
 
     # The independent-axes counterexample: a Hyper-SD-style CFG-preserving
     # few-step adapter row — few-step AND cfg on at its recommended 5-8.
@@ -387,6 +389,75 @@ def test_the_contract_files_exact_usage_holds() -> None:
     assert hyper.guidance.resolve(None, ctx) == 6.5
     assert hyper.guidance.resolve(14.0, ctx) == 8.0
     assert hyper.steps.resolve(None, ctx) == 8
+
+
+def _pick_scheduler(
+    request: str | None, turbo: "SdxlLoraDefaults | None"
+) -> str | None:
+    """main_v2.py's chain verbatim: request > adapter demand > None (tree)."""
+    served = {"dpmpp_2m_karras", "dpmpp_2m", "euler", "euler_trailing",
+              "euler_a", "unipc", "ddim", "lcm"}
+    if request is not None:
+        return request
+    if turbo is not None and turbo.scheduler is not None:
+        if turbo.scheduler in served:
+            return turbo.scheduler
+        return None  # warn + the tree stands
+    return None
+
+
+@pytest.mark.parametrize("adapter_rides", [False, True])
+@pytest.mark.parametrize("cfg", [False, True])
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("request_scheduler", [None, "euler"])
+def test_the_serving_interaction_matrix(
+    adapter_rides: bool, cfg: bool, pinned: bool, request_scheduler: str | None
+) -> None:
+    """The ruled interaction matrix (scheduler-override × pinned-timesteps ×
+    cfg × adapter-state): the decoded config fields drive main_v2.py's arms
+    for every combination — no combination raises, every conflict resolves
+    by the documented precedence."""
+    ctx: RequestContext[GenerationDefaults] = RequestContext("req-matrix")
+    ladder = [999, 749, 499, 249]
+    row: dict[str, object] = {"cfg": cfg}
+    if pinned:
+        row["timesteps"] = ladder
+
+    turbo: SdxlLoraDefaults | None = None
+    if adapter_rides:
+        turbo = decode_model_defaults(
+            SDXL.Lora, model="sdxl.lora", defaults={**row, "distillation": True}
+        )
+        config: SDXL.Config = turbo
+    else:
+        config = decode_model_defaults(SDXL, model="sdxl", defaults=row)
+
+    assert config.cfg is cfg
+
+    picked = _pick_scheduler(request_scheduler, turbo)
+    if request_scheduler is not None:
+        assert picked == request_scheduler  # the request always wins
+    elif adapter_rides:
+        # zero-arg demand is euler_trailing unless the row said otherwise
+        assert picked == "euler_trailing"
+    else:
+        assert picked is None  # the tree stands
+
+    # The step ladder: a pinned ladder owns the step count, unless the
+    # request overrode the scheduler it belongs to (then it is dropped).
+    steps = config.steps.resolve(7, ctx)
+    timesteps: list[int] | None = None
+    if config.timesteps:
+        if request_scheduler is None:
+            steps, timesteps = len(config.timesteps), list(config.timesteps)
+    if pinned and request_scheduler is None:
+        assert (steps, timesteps) == (4, ladder)
+    else:
+        assert (steps, timesteps) == (7, None)
+
+    # cfg gates guidance resolution; the cfg-off arm serves guidance 0.0.
+    guidance = config.guidance.resolve(None, ctx) if config.cfg else 0.0
+    assert guidance == (6.0 if cfg else 0.0)
 
 
 # ── the vocabulary registry + ingest fingerprint seam ────────────────────────

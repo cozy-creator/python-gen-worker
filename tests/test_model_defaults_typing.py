@@ -21,7 +21,7 @@ import msgspec
 
 from gen_worker.models import Knob, ModelType, SchedulerName, SDXL
 from gen_worker.models.defaults_decode import CarriesDefaults, decode_model_defaults
-from gen_worker.models.model_types import SdxlDefaults, SdxlLoraDefaults, SdxlRecipe
+from gen_worker.models.model_types import SdxlDefaults, SdxlLoraDefaults, SdxlConfig
 from gen_worker.families import GenerationDefaults
 from gen_worker.request_context import RequestContext
 
@@ -89,30 +89,30 @@ class _FakeAdapter:
         self.defaults = defaults
 
 
-def test_the_recipe_is_one_nominal_type() -> None:
-    """main_v2.py annotates ``recipe: SDXL.Recipe`` — both Defaults types
+def test_the_config_is_one_nominal_type() -> None:
+    """main_v2.py annotates ``config: SDXL.Config`` — both Defaults types
     inherit it, so ``turbo.defaults if turbo else d`` needs no union."""
     rctx: RequestContext[GenerationDefaults] = RequestContext("typed-2")
     d = SDXL.Defaults()
     turbo: _FakeAdapter | None = _FakeAdapter(SDXL.Lora.Defaults())
 
-    recipe: SdxlRecipe = turbo.defaults if turbo is not None else d
-    assert_type(recipe, SdxlRecipe)
-    assert SDXL.Recipe is SdxlRecipe  # the contract-file spelling
+    config: SdxlConfig = turbo.defaults if turbo is not None else d
+    assert_type(config, SdxlConfig)
+    assert SDXL.Config is SdxlConfig  # the contract-file spelling
 
-    assert_type(recipe.cfg, bool)
-    assert_type(recipe.steps, Knob[int])
-    assert_type(recipe.guidance, Knob[float])
-    assert_type(recipe.timesteps, tuple[int, ...])
-    steps = recipe.steps.resolve(None, rctx)
+    assert_type(config.cfg, bool)
+    assert_type(config.steps, Knob[int])
+    assert_type(config.guidance, Knob[float])
+    assert_type(config.timesteps, tuple[int, ...])
+    steps = config.steps.resolve(None, rctx)
     assert_type(steps, int)
-    guidance = recipe.guidance.resolve(None, rctx)
+    guidance = config.guidance.resolve(None, rctx)
     assert_type(guidance, float)
 
-    assert recipe.cfg is False
+    assert config.cfg is False
     assert (steps, guidance) == (4, 6.0)
     assert turbo is not None
-    assert isinstance(d, SdxlRecipe) and isinstance(turbo.defaults, SdxlRecipe)
+    assert isinstance(d, SdxlConfig) and isinstance(turbo.defaults, SdxlConfig)
 
     lora = SDXL.Lora.Defaults()
     assert_type(lora, SdxlLoraDefaults)

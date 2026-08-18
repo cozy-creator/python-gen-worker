@@ -255,10 +255,10 @@ the tree's shipped scheduler."""
 # ── the launch defaults structs (field defaults = PLATFORM VALUES) ───────────
 
 
-class SdxlRecipe(msgspec.Struct, frozen=True):
-    """The SERVING RECIPE — the axes both SDXL defaults types share, as ONE
-    nominal type (Paul's refinement: the endpoint annotates
-    ``recipe: SDXL.Recipe``, never a union). The axes are INDEPENDENT:
+class SdxlConfig(msgspec.Struct, frozen=True):
+    """The SERVING CONFIG — the axes both SDXL defaults types share, as ONE
+    nominal type ("Defaults are a config plus extras": the endpoint annotates
+    ``config: SDXL.Config``, never a union). The axes are INDEPENDENT:
     ``cfg`` (CFG on/off) and few-step are separate facts — guidance-distilled
     models are cfg-off at FULL steps, Hyper-SD CFG-preserving LoRAs are
     few-step with CFG ON at 5-8. ``scheduler`` is deliberately NOT here
@@ -279,19 +279,19 @@ class SdxlRecipe(msgspec.Struct, frozen=True):
     timesteps: tuple[int, ...] = ()
 
 
-class SdxlDefaults(SdxlRecipe, frozen=True):
-    """The checkpoint row: the recipe plus the prompt vocabulary.
+class SdxlDefaults(SdxlConfig, frozen=True):
+    """The checkpoint row: the config plus the prompt vocabulary.
     ``positive_preamble`` carries the quality vocabulary (Paul's ruling,
     pgw#1376 point 2 — the old endpoint ``_QUALITY_MARKERS``
     "masterpiece, best quality" vocabulary lives HERE, banned from endpoint
     code); ``negative_preamble`` is its symmetric counterpart. A fused
-    step-distilled merge (DMD2/Lightning full checkpoint) carries its recipe
+    step-distilled merge (DMD2/Lightning full checkpoint) carries its config
     in the inherited fields (cfg=False, pinned timesteps) — its
     scheduler ships in its TREE (a proper DMD2 export carries LCMScheduler)."""
 
     positive_preamble: str = "masterpiece, best quality"
     negative_preamble: str = "worst quality, low quality"
-    #: CHECKPOINT-level fact, deliberately NOT on Recipe: is this checkpoint
+    #: CHECKPOINT-level fact, deliberately NOT on Config: is this checkpoint
     #: itself a step-distillation product (fused DMD2/Lightning/LCM merge)?
     #: Decoupled from ``cfg`` (purely the guidance axis): a guidance-distilled
     #: full-step checkpoint is cfg=False + step_distilled=False and MAY take a
@@ -301,8 +301,8 @@ class SdxlDefaults(SdxlRecipe, frozen=True):
     step_distilled: bool = False
 
 
-class SdxlLoraDefaults(SdxlRecipe, frozen=True):
-    """The adapter row: the recipe (platform overrides = Lightning-4-step-ish
+class SdxlLoraDefaults(SdxlConfig, frozen=True):
+    """The adapter row: the config (platform overrides = Lightning-4-step-ish
     servable trace fixture: cfg off, euler_trailing, 4 steps) plus the
     adapter's own facts. ``guidance`` inherits the base platform knob — inert
     while cfg=False, sane if a CFG-preserving adapter row (Hyper-SD) flips
@@ -326,9 +326,9 @@ class SdxlLoraDefaults(SdxlRecipe, frozen=True):
     distillation: bool = False
 
 
-class Sd15Recipe(msgspec.Struct, frozen=True):
-    """SD1.x serving recipe — same shared axes and semantics as
-    :class:`SdxlRecipe` (scheduler is adapter-only, tree-only for
+class Sd15Config(msgspec.Struct, frozen=True):
+    """SD1.x serving config — same shared axes and semantics as
+    :class:`SdxlConfig` (scheduler is adapter-only, tree-only for
     checkpoints). Platform values from the live sd15.schema.json registry
     entry: steps 30 (bounds 1..80, the family payload envelope), guidance
     7.0 (schema minimum 0, no declared max)."""
@@ -339,12 +339,12 @@ class Sd15Recipe(msgspec.Struct, frozen=True):
     timesteps: tuple[int, ...] = ()
 
 
-class Sd15Defaults(Sd15Recipe, frozen=True):
-    """The checkpoint row — the recipe alone (no ruled SD1.x prompt
+class Sd15Defaults(Sd15Config, frozen=True):
+    """The checkpoint row — the config alone (no ruled SD1.x prompt
     vocabulary; fields stay additive if one is ruled)."""
 
 
-class Sd15LoraDefaults(Sd15Recipe, frozen=True):
+class Sd15LoraDefaults(Sd15Config, frozen=True):
     """The adapter row. Zero-arg = LCM-LoRA-SD1.5-ish 4-step platform values
     (sd15.lora.schema.json records the 4-step distilled recipe shape;
     Hyper-SD15's ``ddim_trailing`` is outside the launch SchedulerName vocabulary —
@@ -397,8 +397,8 @@ class SDXL(ModelType[SdxlDefaults]):
     contracts = ("sdxl.*",)
     canonical_contract = SDXL_DIFFUSERS_BF16
     canonical_scheduler_config = SDXL_SCHEDULER_CONFIG
-    # TypeAlias so `recipe: SDXL.Recipe` is a valid annotation (main_v2.py).
-    Recipe: TypeAlias = SdxlRecipe
+    # TypeAlias so `config: SDXL.Config` is a valid annotation (main_v2.py).
+    Config: TypeAlias = SdxlConfig
     Defaults = SdxlDefaults
 
     class Lora(LoraOverlay):
@@ -413,7 +413,7 @@ class SD15(ModelType[Sd15Defaults]):
     contracts = ("sd15.*",)
     canonical_contract = SD15_DIFFUSERS_BF16
     canonical_scheduler_config = SD15_SCHEDULER_CONFIG
-    Recipe: TypeAlias = Sd15Recipe
+    Config: TypeAlias = Sd15Config
     Defaults = Sd15Defaults
 
     class Lora(LoraOverlay):
@@ -550,11 +550,11 @@ __all__ = [
     "SDXL_DIFFUSERS_BF16",
     "Sd15Defaults",
     "Sd15LoraDefaults",
-    "Sd15Recipe",
+    "Sd15Config",
     "Sd2Defaults",
     "SdxlDefaults",
     "SdxlLoraDefaults",
-    "SdxlRecipe",
+    "SdxlConfig",
     "SupportsClamp",
     "TensorLayoutContract",
     "WAN22_DIFFUSERS_BF16",
