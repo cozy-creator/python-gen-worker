@@ -204,6 +204,31 @@ ACTIONS: Dict[str, HubAction] = {
             body=("family", "compiled_graph_key", "checkpoint_id", "ok", "error"),
             timeout_s=60.0,
         ),
+        # th#2133 / pgw#1372 — THE ADOPT ROUTE, the boot's one ask:
+        # `[release x lane x sm]` answered per graph, hit or miss. Without
+        # this entry the whole adopt-first boot is dead under the split (the
+        # only execution model since pgw#783) and dead SILENTLY, exactly as
+        # pgw#1353's keyset tier was: the parent refuses any unlisted path and
+        # the boot store treats the refusal as "no document", so every pod
+        # serves eager forever while nothing logs a defect.
+        #
+        # The path is the whole request except (lane, sm), so both are
+        # enumerated. `release_id` is the pod's OWN release either way — the
+        # hub refuses a credential adopting for a sibling release
+        # (`release_compiled_graphs_release_mismatch`) — but the grammar is
+        # pinned here too: identifiers, never a path.
+        #
+        # The ANSWER carries control only: per-graph digests, the mint's
+        # requirements manifest, and a PRESIGNED snapshot manifest. The .so
+        # bytes are fetched by the child directly off those URLs, so the seam
+        # stays inside its control-body ceiling on a 36-graph endpoint.
+        _a(
+            "release.compiled_graphs",
+            "GET",
+            r"^/v1/worker/releases/[A-Za-z0-9._+-]{1,128}/compiled-graphs$",
+            query=("lane", "sm"),
+            timeout_s=30.0,
+        ),
         # compiled graph discovery: list a system repo's checkpoints, resolve one
         # manifest. The manifest's artifact URL is PRESIGNED, so the bytes are
         # fetched by the child directly — the seam carries control, not data.
