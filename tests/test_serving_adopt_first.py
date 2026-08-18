@@ -51,8 +51,11 @@ ENV = EnvIdentity(closure=CLOSURE, sm=SM)
 #: ``LoadContext.defaults()`` against ``SDXL.Defaults``. Small step knob so
 #: the CPU loop stays tiny.
 OVERRIDES: dict[str, Any] = {
-    "steps": {"default": 2, "lo": 1, "hi": 8, "field": "num_inference_steps"},
-    "guidance": {"default": 6.0, "lo": 1.5, "hi": 8.0, "field": "guidance_scale"},
+    # A hub row narrows [lo, hi] and moves the default; it can NEVER rename
+    # the knob (pgw#1377: `name` is stamped by the struct, never wire input),
+    # so the caller-visible adjustment row names the KNOB — `guidance`.
+    "steps": {"default": 2, "lo": 1, "hi": 8},
+    "guidance": {"default": 6.0, "lo": 1.5, "hi": 8.0},
 }
 
 
@@ -79,6 +82,7 @@ def binding(checkpoint: Path) -> DeployBinding:
     return DeployBinding(
         checkpoint_ref="ckpt:tiny@1",
         checkpoint_dir=checkpoint,
+        model="sdxl",
         defaults=dict(OVERRIDES),
     )
 
@@ -127,7 +131,7 @@ def test_eager_boot_serves_a_request_end_to_end(host: EndpointHost, tmp_path: Pa
     assert saved.is_file() and saved.stat().st_size > 0
 
     # The Knob clamp recorded the caller-visible adjustment (12 -> 8).
-    rows = [row for row in ctx.adjustments if row["field"] == "guidance_scale"]
+    rows = [row for row in ctx.adjustments if row["field"] == "guidance"]
     assert rows and rows[0]["requested"] == "12.0" and rows[0]["applied"] == "8.0"
 
     # The boot recorded a model_load span for the author's load, and no
@@ -157,6 +161,7 @@ def test_the_deployment_decides_the_mode(
         DeployBinding(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
+            model=binding.model,
             defaults=binding.defaults,
             adapter=DistillationAdapter(
                 name="lightning-4step", path=tmp_path / "lora",

@@ -35,7 +35,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Generic, Mapping, Optional, Protocol, Type, TypeVar
+from typing import (
+    TYPE_CHECKING, Any, Callable, Generic, Mapping, Optional, Protocol, Type,
+    TypeVar, cast,
+)
 
 import msgspec
 
@@ -43,6 +46,7 @@ from ..families.base import GenerationDefaults
 from ..request_context import RequestContext as _BaseRequestContext
 
 if TYPE_CHECKING:
+    from ..models.defaults_decode import CarriesDefaults
     from ..models.model_types import ModelType
 
 P = TypeVar("P")
@@ -100,6 +104,10 @@ class DeployBinding:
 
     checkpoint_ref: str
     checkpoint_dir: Path
+    #: The hub row's ``model`` classification column. ``None``/empty = the
+    #: checkpoint is unclassified: it serves on platform fallbacks with the
+    #: named visible warning (pgw#1377's read-side matrix), never a guess.
+    model: Optional[str] = None
     defaults: Mapping[str, Any] = field(default_factory=dict)
     adapter: Optional[Adapter] = None
 
@@ -224,23 +232,38 @@ class LoadContext(Generic[MT_co]):
         the hub's per-checkpoint row decoded as a field-level overlay on the
         model type's ``Defaults`` struct (zero-arg = platform fallbacks —
         pgw#1377's decode matrix; ill-typed values are a typed refusal
-        naming the checkpoint, never a silent coercion)."""
+        naming the checkpoint, never a silent coercion).
+
+        The decode is pgw#1377's ``defaults_decode`` AUTHORITY, never a second
+        msgspec pass: only that path narrows a Knob's [lo, hi] across the
+        platform and checkpoint layers and re-stamps each Knob with its field
+        name, which is what keeps two clamps distinguishable in the
+        caller-visible adjustment ledger."""
+        from ..models.defaults_decode import (
+            DefaultsDecodeError,
+            ModelTypeMismatch,
+            decode_model_defaults,
+        )
+
         schema = getattr(self._model_type, "Defaults", None)
         if self._model_type is None or schema is None:
             raise RuntimeError(
                 "ctx.defaults(): no model type is bound to this LoadContext "
                 "(the model class header's generic parameter carries it)"
             )
-        overlay = dict(self._binding.defaults or {})
-        if not overlay:
-            decoded_empty: DT = schema()
-            return decoded_empty
+        # `_model_type` is erased to `type` on the instance; the self-type on
+        # this method is what carries `DT` for the caller.
+        carrier = cast("CarriesDefaults[DT]", self._model_type)
         try:
-            decoded: DT = msgspec.convert(overlay, type=schema)
-        except msgspec.ValidationError as exc:
+            decoded: DT = decode_model_defaults(
+                carrier,
+                model=self._binding.model,
+                defaults=self._binding.defaults,
+            )
+        except (DefaultsDecodeError, ModelTypeMismatch) as exc:
             raise DefaultsError(
-                f"per-checkpoint defaults for {self._binding.checkpoint_ref!r} "
-                f"do not fit {schema.__name__}: {exc}"
+                f"per-checkpoint defaults for "
+                f"{self._binding.checkpoint_ref!r}: {exc}"
             ) from None
         return decoded
 

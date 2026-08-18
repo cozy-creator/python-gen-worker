@@ -56,9 +56,10 @@ def make_checkpoint(tmp_path: Path, **config: object) -> Path:
 def make_binding(tmp_path: Path, **kwargs: object) -> DeployBinding:
     kwargs.setdefault("checkpoint_ref", "ckpt:tiny@1")
     kwargs.setdefault("checkpoint_dir", make_checkpoint(tmp_path))
+    kwargs.setdefault("model", "sdxl")
     kwargs.setdefault(
         "defaults",
-        {"steps": {"default": 2, "lo": 1, "hi": 8, "field": "num_inference_steps"}},
+        {"steps": {"default": 2, "lo": 1, "hi": 8}},
     )
     return DeployBinding(**kwargs)  # type: ignore[arg-type]
 
@@ -221,7 +222,7 @@ def test_load_context_defaults_decode_matrix(tmp_path: Path) -> None:
         return LoadContext(
             binding=DeployBinding(
                 checkpoint_ref="ckpt:x@1", checkpoint_dir=checkpoint,
-                defaults=defaults,
+                model="sdxl", defaults=defaults,
             ),
             model_type=SDXL,
         )
@@ -308,6 +309,7 @@ def test_scheduler_and_adapter_scopes_restore_after_a_turbo_request(
         DeployBinding(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
+            model=binding.model,
             defaults=binding.defaults,
             adapter=DistillationAdapter(
                 name="lcm-lora", path=tmp_path / "lora",
@@ -342,6 +344,7 @@ def test_scopes_restore_even_when_the_request_raises(
         DeployBinding(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
+            model=binding.model,
             defaults=binding.defaults,
             adapter=DistillationAdapter(
                 name="x", path=tmp_path / "lora", defaults=SDXL.Lora.Defaults(),
@@ -368,6 +371,7 @@ def test_stacking_on_a_step_distilled_checkpoint_warns_and_ignores(
         DeployBinding(
             checkpoint_ref="ckpt:distilled@1",
             checkpoint_dir=make_checkpoint(tmp_path),
+            model="sdxl",
             defaults={"cfg": False, "step_distilled": True,
                       "steps": {"default": 4, "lo": 1, "hi": 8}},
             adapter=DistillationAdapter(
@@ -394,6 +398,7 @@ def test_distilled_checkpoint_serves_turbo_without_an_adapter(
         DeployBinding(
             checkpoint_ref="ckpt:distilled@1",
             checkpoint_dir=binding.checkpoint_dir,
+            model="sdxl",
             defaults={
                 "cfg": False, "step_distilled": True,
                 "timesteps": [8, 6, 4, 2],
@@ -561,6 +566,7 @@ def test_scheduler_precedence_and_the_distillation_slot_kind_guard(
         DeployBinding(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
+            model=binding.model,
             defaults=binding.defaults,
             adapter=DistillationAdapter(
                 name="odd", path=tmp_path / "lora",
@@ -588,6 +594,7 @@ def test_scheduler_precedence_and_the_distillation_slot_kind_guard(
         DeployBinding(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
+            model=binding.model,
             defaults=binding.defaults,
             adapter=Adapter(
                 name="style", path=tmp_path / "style",

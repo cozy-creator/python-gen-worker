@@ -73,6 +73,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("endpoint_dir", help="directory holding endpoint.toml")
     parser.add_argument("--checkpoint", required=True, help="local checkpoint tree")
     parser.add_argument("--checkpoint-ref", default="local/checkpoint")
+    parser.add_argument("--model", default="",
+                        help="the hub row's `model` classification (e.g. sdxl); "
+                             "empty = unclassified, serves platform fallbacks")
     parser.add_argument("--defaults", default="{}",
                         help="per-checkpoint override JSON (the hub's deploy state, locally)")
     parser.add_argument("--lane", default="",
@@ -135,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     binding = DeployBinding(
         checkpoint_ref=args.checkpoint_ref,
         checkpoint_dir=Path(args.checkpoint),
+        model=args.model or None,
         defaults=json.loads(args.defaults),
     )
     host = EndpointHost(
