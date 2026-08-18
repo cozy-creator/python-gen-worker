@@ -1,4 +1,6 @@
-"""The v2 surface can state the machine it needs (se#755 / pgw#1396).
+"""The STAFFING ENVELOPE an entrypoint declares: which machine it is placed on.
+
+# se#755 / pgw#1396: the v2 surface can state the machine it needs.
 
 `Resources` has carried `vcpus`, `max_gpu_count`,
 `max_gpus_per_execution_group` and `parallel` all along, and tensorhub has
