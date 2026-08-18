@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from .chunking import plan_chunks
+from .planner import plan_chunks
 from .manifest import Chunk, FileEntry, RepositoryManifest
 from .refs import CASRef
 
