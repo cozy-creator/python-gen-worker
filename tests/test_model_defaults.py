@@ -537,7 +537,21 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     from gen_worker.models import Flux1, Flux2Klein
 
     assert Flux1.canonical_scheduler_config == {}
-    assert Flux2Klein.canonical_scheduler_config == {}
+    # ...but FLUX.2 Klein's IS recorded now: black-forest-labs/FLUX.2-klein-4B
+    # is the ONE BFL flux repo that is not HF-gated, so its shipped
+    # scheduler_config.json was fetched verbatim (pgw#1393 follow-up).
+    klein = Flux2Klein.canonical_scheduler_config
+    assert klein["_class_name"] == "FlowMatchEulerDiscreteScheduler"
+    # FLOW-MATCHING: a shift ladder, NOT a beta schedule. Asserting the
+    # absence is the point — this is what "don't copy SDXL across" means.
+    for beta_field in ("beta_start", "beta_end", "beta_schedule", "trained_betas"):
+        assert beta_field not in klein
+    assert (klein["base_shift"], klein["max_shift"], klein["shift"]) == (0.5, 1.15, 3.0)
+    # The reason no frozen triple could have been invented: the effective
+    # shift is a function of image sequence length.
+    assert klein["use_dynamic_shifting"] is True
+    assert (klein["base_image_seq_len"], klein["max_image_seq_len"]) == (256, 4096)
+    assert klein["num_train_timesteps"] == 1000
     # Rife is the one AUXILIARY type: no canonical lane, and inventing a
     # tensorfs contract name for its diffusers-layout artifact would be a guess.
     assert Rife.canonical_contract is None
