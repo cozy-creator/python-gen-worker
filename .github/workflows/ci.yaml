@@ -144,7 +144,13 @@ on:
     # skips drafts. Without it listed here a lane that opens a draft, pushes, then
     # clicks "Ready for review" gets NO run for the head it actually merges —
     # the same invisible-green this issue exists to remove.
-    types: [opened, synchronize, reopened, ready_for_review]
+    #
+    # `edited` is here for the same reason, measured on pgw#957: a stacked PR
+    # RETARGETED from its predecessor's branch onto master fires `edited` and
+    # nothing else. Its head never changes, so `synchronize` never comes, and
+    # the PR sat at `statusCheckRollup: []` against a base it had never been
+    # tested on — the exact invisible-green state above.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 concurrency:
   group: ci-${{ github.ref }}
