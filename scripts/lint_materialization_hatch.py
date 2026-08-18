@@ -27,12 +27,11 @@ actually has. A new row is a decision someone makes on purpose, in the design
 doc, not a call site that appeared in a diff.
 
 **`extract()` is the RETIRED SPELLING and is refused.** The same ruling renamed
-it (tensorfs#107), so there is now ONE name for the operation upstream and
-here. A fence that quietly accepted both would let the old name drift back in
-the moment someone copies an old snippet — and the last time this fence had a
-spelling problem it read a census of ZERO while a live materialization ran
-unnoticed. It is refused rather than silently ignored so the failure is a
-message about the rename instead of a mystery.
+it (tensorfs#107), so there is ONE name upstream and here. A fence that quietly
+accepted both would let the old name drift back the moment someone copies an
+old snippet, and a spelling problem in this fence reads as a census of ZERO
+while a live materialization runs unnoticed. Refused, not ignored, so the
+failure is a message about the rename instead of a mystery.
 
 WHY A LINT AND NOT A TEST. The hatch's whole failure mode is a site nobody
 looked at: every individual call works perfectly and the suite stays green
@@ -108,14 +107,10 @@ RETIRED_DEFINED_IN = {
 
 #: The hatch itself, scanned only where tensorfs is imported.
 #:
-#: ONE SPELLING, as of the #1303 ruling. It used to be two: §9 and upstream
-#: called the single-file hatch `extract()` while the rev this repo PINS
-#: (`_vendor/VENDORED.toml`) called the same operation
-#: `LocalCAS.materialize(entry, destination)` -- and a fence that matched only
-#: upstream's name matched NOTHING in the code it guards, reading a census of
-#: zero while a live first-party materialization ran at `aot_delivery.py`.
-#: tensorfs#107 renamed upstream's to `materialize()`, so the two names
-#: converged and the guard spells the one symbol its own snapshot exports.
+#: ONE SPELLING, as of the #1303 ruling (tensorfs#107 renamed upstream's
+#: `extract()` to `materialize()`): the guard spells the one symbol its own
+#: vendored snapshot exports. Two names is how a fence matches NOTHING in the
+#: code it guards and reads a census of zero while a live materialization runs.
 HATCH = re.compile(r"\.materialize\s*\(")
 
 #: The RETIRED spelling. Refused, not ignored -- see the module docstring.

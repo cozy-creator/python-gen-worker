@@ -9,11 +9,10 @@
     middle mint-child tier and lets the serving parent supervise compile
     children directly.
 
-    What used to be bought with a whole extra pipeline load is bought here
-    instead: **``torch.export`` and the AOTI compile entry points may only be
-    NAMED by a module that runs inside a compile/trace child.** Every other
-    module in ``src/gen_worker`` is serving-process code by default and a call
-    there is red.
+    **``torch.export`` and the AOTI compile entry points may only be NAMED by a
+    module that runs inside a compile/trace child.** Every other module in
+    ``src/gen_worker`` is serving-process code by default and a call there is red —
+    bought structurally rather than with a whole extra pipeline load.
 
 Why the fence lands WITH the supervisor rewrite and not after it: a fence that
 arrives after the change it guards never had a chance to go red.

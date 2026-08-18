@@ -535,14 +535,11 @@ def arm_aot(
             phase="measured",
         )
 
-    # §4.33 / pgw#1175: THE HEADROOM GATE IS GONE, and the ATTEMPT replaces it.
-    # `mint_budget.adopt_headroom` refused an arm here on `2 * activation`,
-    # where `activation` was a quarter of the RESIDENT SET whenever no forward
-    # had run — a fraction its own docstring called unmeasured — and its
-    # refusal was STICKY for the life of the process. Its own text conceded it
-    # "CANNOT refuse a card that merely cannot hold 36 runners", i.e. it could
-    # not refuse the failure it was written for (th#1825) and could refuse
-    # cards that were fine. The honest gate is the bind itself:
+    # §4.33 / pgw#1175: THERE IS NO HEADROOM GATE — the ATTEMPT is the gate.
+    # A predictive one (`2 * activation`, where `activation` was an unmeasured
+    # quarter of the resident set) refused stickily for the life of the process
+    # and could not refuse the failure it was written for (th#1825) while
+    # refusing cards that were fine. The honest gate is the bind itself:
     # `aot_serve.arm_compiled_graph` attempts THIS entry and returns a typed
     # `insufficient_adopt_vram` miss on a real device OOM, before any live
     # mutation, and this pod serves eager exactly as it did — on evidence.

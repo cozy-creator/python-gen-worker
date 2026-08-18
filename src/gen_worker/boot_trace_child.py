@@ -209,13 +209,11 @@ def run(job: TraceJob) -> int:
 
     # The weight-free PREMISE, fenced (pgw#1173). Every declared target this
     # pipeline carries must hold zero real parameters — an ALL-of check, and
-    # one that does not care which device the weights are on. The two guards
-    # that stood here before could both read clean on a composition that traces
-    # real weights: `off_host_tensors` sees nothing because `place=False` puts
-    # them on the HOST, and `structure_only_components` is satisfied by ANY one
-    # virtual component, so a two-target family with one target stranded passed
-    # both. This is the seam every downstream VRAM conclusion rests on, so it
-    # fails closed and names the component, the class and the bytes.
+    # one that does not care which device the weights are on (`place=False`
+    # puts real weights on the HOST, where a device-scoped guard sees nothing;
+    # an ANY-of guard passes a two-target family with one target stranded).
+    # This is the seam every downstream VRAM conclusion rests on, so it fails
+    # closed and names the component, the class and the bytes.
     try:
         structure_only.assert_weight_free(
             pipeline, cfg.targets, what=f"the boot trace of {job.function!r}")
