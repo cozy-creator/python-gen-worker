@@ -62,6 +62,7 @@ from .writer import (
 from .writer import (
     normalize_variant_filenames as _normalize_variant_filenames,
 )
+from ..scratchrepo import PREFIX as SCRATCH_PREFIX, is_scratch_name
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,16 @@ def _payload_destination_release(payload: Any) -> str:
     return str(getattr(payload, "destination_release", "") or "").strip()
 
 
+def _valid_repo_name(name: str) -> bool:
+    """The repo half of a destination ref: the public grammar, plus the hub's
+    ONE reserved scratch prefix. Twin of ``normalizeSchedulerRepoName`` — strip
+    the known prefix, validate the REST against the public charset, re-attach.
+    Never a widened charset: a user-authored ``_anything`` still refuses."""
+    if is_scratch_name(name):
+        return bool(_PUBLIC_NAME_RE.match(name[len(SCRATCH_PREFIX):]))
+    return bool(_PUBLIC_NAME_RE.match(name))
+
+
 def normalize_destination_ref(value: str) -> str:
     ref = str(value or "").strip().lower()
     if not ref:
@@ -136,7 +147,9 @@ def normalize_destination_ref(value: str) -> str:
         if ref.startswith(p):
             raise ValueError("destination_repo must be bare owner/repo (no provider prefix)")
     parts = ref.split("/", 1)
-    if len(parts) != 2 or not all(_PUBLIC_NAME_RE.match(p) for p in parts):
+    # The owner half stays strictly public — only the repo half may be scratch,
+    # exactly as the hub's own normalizer splits it.
+    if len(parts) != 2 or not _PUBLIC_NAME_RE.match(parts[0]) or not _valid_repo_name(parts[1]):
         raise ValueError("destination_repo must be '<owner>/<repo>'")
     return ref
 
