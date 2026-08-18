@@ -64,4 +64,4 @@ RUN echo "build-nonce=${BUILD_NONCE}" \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
 # Contract point 3.
-ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]
+ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]

@@ -52,16 +52,13 @@ src/gen_worker/models/store.py::RUNPOD_PROVIDER VIOLATION TENSORHUB_FILL_SOURCE_
 src/gen_worker/postmortem.py::GEN_WORKER_BOOT_RECORD VIOLATION GEN_WORKER_BOOT_RECORD now HAS a field (boot_record_path). BOOT_RECORD_PATH is computed at IMPORT, before any process entry can have loaded config; needs an install-once path.
 src/gen_worker/postmortem.py::TENSORHUB_CACHE_DIR VIOLATION TENSORHUB_CACHE_DIR, same import-time constant, same fix.
 src/gen_worker/runtime_config.py::GEN_WORKER_CONFIG_SNAPSHOT_PATH VIOLATION GEN_WORKER_CONFIG_SNAPSHOT_PATH has a field; this module is reached from paths with no Settings in hand.
-src/gen_worker/parallel/runtime.py::TENSORHUB_CACHE_DIR VIOLATION config->env write-back of boot.cache_dir, used as an intra-process bus. Same sequencing rule.
 src/gen_worker/url_fetch.py::GEN_WORKER_URL_FETCH_ALLOWED_HOSTS VIOLATION GEN_WORKER_URL_FETCH_ALLOWED_HOSTS is an SSRF allow-list: security policy the hub owns and may need to change on a RUNNING worker. Ruled a Directive field (th#1488). As an env, a policy change needs a pod replacement.
 src/gen_worker/input_assets.py::GEN_WORKER_INTERNAL_OBJECT_HOSTS VIOLATION GEN_WORKER_INTERNAL_OBJECT_HOSTS, same SSRF ruling, same blocker.
-src/gen_worker/worker_main.py::$var VIOLATION writes TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR from a computed path. Legitimate library steering, but belongs in the one Settings-derived torch_env() builder rather than here.
+src/gen_worker/entrypoint.py::$var VIOLATION writes TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR from a computed path. Legitimate library steering, but belongs in the one Settings-derived torch_env() builder rather than here.
 
 src/gen_worker/topology.py::<unresolved> VIOLATION binds the WHOLE environment as the default source and reads WORKER_EXECUTION_TOPOLOGY out of it. The hub-delivered topology has no Settings field; absent is legal and means one slot, so a misspelling silently serves one card on a multi-GPU pod.
 src/gen_worker/aot_compile_pool.py::<unresolved> IPC seeds the AOT entry child's env from this process's (TORCHINDUCTOR_CACHE_DIR, seal memo). Parent-to-child handoff; the inherited base is the denylist shape above.
 src/gen_worker/mint_process.py::<unresolved> IPC seeds the mint child's env, then sets GEN_WORKER_MINT_CHILD. Same handoff shape.
-src/gen_worker/boot_key.py::<unresolved> IPC seeds the boot-TRACE child's env — PYTHONPATH is rewritten so the package root leads and PYTHONSAFEPATH removes the cwd (pgw#840's failure at the boot seam). Byte-for-byte aot_compile_pool.child_env's shape; it reads NO config value and DECIDES nothing (K comes from the cgroup's cpu.max, never from an env).
-src/gen_worker/runtimes/server.py::<unresolved> IPC seeds an engine-server subprocess's env. The engine is a third-party binary configured by environment; there is no other API.
 src/gen_worker/subproc.py::<unresolved> IPC seeds a per-invoke subprocess's env in order to set GEN_WORKER_CONFIG_SNAPSHOT_PATH. §1.18 ownership test FAILS with its sibling at :144 - the snapshot path originates in Settings.
 src/gen_worker/env_seal.py::<unresolved> LIBRARY scrub_env() ITERATES the environment to find every name under SCRUB_PREFIXES and erase it before torch imports. Reading all of it is the mechanism; this is the one place §1.18 is already mechanically enforced in either repo.
 
@@ -75,7 +72,6 @@ src/gen_worker/settings_authority.py::$DECLARED_ENV BOOTSTRAP the pgw#1049 setti
 src/gen_worker/procsplit/__init__.py::GEN_WORKER_COMPUTE_CHILD BOOTSTRAP GEN_WORKER_COMPUTE_CHILD decides WHICH OF TWO PROGRAMS this process is, before _run_main and before any config exists.
 src/gen_worker/supervisor.py::GEN_WORKER_SUPERVISOR BOOTSTRAP pre-fork supervisor predicate; runs before the worker process entry.
 src/gen_worker/supervisor.py::GEN_WORKER_SUPERVISED BOOTSTRAP pre-fork re-entry guard, same.
-src/gen_worker/aot_compile_child.py::GEN_WORKER_LOG_LEVEL BOOTSTRAP child log level, applied before the child has any config.
 src/gen_worker/procsplit/actions.py::GEN_WORKER_PROBE BOOTSTRAP pgw#980: marks the pod a live-edit probe and DISARMS compiled graph publish in the parent's action allowlist. It must be readable with no Settings in hand, because `authorize` is the security boundary and a guard that depends on a config load having succeeded is a guard with an unarmed window. Deliberately not a Settings field for the same reason the C2PA key is not: the value must not be reachable through the config surface tenant-adjacent code can read.
 src/gen_worker/procsplit/actions.py::GEN_WORKER_PROBE_PUBLISH_ARMED BOOTSTRAP pgw#980: the second, separate decision that re-arms publish on a marked probe. Same reasoning as its sibling above; two names so that "this is a probe" and "this probe may write to the store" can never be satisfied by one value.
 
@@ -95,7 +91,6 @@ src/gen_worker/subproc.py::$SNAPSHOT_PATH_ENV IPC forwards GEN_WORKER_CONFIG_SNA
 src/gen_worker/supervisor.py::GEN_WORKER_POSTMORTEM_FILE IPC GEN_WORKER_POSTMORTEM_FILE sink path for the pre-fork supervisor.
 src/gen_worker/host_canary.py::$k IPC restores the child's saved env after the canary subprocess.
 
-src/gen_worker/lifecycle.py::$ENV_VAR IPC WORKER_EXECUTION_TOPOLOGY (topology.ENV_VAR), the hub-delivered multi-GPU topology JSON, re-read only to decide whether the "GPUs are invisible" warning applies. Absent is legal and means one slot - which is why an unset value on a multi-GPU pod needs the warning at all.
 src/gen_worker/procsplit/parent.py::$ENV_WATCHDOG_PING_S IPC watchdog ping cadence handed down to the child.
 src/gen_worker/procsplit/parent.py::GEN_WORKER_LOCAL_CELLS_DIR IPC GEN_WORKER_LOCAL_CELLS_DIR, read to prepare the exec boundary rather than to steer this process. `_spawn_child` builds the child's environment from `dict(os.environ)`, so the value the CHILD will resolve its compiled graph store to is whatever this process carries - and the parent must chown that root to the compute uid while it is still root. Reading it anywhere but here would be reading it after the only moment it can be acted on (pgw#1349). Same shape and same justification as the TENSORHUB_CACHE_DIR / GEN_WORKER_BOOT_RECORD reads in the same function; it is listed separately because the unit here is one file reading one variable.
 # ---------------------------------------------------------------------------
@@ -107,8 +102,6 @@ src/gen_worker/procsplit/parent.py::GEN_WORKER_LOCAL_CELLS_DIR IPC GEN_WORKER_LO
 src/gen_worker/settings_authority.py::TORCHINDUCTOR_AUTOGRAD_CACHE LIBRARY TORCHINDUCTOR_AUTOGRAD_CACHE=0 (gw#608, moved from compile_cache by pgw#1049); torch offers no other API.
 src/gen_worker/compile_cache.py::CXX LIBRARY CXX host-compiler discovery, the toolchain's own convention.
 src/gen_worker/compile_cache.py::TORCHINDUCTOR_CACHE_DIR LIBRARY reads back the inductor cache dir torch was steered to.
-src/gen_worker/benchmarks/adopt_only_serve.py::TORCHINDUCTOR_CACHE_DIR LIBRARY pgw#1328's GPU bar steers inductor at its OWN scratch dir; the env var is inductor's only API for it. A benchmark __main__ that loads no app config and never runs in a serving process, so there is no pipeline-passed Settings to take the value from.
-src/gen_worker/benchmarks/store_arm_parity.py::TORCHINDUCTOR_CACHE_DIR LIBRARY pgw#1329's GPU parity probe steers inductor at its OWN scratch dir; the env var is inductor's only API for it. A benchmark __main__ that loads no app config and never runs in a serving process, so there is no pipeline-passed Settings to take the value from.
 src/gen_worker/host_canary.py::NCCL_P2P_DISABLE LIBRARY reads NCCL_P2P_DISABLE for the canary's recorded facts.
 src/gen_worker/host_canary.py::MASTER_ADDR LIBRARY MASTER_ADDR, torch.distributed reads it at init.
 src/gen_worker/host_canary.py::MASTER_PORT LIBRARY MASTER_PORT, torch.distributed reads it at init.
@@ -123,16 +116,12 @@ src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS_LIB LIBRARY G
 src/gen_worker/rigcheck.py::GEN_WORKER_FLEET_LINE_FILE STANDALONE GEN_WORKER_FLEET_LINE_FILE (pgw#1114), a PATH to the fleet-line authority (an endpoint.toml or fleet-floors.toml) for a measurement rig. Never runs in the worker pipeline - a rig process has no Settings and no config sources - so there is nothing to thread it through. It is a config VALUE, not a logic flag: it changes WHERE the expectation is read from, never WHETHER the assertion runs, and there is no value of it that turns the abort into a warning.
 src/gen_worker/rigboot.py::<unresolved> STANDALONE The bring-up host-driver gate (pgw#1120) inherits the process environment into an apt-get subprocess to set DEBIAN_FRONTEND=noninteractive. Not app config in any sense: it runs on a bare pod before anything is installed, has no Settings and no config sources, and reads nothing back out.
 src/gen_worker/rigboot.py::LD_LIBRARY_PATH STANDALONE LD_LIBRARY_PATH (pgw#1120), the loader path NVIDIA's forward-compat libcuda must precede the host's on. It is the mechanism of the repair itself, not a knob: rigboot prepends the compat directory so a fresh interpreter can allocate on a too-old driver, and persists it to /etc/profile.d for later pod-side steps. Never runs in the worker pipeline.
-src/gen_worker/cli/local_context.py::GEN_WORKER_LOCAL_OUTPUT_DIR STANDALONE GEN_WORKER_LOCAL_OUTPUT_DIR, local-run output dir.
-src/gen_worker/cli/local_context.py::USER STANDALONE USER, for the local-dev owner label.
 src/gen_worker/convert/clone.py::COZY_CONVERT_SCRATCH_TTL_S STANDALONE COZY_CONVERT_SCRATCH_TTL_S, convert-tool scratch TTL.
 src/gen_worker/convert/clone.py::COZY_CONVERT_WORKDIR STANDALONE COZY_CONVERT_WORKDIR, convert-tool scratch base.
 src/gen_worker/convert/ingest.py::COZY_CLONE_DOWNLOAD_ATTEMPTS STANDALONE COZY_CLONE_DOWNLOAD_ATTEMPTS, convert-tool retry count.
 src/gen_worker/models/download.py::COZY_CIVITAI_DOWNLOAD_ATTEMPTS STANDALONE COZY_CIVITAI_DOWNLOAD_ATTEMPTS, provider retry count.
 src/gen_worker/net.py::$name STANDALONE COZY_HTTP_*_TIMEOUT_S. Documented as "read from env on every call (test-tunable)" - i.e. env used as a TEST SEAM, which is what loader `init_kwargs` exists for. Worth fixing; it is the last piece of prose from the old 5-file exception list that is still true.
 src/gen_worker/local_compiled_graph_store.py::GEN_WORKER_LOCAL_CELLS_DIR STANDALONE GEN_WORKER_LOCAL_CELLS_DIR, the local compiled graph store's ROOT (pgw#1096 moved the accessor here from local_compiled_graphs): a path relocation like TENSORHUB_CACHE_DIR, never a behavior knob, and a cross-repo contract with cozy-local's paths.go.
-src/gen_worker/keyset/store.py::GEN_WORKER_CG_KEYSET STANDALONE GEN_WORKER_CG_KEYSET, where the shipped cg-keyset-v1 document lives (pgw#1327): a path relocation exactly like GEN_WORKER_LOCAL_CELLS_DIR, read by a module a serve pod must be able to use with no Settings in hand. It carries a VALUE, never a decision - a key set found there is admitted by the same closure match as one found in the image, so pointing it anywhere changes WHERE a document is read and nothing about whether it is believed.
-src/gen_worker/keyset/store.py::GEN_WORKER_LOCAL_CELLS_DIR STANDALONE GEN_WORKER_LOCAL_CELLS_DIR, th#1813's platform-placed durable store root, read here for the cg-keyset-v1 subtree under it (pgw#1353). Same classification and same reason as the local_compiled_graph_store.py read of the same variable two entries up, and as the GEN_WORKER_CG_KEYSET read in this very file: a path relocation, never a behavior knob, in a module a serve pod must be able to use with no Settings in hand. Its ABSENCE means "this pod forgets its key set sooner", never "this pod behaves differently" - whether a document is believed is decided by the closure digest and by nothing about where it was found. Restated rather than imported from local_compiled_graph_store because that module imports the vendored TCG package and reading a key set must not drag a tracer's import graph onto a serve pod; test_the_durable_root_name_matches_the_compiled_graph_store pins the two spellings together.
 src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODE_CONCURRENCY STANDALONE GEN_WORKER_VIDEO_ENCODE_CONCURRENCY, encode fan-out.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS VIOLATION GEN_WORKER_NATIVE_KERNELS. th#1887: NOT standalone — a serving-path rollout gate, not a CLI. Now also registered in BEHAVIOUR_GATES; deletion target pending a release-declaration check.
 
@@ -142,7 +131,6 @@ src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS VIOLATION GEN
 src/gen_worker/content_credentials.py::$env_name TRIPWIRE GEN_WORKER_C2PA_KEY_PEM / _KEY_PATH presence RAISES and refuses the boot (th#1307). A private key must never reach a pod. Correctly loud; carries no behaviour of its own.
 src/gen_worker/host_move_guard.py::GEN_WORKER_HOST_MOVE_GUARD TRIPWIRE GEN_WORKER_HOST_MOVE_GUARD, the pgw#763 host-move guard's disable escape hatch. See the kill-switch note below.
 
-src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter with a producer OUTSIDE this process (`podguard.arm()` on rented pods), so there is no argv to move it to and no Settings that could own it. Gated on podguard_status()==armed; pgw#929 owns its validation and observability permanently and deletion is explicitly out of scope.
 # ---------------------------------------------------------------------------
 # NOTE — the BEHAVIOUR axis (pgw#995), and the kill-switch verdicts.
 #

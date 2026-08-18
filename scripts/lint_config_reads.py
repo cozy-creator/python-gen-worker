@@ -255,10 +255,6 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
     ("src/gen_worker/supervisor.py", "GEN_WORKER_SUPERVISED"):
         "BOOTSTRAP. Pre-fork re-entry guard; without it the supervisor forks "
         "itself forever.",
-    ("src/gen_worker/lifecycle.py", "$ENV_VAR"):
-        "READ-ONLY WARNING PREDICATE. Re-reads the hub-delivered topology only "
-        "to decide whether the 'GPUs are invisible' warning applies. Selects a "
-        "log line, never a code path.",
     ("src/gen_worker/models/store.py", "RUNPOD_POD_ID"):
         "DEFECT, listed to keep the gate green while it burns down. A vendor env "
         "used as a proxy for 'managed runtime'. Blocked on pgw#921/th#1488 "
@@ -290,7 +286,8 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "that does not declare it. Threat while it lives: a dormant rollout "
         "switch nobody re-tests, dark exactly like PREFER_AOT was.",
     ("src/gen_worker/parallel/group.py", "NCCL_NVLS_ENABLE"):
-        "READ-ONLY WARNING PREDICATE, same class as lifecycle.py above. Reads "
+        "READ-ONLY WARNING PREDICATE (the lifecycle.py row of this class went "
+        "with pgw#1373's v1 runtime). Reads "
         "the pre-imposition value only to decide whether to warn that the "
         "settings authority overrode an ambient NCCL setting. Selects a log "
         "line, never a code path — NOT a deletion target.",

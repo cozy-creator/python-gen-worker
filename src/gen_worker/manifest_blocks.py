@@ -1,27 +1,13 @@
 """The declaration rows of a baked ``endpoint.lock``.
 
-ONE walk over EVERY publishable shape. A release may declare ``@entrypoint``
-handlers, ``@endpoint`` functions, ``@job`` functions, or any mix, and a
-release with jobs and ZERO functions is legal (th#2049), as is an
-entrypoints-only release (pgw#1387) — so every reader that asks "what did this
-image declare" must ask it of every block, or it goes blind on the shape it was
-not written for.
-
-pgw#1354 is what blindness costs: ``entrypoint.get_modules_from_manifest`` and
-``cuda_probe.should_probe_cuda`` each walked ``functions[]`` alone, both
-written when everything was a function. The first pod ever booted off a
-jobs-only image (27 jobs, 0 functions) therefore found zero user modules and
-exited 1 before hello, twice, on two card families — and was never CUDA-probed
-on the way. The fix is this module: not a parallel jobs walk beside the
-function walk (two walks drift; the next block makes it three), but one
-derivation both feeders read.
-
-The two row shapes are deliberately identical where they overlap — ``name``,
-``module``, ``resources``, ``env``, ``publishes`` — because a job promoted to a
-serverless endpoint must not change identity on the way. That overlap is what
-makes one walk correct rather than merely convenient. A reader that needs a
-FUNCTION-ONLY concept (slots, bindings, compiled graphs, execution lanes — none
-of which a job declares) must still walk ``functions[]`` directly and say why.
+**ONE block (pgw#1373).** ``entrypoints[]`` is the only shape a release
+declares: Paul's SDK hardcut deleted ``@endpoint``/``@job`` and with them the
+``functions[]``/``jobs[]`` blocks. So there is no block LIST any more, and
+deliberately no ``DECLARATION_BLOCKS`` constant — a name for "the set of
+blocks" is a second home for the vocabulary, and that second home is exactly
+what went stale twice: ``functions``-only walks went blind on jobs-only images
+(pgw#1354) and then on entrypoints-only images (pgw#1395), each time because a
+reader and the block list disagreed. One block, one reader, nothing to sync.
 
 Stdlib only, and no ``gen_worker`` imports: the control parent reads this and
 must stay a bare interpreter with no path to torch (pgw#763).
@@ -31,58 +17,25 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional
 
-#: Every manifest block carrying declaration rows, in wire order.
-#:
-#: pgw#1395 (th#2161 D0 / G14): ``entrypoints`` was missing here. It is
-#: ``functions``' SUCCESSOR SPELLING (th#2146) carrying the identical item
-#: shape — ``name``, ``module``, ``resources`` — and it is the ONLY block a
-#: post-pgw#1382 endpoint declares. Bake time folded it (``validation.py``);
-#: boot time did not, so a v2-only image imported zero user modules, was never
-#: CUDA-probed, and died naming the wrong gap ("declares no functions and no
-#: jobs"). Exactly pgw#1354's jobs-only failure, one hardcut later. The header
-#: rule holds: every reader asking "what did this image declare" asks it here.
-DECLARATION_BLOCKS = ("functions", "entrypoints", "jobs")
+#: The one block, spelled once. Readers ask for rows, not for the name.
+DECLARATION_BLOCK = "entrypoints"
 
 
 def declaration_rows(manifest: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Every declaration row in ``manifest``: functions then jobs.
+    """Every declaration row in ``manifest``.
 
     Tolerant of a malformed or absent block — a lock this process cannot read
     must not raise here, because the callers turn "nothing declared" into a
     typed refusal that names the gap.
     """
-    rows: List[Dict[str, Any]] = []
     if not isinstance(manifest, Mapping):
-        return rows
-    for block in DECLARATION_BLOCKS:
-        for row in manifest.get(block) or ():
-            if isinstance(row, dict):
-                rows.append(row)
-    return rows
-
-
-def block_counts(manifest: Optional[Mapping[str, Any]]) -> Dict[str, int]:
-    """``{block: row count}`` for every declaration block — the shape a boot
-    log or a refusal quotes when it has to say what the image declared."""
-    counts: Dict[str, int] = {}
-    for block in DECLARATION_BLOCKS:
-        rows = (manifest or {}).get(block) if isinstance(manifest, Mapping) else None
-        counts[block] = len(rows) if isinstance(rows, list) else 0
-    return counts
+        return []
+    return [
+        row for row in (manifest.get(DECLARATION_BLOCK) or ())
+        if isinstance(row, dict)
+    ]
 
 
 def declared_row_count(manifest: Optional[Mapping[str, Any]]) -> int:
-    """How many declarations this image carries, across every block."""
-    return sum(block_counts(manifest).values())
-
-
-def declared_block_summary(manifest: Optional[Mapping[str, Any]]) -> str:
-    """``"0 functions, 3 entrypoints, 0 jobs"`` — what a refusal quotes.
-
-    Derived from :data:`DECLARATION_BLOCKS` so a refusal can never name a
-    subset of the blocks the walk reads: that mismatch is what made the
-    pgw#1395 boot failure say "declares no functions and no jobs" over a
-    manifest declaring three entrypoints.
-    """
-    counts = block_counts(manifest)
-    return ", ".join(f"{counts[block]} {block}" for block in DECLARATION_BLOCKS)
+    """How many declarations this image carries."""
+    return len(declaration_rows(manifest))

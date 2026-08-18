@@ -33,8 +33,8 @@ _KNOWN_KINDS = frozenset(("inference", "training", "dataset", "conversion", "eva
 def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationResult:
     """Validate a discovered endpoint.lock dict at bake time (#322/#328).
 
-    Confirms every entry in ``lock_dict["functions"]`` is a class-shape
-    (post-#322) declaration:
+    Confirms every entry in ``lock_dict["entrypoints"]`` is a well-formed
+    ``@entrypoint`` declaration:
 
       1. ``class_name`` is present and non-empty — proves the entry came
          from a ``@inference`` / ``@training`` / ``@dataset`` / ``@conversion``
@@ -58,48 +58,24 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
     warnings: List[str] = []
 
     raw = lock_dict if isinstance(lock_dict, dict) else {}
-    functions = raw.get("functions")
-    # th#2146: `entrypoints[]` is functions[]' SUCCESSOR SPELLING and a FLAT
-    # list of the same item shape — so it folds into `functions` HERE, at this
-    # one site, exactly as `builder.ParseManifest` folds it hub-side. Every
-    # walk below then keeps asking one question. Reading it as a wrapped object
-    # (or not folding it) scores every v2 release as empty.
+    # pgw#1373: ONE declaration block. `functions[]`/`jobs[]` are deleted, so
+    # there is nothing to fold and no both-keys ambiguity left to refuse.
     entrypoints = raw.get("entrypoints")
-    if isinstance(entrypoints, list) and entrypoints:
-        if isinstance(functions, list) and functions:
-            return EndpointLockValidationResult(
-                ok=False,
-                errors=(
-                    "endpoint lock declares BOTH functions[] and "
-                    "entrypoints[]: entrypoints[] is the successor spelling, "
-                    "emit one",
-                ),
-            )
-        functions = entrypoints
-    if functions is None and isinstance(raw.get("jobs"), list):
-        functions = []
-    if not isinstance(functions, list):
+    if not isinstance(entrypoints, list):
         return EndpointLockValidationResult(
             ok=False,
-            errors=("endpoint lock missing 'functions' list",),
+            errors=("endpoint lock missing 'entrypoints' list",),
         )
-    if len(functions) == 0 and not (lock_dict.get("jobs") or ()):
-        # Jobs-aware (pgw#1354): a jobs-only release is legal (th#2049) and
-        # advertises 27 things, so the bare function count must not call it
-        # empty. pgw#1382-aware (pgw#1387): so is an entrypoints-only release,
-        # and THAT is the shape a v2 endpoint has. Everything BELOW is
-        # function-shape by construction — slots, bindings, wire routes and
-        # compiled graphs are concepts a job does not declare (`_job_entry`) —
-        # so those walks stay functions-only.
-        #
+    if len(entrypoints) == 0:
         # An ERROR, not a warning (pgw#1387): a release advertising nothing is
         # refused at hub admission, so a warning here just relocates the
         # failure to nine minutes after the image bake.
         errors.append(
-            "this endpoint advertises NOTHING: no @entrypoint, @endpoint or "
-            "@job declarations were discovered, and hub admission refuses a "
-            "manifest that declares neither functions[] nor jobs[]"
+            "this endpoint advertises NOTHING: no @entrypoint declarations "
+            "were discovered, and hub admission refuses a manifest that "
+            "declares no entrypoints[]"
         )
+    functions = entrypoints
 
     # Per-class accumulator for the "two methods slugify to the same route"
     # check. Keyed by class_name → {function_slug: python_name}. A second
@@ -141,8 +117,6 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
             )
         slugs[slug] = py_name
 
-    _check_slot_layout_declarations(lock_dict, errors)
-    _check_aot_preconditions(lock_dict, errors, warnings)
 
     return EndpointLockValidationResult(
         ok=not errors,
@@ -151,91 +125,14 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
     )
 
 
-def _undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> List[str]:
-    """A19 — the model slots in this manifest that declare no consumed
-    tensor-layout contract, each already rendered as its own refusal.
-
-    There is no default and no exemption list: every entry of a function's
-    ``models={}`` is a model slot by construction, so "non-model slots are
-    exempt" needs no test — they are not slots. A slot whose bytes no
-    registered handle names says so with ``layouts_undeclarable="<reason>"``,
-    and the reason travels on the manifest.
-    """
-    from ..models.tensor_layout_contract import undeclared_slot_refusal
-
-    out: List[str] = []
-    functions = lock_dict.get("functions") if isinstance(lock_dict, dict) else None
-    for fn in functions or ():
-        if not isinstance(fn, dict):
-            continue
-        fn_label = str(fn.get("name") or fn.get("python_name") or "<function>")
-        for slot in fn.get("slots") or ():
-            if not isinstance(slot, dict):
-                continue
-            if slot.get("layouts"):
-                continue
-            if str(slot.get("layouts_undeclarable") or "").strip():
-                continue
-            out.append(undeclared_slot_refusal(
-                function=fn_label, slot=str(slot.get("name") or "<slot>")))
-    return out
-
-
-def refuse_undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> None:
-    """A19's refusal, typed. Every offender in ONE exception rather than one
-    per build — an author fixing them one image build at a time is why nobody
-    fixed them."""
-    from ..models.tensor_layout_contract import UndeclaredSlotLayoutError
-
-    found = _undeclared_slot_layouts(lock_dict)
-    if found:
-        raise UndeclaredSlotLayoutError("\n\n".join(found))
-
-
-def _check_slot_layout_declarations(
-    lock_dict: Dict[str, Any], errors: List[str],
-) -> None:
-    """The typed refusal, as a build error beside the others, so one run
-    surfaces it with everything else the manifest gets wrong."""
-    from ..models.tensor_layout_contract import UndeclaredSlotLayoutError
-
-    try:
-        refuse_undeclared_slot_layouts(lock_dict)
-    except UndeclaredSlotLayoutError as exc:
-        errors.append(str(exc))
-
-
-def _check_aot_preconditions(
-    lock_dict: Dict[str, Any], errors: List[str], warnings: List[str],
-) -> None:
-    """An image that cannot AOT-compile what it DECLARES is broken.
-
-    ``discover_manifest`` stamps ``aot_preconditions`` — the static verdicts
-    read off this very image (its C++ toolchain, its torch wheel, its
-    declaration modules). A ``refused`` row means no pod can fix it, so the
-    build stops here rather than shipping an endpoint that declares an export
-    and silently downgrades its recipe on rented hardware forever.
-
-    ``blocked`` (the family's own typed ``MintRefused``) and ``abstained`` (a
-    torch-less manifest build) are WARNINGS: both are legitimate, and both are
-    said out loud so nobody has to infer them from a pod's absence of events.
-    """
-    rows = lock_dict.get("aot_preconditions") if isinstance(lock_dict, dict) else None
-    for row in rows or ():
-        if not isinstance(row, dict):
-            errors.append(f"aot_preconditions: expected dict rows, got {row!r}")
-            continue
-        verdict = str(row.get("verdict") or "").strip()
-        family = str(row.get("family") or "").strip()
-        label = f"{row.get('check')}{f' [{family}]' if family else ''}"
-        detail = str(row.get("detail") or "")
-        if verdict == "refused":
-            errors.append(f"aot precondition {label}: {detail}")
-        elif verdict in ("blocked", "abstained"):
-            warnings.append(f"aot precondition {label} ({verdict}): {detail}")
-        elif verdict != "ok":
-            errors.append(
-                f"aot precondition {label}: unknown verdict {verdict!r}")
+# pgw#1373: the A19 slot-layout gate (`_undeclared_slot_layouts` /
+# `refuse_undeclared_slot_layouts` / `_check_slot_layout_declarations`) and the
+# `aot_preconditions` gate are DELETED with the vocabularies that fed them.
+# A19 demanded `Slot(layouts=...)` on every model slot; pgw#1394 established
+# that a SERVING LANE is not an artifact-layout handle and removed `layouts`
+# from v2 entrypoint slots entirely, so the gate could only ever fire falsely
+# here — a v2 slot has no layouts to declare, by ruling. The lane travels on
+# the release-derive document's `lane_contracts` and is gated there (th#2160).
 
 
 _NON_SLUG_CHARS = re.compile(r"[^a-z0-9.]+")

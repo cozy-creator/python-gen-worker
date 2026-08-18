@@ -1,9 +1,0 @@
-{
-  "family": "trellis_3d",
-  "layout_requirements": [],
-  "layouts": [],
-  "layouts_undeclarable": "overlay-indirected source-built tree \u2014 the consumed layout is NOT determinable from evidence in this repo; reported, not guessed",
-  "lora_tuned": null,
-  "tuned": null,
-  "v": 1
-}

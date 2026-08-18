@@ -44,30 +44,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.required = False  # so `gen-worker --help` works without a sub
 
     # Lazy-import the subcommand wiring so the cli stays cheap to import
-    # for `gen-worker --help` in CI.
-    from . import run as _run_mod
-    _run_mod.add_subparser(sub)
-
-    from . import serve as _serve_mod
-    _serve_mod.add_subparser(sub)
-
-    from . import invoke as _invoke_mod
-    _invoke_mod.add_subparser(sub)
-
-    from . import prefetch as _prefetch_mod
-    _prefetch_mod.add_subparser(sub)
-
-    from . import families as _families_mod
-    _families_mod.add_subparser(sub)
-
-    from . import model as _model_mod
-    _model_mod.add_subparser(sub)
-
+    # for `gen-worker --help` in CI. pgw#1373 deleted the v1 subcommands
+    # (`run`, `serve`, `invoke`, `prefetch`, `families`, `model`, `job`) with
+    # the declaration surface they drove; local serving is
+    # `python -m gen_worker.serving`.
     from . import models_export as _models_mod
     _models_mod.add_subparser(sub)
-
-    from . import job as _job_mod
-    _job_mod.add_subparser(sub)
 
     from . import release as _release_mod
     _release_mod.add_subparser(sub)

@@ -414,7 +414,6 @@ class WorkerHarness:
         self.worker = Worker(
             settings,
             list(modules),
-            gpu_slots=gpu_slots,
             backoff_base_s=backoff_base_s,
             backoff_cap_s=backoff_cap_s,
         )
@@ -431,20 +430,15 @@ class WorkerHarness:
         return self._thread.is_alive()
 
     def reconcile_marker(self) -> tuple:
-        """A MARKER of residency-reconcile work, for progress-gated waits.
-
-        Deliberately not a "reconcile in flight?" boolean: a task that is stuck
-        is also not done, so a wait that refreshed on that predicate would
-        never end (pgw#795 red-verify measured exactly that hang). What counts
-        as evidence is CHANGE — a new pass, a pass finishing, a different work
-        item — so this returns the identity of both.
-        """
-        lifecycle = self.worker.lifecycle
-        task = getattr(lifecycle, "_residency_task", None)
-        return (
-            id(task) if task is not None else None,
-            task.done() if task is not None else None,
-            repr(getattr(lifecycle, "_reconcile_active", None)),
+        """pgw#1373: the residency-reconcile loop was `lifecycle.py`'s, and
+        `lifecycle.py` is deleted with the v1 runtime. The v2 worker has no
+        reconcile pass to mark — residency is per-request admission
+        (`serving/residency.py`), not a background convergence loop — so this
+        REFUSES rather than returning a marker that can never change, which is
+        exactly the never-ending wait pgw#795 exists to prevent."""
+        raise NotImplementedError(
+            "no residency-reconcile loop on the v2 worker (pgw#1373): residency "
+            "is per-request admission, so there is no pass to wait on"
         )
 
     def start(self) -> None:

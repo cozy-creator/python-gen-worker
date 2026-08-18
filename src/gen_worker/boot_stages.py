@@ -716,7 +716,11 @@ def rollup_detail(table: BootStageTable) -> str:
         f"stages={len({s.stage for s in table.spans})}",
         f"spans={len(table.spans)}",
     ]
-    for key in ("keys_from", "classes", "family"):
+    # pgw#1373: `keys_from` was the keyset ladder's axis and the ladder is
+    # deleted, so nothing writes it. A roll-up that keeps ASKING for a key
+    # nothing produces reads as "the boot had no key source" rather than "that
+    # question no longer exists".
+    for key in ("classes", "family"):
         value = table.attr(key)
         if value:
             parts.append(f"{key}={value}")

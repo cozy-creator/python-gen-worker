@@ -100,7 +100,7 @@ class EntrypointSpec:
     payload_type: Type[msgspec.Struct]
     slots: Tuple[SlotSpec, ...]
     return_type: Type[msgspec.Struct]
-    #: The declared :class:`~gen_worker.api.decorators.Resources`, or ``None``.
+    #: The declared :class:`~gen_worker.api.resources.Resources`, or ``None``.
     #: se#755/pgw#1396: the STAFFING ENVELOPE — the machine this function is
     #: placed on. Function scope because the hub's unit of placement is the
     #: function (pgw#1394) and because `music-analysis` declares three
@@ -240,7 +240,7 @@ def entrypoint(
             "(pgw#1396); the Model class header carries lanes="
         )
     if resources is not None:
-        from ..api.decorators import Resources
+        from ..api.resources import Resources
 
         if not isinstance(resources, Resources):
             raise _refuse(

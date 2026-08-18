@@ -149,13 +149,12 @@ def _fresh_cell_ledgers():
     mints) are process-lifetime in production; clear them between tests so a
     proof failure in one test cannot poison another's arm/selection."""
     from gen_worker import compile_cache as _cc
-    from gen_worker import fleet_compiled_graphs as _fc
 
+    # pgw#1373: `fleet_compiled_graphs` died with the v1 mint stack; only the
+    # compile-cache ledger is left to clear.
     def _clear() -> None:
         with _cc._PROVEN_CELLS_LOCK:
             getattr(_cc, "_QUARANTINED_CELLS", set()).clear()
-        with _fc._PENDING_LOCK:
-            getattr(_fc, "_FINALIZED", {}).clear()
 
     _clear()
     yield

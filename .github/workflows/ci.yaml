@@ -232,7 +232,7 @@ jobs:
       # pgw#1202 PR 2: the TEST tree is checked too — that is where the doubles
       # that lie about production contracts live.
       - name: Type check (mypy, strict by default, src + tests)
-        run: uv run mypy src/gen_worker tests tests_v2
+        run: uv run mypy src/gen_worker tests
 
       # pgw#1347: the pod driver is control-plane code that must NOT ship in the
       # wheel (no pod needs the thing that rents pods), but it spends money, so
@@ -707,10 +707,6 @@ jobs:
       # `always()` so a cancelled run (the concurrency group above cancels
       # superseded pushes) does not spend four more minutes on a result nobody
       # will read.
-      - name: Run tests (v2, zero-based — pgw#808)
-        if: ${{ !cancelled() }}
-        run: uv run pytest tests_v2/ -n 4 --dist loadfile -rs --skip-census-out=.skip-census-v2.json
-
       # GATING (pgw#966). Two rules: every skip this run took is CLASSIFIED in
       # scripts/skip_census.txt, and no row classified CI-MUST-RUN was among
       # them. The first stops the skip set growing invisibly; the second is the
