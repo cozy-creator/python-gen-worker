@@ -34,6 +34,7 @@ from gen_worker.serving import (
     ServeDispatchError,
     EntrypointDeclarationError,
     ModelDeclarationError,
+    lane_handle,
     load_endpoint,
     model_lanes,
     model_type,
@@ -122,10 +123,11 @@ def test_model_header_declarations_and_refusals() -> None:
     class OmittedLanes(Model[SDXL]):
         pass
 
-    # Omitted lanes = the model type's canonical contract — which tensorfs#111
-    # has not shipped yet: a typed refusal naming the seam, never a guess.
-    with pytest.raises(ModelDeclarationError, match="tensorfs#111"):
-        model_lanes(OmittedLanes)
+    # Omitted lanes = the model type's canonical contract object (pgw#1377),
+    # which satisfies the lane protocol: handle + load dtype.
+    (canonical,) = model_lanes(OmittedLanes)
+    assert canonical is SDXL.canonical_contract
+    assert lane_handle(canonical) == "sdxl.diffusers-bf16@1"
 
     # Cheap __init__: constructing a model does not load anything.
     instance = EagerPermanent()
@@ -227,7 +229,7 @@ def test_load_context_defaults_decode_matrix(tmp_path: Path) -> None:
     # Row absent -> the platform fallbacks (zero-arg struct = trace fixture).
     fallback = ctx_for({}).defaults()
     assert fallback == SDXL.Defaults()
-    assert fallback.cfg is True and fallback.steps.default == 30
+    assert fallback.cfg is True and fallback.steps.default == 28
 
     # Partial row -> field-level overlay; untouched fields keep fallbacks.
     # (No scheduler field: checkpoints carry no scheduler metadata — the

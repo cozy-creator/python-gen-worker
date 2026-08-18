@@ -209,7 +209,7 @@ class TinyPipeline:
     ) -> PipelineResult:
         from PIL import Image
 
-        if prompt == "explode":  # a mid-request author bug, on demand
+        if "explode" in prompt:  # a mid-request author bug, on demand
             raise RuntimeError("pipeline exploded mid-request")
         steps = len(timesteps) if timesteps else int(num_inference_steps)
         sample = torch.zeros((height, width), dtype=self.dtype)
