@@ -18,7 +18,8 @@ from typing import Dict, List
 import pytest
 
 import gen_worker.lifecycle as lifecycle_mod
-from gen_worker import boot_phases, entrypoint, env_seal
+from gen_worker import boot_phases, env_seal
+from gen_worker import worker_main as entrypoint
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.hardware_report_hub import recording_hub

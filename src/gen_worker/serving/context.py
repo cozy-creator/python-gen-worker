@@ -7,16 +7,22 @@ Each half carries only what its moment can answer for:
   ``load()`` (pgw#1380's native store->VRAM engine lands here; until then a
   ``from_pretrained`` eager bridge), ``compile()`` (tcg#42's AdoptSession
   delegation), ``defaults()`` (pgw#1377's typed decode).
-* :class:`RequestContext` -> entrypoints: request FACTS (``adapter``,
-  ``is_trace``, ``checkpoint_ref``) + the salvaged base surface
+* :class:`RequestContext` -> entrypoints: the ``checkpoint_ref`` fact
+  (RESOLVED pinned ref of what actually serves) + the salvaged base surface
   (``raise_if_cancelled``, ``save_image``, ``clamp``, ``generator``,
-  ``progress``, ``log`` …) + ``step_callback``.
+  ``progress``, ``log`` …) + ``step_callback`` + ``warn``.
 
-Adapters are EXPLICIT ENTRYPOINT PARAMETERS (Paul ruling, 2026-08-17), not
-ctx facts: ``def generate_turbo(ctx, payload, model: SdxlModel,
-turbo: Adapter | None)`` — the hub resolves what rides per deployment into
-the declared slot; APPLYING it stays a model mutation through a model-owned
-scope (``with model.adapter(turbo): ...``).
+Adapters are EXPLICIT ENTRYPOINT PARAMETERS (Paul ruling), not ctx facts:
+``def generate(ctx, payload, model: SdxlModel, turbo: Adapter | None,
+loras: list[Adapter])`` — the hub resolves what rides per deployment/request
+into the declared slots; APPLYING them stays a model mutation through the
+model-owned scope (``with model.adapters(riding): ...``).
+
+There is deliberately NO trace flag on any ctx (Paul ruling): author code is
+trace-oblivious by construction — the publish-time derive varies BINDINGS
+(input enumeration: synthesized adapters, cfg-false defaults) and its
+harness-private context no-ops the output surfaces; it never asks author
+code to cooperate.
 
 Per-checkpoint serving values are MUTABLE PLATFORM DEPLOY STATE (hub DB),
 not release metadata: the host holds one :class:`DeployBinding` and stamps
@@ -49,20 +55,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class Adapter:
-    """A hub-resolved adapter (LoRA): name, local path, decoded overlay
-    defaults (pgw#1377's ``adapter.defaults``, e.g. ``SDXL.Lora.Defaults``)
-    and the envelope-resolved ``scale`` (platform-clamped through the LoRA's
-    strength Knob before the worker sees it). Entrypoints declare adapter
-    SLOTS as explicit parameters — ``turbo: Adapter | None`` (single,
-    optional) or ``loras: list[Adapter]`` (the request's picks; empty when
-    none ride) — param name = slot name; the worker fills them from
-    deploy/request state. Applying adapters is a MODEL mutation and goes
-    through a model-owned scope (``model.adapters(riding)``)."""
+    """A hub-resolved adapter (LoRA). ``ref`` is its FULLY-PINNED hub
+    identity (``org/repo@release`` — what evidence/output reports; hub
+    resolution fills it pinned even when the pick was floating); ``name`` is
+    the diffusers adapter-registry label (``load_lora_weights``'s
+    ``adapter_name``); ``defaults`` is the decoded overlay (pgw#1377's
+    ``adapter.defaults``, e.g. ``SDXL.Lora.Defaults``); ``scale`` is
+    envelope-resolved, platform-clamped through the LoRA's strength Knob
+    before the worker sees it. Entrypoints declare adapter SLOTS as explicit
+    parameters — ``turbo: Adapter | None`` (single, optional) or
+    ``loras: list[Adapter]`` (the request's picks; empty when none ride) —
+    param name = slot name; the worker fills them from deploy/request state.
+    Applying adapters is a MODEL mutation and goes through a model-owned
+    scope (``model.adapters(riding)``)."""
 
     name: str
     path: Path
     defaults: Any = None
     scale: float = 1.0
+    ref: str = ""
 
 
 @dataclass(slots=True)
@@ -106,14 +117,12 @@ class LoadContext(Generic[MT_co]):
         lane: Any = None,
         engine: Optional[LoaderEngine] = None,
         compile_sink: Optional[Callable[[Any], Any]] = None,
-        is_trace: bool = False,
     ) -> None:
         self._binding = binding
         self._model_type = model_type
         self._lane = lane
         self._engine = engine
         self._compile_sink = compile_sink
-        self._is_trace = bool(is_trace)
 
     @property
     def checkpoint_dir(self) -> Path:
@@ -138,11 +147,6 @@ class LoadContext(Generic[MT_co]):
                 "(eager-permanent); there is no active lane to read"
             )
         return self._lane
-
-    @property
-    def is_trace(self) -> bool:
-        """True under the publish-time derive (meta/fake tensors)."""
-        return self._is_trace
 
     def load(self, pipeline_cls: Type[P]) -> P:
         """Build ``pipeline_cls`` with this checkpoint's weights resident —
@@ -236,30 +240,22 @@ class RequestContext(_BaseRequestContext[D]):
         request_id: str,
         *,
         binding: Optional[DeployBinding] = None,
-        is_trace: bool = False,
         **base_kwargs: Any,
     ) -> None:
         super().__init__(request_id, **base_kwargs)
         self._serve_binding = binding
-        self._is_trace = bool(is_trace)
 
     @property
     def checkpoint_ref(self) -> str:
-        """The hub ref of the checkpoint serving this request — honest
-        output metadata (``model_used``)."""
+        """The RESOLVED, fully-pinned hub ref of the checkpoint that
+        actually served this request — honest structured output evidence
+        (the ``model`` field of an output struct)."""
         if self._serve_binding is None:
             raise RuntimeError(
                 "ctx.checkpoint_ref: no deploy binding rides this context "
                 "(local construction without binding=)"
             )
         return self._serve_binding.checkpoint_ref
-
-    @property
-    def is_trace(self) -> bool:
-        """True under the publish-time discovery drive (sample inputs, fake
-        weights): entrypoints may relax deploy-state checks that cannot hold
-        there, and MUST NOT persist outputs."""
-        return self._is_trace
 
     def step_callback(self, num_inference_steps: int, **kwargs: Any) -> Any:
         """A diffusers ``callback_on_step_end`` wired to progress + cancel —

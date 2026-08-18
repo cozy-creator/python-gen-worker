@@ -88,19 +88,15 @@ class EndpointHost:
 
     # -- contexts -----------------------------------------------------------
 
-    def make_context(
-        self, request_id: str, *, is_trace: bool = False, **overrides: Any
-    ) -> RequestContext[Any]:
+    def make_context(self, request_id: str, **overrides: Any) -> RequestContext[Any]:
         kwargs: Dict[str, Any] = dict(self._context_kwargs)
         if self._output_dir is not None:
             kwargs.setdefault("local_output_dir", str(self._output_dir))
         kwargs.update(overrides)
-        return RequestContext(
-            request_id, binding=self.binding, is_trace=is_trace, **kwargs,
-        )
+        return RequestContext(request_id, binding=self.binding, **kwargs)
 
     def _load_context(
-        self, model_cls: type, *, compile_sink: Any = None, is_trace: bool = False
+        self, model_cls: type, *, compile_sink: Any = None
     ) -> LoadContext[Any]:
         return LoadContext(
             binding=self.binding,
@@ -108,7 +104,6 @@ class EndpointHost:
             lane=self.lanes[model_cls],
             engine=self._engine,
             compile_sink=compile_sink,
-            is_trace=is_trace,
         )
 
     # -- boot ---------------------------------------------------------------

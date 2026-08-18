@@ -2,27 +2,37 @@
 
 Ship-code-as-is under the pgw#1382 split: ``SdxlModel(Model[SDXL], lanes=…)``
 is the stateful half (load/compile/defaults + the self-restoring mutation
-scopes); ONE stateless module-level ``@entrypoint`` serves both modes — the
-DEPLOYMENT decides turbo (bound distillation adapter or cfg-off checkpoint)
-vs regular CFG (Paul's merge ruling). ``TinyPipeline`` stands in for
-``StableDiffusionXLPipeline`` (CPU, fake weights from a config-only
-checkpoint) with REAL diffusers schedulers, so the scheduler-scope semantics
-under test are the real ones; ``contracts`` stands in for
-``tensorfs.contracts`` (tensorfs#111 pending).
+scopes); ONE stateless module-level ``@entrypoint`` whose behavior is driven
+by the ACTIVE RECIPE's typed fields (Paul's recipe-not-mode-flag ruling),
+with the endpoint-served sampler table and structured output evidence.
+``TinyPipeline`` stands in for ``StableDiffusionXLPipeline`` (CPU, fake
+weights from a config-only checkpoint) with REAL diffusers schedulers, so
+the scheduler-scope semantics under test are the real ones; ``contracts``
+stands in for ``tensorfs.contracts`` (tensorfs#111 pending).
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Callable, Literal, Optional, TypedDict, Unpack
+from typing import Annotated, Any, Callable, Literal, Optional, TypedDict, Unpack
 
 import msgspec
 import torch
-from diffusers import EulerDiscreteScheduler, LCMScheduler, SchedulerMixin
+from diffusers import (
+    DDIMScheduler,
+    DPMSolverMultistepScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
+    LCMScheduler,
+    UniPCMultistepScheduler,
+)
+# Deep import: the top-level lazy re-export is a distinct symbol to mypy,
+# which would sever the schedulers' subclass relation the table relies on.
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
 
 from gen_worker import (
     Adapter,
@@ -32,7 +42,6 @@ from gen_worker import (
     Model,
     PromptRole,
     RequestContext,
-    ValidationError,
     entrypoint,
 )
 from gen_worker.models import SDXL
@@ -52,22 +61,59 @@ _BUCKETS: dict[AspectRatio, tuple[int, int]] = {
 }
 
 
+# The samplers THIS endpoint serves. SdxlSampler types the REQUEST field, so
+# an unsupported name is a typed 400 at the API boundary; SamplerName (the
+# platform-wide vocabulary in gen_worker.models) types only the CHECKPOINT
+# METADATA field — a metadata value this endpoint doesn't serve warns and
+# falls through to the tree's scheduler.
+SdxlSampler = Literal[
+    "dpmpp_2m_karras", "dpmpp_2m", "euler", "euler_trailing",
+    "euler_a", "unipc", "ddim", "lcm",
+]
+# diffusers' lazy top-level exports defeat mypy's subclass view of the
+# scheduler classes; the rows are real SchedulerMixin subclasses at runtime.
+_SamplerRow = tuple["type[Any]", Mapping[str, str | bool]]
+_SAMPLERS: dict[SdxlSampler, _SamplerRow] = {
+    "dpmpp_2m_karras": (DPMSolverMultistepScheduler, {"use_karras_sigmas": True}),
+    "dpmpp_2m": (DPMSolverMultistepScheduler, {}),
+    "euler": (EulerDiscreteScheduler, {}),
+    "euler_trailing": (EulerDiscreteScheduler, {"timestep_spacing": "trailing"}),
+    "euler_a": (EulerAncestralDiscreteScheduler, {}),
+    "unipc": (UniPCMultistepScheduler, {}),
+    "ddim": (DDIMScheduler, {}),
+    "lcm": (LCMScheduler, {}),
+}
+# Layer-3 fallback: used only when a checkpoint tree ships no scheduler at all.
+_DEFAULT_SAMPLER: SdxlSampler = "dpmpp_2m_karras"
+
+
 class TextToImageInput(msgspec.Struct, forbid_unknown_fields=True):
     prompt: Annotated[str, PromptRole("positive")]
     negative_prompt: Annotated[str, PromptRole("negative")] = ""
     aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1
-    # API bounds REJECT (typed 400); within them, the checkpoint's own range
-    # CLAMPS. None -> the active recipe's default.
+    # None -> the checkpoint's sampler (metadata override, else its shipped
+    # scheduler config); a name -> caller override, typed by THIS endpoint's
+    # served set — unsupported names are a 400 at the API boundary.
+    sampler: SdxlSampler | None = None
     num_inference_steps: Annotated[int, msgspec.Meta(ge=1, le=80)] | None = None
     guidance_scale: Annotated[float, msgspec.Meta(ge=1.5, le=15.0)] | None = None
     enhance_prompt: bool = True
     seed: int | None = None
-    output_format: ImageFormat = "png"
+    output_format: ImageFormat = "webp"
+
+
+class LoraUsed(msgspec.Struct):
+    ref: str      # org/repo@release — the hub identity it was resolved from
+    scale: float
 
 
 class ImageOutput(msgspec.Struct):
     image: ImageAsset
-    model_used: str
+    #: The checkpoint served: its fully-pinned hub ref (org/repo@release).
+    model: str
+    #: Riding adapters in application order (the distillation adapter first
+    #: when one rode, then the request's style LoRAs).
+    loras: list[LoraUsed] = []
 
 
 class _PipeCall(TypedDict, total=False):
@@ -105,7 +151,8 @@ class PipelineResult:
 class TinyPipeline:
     """Author code as-is: its loop, a REAL diffusers scheduler, LoRA hooks."""
 
-    def __init__(self, unet: TinyUnet, scheduler: SchedulerMixin, dtype: torch.dtype) -> None:
+    def __init__(self, unet: TinyUnet, scheduler: Optional[SchedulerMixin],
+                 dtype: torch.dtype) -> None:
         self.unet = unet
         self.scheduler = scheduler
         self.dtype = dtype
@@ -124,10 +171,12 @@ class TinyPipeline:
         config = json.loads((Path(checkpoint_dir) / "config.json").read_text())
         torch.manual_seed(int(config.get("seed", 0)))
         unet = TinyUnet().to(torch_dtype)
-        scheduler = EulerDiscreteScheduler.from_config(
-            dict(EulerDiscreteScheduler().config,  # type: ignore[attr-defined]
-                 **config.get("scheduler", {}))
-        )
+        scheduler: Optional[SchedulerMixin] = None
+        if config.get("scheduler") is not None:
+            scheduler = EulerDiscreteScheduler.from_config(
+                dict(EulerDiscreteScheduler().config,  # type: ignore[attr-defined]
+                     **config.get("scheduler", {}))
+            )
         return cls(unet, scheduler, torch_dtype)
 
     def load_lora_weights(self, path: Path | str, adapter_name: str = "") -> None:
@@ -193,27 +242,24 @@ class SdxlModel(
         self.pipe = ctx.load(TinyPipeline)
         self.pipe.unet = ctx.compile(self.pipe.unet)
         self.defaults = ctx.defaults()
+        if self.pipe.scheduler is None:  # tree shipped no scheduler config
+            cls, overrides = _SAMPLERS[_DEFAULT_SAMPLER]
+            self.pipe.scheduler = cls(**overrides)
 
     # unload(ctx): inherited no-op — eviction is framework-generic.
 
-    # THE MUTATION CONTRACT: request-time changes go through these
-    # self-restoring scopes; at entrypoint return, serving configuration
-    # equals the post-load baseline. Caches may grow; configuration may not
-    # drift. Single-flight per instance makes the scopes race-free.
+    # This class persists in memory. Request-time changes go through these
+    # self-restoring scopes, so one request cannot mutate pipeline state in
+    # a way that affects the next request.
     @contextmanager
     def scheduler(
         self,
         scheduler_cls: type[SchedulerMixin],
-        *,
-        timestep_spacing: Literal["leading", "trailing", "linspace"] | None = None,
+        overrides: Mapping[str, str | bool] = {},
     ) -> Iterator[None]:
         prev = self.pipe.scheduler
-        overrides = (
-            {} if timestep_spacing is None
-            else {"timestep_spacing": timestep_spacing}
-        )
-        self.pipe.scheduler = scheduler_cls.from_config(
-            prev.config, **overrides)  # type: ignore[attr-defined]
+        self.pipe.scheduler = scheduler_cls.from_config(  # type: ignore[attr-defined]
+            prev.config, **overrides)  # type: ignore[union-attr]
         try:
             yield
         finally:
@@ -233,6 +279,26 @@ class SdxlModel(
         finally:
             if riding:
                 self.pipe.unload_lora_weights()
+
+
+def _pick_sampler(ctx: RequestContext, payload: TextToImageInput,
+                  recipe: SDXL.Recipe) -> SdxlSampler | None:
+    """The sampler precedence, one layer per return:
+    1. the request's pick (typed to this endpoint's served set);
+    2. the checkpoint's metadata pick (platform vocabulary — warn and fall
+       through if this endpoint doesn't serve it);
+    3. None = the checkpoint tree's shipped scheduler stands.
+    (Layer 4, the endpoint default, was applied at load if the tree had none.)
+    """
+    if payload.sampler is not None:
+        return payload.sampler
+    if recipe.sampler is None:
+        return None
+    if recipe.sampler not in _SAMPLERS:
+        ctx.warn(f"checkpoint prefers sampler {recipe.sampler!r}, which this "
+                 "endpoint does not serve; using its shipped scheduler")
+        return None
+    return recipe.sampler  # membership-guarded narrowing
 
 
 def _run(model: SdxlModel, ctx: RequestContext, *, steps: int,
@@ -257,20 +323,23 @@ def generate(ctx: RequestContext, payload: TextToImageInput, model: SdxlModel,
              turbo: Adapter | None, loras: list[Adapter]) -> ImageOutput:
     """One entrypoint; behavior is driven by the ACTIVE RECIPE's typed fields,
     not a mode flag. The recipe is the distillation adapter's defaults when one
-    rides, else the checkpoint's own. Its fields are independent axes:
-    cfg (batch-2 guidance vs none), schedule (None = keep the checkpoint's own
-    scheduler), steps/guidance knobs, pinned timesteps."""
+    rides, else the checkpoint's own."""
 
     ctx.raise_if_cancelled()
 
     width, height = _BUCKETS[payload.aspect_ratio]
     d = model.defaults
 
-    if turbo is not None and not d.cfg:
-        raise ValidationError(
-            "this checkpoint is already distilled; a distillation adapter "
-            "cannot be stacked on it"
+    if turbo is not None and d.step_distilled:
+        # Stacking a step-distillation on a step-distilled checkpoint fries
+        # the output — ignore the adapter, serve the checkpoint as deployed.
+        # (cfg is a separate axis: a guidance-distilled full-step checkpoint
+        # has cfg off but step_distilled False, and MAY take a turbo LoRA.)
+        ctx.warn(
+            f"distillation adapter {turbo.ref!r} ignored: this checkpoint "
+            "is already step-distilled"
         )
+        turbo = None
     # Whichever source it came from, what we hold is a SERVING RECIPE —
     # both Defaults types inherit SDXL.Recipe, so this is one type, not a
     # union.
@@ -280,8 +349,7 @@ def generate(ctx: RequestContext, payload: TextToImageInput, model: SdxlModel,
 
     prompt = payload.prompt.strip()
     negative = payload.negative_prompt.strip()
-    # The positive preamble applies in every mode; the negative preamble is
-    # CFG-only (no unconditional branch exists without CFG).
+    # Some SDXL fine-tunes work better with some special text prepended
     if payload.enhance_prompt and d.positive_preamble \
             and d.positive_preamble not in prompt:
         prompt = f"{d.positive_preamble}, {prompt}"
@@ -298,7 +366,7 @@ def generate(ctx: RequestContext, payload: TextToImageInput, model: SdxlModel,
         })
         # The checkpoint's own scheduler config drives objective handling;
         # v-prediction needs the zero-terminal-SNR rescale at call time.
-        if model.pipe.scheduler.config.get(  # type: ignore[attr-defined]
+        if model.pipe.scheduler.config.get(  # type: ignore[union-attr]
                 "prediction_type") == "v_prediction":
             call_kwargs["guidance_rescale"] = 0.7
     else:
@@ -321,14 +389,10 @@ def generate(ctx: RequestContext, payload: TextToImageInput, model: SdxlModel,
 
     call_kwargs.update({"prompt": prompt, "prompt_2": prompt})
 
-    # schedule=None means: keep the checkpoint's own scheduler untouched.
+    sampler = _pick_sampler(ctx, payload, recipe)
     sched_scope = (
-        model.scheduler(LCMScheduler)  # type: ignore[arg-type]
-        if recipe.schedule == "lcm"
-        else model.scheduler(EulerDiscreteScheduler,  # type: ignore[arg-type]
-                             timestep_spacing="trailing")
-        if recipe.schedule == "euler_trailing"
-        else nullcontext()
+        nullcontext() if sampler is None
+        else model.scheduler(*_SAMPLERS[sampler])
     )
 
     with model.adapters(riding), sched_scope:
@@ -337,5 +401,6 @@ def generate(ctx: RequestContext, payload: TextToImageInput, model: SdxlModel,
 
     return ImageOutput(
         image=image,
-        model_used="+".join([ctx.checkpoint_ref] + [a.name for a in riding]),
+        model=ctx.checkpoint_ref,
+        loras=[LoraUsed(ref=a.ref, scale=a.scale) for a in riding],
     )

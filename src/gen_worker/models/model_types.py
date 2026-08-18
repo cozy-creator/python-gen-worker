@@ -25,6 +25,16 @@ import msgspec
 #: scheduler-class construction stays endpoint code (the main_v2 pattern).
 Schedule = Literal["euler_trailing", "lcm"]
 
+#: The PLATFORM-WIDE sampler vocabulary — types checkpoint METADATA (the
+#: hub-row `sampler` field, written platform-wide). An endpoint serves its
+#: own subset (its request field is its own Literal); a metadata value an
+#: endpoint doesn't serve warns and falls through to the tree's scheduler.
+SamplerName = Literal[
+    "dpmpp_2m_karras", "dpmpp_2m", "dpmpp_sde", "dpmpp_sde_karras",
+    "euler", "euler_trailing", "euler_a", "heun", "unipc", "ddim",
+    "ddpm", "lcm", "pndm", "deis",
+]
+
 N = TypeVar("N", int, float)
 DT_co = TypeVar("DT_co", bound=msgspec.Struct, covariant=True)
 
@@ -119,12 +129,21 @@ class SDXL(ModelType["SDXL.Defaults"]):
         cfg: bool = True
         schedule: Schedule | None = None
         timesteps: tuple[int, ...] = ()
+        #: The checkpoint-metadata sampler preference (platform vocabulary);
+        #: None = the checkpoint tree's shipped scheduler stands.
+        sampler: SamplerName | None = None
 
     class Defaults(Recipe, frozen=True):
         """SDXL per-checkpoint serving defaults (pgw#1377 point 2): the
-        Recipe axes plus the prompt-enhancement vocabulary. Zero-arg
-        construction is the platform fallback AND the trace fixture."""
+        Recipe axes plus checkpoint-only facts and the prompt-enhancement
+        vocabulary. Zero-arg construction is the platform fallback AND the
+        trace fixture."""
 
+        #: A fused step-distilled merge; stacking a step-distillation
+        #: adapter on one is warned-and-ignored (cfg is a SEPARATE axis:
+        #: guidance-distilled full-step checkpoints have cfg off but
+        #: step_distilled False and may take a turbo LoRA).
+        step_distilled: bool = False
         positive_preamble: str = ""
         negative_preamble: str = ""
 
@@ -158,6 +177,7 @@ __all__ = [
     "Knob",
     "ModelType",
     "SDXL",
+    "SamplerName",
     "Schedule",
     "SupportsAdjust",
 ]

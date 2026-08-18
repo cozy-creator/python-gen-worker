@@ -1,4 +1,4 @@
-"""pgw#1382 — the Model/Endpoint split acceptance suite.
+"""The Model/Endpoint split (pgw#1382) — the model-authoring acceptance suite.
 
 Integration, no mocks, no GPU: the main_v2-shaped fixture imports clean and
 extracts statically; a fake-checkpoint load+serve drives the ONE merged
@@ -23,7 +23,6 @@ from gen_worker import (
     LoadContext,
     Model,
     RequestContext,
-    ValidationError,
     entrypoint,
 )
 from gen_worker.models import SDXL
@@ -46,7 +45,8 @@ LANE = "sdxl.diffusers-bf16@1"
 def make_checkpoint(tmp_path: Path, **config: object) -> Path:
     root = tmp_path / "checkpoint"
     root.mkdir(exist_ok=True)
-    (root / "config.json").write_text(json.dumps({"seed": 7, **config}))
+    (root / "config.json").write_text(
+        json.dumps({"seed": 7, "scheduler": {}, **config}))
     return root
 
 
@@ -238,17 +238,17 @@ def test_load_context_defaults_decode_matrix(tmp_path: Path) -> None:
 
 def test_request_context_facts() -> None:
     bare: RequestContext[Any] = RequestContext("req-1")
-    assert bare.is_trace is False
     with pytest.raises(RuntimeError, match="no deploy binding"):
         _ = bare.checkpoint_ref
+    # There is deliberately NO trace flag on ctx (Paul ruling): author code
+    # is trace-oblivious by construction.
+    assert not hasattr(bare, "is_trace")
 
     bound: RequestContext[Any] = RequestContext(
         "req-2",
         binding=DeployBinding(checkpoint_ref="ckpt:y@2", checkpoint_dir=Path(".")),
-        is_trace=True,
     )
     assert bound.checkpoint_ref == "ckpt:y@2"
-    assert bound.is_trace is True
     # The salvaged base surface rides along (clamp records caller-visibly).
     assert bound.clamp("x", 5.0, hi=2.0) == 2.0
     assert bound.adjustments and bound.adjustments[0]["field"] == "x"
@@ -301,11 +301,12 @@ def test_scheduler_and_adapter_scopes_restore_after_a_turbo_request(
             adapter=Adapter(
                 name="lcm-lora", path=tmp_path / "lora",
                 defaults=SDXL.Lora.Defaults(schedule="lcm"),
+                ref="cozy/lcm-lora@1",
             ),
         )
     )
     out = host.dispatch("generate", {"prompt": "turbo"}, request_id="turbo-1")
-    assert out.model_used.endswith("+lcm-lora")
+    assert [used.ref for used in out.loras] == ["cozy/lcm-lora@1"]
 
     # Leave it as you found it: the SAME scheduler object is back, and the
     # adapter is unloaded — configuration equals the post-load baseline.
@@ -316,7 +317,7 @@ def test_scheduler_and_adapter_scopes_restore_after_a_turbo_request(
     # LCM/trailing scheduler is the unrepresentable state).
     host.rebind(binding)
     out = host.dispatch("generate", {"prompt": "cfg"}, request_id="cfg-1")
-    assert out.model_used == binding.checkpoint_ref
+    assert out.model == binding.checkpoint_ref and out.loras == []
     assert model.pipe.scheduler is baseline
 
 
@@ -344,27 +345,33 @@ def test_scopes_restore_even_when_the_request_raises(
     assert model.pipe.loaded_loras == []
 
 
-def test_stacking_an_adapter_on_a_distilled_checkpoint_refuses(
+def test_stacking_on_a_step_distilled_checkpoint_warns_and_ignores(
     tmp_path: Path,
 ) -> None:
+    """Paul's either-or ruling, warn-shaped: a step-distillation adapter on a
+    step-distilled checkpoint is IGNORED caller-visibly — the checkpoint
+    serves as deployed, never a fried render and never an aborted request."""
     loaded = load_endpoint(FIXTURE_DIR)
     stacked = EndpointHost(
         loaded,
         DeployBinding(
             checkpoint_ref="ckpt:distilled@1",
             checkpoint_dir=make_checkpoint(tmp_path),
-            defaults={"cfg": False, "schedule": "lcm",
+            defaults={"cfg": False, "step_distilled": True, "schedule": "lcm",
                       "steps": {"default": 4, "lo": 1, "hi": 8}},
             adapter=Adapter(
                 name="x", path=tmp_path / "lora", defaults=SDXL.Lora.Defaults(),
+                ref="cozy/x@1",
             ),
         ),
         lane_contract=LANE,
         output_dir=tmp_path / "outputs",
     )
     stacked.setup()
-    with pytest.raises(ValidationError, match="cannot be stacked"):
-        stacked.dispatch("generate", {"prompt": "x"}, request_id="r")
+    ctx = stacked.make_context("r")
+    out = stacked.dispatch("generate", {"prompt": "x"}, request_id="r", ctx=ctx)
+    assert out.model == "ckpt:distilled@1" and out.loras == []
+    assert [w for w in ctx.warnings if "already step-distilled" in w]
 
 
 def test_distilled_checkpoint_serves_turbo_without_an_adapter(
@@ -386,7 +393,7 @@ def test_distilled_checkpoint_serves_turbo_without_an_adapter(
     )
     fresh.setup()
     out = fresh.dispatch("generate", {"prompt": "fast"}, request_id="r")
-    assert out.model_used == "ckpt:distilled@1"  # no adapter suffix
+    assert out.model == "ckpt:distilled@1" and out.loras == []
 
 
 # --- the concurrency + lifecycle contract (runtime fixture) -----------------
@@ -494,14 +501,19 @@ def test_per_request_loras_ride_the_list_slot_and_restore(
     model = fixture_model(host)
     picks = [
         Adapter(name="style-ink", path=tmp_path / "ink",
-                defaults=SDXL.Lora.Defaults(), scale=0.7),
+                defaults=SDXL.Lora.Defaults(), scale=0.7, ref="me/style-ink@3"),
         Adapter(name="char-fox", path=tmp_path / "fox",
-                defaults=SDXL.Lora.Defaults(), scale=1.2),
+                defaults=SDXL.Lora.Defaults(), scale=1.2, ref="me/char-fox@1"),
     ]
 
     out = host.dispatch(
         "generate", {"prompt": "styled"}, request_id="r", loras=picks)
-    assert out.model_used == "ckpt:tiny@1+style-ink+char-fox"
+    # Structured output evidence: pinned refs + applied scales, in
+    # application order — fields, never string grammar (Paul/ie#731).
+    assert out.model == "ckpt:tiny@1"
+    assert [(used.ref, used.scale) for used in out.loras] == [
+        ("me/style-ink@3", 0.7), ("me/char-fox@1", 1.2),
+    ]
     # The envelope scales were applied through the plural scope...
     assert model.pipe.adapter_history == [
         [("style-ink", 0.7), ("char-fox", 1.2)],
@@ -509,3 +521,40 @@ def test_per_request_loras_ride_the_list_slot_and_restore(
     # ...and nothing stays loaded or active after the request (full restore).
     assert model.pipe.loaded_loras == []
     assert model.pipe.active_adapters == []
+
+
+def test_sampler_precedence_request_beats_metadata_and_unsupported_warns(
+    host: EndpointHost, tmp_path: Path
+) -> None:
+    model = fixture_model(host)
+    baseline = model.pipe.scheduler
+
+    # Layer 1: the request's pick swaps the scheduler for the call, restored.
+    out = host.dispatch(
+        "generate", {"prompt": "x", "sampler": "lcm"}, request_id="r1")
+    assert out.model == "ckpt:tiny@1"
+    assert model.pipe.scheduler is baseline  # restored after the request
+
+    # Unsupported REQUEST sampler: typed 400 at the API boundary.
+    with pytest.raises(msgspec.ValidationError):
+        host.dispatch(
+            "generate", {"prompt": "x", "sampler": "not-a-sampler"},
+            request_id="r2")
+
+    # Layer 2/3: checkpoint-metadata pick this endpoint does not serve —
+    # warn and fall through to the tree's shipped scheduler.
+    binding = host.binding
+    fresh = EndpointHost(
+        host.loaded,
+        DeployBinding(
+            checkpoint_ref=binding.checkpoint_ref,
+            checkpoint_dir=binding.checkpoint_dir,
+            defaults={**dict(binding.defaults), "sampler": "heun"},
+        ),
+        lane_contract=LANE,
+        output_dir=tmp_path / "outputs-sampler",
+    )
+    fresh.setup()
+    ctx = fresh.make_context("r3")
+    fresh.dispatch("generate", {"prompt": "x"}, request_id="r3", ctx=ctx)
+    assert [w for w in ctx.warnings if "does not serve" in w]

@@ -122,7 +122,7 @@ def test_eager_boot_serves_a_request_end_to_end(host: EndpointHost, tmp_path: Pa
         request_id="req-1",
         ctx=ctx,
     )
-    assert out.model_used == "ckpt:tiny@1"
+    assert out.model == "ckpt:tiny@1" and out.loras == []
     saved = tmp_path / "outputs" / out.image.ref
     assert saved.is_file() and saved.stat().st_size > 0
 
@@ -160,12 +160,13 @@ def test_the_deployment_decides_the_mode(
             defaults=binding.defaults,
             adapter=Adapter(
                 name="lightning-4step", path=tmp_path / "lora",
-                defaults=SDXL.Lora.Defaults(),
+                defaults=SDXL.Lora.Defaults(), ref="cozy/lightning-4step@1",
             ),
         )
     )
     out = host.dispatch("generate", {"prompt": "x"}, request_id="r2")
-    assert out.model_used == "ckpt:tiny@1+lightning-4step"
+    assert out.model == "ckpt:tiny@1"
+    assert [(used.ref, used.scale) for used in out.loras] == [("cozy/lightning-4step@1", 1.0)]
     # Explicit guidance/negatives on a cfg-free serving are IGNORED
     # caller-visibly — ctx.warn rows in the response envelope, never a
     # silent drop and never an aborted request (Paul's warn ruling).
@@ -175,7 +176,7 @@ def test_the_deployment_decides_the_mode(
         {"prompt": "x", "guidance_scale": 7.0, "negative_prompt": "bad"},
         request_id="r3", ctx=ctx,
     )
-    assert out.model_used == "ckpt:tiny@1+lightning-4step"
+    assert [used.ref for used in out.loras] == ["cozy/lightning-4step@1"]
     assert [w for w in ctx.warnings if "guidance_scale ignored" in w]
     assert [w for w in ctx.warnings if "negative_prompt ignored" in w]
 
@@ -216,11 +217,12 @@ def publish_document(host: EndpointHost) -> GraphSetDocument:
     model = fixture_model(host)
 
     def drive() -> None:
+        # Author code is trace-oblivious (Paul ruling): the derive varies
+        # BINDINGS/inputs; it never asks the entrypoint to cooperate.
         for index, ratio in enumerate(AspectRatio):
-            ctx = host.make_context(f"trace-{index}", is_trace=True)
             host.dispatch(
                 "generate", {"prompt": "trace", "aspect_ratio": str(ratio)},
-                request_id=f"trace-{index}", ctx=ctx,
+                request_id=f"trace-{index}",
             )
 
     lane_graphs = discover_lane(LANE, ("unet",), {"unet": model.pipe.unet}, drive)
@@ -330,7 +332,7 @@ def test_eager_permanent_metadata_is_a_clean_noop(
     assert [s.attrs["graphs_from"] for s in spans] == ["eager_permanent"]
     # The endpoint still serves — the eager bridge is unconditional.
     out = booted.dispatch("generate", {"prompt": "still serving"}, request_id="r")
-    assert out.model_used == "ckpt:tiny@1"
+    assert out.model == "ckpt:tiny@1"
 
 
 def test_a_store_less_boot_still_forms_the_full_mint_worklist(
@@ -345,7 +347,7 @@ def test_a_store_less_boot_still_forms_the_full_mint_worklist(
     # Metadata known, artifacts unreachable: everything is stated mint work.
     assert [h.reason for h in booted.holes] == ["miss", "miss"]
     out = booted.dispatch("generate", {"prompt": "eager"}, request_id="r")
-    assert out.model_used == "ckpt:tiny@1"
+    assert out.model == "ckpt:tiny@1"
 
 
 # --- the hub-backed store: th#2133's answer shape, transport stubbed --------

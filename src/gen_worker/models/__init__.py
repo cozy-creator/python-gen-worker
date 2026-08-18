@@ -25,6 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         SDXL,
         Knob,
         ModelType,
+        SamplerName,
     )
     from .download import (
         build_provider_index_from_manifest,
@@ -60,6 +61,7 @@ _EXPORTS: Final[dict[str, str]] = {
     "Knob": "model_types",
     "ModelType": "model_types",
     "SDXL": "model_types",
+    "SamplerName": "model_types",
     "LoadedComponentKey": "residency",
     "ParsedModelRef": "refs",
     "RefFragmentRemoved": "refs",
@@ -98,6 +100,7 @@ __all__ = [
     "Knob",
     "ModelType",
     "SDXL",
+    "SamplerName",
     "tensorhub_cache_dir",
     "tensorhub_cas_dir",
     "ensure_local",
