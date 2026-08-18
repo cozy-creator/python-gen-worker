@@ -1284,6 +1284,14 @@ _IN_FLIGHT: Dict[str, Tuple[str, float]] = {}
 _DURABLE_PROGRESS = 0
 _DURABLE_SEEN: set = set()
 
+#: pgw#1383: how each publish this process ATTEMPTED ended — the key's own
+#: terminal `phase` token (`published`, or the hub's classified refusal code).
+#: The mint driver folds it, because a terminus of `publishing` says only that
+#: an upload was started: a mint whose every upload was refused published
+#: nothing, and the pod must say so rather than hold its card on a mint that
+#: already decided it will not ship.
+_PUBLISH_OUTCOME: Dict[str, str] = {}
+
 
 def publish_durable_progress() -> int:
     """Monotonic count of durable publish transitions in this process."""
@@ -1307,6 +1315,22 @@ def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
     thread has neither succeeded nor failed yet (pgw#815)."""
     with _IN_FLIGHT_LOCK:
         return dict(_IN_FLIGHT)
+
+
+def publish_outcome(key: str) -> str:
+    """How this key's publish ENDED, "" while it is in flight (pgw#1383)."""
+    with _IN_FLIGHT_LOCK:
+        return str(_PUBLISH_OUTCOME.get(key, ""))
+
+
+def _note_publish_outcome(key: str, phase: str) -> None:
+    """Record one publish's terminal phase. LAST writer wins: the question is
+    how this key's most recent attempt ended, so a retry that lands must
+    outrank the refusal that preceded it."""
+    if not key:
+        return
+    with _IN_FLIGHT_LOCK:
+        _PUBLISH_OUTCOME[key] = phase or "unstated"
 
 
 def _publish_async(
@@ -1365,6 +1389,7 @@ def _publish_async(
             local_compiled_graph_store.note_refusal(
                 str(getattr(exc, "code", "") or ""), str(exc))
             _mark_publish(key, local_compiled_graph_store.SINK_REFUSED)
+            _note_publish_outcome(key, _publish_failure_phase(exc) or "refused")
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: hub refused the publish: {exc}",
@@ -1382,6 +1407,7 @@ def _publish_async(
                 "fleet-compiled graphs: publish failed; the compiled graph stays durable in this "
                 "machine's local CAS and the upload is retried next boot",
                 exc_info=True)
+            _note_publish_outcome(key, _publish_failure_phase(exc))
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: publish attempt failed: "
@@ -1393,6 +1419,7 @@ def _publish_async(
             )
         else:
             _note_durable(key, "published")
+            _note_publish_outcome(key, PUBLISH_OUTCOME_PUBLISHED)
             _mark_publish(key, local_compiled_graph_store.SINK_DELIVERED)
             activity_mod.emit_event(
                 "self_mint_publish",
@@ -2876,7 +2903,7 @@ def adopt_delegated_mint(
         # quarantines that class alone, further down, and never reaches this.
         for _row_key in _durable_keys.values():
             _quarantine_durable(_row_key)
-        mark_terminus(pending, TERMINUS_ABORTED)
+        mark_terminus(pending, TERMINUS_ABORTED, reason or "nothing_adopted")
         state["minted"] = None
         _unregister(pending)
         shutil.rmtree(pending.mint_root, ignore_errors=True)
@@ -3115,7 +3142,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             "packed, so nothing can ship",
             phase="nothing_to_publish",
         )
-        mark_terminus(pending, TERMINUS_WITHHELD)
+        mark_terminus(pending, TERMINUS_WITHHELD, "nothing_to_publish")
         return
     state["publish_resolved"] = True
     publisher = pending.publisher
@@ -3125,11 +3152,17 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         # pgw#1371: this class shipped the moment it armed
         # (`adopt_minted_class`); the terminus only closes the books. One
         # upload per key, however the mint ends.
-        mark_terminus(pending, TERMINUS_PUBLISHING)
+        mark_terminus(pending, TERMINUS_PUBLISHING, "shipped_per_class")
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return
     if publisher is not None and publisher.enabled():
-        mark_terminus(pending, TERMINUS_PUBLISHING)
+        mark_terminus(pending, TERMINUS_PUBLISHING, "uploading")
+        # pgw#1383: the terminus ledger records the key it is shipping, the
+        # same way `adopt_minted_class` does — the driver reads that set to
+        # learn whether any upload of this mint actually landed.
+        state.setdefault("published_keys", set()).add(
+            str(getattr(state.get("minted"), "compiled_graph_key", "")
+                or pending.arm_token))
         _publish_async(
             publisher, pending.family,
             # §1.5: FROM THE DURABLE COPY. `adopt_delegated_mint` set this to
@@ -3176,7 +3209,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             "the fleet store still gains nothing",
             phase="no_sink",
         )
-        mark_terminus(pending, TERMINUS_WITHHELD)
+        mark_terminus(pending, TERMINUS_WITHHELD, "no_sink")
         shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
@@ -3210,7 +3243,7 @@ def keep_self_mint_local(pending: "PendingSelfMint") -> None:
             f"there is no compiled graph to keep either",
             phase="nothing_to_publish",
         )
-        mark_terminus(pending, TERMINUS_ABANDONED)
+        mark_terminus(pending, TERMINUS_ABANDONED, "nothing_to_publish")
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return
     logger.info(
@@ -3225,7 +3258,7 @@ def keep_self_mint_local(pending: "PendingSelfMint") -> None:
         f"because no sink exists to attempt one against",
         phase=KEEP_NO_PUBLISHER,
     )
-    mark_terminus(pending, TERMINUS_WITHHELD)
+    mark_terminus(pending, TERMINUS_WITHHELD, KEEP_NO_PUBLISHER)
     shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
@@ -3255,7 +3288,7 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
             "withhold either",
             phase="nothing_to_publish",
         )
-        mark_terminus(pending, TERMINUS_ABANDONED)
+        mark_terminus(pending, TERMINUS_ABANDONED, "nothing_to_publish")
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return
     state["publish_resolved"] = True
@@ -3271,7 +3304,7 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
         f"family={pending.family} key={pending.arm_token}: {reason}",
         phase="incomplete",
     )
-    mark_terminus(pending, TERMINUS_WITHHELD)
+    mark_terminus(pending, TERMINUS_WITHHELD, "incomplete")
     shutil.rmtree(pending.mint_root, ignore_errors=True)
 
 
@@ -3286,14 +3319,90 @@ TERMINUS_ABORTED = "aborted"
 TERMINUS_ABANDONED = "abandoned"
 
 
-def mark_terminus(pending: "PendingSelfMint", name: str) -> None:
-    """Record that this mint obligation reached ``name`` (pgw#815)."""
+def mark_terminus(
+    pending: "PendingSelfMint", name: str, reason: str = "",
+) -> None:
+    """Record that this mint obligation reached ``name``, and WHY (pgw#815).
+
+    pgw#1383: ``reason`` is the SAME flat token the terminus emits as its
+    event ``phase=``, so the driver's one terminal event and the obligation's
+    own event group under one string instead of two derivations of one fact.
+    """
     pending._state["terminus"] = name
+    if reason:
+        pending._state["terminus_reason"] = reason
 
 
 def terminus_of(pending: "PendingSelfMint") -> str:
     """The terminus this mint obligation reached, "" when it reached none."""
     return str(pending._state.get("terminus") or "")
+
+
+def terminus_reason(pending: "PendingSelfMint") -> str:
+    """Why this obligation ended, "" when it never said (pgw#1383)."""
+    return str(pending._state.get("terminus_reason") or "")
+
+
+#: pgw#1383: what a whole MINT ended as, folded from its obligations.
+#: ``published`` is the only end that leaves bytes with the fleet; every other
+#: end means the pod is holding a paid card for nothing and has to say so.
+MINT_END_PUBLISHED = "published"
+MINT_END_WITHHELD = "withheld"
+MINT_END_ABORTED = "aborted"
+MINT_END_ABANDONED = "abandoned"
+MINT_END_UNRESOLVED = "unresolved"
+
+#: The terminal phase a delivered upload reports.
+PUBLISH_OUTCOME_PUBLISHED = "published"
+
+#: Obligation terminus -> mint end, STRONGEST FIRST. One mint may hold several
+#: obligations and they can end differently; one that shipped means the mint
+#: produced something the fleet can adopt, so it outranks the rest.
+_MINT_END_ORDER: Tuple[Tuple[str, str], ...] = (
+    (TERMINUS_SEALED, MINT_END_PUBLISHED),
+    (TERMINUS_PUBLISHING, MINT_END_PUBLISHED),
+    (TERMINUS_WITHHELD, MINT_END_WITHHELD),
+    (TERMINUS_ABORTED, MINT_END_ABORTED),
+    (TERMINUS_ABANDONED, MINT_END_ABANDONED),
+)
+
+
+def _obligation_end(pending: "PendingSelfMint") -> Tuple[str, str]:
+    """One obligation's ``(end, reason)``.
+
+    A ``publishing`` terminus is DOWNGRADED by what the uploads actually did:
+    it is set before the first byte moves, so a mint whose every upload was
+    refused would otherwise report itself published. That downgrade is the
+    measured case — the hub declines, the bytes never ship, and the pod has to
+    know it is finished anyway.
+    """
+    terminus = terminus_of(pending)
+    end = dict(_MINT_END_ORDER).get(terminus, MINT_END_UNRESOLVED)
+    reason = terminus_reason(pending) or terminus or "no_terminus"
+    if end != MINT_END_PUBLISHED:
+        return end, reason
+    keys = [
+        k for k in (pending._state.get("published_keys") or ())
+        if publish_outcome(str(k))]
+    if not keys:
+        return end, reason
+    if any(publish_outcome(str(k)) == PUBLISH_OUTCOME_PUBLISHED for k in keys):
+        return MINT_END_PUBLISHED, PUBLISH_OUTCOME_PUBLISHED
+    return MINT_END_WITHHELD, publish_outcome(str(sorted(keys)[0]))
+
+
+def mint_end(pendings: Sequence["PendingSelfMint"]) -> Tuple[str, str]:
+    """One mint's END and its typed reason, folded over its obligations.
+
+    ``(unresolved, no_obligation)`` for a driver that opened nothing — which
+    is still an end, and still has to be said: the whole defect this closes is
+    a mint that finished and reported nothing at all.
+    """
+    ends: List[Tuple[str, str]] = [_obligation_end(p) for p in pendings]
+    if not ends:
+        return MINT_END_UNRESOLVED, "no_obligation"
+    rank = [e for _t, e in _MINT_END_ORDER] + [MINT_END_UNRESOLVED]
+    return min(ends, key=lambda row: rank.index(row[0]))
 
 
 def abandon_self_mint(pending: "PendingSelfMint") -> None:
@@ -3309,7 +3418,7 @@ def abandon_self_mint(pending: "PendingSelfMint") -> None:
     that never reached the CAS."""
     if pending._state.get("minted") is not None:
         return
-    mark_terminus(pending, TERMINUS_ABANDONED)
+    mark_terminus(pending, TERMINUS_ABANDONED, "capture_discarded")
     _unregister(pending)
     shutil.rmtree(pending.mint_root, ignore_errors=True)
 
@@ -3583,5 +3692,8 @@ __all__ = [
     "publish_self_mint",
     "publishes_in_flight",
     "terminus_of",
+    "mint_end",
+    "publish_outcome",
+    "terminus_reason",
     "withhold_self_mint_publish",
 ]
