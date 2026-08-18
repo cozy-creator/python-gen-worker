@@ -1,9 +1,12 @@
-"""pgw#1392: a WEIGHTLESS entrypoint declares, discovers, derives and SERVES.
+"""A WEIGHTLESS entrypoint declares, discovers, derives and SERVES.
 
-The se#757 blocker-C shape: ten shipped production functions whose signature
-is `def f(ctx, payload) -> Out` with no model anywhere. This drives one of
-them through the whole real path on CPU -- no weights, no GPU, no model
-download -- and pins the guarantees that were KEPT.
+# pgw#1392: model-less entrypoints are legal -- zero model slots is a valid
+# declaration and the envelope has no model field (se#757 blocker C).
+
+Ten shipped production functions -- `dj-utils`, `music-analysis`,
+`quality-benchmark` -- have the signature `def f(ctx, payload) -> Out` with
+no model anywhere. This drives one of them through the whole real path on
+CPU (no weights, no GPU, no model download) and pins the guarantees KEPT.
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ import importlib
 import json
 import sys
 from pathlib import Path
+from types import ModuleType
+from typing import Any, Iterator
 
 import pytest
 
@@ -26,7 +31,7 @@ MODULE = "weightless_endpoint"
 
 
 @pytest.fixture(scope="module")
-def weightless():
+def weightless() -> Iterator[ModuleType]:
     sys.path.insert(0, str(FIXTURES))
     try:
         yield importlib.import_module(MODULE)
@@ -37,7 +42,7 @@ def weightless():
 # -- declaration ------------------------------------------------------------
 
 
-def test_zero_model_slots_is_a_legal_declaration(weightless) -> None:
+def test_zero_model_slots_is_a_legal_declaration(weightless: ModuleType) -> None:
     spec = getattr(weightless.transform, ENTRYPOINT_ATTR)
     assert spec.name == "transform"
     assert spec.slots == ()
@@ -110,7 +115,7 @@ def test_zero_slots_is_legal_but_junk_slots_are_not() -> None:
 # -- discovery --------------------------------------------------------------
 
 
-def test_discovery_publishes_a_row_with_no_slots(weightless) -> None:
+def test_discovery_publishes_a_row_with_no_slots(weightless: ModuleType) -> None:
     from gen_worker.discovery.entrypoints_v2 import (
         assert_manifest_advertises_something,
         discover_entrypoints,
@@ -132,7 +137,7 @@ def test_discovery_publishes_a_row_with_no_slots(weightless) -> None:
 
 
 def test_derive_renders_an_envelope_with_no_model_field(
-    weightless, tmp_path: Path
+    weightless: ModuleType, tmp_path: Path
 ) -> None:
     pytest.importorskip("torchcg")
     from gen_worker.release.derive import derive_release
@@ -163,7 +168,7 @@ def test_derive_renders_an_envelope_with_no_model_field(
 # -- serve ------------------------------------------------------------------
 
 
-def test_a_weightless_entrypoint_actually_serves(weightless) -> None:
+def test_a_weightless_entrypoint_actually_serves(weightless: ModuleType) -> None:
     loaded = load_endpoint_module(MODULE)
     assert loaded.models == ()
     assert sorted(loaded.entrypoints) == ["closure_gate", "transform"]
@@ -193,22 +198,25 @@ def test_a_weightless_entrypoint_actually_serves(weightless) -> None:
     assert gate.passed and gate.above == 2
 
 
-def test_the_wire_path_serves_and_takes_no_lease(weightless) -> None:
+def test_the_wire_path_serves_and_takes_no_lease(weightless: ModuleType) -> None:
     """The full envelope -> invoke -> outcome path. Nothing is made resident."""
 
     from gen_worker.serving.residency import ResidencyManager
     from gen_worker.serving.serve_loop import ServeLoop
 
     class NeverResolver:
-        def resolve(self, model_cls, checkpoint_ref):  # noqa: ANN001
+        def resolve(self, model_cls: type, checkpoint_ref: str) -> Any:
             raise AssertionError("a weightless request resolved a binding")
 
-        def default_pick(self, model_cls, slot_name):  # noqa: ANN001
+        def default_pick(self, model_cls: type, slot_name: str) -> str:
             raise AssertionError("a weightless request asked for a default pick")
 
     class NeverSizer:
-        def resident_bytes(self, checkpoint_ref, lane):  # noqa: ANN001
+        def resident_bytes(self, checkpoint_ref: str, lane: str) -> int:
             raise AssertionError("a weightless request sized a residency slot")
+
+        def activation_headroom_bytes(self, checkpoint_ref: str, lane: str) -> int:
+            raise AssertionError("a weightless request reserved activation bytes")
 
     loop = ServeLoop(
         load_endpoint_module(MODULE),
@@ -224,7 +232,7 @@ def test_the_wire_path_serves_and_takes_no_lease(weightless) -> None:
     assert outcome.warnings == ("transformed 10 chars",)
 
 
-def test_the_envelope_refuses_a_model_pick_by_name(weightless) -> None:
+def test_the_envelope_refuses_a_model_pick_by_name(weightless: ModuleType) -> None:
     spec = load_endpoint_module(MODULE).entrypoints["transform"]
     for envelope in (
         {"input": {"text": "x"}, "model": "org/repo@rel"},
