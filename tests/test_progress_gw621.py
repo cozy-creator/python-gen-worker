@@ -165,49 +165,6 @@ def test_on_beat_noop_without_activity_or_counters():
 # ---------------------------------------------------------------------------
 
 
-def test_hub_sees_cpu_quiet_download_then_confession(monkeypatch):
-    from gen_worker import lifecycle
-    from harness import progress_endpoints as pe
+# pgw#1373: case deleted with the module it drove (lifecycle).
 
-    monkeypatch.setattr(lifecycle, "HEARTBEAT_INTERVAL_MS", 250)
-    monkeypatch.setitem(progress.STALL_WINDOW_S, "download", 0.8)
 
-    with hub_double(modules=("harness.progress_endpoints",)) as (sched, _):
-        conn = sched.wait_connection(0)
-
-        # CPU-quiet but byte-advancing download is visibly alive: counter
-        # beats with advancing done and no confession (the ie#522
-        # false-positive class — reverting the beat wiring turns this red).
-        adv = conn.wait_for(
-            lambda m: m.WhichOneof("msg") == "activity_update"
-            and m.activity_update.counter == "download:toy/model"
-            and m.activity_update.counter_done > 0
-            and not m.activity_update.self_stalled,
-            timeout=10,
-        ).activity_update
-        assert adv.counter_total == pe.TOTAL_BYTES
-        assert adv.counter_unit == progress.UNIT_BYTES
-
-        # Frozen counter past its window: typed confession on the wire.
-        conf = conn.wait_for(
-            lambda m: m.WhichOneof("msg") == "activity_update"
-            and m.activity_update.self_stalled,
-            timeout=15,
-        ).activity_update
-        assert conf.counter == "download:toy/model"
-        assert conf.stalled_for_ms >= 800
-
-        # Local behavior unchanged (the hub owns the kill): setup finishes
-        # after the freeze and the activity completes normally.
-        # KIND-scoped, because a self-contained EVENT is also a COMPLETED
-        # envelope: this used to match whichever landed first, and pgw#1309's
-        # `process_role` row (emitted at sink bind, before setup runs at all)
-        # made "an activity completed" true while setup was still going.
-        conn.wait_for(
-            lambda m: m.WhichOneof("msg") == "activity_update"
-            and m.activity_update.kind == activity.KIND_WARMUP
-            and m.activity_update.state
-            == pb.ActivityState.ACTIVITY_STATE_COMPLETED,
-            timeout=20,
-        )
-        assert pe.SETUP_DONE.is_set()
