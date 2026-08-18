@@ -167,10 +167,17 @@ class LoadContext(Generic[MT_co]):
             self.pipe = ctx.load(StableDiffusionXLPipeline)
 
         No ``torch_dtype=`` (the lane contract IS the dtype), no
-        ``.to("cuda")`` (weights land on device). Behind the call: the
-        pgw#1380 native tensorfs->VRAM engine when bound; until it lands,
-        an eager ``from_pretrained`` bridge over the projected checkpoint
-        tree keeps the eager path runnable."""
+        ``.to("cuda")`` (weights land on device). Behind the call is
+        pgw#1380's ``gen_worker.serving.streaming`` engine: the pipeline
+        built from configs on ``meta``, then its weights walked out of the
+        chunk store in FILE order through pinned staging onto the device,
+        with no tensor file written or read anywhere. The host binds it off
+        the projected checkpoint tree (which carries its own store), so
+        PLACEMENT stays a worker decision and this code names no device.
+
+        The eager ``from_pretrained`` bridge survives for a tree with no
+        chunk store behind it — a bare download, a local run, a fixture —
+        where there is nothing to stream from."""
         if self._engine is not None:
             built: P = self._engine.build(
                 pipeline_cls,
