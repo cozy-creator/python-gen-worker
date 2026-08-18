@@ -2,7 +2,7 @@
 ingress, once, instead of letting AOTInductor copy per call.
 
 Without it the armed `.pt2` is FASTER per forward than the equivalent dynamo
-cell and SLOWER per request (measured on an RTX 4090, sdxl, 28 steps: 2.8% and
+compiled graph and SLOWER per request (measured on an RTX 4090, sdxl, 28 steps: 2.8% and
 0.9%) — the per-call copy lands in the residual. The cause names itself 28+
 times per request on the worker's stderr, a surface hub-spawned pods do not
 expose:

@@ -79,7 +79,7 @@ def test_red_the_fence_fires_on_a_root_that_reaches_the_lane() -> None:
     """`mint_adapter` is the eager side of the seam and reaches the lane
     exclusively through FUNCTION-LOCAL imports, so this proves both that the
     fence fires and that the walk still follows lazy imports — the shape the
-    coupling actually took (`fleet_cells`, before it went through the seam)."""
+    coupling actually took (`fleet_compiled_graphs`, before it went through the seam)."""
     fence = _fence()
     banned = fence._declared_tuple("MINT_MACHINERY")
     problems = fence.check(("gen_worker.mint_adapter",), banned)
@@ -144,7 +144,7 @@ guard.install()
 
 # The whole serving host, under the blocker.
 import gen_worker.executor
-import gen_worker.fleet_cells
+import gen_worker.fleet_compiled_graphs
 import gen_worker.aot_serve
 import gen_worker.boot_adopt
 import gen_worker.worker
@@ -432,7 +432,7 @@ def test_the_eager_capable_role_gets_the_registered_implementation() -> None:
 
 
 @pytest.mark.parametrize(
-    "module", ["gen_worker.fleet_cells", "gen_worker.executor"])
+    "module", ["gen_worker.fleet_compiled_graphs", "gen_worker.executor"])
 def test_the_seam_is_registered_by_whoever_calls_it(module: str) -> None:
     """A registration that depends on some OTHER module having been imported
     first is an ordering hazard, not a dependency — and this one bit.
@@ -523,7 +523,7 @@ def test_serve_role_modules_are_all_real_and_the_lane_is_not_among_them() -> Non
     for name in role.SERVE_ROLE_MODULES:
         assert importlib.util.find_spec(name) is not None, name
     assert not set(role.SERVE_ROLE_MODULES) & set(role.MINT_MACHINERY)
-    for absent in ("gen_worker.executor", "gen_worker.fleet_cells"):
+    for absent in ("gen_worker.executor", "gen_worker.fleet_compiled_graphs"):
         assert absent not in role.SERVE_ROLE_MODULES, (
             f"{absent} is the eager-capable half and reaches the lane on "
             f"purpose; claiming it here would make the fence unpassable for "

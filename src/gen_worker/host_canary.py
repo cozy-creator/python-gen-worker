@@ -236,22 +236,22 @@ def parse_nvidia_smi_topo(text: str, a: int, b: int) -> str:
     """
     header: Optional[List[str]] = None
     for raw in text.splitlines():
-        cells = raw.split()
-        if not cells:
+        graphs = raw.split()
+        if not graphs:
             continue
         if header is None:
-            if any(c.upper().startswith("GPU") for c in cells):
-                header = [c.upper() for c in cells]
+            if any(c.upper().startswith("GPU") for c in graphs):
+                header = [c.upper() for c in graphs]
             continue
-        if cells[0].upper() != f"GPU{a}":
+        if graphs[0].upper() != f"GPU{a}":
             continue
         try:
             col = header.index(f"GPU{b}")
         except ValueError:
             return ""
-        # Row cells after the row label line up with the header columns, but
+        # Row compiled graphs after the row label line up with the header columns, but
         # "X" on the diagonal is printed as a bare token like every other.
-        values = cells[1:]
+        values = graphs[1:]
         if col < len(values):
             return values[col].strip()
         return ""

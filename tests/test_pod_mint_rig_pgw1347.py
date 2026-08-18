@@ -839,11 +839,11 @@ def test_a_mint_that_DID_produce_its_row_is_green(tmp_path: Path) -> None:
 
 
 def test_the_probe_is_ONE_round_trip_and_parses_into_the_gate_observation() -> None:
-    workload = Workload(name="mint", command="x", progress_paths=("/root/rig/cells",))
+    workload = Workload(name="mint", command="x", progress_paths=("/root/rig/compiled graphs",))
     script = workload.probe_script()
     for section in ("SIZE", "BYTES", "MARK", "FAIL", "TAIL"):
         assert f"--RIG-{section}--" in script
-    assert "/root/rig/cells" in script
+    assert "/root/rig/compiled graphs" in script
     sample = "--RIG-SIZE--\n123\n--RIG-BYTES--\n45\n--RIG-MARK--\n0\n--RIG-FAIL--\n0\n--RIG-TAIL--\nminting clip\n"
     assert _section(sample, "SIZE") == "123"
     assert _section(sample, "TAIL") == "minting clip"
@@ -1059,12 +1059,12 @@ def test_the_probe_ships_a_TREE_and_proves_it_arrived_before_paying_for_a_compil
     assert untar and POD_REPO in untar[0]
     guard = [line for line in workload.setup if line.startswith("test -f")]
     assert guard and "micro_mint_rig.py" in guard[0] and "examples/micro-diffusion" in guard[0]
-    # A cell that was never written is not a cleared sm, whatever the log said.
+    # A compiled graph that was never written is not a cleared sm, whatever the log said.
     assert workload.required_artifacts == (f"{POD_ROOT}/probe.json",)
 
 
 def test_the_probe_needs_no_hub_which_is_why_these_rows_are_buyable_today(tmp_path: Path) -> None:
-    """The micro vehicle publishes through an IN-PROCESS `LocalCellHub` and
+    """The micro vehicle publishes through an IN-PROCESS `LocalCompiledGraphHub` and
     adopts in a second OS process on the same pod, so one rental proves compile,
     re-use and parity with nothing external to be blocked on. pgw#1348 gates
     every other leg A on a hub wire proof; this row is exempt by construction."""

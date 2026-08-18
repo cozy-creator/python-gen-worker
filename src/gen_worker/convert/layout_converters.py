@@ -963,7 +963,7 @@ def run_layout_conversion(
 
     Upstream of compute, always: this runs before the tree is materialized for
     `setup()`, so the endpoint observes only its own declared layout and the
-    traced graph — hence the cell key — cannot move.
+    traced graph — hence the compiled graph key — cannot move.
     """
     if not str(produced_by or "").strip():
         raise DeclarationError(

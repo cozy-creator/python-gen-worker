@@ -19,7 +19,7 @@ The two row shapes are deliberately identical where they overlap — ``name``,
 ``module``, ``resources``, ``env``, ``publishes`` — because a job promoted to a
 serverless endpoint must not change identity on the way. That overlap is what
 makes one walk correct rather than merely convenient. A reader that needs a
-FUNCTION-ONLY concept (slots, bindings, compile cells, execution lanes — none
+FUNCTION-ONLY concept (slots, bindings, compiled graphs, execution lanes — none
 of which a job declares) must still walk ``functions[]`` directly and say why.
 
 Stdlib only, and no ``gen_worker`` imports: the control parent reads this and

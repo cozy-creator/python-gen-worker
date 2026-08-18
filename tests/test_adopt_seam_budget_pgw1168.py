@@ -2,18 +2,18 @@
 and its two terms are reported apart.
 
 The measurement lives in `provision.arm_aot`, which owns both the load and the
-§4.32 gate. Putting it in `fleet_cells.adopt_delegated_mint` covers the
+§4.32 gate. Putting it in `fleet_compiled_graphs.adopt_delegated_mint` covers the
 SELF-MINT adopt only — the boot adopt, the local-store adopt and the re-arm run
 the identical `aot_serve.enable` -> `arm_entry` and would report nothing.
 
 Why the SPLIT matters: `load` is what EVERY adopting pod pays for the life of
-the arm and is the term that decides whether a cell fits the fleet it was built
+the arm and is the term that decides whether a compiled graph fits the fleet it was built
 for; `verify` is the parity gate's two forwards and is paid only by the minting
 pod. A boot-adopt row on a 48 GB card is therefore the EMPIRICAL answer to "does
-this cell fit", not arithmetic over a single blended number.
+this compiled graph fit", not arithmetic over a single blended number.
 
 These rows drive the REAL `arm_aot` and the REAL banking registry. The doubles
-are the CUDA reading and `aot_serve.enable`/`gate_cell_numerics` — the GPU work
+are the CUDA reading and `aot_serve.enable`/`gate_compiled_graph_numerics` — the GPU work
 this box may not do.
 """
 
@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 from gen_worker import mint_workers
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.models import provision
 
 _GIB = 1 << 30
@@ -66,7 +66,7 @@ def _install(
     monkeypatch.setattr(aot_serve, "armed_metadata", lambda _p: dict(_META))
     monkeypatch.setattr(aot_serve, "unwrap", lambda _p: None)
     monkeypatch.setattr(
-        provision, "gate_cell_numerics", lambda *a, **k: gate_passes)
+        provision, "gate_compiled_graph_numerics", lambda *a, **k: gate_passes)
     monkeypatch.setattr(
         provision.activity_mod, "emit_event",
         lambda kind, detail, phase="", **_k: events.append((kind, phase, detail)))
@@ -126,7 +126,7 @@ def test_a_boot_adopt_reports_verify_ZERO_by_construction(
 
 
 def test_load_and_verify_are_reported_SEPARATELY(monkeypatch, tmp_path) -> None:
-    """THE ROW THAT DECIDES WHETHER THE CELL OR THE GATE IS THE PROBLEM.
+    """THE ROW THAT DECIDES WHETHER THE COMPILED GRAPH OR THE GATE IS THE PROBLEM.
     A single blended number cannot answer it; `R + load` is the serving
     requirement and `verify` is the minting pod's alone."""
     events: List[Tuple[str, str, str]] = []
@@ -186,13 +186,13 @@ def test_each_armed_CLASS_gets_ITS_OWN_row_never_a_pooled_one(
 def test_the_row_is_keyed_by_the_cell_s_OWN_recorded_lane(
     monkeypatch, tmp_path,
 ) -> None:
-    """The lane comes off the cell's recorded `weight_lane`, so a reader can
+    """The lane comes off the compiled graph's recorded `weight_lane`, so a reader can
     line these rows up per (family, lane) without provision importing
     compile_cache.
 
     this row USED to feed `mint_budget._ADOPT_PEAKS`, which was then
     divided into free VRAM to refuse the next adopt. The bank is deleted; the
-    ROW is not. It is the only instrument that answers where a loaded cell's
+    ROW is not. It is the only instrument that answers where a loaded compiled graph's
     device memory goes, which is exactly what §4.33's ~8 GiB target has to be
     checked against — a measurement, kept, with the prediction it fed removed.
     """

@@ -305,7 +305,7 @@ def unpack_for_vae(latents: Tensor, *, width: int, height: int) -> Tensor:
     the endpoint's fifteen preset sizes collapse onto only nine token counts
     (1184x880 and 880x1184 are both 4070 tokens), so a token bucket cannot tell
     the decoder its output shape, while keying it on (rows, cols) as two axes
-    would oblige a variant at every one of the 15x15 cross-product cells.
+    would oblige a variant at every one of the 15x15 cross-product compiled graphs.
 
     So the VAE stays EAGER — which is also exactly what the endpoint does today
     (its ``Compile`` declares ``targets=("transformer",)``) — and the learned

@@ -31,7 +31,7 @@ payload is a coverage CLAIM that drifts. Derivation per handler:
    field that genuinely changes tracing (validated at walk time; needing
    it usually means the field should be an axis).
 
-The graph SET unifies per class via the class-level axis union: the cell
+The graph SET unifies per class via the class-level axis union: the compiled graph
 CONTRACT digests the union, and the forge traces each graph once. Warm RUNS at
 boot deliberately stay PER FUNCTION — every alias proves itself causally
 through its own handler, and a sibling's run must never certify an alias whose
@@ -631,7 +631,7 @@ def select_runs(
 
     - ``tracing=True`` (a compile artifact is armed or minting): the FULL
       plan — every graph class must trace into the capture / prove against
-      the cell.
+      the compiled graph.
     - ``tracing=False`` (eager lane — nothing armed, nothing minting): one
       run per (function, guidance class), collapsed to a single shape
       representative (:func:`_shape_rank`). Eager warm cost is allocator-
@@ -647,7 +647,7 @@ def select_runs(
       READY (and, on compiled lanes, provides the calls>0 the
       in-memory/cache-hit proof needs). The caller passes ``executed``
       non-empty only when inheritance is sound (same contract, proven
-      cells, no pending mint).
+      compiled graphs, no pending mint).
     """
     runs = list(jobs)
     if not runs:
@@ -772,7 +772,7 @@ def validate_at_decoration(cls: type, decl: EndpointDecl) -> None:
 
 
 def _refuse_compile_nowarmup(cls: type, decl: EndpointDecl) -> None:
-    """``compile=`` + ``NoWarmup`` is a contradiction — compile cells are
+    """``compile=`` + ``NoWarmup`` is a contradiction — compiled graphs are
     minted and proven by warmup execution, so a NoWarmup class can never arm
     one. A custom ``warmup()`` method resolves it (proof runs through that)."""
     if (
@@ -783,7 +783,7 @@ def _refuse_compile_nowarmup(cls: type, decl: EndpointDecl) -> None:
         raise TypeError(
             f"@endpoint class {cls.__name__!r}: compile= with "
             f"warmup=NoWarmup({decl.warmup.reason!r}) can never mint or "
-            "prove a compile cell (proof runs through warmup execution — "
+            "prove a compiled graph (proof runs through warmup execution — "
             "th#959). Drop compile=, define a custom warmup() method, or "
             "make a handler warmable (warm= overrides, pgw#654)."
         )

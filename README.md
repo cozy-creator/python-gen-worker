@@ -178,7 +178,7 @@ hard-fails if `gen_worker` resolves outside `src/`).
   `prefetch`, `field=value` grammar, `--offline`, exit codes.
 - [docs/dockerfile.md](docs/dockerfile.md) — bring-your-own-Dockerfile contract.
 - [docs/endpoint-envs.md](docs/endpoint-envs.md) — tenant envs/secrets.
-- [docs/compile-cache.md](docs/compile-cache.md) — compiled cells: the graph
+- [docs/compile-cache.md](docs/compile-cache.md) — compiled graphs: the graph
   digest vs the declared envelope, kernel lanes, JIT intake.
 
 ## Examples

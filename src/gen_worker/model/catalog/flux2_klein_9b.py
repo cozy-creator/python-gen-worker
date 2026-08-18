@@ -196,7 +196,7 @@ def _denoiser_example(bucket: Mapping[str, int], layout: str) -> CallExample:
 #:
 #: * it is the endpoint's OWN choice — klein-9b's ``Compile`` declares
 #:   ``targets=("transformer",)``, and its mint declaration gives the reason:
-#:   compiling the shared Qwen3 encoder and VAE "would mint larger cells that
+#:   compiling the shared Qwen3 encoder and VAE "would mint larger compiled graphs that
 #:   do not exercise W8A8 scaled-mm and cannot be shared safely across the
 #:   Base/edit and Turbo serving regimes";
 #: * the VAE additionally CANNOT be keyed by this model's bucket axis — see

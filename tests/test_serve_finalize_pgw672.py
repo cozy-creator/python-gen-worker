@@ -1,6 +1,6 @@
 """The minted/attached ck2 compile object must serve its own warmup.
 
-The signature this closes: a worker MINTS its cell (publish-intent 200, armed,
+The signature this closes: a worker MINTS its compiled graph (publish-intent 200, armed,
 obligation discharged), then fails its own finalize —
 
     CompiledLaneUnavailableError: 1 attached compile object(s) did not serve
@@ -16,7 +16,7 @@ finalize disproves it, the mandatory lane raises, both functions are disabled
 and the pod retires — whose replacement re-mints the same key, in a loop.
 
 These tests run the REAL executor ensure_setup codepath and the REAL
-fleet_cells miss policy (miss -> `compile_cache.arm_jit_intake` -> executor
+fleet_compiled_graphs miss policy (miss -> `compile_cache.arm_jit_intake` -> executor
 proof), faking only the torch boundary: ``compile_cache.apply``'s torch.compile leaf is a
 simulator with dynamo-in-memory-code semantics, ``inductor_counters`` reads
 the simulator, and ``torch._dynamo.reset_code`` drops simulator entries.
@@ -24,7 +24,7 @@ the simulator, and ``torch._dynamo.reset_code`` drops simulator entries.
 Fix under test:
   (a) honesty — a scoped per-code dynamo reset before every proof window
       forces the warmup through the real lookup path (mint: real capture;
-      re-arm of an in-process finalized cell: real FX HIT);
+      re-arm of an in-process finalized compiled graph: real FX HIT);
   (c) posture — when a compiled lane genuinely cannot serve, the worker
       DEGRADES to explicit eager (tier flips, loud) instead of
       quarantine -> disable -> die (also pgw#673's sm120 CantSplit shape).
@@ -47,7 +47,7 @@ import pytest
 import gen_worker.executor as executor_mod
 from gen_worker import Compile
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, hot_swap
+from gen_worker import fleet_compiled_graphs, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
 from gen_worker.models import provision
@@ -85,16 +85,16 @@ class _Pipe:
 def _clean_registries() -> Any:
     with cc._PROVEN_CELLS_LOCK:
         cc._PROVEN_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     armed = cc._armed_pipelines()
     for pipe in list(armed):
         armed.discard(pipe)
     yield
     with cc._PROVEN_CELLS_LOCK:
         cc._PROVEN_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     for pipe in list(cc._armed_pipelines()):
         cc._armed_pipelines().discard(pipe)
 
@@ -215,7 +215,7 @@ def _spec(name: str, cls: type, shapes: tuple) -> EndpointSpec:
 
 
 class _Rig:
-    """The REAL executor + REAL fleet_cells miss policy, torch leaves faked."""
+    """The REAL executor + REAL fleet_compiled_graphs miss policy, torch leaves faked."""
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
@@ -240,7 +240,7 @@ class _Rig:
         def _load_slot(*args: Any, **kwargs: Any) -> Any:
             pipe = _Pipe()
             # a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
-            # from a cell — the dispatch fence pins every request to an active
+            # from a compiled graph — the dispatch fence pins every request to an active
             # compile incarnation — so a family with no export declaration
             # fails closed there instead of arming JIT intake. The doctrine
             # this rig exercises is the intake compile itself, which is a plain
@@ -249,12 +249,12 @@ class _Rig:
             return provision.SlotLoad(obj=pipe, is_pipeline=True)
 
         def _mandatory_miss(*a: Any, **k: Any) -> bool:
-            raise cc.CompiledExecutionLaneUnavailableError("no delivered cell")
+            raise cc.CompiledExecutionLaneUnavailableError("no delivered compiled graph")
 
         monkeypatch.setattr(store_mod, "ensure_local", _download)
         monkeypatch.setattr(provision, "load_slot", _load_slot)
         monkeypatch.setattr(provision, "enable_compiled", _mandatory_miss)
-        monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
+        monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
         monkeypatch.setattr(cc, "toolchain_present", lambda: True)
         monkeypatch.setattr(cc, "apply", _sim_apply_factory(self.sim))
         # pgw#681 gate at its torch boundary, simmed like apply's compile
@@ -262,12 +262,12 @@ class _Rig:
         # report closure unprovable and refuse every finalize.
         # The pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
-        # the MINT and wrote the result into the cell's metadata; it went with
+        # the MINT and wrote the result into the compiled graph's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
         # compiles never touch dynamo has no gate left to satisfy.
         monkeypatch.setattr(
             cc, "inductor_counters", lambda: dict(self.sim.counters))
-        monkeypatch.setattr(fleet_cells, "arm_identity", _fake_arm_identity)
+        monkeypatch.setattr(fleet_compiled_graphs, "arm_identity", _fake_arm_identity)
         # torch boundary of the fix: the scoped reset drops the simulator's
         # in-memory code entries, exactly like torch._dynamo.reset_code.
         import torch._dynamo
@@ -280,7 +280,7 @@ class _Rig:
                 self.ex, "_enable_compiled",
                 lambda p, cfg, artifact, delivered=None, arm=None,
                        boot_local_key="":
-                    fleet_cells.enable_compiled(
+                    fleet_compiled_graphs.enable_compiled(
                         p, cfg, self.ex.store._cache_dir, artifact,
                         publisher=None))
             break
@@ -312,7 +312,7 @@ class _Rig:
 # What the pgw#672 posture requirement (c) still asserts is below: a compile
 # that genuinely fails degrades THIS worker to eager, alive and loud. The
 # proof-window honesty half (requirement (a)) keeps its coverage on the lane
-# it still guards — an ADOPTED cell — in `test_executor_adopt.py`.
+# it still guards — an ADOPTED compiled graph — in `test_executor_adopt.py`.
 
 
 def test_a_mandatory_lane_without_a_declaration_fails_closed_before_it_compiles(
@@ -320,18 +320,18 @@ def test_a_mandatory_lane_without_a_declaration_fails_closed_before_it_compiles(
 ) -> None:
     """pgw#1010, the other half of requirement (c).
 
-    A mandatory (w8a8/w4a4) lane serves only from a CELL — the th#910 dispatch
+    A mandatory (w8a8/w4a4) lane serves only from a COMPILED GRAPH — the th#910 dispatch
     fence pins every request to an active compile incarnation — so a JIT intake
     arm there would compile a whole boot's worth of graphs for a pod that then
     refuses every request `required_compile_missing`. It fails closed instead,
     typed, exactly as a mandatory lane did before self-mint existed.
     """
-    from gen_worker.cell_adopt import AdoptOutcome
+    from gen_worker.compiled_graph_adopt import AdoptOutcome
 
     monkeypatch.setattr(
         provision, "enable_compiled",
         lambda *a, **k: AdoptOutcome.miss("no_compiled_graph"))
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(cc, "mandatory_serving", lambda pipe: True)
     monkeypatch.setattr(
@@ -341,11 +341,11 @@ def test_a_mandatory_lane_without_a_declaration_fails_closed_before_it_compiles(
 
     pipe = _Pipe()
     # This family declares NO export, so the refusal is PERMANENT —
-    # no pod can ever hold a cell for it — and it is therefore the terminal
+    # no pod can ever hold a compiled graph for it — and it is therefore the terminal
     # class, not the retryable one. Retrying it was pgw#888's own observation
     # (11 requests, five attempts each, one answer).
-    with pytest.raises(cc.CompiledExecutionLaneImpossibleError, match="cell"):
-        fleet_cells.enable_compiled(
+    with pytest.raises(cc.CompiledExecutionLaneImpossibleError, match="compiled graph"):
+        fleet_compiled_graphs.enable_compiled(
             pipe, Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
             tmp_path, None, publisher=None)
 

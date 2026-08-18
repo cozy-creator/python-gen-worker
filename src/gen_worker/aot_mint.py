@@ -647,7 +647,7 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Mint-phase telemetry (#757's instrument-first doctrine; recorded per cell)
+# Mint-phase telemetry (#757's instrument-first doctrine; recorded per compiled graph)
 # ---------------------------------------------------------------------------
 
 #: ``compilation_time_metrics`` keys summarized into named phases. Host C++
@@ -685,12 +685,12 @@ class MintedArtifact:
 class MintResult:
     """Every entry this mint packed, plus its telemetry.
 
-    pgw#1176: a mint no longer produces "a cell". It produces N independently
+    pgw#1176: a mint no longer produces "a compiled graph". It produces N independently
     keyed, independently publishable, independently armable artifacts and a
     derived MANIFEST digest. Nothing waits for the set to be complete —
     :attr:`entries` is whatever finished, which is what makes the mint's
     durability incremental (a crash costs the one in-flight entry, ~2 min,
-    never a 1 h 37 m cell) and what makes a partially compiled family useful.
+    never a 1 h 37 m compiled graph) and what makes a partially compiled family useful.
     """
 
     entries: Tuple[MintedArtifact, ...]
@@ -720,7 +720,7 @@ class _MintedEntry:
 def adapter_arm(fork: Sequence[Tuple[str, Any]]) -> Optional[bool]:
     """The pgw#790 adapter arm a fork coordinate states, or ``None`` when the
     coordinate does not carry one (a bucket-0 family, or a target that carries
-    no branch-capable module — wan's ``vae.decode`` in a bucket-128 cell)."""
+    no branch-capable module — wan's ``vae.decode`` in a bucket-128 compiled graph)."""
     value = dict(fork).get(ADAPTER_FORK, None)
     return None if value is None else bool(value)
 
@@ -745,7 +745,7 @@ def with_adapter_arm(plan: Any, arm: bool) -> Any:
 
 def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     """The per-entry :class:`ExportSpec` one mint plan derives from the
-    cell-level request."""
+    compiled graph-level request."""
 
     specialization = dict(spec.specialization)
     specialization.setdefault(
@@ -764,7 +764,7 @@ def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     )
     if adapter_arm(plan.fork) is False:
         # pgw#790's branchless class: no bucket, no lifted pair, nothing for
-        # the adapter gates to assert. The CELL still declares its bucket —
+        # the adapter gates to assert. The COMPILED GRAPH still declares its bucket —
         # the fork is what says this graph has no branch, and the specialization
         # block records both, so a reader can see which arm they are holding.
         espec = replace(espec, lora_bucket=0, lifted_inputs=(), lora_fqns=())
@@ -794,7 +794,7 @@ def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
 
 
 #: pgw#1076: the short spelling of a floating-point dtype, matching the
-#: vocabulary the weight-lane labels already use (`bf16`, `fp8-…`) so one cell's
+#: vocabulary the weight-lane labels already use (`bf16`, `fp8-…`) so one compiled graph's
 #: `precision` reads the same whether it came from the lane or from this
 #: measurement.
 _PRECISION_LABELS: Dict[str, str] = {
@@ -860,9 +860,9 @@ def _export_entry(
                 f"entry {entry!r}: fork gate (pgw#739): " + "; ".join(gaps))
     module = owner if attr == "forward" else _CallableTarget(owner, attr)
 
-    # The LoRA bucket is a CELL-level request but a PER-TARGET fact: adapters
+    # The LoRA bucket is a COMPILED GRAPH-level request but a PER-TARGET fact: adapters
     # ride the branch-capable denoisers, never the VAE (wan's vae.decode
-    # entry is bucket-0 in the same cell as its bucket-128 transformer).
+    # entry is bucket-0 in the same compiled graph as its bucket-128 transformer).
     # Scoped by COMPOSED truth (lora_lifted.branch_targets), not vocabulary —
     # and a branch-capable target whose lifting was not installed still fails
     # the lifted-input gate by name, never silently mints bucket-0.
@@ -1050,10 +1050,10 @@ def adapter_arm_plans(
     """``[(plan, arm)]`` — every branch-capable target's plan forked into an
     adapter-bearing and a branchless graph class (pgw#790).
 
-    Scoped by COMPOSED truth, not vocabulary: a cell's non-branch targets
+    Scoped by COMPOSED truth, not vocabulary: a compiled graph's non-branch targets
     (wan's ``vae.decode``) fork into nothing, because there is no adapter for
     them to carry and a second identical graph would be pure mint bill. A
-    bucket-0 family forks into nothing either — its cell IS the branchless
+    bucket-0 family forks into nothing either — its compiled graph IS the branchless
     class already.
 
     Adapter-bearing rows come FIRST so the compile child's already-lifted
@@ -1111,7 +1111,7 @@ def declaration_module_gaps(
 
     gaps: List[str] = []
     try:
-        rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+        rows = adapter_arm_plans(_decl.compiled_graph_plans(decl), pipeline, spec)
         branch_owners = {
             id(m) for m in lora_lifted.branch_targets(pipeline).values()}
     except MintRefused as exc:
@@ -1309,7 +1309,7 @@ def _attach_snapshot(
     """Make every beat re-write the on-disk phase table and touch podguard.
 
     pgw#848: a mint that is KILLED still leaves the minutes it did spend behind
-    it — a 36-class mint abandoned at 30 must not report "no cell produced".
+    it — a 36-class mint abandoned at 30 must not report "no compiled graph produced".
     Wrapped around the caller's own sink rather than replacing it: both are
     best-effort and neither may cost a mint.
 
@@ -1470,7 +1470,7 @@ def write_phase_snapshot(path: Path, progress: MintProgress) -> None:
     report, and every measurement it made dies with the process.
 
     That is not hypothetical: attempt sixteen compiled for **29 minutes** and
-    reported `status=abandoned total_s=1741.33 — no cell produced`. Zero
+    reported `status=abandoned total_s=1741.33 — no compiled graph produced`. Zero
     `entry:` rows. No `pool` row. K, its binding constraint, the per-entry
     timings and the peaks were all measured and all discarded, and the
     K-and-binding answer had to be re-bought with another pod.
@@ -1818,12 +1818,12 @@ def _device_peak_provenance() -> Dict[str, str]:
         version = ""
     return {
         # Both namings of the card: the SKU a human reads and the arch the
-        # kernels were built for. A cell minted at the wrong arch is
+        # kernels were built for. A compiled graph minted at the wrong arch is
         # unadoptable, so a reading must never be shared across arches.
         "card": str(runtime.get("sku") or ""),
         "sm": str(runtime.get("sm") or ""),
-        # The SAME digest the cell key's toolchain axis uses, so a banked row
-        # and the cell it was measured for agree on what this toolchain is.
+        # The SAME digest the compiled graph key's toolchain axis uses, so a banked row
+        # and the compiled graph it was measured for agree on what this toolchain is.
         "toolchain": str(toolchain),
         "gen_worker": str(version),
         "phase": DEVICE_PEAK_PHASE,
@@ -1850,7 +1850,7 @@ def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
         "peak_child_device_bytes": int(pool.peak_device_bytes),
         # pgw#1205: the same reading, PER GRAPH CLASS, with the conditions it
         # was taken under stated once beside it. `peak_child_device_bytes`
-        # above is the max across a whole cell — one number for 18 classes,
+        # above is the max across a whole compiled graph — one number for 18 classes,
         # which cannot answer the only question anyone asks of it. These rows
         # can, and they ride the SAME phase table, so the row the hub receives
         # and the row this machine banks are the same bytes rather than two
@@ -2156,7 +2156,7 @@ def declared_class_rows(pipeline: Any, spec: ExportSpec, decl: Any) -> List[Any]
     caller can enumerate this without a pipeline — and why the boot derivation
     shards by INDEX rather than by name.
     """
-    rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+    rows = adapter_arm_plans(_decl.compiled_graph_plans(decl), pipeline, spec)
     rows.sort(key=lambda row: (
         row[1] is False, _decl.plan_entry_name(row[0])))
     return rows
@@ -2336,7 +2336,7 @@ def _mint_phase_table(
 
     pgw#809 adds the ``pool`` block: the K this mint ran at AND the budget
     that chose it. Without it a mint's wall clock is uninterpretable —
-    two mints of the same cell on two pods legitimately differ by 4x.
+    two mints of the same compiled graph on two pods legitimately differ by 4x.
 
     pgw#1356 REBASES THE INPUT ONTO THE ONLY PROCESS THAT MEASURES IT. This
     took ``Sequence[_MintedEntry]`` — rows the SERIAL driver appended to
@@ -2450,7 +2450,7 @@ def _emit_pool_event(
     bought — the standing "no silent decisions" rule applied to the mint's
     only multiplicative lever.
 
-    Attempts ten and eleven compiled the same 72-entry sdxl cell for the same
+    Attempts ten and eleven compiled the same 72-entry sdxl compiled graph for the same
     seconds (1314.94 vs 1327.23) and took 347.94 s vs 554.78 s, because K was
     5 and then 3. Nothing hub-side recorded WHY: the width block existed in
     the phase table and was never emitted, and the pgw#830 pool ledger was
@@ -2475,7 +2475,7 @@ def _emit_pool_event(
         # Named in the FIRST line, so a narrow pool is legible without
         # parsing the dict: this is the number that cost attempt eleven 59 %.
         head += (
-            f" — the pool ran {under} worker(s) narrower than this cell could "
+            f" — the pool ran {under} worker(s) narrower than this compiled graph could "
             f"use, held by {binding}")
     activity_mod.emit_event(
         MINT_PHASES_KIND, f"{head} pool={pool}",
@@ -2510,7 +2510,7 @@ def emit_phase_events(
         # pgw#825: the roll-up's PHASE is the mint's terminus. An aborted mint
         # measured real entries and must report them — under `aborted`, never
         # under `minted`, or a partial table would enter an AOT-vs-JIT
-        # comparison as if a cell came out.
+        # comparison as if a compiled graph came out.
         roll_up = terminus or str(table.get("terminus") or "") \
             or activity_mod.PHASE_MINTED
         activity_mod.emit_event(
@@ -2631,7 +2631,7 @@ def _specialization_facts(spec: ExportSpec) -> Dict[str, Any]:
     """The frozen-branch declaration, with the lane facts always present.
 
     The lane and bucket belong here as well as in the key axes: the
-    declaration is what a human reads off a rejected cell, and "which lane was
+    declaration is what a human reads off a rejected compiled graph, and "which lane was
     this traced under" is the first question.
     """
     facts: Dict[str, Any] = dict(spec.specialization)

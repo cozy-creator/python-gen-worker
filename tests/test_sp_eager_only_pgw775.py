@@ -90,7 +90,7 @@ def test_a_stray_forward_from_the_warm_thread_is_refused_bounded() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeCell:
+class _FakeGraph:
     family = "toy"
 
 
@@ -99,8 +99,8 @@ class _FakeSpec:
     compile = object()
     cls = object
 
-    def compile_cell(self) -> Any:
-        return _FakeCell()
+    def compile_contract(self) -> Any:
+        return _FakeGraph()
 
 
 def _executor_at(topology: ExecutionTopology) -> Any:
@@ -145,8 +145,8 @@ def test_every_degree_above_one_is_eager_only() -> None:
     the HANG question (nothing forwards outside a collective gate) and says
     nothing about the IDENTITY question: a model whose own device map splits
     its modules across `cuda:0`/`cuda:1` has inductor bake that placement into
-    the artifact, while the cell key scrubs the device index by design — so
-    the 2-card cell and the 1-card cell published under one key and each pod
+    the artifact, while the compiled graph key scrubs the device index by design — so
+    the 2-card compiled graph and the 1-card compiled graph published under one key and each pod
     adopted the other's, silently, in both directions (pgw#819, measured).
 
     The gate was an allowlist by mode NAME, so `cfg` — declared at
@@ -165,4 +165,4 @@ def test_every_degree_above_one_is_eager_only() -> None:
         assert topo.degree == 2
         assert _executor_at(topo)._eager_only_reason(), (
             f"degree-2 pod with parallel={parallel!r} must refuse to arm a "
-            "compile cell: no cell can state the placement it was baked for")
+            "compiled graph: no compiled graph can state the placement it was baked for")

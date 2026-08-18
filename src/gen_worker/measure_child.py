@@ -4,7 +4,7 @@
 
 Runs the mint's own load and export loop — optionally with the INDUCTOR compile
 — against ONE declared class set, records what it cost on the card, and
-produces **nothing else**: no cell, no artifact, no package, no hub call, no
+produces **nothing else**: no compiled graph, no artifact, no package, no hub call, no
 advertisement.
 
 ``<request>.mint.json`` is the DECLARATION payload an endpoint repo commits
@@ -44,7 +44,7 @@ The three properties that make that safe:
    pipeline, so a weightless claim can never be implied by a run that was not.
 
 ``export_peak_device_bytes`` / ``export_peak_device_reserved_bytes`` are the
-mint's own names for the same two counters (``aot_mint._mint_cell``) on the
+mint's own names for the same two counters (``aot_mint._mint_compiled_graph``) on the
 same allocator, so numbers are comparable without translation. The per-entry
 figure is the RUNNING high-water after that entry — the counter is reset once
 before the first row, exactly as the mint resets it once before its export
@@ -107,7 +107,7 @@ REASONS: Tuple[str, ...] = (
     # The endpoint's own `setup()` raised. Never re-classified here: a load
     # that fails under measurement fails under a mint too.
     "load_failed",
-    # The composed pipeline carries no target the cell names.
+    # The composed pipeline carries no target the compiled graph names.
     "no_compile_target",
     # The family ships no export declaration, so there is no class set to
     # measure.
@@ -222,7 +222,7 @@ class EntryMeasurement(msgspec.Struct, frozen=True, kw_only=True):
 class MeasureReport(msgspec.Struct, frozen=True, kw_only=True):
     """The typed evidence a blocker's ``resolution=`` can cite.
 
-    It carries no artifact, no digest and no cell key, and it never will: this
+    It carries no artifact, no digest and no compiled graph key, and it never will: this
     is a measurement of a mint, not a mint.
     """
 
@@ -249,7 +249,7 @@ class MeasureReport(msgspec.Struct, frozen=True, kw_only=True):
     entries: Tuple[EntryMeasurement, ...] = ()
     declared_classes: int = 0
     #: The mint's own two names for the phase high-water, on the mint's own
-    #: counters (``aot_mint._mint_cell``), so these numbers are comparable
+    #: counters (``aot_mint._mint_compiled_graph``), so these numbers are comparable
     #: with a real mint's without translation.
     export_peak_device_bytes: int = 0
     export_peak_device_reserved_bytes: int = 0
@@ -364,7 +364,7 @@ def _slot_from_value(name: str, value: str, ref_text: str) -> MintSlot:
     refusal naming the flag that settles it, and a wrong guess would be a
     measurement of the wrong checkpoint.
 
-    Identity is deliberately weak on the path form. No cell key, digest or
+    Identity is deliberately weak on the path form. No compiled graph key, digest or
     artifact leaves this process (:class:`MeasureReport` carries none of the
     three), so a slot's ``ref`` exists only to satisfy ``ctx.slots``; it is the
     operator's when ``,ref=`` gives one and a slot-shaped placeholder when not.
@@ -423,8 +423,8 @@ def _declares(specs: Sequence[Any], family: str) -> bool:
 def _function_for_family(specs: Sequence[Any], family: str) -> str:
     """The endpoint function the payload's ``family`` names.
 
-    A committed payload names a FAMILY because that is what a cell is scoped to
-    (pgw#758: one mint -> one cell for the family's whole declared class set);
+    A committed payload names a FAMILY because that is what a compiled graph is scoped to
+    (pgw#758: one mint -> one compiled graph for the family's whole declared class set);
     it does not name a function, and it should not have to. Functions sharing a
     class are interchangeable here — ``select_specs`` pulls the whole sibling
     set from any of them — so ambiguity is only real when the candidates span
@@ -583,7 +583,7 @@ def run(
         aot_declaration,
         aot_mint,
         compile_cache as cc,
-        fleet_cells,
+        fleet_compiled_graphs,
     )
     from .cli.run import run_setup
     from .models import structure_only
@@ -656,7 +656,7 @@ def run(
         # `boot_trace_child` arm the pipeline they hand the export. The LIFTED
         # half belongs to the loop that needs it.
         cc.apply_lora_execution_lane(pipeline, int(cfg.lora_bucket))
-    spec = fleet_cells.aot_export_spec(pipeline, cfg)
+    spec = fleet_compiled_graphs.aot_export_spec(pipeline, cfg)
     virtual = structure_only.structure_only_components(pipeline)
     partial = msgspec.structs.replace(
         partial,

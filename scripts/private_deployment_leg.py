@@ -99,7 +99,7 @@ READY_POD_STATES = frozenset({"ready", "connected", "running", "serving"})
 BLOCKER_INVOKE_ROUTE = "th#1927 follow-up (POST /v1/private-deployments/:id/:function)"
 BLOCKER_RECONCILER = "th#1927 (provisioning reconciler)"
 BLOCKER_SETTLEMENT = "th#1928 (per-second settlement)"
-BLOCKER_CELL_INVENTORY = "th#1355 (GET /v1/admin/cells) is absent from this hub"
+BLOCKER_CELL_INVENTORY = "th#1355 (GET /v1/admin/compiled-graphs) is absent from this hub"
 BLOCKER_ACTIVITY_EVENTS = "th#1839 (GET /v1/admin/worker-activity-events) is absent from this hub"
 
 OK = "ok"
@@ -286,13 +286,12 @@ class HttpDeploymentAPI:
         """th#1355's compiled-graph inventory, filtered server-side.
 
         Read from the graph's OWN row rather than through a demand join, so a
-        reaped demand row cannot hide a graph. (The route says `cells`; Paul
-        retired that word for `compiled_graph` and the rename belongs to the
-        cross-repo lockstep, not to this consumer.)
+        reaped demand row cannot hide a graph. Route renamed with th#2131's
+        hub half (pgw#1363 lockstep).
         """
-        query = urllib.parse.urlencode({"view": "cells", "release": release, "limit": 200})
-        out = self._call("GET", "/v1/admin/cells?" + query)
-        return list(out.get("cells", []))
+        query = urllib.parse.urlencode({"view": "compiled_graphs", "release": release, "limit": 200})
+        out = self._call("GET", "/v1/admin/compiled-graphs?" + query)
+        return list(out.get("compiled_graphs", []))
 
     def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]:
         query = urllib.parse.urlencode({"release": release, "state": state, "limit": 200})
@@ -669,7 +668,7 @@ class _Run:
                 observed = str(pod["gpu_class"])
                 break
         try:
-            cells = self.api.admin_cells(self.leg.release_id)
+            graphs = self.api.admin_cells(self.leg.release_id)
         except ApiError as exc:
             if exc.route_missing:
                 self.find("seal.route", BLOCKED,
@@ -677,10 +676,10 @@ class _Run:
             else:
                 self.find("seal.rows", FAILED, f"compiled-graph inventory read failed: {exc}")
             return
-        mine = [c for c in cells if c.get("minted_for_release_id") == self.leg.release_id]
+        mine = [c for c in graphs if c.get("minted_for_release_id") == self.leg.release_id]
         if not self.check("seal.rows", bool(mine),
                           f"{len(mine)} compiled graph(s) minted for the pinned release "
-                          f"{self.leg.release_id} ({len(cells)} row(s) returned)"):
+                          f"{self.leg.release_id} ({len(graphs)} row(s) returned)"):
             return
         if not observed:
             self.find("seal.sku_matches_rented_card", FAILED,
@@ -872,7 +871,7 @@ class ContractModel:
         #: Keeping it faithful is what makes sku_slug load-bearing in the tests
         #: instead of an identity function over an already-slugged value.
         self.pod_gpu_class = pod_gpu_class
-        self.cells: List[Dict[str, Any]] = []
+        self.graphs: List[Dict[str, Any]] = []
         self.events: List[Dict[str, Any]] = []
         self.now = 0
         self.rows: Dict[str, Dict[str, Any]] = {}
@@ -1049,7 +1048,7 @@ class ContractModel:
         if self.break_invariant == "seal_wrong_release":
             release = "a-release-this-rental-did-not-pin"
         digest = "" if self.break_invariant == "seal_no_artifact" else "blake3:" + self._id()[:16]
-        self.cells.append({
+        self.graphs.append({
             "compiled_graph_key": "cg-key-v1:" + self._id()[:12], "family": "sdxl",
             "lane": row["execution_lane"], "sm": "sm86", "sku": sku,
             "artifact_digest": digest, "minted_for_release_id": release,
@@ -1065,8 +1064,8 @@ class ContractModel:
 
     def admin_cells(self, release: str) -> List[Dict[str, Any]]:
         if not self.seal_evidence:
-            raise ApiError("GET", "/v1/admin/cells", 404, "", "404 page not found")
-        return [c for c in self.cells if not release or c["minted_for_release_id"] == release]
+            raise ApiError("GET", "/v1/admin/compiled-graphs", 404, "", "404 page not found")
+        return [c for c in self.graphs if not release or c["minted_for_release_id"] == release]
 
     def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]:
         if not self.seal_evidence:

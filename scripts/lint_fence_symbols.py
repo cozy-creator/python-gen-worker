@@ -2,7 +2,7 @@
 """THE GUARDS ARE GUARDED. Every symbol a fence NAMES must exist.
 
 A fence names symbols in string literals: the arm-state feeder list, the
-cell-key derivation allowlist, the layout fence's ``AXIS_PRODUCERS``. When one
+compiled graph-key derivation allowlist, the layout fence's ``AXIS_PRODUCERS``. When one
 of those symbols is renamed or deleted, the fence keeps running, keeps exiting
 0, and **guards nothing** — nothing is failing, so no amount of running things
 finds it. This script asks every fence what symbol it names NOW, mechanically.
@@ -58,7 +58,7 @@ FENCES: Tuple[str, ...] = (
 #: Only literals that LOOK like this repo's identity/arm vocabulary are
 #: candidates. Without this every English word in a docstring is a symbol.
 VOCABULARY = re.compile(
-    r"cell|entry|entries|graph|arm|mint|artifact|key|manifest|adopt|axis|axes")
+    r"compiled graph|entry|entries|graph|arm|mint|artifact|key|manifest|adopt|axis|axes")
 
 #: `"name"` or `"name("` — the two shapes a fence names a symbol in.
 LITERAL = re.compile(r'"([a-zA-Z_][a-zA-Z0-9_]{3,})\(?"')

@@ -47,7 +47,7 @@ this page covers the worker itself.
 | `WORKER_ID` | `worker_id` | per-pod identity |
 | `ENDPOINT_LOCK_PATH` | `endpoint_lock_path` | discovery manifest path (baked default in images) |
 | `RUNPOD_POD_ID` | `runpod_pod_id` | set by the RunPod runtime |
-| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant; also read raw by `compile_cache.py` to stamp `image_digest` into every compile cell |
+| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant; also read raw by `compile_cache.py` to stamp `image_digest` into every compiled graph |
 | `WORKER_RELEASE_ID` | `worker_release_id` | release identity; re-exported into the compute child |
 | `WORKER_CONFIG_GENERATION` | `boot_config_generation` | boot-config generation, for detecting hub-injected config |
 | `WORKER_EXECUTION_TOPOLOGY` | — (raw, `topology.py`) | hub-delivered multi-GPU topology JSON (see [multi-gpu.md](multi-gpu.md)). Absent is legal and means one slot — so an unset value on a multi-GPU pod silently serves one card |
@@ -113,7 +113,7 @@ gen-worker stopped populating it — see the proto comment), and the
 
 The old `GEN_WORKER_COMPILE_CACHE`, `_CACHE_URL`, and `_ALLOW_COLD` knobs were
 removed. Serving receives immutable compile artifacts through Tensorhub;
-local-cell and producer tools use explicit library arguments. An inherited
+local-compiled graph and producer tools use explicit library arguments. An inherited
 environment can therefore never bypass scheduler selection or mandatory W8A8
 compile evidence.
 

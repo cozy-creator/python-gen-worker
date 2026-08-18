@@ -74,11 +74,11 @@ def runtime_key() -> Dict[str, str]:
             major, minor = torch.cuda.get_device_capability(0)
             key["sm"] = f"sm_{major}{minor}"
     except Exception:
-        # pgw#657: silently leaving these EMPTY manufactures a different cell
+        # pgw#657: silently leaving these EMPTY manufactures a different compiled graph
         # key than every healthy pod computes — i.e. a guaranteed cache miss
         # (and a mint) whose cause is invisible. Say it.
         logger.warning(
-            "compile-cache: torch/CUDA runtime-key probe failed — cell identity "
+            "compile-cache: torch/CUDA runtime-key probe failed — compiled graph identity "
             "falls back to empty sku/sm/torch fields; expect a cache MISS",
             exc_info=True)
     try:
@@ -107,7 +107,7 @@ def is_compile_armed(pipeline: Any) -> bool:
     A guard that permanently degraded this target to eager (``_guarded``'s
     fallback) clears the answer even though the wrapper is still installed:
     reporting a degraded pipeline as compiled is the same lie as reporting an
-    unproven cell as adopted.
+    unproven compiled graph as adopted.
     """
     if getattr(pipeline, MARKER_ATTR, None) is None:
         return False

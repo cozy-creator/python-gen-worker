@@ -52,7 +52,7 @@ THE THREE RULES THAT ARE THE HUB'S, RESTATED SO THE PRODUCER OBEYS THEM
    are different facts with different owners. A schema holding only the resolved
    value makes the second UNREPRESENTABLE at the moment it matters most.
 3. **Magnitudes are data, not identity.** Two runs short by 6.1 and 6.3 GiB that
-   reached for the same levers in the same order are one cell with two samples.
+   reached for the same levers in the same order are one compiled graph with two samples.
    Report the bytes; the hub excludes them from the key.
 """
 
@@ -318,7 +318,7 @@ class MeasuredPosture:
         point. An all-empty posture is NOT a clean posture — it is the absence
         of a report, and the hub keys the two differently on purpose (the
         unreported posture has its own digest, so it can never be mistaken for a
-        cell measured on a known-clean one). Sending one would claim "measured,
+        compiled graph measured on a known-clean one). Sending one would claim "measured,
         nothing applied" on behalf of a worker that never looked: ie#707 with
         the polarity flipped.
         """
@@ -578,7 +578,7 @@ def compile_axis(serving_mode: str) -> str:
 
     ``jit_cell`` and ``aot_cell`` are BOTH compiled — the artifact kind is a
     different axis (``metrics.serving_mode`` carries it), and folding it in here
-    would split every cell in two on a fact §1.30 ruled is a cache question.
+    would split every compiled graph in two on a fact §1.30 ruled is a cache question.
     """
     return COMPILE_EAGER if str(serving_mode or "") == "eager" else COMPILE_COMPILED
 

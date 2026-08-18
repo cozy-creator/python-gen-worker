@@ -2,7 +2,7 @@
 
 Weight-free instantiation is not an optimization — it is step 1 of every
 boot-time adopt (§4.27) and of the zero-download forge. The key a pod derives,
-and therefore whether it can ASK the hub for a cell at all, begins with
+and therefore whether it can ASK the hub for a compiled graph at all, begins with
 building a compile target from code + config alone.
 
 WHY THIS IS NOT ``accelerate.init_empty_weights``
@@ -24,7 +24,7 @@ Declaring the dependency instead is rejected on two facts:
   as a REQUIREMENT — parameters on meta, **buffers real** — and the upstream
   version of it reads ``ACCELERATE_INIT_INCLUDE_BUFFERS`` from the ambient
   environment. An ambient third-party env var that can flip a structure
-  invariant a cell key is derived from is not a dependency, it is a hazard.
+  invariant a compiled graph key is derived from is not a dependency, it is a hazard.
 
 ``accelerate`` remains declared in the ``torch`` extra for the real-weight
 quantized loaders (:mod:`.w8a8`, :mod:`.w4a4`, :mod:`.svdq_native`) that build
@@ -35,7 +35,7 @@ WHY THE CAPABILITY IS PROVEN AND NOT ASSUMED
 --------------------------------------------
 :func:`require_meta_init` builds a probe module and checks the invariant on the
 result. A meta-init that silently stopped moving parameters would trace real
-weights; one that started moving BUFFERS would make the cell's literal
+weights; one that started moving BUFFERS would make the compiled graph's literal
 constants unpackable, much later and much less legibly. Either way the answer
 is a typed :class:`MetaInitUnavailable` naming the capability, which
 ``structure_only`` turns into a refusal a boot-adopt event can distinguish from
@@ -69,7 +69,7 @@ class MetaInitUnavailable(WorkerError):
             f"this process cannot provide {self.capability}: {self.lacks}. "
             f"Weight-free instantiation is how a compile target is built from "
             f"CODE + CONFIG, so without it no boot key can be derived, no "
-            f"cell can be asked for, and this pod will self-mint on every "
+            f"compiled graph can be asked for, and this pod will self-mint on every "
             f"boot")
 
 
@@ -78,7 +78,7 @@ def init_empty_weights() -> Iterator[None]:
     """Instantiate modules with their PARAMETERS on ``meta`` and no storage.
 
     Buffers are left alone on purpose — they are config-derived, KB-to-MB
-    scale, and they are what a literal-bearing cell packs.
+    scale, and they are what a literal-bearing compiled graph packs.
     """
     import torch
     from torch import nn
@@ -140,7 +140,7 @@ def require_meta_init() -> None:
         raise MetaInitUnavailable(
             capability=CAPABILITY,
             lacks=("a BUFFER built under the context manager landed on meta; "
-                   "buffers are config-derived values a literal-bearing cell "
+                   "buffers are config-derived values a literal-bearing compiled graph "
                    "packs, and a fake one makes the package unbuildable"))
 
 

@@ -17,7 +17,7 @@ What this file pins:
    stage name never the round trip, `>= 1.0`, and metric+bar as a PAIR
    (the hub's `Bar.Declared` is `metric != "" && min_speedup >= 1.0`);
 2. it is NOT a contract axis — declaring or raising a bar must never re-key a
-   cell — but it IS an OVERRIDE_FACT, so a migration cannot silently drop it;
+   compiled graph — but it IS an OVERRIDE_FACT, so a migration cannot silently drop it;
 3. discovery emits all three onto `fn["compile"]`, blockers as the OPEN ids
    only: the hub reads `len(blockers) > 0` as "the author refuses to mint", so
    a resolved id would park the family in `blocked-by-declaration` forever;

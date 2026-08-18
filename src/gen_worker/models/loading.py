@@ -867,7 +867,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # bf16-resident weights when free VRAM allowed. The serving lane must be
 # deterministic per (release x declared config), never a function of the
 # individual card's free VRAM: such a probe makes `lane` a GPU-dependent axis
-# of the cell key, so a card with a small VRAM surplus over its same-SKU peers
+# of the compiled graph key, so a card with a small VRAM surplus over its same-SKU peers
 # falls into a lane nothing mints for and serves eager for life. The tax it
 # dodged is only +1.9% for the structural storage lane.
 # Involuntary transitions stay: the fit-ladder rung below (can't-fit fp8)
@@ -878,7 +878,7 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # "" = plain resident weights (incl. the involuntary w8a8/w4a4 dequant
 # lanes), "fp8-hooks" = fp8 weights resident with a per-layer upcast (traced
 # INTO the FX graphs). The "fp8-hooks" spelling is the WIRE value — tensorhub
-# maps it to `w8a16` and cells key on it — so it must stay byte-identical.
+# maps it to `w8a16` and compiled graphs key on it — so it must stay byte-identical.
 _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 
 #: EVERY base lane a loader can leave on ``_WEIGHT_LANE_ATTR``.
@@ -890,7 +890,7 @@ _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 #:
 #: ``"bf16-resident"`` is deliberately absent: :func:`pipeline_weight_lane`
 #: folds it to ``""`` (it traces identically to plain bf16), so it is never a
-#: distinct cell-identity lane. Bucketed LoRA lanes
+#: distinct compiled graph-identity lane. Bucketed LoRA lanes
 #: (``w8a8_lora.lora_execution_lane``) are these bases with a rank suffix and are
 #: decomposed by ``compile_cache.execution_lane_bucket``, so the BASE set is complete.
 STAMPABLE_BASE_EXECUTION_LANES: Tuple[str, ...] = (

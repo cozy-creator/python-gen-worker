@@ -2,7 +2,7 @@
 
 WHY IT LIVES HERE AND NOT IN THE MINT CHILD
 -------------------------------------------
-The endpoint's own handler must be proven to RUN before a cell seals, because
+The endpoint's own handler must be proven to RUN before a compiled graph seals, because
 ``torch.export`` traces the declared graph classes off the modules directly and
 never enters the handler — so a mint's phase table can read green for an
 endpoint whose handler cannot run at all.
@@ -11,7 +11,7 @@ Running that proof in the MINT CHILD is wrong: on a weight-free mint the child
 holds no weights, so it would have to materialise REAL random values for every
 virtual parameter — one full checkpoint at compute dtype, **concurrently with
 the parent's resident copy**. On an H100-80 for wan-2.2 that is 56.2 GB wanted
-against 15.5 GiB free: `CUDA out of memory`, no cell, eager for life.
+against 15.5 GiB free: `CUDA out of memory`, no compiled graph, eager for life.
 
 §4.33 steps 4-5 already say where verification goes: *"load the graph into the
 LIVE pipeline — already running eager — and verify it works"*, against weights
@@ -30,7 +30,7 @@ The record is a per-PROCESS ledger keyed by function name, because that is the
 scope of the claim: *this* process ran *that* handler against the weights it is
 about to mint for. It never crosses a process boundary as a ledger — the mint
 request carries the PROVENANCE string, so the child's report says which proof
-stood behind the cell it sealed rather than asserting one it cannot see.
+stood behind the compiled graph it sealed rather than asserting one it cannot see.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ _LOCK = threading.Lock()
 class HandlerProofFailed(Exception):
     """The endpoint's own handler does not run on the resident pipeline.
 
-    A cell must not seal for a handler that cannot serve. Spoken here, in the
+    A compiled graph must not seal for a handler that cannot serve. Spoken here, in the
     process that holds the weights, rather than in a child that would have to
     allocate a second copy of them to say it.
     """
@@ -193,7 +193,7 @@ def prove(
         raise HandlerProofFailed(
             f"the endpoint's own warm plan does not run on the resident "
             f"pipeline — warm job {job.spec.name!r} raised "
-            f"{type(exc).__name__}: {exc}. A cell must not seal for a handler "
+            f"{type(exc).__name__}: {exc}. A compiled graph must not seal for a handler "
             f"that cannot serve.") from exc
     how = f"resident warm forward {job.spec.name!r} (real weights)"
     record(name, how)

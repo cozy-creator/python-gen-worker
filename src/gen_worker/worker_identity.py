@@ -30,8 +30,8 @@ HOW IT RESOLVES
    conflation is what makes a missing answer read as an attack.
 
 An identity that resolves but names nothing IS an answer, and a legal one: the
-hub stamps the claims only when it can (``cellgrant.Stamp``), and their absence
-narrows the pod to platform-tier cells. "The hub declined to name us" and "we
+hub stamps the claims only when it can (``compiledgraphgrant.Stamp``), and their absence
+narrows the pod to platform-tier compiled graphs. "The hub declined to name us" and "we
 could not ask anyone" must never share a value.
 """
 
@@ -47,9 +47,9 @@ from .request_context._helpers import _decode_unverified_jwt_claims
 
 logger = logging.getLogger(__name__)
 
-#: The hub-stamped viewer claims. ``cellgrant.Stamp`` writes
+#: The hub-stamped viewer claims. ``compiledgraphgrant.Stamp`` writes
 #: them from the hub's OWN record of the release — never from anything the
-#: worker says — which is why they are the identity both ends of the cell
+#: worker says — which is why they are the identity both ends of the compiled graph
 #: exchange scope by.
 CLAIM_ENDPOINT_ID = "cell_read_endpoint_id"
 CLAIM_ORG_ID = "cell_read_org_id"
@@ -73,7 +73,7 @@ class IdentityUnavailable(RuntimeError):
 class ViewerIdentity:
     """The endpoint this pod serves and the org that owns it.
 
-    Both empty is legal and NARROWS the pod (platform-tier cells only); it is
+    Both empty is legal and NARROWS the pod (platform-tier compiled graphs only); it is
     never a licence to widen. :attr:`named` distinguishes "the hub stamped
     nothing" from an identity that can match a publisher.
     """
@@ -136,7 +136,7 @@ def viewer() -> ViewerIdentity:
 
     Cached after the first successful resolution: the endpoint a pod serves and
     the org that owns it do not change for the life of the process, and a
-    credential rotation carries the same two claims (``cellgrant.Stamp`` runs
+    credential rotation carries the same two claims (``compiledgraphgrant.Stamp`` runs
     on both mint sites).
 
     Raises :class:`IdentityUnavailable` when nothing can answer. Callers must

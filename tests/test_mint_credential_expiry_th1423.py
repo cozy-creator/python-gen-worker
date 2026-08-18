@@ -4,7 +4,7 @@ A 28-minute inductor compile finishes past a 30m worker JWT TTL and publish
 fails `(401): invalid worker token`. Two worker-side defects make that
 unreadable:
 
-* `CellPublisher._post` raised a BARE `RuntimeError`, so `_publish_failure_phase`
+* `CompiledGraphPublisher._post` raised a BARE `RuntimeError`, so `_publish_failure_phase`
   had no `status`/`code` to group by and all three landed under the phase
   `RuntimeError` — indistinguishable from any other exception type on the wire;
 * `aot_mint._publisher_from_settings` built the publisher with
@@ -12,7 +12,7 @@ unreadable:
   arriving during the mint could never be picked up.
 
 These drive the REAL publisher against a localhost server speaking tensorhub's
-real refusal envelope — real sockets, real threads, a real packed cell — because
+real refusal envelope — real sockets, real threads, a real packed compiled graph — because
 what is under test is what the worker does with a live 401, not a mock's idea of
 one. Every wait here is a `Thread.join()` on the publish thread itself: no
 sleeps, no durations.
@@ -32,21 +32,21 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker import fleet_cells as fc
+from gen_worker import fleet_compiled_graphs as fc
 from gen_worker.hubio.client import HubPublishError
-from harness.cell_meta import exported_cell_meta, exported_cell_provenance
+from harness.compiled_graph_meta import exported_compiled_graph_meta, exported_compiled_graph_provenance
 
 LAPSE_S = 150  # how far past `exp` the presented credential is, in the JWT
 FAMILY = "sdxl"
 
-# a real exported-cell envelope. The publish path recomputes the key
-# from the recorded blocks and refuses a cell that cannot state one, so the
-# credential-lapse legs below have to ride a cell that could genuinely publish.
-META = exported_cell_meta()
+# a real exported-compiled graph envelope. The publish path recomputes the key
+# from the recorded blocks and refuses a compiled graph that cannot state one, so the
+# credential-lapse legs below have to ride a compiled graph that could genuinely publish.
+META = exported_compiled_graph_meta()
 # pgw#1341: what the mint recorded beside the bytes. The credential legs below
-# have to ride a cell that could genuinely publish, and since pgw#1270 that
+# have to ride a compiled graph that could genuinely publish, and since pgw#1270 that
 # means an artifact TCG built PLUS the provenance the store holds.
-PROVENANCE = exported_cell_provenance(lane="w8a8-lora64", gen_worker="0.76.6")
+PROVENANCE = exported_compiled_graph_provenance(lane="w8a8-lora64", gen_worker="0.76.6")
 COMPILED_GRAPH_KEY = META["compiled_graph_key"]
 
 
@@ -136,8 +136,8 @@ def artifact(tmp_path: Path) -> Path:
     return out
 
 
-def _publisher(hub, token: str) -> fc.CellPublisher:
-    return fc.CellPublisher(base_url=hub.base, worker_jwt=lambda: token,
+def _publisher(hub, token: str) -> fc.CompiledGraphPublisher:
+    return fc.CompiledGraphPublisher(base_url=hub.base, worker_jwt=lambda: token,
                             image_digest="sha256:" + "1" * 64)
 
 
@@ -261,7 +261,7 @@ def test_the_self_mint_publisher_reads_the_credential_at_use_time(
     than the TTL — was invisible.
 
     pgw#1270 deleted the `aot_mint` CLI that built a second publisher of its
-    own. `Executor._cell_publisher` is the ONE surviving construction site, so
+    own. `Executor._compiled_graph_publisher` is the ONE surviving construction site, so
     it is the one asserted; a captured token here would be the same defect in
     the only place left to have it.
     """
@@ -289,7 +289,7 @@ def test_the_self_mint_publisher_reads_the_credential_at_use_time(
     # ENTRY hands it the boot token (`entrypoint` / the procsplit parent).
     worker_credential.install_bootstrap(config.current())
 
-    publisher = ex._cell_publisher()
+    publisher = ex._compiled_graph_publisher()
     assert publisher.worker_jwt() == boot
 
     # 0.0 = expiry unknown to the installer; the token states its own.

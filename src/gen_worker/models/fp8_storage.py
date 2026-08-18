@@ -55,7 +55,7 @@ from ..hostfacts import cuda_ready
 logger = logging.getLogger(__name__)
 
 #: (plain class, kind) -> the punned class. One class object per pair: the
-#: module TYPE enters the cell's composition digest, so it must be stable for
+#: module TYPE enters the compiled graph's composition digest, so it must be stable for
 #: the life of the process.
 _PUNNED: Dict[Tuple[Any, str], type] = {}
 
@@ -206,7 +206,7 @@ def _kind(module: Any) -> str:
 def punned_class(base: Any, kind: str) -> type:
     """The fp8-storage twin of ``base``: same class, same attributes, only
     ``forward`` replaced by the upcast-at-use-site form. Cached, so one class
-    object per (base, kind) — the module type enters the cell's composition
+    object per (base, kind) — the module type enters the compiled graph's composition
     digest and must be stable within a process."""
     cached = _PUNNED.get((base, kind))
     if cached is not None:

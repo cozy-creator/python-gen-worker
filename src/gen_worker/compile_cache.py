@@ -13,7 +13,7 @@ minted ``kind="torch-inductor-cache"``, and th#1788 made ``aot-inductor`` the
 only class the hub adopts, so its publishes were refused before entering the
 store), and DESIGN-RULINGS §4.28/§4.30 make that permanent: there is no
 central compile service, no mint request and no compile fleet, and compilation
-runs on the machine that will USE the cell. A family too large to self-mint beside its own server is a
+runs on the machine that will USE the compiled graph. A family too large to self-mint beside its own server is a
 PLACEMENT question — boot its serving pod on a card that fits, per §4.28's
 "pre-warming a release/SKU = boot an ordinary serving pod there". pgw#1175
 deleted the ``card_bytes`` figure that used to answer it: it was
@@ -30,7 +30,7 @@ W8A8. The compile job itself opts into cold compilation through the explicit
 Artifacts are FAMILY-keyed (settled 2026-07-06): torch.compile caches key on
 the traced graph + shapes, not the weights, so one artifact serves every
 fine-tune of a model family. They live in a system-owned repo per family
-(``root/family-<family>``), one flavor per (SKU, torch) cell — and they
+(``root/family-<family>``), one flavor per (SKU, torch) compiled graph — and they
 are CODE: only a TRUSTED-hardware worker publishes shared ones (§4.28;
 untrusted hardware mints for itself and never uploads).
 
@@ -46,7 +46,7 @@ Key sensitivity (all exact-match): family (graph identity), GPU SKU
 (autotune choices + cubin arch), torch (fx-graph cache key), triton
 (cubin/launcher cache key), diffusers (the traced graph is its code), and
 gen-worker itself plus the producer's low-VRAM prep mode (gw#391: the
-worker's load/wrap/placement code shapes the traced graph — a cell produced
+worker's load/wrap/placement code shapes the traced graph — a compiled graph produced
 by a different gen-worker, or traced under different low-VRAM flags, can
 pass every other key yet miss inductor's FX-graph cache at trace time,
 serving eager while reporting adopted). ``source_ref`` records which family member the producer
@@ -117,16 +117,16 @@ logger = logging.getLogger(__name__)
 # compiled-graph metadata schema, which is `aot_serve.COMPILED_GRAPH_FORMAT`.
 #
 # pgw#1230 RENAMED it from `ARTIFACT_FORMAT`. Two different facts shared that
-# name across two modules; `fleet_cells.arm_identity` read THIS one to compute
+# name across two modules; `fleet_compiled_graphs.arm_identity` read THIS one to compute
 # the `format` axis it compares against what the child stamped from
 # `aot_serve`'s. They were both 2, so the comparison passed by coincidence
-# until pgw#1176 moved the cell schema to 3 — after which every freshly minted
-# cell failed to arm with `key_axis_divergence`. The value is unchanged, so no
+# until pgw#1176 moved the compiled graph schema to 3 — after which every freshly minted
+# compiled graph failed to arm with `key_axis_divergence`. The value is unchanged, so no
 # cache tag moves; only the name that made the confusion possible does.
 #
 # 2 (gw#391): key gained the producer gen-worker version. ie#496 extends its
 # metadata with the canonical module graph, shape/target table and weight-lane
-# schema without gratuitously invalidating proven non-W8A8 cells. New W8A8
+# schema without gratuitously invalidating proven non-W8A8 compiled graphs. New W8A8
 # consumers require those fields; checkpoint bytes remain deliberately absent.
 SEMANTIC_TAG_FORMAT = 2
 #: The marker's one definition is `compile_facts.MARKER_ATTR`; this is the
@@ -138,15 +138,15 @@ _LOCK_TYPE = type(threading.Lock())
 # ---------------------------------------------------------------------------
 # pgw#637: dynamo's in-memory code cache is a THIRD serving surface.
 #
-# Cell keys carry no checkpoint digest, so arming a SECOND checkpoint of an
+# Compiled graph keys carry no checkpoint digest, so arming a SECOND checkpoint of an
 # already-proven family creates a new pipeline whose target forward shares
 # the class ``__code__`` dynamo already compiled — on torch 2.13 (inlined
 # nn-modules) the cached entry's guards match the new instance and the
 # warmup call runs COMPILED with zero FX/AOT counter movement
-# (calls>0, hits=0, misses=0). That signature against a cell this process
+# (calls>0, hits=0, misses=0). That signature against a compiled graph this process
 # already proved is service, not silence: disproving it bricked the
 # compiled lane fleet-wide on every multi-checkpoint session (2026-07-24
-# incident, 6/6 workers). The registry below records every cell proven in
+# incident, 6/6 workers). The registry below records every compiled graph proven in
 # this process (a real FX/AOT hit, or a finalized self-mint); crediting the
 # in-memory surface additionally requires DIRECT evidence from dynamo that
 # compiled code for this object's targets is live
@@ -154,7 +154,7 @@ _LOCK_TYPE = type(threading.Lock())
 # object's hit certify another's silence, which gw#603/gw#611 forbid.
 _PROVEN_CELLS_LOCK = threading.Lock()
 _PROVEN_CELLS: set[str] = set()
-# pgw#672: cells whose serve/finalize proof FAILED in this process. Consulted
+# pgw#672: compiled graphs whose serve/finalize proof FAILED in this process. Consulted
 # at selection and self-mint arm time so one boot never loops adopt-fail /
 # mint-fail on the identical identity (the L4 churn loop's worker half).
 _QUARANTINED_CELLS: set[str] = set()
@@ -165,10 +165,10 @@ _QUARANTINED_CELLS: set[str] = set()
 _ARMED_PIPELINES: Optional["weakref.WeakSet[Any]"] = None
 
 
-def _cell_ref_identity(ref: str) -> str:
-    """Process-registry identity for one cell ref (pgw#672 / th#1166).
+def _compiled_graph_ref_identity(ref: str) -> str:
+    """Process-registry identity for one compiled graph ref (pgw#672 / th#1166).
 
-    The SAME cell can be named in two forms — the mint path's
+    The SAME compiled graph can be named in two forms — the mint path's
     ``system_repo(family)#<key>`` vs the store's delivered ref (release/digest
     decorated). Exact-string matching between those forms manufactured
     false negatives in the pgw#637 escape. A key-flavored ref collapses to
@@ -176,7 +176,7 @@ def _cell_ref_identity(ref: str) -> str:
     ref = str(ref or "").strip()
     if not ref:
         return ""
-    family, flavor = parse_cell_ref(ref)
+    family, flavor = parse_compiled_graph_ref(ref)
     if family and flavor:
 
         if is_compiled_graph_key(flavor):
@@ -185,8 +185,8 @@ def _cell_ref_identity(ref: str) -> str:
 
 
 def record_compiled_graph_proven(ref: str) -> None:
-    """Mark one cell identity as served-and-proven in this process."""
-    identity = _cell_ref_identity(ref)
+    """Mark one compiled graph identity as served-and-proven in this process."""
+    identity = _compiled_graph_ref_identity(ref)
     if not identity:
         return
     with _PROVEN_CELLS_LOCK:
@@ -194,14 +194,14 @@ def record_compiled_graph_proven(ref: str) -> None:
 
 
 def compiled_graph_proven_in_process(ref: str) -> bool:
-    identity = _cell_ref_identity(ref)
+    identity = _compiled_graph_ref_identity(ref)
     with _PROVEN_CELLS_LOCK:
         return bool(identity) and identity in _PROVEN_CELLS
 
 
 def record_compiled_graph_quarantined(ref: str) -> None:
-    """Mark one cell identity as proof-failed in this process (pgw#672)."""
-    identity = _cell_ref_identity(ref)
+    """Mark one compiled graph identity as proof-failed in this process (pgw#672)."""
+    identity = _compiled_graph_ref_identity(ref)
     if not identity:
         return
     with _PROVEN_CELLS_LOCK:
@@ -210,7 +210,7 @@ def record_compiled_graph_quarantined(ref: str) -> None:
 
 
 def compiled_graph_quarantined_in_process(ref: str) -> bool:
-    identity = _cell_ref_identity(ref)
+    identity = _compiled_graph_ref_identity(ref)
     with _PROVEN_CELLS_LOCK:
         return bool(identity) and identity in _QUARANTINED_CELLS
 
@@ -559,7 +559,7 @@ class GuardMiss:
 
     ``reason`` is torch's verbatim message — per cached entry, the exact
     guard that failed (size/stride/scalar specialization, …): the confession
-    is the data for the cell-reusability investigation (Paul's GPU-A/B
+    is the data for the compiled graph-reusability investigation (Paul's GPU-A/B
     hypothesis). ``sig`` is the request's shape/axis identity as the hot-swap
     router sees it; ``heal`` is the background-heal verdict."""
 
@@ -654,7 +654,7 @@ def _record_guard_miss(
 # pgw#1281: no axis tuple lives here. The one that did named `verify()` (gone
 # with the pgw#1035 dead-code wave) and claimed parity with
 # `aot_serve.IDENTITY_AXES`, which was never true — 5 entries against 3, and
-# pgw#1034 had already ruled the two sets deliberately different. The cell key's
+# pgw#1034 had already ruled the two sets deliberately different. The compiled graph key's
 # axes are `torchcg.REQUIRED_AXES`; this module's job is `runtime_key()`,
 # the ONE probe that states them.
 
@@ -719,7 +719,7 @@ def gen_worker_version() -> str:
 def execution_lane_bucket(execution_lane: str) -> Tuple[str, int]:
     """(base lane, rank bucket) for a weight lane in stamp OR label-token
     form: ``"w8a8-lora128"`` -> ``("w8a8", 128)``, ``"lora32"`` -> ``("", 32)``,
-    ``"w8a8"`` -> ``("w8a8", 0)``. Sparse stamps (eager-only, never cells)
+    ``"w8a8"`` -> ``("w8a8", 0)``. Sparse stamps (eager-only, never compiled graphs)
     do not parse as bucketed — they pass through as their whole string."""
     m = re.search(r"(?:^|-)lora(\d+)$", str(execution_lane or ""))
     if m is None:
@@ -729,7 +729,7 @@ def execution_lane_bucket(execution_lane: str) -> Tuple[str, int]:
 
 
 def execution_lane_token(weight_lane: str) -> str:
-    """Label token for a traced weight lane (gw#534): cells of different
+    """Label token for a traced weight lane (gw#534): compiled graphs of different
     lanes are DIFFERENT graphs and must not collide on one flavor label.
     "" (plain resident, incl. bf16-resident) stays unsuffixed. LoRA-branch
     lanes (gw#547/gw#561) keep their base lane's token + the bucket suffix:
@@ -755,7 +755,7 @@ def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
     ``aot_contract.ExportSpec.execution_lane_label``; both were folded here.
     Since pgw#1059 the lane is store METADATA + discovery scoping, never a
     key axis — but the one-derivation rule stands for the same reason: a
-    lane stamped under one spelling and scoped under another is a cell
+    lane stamped under one spelling and scoped under another is a compiled graph
     discovery can never find.
     """
     base, observed = execution_lane_bucket(str(weight_lane or ""))
@@ -766,13 +766,13 @@ def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
     return token
 
 
-def cell_base_execution_lane(pipeline: Any) -> str:
-    """Base weight lane for CELL-IDENTITY computation (advertised requested
+def compiled_graph_base_execution_lane(pipeline: Any) -> str:
+    """Base weight lane for COMPILED GRAPH-IDENTITY computation (advertised requested
     keys, pull-by-key lookups, local-store lookups): the pipeline probe
     first, then the denoiser's own lane markers — the identical resolution
     the mint's ``stamp_lane`` memoizes, so requested == published by
     construction (pgw#686). Dispatch/policy surfaces keep the raw
-    :func:`loading.pipeline_weight_lane` probe; this is cell identity only."""
+    :func:`loading.pipeline_weight_lane` probe; this is compiled graph identity only."""
     return w8a8_lora.effective_base_execution_lane(pipeline)
 
 
@@ -781,7 +781,7 @@ def compile_target_execution_lane_error(weight_lane: str, lora_bucket: int) -> s
 
     This is the Python half of Tensorhub's compile-target descriptor contract:
     the worker reports the *raw pipeline lane* (Tensorhub maps ``fp8-hooks`` to
-    the ``w8a16`` cell token), with an optional exact canonical LoRA suffix.
+    the ``w8a16`` compiled graph token), with an optional exact canonical LoRA suffix.
     Keeping this vocabulary explicit prevents a test or future loader from
     advertising a target the scheduler must reject.
     """
@@ -818,15 +818,15 @@ def flavor_label(sku: str, torch_version: str, weight_lane: str = "") -> str:
 
 
 def system_repo(family: str) -> str:
-    """The system-owned repo holding one family's compiled-artifact cells."""
+    """The system-owned repo holding one family's compiled-artifact compiled graphs."""
     fam = str(family or "").strip()
     if not fam:
         raise ValueError("compile-cache family must be non-empty")
     return f"root/family-{fam}"
 
 
-def parse_cell_ref(ref: str) -> Tuple[str, str]:
-    """(family, flavor) from a system cell ref
+def parse_compiled_graph_ref(ref: str) -> Tuple[str, str]:
+    """(family, flavor) from a system compiled graph ref
     (``root/family-<f>[@release|@digest][#<flavor>]``) via the ONE ref
     grammar (gw#492); ('', '') when the ref is not a system-family ref."""
 
@@ -842,21 +842,21 @@ def parse_cell_ref(ref: str) -> Tuple[str, str]:
 
 def family_from_ref(ref: str) -> str:
     """Family encoded in a compile-cache ref; '' when the ref is not a
-    system-family cell ref."""
-    return parse_cell_ref(ref)[0]
+    system-family compiled graph ref."""
+    return parse_compiled_graph_ref(ref)[0]
 
 
 def declared_compile_facts(cfg: Any, *, lora_bucket_override: Optional[int] = None) -> Dict[str, Any]:
     """Canonical DECLARED compile-contract facts for ``cfg`` (a
-    ``registry.CompileCell`` or any duck with the same fields).
+    ``registry.CompileContract`` or any duck with the same fields).
 
     pgw#1059: this is no longer a key-axis input — the fused ``contract``
-    axis is split into ``graph`` x ``envelope`` and the exported-cell key
+    axis is split into ``graph`` x ``envelope`` and the exported-compiled graph key
     reads recorded blocks only. What remains of this dict: the
     torch-inductor-cache block ``declared_compile_contract`` (compared
-    verbatim by :func:`local_cell_mismatch` / :func:`contract_drift` — the
+    verbatim by :func:`local_compiled_graph_mismatch` / :func:`contract_drift` — the
     cozy-local store verdict), the SDK v2 manifest's opaque
-    ``shape_contract_digest`` (``registry.CompileCell.contract_digest``
+    ``shape_contract_digest`` (``registry.CompileContract.contract_digest``
     digests its own near-twin of this dict), and the JIT semantic cache tag.
     """
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
@@ -871,7 +871,7 @@ def declared_compile_facts(cfg: Any, *, lora_bucket_override: Optional[int] = No
             [int(v) for v in row] for row in getattr(cfg, "shapes", ())),
         "targets": [str(t) for t in getattr(cfg, "targets", ())],
         # pgw#654 gap #6: the CLASS's per-lane text-pin UNION — sibling
-        # functions with different pins share one cell contract.
+        # functions with different pins share one compiled graph contract.
         "text_lens": sorted({int(v) for v in text_lens}),
         "dynamic": [
             {"dim": d.dim, "min": d.min, "max": d.max}
@@ -966,7 +966,7 @@ def static_code_closure() -> Tuple[Tuple[str, str], ...]:
     Restricted to the gen_worker package; torch/triton content rides the
     ``toolchain`` axis at package granularity, and the model libraries ride
     the ``graph`` axis (pgw#1050 — their code IS the traced computation, and
-    nothing else about them reaches a cell). Deterministic:
+    nothing else about them reaches a compiled graph). Deterministic:
     module-derived relative paths, sorted, content digests — never absolute
     paths, never bytecode.
 
@@ -1008,12 +1008,12 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
 
     THE COMPILER, and not the model libraries (pgw#1050): ``diffusers`` /
     ``transformers`` / ``peft`` rode this axis until 2026-08-11 and were
-    evicted because their whole effect on a cell arrives through the traced
+    evicted because their whole effect on a compiled graph arrives through the traced
     graph, which the ``graph`` axis hashes node-for-node since pgw#1031 —
     see ``torchcg.identity``'s membership rules for the channel-by-channel argument
     and for the two fences (B1 code-only + the pgw#1097 folding fence;
     ``env_seal.assert_seal_unchanged``) that close the routes around it.
-    Folded here, every model-library patch release re-keyed every cell in
+    Folded here, every model-library patch release re-keyed every compiled graph in
     the fleet for a graph that had not moved. ``tcg.identity.toolchain_axis_digest``
     is the READER of the same membership, and the pair is what keeps one
     axis one derivation. Their versions stay RECORDED for forensics
@@ -1135,10 +1135,10 @@ def _normalize_system_info(info: Dict[str, Any], sm: str) -> Dict[str, Any]:
 
 
 def _install_fx_system_shim() -> None:
-    """P0 (cache-design review §6.1, VERIFIED on a real B200 cell): inductor
+    """P0 (cache-design review §6.1, VERIFIED on a real B200 compiled graph): inductor
     hashes ``torch.cuda.get_device_properties().name`` — the GPU MARKETING
     string — into every FX graph key via ``CacheBase.get_system()``
-    (torch 2.13 codecache.py:287-311, consumed :1503). A cell minted on an
+    (torch 2.13 codecache.py:287-311, consumed :1503). A compiled graph minted on an
     a40 therefore never HITS on an rtx-3090 despite the identical sm_86 ck
     key: the pgw#691 sku collapse delivers zero cross-SKU hits until the
     inner key is normalized. This shim rewrites the device name to our
@@ -1173,7 +1173,7 @@ def _install_fx_system_shim() -> None:
 def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
     """Digest of the SEMANTIC identity (format|kind|family|lane|mode|
     contract) — bound into every inner torch.compile key via
-    ``cache_key_tag`` (review §6.3), so a delivered cell's entries are
+    ``cache_key_tag`` (review §6.3), so a delivered compiled graph's entries are
     mechanically unconsumable by a process whose declared semantic identity
     differs. Environment facts are deliberately excluded: the inner FX key
     already hashes them natively (system info, config, dtypes) and the
@@ -1218,13 +1218,13 @@ def _reset_inductor_latch() -> None:
 def inductor_counters() -> Dict[str, int]:
     """This process's compiled-artifact cache counters (monotonic). The delta
     across a warmup is the honest adopted-vs-silently-eager signal (gw#391):
-    zero hits means the seeded cell never served the trace.
+    zero hits means the seeded compiled graph never served the trace.
 
     gw#611: the AOT-autograd layer is a SECOND serving surface. In bundled
     mode an AOT hit loads the compiled artifact without ever consulting
     FxGraphCache (measured on torch 2.13: fxgraph counters fully silent on a
     served call), so a proof reading only fxgraph_* sees hits=0/misses=0 on
-    a healthy serving cell and fail-closes it — the th#954 SDXL second-boot
+    a healthy serving compiled graph and fail-closes it — the th#954 SDXL second-boot
     release-bricking shape. AOT hits are therefore reported alongside
     (``aot_cache_hit``/``aot_cache_miss``) and count as serving evidence.
     Production pins the AOT layer OFF (gw#608 portability), so these stay 0
@@ -1325,7 +1325,7 @@ def compile_wall_seconds() -> float:
 
     gw#587: the store-served-boot runtime assertion samples this before/after
     a boot warmup window to measure the actual inductor compile wall (not
-    just a hit/miss count) — a delivered cell should cost ~0 here. Mirrors
+    just a hit/miss count) — a delivered compiled graph should cost ~0 here. Mirrors
     ``inductor_counters()``: process-global, so callers must scope the
     before/after sample to a window where no OTHER boot is compiling
     concurrently (the executor already holds the exclusive GPU permit for
@@ -1409,7 +1409,7 @@ def cxx_toolchain_present() -> bool:
 # the complete FxGraphHashDetails per-component dump behind their own key.
 # A store-served boot that recompiles (the gw#608 signature) SAVES its fresh
 # entries into the live cache dir before the warmup proof fails, so at
-# failure time both sides of the divergence are on disk: the seeded cell's
+# failure time both sides of the divergence are on disk: the seeded compiled graph's
 # key inputs (inside the artifact tar) and this boot's (freshly written).
 # Diffing them names the exact diverging key component in the wire-visible
 # error — no pod-log access needed. Pure observability: every helper
@@ -1431,7 +1431,7 @@ def fx_cache_failure_report() -> str:
     a failure path, so it may never add a second failure to the one being
     diagnosed.
 
-    **pgw#1200 deleted the CELL side, and with it the three-way
+    **pgw#1200 deleted the COMPILED GRAPH side, and with it the three-way
     classification.** The report used to name B1 (*"the boot computed
     different keys"*), B2 (*"the keys matched and the miss is in torch's
     candidate-load path"*) or *"unreadable artifact"* — every one of them a
@@ -1442,7 +1442,7 @@ def fx_cache_failure_report() -> str:
     gracefully — it INVERTED. `fresh = live_keys - seeded` became EVERY live
     key, so **B1 was named on every boot with any FX entry at all**, while B2
     was structurally unreportable and `compiled_graph_keys=0` (*"unreadable"*) was the
-    normal case. Measured on the real function: handed an exported cell — what
+    normal case. Measured on the real function: handed an exported compiled graph — what
     the caller passes today — the output was byte-identical to passing
     ``None``, which is the shortest proof the argument carried no information.
 
@@ -1474,7 +1474,7 @@ def fx_cache_failure_report() -> str:
 
     # The extern-libs key is a real input to torch's FX cache key and a real
     # reason a boot misses, so it stays: it is a fact about THIS process,
-    # needing no cell to compare against.
+    # needing no compiled graph to compare against.
     try:
         import torch.utils._triton as _tu
 
@@ -1494,10 +1494,10 @@ class AdoptError(RuntimeError):
         super().__init__(detail or reason)
 
 
-class CellSelectionBugError(RuntimeError):
-    """A SELF-REQUESTED, identity-verified cell failed to arm (th#883).
+class CompiledGraphSelectionBugError(RuntimeError):
+    """A SELF-REQUESTED, identity-verified compiled graph failed to arm (th#883).
 
-    Under worker-owned selection the worker never refuses a cell it asked
+    Under worker-owned selection the worker never refuses a compiled graph it asked
     for: the artifact's axes describe exactly the key this runtime computed
     for itself, so any arm failure is by construction a bug in the one
     shared selection/parity brain — never a compatibility outcome. Callers
@@ -1510,9 +1510,9 @@ class CellSelectionBugError(RuntimeError):
 
 
 class CompiledExecutionLaneUnavailableError(RetryableError):
-    """A precision lane whose production contract requires a cell is unsafe.
+    """A precision lane whose production contract requires a compiled graph is unsafe.
 
-    RETRYABLE, and correctly so: a cell that is merely ABSENT here can exist
+    RETRYABLE, and correctly so: a compiled graph that is merely ABSENT here can exist
     elsewhere or later — another pod may already hold it, and a requeue is how
     the request reaches that pod. Everything whose cause can change (no CUDA
     on this pod, an arm that failed, an identity computation that raised) exits
@@ -1524,8 +1524,8 @@ class CompiledExecutionLaneImpossibleError(FatalError):
     """The same refusal, for a cause that CANNOT change (pgw#888/pgw#1010).
 
     A mandatory w8a8/w4a4 lane on a family that declares no export: the lane
-    serves only from a cell, the only cell is an AOT cell, and no export means
-    no cell can be minted for it on any pod, ever. Retrying spends the
+    serves only from a compiled graph, the only compiled graph is an compiled graph, and no export means
+    no compiled graph can be minted for it on any pod, ever. Retrying spends the
     orchestrator's whole attempt budget re-deriving one answer — pgw#888
     measured 11 real requests each exhausting five retries — and the user waits
     five times as long for the identical refusal.
@@ -1539,7 +1539,7 @@ class CompiledExecutionLaneImpossibleError(FatalError):
     endpoint. Here the author declared a mandatory quantized lane, so eager is
     not a posture they sanctioned — falling back to it would serve numerics
     nobody approved rather than refuse. §4.31 and pgw#1010 therefore do not
-    conflict once "cell-attributable failure => serve eager" is read as
+    conflict once "compiled graph-attributable failure => serve eager" is read as
     "=> serve eager WHERE EAGER IS PERMITTED". Recorded here because it is an
     assumption, not a quotation: if it is ever reversed, this class is the
     single place the reversal lands.
@@ -1551,7 +1551,7 @@ def apply_lora_execution_lane(pipeline: Any, bucket: int) -> bool:
     (gw#561): canonical zeroed rank-``bucket`` branches on every
     branch-capable denoiser Linear (the gw#547 compiled-lane contract) + the
     ``<base>-lora<bucket>`` lane stamp, so :func:`lane_drift` admits exactly
-    the matching lora cells. Raises when the pipeline has no branch-capable
+    the matching lora compiled graphs. Raises when the pipeline has no branch-capable
     denoiser — a declared bucket that cannot trace must fail loud, not
     publish/adopt the wrong graph.
 
@@ -1784,7 +1784,7 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     graph. Conversion producers load via generic ``DiffusionPipeline``
     (model_index -> e.g. LTX2Pipeline) while serving loads the endpoint's
     declared wrapper (e.g. LTX2ConditionPipeline) over a byte-identical
-    module tree — proven identical-graph, and must share one cell.
+    module tree — proven identical-graph, and must share one compiled graph.
     """
     graph_targets: list[Dict[str, Any]] = []
     quantized: list[Dict[str, Any]] = []
@@ -2048,7 +2048,7 @@ def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
     shapes/targets/CFG classes, whole-vs-regional mode, actual weight lane and
     activation-scaling schema, LoRA bucket, and observed low-VRAM preparation.
     Tensor values and checkpoint identities remain excluded so compatible
-    fine-tunes share one family cell.
+    fine-tunes share one family compiled graph.
     """
     graph_signature, weight_contract = execution_contract(pipeline, cfg)
 
@@ -2066,7 +2066,7 @@ def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
             float(v) for v in getattr(cfg, "guidance_scales", ())
         ],
         # pgw#654 gap #6: sibling lanes with different text pins share one
-        # cell — the digest carries the class UNION, never one lane's pin.
+        # compiled graph — the digest carries the class UNION, never one lane's pin.
         "text_lens": sorted({int(v) for v in text_lens}),
         "dynamic": [
             {"dim": d.dim, "min": d.min, "max": d.max}
@@ -2190,7 +2190,7 @@ def _guarded(
             )
             # pgw#1010: the degrade is recorded on the SHARED signal, not only
             # in this closure. An INTAKE arm names no artifact, so "is this
-            # pipeline serving compiled" cannot be answered by an active cell
+            # pipeline serving compiled" cannot be answered by an active compiled graph
             # ref — `is_compile_armed` reads this, and without it a permanently
             # degraded intake pod would keep reporting `serving_mode=jit_cell`
             # while every request ran eager (the gw#586 class, one lane over).
@@ -2401,7 +2401,7 @@ def _vae_supports_channels_last(vae: Any) -> bool:
 
 #: The hub-resolved execution-lane descriptor for the checkpoint this
 #: pipeline serves (th#913 ``lane`` string), stamped by the executor at
-#: injection time. Consumed by :func:`mandatory_serving` only — cell keys
+#: injection time. Consumed by :func:`mandatory_serving` only — compiled graph keys
 #: keep the weight-lane brain (pgw#686).
 EXECUTION_LANE_ATTR = "_cozy_execution_lane"
 
@@ -2505,7 +2505,7 @@ def mandatory_serving(pipeline: Any) -> bool:
     Mandatory-ness follows the hub-resolved EXECUTION lane whenever the
     executor stamped one (``_cozy_execution_lane``, th#913/th#1059): only
     real w8a8/w4a4 ACTIVATION execution forbids the eager tier. The weight
-    -lane stamp stays the CELL IDENTITY brain (pgw#686) — but it names the
+    -lane stamp stays the COMPILED GRAPH IDENTITY brain (pgw#686) — but it names the
     storage/branch family, not serveability: sdxl's mixed ``#fp8-w8a8``
     storage stamps ``w8a8-lora64`` while the hub serves it as
     ``fp8-w8a16+eager``, and classifying that stamp as mandatory silently
@@ -2569,7 +2569,7 @@ def apply(
         return False
     import torch
 
-    # gw#608: cross-pod cell portability requires the (portable) FX graph
+    # gw#608: cross-pod compiled graph portability requires the (portable) FX graph
     # cache to be the lookup surface.
     settings_authority.disable_autograd_cache()
     # The two inner-key alignments (both symmetric mint/consumer by
@@ -2761,7 +2761,7 @@ def unwrap(pipeline: Any) -> bool:
     """Restore the eager callables :func:`apply` wrapped and drop dynamo's
     in-memory compiled code so a later :func:`apply` re-traces against the
     then-seeded caches. Used on adoption rollback (zero cache hits => back to
-    true eager, gw#391) and before re-adoption of a re-published cell."""
+    true eager, gw#391) and before re-adoption of a re-published compiled graph."""
     marker = getattr(pipeline, _MARKER_ATTR, None)
     if marker is None:
         return False
@@ -2822,7 +2822,7 @@ def enable(pipeline: Any, cfg: Any) -> bool:
     with the format. Nothing has produced such an artifact since pgw#1178
     removed `mint_artifact`, its last writer, so every parameter of that
     branch (`cache_dir`, `artifact`) named a file that could not exist.
-    Delivered cells arrive as AOT ``.pt2`` entries or TRT engines, and
+    Delivered compiled graphs arrive as AOT ``.pt2`` entries or TRT engines, and
     `models.provision.arm_compiled` dispatches those on `metadata.json`'s
     `kind` BEFORE this call; what reaches here is the no-artifact lane, which
     is JIT intake (§4.34 keeps that) and cold compile.
@@ -2836,8 +2836,8 @@ def enable(pipeline: Any, cfg: Any) -> bool:
     if quant_execution_lane.startswith(("w8a8", "w4a4")) and not armed:
         execution_lane_name = quant_execution_lane[:4].upper()
         raise CompiledExecutionLaneUnavailableError(
-            f"{execution_lane_name} requires an exact compatible compile cell "
-            f"(no cell artifact delivered); eager/dequantized execution is "
+            f"{execution_lane_name} requires an exact compatible compiled graph "
+            f"(no compiled graph artifact delivered); eager/dequantized execution is "
             f"not a {execution_lane_name} production lane"
         )
     return armed
@@ -2921,8 +2921,8 @@ def arm_jit_intake(pipe: Any, cfg: Any) -> None:
     Intake is the serving posture for a family with no export declaration:
     the declared targets are enabled cold-allowed and GUARDED, this pod's own
     warmup performs the compile, and the pod serves compiled for its own life.
-    Nothing is captured, packed, keyed or published — a JIT cell is an artifact
-    class with no consumer (only ``aot-inductor`` cells are ever adopted), so
+    Nothing is captured, packed, keyed or published — a JIT graph is an artifact
+    class with no consumer (only ``aot-inductor`` compiled graphs are ever adopted), so
     every honest cold boot re-compiles and that is the contract, not a gap.
 
     This used to be ``begin_fleet_mint``, which additionally re-pointed the
@@ -2930,7 +2930,7 @@ def arm_jit_intake(pipe: Any, cfg: Any) -> None:
     capture dir so the compile could be packed afterwards. With no artifact to
     pack, that move has no purpose — and its removal deletes gw#608's whole
     root-cause class (a capture dir stealing the process cache dir from a
-    sibling's seeded cell), pgw#777's multi-execution-group refusal, and the
+    sibling's seeded compiled graph), pgw#777's multi-execution-group refusal, and the
     one-capture-per-process conflict, along with the env-restore transaction
     they needed.
 
@@ -2966,7 +2966,7 @@ def arm_jit_intake(pipe: Any, cfg: Any) -> None:
 
 __all__ = [
     "AdoptError",
-    "CellSelectionBugError",
+    "CompiledGraphSelectionBugError",
     "CompileArmRefused",
     "CompiledExecutionLaneUnavailableError",
     "SEMANTIC_TAG_FORMAT",
@@ -2976,7 +2976,7 @@ __all__ = [
     "compile_target_block",
     "resolve_targets",
     "arm_jit_intake",
-    "cell_base_execution_lane",
+    "compiled_graph_base_execution_lane",
     "declared_compile_facts",
     "drop_lora_execution_lane",
     "counters_delta",
@@ -2987,7 +2987,7 @@ __all__ = [
     "execution_contract",
     "execution_contract_digest",
     "family_from_ref",
-    "parse_cell_ref",
+    "parse_compiled_graph_ref",
     "flavor_label",
     "fx_cache_failure_report",
     "gen_worker_version",

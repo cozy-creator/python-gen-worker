@@ -200,7 +200,7 @@ def parse_closure(
     if not row.classes:
         raise KeySetError(
             "keyset_invalid",
-            f"closure {digest} declares an empty class set; a cell with no "
+            f"closure {digest} declares an empty class set; a compiled graph with no "
             f"class set has no identity (pgw#716/#758)")
     classes: list[ShippedClass] = []
     for name, entry in sorted(row.classes.items()):

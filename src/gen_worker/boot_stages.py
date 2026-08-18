@@ -170,10 +170,10 @@ class Stage(StrEnum):
     #: pgw#1353 measured `keys_from=traced` costing 805 s on every sdxl pod,
     #: against milliseconds for a read.
     KEYSET = "keyset"
-    #: Getting a compiled cell: the boot-adopt decision, the fetch it orders
+    #: Getting a compiled graph: the boot-adopt decision, the fetch it orders
     #: and the staging/verification before the first dlopen.
     ADOPT = "adopt"
-    #: Making a fetched cell the served path: entry admission, constant bind,
+    #: Making a fetched compiled graph the served path: entry admission, constant bind,
     #: ingress arming, the parity sweep.
     ARM = "arm"
     #: The warm forwards. An ARMED warm pays the call; an unarmed one pays a

@@ -4,9 +4,9 @@ reports throughout.
 Paul's contract (``WORKER-CONTRACTS.md`` §2, verbatim)::
 
     "the process for mint is: 1. compute key 2. try to fetch from hub, if
-    miss then begin compiling and serve eager until the local cell is
+    miss then begin compiling and serve eager until the local compiled graph is
     available; then switch over to using that. 2b. if cache-hit, then load
-    the AOT/JIT cell and serve compiled. that's it. THE WORKER IS AVAILABLE
+    the AOT/JIT graph and serve compiled. that's it. THE WORKER IS AVAILABLE
     THE ENTIRE TIME WHILE IT IS MINTING!"
 
 The defect this closes (th#1299)
@@ -88,7 +88,7 @@ REPORT_NAME = "report.json"
 #: pgw#848: the mint's phase table AS IT RUNS, rewritten atomically on every
 #: beat. `REPORT_NAME` is written once, at a terminus the child reaches under
 #: its own power — a child that is KILLED never writes one, and until this
-#: existed a 29-minute abandoned mint reported `total_s=1741.33 — no cell
+#: existed a 29-minute abandoned mint reported `total_s=1741.33 — no compiled graph
 #: produced` with zero entry rows and no pool row. The measurements were all
 #: made; nothing carried them out of the process.
 PHASES_SNAPSHOT_NAME = "mint_phases.json"
@@ -158,7 +158,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     modules: Tuple[str, ...]
     family: str
     #: The parent's ArmIdentity token (``arm1-…``) — the obligation this
-    #: child discharges. NOT a cell key (pgw#1059): the cell's key is
+    #: child discharges. NOT a compiled graph key (pgw#1059): the compiled graph's key is
     #: stamped by the mint itself and returned in ``MintReport.compiled_graph_key``.
     arm_token: str
     target: str          # artifact the child writes (.tar.gz), atomically
@@ -210,7 +210,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: compute dtype in a process that holds none (56.2 GB on wan-2.2, against
     #: 15.5 GiB free), which is the allocation §4.33's "~8 GiB" was actually
     #: measuring. The string is PROVENANCE, not a boolean, so the child's
-    #: report says which proof stood behind the cell it sealed.
+    #: report says which proof stood behind the compiled graph it sealed.
     handler_proof: str = ""
 
 
@@ -423,7 +423,7 @@ def _tree_cpu_seconds(pid: int) -> Optional[float]:
 def _work_root_mib(work_root: Path) -> Optional[float]:
     """MiB the child has written into its work root.
 
-    Generated sources, compiled objects and the packed cell — not a stdio
+    Generated sources, compiled objects and the packed compiled graph — not a stdio
     buffer. It grows in BURSTS: sources land, then a single-threaded ``g++``
     chews on them for minutes writing nothing. So its growth proves work and
     its silence proves nothing, which is why ``_observe`` treats it as an
@@ -483,7 +483,7 @@ def child_env(
     """The child's environment.
 
     The seal is re-established by the child from this env, so it must be the
-    parent's env — a child that sealed differently would stamp a cell the
+    parent's env — a child that sealed differently would stamp a compiled graph the
     parent's ``verify()`` rejects. Two deliberate additions:
 
     * ``CUDA_VISIBLE_DEVICES`` pins the child to the mint device, so a
@@ -659,7 +659,7 @@ def _terminate_group(pid: int, *, grace_s: float = 10.0) -> None:
 
     The group, not the process: inductor's compile workers are children of
     the child, and a mint that left them behind would keep burning the pod's
-    CPU against a cell nobody will adopt.
+    CPU against a compiled graph nobody will adopt.
     """
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -690,11 +690,11 @@ async def run_mint(
     python: str = "",
     env: Optional[Mapping[str, str]] = None,
 ) -> MintOutcome:
-    """Build one cell in a child process. Never raises for a failed mint.
+    """Build one compiled graph in a child process. Never raises for a failed mint.
 
     A failed mint is an OUTCOME, not an exception, because the caller's
     correct response is identical in every branch: keep serving eager, report
-    the failure, and leave the cell absent. The one thing this function must
+    the failure, and leave the compiled graph absent. The one thing this function must
     never do is take the worker with it — so the only exception it propagates
     is ``asyncio.CancelledError`` (the parent's own shutdown), and even that
     reaps the child's process group on the way out.
@@ -798,7 +798,7 @@ async def run_mint(
     # it off there and let the ladder below run unchanged. This also
     # reinterprets a stall the parent had to kill: a mint whose report is on
     # disk produced whatever the report says it produced, and calling that a
-    # crash would throw away a finished cell over a teardown that hung.
+    # crash would throw away a finished compiled graph over a teardown that hung.
     if reaped_by_parent and report is not None:
         code = _code_for_report(report)
         logger.info(
@@ -813,7 +813,7 @@ async def run_mint(
     if code == EXIT_MINTED:
         # pgw#1176: a mint's product is a SET of independently keyed entry
         # artifacts. A report naming none is a crash; a report naming some is
-        # a mint — a subset is a coherent outcome now, not a broken cell.
+        # a mint — a subset is a coherent outcome now, not a broken compiled graph.
         rows = [Path(path) for _key, path, _digest in (
             report.entries if report else ())]
         present = [path for path in rows if path.is_file()]
@@ -893,7 +893,7 @@ class MintTask:
     process boundary — the child loads what it needs itself.
     """
 
-    pending: Any                      # fleet_cells.PendingSelfMint
+    pending: Any                      # fleet_compiled_graphs.PendingSelfMint
     pipe: Any = None
     function: str = ""
     modules: Tuple[str, ...] = ()
@@ -909,7 +909,7 @@ class MintTask:
 
 
 def cfg_spec(cfg: Any) -> CompileSpec:
-    """Flatten a ``CompileCell`` for the wire.
+    """Flatten a ``CompileContract`` for the wire.
 
     The caller states the contract because the class-scoped guidance/text-len
     unions live on the spec rather than the decorator: a child re-deriving

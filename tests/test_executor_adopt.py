@@ -176,10 +176,10 @@ def _guarded_apply(pipeline, _cfg, *, cache_ready, guard=True):
 
 
 def _guarded_enable(pipeline, *_args):
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     _mark_fake_guard(pipeline)
-    return fleet_cells.ArmOutcome(armed=True)
+    return fleet_compiled_graphs.ArmOutcome(armed=True)
 
 
 class _FakeAotRunner:
@@ -217,8 +217,8 @@ def _mark_fake_aot_arm(pipeline, compiled_graph_key: str) -> None:
     })
 
 
-def _cell_arm(artifact, ref=None, digest=None):
-    """pgw#904: a delivered cell is an exact ORDER (`Arm.artifact` ->
+def _compiled_graph_arm(artifact, ref=None, digest=None):
+    """pgw#904: a delivered compiled graph is an exact ORDER (`Arm.artifact` ->
     `_ArmOrder`), never a snapshot entry the worker scans for. These rigs
     fake the arm itself, so no expected identity or publisher rides it."""
     from gen_worker import executor as executor_mod
@@ -234,10 +234,10 @@ def _seeded_enable(ex, artifact, ref=None, digest=None):
     """The REAL hub-less arming policy, handed its artifact at the test seam
     (pgw#904 deleted the connected fetch): the seeded dynamo arm and the
     warmup proof run unchanged."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     def _enable(pipe, cfg, art, delivered=None, arm=None, boot_local_key=""):
-        return fleet_cells.enable_compiled(
+        return fleet_compiled_graphs.enable_compiled(
             pipe, cfg, ex.store._cache_dir, Path(artifact),
             delivered_ref=ref or CACHE_REF,
             delivered_digest=digest or DIGEST_A)
@@ -344,11 +344,11 @@ def _target_id(ex) -> str:
 # harness, `_assert_failed`, the success/classified-failure sections, the
 # target-replaced and republish-reload cases, and the per-target quarantine
 # tests). They drove `Executor.handle_model_op`, which answered the hub's
-# `ModelOp{ADOPT_COMPILE_CACHE}` push — a push keyed off the COMPUTED cell key,
+# `ModelOp{ADOPT_COMPILE_CACHE}` push — a push keyed off the COMPUTED compiled graph key,
 # a space with no producer since pgw#1010, so no stack has ever dispatched one.
 # The behaviour they guarded is gone with the handler; nothing was weakened to
 # keep a test green. What remains below is the LIVE path — the worker arming a
-# cell it ACQUIRED itself (`aot_cells` fetch-and-filter; th#1702 deletes the
+# compiled graph it ACQUIRED itself (`aot_compiled_graphs` fetch-and-filter; th#1702 deletes the
 # hub's snapshot attach too, so nothing is pushed to a pod any more) — and the
 # runtime-guard revocation the dispatch fence rides.
 # ---------------------------------------------------------------------------
@@ -626,7 +626,7 @@ def test_production_setup_stamps_cold_active_identity_after_warmup(
     snapshots = {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}
 
     instance = asyncio.run(
-        ex.ensure_setup(spec, snapshots, arm=_cell_arm(artifact)))
+        ex.ensure_setup(spec, snapshots, arm=_compiled_graph_arm(artifact)))
     assert isinstance(instance, _ColdEndpoint)
     assert _ColdEndpoint.setups == 1 and _ColdEndpoint.warmups == 1
     (target,) = ex.compile_targets()
@@ -640,9 +640,9 @@ def test_production_setup_stamps_cold_active_identity_after_warmup(
 def test_store_served_boot_with_clean_hits_raises_no_compile_alarm(
     tmp_path, monkeypatch,
 ):
-    """gw#587 runtime assertion: a store-served boot (cell delivered, not
+    """gw#587 runtime assertion: a store-served boot (compiled graph delivered, not
     self-minted) that proves clean cache hits must NOT alarm — the whole
-    point of a delivered cell is ~0 compile wall time at boot."""
+    point of a delivered compiled graph is ~0 compile wall time at boot."""
 
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "model"
@@ -682,7 +682,7 @@ def test_store_served_boot_with_clean_hits_raises_no_compile_alarm(
     snapshots = {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}
 
     instance = asyncio.run(
-        ex.ensure_setup(spec, snapshots, arm=_cell_arm(artifact)))
+        ex.ensure_setup(spec, snapshots, arm=_compiled_graph_arm(artifact)))
     assert isinstance(instance, _ColdEndpoint)
     adopted = [
         m for m in sent
@@ -698,7 +698,7 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
     """gw#587 runtime assertion, the poisoned/mismatched-cache half: a
     store-served boot proves cache hits (the artifact round-tripped) but the
     process ALSO burns real inductor compile wall time getting there — the
-    gw#586 defect class generalized (a cell that claims to serve while the
+    gw#586 defect class generalized (a compiled graph that claims to serve while the
     boot silently recompiles). Must alarm loudly AND report it hub-side via
     the existing ADOPTED ModelEvent shape."""
 
@@ -735,7 +735,7 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
 
     with caplog.at_level("ERROR", logger="gen_worker.executor"):
         instance = asyncio.run(
-            ex.ensure_setup(spec, snapshots, arm=_cell_arm(artifact)))
+            ex.ensure_setup(spec, snapshots, arm=_compiled_graph_arm(artifact)))
     assert isinstance(instance, _ColdEndpoint)
     assert any(
         "STORE_SERVED_BOOT_COMPILED" in r.message for r in caplog.records
@@ -766,15 +766,15 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
 def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     tmp_path, monkeypatch, caplog,
 ):
-    """gw#587 serving bootstrap: a mandatory-lane boot with NO delivered cell
+    """gw#587 serving bootstrap: a mandatory-lane boot with NO delivered compiled graph
     self-mints, runs the SAME warmup proof as a store-served boot (real
     cache-hit accounting on the actual serving graphs), and then ADVERTISES
     its compile target under its own key ref + self-attested digest so the
     hub's self-attested dispatch fence (th#910 PR #488) can dispatch to it.
     The minting boot legitimately burns compile wall time — it must NOT trip
     the STORE_SERVED_BOOT_COMPILED alarm (that line belongs to delivered
-    cells only; the store-served side is proven by the sibling tests above)."""
-    from gen_worker import fleet_cells
+    compiled graphs only; the store-served side is proven by the sibling tests above)."""
+    from gen_worker import fleet_compiled_graphs
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -785,7 +785,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     mint_digest = "blake3:" + "e" * 64
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
     mint_artifact.parent.mkdir()
-    mint_artifact.write_bytes(b"cell-bytes")
+    mint_artifact.write_bytes(b"compiled graph-bytes")
     sent = []
 
     async def _send(msg):
@@ -808,7 +808,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
 
     def _minting_enable(pipeline, *_args):
         _mark_fake_aot_arm(pipeline, mint_key)
-        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=fleet_compiled_graphs.SelfMint(
             family=FAMILY, compiled_graph_key=mint_key, ref=mint_ref,
             snapshot_digest=mint_digest, artifact=mint_artifact))
 
@@ -825,7 +825,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
             spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
     assert isinstance(instance, _ColdEndpoint)
     assert _ColdEndpoint.warmups == 1, "the warmup proof must run for a self-mint"
-    # Advertised exactly like a delivered cell, under the worker's OWN key.
+    # Advertised exactly like a delivered compiled graph, under the worker's OWN key.
     (target,) = ex.compile_targets()
     assert target.active_compile_ref == mint_ref
     assert target.active_compile_snapshot_digest == mint_digest
@@ -843,13 +843,13 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     tmp_path, monkeypatch,
 ):
     """Revert-turns-red for the gw#587 serving-bootstrap proof gate: a
-    self-minted mandatory-lane cell whose warmup EXERCISES the pipeline but
+    self-minted mandatory-lane compiled graph whose warmup EXERCISES the pipeline but
     proves ZERO cache hits (the mint does not actually serve the serving
     graphs — the gw#586 silent-eager shape) must fail the boot closed
     (CompiledLaneUnavailable), never advertise a target, never serve eager.
     If self-mints are dropped from the warmup proof again (the 0.39.0
     regression this closes), this boot completes and the test goes red."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -871,7 +871,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     mint_key = "cg-key-v1-" + "f" * 56
     mint_artifact = tmp_path / "selfmint" / "cell.tar.gz"
     mint_artifact.parent.mkdir()
-    mint_artifact.write_bytes(b"cell-bytes")
+    mint_artifact.write_bytes(b"compiled graph-bytes")
 
     async def _send(_msg):
         return None
@@ -893,7 +893,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
 
     def _minting_enable(pipeline, *_args):
         _mark_fake_guard(pipeline)
-        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=fleet_compiled_graphs.SelfMint(
             family=FAMILY, compiled_graph_key=mint_key,
             ref=f"root/family-{FAMILY}#{mint_key}",
             snapshot_digest="sha256:" + "0" * 64, artifact=mint_artifact))
@@ -924,10 +924,10 @@ def _sim_guard_closure(pipe, cfg, label=""):
 # the-proven-capture, unproven-fails-closed-and-never-publishes) covered the
 # IN-PROCESS capture — the executor arming a live pipe cold, packing the dir
 # its own warmup filled, and publishing those bytes. That whole route built a
-# DYNAMO cell, which `aot_cells` rejects by name, so it is deleted rather than
+# DYNAMO compiled graph, which `aot_compiled_graphs` rejects by name, so it is deleted rather than
 # re-pointed. Its surviving claims live on the delegated route:
 # `test_mint_wiring_pgw784.py` (adopt-then-publish, sibling coverage) and
-# `test_fleet_cells.py` (the publish/withhold gate).
+# `test_fleet_compiled_graphs.py` (the publish/withhold gate).
 
 
 def test_boot_warmup_proves_each_compile_object_independently(
@@ -981,7 +981,7 @@ def test_boot_warmup_proves_each_compile_object_independently(
     instance = asyncio.run(ex.ensure_setup(spec, {
         first_ref: pb.Snapshot(digest=MODEL_DIGEST),
         second_ref: pb.Snapshot(digest=DIGEST_B),
-    }, arm=_cell_arm(artifact)))
+    }, arm=_compiled_graph_arm(artifact)))
     assert isinstance(instance, _DualEndpoint)
     targets = {
         target.model_bindings[0].slot: target for target in ex.compile_targets()
@@ -999,11 +999,11 @@ def test_sdxl_w8a8_boot_proves_both_aliases_through_their_own_runs(
 ):
     """pgw#654: the derived plan runs one warm forward PER ALIAS (causal
     per-alias proof — a sibling's run never certifies an unexercised code
-    path), and the class-union contract keeps both aliases on ONE cell, so
+    path), and the class-union contract keeps both aliases on ONE compiled graph, so
     turbo serves compiled on w8a8 instead of failing closed (gap #1)."""
 
     family = "sdxl"
-    cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    cg_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "sdxl-model"
     model_dir.mkdir()
@@ -1041,7 +1041,7 @@ def test_sdxl_w8a8_boot_proves_both_aliases_through_their_own_runs(
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == cell_ref else model_dir
+        return artifact.parent if ref == cg_ref else model_dir
 
     monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
@@ -1053,12 +1053,12 @@ def test_sdxl_w8a8_boot_proves_both_aliases_through_their_own_runs(
 
     asyncio.run(ex.ensure_setup(generate, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-    }, arm=_cell_arm(artifact, ref=cell_ref)))
+    }, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
 
     assert calls == {"generate": 1, "generate_turbo": 1}
     (target,) = ex.compile_targets()
     assert list(target.function_names) == ["generate", "generate-turbo"]
-    assert target.active_compile_ref == cell_ref
+    assert target.active_compile_ref == cg_ref
     assert target.active_compile_snapshot_digest == DIGEST_A
 
 
@@ -1067,7 +1067,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
 ):
     """Both aliases recover coherently after one target guard failure."""
 
-    cell_ref = CACHE_REF + "-w8a8"
+    cg_ref = CACHE_REF + "-w8a8"
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "flux-model"
     model_dir.mkdir()
@@ -1110,7 +1110,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == cell_ref else model_dir
+        return artifact.parent if ref == cg_ref else model_dir
 
     monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
@@ -1123,12 +1123,12 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
 
     snapshots = {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}
     asyncio.run(ex.ensure_setup(
-        generate, snapshots, arm=_cell_arm(artifact, ref=cell_ref)))
+        generate, snapshots, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
 
     assert calls == {"generate": 1, "edit": 1}
     (target,) = ex.compile_targets()
     assert list(target.function_names) == ["edit", "generate"]
-    assert target.active_compile_ref == cell_ref
+    assert target.active_compile_ref == cg_ref
 
     # A runtime guard failure revokes the compiled identity — pgw#672: the
     # aliases STAY dispatchable at explicit eager tier (a broken optimization
@@ -1158,7 +1158,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     (tripped,) = ex.compile_targets()
     assert tripped.active_compile_ref == ""
     assert ex.serving_tiers() == {"edit": "eager", "generate": "eager"}
-    assert cc.compiled_graph_quarantined_in_process(cell_ref)
+    assert cc.compiled_graph_quarantined_in_process(cg_ref)
     # revocation is state-only. The `adopt_failed:runtime_guard`
     # ModelEvent terminated a hub-commanded adoption operation, and there is no
     # operation to terminate — the tier flip above is the wire-visible signal.
@@ -1267,7 +1267,7 @@ def test_flux_real_guard_requires_object_activation_and_each_alias_execution(
         await ex._gpu_semaphore.acquire()
         task = asyncio.create_task(ex.ensure_setup(generate, {
             model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-        }, arm=_cell_arm(artifact)))
+        }, arm=_compiled_graph_arm(artifact)))
         try:
             assert await asyncio.to_thread(compiled_ready.wait, 10)
             for _ in range(3):
@@ -1365,7 +1365,7 @@ def test_compile_hit_on_other_object_cannot_certify_primary_object(
     asyncio.run(ex.ensure_setup(spec, {
         refs["primary"]: pb.Snapshot(digest=MODEL_DIGEST),
         refs["other"]: pb.Snapshot(digest=DIGEST_B),
-    }, arm=_cell_arm(artifact)))
+    }, arm=_compiled_graph_arm(artifact)))
 
     assert counter_reads == 4
     (target,) = ex.compile_targets()
@@ -1382,10 +1382,10 @@ def test_compile_hit_on_other_object_cannot_certify_primary_object(
 def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
     tmp_path, monkeypatch,
 ):
-    """pgw#637: cell keys are checkpoint-free, so the 2nd checkpoint of an
+    """pgw#637: compiled graph keys are checkpoint-free, so the 2nd checkpoint of an
     already-proven family serves its warmup off dynamo's in-memory compiled
     code — calls>0 with ZERO FX/AOT counter movement. That signature used to
-    disprove the cell (`CompiledLaneUnavailableError` -> FnUnavailable
+    disprove the compiled graph (`CompiledLaneUnavailableError` -> FnUnavailable
     `compile_cell_failed`) on every multi-checkpoint session. It now proves,
     but ONLY with dynamo confirming live compiled code for this object's
     targets: the sibling-hit guard above must keep failing closed."""
@@ -1395,7 +1395,7 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
     from gen_worker import settings_authority
 
     # Production boot order: the canonical config is imposed
-    # BEFORE any mint/artifact exists, so the cell's recorded seal and the
+    # BEFORE any mint/artifact exists, so the compiled graph's recorded seal and the
     # post-bootstrap arm state agree (the executor's pgw#654 TF32 bootstrap
     # is a no-op re-assertion of the same canonical values).
     settings_authority.impose_torch()
@@ -1451,17 +1451,17 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
         monkeypatch.setattr(ex, "_enable_compiled", _seeded_enable(ex, artifact))
         asyncio.run(ex.ensure_setup(spec, {
             wire_ref(spec.models["pipeline"]): pb.Snapshot(digest=MODEL_DIGEST),
-        }, arm=_cell_arm(artifact)))
+        }, arm=_compiled_graph_arm(artifact)))
         return ex
 
-    # Checkpoint 1 mints/hits normally and registers the cell as proven here.
+    # Checkpoint 1 mints/hits normally and registers the compiled graph as proven here.
     first_pipe = _Pipe()
     first = _run("acme/checkpoint-one", (10, 11), first_pipe)
     (first_target,) = first.compile_targets()
     assert first_target.active_compile_ref == CACHE_REF
     assert cc.compiled_graph_proven_in_process(CACHE_REF) is True
 
-    # Checkpoint 2: same cell, new pipeline object, ZERO counter movement.
+    # Checkpoint 2: same compiled graph, new pipeline object, ZERO counter movement.
     second_pipe = _Pipe()
     second = _run("acme/checkpoint-two", (10, 10), second_pipe)
     (second_target,) = second.compile_targets()
@@ -1518,7 +1518,7 @@ def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
     )
     pipeline_ref = wire_ref(spec.models["pipeline"])
     vae_ref = wire_ref(spec.models["vae"])
-    cell_ref = CACHE_REF + "-w8a8"
+    cg_ref = CACHE_REF + "-w8a8"
     pipe = _LoadablePipe()
     setattr(pipe, "_cozy_weight_lane", "w8a8")
     vae = _AncillaryVae()
@@ -1530,7 +1530,7 @@ def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == cell_ref else model_dir
+        return artifact.parent if ref == cg_ref else model_dir
 
     monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
@@ -1545,7 +1545,7 @@ def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
     asyncio.run(ex.ensure_setup(spec, {
         pipeline_ref: pb.Snapshot(digest=MODEL_DIGEST),
         vae_ref: pb.Snapshot(digest=DIGEST_B),
-    }, arm=_cell_arm(artifact, ref=cell_ref)))
+    }, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
     (target,) = ex.compile_targets()
     assert [binding.slot for binding in target.model_bindings] == ["pipeline"]
 
@@ -1590,7 +1590,7 @@ def test_w8a8_without_exact_cell_self_mints_and_fails_typed_without_cuda(
     tmp_path, monkeypatch,
 ):
     """gw#587: a mandatory-lane miss no longer fail-closes before load — the
-    worker proceeds to load and SELF-MINTS its own cell. In a CUDA-less test
+    worker proceeds to load and SELF-MINTS its own compiled graph. In a CUDA-less test
     env the mint is impossible, so the quantized lane's typed refusal fires
     from the self-mint exit (never a silent eager serve), and the function
     still lands in the same compile_cell_failed unavailable class."""
@@ -1643,10 +1643,10 @@ def test_w8a8_custom_warmup_proof_attributes_to_all_compatible_siblings(
     Live motivation: LTX serves generate+edit(+extend) from ONE class with
     ONE custom warmup that warms every declared graph — under the ac0bab9
     single-name attribution no >=0.38.8 worker could EVER boot it compiled,
-    delivered cells included."""
+    delivered compiled graphs included."""
 
     family = "sdxl"
-    cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    cg_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "partial-proof-model"
     model_dir.mkdir()
@@ -1686,7 +1686,7 @@ def test_w8a8_custom_warmup_proof_attributes_to_all_compatible_siblings(
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == cell_ref else model_dir
+        return artifact.parent if ref == cg_ref else model_dir
 
     monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
@@ -1698,7 +1698,7 @@ def test_w8a8_custom_warmup_proof_attributes_to_all_compatible_siblings(
 
     instance = asyncio.run(ex.ensure_setup(generate, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-    }, arm=_cell_arm(artifact, ref=cell_ref)))
+    }, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
     assert isinstance(instance, _SdxlEndpoint)
 
     # The object proof covers EVERY contract-compatible sibling (pgw#654:
@@ -1718,11 +1718,11 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
     ONE custom warmup() covering every declared graph, NO decorator warmup
     rows. Under single-name attribution this boot failed closed forever
     ("expected=['edit','generate'] proven=['edit']") on delivered AND
-    self-mint cells alike; under the gw#603 ruling the proven object
+    self-mint compiled graphs alike; under the gw#603 ruling the proven object
     certifies both siblings and the boot serves."""
 
     family = "ltx-shaped"
-    cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    cg_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "ltx-shaped-model"
     model_dir.mkdir()
@@ -1760,7 +1760,7 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == cell_ref else model_dir
+        return artifact.parent if ref == cg_ref else model_dir
 
     monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
@@ -1772,7 +1772,7 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
 
     instance = asyncio.run(ex.ensure_setup(generate, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-    }, arm=_cell_arm(artifact, ref=cell_ref)))
+    }, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
     assert isinstance(instance, _LtxShapedEndpoint)
     (target,) = ex.compile_targets()
     assert set(target.function_names) == {
@@ -1808,7 +1808,7 @@ def _merged_execution_lane_endpoint(record_warm):
 def _wire_merged_execution_lane(ex_cls_specs, tmp_path, monkeypatch):
 
     family = "qwen-image"
-    cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    cg_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "merged-lane-model"
     model_dir.mkdir(exist_ok=True)
@@ -1823,7 +1823,7 @@ def _wire_merged_execution_lane(ex_cls_specs, tmp_path, monkeypatch):
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == cell_ref else model_dir
+        return artifact.parent if ref == cg_ref else model_dir
 
     monkeypatch.setattr(store_mod, "ensure_local", _download)
     monkeypatch.setattr(
@@ -1833,7 +1833,7 @@ def _wire_merged_execution_lane(ex_cls_specs, tmp_path, monkeypatch):
             obj=pipes[kwargs["slot"]], is_pipeline=True),
     )
     monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
-    return ex, pipes, cell_ref, artifact
+    return ex, pipes, cg_ref, artifact
 
 
 def test_w8a8_unexercised_sibling_stays_armed_unproven(
@@ -1845,21 +1845,21 @@ def test_w8a8_unexercised_sibling_stays_armed_unproven(
     cls = _merged_execution_lane_endpoint(lambda self: _record_fake_warm(self.t2i))
     specs = extract_specs(cls)
     (generate,) = specs
-    ex, pipes, cell_ref, artifact = _wire_merged_execution_lane(
+    ex, pipes, cg_ref, artifact = _wire_merged_execution_lane(
         specs, tmp_path, monkeypatch)
 
     with caplog.at_level("WARNING"):
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
             wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
-        }, arm=_cell_arm(artifact, ref=cell_ref)))
+        }, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
 
     targets = {t.model_bindings[0].slot: t for t in ex.compile_targets()}
     assert set(targets) == {"t2i", "edit"}
-    assert targets["t2i"].active_compile_ref == cell_ref
+    assert targets["t2i"].active_compile_ref == cg_ref
     assert targets["t2i"].active_compile_snapshot_digest == DIGEST_A
     # The edit lane is armed (eager is not a w8a8 lane) but unproven.
-    assert targets["edit"].active_compile_ref == cell_ref
+    assert targets["edit"].active_compile_ref == cg_ref
     assert "armed unproven: no warmup modality" in caplog.text
     assert generate.name not in ex.unavailable
 
@@ -1868,14 +1868,14 @@ def test_w8a8_exercised_miss_degrades_despite_unexercised_sibling(
     tmp_path, monkeypatch, caplog,
 ):
     """gw#595(b) keeps gw#586 shut: an EXERCISED object that misses its own
-    warmup graph disproves the cell — the unexercised sibling exemption
+    warmup graph disproves the compiled graph — the unexercised sibling exemption
     never launders a genuine parity defect. pgw#672: the disproof now
     degrades to explicit eager instead of killing the boot."""
     cls = _merged_execution_lane_endpoint(
         lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
     specs = extract_specs(cls)
     (generate,) = specs
-    ex, pipes, cell_ref, artifact = _wire_merged_execution_lane(
+    ex, pipes, cg_ref, artifact = _wire_merged_execution_lane(
         specs, tmp_path, monkeypatch)
 
     # The disproven proof DEGRADES to explicit eager — setup
@@ -1886,7 +1886,7 @@ def test_w8a8_exercised_miss_degrades_despite_unexercised_sibling(
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
             wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
-        }, arm=_cell_arm(artifact, ref=cell_ref)))
+        }, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
     assert ex.compile_targets() == []
     assert generate.name not in ex.unavailable
     degrade = [
@@ -1904,7 +1904,7 @@ def test_a_failed_warmup_proof_carries_the_fx_cache_state(
     this boot's FX cache lands in the degrade detail. Revert the executor
     wiring and this goes red.
 
-    pgw#1200 retargeted the stub. It used to return the cell-side vocabulary
+    pgw#1200 retargeted the stub. It used to return the compiled graph-side vocabulary
     (`compiled_graph_keys` / `fresh_keys` / `divergence`) and take the artifact path —
     both deleted with the `torch-inductor-cache` format, so the fixture was
     asserting a shape the real function can no longer emit. The wiring is the
@@ -1913,7 +1913,7 @@ def test_a_failed_warmup_proof_carries_the_fx_cache_state(
         lambda self: _record_fake_warm(self.t2i, hits=0, misses=2))
     specs = extract_specs(cls)
     (generate,) = specs
-    ex, pipes, cell_ref, artifact = _wire_merged_execution_lane(
+    ex, pipes, cg_ref, artifact = _wire_merged_execution_lane(
         specs, tmp_path, monkeypatch)
 
     monkeypatch.setattr(
@@ -1925,7 +1925,7 @@ def test_a_failed_warmup_proof_carries_the_fx_cache_state(
         asyncio.run(ex.ensure_setup(generate, {
             wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
             wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
-        }, arm=_cell_arm(artifact, ref=cell_ref)))
+        }, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
     assert generate.name not in ex.unavailable
     (detail,) = [
         r.getMessage() for r in caplog.records
@@ -1937,19 +1937,19 @@ def test_a_failed_warmup_proof_carries_the_fx_cache_state(
 
 
 def test_w8a8_all_objects_unexercised_degrades_to_eager(tmp_path, monkeypatch):
-    """gw#595(b): with ZERO proven objects the cell is entirely unverified —
+    """gw#595(b): with ZERO proven objects the compiled graph is entirely unverified —
     a warmup that exercises nothing cannot arm anything. pgw#672: the boot
     completes at explicit eager instead of failing closed."""
     cls = _merged_execution_lane_endpoint(lambda self: None)
     specs = extract_specs(cls)
     (generate,) = specs
-    ex, pipes, cell_ref, artifact = _wire_merged_execution_lane(
+    ex, pipes, cg_ref, artifact = _wire_merged_execution_lane(
         specs, tmp_path, monkeypatch)
 
     asyncio.run(ex.ensure_setup(generate, {
         wire_ref(generate.models["t2i"]): pb.Snapshot(digest=MODEL_DIGEST),
         wire_ref(generate.models["edit"]): pb.Snapshot(digest=DIGEST_B),
-    }, arm=_cell_arm(artifact, ref=cell_ref)))
+    }, arm=_compiled_graph_arm(artifact, ref=cg_ref)))
     assert ex.compile_targets() == []
     assert generate.name not in ex.unavailable
     assert ex.serving_tiers()[generate.name] == "eager"
@@ -1962,7 +1962,7 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
 
     artifact = _artifact(tmp_path)
     monkeypatch.setenv("GEN_WORKER_COMPILE_CACHE", str(artifact))
-    monkeypatch.setenv("GEN_WORKER_COMPILE_CACHE_URL", "https://ignored/cell")
+    monkeypatch.setenv("GEN_WORKER_COMPILE_CACHE_URL", "https://ignored/compiled-graph")
     monkeypatch.setenv("GEN_WORKER_COMPILE_ALLOW_COLD", "1")
     spec = _cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
@@ -1992,7 +1992,7 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
         models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
     )
     # The miss proceeds to the self-mint, IGNORING the inherited
-    # local/producer env cells (if the env were honored this would arm and
+    # local/producer env compiled graphs (if the env were honored this would arm and
     # succeed); in a CUDA-less env the typed quantized refusal fires from
     # the self-mint exit.
     with pytest.raises(cc.CompiledExecutionLaneUnavailableError, match="self-mint is unavailable"):
@@ -2048,7 +2048,7 @@ def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, mo
     model_dir.mkdir()
     spec = _cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
-    cell_ref = CACHE_REF + "-w8a8"
+    cg_ref = CACHE_REF + "-w8a8"
 
     async def _send(_msg):
         return None
@@ -2057,7 +2057,7 @@ def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, mo
     ex.store._cache_dir = tmp_path / "cas"
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == cell_ref else model_dir
+        return artifact.parent if ref == cg_ref else model_dir
 
     class _SupportObject:
         pass  # no transformer/vae target despite typed setup annotation
@@ -2075,7 +2075,7 @@ def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, mo
     # explicit eager; the boot never dies for a missing optimization.
     asyncio.run(ex.ensure_setup(spec, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
-        cell_ref: pb.Snapshot(digest=DIGEST_A),
+        cg_ref: pb.Snapshot(digest=DIGEST_A),
     }))
     assert ex.compile_targets() == []
     assert spec.name not in ex.unavailable
@@ -2083,10 +2083,10 @@ def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, mo
 
 
 def test_missing_desired_w8a8_cell_keeps_workers_own_armed_target(tmp_path, monkeypatch):
-    """gw#587 flips this outcome BY DESIGN: cells are worker-owned (th#883
+    """gw#587 flips this outcome BY DESIGN: compiled graphs are worker-owned (th#883
     pull-by-key + self-mint), so a hub delivery that does NOT attach the
-    cell is no longer authority to tear down a worker's own armed, proven
-    target — the worker minted (or can re-mint) that cell itself.
+    compiled graph is no longer authority to tear down a worker's own armed, proven
+    target — the worker minted (or can re-mint) that compiled graph itself.
     Invalidation still flows through the real channels (adoption ops,
     artifact_drift, compiled_graph_selection_bug), never through non-delivery.
     Pre-gw#587 this asserted the fail-closed teardown."""
@@ -2146,11 +2146,11 @@ def test_concurrent_same_ref_setups_keep_each_loaded_snapshot_identity(
         lambda *args, **kwargs: provision.SlotLoad(
             obj=_LoadablePipe(), is_pipeline=True),
     )
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     monkeypatch.setattr(
         ex, "_enable_compiled",
-        lambda *args: fleet_cells.ArmOutcome(armed=False))
+        lambda *args: fleet_compiled_graphs.ArmOutcome(armed=False))
 
     async def scenario():
         await ex._load_lock.acquire()
@@ -2219,7 +2219,7 @@ def _required_run(spec: EndpointSpec, target, **overrides) -> pb.RunJob:
         # pgw#888 split the single `identity_mismatch` refusal in two. The
         # execution CONTRACT is identity — a different call ingress is a
         # different function — so it keeps a refusal and gets its own token.
-        # The cell ref/digest above is AVAILABILITY, and still refuses here
+        # The compiled graph ref/digest above is AVAILABILITY, and still refuses here
         # only because this fixture's lane is the declared-mandatory w8a8 one.
         ({"contract_digest": "bad-contract"}, "required_compile_contract_mismatch"),
         ({"cell_ref": ""}, "required_compile_invalid"),
@@ -2267,16 +2267,16 @@ def test_required_compile_rejects_missing_fence_and_binding_digest_drift(tmp_pat
 
 
 def test_runtime_guard_revokes_state_and_quarantines_the_cell(tmp_path):
-    """The LIVE revocation path, on a cell this worker armed at boot.
+    """The LIVE revocation path, on a compiled graph this worker armed at boot.
 
     pgw#1032 removed two things this test used to also assert: the `_adopt`
     call that established the active identity (the hub-commanded adoption is
-    gone — a cell is ACQUIRED by the worker's own `aot_cells` discovery and
+    gone — a compiled graph is ACQUIRED by the worker's own `aot_compiled_graphs` discovery and
     armed at boot, which is what `_active_w8a8_target` stands in for), and the
     causal `adopt_failed:runtime_guard` ModelEvent,
     which existed only to terminate an adoption operation nothing issues. What
     revocation MEANS is unchanged and still asserted: the target drops its
-    active identity, the record stays serving at explicit eager, the cell is
+    active identity, the record stays serving at explicit eager, the compiled graph is
     quarantined process-wide, and the dispatch fence refuses the pinned run.
     """
     spec = replace(
@@ -2313,8 +2313,8 @@ def test_runtime_guard_revokes_state_and_quarantines_the_cell(tmp_path):
     assert revoked.active_compile_snapshot_digest == ""
     # The record is NOT marked stale and the aliases stay
     # dispatchable — the object serves explicit eager; the identity is
-    # quarantined process-wide, which is the half `fleet_cells` reads on the
-    # arm path so this boot never re-arms the cell that just exploded.
+    # quarantined process-wide, which is the half `fleet_compiled_graphs` reads on the
+    # arm path so this boot never re-arms the compiled graph that just exploded.
     assert rec.stale is False
     assert spec.name not in ex.unavailable
     assert cc.compiled_graph_quarantined_in_process(active_ref)
@@ -2452,7 +2452,7 @@ def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_pa
 # inductor tree under the lock — is deleted with the `torch-inductor-cache`
 # format it was the entry point of. Nothing has written that format since
 # pgw#1178 removed `mint_artifact`, so this row proved a transaction no pod
-# can enter. The live delivered-cell transaction is `aot_serve`'s, and
+# can enter. The live delivered-compiled graph transaction is `aot_serve`'s, and
 # `test_aot_serve_pgw721` / `test_aot_selfmint_pgw805` drive it.
 
 
@@ -2475,8 +2475,8 @@ def test_manifest_carries_compile_block():
 
     (spec,) = extract_specs(Ep)
     assert spec.lora_bucket == 64
-    cell = spec.compile_cell()
-    assert cell is not None
+    graph = spec.compile_contract()
+    assert graph is not None
     (entry,) = _extract_entries(Ep, "testmod")
     assert entry["lora_bucket"] == 64
     assert entry["compile_axes"] == [{
@@ -2492,7 +2492,7 @@ def test_manifest_carries_compile_block():
         # The class's per-lane pin union rides too.
         "text_lens": [0],
         "guidance_scales": [0.0, 5.0],
-        "shape_contract_digest": cell.contract_digest(),
+        "shape_contract_digest": graph.contract_digest(),
         "lora_bucket": 64,
     }
 
@@ -2537,10 +2537,10 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
 
 # `test_fresh_boot_advertises_candidate_cell_lookups` is deleted with
 # `Executor.cell_lookups`. gw#605 wrote it to keep a fresh boot advertising
-# pre-load CANDIDATE keys so the hub could attach a stored cell before setup —
+# pre-load CANDIDATE keys so the hub could attach a stored compiled graph before setup —
 # but those candidates are COMPUTED (kind="inductor") keys, and since pgw#1010
 # no mint publishes into that space, so the attach it protected could never
-# have resolved. Cold-boot adoption is `aot_cells` fetch-and-filter now
+# have resolved. Cold-boot adoption is `aot_compiled_graphs` fetch-and-filter now
 # (pgw#904 owns its replacement), which does not go through the hub's key
 # lookup at all.
 
@@ -2554,8 +2554,8 @@ def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
 # The two-lane IN-PROCESS mint boots that stood here
 # (`_dual_mint_boot` / `_routed_mint_boot` + three publish/withhold tests) are
 # deleted with the route they drove. Each armed live pipes cold, packed one
-# shared inductor capture and published the union as a family cell — a DYNAMO
+# shared inductor capture and published the union as a family compiled graph — a DYNAMO
 # artifact with no consumer. gw#612's sibling-coverage rule, which is the claim
 # they carried, is asserted on the surviving delegated route in
 # `test_mint_wiring_pgw784.py::test_shared_sharers_mint_one_cell_between_them`
-# and in `test_fleet_cells.py`'s withhold/publish gate.
+# and in `test_fleet_compiled_graphs.py`'s withhold/publish gate.

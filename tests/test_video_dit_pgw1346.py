@@ -17,7 +17,7 @@ describe it. The ones that matter most:
 5. **F2 is resolved**: MiniMax-H3's loop is staged-shaped, ``loop.kind: host``
    would forbid the bounded step count it really has, and the reason H3 is
    eager is architecture-source availability rather than either.
-6. **K9-video**: ``shape`` x ``frames`` is TOTAL on Wan (no phantom cell) and
+6. **K9-video**: ``shape`` x ``frames`` is TOTAL on Wan (no phantom compiled graph) and
    genuinely sparse on LTX (filed, not contorted).
 """
 
@@ -429,7 +429,7 @@ def test_the_wan_bucket_product_is_total_which_is_k9s_video_answer() -> None:
 
     This is the half of K9-video that turns out fine. ``frames`` is a genuine
     product axis on Wan — one trained temporal grid per family — so adding it
-    beside B2's packed ``shape`` costs no phantom cell: 2 x 1 on A14B and
+    beside B2's packed ``shape`` costs no phantom compiled graph: 2 x 1 on A14B and
     1 x 1 on TI2V-5B, which is the exact set the shipped mint declarations
     carry.
     """
@@ -732,7 +732,7 @@ def test_h3_has_no_minted_backing_to_lose() -> None:
     over one dynamic sequence axis, which the eager tier does not touch.
 
     Asserted here as the declaration's own shape: an eager ``ModelSpec``
-    withholds a MINTED cell and nothing else, so there is no ``variants()`` to
+    withholds a MINTED compiled graph and nothing else, so there is no ``variants()`` to
     lose.
     """
 

@@ -8,7 +8,7 @@ There is exactly ONE goal:
 * ``serve`` — accept tenant dispatch and hold a resident serving instance.
 
 Minting is not a goal anybody can hold, because nobody orders one. Every
-serving pod mints opportunistically on a cell miss, and that is the only mint
+serving pod mints opportunistically on a compiled graph miss, and that is the only mint
 path there is — so the tenant reserves it runs under are UNCONDITIONAL, not a
 function of a posture.
 

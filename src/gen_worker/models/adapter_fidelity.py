@@ -4,7 +4,7 @@ An adapter fused into fp8-E4M3 weights does not merely vanish, it CORRUPTS.
 fp8-E4M3's half-ulp is 3.1-6.25%
 of each weight (3 mantissa bits) against bf16's 0.20-0.39% — 16x coarser — so
 ``Q(W + BA) == Q(W)`` for every element whose own delta is below half an ulp,
-while the few elements that happen to sit near a cell boundary jump a FULL ulp.
+while the few elements that happen to sit near a compiled graph boundary jump a FULL ulp.
 The qwen Lightning row is the shape of the hazard: surviving-delta cosine
 **0.074** with **15x the norm** of the true delta, i.e. the served weights carry
 a perturbation larger than the adapter and 99.7% orthogonal to it.

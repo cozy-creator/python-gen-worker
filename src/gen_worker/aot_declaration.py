@@ -242,7 +242,7 @@ def entry_name(
     class_dims: Tuple[Tuple[str, int], ...] = (),
 ) -> str:
     """The deterministic NAMED-ENTRY label of one graph class inside a
-    multi-graph cell: separate graphs per function, combined into one file.
+    multi-graph compiled graph: separate graphs per function, combined into one file.
 
     ``<target>/<fork k=v,...>/<dims k=v,...>`` with empty segments omitted;
     pairs are sorted, bools render lowercase. The name is the AOTI model
@@ -271,14 +271,14 @@ def plan_entry_name(plan: MintPlan) -> str:
     return entry_name(plan.target, fork, dims)
 
 
-def cell_plans(decl: Compile) -> Tuple[MintPlan, ...]:
+def compiled_graph_plans(decl: Compile) -> Tuple[MintPlan, ...]:
     """EVERY mint plan of one family's declaration, across ALL declared
-    targets — the whole class set one cell packages. Refuses a
+    targets — the whole class set one compiled graph packages. Refuses a
     declaration whose plans would collide on an entry name (two classes one
     label could not be told apart by a refusal)."""
     if not decl.targets:
         raise MintRefused(
-            f"family {decl.family!r} declares no targets — a cell with no "
+            f"family {decl.family!r} declares no targets — a compiled graph with no "
             f"functions has nothing to package")
     plans: List[MintPlan] = []
     for target in decl.targets:
@@ -727,7 +727,7 @@ def _nest(kwargs: Dict[str, Any], dotted: str, value: Any) -> None:
 __all__ = [
     "MintPlan",
     "call_signature",
-    "cell_plans",
+    "compiled_graph_plans",
     "declared_inputs",
     "derived_dynamic",
     "dim_hull",

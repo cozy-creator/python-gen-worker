@@ -12,7 +12,7 @@ compiled subject is compared against. The substitutions are a tiny Engine and
 The worker still exercises its real import/resolve/runner/bind/dispatch path;
 the harness does not recreate the deleted worker-owned package format.
 
-No number produced here may be cited as evidence about a real cell's numerics.
+No number produced here may be cited as evidence about a real compiled graph's numerics.
 """
 
 from __future__ import annotations
@@ -332,20 +332,20 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     return said
 
 
-def cell_cfg(decl: Any, **enrichments: Any) -> Any:
+def graph_cfg(decl: Any, **enrichments: Any) -> Any:
     """The object the FLEET hands the compile machinery, built its own way.
 
     pgw#1150 (second pass) / pgw#1152: **raw ``Compile`` never travels past the
-    registry** — every production path hands a ``CompileCell``, and it is built
-    by exactly one map, ``CompileCell.from_declaration``. A test that passes the
+    registry** — every production path hands a ``CompileContract``, and it is built
+    by exactly one map, ``CompileContract.from_declaration``. A test that passes the
     raw declaration is testing a TYPE no fleet path constructs, which is the
     third variant of this repo's fixture defect class: deleting the two
     ``numerics_floor=`` lines from ``registry.py`` left the old gate suite green
     because every one of its rows passed a shape production never passes.
     """
-    from gen_worker.registry import CompileCell
+    from gen_worker.registry import CompileContract
 
-    return CompileCell.from_declaration(decl, **enrichments)
+    return CompileContract.from_declaration(decl, **enrichments)
 
 
 class ArmOutcomes(tuple):
@@ -359,7 +359,7 @@ class ArmOutcomes(tuple):
 
     They are DELIBERATELY not what production reports. A pod reports
     per-entry serve state (`aot_serve.entry_states`) precisely because a
-    cell-level boolean can advertise more than it serves. Nothing here is
+    compiled graph-level boolean can advertise more than it serves. Nothing here is
     wired to production; index this to assert per class, which is what the
     per-entry rows do.
     """
@@ -409,7 +409,7 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
     perturbs one artifact (a bad host_isa, a forged stamp) without having to
     rebuild the declaration.
 
-    ``cfg`` defaults to :func:`cell_cfg` — the ``CompileCell`` production
+    ``cfg`` defaults to :func:`graph_cfg` — the ``CompileContract`` production
     builds. Pass one of :func:`harness.adopt_rig.production_cfgs`' values to
     parametrise a row over every production call site.
 
@@ -464,7 +464,7 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
             packages[str(tcg_meta["graph_class"]["name"])]
         )
         outcomes.append(provision.arm_aot(
-            pipeline, cell_cfg(decl) if cfg is None else cfg,
+            pipeline, graph_cfg(decl) if cfg is None else cfg,
             tmp_path / "cache", artifact_path, 0, meta=tcg_meta,
             verify_numerics=verify_numerics,
             declared=declared_names(use_rows)))

@@ -123,12 +123,12 @@ FEEDERS = (
     Feeder("compile_cache.record_compiled_graph_proven", "compile_cache.py"),
     Feeder("compile_cache.record_compiled_graph_quarantined", "compile_cache.py"),
     Feeder(
-        "local_cell_store.store",
-        "local_cell_store.py",
+        "local_compiled_graph_store.store",
+        "local_compiled_graph_store.py",
         distinctive=False,
-        receivers=("local_cell_store", "store"),
+        receivers=("local_compiled_graph_store", "store"),
     ),
-    Feeder("local_cell_store.note_memo", "local_cell_store.py"),
+    Feeder("local_compiled_graph_store.note_memo", "local_compiled_graph_store.py"),
 )
 
 
@@ -144,8 +144,8 @@ class OneConstructor:
 
 ONE_CONSTRUCTOR = (
     OneConstructor(
-        "CompileCell",
-        ("registry.py", "CompileCell.from_declaration"),
+        "CompileContract",
+        ("registry.py", "CompileContract.from_declaration"),
         why="a declaration field reaching one map but not another silently "
         "changes the compiled class",
     ),

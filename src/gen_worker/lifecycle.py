@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
 from . import content_credentials
-from . import fleet_cells
+from . import fleet_compiled_graphs
 from . import receipts
 from . import serve_posture
 from . import progress as progress_mod
@@ -462,8 +462,8 @@ class Lifecycle:
                 return
         # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
-        # Arm the cell-receipt gate the moment the hub wiring exists: every
-        # delivered compile cell is signature-verified before it may arm.
+        # Arm the compiled graph-receipt gate the moment the hub wiring exists: every
+        # delivered compiled graph is signature-verified before it may arm.
         if self.executor.file_base_url:
             receipts.configure(
                 base_url=self.executor.file_base_url,
@@ -477,15 +477,15 @@ class Lifecycle:
                 worker_jwt=self.executor.worker_jwt_provider,
             )
             # First moment this pod CAN discharge an upload it still owes: a
-            # cell minted by a process that died mid-upload is durable in the
+            # compiled graph minted by a process that died mid-upload is durable in the
             # local CAS with its record still `pending`. Off the critical path,
             # and a no-op on the pods that owe nothing.
             try:
-                fleet_cells.resume_owed_publishes(
-                    self.executor._cell_publisher())
+                fleet_compiled_graphs.resume_owed_publishes(
+                    self.executor._compiled_graph_publisher())
             except Exception:  # noqa: BLE001 — never blocks the handshake
                 logger.warning(
-                    "owed cell uploads could not be re-attempted", exc_info=True)
+                    "owed compiled graph uploads could not be re-attempted", exc_info=True)
         # The desired state advertises (release_id, config_gen). Observe it
         # (memory + snapshot file rewrite); parameter VALUES ride RunJob stamps
         # (class 1), bindings ride the desired-residency reconcile below
@@ -646,7 +646,7 @@ class Lifecycle:
         and whose replacement is in the same list.
 
         The hub addresses workers in resolved ref space, but a moment with no
-        pick — a transient flavor resolve, a refusal, an unminted-cell gate —
+        pick — a transient flavor resolve, a refusal, an unminted-compiled graph gate —
         seeds the BARE spelling into desired.disk_refs, and no hub path removes
         it once the pick returns. Materializing both costs a full extra copy of
         weights that are never loaded.
@@ -947,13 +947,13 @@ class Lifecycle:
             # stream over a message we simply no longer act on.
             logger.warning(
                 "ignoring retired ModelOp (pgw#1032): hot compile-cache "
-                "adoption is gone; a cell arrives only through §4.27 "
+                "adoption is gone; a compiled graph arrives only through §4.27 "
                 "boot-adopt — the hub never pushes one")
         elif which == "serve_posture":
             # The operator's eager-only command, applied SYNCHRONOUSLY and
             # unconditionally: it touches one process-global order and never
             # blocks, so no worker is ever "too busy" to stop using a broken
-            # cell, and in-flight requests pick it up at their next compiled
+            # compiled graph, and in-flight requests pick it up at their next compiled
             # call. Idempotent, so a reconnect replay is free.
             serve_posture.apply_command(
                 bool(msg.serve_posture.eager_only),
@@ -1227,7 +1227,7 @@ class Lifecycle:
             if spec.name in self.executor.unavailable:
                 continue
             if spec.slots or spec.compile is not None:
-                # Slot picks and compile cells are set up ONLY on hub delivery —
+                # Slot picks and compiled graphs are set up ONLY on hub delivery —
                 # Hot DesiredInstance or RunJob, both of which rebind through
                 # _effective_spec with the hub-stamped refs. Running
                 # ensure_setup on the class-table spec here would materialize
@@ -1260,7 +1260,7 @@ class Lifecycle:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
         if dynamic:
             logger.info(
-                "hub-resolved functions (dynamic slots / compile cells) set up "
+                "hub-resolved functions (dynamic slots / compiled graphs) set up "
                 "on delivery, not at boot (pgw#532, gw#584): %s",
                 ", ".join(sorted(dynamic)),
             )
@@ -1302,7 +1302,7 @@ class Lifecycle:
             return
         # The pod reports its OWN decomposition once, at the instant the boot
         # closes, and says so when it cannot explain itself. `SHAPE_ENTRYPOINT`
-        # is the MINIMUM every pod boot produces (the cell phases depend on
+        # is the MINIMUM every pod boot produces (the compiled graph phases depend on
         # what the boot did), so `missing` here is always an instrument defect,
         # never a boot-shape difference.
         try:

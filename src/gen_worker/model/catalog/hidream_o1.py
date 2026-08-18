@@ -36,7 +36,7 @@ recorded reasons for deleting its ``compile=`` block:
    so a declaration's ``build`` could not run on the authoring box and no
    committed ``<family>.export.json`` could exist.
 
-Nothing regresses: the fleet already serves this endpoint with no compile cell.
+Nothing regresses: the fleet already serves this endpoint with no compiled graph.
 
 **And one blocker belongs to the SDK, not to this model (pgw#1346 K11).** The
 eager tier has no generated ``Model`` type — ``ModelExport`` refuses a document

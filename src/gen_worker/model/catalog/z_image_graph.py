@@ -72,7 +72,7 @@ class BoundRopeEmbedder(nn.Module):
     Upstream's ``RopeEmbedder`` is not an ``nn.Module`` at all: it holds
     ``freqs_cis = None`` and materializes three complex64 tables on first call
     inside ``with torch.device("cpu")``. Three consequences, all measured
-    (ie#630): 393,216 bytes are lifted into every compiled cell as anonymous
+    (ie#630): 393,216 bytes are lifted into every compiled graph as anonymous
     constants instead of being rebound from resident tensors (DESIGN-RULINGS
     §1.30); the device pin escapes a meta/fake instantiation context; and the
     lazy build is why the endpoint had to declare ``warm_changes_key=True``.

@@ -1,7 +1,7 @@
-"""Lora-bucket compile cells (gw#561, SDK v2 pgw#647): the decorator-level
+"""Lora-bucket compiled graphs (gw#561, SDK v2 pgw#647): the decorator-level
 ``@endpoint(lora_bucket=...)`` declaration, lane parsing/labels,
 branch-bearing lane apply/rollback through the real arming path, and the
-lane-exact cell pick — all against real modules (CPU; the GPU
+lane-exact compiled graph pick — all against real modules (CPU; the GPU
 build/adopt/tax proof runs on the pod rig)."""
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from gen_worker import Compile, endpoint, compile_cache
 from gen_worker.models import provision
 from gen_worker.models.w8a8 import detect_w8a8_artifact, load_w8a8_denoiser, quantize_tree_w8a8
 from gen_worker.models.w8a8_lora import RANK_BUCKETS, branch_bucket
-from gen_worker.registry import CompileCell, collect_from_namespace
+from gen_worker.registry import CompileContract, collect_from_namespace
 
 
 class _In(msgspec.Struct):
@@ -34,11 +34,11 @@ class _Out(msgspec.Struct):
 
 def _cfg(
     family: str, *, shapes=((64, 64),), targets=("unet",), lora_bucket=0,
-) -> CompileCell:
-    """The enriched compile-cell configuration the machinery consumes in v2
-    (``EndpointSpec.compile_cell()``): lora_bucket lives here, never on
+) -> CompileContract:
+    """The enriched compiled graph configuration the machinery consumes in v2
+    (``EndpointSpec.compile_contract()``): lora_bucket lives here, never on
     ``Compile``."""
-    return CompileCell(
+    return CompileContract(
         shapes=tuple(tuple(s) for s in shapes), targets=tuple(targets),
         family=family, regional=False, text_len=0, dynamic=(),
         lora_bucket=int(lora_bucket), guidance_scales=(),
@@ -49,7 +49,7 @@ def _cfg(
 def w8a8_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     from diffusers import DDPMPipeline, DDPMScheduler, UNet2DModel
 
-    root = tmp_path_factory.mktemp("loracells") / "src"
+    root = tmp_path_factory.mktemp("loragraphs") / "src"
     unet = UNet2DModel(
         sample_size=8, in_channels=3, out_channels=3,
         block_out_channels=(32, 32), layers_per_block=1,
@@ -128,7 +128,7 @@ def test_execution_lane_bucket_parses_stamp_and_token_forms() -> None:
     assert compile_cache.execution_lane_bucket("w8a16-lora32") == ("w8a16", 32)
     assert compile_cache.execution_lane_bucket("fp8-hooks-lora64") == ("fp8-hooks", 64)
     assert compile_cache.execution_lane_bucket("lora32") == ("", 32)
-    # sparse stamps are eager-only and never parse as a cell bucket
+    # sparse stamps are eager-only and never parse as a compiled graph bucket
     assert compile_cache.execution_lane_bucket("w8a8-lora32-sparse") == ("w8a8-lora32-sparse", 0)
 
 
@@ -153,7 +153,7 @@ def test_apply_lora_execution_lane_stamps_and_allocates(w8a8_pipe: Any) -> None:
     assert w8a8_pipe._cozy_weight_lane == "w8a8-lora128"
     # The metadata round-trip that used to sit here
     # (`artifact_metadata` + `execution_lane_drift`) compared a
-    # `torch-inductor-cache` cell's RECORDED lane with this pipeline's. Both
+    # `torch-inductor-cache` compiled graph's RECORDED lane with this pipeline's. Both
     # are deleted with the format. The lane stamp itself is what this row is
     # named for and it is unchanged; the exported lane's own recorded-lane
     # check is `aot_serve`'s.
@@ -176,9 +176,9 @@ def test_apply_lora_execution_lane_requires_denoiser() -> None:
 
 
 def test_enable_compiled_rolls_back_branches_when_eager(plain_pipe: Any) -> None:
-    """No cell + no CUDA => stays eager; the declared branch lane must not
+    """No compiled graph + no CUDA => stays eager; the declared branch lane must not
     leak into eager serving (canonical zeroed slots cost +21-32% eager)."""
-    cfg = _cfg("loracells-test", lora_bucket=32)
+    cfg = _cfg("loragraphs-test", lora_bucket=32)
     armed = provision.enable_compiled(plain_pipe, cfg, cache_dir=None, artifact=None).armed
     assert armed is False
     assert branch_bucket(plain_pipe.unet) == 0
@@ -188,12 +188,12 @@ def test_enable_compiled_rolls_back_branches_when_eager(plain_pipe: Any) -> None
 
 
 def test_enable_compiled_w8a8_fail_closed_keeps_contract(w8a8_pipe: Any) -> None:
-    cfg = _cfg("loracells-test", lora_bucket=128)
+    cfg = _cfg("loragraphs-test", lora_bucket=128)
     with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
         provision.enable_compiled(w8a8_pipe, cfg, cache_dir=None, artifact=None)
 
 
-def test_rank_buckets_cover_declared_cells() -> None:
+def test_rank_buckets_cover_declared_graphs() -> None:
     # The produced buckets (32 civitai-common, 128 Lightning) are declared
     # RANK_BUCKETS members — the survey-tuned contract.
     assert 32 in RANK_BUCKETS and 128 in RANK_BUCKETS
@@ -207,13 +207,13 @@ def test_discovery_carries_lora_bucket() -> None:
 
     spec = collect_from_namespace(types.SimpleNamespace(gen64=gen64))[0]
     assert spec.lora_bucket == 64
-    # The compile machinery consumes the enriched CompileCell, which folds
+    # The compile machinery consumes the enriched CompileContract, which folds
     # the decorator-level bucket into the declared graph family.
-    cell = spec.compile_cell()
-    assert cell is not None
-    assert cell.lora_bucket == 64
-    assert cell.family == "f"
-    assert cell.contract_facts()["lora_bucket"] == 64
+    graph = spec.compile_contract()
+    assert graph is not None
+    assert graph.lora_bucket == 64
+    assert graph.family == "f"
+    assert graph.contract_facts()["lora_bucket"] == 64
 
 
 def test_enable_compiled_skips_execution_lane_on_component_slot_without_target() -> None:
@@ -229,24 +229,24 @@ def test_enable_compiled_skips_execution_lane_on_component_slot_without_target()
             self.decoder = torch.nn.Linear(8, 8)
 
     vae = _Vae()
-    cfg = _cfg("loracells-test", lora_bucket=64)
+    cfg = _cfg("loragraphs-test", lora_bucket=64)
     armed = provision.enable_compiled(vae, cfg, cache_dir=None, artifact=None).armed
     assert armed is False
 
 
-def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
+def test_delivered_lora_graph_on_component_slot_is_ordinary_miss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """gw#632 (r3 live find, the all_declared_functions_disabled chain): a
-    DELIVERED family lora<bucket> cell arriving at a bare component slot
+    DELIVERED family lora<bucket> compiled graph arriving at a bare component slot
     (sdxl's standalone vae — no cfg.target resolves) must be an ordinary
     lane miss that stays eager. Before the effective-bucket fix the self-key
-    check claimed the cell as this runtime's own (cfg bucket, '' lane) and
-    raised CellSelectionBugError (`weight_lane 'lora64' != pipeline ''`),
-    which cascaded into the gw#608 seeded-cell refusal and retired the pod."""
+    check claimed the compiled graph as this runtime's own (cfg bucket, '' lane) and
+    raised CompiledGraphSelectionBugError (`weight_lane 'lora64' != pipeline ''`),
+    which cascaded into the gw#608 seeded-compiled graph refusal and retired the pod."""
 
     # Pin the runtime axes so the self-verdict computes on a CPU host (the
-    # live failure needs the seeded self-cell check to succeed — sku/sm come
+    # live failure needs the seeded self-compiled graph check to succeed — sku/sm come
     # from the GPU).
     rt = {
         "sku": "rtx-4090", "sm": "sm_89", "torch": "2.13.0+cu130",
@@ -260,12 +260,12 @@ def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
             super().__init__()
             self.decoder = torch.nn.Linear(8, 8)
 
-    # The delivered cell this used to build is a
+    # The delivered compiled graph this used to build is a
     # `torch-inductor-cache` tarball — a format with no writer, now deleted.
     # The gw#627 property does not need one: a component slot resolves none of
     # `cfg.targets`, so the lane is never applied and nothing arms. Stating it
-    # without a cell states it on the path production takes for a bare VAE.
-    cfg = _cfg("loracells-test", lora_bucket=64)
+    # without a compiled graph states it on the path production takes for a bare VAE.
+    cfg = _cfg("loragraphs-test", lora_bucket=64)
 
     vae = _Vae()
     armed = provision.enable_compiled(

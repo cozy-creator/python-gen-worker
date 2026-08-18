@@ -354,7 +354,7 @@ def test_a_mint_child_that_reported_and_never_died_still_mints(
     ``wedged_spin`` is the production shape: walk ``seal_publish`` ->
     ``finalize``, write the entries and the report, then burn a core forever.
     ``wedged_block`` is the flat-CPU teardown, which the old supervisor could
-    only escape by calling a finished mint a CRASH and discarding its cell.
+    only escape by calling a finished mint a CRASH and discarding its compiled graph.
     """
     frames: List[child_contract.MintFrame] = []
     outcome = _run(tmp_path, mode, window_s=_UNREACHABLE_WINDOW_S,
@@ -494,8 +494,8 @@ def test_the_mint_counts_against_an_honest_total(
 
 def _cfg() -> Any:
     from gen_worker.api.decorators import DynamicDim
-    from gen_worker.registry import CompileCell
-    return CompileCell(
+    from gen_worker.registry import CompileContract
+    return CompileContract(
         shapes=((1024, 1024),), targets=("unet",), family="sdxl",
         regional=False, text_len=77,
         dynamic=(DynamicDim(dim="batch", min=2, max=8),),
@@ -503,8 +503,8 @@ def _cfg() -> Any:
 
 
 def _task(tmp_path: Path) -> Any:
-    from gen_worker import fleet_cells
-    pending = fleet_cells.PendingSelfMint(
+    from gen_worker import fleet_compiled_graphs
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family="sdxl", arm_token="ck1-abc",
         ref="root/family-sdxl#cg-key-v1-abc", cfg=_cfg(),
         target=tmp_path / "cell.tar.gz",
@@ -536,13 +536,13 @@ def test_a_wedged_compile_fails_the_BUILD_and_never_the_WORKER(
     and that debt is th#1930's. What is owed here is the honest terminal state,
     and nothing more.
     """
-    from gen_worker import aot_mint, fleet_cells
+    from gen_worker import aot_mint, fleet_compiled_graphs
     from gen_worker import activity as activity_mod
 
     monkeypatch.setattr(
         mint_supervisor, "assert_family_mintable", lambda family: None)
     monkeypatch.setattr(
-        fleet_cells, "aot_export_spec",
+        fleet_compiled_graphs, "aot_export_spec",
         lambda pipe, cfg: SimpleNamespace(
             family="sdxl", strict=True, lora_bucket=0))
     monkeypatch.setattr(
@@ -556,7 +556,7 @@ def test_a_wedged_compile_fails_the_BUILD_and_never_the_WORKER(
         lambda kind, detail, phase="", **_kw: seen.append((kind, phase, detail)))
     abandoned: List[Any] = []
     monkeypatch.setattr(
-        fleet_cells, "abandon_self_mint",
+        fleet_compiled_graphs, "abandon_self_mint",
         lambda pending: abandoned.append(pending))
 
     wedge = (

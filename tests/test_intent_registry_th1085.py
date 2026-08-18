@@ -157,7 +157,7 @@ def test_setup_and_gpu_waits_are_typed_before_blocking() -> None:
 
 def test_legacy_job_has_a_bounded_local_intent() -> None:
     """pgw#1032: the ADOPTION half of this test is deleted with the handler it
-    drove. ``ModelOp{ADOPT_COMPILE_CACHE}`` was pushed off the COMPUTED cell
+    drove. ``ModelOp{ADOPT_COMPILE_CACHE}`` was pushed off the COMPUTED compiled graph
     key, a space with no producer since pgw#1010, so no stack ever dispatched
     one — there is no adoption intent to bound. The job half is unchanged."""
     class Input(msgspec.Struct):

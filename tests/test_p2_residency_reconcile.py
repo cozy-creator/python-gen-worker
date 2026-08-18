@@ -5,10 +5,10 @@ event after a tag-move never misattributes to the new identity); a mutable
 tag can move to new bytes under the SAME wire ref.
 
 Not covered here (documented deviation, one line): "adopt-to-self no-op
-re-arm" is compile-cell/fleet_cells adoption machinery, not
+re-arm" is compiled graph/fleet_compiled_graphs adoption machinery, not
 model residency — its worker-side tests live in test_executor_adopt.py,
 currently under a different lane's active dirty WIP per the th#960 tracker
-note ("foreign WIP ... compile_cache/executor/fleet_cells ... left alone").
+note ("foreign WIP ... compile_cache/executor/fleet_compiled_graphs ... left alone").
 Duplicating that surface here risks colliding with in-flight work; the
 th#960 checkpoint records this as an open follow-up for whoever owns that
 lane next.

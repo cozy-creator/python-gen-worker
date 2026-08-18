@@ -38,7 +38,7 @@ they point opposite ways:
 
 * **Wan does not need more than K9 already gives.** ``frames`` is a genuine
   product axis there (one trained frame grid per family), so ``shape`` x
-  ``frames`` is total with no phantom cell. See ``wan22_serve.packed_shape``.
+  ``frames`` is total with no phantom compiled graph. See ``wan22_serve.packed_shape``.
 * **LTX is where the product genuinely fails, and it fails on axes that are
   not spatial at all.** The endpoint's own mint declaration says it outright:
   the graph is a function of the TOKEN COUNTS alone (``num_frames``,

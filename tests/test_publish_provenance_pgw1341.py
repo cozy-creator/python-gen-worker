@@ -2,16 +2,16 @@
 
 THE DEFECT, structural and provable for $0. Since pgw#1270 every artifact is
 minted by TCG, and ``torchcg.artifact.validate_metadata`` refuses metadata whose
-field set is not exactly ``artifact_meta.cell_metadata_fields()``::
+field set is not exactly ``artifact_meta.compiled_graph_metadata_fields()``::
 
     compiled_graph_format  compiled_graph_key  constant_folding_fenced
     graph_class  host_isa  kind  package_constants_in_so  sm  toolchain
 
-``fleet_cells._identity_axes`` read ``env_seal``, ``manifest_digest``, ``family``
+``fleet_compiled_graphs._identity_axes`` read ``env_seal``, ``manifest_digest``, ``family``
 and ``weight_lane``/``lora_bucket`` out of that dict, and ``intent_entry`` read
 ``sku`` and ``gen_worker``. None of the six is in the vocabulary. The first one
 FAILS CLOSED, so the outcome was not a degraded row — it was
-``CellPublishRefused("cell records no env_seal block")`` for **every real
+``CompiledGraphPublishRefused("compiled graph records no env_seal block")`` for **every real
 artifact, unconditionally**. pgw#1340 made a pod ARM its own compiled graph;
 this is the seam that decides whether the FLEET may adopt it, and it was shut.
 Consequence, in money: every pod re-mints a graph another pod already compiled.
@@ -21,22 +21,22 @@ an owed upload on a LATER BOOT, in a different process, potentially on a
 different pod. Recomputing these from the live runtime would therefore attest
 one machine's card, wheel and env seal against another machine's bytes — a
 publish that is wrong in exactly the cases the retry exists for. The facts have
-to be DURABLE beside the cell, so they are: ``local_cell_store.MintProvenance``,
+to be DURABLE beside the compiled graph, so they are: ``local_compiled_graph_store.MintProvenance``,
 written into the same sidecar as the upload obligation, by the mint, at the
 moment the bytes become durable.
 
 WHAT THIS FILE PROVES, in the order the design has to be believed:
 
-1. the RED, on a cell TCG really built: no provenance -> refused BY NAME;
+1. the RED, on a compiled graph TCG really built: no provenance -> refused BY NAME;
 2. with the provenance the mint recorded, all five fields resolve;
 3. **BOOT 1 mints in one PROCESS, BOOT 2 publishes in another** — a real
    subprocess writes the store, this process ships it over the real publish
    wire, and the hub's recorded intent carries the mint's facts, not the
    shipper's;
-4. the controls: a genuinely provenance-less cell still refuses, and the
+4. the controls: a genuinely provenance-less compiled graph still refuses, and the
    ARM/serve path is untouched by any of it.
 
-THE FIXTURE FENCE (pgw#1340, applied here). Every cell below is built by
+THE FIXTURE FENCE (pgw#1340, applied here). Every compiled graph below is built by
 ``torchcg.artifact.build_metadata`` through ``tests/tcg_artifacts.py``. A
 hand-written envelope is exactly how this survived two wheels: pgw#1277 recorded
 the rule after finding the same class one block over — *"CI stayed green because
@@ -59,10 +59,10 @@ from typing import Any, Dict
 import pytest
 
 import tcg_artifacts
-from gen_worker import aot_serve, env_seal, fleet_cells, graph_facts
-from gen_worker import local_cell_store
+from gen_worker import aot_serve, env_seal, fleet_compiled_graphs, graph_facts
+from gen_worker import local_compiled_graph_store
 from gen_worker._vendor.torchcg import identity as tcg_identity
-from harness.cell_hub import local_cell_hub
+from harness.compiled_graph_hub import local_compiled_graph_hub
 
 FAMILY = "sd15"
 LANE = "bf16-w16a16"
@@ -79,12 +79,12 @@ MANIFEST = graph_facts.manifest_digest([str(META["graph_class"]["class_hash"])])
 SEAL_DIGEST = env_seal.seal_digest(env_seal.effective_seal())
 
 
-def _provenance(**kw: Any) -> local_cell_store.MintProvenance:
+def _provenance(**kw: Any) -> local_compiled_graph_store.MintProvenance:
     facts: Dict[str, Any] = dict(
         env_seal=SEAL_DIGEST, lane=LANE, graph_contract=MANIFEST,
         sku=SKU, gen_worker=GEN_WORKER)
     facts.update(kw)
-    return local_cell_store.MintProvenance(**facts)
+    return local_compiled_graph_store.MintProvenance(**facts)
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +95,13 @@ def _provenance(**kw: Any) -> local_cell_store.MintProvenance:
 def test_a_real_TCG_cell_states_none_of_the_five_publish_fields() -> None:
     """THE $0 PROOF, on the vocabulary itself.
 
-    This is what makes the defect structural rather than a bad cell: the five
+    This is what makes the defect structural rather than a bad compiled graph: the five
     reads name fields the closed vocabulary does not contain, so no artifact
     that exists can answer any of them.
     """
     from gen_worker import artifact_meta
 
-    vocabulary = artifact_meta.cell_metadata_fields()
+    vocabulary = artifact_meta.compiled_graph_metadata_fields()
     for field in (env_seal.SEAL_KEY, "manifest_digest", "family",
                   "weight_lane", "lora_bucket", "sku", "gen_worker"):
         assert field not in vocabulary, field
@@ -111,13 +111,13 @@ def test_a_real_TCG_cell_states_none_of_the_five_publish_fields() -> None:
 def test_the_publish_refuses_a_cell_this_machine_can_say_nothing_about() -> None:
     """THE RED, preserved and NARROWED (pgw#939: absence is a verdict).
 
-    Before this issue the same refusal fired on a metadata field no cell can
+    Before this issue the same refusal fired on a metadata field no compiled graph can
     carry — i.e. always. It now fires on the case it was written for, and only
     that one: bytes with no recorded mint provenance beside them.
     """
-    with pytest.raises(fleet_cells.CellPublishRefused) as exc:
-        fleet_cells._identity_axes(
-            FAMILY, dict(META), local_cell_store.MintProvenance())
+    with pytest.raises(fleet_compiled_graphs.CompiledGraphPublishRefused) as exc:
+        fleet_compiled_graphs._identity_axes(
+            FAMILY, dict(META), local_compiled_graph_store.MintProvenance())
     assert "no mint provenance" in str(exc.value)
     assert "pgw#1341" in str(exc.value)
 
@@ -125,10 +125,10 @@ def test_the_publish_refuses_a_cell_this_machine_can_say_nothing_about() -> None
 def test_the_five_fields_all_resolve_from_the_recorded_provenance() -> None:
     """The green half, field by field — each one named, so a silent blank in
     any of them is a failure here rather than an unarmable row on the fleet."""
-    axes = fleet_cells._identity_axes(FAMILY, dict(META), _provenance())
+    axes = fleet_compiled_graphs._identity_axes(FAMILY, dict(META), _provenance())
     key = tcg_identity.from_artifact_metadata(META)
 
-    # The three KEY axes still come from the artifact: a cell must corroborate
+    # The three KEY axes still come from the artifact: a compiled graph must corroborate
     # its own identity, and provenance must never be able to restate it.
     assert axes["graph"] == str(META["graph_class"]["class_hash"])
     assert axes["sm"] == str(META["sm"])
@@ -137,19 +137,19 @@ def test_the_five_fields_all_resolve_from_the_recorded_provenance() -> None:
     assert key.value == META["compiled_graph_key"]
 
     # The five that could not be stated before.
-    assert axes[fleet_cells.ENV_SEAL_AXIS] == SEAL_DIGEST
-    assert axes[fleet_cells.GRAPH_CONTRACT_AXIS] == MANIFEST
+    assert axes[fleet_compiled_graphs.ENV_SEAL_AXIS] == SEAL_DIGEST
+    assert axes[fleet_compiled_graphs.GRAPH_CONTRACT_AXIS] == MANIFEST
     assert axes["family"] == FAMILY
     assert axes["lane"] == LANE
 
-    entry, sku, gen_worker = fleet_cells.intent_entry(
+    entry, sku, gen_worker = fleet_compiled_graphs.intent_entry(
         FAMILY, dict(META), _provenance(), 347_940)
     assert (sku, gen_worker) == (SKU, GEN_WORKER)
     assert entry.compiled_graph_key == key.value
     assert entry.mint_duration_ms == 347_940
 
 
-def test_no_publish_fact_is_read_from_the_cell_metadata() -> None:
+def test_no_publish_fact_is_read_from_the_compiled_graph_metadata() -> None:
     """The rule, enforced rather than described.
 
     A metadata dict that LIES — carrying the old field names with hostile
@@ -166,13 +166,13 @@ def test_no_publish_fact_is_read_from_the_cell_metadata() -> None:
         gen_worker="0.0.1",
         **{env_seal.SEAL_KEY: {"v": 99}},
     )
-    entry, sku, gen_worker = fleet_cells.intent_entry(
+    entry, sku, gen_worker = fleet_compiled_graphs.intent_entry(
         FAMILY, lying, _provenance())
     axes = dict(entry.identity_axes)
     assert axes["family"] == FAMILY
     assert axes["lane"] == LANE
-    assert axes[fleet_cells.GRAPH_CONTRACT_AXIS] == MANIFEST
-    assert axes[fleet_cells.ENV_SEAL_AXIS] == SEAL_DIGEST
+    assert axes[fleet_compiled_graphs.GRAPH_CONTRACT_AXIS] == MANIFEST
+    assert axes[fleet_compiled_graphs.ENV_SEAL_AXIS] == SEAL_DIGEST
     assert (sku, gen_worker) == (SKU, GEN_WORKER)
 
 
@@ -182,7 +182,7 @@ def test_no_publish_fact_is_read_from_the_cell_metadata() -> None:
 
 
 #: BOOT 1. A real, separate interpreter: it mints (fixture bytes, no compile),
-#: stages the cell durable exactly as ``adopt_delegated_mint`` does, and dies.
+#: stages the compiled graph durable exactly as ``adopt_delegated_mint`` does, and dies.
 #: Everything the publish will need has to be on disk when it does.
 _BOOT_1 = textwrap.dedent(
     """
@@ -190,7 +190,7 @@ _BOOT_1 = textwrap.dedent(
     from pathlib import Path
 
     from gen_worker import compile_cache as cc
-    from gen_worker import fleet_cells, local_cell_store
+    from gen_worker import fleet_compiled_graphs, local_compiled_graph_store
 
     artifact, cas, family, lane, seal, manifest, token, sku, gw = sys.argv[1:10]
     # THE CARD THIS BOX DOES NOT HAVE. `mint_provenance`'s derivation runs for
@@ -200,7 +200,7 @@ _BOOT_1 = textwrap.dedent(
     # the publish wire are all production's.
     cc.runtime_key = lambda: {"sku": sku, "sm": "sm_89"}
     cc.gen_worker_version = lambda: gw
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family=family,
         arm_token=token,
         ref="root/family-%s#pending" % family,
@@ -209,22 +209,22 @@ _BOOT_1 = textwrap.dedent(
         mint_root=Path(artifact).parent,
         # A publisher this boot never gets to use: it is what makes the upload
         # OWED, which is the obligation boot 2 discharges.
-        publisher=fleet_cells.CellPublisher(
+        publisher=fleet_compiled_graphs.CompiledGraphPublisher(
             base_url="http://boot-1.invalid", worker_jwt=lambda: "jwt",
             image_digest="sha256:image"),
         cache_dir=Path(cas),
-        arm_key=fleet_cells.ArmIdentity(facts=tuple(sorted({
+        arm_key=fleet_compiled_graphs.ArmIdentity(facts=tuple(sorted({
             "family": family, "lane": lane, "env_seal": seal,
             "subject": "", "targets": "unet", "dynamic": "{}",
             "regional": "0", "sm": "sm_89", "toolchain": "t",
             "compiled_graph_format": "1",
         }.items()))),
     )
-    provenance = fleet_cells.mint_provenance(pending, manifest=manifest)
-    key = fleet_cells._stage_durable(pending, Path(artifact), provenance)
+    provenance = fleet_compiled_graphs.mint_provenance(pending, manifest=manifest)
+    key = fleet_compiled_graphs._stage_durable(pending, Path(artifact), provenance)
     # The arm gate passing, which is what promotes the staged bytes: only an
-    # ADMITTED cell is ever owed to the sink.
-    fleet_cells._admit_durable(pending, key, key)
+    # ADMITTED compiled graph is ever owed to the sink.
+    fleet_compiled_graphs._admit_durable(pending, key, key)
     print(json.dumps({"key": key, "provenance": provenance.as_dict()}))
     """
 )
@@ -232,8 +232,8 @@ _BOOT_1 = textwrap.dedent(
 
 @pytest.fixture()
 def store_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "cozy-cells"
-    monkeypatch.setenv(local_cell_store.ENV_STORE_DIR, str(root))
+    root = tmp_path / "cozy-compiled graphs"
+    monkeypatch.setenv(local_compiled_graph_store.ENV_STORE_DIR, str(root))
     return root
 
 
@@ -243,7 +243,7 @@ def _boot_1(tmp_path: Path, store_root: Path) -> Dict[str, Any]:
     staged.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ARTIFACT, staged)
     env = dict(os.environ)
-    env[local_cell_store.ENV_STORE_DIR] = str(store_root)
+    env[local_compiled_graph_store.ENV_STORE_DIR] = str(store_root)
     proc = subprocess.run(
         [sys.executable, "-c", _BOOT_1, str(staged), str(tmp_path / "cas"),
          FAMILY, LANE, SEAL_DIGEST, MANIFEST, ARM_TOKEN, SKU, GEN_WORKER],
@@ -263,9 +263,9 @@ def test_boot_1_records_the_mint_facts_beside_the_bytes(
     recorded = _boot_1(tmp_path, store_root)
     assert recorded["key"] == KEY
 
-    record = local_cell_store.read_record(KEY, store_root)
+    record = local_compiled_graph_store.read_record(KEY, store_root)
     assert record is not None
-    assert record.sink == local_cell_store.SINK_OWED
+    assert record.sink == local_compiled_graph_store.SINK_OWED
     assert record.family == FAMILY
     assert record.provenance.env_seal == SEAL_DIGEST
     assert record.provenance.lane == LANE
@@ -278,7 +278,7 @@ def test_boot_1_records_the_mint_facts_beside_the_bytes(
     # And the artifact still says nothing about any of it.
     from gen_worker import artifact_meta
 
-    bytes_on_disk = local_cell_store.materialize(
+    bytes_on_disk = local_compiled_graph_store.materialize(
         KEY, store_root, tmp_path / "cas")
     assert bytes_on_disk is not None
     packed = artifact_meta.read_metadata(bytes_on_disk)
@@ -289,7 +289,7 @@ def test_boot_1_records_the_mint_facts_beside_the_bytes(
 def test_boot_2_PUBLISHES_what_boot_1_minted(
     tmp_path: Path, store_root: Path,
 ) -> None:
-    """THE END-STATE PROOF. Two processes, one cell, one publish.
+    """THE END-STATE PROOF. Two processes, one compiled graph, one publish.
 
     Boot 1 (a subprocess, now dead) minted and recorded. Boot 2 — this process,
     holding nothing but the store — discharges the owed upload over the REAL
@@ -298,17 +298,17 @@ def test_boot_2_PUBLISHES_what_boot_1_minted(
     Before pgw#1341 this could not happen at all: ``resume_owed_publishes``
     read the artifact's metadata, ``_identity_axes`` demanded an ``env_seal``
     block no TCG artifact has, and the thread died on
-    ``CellPublishRefused`` without a byte moving.
+    ``CompiledGraphPublishRefused`` without a byte moving.
     """
     _boot_1(tmp_path, store_root)
 
-    with local_cell_hub() as hub:
-        publisher = fleet_cells.CellPublisher(
+    with local_compiled_graph_hub() as hub:
+        publisher = fleet_compiled_graphs.CompiledGraphPublisher(
             base_url=hub.base, worker_jwt=lambda: "worker-jwt",
             image_digest="sha256:" + "e" * 64)
-        threads = fleet_cells.resume_owed_publishes(
+        threads = fleet_compiled_graphs.resume_owed_publishes(
             publisher, cas_root=tmp_path / "cas")
-        assert len(threads) == 1, "the owed cell must be shipped"
+        assert len(threads) == 1, "the owed compiled graph must be shipped"
         threads[0].join(timeout=120)
         assert not threads[0].is_alive()
 
@@ -325,16 +325,16 @@ def test_boot_2_PUBLISHES_what_boot_1_minted(
     assert entry["compiled_graph_key"] == KEY
     axes = entry["identity_axes"]
     # pgw#903's pre-dlopen fence compares this; it was published empty.
-    assert axes[fleet_cells.GRAPH_CONTRACT_AXIS] == MANIFEST
+    assert axes[fleet_compiled_graphs.GRAPH_CONTRACT_AXIS] == MANIFEST
     # The hub's ArtifactIdentity requires this; the publish never got here.
-    assert axes[fleet_cells.ENV_SEAL_AXIS] == SEAL_DIGEST
+    assert axes[fleet_compiled_graphs.ENV_SEAL_AXIS] == SEAL_DIGEST
     # The store-row self-description, blank before.
     assert axes["family"] == FAMILY
     assert axes["lane"] == LANE
 
     # The obligation is discharged, durably, so a third boot ships nothing.
-    record = local_cell_store.read_record(KEY, store_root)
-    assert record is not None and record.sink == local_cell_store.SINK_DELIVERED
+    record = local_compiled_graph_store.read_record(KEY, store_root)
+    assert record is not None and record.sink == local_compiled_graph_store.SINK_DELIVERED
 
 
 # ---------------------------------------------------------------------------
@@ -355,25 +355,25 @@ def test_a_cell_with_NO_recorded_provenance_still_refuses_by_name(
     staged = tmp_path / "mint" / "cell.tar.gz"
     staged.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ARTIFACT, staged)
-    stored = local_cell_store.store(
+    stored = local_compiled_graph_store.store(
         staged, key=KEY, family=FAMILY, arm_token=ARM_TOKEN,
-        sink=local_cell_store.SINK_OWED, root=store_root,
+        sink=local_compiled_graph_store.SINK_OWED, root=store_root,
         cas_root=tmp_path / "cas")
     assert stored is not None and not stored.provenance.stated
 
-    with local_cell_hub() as hub:
-        publisher = fleet_cells.CellPublisher(
+    with local_compiled_graph_hub() as hub:
+        publisher = fleet_compiled_graphs.CompiledGraphPublisher(
             base_url=hub.base, worker_jwt=lambda: "worker-jwt",
             image_digest="sha256:" + "e" * 64)
-        threads = fleet_cells.resume_owed_publishes(
+        threads = fleet_compiled_graphs.resume_owed_publishes(
             publisher, cas_root=tmp_path / "cas")
         assert len(threads) == 1
         threads[0].join(timeout=120)
         assert hub.intents == [], "nothing may reach the hub"
 
-    record = local_cell_store.read_record(KEY, store_root)
+    record = local_compiled_graph_store.read_record(KEY, store_root)
     assert record is not None
-    assert record.sink == local_cell_store.SINK_REFUSED
+    assert record.sink == local_compiled_graph_store.SINK_REFUSED
 
 
 def test_a_pre_pgw1341_sidecar_reads_back_without_inventing_facts(
@@ -382,51 +382,51 @@ def test_a_pre_pgw1341_sidecar_reads_back_without_inventing_facts(
     """A record file with no ``provenance`` block at all.
 
     It must read as an EMPTY provenance — never as defaults, and never as an
-    unreadable record: the bytes are fine and the cell still ARMS. Only the
+    unreadable record: the bytes are fine and the compiled graph still ARMS. Only the
     publish is refused.
     """
     staged = tmp_path / "mint" / "cell.tar.gz"
     staged.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ARTIFACT, staged)
-    assert local_cell_store.store(
+    assert local_compiled_graph_store.store(
         staged, key=KEY, family=FAMILY, root=store_root,
         cas_root=tmp_path / "cas") is not None
-    path = local_cell_store.cell_dir(KEY, store_root) / local_cell_store.RECORD_NAME
+    path = local_compiled_graph_store.compiled_graph_dir(KEY, store_root) / local_compiled_graph_store.RECORD_NAME
     raw = json.loads(path.read_text())
     raw.pop("provenance")
     path.write_text(json.dumps(raw))
 
-    record = local_cell_store.read_record(KEY, store_root)
+    record = local_compiled_graph_store.read_record(KEY, store_root)
     assert record is not None
-    assert record.provenance == local_cell_store.MintProvenance()
+    assert record.provenance == local_compiled_graph_store.MintProvenance()
     assert not record.provenance.stated
 
 
 def test_the_ARM_side_is_untouched(tmp_path: Path, store_root: Path) -> None:
     """The negative control for the whole change.
 
-    pgw#1340 made the cell ARM. Nothing here may cost that: the serve-side
+    pgw#1340 made the compiled graph ARM. Nothing here may cost that: the serve-side
     lookup still returns admitted bytes, the arm-token memo still resolves, and
     the handback comparison still agrees with the runtime that minted it.
     """
     staged = tmp_path / "mint" / "cell.tar.gz"
     staged.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ARTIFACT, staged)
-    assert local_cell_store.store(
+    assert local_compiled_graph_store.store(
         staged, key=KEY, family=FAMILY, arm_token=ARM_TOKEN,
         provenance=_provenance(), root=store_root,
         cas_root=tmp_path / "cas") is not None
 
-    cell = local_cell_store.lookup(KEY, store_root, tmp_path / "cas")
-    assert cell is not None
-    assert cell.verdict == local_cell_store.VERDICT_ADMITTED
-    assert cell.provenance.env_seal == SEAL_DIGEST
-    assert local_cell_store.lookup_for_arm(
+    graph = local_compiled_graph_store.lookup(KEY, store_root, tmp_path / "cas")
+    assert graph is not None
+    assert graph.verdict == local_compiled_graph_store.VERDICT_ADMITTED
+    assert graph.provenance.env_seal == SEAL_DIGEST
+    assert local_compiled_graph_store.lookup_for_arm(
         ARM_TOKEN, store_root, tmp_path / "cas") is not None
 
-    # pgw#1340's seam, unchanged: the compared axes are the three a cell states.
-    assert fleet_cells.unstateable_arm_axes() == ()
-    arm = fleet_cells.ArmIdentity(facts=tuple(sorted({
+    # pgw#1340's seam, unchanged: the compared axes are the three a compiled graph states.
+    assert fleet_compiled_graphs.unstateable_arm_axes() == ()
+    arm = fleet_compiled_graphs.ArmIdentity(facts=tuple(sorted({
         "family": FAMILY, "lane": LANE, "env_seal": SEAL_DIGEST,
         "subject": graph_facts.subject_digest(()), "targets": "unet",
         "dynamic": "{}", "regional": "0",
@@ -436,4 +436,4 @@ def test_the_ARM_side_is_untouched(tmp_path: Path, store_root: Path) -> None:
         "toolchain": tcg_identity.toolchain_axis_digest(
             dict(META["toolchain"])),
     }.items())))
-    assert fleet_cells.arm_axis_divergence(arm, dict(META)) == ""
+    assert fleet_compiled_graphs.arm_axis_divergence(arm, dict(META)) == ""

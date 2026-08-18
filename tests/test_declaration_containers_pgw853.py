@@ -34,7 +34,7 @@ from gen_worker import Arg, Compile, Dim, GraphClass, Input
 from gen_worker.aot_mint import DynamicDim, ExportSpec, MintRefused, dynamic_shapes_spec
 from gen_worker.api.export_contract import DeclarationError
 from gen_worker.aot_declaration import (
-    cell_plans, container_arities, declared_inputs,
+    compiled_graph_plans, container_arities, declared_inputs,
 )
 
 torch = pytest.importorskip("torch")
@@ -147,7 +147,7 @@ def test_a_declared_list_input_feeds_a_list_not_a_dict() -> None:
     assert all(isinstance(e, torch.Tensor) for e in feed)
     # Every element carries the declared shape: (config.in_channels, 1, H, W),
     # resolved from the row that seeds the trace.
-    (plan,) = cell_plans(decl)
+    (plan,) = compiled_graph_plans(decl)
     seed = dict(plan.seed.dims)
     want = (4, 1, seed["H_lat"], seed["W_lat"])
     assert all(tuple(e.shape) == want for e in feed), feed[0].shape
@@ -213,7 +213,7 @@ def test_a_real_torch_export_accepts_the_container_form() -> None:
     decl = _list_declaration()
     module = _ListModule()
     args, kwargs = declared_inputs(module, _spec(decl.family), decl)
-    (plan,) = cell_plans(decl)
+    (plan,) = compiled_graph_plans(decl)
     spec = dynamic_shapes_spec(
         plan.dynamic, ["x", "t"], container_arities(decl, _spec(decl.family)))
 
@@ -337,7 +337,7 @@ def _fingerprint(decl: Compile) -> str:
             {"fork": [list(f) for f in p.fork],
              "dynamic": [[d.input_name, d.axis, d.min, d.max, d.multiple_of,
                           d.dim] for d in p.dynamic]}
-            for p in cell_plans(decl)],
+            for p in compiled_graph_plans(decl)],
     }, sort_keys=True)
 
 
@@ -368,7 +368,7 @@ def test_existing_declarations_are_byte_identical() -> None:
         args=(Arg("return_dict", False),),
         shape_strategy="static-rows", warm_changes_key=False,
     )
-    (plan,) = cell_plans(decl)
+    (plan,) = compiled_graph_plans(decl)
     assert plan.dynamic == ()
     assert '"repeat"' not in _fingerprint(decl)
     assert '"template"' not in _fingerprint(decl)
@@ -423,7 +423,7 @@ def test_an_arg_carried_extent_never_becomes_a_torch_symbol() -> None:
     """A python int SPECIALIZES the graph. It must never reach
     `dynamic_shapes`, or torch is being told a constant is free."""
     decl = _arg_carried_declaration()
-    (plan,) = cell_plans(decl)
+    (plan,) = compiled_graph_plans(decl)
     assert all(d.input_name != "img_shapes" for d in plan.dynamic), plan.dynamic
 
 
@@ -438,7 +438,7 @@ def test_collapsing_rows_that_differ_on_an_ARG_carried_dim_is_REFUSED() -> None:
               for f in _arg_carried_declaration().__struct_fields__},
            "shape_strategy": "dynamic-collapse"})
     with pytest.raises(MintRefused) as excinfo:
-        cell_plans(decl)
+        compiled_graph_plans(decl)
     msg = str(excinfo.value)
     assert "H_pat" in msg and "SPECIALIZES" in msg
 
@@ -449,7 +449,7 @@ def test_static_rows_keeps_one_artifact_per_row_for_arg_carried_dims() -> None:
     qwen-image derives 14 entries from 14 rows."""
     rows = (GraphClass(dims={"B": 1, "H_pat": 4, "W_pat": 6}),
             GraphClass(dims={"B": 1, "H_pat": 8, "W_pat": 6}))
-    assert len(cell_plans(_arg_carried_declaration(rows))) == 2
+    assert len(compiled_graph_plans(_arg_carried_declaration(rows))) == 2
 
 
 def test_a_dim_binding_nothing_declared_is_still_refused() -> None:

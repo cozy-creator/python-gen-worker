@@ -14,7 +14,7 @@ the third option — the one the fork did not offer — is the right one.**
 with **no ``aot/`` directory and no ``*.mint.json``** (wan-2.2, ltx-video-2.3,
 qwen-image, sdxl, z-image and both klein dirs all have one). What H3 runs today
 is ``torch.compile`` over a single dynamic sequence axis, and the eager tier
-keeps that: ``ModelSpec`` withholds a MINTED cell, not dynamo.
+keeps that: ``ModelSpec`` withholds a MINTED compiled graph, not dynamo.
 
 **2. The ``Scheduler`` vocabulary does not need a host-implemented escape,
 because it already IS one.** ``recipe_v1``: *"The scheduler block is a name plus

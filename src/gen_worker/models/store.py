@@ -279,7 +279,7 @@ class ModelStore:
         # thread). Measuring here means statvfs()/stat() on a real mount —
         # the provider-attached VOLUME fill-source is a network-backed
         # mount that can stall for minutes under load, exactly what a
-        # self-mint's weight download + cell pack produce right before the
+        # self-mint's weight download + compiled graph pack produce right before the
         # first post-publish delta. A stalled statvfs on the event loop
         # thread freezes the ENTIRE worker (including the th#965 heartbeat,
         # which shares the same loop): every StateDelta, RunJob dispatch,

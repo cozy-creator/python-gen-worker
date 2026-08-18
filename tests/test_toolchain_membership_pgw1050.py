@@ -4,9 +4,9 @@ Two failure modes; this file pins the expensive one. The key must not
 UNDER-split — that is the arm token's and the local-store verdict's problem,
 and both stay pessimistic. It must also not OVER-split:
 ``diffusers``/``transformers``/``peft`` do not belong on the ``toolchain`` axis
-because everything they can do to a cell already arrives through the traced
+because everything they can do to a compiled graph already arrives through the traced
 ``graph`` axis (the axis is the COMPUTATION, not the ingress). Otherwise every
-model-library patch release re-keys every cell in the fleet for a graph that
+model-library patch release re-keys every compiled graph in the fleet for a graph that
 has not moved.
 
 The two tests that matter are a matched pair, and neither is meaningful
@@ -28,12 +28,12 @@ from gen_worker._vendor.torchcg import identity as tcg_identity
 
 from gen_worker import compile_cache as cc, dist_records
 
-from harness.cell_meta import exported_cell_meta
+from harness.compiled_graph_meta import exported_compiled_graph_meta
 
 #: A recorded ``toolchain`` block of the shape a real mint records: the
 #: compiler proper (content digests of the wheels' RECORDs + the bundled CUDA
 #: tool binaries), the settings declaration, the boot-frozen native manifest —
-#: and, on a pre-pgw#1050 cell, the three model libraries.
+#: and, on a pre-pgw#1050 compiled graph, the three model libraries.
 TOOLCHAIN: Dict[str, str] = {
     "settings_declaration": "5" * 16,
     "loaded_libs": "6" * 16,
@@ -65,9 +65,9 @@ def _bumped(component: str) -> Dict[str, str]:
 
 
 def _key(block: Dict[str, str]) -> str:
-    """The ck1 key of a cell whose graph, envelope and sm are held fixed and
+    """The ck1 key of a compiled graph whose graph, envelope and sm are held fixed and
     whose toolchain block is ``block``."""
-    return str(exported_cell_meta(toolchain=block)["compiled_graph_key"])
+    return str(exported_compiled_graph_meta(toolchain=block)["compiled_graph_key"])
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +77,8 @@ def _key(block: Dict[str, str]) -> str:
 
 @pytest.mark.parametrize("library", MODEL_LIBRARIES)
 def test_a_model_library_bump_does_not_rekey(library: str) -> None:
-    """Two cells identical in graph x envelope x sm, differing ONLY in a model
-    library's content, are ONE cell and must carry ONE key.
+    """Two compiled graphs identical in graph x envelope x sm, differing ONLY in a model
+    library's content, are ONE compiled graph and must carry ONE key.
 
     RED on `origin/master`: the axis folded the library's RECORD digest, so
     the bump moved the key and the whole fleet re-minted for a computation
@@ -116,7 +116,7 @@ def test_the_axis_ignores_the_library_even_when_a_cell_records_it(
 @pytest.mark.parametrize("component", COMPILER_COMPONENTS)
 def test_a_genuine_toolchain_bump_still_splits(component: str) -> None:
     """torch, triton, the CUDA runtime wheels, the bundled ptxas, the settings
-    declaration and the boot-frozen native manifest are the compiler. A cell is
+    declaration and the boot-frozen native manifest are the compiler. A compiled graph is
     a ``dlopen``-ed ELF linking torch's AOTI runtime: an ABI mismatch is a
     segfault or silent numerics, never slowness. Each of them moves the key."""
     assert _key(_bumped(component)) != _key(dict(TOOLCHAIN))

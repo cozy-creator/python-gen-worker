@@ -2,7 +2,7 @@
 
 The question is "which acceleration technique is worth adopting on OUR
 silicon" for a model whose every published number was measured on somebody
-else's, on hardware we do not have. That is a MATRIX — technique x cell — and
+else's, on hardware we do not have. That is a MATRIX — technique x compiled graph — and
 the expensive part is not the measurement, it is the pod. Three facts fix the
 shape of this harness:
 
@@ -82,7 +82,7 @@ class Arm(msgspec.Struct, frozen=True, kw_only=True):
     #: this module only records it.
     settings: Dict[str, Any] = msgspec.field(default_factory=dict)
     #: Request-body fragment merged over the plan's base payload (step count,
-    #: resolution, duration — the CELL half of "technique x cell").
+    #: resolution, duration — the COMPILED GRAPH half of "technique x compiled graph").
     payload: Dict[str, Any] = msgspec.field(default_factory=dict)
     #: The arm this one's speedup is computed against. Empty = the plan's first
     #: arm. A speedup with no stated denominator is not a number.

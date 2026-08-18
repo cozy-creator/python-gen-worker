@@ -48,7 +48,7 @@ from gen_worker.api.binding import ModelRef, wire_ref
 from gen_worker.cli import run as cli_run
 from gen_worker.executor import _BackgroundMint, _hub_binding_for_wire_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 
 from harness import mint_catalog_slot_pgw969 as catalog
 from harness.blob_host import BlobHost
@@ -144,7 +144,7 @@ def _request(
     """
     pending = SimpleNamespace(
         family="pgw969", arm_token="ck1-catalog", recipe="dynamo",
-        cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
+        cfg=CompileContract(shapes=((1024, 1024),), targets=("unet",),
                         family="pgw969", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
                         text_lens=()), target=tmp_path / "cell.tar.gz",
@@ -230,7 +230,7 @@ def test_the_child_warms_the_checkpoint_THE_PARENT_SERVED(
 
     Not "resolves something": the ref is compared against what the serving
     path recorded, because a child that traced a different checkpoint would
-    pack a cell the parent's proof then misses (pgw#815's silent class).
+    pack a compiled graph the parent's proof then misses (pgw#815's silent class).
     """
     tree, binding = served
     request = _request(tree, binding, tmp_path)

@@ -33,7 +33,7 @@ def _abort_events(h: _Harness) -> List[object]:
 @pytest.mark.parametrize(
     "code,reason",
     [
-        ("adopt_on_arm", "adopting peer cell repo/cell"),
+        ("adopt_on_arm", "adopting peer compiled graph repo/compiled graph"),
         ("vacate", "instance vacate"),
         ("shutdown", "worker shutdown"),
         ("tenant_oom", "tenant OOM — the mint loses, the request wins"),

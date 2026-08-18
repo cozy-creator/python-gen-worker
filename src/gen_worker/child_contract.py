@@ -51,7 +51,7 @@ class CompileSpec(msgspec.Struct, frozen=True, kw_only=True):
 
     pgw#1034 therefore dropped ``regional``/``text_len``/``dynamic``: they
     crossed the wire and no child consumer read them
-    (``fleet_cells.aot_export_spec`` and ``compile_cache.resolve_targets`` read
+    (``fleet_compiled_graphs.aot_export_spec`` and ``compile_cache.resolve_targets`` read
     family/targets/shapes/text_lens/guidance/bucket, and nothing else does).
     Any field added back must name the child code that reads it.
     """

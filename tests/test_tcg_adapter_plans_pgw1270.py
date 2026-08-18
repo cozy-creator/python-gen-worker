@@ -47,7 +47,7 @@ def _spec(bucket: int) -> aot_inputs.ExportSpec:
 
 
 def test_bucket_family_forks_branch_capable_target_adapter_first() -> None:
-    plans = aot_declaration.cell_plans(_declaration())
+    plans = aot_declaration.compiled_graph_plans(_declaration())
     rows = aot_mint.adapter_arm_plans(
         plans, SimpleNamespace(unet=_TinyDenoiser().eval()), _spec(_BUCKET),
     )
@@ -61,7 +61,7 @@ def test_bucket_family_forks_branch_capable_target_adapter_first() -> None:
 
 def test_bucket_zero_family_does_not_fork() -> None:
     rows = aot_mint.adapter_arm_plans(
-        aot_declaration.cell_plans(_declaration()),
+        aot_declaration.compiled_graph_plans(_declaration()),
         SimpleNamespace(unet=_TinyDenoiser().eval()),
         _spec(0),
     )
@@ -73,7 +73,7 @@ def test_bucket_zero_family_does_not_fork() -> None:
 def test_non_branch_target_does_not_fork_in_a_bucket_family() -> None:
     plans = tuple(
         replace(plan, target="vae")
-        for plan in aot_declaration.cell_plans(_declaration())
+        for plan in aot_declaration.compiled_graph_plans(_declaration())
     )
     rows = aot_mint.adapter_arm_plans(
         plans,

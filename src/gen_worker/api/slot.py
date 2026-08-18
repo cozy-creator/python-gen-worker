@@ -176,9 +176,9 @@ class Slot(Generic[D]):
     Inventing a handle for those is the failure mode, not the fix.
 
     This lives on ``Slot`` and NOT on ``Compile``: ``Compile``'s fields feed
-    ``contract_axes()``, a cell-key input, and §1.33 point 5 is that
-    conversion is upstream of compute and invisible to cell identity. A
-    layout declaration there would either re-key every cell in the fleet or
+    ``contract_axes()``, a compiled graph-key input, and §1.33 point 5 is that
+    conversion is upstream of compute and invisible to compiled graph identity. A
+    layout declaration there would either re-key every compiled graph in the fleet or
     sit inside the key struct while deliberately not participating.
 
     ``layout_requirements`` is the REQUIREMENTS axis (Paul, 2026-08-15): what

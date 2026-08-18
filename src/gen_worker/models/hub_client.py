@@ -63,7 +63,7 @@ def resolved_entry_digest(
     """The algorithm-tagged digest of one RAW resolve-manifest entry.
 
     Callers that never build a ``WorkerResolvedRepoFile`` — anything reading
-    ``/resolve`` JSON directly, e.g. AOT cell discovery — must go through here
+    ``/resolve`` JSON directly, e.g. compiled graph discovery — must go through here
     rather than reaching for a field name. Raises on an absent or untagged
     digest: an integrity check with no digest is a REFUSAL, never a skip.
 

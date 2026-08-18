@@ -54,7 +54,7 @@ SYNTHETIC_RUNTIME_INSTALLED = install_synthetic_runtime_if_asked()
 
 FAMILY = "microrig"
 
-#: The pixel shape row the latent grid corresponds to. Part of the cell key's
+#: The pixel shape row the latent grid corresponds to. Part of the compiled graph key's
 #: contract axis, so it is stated once here and nowhere else.
 PIXEL_SHAPE = (LATENT_SIZE * 8, LATENT_SIZE * 8)
 

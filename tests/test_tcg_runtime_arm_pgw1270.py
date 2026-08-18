@@ -37,7 +37,7 @@ def test_delivery_checks_receipt_before_importing_exact_key(
     )
 
     aot_delivery._import_verified_artifact(
-        artifact, cell_ref=REF, cache_dir=tmp_path / "cas", what="test"
+        artifact, cg_ref=REF, cache_dir=tmp_path / "cas", what="test"
     )
 
     assert order == [
@@ -65,7 +65,7 @@ def test_delivery_refuses_divergent_local_key_binding(
 
     with pytest.raises(aot_delivery.NamedArtifactUnavailable) as excinfo:
         aot_delivery._import_verified_artifact(
-            artifact, cell_ref=REF, cache_dir=tmp_path / "cas", what="test"
+            artifact, cg_ref=REF, cache_dir=tmp_path / "cas", what="test"
         )
 
     assert excinfo.value.reason == "artifact_divergent"
@@ -85,7 +85,7 @@ def test_delivery_never_imports_an_unkeyed_ref(
     with pytest.raises(aot_delivery.NamedArtifactUnavailable) as excinfo:
         aot_delivery._import_verified_artifact(
             artifact,
-            cell_ref=f"root/family-{FAMILY}#old-cell-key",
+            cg_ref=f"root/family-{FAMILY}#old-cg-key",
             cache_dir=tmp_path / "cas",
             what="test",
         )

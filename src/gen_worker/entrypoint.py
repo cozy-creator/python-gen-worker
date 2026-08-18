@@ -319,7 +319,7 @@ def _isolate_group_inductor_cache() -> None:
 
     Set AFTER the seal — env_seal scrubs the whole ``TORCH*``/``TRITON*``
     namespace at boot, and the sanctioned window to point the SDK's own capture
-    redirects is after that scrub (same as cell ``capture_env``). A per-group
+    redirects is after that scrub (same as compiled graph ``capture_env``). A per-group
     PATH is plumbing, not a behaviour flag, so it does not touch the seal
     digest or minted kernels (inductor keys are content-addressed).
 

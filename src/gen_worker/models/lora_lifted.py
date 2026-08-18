@@ -84,7 +84,7 @@ class LiftedLoraPlan:
 
     Derived from the ALLOCATED branch buffers, so the layout mirrors canonical
     placement exactly and is a deterministic function of (module set, bucket) —
-    which is precisely the compile cell's graph class. Offsets and shapes are
+    which is precisely the compiled graph's graph class. Offsets and shapes are
     plain ints, so the per-layer views are trace-time constants and the graph
     carries no indexing arithmetic.
     """

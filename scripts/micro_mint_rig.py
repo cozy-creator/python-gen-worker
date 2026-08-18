@@ -17,9 +17,9 @@ randomly-initialized toy latent-diffusion model on this box's card:
   4. load         — the child re-runs module discovery and `run_setup` from scratch
   5. warm         — `warmup_forward` over the endpoint's own declared plan
   6. export       — real `torch.export` + real AOTInductor compile + link
-  7. seal         — real cell key, real packed artifact, real envelope
-  8. publish      — the real `CellPublisher` wire to a LOCAL hub (7 HTTP calls)
-  9. adopt        — a SECOND OS process fetches the exact named cell and adopts it
+  7. seal         — real compiled graph key, real packed artifact, real envelope
+  8. publish      — the real `CompiledGraphPublisher` wire to a LOCAL hub (7 HTTP calls)
+  9. adopt        — a SECOND OS process fetches the exact named compiled graph and adopts it
 
 THE BOUNDS (the local-inference carve-out recorded in
 `WORKSPACE-GIT-POLICY.md`). These are hard and this script enforces them rather
@@ -269,12 +269,12 @@ def _mint_request(
     from gen_worker import mint_process
     from gen_worker.mint_process import MintTask
 
-    cfg = veh.compile_cell()
+    cfg = veh.compile_contract()
     pending = SimpleNamespace(
         family=veh.family, arm_token="", cfg=cfg,
         target=workdir / "cell.tar.gz", mint_root=workdir)
     # The obligation token is inessential here — the child stamps the REAL
-    # cell key from the artifact's own recorded facts.
+    # compiled graph key from the artifact's own recorded facts.
     task = MintTask(
         pending=pending, pipe=None,
         function=veh.function, modules=tuple(veh.modules),
@@ -401,7 +401,7 @@ def run_cycle(
          env.get("PYTHONPATH", "")])
     env["PGW978_CHECKPOINT"] = str(tree)
     if dev["device_kind"] != "cuda":
-        # A cell key needs an `sm` and this box can state none. The probes are
+        # A compiled graph key needs an `sm` and this box can state none. The probes are
         # supplied, LOUDLY — see `install_synthetic_runtime_if_asked` and the
         # `synthetic_runtime` fact this leg reports.
         env[SYNTHETIC_RUNTIME_ENV] = "1"
@@ -424,7 +424,7 @@ def run_cycle(
         "artifacts": [str(p) for p in (getattr(outcome, "artifacts", ()) or ())],
         "detail": outcome.detail[:500],
         "stderr_tail": outcome.stderr_tail[-1200:],
-        # Never implied away: a cell sealed under a supplied `sm` is a PLUMBING
+        # Never implied away: a compiled graph sealed under a supplied `sm` is a PLUMBING
         # artifact and must never reach a shared namespace.
         "synthetic_runtime": env.get(SYNTHETIC_RUNTIME_ENV) == "1",
     }
@@ -441,13 +441,13 @@ def run_cycle(
     leg.facts["packed_entries"] = packed
     # The guard is a SUBSET check, not equality. A bucket-bearing mint adds
     # adapter arms whose exact set depends on composed branch-capability; what
-    # must never happen is a packed cell MISSING a declared class. An extra
+    # must never happen is a packed compiled graph MISSING a declared class. An extra
     # packed arm is the adapter fork doing its job.
     missing = [n for n in _branchless(packed) if n not in set(entries)]
     if entries and missing:
         leg.ok = False
         leg.detail = (f"declared entries {sorted(entries)!r} but the packed "
-                      f"cell is MISSING {missing!r} (packed: {packed!r})")
+                      f"compiled graph is MISSING {missing!r} (packed: {packed!r})")
         result.total_s = time.monotonic() - t0
         return result
     leg.detail = (
@@ -460,16 +460,16 @@ def run_cycle(
         result.total_s = time.monotonic() - t0
         return result
 
-    # -- the handback: the parent adopts its OWN child's cell -----
+    # -- the handback: the parent adopts its OWN child's compiled graph -----
     # The pod order: `adopt_delegated_mint` on the mint-opening parent's live
-    # pipeline runs BEFORE anything publishes — only a cell that can arm ships.
+    # pipeline runs BEFORE anything publishes — only a compiled graph that can arm ships.
     # Adopting only in a fresh SECOND process would leave this leg untested.
     if veh.parent_pipe is not None:
         import gc
 
         from gen_worker import aot_serve as _aserve
         from gen_worker import compile_cache as _cc
-        from gen_worker import fleet_cells as _fc
+        from gen_worker import fleet_compiled_graphs as _fc
         from gen_worker.models import loading as _loading
 
         leg = result.add(Leg("handback"))
@@ -530,9 +530,9 @@ def run_cycle(
             return result
 
     # -- publish -------------------------------------------------------------
-    from harness.cell_hub import LocalCellHub
+    from harness.compiled_graph_hub import LocalCompiledGraphHub
 
-    hub = LocalCellHub()
+    hub = LocalCompiledGraphHub()
     try:
         leg = result.add(Leg("publish"))
         g0 = time.monotonic()
@@ -582,7 +582,7 @@ def run_cycle(
 
 
 def _first_artifact(outcome: Any) -> Path:
-    """The cell tarball the child produced.
+    """The compiled graph tarball the child produced.
 
     pgw#1176 turned `MintOutcome.artifact` into `artifacts: Tuple[Path, ...]`
     ("every entry artifact the child produced, in report order") and this rig
@@ -599,12 +599,12 @@ def _first_artifact(outcome: Any) -> Path:
 
 
 def _publish(hub: Any, request: Any, artifact: Path, report: Any = None) -> str:
-    """The real `CellPublisher`, against the local hub.
+    """The real `CompiledGraphPublisher`, against the local hub.
 
     pgw#1341 made PROVENANCE a required argument: the env seal, the lane, the
     manifest digest and the two pod axes are facts the ARTIFACT cannot state
     (torchcg's metadata vocabulary is closed), so the publisher takes them
-    alongside the bytes and REFUSES a cell that has none. This rig had not been
+    alongside the bytes and REFUSES a compiled graph that has none. This rig had not been
     updated and was calling the four-argument form; nothing noticed, because
     `scripts/` is off mypy's shared path and the rig never runs in CI.
 
@@ -612,14 +612,14 @@ def _publish(hub: Any, request: Any, artifact: Path, report: Any = None) -> str:
     stand-in would publish this process's facts about the child's mint.
     """
     from gen_worker import artifact_meta as _meta
-    from gen_worker import fleet_cells, local_cell_store
+    from gen_worker import fleet_compiled_graphs, local_compiled_graph_store
 
-    # The cell's OWN recorded envelope, read back off the packed tarball —
-    # never a dict rebuilt here. `CellPublisher` derives the key, the axes and
-    # the identity axes from it, so a hand-built stand-in would publish a cell
+    # The compiled graph's OWN recorded envelope, read back off the packed tarball —
+    # never a dict rebuilt here. `CompiledGraphPublisher` derives the key, the axes and
+    # the identity axes from it, so a hand-built stand-in would publish a compiled graph
     # describing something other than the bytes beside it.
     meta = _meta.read_metadata(artifact)
-    provenance = local_cell_store.MintProvenance(
+    provenance = local_compiled_graph_store.MintProvenance(
         env_seal=str(getattr(report, "env_seal", "") or meta.get("env_seal") or ""),
         lane=str(getattr(report, "execution_lane", "") or ""),
         graph_contract=str(getattr(report, "manifest", "") or ""),
@@ -629,11 +629,11 @@ def _publish(hub: Any, request: Any, artifact: Path, report: Any = None) -> str:
     if not provenance.stated:
         # The one field the hub's ArtifactIdentity cannot survive without.
         # Refusing here is the rig reporting pgw#1341's shape rather than
-        # publishing a cell under invented axes.
+        # publishing a compiled graph under invented axes.
         raise RigRefused(
-            "the mint reported no env seal, so this cell is unpublishable "
+            "the mint reported no env seal, so this compiled graph is unpublishable "
             "(pgw#1341: MintProvenance.stated is False)")
-    publisher = fleet_cells.CellPublisher(
+    publisher = fleet_compiled_graphs.CompiledGraphPublisher(
         base_url=hub.base,
         worker_jwt=lambda: "local-rig-worker-jwt",
         image_digest="sha256:" + "0" * 64,
@@ -663,12 +663,12 @@ def _declared_entries(veh: Any) -> List[str]:
     # is composed truth this function has no pipeline for. So the declaration
     # stays the branchless authority and the guard compares against it after
     # stripping the adapter coordinate — see `_branchless`.
-    return [ad.plan_entry_name(p) for p in ad.cell_plans(decl)]
+    return [ad.plan_entry_name(p) for p in ad.compiled_graph_plans(decl)]
 
 
 def _branchless(names: List[str]) -> List[str]:
     """Packed entry names with any ``adapter=…`` coordinate dropped, so a
-    bucket-bearing cell's arms compare against the declared class set."""
+    bucket-bearing compiled graph's arms compare against the declared class set."""
     out = []
     for name in names:
         segs = []
@@ -687,12 +687,12 @@ def _adopt_in_subprocess(
     checkpoint_id: str,
     synthetic_runtime: bool = False,
 ) -> Dict[str, Any]:
-    """A SECOND OS process adopting the EXACT published cell: it is TOLD the
+    """A SECOND OS process adopting the EXACT published compiled graph: it is TOLD the
     checkpoint id — there is no discovery; a serving pod is told by
     `Arm.artifact` the same way.
 
     In-process adoption would be a different test: the whole cross-pod claim is
-    that a cell minted by one interpreter is servable by another that shares
+    that a compiled graph minted by one interpreter is servable by another that shares
     nothing but the hub and the card. A fresh interpreter is the cheapest
     honest stand-in for the second pod.
     """
@@ -710,9 +710,9 @@ def _adopt_in_subprocess(
     # has the bytes, and the snapshot digest agrees without a download.
     env["PGW978_CHECKPOINT"] = str(tree)
     if synthetic_runtime:
-        # The adopting side runs `aot_serve.verify`, which compares the cell's
+        # The adopting side runs `aot_serve.verify`, which compares the compiled graph's
         # stamped sm/torch/cuda against THIS runtime's. A second process that
-        # did not get the same supplied probes would reject the cell the first
+        # did not get the same supplied probes would reject the compiled graph the first
         # one just minted — and report it as a filter miss, which is exactly the
         # wrong diagnosis. Both sides state the same runtime or neither does.
         env[SYNTHETIC_RUNTIME_ENV] = "1"
@@ -724,7 +724,7 @@ def _adopt_in_subprocess(
             if not out.get("ok"):
                 # A MISS is not a crash, and its reason lives in the typed
                 # `aot-cells` events on stderr. Carrying it out is the whole
-                # difference between "no cell" and "twelve cells, all rejected
+                # difference between "no compiled graph" and "twelve compiled graphs, all rejected
                 # on one axis".
                 out["miss_log"] = _adopt_miss_log(proc.stderr)
             return dict(out)

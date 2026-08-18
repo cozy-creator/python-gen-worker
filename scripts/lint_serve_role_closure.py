@@ -11,7 +11,7 @@ closure inside ``gen_worker`` must not contain any module in
 :data:`gen_worker.serve.role.MINT_MACHINERY`. **Function-local imports count**
 — a lazy ``from . import aot_mint`` inside a method is exactly the shape a
 re-coupling takes, and an import-time-only fence would miss it. That is not
-hypothetical: it is how ``fleet_cells`` reached the mint lane before this
+hypothetical: it is how ``fleet_compiled_graphs`` reached the mint lane before this
 landed.
 
 THE TWO LISTS ARE READ OUT OF THE SOURCE, NOT RETYPED HERE
@@ -458,7 +458,7 @@ def selftest() -> int:
     and which names it exclusively through FUNCTION-LOCAL imports. So this one
     root proves both halves at once: that the walk fires, and that it still
     follows lazy imports, which is the shape the coupling actually took (it is
-    how ``fleet_cells`` reached ``mint_supervisor`` before this landed).
+    how ``fleet_compiled_graphs`` reached ``mint_supervisor`` before this landed).
     """
     banned = _declared_tuple("MINT_MACHINERY")
     libraries = _declared_tuple("FORBIDDEN_LIBRARIES")

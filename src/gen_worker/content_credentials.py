@@ -37,7 +37,7 @@ a test harness — must not be the process where a delivered private key goes
 unnoticed and media then ships unsigned.
 
 Signing is ON iff cert material is set. The hub transport is armed at HelloAck
-(``configure_remote_signer``, same wiring moment as the cell-receipt gate).
+(``configure_remote_signer``, same wiring moment as the compiled graph-receipt gate).
 
 Policy: default-ON when the cert is configured; a cert that does not parse
 fails worker startup (never silently ship unlabeled media believing signing is
@@ -243,7 +243,7 @@ def configure_remote_signer(base_url: str, worker_jwt: Any) -> None:
     """Arm the hub signing oracle.
 
     Called at HelloAck, the moment the hub wiring exists — the same seam that
-    arms the cell-receipt gate. Until this lands, a configured signer FAILS
+    arms the compiled graph-receipt gate. Until this lands, a configured signer FAILS
     requests rather than shipping unsigned media.
     """
     global _remote

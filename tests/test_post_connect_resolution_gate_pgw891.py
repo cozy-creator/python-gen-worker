@@ -45,7 +45,7 @@ def _tree(tmp_path: Path, source: str, allowlist: str) -> ModuleType:
     return mod
 
 
-CALLS_DISCOVER = "from x import aot_cells\n\ndef f():\n    return aot_cells.discover(1)\n"
+CALLS_DISCOVER = "from x import aot_compiled_graphs\n\ndef f():\n    return aot_compiled_graphs.discover(1)\n"
 
 
 def test_a_new_call_site_fails(tmp_path: Path) -> None:

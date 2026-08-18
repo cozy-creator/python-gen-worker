@@ -110,7 +110,7 @@ def test_the_component_posture_carries_applied_versus_bound() -> None:
 def test_a_declared_compiled_lane_that_serves_eager_says_so() -> None:
     """minimax-h3's specimen: `wanted=compiled, applied=eager`.
 
-    The hub instructs `+compiled`; this worker has no cell and serves eager. The
+    The hub instructs `+compiled`; this worker has no compiled graph and serves eager. The
     posture must carry BOTH values — a record holding only the resolved one
     makes the more urgent fact unrepresentable at the moment it matters most,
     which is how hours of eager serving at the shape that serves most went

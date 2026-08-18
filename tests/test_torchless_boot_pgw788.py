@@ -12,8 +12,8 @@ removed per test, and `torch_capability` deliberately does not memoize its
 verdict, so nothing leaks into the rest of the session.
 
 The other half of the guarantee is asserted here too: with torch PRESENT the
-seal must be byte-identical to the pre-fix seal, because the seal is a cell-key
-axis and a changed shape would strand every published cell.
+seal must be byte-identical to the pre-fix seal, because the seal is a compiled graph-key
+axis and a changed shape would strand every published compiled graph.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def test_torchless_isa_clamp_and_posture_no_op(torchless):
 
 def test_torchless_posture_assertion_agrees_with_its_own_seal(torchless):
     """pgw#1181: `assert_posture` is deleted — it compared the live process
-    against a CELL's recorded posture seal, and the only writer of that seal
+    against a COMPILED GRAPH's recorded posture seal, and the only writer of that seal
     was `closure_manifest`, which went with the `torch-inductor-cache` format.
     The property this row is named for survives without it: what a torchless
     worker establishes is exactly what it later observes, so a seal taken at
@@ -103,7 +103,7 @@ def test_torchless_posture_assertion_agrees_with_its_own_seal(torchless):
 
 def test_declared_knob_on_a_torchless_worker_refuses_by_name(torchless):
     """Every canonical knob is a torch flag. Silently ignoring one would fork
-    cell identity, so a torchless worker that declares one refuses."""
+    compiled graph identity, so a torchless worker that declares one refuses."""
     from gen_worker import settings_authority as sa
 
     with pytest.raises(sa.SettingsImpositionError) as exc:
@@ -136,7 +136,7 @@ def test_boot_modules_import_without_torch(torchless):
 
 
 # ---------------------------------------------------------------------------
-# The other direction: torch present is UNTOUCHED (cell identity is a key).
+# The other direction: torch present is UNTOUCHED (compiled graph identity is a key).
 # ---------------------------------------------------------------------------
 
 
@@ -147,7 +147,7 @@ def test_torch_present_seal_shape_is_unchanged():
     cfg = env_seal.effective_config()
     assert "torch" not in cfg, (
         "a torch-present worker must seal exactly the pre-pgw#788 config keys — "
-        "an extra key rewrites every cell key in the fleet")
+        "an extra key rewrites every compiled graph key in the fleet")
     for flag in ("float32_matmul_precision", "cuda_matmul_allow_tf32",
                  "cudnn_allow_tf32", "cudnn_benchmark"):
         assert flag in cfg

@@ -26,8 +26,8 @@ from typing import Any, List, Tuple
 
 import pytest
 
-from gen_worker import activity, executor, fleet_cells, serving_mode
-from gen_worker.cell_adopt import EagerPhase
+from gen_worker import activity, executor, fleet_compiled_graphs, serving_mode
+from gen_worker.compiled_graph_adopt import EagerPhase
 
 
 @pytest.fixture()
@@ -49,7 +49,7 @@ def _rows(events: List[Any], kind: str) -> List[Tuple[str, str]]:
 def test_eager_with_no_cell_reports_a_reason_not_an_empty_string() -> None:
     """RED before pgw#824: `serving_mode=eager, fallback_reason=""`.
 
-    All four pre-existing fallback classes presuppose an ARMED cell, so the
+    All four pre-existing fallback classes presuppose an ARMED compiled graph, so the
     commonest eager case — nothing armed at all — had no vocabulary and
     reported the empty string. "" could not distinguish a release that declares
     no compile target from a pod still minting from a pod that declined for
@@ -81,7 +81,7 @@ def test_a_per_request_fallback_outranks_the_posture() -> None:
 
 
 def test_the_posture_never_overwrites_a_compiled_serve() -> None:
-    """A posture leaking onto a cell-served request would be a WRONG dimension,
+    """A posture leaking onto a compiled graph-served request would be a WRONG dimension,
     which is worse than a coarse one (the pgw#764 rule)."""
     served = serving_mode.resolve(
         active_compile_ref="root/family-sdxl#deadbeef",
@@ -110,11 +110,11 @@ def test_fail_closed_names_the_cause_instead_of_one_shared_constant(
     causes hub-side meant substring-matching a sentence — the th#1250 lesson
     (kind-only coalescing erases the reason) one level down.
     """
-    monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda pipe: False)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "mandatory_serving", lambda pipe: False)
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "")
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "")
 
-    outcome = fleet_cells._fail_closed(
+    outcome = fleet_compiled_graphs._fail_closed(
         _Pipe(), "no C compiler for the self-mint",
         phase=EagerPhase.NO_TOOLCHAIN)
 
@@ -129,7 +129,7 @@ def test_fail_closed_names_the_cause_instead_of_one_shared_constant(
 
 #: The eager exits pgw#824 gave a classified cause, named as MEMBERS.
 #:
-#: pgw#1010 retired three (``delivered_cell_seeded``, ``capture_conflict``,
+#: pgw#1010 retired three (``delivered_compiled_graph_seeded``, ``capture_conflict``,
 #: ``multi_group_in_process``) with the in-process capture whose process-global
 #: cache-dir move was the only reason they existed, and renamed
 #: ``capture_arm_failed`` to ``jit_arm_failed`` — the arm it measures is the
@@ -160,12 +160,12 @@ _DECLINE_PHASES = (
 def _phase_uses(member: EagerPhase) -> int:
     """How many exits in the arming module pass ``member`` as their phase.
 
-    Scans the whole ``fleet_cells`` module, not one function: WHICH function
+    Scans the whole ``fleet_compiled_graphs`` module, not one function: WHICH function
     holds the policy is an implementation detail that has already changed once,
     and an audit that fails when a helper is extracted is an audit that gets
     re-pointed rather than read.
     """
-    src = inspect.getsource(fleet_cells)
+    src = inspect.getsource(fleet_compiled_graphs)
     return len(re.findall(rf"phase=EagerPhase\.{member.name}\b", src))
 
 
@@ -196,7 +196,7 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "JIT_ARM_FAILED": "jit_arm_failed",
         "MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH": "mandatory_lane_needs_a_compiled_graph",
         "COMPILED_GRAPH_QUARANTINED": "compiled_graph_quarantined",
-        # pgw#1340 / th#2098: the seam compares an axis no cell can state, so
+        # pgw#1340 / th#2098: the seam compares an axis no compiled graph can state, so
         # the mint is refused for $0 at obligation-open instead of after the
         # compile. A NEW value, deliberately — grouping it with the
         # mint-impossibility tokens would put a code defect in the same bucket
@@ -236,7 +236,7 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "COMPILED_DEGRADED": "compiled_degraded",
         "ARMED_TARGET_UNRESOLVED": "armed_target_unresolved",
         "NO_COMPILE_CANDIDATES": "no_compile_candidates",
-        # a cell this pod resolved BY ITS OWN derived key (§4.27
+        # a compiled graph this pod resolved BY ITS OWN derived key (§4.27
         # boot-adopt) would not arm. Nothing ordered it, so the pod boots as it
         # booted yesterday — where before this token the refusal escaped setup
         # as `worker_function_unavailable reason=compile_cell_failed` and the
@@ -297,7 +297,7 @@ def test_the_posture_tokens_are_the_enum_and_not_a_second_spelling() -> None:
 def test_a_quarantined_cell_is_a_typed_event_not_a_log_line() -> None:
     """RED before pgw#824. This was the ONE eager exit in the arming policy
     that returned before `_fail_closed` and only `logger.error`'d. A pod that
-    quarantines its own cell serves eager for the rest of its life — the state
+    quarantines its own compiled graph serves eager for the rest of its life — the state
     the hub most needs named, and the one it could not see.
     """
     assert _phase_uses(EagerPhase.COMPILED_GRAPH_QUARANTINED) == 1, (
@@ -584,8 +584,8 @@ def test_an_unparseable_destination_repo_confesses_once() -> None:
 def test_an_eager_request_on_a_compile_declaring_release_names_its_reason() -> None:
     """RED before pgw#824: `fallback_reason=""` on every one of these rows.
 
-    This endpoint DECLARES a compile cell, so `no_compile_declared` cannot be
-    the answer — the worker genuinely wanted a cell and did not get one. The
+    This endpoint DECLARES a compiled graph, so `no_compile_declared` cannot be
+    the answer — the worker genuinely wanted a compiled graph and did not get one. The
     arming brain classified why (there is no CUDA device on a CI host, so
     `_fail_closed(phase="no_cuda")`), and the whole point of the issue is that
     the classification survives all the way to the request row instead of dying

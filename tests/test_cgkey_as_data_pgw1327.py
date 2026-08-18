@@ -20,7 +20,7 @@ What is proved here, in the order the checklist asks for it:
 3. **Drift fails safe.** A closure the document does not carry is a stated
    ``keyset_absent`` refusal, never a fold of the nearest row; a document
    carrying a DIFFERENT graph's hash folds to a different key, so the hub
-   answers MISS and no wrong cell is ever armed.
+   answers MISS and no wrong compiled graph is ever armed.
 4. **The tracer is unreachable from the serve-boot path**, statically.
 5. **The round trip on the real vehicle:** what ``boot_key.derive`` traces is,
    key for key, what a fresh pod reads out of the shipped document — so the data
@@ -44,7 +44,7 @@ import pytest
 
 from harness.slot_facts import TEST_FACTS as _TEST_FACTS
 
-from gen_worker import boot_adopt, cell_resolve, compile_cache as cc, keyset
+from gen_worker import boot_adopt, compiled_graph_resolve, compile_cache as cc, keyset
 from gen_worker.child_contract import CompileSpec
 from gen_worker.keyset import document as doc_mod, store as keyset_store
 
@@ -262,22 +262,22 @@ class _Deriver:
             "cg-keyset-v1 document holds this pod's closure")
 
 
-class _Cell:
+class _Graph:
     publisher_org = "org-a"
     publisher_tier = "platform"
     content_digest = "sha256:" + "ab" * 32
 
     def __init__(self, key: str) -> None:
-        self.cell_ref = f"root/family-{FAMILY}#{key}"
+        self.cg_ref = f"root/family-{FAMILY}#{key}"
 
 
 def _hub(seen: List[str]) -> Any:
     def _resolve_batch(family: str, keys: Any, **_kw: Any) -> Any:
         seen.extend(str(k) for k in keys)
         return tuple(
-            cell_resolve.ResolveAnswer(
+            compiled_graph_resolve.ResolveAnswer(
                 compiled_graph_key=str(key), status="hit",
-                cell=cast(Any, _Cell(str(key))))
+                graph=cast(Any, _Graph(str(key))))
             for key in keys)
     return _resolve_batch
 
@@ -295,10 +295,10 @@ def test_a_fresh_pod_with_a_shipped_key_set_adopts_with_zero_torch_export(
     digest = _digest()
     shipped = _ship(tmp_path / "image", digest, _row(denoiser=HASH_A, vae=HASH_B))
     asked: List[str] = []
-    monkeypatch.setattr(cell_resolve, "resolve_batch", _hub(asked))
+    monkeypatch.setattr(compiled_graph_resolve, "resolve_batch", _hub(asked))
     monkeypatch.setattr(
-        cell_resolve, "materialize",
-        lambda cell, **_kw: tmp_path / "artifact.pt2")
+        compiled_graph_resolve, "materialize",
+        lambda graph, **_kw: tmp_path / "artifact.pt2")
     deriver = _Deriver()
 
     outcomes = boot_adopt.attempt(
@@ -379,7 +379,7 @@ def test_a_closure_the_document_does_not_carry_is_a_stated_refusal(
     stale = keyset.parse_closure_digest("dead" + "0" * 28)
     shipped = _ship(tmp_path / "image", stale, _row(denoiser=HASH_A))
     monkeypatch.setattr(
-        cell_resolve, "resolve_batch",
+        compiled_graph_resolve, "resolve_batch",
         lambda *a, **k: pytest.fail("no key was stated; nothing may be asked"))
 
     (out,) = boot_adopt.attempt(
@@ -401,7 +401,7 @@ def test_a_drifted_hash_folds_to_a_key_the_hub_misses_and_arms_nothing(
 ) -> None:
     """The other half of fail-safe: a document that ADDRESSES correctly but
     carries a hash for a graph this code no longer produces asks for a key the
-    hub does not hold. A miss, and nothing is armed — never a wrong cell."""
+    hub does not hold. A miss, and nothing is armed — never a wrong compiled graph."""
     digest = _digest()
     shipped = _ship(tmp_path / "image", digest, _row(denoiser=HASH_B))
     only_a = str(keyset.fold_entry_keys(
@@ -410,13 +410,13 @@ def test_a_drifted_hash_folds_to_a_key_the_hub_misses_and_arms_nothing(
 
     def _resolve(family: str, keys: Any, **_kw: Any) -> Any:
         return tuple(
-            cell_resolve.ResolveAnswer(
+            compiled_graph_resolve.ResolveAnswer(
                 compiled_graph_key=str(key),
                 status="hit" if str(key) == only_a else "miss",
-                cell=cast(Any, _Cell(str(key))) if str(key) == only_a else None)
+                graph=cast(Any, _Graph(str(key))) if str(key) == only_a else None)
             for key in keys)
 
-    monkeypatch.setattr(cell_resolve, "resolve_batch", _resolve)
+    monkeypatch.setattr(compiled_graph_resolve, "resolve_batch", _resolve)
     (out,) = boot_adopt.attempt(
         function=FUNCTION, modules=MODULES, cfg=_Cfg(), slots={},
         declared_hint=1, work_root=tmp_path / "work",
@@ -491,10 +491,10 @@ def test_this_machines_cache_answers_under_its_own_source(
     cache = tmp_path / "cache"
     keyset_store.write_closure(cache, digest, _row(denoiser=HASH_A))
     monkeypatch.setattr(
-        cell_resolve, "resolve_batch",
+        compiled_graph_resolve, "resolve_batch",
         lambda family, keys, **k: tuple(
-            cell_resolve.ResolveAnswer(
-                compiled_graph_key=str(key), status="miss", cell=None)
+            compiled_graph_resolve.ResolveAnswer(
+                compiled_graph_key=str(key), status="miss", graph=None)
             for key in keys))
 
     (out,) = boot_adopt.attempt(
@@ -652,7 +652,7 @@ def test_the_minted_key_set_is_the_key_set_a_fresh_pod_reads(
         "PYTHONPATH", ":".join([str(REPO / "src"), str(MICRO_SRC)]))
     specs = collect_endpoints(["micro_diffusion.main"])
     spec = next(s for s in specs if s.name == FUNCTION)
-    cfg = spec.compile_cell()
+    cfg = spec.compile_contract()
     assert cfg is not None
     compile_spec = CompileSpec(
         shapes=tuple(tuple(int(v) for v in row) for row in (cfg.shapes or ())),
@@ -676,7 +676,7 @@ def test_the_minted_key_set_is_the_key_set_a_fresh_pod_reads(
         family=str(cfg.family),
         cfg=compile_spec,
         slots=slots,
-        declared_hint=len(list(aot_declaration.cell_plans(declaration))),
+        declared_hint=len(list(aot_declaration.compiled_graph_plans(declaration))),
         work_root=tmp_path / "trace",
         memo_dir=mint_cache,
         emitted_by="pgw#1327 round-trip",
@@ -692,9 +692,9 @@ def test_the_minted_key_set_is_the_key_set_a_fresh_pod_reads(
         (mint_cache / keyset.KEYSET_FILENAME).read_bytes())
 
     asked: List[str] = []
-    monkeypatch.setattr(cell_resolve, "resolve_batch", _hub(asked))
+    monkeypatch.setattr(compiled_graph_resolve, "resolve_batch", _hub(asked))
     monkeypatch.setattr(
-        cell_resolve, "materialize", lambda cell, **_kw: tmp_path / "artifact")
+        compiled_graph_resolve, "materialize", lambda graph, **_kw: tmp_path / "artifact")
 
     sentinel = _ExportSentinel()
     torch = sys.modules.get("torch")

@@ -15,7 +15,7 @@ low-rank machinery around it does not:
 So this module owns the parts that are population-independent — the verdict
 ladder, the aggregate rule, the evidence formatting and the gate shape — and
 each caller brings its own :class:`Thresholds` and its own evaluator.
-:mod:`gen_worker.models.adapter_fidelity` is one caller; the compiled-cell
+:mod:`gen_worker.models.adapter_fidelity` is one caller; the compiled graph
 assembled-vs-eager population (whose calibrated defaults live below) is the
 other.
 
@@ -50,10 +50,10 @@ _ORDER = {VERDICT_HEALTHY: 0, VERDICT_DEGRADED: 1, VERDICT_DESTROYED: 2}
 PHASE_DEGRADED = "degraded"
 PHASE_REFUSED = "refused"
 
-#: An armed exported cell took no warm dispatch this boot, which is the
-#: NORMAL state of every adopted cell (the arm precedes setup) and is NOT a
+#: An armed exported compiled graph took no warm dispatch this boot, which is the
+#: NORMAL state of every adopted compiled graph (the arm precedes setup) and is NOT a
 #: verdict about it. Carried on this kind so one
-#: query (`?kind=compiled_graph_numerics`) still answers what happened to every cell that
+#: query (`?kind=compiled_graph_numerics`) still answers what happened to every compiled graph that
 #: armed on a pod, and emitted because an unannounced posture is
 #: indistinguishable from a gate that never ran.
 PHASE_ARMED_UNDISPATCHED = "armed_undispatched"
@@ -166,7 +166,7 @@ class Comparison:
 
     #: What was compared against (``"eager"``, the true adapter delta, ...).
     reference: str
-    #: What is on trial (a cell key, an adapter ref, ...).
+    #: What is on trial (a compiled graph key, an adapter ref, ...).
     subject: str
     thresholds: Thresholds
     rows: Tuple[RowStat, ...]
@@ -343,7 +343,7 @@ def gate(
 
     ``refuse`` builds the caller's OWN typed exception from the message and
     the comparison — this module refuses to own a shared error type, because
-    "this adapter cannot serve here" and "this cell must not arm" route
+    "this adapter cannot serve here" and "this compiled graph must not arm" route
     through completely different classifiers.
     """
     if comparison is None:
@@ -372,12 +372,12 @@ def gate(
 
 
 # ---------------------------------------------------------------------------
-# The compiled-cell (assembled-vs-eager) calibration — the measured band
+# The compiled graph (assembled-vs-eager) calibration — the measured band
 # ---------------------------------------------------------------------------
 # The calibration is family-GENERAL: it reads `Compile.numerics_floor` /
 # `numerics_warn`, which whole-graph families (sdxl: 0.995/0.999) declare too.
 
-#: Cosine floor for an ASSEMBLED-vs-EAGER comparison — below it the cell is
+#: Cosine floor for an ASSEMBLED-vs-EAGER comparison — below it the compiled graph is
 #: DESTROYED and refuses to arm.
 #:
 #: Derived from the measured band on the production toolchain (torch
@@ -396,7 +396,7 @@ def gate(
 #: 0.99979, sdxl w8a8 whole-graph 0.99984.
 NUMERICS_FLOOR = 0.98
 
-#: Gray-band ceiling — at or above this the arm is silent, below it the cell
+#: Gray-band ceiling — at or above this the arm is silent, below it the compiled graph
 #: arms and confesses ``compiled_graph_numerics phase=degraded``.
 #:
 #: Every configuration anyone has called healthy measures 0.9998+ (bf16
@@ -447,8 +447,8 @@ def declared_thresholds(cfg: Any) -> Thresholds:
     authority.
 
     ``cfg`` is duck-typed on purpose — it is a raw ``Compile`` on the author-CI
-    path and a ``registry.CompileCell`` on every fleet path, and both carry the
-    two fields (``CompileCell.from_declaration`` is what keeps that true).
+    path and a ``registry.CompileContract`` on every fleet path, and both carry the
+    two fields (``CompileContract.from_declaration`` is what keeps that true).
     """
     floor = getattr(cfg, "numerics_floor", None)
     warn = getattr(cfg, "numerics_warn", None)

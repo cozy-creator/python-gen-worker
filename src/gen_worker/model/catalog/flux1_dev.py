@@ -18,7 +18,7 @@ for. ``scripts/lint_serve_role_closure.py`` enforces the split.
 
 **Checkpoint-free, and the architecture config is why.** The blocks below are
 FLUX.1-dev's architecture, not any checkpoint's weights: every fine-tune that
-shares it shares the graph classes, which is what lets one compiled cell serve
+shares it shares the graph classes, which is what lets one compiled graph serve
 sixteen of them (DESIGN-RULINGS §4.27). A checkpoint whose config DIFFERS is a
 different family, not another instance of this one — FLUX.1-schnell is the
 live example (``guidance_embeds`` is False there, which changes the graph), and

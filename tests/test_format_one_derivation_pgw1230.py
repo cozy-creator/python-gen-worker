@@ -7,14 +7,14 @@ THE DEFECT, and why nothing caught it. Two different facts shared the name
     the compiled-graph metadata schema. TCG stamps it into every artifact.
   * ``compile_cache.ARTIFACT_FORMAT`` — the torch-inductor-cache PRODUCER
     format (gw#391), an ingredient of the JIT semantic cache tag and nothing
-    to do with cell metadata.
+    to do with compiled graph metadata.
 
-``fleet_cells.arm_identity`` computed its ``format`` fact from the SECOND one
+``fleet_compiled_graphs.arm_identity`` computed its ``format`` fact from the SECOND one
 and compared it against the first. Both were 2, so it passed by coincidence
-for a year. pgw#1176 moved the cell schema to 3 and left the inductor format
-at 2, and from that commit **every freshly minted cell failed to arm** —
-`key_axis_divergence: format: child cell states '3', this runtime computed
-'2'` — compiled fine, quarantined, published nothing. Observed on Cell Zero
+for a year. pgw#1176 moved the compiled graph schema to 3 and left the inductor format
+at 2, and from that commit **every freshly minted compiled graph failed to arm** —
+`key_axis_divergence: format: child compiled graph states '3', this runtime computed
+'2'` — compiled fine, quarantined, published nothing. Observed on Compiled graph Zero
 across all 4 z-image graph classes.
 
 Nothing was red, for two separate reasons, and both are the point of this
@@ -28,7 +28,7 @@ file:
      the bug and stayed green through the 2->3 bump.
 
 So the rows here are deliberately built from the REAL derivations on both
-sides — ``fleet_cells.arm_identity`` for the parent, public TCG metadata for
+sides — ``fleet_compiled_graphs.arm_identity`` for the parent, public TCG metadata for
 the child — because a double on either side is what hid a P0.
 
 The arm check itself was NOT at fault and is not weakened: it fired, named
@@ -45,7 +45,7 @@ from typing import Any, Dict
 import pytest
 
 from gen_worker import aot_serve, compile_cache as cc, env_seal
-from gen_worker import fleet_cells
+from gen_worker import fleet_compiled_graphs
 import sys
 from pathlib import Path
 
@@ -85,9 +85,9 @@ def one_process_tree(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _child_meta() -> Dict[str, Any]:
     """What the CHILD stamps, through the producer that owns the envelope."""
-    from tests.harness import exported_cell
+    from tests.harness import exported_compiled_graph
 
-    meta = exported_cell.metadata()
+    meta = exported_compiled_graph.metadata()
     meta.update(RUNTIME_KEY)
     meta["family"] = _Cfg.family
     meta["weight_lane"] = ""
@@ -111,19 +111,19 @@ def test_the_stamp_and_the_computed_format_are_the_same_value(
     ``'2'`` from ``compile_cache`` while the child stamped ``3`` from
     public TCG artifact metadata.
     """
-    parent = fleet_cells.arm_identity(_Cfg.family, "", 0, _Cfg())
+    parent = fleet_compiled_graphs.arm_identity(_Cfg.family, "", 0, _Cfg())
     stamped = _child_meta()
     k = aot_serve.COMPILED_GRAPH_FORMAT_KEY
     assert parent.facts_dict()[k] == str(stamped[k])
 
 
-def test_a_freshly_minted_cell_arms_in_the_tree_that_minted_it(
+def test_a_freshly_minted_compiled_graph_arms_in_the_tree_that_minted_it(
     one_process_tree: None,
 ) -> None:
     """The seam, end to end, with NOTHING stubbed on it — the exact call that
-    quarantined Cell Zero's four classes."""
-    parent = fleet_cells.arm_identity(_Cfg.family, "", 0, _Cfg())
-    divergence = fleet_cells.arm_axis_divergence(parent, _child_meta())
+    quarantined Compiled graph Zero's four classes."""
+    parent = fleet_compiled_graphs.arm_identity(_Cfg.family, "", 0, _Cfg())
+    divergence = fleet_compiled_graphs.arm_axis_divergence(parent, _child_meta())
     assert divergence == "", divergence
 
 
@@ -136,13 +136,13 @@ def test_a_divergent_format_is_still_refused_by_name(
     one_process_tree: None,
 ) -> None:
     """Credit where due: this check is what made the outage diagnosable. The
-    fix removes the DISAGREEMENT, never the detection — a cell of a foreign
+    fix removes the DISAGREEMENT, never the detection — a compiled graph of a foreign
     schema must still be refused loudly rather than armed hopefully."""
-    parent = fleet_cells.arm_identity(_Cfg.family, "", 0, _Cfg())
+    parent = fleet_compiled_graphs.arm_identity(_Cfg.family, "", 0, _Cfg())
     foreign = dict(_child_meta())
     foreign[aot_serve.COMPILED_GRAPH_FORMAT_KEY] = (
         aot_serve.COMPILED_GRAPH_FORMAT + 1)
-    got = fleet_cells.arm_axis_divergence(parent, foreign)
+    got = fleet_compiled_graphs.arm_axis_divergence(parent, foreign)
     assert got.startswith(aot_serve.COMPILED_GRAPH_FORMAT_KEY + ": ")
     assert str(aot_serve.COMPILED_GRAPH_FORMAT + 1) in got
     assert str(aot_serve.COMPILED_GRAPH_FORMAT) in got
@@ -174,7 +174,7 @@ def test_the_inductor_cache_format_is_not_called_a_format_of_the_artifact(
 ) -> None:
     """The renamed constant keeps its VALUE — the semantic cache tag is a
     published-cache identity and must not churn on a rename — while losing the
-    name that let it be read as the cell schema."""
+    name that let it be read as the compiled graph schema."""
     assert cc.SEMANTIC_TAG_FORMAT == 2
     assert not hasattr(cc, "ARTIFACT_FORMAT")
     assert not hasattr(aot_serve, "ARTIFACT_FORMAT")  # 1.38b hard cut
@@ -190,7 +190,7 @@ def test_no_module_computes_the_format_axis_from_a_second_source(
     Stated structurally because the failure mode was structural: the parent
     was not WRONG about the format, it was asking a different module.
     """
-    text = (SRC / "fleet_cells.py").read_text()
+    text = (SRC / "fleet_compiled_graphs.py").read_text()
     assert "aot_serve.COMPILED_GRAPH_FORMAT_KEY:" in text
     assert "str(aot_serve.COMPILED_GRAPH_FORMAT)" in text
     # CODE only — the comment above that line names the old symbol on purpose,

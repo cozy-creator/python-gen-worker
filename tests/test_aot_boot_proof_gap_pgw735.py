@@ -2,20 +2,20 @@
 
 An executor proof that scores EXPORTED arms inside a loop gated on
 ``proves_inductor`` runs only when SOME dynamo selection coexists. A worker
-whose ONLY arm is an adopted AOT cell then skips the boot proof entirely and
+whose ONLY arm is an adopted compiled graph then skips the boot proof entirely and
 stays armed UNPROVEN. Same fail-closed rule as the dynamo lane, through the
 REAL executor setup path (fakes only at the download + arming boundaries):
 
-  1. an exercised pure-AOT arm is PROVEN — stays armed, cell recorded
+  1. an exercised pure-AOT arm is PROVEN — stays armed, compiled graph recorded
      proven in-process (the pgw#637 registry);
   2. an unexercised pure-AOT arm KEEPS SERVING and banks no proof;
   3. the same on the MANDATORY (w8a8) lane does not kill the boot.
 
 An unexercised arm must NOT be unwrapped, quarantined or dropped: an ADOPTED
-cell arms before setup, so nothing has dispatched through it by construction,
+compiled graph arms before setup, so nothing has dispatched through it by construction,
 and pods threw away artifacts they had just verified at `cos=1.00000`. The
-fail-closed property lives elsewhere — the numerics gate refuses a cell that
-does not reproduce eager, and a cell-attributable failure at SERVE time revokes
+fail-closed property lives elsewhere — the numerics gate refuses a compiled graph that
+does not reproduce eager, and a compiled graph-attributable failure at SERVE time revokes
 the arm in-request. What an absent measurement still decides is the PUBLISH,
 which is what rows 2 and 3 pin.
 """
@@ -34,7 +34,7 @@ from gen_worker.serving_facts import FactsUnavailable as _FU
 _NO_FACTS = _FU(owed_by="a test that resolves no catalog")
 
 import gen_worker
-from gen_worker import aot_serve, compile_cache, fleet_cells
+from gen_worker import aot_serve, compile_cache, fleet_compiled_graphs
 from gen_worker.api.decorators import Compile
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
 from gen_worker.executor import Executor
@@ -117,12 +117,12 @@ class AotFamily:
 
 
 def _fake_arm(key: str, ref: str):
-    """A fleet policy standing in for F1: arm an exported cell on the unet
+    """A fleet policy standing in for F1: arm an exported compiled graph on the unet
     and return the adopted identity — the executor path from ArmOutcome to
     the boot proof is the code under test and runs REAL."""
 
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
-                publisher: Any = None) -> "fleet_cells.ArmOutcome":
+                publisher: Any = None) -> "fleet_compiled_graphs.ArmOutcome":
         unet = pipe.unet
         # production wraps a REGISTRY; `is_armed` reads it.
         _runner = aot_serve.TCGEntryRunner(
@@ -156,13 +156,13 @@ def _fake_arm(key: str, ref: str):
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
         # marker set above is what `arm_entry` publishes, so
-        # `holds_exported_cell` answers the lane question off the OBJECT.
+        # `holds_exported_compiled_graph` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
-        adopted = fleet_cells.SelfMint(
+        adopted = fleet_compiled_graphs.SelfMint(
             family=FAMILY, compiled_graph_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
-            artifact=Path(cache_dir or ".") / "cell.tar")
-        return fleet_cells.ArmOutcome(armed=True, self_mint=adopted)
+            artifact=Path(cache_dir or ".") / "compiled-graph.tar")
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=adopted)
 
     return _enable
 
@@ -217,7 +217,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str, exercise: bool,
         RIG["weight_lane"] = weight_lane
     key = "cg-key-v1-" + (seed * 56)[:56]
     ref = f"root/family-{FAMILY}#{key}"
-    monkeypatch.setattr(fleet_cells, "enable_compiled", _fake_arm(key, ref))
+    monkeypatch.setattr(fleet_compiled_graphs, "enable_compiled", _fake_arm(key, ref))
     return key, ref
 
 
@@ -240,7 +240,7 @@ def test_unexercised_pure_aot_arm_keeps_serving_and_banks_no_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """pgw#1141: absence of a dispatch is not a verdict about the artifact.
-    The arm stands and the first real request is the proof; the cell is not
+    The arm stands and the first real request is the proof; the compiled graph is not
     recorded proven, which is what the publish gate reads."""
     _key, ref = _rig(monkeypatch, seed="b", exercise=False)
     ex = _executor(tmp_path, monkeypatch)

@@ -197,7 +197,7 @@ def test_a_fragment_side_query_is_still_discarded() -> None:
     """The lockfile-attribution `?` on the FRAGMENT half keeps its old meaning:
     discarded, not stored. Only a `?` on the address half is a lane spec.
 
-    Asserted on a CELL ref, because th#2031 left the fragment no other home."""
+    Asserted on a COMPILED GRAPH ref, because th#2031 left the fragment no other home."""
     th = parse_model_ref("root/family-sdxl#inductor-rtx-4090-torch2.9?src=lockfile").tensorhub
     assert (th.fragment, th.lane_spec) == ("inductor-rtx-4090-torch2.9", "")
 
@@ -220,11 +220,11 @@ def test_a_weight_ref_fragment_is_a_typed_refusal_th2031() -> None:
             parse_model_ref(ref)
         assert "?<contract pattern>" in str(err.value)
     # ...and the ONE surviving meaning still parses, on every address shape.
-    for cell in ("root/family-sdxl#inductor-rtx-4090-torch2.9",
+    for graph in ("root/family-sdxl#inductor-rtx-4090-torch2.9",
                  "root/family-sdxl@prod#inductor-rtx-4090-torch2.9"):
-        th = parse_model_ref(cell).tensorhub
+        th = parse_model_ref(graph).tensorhub
         assert th.fragment == "inductor-rtx-4090-torch2.9"
-        assert th.canonical() == cell
+        assert th.canonical() == graph
 
 
 def test_folding_a_release_onto_a_spec_ref_mints_no_double_at() -> None:

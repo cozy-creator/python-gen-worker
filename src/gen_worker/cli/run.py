@@ -108,7 +108,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument(
         "--eager-only", dest="eager_only", action="store_true",
         help=(
-            "Serve EAGER ONLY: never arm a compiled cell and never mint one "
+            "Serve EAGER ONLY: never arm a compiled graph and never mint one "
             "(DESIGN-RULINGS §4.32). One invocation is where a cold machine "
             "would otherwise spend minutes minting."
         ),
@@ -570,7 +570,7 @@ def run_setup(
     slots its signature declares.
 
     ``arm_compile=False`` loads the slots WITHOUT arming any compiled path: the
-    mint child drives its own cold arm + capture and must not have a cell armed
+    mint child drives its own cold arm + capture and must not have a compiled graph armed
     under it. ``return_loaded=True`` returns the loaded slot objects so a caller
     can reach the pipeline it just built.
 
@@ -790,7 +790,7 @@ def _structure_device(device: str) -> str:
     """Where a structure-only component's VIRTUAL tensors claim to live.
 
     AOTInductor codegens for the device the traced tensors report, so a
-    structure built as "cpu" on a CUDA pod would compile a CPU cell. Fake
+    structure built as "cpu" on a CUDA pod would compile a CPU compiled graph. Fake
     tensors allocate nothing, so claiming the card costs nothing.
     """
     want = (device or "").strip().lower()
@@ -852,17 +852,17 @@ def _load_injected_model(
             sl.obj, injected, requested=structure_only, slot=slot)
     compile_cfg = getattr(decl, "compile", None) if decl is not None else None
     if compile_cfg is not None:
-        # The compile machinery consumes the enriched CompileCell
+        # The compile machinery consumes the enriched CompileContract
         # (decorator-level lora_bucket + declared shape contract), never the
         # raw Compile. Warm guidance stays empty locally — the local mint
         # and its verify both compute from this same object, so the store
         # is self-consistent.
-        from ..registry import CompileCell
+        from ..registry import CompileContract
 
         # ONE constructor, shared with the registry's path: a must-survive field
         # missed here (e.g. the declared numerics band) would silently judge
-        # every locally minted cell at a default nobody chose.
-        compile_cfg = CompileCell.from_declaration(
+        # every locally minted compiled graph at a default nobody chose.
+        compile_cfg = CompileContract.from_declaration(
             compile_cfg, lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0))
     if (
         arm_compile
@@ -873,7 +873,7 @@ def _load_injected_model(
         from ..models.cache_paths import tensorhub_cas_dir
 
         # The ONE arming brain, with NO sink: delivered artifact, then THIS
-        # MACHINE's own ck1-keyed cell store, then a delegated AOT mint whose
+        # MACHINE's own ck1-keyed compiled graph store, then a delegated AOT mint whose
         # result lands in that store — so the second run of this endpoint on
         # this machine arms from disk with no mint, no hub and no network.
         local_serve.enable_compiled(

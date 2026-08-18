@@ -8,7 +8,7 @@ outranks the mint and cannot be scheduled around.
 
 THE FACT IS DECLARED, NOT SNIFFED. *"A person is sitting at this machine"* is
 not measurable, and the three plausible proxies each answer a DIFFERENT
-question: ``local_cell_store.trust_class()`` is the hub's verdict on whether
+question: ``local_compiled_graph_store.trust_class()`` is the hub's verdict on whether
 this hardware may publish (a rented community pod is untrusted and has no human
 on it); ``publisher is None`` is a fact about the SINK, which
 ``publish_disarmed`` makes an ordinary fleet pod share; ``worker_goals`` is what

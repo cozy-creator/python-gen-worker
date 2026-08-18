@@ -2,7 +2,7 @@
 TOOLCHAIN libs only — driver-side objects are NEVER identity. The
 host-mounted driver userspace half (libcuda.so.<driver-version>,
 libnvidia-*) varies per machine and driver rollout, invisible to the image
-digest; sealing it fractures cell keys per driver cohort (live:
+digest; sealing it fractures compiled graph keys per driver cohort (live:
 libcuda.so.580.126.16 vs .580.159.04 split an L4 fleet — every worker kept
 self-minting).
 
@@ -70,7 +70,7 @@ def test_seal_identical_across_driver_cohorts_when_userspace_matches(
 ) -> None:
     """The pgw#745 live shape: same image (same toolchain content on disk),
     two RunPod machines with different host drivers — the seal (and hence
-    the cell key's env_seal axis) must be IDENTICAL. Driver identity stays
+    the compiled graph key's env_seal axis) must be IDENTICAL. Driver identity stays
     a recorded-only metadata axis, and even a driver lib FILE
     smuggled into a toolchain dir is excluded by name."""
     driver_a = (("libcuda.so.580.126.16", b"driver-cohort-a"),)

@@ -133,7 +133,7 @@ def _fresh_process_settings():
 
 @pytest.fixture(autouse=True)
 def _fresh_delivered_seed_flag():
-    """The gw#608 delivered-cell seed latch is process-lifetime in
+    """The gw#608 delivered-compiled graph seed latch is process-lifetime in
     production; tests seeding artifacts must not leak it into later
     self-mint tests."""
     from gen_worker import compile_cache as _cc
@@ -149,7 +149,7 @@ def _fresh_cell_ledgers():
     mints) are process-lifetime in production; clear them between tests so a
     proof failure in one test cannot poison another's arm/selection."""
     from gen_worker import compile_cache as _cc
-    from gen_worker import fleet_cells as _fc
+    from gen_worker import fleet_compiled_graphs as _fc
 
     def _clear() -> None:
         with _cc._PROVEN_CELLS_LOCK:
@@ -285,7 +285,7 @@ def _fresh_receipt_gate():
     flux cluster: `provision.enable_compiled` drops the refused artifact and
     falls through to the inductor lane, so a dispatch assertion sees
     ``{'cc': None}`` instead of the delivered artifact, and the executor-adopt
-    hit-counter tests lose their delivered cell. Those tests passed in
+    hit-counter tests lose their delivered compiled graph. Those tests passed in
     isolation and failed only after an earlier file armed the gate.
     """
     from gen_worker import receipts as _receipts
@@ -374,13 +374,13 @@ def _postmortem_paths_off_the_host(_postmortem_root):
 
 
 @pytest.fixture(autouse=True)
-def _isolated_local_cell_store(tmp_path_factory):
-    """pgw#1096: the local cell store defaults to ``~/.cache/cozy/compile-cells``.
+def _isolated_local_compiled_graph_store(tmp_path_factory):
+    """pgw#1096: the local compiled graph store defaults to ``~/.cache/cozy/compiled graphs``.
 
     A suite that exercises the AOT self-mint now legitimately WRITES there —
-    `local_keep_reason` keeps a cell whenever no publisher was wired, which is
+    `local_keep_reason` keeps a compiled graph whenever no publisher was wired, which is
     every unit fixture in the tree. Redirect the root per test, so the suite
-    can never deposit fake cells in the developer's real store (or read one
+    can never deposit fake compiled graphs in the developer's real store (or read one
     left by a previous run and call it a hit).
 
     **Deliberately does NOT take `monkeypatch`**, and this is not a style
@@ -415,7 +415,7 @@ def _isolated_local_cell_store(tmp_path_factory):
     prior = os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR")
     prior_cache = os.environ.get("TENSORHUB_CACHE_DIR")
     os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = str(
-        tmp_path_factory.mktemp("local-cell-store"))
+        tmp_path_factory.mktemp("local-compiled-graph-store"))
     os.environ["TENSORHUB_CACHE_DIR"] = str(
         tmp_path_factory.mktemp("worker-cache"))
     _config.reload_for_test()

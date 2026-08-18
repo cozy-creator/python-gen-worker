@@ -14,7 +14,7 @@ identical too (static shift 4.0). What differs is weights and the published
 recipe (28 steps at CFG 4.0 versus 8 steps at CFG 1.0), which is the definition
 of ``tuned``. The ernie ENDPOINT already said so structurally: its two
 ``@endpoint`` classes share ONE ``Compile`` object, and its own comment reads
-*"The two classes are the two CFG arms of this one family cell."*
+*"The two classes are the two CFG arms of this one family compiled graph."*
 
 **CFG is a BATCH AXIS here, not a call count.** ``ErnieImagePipeline``
 concatenates the latents to batch 2 and chunks the prediction, so the guided

@@ -15,7 +15,7 @@
 #       delisting MEANS: "pgw#817's ADOPTION numerics gate. `api/decorators.py`
 #       declares numerics_floor and numerics_warn per family, `activity.py`
 #       declares KIND_COMPILED_GRAPH_NUMERICS, and NOTHING IN src/ IMPORTS numerics_ladder
-#       AT ALL. A cell about to arm is supposed to be run against the eager
+#       AT ALL. A compiled graph about to arm is supposed to be run against the eager
 #       forward it replaces and REFUSE below the floor. It never is."
 #       That sentence is now FALSE, which is the whole point — pgw#848 CP12
 #       (`c47dc46`) gave all three their first production callers, the guard went
@@ -88,7 +88,7 @@
 #       unchanged: whether anything still PRODUCES a delivered
 #       `torch-inductor-cache` artifact for that path to consume. That is the
 #       ratification Paul owes. Three real-compile proofs drive the
-#       transaction through THIS entry (cell portability gw#611, adopt
+#       transaction through THIS entry (compiled graph portability gw#611, adopt
 #       collision pgw#751, executor adopt); routing them at `stage_artifact` +
 #       `_activate_staged` would put tests on module privates to buy nothing.
 #       It goes when the lane goes, or it gains a caller when the lane stays.
@@ -171,7 +171,7 @@ gen_worker.boot_phases.servable_ms()
 #   pgw#1178 the same day with OWNER: Phase 1 and EXPIRY: the per-entry atom.
 #   Phase 1 traced the ~82 `compile_cache.pack` call sites and reported they
 #   are not its tail: they exercise the JIT lane's OWN format, and format 3 is
-#   one graph class keyed by `ek1` while `torch-inductor-cache` is a whole-cell
+#   one graph class keyed by `ek1` while `torch-inductor-cache` is a whole-compiled graph
 #   FX-cache tarball with no per-class identity — so porting it is a category
 #   error, not a task, and the format DIES. That re-assigned the three rows
 #   back to this lane, and the expiry was discharged by deleting rather than

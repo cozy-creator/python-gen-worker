@@ -13,7 +13,7 @@ One test per cut, each red before its change:
              post-th#2062 OBJECT envelope the five routes actually emit;
   * arm (12) an unknown local-context kind refuses instead of silently
              getting a base RequestContext;
-  * addendum a keyless cell record refuses instead of adopting its directory.
+  * addendum a keyless compiled graph record refuses instead of adopting its directory.
 """
 
 from __future__ import annotations
@@ -249,40 +249,40 @@ def test_the_string_code_branch_is_still_admitted() -> None:
 def test_a_keyless_cell_record_refuses_instead_of_adopting_its_directory(
     tmp_path: Path,
 ) -> None:
-    from gen_worker import local_cell_store as store
+    from gen_worker import local_compiled_graph_store as store
 
     root = tmp_path / "cache"
     key = "ck1_" + "a" * 40
-    cell = store.cells_root(root) / key
-    cell.mkdir(parents=True)
-    (cell / store.RECORD_NAME).write_text(json.dumps({
+    graph = store.compiled_graphs_root(root) / key
+    graph.mkdir(parents=True)
+    (graph / store.RECORD_NAME).write_text(json.dumps({
         "family": "example", "bytes": 12, "stored_at": 1.0,
         "verdict": store.VERDICT_ADMITTED, "sink": store.SINK_OWED,
     }))
 
-    listed = store.stored_cells(root)
+    listed = store.stored_compiled_graphs(root)
 
     assert [c.key for c in listed] == []
     # And the identity never reaches an upload scan either.
-    assert store.cells_owed_to_sink(root) == []
+    assert store.compiled_graphs_owed_to_sink(root) == []
 
 
 def test_a_keyed_record_still_lists(tmp_path: Path) -> None:
     """The refusal above must not blank a healthy store."""
-    from gen_worker import local_cell_store as store
+    from gen_worker import local_compiled_graph_store as store
 
     root = tmp_path / "cache"
     key = "ck1_" + "b" * 40
-    cell = store.cells_root(root) / key
-    cell.mkdir(parents=True)
-    (cell / store.RECORD_NAME).write_text(json.dumps({
+    graph = store.compiled_graphs_root(root) / key
+    graph.mkdir(parents=True)
+    (graph / store.RECORD_NAME).write_text(json.dumps({
         "compiled_graph_key": key, "family": "example", "bytes": 12,
         "stored_at": 1.0, "verdict": store.VERDICT_ADMITTED,
         "sink": store.SINK_OWED,
     }))
 
-    assert [c.key for c in store.stored_cells(root)] == [key]
-    assert [c.key for c in store.cells_owed_to_sink(root)] == [key]
+    assert [c.key for c in store.stored_compiled_graphs(root)] == [key]
+    assert [c.key for c in store.compiled_graphs_owed_to_sink(root)] == [key]
 
 
 # ---------------------------------------------------------------------------

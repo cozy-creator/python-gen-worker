@@ -1,17 +1,17 @@
-"""pgw#784: the mint child — one cell, one process, then exit.
+"""pgw#784: the mint child — one compiled graph, one process, then exit.
 
 ``python -m gen_worker.mint_child <request.json>``
 
-Run by ``mint_process.run_mint`` on a compile-cell cache MISS while the
+Run by ``mint_process.run_mint`` on a compiled graph cache MISS while the
 serving process keeps serving eager and heartbeating. Also runnable by hand
 from the request file a failed mint leaves behind, which is the whole reason
 the boundary is a file.
 
 What it does, and why in this order
 -----------------------------------
-1. **Seal the environment** exactly as a worker boot does. The cell key
+1. **Seal the environment** exactly as a worker boot does. The compiled graph key
    digests the inductor config; a child that sealed differently would stamp a
-   cell the parent's ``verify()`` then rejects on an axis nobody changed.
+   compiled graph the parent's ``verify()`` then rejects on an axis nobody changed.
 2. **Install the parent's RESOLVED slot bindings** (pgw#969) onto the specs
    this process rediscovered, before a weight is read. Rediscovery yields
    only what ``@endpoint`` DECLARED, and a hub-catalog slot
@@ -27,29 +27,29 @@ What it does, and why in this order
    ``mint_artifact``'s producer-style ``_compile_and_warm``. That distinction
    is gw#586/gw#587's whole lesson: a synthetic single-stage warm call can
    trace DIFFERENT FX graphs than a conditioned/two-stage endpoint's real
-   warmup, and a cell packed from the wrong graphs bricks every adopting boot.
+   warmup, and a compiled graph packed from the wrong graphs bricks every adopting boot.
    So the child runs ``warmup.plan`` over the same sibling spec set the parent
    would have, through the endpoint's own handler. Same code, same shapes,
    same seal — a different PROCESS, not a different execution.
 
-   The AOT recipe traces with ``torch.export`` instead, so its cell is not
+   The AOT recipe traces with ``torch.export`` instead, so its compiled graph is not
    derived from these forwards — but it runs ONE of them anyway (pgw#984),
    before exporting. A recipe that never enters the handler cannot tell a
    working endpoint from one whose forward dies on its first request, and a
-   green mint that sealed a cell for the latter is the shape pgw#969 cost
+   green mint that sealed a compiled graph for the latter is the shape pgw#969 cost
    four hours to find on a pod.
-5. **Pack** the exported cell and write a typed report.
+5. **Pack** the exported compiled graph and write a typed report.
 
 The parity claim is checked, not asserted
 -----------------------------------------
-The parent adopts this artifact through the ordinary DELIVERED-cell path and
+The parent adopts this artifact through the ordinary DELIVERED-compiled graph path and
 then runs its own warmup proof against it. If the child's traced graphs are
 not the ones the parent's serving code compiles, the parent's proof MISSES and
-the cell is neither advertised nor published — the same gw#607 per-object
-proof that gates a hub-delivered cell. In-process capture made that proof
+the compiled graph is neither advertised nor published — the same gw#607 per-object
+proof that gates a hub-delivered compiled graph. In-process capture made that proof
 tautological (the capture was byte-derived from the proof); out-of-process
-makes it load-bearing. A parity gap therefore degrades to "eager, cell
-absent", never to a poisoned published cell.
+makes it load-bearing. A parity gap therefore degrades to "eager, compiled graph
+absent", never to a poisoned published compiled graph.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ from .mint_process import (
 logger = logging.getLogger(__name__)
 
 #: pgw#1010: the child builds ONE artifact kind. The dynamo recipe it used to
-#: also run produced a cell with no consumer, and it is deleted rather than
+#: also run produced a compiled graph with no consumer, and it is deleted rather than
 #: kept behind a request field nobody may set.
 RECIPE_AOT = "aot"
 
@@ -100,7 +100,7 @@ def _assert_family_mintable(family: str) -> None:
     The pattern is pgw#1080's: split the refusal by TYPE and fail closed
     rather than degrading. A blocked family has exactly one legal outcome —
     it serves eager and mints nothing — so there is no fallback to take, and
-    a mint that started anyway would publish a cell for a class set the
+    a mint that started anyway would publish a compiled graph for a class set the
     declaration says it cannot yet claim.
     """
     if not family:
@@ -201,9 +201,9 @@ def mint_identity(request: MintRequest) -> str:
 
     A mint child holds no orchestrator session, so its only channel is the
     text of whatever it raises. ``ValueError: slot 'pipeline': no resolved
-    model ref`` named a symptom and no mint: family, cell key, lane and
+    model ref`` named a symptom and no mint: family, compiled graph key, lane and
     function all had to be reconstructed from a truncated activity row plus a
-    DB read before anyone could say which of a pod's cells had died.
+    DB read before anyone could say which of a pod's compiled graphs had died.
     """
     return (
         f"mint family={request.family!r} arm_key={request.arm_token!r} "
@@ -252,7 +252,7 @@ def _drive_warm_plan(
             raise PreflightRefused(
                 f"{mint_identity(request)}: the endpoint's own warm plan does "
                 f"not run — warm job {job.spec.name!r} raised "
-                f"{type(exc).__name__}: {exc}. A cell must not seal for a "
+                f"{type(exc).__name__}: {exc}. A compiled graph must not seal for a "
                 f"handler that cannot serve.") from exc
     return ledger
 
@@ -334,7 +334,7 @@ def _mint_aot(
     operator-driven since pgw#723/#758, and discovery filtered for its artifact
     kind since pgw#722 — but no serving-pod code path imported it, so a
     discovery MISS could only ever fall through to the dynamo recipe, whose
-    cell that filter rejects. Every pod missed, "re-minted" the wrong kind, and
+    compiled graph that filter rejects. Every pod missed, "re-minted" the wrong kind, and
     the next pod missed identically.
 
     pgw#1215 (th#1834 Phase 3 keystone) changed WHERE the export happens. This
@@ -348,11 +348,11 @@ def _mint_aot(
     depends on the composed pipeline), and moving the packed artifacts into the
     parent's directory.
     """
-    from . import aot_compile_pool, aot_mint, fleet_cells
+    from . import aot_compile_pool, aot_mint, fleet_compiled_graphs
 
     frame(phase="trace_graph", note=f"export declaration for {cfg.family!r}")
     if spec is None:
-        spec = fleet_cells.aot_export_spec(pipe, cfg)
+        spec = fleet_compiled_graphs.aot_export_spec(pipe, cfg)
     out_dir = target.parent / "aot"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -397,7 +397,7 @@ def _mint_aot(
     if decl is None:
         raise PreflightRefused(
             f"family {spec.family!r} has no registered export declaration — "
-            f"a multi-graph cell derives its class set from it")
+            f"a multi-graph compiled graph derives its class set from it")
     class_count = len(aot_mint.declared_class_rows(pipe, spec, decl))
     width = aot_compile_pool.entry_workers(
         class_count,
@@ -501,7 +501,7 @@ def _mint_aot(
 
 
 def mint(request: MintRequest) -> MintReport:
-    """Build the cell. Raises ``PreflightRefused`` for a named refusal."""
+    """Build the compiled graph. Raises ``PreflightRefused`` for a named refusal."""
     # The two views ``cli.run.run_setup`` takes, both DERIVED from the one
     # resolution (pgw#974) rather than carried beside it.
     paths = {slot: res.path for slot, res in request.slots.items()}
@@ -538,9 +538,9 @@ def mint(request: MintRequest) -> MintReport:
     assert_slots_resolvable(
         siblings, request.slots, what=mint_identity(request))
     # pgw#1034: the wire struct IS the cfg. It used to be re-inflated into a
-    # `registry.CompileCell` to keep `contract_facts()` byte-identical for a
+    # `registry.CompileContract` to keep `contract_facts()` byte-identical for a
     # key the child computed — the child has computed no key since pgw#758, so
-    # the rebuild only manufactured a CompileCell whose contract axes were
+    # the rebuild only manufactured a CompileContract whose contract axes were
     # whatever the wire happened to carry. Every consumer here reads the
     # declared facts by name (family, targets, shapes, text_lens, guidance,
     # lora_bucket) and the spec carries exactly those.
@@ -548,7 +548,7 @@ def mint(request: MintRequest) -> MintReport:
 
     # pgw#1115: FAIL CLOSED on a declared mint blocker, here — after discovery
     # has registered the declaration and before one weight is read. The parent
-    # declines a blocked family in `fleet_cells.mint_recipe`, so a request that
+    # declines a blocked family in `fleet_compiled_graphs.mint_recipe`, so a request that
     # reaches a child came from somewhere else (an operator CLI, a delegated
     # request built against a stale declaration). Serving a blocked family
     # eagerly is the declared outcome; minting it is not available at all, and
@@ -567,7 +567,7 @@ def mint(request: MintRequest) -> MintReport:
 
     def _load() -> Tuple[Any, Any, Any]:
         """Load the endpoint instance and its compile-target pipeline once."""
-        from . import fleet_cells
+        from . import fleet_compiled_graphs
         from .models import structure_only
         from .models.structure_only import (
             StructureCapabilityMissing,
@@ -647,7 +647,7 @@ def mint(request: MintRequest) -> MintReport:
         assert_traceable_as_loaded(loaded_pipe, request)
         if cfg.lora_bucket:
             cc.apply_lora_execution_lane(loaded_pipe, cfg.lora_bucket)
-        return obj, loaded_pipe, fleet_cells.aot_export_spec(loaded_pipe, cfg)
+        return obj, loaded_pipe, fleet_compiled_graphs.aot_export_spec(loaded_pipe, cfg)
 
     # TCG owns the compiled artifact and admits a closed metadata schema. The
     # retired worker kernel-lane A/B neither reached that schema nor affected
@@ -673,7 +673,7 @@ def mint(request: MintRequest) -> MintReport:
                 for f in facts)))
     # pgw#984's guarantee, discharged where it costs nothing (pgw#1199).
     #
-    # The endpoint's own handler must be PROVEN to run before a cell seals:
+    # The endpoint's own handler must be PROVEN to run before a compiled graph seals:
     # `torch.export` traces the declared graph classes off the modules directly
     # and never enters the handler, so a mint's phase table could read
     # `load / trace_graph / seal_publish / finalize` — green — for an endpoint
@@ -691,7 +691,7 @@ def mint(request: MintRequest) -> MintReport:
     #
     # REFUSED, never re-proven here: a child that proved it itself would
     # reintroduce the allocation, and a caller that cannot prove its handler
-    # runs has no business publishing a cell for it.
+    # runs has no business publishing a compiled graph for it.
     if virtual_modules:
         assert_handler_proven(request)
         footprint["handler_proof"] = str(request.handler_proof)
@@ -725,7 +725,7 @@ def mint(request: MintRequest) -> MintReport:
         raise PreflightRefused(
             f"compiled_graph_target_unnameable: {target_block}")
     # Deliberately NOT `aot_mint.compose_for_mint` (which builds a pipeline
-    # from a model ref for an operator's mint pod): the graphs this cell must
+    # from a model ref for an operator's mint pod): the graphs this compiled graph must
     # serve are the graphs the ENDPOINT's own composed pipeline runs, and
     # composing a second time is how a mint exports something the serving pod
     # cannot adopt.
@@ -816,7 +816,7 @@ def assert_handler_proven(request: MintRequest) -> None:
     raise PreflightRefused(
         f"{mint_identity(request)}: this is a WEIGHT-FREE mint and the parent "
         f"sent no handler proof. pgw#984 requires the endpoint's own handler "
-        f"to have run before a cell seals, and since pgw#1199 that proof "
+        f"to have run before a compiled graph seals, and since pgw#1199 that proof "
         f"belongs to the process that HOLDS the weights — proving it here "
         f"would mean materialising one full checkpoint at compute dtype in a "
         f"process that holds none. Run one warm forward on the resident "
@@ -826,7 +826,7 @@ def assert_handler_proven(request: MintRequest) -> None:
 def _device_label(request: MintRequest) -> str:
     """Where this child's tensors live — the ordinal the parent chose, or the
     card this process defaults to. ``cpu`` on a cardless box, stated rather
-    than assumed: a structure built as "cpu" compiles a CPU cell."""
+    than assumed: a structure built as "cpu" compiles a CPU compiled graph."""
     if not cuda_ready():
         return "cpu"
     ordinal = int(getattr(request, "device", -1) or -1)
@@ -906,7 +906,7 @@ def _install_posture(request: MintRequest) -> None:
 
     Doing it here also covers strictly more ground than nicing the entry-pool
     spawns would. Since pgw#1080 every production mint is weight-free, and
-    ``aot_mint._mint_cell`` forces ``parallel=False`` for a weight-free mint —
+    ``aot_mint._mint_compiled_graph`` forces ``parallel=False`` for a weight-free mint —
     so the pool spawns NO children at all today and the compile runs in THIS
     process. Nice is inherited across ``fork``/``exec``, so this one call
     covers the serial compile, the entry children when parallelism returns

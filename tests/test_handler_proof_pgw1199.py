@@ -5,7 +5,7 @@ weight-free compile. A does-it-run proof inside `mint_child` breaks that: it
 materialises REAL random values for every virtual parameter — one full
 checkpoint at compute dtype, in a child process holding none, concurrently with
 the parent's resident copy (wan-2.2 on an H100-80: 56.2 GB against 15.5 GiB
-free, so `CUDA out of memory` -> `delegated_no_cell` -> `boot_ended_uncompiled`).
+free, so `CUDA out of memory` -> `delegated_no_compiled_graph` -> `boot_ended_uncompiled`).
 
 §4.33 steps 4-5 put verification on the LIVE pipeline, against weights that are
 resident and paid for once. This file fences that from both ends:
@@ -18,7 +18,7 @@ resident and paid for once. This file fences that from both ends:
 
 WHAT IS DELIBERATELY NOT WEAKENED
 ---------------------------------
-A cell must not seal for a handler that cannot serve. A missing proof REFUSES
+A compiled graph must not seal for a handler that cannot serve. A missing proof REFUSES
 the mint. It never degrades to "mint anyway".
 """
 
@@ -65,7 +65,7 @@ def test_a_function_is_unproven_until_its_handler_has_run() -> None:
 
 def test_the_proof_is_PROVENANCE_and_not_a_boolean() -> None:
     """The child's report has to be able to say WHICH proof stood behind the
-    cell it sealed. A bare True would make "proven" unauditable across the
+    compiled graph it sealed. A bare True would make "proven" unauditable across the
     process boundary — the child cannot see the parent's ledger, only what the
     request carries."""
     handler_proof.record("generate", "boot warm forward 'generate' (real weights)")
@@ -82,7 +82,7 @@ def test_the_first_proof_wins_and_a_later_one_does_not_overwrite_it() -> None:
 def test_functions_are_proven_INDIVIDUALLY() -> None:
     """A pod serves several handlers off one pipeline and mints per function.
     Proving one must not vouch for another — that is how a broken sibling
-    handler would seal a cell."""
+    handler would seal a compiled graph."""
     handler_proof.record("generate", "boot warm forward (real weights)")
     assert not handler_proof.proven("generate_turbo")
 
@@ -218,7 +218,7 @@ def test_a_local_mint_is_DEFERRED_rather_than_run_inside_the_slot_load() -> None
     from gen_worker import local_serve
 
     deferred: List[Any] = []
-    pending = object.__new__(local_serve.fleet_cells.PendingSelfMint)
+    pending = object.__new__(local_serve.fleet_compiled_graphs.PendingSelfMint)
     outcome = type("_Outcome", (), {"armed": False, "self_mint": pending})()
     ctx = local_serve.LocalMintContext(
         function="generate", modules=("m",), slots={})
@@ -229,15 +229,15 @@ def test_a_local_mint_is_DEFERRED_rather_than_run_inside_the_slot_load() -> None
 
     # Drive the branch directly: a pending nobody deferred would be minted
     # in-line, which is what this must not do.
-    import gen_worker.fleet_cells as fleet_cells
+    import gen_worker.fleet_compiled_graphs as fleet_compiled_graphs
 
-    original = fleet_cells.enable_compiled
+    original = fleet_compiled_graphs.enable_compiled
     try:
-        fleet_cells.enable_compiled = lambda *a, **k: outcome  # type: ignore[assignment]
+        fleet_compiled_graphs.enable_compiled = lambda *a, **k: outcome  # type: ignore[assignment]
         result = local_serve.enable_compiled(
             object(), object(), None, mint=ctx, defer=deferred)
     finally:
-        fleet_cells.enable_compiled = original  # type: ignore[assignment]
+        fleet_compiled_graphs.enable_compiled = original  # type: ignore[assignment]
 
     assert result is False, "a deferred mint has not armed anything yet"
     assert len(deferred) == 1
@@ -262,20 +262,20 @@ def test_run_deferred_refuses_the_mint_when_the_handler_does_not_run() -> None:
     def _boom(*_a: Any, **_k: Any) -> str:
         raise handler_proof.HandlerProofFailed("the handler raised TypeError")
 
-    import gen_worker.fleet_cells as fleet_cells
+    import gen_worker.fleet_compiled_graphs as fleet_compiled_graphs
 
     original_prove = handler_proof.prove
-    original_abandon = fleet_cells.abandon_self_mint
+    original_abandon = fleet_compiled_graphs.abandon_self_mint
     original_mint = local_serve._mint_here
     try:
         handler_proof.prove = _boom  # type: ignore[assignment]
-        fleet_cells.abandon_self_mint = abandoned.append  # type: ignore[assignment]
+        fleet_compiled_graphs.abandon_self_mint = abandoned.append  # type: ignore[assignment]
         local_serve._mint_here = (  # type: ignore[assignment]
             lambda *a, **k: minted.append(a))
         local_serve.run_deferred([owed], instance=object(), specs=[])
     finally:
         handler_proof.prove = original_prove  # type: ignore[assignment]
-        fleet_cells.abandon_self_mint = original_abandon  # type: ignore[assignment]
+        fleet_compiled_graphs.abandon_self_mint = original_abandon  # type: ignore[assignment]
         local_serve._mint_here = original_mint  # type: ignore[assignment]
 
     assert minted == [], "a mint must not start behind a failed proof"

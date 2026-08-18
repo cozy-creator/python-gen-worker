@@ -137,9 +137,9 @@ def test_ref_acceptance_implies_well_formed_components(raw: str) -> None:
         assert not any(c in part for c in REF_GRAMMAR_SEPARATORS), (
             f"{raw!r} accepted with a separator inside {name}={part!r}")
     if th.fragment is not None:
-        # th#2031: a fragment survives parsing only on a compile CELL repo.
+        # th#2031: a fragment survives parsing only on a compile COMPILED GRAPH repo.
         assert th.owner == "root" and th.repo.startswith("family-"), (
-            f"{raw!r} accepted a fragment on a non-cell repo")
+            f"{raw!r} accepted a fragment on a non-compiled graph repo")
         assert th.fragment == th.fragment.lower()
         assert 1 <= len(th.fragment) <= MAX_FRAGMENT_LEN
     if th.digest is not None:

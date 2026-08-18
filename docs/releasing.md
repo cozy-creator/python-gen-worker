@@ -73,19 +73,19 @@ if want_gw != have_gw:
     return f"gen_worker {want_gw!r} != runtime {have_gw!r}"
 ```
 
-So a compiled cell is accepted **only** by a runtime whose `gen_worker` string matches the producer's
+So a compiled graph is accepted **only** by a runtime whose `gen_worker` string matches the producer's
 exactly, checked per-artifact, at arm time, and **named** on mismatch.
 
 **Therefore loosening the pin does not weaken the invariant.** The `==` in `pyproject.toml` was a
 crude *proxy* for a property that `verify()` enforces directly and more strictly: a packaging pin
-cannot stop a cell minted elsewhere from being offered to this pod, whereas `verify()` can and does.
+cannot stop a compiled graph minted elsewhere from being offered to this pod, whereas `verify()` can and does.
 Moving to ranges relocates nothing — it just stops pretending the packaging constraint was the
 safety mechanism.
 
-**State the honest trade:** with ranges, two endpoints may resolve different patches, and a cell
+**State the honest trade:** with ranges, two endpoints may resolve different patches, and a compiled graph
 minted under one will be **refused, typed** (`gen_worker 'a' != runtime 'b'`) by the other. That is a
 **cache-hit-rate** cost — a re-mint — **not a correctness cost**. Nothing is ever silently
-mis-served. If cross-endpoint cell sharing matters for a given family, converge those endpoints on
+mis-served. If cross-endpoint compiled graph sharing matters for a given family, converge those endpoints on
 one version deliberately; do not reach for a global exact pin to get it.
 
 ---
@@ -380,5 +380,5 @@ print([l for l in z.read([n for n in z.namelist() if n.endswith('METADATA')][0])
 
 Check the METADATA version **and one thing this cut actually changed** — a file the release deleted
 should be absent, a restored function present. The 0.113.0 cut confirmed `mint_budget.py` and
-`local_cells.py` gone and `trt_engine.build()` present, which is the only check that distinguishes
+`local_compiled_graphs.py` gone and `trt_engine.build()` present, which is the only check that distinguishes
 "the right tree shipped" from "a wheel with the right number shipped".

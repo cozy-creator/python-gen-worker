@@ -132,14 +132,14 @@ def _cfg() -> CompileSpec:
 
     specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main_w8a8"])
     spec = next(s for s in specs if s.name == "generate-w8a8")
-    cell = spec.compile_cell()
+    graph = spec.compile_contract()
     return CompileSpec(
-        shapes=tuple(tuple(int(v) for v in row) for row in (cell.shapes or ())),
-        targets=tuple(str(t) for t in (cell.targets or ())),
-        family=str(cell.family or ""),
-        lora_bucket=int(cell.lora_bucket or 0),
-        guidance_scales=tuple(float(v) for v in (cell.guidance_scales or ())),
-        text_lens=tuple(int(v) for v in (cell.text_lens or ())),
+        shapes=tuple(tuple(int(v) for v in row) for row in (graph.shapes or ())),
+        targets=tuple(str(t) for t in (graph.targets or ())),
+        family=str(graph.family or ""),
+        lora_bucket=int(graph.lora_bucket or 0),
+        guidance_scales=tuple(float(v) for v in (graph.guidance_scales or ())),
+        text_lens=tuple(int(v) for v in (graph.text_lens or ())),
     )
 
 
@@ -340,7 +340,7 @@ def test_a_full_mint_request_decodes_with_its_destinations_dropped(
 
 def test_the_report_type_carries_no_artifact_identity() -> None:
     """A measurement that could name an artifact is one field away from being
-    mistaken for one. ``MeasureReport`` has no path, no digest, no cell key —
+    mistaken for one. ``MeasureReport`` has no path, no digest, no compiled graph key —
     and the mint's own report has all three, which is what makes the absence
     deliberate rather than accidental."""
     from gen_worker.mint_process import MintReport
@@ -355,14 +355,14 @@ def test_the_report_type_carries_no_artifact_identity() -> None:
 
 PUBLISH_SURFACE = (
     # (module attribute path, why it publishes)
-    ("fleet_cells", "publish_self_mint"),
-    ("local_cell_store", "store"),
+    ("fleet_compiled_graphs", "publish_self_mint"),
+    ("local_compiled_graph_store", "store"),
     ("aot_serve", "artifact_metadata"),
     ("aot_mint", "mint_targets"),
     ("mint_child", "mint"),
     ("mint_process", "run_mint"),
     ("aot_delivery", "materialize_named_artifact"),
-    ("cell_resolve", "materialize"),
+    ("compiled_graph_resolve", "materialize"),
 )
 
 

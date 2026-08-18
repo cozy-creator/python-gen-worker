@@ -35,13 +35,13 @@ from gen_worker._vendor.torchcg import (
 
 from . import boot_phases, receipts
 from .api.errors import RetryableError
-from .compile_cache import parse_cell_ref
+from .compile_cache import parse_compiled_graph_ref
 from .models.cache_paths import open_worker_cas, open_worker_engine
 
 logger = logging.getLogger(__name__)
 
 class NamedArtifactUnavailable(RetryableError):
-    """The named cell's bytes could not be materialized AS NAMED."""
+    """The named compiled graph's bytes could not be materialized AS NAMED."""
 
     def __init__(self, reason: str, detail: str) -> None:
         self.reason = reason
@@ -51,29 +51,29 @@ class NamedArtifactUnavailable(RetryableError):
 def _import_verified_artifact(
     artifact: Path,
     *,
-    cell_ref: str,
+    cg_ref: str,
     cache_dir: Optional[Path],
     what: str,
 ) -> None:
     """Bind verified delivery bytes to the one exact TCG key they declare."""
 
-    family, named_key = parse_cell_ref(cell_ref)
+    family, named_key = parse_compiled_graph_ref(cg_ref)
     if not is_compiled_graph_key(named_key):
         raise NamedArtifactUnavailable(
             "artifact_unpinned",
-            f"{what}: named ref {cell_ref!r} carries no compiled-graph key",
+            f"{what}: named ref {cg_ref!r} carries no compiled-graph key",
         )
     if not receipts.gate_delivered_artifact(artifact, family):
         raise NamedArtifactUnavailable(
             "artifact_receipt_refused",
-            f"{what}: the hub receipt did not authorize {cell_ref!r}",
+            f"{what}: the hub receipt did not authorize {cg_ref!r}",
         )
     try:
         result = open_worker_engine(cache_dir).import_artifact(named_key, artifact)
     except Exception as exc:
         raise NamedArtifactUnavailable(
             "artifact_admission_failed",
-            f"{what}: TCG refused {cell_ref!r}: {type(exc).__name__}: {exc}",
+            f"{what}: TCG refused {cg_ref!r}: {type(exc).__name__}: {exc}",
         ) from exc
     if result.outcome == StoreOutcome.DIVERGENT:
         raise NamedArtifactUnavailable(
@@ -83,7 +83,7 @@ def _import_verified_artifact(
 
 
 def materialize_named_artifact(
-    cell_ref: str,
+    cg_ref: str,
     content_digest: str,
     presigned: Optional[Any],
     *,
@@ -97,23 +97,23 @@ def materialize_named_artifact(
     digest, so a re-dispatch of the same spec is a verify-and-return.
     ``what`` names the attempt + spec digest for every refusal.
     """
-    # THE cell-download phase. Without a producer here, an adopt leg cannot be
+    # THE compiled graph-download phase. Without a producer here, an adopt leg cannot be
     # split into download vs admission — the first question anyone asks about
-    # an adopt. This is the one place cell bytes move, so it is the one place
+    # an adopt. This is the one place compiled graph bytes move, so it is the one place
     # the span belongs.
     with boot_phases.span(
         boot_phases.PHASE_CELL_FETCH,
-        ref=cell_ref,
+        ref=cg_ref,
         artifact_kind=ARTIFACT_KIND,
         artifact_key=str(content_digest or ""),
     ) if boot_phases.in_boot() else contextlib.nullcontext() as fetch_span:
         return _materialize_named_artifact(
-            cell_ref, content_digest, presigned,
+            cg_ref, content_digest, presigned,
             cache_dir=cache_dir, what=what, span=fetch_span)
 
 
 def _materialize_named_artifact(
-    cell_ref: str,
+    cg_ref: str,
     content_digest: str,
     presigned: Optional[Any],
     *,
@@ -124,7 +124,7 @@ def _materialize_named_artifact(
     digest = str(content_digest or "").strip()
     if not digest:
         raise NamedArtifactUnavailable(
-            "artifact_unpinned", f"{what}: named cell {cell_ref!r} carries no "
+            "artifact_unpinned", f"{what}: named compiled graph {cg_ref!r} carries no "
             "content digest")
     cas = open_worker_cas(cache_dir)
     # A bounded transfer staging path, never a second compiled-graph store.
@@ -144,18 +144,18 @@ def _materialize_named_artifact(
             # A cache hit is a real and countable outcome of this phase, not a
             # zero-byte fetch: the verify pass still reads the whole tarball.
             if span is not None:
-                span.classify("cached", f"ref={cell_ref}")
+                span.classify("cached", f"ref={cg_ref}")
                 span.bytes_moved(dest.stat().st_size, boot_phases.SOURCE_LOCAL)
             _import_verified_artifact(
-                dest, cell_ref=cell_ref, cache_dir=cache_dir, what=what
+                dest, cg_ref=cg_ref, cache_dir=cache_dir, what=what
             )
             return dest
 
     if presigned is None or not list(getattr(presigned, "files", ())):
         raise NamedArtifactUnavailable(
             "missing_content",
-            f"{what}: the grant carries no transport for the named cell "
-            f"{cell_ref!r} (content digest {digest})")
+            f"{what}: the grant carries no transport for the named compiled graph "
+            f"{cg_ref!r} (content digest {digest})")
     files = list(presigned.files)
     entry = next(
         (f for f in files if str(f.path or "").endswith(".tar.gz")),
@@ -163,18 +163,18 @@ def _materialize_named_artifact(
     if entry is None:
         raise NamedArtifactUnavailable(
             "missing_content",
-            f"{what}: the grant's transport for {cell_ref!r} names no "
+            f"{what}: the grant's transport for {cg_ref!r} names no "
             "artifact tarball")
 
     declared_size = int(entry.size_bytes or 0)
     remote_chunks = list(entry.chunks or ())
     if not remote_chunks and declared_size <= 0:
-        # A cell artifact is compiled code fetched before serving; an entry
+        # A compiled graph artifact is compiled code fetched before serving; an entry
         # that cannot say how big it is cannot be sized against disk
         #  — refuse rather than an unbounded write.
         raise NamedArtifactUnavailable(
             "missing_content",
-            f"{what}: transport for {cell_ref!r} declares no size_bytes")
+            f"{what}: transport for {cg_ref!r} declares no size_bytes")
 
     try:
         chunks = tuple(
@@ -193,7 +193,7 @@ def _materialize_named_artifact(
     except ValueError as exc:
         raise NamedArtifactUnavailable(
             "artifact_fetch_failed",
-            f"{what}: named cell {cell_ref!r} has invalid tensorfs transport: {exc}",
+            f"{what}: named compiled graph {cg_ref!r} has invalid tensorfs transport: {exc}",
         ) from exc
     try:
         report = download(grants, cas)
@@ -202,7 +202,7 @@ def _materialize_named_artifact(
             raise RuntimeError(failures or "artifact grants expired")
         dest_dir.mkdir(parents=True, exist_ok=True)
         # A compiled-graph artifact leaving the tensorfs store for torchcg's
-        # own cell store. Priced under §9's `tcg artifact export off-store`
+        # own compiled graph store. Priced under §9's `tcg artifact export off-store`
         # row: the destination is a different store's file, not a path inside
         # a projected snapshot, so there is nothing here to point a stub at.
         # The pinned rev spells the single-file hatch `materialize`; §9 and
@@ -215,14 +215,14 @@ def _materialize_named_artifact(
         raise NamedArtifactUnavailable(
             "content_digest_mismatch" if isinstance(exc, DigestMismatch)
             else "artifact_fetch_failed",
-            f"{what}: named cell {cell_ref!r} bytes refused against "
+            f"{what}: named compiled graph {cg_ref!r} bytes refused against "
             f"{digest[:24]}…: {exc}") from exc
     if span is not None:
-        span.classify("fetched", f"ref={cell_ref} chunks={len(remote_chunks)}")
+        span.classify("fetched", f"ref={cg_ref} chunks={len(remote_chunks)}")
         span.bytes_moved(declared_size or dest.stat().st_size,
                          boot_phases.SOURCE_CAS)
     _import_verified_artifact(
-        dest, cell_ref=cell_ref, cache_dir=cache_dir, what=what
+        dest, cg_ref=cg_ref, cache_dir=cache_dir, what=what
     )
     return dest
 

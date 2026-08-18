@@ -1,8 +1,8 @@
-"""DESIGN-RULINGS §4.31 + §4.32: a boot-ADOPTED cell materializes, arms and
+"""DESIGN-RULINGS §4.31 + §4.32: a boot-ADOPTED compiled graph materializes, arms and
 SERVES. No warmup barrier, and no quality gate at adoption.
 
 §4.31: skip the warmup / arm check and serve right away; if serving raises and
-the cell is the cause, de-arm the cell and serve eager. The barrier could never
+the compiled graph is the cause, de-arm the compiled graph and serve eager. The barrier could never
 pass for an adopt anyway — the adopt arms BEFORE setup, so the setup warmup
 dispatches nothing through the artifact, scores it `unexercised`, folds it into
 `unproven` and unwraps it. (The SELF-MINT arm is healthy because a mint's warmup
@@ -17,8 +17,8 @@ and it is STRICT.
 
 Safety without re-measurement comes from CONSTRUCTION, not from checkpoint
 identity (a `ck1` key is graph x envelope x sm x toolchain and carries no
-checkpoint hash — one cell serves every checkpoint of the architecture, which
-is the whole point of reuse): the cell is compiled CODE and weights flow
+checkpoint hash — one compiled graph serves every checkpoint of the architecture, which
+is the whole point of reuse): the compiled graph is compiled CODE and weights flow
 through it as data, so a mint-time parity proof proves the FUNCTION; a weight
 value baked into the artifact is fenced fail-closed by the constant-folding
 fence; and a checkpoint that changes the COMPUTATION hashes to a different
@@ -28,11 +28,11 @@ What this file pins, in four parts:
 
 A. the MINT gate — strict, identical-or-refuse, and it is the thing that
    decides whether bytes ship;
-B. ADOPTION — a cell that would FAIL that gate still arms and serves, and no
+B. ADOPTION — a compiled graph that would FAIL that gate still arms and serves, and no
    quality row is emitted at all, because nobody measured it;
-C. the executor's setup warmup — an armed cell with no dispatch keeps its arm,
+C. the executor's setup warmup — an armed compiled graph with no dispatch keeps its arm,
    its target and its aliases;
-D. try-serve — a cell-attributable failure answers the request eager and
+D. try-serve — a compiled graph-attributable failure answers the request eager and
    de-arms sticky; a transient OOM does neither.
 
 Nothing is stubbed. Parts A and B drive the REAL `provision.arm_aot` against a
@@ -57,7 +57,7 @@ _NO_FACTS = _FU(owed_by="a test that resolves no catalog")
 import gen_worker
 import gen_worker.executor as ex_mod
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
-from gen_worker import activity, aot_serve, cell_adopt, compile_cache, fleet_cells
+from gen_worker import activity, aot_serve, compiled_graph_adopt, compile_cache, fleet_compiled_graphs
 from gen_worker import numerics_ladder
 from gen_worker.api.decorators import Compile
 from gen_worker.executor import Executor
@@ -115,7 +115,7 @@ def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
     pipeline, _module, outcome = arm(
         tmp_path, monkeypatch, declared, packages, verify_numerics=True)
 
-    assert outcome.armed is False, "a gray-band cell was published to the fleet"
+    assert outcome.armed is False, "a gray-band compiled graph was published to the fleet"
     assert aot_serve.is_armed(pipeline) is False
     assert outcome.reason == "numerics_refused"
     # The refusal is per CLASS, so it says "is not published" of
@@ -131,7 +131,7 @@ def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
 def test_the_MINT_gate_refuses_a_cell_below_its_floor(
         tmp_path, monkeypatch, declared, events):
     """Unchanged by both rulings, and the reason the gate still exists at all:
-    try-serve catches ERRORS, never wrong OUTPUT. A cell that runs cleanly and
+    try-serve catches ERRORS, never wrong OUTPUT. A compiled graph that runs cleanly and
     renders a bad image raises nothing."""
     packages = {entry_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
     pipeline, _module, outcome = arm(
@@ -157,19 +157,19 @@ def test_the_MINT_gate_refuses_a_cell_below_its_floor(
 def test_ADOPTION_arms_a_cell_the_mint_gate_would_have_REFUSED(
         tmp_path, monkeypatch, declared, events, cosine, label):
     """THE §4.32 RED, and it fails on master twice over: the adopt path used to
-    run this gate and would have unwrapped both of these cells.
+    run this gate and would have unwrapped both of these compiled graphs.
 
     Adoption is materialize -> arm -> serve. The bytes were proven once, at
     their mint; re-proving them on every adopter taxes the fleet forever for an
     author's one-time mistake, and it is the tax that made a pod throw away a
-    cell it had just verified at `cos=1.00000`. Deliberately parametrized over
-    a cell that would FAIL: the point is not that adoption is lucky, it is that
+    compiled graph it had just verified at `cos=1.00000`. Deliberately parametrized over
+    a compiled graph that would FAIL: the point is not that adoption is lucky, it is that
     adoption does not ASK."""
     packages = {entry_name(h, w): ProbePackage(cosine=cosine) for h, w in ROWS}
     pipeline, _module, outcome = arm(
         tmp_path, monkeypatch, declared, packages, verify_numerics=False)
 
-    assert outcome.armed is True, f"an adopting pod re-judged a cell {label}"
+    assert outcome.armed is True, f"an adopting pod re-judged a compiled graph {label}"
     assert aot_serve.is_armed(pipeline) is True
     assert [k for k, _d, _p in events if k == activity.KIND_COMPILED_GRAPH_NUMERICS] == [], (
         "adoption emitted a quality verdict, so it ran a quality gate")
@@ -237,7 +237,7 @@ class AdoptedFamily:
     @worker_function()
     def generate(self, ctx: RequestContext, p: GenIn) -> Out:
         # The pod shape: the boot warmup runs, and its payload lands on no
-        # packaged entry of the adopted cell — so the artifact's own execution
+        # packaged entry of the adopted compiled graph — so the artifact's own execution
         # counter does not move. `RIG["dispatch"]` models the OTHER arm, where
         # a warm dispatch does land.
         if RIG.get("dispatch"):
@@ -262,12 +262,12 @@ PROBE_CALLS = 3
 
 
 def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
-    """A fleet policy standing in for §4.27 boot-adopt: arm the resolved cell
+    """A fleet policy standing in for §4.27 boot-adopt: arm the resolved compiled graph
     on the unet and hand back the adopted identity. Everything from
     `ArmOutcome` to the setup warmup runs REAL."""
 
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
-                publisher: Any = None, **_kw: Any) -> "fleet_cells.ArmOutcome":
+                publisher: Any = None, **_kw: Any) -> "fleet_compiled_graphs.ArmOutcome":
         unet = pipe.unet
         # production's `arm_entry` puts an `EntryDispatch` REGISTRY
         # in `state["runner"]`, and `is_armed`/`armed_entries` read it — a
@@ -315,20 +315,20 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
         # marker set above is what `arm_entry` publishes, so
-        # `holds_exported_cell` answers the lane question off the OBJECT.
+        # `holds_exported_compiled_graph` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
         if revoke:
             # revoking is DE-ARMING. `is_armed` asks the registry,
             # so a flag left the runner armed and the pipeline claiming
-            # compiled service it was not giving — the exact lie a cell-level
+            # compiled service it was not giving — the exact lie a compiled graph-level
             # boolean makes possible.
             state["failed"] = True
             _dispatch.remove("unet/main", "revoked by the rig")
-        adopted = fleet_cells.SelfMint(
+        adopted = fleet_compiled_graphs.SelfMint(
             family=FAMILY, compiled_graph_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
-            artifact=Path(cache_dir or ".") / "cell.tar")
-        return fleet_cells.ArmOutcome(armed=True, self_mint=adopted)
+            artifact=Path(cache_dir or ".") / "compiled-graph.tar")
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=adopted)
 
     return _enable
 
@@ -340,7 +340,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str,
     key = "cg-key-v1-" + (seed * 56)[:56]
     ref = f"root/family-{FAMILY}#{key}"
     monkeypatch.setattr(
-        fleet_cells, "enable_compiled",
+        fleet_compiled_graphs, "enable_compiled",
         _fake_adopt_arm(key, ref, revoke=revoke))
     return key, ref
 
@@ -402,7 +402,7 @@ def test_an_ADOPTED_cell_serves_COMPILED_immediately_after_materialize(
     """THE HEADLINE RED, and on master it fails twice over — once for the
     warmup barrier (§4.31) and once for the adopt-side gate (§4.32).
 
-    The pod's own reading, reproduced: the cell arms before setup, the boot
+    The pod's own reading, reproduced: the compiled graph arms before setup, the boot
     warmup dispatches nothing through it, and pre-fix that made it
     `unexercised` -> `unproven` -> unwrap -> quarantine, `functions=()`,
     `target_applicability_incomplete`, `armed_target_unresolved`, eager for
@@ -413,7 +413,7 @@ def test_an_ADOPTED_cell_serves_COMPILED_immediately_after_materialize(
     pipe = RIG["pipe"]
 
     assert aot_serve.is_armed(pipe) is True, (
-        "the pod threw away the cell it had just materialized")
+        "the pod threw away the compiled graph it had just materialized")
     assert getattr(pipe.unet, aot_serve._MARKER_ATTR, None) is not None
     assert not compile_cache.compiled_graph_quarantined_in_process(ref)
 
@@ -425,7 +425,7 @@ def test_an_ADOPTED_cell_serves_COMPILED_immediately_after_materialize(
     target = next(iter(rec.compile_targets.values()))
     assert "generate" in target.function_names
     assert rec.eager_posture == ""
-    assert cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value not in _phases(
+    assert compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value not in _phases(
         spy, "serve_eager_posture")
     assert "target_applicability_incomplete" not in _phases(
         spy, "serve_eager_posture")
@@ -461,7 +461,7 @@ def test_a_REVOKED_artifact_is_not_re_armed_by_the_setup_pass(
     # (`rec.eager_posture` settles on the terminal `armed_target_unresolved`
     # from `_assert_armed_targets_installed`, which is the orphan report for
     # the same object; both rows are emitted and neither is silence.)
-    assert cell_adopt.EagerPhase.COMPILED_DEGRADED.value in _phases(
+    assert compiled_graph_adopt.EagerPhase.COMPILED_DEGRADED.value in _phases(
         spy, "serve_eager_posture")
     assert rec.eager_posture
 
@@ -504,7 +504,7 @@ def _wrapped(runner: _Runner, spy: List[Tuple[str, str, str]]) -> Any:
 
 def test_a_cell_that_FAILS_at_serve_answers_the_request_eager_and_stays_down(
         spy, monkeypatch):
-    """Paul's clause 2, exactly: the tenant whose request hit the bad cell
+    """Paul's clause 2, exactly: the tenant whose request hit the bad compiled graph
     still gets a correct answer, the disarm is STICKY for the process, and the
     revocation reaches the scheduler state through the wrapper's own callback.
     Nothing here is stubbed — this is the shipping wrapper."""
@@ -527,7 +527,7 @@ def test_a_TRANSIENT_OOM_is_not_the_cells_fault_and_does_not_disarm_it(
         spy, monkeypatch):
     """Honest attribution, which is what makes serve-first safe: allocator
     exhaustion is a fact about the CARD at this instant (a sibling load, a
-    rotation), not about the artifact. Condemning the cell for it would retire
+    rotation), not about the artifact. Condemning the compiled graph for it would retire
     a correct one on the first busy moment and re-mint it on the replacement
     pod. The request is still answered."""
     runner = _Runner(RuntimeError("CUDA out of memory. Tried to allocate 2 GiB"))
@@ -536,7 +536,7 @@ def test_a_TRANSIENT_OOM_is_not_the_cells_fault_and_does_not_disarm_it(
     module._cozy_aot["state"]["failure_callback"] = revoked.append
 
     assert module.forward(1) == "eager"
-    assert revoked == [], "a transient OOM revoked the cell"
+    assert revoked == [], "a transient OOM revoked the compiled graph"
     assert module._cozy_aot["state"]["failed"] is False
 
     # ...and the artifact is still the serving lane once the pressure passes.
@@ -549,7 +549,7 @@ def test_a_TRANSIENT_OOM_is_not_the_cells_fault_and_does_not_disarm_it(
 def test_a_warm_DISPATCH_still_proves_first_and_says_nothing_extra(
         tmp_path, monkeypatch, spy):
     """Symmetry, from the other side. A warm dispatch that DOES land still
-    records the cell proven in-process (the pgw#637 registry the dynamo lane
+    records the compiled graph proven in-process (the pgw#637 registry the dynamo lane
     reads), and emits no posture row — there is nothing to explain."""
     _key, ref = _rig(monkeypatch, seed="d", dispatch=True)
     ex, eff = _boot(tmp_path, monkeypatch)

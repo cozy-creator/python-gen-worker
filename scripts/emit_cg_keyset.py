@@ -9,7 +9,7 @@ Two modes, because there are two honest producers:
 ``--from-cache DIR`` (default)
     Take the closures a pod ALREADY derived — its own
     ``DIR/cg-keyset-v1.json``, written by ``boot_key.derive`` as a side effect
-    of the mint that produced the cells (§4.28) — validate them, and merge them
+    of the mint that produced the compiled graphs (§4.28) — validate them, and merge them
     into ``--out``. Imports no endpoint code, needs no torch, and is the
     realistic operator flow: mint on a pod, copy one small JSON out, bake it
     into the next image.
@@ -236,9 +236,9 @@ def derive(
     if not specs:
         print(f"no endpoint named {function!r} in {list(modules)!r}")
         return 1
-    cfg = specs[0].compile_cell()
+    cfg = specs[0].compile_contract()
     if cfg is None:
-        print(f"{function!r} declares no compile cell, so it has no key set")
+        print(f"{function!r} declares no compiled graph, so it has no key set")
         return 1
     family = str(getattr(cfg, "family", "") or "")
     declaration = export_declaration(family)
@@ -272,7 +272,7 @@ def derive(
             family=family,
             cfg=spec,
             slots=resolved,
-            declared_hint=len(list(aot_declaration.cell_plans(declaration))),
+            declared_hint=len(list(aot_declaration.compiled_graph_plans(declaration))),
             work_root=work / "trace",
             memo_dir=cache,
             trust_memo=False,

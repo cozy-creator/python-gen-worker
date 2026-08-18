@@ -25,7 +25,7 @@ import pytest
 from gen_worker import child_preflight
 from gen_worker import aot_preconditions as pre
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells
+from gen_worker import fleet_compiled_graphs
 from gen_worker.api import export_contract as ec
 from gen_worker.discovery.discover import discover_manifest
 from gen_worker.discovery.validation import validate_endpoint_lock
@@ -339,21 +339,21 @@ def _mint_recipe_on(monkeypatch: pytest.MonkeyPatch, *, bucket: int) -> tuple:
     stream. Returns (recipe, events)."""
     decl = _example_declaration()
     monkeypatch.setattr(ec, "export_declaration", lambda _f: decl)
-    monkeypatch.setattr(fleet_cells, "export_declaration", lambda _f: decl)
-    monkeypatch.setattr(fleet_cells, "aot_export_spec", lambda *a, **k: object())
+    monkeypatch.setattr(fleet_compiled_graphs, "export_declaration", lambda _f: decl)
+    monkeypatch.setattr(fleet_compiled_graphs, "aot_export_spec", lambda *a, **k: object())
     from gen_worker import aot_mint
 
     monkeypatch.setattr(aot_mint, "declaration_module_gaps", lambda *a, **k: [])
 
     events: list = []
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
+        fleet_compiled_graphs.activity_mod, "emit_event",
         lambda kind, detail, **kw: events.append((kind, detail, kw)))
 
     cfg = types.SimpleNamespace(
         family="ep996-abstain", lora_bucket=bucket, shapes=(), text_lens=(),
         guidance_scales=(), targets=("unet",), regional=False)
-    return fleet_cells.mint_recipe(object(), cfg, delegate=True), events
+    return fleet_compiled_graphs.mint_recipe(object(), cfg, delegate=True), events
 
 
 def test_the_mint_no_longer_declines_for_a_missing_cxx_toolchain(
@@ -368,7 +368,7 @@ def test_the_mint_no_longer_declines_for_a_missing_cxx_toolchain(
 
     recipe, events = _mint_recipe_on(monkeypatch, bucket=0)
 
-    assert recipe == fleet_cells.RECIPE_AOT
+    assert recipe == fleet_compiled_graphs.RECIPE_AOT
     assert [e for e in events if e[2].get("phase") == "no_cxx_toolchain"] == []
 
 
@@ -381,7 +381,7 @@ def test_the_mint_no_longer_declines_below_the_lifted_lora_torch_floor(
 
     recipe, events = _mint_recipe_on(monkeypatch, bucket=64)
 
-    assert recipe == fleet_cells.RECIPE_AOT
+    assert recipe == fleet_compiled_graphs.RECIPE_AOT
     assert [e for e in events
             if e[2].get("phase") == "aot_lifted_torch_gap"] == []
 
@@ -389,7 +389,7 @@ def test_the_mint_no_longer_declines_below_the_lifted_lora_torch_floor(
 def test_the_retired_phases_are_gone_from_the_mint_path() -> None:
     """The tokens themselves: a decline phase that still exists in the source
     is a decline a fleet can still be told, whatever the tests say."""
-    source = Path(fleet_cells.__file__).read_text()
+    source = Path(fleet_compiled_graphs.__file__).read_text()
     assert "no_cxx_toolchain" not in source
     assert "aot_lifted_torch_gap" not in source
     assert "cxx_toolchain_present" not in source

@@ -5,7 +5,7 @@ power. A child that is group-killed (endpoint teardown under the drain path)
 reaches no terminus, raises nothing, and writes nothing, so the whole phase
 table collapses to one row::
 
-    status=abandoned total_s=1741.33 — no cell produced
+    status=abandoned total_s=1741.33 — no compiled graph produced
 
 — zero `entry:` rows, no `pool` row: K, its binding constraint, every per-entry
 timing and every peak measured and thrown away. Work on the *aborted* path does
@@ -26,7 +26,7 @@ import pytest
 
 from gen_worker import aot_compile_pool as pool
 from gen_worker import aot_mint, child_contract, mint_process, mint_supervisor
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 _GIB = 1 << 30
 
@@ -477,7 +477,7 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
 
     Two things are pinned here so the stopgap cannot creep back:
 
-    * `_announce_unchecked_numerics` no longer exists. A cell that armed while
+    * `_announce_unchecked_numerics` no longer exists. A compiled graph that armed while
       announcing it was unchecked is exactly what the gate refuses now.
     * `arm_aot` FAILS CLOSED when there is nothing to measure. The old shape
       of this test drove `arm_aot` with a stub `enable` and asserted True;
@@ -509,7 +509,7 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
     # this test is about is unchanged: an arm that could not be MEASURED is a
     # refusal, never a silent `unchecked` announcement.
     assert provision.arm_aot(
-        object(), cfg, None, Path("cell.pt2"), 0,
+        object(), cfg, None, Path("compiled-graph.pt2"), 0,
         verify_numerics=True).armed is False
     rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_COMPILED_GRAPH_NUMERICS]
     assert rows, "an arm that could not be measured said nothing"

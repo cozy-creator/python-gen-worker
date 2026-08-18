@@ -1,5 +1,5 @@
 """The BOOT-KEY derivation owns its own branch arm, or no ``lora_bucket``
-family can ever ask for its cell.
+family can ever ask for its compiled graph.
 
 Arming only the branch CONTAINERS (``compile_cache.apply_lora_execution_lane``)
 hands ``torch.export`` a BARE denoiser whose forward never takes

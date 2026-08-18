@@ -27,10 +27,10 @@ from typing import Dict, List, Tuple
 
 import pytest
 
-from gen_worker import cell_resolve, fleet_cells as fc, receipts
+from gen_worker import compiled_graph_resolve, fleet_compiled_graphs as fc, receipts
 from gen_worker.procsplit import actions
 
-from harness.cell_hub import local_cell_hub
+from harness.compiled_graph_hub import local_compiled_graph_hub
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 _SRC = _REPO / "src"
@@ -129,7 +129,7 @@ def test_the_proto_translation_lives_on_exactly_one_line() -> None:
 
 def test_the_live_constants_hold_the_compiled_graph_spelling() -> None:
     """The fence cannot be satisfied by deleting the thing it fences."""
-    assert cell_resolve.RESOLVE_PATH == "/v1/worker/compiled-graphs/resolve"
+    assert compiled_graph_resolve.RESOLVE_PATH == "/v1/worker/compiled-graphs/resolve"
     assert receipts.RECEIPT_PATH == "/v1/worker/compiled-graphs/receipt"
     assert receipts.REVOCATIONS_PATH == "/v1/worker/compiled-graphs/revocations"
     assert receipts.RECEIPT_VERSION == "compiled-graph-receipt-v1"
@@ -142,7 +142,7 @@ def test_the_live_constants_hold_the_compiled_graph_spelling() -> None:
 
 
 def test_the_publisher_speaks_the_new_route_over_a_real_socket() -> None:
-    """The live arm. A real ``CellPublisher`` against a real loopback hub: the
+    """The live arm. A real ``CompiledGraphPublisher`` against a real loopback hub: the
     path the hub SAW and the body key it read are the cut's actual product."""
     entry = fc.PublishEntry(
         compiled_graph_key="cg-key-v1-" + "a" * 56,
@@ -150,8 +150,8 @@ def test_the_publisher_speaks_the_new_route_over_a_real_socket() -> None:
                        "toolchain": "toolch0000000000"},
         mint_duration_ms=1234,
     )
-    with local_cell_hub() as hub:
-        pub = fc.CellPublisher(base_url=hub.base, worker_jwt=lambda: "worker-jwt",
+    with local_compiled_graph_hub() as hub:
+        pub = fc.CompiledGraphPublisher(base_url=hub.base, worker_jwt=lambda: "worker-jwt",
                                image_digest="sha256:" + "1" * 64)
         batch = pub.publish_intent("sdxl", [entry], sku="l4", gen_worker="0.116.0")
 
@@ -196,9 +196,9 @@ def test_the_resolve_answer_is_read_under_the_new_wire_key(
         return _Resp({"object": "compiled_graph_resolve_batch", "family": "sdxl",
                       "answers": [answer]})
 
-    monkeypatch.setattr("gen_worker.cell_resolve.broker.request", _request)
-    with pytest.raises(cell_resolve.CellResolveRefused) as exc:
-        cell_resolve.resolve_batch("sdxl", [key], base_url="https://hub")
+    monkeypatch.setattr("gen_worker.compiled_graph_resolve.broker.request", _request)
+    with pytest.raises(compiled_graph_resolve.CompiledGraphResolveRefused) as exc:
+        compiled_graph_resolve.resolve_batch("sdxl", [key], base_url="https://hub")
 
     assert sent["path"] == "/v1/worker/compiled-graphs/resolve"
     assert exc.value.code == "compiled_graph_resolve_answer_out_of_order"

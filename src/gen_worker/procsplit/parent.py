@@ -1386,9 +1386,9 @@ class ParentControl:
                 self._child_env.get("GEN_WORKER_BOOT_RECORD", "")
                 or self._settings.boot_record_path
             ),
-            # The local compiled-cell store: the CHILD mints, and the mint
-            # writes the memo and the per-cell sidecar under this root. Its
-            # DEFAULT (``~/.cache/cozy/compile-cells``) already resolves inside
+            # The local compiled graph store: the CHILD mints, and the mint
+            # writes the memo and the per-compiled graph sidecar under this root. Its
+            # DEFAULT (``~/.cache/cozy/compiled graphs``) already resolves inside
             # the compute uid's own home, so nothing needed granting while the
             # default stood — which is exactly why the gap survived: cozy-local
             # RELOCATES it by env (`internal/paths/paths.go`), and a relocated

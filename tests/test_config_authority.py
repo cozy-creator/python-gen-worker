@@ -18,7 +18,7 @@ import pytest
 from gen_worker import compile_cache as cc
 from gen_worker import env_seal
 from gen_worker import settings_authority as sa
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileContract
 
 # ============================================================================
 # pgw#1049 — pgw#1049: the single settings authority — seal from
@@ -241,14 +241,14 @@ def _restore_global_matmul_flags() -> Iterator[None]:
     torch.backends.cudnn.benchmark = benchmark
 
 
-def _cfg(**overrides: Any) -> CompileCell:
+def _cfg(**overrides: Any) -> CompileContract:
     base: Dict[str, Any] = dict(
         shapes=((64, 64),), targets=("transformer",), family="toyfam",
         regional=False, text_len=None, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=(),
     )
     base.update(overrides)
-    return CompileCell(**base)
+    return CompileContract(**base)
 
 
 def test_scrub_never_fails_and_names_what_it_erased(
@@ -329,7 +329,7 @@ def test_loaded_libraries_come_from_the_real_loader_map() -> None:
     # digest diverges from the manifest is a substitution
     # `assert_seal_unchanged` refuses by name. pgw#1181 reads the manifest from
     # its producer: `compile_cache.artifact_metadata` embedded it in a
-    # `torch-inductor-cache` cell and is deleted with that format, while
+    # `torch-inductor-cache` compiled graph and is deleted with that format, while
     # `aot_mint` records this same call's output under the same key.
     manifest = dict(env_seal.frozen_library_digests())
     for base, digest in libs.items():
@@ -392,7 +392,7 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
     (fx_entry / "entry").write_bytes(b"fx")
 
     # The seal this drove was `finish_fleet_mint`'s, which packed a
-    # DYNAMO cell and is deleted with that artifact class. The RULE is
+    # DYNAMO compiled graph and is deleted with that artifact class. The RULE is
     # unchanged and lives where every surviving mint reads it —
     # `env_seal.assert_seal_unchanged("mint")`, called by `mint_artifact` (the
     # local store's mint) and by `aot_mint` — so the drift is driven directly

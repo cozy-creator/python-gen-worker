@@ -402,7 +402,7 @@ jobs:
       # GATING (pgw#1299): TCG owns the compiled-graph metadata vocabulary and
       # exports it. A respelled `"graph_class"` / `"aot-inductor"` does not fail
       # at import when TCG renames the key — it returns None from a `.get()` on
-      # an artifact-metadata dict, the arm reads an un-armed cell as a cache
+      # an artifact-metadata dict, the arm reads an un-armed compiled graph as a cache
       # miss, and the fleet silently re-mints. Filed three times (pgw#1288,
       # pgw#1299); remembering failed. AST-based, so prose is not a finding, and
       # a genuinely different vocabulary is classified at the line.
@@ -475,11 +475,11 @@ jobs:
         run: uv run python scripts/lint_layout_declarations.py
 
       # GATING (pgw#1143, §1.33 point 5): conversion is UPSTREAM of compute, so
-      # no cell-key axis may read the layout demand or a conversion chain — no
-      # cell re-keys on a conversion, ever. The fenced module set is DERIVED
-      # from who calls a cell-key axis producer, so a new key computation joins
+      # no compiled graph-key axis may read the layout demand or a conversion chain — no
+      # compiled graph re-keys on a conversion, ever. The fenced module set is DERIVED
+      # from who calls a compiled graph-key axis producer, so a new key computation joins
       # the fence without anyone remembering to add it.
-      - name: pgw#1143 guard - no cell-key axis reads the layout vocabulary
+      - name: pgw#1143 guard - no compiled graph-key axis reads the layout vocabulary
         run: uv run python scripts/lint_compiled_graph_key_layout_fence.py
 
       # GATING (pgw#1215 / th#1834 §PHASE 3): th#1299's real invariant, as a
@@ -496,7 +496,7 @@ jobs:
       # ADOPT-ONLY serve role adopts by key and refuses or routes on a miss
       # (§4.28/§4.29), so it must not be able to compile. This walks the
       # transitive static import closure of the role's declared module set —
-      # function-local imports INCLUDED, which is how `fleet_cells` reached
+      # function-local imports INCLUDED, which is how `fleet_compiled_graphs` reached
       # the lane — and reds on any reach into the mint machinery. Both lists
       # are read out of `src/gen_worker/serve/role.py` rather than retyped
       # here, so the role and its fence cannot drift (pgw#1176). Selftest
@@ -591,7 +591,7 @@ jobs:
       # a row — pgw#1108, pgw#1122, pgw#1141, pgw#1141b — were one defect: a
       # rule written against the SELF-MINT path that the boot-adopt path does
       # not take. `aot_serve._KNOWN_AOT_KEYS` had two feeders, both
-      # self-produced routes, so a cell that resolved, materialized and armed
+      # self-produced routes, so a compiled graph that resolved, materialized and armed
       # was scored on the dynamo ledger and thrown away on a real pod. The rule
       # is structural now (registration happens inside `load_and_wrap`), and
       # this fence keeps it: a production feeder off the seam is red, a stale
@@ -777,7 +777,7 @@ jobs:
       # Both directories run for the whole transition, and the reason is
       # coverage, not caution. `tests_v2/` has 2 of its 14 planned suites
       # (`test_boot`, `test_dispatch`); nine behavior domains — fatal/crash,
-      # residency, CAS, lanes, adapters, JIT cells, AOT cells, convert, SDK
+      # residency, CAS, lanes, adapters, JIT graphs, compiled graphs, convert, SDK
       # and telemetry — have ZERO v2 coverage today and `tests/` is their only
       # net. Flipping now would trade a real suite for a partial one.
       #

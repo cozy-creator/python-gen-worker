@@ -48,7 +48,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, guard_closure, hot_swap, mint_supervisor
+from gen_worker import fleet_compiled_graphs, guard_closure, hot_swap, mint_supervisor
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
 from gen_worker.models.store import ModelStore
@@ -88,16 +88,16 @@ class _Pipe:
 def _clean_process_registries() -> Any:
     with cc._PROVEN_CELLS_LOCK:
         cc._PROVEN_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     armed = cc._armed_pipelines()
     for pipe in list(armed):
         armed.discard(pipe)
     yield
     with cc._PROVEN_CELLS_LOCK:
         cc._PROVEN_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     for pipe in list(cc._armed_pipelines()):
         cc._armed_pipelines().discard(pipe)
 
@@ -159,25 +159,25 @@ class _Harness:
 
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
-            fleet_cells, "enable_compiled", self._fake_enable_compiled)
+            fleet_compiled_graphs, "enable_compiled", self._fake_enable_compiled)
         # Every mint is a CHILD mint now. This rig has no child
         # process — without a stub it spawns a REAL one per attempt and the
         # test spends minutes importing torch to watch it fail. The serving
         # side is what pgw#671 is about: READY at eager tier first, the tier
         # flipping only when the mint lands.
         monkeypatch.setattr(
-            mint_supervisor, "supervise", self._fake_build_cell)
+            mint_supervisor, "supervise", self._fake_build_compiled_graph)
         # The pgw#681 mint gate this simmed is deleted with the
         # `torch-inductor-cache` format whose metadata carried its manifest.
         self.ex = Executor(self.specs, _send, store=store)
 
     # -- the child, minus the process ---------------------------------------
 
-    async def _fake_build_cell(self, task: Any, **kwargs: Any) -> Any:
+    async def _fake_build_compiled_graph(self, task: Any, **kwargs: Any) -> Any:
         pending = task.pending
         # The harness's own controls steer the CHILD now, exactly as they used
         # to steer the in-process compile: `compile_delay_s` is how long the
-        # cell takes to appear (so a mid-build abandonment has something to
+        # compiled graph takes to appear (so a mid-build abandonment has something to
         # abandon), `compile_raises` is a child that produced nothing.
         abandon = kwargs.get("abandon")
         if self.compile_delay_s:
@@ -200,13 +200,13 @@ class _Harness:
                 status=mint_supervisor.FAILED, attempts=1,
                 reason="synthetic_child_failure",
                 detail="synthetic inductor failure")
-        minted = fleet_cells.SelfMint(
+        minted = fleet_compiled_graphs.SelfMint(
             family=pending.family, compiled_graph_key=pending.arm_token,
             ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
             artifact=pending.target)
         pending._state["minted"] = minted
         pending.target.parent.mkdir(parents=True, exist_ok=True)
-        pending.target.write_bytes(b"stub-cell")
+        pending.target.write_bytes(b"stub-compiled graph")
         return mint_supervisor.SupervisedResult(
             status=mint_supervisor.ADOPTED, minted=minted, attempts=1)
 
@@ -215,11 +215,11 @@ class _Harness:
     def _fake_enable_compiled(
         self, pipe: Any, cfg: Any, cache_dir: Any = None,
         artifact: Any = None, publisher: Any = None,
-    ) -> fleet_cells.ArmOutcome:
+    ) -> fleet_compiled_graphs.ArmOutcome:
         mint_root = self.tmp_path / f"mint-{id(pipe)}"
         capture = mint_root / "capture"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
-        pending = fleet_cells.PendingSelfMint(
+        pending = fleet_compiled_graphs.PendingSelfMint(
             family=FAMILY, arm_token="cg-key-v1-" + "a" * 56,
             ref=f"{cc.system_repo(FAMILY)}#cg-key-v1-{'a' * 56}",
             cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
@@ -268,7 +268,7 @@ class _Harness:
         pipe.transformer.forward = cc._guarded(
             original, compiled, "transformer", failure_signal=signal)
         cc._armed_pipelines().add(pipe)
-        return fleet_cells.ArmOutcome(armed=True, self_mint=pending)
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=pending)
 
     # -- drive ---------------------------------------------------------------
 
@@ -303,11 +303,11 @@ def test_eager_first_boot_ready_before_compile_then_hot_swaps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The headline: READY at eager tier BEFORE any graph finished compiling;
-    the background driver builds the cell and flips the tier — state never
+    the background driver builds the compiled graph and flips the tier — state never
     flaps.
 
     the driver's compile is a CHILD PROCESS's now (the in-process
-    seed/prove/pack phases only ever built a dynamo cell), so the assertions
+    seed/prove/pack phases only ever built a dynamo compiled graph), so the assertions
     that counted this rig's own simulated compiles and its inherited warm
     memory are gone with them. What pgw#671 actually claims — READY does not
     wait for compiled serving, and the tier flips exactly once when the mint
@@ -324,8 +324,8 @@ def test_eager_first_boot_ready_before_compile_then_hot_swaps(
         assert len(h.compile_log) < 3
         assert h.ex.serving_tiers() == {"generate": "eager"}
         # Targets are registered active-less while the mint builds, so the
-        # incarnation is addressable for peer-cell adoption. (The requested
-        # cell key itself is not computable on a CUDA-less test host —
+        # incarnation is addressable for peer-compiled graph adoption. (The requested
+        # compiled graph key itself is not computable on a CUDA-less test host —
         # the obligation identity needs the real runtime axes.)
         (target,) = h.ex.compile_targets()
         assert target.incarnation_id
@@ -441,7 +441,7 @@ def test_mid_build_abandonment_is_clean_and_keeps_serving_eager(
         assert bg is not None
         pendings = list(bg.pendings.values())
         assert pendings
-        await h.ex.abandon_background_mint(rec, reason="peer cell adopting")
+        await h.ex.abandon_background_mint(rec, reason="peer compiled graph adopting")
         assert rec.background_mint is None
         for pending in pendings:
             assert not pending.mint_root.exists()
@@ -491,7 +491,7 @@ def test_failed_background_compile_stays_eager_and_reports_typed_failure(
 # NOTHING, so its eager tier is the untouched pipeline and a mandatory lane may
 # defer) and pgw#1010 (there is no in-process foreground mint left to keep). The
 # mandatory lane's protection is now stated where it belongs — it fails closed
-# when the family declares no export, because the only cell is an AOT cell:
+# when the family declares no export, because the only compiled graph is an compiled graph:
 # `test_serve_finalize_pgw672.py::test_a_mandatory_lane_without_a_declaration_
 # fails_closed_before_it_compiles`.
 

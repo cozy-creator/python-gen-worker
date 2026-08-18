@@ -18,7 +18,7 @@ tier is simply the honest state, and it is the state the endpoint already had.
 
 **It is its own model, not an instance of a Flux1 one.** Three separately
 registered hub families exist — ``flux1-dev``, ``flux1-schnell``,
-``flex2-preview`` (the endpoint stamps the last on its own compile cell) — and
+``flex2-preview`` (the endpoint stamps the last on its own compiled graph) — and
 B1's measured rule is that a differing architecture config is a different
 ``ModelSpec`` by construction. Flex.2 is a redistill with built-in inpainting
 and universal control inputs; its call surface is not schnell's.

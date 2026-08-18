@@ -7,7 +7,7 @@ pure function of ``(seed, config)`` and is materialized wherever it is needed â€
 in the image at ``docker build`` time, on the pod at boot, or in the local rig.
 
 Two runs with the same seed produce BYTE-IDENTICAL files. That is not a nicety:
-the cell key and the snapshot digest are claims about which checkpoint was
+the compiled graph key and the snapshot digest are claims about which checkpoint was
 traced, and they mean nothing if the same ref resolves to different bytes on
 two machines.
 

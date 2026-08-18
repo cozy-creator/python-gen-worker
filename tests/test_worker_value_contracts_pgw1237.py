@@ -16,7 +16,7 @@ from gen_worker import (
     activity,
     boot_phases,
     callout,
-    cell_resolve,
+    compiled_graph_resolve,
     compile_cache,
     cuda_probe,
     host_canary,
@@ -25,7 +25,7 @@ from gen_worker import (
 )
 from gen_worker.api.binding import ModelSource
 from gen_worker.convert.layout_converters import derived_artifact_identity
-from gen_worker.local_cell_store import UNTRUSTED_REFUSAL_CODE
+from gen_worker.local_compiled_graph_store import UNTRUSTED_REFUSAL_CODE
 from gen_worker.models import execution_lanes, rung
 from gen_worker.models.cozy_snapshot import PICKLE_WEIGHT_EXTENSIONS
 from gen_worker.models.tensor_layout_contract import (
@@ -97,7 +97,7 @@ def test_exact_worker_values_match_pgw1237() -> None:
         {"kind": activity.KIND_JIT_COMPILE, "phase": activity.PHASE_MINTED},
     ]
     assert set(exact["compiled_graph_resolve_hub_refusal_codes"]) == set(
-        cell_resolve.REFUSAL_CODES
+        compiled_graph_resolve.REFUSAL_CODES
     )
     assert exact["compiled_graph_publish_untrusted_refusal_code"] == UNTRUSTED_REFUSAL_CODE
     assert exact["hardware_unsuitable_reason_classes"] == [

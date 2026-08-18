@@ -12,7 +12,7 @@ The acceptance this file encodes:
   report its own tail and silently drop the expensive part.
 * A REFUSED ARM appears with its classified reason: a real ``AdoptError``
   survives as ``outcome=refused reason=<token>`` — not as a failure, because
-  the worker declined that cell deliberately and goes on serving eager.
+  the worker declined that compiled graph deliberately and goes on serving eager.
 * The phases RECONCILE: nested spans charge time to the child, so measured
   phases plus the residual equal the boot window. An instrument that does not
   close cannot say where the time went.
@@ -156,8 +156,8 @@ def test_a_typed_refusal_is_recorded_as_refused_not_failed() -> None:
     after the fact: it decides whether this pod serves compiled or spends
     another 20 minutes minting. It must survive as ``refused`` with the
     CLASSIFIED reason — not as ``failed``, because the worker declined this
-    cell deliberately and goes on serving eager."""
-    exc = AdoptError("key_mismatch", "cell was minted for sm_90, host is sm_89")
+    compiled graph deliberately and goes on serving eager."""
+    exc = AdoptError("key_mismatch", "compiled graph was minted for sm_90, host is sm_89")
     with boot_phases.span(
         boot_phases.PHASE_CELL_ARM,
         artifact_kind=ARTIFACT_KIND,
@@ -232,7 +232,7 @@ def test_serving_mode_distinguishes_aot_from_jit_from_eager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert serving_mode.classify_mode("") == serving_mode.MODE_EAGER
-    # Both cell kinds set active_compile_ref, so the ref alone cannot be
+    # Both compiled graph kinds set active_compile_ref, so the ref alone cannot be
     # pattern-matched — aot_serve owns the discrimination.
     monkeypatch.setattr(aot_serve, "is_aot_ref", lambda ref: ref.endswith("aot"))
     assert serving_mode.classify_mode("root/family-sdxl#ck1aot") == \

@@ -539,17 +539,17 @@ def test_fork_gate_refuses_missing_source_field_by_name() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The whole-cell plan set + identity (pgw#758: apply_declaration's
-# single-plan request resolution is DELETED — the cell covers every plan)
+# The whole-compiled graph plan set + identity (pgw#758: apply_declaration's
+# single-plan request resolution is DELETED — the compiled graph covers every plan)
 # ---------------------------------------------------------------------------
 
 
-def test_cell_plans_span_every_target_and_derive_the_contract() -> None:
+def test_compiled_graph_plans_span_every_target_and_derive_the_contract() -> None:
     """What apply_declaration used to resolve for ONE coordinate now
-    enumerates for the whole cell: every target's plans, each with its
+    enumerates for the whole compiled graph: every target's plans, each with its
     SDK-derived dynamic contract — never hand-math."""
     decl = _wan_a14b_decl()
-    plans = aot_declaration.cell_plans(decl)
+    plans = aot_declaration.compiled_graph_plans(decl)
     by_target = {p.target: p for p in plans}
     assert sorted(by_target) == ["transformer", "transformer_2", "vae.decode"]
     for target in ("transformer", "transformer_2"):
@@ -565,7 +565,7 @@ def test_cell_plan_entry_names_are_deterministic_coordinates() -> None:
     decl = _wan_a14b_decl()
     names = sorted(
         aot_declaration.plan_entry_name(p)
-        for p in aot_declaration.cell_plans(decl))
+        for p in aot_declaration.compiled_graph_plans(decl))
     # Dynamic-collapse plans span their rows, so the dims segment is empty
     # and the fork coordinate alone names the entry.
     assert names == [

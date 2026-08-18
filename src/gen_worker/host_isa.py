@@ -3,7 +3,7 @@
 An AOTI ``.pt2`` ships host-side machine code (the wrapper ``.so`` plus any
 CPU kernels). torch compiles that code ``-march=native`` when
 ``inductor.config.cpp.march`` is None and vectorizes CPU kernels with
-``cpu_vec_isa.pick_vec_isa()`` — both resolve to the MINT host's CPU. A cell
+``cpu_vec_isa.pick_vec_isa()`` — both resolve to the MINT host's CPU. A compiled graph
 minted on an AVX-512 host therefore carries EVEX-encoded instructions that
 SIGILL any serving host without AVX-512 (exit 132 inside ``aoti_load_package``,
 in a crash loop). GPU compatibility is keyed (``sm``); host CPU compatibility is
@@ -19,7 +19,7 @@ wrapper contains ZERO ymm/zmm vector instructions (inductor passes
 ``-fno-tree-loop-vectorize``); the only above-baseline code is a handful of
 incidental EVEX scalar encodings with exact SSE2 equivalents. Because
 ``cpp.march``/``cpp.simdlen`` are part of ``save_config_portable`` the clamp
-is env_seal- and therefore cell-key-visible: hosts below baseline mint and
+is env_seal- and therefore compiled graph-key-visible: hosts below baseline mint and
 serve their own honestly-keyed cohort instead of sharing a lying key.
 
 TCG owns artifact admission and runner loading. The worker's responsibility is

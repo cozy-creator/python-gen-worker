@@ -3,7 +3,7 @@
 Four static entries: 2 latent rows x the 2 CFG regimes, one target. That is
 sdxl's exact declaration shape (aspect rows x cfg x static-rows) with the row
 count cut to the smallest set that still produces MULTIPLE static entries per
-cell — the artifact-identity surface pgw#1058 broke on (entry labels are
+compiled graph — the artifact-identity surface pgw#1058 broke on (entry labels are
 per-row static facts under this strategy, and label/ask drift admits nothing).
 
 What this member declares that no other micro member does:
@@ -33,7 +33,7 @@ from gen_worker import (
 FAMILY = "micro-conv"
 
 #: Two latent rows -> with the cfg fork, FOUR static entries. Enough to make
-#: "multiple entries per cell" real; few enough that the cycle stays seconds.
+#: "multiple entries per compiled graph" real; few enough that the cycle stays seconds.
 LATENT_ROWS = (24, 32)
 VAE_SCALE = 8
 PIXEL_ROWS = tuple((n * VAE_SCALE, n * VAE_SCALE) for n in LATENT_ROWS)

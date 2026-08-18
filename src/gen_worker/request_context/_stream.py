@@ -317,7 +317,7 @@ class _RequestOutputStream:
     def _finalize_checkpoint_commit(self) -> Tensors:
         """Publish the buffered checkpoint file as ONE tensorhub publish.
 
-        Goes over the chunked sha256 route through the same client the cell
+        Goes over the chunked sha256 route through the same client the compiled graph
         self-mint uses — one save_checkpoint == one publish == one finalized
         repo revision, with the repo auto-created server-side under the job's
         create_repo grant on first publish. A multi-GB adapter retries a 64 MiB

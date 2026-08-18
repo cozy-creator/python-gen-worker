@@ -6,7 +6,7 @@ reason: a consumer that spells the string instead of importing it does not fail
 at import when TCG renames the key. It fails at run time, silently, and in the
 worst possible shape — every one of these sites is a `.get(...)` on an
 artifact-metadata dict, so a rename returns `None`, the arming path reads an
-un-armed cell as a cache miss, and the fleet re-mints. That is money, not a
+un-armed compiled graph as a cache miss, and the fleet re-mints. That is money, not a
 warning.
 
 This has now been filed three times (pgw#1288 deleted four sites, pgw#1299

@@ -161,7 +161,7 @@ def run(job: TraceJob) -> int:
             f"{CODE_DIGEST!r}; the classes this child would hash are not the "
             f"classes the parent's code describes")
 
-    from . import aot_mint, fleet_cells
+    from . import aot_mint, fleet_compiled_graphs
     from .api.export_contract import export_declaration
     from .cli.run import run_setup
     from .registry import collect_endpoints
@@ -241,7 +241,7 @@ def run(job: TraceJob) -> int:
         # that needs it — `aot_mint.trace_for_key` arms it itself (pgw#1132);
         # a second arm site here is how the two halves drifted apart.
         cc.apply_lora_execution_lane(pipeline, int(cfg.lora_bucket))
-    export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
+    export_spec = fleet_compiled_graphs.aot_export_spec(pipeline, cfg)
     setup_ms = int((time.monotonic() - t_setup) * 1000)
 
     decl = export_declaration(export_spec.family)
@@ -249,7 +249,7 @@ def run(job: TraceJob) -> int:
         return _fail(
             report_path, "no_declaration",
             f"family {export_spec.family!r} has no registered export "
-            f"declaration — a multi-graph cell derives its class set from it")
+            f"declaration — a multi-graph compiled graph derives its class set from it")
 
     declarations: Dict[str, str] = {}
     nodes: Dict[str, int] = {}

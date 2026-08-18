@@ -55,7 +55,7 @@ def test_static_rows_yields_four_static_entries(declaration) -> None:
     is the difference from every other micro member and the surface pgw#1058
     broke on (per-row entry labels vs serve-side asks)."""
     assert declaration.shape_strategy == "static-rows"
-    plans = ad.cell_plans(declaration)
+    plans = ad.compiled_graph_plans(declaration)
     assert len(plans) == 4
     names = sorted(ad.plan_entry_name(p) for p in plans)
     assert len(set(names)) == 4
@@ -130,7 +130,7 @@ def test_the_slot_is_a_catalog_slot_with_no_code_default() -> None:
 
 def test_two_buckets_are_two_lanes() -> None:
     """The bucket is a KEY axis: lora16 and lora64 must be disjoint lanes, so
-    a cell minted at one rank can never be armed at the other."""
+    a compiled graph minted at one rank can never be armed at the other."""
     assert MICRO_LORA16_BUCKET != MICRO_LORA_BUCKET
     lane16 = cc.execution_lane_label("", MICRO_LORA16_BUCKET)
     lane64 = cc.execution_lane_label("", MICRO_LORA_BUCKET)

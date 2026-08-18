@@ -15,12 +15,12 @@ attention mode   ``dense | sparse-kNN``               the SELECTOR + its index
 ===============  ==================================  ==========================
 
 Why this is not a lane token. The lane grammar is a NUMERICS descriptor and its
-consumers — residency/VRAM planning, pricing, compile-cell identity,
+consumers — residency/VRAM planning, pricing, compiled graph identity,
 ``ResolvePinned`` — all ask it *"how big are the weights and what arithmetic"*.
 Sparse attention changes neither operand format; it changes which blocks are
 read. Growing the closed two-repo lane table by a cross product for an axis none
 of those consumers use is exactly the mistake pgw#764/th#1293 declined to make
-when ``+compiled`` could not distinguish an AOT replay from a JIT cell: the
+when ``+compiled`` could not distinguish an AOT replay from a JIT graph: the
 answer there was a SEPARATE typed axis, and it is the answer here.
 
 A mode token alone is also not enough, which is the second reason it cannot ride

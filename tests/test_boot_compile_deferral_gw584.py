@@ -3,9 +3,9 @@
 The race: ``worker.py`` starts ``lifecycle.startup()`` and ``transport.run()``
 concurrently, so a boot-time ``ensure_setup`` can run ahead of HelloAck's
 ``apply_model_resolutions`` rebind and reach ``_fetch_compile_snapshot`` with
-bare authored refs and ``snapshots=None`` — a silent ``None`` (no cell selected)
+bare authored refs and ``snapshots=None`` — a silent ``None`` (no compiled graph selected)
 while materialization later follows the resolved w8a8 lane, fail-closing
-``enable()`` generically. A compile cell,
+``enable()`` generically. A compiled graph,
 exactly like a Slot pick, can only arrive via hub delivery, so boot
 must defer these functions the same way.
 
@@ -18,10 +18,10 @@ Covered here, over the REAL ``Lifecycle.startup()`` / ``Executor`` machinery
      function's deferral holds.
   2. hub delivery (DesiredResidency-equivalent): after the HelloAck rebind,
      ``ensure_desired_instance`` with resolved w8a8 bindings + snapshots
-     selects the delivered Forge cell — selection and materialization derive
+     selects the delivered Forge compiled graph — selection and materialization derive
      from one resolved state.
-  3. a w8a8-resolved setup with NO cell in the snapshot map fails LOUD
-     (CompiledLaneUnavailableError naming the missing cell), never the
+  3. a w8a8-resolved setup with NO compiled graph in the snapshot map fails LOUD
+     (CompiledLaneUnavailableError naming the missing compiled graph), never the
      silent boot-path bail.
   4. the full w8a8 serve chain over deferral: desired-state warm mints the
      compile target, then a RunJob carrying ``required_compile`` for that
@@ -55,7 +55,7 @@ from gen_worker.lifecycle import Lifecycle
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.models import store as store_mod
 
 
@@ -164,7 +164,7 @@ def _snapshot(digest: str) -> pb.Snapshot:
         url="http://r2.invalid/presigned")])
 
 
-def _cell_artifact(tmp_path: Path) -> Path:
+def _graph_artifact(tmp_path: Path) -> Path:
     """Opaque carrier bytes for the fully stubbed compiled-enable boundary.
 
     The executor still downloads and selects this path, which is the behavior
@@ -187,7 +187,7 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
         sent.append(msg)
 
     ex = Executor(specs, _send)
-    artifact = _cell_artifact(tmp_path)
+    artifact = _graph_artifact(tmp_path)
 
     async def _fake_download(ref: str, **kwargs: Any) -> Path:
         p = tmp_path / ref.replace("/", "_").replace(":", "_").replace("#", "_")
@@ -219,11 +219,11 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
     return ex, sent, enables
 
 
-def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
+def _mint_enable(cg_ref: str, digest: str, artifact_path: Path):
     """pgw#904: an advertised identity now comes from the worker's OWN mint
-    (delivered-cell selection is deleted); stamp it the way the live fleet
+    (delivered-compiled graph selection is deleted); stamp it the way the live fleet
     policy does — an ArmOutcome carrying the finalized SelfMint."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     def _enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
                 delegate=None, delivered_ref="", delivered_digest=""):
@@ -238,8 +238,8 @@ def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
             "originals": [],
             "regional_mods": [],
         })
-        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, compiled_graph_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=fleet_compiled_graphs.SelfMint(
+            family=FAMILY, compiled_graph_key=cg_ref.rsplit("#", 1)[-1], ref=cg_ref,
             snapshot_digest=digest, artifact=artifact_path))
 
     return _enable
@@ -302,11 +302,11 @@ def test_boot_defers_compile_declared_function(tmp_path, monkeypatch, caplog) ->
 
 
 # ---------------------------------------------------------------------------
-# 3. w8a8 without a delivered cell still fails LOUD when the arm is unproven
+# 3. w8a8 without a delivered compiled graph still fails LOUD when the arm is unproven
 # ---------------------------------------------------------------------------
 
 
-def test_w8a8_setup_without_cell_degrades_to_explicit_eager(
+def test_w8a8_setup_without_graph_degrades_to_explicit_eager(
     tmp_path, monkeypatch,
 ) -> None:
     """gw#587 moved the refusal to the proof gate; pgw#672 changed its
@@ -359,9 +359,9 @@ def test_fenced_runjob_serves_after_desired_warm(tmp_path, monkeypatch) -> None:
     setup_calls: List[str] = []
     ex, sent, _enables = _harness(tmp_path, monkeypatch,
                                   [_compile_spec(setup_calls)])
-    from gen_worker import fleet_cells as fleet_cells_mod
+    from gen_worker import fleet_compiled_graphs as fleet_compiled_graphs_mod
     monkeypatch.setattr(
-        fleet_cells_mod, "enable_compiled",
+        fleet_compiled_graphs_mod, "enable_compiled",
         _mint_enable(CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
     _startup(ex)
     assert setup_calls == []  # boot deferred
@@ -429,9 +429,9 @@ def test_plain_execution_lane_runjob_cold_setup_after_deferral(tmp_path, monkeyp
     setup_calls: List[str] = []
     ex, sent, _enables = _harness(tmp_path, monkeypatch,
                                   [_plain_compile_spec(setup_calls)])
-    from gen_worker import fleet_cells as fleet_cells_mod
+    from gen_worker import fleet_compiled_graphs as fleet_compiled_graphs_mod
     monkeypatch.setattr(
-        fleet_cells_mod, "enable_compiled",
+        fleet_compiled_graphs_mod, "enable_compiled",
         _mint_enable(PLAIN_CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
     _startup(ex)
     assert setup_calls == []  # boot deferred

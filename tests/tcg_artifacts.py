@@ -1,8 +1,8 @@
 """Real ``torchcg`` artifacts, built without torch (pgw#1283).
 
-The local cell store used to hold OPAQUE bytes — it hashed whatever it was
+The local compiled graph store used to hold OPAQUE bytes — it hashed whatever it was
 handed and re-hashed it on the way out — so every test about it could feed it
-``b"packed-cell-bytes"``. pgw#1283 moved byte custody to TCG, which admits an
+``b"packed-compiled graph-bytes"``. pgw#1283 moved byte custody to TCG, which admits an
 artifact only if it unpacks, restates its own key, and names a host ISA this
 machine can run. Opaque bytes are now correctly refused, so the tests need the
 real envelope.
@@ -32,7 +32,7 @@ from gen_worker._vendor.torchcg.artifact import build_metadata, pack_artifact
 from gen_worker._vendor.torchcg.host_isa import _host_requirement
 
 #: The default compiler-content facts. Two artifacts that differ only here get
-#: different ``ck1`` keys, which is how a test asks for a second cell.
+#: different ``ck1`` keys, which is how a test asks for a second compiled graph.
 TOOLCHAIN: Dict[str, str] = {"torch": "record-digest", "triton": "compiler-digest"}
 
 GRAPH_CLASS = "denoiser/h=64,w=64"
