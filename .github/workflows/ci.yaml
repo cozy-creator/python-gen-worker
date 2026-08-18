@@ -376,6 +376,17 @@ jobs:
           uv run python scripts/lint_test_fork_start_method.py --selftest
           uv run python scripts/lint_test_fork_start_method.py
 
+      # GATING (pgw#1362, DESIGN-RULINGS 4.34b): a cleanup epic cannot outrun
+      # its own intake. Measured 2026-08-17/18 — three consolidation waves
+      # removed 41 incident-named modules and ~1,900 lines, and master's test
+      # tree still went 441/134,979 -> 411/135,818, because other lanes added
+      # ~2,700 lines of new issue-named tests in the same window. All correct
+      # work; the corpus grew anyway. Without this gate pgw#1362 is a treadmill.
+      - name: pgw#1362 guard - a NEW test module is not named for an issue
+        run: |
+          uv run python scripts/lint_incident_test_names.py --selftest
+          uv run python scripts/lint_incident_test_names.py
+
       # GATING (pgw#1308): under mixed-CAS a resident model occupies disk ONCE
       # — non-tensor files are symlinks into the object store and tensor bytes
       # are read, never copied. The hatch that undoes that works perfectly at
