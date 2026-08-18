@@ -24,6 +24,7 @@ a latency cost, not a correctness question.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -85,6 +86,31 @@ def _synthesize(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _synthesize(item) for key, item in value.items()}
     return value
+
+
+def _fake_mode_of(module: Any) -> Any:
+    """The one fake mode a hollow module's parameters belong to, or ``None``.
+
+    A hollow (weights-free) module carries FAKE parameters; synthesized
+    export inputs must then be created in the SAME mode -- ``torch.export``
+    refuses a mix of real inputs and fake parameters, and two fake modes in
+    one export refuse each other. A real-weight module answers ``None`` and
+    keeps the plain real-zeros path.
+    """
+
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    modes = set()
+    for parameter in module.parameters():
+        if isinstance(parameter, FakeTensor):
+            modes.add(parameter.fake_mode)
+    if len(modes) > 1:
+        raise DiscoveryError(
+            f"{type(module).__name__} holds fake parameters from "
+            f"{len(modes)} different fake modes; a hollow module must be "
+            f"virtualized under ONE session"
+        )
+    return modes.pop() if modes else None
 
 
 def _param_names(module: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> list[str]:
@@ -160,11 +186,15 @@ def discover_lane(
     seen_graphs: set[str] = set()
     for path, calls in observed.items():
         module = modules[path]
+        fake_mode = _fake_mode_of(module)
+        synthesis = fake_mode if fake_mode is not None else contextlib.nullcontext()
         for call in calls.values():
-            args = tuple(_synthesize(value) for value in call.args)
-            kwargs = {name: _synthesize(value) for name, value in call.kwargs}
+            with synthesis:
+                args = tuple(_synthesize(value) for value in call.args)
+                kwargs = {name: _synthesize(value) for name, value in call.kwargs}
             try:
-                program = torch.export.export(module, args, kwargs, strict=strict)
+                with synthesis:
+                    program = torch.export.export(module, args, kwargs, strict=strict)
             except Exception as exc:
                 raise DiscoveryError(
                     f"lane {lane.name!r} target {path!r}: torch.export"

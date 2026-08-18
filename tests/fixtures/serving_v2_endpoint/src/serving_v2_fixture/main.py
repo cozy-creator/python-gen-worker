@@ -27,7 +27,7 @@ from typing import Annotated, Callable, Literal, Optional
 import msgspec
 import torch
 
-from gen_worker import ImageAsset, PromptRole, StringEnum, ValidationError
+from gen_worker import Endpoint, ImageAsset, PromptRole, StringEnum, ValidationError
 from gen_worker._vendor.torchcg import Lane
 from gen_worker.serving import ServeContext as RequestContext
 from gen_worker.serving.loader import EndpointDeclaration
@@ -158,12 +158,19 @@ def _sample_payloads() -> tuple[msgspec.Struct, ...]:
     )
 
 
-class TinyImage:
+class TinyImageEndpoint(Endpoint):
     def setup(self, ctx: RequestContext) -> None:
         self.pipe = TinyPipeline.from_pretrained(
             ctx.checkpoint_dir, torch_dtype=ctx.lane.dtype
         )
+        # torch.compile-style marking: at derive this records+hooks the
+        # module; at serve it swaps in the (lane, sm) compiled graphs or
+        # returns the module unchanged (eager) and registers the holes.
+        self.pipe.unet = ctx.compile(self.pipe.unet)
         self.defaults = ctx.checkpoint_defaults(TinyDefaults)
+
+    def teardown(self, ctx: RequestContext) -> None:
+        self.torn_down = True  # the base-class hook, observable in tests
 
     def generate(self, ctx: RequestContext, payload: TextToImageInput) -> ImageOutput:
         ctx.raise_if_cancelled()
@@ -217,8 +224,8 @@ class TinyImage:
         return ImageOutput(image=image, model_used=f"{ctx.checkpoint_ref}{suffix}")
 
 
-# What @endpoint(lanes=..., samples=...) will stamp — the loader's seam.
-TinyImage.__cozy_endpoint__ = EndpointDeclaration(  # type: ignore[attr-defined]
+# What the @endpoint decorator (DATA: lanes) will stamp — the loader's seam.
+TinyImageEndpoint.__cozy_endpoint__ = EndpointDeclaration(  # type: ignore[attr-defined]
     lanes=(
         Lane("bf16", compile=("unet",), contract="plain.fp32@1", dtype=torch.float32),
     ),

@@ -1,10 +1,10 @@
-"""pgw#1372: the ship-code-as-is serving layer, eager-first, adopt as bolt-on.
+"""pgw#1372: the ship-code-as-is serving layer — eager-first, ctx.compile adopt.
 
 Integration, no mocks: the fixture endpoint under
 ``tests/fixtures/serving_v2_endpoint`` is shaped exactly like the
-serverless-endpoints sdxl ``main_v2.py`` (lanes + samples declaration,
-``setup(ctx)`` loading a pipeline from ``ctx.checkpoint_dir``, handlers on
-the serving context surface). It boots from a CONFIG-ONLY checkpoint (fake
+serverless-endpoints sdxl ``main_v2.py`` (``class ...(Endpoint)``, imperative
+``self.pipe.unet = ctx.compile(self.pipe.unet)`` marking, handlers on the
+serving context surface). It boots from a CONFIG-ONLY checkpoint (fake
 weights), serves real requests end-to-end on CPU, and the adopt path runs
 real publish-time discovery output through a real ``LocalGraphStore`` — only
 the artifact loader is a stub, because bytes-to-callable is the AOTInductor
@@ -27,6 +27,7 @@ from gen_worker._vendor.torchcg import EnvironmentMismatch
 from gen_worker._vendor.torchcg.discovery import discover_lane
 from gen_worker._vendor.torchcg.document import GraphSetDocument
 from gen_worker._vendor.torchcg.graph_identity import EnvIdentity, closure_hash
+from gen_worker._vendor.torchcg.lane import Lane
 from gen_worker._vendor.torchcg.requirements import RequirementsManifest
 from gen_worker._vendor.torchcg.store import LocalGraphStore, StoreError
 from gen_worker.serving import (
@@ -75,12 +76,16 @@ def binding(checkpoint: Path) -> DeployBinding:
     )
 
 
+def fresh_host(binding: DeployBinding, tmp_path: Path) -> EndpointHost:
+    loaded = load_endpoint(FIXTURE_DIR)
+    return EndpointHost(loaded, binding, output_dir=tmp_path / "outputs")
+
+
 @pytest.fixture()
 def host(binding: DeployBinding, tmp_path: Path) -> EndpointHost:
-    loaded = load_endpoint(FIXTURE_DIR)
-    host = EndpointHost(loaded, binding, output_dir=tmp_path / "outputs")
-    host.setup()
-    return host
+    booted = fresh_host(binding, tmp_path)
+    booted.setup()
+    return booted
 
 
 # --- the eager path: standalone, first --------------------------------------
@@ -92,6 +97,9 @@ def test_eager_boot_serves_a_request_end_to_end(host: EndpointHost, tmp_path: Pa
     assert host.instance.pipe.dtype is torch.float32
     assert host.instance.defaults.steps == 2  # hub override beat the schema default
     assert host.instance.defaults.guidance == 6.0  # schema default survived
+    # ctx.compile with no adoption source is a transparent pass-through: the
+    # marked module carries no swapped forward.
+    assert "forward" not in host.instance.pipe.unet.__dict__
 
     ctx = host.make_context("req-1")
     out = host.dispatch(
@@ -108,9 +116,11 @@ def test_eager_boot_serves_a_request_end_to_end(host: EndpointHost, tmp_path: Pa
     rows = [row for row in ctx.adjustments if row["field"] == "guidance_scale"]
     assert rows and rows[0]["requested"] == "12.0" and rows[0]["applied"] == "8.0"
 
-    # The boot recorded a model_load span for the author's setup.
+    # The boot recorded a model_load span for the author's setup, and no
+    # adopt_pull span — nothing was offered to adopt.
     stages = [span.stage.value for span in boot_stages.recorded()]
     assert "model_load" in stages
+    assert "adopt_pull" not in stages
 
 
 def test_dispatch_refusals_are_typed_before_author_code_runs(host: EndpointHost) -> None:
@@ -149,9 +159,10 @@ def test_adapter_gate_and_trace_flag_shape_the_turbo_handler(
 def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
     loaded = load_endpoint(FIXTURE_DIR)
     assert loaded.module_name == "serving_v2_fixture.main"
+    # setup/teardown are the base-class hooks, never routable handlers.
     assert sorted(loaded.handlers) == ["generate", "generate_turbo"]
     lane = loaded.lane()
-    assert lane.name == "bf16" and lane.compile == ("unet",)
+    assert lane.name == "bf16"
     assert lane.contract == "plain.fp32@1"
     assert loaded.declaration.samples is not None
     payloads = loaded.declaration.samples()
@@ -162,24 +173,85 @@ def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
         load_endpoint(tmp_path)
 
 
-# --- the adopt path: publish-time discovery, store pull, swap-in ------------
+def test_the_endpoint_base_class_is_required_and_hooks_are_verified(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "rogue"
+    (root / "src" / "rogue_ep").mkdir(parents=True)
+    (root / "endpoint.toml").write_text('main = "rogue_ep.main"\n')
+    (root / "src" / "rogue_ep" / "__init__.py").write_text("")
+    (root / "src" / "rogue_ep" / "main.py").write_text(
+        "import msgspec\n"
+        "class In(msgspec.Struct):\n    prompt: str\n"
+        "class Rogue:\n"
+        "    def setup(self, ctx):\n        pass\n"
+        "    def generate(self, ctx, payload: In):\n        return payload\n"
+    )
+    # No Endpoint subclass in the module: the base is REQUIRED, named error.
+    with pytest.raises(EndpointLoadError, match="Endpoint"):
+        load_endpoint(root)
+    # A DECORATED class that skips the base is refused by name too — the
+    # marker does not exempt anyone from the behavior contract.
+    (root / "src" / "rogue_ep" / "main.py").write_text(
+        "import msgspec\n"
+        "from gen_worker.serving.loader import EndpointDeclaration\n"
+        "class In(msgspec.Struct):\n    prompt: str\n"
+        "class Rogue:\n"
+        "    def setup(self, ctx):\n        pass\n"
+        "    def generate(self, ctx, payload: In):\n        return payload\n"
+        "Rogue.__cozy_endpoint__ = EndpointDeclaration()\n"
+    )
+    import importlib
+    import rogue_ep.main
+
+    importlib.reload(rogue_ep.main)
+    from gen_worker.serving.loader import load_endpoint_module
+
+    with pytest.raises(EndpointLoadError, match="does not inherit"):
+        load_endpoint_module("rogue_ep.main")
+    # A subclass whose hook breaks the (self, ctx) contract is refused too:
+    # framework capabilities arrive via ctx ONLY.
+    (root / "src" / "rogue_ep" / "main.py").write_text(
+        "import msgspec\n"
+        "from gen_worker import Endpoint\n"
+        "class In(msgspec.Struct):\n    prompt: str\n"
+        "class Rogue(Endpoint):\n"
+        "    def setup(self, ctx, extra_toolbox):\n        pass\n"
+        "    def generate(self, ctx, payload: In):\n        return payload\n"
+    )
+    importlib.reload(rogue_ep.main)
+    with pytest.raises(EndpointLoadError, match=r"exactly \(self, ctx\)"):
+        load_endpoint_module("rogue_ep.main")
+
+
+def test_teardown_hook_runs_through_the_base_class_contract(
+    host: EndpointHost,
+) -> None:
+    instance = host.instance
+    assert not hasattr(instance, "torn_down")
+    host.teardown()
+    assert instance.torn_down is True
+    assert host.instance is None
+
+
+# --- the adopt path: publish-time discovery, store pull, ctx.compile --------
 
 
 def publish_document(host: EndpointHost) -> GraphSetDocument:
-    """The publish-time derive, run for real: discovery hooks the lane's
-    target on the author's live pipeline and drives the author's own
+    """The publish-time derive, run for real: discovery hooks the marked
+    module on the author's live pipeline and drives the author's own
     handlers with the declared sample payloads."""
-    lane = host.lane
-    sample_fn = host.loaded.declaration.samples
-    assert sample_fn is not None
-    samples = sample_fn()
+    lane: Lane = host.loaded.lane()
+    samples_fn = host.loaded.declaration.samples
+    assert samples_fn is not None
+    samples = samples_fn()
 
     def drive() -> None:
         for index, payload in enumerate(samples):
             ctx = host.make_context(f"trace-{index}", is_trace=True)
             host.dispatch("generate", payload, request_id=f"trace-{index}", ctx=ctx)
 
-    lane_graphs = discover_lane(lane, host.roots(), drive)
+    lane_graphs = discover_lane(lane, {"unet": host.instance.pipe.unet}, drive)
     return GraphSetDocument(closure=CLOSURE, lanes=(lane_graphs,))
 
 
@@ -198,8 +270,8 @@ def counting_loader(calls: "list[str]") -> "Callable[[Path, Any], Callable[..., 
     return load
 
 
-def test_adopt_swaps_the_module_forward_and_hands_ordered_holes(
-    host: EndpointHost, tmp_path: Path
+def test_adopt_first_boot_swaps_via_ctx_compile_and_hands_ordered_holes(
+    host: EndpointHost, binding: DeployBinding, tmp_path: Path
 ) -> None:
     document = publish_document(host)
     lane_graphs = document.lanes[0]
@@ -211,37 +283,40 @@ def test_adopt_swaps_the_module_forward_and_hands_ordered_holes(
     store.publish_artifact(hit.graph, ENV, artifact, manifest())
 
     calls: list = []
-    adoption = host.adopt(
-        store, document, SM,
+    adopted_host = fresh_host(binding, tmp_path)
+    adopted_host.setup(
+        store=store, document=document, sm=SM,
         loader=counting_loader(calls),
         artifacts_dir=tmp_path / "adopted",
         installed=INSTALLED,
     )
 
     # THE handoff for pgw#1371: ordered holes carrying full GraphRecords.
-    assert [h.record.graph for h in host.holes] == [hole.graph]
-    assert host.holes[0].reason == "miss"
-    assert host.holes[0].record.target == "unet"
-    assert host.holes[0].record.ingress is hole.ingress
+    assert [h.record.graph for h in adopted_host.holes] == [hole.graph]
+    assert adopted_host.holes[0].reason == "miss"
+    assert adopted_host.holes[0].record.ingress == hole.ingress
 
-    # The armed bucket serves THROUGH the swap (module-forward verified
-    # called); the hole bucket stays on the author's eager forward.
+    # The armed bucket serves THROUGH the ctx.compile swap (module-forward
+    # verified called); the hole bucket stays on the author's eager forward.
     hit_shape = tuple(d for d in hit.ingress.inputs[0].shape)
     hit_ratio = "1:1" if hit_shape == (16, 16) else "3:4"
     hole_ratio = "3:4" if hit_ratio == "1:1" else "1:1"
-    host.dispatch("generate", {"prompt": "x", "aspect_ratio": hit_ratio}, request_id="r1")
+    adopted_host.dispatch(
+        "generate", {"prompt": "x", "aspect_ratio": hit_ratio}, request_id="r1")
     assert calls and set(calls) == {hit.graph}
     swapped = len(calls)
-    host.dispatch("generate", {"prompt": "x", "aspect_ratio": hole_ratio}, request_id="r2")
+    adopted_host.dispatch(
+        "generate", {"prompt": "x", "aspect_ratio": hole_ratio}, request_id="r2")
     assert len(calls) == swapped  # the hole ran eager
 
     # A late mint arms without a reboot and leaves the hole list empty.
     minted = tmp_path / "late.so"
     minted.write_bytes(b"late")
-    adoption.arm(hole, minted)
-    host.dispatch("generate", {"prompt": "x", "aspect_ratio": hole_ratio}, request_id="r3")
+    adopted_host.adoption.arm(hole, minted)
+    adopted_host.dispatch(
+        "generate", {"prompt": "x", "aspect_ratio": hole_ratio}, request_id="r3")
     assert hole.graph in calls
-    assert host.holes == ()
+    assert adopted_host.holes == ()
 
     # Telemetry: the adopt_pull span replaced the keyset span in this flow.
     spans = [s for s in boot_stages.recorded() if s.stage.value == "adopt_pull"]
@@ -252,35 +327,52 @@ def test_adopt_swaps_the_module_forward_and_hands_ordered_holes(
     assert not [s for s in boot_stages.recorded() if s.stage.value == "keyset"]
 
 
-def test_exact_env_mismatch_refuses_loudly(host: EndpointHost, tmp_path: Path) -> None:
+def test_exact_env_mismatch_refuses_loudly_before_author_code(
+    host: EndpointHost, binding: DeployBinding, tmp_path: Path
+) -> None:
     document = publish_document(host)
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
+    refused = fresh_host(binding, tmp_path)
     with pytest.raises(EnvironmentMismatch, match="build-system bug"):
-        host.adopt(
-            store, document, SM,
+        refused.setup(
+            store=store, document=document, sm=SM,
             loader=counting_loader([]),
             artifacts_dir=tmp_path / "adopted",
             installed={"torch": "0.0.0-divergent"},
         )
+    # The audit fired BEFORE the author's class was even instantiated.
+    assert refused.instance is None
     spans = [s for s in boot_stages.recorded() if s.stage.value == "adopt_pull"]
-    assert spans and spans[0].attrs["refusal"] == "environment_mismatch"
+    assert spans and spans[-1].attrs["refusal"] == "environment_mismatch"
 
 
-def test_absent_or_eager_permanent_metadata_is_a_clean_noop(
-    host: EndpointHost, tmp_path: Path
+def test_eager_permanent_metadata_is_a_clean_noop(
+    binding: DeployBinding, tmp_path: Path
 ) -> None:
-    assert host.adopt(
-        None, None, SM, loader=counting_loader([]), artifacts_dir=tmp_path
-    ) is None
     eager = GraphSetDocument(closure=CLOSURE, lanes=())
-    assert host.adopt(
-        None, eager, SM, loader=counting_loader([]), artifacts_dir=tmp_path
-    ) is None
-    assert host.holes == ()
+    booted = fresh_host(binding, tmp_path)
+    booted.setup(document=eager, sm=SM)
+    assert booted.adoption is None
+    assert booted.holes == ()
     spans = [s for s in boot_stages.recorded() if s.stage.value == "adopt_pull"]
-    assert [s.attrs["graphs_from"] for s in spans] == ["absent", "eager_permanent"]
+    assert [s.attrs["graphs_from"] for s in spans] == ["eager_permanent"]
     # The endpoint still serves — the eager bridge is unconditional.
-    out = host.dispatch("generate", {"prompt": "still serving"}, request_id="r")
+    out = booted.dispatch("generate", {"prompt": "still serving"}, request_id="r")
+    assert out.model_used == "ckpt:tiny@1"
+
+
+def test_a_store_less_boot_still_forms_the_full_mint_worklist(
+    host: EndpointHost, binding: DeployBinding, tmp_path: Path
+) -> None:
+    document = publish_document(host)
+    booted = fresh_host(binding, tmp_path)
+    booted.setup(
+        document=document, sm=SM, loader=counting_loader([]),
+        artifacts_dir=tmp_path / "adopted", installed=INSTALLED,
+    )
+    # Metadata known, artifacts unreachable: everything is stated mint work.
+    assert [h.reason for h in booted.holes] == ["miss", "miss"]
+    out = booted.dispatch("generate", {"prompt": "eager"}, request_id="r")
     assert out.model_used == "ckpt:tiny@1"
 
 
@@ -306,7 +398,7 @@ class StubTransport:
 
 
 def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
-    host: EndpointHost, tmp_path: Path
+    host: EndpointHost, binding: DeployBinding, tmp_path: Path
 ) -> None:
     import hashlib
 
@@ -328,14 +420,15 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     store = HubGraphStore(transport, "release-1", "bf16", SM)
 
     calls: list = []
-    host.adopt(
-        store, document, SM,
+    adopted_host = fresh_host(binding, tmp_path)
+    adopted_host.setup(
+        store=store, document=store.get_graphs("release-1"), sm=SM,
         loader=counting_loader(calls),
         artifacts_dir=tmp_path / "adopted",
         installed=INSTALLED,
     )
     assert transport.asks == 1  # ONE ask per boot, cached thereafter
-    assert [h.record.graph for h in host.holes] == [hole.graph]
+    assert [h.record.graph for h in adopted_host.holes] == [hole.graph]
     fetched = tmp_path / "adopted" / ENV.value / f"{hit.graph}.so"
     assert fetched.read_bytes() == payload
     hit_manifest = store.get_manifest(hit.graph, ENV)
@@ -344,15 +437,15 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     # A lying digest is a StoreError -> a HOLE with the reason stated, never
     # an adopted artifact and never a boot failure (partial-hit everywhere).
     transport.blobs["https://presigned.example/hit"] = b"tampered"
-    store_again = HubGraphStore(transport, "release-1", "bf16", SM)
-    host2_calls: list = []
-    adoption = host.adopt(
-        store_again, document, SM,
-        loader=counting_loader(host2_calls),
+    tampered_store = HubGraphStore(transport, "release-1", "bf16", SM)
+    tampered_host = fresh_host(binding, tmp_path)
+    tampered_host.setup(
+        store=tampered_store, document=tampered_store.get_graphs("release-1"),
+        sm=SM, loader=counting_loader([]),
         artifacts_dir=tmp_path / "adopted-2",
         installed=INSTALLED,
     )
-    reasons = {h.record.graph: h.reason for h in adoption.holes}
+    reasons = {h.record.graph: h.reason for h in tampered_host.holes}
     assert reasons[hit.graph].startswith("store_error:")
     assert "digest verification" in reasons[hit.graph]
 

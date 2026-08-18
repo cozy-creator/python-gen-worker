@@ -65,12 +65,14 @@ class ServeContext(RequestContext[Any]):
         binding: DeployBinding,
         lane: Any = None,
         is_trace: bool = False,
+        compile_sink: Optional[Any] = None,
         **base_kwargs: Any,
     ) -> None:
         super().__init__(request_id, **base_kwargs)
         self._binding = binding
         self._lane = lane
         self._is_trace = bool(is_trace)
+        self._compile_sink = compile_sink
 
     # The base class spells `checkpoint_dir(*, key)` as JOB-SCOPED scratch;
     # the serving surface's `ctx.checkpoint_dir` is the checkpoint TREE. The
@@ -127,6 +129,25 @@ class ServeContext(RequestContext[Any]):
                 f"per-checkpoint overrides for {self._binding.checkpoint_ref!r} "
                 f"do not fit {schema.__name__}: {exc}"
             ) from None
+
+    def compile(self, target: Any) -> Any:
+        """Imperative module marking, the torch.compile idiom (Paul ruling
+        2026-08-18)::
+
+            self.pipe.unet = ctx.compile(self.pipe.unet)
+
+        At publish time this records + hooks the module for the derive; at
+        serve boot it consults the store per graph for the active
+        (lane, sm) — hit: the module comes back with the compiled graph
+        armed; miss: the module comes back UNCHANGED (eager) and the graph
+        joins the ordered hole list the background mint consumes
+        (pgw#1371). ``ctx.compile(pipe)`` walks the pipeline's nn.Module
+        components. With no adoption source bound (local runs, the eager
+        bridge) it returns ``target`` untouched — marking is always safe.
+        """
+        if self._compile_sink is None:
+            return target
+        return self._compile_sink(target)
 
     def step_callback(self, num_inference_steps: int, **kwargs: Any) -> Any:
         """A diffusers ``callback_on_step_end`` wired to progress + cancel —

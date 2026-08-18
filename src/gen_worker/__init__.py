@@ -175,6 +175,7 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         LayoutRequirements,
         RequirementTerms,
     )
+    from .serving.endpoint import Endpoint
     from .request_context import (
         JobContext,
         RequestContext,
@@ -227,6 +228,8 @@ _EXPORTS: Final[dict[str, str]] = {
     "Dim": "api.export_contract",
     "Done": "api.streaming",
     "DynamicDim": "api.decorators",
+    # pgw#1372: the REQUIRED minimal endpoint base (Paul ruling 2026-08-18).
+    "Endpoint": "serving.endpoint",
     "Error": "api.streaming",
     "ExpectedOutput": "api.types",
     "FamilyGeometry": "geometry",
@@ -403,6 +406,8 @@ __all__ = [
     # Context types.
     "RequestContext",
     "JobContext",
+    # pgw#1372: the required minimal endpoint base class.
+    "Endpoint",
     "TrainingMetric",
     # Per-step progress helper for diffusers pipelines.
     "diffusers_step_callback",

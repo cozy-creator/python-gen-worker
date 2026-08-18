@@ -1,18 +1,17 @@
-"""The endpoint serve host (pgw#1372): eager-first boot, adopt as a bolt-on.
+"""The endpoint serve host (pgw#1372): eager-first boot, adopt via ctx.compile.
 
-Boot, in order (Paul's flow, pgw#1367): instantiate the author's class, call
-``setup(ctx)`` — the author's own code loads its pipeline from
-``ctx.checkpoint_dir`` and IS the serve host — then, when release metadata
-and a store exist, ``adopt()`` swaps compiled graphs in for the active
-lane's target modules on the author's own objects. Holes stay eager and are
-handed to the background mint (pgw#1371) as the ordered
-``LaneAdoption.holes`` list. No trace, no derivation, no compile happens
-here, ever; the exact-env audit refuses loudly BEFORE any artifact is
-touched.
+Boot, in order (Paul's flow, pgw#1367 + the 2026-08-18 imperative-marking
+ruling): when release metadata is at hand, build the torchcg ``AdoptSession``
+FIRST — its constructor runs the exact-env audit, so a mismatched pod
+refuses loudly before any author code runs — then instantiate the author's
+class and call ``setup(ctx)``. The author's own ``ctx.compile(module)``
+calls are where compiled graphs swap in: hit -> armed, miss -> eager + an
+ordered :class:`Hole` for the background mint (pgw#1371). No trace, no
+derivation, no compile happens here, ever.
 
-Telemetry: ``setup`` records a ``model_load`` span and ``adopt`` records the
-``adopt_pull`` span (``graphs_from=release`` + per-outcome counts) — the
-new-flow replacement for the deleted keyset/derive span.
+Telemetry: ``setup`` records a ``model_load`` span, and an adoption-carrying
+boot records the ``adopt_pull`` span (``graphs_from=release`` + per-outcome
+counts) — the new-flow replacement for the deleted keyset/derive span.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ class EndpointHost:
 
     The host owns worker-side state only: the deploy binding (mutable hub
     state — ``rebind`` swaps it), the active lane (the deploy's pick), the
-    author's live instance, and the adoption report. Author state lives on
+    author's live instance, and the adoption session. Author state lives on
     the author's instance, untouched.
     """
 
@@ -80,91 +79,31 @@ class EndpointHost:
 
     # -- boot ---------------------------------------------------------------
 
-    def setup(self) -> None:
+    def setup(
+        self,
+        *,
+        store: Any = None,
+        document: Any = None,
+        sm: str = "",
+        loader: Any = None,
+        artifacts_dir: Optional[Path] = None,
+        installed: Optional[Mapping[str, str]] = None,
+    ) -> None:
         """Instantiate the author's class and run its ``setup(ctx)``.
 
-        The EAGER path ends here: after setup the endpoint serves, compiled
-        or not — everything below is a bolt-on.
-        """
-        started = time.monotonic()
-        self.instance = self.loaded.cls()
-        ctx = self.make_context("boot-setup", boot_warmup=True)
-        self.instance.setup(ctx)
-        boot_stages.record_ending_now(
-            boot_stages.Stage.MODEL_LOAD,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            label=self.loaded.module_name,
-            checkpoint=self.binding.checkpoint_ref,
-        )
-
-    def rebind(self, binding: DeployBinding) -> None:
-        """Swap the deploy binding (hub deploy state changed). Contexts made
-        after this read the new binding; release identity is untouched —
-        graphs a rebind introduces are holes the mint fills (partial-hit)."""
-        self.binding = binding
-
-    def roots(self) -> Dict[str, Any]:
-        """The author's namespace for lane target paths.
-
-        The convention discovery uses at publish time, restated at adopt
-        time: a pipeline-shaped attribute (anything with a ``components``
-        mapping) contributes its components at top level — ``"unet"`` is
-        ``pipe.unet`` — and bare module attributes contribute by name. A
-        name two attributes both claim is refused: adoption must not guess
-        which module the author meant.
-        """
-        import torch
-
-        if self.instance is None:
-            raise RuntimeError("roots(): boot the endpoint first (setup())")
-        roots: Dict[str, Any] = {}
-
-        def claim(name: str, value: Any, source: str) -> None:
-            if name in roots and roots[name] is not value:
-                raise RuntimeError(
-                    f"root {name!r} is claimed twice (latest by {source}); "
-                    f"adoption cannot guess which module the author meant"
-                )
-            roots[name] = value
-
-        for attr, value in vars(self.instance).items():
-            components = getattr(value, "components", None)
-            if isinstance(components, Mapping):
-                for name, component in components.items():
-                    claim(str(name), component, f"{attr}.components")
-            elif isinstance(value, torch.nn.Module):
-                claim(attr, value, "instance attribute")
-        return roots
-
-    # -- adoption -----------------------------------------------------------
-
-    def adopt(
-        self,
-        store: Any,
-        document: Any,
-        sm: str,
-        *,
-        loader: Any,
-        artifacts_dir: Path,
-        installed: Optional[Mapping[str, str]] = None,
-    ) -> Any:
-        """Adopt-first boot, after ``setup``: pull ``[release x sm]``, swap in.
-
-        ``document`` is the release's stamped graph metadata
-        (``GraphSetDocument``); ``None`` or an eager-permanent document is a
-        clean no-op — the endpoint stays on the eager bridge. The exact-env
-        audit runs INSIDE ``torchcg.adopt_lane`` and its
-        ``EnvironmentMismatch`` propagates loudly (a build-system bug is not
-        a compat decision); the refusal is recorded on the span before it
-        leaves. Everything else is partial-hit: what exists arms, the rest
-        is the ordered ``holes`` handoff to the pgw#1371 mint.
+        With no ``document`` this is the EAGER bridge: ``ctx.compile`` is a
+        transparent pass-through and the endpoint serves after setup,
+        unconditionally. With release metadata (``document`` + ``sm``), the
+        adopt session forms FIRST — the exact-env audit refuses loudly
+        before any author code runs — and the author's own ``ctx.compile``
+        calls arm what the store holds; ``self.holes`` afterwards is the
+        ordered mint work-list. ``store`` may be ``None`` with a document:
+        every claimed graph is then a hole (mint everything).
         """
         from .._vendor.torchcg import EnvironmentMismatch
-        from .._vendor.torchcg.adopt import adopt_lane
-        from .._vendor.torchcg.graph_identity import EnvIdentity, installed_closure
+        from .._vendor.torchcg.adopt import AdoptSession
+        from .._vendor.torchcg.graph_identity import installed_closure
 
-        if self.instance is None:
-            raise RuntimeError("adopt(): boot the endpoint first (setup())")
         started = time.monotonic()
 
         def span(**attrs: object) -> None:
@@ -176,56 +115,91 @@ class EndpointHost:
                 **attrs,
             )
 
-        if document is None or getattr(document, "eager_permanent", False):
-            span(graphs_from="absent" if document is None else "eager_permanent")
-            self.adoption = None
-            return None
-        if self.lane is None:
-            raise RuntimeError(
-                "adopt(): this endpoint declared no lanes; an eager-permanent "
-                "endpoint has nothing to adopt"
-            )
-        lane_name = str(getattr(self.lane, "name"))
-        installed_map = dict(installed) if installed is not None else installed_closure()
-        try:
-            adoption = adopt_lane(
-                store,
-                document,
-                lane_name,
-                self.roots(),
-                sm,
-                loader=loader,
-                artifacts_dir=artifacts_dir,
-                installed=installed_map,
-            )
+        session = None
+        installed_map: Optional[Mapping[str, str]] = None
+        if document is not None and getattr(document, "eager_permanent", False):
+            span(graphs_from="eager_permanent")
+            document = None
+        if document is not None:
+            if self.lane is None:
+                raise RuntimeError(
+                    "setup(): release metadata offered but this endpoint "
+                    "declared no lanes; an eager-permanent endpoint has "
+                    "nothing to adopt"
+                )
+            lane_name = str(getattr(self.lane, "name"))
+            installed_map = dict(installed) if installed is not None else installed_closure()
+            try:
+                session = AdoptSession(
+                    store,
+                    document,
+                    lane_name,
+                    sm,
+                    loader=loader,
+                    artifacts_dir=artifacts_dir
+                    or Path(".compiled-graphs"),
+                    installed=installed_map,
+                )
+            except EnvironmentMismatch as exc:
+                # The audit fired BEFORE any author code ran — a
+                # build-system bug surfacing, recorded then re-raised loudly.
+                span(graphs_from="release", lane=lane_name,
+                     refusal="environment_mismatch")
+                logger.error("adopt refused: %s", exc)
+                raise
+
+        load_started = time.monotonic()
+        self.instance = self.loaded.cls()
+        ctx = self.make_context(
+            "boot-setup", boot_warmup=True,
+            compile_sink=session.adopt if session is not None else None,
+        )
+        self.instance.setup(ctx)
+        boot_stages.record_ending_now(
+            boot_stages.Stage.MODEL_LOAD,
+            duration_ms=int((time.monotonic() - load_started) * 1000),
+            label=self.loaded.module_name,
+            checkpoint=self.binding.checkpoint_ref,
+        )
+        if session is not None:
             # The mint-written requirements manifest is an AUDIT assertion
             # (exact-env ruling): every adopted artifact restates what its
             # mint linked, and a divergence is the build system contradicting
             # itself — refuse loudly, never adopt-and-hope.
-            env = EnvIdentity(closure=document.closure, sm=sm)
-            for record in adoption.adopted:
-                manifest = store.get_manifest(record.graph, env)
-                if manifest is not None:
-                    manifest.assert_environment(installed_map, sm=sm)
-        except EnvironmentMismatch as exc:
-            span(graphs_from="release", lane=lane_name, refusal="environment_mismatch")
-            logger.error("adopt refused: %s", exc)
-            raise
-        span(
-            graphs_from="release",
-            lane=lane_name,
-            artifact_from_store=len(adoption.adopted),
-            artifact_from_eager=len(adoption.holes),
-            ambiguous=len(adoption.ambiguous),
-        )
-        self.adoption = adoption
-        return adoption
+            if store is not None and installed_map is not None:
+                for record in session.adopted:
+                    manifest = store.get_manifest(record.graph, session.env)
+                    if manifest is not None:
+                        manifest.assert_environment(installed_map, sm=sm)
+            span(
+                graphs_from="release",
+                lane=str(getattr(self.lane, "name")),
+                artifact_from_store=len(session.adopted),
+                artifact_from_eager=len(session.holes),
+                ambiguous=len(session.ambiguous),
+                unclaimed=len(session.unclaimed),
+            )
+        self.adoption = session
+
+    def teardown(self) -> None:
+        """Run the author's ``teardown(ctx)`` hook (base-class contract)."""
+        if self.instance is None:
+            return
+        self.instance.teardown(self.make_context("boot-teardown"))
+        self.instance = None
+
+    def rebind(self, binding: DeployBinding) -> None:
+        """Swap the deploy binding (hub deploy state changed). Contexts made
+        after this read the new binding; release identity is untouched —
+        graphs a rebind introduces are holes the mint fills (partial-hit)."""
+        self.binding = binding
 
     @property
     def holes(self) -> tuple[Any, ...]:
         """The ordered mint work-list (pgw#1371's input): torchcg ``Hole``
         rows in canonical document order, each carrying its full
-        ``GraphRecord`` (graph hash + target path + ingress) and reason."""
+        ``GraphRecord`` (graph hash + ingress) and reason. The mint arms
+        each landed artifact via ``self.adoption.arm(record, path)``."""
         return tuple(self.adoption.holes) if self.adoption is not None else ()
 
     # -- serving ------------------------------------------------------------

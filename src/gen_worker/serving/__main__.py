@@ -92,9 +92,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _adopt(host: EndpointHost, args: argparse.Namespace) -> None:
+def _adoption_source(
+    args: argparse.Namespace, module_name: str
+) -> tuple[Any, Any]:
+    """(store, document) for the boot, or (None, None) — the eager bridge."""
     if not (args.graph_store or args.hub_base_url):
-        return
+        return None, None
     if not args.sm:
         raise SystemExit("--sm is required to adopt (artifacts are per-sm)")
     if args.hub_base_url:
@@ -106,37 +109,21 @@ def _adopt(host: EndpointHost, args: argparse.Namespace) -> None:
             HttpReleaseGraphTransport(args.hub_base_url), args.release,
             args.lane, args.sm,
         )
-        document = store.get_graphs(args.release)
-    else:
-        from .._vendor.tensorfs import LocalCAS
-        from .._vendor.torchcg.store import LocalGraphStore
+        return store, store.get_graphs(args.release)
+    from .._vendor.tensorfs import LocalCAS
+    from .._vendor.torchcg.store import LocalGraphStore
 
-        store = LocalGraphStore(LocalCAS(Path(args.graph_store)))
-        document = store.get_graphs(host.loaded.module_name)
+    store = LocalGraphStore(LocalCAS(Path(args.graph_store)))
+    return store, store.get_graphs(module_name)
 
-    def loader(path: Path, record: Any) -> Any:
-        # The AOTInductor runtime load: the packaged compiled graph becomes
-        # the module forward for its graph class. Exact-env by construction —
-        # the audit already ran before any artifact was touched.
-        import torch._inductor
 
-        return torch._inductor.aoti_load_package(str(path))
+def _aoti_loader(path: Path, record: Any) -> Any:
+    # The AOTInductor runtime load: the packaged compiled graph becomes the
+    # module forward for its graph class. Exact-env by construction — the
+    # audit already ran before any author code touched an artifact.
+    import torch._inductor
 
-    adoption = host.adopt(
-        store, document, args.sm,
-        loader=loader, artifacts_dir=Path(args.artifacts_dir),
-    )
-    if adoption is not None:
-        print(
-            json.dumps({
-                "adopted": [record.graph for record in adoption.adopted],
-                "holes": [
-                    {"graph": hole.record.graph, "reason": hole.reason}
-                    for hole in adoption.holes
-                ],
-            }),
-            file=sys.stderr,
-        )
+    return torch._inductor.aoti_load_package(str(path))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -152,12 +139,27 @@ def main(argv: list[str] | None = None) -> int:
     host = EndpointHost(
         loaded, binding, lane_name=args.lane, output_dir=Path(args.output_dir)
     )
-    host.setup()
-    _adopt(host, args)
+    store, document = _adoption_source(args, loaded.module_name)
+    host.setup(
+        store=store, document=document, sm=args.sm,
+        loader=_aoti_loader, artifacts_dir=Path(args.artifacts_dir),
+    )
+    if host.adoption is not None:
+        print(
+            json.dumps({
+                "adopted": [record.graph for record in host.adoption.adopted],
+                "holes": [
+                    {"graph": hole.record.graph, "reason": hole.reason}
+                    for hole in host.holes
+                ],
+            }),
+            file=sys.stderr,
+        )
     for index, (function, raw) in enumerate(zip(args.invoke, args.payload)):
         result = host.dispatch(function, json.loads(raw), request_id=f"local-{index}")
         sys.stdout.buffer.write(msgspec.json.encode(result))
         sys.stdout.buffer.write(b"\n")
+    host.teardown()
     return 0
 
 

@@ -96,7 +96,7 @@ class LoadedEndpoint:
 def _handlers_of(cls: type) -> Dict[str, Handler]:
     handlers: Dict[str, Handler] = {}
     for name, fn in vars(cls).items():
-        if name.startswith("_") or name == "setup" or not inspect.isfunction(fn):
+        if name.startswith("_") or name in ("setup", "teardown") or not inspect.isfunction(fn):
             continue
         parameters = list(inspect.signature(fn).parameters.values())
         if len(parameters) != 3:  # self, ctx, payload — the one handler shape
@@ -119,37 +119,78 @@ def _handlers_of(cls: type) -> Dict[str, Handler]:
     return handlers
 
 
+def _verify_hooks(cls: type) -> None:
+    """The base-class behavior contract, held: an overridden hook keeps the
+    typed ``(self, ctx)`` shape. Framework capabilities arrive via ctx ONLY
+    (Paul ruling 2026-08-18) — a hook that asks for more is asking the base
+    to be a toolbox, and the refusal names it."""
+    for hook in ("setup", "teardown"):
+        fn = vars(cls).get(hook)
+        if fn is None:
+            continue  # inherited no-op
+        if not inspect.isfunction(fn):
+            raise EndpointLoadError(
+                f"{cls.__name__}.{hook} must be a plain method, got "
+                f"{type(fn).__name__}"
+            )
+        positional = [
+            parameter
+            for parameter in inspect.signature(fn).parameters.values()
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if len(positional) != 2:
+            raise EndpointLoadError(
+                f"{cls.__name__}.{hook} must accept exactly (self, ctx); "
+                f"framework capabilities arrive via ctx only"
+            )
+
+
 def _endpoint_class(module: ModuleType) -> tuple[type, EndpointDeclaration]:
+    from .endpoint import Endpoint
+
     own_classes = [
         value
         for value in vars(module).values()
         if isinstance(value, type) and value.__module__ == module.__name__
     ]
-    marked = [cls for cls in own_classes if getattr(cls, ENDPOINT_ATTR, None) is not None]
+    marked = [cls for cls in own_classes if ENDPOINT_ATTR in vars(cls)]
     if len(marked) > 1:
         raise EndpointLoadError(
             f"{module.__name__} marks {len(marked)} endpoint classes; one module, "
             f"one endpoint"
         )
     if marked:
-        declaration = getattr(marked[0], ENDPOINT_ATTR)
+        cls = marked[0]
+        declaration = vars(cls)[ENDPOINT_ATTR]
         if not isinstance(declaration, EndpointDeclaration):
             raise EndpointLoadError(
-                f"{module.__name__}.{marked[0].__name__}.{ENDPOINT_ATTR} is "
+                f"{module.__name__}.{cls.__name__}.{ENDPOINT_ATTR} is "
                 f"{type(declaration).__name__}, not an EndpointDeclaration"
             )
-        return marked[0], declaration
-    # Unmarked bridge shape: the single class with a setup() is the endpoint,
-    # eager-permanent. Stated so plain author code runs before the decorator
-    # lane lands — the always-runnable eager bridge.
-    with_setup = [cls for cls in own_classes if callable(getattr(cls, "setup", None))]
-    if len(with_setup) == 1:
-        return with_setup[0], EndpointDeclaration()
-    raise EndpointLoadError(
-        f"{module.__name__} has {'no' if not with_setup else len(with_setup)} "
-        f"endpoint class: expected exactly one class stamped by @endpoint "
-        f"(or exactly one class with a setup method)"
-    )
+    else:
+        # Unmarked bridge shape: the single Endpoint subclass is the
+        # endpoint, eager-permanent — plain author code runs before the
+        # decorator lane lands (the always-runnable eager bridge).
+        subclasses = [
+            value for value in own_classes
+            if issubclass(value, Endpoint) and value is not Endpoint
+        ]
+        if len(subclasses) != 1:
+            raise EndpointLoadError(
+                f"{module.__name__} defines {len(subclasses)} Endpoint "
+                f"subclasses; expected exactly one endpoint class "
+                f"(class MyEndpoint(gen_worker.Endpoint))"
+            )
+        cls, declaration = subclasses[0], EndpointDeclaration()
+    if not issubclass(cls, Endpoint):
+        raise EndpointLoadError(
+            f"{module.__name__}.{cls.__name__} does not inherit "
+            f"gen_worker.Endpoint — the base class is REQUIRED (Paul ruling "
+            f"2026-08-18): class {cls.__name__}(Endpoint)"
+        )
+    _verify_hooks(cls)
+    return cls, declaration
 
 
 def load_endpoint_module(module_name: str) -> LoadedEndpoint:

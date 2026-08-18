@@ -14,8 +14,12 @@ Seams, deliberately narrow:
 * ``RequestContext`` here is the serving surface ``main_v2.py`` uses
   (``ctx.checkpoint_dir``, ``ctx.lane``, ``ctx.checkpoint_defaults(T)``,
   ``ctx.adapter``, ``ctx.is_trace`` + the base survivors).
-* The author-surface lane owns the ``@endpoint(lanes=..., samples=...)``
-  decorator; this package only reads what it stamps
+* Endpoint classes inherit the REQUIRED minimal base
+  (:class:`~gen_worker.serving.endpoint.Endpoint` — typed setup/teardown
+  hooks only; framework capabilities arrive via ctx ONLY, by ruling).
+  Module marking is imperative: ``self.pipe.unet = ctx.compile(self.pipe.unet)``.
+* The author-surface lane owns the ``@endpoint`` decorator (DATA: lanes);
+  this package only reads what it stamps
   (``loader.ENDPOINT_ATTR`` -> :class:`~gen_worker.serving.loader.EndpointDeclaration`).
 * The hub is one ``GraphStore`` implementation behind th#2133's route
   (:mod:`~gen_worker.serving.hub_store`); cozy-local is another
@@ -23,6 +27,7 @@ Seams, deliberately narrow:
 """
 
 from .context import BoundAdapter, DeployBinding, ServeContext
+from .endpoint import Endpoint
 from .host import EndpointHost, ServeDispatchError
 from .loader import (
     ENDPOINT_ATTR,
@@ -38,6 +43,7 @@ __all__ = [
     "ENDPOINT_ATTR",
     "BoundAdapter",
     "DeployBinding",
+    "Endpoint",
     "EndpointDeclaration",
     "EndpointHost",
     "EndpointLoadError",
