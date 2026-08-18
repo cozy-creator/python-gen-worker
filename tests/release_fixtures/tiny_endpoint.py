@@ -17,7 +17,7 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import Adapter, ImageAsset, Model, RequestContext, entrypoint
+from gen_worker import Adapter, ImageAsset, Model, RequestContext, ValidationError, entrypoint
 from gen_worker.models import SDXL
 from gen_worker.models.model_types import register_contract_dtype
 
@@ -75,12 +75,23 @@ def _run(model: TinyModel, ctx: Any, *, steps: int, guidance: float,
 @entrypoint  # type: ignore[operator]
 def generate(ctx: RequestContext, payload: GenerateInput, model: TinyModel,
              turbo: Adapter | None, loras: list[Adapter]) -> ImageOutput:
-    """Contract-file shape: ctx-first order, platform-injected facts."""
-    assert turbo is None and loras == []  # no adapter is ever bound at trace
+    """Contract-file shape: ctx-first order, platform-injected facts.
+
+    A riding distillation adapter (or a cfg-off checkpoint) serves the
+    guidance-free batch-1 arm -- the derive's binding enumeration reaches it
+    without any real adapter bytes.
+    """
     ctx.raise_if_cancelled()
     d = model.defaults
-    steps = d.steps.resolve(payload.num_inference_steps or 2, ctx)
-    guidance = d.guidance.resolve(payload.guidance_scale, ctx)
+    if turbo is not None and not d.cfg:
+        raise ValidationError(
+            "this checkpoint is already distilled; a distillation adapter "
+            "cannot be stacked on it"
+        )
+    recipe = turbo.defaults if turbo is not None else d
+    distilled = not recipe.cfg
+    steps = recipe.steps.resolve(payload.num_inference_steps or 2, ctx)
+    guidance = 0.0 if distilled else d.guidance.resolve(payload.guidance_scale, ctx)
     image = _run(model, ctx, steps=int(steps), guidance=guidance,
                  side=_BUCKETS[payload.size], prompt=payload.prompt.strip())
     # checkpoint_ref lands on the serving RequestContext with pgw#1372.

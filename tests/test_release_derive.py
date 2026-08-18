@@ -161,6 +161,35 @@ def test_a_no_lane_endpoint_stamps_the_explicit_eager_marker(
     assert document["checkpoint_defaults_schema"] is None
 
 
+def test_binding_enumeration_reaches_adapter_and_cfg_arms(
+    config_only_tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """is_trace is DELETED: arm coverage is the derive's binding enumeration.
+
+    The fixture's guidance-free batch-1 arm is reachable two ways -- a fake
+    riding adapter, and the cfg-flipped defaults variant -- and the
+    impossible combination (adapter stacked on a distilled checkpoint) is
+    REFUSED by the author's own ValidationError and skipped, counted.
+    """
+
+    from gen_worker.api.model_base import Adapter
+    from gen_worker.models import SDXL
+    from gen_worker.release.derive import _defaults_variants, _fake_adapter
+
+    variants = _defaults_variants(SDXL)
+    assert [variant.cfg for variant in variants] == [True, False]
+
+    fake = _fake_adapter(SDXL)
+    assert isinstance(fake, Adapter)
+    assert fake.defaults is not None and fake.defaults.cfg is False
+    assert fake.defaults.steps.default == 4
+
+    out = tmp_path / "release.json"
+    assert _derive("tiny_endpoint", config_only_tree, out) == 0
+    stderr = capsys.readouterr().err
+    assert "refused by the author's own validation" in stderr
+
+
 def test_lockfile_closure_is_the_env_identity(
     config_only_tree: Path, tmp_path: Path
 ) -> None:

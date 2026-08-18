@@ -392,6 +392,7 @@ def test_no_deleted_project_is_required_from_an_index() -> None:
     # library (the derive imports torchcg from the env it runs in; the
     # standalone-package decision is tcg#41 open question 3, Paul's).
     # The [project] tables above stay fenced for it unchanged.
+    # retired-name: the source-pin denylist itself, minus the carved-out row.
     for name in ("hashrepo =", "torch-compiled-graphs =", "tensorfs ="):
         assert name not in text, (
             f"a `{name}` source pin is back in pyproject.toml. A source pin is "

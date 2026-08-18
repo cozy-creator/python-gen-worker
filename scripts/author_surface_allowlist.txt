@@ -93,3 +93,4 @@ convert.writer.verify_w8a8_snapshot	training-endpoints/conversion/src/conversion
 # lane re-points RequestContext at the serving context (pgw#1373 hardcut).
 serving.context.ServeContext.checkpoint_defaults	serverless-endpoints/sdxl/src/sdxl/main_v2.py:125	PROD
 serving.context.ServeContext.step_callback	serverless-endpoints/sdxl/src/sdxl/main_v2.py:136	PROD
+release.trace_context.TraceRequestContext.step_callback	serverless-endpoints/sdxl/src/sdxl/main_v2.py:197	PROD

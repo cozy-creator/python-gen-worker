@@ -14,11 +14,20 @@ form; coordinate there before widening it.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import msgspec
 
 Number = Union[int, float]
+
+#: The PLATFORM-WIDE sampler vocabulary (checkpoint metadata is written in
+#: it). An endpoint types its REQUEST field with its own served subset; a
+#: metadata value the endpoint does not serve warns and falls through to the
+#: tree's shipped scheduler (main_v2 three-layer resolution).
+SamplerName = Literal[
+    "dpmpp_2m_karras", "dpmpp_2m", "dpmpp_sde_karras", "euler",
+    "euler_trailing", "euler_a", "unipc", "ddim", "lcm", "heun",
+]
 
 
 class Knob(msgspec.Struct, frozen=True):
@@ -101,6 +110,9 @@ class _SdxlRecipe(msgspec.Struct, frozen=True):
     # None = keep the checkpoint's own scheduler untouched.
     schedule: Optional[str] = None  # "euler_trailing" | "lcm" | None
     timesteps: tuple[int, ...] = ()
+    # Checkpoint metadata sampler preference, platform vocabulary; None =
+    # the tree's shipped scheduler.
+    sampler: Optional[SamplerName] = None
 
 
 class _SdxlDefaults(_SdxlRecipe, frozen=True):
@@ -112,7 +124,8 @@ class _SdxlDefaults(_SdxlRecipe, frozen=True):
 
 
 class _SdxlLoraDefaults(_SdxlRecipe, frozen=True):
-    """A distillation adapter's own recipe metadata."""
+    """A distillation adapter's own recipe metadata (what ``turbo.defaults``
+    reads as; the derive's fake-adapter enumeration instantiates it)."""
 
     cfg: bool = False
     steps: Knob = msgspec.field(

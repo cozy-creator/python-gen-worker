@@ -54,6 +54,7 @@ _EXPORTS: Final[dict[str, str]] = {
     "HuggingFaceRef": "refs",
     "Knob": "model_types",
     "SDXL": "model_types",
+    "SamplerName": "model_types",
     "LoadedComponentKey": "residency",
     "ParsedModelRef": "refs",
     "RefFragmentRemoved": "refs",
@@ -91,6 +92,7 @@ def __dir__() -> list[str]:
 __all__ = [
     "Knob",
     "SDXL",
+    "SamplerName",
     "tensorhub_cache_dir",
     "tensorhub_cas_dir",
     "ensure_local",

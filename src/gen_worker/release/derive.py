@@ -8,14 +8,30 @@ instrumented discovery, and stamp the observed graph set -- plus the lane
 contracts and the model type's checkpoint-defaults schema -- as the static
 release metadata document.
 
-**Coverage is auto-enumerated from the payload schemas** (Paul ruling,
-2026-08-19): one pass per entrypoint per enum-typed field value, every other
-field at its default, required non-defaulted fields synthesized minimally by
-type. The author surface is exactly CODE + LANES -- there is no samples
-surface. Shapes a schema cannot express are discovered at the first live
-request (served eager, minted in the background), so enumeration is a
-pre-warming completeness aid, never a correctness gate. A cross-product
-larger than the cap warns and traces the deterministic prefix.
+**Coverage is auto-enumerated -- inputs AND bindings** (Paul rulings,
+2026-08-19/20; ``ctx.is_trace`` is DELETED from the author surface, so author
+code is trace-oblivious and arm coverage is entirely the derive's job):
+
+* payload schemas: one pass per enum-typed field value, every other field at
+  its default, required non-defaulted fields synthesized minimally by type;
+* adapter state: each injected ``Adapter | None`` parameter enumerates None
+  AND a synthesized fake adapter carrying the model type's platform
+  ``Lora.Defaults``; each ``list[Adapter]`` enumerates empty and one-fake
+  (adapter I/O is neutralized at trace -- fake parameters hold no bytes);
+* checkpoint-defaults variants: when the model type's Defaults schema
+  carries ``cfg``, both the platform row and its cfg-flipped twin run (they
+  change the executed arm and therefore the observed graphs), each under a
+  fresh instance + ``load``.
+
+An enumerated combination the author's code REFUSES with ``ValidationError``
+is a legitimately impossible serving combination and is skipped (counted,
+never silent); any other exception is a derive failure. Shapes/arms the
+enumeration cannot express are discovered at the first live request (served
+eager, minted in the background) -- enumeration is a pre-warming
+completeness aid, never a correctness gate. A cross-product larger than the
+cap warns and traces the deterministic prefix. Author code wrapped in
+``torch.inference_mode()`` composes fine with the fake-tensor drive -- no
+special handling; traced graphs are identical.
 
 torchcg is imported TOP-LEVEL and lazily: the derive runs inside the release
 env, torchcg is a release dependency there, and the env's pinned rev is the
@@ -129,7 +145,8 @@ class _Entrypoint:
     payload_type: type
     model_param: str
     ctx_param: str
-    injected: tuple[tuple[str, Any], ...]  # (param name, trace value)
+    #: (param name, annotation, base trace value) per platform-injected fact.
+    injected: tuple[tuple[str, Any, Any], ...]
 
 
 def _injected_trace_value(name: str, parameter_name: str, annotation: Any) -> Any:
@@ -199,7 +216,11 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
                     f"RequestContext"
                 )
         injected = tuple(
-            (parameter_name, _injected_trace_value(name, parameter_name, annotation))
+            (
+                parameter_name,
+                annotation,
+                _injected_trace_value(name, parameter_name, _strip_annotated(annotation)),
+            )
             for parameter_name, annotation in rest
         )
         out.append(
@@ -304,6 +325,89 @@ def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], boo
             break
         payloads.append(payload_type(**base, **dict(zip(names, combo))))
     return tuple(payloads), capped
+
+
+def _fake_adapter(model_type: Optional[type]) -> Any:
+    """A synthesized adapter for the enumeration's adapter-riding arms.
+
+    Carries the model type's platform ``Lora.Defaults`` (what
+    ``adapter.defaults`` reads as); its path points nowhere -- adapter I/O is
+    neutralized at trace by the load context.
+    """
+
+    from ..api.model_base import Adapter
+
+    lora = getattr(model_type, "Lora", None)
+    defaults_type = getattr(lora, "Defaults", None)
+    return Adapter(
+        name="trace-adapter",
+        path=Path("/nonexistent/trace-adapter"),
+        defaults=defaults_type() if defaults_type is not None else None,
+    )
+
+
+def _adapter_annotation(annotation: Any) -> bool:
+    from ..api.model_base import Adapter
+
+    stripped = _strip_annotated(annotation)
+    if isinstance(stripped, type) and issubclass(stripped, Adapter):
+        return True
+    return any(
+        isinstance(argument, type) and issubclass(argument, Adapter)
+        for argument in typing.get_args(stripped)
+    )
+
+
+def _injected_axes(
+    plan: "_Entrypoint", model_type: Optional[type]
+) -> list[list[tuple[str, Any]]]:
+    """Per injected parameter, its enumerated trace values.
+
+    Adapter-shaped facts enumerate BOTH states (absent and riding); other
+    facts keep their single trace value.
+    """
+
+    axes: list[list[tuple[str, Any]]] = []
+    for parameter_name, annotation, base_value in plan.injected:
+        if _adapter_annotation(annotation):
+            if _optional_none(_strip_annotated(annotation)):
+                values: list[Any] = [None, _fake_adapter(model_type)]
+            else:
+                values = [base_value, [_fake_adapter(model_type)]]
+            axes.append([(parameter_name, value) for value in values])
+        else:
+            axes.append([(parameter_name, base_value)])
+    return axes
+
+
+def _defaults_variants(model_type: Optional[type]) -> list[Any]:
+    """The recipe-relevant checkpoint-defaults variants, platform values.
+
+    The platform row always runs; when the schema carries ``cfg``, its
+    flipped twin runs too -- cfg selects the executed arm (batch-2 guidance
+    vs guidance-free) and therefore the graph set.
+    """
+
+    if model_type is None:
+        return [None]
+    defaults_type = getattr(model_type, "Defaults", model_type)
+    try:
+        instance = defaults_type()
+    except Exception:
+        return [None]
+    variants: list[Any] = [instance]
+    import msgspec
+
+    try:
+        field_names = {field.name for field in msgspec.structs.fields(defaults_type)}
+    except TypeError:
+        return variants
+    if "cfg" in field_names:
+        try:
+            variants.append(msgspec.structs.replace(instance, cfg=not instance.cfg))
+        except Exception:
+            pass
+    return variants
 
 
 def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
@@ -484,73 +588,120 @@ def _derive_lane(
     lane: Any,
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]],
     checkpoint_dir: Path,
+    warnings: list[str],
 ) -> Any:
-    """One lane's instrumented run: fresh model, load, drive, discover."""
+    """One lane's instrumented runs, merged across defaults variants.
+
+    Per variant: fresh model, ``load`` (defaults variants change what
+    ``ctx.defaults()`` answers, so the instance is rebuilt), then every
+    (entrypoint x payload x adapter-state) combination drives under
+    instrumented discovery. Combinations the author REFUSES with
+    ``ValidationError`` are legitimately impossible servings and are
+    skipped, counted in the warnings.
+    """
+
+    from ..api.errors import ValidationError
 
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
     resolved = _resolve_lane(torchcg, cls, lane)
-    model = cls()
-    load_ctx = TraceLoadContext(
-        lane=resolved,
-        checkpoint_dir=checkpoint_dir,
-        model_type=model_model_type(cls),
-    )
-    request_ctx = TraceRequestContext(
-        lane=resolved, checkpoint_ref=f"trace:{checkpoint_dir.name}"
-    )
-    with torchcg.hollow_session():
-        try:
-            model.load(load_ctx)
-        except torchcg.HollowError as exc:
-            raise DeriveError(f"lane {handle!r}: {exc}") from exc
-        except Exception as exc:
-            raise DeriveError(
-                f"lane {handle!r}: load() failed under the trace "
-                f"session: {type(exc).__name__}: {exc}"
-            ) from exc
-        if not load_ctx.marked_modules:
-            raise DeriveError(
-                f"lane {handle!r}: load() marked nothing via ctx.compile(). "
-                f"A lane-declaring model compiles SOMETHING; a model that "
-                f"wants eager-forever declares no lanes instead."
-            )
-        modules = _named_marked_modules(model, load_ctx.marked_modules)
+    model_type = model_model_type(cls)
+    merged: dict[str, Any] = {}
+    all_targets: set[str] = set()
+    observed_targets: set[str] = set()
+    refused = 0
+    total_combos = 0
 
-        def drive() -> None:
-            for plan, payloads in plans:
-                for index, payload in enumerate(payloads):
-                    try:
-                        plan.fn(**{
-                            plan.payload_param: payload,
-                            plan.model_param: model,
-                            plan.ctx_param: request_ctx,
-                            **dict(plan.injected),
-                        })
-                    except Exception as exc:
-                        raise DeriveError(
-                            f"lane {handle!r}: entrypoint {plan.name!r} failed "
-                            f"on auto-enumerated payload {index} "
-                            f"({payload!r}) under the trace session: "
-                            f"{type(exc).__name__}: {exc}"
-                        ) from exc
-
-        try:
-            lane_graphs = torchcg.discover_modules(handle, modules, drive)
-        except DeriveError:
-            raise
-        except torchcg.DiscoveryError as exc:
-            raise DeriveError(f"lane {handle!r}: {exc}") from exc
-    if lane_graphs.unobserved_targets:
-        total = sum(len(payloads) for _, payloads in plans)
-        raise DeriveError(
-            f"lane {handle!r}: marked module(s) "
-            f"{list(lane_graphs.unobserved_targets)!r} were never CALLED "
-            f"while driving {total} auto-enumerated payload(s). ctx.compile "
-            f"must mark the module the code actually CALLS (e.g. the vae's "
-            f".decoder, not the vae, when only .decode() runs) -- silent "
-            f"zero-graph discovery is not an outcome."
+    for defaults_instance in _defaults_variants(model_type):
+        model = cls()
+        load_ctx = TraceLoadContext(
+            lane=resolved,
+            checkpoint_dir=checkpoint_dir,
+            model_type=model_type,
+            defaults_instance=defaults_instance,
         )
-    return lane_graphs
+        request_ctx = TraceRequestContext(
+            lane=resolved, checkpoint_ref=f"trace:{checkpoint_dir.name}"
+        )
+        with torchcg.hollow_session():
+            try:
+                model.load(load_ctx)
+            except torchcg.HollowError as exc:
+                raise DeriveError(f"lane {handle!r}: {exc}") from exc
+            except Exception as exc:
+                raise DeriveError(
+                    f"lane {handle!r}: load() failed under the trace "
+                    f"session: {type(exc).__name__}: {exc}"
+                ) from exc
+            if not load_ctx.marked_modules:
+                raise DeriveError(
+                    f"lane {handle!r}: load() marked nothing via ctx.compile(). "
+                    f"A lane-declaring model compiles SOMETHING; a model that "
+                    f"wants eager-forever declares no lanes instead."
+                )
+            modules = _named_marked_modules(model, load_ctx.marked_modules)
+
+            def drive() -> None:
+                nonlocal refused, total_combos
+                for plan, payloads in plans:
+                    axes = _injected_axes(plan, model_type)
+                    for binding in itertools.product(*axes) if axes else [()]:
+                        for index, payload in enumerate(payloads):
+                            total_combos += 1
+                            try:
+                                plan.fn(**{
+                                    plan.payload_param: payload,
+                                    plan.model_param: model,
+                                    plan.ctx_param: request_ctx,
+                                    **dict(binding),
+                                })
+                            except ValidationError:
+                                # The author refusing an impossible serving
+                                # combination is correct behavior, not a
+                                # derive failure.
+                                refused += 1
+                            except Exception as exc:
+                                raise DeriveError(
+                                    f"lane {handle!r}: entrypoint "
+                                    f"{plan.name!r} failed on auto-enumerated "
+                                    f"payload {index} ({payload!r}) with "
+                                    f"binding {dict(binding)!r} under the "
+                                    f"trace session: "
+                                    f"{type(exc).__name__}: {exc}"
+                                ) from exc
+
+            try:
+                lane_graphs = torchcg.discover_modules(handle, modules, drive)
+            except DeriveError:
+                raise
+            except torchcg.DiscoveryError as exc:
+                raise DeriveError(f"lane {handle!r}: {exc}") from exc
+        all_targets.update(lane_graphs.targets)
+        for record in lane_graphs.graphs:
+            merged.setdefault(record.graph, record)
+            observed_targets.add(record.target)
+
+    if refused:
+        warnings.append(
+            f"lane {handle}: {refused}/{total_combos} enumerated "
+            f"combination(s) refused by the author's own validation "
+            f"(impossible servings; skipped)"
+        )
+    unobserved = tuple(sorted(all_targets - observed_targets))
+    if unobserved:
+        raise DeriveError(
+            f"lane {handle!r}: marked module(s) {list(unobserved)!r} were "
+            f"never CALLED while driving {total_combos} auto-enumerated "
+            f"combination(s). ctx.compile must mark the module the code "
+            f"actually CALLS (e.g. the vae's .decoder, not the vae, when "
+            f"only .decode() runs) -- silent zero-graph discovery is not an "
+            f"outcome."
+        )
+    return torchcg.LaneGraphs(
+        contract=handle,
+        targets=tuple(sorted(all_targets)),
+        graphs=tuple(merged.values()),
+        unobserved_targets=(),
+    )
 
 
 def derive_release(
@@ -589,7 +740,9 @@ def derive_release(
             plans.append((plan, payloads))
 
         for lane in model_lanes(cls):
-            lane_graphs = _derive_lane(torchcg, cls, lane, plans, checkpoint_dir)
+            lane_graphs = _derive_lane(
+                torchcg, cls, lane, plans, checkpoint_dir, warnings
+            )
             lanes.append(lane_graphs)
             lane_contracts[lane_graphs.contract] = {
                 "stamp": lane_graphs.contract,

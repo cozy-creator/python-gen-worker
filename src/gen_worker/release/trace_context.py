@@ -23,9 +23,14 @@ from ..api.model_base import LoadContext
 
 
 class TraceLoadContext(LoadContext[Any]):
-    """What ``Model.load`` sees under ``gen-worker release derive``."""
+    """What ``Model.load`` sees under ``gen-worker release derive``.
 
-    is_trace: bool = True
+    There is NO ``is_trace`` -- Paul deleted it from the author surface
+    (author code branching on it corrupts compilation coverage; author code
+    is trace-oblivious by construction). Arm coverage is the DERIVE'S job,
+    via input/binding enumeration (payload enums x adapter states x
+    checkpoint-defaults variants).
+    """
 
     def __init__(
         self,
@@ -33,10 +38,12 @@ class TraceLoadContext(LoadContext[Any]):
         lane: Any,
         checkpoint_dir: Path,
         model_type: Optional[type] = None,
+        defaults_instance: Any = None,
     ) -> None:
         self.lane = lane
         self.checkpoint_dir = Path(checkpoint_dir)
         self.model_type = model_type
+        self.defaults_instance = defaults_instance
         self.log = logging.getLogger("gen_worker.release.trace")
         #: Modules the author marked via ctx.compile() -- discovery hooks
         #: exactly these during the payload drives.
@@ -58,9 +65,19 @@ class TraceLoadContext(LoadContext[Any]):
                 f"ctx.load() needs a loader with from_pretrained "
                 f"(a diffusers/transformers class); got {loader!r}"
             )
-        return from_pretrained(
+        loaded = from_pretrained(
             self.checkpoint_dir, torch_dtype=getattr(self.lane, "dtype", None)
         )
+        # Adapter application mutates WEIGHTS (or injects adapter layers);
+        # at trace every parameter is fake and no adapter bytes exist, so the
+        # enumeration's fake-adapter arms must not hit real LoRA I/O. The
+        # graphs observed on those arms are the base modules' -- a served
+        # adapter that changes the module graph re-keys and first-encounter
+        # mints (pgw#1371/#1372 own the branch-bearing lora story).
+        for lora_call in ("load_lora_weights", "set_adapters", "unload_lora_weights"):
+            if hasattr(loaded, lora_call):
+                setattr(loaded, lora_call, _noop)
+        return loaded
 
     def compile(self, target: Any) -> Any:
         """torch.compile-style marking, trace half (pgw#1370/#1372 contract).
@@ -94,13 +111,17 @@ class TraceLoadContext(LoadContext[Any]):
         )
 
     def defaults(self) -> Any:
-        """The PLATFORM-FALLBACK defaults for the class-header model type.
+        """The enumerated defaults VARIANT for the class-header model type.
 
         ``Model[SDXL]`` is the single source of the type; at serve the
         checkpoint's hub row decodes as ``SDXL.Defaults`` with missing
-        fields filled from platform values, and at trace the zero-arg
-        construction IS the platform row. Typed via the generic.
+        fields filled from platform values. At trace the derive enumerates
+        recipe-relevant variants (platform row; cfg flipped when the schema
+        carries it) because they change the executed arm and thus the
+        observed graphs.
         """
+        if self.defaults_instance is not None:
+            return self.defaults_instance
         if self.model_type is None:
             raise TypeError(
                 "ctx.defaults() reads the model type off the class header "
@@ -111,10 +132,16 @@ class TraceLoadContext(LoadContext[Any]):
         return defaults_type()
 
 
-class TraceRequestContext:
-    """What entrypoints see under ``gen-worker release derive``."""
+def _noop(*_args: Any, **_kwargs: Any) -> None:
+    return None
 
-    is_trace: bool = True
+
+class TraceRequestContext:
+    """What entrypoints see under ``gen-worker release derive``.
+
+    No ``is_trace`` here either (deleted from the author surface); warns and
+    clamps are collected as log lines.
+    """
 
     def __init__(
         self,
@@ -149,6 +176,10 @@ class TraceRequestContext:
 
     def raise_if_cancelled(self, message: str = "request cancelled") -> None:
         del message
+
+    def warn(self, message: str) -> None:
+        """Caller-visible advisory at serve; a log line at trace."""
+        self.log.warning("trace: %s", message)
 
     # -- egress -------------------------------------------------------------
     def step_callback(self, total_steps: int) -> Callable[..., dict[str, Any]]:
