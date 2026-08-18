@@ -63,13 +63,24 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
             ok=False,
             errors=("endpoint lock missing 'functions' list",),
         )
-    if len(functions) == 0 and not (lock_dict.get("jobs") or ()):
+    v2 = (lock_dict.get("entrypoints") or {}).get("entrypoints") or ()
+    if len(functions) == 0 and not (lock_dict.get("jobs") or ()) and not v2:
         # Jobs-aware (pgw#1354): a jobs-only release is legal (th#2049) and
         # advertises 27 things, so the bare function count must not call it
-        # empty. Everything BELOW is function-shape by construction — slots,
-        # bindings, wire routes and compiled graphs are concepts a job does not
-        # declare (`_job_entry`) — so those walks stay functions-only.
-        warnings.append("no functions discovered (endpoint will advertise nothing)")
+        # empty. pgw#1382-aware (pgw#1387): so is an entrypoints-only release,
+        # and THAT is the shape a v2 endpoint has. Everything BELOW is
+        # function-shape by construction — slots, bindings, wire routes and
+        # compiled graphs are concepts a job does not declare (`_job_entry`) —
+        # so those walks stay functions-only.
+        #
+        # An ERROR, not a warning (pgw#1387): a release advertising nothing is
+        # refused at hub admission, so a warning here just relocates the
+        # failure to nine minutes after the image bake.
+        errors.append(
+            "this endpoint advertises NOTHING: no @entrypoint, @endpoint or "
+            "@job declarations were discovered, and hub admission refuses a "
+            "manifest that declares neither functions[] nor jobs[]"
+        )
 
     # Per-class accumulator for the "two methods slugify to the same route"
     # check. Keyed by class_name → {function_slug: python_name}. A second

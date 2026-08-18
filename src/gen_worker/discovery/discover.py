@@ -3,9 +3,7 @@ package, extract every ``@endpoint`` object, and emit the endpoint.lock
 manifest as TOML on stdout. Run as ``python -m gen_worker.discovery``.
 """
 
-import hashlib
 import inspect
-import json
 import sys
 import traceback
 import typing
@@ -45,6 +43,12 @@ from gen_worker.discovery.execution_lanes import (
 from gen_worker.discovery.heavy_deps import stub_missing_heavy_deps
 from gen_worker.discovery.names import slugify_name
 from gen_worker.discovery.project import load_project_config
+from gen_worker.discovery.entrypoints_v2 import (
+    assert_manifest_advertises_something,
+    discover_entrypoints,
+    entrypoints_block,
+)
+from gen_worker.discovery.schema import type_schema_and_hash
 from gen_worker.discovery.walk import EndpointImportError, find_endpoints
 from gen_worker.registry import extract_specs
 from .validation import validate_endpoint_lock
@@ -475,9 +479,7 @@ def _slot_to_manifest(
 
 def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
     """Generate JSON schema and SHA256 hash for a msgspec type."""
-    schema = msgspec.json.schema(t)
-    raw = json.dumps(schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return schema, hashlib.sha256(raw).hexdigest()
+    return type_schema_and_hash(t)
 
 
 def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
@@ -1142,6 +1144,14 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         "execution_lanes": manifest_block(derived),
         "decode_set": decode_set_manifest_block(decode_set),
     }
+    # The pgw#1382 half (pgw#1387). Same heavy-dep stubbing as the v1 walk, so
+    # a torch-less manifest build sees the same declarations an in-image build
+    # does. The block is emitted only when the package HAS a v2 surface: a v1
+    # endpoint's manifest is byte-identical to what it was.
+    with stub_missing_heavy_deps(cfg.discovery_heavy_deps):
+        v2_rows = discover_entrypoints(cfg.main)
+    if v2_rows:
+        manifest["entrypoints"] = entrypoints_block(v2_rows)
     # The jobs block sits BESIDE functions, never inside it: one package may
     # carry both, publish once, submit as needed. A release with jobs and zero
     # functions is legal (th#2049).
@@ -1152,6 +1162,9 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     if preconditions:
         manifest["aot_preconditions"] = [
             row.manifest_row() for row in preconditions]
+    # A manifest that advertises nothing is a BUILD failure, never a warning
+    # the bake outlives (pgw#1387).
+    assert_manifest_advertises_something(manifest)
     return manifest
 
 
