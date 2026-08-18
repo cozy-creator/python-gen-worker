@@ -229,15 +229,19 @@ class EndpointHost:
                 **self._stream_attributes(),
             )
         if session is not None:
-            # The mint-written requirements manifest is an AUDIT assertion
-            # (exact-env ruling): every adopted artifact restates what its
-            # mint linked, and a divergence is the build system contradicting
-            # itself — refuse loudly, never adopt-and-hope.
-            if store is not None and installed_map is not None:
+            # The mint-written manifest is the artifact's COMPATIBILITY SET
+            # (Paul, 2026-08-18): same-major ``>=`` floors for the libraries
+            # the artifact actually LINKS, read off its own ELF at mint. This
+            # host adopts when it SATISFIES them — an unrelated package bump
+            # can no longer reject bytes that still load, and a runtime older
+            # than the one that built them still cannot adopt.
+            if store is not None:
+                from .mint import assert_satisfied
+
                 for record in session.adopted:
                     manifest = store.get_manifest(record.graph, session.env)
                     if manifest is not None:
-                        manifest.assert_environment(installed_map, sm=sm)
+                        assert_satisfied(manifest, sm=sm)
             span(
                 graphs_from="release",
                 lane=lane_contract,
