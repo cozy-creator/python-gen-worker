@@ -122,7 +122,12 @@ class TensorLayoutContract(Protocol):
 
 
 class PendingContract(msgspec.Struct, frozen=True):
-    """Placeholder tensorfs Contract object (tensorfs#111 seam, see above)."""
+    """Placeholder tensorfs Contract object (tensorfs#111 seam, see above).
+
+    Satisfies the SDK's ``LaneContract`` protocol (pgw#1382): ``contract`` is
+    the string handle and ``dtype`` the load dtype, so a canonical contract
+    object may be written straight into a ``Model[...]`` ``lanes=`` header.
+    """
 
     name: str
     version: int
@@ -130,6 +135,14 @@ class PendingContract(msgspec.Struct, frozen=True):
     @property
     def stamp(self) -> str:
         return f"{self.name}@{self.version}"
+
+    @property
+    def contract(self) -> str:
+        return self.stamp
+
+    @property
+    def dtype(self) -> object:
+        return CONTRACT_DTYPES.get(self.stamp)
 
 
 #: stabilityai/stable-diffusion-xl-base-1.0 scheduler_config.json — SDXL's

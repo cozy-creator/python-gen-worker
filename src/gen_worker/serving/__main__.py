@@ -73,13 +73,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("endpoint_dir", help="directory holding endpoint.toml")
     parser.add_argument("--checkpoint", required=True, help="local checkpoint tree")
     parser.add_argument("--checkpoint-ref", default="local/checkpoint")
+    parser.add_argument("--model", default="",
+                        help="the hub row's `model` classification (e.g. sdxl); "
+                             "empty = unclassified, serves platform fallbacks")
     parser.add_argument("--defaults", default="{}",
                         help="per-checkpoint override JSON (the hub's deploy state, locally)")
     parser.add_argument("--lane", default="",
                         help="active lane contract handle (the deploy's pick)")
     parser.add_argument("--output-dir", default="outputs")
     parser.add_argument("--invoke", action="append", default=[],
-                        help="handler name to invoke (repeatable, pairs with --payload)")
+                        help="entrypoint name to invoke (repeatable, pairs with --payload)")
     parser.add_argument("--payload", action="append", default=[],
                         help="JSON payload for the matching --invoke")
     # Adoption sources, mutually exclusive; absent = the eager bridge.
@@ -135,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     binding = DeployBinding(
         checkpoint_ref=args.checkpoint_ref,
         checkpoint_dir=Path(args.checkpoint),
+        model=args.model or None,
         defaults=json.loads(args.defaults),
     )
     host = EndpointHost(

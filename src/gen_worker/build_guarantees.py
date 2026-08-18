@@ -97,8 +97,8 @@ REGISTRY: Tuple[Guarantee, ...] = (
         id="worker_entrypoint",
         synthesized="generate_dockerfile.go — the ENTRYPOINT line",
         applies=ALWAYS,
-        require=re.compile(r"gen_worker\.entrypoint\b"),
-        line='ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]',
+        require=re.compile(r"gen_worker\.worker_main\b"),
+        line='ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]',
         verified_by="tensorhub executor.go — matchesWorkerEntrypoint, from the "
                     "image config",
         cost="same as discovery_lock: a post-build refusal for a one-line omission",

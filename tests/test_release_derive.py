@@ -172,7 +172,7 @@ def test_binding_enumeration_reaches_adapter_and_cfg_arms(
     REFUSED by the author's own ValidationError and skipped, counted.
     """
 
-    from gen_worker.api.model_base import Adapter
+    from gen_worker import Adapter, DistillationAdapter
     from gen_worker.models import SDXL
     from gen_worker.release.derive import _defaults_variants, _fake_adapter
 
@@ -183,6 +183,9 @@ def test_binding_enumeration_reaches_adapter_and_cfg_arms(
     assert isinstance(fake, Adapter)
     assert fake.defaults is not None and fake.defaults.cfg is False
     assert fake.defaults.steps.default == 4
+    # A distillation SLOT enumerates its own KIND (the typed-takeover guard).
+    marked = _fake_adapter(SDXL, DistillationAdapter)
+    assert isinstance(marked, DistillationAdapter)
 
     out = tmp_path / "release.json"
     assert _derive("tiny_endpoint", config_only_tree, out) == 0

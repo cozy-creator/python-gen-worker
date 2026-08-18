@@ -1,77 +1,128 @@
 """A fixture endpoint shaped exactly like serverless-endpoints sdxl main_v2.py.
 
-Ship-code-as-is: this module is the WHOLE author surface — the pipeline is
-author-owned code (a tiny stand-in for diffusers, CPU-only, fake weights
-from a config-only checkpoint), the endpoint class declares lanes + sample
-payloads, handlers read the pgw#1372 serving context surface
-(``checkpoint_dir``, ``lane``, ``checkpoint_defaults``, ``adapter``,
-``is_trace``, ``step_callback``, ``save_image``, ``clamp``…). The body
-annotates ``ctx: RequestContext`` exactly as ``main_v2.py`` does; the import
-binds that name to the serving surface until the pgw#1373 hardcut re-points
-``gen_worker.RequestContext`` itself.
-
-The shipped author surface imports ``torchcg`` and decorates with
-``@endpoint(lanes=..., samples=...)``; the decorator is the author-surface
-lane's — this fixture stamps the marker the decorator will stamp, through
-the loader's declared seam, and imports Lane from the worker's vendored
-torchcg because the packaging decision (standalone vs vendored) is Paul's
-open question on pgw#1367.
+Ship-code-as-is under the pgw#1382 split: ``SdxlModel(Model[SDXL], lanes=…)``
+is the stateful half (load/compile/defaults + the self-restoring mutation
+scopes); ONE stateless module-level ``@entrypoint`` whose behavior is driven
+by the ACTIVE CONFIG's typed fields (Paul's config-not-mode-flag ruling),
+with the endpoint-served scheduler table, the DistillationAdapter slot-kind
+guard, and structured output evidence. ``TinyPipeline`` stands in for
+``StableDiffusionXLPipeline`` (CPU, fake weights from a config-only
+checkpoint) with REAL diffusers schedulers, so the scheduler-scope semantics
+under test are the real ones; ``contracts`` stands in for
+``tensorfs.contracts`` (tensorfs#111 pending).
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
+from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Callable, Literal, Optional
+from typing import Annotated, Any, Callable, Literal, Optional, TypedDict, Unpack, cast
 
 import msgspec
 import torch
+from diffusers import (
+    DDIMScheduler,
+    DPMSolverMultistepScheduler,
+    EulerAncestralDiscreteScheduler,
+    EulerDiscreteScheduler,
+    LCMScheduler,
+)
 
-from gen_worker import Endpoint, ImageAsset, PromptRole, StringEnum, ValidationError
-from gen_worker._vendor.torchcg import LaneRef
-from gen_worker.serving import ServeContext as RequestContext
-from gen_worker.serving.loader import EndpointDeclaration
+from gen_worker import (
+    Adapter,
+    DistillationAdapter,
+    ImageAsset,
+    ImageFormat,
+    LoadContext,
+    Model,
+    PromptRole,
+    RequestContext,
+    entrypoint,
+)
+from gen_worker.models import SDXL
+
+from . import contracts
 
 
-class AspectRatio(StringEnum):
+class AspectRatio(StrEnum):
     RATIO_1_1 = "1:1"
     RATIO_3_4 = "3:4"
 
 
+# Tiny buckets — the contract file's ~1MP SDXL buckets, CPU-sized.
 _BUCKETS: dict[AspectRatio, tuple[int, int]] = {
     AspectRatio.RATIO_1_1: (16, 16),
     AspectRatio.RATIO_3_4: (12, 16),
 }
 
 
-class TinyDefaults(msgspec.Struct, frozen=True):
-    """Per-checkpoint tunables; the hub may override any field."""
-
-    steps: int = 3
-    guidance: float = 6.0
-    max_guidance: Optional[float] = None
-    negative: str = ""
+# The schedulers THIS endpoint serves. SdxlScheduler types the REQUEST field,
+# so an unsupported name is a typed 400 at the API boundary. SchedulerName
+# (the platform-wide vocabulary in gen_worker.models) appears only on ADAPTER
+# metadata (an applied distillation demands its scheduler); checkpoints carry
+# no scheduler metadata at all — their tree ships it (ingest-guaranteed).
+SdxlScheduler = Literal[
+    "dpmpp_2m_karras", "dpmpp_2m", "euler", "euler_trailing",
+    "euler_a", "ddim", "lcm",
+]
+# diffusers' lazy top-level exports defeat mypy's subclass view of the
+# scheduler classes; the rows are real SchedulerMixin subclasses at runtime.
+_SchedulerRow = tuple["type[Any]", Mapping[str, str | bool]]
+_SCHEDULERS: dict[SdxlScheduler, _SchedulerRow] = {
+    "dpmpp_2m_karras": (DPMSolverMultistepScheduler, {"use_karras_sigmas": True}),
+    "dpmpp_2m": (DPMSolverMultistepScheduler, {}),
+    "euler": (EulerDiscreteScheduler, {}),
+    "euler_trailing": (EulerDiscreteScheduler, {"timestep_spacing": "trailing"}),
+    "euler_a": (EulerAncestralDiscreteScheduler, {}),
+    "ddim": (DDIMScheduler, {}),
+    "lcm": (LCMScheduler, {}),
+}
 
 
 class TextToImageInput(msgspec.Struct, forbid_unknown_fields=True):
     prompt: Annotated[str, PromptRole("positive")]
     negative_prompt: Annotated[str, PromptRole("negative")] = ""
     aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1
-    num_inference_steps: Optional[Annotated[int, msgspec.Meta(ge=1, le=16)]] = None
-    guidance_scale: Optional[Annotated[float, msgspec.Meta(ge=1.0, le=15.0)]] = None
-    seed: Optional[int] = None
-    output_format: Literal["webp", "png"] = "png"
+    # None -> the applied distillation adapter's demand when one rides, else
+    # the checkpoint's own shipped scheduler; a name -> caller override,
+    # typed by THIS endpoint's served set.
+    scheduler: SdxlScheduler | None = None
+    num_inference_steps: Annotated[int, msgspec.Meta(ge=1, le=80)] | None = None
+    guidance_scale: Annotated[float, msgspec.Meta(ge=1.5, le=15.0)] | None = None
+    enhance_prompt: bool = True
+    seed: int | None = None
+    output_format: ImageFormat = "webp"
 
 
-class TurboInput(msgspec.Struct, forbid_unknown_fields=True):
-    prompt: Annotated[str, PromptRole("positive")]
-    aspect_ratio: AspectRatio = AspectRatio.RATIO_1_1
-    output_format: Literal["webp", "png"] = "png"
+class LoraUsed(msgspec.Struct):
+    ref: str      # org/repo@release — the hub identity it was resolved from
+    scale: float
 
 
 class ImageOutput(msgspec.Struct):
     image: ImageAsset
-    model_used: str
+    #: The checkpoint served: its fully-pinned hub ref (org/repo@release).
+    model: str
+    #: Riding adapters in application order (the distillation adapter first
+    #: when one rode, then the request's style LoRAs).
+    loras: list[LoraUsed] = []
+
+
+class _PipeCall(TypedDict, total=False):
+    """The exact kwargs this endpoint passes to the pipeline __call__."""
+
+    prompt: str
+    prompt_2: str
+    negative_prompt: str
+    negative_prompt_2: str
+    guidance_scale: float
+    width: int
+    height: int
+    timesteps: list[int] | None
+    guidance_rescale: float
 
 
 # --- the author-owned pipeline (the fixture's "diffusers") -----------------
@@ -87,54 +138,80 @@ class TinyUnet(torch.nn.Module):
         return sample * self.scale + self.bias
 
 
-class TinyScheduler:
-    def __init__(self, config: dict) -> None:
-        self.config = dict(config)
-
-
 class PipelineResult:
     def __init__(self, images: list) -> None:
         self.images = images
 
 
 class TinyPipeline:
-    """Author code as-is: its loop, its scheduler, its components mapping."""
+    """Author code as-is: its loop, a REAL diffusers scheduler, LoRA hooks."""
 
-    def __init__(self, unet: TinyUnet, scheduler: TinyScheduler, dtype: torch.dtype) -> None:
+    def __init__(self, unet: TinyUnet, scheduler: Any, dtype: torch.dtype) -> None:
         self.unet = unet
         self.scheduler = scheduler
         self.dtype = dtype
+        self.loaded_loras: list[str] = []
+        self.active_adapters: list[tuple[str, float]] = []
+        self.adapter_history: list[list[tuple[str, float]]] = []
 
     @property
     def components(self) -> dict:
         return {"unet": self.unet}
 
+    @property
+    def device(self) -> torch.device:
+        return torch.device("cpu")
+
     @classmethod
-    def from_pretrained(cls, checkpoint_dir: Path | str, torch_dtype: torch.dtype) -> "TinyPipeline":
+    def from_pretrained(
+        cls, checkpoint_dir: Path | str, torch_dtype: torch.dtype = torch.float32
+    ) -> "TinyPipeline":
         config = json.loads((Path(checkpoint_dir) / "config.json").read_text())
         torch.manual_seed(int(config.get("seed", 0)))
         unet = TinyUnet().to(torch_dtype)
-        return cls(unet, TinyScheduler(config.get("scheduler", {})), torch_dtype)
+        # Ingest guarantees a scheduler config in every projected tree
+        # (synthesizing the model type's canonical one when absent) — the
+        # fixture mirrors that guarantee.
+        scheduler = EulerDiscreteScheduler.from_config(
+            dict(EulerDiscreteScheduler().config,  # type: ignore[attr-defined]
+                 **config.get("scheduler", {}))
+        )
+        return cls(unet, scheduler, torch_dtype)
+
+    def load_lora_weights(self, path: Path | str, adapter_name: str = "") -> None:
+        self.loaded_loras.append(adapter_name or str(path))
+
+    def set_adapters(self, names: list[str], adapter_weights: list[float]) -> None:
+        self.active_adapters = list(zip(names, adapter_weights))
+        self.adapter_history.append(list(self.active_adapters))
+
+    def unload_lora_weights(self) -> None:
+        self.loaded_loras.clear()
+        self.active_adapters = []
 
     def __call__(
         self,
         *,
         prompt: str,
+        prompt_2: str = "",
         negative_prompt: str = "",
+        negative_prompt_2: str = "",
         guidance_scale: float,
         width: int,
         height: int,
         num_inference_steps: int,
+        timesteps: Optional[list[int]] = None,
+        guidance_rescale: float = 0.0,
         generator: Optional[torch.Generator] = None,
         callback_on_step_end: Optional[Callable[..., object]] = None,
     ) -> PipelineResult:
         from PIL import Image
 
+        if "explode" in prompt:  # a mid-request author bug, on demand
+            raise RuntimeError("pipeline exploded mid-request")
+        steps = len(timesteps) if timesteps else int(num_inference_steps)
         sample = torch.zeros((height, width), dtype=self.dtype)
-        if generator is not None:
-            sample = torch.rand(
-                (height, width), generator=generator, dtype=self.dtype)
-        for step in range(int(num_inference_steps)):
+        for step in range(steps):
             sample = self.unet(sample)
             if callback_on_step_end is not None:
                 callback_on_step_end(self, step, 0, {})
@@ -151,85 +228,184 @@ class TinyPipeline:
 # --- the endpoint, shaped exactly like main_v2.py --------------------------
 
 
-def _sample_payloads() -> tuple[msgspec.Struct, ...]:
-    """Trace coverage: every bucket through the handler."""
-    return tuple(
-        TextToImageInput(prompt="trace", aspect_ratio=ar) for ar in AspectRatio
-    )
+class SdxlModel(
+    Model[SDXL],
+    # A lane IS a tensorfs layout contract — an imported object carrying the
+    # actual layout. Omitting lanes= means one lane: SDXL's canonical contract.
+    lanes=(contracts.SDXL_DIFFUSERS_BF16, contracts.COZY_SDXL_FP8_ROWWISE),
+):
+    """The stateful half: weights, compile-marked modules, defaults. One
+    instance per (checkpoint x lane), LRU-resident, single-flight."""
 
-
-class TinyImageEndpoint(Endpoint):
-    def setup(self, ctx: RequestContext) -> None:
-        self.pipe = TinyPipeline.from_pretrained(
-            ctx.checkpoint_dir, torch_dtype=ctx.lane.dtype
-        )
-        # torch.compile-style marking: at derive this records+hooks the
-        # module; at serve it swaps in the (lane, sm) compiled graphs or
-        # returns the module unchanged (eager) and registers the holes.
+    def load(self, ctx: LoadContext[SDXL]) -> None:
+        self.pipe = ctx.load(TinyPipeline)
         self.pipe.unet = ctx.compile(self.pipe.unet)
-        self.defaults = ctx.checkpoint_defaults(TinyDefaults)
+        self.defaults = ctx.defaults()
 
-    def teardown(self, ctx: RequestContext) -> None:
-        self.torn_down = True  # the base-class hook, observable in tests
+    # unload(ctx): inherited no-op — eviction is framework-generic.
 
-    def generate(self, ctx: RequestContext, payload: TextToImageInput) -> ImageOutput:
-        ctx.raise_if_cancelled()
-        d = self.defaults
-        width, height = _BUCKETS[payload.aspect_ratio]
-        steps = payload.num_inference_steps or d.steps
-        guidance = payload.guidance_scale if payload.guidance_scale is not None else d.guidance
-        if d.max_guidance is not None and guidance > d.max_guidance:
-            guidance = ctx.clamp(
-                "guidance_scale", guidance, hi=d.max_guidance, reason="model maximum"
-            )
-        generator = (
-            torch.Generator("cpu").manual_seed(payload.seed)
-            if payload.seed is not None
-            else None
+    # This class persists in memory. Request-time changes go through these
+    # self-restoring scopes, so one request cannot mutate pipeline state in
+    # a way that affects the next request.
+    @contextmanager
+    def scheduler(
+        self,
+        scheduler_cls: type[Any],
+        overrides: Mapping[str, str | bool] | None = None,
+    ) -> Iterator[None]:
+        prev = self.pipe.scheduler
+        self.pipe.scheduler = scheduler_cls.from_config(
+            prev.config, **(overrides or {})
         )
-        with torch.inference_mode():
-            result = self.pipe(
-                prompt=payload.prompt.strip(),
-                negative_prompt=payload.negative_prompt.strip() or d.negative,
-                guidance_scale=guidance,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                generator=generator,
-                callback_on_step_end=ctx.step_callback(steps),
-            )
-        image = ctx.save_image(result.images[0], format=payload.output_format)
-        return ImageOutput(image=image, model_used=ctx.checkpoint_ref)
+        try:
+            yield
+        finally:
+            self.pipe.scheduler = prev
 
-    def generate_turbo(self, ctx: RequestContext, payload: TurboInput) -> ImageOutput:
-        ctx.raise_if_cancelled()
-        adapter = ctx.adapter  # hub-resolved distillation LoRA, or None
-        if adapter is None and not ctx.is_trace:
-            raise ValidationError(
-                "no distillation adapter is bound to this deployment; "
-                "refusing to serve undistilled output as turbo"
+    @contextmanager
+    def adapters(self, applied: Sequence[Adapter]) -> Iterator[None]:
+        if applied:
+            for a in applied:
+                self.pipe.load_lora_weights(a.path, adapter_name=a.name)
+            self.pipe.set_adapters(
+                [a.name for a in applied],
+                adapter_weights=[a.scale for a in applied],
             )
-        width, height = _BUCKETS[payload.aspect_ratio]
-        with torch.inference_mode():
-            result = self.pipe(
-                prompt=payload.prompt.strip(),
-                guidance_scale=0.0,
-                width=width,
-                height=height,
-                num_inference_steps=1,
-                callback_on_step_end=ctx.step_callback(1),
-            )
-        image = ctx.save_image(result.images[0], format=payload.output_format)
-        suffix = f"+{adapter.name}" if adapter else ""
-        return ImageOutput(image=image, model_used=f"{ctx.checkpoint_ref}{suffix}")
+        try:
+            yield
+        finally:
+            if applied:
+                self.pipe.unload_lora_weights()
 
 
-# What the @endpoint decorator (DATA: lanes) will stamp — the loader's seam.
-TinyImageEndpoint.__cozy_endpoint__ = EndpointDeclaration(  # type: ignore[attr-defined]
-    lanes=(
-        # A lane IS a tensorfs contract reference; dtype is resolution-derived
-        # (registry entry), read back as ctx.lane.dtype.
-        LaneRef("tiny.plain-fp32@1", dtype=torch.float32),
-    ),
-    samples=_sample_payloads,
-)
+def _pick_scheduler(ctx: RequestContext, payload: TextToImageInput,
+                    turbo: DistillationAdapter | None) -> SdxlScheduler | None:
+    """The scheduler precedence, one layer per return:
+    1. the request's pick (typed to this endpoint's served set);
+    2. the applied distillation adapter's demand (its metadata — the base
+       checkpoint's tree cannot know a LoRA needs trailing-Euler/LCM);
+    3. None = the checkpoint's own shipped scheduler stands, untouched.
+       (Checkpoints carry NO scheduler metadata: the tree IS their choice,
+       and ingest guarantees one exists.)"""
+    if payload.scheduler is not None:
+        return payload.scheduler
+    if turbo is not None and turbo.defaults.scheduler is not None:
+        if turbo.defaults.scheduler in _SCHEDULERS:
+            return cast(SdxlScheduler, turbo.defaults.scheduler)
+        ctx.warn(f"adapter demands scheduler {turbo.defaults.scheduler!r}, "
+                 "which this endpoint does not serve; using the checkpoint's")
+    return None
+
+
+def _run(model: SdxlModel, ctx: RequestContext, *, steps: int,
+         fmt: ImageFormat, seed: int | None,
+         **call_kwargs: Unpack[_PipeCall]) -> ImageAsset:
+    # Pure composition: reads model state, mutates nothing. The generator
+    # lives on the pipe's device — placement is the worker's decision, and
+    # this code never names one.
+    generator = (
+        torch.Generator(device=model.pipe.device).manual_seed(seed)
+        if seed is not None else None
+    )
+    with torch.inference_mode():
+        result = model.pipe(
+            num_inference_steps=steps,
+            generator=generator,
+            callback_on_step_end=ctx.step_callback(steps),
+            **call_kwargs,
+        )
+    return ctx.save_image(result.images[0], format=fmt)
+
+
+@entrypoint
+def generate(ctx: RequestContext, payload: TextToImageInput, model: SdxlModel,
+             turbo: DistillationAdapter | None, loras: list[Adapter]) -> ImageOutput:
+    """One entrypoint; behavior is driven by the ACTIVE CONFIG's typed fields,
+    not a mode flag. The config is the distillation adapter's defaults when one
+    rides, else the checkpoint's own."""
+
+    ctx.raise_if_cancelled()
+    d = model.defaults
+
+    # -- the active config and applied adapters -----------------------------
+    if turbo is not None and d.step_distilled:
+        # Stacking a step-distillation on a step-distilled checkpoint fries
+        # the output — ignore the adapter, serve the checkpoint as deployed.
+        # (cfg is a separate axis: a guidance-distilled full-step checkpoint
+        # has cfg off but step_distilled False, and MAY take a turbo LoRA.)
+        ctx.warn(f"distillation adapter {turbo.ref!r} ignored: this "
+                 "checkpoint is already step-distilled")
+        turbo = None
+    config: SDXL.Config = turbo.defaults if turbo is not None else d
+    adapters: list[Adapter] = ([turbo] if turbo is not None else []) + loras
+
+    # -- prompts: positive preamble applies in every mode; negatives exist
+    # -- only under CFG ------------------------------------------------------
+    prompt = payload.prompt.strip()
+    if payload.enhance_prompt and d.positive_preamble \
+            and d.positive_preamble not in prompt:
+        prompt = f"{d.positive_preamble}, {prompt}"
+    negative = payload.negative_prompt.strip()
+
+    # -- guidance ------------------------------------------------------------
+    if config.cfg:
+        guidance = config.guidance.resolve(payload.guidance_scale, ctx)
+        if payload.enhance_prompt and d.negative_preamble \
+                and d.negative_preamble not in negative:
+            negative = f"{d.negative_preamble}, {negative}" if negative else d.negative_preamble
+    else:
+        guidance = 0.0
+        if payload.guidance_scale is not None:
+            ctx.warn("guidance_scale ignored: this serving runs without "
+                     "classifier-free guidance")
+        if payload.negative_prompt:
+            ctx.warn("negative_prompt ignored: no unconditional branch "
+                     "exists without classifier-free guidance")
+
+    # -- scheduler and step ladder ------------------------------------------
+    picked = _pick_scheduler(ctx, payload, turbo)
+    steps = config.steps.resolve(payload.num_inference_steps, ctx)
+    timesteps: list[int] | None = None
+    if config.timesteps:
+        # A pinned ladder belongs to the config's own scheduler; a request
+        # that overrode the scheduler makes it meaningless. When active, the
+        # ladder owns the step count.
+        if payload.scheduler is not None:
+            ctx.warn("pinned denoising timesteps dropped: they belong to the "
+                     f"config's scheduler, not {payload.scheduler!r}")
+        else:
+            if payload.num_inference_steps is not None:
+                ctx.warn("num_inference_steps ignored: this config pins its "
+                         "denoising timesteps")
+            steps, timesteps = len(config.timesteps), list(config.timesteps)
+
+    # -- assemble the pipeline call -----------------------------------------
+    width, height = _BUCKETS[payload.aspect_ratio]
+    call_kwargs: _PipeCall = dict(
+        prompt=prompt, prompt_2=prompt,
+        width=width, height=height, guidance_scale=guidance,
+    )
+    if config.cfg:
+        call_kwargs.update({
+            "negative_prompt": negative, "negative_prompt_2": negative,
+        })
+        # The checkpoint's own scheduler config drives objective handling;
+        # v-prediction needs the zero-terminal-SNR rescale at call time.
+        if model.pipe.scheduler.config.get("prediction_type") == "v_prediction":
+            call_kwargs["guidance_rescale"] = 0.7
+    if timesteps is not None:
+        call_kwargs["timesteps"] = timesteps
+
+    sched_scope = (
+        nullcontext() if picked is None
+        else model.scheduler(*_SCHEDULERS[picked])
+    )
+    with model.adapters(adapters), sched_scope:
+        image = _run(model, ctx, steps=steps, fmt=payload.output_format,
+                     seed=payload.seed, **call_kwargs)
+
+    return ImageOutput(
+        image=image,
+        model=ctx.checkpoint_ref,
+        loras=[LoraUsed(ref=a.ref, scale=a.scale) for a in adapters],
+    )

@@ -10,14 +10,10 @@ from __future__ import annotations
 from typing import Any
 
 import msgspec
-import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import Model, entrypoint
-from gen_worker.models.model_types import register_contract_dtype
-
-LANE = "tiny.diffusers-fp32@1"
-register_contract_dtype(LANE, torch.float32)
+from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from lane_contracts import TINY_DIFFUSERS_FP32
 
 
 class In(msgspec.Struct):
@@ -28,15 +24,19 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-class UnobservedMark(Model[Any], lanes=(LANE,)):
-    def load(self, ctx: Any) -> None:
+class UnobservedMark(Model[Any], lanes=(TINY_DIFFUSERS_FP32,)):
+    # diffusers pipelines compose their components dynamically; the static
+    # class carries no `unet`/`vae`.
+    pipe: Any
+
+    def load(self, ctx: LoadContext[Any]) -> None:
         self.pipe = ctx.load(StableDiffusionPipeline)
         self.pipe.unet = ctx.compile(self.pipe.unet)
         self.pipe.vae = ctx.compile(self.pipe.vae)  # .decode() bypasses __call__
 
 
-@entrypoint  # type: ignore[operator]
-def generate(payload: In, model: UnobservedMark, ctx: Any) -> Out:
+@entrypoint
+def generate(ctx: RequestContext, payload: In, model: UnobservedMark) -> Out:
     model.pipe(
         prompt=payload.prompt, num_inference_steps=2, guidance_scale=0.0,
         height=32, width=32, output_type="pil",

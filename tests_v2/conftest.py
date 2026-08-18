@@ -29,7 +29,7 @@ Fixture / helper interface
 
 ``standalone_scheduler()`` (context manager)
     A hub-double gRPC server with NO in-process worker — for REAL
-    ``python -m gen_worker.entrypoint`` subprocess boots that dial in over
+    ``python -m gen_worker.worker_main`` subprocess boots that dial in over
     localhost TCP. Yields ``(FakeScheduler, port)``.
 
 ``spawn_entrypoint(tmp_path, functions=..., env_overrides=...)`` (helper)
@@ -384,7 +384,7 @@ def manifest_entry(
 
 
 class EntrypointProc:
-    """One live ``python -m gen_worker.entrypoint`` subprocess with drained,
+    """One live ``python -m gen_worker.worker_main`` subprocess with drained,
     inspectable output. All waits are progress-gated on output growth or on
     process death — never a wall clock."""
 
@@ -486,7 +486,7 @@ def spawn_entrypoint(
     }
     env.update(env_overrides or {})
     proc = subprocess.Popen(
-        [sys.executable, "-m", "gen_worker.entrypoint"],
+        [sys.executable, "-m", "gen_worker.worker_main"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     return EntrypointProc(proc)

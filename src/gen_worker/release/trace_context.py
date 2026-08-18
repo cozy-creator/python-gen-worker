@@ -19,11 +19,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..api.model_base import LoadContext
-
-
-class TraceLoadContext(LoadContext[Any]):
+class TraceLoadContext:
     """What ``Model.load`` sees under ``gen-worker release derive``.
+
+    Deliberately duck-typed (the author annotates ``LoadContext[MT]``; the
+    harness-private object answers the same spelling): the serving
+    ``LoadContext`` carries a deploy binding and property-backed facts this
+    trace half has no business constructing.
 
     There is NO ``is_trace`` -- Paul deleted it from the author surface
     (author code branching on it corrupts compilation coverage; author code
@@ -151,8 +153,6 @@ class TraceRequestContext:
     ) -> None:
         self.lane = lane
         self.checkpoint_ref = checkpoint_ref or "trace:config-only"
-        #: The hub-resolved distillation adapter -- never bound at trace time.
-        self.adapter: Optional[Any] = None
         self.log = logging.getLogger("gen_worker.release.trace")
 
     # -- knobs / control ----------------------------------------------------

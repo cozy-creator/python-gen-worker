@@ -33,7 +33,7 @@ def main() -> int:
     role.declare(role.ServeRole.ADOPT_ONLY)
     guard.install()
 
-    from ..entrypoint import _run_main
+    from ..worker_main import _run_main
 
     return int(_run_main())
 

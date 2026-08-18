@@ -1093,7 +1093,7 @@ SHAPE_EAGER: frozenset = frozenset({
     PHASE_WEIGHTS_FETCH, PHASE_COMPONENT_FETCH, PHASE_PIPELINE_LOAD,
     PHASE_EAGER_READY, PHASE_FIRST_REQUEST_SERVABLE,
 })
-#: A boot that came up through `python -m gen_worker.entrypoint` — i.e. every
+#: A boot that came up through `python -m gen_worker.worker_main` — i.e. every
 #: pod. `env_establish` and its nested `lib_memo` are produced by
 #: `env_seal.establish`, which the entrypoint, the mint child and the
 #: entry-compile child all call and an EMBEDDED worker (the in-process test

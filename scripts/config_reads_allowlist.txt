@@ -55,7 +55,7 @@ src/gen_worker/runtime_config.py::GEN_WORKER_CONFIG_SNAPSHOT_PATH VIOLATION GEN_
 src/gen_worker/parallel/runtime.py::TENSORHUB_CACHE_DIR VIOLATION config->env write-back of boot.cache_dir, used as an intra-process bus. Same sequencing rule.
 src/gen_worker/url_fetch.py::GEN_WORKER_URL_FETCH_ALLOWED_HOSTS VIOLATION GEN_WORKER_URL_FETCH_ALLOWED_HOSTS is an SSRF allow-list: security policy the hub owns and may need to change on a RUNNING worker. Ruled a Directive field (th#1488). As an env, a policy change needs a pod replacement.
 src/gen_worker/input_assets.py::GEN_WORKER_INTERNAL_OBJECT_HOSTS VIOLATION GEN_WORKER_INTERNAL_OBJECT_HOSTS, same SSRF ruling, same blocker.
-src/gen_worker/entrypoint.py::$var VIOLATION writes TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR from a computed path. Legitimate library steering, but belongs in the one Settings-derived torch_env() builder rather than here.
+src/gen_worker/worker_main.py::$var VIOLATION writes TORCHINDUCTOR_CACHE_DIR/TRITON_CACHE_DIR from a computed path. Legitimate library steering, but belongs in the one Settings-derived torch_env() builder rather than here.
 
 src/gen_worker/topology.py::<unresolved> VIOLATION binds the WHOLE environment as the default source and reads WORKER_EXECUTION_TOPOLOGY out of it. The hub-delivered topology has no Settings field; absent is legal and means one slot, so a misspelling silently serves one card on a multi-GPU pod.
 src/gen_worker/aot_compile_pool.py::<unresolved> IPC seeds the AOT entry child's env from this process's (TORCHINDUCTOR_CACHE_DIR, seal memo). Parent-to-child handoff; the inherited base is the denylist shape above.

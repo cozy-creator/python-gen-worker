@@ -225,7 +225,7 @@ def test_the_adopt_only_entry_point_declares_before_it_imports() -> None:
                 target = ast.unparse(node.func)
                 if target.endswith(("declare", "install")):
                     steps.append(target.rsplit(".", 1)[-1])
-            elif isinstance(node, ast.ImportFrom) and "entrypoint" in (
+            elif isinstance(node, ast.ImportFrom) and "worker_main" in (
                     node.module or ""):
                 steps.append("import_worker")
     assert steps == ["declare", "install", "import_worker"], steps

@@ -81,6 +81,7 @@ from ..deferred_outputs import (
 from ..io import (
     DEFAULT_IMAGE_FORMAT,
     DEFAULT_IMAGE_QUALITY,
+    ImageFormat,
     encode_image,
     image_format,
 )
@@ -1357,7 +1358,7 @@ class RequestContext(Generic[D]):
         image: "Image.Image",
         ref: Optional[str] = None,
         *,
-        format: str = DEFAULT_IMAGE_FORMAT,
+        format: ImageFormat = DEFAULT_IMAGE_FORMAT,
         quality: int = DEFAULT_IMAGE_QUALITY,
         lossless: bool = False,
         **encode_kwargs: Any,

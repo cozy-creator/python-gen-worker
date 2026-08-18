@@ -2,7 +2,7 @@
 
 Scenario shape: each test is a WALK that asserts many behaviors of one real
 boot — an in-process Worker over the hub double, or a real
-``python -m gen_worker.entrypoint`` subprocess dialing a live scheduler
+``python -m gen_worker.worker_main`` subprocess dialing a live scheduler
 socket. Refusals are first-class: the matrix at the bottom pins the typed,
 named, hub-visible failure of every boot gate.
 """
@@ -18,7 +18,8 @@ from typing import Dict, List
 import pytest
 
 import gen_worker.lifecycle as lifecycle_mod
-from gen_worker import boot_phases, entrypoint, env_seal
+from gen_worker import boot_phases, env_seal
+from gen_worker import worker_main as entrypoint
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness.hardware_report_hub import recording_hub

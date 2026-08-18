@@ -54,13 +54,14 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Optional
 
-from ..api.entrypoint import ENTRYPOINT_ATTR
-from ..api.model_base import (
+from ..serving.entrypoints import ENTRYPOINT_ATTR
+from ..serving.model import (
     Model,
-    lane_contract_handle,
+    ModelDeclarationError,
+    lane_handle,
     model_lanes,
-    model_model_type,
 )
+from ..serving.model import model_type as _strict_model_type
 from .trace_context import TraceLoadContext, TraceRequestContext
 
 DOCUMENT_KIND = "gen-worker.release-metadata@1"
@@ -73,6 +74,21 @@ ENUM_CAP = 64
 
 class DeriveError(RuntimeError):
     """The release derive cannot state this endpoint's graph set."""
+
+
+def model_model_type(cls: type) -> Optional[type]:
+    """The class-header model type, or None for an undeclared base."""
+    try:
+        return _strict_model_type(cls)
+    except ModelDeclarationError:
+        return None
+
+
+def lane_contract_handle(owner: str, lane: Any) -> str:
+    try:
+        return lane_handle(lane)
+    except ModelDeclarationError as exc:
+        raise DeriveError(f"{owner}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -108,13 +124,21 @@ def _lane_model_class(module: ModuleType) -> Optional[type]:
 
     found: list[type] = []
     for value in vars(module).values():
-        if (
+        if not (
             inspect.isclass(value)
             and issubclass(value, Model)
             and value is not Model
             and getattr(value, "__module__", None) == module.__name__
-            and model_lanes(value)
         ):
+            continue
+        try:
+            lanes = model_lanes(value)
+        except ModelDeclarationError as exc:
+            # Omitted lanes with no canonical contract (tensorfs#111 not
+            # shipped): the class cannot state its lanes — refuse loudly,
+            # never silently treat it as eager.
+            raise DeriveError(str(exc)) from exc
+        if lanes:
             found.append(value)
     if len(found) > 1:
         raise DeriveError(
@@ -327,19 +351,25 @@ def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], boo
     return tuple(payloads), capped
 
 
-def _fake_adapter(model_type: Optional[type]) -> Any:
+def _fake_adapter(
+    model_type: Optional[type], adapter_cls: Optional[type] = None
+) -> Any:
     """A synthesized adapter for the enumeration's adapter-riding arms.
 
     Carries the model type's platform ``Lora.Defaults`` (what
     ``adapter.defaults`` reads as); its path points nowhere -- adapter I/O is
-    neutralized at trace by the load context.
+    neutralized at trace by the load context. ``adapter_cls`` is the slot's
+    declared KIND (``DistillationAdapter`` for a distillation slot — the
+    annotation is the declaration, pgw#1382's typed-takeover guard).
     """
 
-    from ..api.model_base import Adapter
+    from ..serving.context import Adapter
 
+    if adapter_cls is None:
+        adapter_cls = Adapter
     lora = getattr(model_type, "Lora", None)
     defaults_type = getattr(lora, "Defaults", None)
-    return Adapter(
+    return adapter_cls(
         name="trace-adapter",
         path=Path("/nonexistent/trace-adapter"),
         defaults=defaults_type() if defaults_type is not None else None,
@@ -347,16 +377,17 @@ def _fake_adapter(model_type: Optional[type]) -> Any:
     )
 
 
-def _adapter_annotation(annotation: Any) -> bool:
-    from ..api.model_base import Adapter
+def _adapter_arm_class(annotation: Any) -> Optional[type]:
+    """The Adapter subclass an adapter-shaped fact declares, else None."""
+    from ..serving.context import Adapter
 
     stripped = _strip_annotated(annotation)
     if isinstance(stripped, type) and issubclass(stripped, Adapter):
-        return True
-    return any(
-        isinstance(argument, type) and issubclass(argument, Adapter)
-        for argument in typing.get_args(stripped)
-    )
+        return stripped
+    for argument in typing.get_args(stripped):
+        if isinstance(argument, type) and issubclass(argument, Adapter):
+            return argument
+    return None
 
 
 def _injected_axes(
@@ -370,11 +401,12 @@ def _injected_axes(
 
     axes: list[list[tuple[str, Any]]] = []
     for parameter_name, annotation, base_value in plan.injected:
-        if _adapter_annotation(annotation):
+        arm_cls = _adapter_arm_class(annotation)
+        if arm_cls is not None:
             if _optional_none(_strip_annotated(annotation)):
-                values: list[Any] = [None, _fake_adapter(model_type)]
+                values: list[Any] = [None, _fake_adapter(model_type, arm_cls)]
             else:
-                values = [base_value, [_fake_adapter(model_type)]]
+                values = [base_value, [_fake_adapter(model_type, arm_cls)]]
             axes.append([(parameter_name, value) for value in values])
         else:
             axes.append([(parameter_name, base_value)])
@@ -560,25 +592,18 @@ def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
     """The resolved ``ctx.lane``: always a LaneRef with a REAL torch dtype.
 
     A contract OBJECT (tensorfs registry entry / inline Contract) carries its
-    own dtype (tensorfs#113's top-level field, safetensors spelling). A bare
-    handle string resolves through the model-type pointer table
-    (``gen_worker.models.model_types.CONTRACT_DTYPES`` -- the interim home
-    until the tensorfs#111/#113 surface lands).
+    own dtype (tensorfs#113's top-level field, safetensors spelling); the
+    Model class header refuses dtype-less lanes at declaration, so this
+    refusal is the derive-side restatement, never a fallback path.
     """
 
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
-    dtype = getattr(lane, "dtype", None) if not isinstance(lane, str) else None
-    if dtype is None:
-        from ..models.model_types import CONTRACT_DTYPES
-
-        dtype = CONTRACT_DTYPES.get(handle)
+    dtype = getattr(lane, "dtype", None)
     if dtype is None:
         raise DeriveError(
-            f"lane {handle!r}: no dtype resolution -- the contract object "
-            f"carries none and the model-type pointer table "
-            f"(gen_worker.models.model_types.CONTRACT_DTYPES) does not know "
-            f"the handle. Import a dtype-bearing contract object, or "
-            f"register the handle."
+            f"lane {handle!r}: the contract object carries no dtype. A lane "
+            f"IS a tensorfs layout contract (an imported object; its load "
+            f"dtype is the contract's) — never a bare string."
         )
     return torchcg.LaneRef(handle, dtype=_torch_dtype(dtype))
 

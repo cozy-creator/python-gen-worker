@@ -131,7 +131,7 @@ def test_capability_probe_is_not_memoized_across_the_boundary(torchless):
 def test_boot_modules_import_without_torch(torchless):
     """entrypoint is what calls establish(); it must be importable torchless."""
     for name in ("gen_worker.env_seal", "gen_worker.host_isa",
-                 "gen_worker.guard_closure", "gen_worker.entrypoint"):
+                 "gen_worker.guard_closure", "gen_worker.worker_main"):
         __import__(name)
 
 

@@ -67,11 +67,6 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         variant_of,
         worker_function,
     )
-    from .api.model_base import (
-        Adapter,
-        LoadContext,
-        Model,
-    )
     from .api.derive import (
         DeclarationMismatch,
         assert_blockers,
@@ -140,7 +135,6 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         AudioAsset,
         ExpectedOutput,
         ImageAsset,
-        ImageFormat,
         MediaAsset,
         PromptRole,
         StringEnum,
@@ -181,12 +175,19 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         LayoutRequirements,
         RequirementTerms,
     )
-    from .serving.endpoint import Endpoint
+    from .io import ImageFormat
     from .request_context import (
         JobContext,
-        RequestContext,
         TrainingMetric,
     )
+    from .serving.context import (
+        Adapter,
+        DistillationAdapter,
+        LoadContext,
+        RequestContext,
+    )
+    from .serving.entrypoints import entrypoint
+    from .serving.model import Model
     from .subproc import (
         ProcessStalledError,
         run_process,
@@ -231,15 +232,15 @@ _EXPORTS: Final[dict[str, str]] = {
     "CompileAxis": "api.compile_axis",
     "ConfigParam": "api.decorators",
     "DeclarationMismatch": "api.derive",
+    # pgw#1382: the Model/Endpoint split author surface. Model is the
+    # stateful class; @entrypoint marks stateless module-level functions;
+    # ctx splits into LoadContext (load moment) + RequestContext (request
+    # moment); Adapter slots are explicit entrypoint parameters.
+    "Adapter": "serving.context",
     "Dim": "api.export_contract",
-    "Model": "api.model_base",
+    "DistillationAdapter": "serving.context",
     "Done": "api.streaming",
     "DynamicDim": "api.decorators",
-    # pgw#1372's serving.endpoint base predates the ratified Model/entrypoint
-    # split; it stays exported until that lane cuts over.
-    "Endpoint": "serving.endpoint",
-    "Adapter": "api.model_base",
-    "LoadContext": "api.model_base",
     "Error": "api.streaming",
     "ExpectedOutput": "api.types",
     "FamilyGeometry": "geometry",
@@ -256,14 +257,16 @@ _EXPORTS: Final[dict[str, str]] = {
     "HubError": "hub_error",
     "IllegalCombination": "api.errors",
     "ImageAsset": "api.types",
-    "ImageFormat": "api.types",
+    "ImageFormat": "io",
     "IncrementalTokenDelta": "api.streaming",
     "Input": "api.export_contract",
     "JobContext": "request_context",
     "LayoutDeclarationError": "models.tensor_layout_contract",
+    "LoadContext": "serving.context",
     "LayoutRequirements": "models.tensor_layout_contract",
     "MediaAsset": "api.types",
     "MintBlocker": "api.export_contract",
+    "Model": "serving.model",
     "ModelRef": "api.binding",
     "ModelScope": "api.binding",
     "NoWarmup": "api.decorators",
@@ -274,7 +277,9 @@ _EXPORTS: Final[dict[str, str]] = {
     "ProcessStalledError": "subproc",
     "PromptRole": "api.types",
     "RefCompatibilitySurprise": "api.errors",
-    "RequestContext": "request_context",
+    # pgw#1382: THE RequestContext is the serving one (request facts +
+    # salvaged base surface); JobContext stays on the base module.
+    "RequestContext": "serving.context",
     "RequirementTerms": "models.tensor_layout_contract",
     "ResolvedSlot": "api.slot",
     "ResourceError": "api.errors",
@@ -302,6 +307,7 @@ _EXPORTS: Final[dict[str, str]] = {
     "contract_delta": "api.derive",
     "diffusers_step_callback": "api.progress",
     "endpoint": "api.decorators",
+    "entrypoint": "serving.entrypoints",
     "fetch_bytes": "url_fetch",
     "fit_to_native": "geometry",
     "for_request": "view",
@@ -340,10 +346,14 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
-    # The decorators + bindings.
+    # pgw#1382: the Model/Endpoint split author surface.
     "Adapter",
+    "DistillationAdapter",
+    "ImageFormat",
     "LoadContext",
     "Model",
+    "entrypoint",
+    # The decorators + bindings.
     "endpoint",
     # pgw#1294: run-once submitted functions. Same (ctx, payload) -> Struct
     # contract as @endpoint, so one body promotes between them unchanged.
@@ -420,8 +430,6 @@ __all__ = [
     # Context types.
     "RequestContext",
     "JobContext",
-    # pgw#1372: the required minimal endpoint base class.
-    "Endpoint",
     "TrainingMetric",
     # Per-step progress helper for diffusers pipelines.
     "diffusers_step_callback",
@@ -466,7 +474,6 @@ __all__ = [
     "AudioAsset",
     "ExpectedOutput",
     "ImageAsset",
-    "ImageFormat",
     "MediaAsset",
     "PromptRole",
     "StringEnum",

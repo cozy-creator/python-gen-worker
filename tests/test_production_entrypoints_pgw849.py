@@ -250,7 +250,7 @@ CERTIFICATION: Dict[str, str] = {
 
 # STATUS 2026-08-01, measured, NOT yet a gate. The mechanism is built —
 # ``tests/harness/ladder_boot_main.py`` wraps the ladder, hands control to the
-# real ``gen_worker.entrypoint`` through ``runpy``, and dumps the recording — and
+# real ``gen_worker.worker_main`` through ``runpy``, and dumps the recording — and
 # two facts came out of driving it:
 #
 #   1. ``Lifecycle.startup`` DOES NOT RUN until the transport has a hub. A fresh

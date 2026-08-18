@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import io as _io
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, Optional
+from typing import IO, TYPE_CHECKING, Any, Final, Literal, Optional
 
 from .api.errors import ValidationError
 from .api.types import Asset
@@ -125,7 +125,13 @@ def read_audio(
 # The platform image-encoding default (Paul's ruling, 2026-07-24): WebP
 # always, with PNG and JPEG as first-class alternatives. Endpoints expose the
 # choice as an `output_format` payload field; they never hardcode a format.
-DEFAULT_IMAGE_FORMAT = "webp"
+# ``ctx.save_image``'s value vocabulary IS this type (Paul ruling,
+# 2026-08-17): a ctx method's accepted values are defined by gen-worker next
+# to the method and EXPORTED — endpoints import the SDK's capability
+# (payload fields, signatures) instead of restating it as a local type.
+ImageFormat = Literal["webp", "png", "jpg", "jpeg"]
+
+DEFAULT_IMAGE_FORMAT: Final[ImageFormat] = "webp"
 DEFAULT_IMAGE_QUALITY = 95
 
 # tenant-facing name -> (PIL format, file extension)
@@ -137,7 +143,7 @@ IMAGE_FORMATS: dict[str, tuple[str, str]] = {
 }
 
 
-def image_format(format: str = DEFAULT_IMAGE_FORMAT) -> tuple[str, str]:
+def image_format(format: ImageFormat = DEFAULT_IMAGE_FORMAT) -> tuple[str, str]:
     """``(PIL format, file extension)`` for a tenant-facing format name.
 
     Split out of :func:`encode_image` so the deferred-tail path can
@@ -158,7 +164,7 @@ def image_format(format: str = DEFAULT_IMAGE_FORMAT) -> tuple[str, str]:
 def encode_image(
     image: Any,
     *,
-    format: str = DEFAULT_IMAGE_FORMAT,
+    format: ImageFormat = DEFAULT_IMAGE_FORMAT,
     quality: int = DEFAULT_IMAGE_QUALITY,
     lossless: bool = False,
     method: int = 4,
@@ -202,7 +208,7 @@ def write_image(
     ref: str,
     image: Any,
     *,
-    format: str = DEFAULT_IMAGE_FORMAT,
+    format: ImageFormat = DEFAULT_IMAGE_FORMAT,
     quality: int = DEFAULT_IMAGE_QUALITY,
     as_type: Optional[type] = None,
     **encode_kwargs: Any,
