@@ -181,6 +181,35 @@ SD15_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "clip_sample": False,
 }
 
+#: black-forest-labs/FLUX.2-klein-4B scheduler/scheduler_config.json, fetched
+#: VERBATIM from the family owner's own repo (pgw#1393). FLUX.2 Klein is
+#: FLOW-MATCHING, so there is no beta schedule here at all — the shape is a
+#: shift ladder, and ``use_dynamic_shifting`` is exactly why pgw#1393 refused
+#: to invent one: the effective shift is a function of image sequence length
+#: between ``base_image_seq_len`` and ``max_image_seq_len``, so no frozen
+#: triple could have stood in for it. 4B is the ONE BFL flux repo that is not
+#: HF-gated; 9B is the same architecture (its endpoint module differs by a
+#: single VRAM floor) and rides the same schedule. FLUX.1's own repos are
+#: gated, so ``Flux1.canonical_scheduler_config`` stays empty — do not invent
+#: it by analogy with these numbers.
+FLUX2_KLEIN_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "FlowMatchEulerDiscreteScheduler",
+    "num_train_timesteps": 1000,
+    "shift": 3.0,
+    "base_shift": 0.5,
+    "max_shift": 1.15,
+    "use_dynamic_shifting": True,
+    "base_image_seq_len": 256,
+    "max_image_seq_len": 4096,
+    "time_shift_type": "exponential",
+    "shift_terminal": None,
+    "invert_sigmas": False,
+    "stochastic_sampling": False,
+    "use_beta_sigmas": False,
+    "use_exponential_sigmas": False,
+    "use_karras_sigmas": False,
+}
+
 SDXL_DIFFUSERS_BF16: Final = PendingContract("sdxl.diffusers-bf16", 1)
 SD15_DIFFUSERS_BF16: Final = PendingContract("sd15.diffusers-bf16", 1)
 SD2_DIFFUSERS_BF16: Final = PendingContract("sd2.diffusers-bf16", 1)
@@ -527,8 +556,12 @@ class Flux2KleinDefaults(msgspec.Struct, frozen=True):
     its own narrower wire bounds. Upper bounds are the endpoint's (``:306``,
     ``:310``).
 
-    DELIBERATELY ABSENT, same reasons as :class:`Flux1Defaults`: the noise
-    schedule, a ``.Lora`` overlay, a ``timesteps`` ladder. Also absent: the
+    The noise schedule IS recorded for this family —
+    :data:`FLUX2_KLEIN_SCHEDULER_CONFIG`, fetched verbatim from the one BFL
+    flux repo that is not HF-gated. DELIBERATELY ABSENT, same reasons as
+    :class:`Flux1Defaults`: a ``.Lora`` overlay, a ``timesteps`` ladder (the
+    flow-match sigma ladder is derived from the shift parameters, never
+    pinned by an endpoint). Also absent: the
     preset grids / megapixel tiers and the 1..4 ordered-reference bound
     (``flux.2-klein-4b/main.py:136-137``, ``:357-360``) — those are endpoint
     PAYLOAD vocabulary, and a ModelType is name + Defaults + fingerprint,
@@ -671,6 +704,7 @@ class Flux2Klein(ModelType[Flux2KleinDefaults]):
     name = "flux2-klein"
     contracts = ("flux2-klein.*",)
     canonical_contract = DIT_BLOCKS_FUSED_QKV
+    canonical_scheduler_config = FLUX2_KLEIN_SCHEDULER_CONFIG
     Defaults = Flux2KleinDefaults
 
 
@@ -765,6 +799,7 @@ _seed_sdxl_contracts()
 __all__ = [
     "CONTRACT_DTYPES",
     "DIT_BLOCKS_FUSED_QKV",
+    "FLUX2_KLEIN_SCHEDULER_CONFIG",
     "Flux1",
     "Flux1Defaults",
     "Flux2Klein",
