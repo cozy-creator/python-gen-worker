@@ -134,10 +134,56 @@ subdir = "python/src/tensorfs"
 # some view of it exists. A bare `mmap.mmap` supplies neither; a py3.12 class
 # with `__buffer__` supplies both, and py3.12 is this package's floor. Nothing
 # else in the file is touched, so every other line is still upstream's.
+# pgw#1365: THE ADMISSION GRID JOINS THE REWRITE, FOR THE SAME REASON, AND IT
+# IS THE LAST HALF OF THE SNAPSHOT THAT WAS STILL ANSWERING A RETIRED QUESTION.
+#
+# `chunking.py` at `8bafdfbb` was the GREEDY SMALL-TENSOR PACKER: tensors under
+# 64 MiB were accumulated into one object, and every non-tensor file was cut on
+# a fixed 64 MiB grid. Upstream DELETED that file at `00c57c1` ("pgw#1259: one
+# chunker — the legacy Python data plane is gone", Paul's ruling: two chunker
+# implementations, pick one, hard cut) because its grid disagreed with the Rust
+# planner's — a packed object spans two tensors, owns neither's digest, and can
+# therefore be inherited by nothing. The mixed-CAS ruling says verbatim "one
+# chunker (the Rust planner is canonical)". `hubio/client.py::publish_v2` calls
+# `LocalCAS.ingest_file`, so until this lane EVERY FLEET UPLOAD cut its objects
+# on the retired grid: measured against upstream's released conformance corpus,
+# 3 of 12 cases disagreed — a safetensors pair packed 3+5 bytes into one object
+# where the planner emits two, and BOTH GGUF cases were planned as raw blobs
+# because the retired module had no GGUF planner at all. That last one is the
+# expensive half: pgw#1344 had just taught `convert/gguf_native.py` to COMPOSE
+# GGUFs on the planner grid, and publishing one re-cut it.
+#
+# `planner.py` REPLACES it, and the pgw#1344 precedent is exactly why it is a
+# rewrite rather than a rev bump: upstream's successor is
+# `crates/tensorfs-core/src/planner/`, reachable from Python only through the
+# compiled extension, and pgw#1310 rules a compiled extension out of a
+# source-vendored wheel. So the grid is restored in pure Python and pinned to
+# the ORACLE UPSTREAM SHIPS — `spec/v1/planner-vectors`, the language-neutral
+# corpus Rust, Go and Python must all satisfy — vendored at
+# `tests/testdata/planner-vectors/` with its own digest and a sibling-checkout
+# comparison. All twelve cases now agree object-for-object AND digest-for-digest.
+# The safetensors structural proof (`_tensor_spans`) is the retired module's,
+# unchanged: it was already a faithful port of `safetensors.rs::read_layout`,
+# and only the packing it fed died.
+#
+# ONE DEVIATION, and it is the HUB's constraint, not a preference. `blob-v1` is
+# one unchunked object of ANY size; `plan_chunks` still cuts a blob above
+# 64 MiB on the fixed grid, because tensorhub's publish-v2 lane promotes an
+# object with a SINGLE PUT (`internal/s3/sha256_cas.go`: "verified promote:
+# size %d is outside the HashRepo single-PUT range 0..67108864") and would
+# refuse the whole-blob entry terminally. Files at or below 64 MiB are already
+# exactly `blob-v1`, so the residual is only large non-tensor files; it is
+# pgw#1366, it closes when publish-v2 grants ride th#2064's multipart blob
+# lane, and `test_the_oversized_blob_deviation_is_the_only_one` fails the
+# moment anyone widens it. `manifest.py` stays at `8bafdfbb` for the same
+# reason — its chunkless 64 MiB cap is the older, stricter parser, and nothing
+# this snapshot emits can violate it.
 read_plane_rev = "21cec66a580cb232210facbfccfa580a16d7196e"
 read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "writer.py"]
 rewrites = [
   "`tensors.py`: `TensorReader._map` maps through a pure-Python `_MappedObject` (an `mmap` exported via PEP 688) instead of the compiled `tensorfs.native.MappedObject`, because pgw#1310 rules a compiled extension out of a source-vendored wheel. Upstream's weak-mapping ownership rule is preserved exactly; see the paragraph above. No other file is edited, so the remaining digests are upstream's verbatim.",
+  "`planner.py` REPLACES `chunking.py` (pgw#1365): a pure-Python port of `crates/tensorfs-core/src/planner/{mod,safetensors,gguf}.rs` at `read_plane_rev`, because upstream deleted the Python chunker at `00c57c1` in favour of the Rust planner and pgw#1310 rules a compiled extension out of a source-vendored wheel. Conformance is asserted against upstream's released `spec/v1/planner-vectors` corpus, vendored at `tests/testdata/planner-vectors/`. Two knowing divergences, both tested by name: `plan_chunks` cuts a >64 MiB blob on the fixed grid (tensorhub's single-PUT promotion cap — pgw#1366), and a duplicate GGUF metadata key is planned as `gguf-v1` here and `blob-v1` upstream, because `gguf.read_header` does not record metadata keys.",
+  "`local.py`: one line — `from .chunking import plan_chunks` becomes `from .planner import plan_chunks`. Every other line is `8bafdfbb`'s verbatim.",
 ]
 
 [packages.torchcg]
@@ -203,10 +249,10 @@ rewrites = [
 
 [packages.tensorfs.files]
 "__init__.py" = "a66ced3cd03e042989602b9e122e4b3988be6be6611aacdb05b852c8a968ec7b"
-"chunking.py" = "69333dc0836f35b05c420780b7eac205993ebde54c1b91b1afe03e55c313bd7a"
 "gguf.py" = "ced89fc42009ab2e69406d2726c9b0caf43254c51ab16bdcf37c5ad239a2d7be"
-"local.py" = "92ec0d1249115f08eb02fccf554e946d36854a4ae861bde8190590d404695e0e"
+"local.py" = "186401e38a14f74e70d20991fa47fdda4e10dc3f1c82b44c540eee73220b1f86"
 "manifest.py" = "a93ee850992c17dd90a57946441875d282367556703b9e9d1c8be057ea12bed4"
+"planner.py" = "3771ebd6d2a537c56736d740d0b0bfc72b74135dd84782509a923acd3b45ff4f"
 "project.py" = "2471c26e013b287a7554cecda51ff9b42c09f71cd6d6d57dd33ed4ef242c40cd"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "refs.py" = "f3a144543f423a6b01043294b21104ababaafdbfb31798560de678b69f27ac2f"

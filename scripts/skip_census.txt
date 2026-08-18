@@ -157,6 +157,18 @@ LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (pac
 # `lint_author_ci.py --selftest` (23 cases, red on 20), which its CI gates
 # on. Set AUTHOR_CI_LINT=<path to lint_author_ci.py> to run them anywhere.
 LOCAL-ONLY tests/test_author_ci_harness_pgw1150.py|serverless-endpoints is not checked out beside this repo
+# pgw#1365. ONE row: the vendored planner-vector corpus compared BYTE-FOR-BYTE
+# against tensorfs's own `spec/v1/planner-vectors`. No CI runner has a tensorfs
+# checkout, so the comparison cannot run there — but the property it guards IS
+# measured in CI, twice over and by the same test: the corpus is pinned by
+# `PLANNER_VECTORS_DIGEST`, and all twelve vectors are executed against
+# `planner.plan` object-for-object and digest-for-digest. What the sibling half
+# adds is only "upstream has not moved since we vendored", and that question is
+# only answerable where upstream exists. Set TENSORFS_REPO to run it anywhere.
+# Note the shape deliberately: where the tensorfs DIRECTORY resolves but the
+# corpus does not, the test FAILS rather than skipping — a rename must not turn
+# this gate into a `continue` (WORKSPACE-GIT-POLICY, "read the COUNT").
+LOCAL-ONLY tests/test_planner_grid.py|no tensorfs checkout beside this repo (set tensorfs_repo)
 # pgw#978. The full local mint cycle: a real child spawn, a real torch.export +
 # AOTInductor compile, a real publish over the wire and a real second-process
 # adopt. It is opt-in EVERYWHERE, CI included — not because CI could run it and

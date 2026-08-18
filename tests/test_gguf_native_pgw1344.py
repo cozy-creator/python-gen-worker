@@ -163,23 +163,28 @@ def test_an_unpermuted_tensor_shares_its_objects_with_its_safetensors_source(
     )
     sharing = result.sharing
 
-    # v_proj and o_proj pass through untouched at f32; q_proj and k_proj are
-    # rope-permuted, so their bytes -- and therefore their objects -- differ.
-    assert set(sharing.shared) == {"blk.0.attn_v.weight", "blk.0.attn_output.weight"}
-    assert set(sharing.transformed) == {"blk.0.attn_q.weight", "blk.0.attn_k.weight"}
-    assert len(sharing.shared_digests) == 2, sharing.describe()
-
-    # Everything else is UNSHAREABLE, and that is a fact about the SOURCE's
-    # grid rather than about this converter: a tensor below `MAX_CHUNK_SIZE`
-    # was packed in with its neighbours when the snapshot was admitted, so it
-    # has no digest of its own for anything to share. Naming them keeps the
-    # measurement honest -- "everything shared" would be the false claim.
-    assert set(sharing.unshareable) == {
+    # Everything except q_proj and k_proj passes through untouched at f32;
+    # those two are rope-permuted, so their bytes -- and therefore their
+    # objects -- differ.
+    assert set(sharing.shared) == {
         "token_embd.weight",
+        "blk.0.attn_v.weight",
+        "blk.0.attn_output.weight",
         "blk.0.attn_norm.weight",
         "blk.0.ffn_norm.weight",
         "output_norm.weight",
     }
+    assert set(sharing.transformed) == {"blk.0.attn_q.weight", "blk.0.attn_k.weight"}
+
+    # NOTHING is unshareable, and the four names that used to be here are the
+    # measured value of pgw#1365. This test shipped asserting them as an
+    # accepted loss -- "a tensor below MAX_CHUNK_SIZE was packed in with its
+    # neighbours when the snapshot was admitted, so it has no digest of its own
+    # for anything to share" -- which was true only because `ingest_file`
+    # planned with the retired greedy packer instead of the Rust planner's
+    # grid. On the canonical grid every tensor owns its objects, so 2 of 8
+    # tensors sharing became 6 of 8 with no change to the converter at all.
+    assert set(sharing.unshareable) == set(), sharing.describe()
 
     # The comparison that makes it a measurement rather than a claim: the
     # SHARED tensor's own objects are literally the source's objects.
