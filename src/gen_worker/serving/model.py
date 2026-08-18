@@ -69,22 +69,100 @@ def lane_handle(lane: Any) -> str:
     ``digest`` is only ever used PREFIXED.
     """
 
-    for attribute in ("stamp", "contract"):
-        value = getattr(lane, attribute, None)
-        if isinstance(value, str) and value:
-            return value
-    name = getattr(lane, "name", None)
-    version = getattr(lane, "version", None)
-    if isinstance(name, str) and name and isinstance(version, int):
-        return f"{name}@{version}"
-    digest = getattr(lane, "digest", None)
-    if isinstance(digest, str) and digest:
-        return digest if digest.startswith("sha256:") else f"sha256:{digest}"
+    # pgw#1391: a lane that names a contract tensorfs ships no document for
+    # refuses HERE, at the one chokepoint every stamp-reading surface goes
+    # through (declaration, discovery's `_lane_stamps`, derive's
+    # `_lane_model_class`) — restated as a ModelDeclarationError so derive's
+    # existing conversion to a loud DeriveError needs no second pattern.
+    from ..models.model_types import MissingContractError
+
+    try:
+        for attribute in ("stamp", "contract"):
+            value = getattr(lane, attribute, None)
+            if isinstance(value, str) and value:
+                return value
+        name = getattr(lane, "name", None)
+        version = getattr(lane, "version", None)
+        if isinstance(name, str) and name and isinstance(version, int):
+            return f"{name}@{version}"
+        digest = getattr(lane, "digest", None)
+        if isinstance(digest, str) and digest:
+            return digest if digest.startswith("sha256:") else f"sha256:{digest}"
+    except MissingContractError as exc:
+        raise ModelDeclarationError(str(exc)) from exc
     raise ModelDeclarationError(
         f"lane {lane!r} carries no string handle (`stamp`, `contract`, "
         "`name`+`version` or `digest`); a lane is a tensorfs layout contract "
         "object"
     )
+
+
+#: Lane stamps whose contract document declares no top-level dtype UPSTREAM,
+#: waived at declaration time so a live model class is not refused for a gap
+#: only tensorfs can close.
+#:
+#: EMPTY, AND IT SHOULD STAY THAT WAY — the fence already did its job once. It
+#: briefly held ``minimax.h3-dit-diffusers@1`` while that document was
+#: dtype-less and its endpoint was live (deploy lane ``ab56185761f1597f1``);
+#: tensorfs#121 gave it ``bfloat16``, re-vendoring made
+#: ``test_the_h3_dtype_waiver_deletes_itself_when_upstream_lands_the_dtype``
+#: fail, and the entry was deleted. A waiver is a fact about the vendored
+#: document, never a preference, so it cannot outlive its reason.
+#:
+#: Three vendored documents are STILL dtype-less on purpose
+#: (``dit.blocks-fused-qkv``, ``sdxl.clip-g-fused-qkv``,
+#: ``sdxl.clip-g-split-qkv``) and need no waiver: they are FRAGMENTS a
+#: ``lanes=`` header never names on its own, so they never reach this check.
+#: Adding an entry here means knowingly accepting a lane whose serve-side
+#: ``ctx.lane.dtype`` will raise — do it only against a named upstream issue.
+DTYPELESS_UPSTREAM_LANES: frozenset[str] = frozenset()
+
+
+def lane_dtype(lane: Any, *, where: str) -> Any:
+    """The lane's declared load dtype, READ rather than looked for.
+
+    pgw#1391: ``isinstance(lane, LaneContract)`` is not this check. A
+    ``runtime_checkable`` Protocol with a property member resolves through
+    ``inspect.getattr_static`` on py3.12, so it never invokes the getter — a
+    ``@property`` that RAISES satisfies it. That is exactly how a contract
+    declaring no dtype used to clear declaration and die at load on a pod, and
+    how a documentless lane used to clear it at all.
+
+    So the dtype is read. ``MissingDtype`` (and the ``MissingContractError``
+    that a documentless lane raises first) become a declaration refusal naming
+    the author's own class header.
+    """
+
+    from ..models.model_types import MissingContractError
+
+    handle = lane_handle(lane)  # refuses first if there is no document at all
+    try:
+        dtype = lane.dtype
+    except MissingContractError as exc:  # pragma: no cover - lane_handle refuses first
+        raise ModelDeclarationError(str(exc)) from exc
+    except Exception as exc:
+        if handle in DTYPELESS_UPSTREAM_LANES:
+            return None
+        raise ModelDeclarationError(
+            f"{where}: lane {handle} declares no load dtype "
+            f"({type(exc).__name__}: {exc}). `ctx.lane.dtype` is on the serve "
+            f"path, so this refuses HERE rather than reading None at load on a "
+            f"rented pod. A tensorfs document with no top-level dtype is "
+            f"usually a FRAGMENT — a shared block or component spelling, not a "
+            f"serve layout — and the fix is then to author the real lane "
+            f"document in tensorfs spec/v1/contracts and re-vendor, NOT to add "
+            f"a dtype to the fragment. Declaring the fragment in `lanes=` "
+            f"explicitly does not make it a lane."
+        ) from exc
+    if dtype is None:
+        if handle in DTYPELESS_UPSTREAM_LANES:
+            return None
+        raise ModelDeclarationError(
+            f"{where}: lane {handle} answers None for its load dtype. A lane "
+            f"IS a tensorfs layout contract and its dtype is the contract's; "
+            f"None is not an answer."
+        )
+    return dtype
 
 
 def _parse_requires(
@@ -113,9 +191,9 @@ def _parse_requires(
             "UNDECLARED; an empty mapping is not a statement that this model "
             "runs anywhere."
         )
-    # `lanes=` omitted (None) means the canonical contract, resolved lazily —
-    # there is nothing to check the keys against yet. `lanes=()` IS a
-    # declaration, and every floor over it guards nothing.
+    # `lanes=()` IS a declaration, and every floor over it guards nothing.
+    # `None` reaches here only when the model type declares no canonical
+    # contract either, so there is genuinely nothing to check the keys against.
     declared = None if lanes is None else {lane_handle(lane) for lane in lanes}
     out: dict[str, Any] = {}
     for lane, value in requires.items():
@@ -203,6 +281,12 @@ class Model(Generic[MT]):
         declared = _declared_model_type(cls)
         if declared is not None:
             cls.__cozy_model_type__ = declared
+        # The lanes this class actually serves — declared, or the model type's
+        # canonical contract when `lanes=` is omitted. `requires=` is checked
+        # against THESE, not against the raw kwarg (pgw#1391): with `lanes=`
+        # omitted the old check had nothing to compare keys to and accepted a
+        # floor keyed to any stamp at all, including one naming no document.
+        effective_lanes: tuple[Any, ...] | None = lanes
         if lanes is not None:
             if not isinstance(lanes, tuple):
                 raise ModelDeclarationError(
@@ -216,10 +300,28 @@ class Model(Generic[MT]):
                         "contract (no `dtype`); a lane is an imported "
                         "tensorfs contract object, never a name string"
                     )
-                lane_handle(lane)
+                # The isinstance above only proves the ATTRIBUTE exists; this
+                # READS it, which is the pgw#1391 difference.
+                lane_dtype(lane, where=cls.__qualname__)
             cls.__cozy_lanes__ = tuple(lanes)
+        elif declared is not None:
+            # pgw#1391: OMITTING `lanes=` IS THE se#757 TRAP, so it is checked
+            # here too. `model_lanes()` falls through to the model type's
+            # `canonical_contract`, and the class that declares nothing is
+            # exactly the one that used to claim `sd15.diffusers-bf16@1` — a
+            # document that existed nowhere — all the way into a published
+            # manifest. Validating the fall-through target at declaration is
+            # what makes discovery refuse it, because discovery IMPORTS the
+            # author module: the guarantee rides on `__init_subclass__` rather
+            # than on any particular consumer remembering to enumerate lanes.
+            # (pgw#1394 deleted discovery's `_lane_stamps` for good reasons;
+            # this seam is why that deletion costs the fence nothing.)
+            canonical = getattr(declared, "canonical_contract", None)
+            if canonical is not None:
+                lane_dtype(canonical, where=f"{cls.__qualname__} (lanes= omitted)")
+                effective_lanes = (canonical,)
         if requires is not None:
-            cls.__cozy_requires__ = _parse_requires(cls, requires, lanes)
+            cls.__cozy_requires__ = _parse_requires(cls, requires, effective_lanes)
 
     # -- lifecycle hooks (the load/unload contract, pgw#1382) ---------------
 
@@ -284,6 +386,7 @@ def model_requires(cls: type) -> dict[str, Any]:
 
 
 __all__ = [
+    "DTYPELESS_UPSTREAM_LANES",
     "LANES_ATTR",
     "LaneContract",
     "MODEL_TYPE_ATTR",

@@ -101,48 +101,142 @@ class Knob(msgspec.Struct, Generic[Number], frozen=True):
 
 # ── tensorfs contract seam ───────────────────────────────────────────────────
 #
-# tensorfs#111 seam: a canonical contract is an IMPORTED OBJECT, never a
-# pointer-string (Paul's contract-objects ruling 2026-08-18). Until the
-# vendored tensorfs ships ``contracts`` (tensorfs#111/#113), these are
-# placeholder objects carrying the eventual identity shape (``name`` +
-# ``version``; stamp ``<name>@<version>``, the identity
-# ``ContractRegistry.stamps()`` speaks). The swap is one edit: replace the
-# ``PendingContract`` assignments below with
-# ``from gen_worker._vendor.tensorfs.contracts import ...`` and delete
-# ``PendingContract``.
+# A canonical contract is an IMPORTED OBJECT, never a pointer-string (Paul's
+# contract-objects ruling 2026-08-18), and pgw#1391 makes the object REAL: the
+# constants below resolve against the vendored tensorfs contract library, so a
+# lane stamp is now falsifiable rather than free text.
+#
+# What that replaced (pgw#1391, measured): ``PendingContract(name, version)``
+# was a placeholder that answered ``stamp``/``contract`` for ANY name. Four of
+# the six constants named documents tensorfs does not ship, so a ``Model``
+# subclass that omitted ``lanes=`` fell through ``model_lanes()`` to one of
+# them and claimed, all the way into the published manifest, a lane the hub
+# cannot intern (se#757 blocker A). The live sdxl lane was no better off: a
+# placeholder has no ``document`` and no ``digest``, so every release shipped
+# ``"document": null`` for a contract tensorfs really does publish.
+#
+# A name the library does not carry becomes a ``MissingContract`` sentinel.
+# Import stays clean — the module must remain importable or every consumer
+# breaks — and CLAIMING one as a lane is what refuses. All ten current names
+# resolve, so no sentinel is live today; the MACHINERY STAYS, because se#757
+# blocker B is 21 more endpoints that will each want a ``ModelType`` before
+# their document exists, and this is the shape that lets them declare one
+# without shipping a lie. Clearing the original four took zero code change,
+# which is the property worth keeping.
+
+from .._vendor.tensorfs import contracts as _tensorfs_contracts
 
 
 class TensorLayoutContract(Protocol):
-    """What ``canonical_contract`` is typed against until tensorfs#111."""
+    """What ``canonical_contract`` is typed against: the tensorfs ``Contract``
+    surface a lane header, discovery and derive all read."""
 
     @property
-    def name(self) -> str: ...
+    def stamp(self) -> str: ...
     @property
-    def version(self) -> int: ...
+    def document(self) -> str: ...
+    @property
+    def digest(self) -> str: ...
+    @property
+    def dtype(self) -> str: ...
 
 
-class PendingContract(msgspec.Struct, frozen=True):
-    """Placeholder tensorfs Contract object (tensorfs#111 seam, see above).
+class MissingContractError(LookupError):
+    """A lane names a layout contract tensorfs ships no document for.
 
-    Satisfies the SDK's ``LaneContract`` protocol (pgw#1382): ``contract`` is
-    the string handle and ``dtype`` the load dtype, so a canonical contract
-    object may be written straight into a ``Model[...]`` ``lanes=`` header.
+    Raised on ANY lane-ish read of a :class:`MissingContract`, which is what
+    turns the se#757 silent lie loud: the stamp cannot be spelled, so it cannot
+    reach a manifest, a release document or a load.
     """
 
-    name: str
-    version: int
 
+class MissingContract:
+    """A named contract the vendored tensorfs library does not carry.
+
+    INERT AT IMPORT, LOUD ON USE. A hard refusal at module import would make
+    ``gen_worker.models`` unimportable and break everything downstream, so the
+    constant exists — but every attribute a lane header, discovery, derive or a
+    load would read (``stamp``, ``contract``, ``dtype``, ``document``,
+    ``digest``, ``label``, ``tensors``, ``sets``) refuses instead of answering.
+    It is deliberately NOT a ``LaneContract``-shaped liar: there is no path by
+    which it produces a string somebody could publish.
+    """
+
+    _name: str
+    _version: int
+
+    __slots__ = ("_name", "_version")
+
+    def __init__(self, name: str, version: int) -> None:
+        object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_version", version)
+
+    def __setattr__(self, attribute: str, value: object) -> None:
+        raise AttributeError("a MissingContract is frozen")
+
+    def _refuse(self) -> MissingContractError:
+        carried = ", ".join(sorted(contract.stamp for contract in _tensorfs_contracts.all()))
+        return MissingContractError(
+            f"lane {self._name}@{self._version} names a tensorfs layout "
+            f"contract that DOES NOT EXIST. The vendored library carries: "
+            f"{carried}. A lane stamp is a promise the hub interns and the "
+            f"loader reads — it cannot be claimed by naming it. Author "
+            f"'{self._name}.v{self._version}.json' in tensorfs "
+            f"spec/v1/contracts (see its README), then re-vendor per "
+            f"gen_worker/_vendor/VENDORED.toml; this constant becomes a real "
+            f"contract with no code change. Until then declare a lane the "
+            f"library carries, or lanes=() for eager-permanent."
+        )
+
+    # Every read a lane header, discovery, derive or a load performs.
     @property
     def stamp(self) -> str:
-        return f"{self.name}@{self.version}"
+        raise self._refuse()
 
     @property
     def contract(self) -> str:
-        return self.stamp
+        raise self._refuse()
 
     @property
-    def dtype(self) -> object:
-        return CONTRACT_DTYPES.get(self.stamp)
+    def dtype(self) -> str:
+        raise self._refuse()
+
+    @property
+    def document(self) -> str:
+        raise self._refuse()
+
+    @property
+    def digest(self) -> str:
+        raise self._refuse()
+
+    @property
+    def label(self) -> str:
+        raise self._refuse()
+
+    @property
+    def tensors(self) -> tuple[object, ...]:
+        raise self._refuse()
+
+    @property
+    def sets(self) -> dict[str, tuple[str, ...]]:
+        raise self._refuse()
+
+    def __repr__(self) -> str:
+        return f"MissingContract({self._name!r}, {self._version!r}, NO DOCUMENT)"
+
+
+def _library(name: str, version: int) -> TensorLayoutContract:
+    """The library contract ``name@version``, or the sentinel that refuses.
+
+    The lookup happens at import so a name the library DOES carry is a real
+    ``Contract`` from that moment on — document, digest and dtype included —
+    while a name it does not carry costs nothing until somebody claims it.
+    """
+
+    try:
+        return _tensorfs_contracts.get(f"{name}@{version}")
+    except KeyError:
+        return MissingContract(name, version)
 
 
 #: stabilityai/stable-diffusion-xl-base-1.0 scheduler_config.json — SDXL's
@@ -210,25 +304,51 @@ FLUX2_KLEIN_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "use_karras_sigmas": False,
 }
 
-SDXL_DIFFUSERS_BF16: Final = PendingContract("sdxl.diffusers-bf16", 1)
-SD15_DIFFUSERS_BF16: Final = PendingContract("sd15.diffusers-bf16", 1)
-SD2_DIFFUSERS_BF16: Final = PendingContract("sd2.diffusers-bf16", 1)
-HIDREAM_O1_DIFFUSERS_BF16: Final = PendingContract("hidream-o1.diffusers-bf16", 1)
-WAN22_DIFFUSERS_BF16: Final = PendingContract("wan22.diffusers-bf16", 1)
-#: The one name here that is ALREADY a real tensorfs library contract
-#: (``contracts.MINIMAX_H3_DIT_DIFFUSERS``, beside ``minimax.h3-dit-native``) —
-#: the H3 contract file names it in ``lanes=``. Still a PendingContract only
-#: because the vendored tensorfs snapshot predates the ``contracts`` module.
-MINIMAX_H3_DIT_DIFFUSERS: Final = PendingContract("minimax.h3-dit-diffusers", 1)
-#: Also already a real tensorfs library contract — and the ONLY shipped one
-#: whose own ``description`` names the Flux family (pgw#1393). It is a
-#: family-PLURAL block-spelling FRAGMENT, not a lane document: no top-level
-#: ``dtype`` (so ``ctx.lane.dtype`` reads None on it, pgw#970) and its
-#: patterns are the timm/native ``blocks.{i}.attn.qkv`` spelling. Flux's own
-#: ``flux1.*``/``flux2-klein.*`` lane documents are OWED (tracked pgw#1393);
-#: until then this is the honest placeholder, and every migrating flux
-#: endpoint spells ``lanes=`` explicitly anyway.
-DIT_BLOCKS_FUSED_QKV: Final = PendingContract("dit.blocks-fused-qkv", 1)
+#: REAL — a tensorfs library document. Live on deploy lane
+#: ``a55e45a571cdb6188``.
+SDXL_DIFFUSERS_BF16: Final = _library("sdxl.diffusers-bf16", 1)
+#: REAL — beside ``minimax.h3-dit-native``; the H3 contract file names it in
+#: ``lanes=``. Live on deploy lane ``ab56185761f1597f1``.
+MINIMAX_H3_DIT_DIFFUSERS: Final = _library("minimax.h3-dit-diffusers", 1)
+
+#: REAL as of tensorfs#121, which authored these four for se#757 blocker A.
+#: They were ``MissingContract`` sentinels between pgw#1391's first commit and
+#: its re-vendor, and clearing them took NO code change here — the property the
+#: sentinel shape exists to have. ``sd15`` and ``sd2`` are SEPARATE documents
+#: with separate digests, not one shared one.
+SD15_DIFFUSERS_BF16: Final = _library("sd15.diffusers-bf16", 1)
+SD2_DIFFUSERS_BF16: Final = _library("sd2.diffusers-bf16", 1)
+HIDREAM_O1_DIFFUSERS_BF16: Final = _library("hidream-o1.diffusers-bf16", 1)
+WAN22_DIFFUSERS_BF16: Final = _library("wan22.diffusers-bf16", 1)
+
+#: REAL as of tensorfs#124 — FLUX.2 Klein's own transformer-only lane document
+#: (29 declarations). This is what makes ``flux.2-klein-4b``/``-9b``
+#: migratable, and it is what ``Flux2Klein.canonical_contract`` points at.
+FLUX2_KLEIN_DIFFUSERS_BF16: Final = _library("flux2-klein.diffusers-bf16", 1)
+
+#: NO DOCUMENT YET — tensorfs#124 owes it (blocked on HF access to the BFL
+#: repos), so this is a ``MissingContract`` sentinel and ``Model[Flux1]``
+#: refuses loudly, naming the document it wants.
+#:
+#: THAT IS DELIBERATE, AND IT IS SAFER THAN WHAT IT REPLACED. ``Flux1``
+#: pointed at ``dit.blocks-fused-qkv@1``, which is a family-PLURAL
+#: block-spelling FRAGMENT in the timm/native ``blocks.{i}.attn.qkv``
+#: spelling — it declares that pattern ``required: true`` and matches ZERO of
+#: the 169 tensors in a real Flux transformer header, whose tree is
+#: ``transformer_blocks.*``/``single_transformer_blocks.*``. So it was not a
+#: lane that MIGHT fail; it was a guaranteed refusal dressed as a resolved
+#: lane, which is exactly the silent lie pgw#1391 exists to kill. Pointing at
+#: nothing beats pointing at something that cannot match, and spelling the
+#: fragment in ``lanes=`` explicitly does not rescue it either.
+FLUX1_DIFFUSERS_BF16: Final = _library("flux1.diffusers-bf16", 1)
+
+#: REAL, and the only shipped document whose own ``description`` names the Flux
+#: family — but it is a FRAGMENT, not a lane document, and nothing here points
+#: a ``canonical_contract`` at it any more (see ``FLUX1_DIFFUSERS_BF16``). It
+#: declares no top-level ``dtype`` on purpose, as the two ``sdxl.clip-g-*``
+#: component fragments do, so claiming it as a serve lane refuses at
+#: declaration instead of reading ``None`` at load.
+DIT_BLOCKS_FUSED_QKV: Final = _library("dit.blocks-fused-qkv", 1)
 
 
 # ── bases ────────────────────────────────────────────────────────────────────
@@ -691,7 +811,7 @@ class Flux1(ModelType[Flux1Defaults]):
 
     name = "flux1"
     contracts = ("flux1.*",)
-    canonical_contract = DIT_BLOCKS_FUSED_QKV
+    canonical_contract = FLUX1_DIFFUSERS_BF16
     Defaults = Flux1Defaults
 
 
@@ -703,7 +823,7 @@ class Flux2Klein(ModelType[Flux2KleinDefaults]):
 
     name = "flux2-klein"
     contracts = ("flux2-klein.*",)
-    canonical_contract = DIT_BLOCKS_FUSED_QKV
+    canonical_contract = FLUX2_KLEIN_DIFFUSERS_BF16
     canonical_scheduler_config = FLUX2_KLEIN_SCHEDULER_CONFIG
     Defaults = Flux2KleinDefaults
 
@@ -761,44 +881,29 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
 
 
 
-# ── interim lane-dtype seam (pgw#1370's derive consumes this) ────────────────
+# ── the lane-dtype side-channel is DELETED (pgw#1391) ───────────────────────
 #
-# INTERIM dtype resolution for lanes spelled as bare contract HANDLES. A lane
-# is a tensorfs layout contract; when the author imports the contract OBJECT
-# (tensorfs#111), dtype rides on it and this table is not consulted. Bare
-# handles resolve here until the canonical per-model-type entries land in
-# tensorfs ``spec/v1/contracts``.
-
-CONTRACT_DTYPES: dict[str, object] = {}
-
-
-def register_contract_dtype(handle: str, dtype: object) -> None:
-    known = CONTRACT_DTYPES.get(handle)
-    if known is not None and known != dtype:
-        raise ValueError(
-            f"contract {handle!r} already resolves to {known!r}; refusing to "
-            f"re-register it as {dtype!r}"
-        )
-    CONTRACT_DTYPES[handle] = dtype
-
-
-def _seed_sdxl_contracts() -> None:
-    try:
-        import torch
-    except ImportError:  # pragma: no cover - torch-less installs never derive
-        return
-    register_contract_dtype("sdxl.diffusers-bf16@1", torch.bfloat16)
-    # The fp8-rowwise lane LOADS bf16 (the quantized artifact path is the fp8
-    # pipeline's; the serve host's from_pretrained dtype stays bf16).
-    register_contract_dtype("cozy.sdxl-fp8-rowwise@1", torch.bfloat16)
-
-
-_seed_sdxl_contracts()
+# `CONTRACT_DTYPES` was a module-level MUTABLE dict and `register_contract_dtype()`
+# wrote to it, so the serve dtype was whatever code happened to register —
+# structurally disconnected from what the tensorfs document declares. Measured
+# at master `a9bec13e`: `sdxl.diffusers-bf16@1` answered `torch.bfloat16` only
+# because a seed function seeded it, while `minimax.h3-dit-diffusers@1` answered
+# `None` even though its document had declared `bfloat16` since tensorfs#121.
+# Had the registration and the document ever disagreed, the registration would
+# have won and no gate would have noticed.
+#
+# That is the same defect as the `PendingContract` lie one layer down: a fact
+# asserted BESIDE the real source instead of read FROM it. A lane's dtype now
+# comes from `Contract.dtype`, which reads the document, and from nowhere else.
+# There is deliberately no replacement hook: a caller wanting to register a
+# dtype for a document that declares none is treating a FRAGMENT as a serve
+# lane, which is the bug rather than a reason to keep the dict.
 
 
 __all__ = [
-    "CONTRACT_DTYPES",
     "DIT_BLOCKS_FUSED_QKV",
+    "FLUX1_DIFFUSERS_BF16",
+    "FLUX2_KLEIN_DIFFUSERS_BF16",
     "FLUX2_KLEIN_SCHEDULER_CONFIG",
     "Flux1",
     "Flux1Defaults",
@@ -817,7 +922,8 @@ __all__ = [
     "RifeDefaults",
     "MODEL_TYPES",
     "ModelType",
-    "PendingContract",
+    "MissingContract",
+    "MissingContractError",
     "SD15",
     "SchedulerName",
     "SD15_DIFFUSERS_BF16",
@@ -840,5 +946,4 @@ __all__ = [
     "defaults_vocabularies",
     "model_type_by_name",
     "model_type_for_contract",
-    "register_contract_dtype",
 ]

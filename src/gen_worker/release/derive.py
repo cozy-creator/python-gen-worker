@@ -238,6 +238,15 @@ def _lane_model_class(module: ModuleType) -> Optional[type]:
             continue
         try:
             lanes = model_lanes(value)
+            # pgw#1391: `model_lanes` hands back the lane OBJECTS without
+            # reading them, so a class that omitted `lanes=` and fell through
+            # to a canonical contract with no tensorfs document got this far
+            # silently. Reading each lane's handle and dtype here is what makes
+            # the publish path refuse it, through the SAME conversion.
+            from ..serving.model import lane_dtype
+
+            for lane in lanes:
+                lane_dtype(lane, where=f"class {value.__qualname__!r}")
         except ModelDeclarationError as exc:
             # Omitted lanes with no canonical contract (tensorfs#111 not
             # shipped): the class cannot state its lanes — refuse loudly,
@@ -949,12 +958,21 @@ def _contract_document(
             f"a stamp with an unreadable layout behind it is worse than no "
             f"row."
         )
-    warnings.append(
-        f"{owner}: lane {lane_handle(lane)} carries NO layout document, so "
-        f"the release ships its stamp alone and the platform must already "
-        f"know the layout. Import a tensorfs Contract object."
+    # pgw#1391: this was a WARNING, and it fired on EVERY lane — including the
+    # live `sdxl.diffusers-bf16@1`, whose document tensorfs really does
+    # publish. Every release therefore carried `"document": null` and an empty
+    # digest, which is se#756's "the release proves NO lane". A stamp with no
+    # layout behind it is the bug, so it refuses. Under the contract library
+    # every real lane HAS a document.
+    raise DeriveError(
+        f"{owner}: lane {lane_handle(lane)} carries NO layout document. The "
+        f"whole point of contract OBJECTS is that the layout TRAVELS in the "
+        f"release metadata, so the platform needs no prior knowledge of it — "
+        f"a stamp alone is a claim the hub cannot intern. Declare the lane as "
+        f"an imported tensorfs Contract "
+        f"(`gen_worker.models.SDXL_DIFFUSERS_BF16`-style), never a handle "
+        f"string or a stand-in."
     )
-    return None
 
 
 def _contract_digest(lane: Any) -> str:
