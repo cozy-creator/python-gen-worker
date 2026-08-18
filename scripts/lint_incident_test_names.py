@@ -67,7 +67,7 @@ ROOTS: Tuple[str, ...] = ("tests", "tests_v2")
 #: Length of the grandfather list. **Lower it with the names you deleted; never
 #: raise it.** 375 at adoption (pgw#1362, after waves 1-3a folded 41 modules out
 #: of the 416 that were issue-named when the epic's census was taken).
-BASELINE_HIGH_WATER = 375
+BASELINE_HIGH_WATER = 370  # 375 -> 370: pgw#1362 wave 3b folded the procsplit group
 
 #: The issue-id spellings this workspace uses, as they appear inside a filename
 #: (`_pgw1234`, `_th1130`, `_gw640`, `_cl72`, `_ie655`, `_te148`). Matched

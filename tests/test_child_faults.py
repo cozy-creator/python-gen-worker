@@ -20,16 +20,16 @@ from typing import Any, List
 import grpc
 import msgspec
 import pytest
-from test_procsplit_pgw763 import (  # noqa: F401  (fixtures re-used)
+from harness.split import (  # noqa: F401  (fixtures re-used)
     SplitHarness,
 )
-from test_procsplit_pgw763 import (
+from harness.split import (
     captured_dials as captured_dials,
 )
-from test_procsplit_pgw763 import (
+from harness.split import (
     captured_reports as captured_reports,
 )
-from test_procsplit_pgw763 import (
+from harness.split import (
     isolated_postmortem as isolated_postmortem,
 )
 

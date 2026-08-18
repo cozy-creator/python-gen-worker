@@ -38,7 +38,7 @@ from harness.receipt_hub import (  # noqa: F401 — fixtures ride along
     sign_receipt,
     worker_jwt_for,
 )
-from test_procsplit_pgw763 import (  # noqa: F401 — fixtures come with it
+from harness.split import (  # noqa: F401 — fixtures come with it
     CHILD_MAIN,
     SplitHarness,
     _payload,

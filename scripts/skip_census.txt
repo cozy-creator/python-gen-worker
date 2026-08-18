@@ -65,7 +65,7 @@
 # text, not its resolution. `_interpreter_mounts()` now mounts all four
 # candidate prefixes. If this key is ever observed again the fix regressed, and
 # CI says so instead of staying quiet.
-CI-MUST-RUN tests/test_pod_privilege_isolation_pgw858.py|the container cannot exec this interpreter, so no row ran: [fatal tini (#)] exec <path> failed: no such file or director
+CI-MUST-RUN tests/test_pod_isolation.py|the container cannot exec this interpreter, so no row ran: [fatal tini (#)] exec <path> failed: no such file or director
 
 # ─── CI-SKIPPED: no CUDA device, and no GPU lane anywhere ─────────────────────
 # UNVERIFIED except by hand on a pod. Do not read a green CI as evidence.
@@ -83,7 +83,7 @@ CI-SKIPPED tests/test_llama_runtime.py|gpu smoke runs on the nightly gpu ci lane
 # above — they run as root inside that container, and skipping them outside it
 # is the design (a uid boundary cannot be measured by a suite already at uid
 # 1000: every /proc read the fix denies is already denied).
-CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|pgw#858 is a uid boundary — the containerised row above measures it
+CI-SKIPPED tests/test_pod_isolation.py|pgw#858 is a uid boundary — the containerised row above measures it
 
 # ─── CI-SKIPPED: a host capability the runner HAS, which the row needs absent ──
 # Inverse of the section above, and the only key here whose presence depends on
@@ -99,8 +99,8 @@ CI-SKIPPED tests/test_host_isa_pgw754.py|host has avx-#; the genuine-lack refusa
 # Degrades to a counted skip, never a red: an unreachable third party may not
 # fail a required check.
 CI-SKIPPED tests/test_llama_runtime.py|llama-server binary not found (path or gen_worker_llama_server_bin)
-CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|docker could not start the container, so no row ran (image pull or daemon): <path>
-CI-SKIPPED tests/test_pod_privilege_isolation_pgw858.py|docker is required: pgw#858 is a uid boundary and a non-root runner cannot observe it (every /proc read is already denie
+CI-SKIPPED tests/test_pod_isolation.py|docker could not start the container, so no row ran (image pull or daemon): <path>
+CI-SKIPPED tests/test_pod_isolation.py|docker is required: pgw#858 is a uid boundary and a non-root runner cannot observe it (every /proc read is already denie
 CI-SKIPPED tests/test_registry_contract_pgw740.py|uv not on path
 
 # ─── CI-SKIPPED: rows keyed to weights that are only on a developer box ───────
