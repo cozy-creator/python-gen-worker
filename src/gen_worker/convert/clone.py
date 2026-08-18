@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,7 @@ from .ingest import (
     ingest_huggingface,
     plan_civitai,
     plan_huggingface,
+    plan_source_facts,
 )
 from .keepalive import HubKeepalive
 from .publish import destination_release as _destination_release
@@ -89,6 +91,9 @@ _KNOWN_FILE_TYPES = {"safetensors", "gguf"}
 
 _default_quant_components = quant_candidate_components
 _MIN_CONVERT_BYTES = 100 * 1024 * 1024  # leave tiny weights (embeddings) untouched
+# The unit of the clone's declared position (pgw#1397). MiB, not bytes:
+# the hub stores an int64 and an operator reads it.
+_MIB = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -213,6 +218,47 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = MULTI_
 # ---------------------------------------------------------------------------
 # Flavor tree construction
 # ---------------------------------------------------------------------------
+
+def refuse_unproducible_layout(plan: Any, specs: list[OutputSpec]) -> None:
+    """Refuse, BEFORE the download, a request whose every output needs a
+    layout repackage this source has no route for (jobs#294).
+
+    The verdict is a fact about the source's METADATA — its layout, its family
+    and whether that family declares the direction — so paying for 6.9 GB of
+    checkpoint to reach it is pure waste. Only an ALL-flavors refusal is
+    decided here: a request with one impossible flavor and one possible one
+    still runs, and the per-flavor refusal downstream is unchanged.
+    """
+    facts = plan_source_facts(plan)
+    if facts is None or facts.source_layout not in _KNOWN_FILE_LAYOUTS:
+        return
+    declared = repackage_family(facts.model_family)
+    supported = declared is not None and (
+        declared.supports_singlefile_to_diffusers
+        if facts.source_layout == SINGLE_FILE
+        else declared.supports_diffusers_to_singlefile
+    )
+    # publish-as-is classes never repackage, so the layout a caller asked for
+    # is simply not consulted for them (mirroring build_flavor_tree's own
+    # `publish_as_is` predicate — one rule, read twice).
+    if facts.strategy in _PUBLISH_AS_IS_STRATEGIES or (
+        facts.strategy == "aio_singlefile" and not supported
+    ):
+        return
+    if supported:
+        return
+    for spec in specs:
+        # gguf is a container conversion, decided before the layout leg.
+        if spec.file_layout == facts.source_layout or spec.file_type == "gguf":
+            return
+    wanted = "/".join(sorted({spec.file_layout for spec in specs}))
+    raise ValidationError(
+        f"clone would produce no publishable flavor: layout repackage "
+        f"{facts.source_layout}->{wanted} unsupported for "
+        f"model_family={facts.model_family!r} — decided from the source's "
+        f"metadata, before the download"
+    )
+
 
 def build_flavor_tree(
     source: IngestedSource,
@@ -765,13 +811,50 @@ def run_clone(
     explicit_outputs = bool(outputs)
     effective_hf_token = str(hf_token or "").strip() or str(getattr(ctx, "hf_token", "") or "").strip()
 
-    def _progress(p: float, stage: str) -> None:
+    # pgw#1397 — THE DECLARED POSITION HAS TO MOVE.
+    #
+    # Hub job liveness is position ADVANCE inside a phase budget (th#2050), and
+    # the position it reads is an int64 that `AdvanceJobProgress` accepts only
+    # on a STRICT increase. A clone declared its progress as a 0..1 FRACTION,
+    # which is `int(...) == 0` for the entire run — so the first tick wrote
+    # `clone.plan 0`, every later tick was dropped by the `>` predicate, the
+    # position clock froze, and a 6.9 GB fetch became indistinguishable from a
+    # wedged one at the 10-minute budget. The budget is right; the worker was
+    # not telling the truth about advancing.
+    #
+    # The position is therefore MEBIBYTES MOVED — bytes fetched, then bytes
+    # uploaded — ONE number that rises across every phase of the job. The 0..1
+    # fraction rides beside it for the user-facing feed. A phase entry counts
+    # as one MiB of movement (it IS movement, and it keeps the clock alive
+    # across a leg that moves no bytes); inside a phase only real bytes
+    # advance it, because a counter that ticks on its own would manufacture
+    # exactly the liveness this instrument exists to disprove.
+    moved = {"mib": 0, "base": 0}
+    moved_lock = threading.Lock()
+
+    def _emit(fraction: float, stage: str, total_mib: Optional[int]) -> None:
         fn = getattr(ctx, "progress", None)
-        if callable(fn):
-            try:
-                fn(p, stage=stage)
-            except Exception:
-                pass
+        if not callable(fn):
+            return
+        try:
+            fn(fraction, stage, position=float(moved["mib"]), total=total_mib)
+        except Exception:
+            pass
+
+    def _progress(p: float, stage: str) -> None:
+        with moved_lock:
+            moved["mib"] += 1
+            moved["base"] = moved["mib"]
+            _emit(p, stage, None)
+
+    def _progress_bytes(p: float, stage: str, done: int, total: Optional[int]) -> None:
+        """Advance the position by the bytes this phase has actually moved."""
+        with moved_lock:
+            mib = moved["base"] + int(done or 0) // _MIB
+            if mib <= moved["mib"]:
+                return
+            moved["mib"] = mib
+            _emit(p, stage, (moved["base"] + int(total) // _MIB) if total else None)
 
     source_key = source_ref if provider == "huggingface" else str(civitai_model_version_id or 0)
     if source_revision:
@@ -815,14 +898,17 @@ def run_clone(
         # The plan already knows every selected file's size — fail fast on an
         # undersized disk instead of ENOSPC mid-download.
         _preflight_disk(workdir, plan, specs)
+        # ...and it knows the source's layout, so a request no flavor of which
+        # could ever be produced is refused here rather than after the bytes.
+        refuse_unproducible_layout(plan, specs)
 
         _progress(0.05, "clone.ingest")
         dl_bytes = {"done": 0}
 
         def _dl_progress(done: int, total: Optional[int]) -> None:
             dl_bytes["done"] = max(dl_bytes["done"], int(done or 0))
-            if total:
-                _progress(0.05 + 0.45 * min(1.0, done / total), "clone.download")
+            fraction = 0.05 + 0.45 * min(1.0, done / total) if total else 0.05
+            _progress_bytes(fraction, "clone.download", dl_bytes["done"], total)
 
         # Download and cast are the two phases that talk to the hub NOT AT ALL
         # — an hour of them, and then the first upload discovers whatever
@@ -1039,7 +1125,20 @@ def run_clone(
             for k, v in attrs.items():
                 metadata.setdefault(f"attr_{k}", str(v))
 
-            _progress(0.55 + 0.4 * (i / max(1, len(specs))), f"clone.publish.{spec.label}")
+            publish_fraction = 0.55 + 0.4 * (i / max(1, len(specs)))
+            publish_phase = f"clone.publish.{spec.label}"
+            _progress(publish_fraction, publish_phase)
+            # The upload is the OTHER leg that can outlast the phase budget on
+            # a real-sized model, and it has a byte channel of its own — so it
+            # advances the same position the fetch does (pgw#1397). Called
+            # from the uploader's threads; `_progress_bytes` holds the lock.
+            uploaded_bytes = {"done": 0}
+
+            def _up_progress(_parts: int, _total_parts: int, n: int,
+                             *, _f: float = publish_fraction,
+                             _p: str = publish_phase) -> None:
+                uploaded_bytes["done"] += max(0, int(n or 0))
+                _progress_bytes(_f, _p, uploaded_bytes["done"], None)
             # Every file here is a real local file (`files_from_tree`), which
             # publish_v2 requires: its guarantee is that a digest is PROVEN
             # from bytes in hand. A `merge` into a prior v1/blake3 manifest is
@@ -1075,6 +1174,7 @@ def run_clone(
                     "tree": str(tree),
                     "attrs": {str(k): str(v) for k, v in attrs.items()},
                 },
+                part_progress=_up_progress,
             )
             result.published.append({
                 # The report states the DTYPE it published, not a flavor token
