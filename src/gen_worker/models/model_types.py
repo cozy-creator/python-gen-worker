@@ -101,7 +101,9 @@ class SDXL:
             timesteps: tuple[int, ...] = ()
 
     class Defaults(msgspec.Struct, frozen=True):
-        # cfg=False marks a distilled checkpoint (guidance-off serving).
+        # cfg=False marks a step-distilled checkpoint (guidance-off serving);
+        # such a checkpoint carries its OWN recipe fields (schedule/timesteps),
+        # same vocabulary as an adapter's Lora.Defaults.
         cfg: bool = True
         steps: Knob = msgspec.field(
             default_factory=lambda: Knob(
@@ -115,6 +117,8 @@ class SDXL:
         )
         positive_preamble: str = ""
         negative_preamble: str = ""
+        schedule: str = "euler_trailing"  # "euler_trailing" | "lcm"
+        timesteps: tuple[int, ...] = ()
 
 
 _seed_sdxl_contracts()

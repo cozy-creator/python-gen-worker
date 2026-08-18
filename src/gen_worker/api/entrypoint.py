@@ -36,10 +36,12 @@ def entrypoint(fn: F) -> F:
         if parameter.kind
         not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
     ]
-    if len(parameters) != 3:
+    if len(parameters) < 3:
         raise TypeError(
-            f"@entrypoint {fn.__name__}: an entrypoint is "
-            f"(payload, model, ctx); got {len(parameters)} parameters"
+            f"@entrypoint {fn.__name__}: an entrypoint takes at least "
+            f"(payload, model, ctx); further parameters are platform-injected "
+            f"FACTS by annotation (e.g. `turbo: Adapter | None`, "
+            f"`loras: list[Adapter]`); got {len(parameters)} parameters"
         )
     setattr(fn, ENTRYPOINT_ATTR, True)
     return fn

@@ -132,10 +132,13 @@ class Adapter:
     the ADAPTER, never to endpoint vocabulary.
     """
 
-    def __init__(self, *, name: str, path: Any, defaults: Any = None) -> None:
+    def __init__(
+        self, *, name: str, path: Any, defaults: Any = None, scale: float = 1.0
+    ) -> None:
         self.name = name
         self.path = path
         self.defaults = defaults
+        self.scale = scale
 
 
 def model_lanes(cls: type) -> tuple[Any, ...]:

@@ -115,8 +115,12 @@ class _Entrypoint:
 
     The payload parameter is the msgspec Struct; the model parameter is the
     ``Model`` subclass (its annotation IS the model declaration, its NAME is
-    the slot name); the remaining parameter is ctx. The derive calls by
-    KEYWORD, so the author owns the order.
+    the slot name); ctx is the RequestContext-annotated (or sole remaining)
+    parameter; every OTHER parameter is a platform-injected FACT
+    (``turbo: Adapter | None``, ``loras: list[Adapter]``) and takes its
+    trace value from its annotation shape -- Optional injects None, a
+    sequence injects empty. The derive calls by KEYWORD, so the author owns
+    the order.
     """
 
     name: str
@@ -125,10 +129,35 @@ class _Entrypoint:
     payload_type: type
     model_param: str
     ctx_param: str
+    injected: tuple[tuple[str, Any], ...]  # (param name, trace value)
+
+
+def _injected_trace_value(name: str, parameter_name: str, annotation: Any) -> Any:
+    """The trace-time value of a platform-injected fact, by annotation shape.
+
+    No adapter is ever bound at trace (the derive stamps a RELEASE, not a
+    deployment), so Optional facts inject None and sequence facts inject
+    empty. A fact the shape cannot state is refused by name.
+    """
+
+    if _optional_none(annotation):
+        return None
+    origin = typing.get_origin(annotation)
+    if origin in (list, tuple) or (
+        isinstance(origin, type) and origin.__name__ in ("Sequence", "list", "tuple")
+    ):
+        return [] if origin is not tuple else ()
+    raise DeriveError(
+        f"@entrypoint {name}: injected parameter {parameter_name!r} of type "
+        f"{annotation!r} has no trace value (Optional facts inject None, "
+        f"sequence facts inject empty)"
+    )
 
 
 def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
     import msgspec
+
+    from ..request_context import RequestContext
 
     out: list[_Entrypoint] = []
     for name, fn in sorted(vars(module).items()):
@@ -136,14 +165,21 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
             continue
         hints = typing.get_type_hints(fn)
         parameters = list(inspect.signature(fn).parameters.values())
-        payload_param = model_param = None
+        payload_param = model_param = ctx_param = None
         payload_type: Any = None
+        rest: list[tuple[str, Any]] = []
         for parameter in parameters:
             annotation = _strip_annotated(hints.get(parameter.name))
             if isinstance(annotation, type) and issubclass(annotation, msgspec.Struct):
                 payload_param, payload_type = parameter.name, annotation
             elif annotation is model_cls:
                 model_param = parameter.name
+            elif typing.get_origin(annotation) is RequestContext or (
+                isinstance(annotation, type) and issubclass(annotation, RequestContext)
+            ):
+                ctx_param = parameter.name
+            else:
+                rest.append((parameter.name, hints.get(parameter.name)))
         if model_param is None:
             continue
         if payload_param is None:
@@ -151,16 +187,21 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
                 f"@entrypoint {name}: no parameter annotates a msgspec "
                 f"payload struct"
             )
-        ctx_candidates = [
-            parameter.name
-            for parameter in parameters
-            if parameter.name not in (payload_param, model_param)
-        ]
-        if len(ctx_candidates) != 1:
-            raise DeriveError(
-                f"@entrypoint {name}: expected exactly one ctx parameter "
-                f"beside payload and model; got {ctx_candidates!r}"
-            )
+        if ctx_param is None:
+            # No RequestContext annotation anywhere: the sole remaining
+            # parameter is ctx (the minimal (payload, model, ctx) shape).
+            if len(rest) == 1:
+                ctx_param = rest.pop(0)[0]
+            else:
+                raise DeriveError(
+                    f"@entrypoint {name}: cannot identify the ctx parameter "
+                    f"among {[item[0] for item in rest]!r}; annotate it "
+                    f"RequestContext"
+                )
+        injected = tuple(
+            (parameter_name, _injected_trace_value(name, parameter_name, annotation))
+            for parameter_name, annotation in rest
+        )
         out.append(
             _Entrypoint(
                 name=name,
@@ -168,7 +209,8 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
                 payload_param=payload_param,
                 payload_type=payload_type,
                 model_param=model_param,
-                ctx_param=ctx_candidates[0],
+                ctx_param=ctx_param,
+                injected=injected,
             )
         )
     if not out:
@@ -482,6 +524,7 @@ def _derive_lane(
                             plan.payload_param: payload,
                             plan.model_param: model,
                             plan.ctx_param: request_ctx,
+                            **dict(plan.injected),
                         })
                     except Exception as exc:
                         raise DeriveError(
