@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import IO, Any, Dict, Literal, Optional
 
 import msgspec

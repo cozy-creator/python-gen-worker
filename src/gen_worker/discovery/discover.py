@@ -32,7 +32,6 @@ from gen_worker.discovery.entrypoints_v2 import (
     entrypoints_block,
 )
 from gen_worker.discovery.execution_lanes import (
-    DerivedExecutionLanes,
     derive_execution_lanes,
     execution_lanes_for_function,
     manifest_block,

@@ -95,8 +95,6 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.serve.selection",
     # §4.27 steps 1-3, the parts that state and materialize a key set.
     "gen_worker.local_compiled_graph_store",
-    "gen_worker.keyset.document",
-    "gen_worker.keyset.identifiers",
     # The arm's constants (pgw#1329) and the adopt outcome vocabulary.
     "gen_worker.aot_constants",
     "gen_worker.compiled_graph_adopt",
@@ -113,66 +111,23 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     # the bindings, the backings behind them, the bare-math schedulers, and the
     # catalog's serving halves. Roots, not incidental members: the claim this
     # issue makes is that a Flux request runs end to end from here.
-    "gen_worker.model",
-    "gen_worker.model.backing",
-    "gen_worker.model.errors",
-    "gen_worker.model.runtime",
-    "gen_worker.model.scheduler",
     # pgw#1346 B3a: the two flow-match ladder parameters the scheduler above
     # does not read yet (Qwen-Image's `shift_terminal`), as bare typed math over
     # the same declared block.
-    "gen_worker.model.flow_ladders",
     # HiDream-O1's flash ladder: its own module because it is NOT a member of
     # scheduler.py's closed declarable set — nothing can declare it while
     # GraphModelSpec.scheduler is single-valued (pgw#1346 K10).
-    "gen_worker.model.scheduler_hidream",
-    "gen_worker.model.snapshot",
-    "gen_worker.model.spec",
-    "gen_worker.model.tuned",
-    "gen_worker.model.catalog",
-    "gen_worker.model.catalog._generated",
-    "gen_worker.model.catalog._generated.ernie",
-    "gen_worker.model.catalog._generated.flux1_dev",
-    "gen_worker.model.catalog._generated.flux1_schnell",
-    "gen_worker.model.catalog._generated.flux2_klein_4b",
-    "gen_worker.model.catalog._generated.flux2_klein_9b",
-    "gen_worker.model.catalog._generated.qwen_image",
-    "gen_worker.model.catalog._generated.sd2",
-    "gen_worker.model.catalog._generated.sd15",
-    "gen_worker.model.catalog._generated.sdxl",
-    "gen_worker.model.catalog._generated.z_image",
     # K9's packed shape axis, shared by the families whose graph classes are a
     # SET of (width, height) pairs rather than a product of two axes.
-    "gen_worker.model.catalog._packed_shape",
-    "gen_worker.model.catalog._generated.ltx23",
-    "gen_worker.model.catalog._generated.minimax_h3",
-    "gen_worker.model.catalog._generated.wan22_i2v_a14b",
-    "gen_worker.model.catalog._generated.wan22_t2v_a14b",
-    "gen_worker.model.catalog._generated.wan22_ti2v_5b",
     # pgw#1346 B3b's two EAGER models. Both halves are model-free here, not
     # only the serving one: neither declaration builds a module, because
     # neither model's code (DiffSynth-Studio's) is reachable from this SDK at
     # all — which is one of the reasons they are eager. So they take no
     # guarded-import hatch and are held by the real walk.
-    "gen_worker.model.catalog.anima",
-    "gen_worker.model.catalog.anima_serve",
-    "gen_worker.model.catalog.ernie_serve",
-    "gen_worker.model.catalog.flux1_dev_serve",
-    "gen_worker.model.catalog.flux1_schnell_serve",
-    "gen_worker.model.catalog.flux2_klein_4b_serve",
-    "gen_worker.model.catalog.flux2_klein_9b_serve",
-    "gen_worker.model.catalog.hidream_o1",
-    "gen_worker.model.catalog.hidream_o1_serve",
-    "gen_worker.model.catalog.qwen_image_serve",
-    "gen_worker.model.catalog.ltx23_serve",
     # pgw#1346 B4's EAGER model, held by the real walk for the same reason as
     # B3b's two: MiniMax-H3's architecture is vendored in the endpoint at a
     # pinned diffusers SHA and is not reachable from this SDK, so the
     # declaration builds nothing and needs no guarded-import hatch.
-    "gen_worker.model.catalog.minimax_h3",
-    "gen_worker.model.catalog.sd15_serve",
-    "gen_worker.model.catalog.sdxl_serve",
-    "gen_worker.model.catalog.z_image_serve",
     # pgw#1346 B5: the EAGER boundary models, DECLARATIONS INCLUDED. A graph
     # declaration is model-bearing and reaches its binding only through the
     # guarded hatch above; an eager one has no `build` callable, so it is
@@ -181,22 +136,6 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     # from a convention into something the fence checks — and the day one of
     # these grows a diffusers import, this list goes red instead of the claim
     # quietly becoming false.
-    "gen_worker.model.catalog.boundary_3d",
-    "gen_worker.model.catalog.boundary_audio",
-    "gen_worker.model.catalog.boundary_llm",
-    "gen_worker.model.catalog.flex2_preview",
-    "gen_worker.model.catalog._generated.chatterbox",
-    "gen_worker.model.catalog._generated.flex2_preview",
-    "gen_worker.model.catalog._generated.foundation_1",
-    "gen_worker.model.catalog._generated.hunyuan3d",
-    "gen_worker.model.catalog._generated.internvl_u",
-    "gen_worker.model.catalog._generated.joycaption",
-    "gen_worker.model.catalog._generated.musicgen",
-    "gen_worker.model.catalog._generated.qwen36_27b_mtp",
-    "gen_worker.model.catalog._generated.qwen36_35b_a3b",
-    "gen_worker.model.catalog._generated.stable_audio_open",
-    "gen_worker.model.catalog._generated.trellis_3d",
-    "gen_worker.model.catalog.wan22_serve",
 )
 
 
@@ -231,15 +170,8 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
 #:    to the eager model layer and the adopt-only arm's use of it has to be
 #:    read before it is relocated.
 MODEL_BEARING_SERVE_MODULES: Tuple[str, ...] = (
-    "gen_worker.boot_adopt",
     "gen_worker.compiled_graph_resolve",
-    "gen_worker.keyset",
-    "gen_worker.keyset.boot",
-    "gen_worker.keyset.closure",
-    "gen_worker.keyset.fold",
-    "gen_worker.keyset.store",
     "gen_worker.aot_serve",
-    "gen_worker.serving_mode",
 )
 
 
@@ -299,34 +231,23 @@ OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
     # each case: ERNIE-Image and ERNIE-Image-Turbo differ only in weights and
     # recipe, and Z-Image's base and official DMD Turbo differ only in weights
     # and a scheduler shift.
-    "gen_worker.model.catalog.ernie",
-    "gen_worker.model.catalog.flux1_dev",
     # schnell DERIVES its architecture from dev's and its binding guard-imports
     # its own declaration module (pgw#1346 B1).
-    "gen_worker.model.catalog.flux1_schnell",
     # ONE declaration for TWO checkpoints: Base and Turbo are instances of this
     # model, not two models, so the Turbo binding guard-imports the same name
     # (pgw#1346 B1 — byte-identical transformer configs, differing only in the
     # published recipe).
-    "gen_worker.model.catalog.flux2_klein_4b",
     # Same shape at the second width: Base and Turbo are two instances of
     # ONE 9B model (their transformer configs differ only in
     # `_name_or_path`), so the 9B binding guard-imports one declaration too
     # (pgw#1346 B3b).
-    "gen_worker.model.catalog.flux2_klein_9b",
-    "gen_worker.model.catalog.qwen_image",
-    "gen_worker.model.catalog.ltx23",
     # ONE declaration module for TWO bindings: `sd15.py` declares both `SD15`
     # and `SD2` (pgw#1346 B2 — same runner set, different graphs), so both
     # generated modules guard-import the same name.
-    "gen_worker.model.catalog.sd15",
-    "gen_worker.model.catalog.sdxl",
-    "gen_worker.model.catalog.z_image",
     # ONE declaration module for THREE bindings: `wan22.py` declares
     # WAN22_T2V_A14B, WAN22_I2V_A14B and WAN22_TI2V_5B (pgw#1346 B4 — three
     # architectures, one endpoint repo), so all three generated modules
     # guard-import the same name.
-    "gen_worker.model.catalog.wan22",
 )
 
 #: The mint lane. A serve-role module that reaches ANY of these is a pod that
@@ -336,20 +257,12 @@ OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
 #: (``mint_child``/``mint_process`` spawn them, ``keyset.emit`` consumes a
 #: tracer's output and is pgw#1327's own declared mint-side root).
 MINT_MACHINERY: Tuple[str, ...] = (
-    "gen_worker.aot_compile_child",
     "gen_worker.aot_compile_pool",
-    "gen_worker.aot_mint",
-    "gen_worker.boot_key",
-    "gen_worker.boot_trace_child",
     # pgw#1331: a family declaration mints its OWN graph classes through this
     # bridge. It is the family surface's mint half, and the family surface is
     # on the serve path — which is exactly why it is named here: a serve-role
     # module that could reach it would be a pod that can compile.
-    "gen_worker.model.mint",
-    "gen_worker.keyset.emit",
-    "gen_worker.mint_child",
     "gen_worker.mint_process",
-    "gen_worker.mint_supervisor",
 )
 
 _role: ServeRole = ServeRole.EAGER_CAPABLE

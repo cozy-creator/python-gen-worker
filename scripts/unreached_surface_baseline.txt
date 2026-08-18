@@ -387,7 +387,6 @@ gen_worker.env_seal.assert_seal_unchanged()  # pgw#1373: its caller was the v1 e
 gen_worker.families.base.register_family()
 gen_worker.file_hash.sha256_file()
 gen_worker.graph_facts.subject_digest()
-gen_worker.hostfacts.device_identity()
 gen_worker.input_assets.materialize_input_assets()
 gen_worker.models.attention_modes.most_sparse_mode()
 gen_worker.models.execution_lanes.ExecutionLaneUnavailableError

@@ -13,7 +13,7 @@ at the author's own line.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict
 
 import msgspec
 

@@ -447,7 +447,7 @@ class HostFacts(msgspec.Struct, frozen=True, kw_only=True):
     A handful of these floats become FLEET-WIDE verdicts: ``HardwareUnsuitable``
     fences a machine, ``HostCanary`` condemns a SKU, ``gpu_name`` chooses which
     verdict key gets written. So there is exactly one producer
-    (:func:`gen_worker.lifecycle.probe_hardware`, run by
+    (:func:`gen_worker.hostfacts.probe_hardware`, run by
     ``procsplit.measure`` before any tenant code is imported) and exactly one
     consumer that puts it on the wire
     (``procsplit.parent.ParentControl._parent_resources``). A second builder
