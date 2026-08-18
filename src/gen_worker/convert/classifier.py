@@ -114,6 +114,24 @@ class SourceIncludeError(ValidationError):
         )
 
 
+def _no_safetensors(paths: Sequence[str]) -> RepoRefusal:
+    """The precise refusal for a repo whose safetensors selection came back
+    empty (pgw#1397).
+
+    ``pickle_only`` and ``missing_safetensors`` are DIFFERENT facts — "these
+    weights are a format we will never load" vs "this repo has no weights at
+    all" — and they want different answers from a UI. The tail of
+    :func:`classify_repo` already distinguishes them, but only for a repo that
+    reached it; a shaped repo (diffusers/peft/sentence-transformers) refuses
+    inside its own branch and lost the distinction on the way. Same evidence,
+    same tokens, decided in one place.
+    """
+    pickles = [p for p in paths if _ext(p) in _PICKLE_EXTS]
+    if pickles and not any(p.lower().endswith(".safetensors") for p in paths):
+        return RepoRefusal("pickle_only", files_seen=pickles)
+    return RepoRefusal("missing_safetensors", files_seen=paths)
+
+
 def apply_source_include(paths: Sequence[str], include: Sequence[str]) -> list[str]:
     """Filter repo-relative paths to only those matching at least one glob in
     ``include`` (``fnmatch`` against the full repo-relative path, e.g.
@@ -373,7 +391,7 @@ def classify_repo(
         weights, dtype = _pick_weight_set(
             [p for p in paths if p.lower().endswith(".safetensors")], dtype_pref)
         if not weights:
-            raise RepoRefusal("missing_safetensors", files_seen=paths)
+            raise _no_safetensors(paths)
         return _finish("sentence_transformers", "sentence-transformers", weights, [],
                        {"dtype": dtype or "fp32"}, "modules.json at root")
 
@@ -381,7 +399,7 @@ def classify_repo(
     if "adapter_config.json" in root_set:
         weights = sorted(p for p in root if p.lower().endswith(".safetensors"))
         if not weights:
-            raise RepoRefusal("missing_safetensors", files_seen=paths)
+            raise _no_safetensors(paths)
         return _finish("peft", "peft", weights, [], {}, "adapter_config.json at root")
 
     # 3. diffusers pipeline
@@ -415,7 +433,7 @@ def classify_repo(
             if comp and comp_dtype:
                 resolved[comp] = comp_dtype
         if not d_weights:
-            raise RepoRefusal("missing_safetensors", files_seen=paths)
+            raise _no_safetensors(paths)
         dtypes = sorted(set(resolved.values()))
         return _finish("diffusers", "diffusers", d_weights, d_indexes,
                        {"dtype": dtypes[0] if len(dtypes) == 1 else "",
