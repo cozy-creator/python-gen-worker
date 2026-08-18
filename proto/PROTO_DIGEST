@@ -3,7 +3,7 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-7914d87200658d6b421bbcce4b449331d17c2df5f3e99b09434d92fbb2e5db7c
+20d0e5f548426bb0045af455295aa1c43f250afc7d6392881bb3f8c110726ee7
 
 # th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
 # `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
@@ -23,3 +23,10 @@
 # Do NOT "fix" the remaining divergence with scripts/vendor-proto.sh: a
 # whole-file resync would DELETE the th#1941 hunks this tree depends on. Apply
 # a peer's hunk surgically and re-record the digest, which is what this did.
+
+# th#2148: `RunJob.file_base_url = 22` — the hub's own base URL on the JOB
+# dispatch, beside the capability token it is half of, applied surgically
+# (NOT via vendor-proto.sh, which would delete th#1941's hunks) and byte-
+# identically to tensorhub's canonical hunk. ADDITIVE. This is the credential's
+# ONE home for a job: the compute child that runs job N+1 on a held-open pod is
+# a process the hub never HelloAck'd, so pod-lifetime state cannot carry it.

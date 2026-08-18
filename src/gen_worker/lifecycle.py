@@ -14,9 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import activity as activity_mod
 from . import boot_phases as boot_mod
-from . import content_credentials
 from . import fleet_compiled_graphs
-from . import receipts
 from . import serve_posture
 from . import progress as progress_mod
 from .models.records import shutdown_instances
@@ -460,22 +458,13 @@ class Lifecycle:
                 self._last_delta = None
                 await self.maybe_send_state_delta(hello_ack=True)
                 return
-        # Full-replace config: file base URL + desired model residency.
-        self.executor.file_base_url = ack.file_base_url or ""
-        # Arm the compiled graph-receipt gate the moment the hub wiring exists: every
-        # delivered compiled graph is signature-verified before it may arm.
+        # Full-replace config: file base URL + desired model residency. The
+        # URL goes through the executor's ONE seam (th#2148), which also arms
+        # the compiled graph-receipt gate and the remote content-credentials
+        # signer — the same seam every dispatch uses, so a compute child that
+        # respawned after a job is armed by the job that woke it.
+        self.executor.apply_hub_base_url(ack.file_base_url)
         if self.executor.file_base_url:
-            receipts.configure(
-                base_url=self.executor.file_base_url,
-                worker_jwt=self.executor.worker_jwt_provider,
-            )
-            # The platform private key never enters this pod — the hub signs
-            # the claim bytes. Until this call lands, a signing-configured
-            # worker FAILS media requests rather than shipping them unsigned.
-            content_credentials.configure_remote_signer(
-                base_url=self.executor.file_base_url,
-                worker_jwt=self.executor.worker_jwt_provider,
-            )
             # First moment this pod CAN discharge an upload it still owes: a
             # compiled graph minted by a process that died mid-upload is durable in the
             # local CAS with its record still `pending`. Off the critical path,

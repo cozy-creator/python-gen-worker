@@ -185,7 +185,9 @@ from .models.loading import composition_compute_dtype
 from .runtimes.server import ServerHandle
 from .models.lane_residency_gate import LaneResidencyGate, arm_lane_residency_gate
 from .models.memory import rearm_offload
+from . import content_credentials
 from . import fleet_compiled_graphs
+from . import receipts
 from . import aot_serve, numerics_ladder, shape_growth
 from . import fleet_compiled_graphs as fleet_compiled_graphs_mod
 from . import hot_swap
@@ -8850,10 +8852,38 @@ class Executor:
 
     # ---- job intake --------------------------------------------------------
 
+    def apply_hub_base_url(self, url: str) -> None:
+        """Adopt the hub's own base URL and arm everything that speaks to it.
+
+        THE ONE HOME for this value, and the one place that arms on it
+        (th#2148). Two frames from the same authority carry it — HelloAck, at
+        connect, and every dispatch — because a JOB pod's compute child EXITS
+        after every job (the run-once lifecycle) and the respawned child is
+        never HelloAck'd again: the second job on a held-open pod used to hold
+        a valid capability token pointed at "" and die at 0 GPU-seconds. A
+        dispatch that names no URL leaves the armed value alone; it is not an
+        instruction to disarm.
+        """
+        url = str(url or "").strip()
+        if not url or url == self.file_base_url:
+            return
+        self.file_base_url = url
+        receipts.configure(base_url=url, worker_jwt=self.worker_jwt_provider)
+        # The platform private key never enters this pod — the hub signs the
+        # claim bytes. Until this lands, a signing-configured worker FAILS
+        # media requests rather than shipping them unsigned.
+        content_credentials.configure_remote_signer(
+            base_url=url, worker_jwt=self.worker_jwt_provider)
+
     async def handle_run_job(self, run: pb.RunJob) -> None:
         """The LEGACY wire head. Dies whole with ``RunJob`` at th#1457's cut:
         it and the ``_legacy_order`` projection it schedules are the only
         frames on the dispatch path that read ``pb.RunJob``."""
+        # th#2148: the dispatch carries the hub's address beside the capability
+        # token it is half of. Applied BEFORE admission so every consumer
+        # downstream — capability renewal, input materialization, the job's own
+        # ctx — reads one value that this dispatch actually delivered.
+        self.apply_hub_base_url(run.file_base_url)
         job = await self._admit_dispatch(run)
         if job is None:
             return
