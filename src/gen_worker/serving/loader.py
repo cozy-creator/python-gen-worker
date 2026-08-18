@@ -69,27 +69,27 @@ class LoadedEndpoint:
     declaration: EndpointDeclaration
     handlers: Dict[str, Handler] = field(default_factory=dict)
 
-    def lane(self, name: str = "") -> Any:
-        """The named lane, or the single declared lane. Ambiguity refuses:
-        a multi-lane endpoint's active lane is the deploy's pick, never a
-        default."""
+    def lane(self, contract: str = "") -> Any:
+        """The lane for one contract handle, or the single declared lane.
+        A lane IS a tensorfs contract reference (Paul's main_v2 review
+        ruling); ambiguity refuses — a multi-lane endpoint's active lane is
+        the deploy's pick, never a default."""
         lanes = self.declaration.lanes
         if not lanes:
             return None
-        if not name:
+        declared = sorted(str(getattr(lane, "contract", lane)) for lane in lanes)
+        if not contract:
             if len(lanes) == 1:
                 return lanes[0]
             raise EndpointLoadError(
                 f"{self.module_name}: {len(lanes)} lanes declared "
-                f"({sorted(str(getattr(lane, 'name', lane)) for lane in lanes)}); "
-                f"the active lane must be named"
+                f"({declared}); the active lane must be named by contract"
             )
         for lane in lanes:
-            if getattr(lane, "name", None) == name:
+            if getattr(lane, "contract", None) == contract:
                 return lane
         raise EndpointLoadError(
-            f"{self.module_name}: no lane named {name!r} "
-            f"(declared: {sorted(str(getattr(lane, 'name', lane)) for lane in lanes)})"
+            f"{self.module_name}: no lane {contract!r} (declared: {declared})"
         )
 
 

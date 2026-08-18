@@ -28,7 +28,7 @@ import msgspec
 import torch
 
 from gen_worker import Endpoint, ImageAsset, PromptRole, StringEnum, ValidationError
-from gen_worker._vendor.torchcg import Lane
+from gen_worker._vendor.torchcg import LaneRef
 from gen_worker.serving import ServeContext as RequestContext
 from gen_worker.serving.loader import EndpointDeclaration
 
@@ -227,7 +227,9 @@ class TinyImageEndpoint(Endpoint):
 # What the @endpoint decorator (DATA: lanes) will stamp — the loader's seam.
 TinyImageEndpoint.__cozy_endpoint__ = EndpointDeclaration(  # type: ignore[attr-defined]
     lanes=(
-        Lane("bf16", compile=("unet",), contract="plain.fp32@1", dtype=torch.float32),
+        # A lane IS a tensorfs contract reference; dtype is resolution-derived
+        # (registry entry), read back as ctx.lane.dtype.
+        LaneRef("tiny.plain-fp32@1", dtype=torch.float32),
     ),
     samples=_sample_payloads,
 )

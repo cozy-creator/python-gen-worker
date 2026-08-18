@@ -19,11 +19,11 @@ from typing import Any
 
 from .graph_identity import GraphIdentityError, is_graph_hash
 from .ingress import CallIngress, IngressError
-from .lane import Lane, LaneError
+from .lane import LaneError, require_contract_ref, require_targets
 
 DOCUMENT_FORMAT = 1
 _DOCUMENT_FIELDS = frozenset(("v", "closure", "lanes"))
-_LANE_FIELDS = frozenset(("name", "contract", "targets", "graphs", "unobserved_targets"))
+_LANE_FIELDS = frozenset(("contract", "targets", "graphs", "unobserved_targets"))
 _GRAPH_FIELDS = frozenset(("graph", "target", "ingress"))
 
 
@@ -57,9 +57,12 @@ class GraphRecord:
 
 @dataclass(frozen=True, slots=True)
 class LaneGraphs:
-    """One lane's observed graph set, unobserved targets stated."""
+    """One lane's observed graph set, unobserved targets stated.
 
-    name: str
+    A lane IS its contract reference (Paul's main_v2 review ruling): the
+    handle is the row key, and there is no separate name.
+    """
+
     contract: str
     targets: tuple[str, ...]
     graphs: tuple[GraphRecord, ...]
@@ -67,21 +70,21 @@ class LaneGraphs:
 
     def __post_init__(self) -> None:
         try:
-            lane = Lane(name=self.name, compile=self.targets, contract=self.contract)
+            require_contract_ref(self.contract)
+            require_targets(self.targets)
         except LaneError as exc:
             raise DocumentError(f"lane graphs restate an invalid lane: {exc}") from exc
-        del lane
         ordered = tuple(
             sorted(self.graphs, key=lambda record: (record.target, record.graph))
         )
         if len({record.graph for record in ordered}) != len(ordered):
             # Identical traces dedup by construction; a duplicate row here is
             # a producer bug, not a second artifact.
-            raise DocumentError(f"lane {self.name!r} repeats a graph hash")
+            raise DocumentError(f"lane {self.contract!r} repeats a graph hash")
         for record in ordered:
             if record.target not in self.targets:
                 raise DocumentError(
-                    f"lane {self.name!r} records graph for undeclared target "
+                    f"lane {self.contract!r} records graph for undeclared target "
                     f"{record.target!r}"
                 )
         unobserved = tuple(sorted(set(self.unobserved_targets)))
@@ -89,17 +92,17 @@ class LaneGraphs:
         for path in unobserved:
             if path not in self.targets:
                 raise DocumentError(
-                    f"lane {self.name!r} states unobserved target {path!r} it never declared"
+                    f"lane {self.contract!r} states unobserved target {path!r} it never declared"
                 )
             if path in observed:
                 raise DocumentError(
-                    f"lane {self.name!r} states {path!r} both observed and unobserved"
+                    f"lane {self.contract!r} states {path!r} both observed and unobserved"
                 )
         stated = observed | set(unobserved)
         missing = sorted(set(self.targets) - stated)
         if missing:
             raise DocumentError(
-                f"lane {self.name!r} says nothing about declared target {missing[0]!r}; "
+                f"lane {self.contract!r} says nothing about declared target {missing[0]!r}; "
                 f"every target is either observed or stated unobserved"
             )
         object.__setattr__(self, "graphs", ordered)
@@ -107,7 +110,6 @@ class LaneGraphs:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "name": self.name,
             "contract": self.contract,
             "targets": list(self.targets),
             "graphs": [record.as_dict() for record in self.graphs],
@@ -135,9 +137,9 @@ class GraphSetDocument:
             raise DocumentError(
                 "document closure must be the 64-hex resolved-closure hash"
             )
-        ordered = tuple(sorted(self.lanes, key=lambda lane: lane.name))
-        if len({lane.name for lane in ordered}) != len(ordered):
-            raise DocumentError("document repeats a lane name")
+        ordered = tuple(sorted(self.lanes, key=lambda lane: lane.contract))
+        if len({lane.contract for lane in ordered}) != len(ordered):
+            raise DocumentError("document repeats a lane contract")
         object.__setattr__(self, "lanes", ordered)
 
     @property
@@ -216,7 +218,6 @@ class GraphSetDocument:
                 )
             lanes.append(
                 LaneGraphs(
-                    name=raw_lane["name"],
                     contract=raw_lane["contract"],
                     targets=tuple(raw_targets),
                     graphs=tuple(records),

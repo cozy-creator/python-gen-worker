@@ -27,7 +27,7 @@ from gen_worker._vendor.torchcg import EnvironmentMismatch
 from gen_worker._vendor.torchcg.discovery import discover_lane
 from gen_worker._vendor.torchcg.document import GraphSetDocument
 from gen_worker._vendor.torchcg.graph_identity import EnvIdentity, closure_hash
-from gen_worker._vendor.torchcg.lane import Lane
+from gen_worker._vendor.torchcg.lane import LaneRef
 from gen_worker._vendor.torchcg.requirements import RequirementsManifest
 from gen_worker._vendor.torchcg.store import LocalGraphStore, StoreError
 from gen_worker.serving import (
@@ -162,13 +162,13 @@ def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
     # setup/teardown are the base-class hooks, never routable handlers.
     assert sorted(loaded.handlers) == ["generate", "generate_turbo"]
     lane = loaded.lane()
-    assert lane.name == "bf16"
-    assert lane.contract == "plain.fp32@1"
+    assert lane.contract == "tiny.plain-fp32@1"
+    assert lane.dtype is torch.float32
     assert loaded.declaration.samples is not None
     payloads = loaded.declaration.samples()
     assert len(payloads) == 2  # every bucket through the handler
-    with pytest.raises(EndpointLoadError, match="no lane named 'fp8'"):
-        loaded.lane("fp8")
+    with pytest.raises(EndpointLoadError, match="no lane 'other.fp8@1'"):
+        loaded.lane("other.fp8@1")
     with pytest.raises(EndpointLoadError, match="no endpoint.toml"):
         load_endpoint(tmp_path)
 
@@ -241,7 +241,7 @@ def publish_document(host: EndpointHost) -> GraphSetDocument:
     """The publish-time derive, run for real: discovery hooks the marked
     module on the author's live pipeline and drives the author's own
     handlers with the declared sample payloads."""
-    lane: Lane = host.loaded.lane()
+    lane: LaneRef = host.loaded.lane()
     samples_fn = host.loaded.declaration.samples
     assert samples_fn is not None
     samples = samples_fn()
@@ -251,7 +251,8 @@ def publish_document(host: EndpointHost) -> GraphSetDocument:
             ctx = host.make_context(f"trace-{index}", is_trace=True)
             host.dispatch("generate", payload, request_id=f"trace-{index}", ctx=ctx)
 
-    lane_graphs = discover_lane(lane, {"unet": host.instance.pipe.unet}, drive)
+    lane_graphs = discover_lane(
+        lane, ("unet",), {"unet": host.instance.pipe.unet}, drive)
     return GraphSetDocument(closure=CLOSURE, lanes=(lane_graphs,))
 
 
@@ -417,7 +418,7 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
         "misses": [hole.graph],
     }
     transport = StubTransport(answer, {"https://presigned.example/hit": payload})
-    store = HubGraphStore(transport, "release-1", "bf16", SM)
+    store = HubGraphStore(transport, "release-1", "tiny.plain-fp32@1", SM)
 
     calls: list = []
     adopted_host = fresh_host(binding, tmp_path)
@@ -437,7 +438,7 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     # A lying digest is a StoreError -> a HOLE with the reason stated, never
     # an adopted artifact and never a boot failure (partial-hit everywhere).
     transport.blobs["https://presigned.example/hit"] = b"tampered"
-    tampered_store = HubGraphStore(transport, "release-1", "bf16", SM)
+    tampered_store = HubGraphStore(transport, "release-1", "tiny.plain-fp32@1", SM)
     tampered_host = fresh_host(binding, tmp_path)
     tampered_host.setup(
         store=tampered_store, document=tampered_store.get_graphs("release-1"),

@@ -177,18 +177,18 @@ class AdoptSession:
         self,
         store: GraphStore | None,
         document: GraphSetDocument,
-        lane_name: str,
+        contract: str,
         sm: str,
         *,
         loader: ArtifactLoader,
         artifacts_dir: str | Path,
         installed: Mapping[str, str],
     ) -> None:
-        lane = next((row for row in document.lanes if row.name == lane_name), None)
+        lane = next((row for row in document.lanes if row.contract == contract), None)
         if lane is None:
-            available = sorted(row.name for row in document.lanes)
+            available = sorted(row.contract for row in document.lanes)
             raise AdoptError(
-                f"document has no lane {lane_name!r} "
+                f"document has no lane {contract!r} "
                 f"({'lanes: ' + repr(available) if available else 'eager-permanent document'})"
             )
         self.lane: LaneGraphs = lane

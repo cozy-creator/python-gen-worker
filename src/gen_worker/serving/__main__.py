@@ -75,7 +75,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-ref", default="local/checkpoint")
     parser.add_argument("--defaults", default="{}",
                         help="per-checkpoint override JSON (the hub's deploy state, locally)")
-    parser.add_argument("--lane", default="", help="active lane name (the deploy's pick)")
+    parser.add_argument("--lane", default="",
+                        help="active lane contract handle (the deploy's pick)")
     parser.add_argument("--output-dir", default="outputs")
     parser.add_argument("--invoke", action="append", default=[],
                         help="handler name to invoke (repeatable, pairs with --payload)")
@@ -137,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         defaults=json.loads(args.defaults),
     )
     host = EndpointHost(
-        loaded, binding, lane_name=args.lane, output_dir=Path(args.output_dir)
+        loaded, binding, lane_contract=args.lane, output_dir=Path(args.output_dir)
     )
     store, document = _adoption_source(args, loaded.module_name)
     host.setup(

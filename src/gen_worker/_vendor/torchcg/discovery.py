@@ -33,7 +33,7 @@ from typing import Any
 from .document import GraphRecord, LaneGraphs
 from .graph_identity import GraphIdentityError, graph_hash
 from .ingress import IngressError, build_call_ingress
-from .lane import Lane, LaneError, resolve_target
+from .lane import LaneError, LaneRef, require_targets, resolve_target
 
 
 class DiscoveryError(RuntimeError):
@@ -130,7 +130,8 @@ def _param_names(module: Any, args: tuple[Any, ...], kwargs: Mapping[str, Any]) 
 
 
 def discover_lane(
-    lane: Lane,
+    lane: LaneRef | str,
+    targets: tuple[str, ...],
     roots: Mapping[str, object],
     drive: Callable[[], object],
     *,
@@ -138,28 +139,65 @@ def discover_lane(
 ) -> LaneGraphs:
     """Run the author's code once, derive every observed graph, state the rest.
 
-    ``roots`` is the author's namespace (``{"pipe": pipe}``); ``drive`` is the
-    author's own invocation with sample inputs. The return states, per
+    ``lane`` is a resolved ``LaneRef`` (or the bare contract handle);
+    ``targets`` are the ENDPOINT-level compile paths -- they do not vary by
+    lane. ``roots`` is the author's namespace (``{"pipe": pipe}``); ``drive``
+    is the author's own invocation with trace inputs. The return states, per
     declared target, either its observed graphs or its membership in
     ``unobserved_targets`` -- silence is not an outcome.
     """
 
     import torch
 
+    contract = lane.contract if isinstance(lane, LaneRef) else LaneRef(lane).contract
+    targets = require_targets(tuple(targets))
     modules: dict[str, Any] = {}
-    for path in lane.compile:
+    for path in targets:
         try:
             module = resolve_target(roots, path)
         except LaneError as exc:
             raise DiscoveryError(str(exc)) from exc
         if not isinstance(module, torch.nn.Module):
             raise DiscoveryError(
-                f"lane {lane.name!r} target {path!r} resolves to "
+                f"lane {contract!r} target {path!r} resolves to "
                 f"{type(module).__name__}, which is not a torch.nn.Module"
             )
         modules[path] = module
+    return discover_modules(lane, modules, drive, strict=strict)
 
-    observed: dict[str, dict[str, _ObservedCall]] = {path: {} for path in lane.compile}
+
+def discover_modules(
+    lane: LaneRef | str,
+    modules: Mapping[str, Any],
+    drive: Callable[[], object],
+    *,
+    strict: bool = False,
+) -> LaneGraphs:
+    """Discovery over MARKED modules (the imperative ``ctx.compile`` surface).
+
+    Paul's review ruling: the compile hint is torch.compile-style -- author
+    code marks real module objects in ``setup`` (``self.pipe.unet =
+    ctx.compile(self.pipe.unet)``); nothing is spelled as a string. The
+    caller (the derive) names each marked module for the document's
+    provenance and hands them here keyed by that name.
+    """
+
+    import torch
+
+    contract = lane.contract if isinstance(lane, LaneRef) else LaneRef(lane).contract
+    if not modules:
+        raise DiscoveryError(
+            f"lane {contract!r}: nothing is marked for compilation"
+        )
+    targets = require_targets(tuple(modules))
+    for path, module in modules.items():
+        if not isinstance(module, torch.nn.Module):
+            raise DiscoveryError(
+                f"lane {contract!r} marked object {path!r} is a "
+                f"{type(module).__name__}, not a torch.nn.Module"
+            )
+
+    observed: dict[str, dict[str, _ObservedCall]] = {path: {} for path in targets}
     handles = []
 
     def _recorder(path: str) -> Callable[..., None]:
@@ -197,7 +235,7 @@ def discover_lane(
                     program = torch.export.export(module, args, kwargs, strict=strict)
             except Exception as exc:
                 raise DiscoveryError(
-                    f"lane {lane.name!r} target {path!r}: torch.export"
+                    f"lane {contract!r} target {path!r}: torch.export"
                     f"(strict={strict}) failed for the observed call: "
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
@@ -207,7 +245,7 @@ def discover_lane(
                 graph = graph_hash(program, ingress)
             except (IngressError, GraphIdentityError) as exc:
                 raise DiscoveryError(
-                    f"lane {lane.name!r} target {path!r}: observed call cannot "
+                    f"lane {contract!r} target {path!r}: observed call cannot "
                     f"state its identity: {exc}"
                 ) from exc
             if graph in seen_graphs:
@@ -219,9 +257,8 @@ def discover_lane(
 
     unobserved = tuple(sorted(path for path, calls in observed.items() if not calls))
     return LaneGraphs(
-        name=lane.name,
-        contract=lane.contract,
-        targets=lane.compile,
+        contract=contract,
+        targets=targets,
         graphs=tuple(records),
         unobserved_targets=unobserved,
     )

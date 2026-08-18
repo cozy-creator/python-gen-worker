@@ -1,79 +1,90 @@
-"""Execution lanes: the author-facing compile declaration (tcg#41).
+"""Execution lanes: a lane IS a tensorfs contract reference (tcg#41).
 
-A lane is the WHOLE author surface for compilation under the 2026-08-18
-ship-code-as-is ruling: the author's serving code runs as-is, and a lane names
-(1) the modules on the author's own objects that are compile targets, spelled
-as attribute paths, (2) the tensor-layout contract that lane expects
-checkpoints in -- the same contract name tensorfs negotiates checkpoints
-toward -- and (3) the torch dtype the lane loads under. Architecture forks
-(inpaint channels, refiner, fp8 vs bf16) are simply more lanes. No lanes means
-eager forever, stated rather than implied.
+Paul's ruling from the main_v2.py line review (2026-08-18): the named-Lane
+class was under-determined -- with arbitrary names and a free-form contract
+field, two lanes were functionally indistinguishable. The author surface is
+now exactly::
 
-The spelling is the contract file's (sdxl ``main_v2.py``, under Paul's
-line review)::
+    @endpoint(compile=("unet",), lanes=("sdxl.diffusers-bf16@1", ...))
 
-    Lane("bf16", compile=("unet",), contract="plain.bf16@1",
-         dtype=torch.bfloat16)
+``compile`` hoists to the endpoint level (targets do not vary by weight
+format); each lane is a REGISTRY CONTRACT NAME -- ``<producer>.<format>@<major>``,
+the same handle tensorfs's ``spec/v1/contracts`` library uses. Everything
+else about a lane (its load dtype, its layout) is derived from the registry
+entry, never typed by the author. ``LaneRef`` is that RESOLVED form: the
+contract handle plus the resolution's dtype, which is what serve code reads
+back as ``ctx.lane.dtype``.
 
-``compile`` paths resolve against the root namespace the discovery caller
-supplies -- for a diffusers pipeline, its ``components`` mapping, so ``"unet"``
-is ``pipe.unet`` and ``"vae.decoder"`` is ``pipe.vae.decoder``.
+Omitting ``lanes=`` means one lane -- the model type's canonical contract.
+No lanes at all means eager forever, stated rather than implied.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 _PATH_SEPARATOR = "."
 
+#: ``<producer>.<format>@<major>`` -- the tensorfs contract-handle spelling.
+_CONTRACT_RE = re.compile(r"[a-z0-9][a-z0-9._-]*[a-z0-9]@[1-9][0-9]*\Z")
+
 
 class LaneError(ValueError):
     """An execution-lane declaration is incomplete or noncanonical."""
 
 
-def _require_canonical(field: str, value: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise LaneError(f"lane {field} must be a non-empty canonical string")
+def require_contract_ref(value: object) -> str:
+    """Validate one lane spelling: a registry contract handle, nothing else."""
+
+    if not isinstance(value, str) or _CONTRACT_RE.fullmatch(value) is None:
+        raise LaneError(
+            f"a lane is a tensorfs contract reference "
+            f"('<producer>.<format>@<major>', e.g. 'sdxl.diffusers-bf16@1'); "
+            f"got {value!r}"
+        )
     return value
 
 
-@dataclass(frozen=True, slots=True)
-class Lane:
-    """One compile lane: target module paths, checkpoint contract, dtype.
+def require_targets(paths: object) -> tuple[str, ...]:
+    """Validate the endpoint-level compile-target paths."""
 
-    ``compile`` holds attribute paths on the author's own objects, resolved
-    against the namespace handed to discovery. The path names the module the
-    author means -- the one actually CALLED (``"vae.decoder"``, not ``"vae"``
-    when ``.decode`` bypasses ``__call__``) -- never a family the library
-    knows. ``dtype`` is the lane's load dtype, carried for the serve host
-    (``ctx.lane.dtype``); it is a derivation input by way of the author's own
-    setup, never a name component.
+    if not isinstance(paths, tuple) or not paths:
+        raise LaneError(
+            "compile= must be a non-empty tuple of attribute paths on the "
+            "author's own objects, e.g. ('unet',) or ('unet', 'vae.decoder')"
+        )
+    for path in paths:
+        if not isinstance(path, str) or not path or path != path.strip():
+            raise LaneError("compile-target paths must be canonical strings")
+        segments = path.split(_PATH_SEPARATOR)
+        if any(not segment.isidentifier() for segment in segments):
+            raise LaneError(
+                f"compile target {path!r} must be a dotted attribute path of "
+                f"identifiers, e.g. 'unet' or 'vae.decoder'"
+            )
+    if len(set(paths)) != len(paths):
+        raise LaneError(f"compile targets repeat a path: {paths!r}")
+    return paths
+
+
+@dataclass(frozen=True, slots=True)
+class LaneRef:
+    """One RESOLVED lane: the contract handle + what resolution derived.
+
+    The author types only the contract string; ``dtype`` is filled by the
+    resolver from the registry entry (interim: the model-type pointer table,
+    until the canonical per-model-type entries land in tensorfs
+    ``spec/v1/contracts``). Serve code reads it back as ``ctx.lane.dtype``.
     """
 
-    name: str
-    compile: tuple[str, ...]
     contract: str
     dtype: Any = None
 
     def __post_init__(self) -> None:
-        _require_canonical("name", self.name)
-        _require_canonical("contract", self.contract)
-        if not isinstance(self.compile, tuple) or not self.compile:
-            raise LaneError(
-                f"lane {self.name!r} must declare at least one compile-target path"
-            )
-        for path in self.compile:
-            _require_canonical("compile-target path", path)
-            segments = path.split(_PATH_SEPARATOR)
-            if any(not segment.isidentifier() for segment in segments):
-                raise LaneError(
-                    f"lane {self.name!r} compile target {path!r} must be a dotted "
-                    f"attribute path of identifiers, e.g. 'unet' or 'vae.decoder'"
-                )
-        if len(set(self.compile)) != len(self.compile):
-            raise LaneError(f"lane {self.name!r} declares a duplicate compile target")
+        require_contract_ref(self.contract)
 
 
 def resolve_target(roots: Mapping[str, object], path: str) -> object:
@@ -85,7 +96,9 @@ def resolve_target(roots: Mapping[str, object], path: str) -> object:
     into an eager-forever lane.
     """
 
-    segments = _require_canonical("compile-target path", path).split(_PATH_SEPARATOR)
+    if not isinstance(path, str) or not path:
+        raise LaneError("compile-target path must be a non-empty string")
+    segments = path.split(_PATH_SEPARATOR)
     root_name = segments[0]
     if root_name not in roots:
         raise LaneError(
@@ -104,4 +117,10 @@ def resolve_target(roots: Mapping[str, object], path: str) -> object:
     return value
 
 
-__all__ = ["Lane", "LaneError", "resolve_target"]
+__all__ = [
+    "LaneError",
+    "LaneRef",
+    "require_contract_ref",
+    "require_targets",
+    "resolve_target",
+]

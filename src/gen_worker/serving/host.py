@@ -48,13 +48,13 @@ class EndpointHost:
         loaded: LoadedEndpoint,
         binding: DeployBinding,
         *,
-        lane_name: str = "",
+        lane_contract: str = "",
         output_dir: Optional[Path] = None,
         context_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.loaded = loaded
         self.binding = binding
-        self.lane = loaded.lane(lane_name)
+        self.lane = loaded.lane(lane_contract)
         self.instance: Any = None
         self.adoption: Any = None
         self._output_dir = output_dir
@@ -127,13 +127,13 @@ class EndpointHost:
                     "declared no lanes; an eager-permanent endpoint has "
                     "nothing to adopt"
                 )
-            lane_name = str(getattr(self.lane, "name"))
+            lane_contract = str(getattr(self.lane, "contract"))
             installed_map = dict(installed) if installed is not None else installed_closure()
             try:
                 session = AdoptSession(
                     store,
                     document,
-                    lane_name,
+                    lane_contract,
                     sm,
                     loader=loader,
                     artifacts_dir=artifacts_dir
@@ -143,7 +143,7 @@ class EndpointHost:
             except EnvironmentMismatch as exc:
                 # The audit fired BEFORE any author code ran — a
                 # build-system bug surfacing, recorded then re-raised loudly.
-                span(graphs_from="release", lane=lane_name,
+                span(graphs_from="release", lane=lane_contract,
                      refusal="environment_mismatch")
                 logger.error("adopt refused: %s", exc)
                 raise
@@ -173,7 +173,7 @@ class EndpointHost:
                         manifest.assert_environment(installed_map, sm=sm)
             span(
                 graphs_from="release",
-                lane=str(getattr(self.lane, "name")),
+                lane=str(getattr(self.lane, "contract")),
                 artifact_from_store=len(session.adopted),
                 artifact_from_eager=len(session.holes),
                 ambiguous=len(session.ambiguous),
