@@ -307,31 +307,74 @@ def _defaults_schema(requested: list[type]) -> Optional[dict[str, Any]]:
     return msgspec.json.schema(types_seen.pop())
 
 
-def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
-    """The resolved lane object author code reads as ``ctx.lane``.
+#: safetensors dtype spellings -> torch dtypes (tensorfs#113 carries the
+#: contract's load dtype in the document's additive top-level `dtype` field,
+#: safetensors spelling; torch never appears in tensorfs).
+_SAFETENSORS_DTYPES = {
+    "BF16": "bfloat16",
+    "F16": "float16",
+    "F32": "float32",
+    "F64": "float64",
+    "F8_E4M3": "float8_e4m3fn",
+    "F8_E5M2": "float8_e5m2",
+}
 
-    A contract OBJECT (tensorfs registry entry / inline Contract) is its own
-    resolution -- ``ctx.lane`` IS it, dtype and layout included. A bare
+
+def _torch_dtype(value: Any) -> Any:
+    import torch
+
+    if value is None or isinstance(value, torch.dtype):
+        return value
+    if isinstance(value, str):
+        spelled = _SAFETENSORS_DTYPES.get(value.upper(), value.lower())
+        candidate = getattr(torch, spelled, None)
+        if isinstance(candidate, torch.dtype):
+            return candidate
+    raise DeriveError(f"contract dtype {value!r} names no torch dtype")
+
+
+def _contract_document(lane: Any) -> Optional[dict[str, Any]]:
+    """The lane contract's canonical document, when the object carries one.
+
+    Duck-typed against tensorfs#111's Contract surface (in design): the full
+    document travels in the release metadata so the platform needs no prior
+    knowledge of the layout. A bare handle string carries no document.
+    """
+
+    for attribute in ("document", "as_dict", "to_dict"):
+        value = getattr(lane, attribute, None)
+        if callable(value):
+            value = value()
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
+    """The resolved ``ctx.lane``: always a LaneRef with a REAL torch dtype.
+
+    A contract OBJECT (tensorfs registry entry / inline Contract) carries its
+    own dtype (tensorfs#113's top-level field, safetensors spelling). A bare
     handle string resolves through the model-type pointer table
     (``gen_worker.models.model_types.CONTRACT_DTYPES`` -- the interim home
-    until the canonical per-model-type entries land in tensorfs
-    ``spec/v1/contracts``).
+    until the tensorfs#111/#113 surface lands).
     """
 
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
-    if not isinstance(lane, str):
-        return lane
-    from ..models.model_types import CONTRACT_DTYPES
+    dtype = getattr(lane, "dtype", None) if not isinstance(lane, str) else None
+    if dtype is None:
+        from ..models.model_types import CONTRACT_DTYPES
 
-    dtype = CONTRACT_DTYPES.get(handle)
+        dtype = CONTRACT_DTYPES.get(handle)
     if dtype is None:
         raise DeriveError(
-            f"lane {handle!r}: no dtype resolution -- the contract is not a "
-            f"registry object and the model-type pointer table "
+            f"lane {handle!r}: no dtype resolution -- the contract object "
+            f"carries none and the model-type pointer table "
             f"(gen_worker.models.model_types.CONTRACT_DTYPES) does not know "
-            f"it. Import the contract object, or register the handle."
+            f"the handle. Import a dtype-bearing contract object, or "
+            f"register the handle."
         )
-    return torchcg.LaneRef(handle, dtype=dtype)
+    return torchcg.LaneRef(handle, dtype=_torch_dtype(dtype))
 
 
 def _derive_lane(
@@ -417,6 +460,7 @@ def derive_release(
     endpoint_name = f"{module.__name__}:{cls.__name__ if cls else ''}".rstrip(":")
 
     lanes: list[Any] = []
+    lane_contracts: dict[str, Any] = {}
     requested_defaults: list[type] = []
     warnings: list[str] = []
     if cls is not None:
@@ -439,6 +483,10 @@ def derive_release(
                 torchcg, cls, lane, plans, checkpoint_dir
             )
             lanes.append(lane_graphs)
+            lane_contracts[lane_graphs.contract] = {
+                "stamp": lane_graphs.contract,
+                "document": _contract_document(lane),
+            }
             requested_defaults.extend(lane_defaults)
 
     graphs_document = torchcg.GraphSetDocument(closure=closure, lanes=tuple(lanes))
@@ -447,6 +495,7 @@ def derive_release(
         "kind": DOCUMENT_KIND,
         "endpoint": endpoint_name,
         "graphs": graphs_document.as_dict(),
+        "lane_contracts": lane_contracts,
         "checkpoint_defaults_schema": _defaults_schema(requested_defaults),
     }
     document = json.dumps(

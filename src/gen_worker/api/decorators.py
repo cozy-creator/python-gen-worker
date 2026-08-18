@@ -1742,16 +1742,22 @@ def lane_contract_handle(owner: str, lane: Any) -> str:
     vocabulary — it reads the handle off whichever shape arrives (the
     contract-objects design lane owns the object's final form).
     """
+    handle: Any = None
     if isinstance(lane, str):
         handle = lane
     else:
         handle = getattr(lane, "handle", None)
         if not isinstance(handle, str):
+            # tensorfs#112: an anonymous custom contract is digest-identified.
+            handle = getattr(lane, "stamp", None)
+        if not isinstance(handle, str):
             name = getattr(lane, "name", None)
             version = getattr(lane, "version", None)
             if isinstance(name, str) and isinstance(version, int):
                 handle = f"{name}@{version}"
-    if not isinstance(handle, str) or "@" not in handle or not handle.strip():
+    if not isinstance(handle, str) or not handle.strip() or not (
+        "@" in handle or handle.startswith("sha256:")
+    ):
         raise ValueError(
             f"@endpoint {owner}: a lane must be a tensorfs layout-contract "
             f"reference (registry object or '<producer>.<format>@<major>' "
