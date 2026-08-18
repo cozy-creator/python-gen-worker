@@ -1007,7 +1007,7 @@ def test_protocol_version_is_1() -> None:
     # th#1597 / §1.27(g): the first package is v1 and the enum restarts at 1.
     # Versions 1-4 never existed as packages, so 5 was a label with no history
     # behind it. The major itself now lives in the proto package, not here —
-    # see tests/test_wire_major_th1597.py.
+    # see tests/test_wire_protocol.py.
     assert pb.PROTOCOL_VERSION_CURRENT == 1
 
 

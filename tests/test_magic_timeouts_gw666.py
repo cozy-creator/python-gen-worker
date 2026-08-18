@@ -646,7 +646,7 @@ _DEADLINE_BURNDOWN: set = set()
 #: configured quantities the way pgw#677's were.
 _ELAPSED_ASSERT_BURNDOWN = {
     "test_boot_smoke_hardware_report.py",  # hang bound: refused connect << 15s
-    "test_hardware_report.py",             # hang bound: refused connect << 10s
+    "test_hub_transport.py",               # hang bound: refused connect << 10s
     "test_mint_process_pgw784.py",         # hang bound: reap must not wait out a 600s child
     "test_subprocess_stall_gw665.py",      # hang bound: stall window << 30s
     # pgw#1349 deleted this file's entry. Its two LATENCY BUDGETS
