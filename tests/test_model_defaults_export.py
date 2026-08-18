@@ -30,7 +30,8 @@ def _validator(schema: dict[str, object]) -> jsonschema.Draft202012Validator:
 def test_the_document_names_the_launch_set() -> None:
     doc = export_document()
     assert doc["names"] == [
-        "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "sdxl.lora", "sd15.lora",
+        "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
+        "sdxl.lora", "sd15.lora",
     ]
     schemas = doc["schemas"]
     assert isinstance(schemas, dict)

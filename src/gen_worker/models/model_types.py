@@ -173,6 +173,11 @@ SD15_DIFFUSERS_BF16: Final = PendingContract("sd15.diffusers-bf16", 1)
 SD2_DIFFUSERS_BF16: Final = PendingContract("sd2.diffusers-bf16", 1)
 HIDREAM_O1_DIFFUSERS_BF16: Final = PendingContract("hidream-o1.diffusers-bf16", 1)
 WAN22_DIFFUSERS_BF16: Final = PendingContract("wan22.diffusers-bf16", 1)
+#: The one name here that is ALREADY a real tensorfs library contract
+#: (``contracts.MINIMAX_H3_DIT_DIFFUSERS``, beside ``minimax.h3-dit-native``) —
+#: the H3 contract file names it in ``lanes=``. Still a PendingContract only
+#: because the vendored tensorfs snapshot predates the ``contracts`` module.
+MINIMAX_H3_DIT_DIFFUSERS: Final = PendingContract("minimax.h3-dit-diffusers", 1)
 
 
 # ── bases ────────────────────────────────────────────────────────────────────
@@ -199,7 +204,11 @@ class ModelType(Generic[D_co]):
 
     name: ClassVar[str] = ""
     contracts: ClassVar[tuple[str, ...]] = ()
-    canonical_contract: ClassVar[TensorLayoutContract]
+    #: The lane an endpoint gets when ``lanes=`` is omitted. None for an
+    #: AUXILIARY type whose bytes have no canonical tensorfs layout contract
+    #: yet (Rife) — the same "do not invent" rule that leaves
+    #: ``canonical_scheduler_config`` empty for SD2/HiDreamO1/Wan22.
+    canonical_contract: ClassVar[TensorLayoutContract | None] = None
     #: The architecture's TRAINING-TIME scheduler config (the standard
     #: scheduler_config.json content) — an architecture fact beside the
     #: fingerprint (Paul's ruling, 2026-08-18: the endpoint layer-3 scheduler
@@ -387,6 +396,30 @@ class Wan22Defaults(msgspec.Struct, frozen=True):
     guidance_2: Knob[float] = Knob(3.0, lo=0.0, name="guidance_2")
 
 
+class MiniMaxH3Defaults(msgspec.Struct, frozen=True):
+    """MiniMax-H3 (joint video+audio DiT). Values from the OLD endpoint's own
+    per-checkpoint schema (`minimax_h3/main.py` ``MiniMaxH3Defaults``, the
+    ``register_family("minimax-h3", ...)`` row this vocabulary replaces).
+
+    H3-Base is GUIDANCE-DISTILLED: guidance is baked into the weights — no
+    guider, no negative prompt, no guidance_scale, one forward pass per step.
+    Declaring a ``guidance`` knob would declare a knob the model does not
+    have, so this type deliberately carries neither ``guidance`` nor a
+    ``steps`` knob (the endpoint's duration/canvas presets fix the step
+    count). The two shift values ARE the per-checkpoint facts."""
+
+    video_shift: float = 12.0
+    audio_shift: float = 3.0
+
+
+class RifeDefaults(msgspec.Struct, frozen=True):
+    """RIFE has no serving knobs — the interpolator takes source/target fps
+    from the delivery preset, nothing per-checkpoint. Empty on purpose: the
+    type exists for its NAME and its ingest fingerprint, so an auxiliary slot
+    can be classified and typed like any other. Fields stay additive if a
+    knob is ever ruled."""
+
+
 # ── the model types (launch set, pgw#1376 point 1) ───────────────────────────
 
 
@@ -450,12 +483,40 @@ class Wan22(ModelType[Wan22Defaults]):
     Defaults = Wan22Defaults
 
 
+class MiniMaxH3(ModelType[MiniMaxH3Defaults]):
+    """MiniMax-H3 — COMPILABLE like any other type (Paul, 2026-08-20,
+    reversing the old F3 misfiling: the "737k static classes" refusal was an
+    artifact of the pre-enumerated static-bucket design, not a property of
+    H3; F3's eager-permanent tier now means EXTERNAL-BINARY runtimes only).
+    Nothing in a ModelType was ever compile-related, so that ruling costs
+    this vocabulary nothing — it is why H3 is an ORDINARY entry here."""
+
+    name = "minimax-h3"
+    contracts = ("minimax.h3-*",)
+    canonical_contract = MINIMAX_H3_DIT_DIFFUSERS
+    Defaults = MiniMaxH3Defaults
+
+
+class Rife(ModelType[RifeDefaults]):
+    """RIFE v4.25 frame interpolation — a small AUXILIARY model with its own
+    checkpoint, bound beside a video model to serve the fps>24 delivery
+    presets. Name + fingerprint seam only: no canonical lane (its artifact is
+    a plain diffusers-layout repo, and inventing a tensorfs contract name for
+    it would be a guess) and no Defaults vocabulary beyond the base."""
+
+    name = "rife"
+    contracts = ("rife.*",)
+    Defaults = RifeDefaults
+
+
 MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     SDXL,
     SD15,
     SD2,
     HiDreamO1,
     Wan22,
+    MiniMaxH3,
+    Rife,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
@@ -489,6 +550,8 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         SD2.name: SD2.Defaults,
         HiDreamO1.name: HiDreamO1.Defaults,
         Wan22.name: Wan22.Defaults,
+        MiniMaxH3.name: MiniMaxH3.Defaults,
+        Rife.name: Rife.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }
@@ -538,6 +601,11 @@ __all__ = [
     "Knob",
     "LORA_OVERLAYS",
     "LoraOverlay",
+    "MINIMAX_H3_DIT_DIFFUSERS",
+    "MiniMaxH3",
+    "MiniMaxH3Defaults",
+    "Rife",
+    "RifeDefaults",
     "MODEL_TYPES",
     "ModelType",
     "PendingContract",
