@@ -161,6 +161,7 @@ def _serve_envelopes(args: argparse.Namespace, loaded: Any) -> int:
             return DeployBinding(
                 checkpoint_ref=checkpoint_ref,
                 checkpoint_dir=tree,
+                model=args.model or None,
                 defaults=json.loads(args.defaults),
             )
 

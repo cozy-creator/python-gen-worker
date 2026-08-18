@@ -67,6 +67,7 @@ class LocalResolver:
         return DeployBinding(
             checkpoint_ref=checkpoint_ref,
             checkpoint_dir=self._tree(checkpoint_ref),
+            model="sdxl",
             defaults=self.defaults_by_ref.get(checkpoint_ref, {}),
         )
 
