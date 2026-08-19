@@ -231,6 +231,7 @@ class LoadContext(Generic[MT_co]):
         lane: Any = None,
         engine: Optional[LoaderEngine] = None,
         compile_sink: Optional[Callable[[Any], Any]] = None,
+        device: str = "",
     ) -> None:
         self._binding = binding
         self._model_type = model_type
@@ -238,6 +239,10 @@ class LoadContext(Generic[MT_co]):
         self._engine = engine
         self._compile_sink = compile_sink
         self._engines: list[Any] = []
+        #: The WORKER's placement decision, handed down (pgw#1452). Empty
+        #: means none was handed down — a bare `LoadContext(...)` places
+        #: nothing, exactly as before.
+        self._device = str(device or "")
 
     @property
     def checkpoint_dir(self) -> Path:
@@ -302,10 +307,10 @@ class LoadContext(Generic[MT_co]):
         dtype = self._lane_dtype()
         if dtype is None:
             no_lane: P = from_pretrained(self.checkpoint_dir)
-            return no_lane
+            return self._placed(no_lane)
         try:
             bridged: P = from_pretrained(self.checkpoint_dir, torch_dtype=dtype)
-            return bridged
+            return self._placed(bridged)
         except TypeError as exc:
             if not _rejected_torch_dtype(exc):
                 raise
@@ -322,7 +327,38 @@ class LoadContext(Generic[MT_co]):
         to = getattr(loaded, "to", None)
         if callable(to):
             to(dtype)
-        return loaded
+        return self._placed(loaded)
+
+    def _placed(self, pipeline: P) -> P:
+        """Apply the WORKER's placement decision to a bridged pipeline.
+
+        pgw#1452. The streaming arm streams weights ONTO the device
+        (`engine_for(..., device=device)`), and `host.py` says why in the same
+        breath: "PLACEMENT is decided here, by the worker, never by author
+        code". The eager arm built a pipeline and placed nothing — so every
+        tree with no chunk store behind it (a bare download, a local run, a
+        fixture: the entire cozy-local substrate) ran on the CPU, while
+        `ctx.load`'s own docstring four lines above promised "weights land on
+        device". Nothing failed. It was simply the wrong processor, which is
+        why every timing taken through this bridge was measuring a CPU.
+
+        This names NO device, which is the whole point — it applies the one it
+        was handed. An empty `_device` places nothing, so a bare
+        `LoadContext(...)` and any caller that never had a placement decision
+        behave exactly as before.
+        """
+        if not self._device:
+            return pipeline
+        to = getattr(pipeline, "to", None)
+        if not callable(to):
+            return pipeline
+        logger.info(
+            "ctx.load: placing the bridged pipeline on %s — the worker's "
+            "decision, inherited (pgw#1452)", self._device,
+        )
+        moved = to(self._device)
+        # diffusers returns self; some component-wise `.to` return None.
+        return pipeline if moved is None else moved
 
     def _lane_dtype(self) -> Any:
         """The lane's load dtype, or None when the contract declares none.

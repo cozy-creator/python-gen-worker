@@ -112,6 +112,12 @@ class EndpointHost:
 
             engine = engine_for(binding.checkpoint_dir, device=device, io=io)
         self._engine = engine
+        #: pgw#1452: the SAME decision reaches the eager bridge. Handing it
+        #: only to `engine_for` meant a tree with no chunk store behind it
+        #: was built by `from_pretrained` and left wherever that put it —
+        #: the CPU — which is the substrate cozy-local, fixtures and every
+        #: local run use.
+        self._device = str(device or "")
         self._output_dir = output_dir
         self._context_kwargs = dict(context_kwargs or {})
 
@@ -150,6 +156,7 @@ class EndpointHost:
             lane=self.lanes[model_cls],
             engine=self._engine,
             compile_sink=compile_sink,
+            device=self._device,
         )
 
     # -- boot ---------------------------------------------------------------
