@@ -293,12 +293,12 @@ def test_the_producer_context_carries_the_producer_surface() -> None:
     source/destination contract are on the class every entrypoint receives,
     and the DECLARATION — not the class — decides what may be written."""
     ctx: RequestContext = RequestContext(
-        "req-producer", publishes=True, source_info={"ref": "org/model:main"}
+        "req-producer", publishes=True, source_info={"ref": "org/model@r1"}
     )
     scratch = ctx.mktemp()
     assert scratch.is_dir()
     assert ctx.mktemp() != scratch
-    assert ctx.source == {"ref": "org/model:main"}
+    assert ctx.source == {"ref": "org/model@r1"}
     assert ctx.source_path is None
     ctx._set_source_path(str(scratch))
     assert ctx.source_path == str(scratch)
