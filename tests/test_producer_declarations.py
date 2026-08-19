@@ -322,6 +322,11 @@ def test_the_serve_loop_stamps_the_declaration(producers: ModuleType) -> None:
     host = object.__new__(ServeLoop)
     host._context_kwargs = {}
     host._output_dir = None
+    # pgw#1475: this hand-built host must state every field `_make_context`
+    # reads. Left absent it is an AttributeError, which is the right answer —
+    # a `getattr(..., "")` default in production would turn "this loop was
+    # never given the pod's HF credential" into "the pod has none".
+    host._hf_token = ""
 
     producer = host._make_context("r1", None, spec(producers.cast_dtype))
     assert producer.publishes is True

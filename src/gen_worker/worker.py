@@ -43,6 +43,7 @@ from . import process_role
 from . import receipts
 from . import serve_posture
 from . import worker_credential
+from .api.errors import ValidationError as ApiValidationError
 from .capability_renewal import renew_capability_while_running
 from .config import Settings
 from .failure_traceback import MAX_BYTES as MAX_TRACEBACK_BYTES
@@ -73,6 +74,7 @@ from .transport import (
     Transport,
 )
 from .v1_deleted import MIGRATION, refuse_module
+from .wire_snapshots import resolved_repos
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +517,10 @@ class Worker:
                 on_loaded=(
                     self.adoption.loaded if self.adoption is not None else None
                 ),
+                # pgw#1475: the pod's HF credential — `ctx.hf_token` for the
+                # producer contract, and what an upstream-mirror reserved repo
+                # downloads with.
+                hf_token=str(getattr(settings, "hf_token", "") or ""),
             )
         except EndpointLoadError as exc:
             # A multi-lane model needs the deploy's lane pick, which no wire
@@ -967,6 +973,15 @@ class Worker:
                         # every Image/Video/AudioAsset reached the author with
                         # `local_path` unset.
                         input_assets=manifest_from_run_job(run.input_assets),
+                        # pgw#1475: the dispatch's ref-keyed snapshot map, the
+                        # pin every RESERVED repo field materializes against.
+                        # The hub ships them unconditionally
+                        # (`ExtractReservedRepoBindingsFromPayload` ->
+                        # `attachJobSourceSnapshots`) and keys an
+                        # uncomposed artifact — which a payload `source` is —
+                        # by ref. Without this the map is empty and every
+                        # tensorhub source refuses `missing_snapshot`.
+                        snapshots=resolved_repos(run.snapshots, run.models),
                         context=self._request_context_facts(run),
                         on_context=_bind_context,
                     )
@@ -990,7 +1005,16 @@ class Worker:
         # surface of a body failure, and it cost a $0.50, 455-GPU-second
         # flagship run to learn nothing but the five characters `'keys'` — the
         # exception object was in hand at this exact site the entire time.
-        except (EnvelopeError, ServeDispatchError, msgspec.ValidationError) as exc:
+        except (
+            EnvelopeError,
+            ServeDispatchError,
+            msgspec.ValidationError,
+            # pgw#1475: a reserved repo field naming an unparseable or empty
+            # ref is BAD INPUT, and retrying it costs a pod-minute to reach
+            # the same refusal. `api.errors.ValidationError` says "do not
+            # retry" in its own docstring; the wire status has to agree.
+            ApiValidationError,
+        ) as exc:
             status, message = pb.JOB_STATUS_INVALID, f"{type(exc).__name__}: {exc}"
             tb = traceback_tail(exc)
             logger.warning("job %s attempt=%d rejected: %s", *key, exc)

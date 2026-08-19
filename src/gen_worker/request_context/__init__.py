@@ -377,6 +377,7 @@ class RequestContext(Generic[D]):
         config generation. Read-only; a returned copy."""
         return dict(self._config)
 
+    # writerless: pgw#1475 -> owed to the config-plane cutover, expiry 2026-09-15 — the THIRD sibling the hardcut orphaned, but unlike source_path and execution_lane it cannot simply be re-wired: `@endpoint(config=[ConfigParam(...)])` is v1's declaration and `@entrypoint` declares no config at all, so there is no schema to decode `RunJob.config_params` against. Whether v2 gains a config declaration is a design call, not a repair; `subproc.py:194` still reads `_config_snapshot`, so it is not dead either.
     def _set_config(
         self,
         values: Optional[Mapping[str, Any]],

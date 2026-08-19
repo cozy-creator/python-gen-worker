@@ -1226,6 +1226,86 @@ def gate_rows_without_reasons(
         if is_gate_label(label) and not reasons.get(label))
 
 
+# --------------------------------------------------------------------------
+# pgw#1475: WRITER-LESS PRIVATE SETTERS — the blind spot that cost 25 producers
+# --------------------------------------------------------------------------
+#
+# `collect_definitions` SKIPS every `_`-prefixed name (a private callable is
+# not surface), which is right for the surface question and exactly wrong for
+# one shape: a private SETTER whose public reader is the contract. Nothing on
+# the ratchet ever mentioned `RequestContext._set_source_path`, because it was
+# never a candidate — so when pgw#1373 deleted its only caller with
+# `executor.py`, `ctx.source_path` kept returning `None` forever and 25 of 27
+# conversion producers died on their own first line at 0 GPU-seconds.
+#
+# A reader with no writer renders its failure as ABSENCE, which is why no test
+# caught it: the property exists and answers `None`. So this check has NO
+# BASELINE FILE, deliberately — bulk-appending rows to one is what made a
+# correct instrument silent in pgw#1425. Its only escape valve is an INLINE
+# `# writerless: <owner/issue> — <reason>` comment on the `def` line or the
+# line above it: one sentence, next to the code, un-regenerable in bulk, and
+# it REFUSES an empty reason.
+
+#: `_set_<x>` on a context class is the WRITE half of the public `<x>` reader.
+_SETTER_RE = re.compile(r"^_set_[a-z0-9_]+$")
+_WRITERLESS_OK = re.compile(r"#\s*writerless:\s*(?P<reason>\S.*)$")
+
+
+def _writerless_marker(lines: List[str], lineno: int) -> Optional[str]:
+    """The inline sentence excusing a writer-less setter, or None."""
+    for idx in (lineno - 1, lineno - 2):
+        if 0 <= idx < len(lines):
+            m = _WRITERLESS_OK.search(lines[idx])
+            if m:
+                return m.group("reason").strip()
+    return None
+
+
+def writerless_private_setters() -> List[Tuple[str, Path, int]]:
+    """Private `_set_*` methods defined in src/ that nothing in src/ calls."""
+    files = py_files(POD_ROOTS)
+    defined: Dict[str, Tuple[Path, int]] = {}
+    excused: Set[str] = set()
+    called: Set[str] = set()
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=str(path))
+        except SyntaxError:
+            continue
+        lines = text.splitlines()
+        for node in ast.walk(tree):
+            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and _SETTER_RE.match(node.name)):
+                defined.setdefault(node.name, (path, node.lineno))
+                if _writerless_marker(lines, node.lineno):
+                    excused.add(node.name)
+            elif isinstance(node, ast.Call):
+                fn = node.func
+                # `ctx._set_source_path(p)` and `(set_path or ctx._set_x)(p)`
+                # are both calls; a bare `getattr(ctx, "_set_x")` reference is
+                # covered by the Attribute/Constant walk below.
+                if isinstance(fn, ast.Attribute) and _SETTER_RE.match(fn.attr):
+                    called.add(fn.attr)
+                elif isinstance(fn, ast.Name) and _SETTER_RE.match(fn.id):
+                    called.add(fn.id)
+            elif isinstance(node, ast.Attribute) and _SETTER_RE.match(node.attr):
+                called.add(node.attr)
+            elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and _SETTER_RE.match(node.value)):
+                # `getattr(ctx, "_set_source_path")` — an indirection is still
+                # a writer, and refusing to see it would push the fix toward
+                # a fake direct call.
+                called.add(node.value)
+    out: List[Tuple[str, Path, int]] = []
+    for name, (path, line) in sorted(defined.items()):
+        # A definition site mentions its own name once (the `def`); reach is
+        # any OTHER mention, which the call/attr walk above collects.
+        if name not in called and name not in excused:
+            out.append((name, path, line))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true",
@@ -1285,6 +1365,23 @@ def main() -> int:
     if args.write_baseline:
         rewrite_baseline(current)
         return 0
+
+    writerless = writerless_private_setters()
+    for name, path, line in writerless:
+        print(f"WRITER-LESS SETTER: {path.relative_to(REPO)}:{line}: {name}\n"
+              f"  Nothing in src/ calls it, so the PUBLIC reader it fills "
+              f"answers `None` forever — a contract that fails as ABSENCE, "
+              f"which no test that imports the property can catch (pgw#1475: "
+              f"`_set_source_path` lost its only caller with `executor.py` and "
+              f"killed 25 of 27 conversion producers at 0 GPU-seconds).\n"
+              f"    WIRE IT   restore the step that fills it, at the seam the "
+              f"deleted caller had it;\n"
+              f"    DELETE IT with the reader it writes — a property nobody "
+              f"can fill is not a contract.\n"
+              f"  There is no baseline for this check, deliberately: silencing "
+              f"it by regeneration is the pgw#1425 failure mode, and this "
+              f"class of defect is invisible precisely when it is silent.",
+              file=sys.stderr)
 
     known, notes, reasons = baseline_rows()
     unexplained = gate_rows_without_reasons(known, reasons)
@@ -1356,7 +1453,7 @@ def main() -> int:
                   f"nothing can. Delete its line from {BASELINE.name} in the "
                   f"same commit as the deletion. (Do not go looking for its new "
                   f"caller — there isn't one.)", file=sys.stderr)
-    return 1 if (new or stale or unexplained) else 0
+    return 1 if (new or stale or unexplained or writerless) else 0
 
 
 if __name__ == "__main__":
