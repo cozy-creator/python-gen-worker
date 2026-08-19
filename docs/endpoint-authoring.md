@@ -822,7 +822,10 @@ sibling of `ctx.load(...)`:
 ```python
 from gen_worker import LlamaServer, LoadContext, Model, entrypoint
 
-class QwenMtpModel(Model[Qwen36MtpGguf], lanes=()):
+class QwenMtpModel(
+    Model[Qwen36MtpGguf],
+    eager_only="llama-server owns the weights and the graph",
+):
     def load(self, ctx: LoadContext[Qwen36MtpGguf]) -> None:
         self.engine = ctx.engine(LlamaServer(
             n_ctx=32768,
@@ -838,9 +841,17 @@ async def chat(ctx, payload: ChatIn, model: QwenMtpModel) -> AsyncIterator[...]:
             ...
 ```
 
-`lanes=()` is the honest declaration here: an engine-hosted model performs no
-pytorch streaming load, so `ctx.lane` has nothing to answer and raises by
-design.
+`eager_only="<why>"` is the honest declaration here: an engine-hosted model
+performs no pytorch streaming load and compiles nothing, so `ctx.lane` has
+nothing to answer and raises by design.
+
+**It is the ONLY way to say that (pgw#1488).** An absent lane declaration —
+`lanes=()`, or no `lanes=` at all — means "this class states no layout
+contract", and a class that states none still TRACES, under a lane identity
+derived from the model type. Contract documents are fleet metadata that
+attaches to the produced artifacts; they are never a precondition for
+producing them. The reason is mandatory for the same reason `self_loading=`'s
+is: eager-forever costs throughput and the class should say why.
 
 The spec is a DECLARATION — engine + flags, and nothing else. The checkpoint
 tree, the port, the environment and the supervision are the platform's half:

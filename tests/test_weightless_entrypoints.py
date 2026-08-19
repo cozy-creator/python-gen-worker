@@ -165,7 +165,7 @@ def test_derive_renders_an_envelope_with_no_model_field(
     assert "model" not in json.dumps(schema)
 
     # "No lanes" has two causes and the log may not conflate them: a model
-    # held eagerly (lanes=()) vs NO MODEL AT ALL.
+    # held eagerly (`eager_only=`) vs NO MODEL AT ALL.
     assert result.eager_permanent and result.weightless
 
     sys.path.insert(0, str(FIXTURES))
@@ -176,6 +176,10 @@ def test_derive_renders_an_envelope_with_no_model_field(
     finally:
         sys.path.remove(str(FIXTURES))
     assert eager.eager_permanent and not eager.weightless
+    # pgw#1488: eager-by-DECLARATION carries the author's reason, and the
+    # reason is the difference between this and "traced, nothing marked".
+    assert eager.eager_only.startswith("the fixture's subject")
+    assert not result.eager_only
     assert json.loads(eager.document)["entrypoints"] == {}
 
 

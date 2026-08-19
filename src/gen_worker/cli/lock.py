@@ -71,6 +71,13 @@ def add_subparser(sub: Any) -> None:
         help="write the discovery blocks and no [derive] — the bake-time shape",
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify the committed lock is current and WRITE NOTHING; exit 1 "
+             "on drift. The freshness gate for CI (endpoint.lock is source, "
+             "committed beside the endpoint, and a stale one is a wrong build)",
+    )
+    parser.add_argument(
         "-o", "--out",
         default="",
         help=f"lock path (default: <endpoint_dir>/{el.LOCK_FILENAME})",
@@ -99,7 +106,7 @@ def _checkpoint_tree(args: argparse.Namespace) -> tuple[Optional[Path], str]:
 
 
 def run_lock(args: argparse.Namespace) -> int:
-    from ..discovery.discover import discover_manifest, prime_sys_path
+    from ..discovery.discover import discover_manifest
     from ..discovery.project import load_project_config
 
     root = Path(args.endpoint_dir).resolve()
@@ -165,6 +172,32 @@ def run_lock(args: argparse.Namespace) -> int:
         _say(f"lock: ignoring unusable saved trace: {exc}")
         existing = None
 
+    if args.check:
+        # endpoint.lock is SOURCE: it is committed beside the endpoint and a
+        # stale one builds the wrong thing. The gate is cheap in the common
+        # case ON PURPOSE — the inputs digest is the derive's own definition of
+        # "would this trace differently", computed in milliseconds, so CI can
+        # run it on every push. Only when the inputs MOVED does it pay for a
+        # re-derive, and then it compares the produced document against the
+        # committed one: an input that changed without changing the output is
+        # not drift, and reporting it as drift would train people to ignore
+        # this check.
+        if existing is None:
+            _say(f"error: {out} has no saved trace to check — run `gen-worker lock`")
+            return 2
+        if existing.inputs_digest == want and existing.trace_device == device:
+            _say(f"lock --check: {out} is current (inputs unchanged)")
+            print(json.dumps({
+                "lock": str(out), "check": "current",
+                "document_digest": existing.document_digest,
+            }))
+            return 0
+        _say("lock --check: inputs moved — re-deriving to see whether the "
+             "document moved with them")
+        return _check_by_rederive(
+            config, root, out, existing, tree, graph_cas_root, device,
+        )
+
     cas = ws.local_cas(graph_cas_root)
     reuse = el.derive_is_reusable(
         existing,
@@ -203,34 +236,10 @@ def run_lock(args: argparse.Namespace) -> int:
             "say so rather than emit an empty document."
         )
 
-    prime_sys_path(root)
-    try:
-        module = importlib.import_module(config.main)
-    except Exception as exc:  # noqa: BLE001
-        _say(f"error: failed to import {config.main!r}: {exc}")
+    traced = _trace(config, root, tree, graph_cas_root, device)
+    if traced is None:
         return 1
-
-    from ..release.derive import DeriveError, derive_release
-
-    _say(
-        f"lock: trace device is {device}-class"
-        + ("" if device == "cuda" else " — CPU-class graphs are NOT servable on "
-                                       "a GPU; a cuda mint refuses by name")
-    )
-    started = time.monotonic()
-    try:
-        result = derive_release(
-            module,
-            checkpoint_dir=tree if tree is not None else root,
-            graph_cas=graph_cas_root,
-        )
-    except DeriveError as exc:
-        _say(f"error: derive: {exc}")
-        return 1
-    elapsed = time.monotonic() - started
-
-    for warning in result.warnings:
-        _say(f"warning: {warning}")
+    result, elapsed = traced
 
     interface_v, _document_v = el.torchcg_format_versions()
     block = el.DeriveBlock(
@@ -246,12 +255,7 @@ def run_lock(args: argparse.Namespace) -> int:
 
     graphs = sum(len(h) for h in result.lane_graphs.values())
     programs = el.program_digests(json.loads(result.document))
-    for lane, hashes in result.lane_graphs.items():
-        _say(f"lock: lane {lane}: {len(hashes)} specialization(s)")
-    if result.eager_permanent:
-        why = ("no model class — weightless endpoint, nothing to compile"
-               if result.weightless else "no lanes — eager-permanent by declaration")
-        _say(f"lock: {result.endpoint}: {why}")
+    _say_posture(result)
     _say(
         f"lock: traced {graphs} specialization(s), {len(programs)} exported "
         f"program(s) in the CAS at {graph_cas_root} ({elapsed:.1f}s)"
@@ -261,6 +265,7 @@ def run_lock(args: argparse.Namespace) -> int:
         "lock": str(out),
         "derive": "traced",
         "endpoint": result.endpoint,
+        "posture": _posture(result),
         "document_digest": result.digest,
         "trace_device": device,
         "specializations": graphs,
@@ -268,6 +273,148 @@ def run_lock(args: argparse.Namespace) -> int:
         "seconds": round(elapsed, 1),
     }))
     return 0
+
+
+#: The compile posture of a derived endpoint — ONE WORD, always printed
+#: (pgw#1488). Silence used to be a posture: `lanes=()` disabled compilation
+#: with no output at all, and a missing contract document refused to trace at
+#: all. Both are states now, and both are named.
+POSTURE_EAGER_BY_DECLARATION = "eager-by-declaration"
+POSTURE_WEIGHTLESS = "weightless"
+POSTURE_NO_COMPILE_TARGETS = "traced-no-compile-targets"
+POSTURE_TRACED = "traced"
+
+
+def _posture(result: Any) -> str:
+    if result.eager_only:
+        return POSTURE_EAGER_BY_DECLARATION
+    if result.weightless:
+        return POSTURE_WEIGHTLESS
+    if not result.lane_graphs:
+        return POSTURE_NO_COMPILE_TARGETS
+    return POSTURE_TRACED
+
+
+def _say_posture(result: Any) -> None:
+    """State what this endpoint compiles, and why, in the author's words."""
+
+    for lane, hashes in result.lane_graphs.items():
+        _say(f"lock: lane {lane}: {len(hashes)} specialization(s)")
+    for lane in result.derived_lanes:
+        _say(
+            f"lock: lane {lane}: identity DERIVED from the model class — this "
+            f"endpoint declares no layout contract, so the trace named the "
+            f"lane itself. A contract document ATTACHES to these artifacts "
+            f"later as fleet metadata; it was never needed to produce them."
+        )
+    posture = _posture(result)
+    if posture == POSTURE_EAGER_BY_DECLARATION:
+        _say(
+            f"lock: {result.endpoint}: {posture} — eager_only="
+            f"{result.eager_only!r}. Nothing was traced because the author "
+            f"said so."
+        )
+    elif posture == POSTURE_WEIGHTLESS:
+        _say(
+            f"lock: {result.endpoint}: {posture} — no model class, nothing to "
+            f"compile"
+        )
+    elif posture == POSTURE_NO_COMPILE_TARGETS:
+        _say(
+            f"lock: {result.endpoint}: {posture} — the trace RAN and load() "
+            f"marked no module via ctx.compile(), so there is nothing to "
+            f"compile (lane(s): "
+            f"{', '.join(result.unmarked_lanes) or 'none'}). Mark a module to "
+            f"compile it; declare eager_only=\"<why>\" to state that this is "
+            f"permanent."
+        )
+
+
+def _trace(
+    config: Any,
+    root: Path,
+    tree: Optional[Path],
+    graph_cas_root: Path,
+    device: str,
+) -> Optional[tuple[Any, float]]:
+    """Import the author's module and derive it. ``None`` = said why, failed."""
+
+    from ..discovery.discover import prime_sys_path
+    from ..release.derive import DeriveError, derive_release
+
+    prime_sys_path(root)
+    try:
+        module = importlib.import_module(config.main)
+    except Exception as exc:  # noqa: BLE001
+        _say(f"error: failed to import {config.main!r}: {exc}")
+        return None
+
+    _say(
+        f"lock: trace device is {device}-class"
+        + ("" if device == "cuda" else " — CPU-class graphs are NOT servable on "
+                                       "a GPU; a cuda mint refuses by name")
+    )
+    started = time.monotonic()
+    try:
+        result = derive_release(
+            module,
+            checkpoint_dir=tree if tree is not None else root,
+            graph_cas=graph_cas_root,
+        )
+    except DeriveError as exc:
+        _say(f"error: derive: {exc}")
+        return None
+    elapsed = time.monotonic() - started
+    for warning in result.warnings:
+        _say(f"warning: {warning}")
+    return result, elapsed
+
+
+def _check_by_rederive(
+    config: Any,
+    root: Path,
+    out: Path,
+    existing: el.DeriveBlock,
+    tree: Optional[Path],
+    graph_cas_root: Path,
+    device: str,
+) -> int:
+    """``--check``'s expensive arm: does the committed DOCUMENT still hold?
+
+    Inputs moving is not drift — a comment, a retimed dependency, a new tracer
+    that emits the same graphs all move the inputs digest and change nothing
+    anyone builds. Only the document decides, so only the document is compared,
+    and NOTHING IS WRITTEN either way: `--check` is a question.
+    """
+
+    traced = _trace(config, root, tree, graph_cas_root, device)
+    if traced is None:
+        return 1
+    result, elapsed = traced
+    _say_posture(result)
+    drifted = result.digest != existing.document_digest
+    if drifted:
+        _say(
+            f"lock --check: DRIFT — {out} carries document "
+            f"{existing.document_digest} and this tree derives "
+            f"{result.digest} ({elapsed:.1f}s). The committed lock does not "
+            f"describe this endpoint; re-run `gen-worker lock` and commit it."
+        )
+    else:
+        _say(
+            f"lock --check: {out} is current — the inputs moved, the document "
+            f"did not ({elapsed:.1f}s)"
+        )
+    print(json.dumps({
+        "lock": str(out),
+        "check": "drift" if drifted else "current",
+        "endpoint": result.endpoint,
+        "posture": _posture(result),
+        "committed_document_digest": existing.document_digest,
+        "derived_document_digest": result.digest,
+        "seconds": round(elapsed, 1),
+    }))
+    return 1 if drifted else 0
 
 
 __all__ = ["add_subparser", "run_lock"]

@@ -48,7 +48,10 @@ class Out(msgspec.Struct):
     served_by: str
 
 
-class SlowModel(Model[SDXL], lanes=()):
+class SlowModel(
+    Model[SDXL],
+    eager_only="a residency/lifecycle fixture: it compiles nothing by design",
+):
     """Eager-permanent; ``load`` builds cheap state, work is gauged."""
 
     def load(self, ctx: LoadContext[SDXL]) -> None:
@@ -73,11 +76,13 @@ class SlowModel(Model[SDXL], lanes=()):
         ORDER.append(f"unload:{type(self).__name__}")
 
 
-class OtherModel(SlowModel, lanes=()):
+class OtherModel(SlowModel, eager_only="second residency key, same posture"):
     pass
 
 
-class BrokenUnloadModel(SlowModel, lanes=()):
+class BrokenUnloadModel(
+    SlowModel, eager_only="unload-failure fixture; compiles nothing"
+):
     def unload(self, ctx: LoadContext[SDXL]) -> None:
         ORDER.append("unload:BrokenUnloadModel")
         raise RuntimeError("author unload bug — must not pin the eviction")

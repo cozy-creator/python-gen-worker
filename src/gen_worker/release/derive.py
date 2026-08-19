@@ -8,6 +8,16 @@ instrumented discovery, and stamp the observed graph set -- plus the lane
 contracts and the model type's checkpoint-defaults schema -- as the static
 release metadata document.
 
+**A contract is METADATA, never a gate** (Paul, 2026-08-19, "A NORMAL TRACE
+MUST JUST WORK"; pgw#1488). A model class that names no tensorfs contract is
+traced under a DERIVED lane identity — ``derived.<model type>@1``, computed
+identically here and at serve — and its load dtype comes from the checkpoint
+when no contract states one. Nothing rekeys: ``cg-graph-v1`` hashes the
+canonical trace plus ingress plus passes, so the lane's NAME never entered
+graph identity, and a lane that declares a contract publishes exactly the
+bytes it always did. Eager-forever is the class header's ``eager_only=``
+declaration, with a reason, and never an inference from an empty lane tuple.
+
 **Coverage is auto-enumerated -- inputs AND bindings** (Paul rulings,
 2026-08-19/20; ``ctx.is_trace`` is DELETED from the author surface, so author
 code is trace-oblivious and arm coverage is entirely the derive's job):
@@ -64,6 +74,8 @@ from ..serving.entrypoints import ENTRYPOINT_ATTR
 from ..serving.model import (
     Model,
     ModelDeclarationError,
+    eager_only_reason,
+    is_derived_lane,
     lane_handle,
     model_lanes,
     model_requires,
@@ -128,6 +140,15 @@ class ReleaseDeriveResult:
     #: Distinct from eager-permanent, which holds a model and compiles none —
     #: both land on "no lanes", and a log that conflates them lies.
     weightless: bool = False
+    #: pgw#1488: the class's DECLARED eager-forever reason (``eager_only=``).
+    #: Non-empty means no trace was attempted and the author said why.
+    eager_only: str = ""
+    #: Lanes whose identity was DERIVED (no contract declared). Their handles
+    #: read ``derived.*``; contract metadata attaches to the artifacts later.
+    derived_lanes: tuple[str, ...] = ()
+    #: Lanes that TRACED and found nothing marked via ``ctx.compile``. Zero
+    #: graphs because the author marked zero modules — measured, not assumed.
+    unmarked_lanes: tuple[str, ...] = ()
 
     @property
     def eager_permanent(self) -> bool:
@@ -287,10 +308,18 @@ def _assert_weights_free(torch: Any, program: Any) -> None:
         )
 
 
-def _lane_model_class(module: ModuleType) -> Optional[type]:
-    """The ONE lanes-declaring Model subclass in the module, or None."""
+def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
+    """``(the ONE traced Model subclass or None, the eager_only reason)``.
+
+    pgw#1488: every model class has a lane unless it declares
+    ``eager_only="<reason>"``, so "which class do we trace" is now the same
+    question as "which class is not declared eager". A module whose only model
+    class IS eager-declared answers ``(None, reason)`` — the same shape the
+    eager-permanent path always had, plus the author's own words for it.
+    """
 
     found: list[type] = []
+    eager: list[tuple[type, str]] = []
     for value in vars(module).values():
         if not (
             inspect.isclass(value)
@@ -299,31 +328,37 @@ def _lane_model_class(module: ModuleType) -> Optional[type]:
             and getattr(value, "__module__", None) == module.__name__
         ):
             continue
+        reason = eager_only_reason(value)
+        if reason:
+            eager.append((value, reason))
+            continue
         try:
             lanes = model_lanes(value)
             # pgw#1391: `model_lanes` hands back the lane OBJECTS without
-            # reading them, so a class that omitted `lanes=` and fell through
-            # to a canonical contract with no tensorfs document got this far
-            # silently. Reading each lane's handle and dtype here is what makes
-            # the publish path refuse it, through the SAME conversion.
+            # reading them, so a class whose lane is a CONTRACT still has to
+            # have that contract read here. A derived lane has nothing to
+            # read — it carries no document by construction, which is the
+            # whole point — so it is not put through the contract check.
             from ..serving.model import lane_dtype
 
             for lane in lanes:
+                if is_derived_lane(lane):
+                    continue
                 lane_dtype(lane, where=f"class {value.__qualname__!r}")
         except ModelDeclarationError as exc:
-            # Omitted lanes with no canonical contract (tensorfs#111 not
-            # shipped): the class cannot state its lanes — refuse loudly,
-            # never silently treat it as eager.
             raise DeriveError(str(exc)) from exc
         if lanes:
             found.append(value)
     if len(found) > 1:
         raise DeriveError(
-            f"module {module.__name__!r} declares lanes on "
-            f"{[cls.__name__ for cls in found]!r}; a release derives ONE "
-            f"model class"
+            f"module {module.__name__!r} has more than one compilable model "
+            f"class ({[cls.__name__ for cls in found]!r}); a release derives "
+            f"ONE. An auxiliary model that another slot drives and that "
+            f"compiles nothing declares "
+            f"eager_only=\"<why>\" on its class header — that is the "
+            f"declaration, and it is not an empty lanes tuple."
         )
-    return found[0] if found else None
+    return (found[0] if found else None, eager[0][1] if eager and not found else "")
 
 
 @dataclass(frozen=True)
@@ -972,6 +1007,13 @@ def _contract_document(
     stand-in — travels stamp-only with a WARNING naming it, never silently.
     """
 
+    if is_derived_lane(lane):
+        # pgw#1488: a DERIVED lane has no contract and never claimed one. The
+        # honest row is no document — the artifacts exist under the derived
+        # identity and a contract, when someone authors one, ATTACHES to them
+        # as fleet metadata. That is a later step, not a precondition.
+        return None
+
     claimed = False
     for attribute in ("document", "as_dict", "to_dict"):
         value = getattr(lane, attribute, None)
@@ -1038,6 +1080,12 @@ def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
     """
 
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
+    if is_derived_lane(lane):
+        # pgw#1488: no contract, so no contract dtype. The precision comes
+        # from the CHECKPOINT, resolved inside the load context (which is the
+        # one place that holds the tree) so the trace and the serve read the
+        # same source. `LaneRef` carries the handle; dtype stays open here.
+        return torchcg.LaneRef(handle, dtype=None)
     try:
         # tensorfs#113's `dtype` is a PROPERTY that RAISES on a contract
         # declaring none (minimax.h3-dit-diffusers today), so this is a try,
@@ -1063,7 +1111,7 @@ def _derive_lane(
     checkpoint_dir: Path,
     warnings: list[str],
     program_sink: Optional[Any] = None,
-) -> Any:
+) -> Optional[Any]:
     """One lane's instrumented runs, merged across defaults variants.
 
     Per variant: fresh model, ``load`` (defaults variants change what
@@ -1121,10 +1169,20 @@ def _derive_lane(
                     f"session: {type(exc).__name__}: {exc}"
                 ) from exc
             if not load_ctx.marked_modules:
+                if is_derived_lane(lane):
+                    # pgw#1488. The trace RAN — the model loaded under the
+                    # hollow session and the author marked no module, which is
+                    # an observation, not a failure. Zero graphs is the honest
+                    # answer and the caller prints it as one. The refusal below
+                    # stays for a lane the author DECLARED: declaring a lane is
+                    # saying "graphs key here", and then compiling nothing is a
+                    # contradiction only the author can resolve.
+                    return None
                 raise DeriveError(
                     f"lane {handle!r}: load() marked nothing via ctx.compile(). "
                     f"A lane-declaring model compiles SOMETHING; a model that "
-                    f"wants eager-forever declares no lanes instead."
+                    f"wants eager-forever declares "
+                    f"eager_only=\"<why>\" instead."
                 )
             modules = _named_marked_modules(model, load_ctx.marked_modules)
 
@@ -1271,10 +1329,12 @@ def derive_release(
     except EnvIdentityError as exc:
         raise DeriveError(str(exc)) from exc
 
-    cls = _lane_model_class(module)
+    cls, eager_only = _lane_model_class(module)
     endpoint_name = f"{module.__name__}:{cls.__name__ if cls else ''}".rstrip(":")
 
     lanes: list[Any] = []
+    derived_lanes: list[str] = []
+    unmarked_lanes: list[str] = []
     lane_contracts: dict[str, Any] = {}
     entrypoints: dict[str, Any] = {}
     warnings: list[str] = []
@@ -1316,6 +1376,15 @@ def derive_release(
                 torchcg, cls, lane, plans, checkpoint_dir, warnings,
                 program_sink=program_sink,
             )
+            if lane_graphs is None:
+                # Traced, nothing marked (pgw#1488). No lane row: an empty one
+                # would claim a keyed graph set that does not exist.
+                unmarked_lanes.append(
+                    lane_contract_handle(f"class {cls.__name__!r}", lane)
+                )
+                continue
+            if is_derived_lane(lane):
+                derived_lanes.append(lane_graphs.contract)
             lanes.append(lane_graphs)
             entry: dict[str, Any] = {
                 "stamp": lane_graphs.contract,
@@ -1329,6 +1398,13 @@ def derive_release(
                 # states none.
                 "digest": _contract_digest(lane),
             }
+            if is_derived_lane(lane):
+                # pgw#1488: `document: null` is a BUG on a declared contract
+                # (pgw#1391) and the HONEST state on a derived one. The reader
+                # cannot tell those apart from a null, so the producer says
+                # which it is. Written only on the derived branch, so every
+                # contract-declaring release keeps its bytes exactly.
+                entry["derived"] = True
             # ie#740 placement floor for THIS lane, read off the class header
             # (`requires=`). Absent = undeclared, and the platform default is
             # what the deployment gets — the honest state, never an invented
@@ -1375,6 +1451,9 @@ def derive_release(
         # declared zero model slots. An eager-permanent module also has no
         # lane class, but its entrypoints carry slots and derive no plan.
         weightless=cls is None and bool(plans),
+        eager_only=eager_only,
+        derived_lanes=tuple(derived_lanes),
+        unmarked_lanes=tuple(unmarked_lanes),
     )
 
 
