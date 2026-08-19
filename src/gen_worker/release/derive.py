@@ -59,7 +59,6 @@ from __future__ import annotations
 import enum
 import hashlib
 import inspect
-import logging
 import itertools
 import json
 import types
@@ -86,8 +85,6 @@ from .trace_context import (
     TraceLoadContext,
     TraceRequestContext,
 )
-
-_LOG = logging.getLogger("gen_worker.release.derive")
 
 #: A hollow derive's REAL tensors are config-computed buffers and lifted
 #: constants -- KB to MB. Anything past this is a checkpoint weight that
@@ -220,42 +217,29 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
 
 
 def _trace_device() -> str:
-    """The DEVICE CLASS this derive traces on -- and it is a real choice.
+    """The DEVICE CLASS this derive traces on. Always ``cuda``, GPU or not.
 
-    pgw#1458: a graph's device is established at TRACE time and cannot be
-    re-homed downstream, so a cpu-traced graph cannot be cuda-minted. torchcg
-    records the class in the declaration and refuses the mismatch by name
-    (`RuntimeCompatibility.key`), which is the whole point -- but the refusal
-    is only useful if the derive states the class DELIBERATELY rather than
-    inheriting a default that happens to be wrong for the host.
+    pgw#1458 stands: a graph's device is established at TRACE time and cannot
+    be re-homed downstream, so a cpu-traced graph cannot be cuda-minted, and
+    torchcg refuses the mismatch by name (`RuntimeCompatibility.key`). What
+    is gone (Paul, 2026-08-19 "A NORMAL TRACE MUST JUST WORK"; tcg#64) is the
+    HOST answering the question. It never should have: the fleet compiles
+    cuda graphs, so a derive that emits cpu-class ones because the box it ran
+    on had no GPU produces a document nothing can serve, and hands the author
+    a device taxonomy to reason about for a device the trace never uses.
 
-    A fake-cuda trace needs no silicon in principle, and torchcg proves that
-    for plain modules. It does NOT yet hold for a full diffusers pipeline on a
-    GPU-less box: `encode_prompt` moves real token ids to the execution device
-    and the fake-tensor path runs a real cuda kernel for them
-    (`No CUDA GPUs are available`). Until that is closed, this states the
-    truth about the host instead of failing at the first pipeline call.
+    A trace needs no silicon. torchcg's session drives the author's code on a
+    device that EXISTS -- real sigmas, real token ids, real `encode_prompt` --
+    and restates each exported program onto the stated device before it is
+    hashed. Measured: a CPU-only sd1.5 derive reproduces the graph keys of the
+    GPU-traced one, key for key.
 
-    So: cuda when there IS a device, cpu otherwise, and the fallback SAYS what
-    it costs. A cpu-derived document is not a degraded cuda one -- it is a
-    different graph specialization, and a cuda mint of it refuses by name rather than
-    serving something wrong.
+    This is what makes `gen-worker lock` an AUTHOR-time command (2026-08-19
+    "the full artifact axis and who runs what"): endpoint.lock is committed to
+    git, produced once per version on whatever machine the author has.
     """
 
-    try:
-        import torch
-    except ImportError:  # pragma: no cover - torch is the derive's premise
-        return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    _LOG.warning(
-        "derive: no CUDA device is visible, so this derive traces on CPU and "
-        "produces CPU-CLASS graphs. They are a different graph specialization from the "
-        "cuda graphs a GPU pod serves — a cuda mint of this document refuses "
-        "by name (pgw#1458), it does not silently serve. Derive on a "
-        "CUDA-bearing host to publish servable graphs."
-    )
-    return "cpu"
+    return "cuda"
 
 
 def _assert_weights_free(torch: Any, program: Any) -> None:

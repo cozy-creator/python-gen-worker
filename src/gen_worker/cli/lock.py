@@ -378,11 +378,7 @@ def _trace(
         _say(f"error: failed to import {config.main!r}: {exc}")
         return None
 
-    _say(
-        f"lock: trace device is {device}-class"
-        + ("" if device == "cuda" else " — CPU-class graphs are NOT servable on "
-                                       "a GPU; a cuda mint refuses by name")
-    )
+    _say(f"lock: trace device is {device}-class")
     from ..env_identity import lockfile_beside
 
     started = time.monotonic()

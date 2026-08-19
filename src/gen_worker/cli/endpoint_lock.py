@@ -87,9 +87,11 @@ class DeriveBlock:
     document_digest: str
     #: The derive document, verbatim ASCII JSON.
     document: str
-    #: ``cuda`` or ``cpu`` — the device CLASS traced, `derive._trace_device`'s
-    #: answer. A cpu-traced graph is a DIFFERENT graph specialization, not a degraded
-    #: cuda one, so it is stated rather than assumed by every reader.
+    #: The device CLASS traced, `derive._trace_device`'s answer (``cuda``
+    #: since tcg#64, on any host). A trace on another class is a DIFFERENT
+    #: graph specialization, not a degraded one, so it is stated rather than
+    #: assumed by every reader — which is also what retires a lock committed
+    #: before the class stopped depending on the deriving box.
     trace_device: str
     #: The endpoint identity the derive stamped (``module:Class``).
     endpoint: str

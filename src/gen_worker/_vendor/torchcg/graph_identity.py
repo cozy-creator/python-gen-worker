@@ -186,7 +186,14 @@ class EnvIdentity:
     the image, not fingerprinted (pgw#1467, stated residual).
     """
 
-    stack: tuple[tuple[str, str], ...]
+    #: Declared as either shape because ``__post_init__`` NORMALIZES it --
+    #: `require_stack` takes a mapping or rows and always stores the canonical
+    #: tuple, so every reader sees `tuple[tuple[str, str], ...]` and every
+    #: caller may hand it whichever it has. pgw ruled the same way on its own
+    #: side of the boundary (pgw#1490, "a compile stack is either shape");
+    #: declaring only the stored shape left torchcg's own `assert_exact_env`
+    #: red under mypy against a constructor its docstring invites.
+    stack: tuple[tuple[str, str], ...] | Mapping[str, str] | Sequence[tuple[str, str]]
     sm: str
 
     def __post_init__(self) -> None:
