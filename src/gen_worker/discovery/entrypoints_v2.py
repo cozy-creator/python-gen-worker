@@ -299,8 +299,20 @@ def _adapter_slot(slot: Any) -> Dict[str, Any]:
     }
 
 
+def _is_job_kind(kind: str) -> bool:
+    """The hub's ``functionkind.IsJob``, mirrored: every non-inference kind is
+    submitted rather than invoked.
+
+    One line, and it reads off the same `KINDS` tuple `@entrypoint` validates
+    against — which is itself copied verbatim from `internal/functionkind.All`
+    — so this is a mirror of one authority, not a second vocabulary.
+    """
+    return str(kind or "").strip().lower() not in ("", ENTRYPOINT_KIND)
+
+
 def _entrypoint_row(spec: Any) -> Dict[str, Any]:
     resources = _resources([spec])
+    row_kind = getattr(spec, "kind", "") or ENTRYPOINT_KIND
     input_schema, input_sha = type_schema_and_hash(spec.payload_type)
     output_schema, output_sha = type_schema_and_hash(spec.return_type)
     slots: List[Dict[str, Any]] = []
@@ -319,7 +331,7 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # producer can get from the `inference` default. Nothing is invented:
         # the value space is `internal/functionkind.All`, validated at
         # decoration against `serving.entrypoints.KINDS`.
-        "kind": getattr(spec, "kind", "") or ENTRYPOINT_KIND,
+        "kind": row_kind,
         "input_schema": input_schema,
         "payload_schema_sha256": input_sha,
         "output_schema": output_schema,
@@ -343,13 +355,33 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # WITHOUT A HUB CHANGE. Emitted only when declared, so every existing
         # v2 row stays byte-identical (the hub's own tags are `omitempty`).
         #
-        # `emits_media` is NOT here, deliberately: the request path grants
-        # `upload_media` unconditionally (`capability_subject_th2068.go:124`),
-        # so the hub has no decoder for it on a function row and emitting it
-        # would be exactly the mirror-with-no-reader th#2087's fence exists to
-        # catch. It is enforced SDK-side instead — see the decorator.
+        # `emits_media` rides ONLY a job-kind row, and the fence is narrowed
+        # rather than reversed (th#2177's correction to this lane's first
+        # ruling, accepted). Both halves are measured:
+        #
+        #   * on the REQUEST path the hub grants `upload_media`
+        #     UNCONDITIONALLY (`capability_subject_th2068.go:124`,
+        #     `UploadsMedia: true`) and `manifestFunction` has no field and
+        #     `endpoint_function_schemas` no COLUMN for it, so emitting it on
+        #     an inference row is exactly the mirror-with-no-reader th#2087's
+        #     fence exists to catch;
+        #   * on the JOB path it is READ and it GATES —
+        #     `jobCapabilitySubject` sets `UploadsMedia: d.EmitsMedia` from
+        #     `endpoint_release_jobs.emits_media`, a column that already
+        #     exists. Withholding the key there would silently downgrade every
+        #     producer that declared media to no media at all.
+        #
+        # So the first ruling was right about requests and did not survive a
+        # row dispatched as a job. `_is_job_kind` mirrors the hub's
+        # `functionkind.IsJob` off the one `KINDS` tuple this repo already
+        # copies verbatim, so there is no second vocabulary to drift.
         **({"publishes": True} if spec.publishes else {}),
         **({"env": list(spec.env)} if spec.env else {}),
+        **(
+            {"emits_media": bool(spec.emits_media)}
+            if spec.emits_media is not None and _is_job_kind(row_kind)
+            else {}
+        ),
     }
 
 

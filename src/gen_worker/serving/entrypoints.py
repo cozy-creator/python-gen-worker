@@ -382,8 +382,17 @@ def entrypoint(
       therefore accepted (so a producer ports verbatim) and enforced
       SDK-side: ``None`` is the undeclared inference default, ``True``
       declares emission, and an explicit ``False`` refuses the media surface
-      at the call site. It is deliberately NOT emitted on the manifest row —
-      th#2087's fence exists to stop a key the hub has no decoder for.
+      at the call site.
+
+      ON THE WIRE IT RIDES A JOB-KIND ROW ONLY (th#2177 narrowed this, and
+      was right). The paragraph above is true of a row dispatched as a
+      REQUEST and does not survive one dispatched as a JOB:
+      ``jobCapabilitySubject`` sets ``UploadsMedia: d.EmitsMedia`` from
+      ``endpoint_release_jobs.emits_media``, a column that already exists —
+      so on that path the declaration is READ and it GATES, and withholding
+      it would silently downgrade every producer that declared media. An
+      INFERENCE row still emits nothing, because nothing there can store or
+      read it; that half of th#2087's fence stays.
     """
 
     if fn is None:

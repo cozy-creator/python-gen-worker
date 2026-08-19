@@ -11,10 +11,13 @@ with two deliberate deltas, both named at their assertion:
 1. ``emits_media`` is TRI-STATE here and a bool on ``@job``. Undeclared must
    stay the inference default, because on the request path the hub grants
    ``upload_media`` unconditionally.
-2. ``emits_media`` is NOT emitted on the manifest row. Measured at tensorhub
-   master: ``manifestFunction`` has no decoder for it, and
-   ``capability_subject_th2068.go:124`` sets ``UploadsMedia: true`` for every
-   request. A key on the wire that nothing reads is th#2087's own defect.
+2. ``emits_media`` rides a JOB-KIND row only (th#2177 narrowed this lane's
+   first ruling, which withheld it everywhere). On the REQUEST path
+   ``capability_subject_th2068.go:124`` sets ``UploadsMedia: true``
+   unconditionally and there is no column to store it in; on the JOB path
+   ``jobCapabilitySubject`` gates on ``endpoint_release_jobs.emits_media``,
+   which exists. Right about requests, wrong about jobs — so the fence
+   narrowed rather than reversed.
 
 ``publishes`` and ``env`` need NO hub change at all: the hub already decodes
 ``functions[].publishes`` / ``functions[].env``, and ``entrypoints[]`` folds
@@ -147,16 +150,56 @@ def test_a_non_publishing_row_omits_the_key(rows: dict[str, dict]) -> None:
     assert "env" not in rows["describe"]
 
 
-def test_emits_media_is_not_on_the_wire(rows: dict[str, dict]) -> None:
-    """DELIBERATE DELTA 2, and the reason is a measurement at tensorhub master.
+def test_emits_media_rides_a_job_kind_row_only(rows: dict[str, dict]) -> None:
+    """DELIBERATE DELTA 2, NARROWED rather than reversed (th#2177).
 
-    `manifestFunction` decodes `publishes` and `env`; it has NO `emits_media`
-    field, and the request path's `UploadsMedia` is an unconditional `true`.
-    Emitting the key would be a mirror with no reader — th#2087's fence exists
-    to catch exactly that. The declaration is enforced SDK-side instead (see
-    `test_an_explicit_emits_media_false_refuses_media`)."""
-    for row in rows.values():
-        assert "emits_media" not in row
+    Both halves are measured at tensorhub master and they disagree, which is
+    the whole point:
+
+    * REQUEST path — `capability_subject_th2068.go:124` sets
+      `UploadsMedia: true` unconditionally, `manifestFunction` has no field
+      and `endpoint_function_schemas` no COLUMN. Emitting on an inference row
+      is the mirror-with-no-reader th#2087's fence catches.
+    * JOB path — `jobCapabilitySubject` sets `UploadsMedia: d.EmitsMedia` from
+      `endpoint_release_jobs.emits_media`, a column that already exists. Here
+      the key is READ and it GATES, so withholding it would silently downgrade
+      a producer that declared media to no media at all.
+
+    So the first ruling was right about requests and did not survive a job.
+    `quality_matrix` and `score_bench` are job kinds and carry it; `describe`
+    and `cast_dtype` declared nothing and stay absent either way."""
+    assert rows["quality_matrix"]["emits_media"] is True   # kind="conversion"
+    assert rows["score_bench"]["emits_media"] is True      # kind="eval"
+    # Undeclared is ABSENT on every kind — the tri-state's whole purpose.
+    assert "emits_media" not in rows["cast_dtype"]         # job kind, undeclared
+    assert "emits_media" not in rows["clone_repo"]
+    assert "emits_media" not in rows["describe"]           # inference, undeclared
+
+
+def test_an_inference_row_never_carries_emits_media() -> None:
+    """The half of the fence that STAYS. An inference entrypoint that declares
+    the field explicitly still emits nothing, because nothing on the request
+    path can store or read it."""
+    from gen_worker.discovery.entrypoints_v2 import _entrypoint_row
+
+    module = type(sys)("pgw1406_inference_media")
+    module.__dict__["__name__"] = "pgw1406_inference_media"
+    sys.modules["pgw1406_inference_media"] = module
+    try:
+        exec(compile(
+            "import msgspec\n"
+            "from gen_worker import RequestContext, entrypoint\n"
+            "class I(msgspec.Struct): pass\n"
+            "class O(msgspec.Struct): pass\n"
+            "@entrypoint(emits_media=True)\n"
+            "def render(ctx: RequestContext, payload: I) -> O: ...\n",
+            "pgw1406_inference_media", "exec"), module.__dict__)
+        row = _entrypoint_row(getattr(module.render, ENTRYPOINT_ATTR))
+    finally:
+        sys.modules.pop("pgw1406_inference_media", None)
+
+    assert row["kind"] == "inference"
+    assert "emits_media" not in row
 
 
 def test_the_undeclared_row_is_byte_identical(rows: dict[str, dict]) -> None:
