@@ -394,6 +394,30 @@ def test_the_dispatch_resolves_the_tree_BOOT_materialized(
         origin.close()
 
 
+def test_the_dispatch_supplies_its_own_fetch_pointer(tmp_path: Path) -> None:
+    """`RunJob.snapshots` is keyed by ref and ships on every dispatch.
+
+    `ModelBinding.manifest_digest` has no sender, but the dispatch is not
+    actually pointer-less: the hub already sends the ref's snapshot beside the
+    binding (pgw#1475 depends on exactly that for reserved repos) and the
+    worker was dropping it on the floor for checkpoints. Reading it is not
+    dispatch-time materialization — it is the IDENTITY of a tree, not a
+    request for one.
+    """
+    from gen_worker.worker import _picks_of
+
+    run = pb.RunJob()
+    binding = run.models.add()
+    binding.slot = "model"
+    binding.ref = str(_REF)
+    run.snapshots[str(_REF)].digest = "b7f2c1a0" * 8
+
+    picks = _picks_of(run)
+    assert picks.by_ref[str(_REF)].manifest_digest == "b7f2c1a0" * 8, (
+        "the dispatch's own snapshot must supply the fetch pointer the wire's "
+        "digest field never carries")
+
+
 @pytest.fixture
 def _fine_cadence(monkeypatch: pytest.MonkeyPatch) -> Any:
     """pgw#1455's stride/floor make a 9 MiB fixture emit one row; the position

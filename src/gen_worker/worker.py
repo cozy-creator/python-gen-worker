@@ -283,10 +283,23 @@ def _picks_of(run: pb.RunJob) -> _DispatchPicks:
     by_ref: Dict[str, _Pick] = {}
     by_slot: Dict[str, str] = {}
     for binding in run.models:
+        # pgw#1490: THE DISPATCH ALREADY CARRIES ITS OWN FETCH POINTER, and it
+        # was being ignored. `ModelBinding.manifest_digest` has never had a
+        # sender, but `RunJob.snapshots` ships on every dispatch and the hub
+        # keys an uncomposed artifact in it BY REF (`attachJobSourceSnapshots`;
+        # pgw#1475 already relies on exactly that for reserved repos). So when
+        # the wire's digest field is empty — which is always, today — the ref's
+        # own snapshot supplies it. Nothing is fetched here: this is the
+        # identity of a tree, not a request for one.
+        digest = str(binding.manifest_digest).strip()
+        if not digest:
+            snapshot = run.snapshots.get(str(binding.ref))
+            if snapshot is not None:
+                digest = str(snapshot.digest).strip()
         pick = _Pick(
             slot=str(binding.slot),
             ref=str(binding.ref),
-            manifest_digest=str(binding.manifest_digest),
+            manifest_digest=digest,
             model=str(binding.model).strip(),
             inference_defaults=str(binding.inference_defaults),
         )
