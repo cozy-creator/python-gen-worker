@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
+from . import weightless_program
+
 logger = logging.getLogger(__name__)
 
 #: The modules that DEFINE the parent/child contract: this entrypoint and the
@@ -173,6 +175,14 @@ def compile_one(request: Mapping[str, Any]) -> Path:
     from .._vendor.tensorfs import LocalCAS
 
     _ensure_cuda_home(str(request.get("target_arch", "")))
+    # pgw#1468: the derive's blob carries structure and NO weight bytes, and
+    # `torch.export.load` cannot read one — every fake parameter dedups onto a
+    # single 0-byte payload, so the second and later parameters land out of
+    # bounds of a storage sized from the first. This teaches the loader to
+    # rebuild the state dict from the archive's own metadata, which is the only
+    # description of those tensors that was ever written. Weight-BEARING
+    # archives are untouched.
+    weightless_program.install()
     program = torch.export.load(str(request["blob"]))
     # pgw#1458: the derive traces on cuda, but the swap-back that keeps the
     # lifted constants' REAL values (they key the graph, so faking them would
