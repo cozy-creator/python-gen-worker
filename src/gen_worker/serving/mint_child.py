@@ -26,9 +26,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Mapping
+
+logger = logging.getLogger(__name__)
 
 #: The modules that DEFINE the parent/child contract: this entrypoint and the
 #: mint that spawns it. Their bytes are the request/response shape, so a child
@@ -106,6 +110,42 @@ def _place_constants(program: "Any", target_arch: str) -> None:
             constants[name] = value.to("cuda")
 
 
+
+def _ensure_cuda_home(target_arch: str) -> None:
+    """Make the CUDA root exist BEFORE inductor needs it (pgw#1464).
+
+    `cuda_root.py` exists for exactly one failure and nothing on the mint path
+    called it. Its own docstring names the shape: AOTI "dies with *CUDA_HOME
+    environment variable is not set*" -- and it dies at the LINK step, so the
+    codegen and the kernel work are already paid for. Measured on a real
+    compile: the whole thing runs, then `InductorError: OSError: CUDA_HOME
+    environment variable is not set`. On a pod that is a mint's entire
+    wall-clock spent to produce nothing, attributed to nothing.
+
+    A CUDA_HOME already in the environment WINS and is never second-guessed:
+    that is the operator stating where their toolkit is (a devel base image, a
+    distro package, a developer box that cannot write to `/usr/local`). Only
+    when nobody has said does this compose one, and `compose()` is itself
+    idempotent -- a pre-existing root is left alone rather than rebuilt.
+
+    Only for `sm_*`: a CPU target needs no CUDA root, and composing one there
+    would be work done to answer a question nobody asked.
+    """
+    if not target_arch.startswith("sm_"):
+        return
+    if os.environ.get("CUDA_HOME", "").strip():
+        return
+    from .. import cuda_root
+
+    cuda_root.compose()
+    os.environ["CUDA_HOME"] = str(cuda_root.CUDA_ROOT)
+    logger.info(
+        "mint: composed the CUDA root at %s and set CUDA_HOME (pgw#1464) — "
+        "AOTI resolves it at the link step, after the compile is already paid",
+        cuda_root.CUDA_ROOT,
+    )
+
+
 def compile_one(request: Mapping[str, Any]) -> Path:
     """Deserialize one graph blob and AOTI-compile it into ``destination``."""
     # pgw#1444/pgw#840, BEFORE any work: this child must BE the parent. It is
@@ -132,6 +172,7 @@ def compile_one(request: Mapping[str, Any]) -> Path:
     from .._vendor.torchcg import CallIngress, Engine, GraphClassSpec, RuntimeCompatibility
     from .._vendor.tensorfs import LocalCAS
 
+    _ensure_cuda_home(str(request.get("target_arch", "")))
     program = torch.export.load(str(request["blob"]))
     # pgw#1458: the derive traces on cuda, but the swap-back that keeps the
     # lifted constants' REAL values (they key the graph, so faking them would

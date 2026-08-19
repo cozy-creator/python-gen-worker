@@ -1065,7 +1065,14 @@ def _derive_lane(
             checkpoint_ref=f"trace:{checkpoint_dir.name}",
             step_budget=TRACE_STEP_BUDGET,
         )
-        with hollow.hollow_session():
+        # pgw#1458: the session is CAPTURED and handed to discovery. A
+        # GPU-less cuda trace fakes the lifted constants; `discover_modules`
+        # restores their real values FROM THE SESSION before it hashes and
+        # before `program_sink` serializes. Omitting `session=` does not
+        # degrade quietly — torchcg raises `DiscoveryError` naming the faked
+        # constants — but a digest taken over faked values would be a lie,
+        # so the wiring is the point, not the refusal.
+        with hollow.hollow_session() as session:
             try:
                 model.load(load_ctx)
             except hollow.HollowError as exc:
@@ -1153,7 +1160,8 @@ def _derive_lane(
 
             try:
                 lane_graphs = torchcg.discover_modules(
-                    handle, modules, drive, program_sink=program_sink
+                    handle, modules, drive, program_sink=program_sink,
+                    session=session,
                 )
                 if set(lane_graphs.targets) - {
                     record.target for record in lane_graphs.graphs
@@ -1163,7 +1171,8 @@ def _derive_lane(
                     # before calling it unobserved.
                     request_ctx.step_budget = None
                     lane_graphs = torchcg.discover_modules(
-                        handle, modules, drive, program_sink=program_sink
+                        handle, modules, drive, program_sink=program_sink,
+                        session=session,
                     )
             except DeriveError:
                 raise
