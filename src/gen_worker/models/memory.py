@@ -1490,6 +1490,93 @@ def _apply_group_offload(
     return any_applied
 
 
+def _apply_gguf_dequant_ahead(
+    pipeline: Any,
+    applied: Dict[str, Any],
+    *,
+    budget: Any,
+    log: logging.Logger,
+) -> None:
+    """Spend the residency lease's SURPLUS decoding GGML weights once, at load.
+
+    Paul's three-tier ruling (2026-08-19): quantized-resident and
+    fully-dequantized are the two ENDPOINTS OF ONE DIAL, and which end a worker
+    sits at is the lease's answer, not the loader's. A worker handed surplus
+    memory should use it — one decode pass beats paying a per-forward decode
+    every step for the life of the endpoint — and a constrained worker pays per
+    forward. ``gguf_torch.dequant_ahead`` graduates weights LARGEST FIRST, so
+    the transient headroom the fit plan must reserve falls as the dial turns up.
+
+    The surplus is ``lease VRAM − what the pipeline already costs``, and it is
+    capped by what the card ACTUALLY has free, exactly as the ``partial_stream``
+    upgrade caps its budget: a lease written when the card was emptier is not a
+    licence to allocate bytes that are gone. Nothing is ever re-quantized, so
+    this is one-way and the ladder still only ever SELECTS artifacts.
+
+    Runs BEFORE the rung is chosen, because turning the dial changes the
+    resident footprint the chooser is looking at.
+
+    ``budget`` is pgw#1497's admission shape — a bare VRAM int or the
+    {VRAM, RAM} :class:`~gen_worker.models.stream_residency.MemoryBudget` pair.
+    Only the VRAM half means anything here: decoding ahead moves nothing to the
+    host, so this dial never spends the RAM half.
+    """
+    try:
+        from .gguf_torch import dequant_ahead, gguf_leaves, peak_transient_bytes
+        from .stream_residency import MemoryBudget
+    except Exception:  # noqa: BLE001 — torch-less host
+        return
+
+    lease = MemoryBudget.of(budget).vram_bytes
+    if lease <= 0:
+        return
+
+    denoisers = [
+        module for _, module in _named_components(pipeline)
+        if hasattr(module, "named_modules") and gguf_leaves(module)
+    ]
+    if not denoisers and hasattr(pipeline, "named_modules") and gguf_leaves(pipeline):
+        denoisers = [pipeline]
+    if not denoisers:
+        return
+
+    import torch
+
+    dtype = torch.bfloat16
+    resident = int(_sum_tensor_bytes([pipeline], cuda_only=False))
+    headroom = int(max(0.0, get_available_vram_gb() - _DEFAULT_SAFETY_MARGIN_GB) * _GIB)
+    surplus = max(0, min(lease, headroom) - resident)
+    materialized = 0
+    for denoiser in denoisers:
+        done = dequant_ahead(denoiser, surplus_bytes=float(surplus), dtype=dtype)
+        materialized += len(done)
+        # Each pass spends its own share; charge it so two denoisers cannot
+        # both spend the whole surplus.
+        after = int(_sum_tensor_bytes([pipeline], cuda_only=False))
+        surplus = max(0, surplus - (after - resident))
+        resident = after
+
+    applied["gguf_dequant_ahead"] = materialized
+    applied["gguf_quantized_bytes"] = sum(
+        int(_gguf_quantized_bytes(d)) for d in denoisers)
+    applied["gguf_peak_transient_bytes"] = max(
+        (int(peak_transient_bytes(d, dtype=dtype)) for d in denoisers), default=0)
+    log.info(
+        "low_vram: gguf dequant-ahead materialized %d weight(s) under a "
+        "%.2f GiB lease; %.2f GiB still resides as ggml blocks, largest "
+        "per-forward decode %.3f GiB",
+        materialized, lease / _GIB,
+        applied["gguf_quantized_bytes"] / _GIB,
+        applied["gguf_peak_transient_bytes"] / _GIB,
+    )
+
+
+def _gguf_quantized_bytes(model: Any) -> int:
+    from .gguf_torch import quantized_bytes
+
+    return quantized_bytes(model)
+
+
 def _gguf_resident_override(
     pipeline: Any, effective: Mode, log: logging.Logger,
 ) -> Mode:
@@ -1903,6 +1990,24 @@ def apply_low_vram_config(
     if prior is not None:
         return {"mode": prior, "already_applied": True}
 
+    # pgw#1498's tier dial, BEFORE the rung is chosen: spending the lease's
+    # surplus on decode-once weights changes the footprint every decision below
+    # is made against. A no-op on any pipeline holding no ggml block bytes.
+    gguf_dial: Dict[str, Any] = {}
+    try:
+        _apply_gguf_dequant_ahead(
+            pipeline, gguf_dial,
+            budget=stream_budget_bytes,
+            log=log,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # A dial that cannot turn must never stop a load: the constrained tier
+        # (decode every forward) is the correct, serving answer.
+        log.warning(
+            "low_vram: the gguf dequant-ahead dial could not turn (%s: %s); "
+            "serving quantized-resident, decoding per forward",
+            type(exc).__name__, exc)
+
     effective_mode = mode
     if effective_mode == "auto":
         effective_mode = select_auto_mode(
@@ -1963,6 +2068,7 @@ def apply_low_vram_config(
         "disk_offload_path": False,
         "already_applied": False,
     }
+    applied.update(gguf_dial)
 
     if effective_mode == "off":
         setattr(pipeline, _COZY_MODE_ATTR, "off")

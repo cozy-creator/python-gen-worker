@@ -63,7 +63,12 @@ _PUNNED: Dict[Tuple[Any, str], type] = {}
 #: class it was restructured from. Structural markers, not name checks: they
 #: survive refactors and record no checkpoint-specific data.
 LEAF_MARKER = "_cozy_fp8_storage_leaf"
-BASE_ATTR = "_cozy_fp8_storage_base"
+#: SHARED ACROSS EVERY CLASS PUN IN THE REPO — ``gguf_torch`` imports this exact
+#: constant and :func:`structural_base` rather than spelling its own (pgw#1498).
+#: One name for one concept is what makes every module walker correct for a pun
+#: it has never heard of; two names would have left a GGML Linear invisible to
+#: LoRA branch targeting with every walk still looking right.
+BASE_ATTR = "_cozy_pun_base"
 
 #: diffusers 0.39 ``hooks.layerwise_casting.DEFAULT_SKIP_MODULES_PATTERN``,
 #: mirrored so a renamed upstream constant degrades to the same coverage
