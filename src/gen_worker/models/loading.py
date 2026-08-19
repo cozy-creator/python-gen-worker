@@ -492,17 +492,105 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
     return applied
 
 
-# pgw#1497 DELETED the block-window offload rung that stood here
-# (`_BlockOffloadWindow` / `apply_block_window_offload` / `block_offload_active`).
-# It was exported and NEVER CALLED, and every property it had, the
-# `stream_residency` rung has strictly better: it windowed whole transformer
-# BLOCKS where that one windows leaf modules, moved all of them or none of them
-# where that one fills a budget, and streamed on the ambient stream with no
-# reused cast buffer, no in-flight reservation and no partial-unload primitive.
-# Keeping both would have left three overlapping offload implementations in one
-# tree, which is exactly the disease the ComfyUI study named (report A,
-# do-not-copy list). `_fp8_block_windows` survives — the fp8 storage rung is its
-# real caller.
+# pgw#1497 REPLACED the block-window offload rung's IMPLEMENTATION with the
+# budgeted per-leaf one (`models.stream_residency`) and kept its NAME, because
+# the name has a production consumer this lane originally missed.
+#
+# The first pass DELETED it outright on the evidence that nothing in `src/`
+# called it. That evidence was real and the conclusion was WRONG: `src/` is not
+# the tree. `scripts/author_surface_allowlist.txt:48` recorded the caller —
+# `serverless-endpoints/ltx-video-2.3/.../main.py:128`, marked PROD — and
+# pgw#849 guard 2 says so in as many words: *"'No call site in this repo' is NOT
+# 'no consumer'"*. Deleting it would have made the ltx-video-2.3 endpoint fail
+# at IMPORT on its next gen-worker bump, nowhere near the offload path. The
+# lesson is the guard's own: run `lint_unreached_surface.py --siblings` before
+# deleting public surface, because CI structurally cannot.
+#
+# What DID die is the second implementation. `_BlockOffloadWindow` (per-BLOCK
+# windows, all-or-nothing, ambient stream, no reused cast buffer, no in-flight
+# reservation, no partial unload) is gone; this is now a thin adapter onto the
+# one mechanism, at the budget that means what the old rung meant — zero, park
+# everything, stream per forward. Strictly finer, and one mechanism, not three.
+
+
+def apply_block_window_offload(
+    obj: Any,
+    *,
+    components: tuple[str, ...] | None = None,
+    device: Any = None,
+) -> bool:
+    """Park a pipeline's weights in pinned host RAM and stream them per forward
+    (degraded-mode rung 2). Returns True when any component was armed.
+
+    Quality-preserving and slow (whole-model PCIe traffic per forward); a
+    guaranteed-completion last resort for VRAM-constrained cards, never a
+    production serving mode.
+
+    ``components`` names which components to arm; everything else is left where
+    it is for the caller to place. Each armed component is stamped
+    ``_cozy_block_offload_applied``, which is how a caller tells an armed
+    component from one it still has to move onto the device itself.
+
+    Idempotent per component. The default is resolved at CALL time, never in
+    the signature: a def-time default would freeze the component vocabulary
+    before ``declare_components()`` ever runs.
+    """
+    if components is None:
+        components = denoiser_components()
+    try:
+        from .stream_residency import StreamedResidency
+    except Exception as exc:  # noqa: BLE001 — torch-less host
+        logger.warning("block-window offload ignored: %s", exc)
+        return False
+    if device is None:
+        if not cuda_ready():
+            logger.warning("block-window offload ignored: no CUDA device")
+            return False
+        device = "cuda"
+
+    targets: List[tuple[str, Any]] = []
+    for name in components:
+        mod = getattr(obj, name, None)
+        if mod is not None and hasattr(mod, "named_modules"):
+            targets.append((name, mod))
+    if not targets and hasattr(obj, "named_modules"):
+        targets.append((type(obj).__name__, obj))
+
+    applied = False
+    for name, mod in targets:
+        if getattr(mod, "_cozy_block_offload_applied", False):
+            applied = True
+            continue
+        # Budget zero: every leaf streams. That IS what this rung always meant,
+        # and `_place_residue` keeps everything outside the tail on the device,
+        # which is the clause the old implementation spelled as "parameters
+        # outside the discovered block windows must be resident".
+        residency = StreamedResidency([(name, mod)], device=device, budget_bytes=0)
+        plan = residency.engage()
+        if not plan.streamed:
+            logger.warning("block-window offload: no streamable leaves in %s", name)
+            continue
+        try:
+            mod._cozy_block_offload_applied = True
+        except Exception:  # noqa: BLE001
+            pass
+        applied = True
+        logger.warning(
+            "DEGRADED_MODE=engaged model=%s phase=load rung=resident->"
+            "block_offload: %d leaves / %.1f GiB parked in host RAM, streaming "
+            "per forward",
+            name, len(plan.streamed), plan.streamed_bytes / float(1 << 30),
+        )
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            f"component={name} obj={type(obj).__name__}: block-window offload "
+            f"ENGAGED — {len(plan.streamed)} leaf module(s) / "
+            f"{plan.streamed_bytes / float(1 << 30):.1f} GiB rest in host RAM "
+            f"and stream to the device per forward; every request on this "
+            f"component pays that transfer",
+            phase="block_offload_engaged",
+        )
+    return applied
 
 
 def require_decodable(contract: str, path: Any, *, component: str = "") -> None:
@@ -2387,6 +2475,7 @@ __all__ = [
     "safetensors_file_valid",
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
+    "apply_block_window_offload",
     "apply_fp8_storage",
     "assert_uniform_compute_dtype",
     "MixedComputeDtypeError",
