@@ -8,12 +8,19 @@ The three arms below are the ones measured against `e0725c71` when the defect
 was found. They are kept as fixtures because each answers a different question,
 and the control is what makes the other two mean anything:
 
-    ArmControl       module-level class     -> resolves      (the control)
-    ArmLazyImport    `from x import C` in load() -> resolved by this fix
-    ArmSelfLoading   no `ctx.load` at all   -> still ""      (needs pgw#1421's
-                                                              typed self_loading
-                                                              marker, a Paul
-                                                              ruling; NOT this)
+    ArmControl       module-level class          -> resolves   (the control)
+    ArmLazyImport    `from x import C` in load()  -> fixed here
+    ArmStubbedDep    module-top import of a STUB  -> fixed here (internvl lane)
+    ArmSelfLoading   no `ctx.load` at all         -> still ""   (needs pgw#1421's
+                                                                 typed self_loading
+                                                                 marker, a Paul
+                                                                 ruling; NOT this)
+
+The two fixed shapes have ONE cause: the reader recovered the class by
+importing and type-checking when the AST already carried the answer. So the
+fallback is keyed on "the runtime lookup did not yield a TYPE", which covers a
+name that is unbound (deferred import) and a name bound to a MODULE OBJECT (a
+stubbed heavy dep) with a single branch.
 
 An endpoint whose upstream runtime is source-built cannot import it at module
 top — the package is not on PyPI and compiles CUDA extensions, so a discovery
@@ -24,6 +31,8 @@ discovery importable was the rule that made discovery refuse.
 """
 
 from __future__ import annotations
+
+import types
 
 import pytest
 
@@ -36,6 +45,17 @@ from gen_worker.discovery.entrypoints_v2 import (
 
 class RealPipeline:
     """Importable at discovery — the control arm's subject."""
+
+
+# The internvl-U condition, reproduced exactly: a module-top ImportFrom in the
+# source (which is what `_import_sites` reads) whose RUNTIME binding is a
+# MODULE OBJECT rather than a class — which is what the stub finder produces
+# off-image for a package listed in `discovery_heavy_deps`. The try/except is
+# the stub finder's stand-in, so this test needs none of its machinery.
+try:  # pragma: no cover - `internvlu` is never installed here
+    from internvlu import InternVLUPipeline
+except ImportError:
+    InternVLUPipeline = types.ModuleType("internvlu.InternVLUPipeline")
 
 
 class ArmControl:
@@ -58,6 +78,19 @@ class ArmLazyAliased:
         from trellis2.pipelines import Trellis2ImageTo3DPipeline as Pipe
 
         self.pipe = ctx.load(Pipe)
+
+
+class ArmStubbedDep:
+    """The internvl-U shape, contributed by that lane. A module-top import of a
+    package listed in `discovery_heavy_deps`: off-image the stub finder binds a
+    MODULE OBJECT where a class is expected, so `isinstance(target, type)` is
+    False even though the import is module-top and sanctioned. In-image publish
+    was fine; every off-image gate broke — the caller that reaches the refusal
+    is `serverless-endpoints/scripts/lint_discovery.py:121`.
+    """
+
+    def load(self, ctx):  # type: ignore[no-untyped-def]
+        self.pipe = ctx.load(InternVLUPipeline)
 
 
 class ArmSelfLoading:
@@ -103,6 +136,15 @@ def test_a_deferred_import_under_an_alias_resolves_to_the_real_name() -> None:
         _pipeline_class(ArmLazyAliased)
         == "trellis2.pipelines.Trellis2ImageTo3DPipeline"
     )
+
+
+# pgw#1431: a module-top import of a STUBBED heavy dep binds a module, not a class.
+def test_a_stubbed_heavy_dep_resolves_statically_despite_the_vendored_package() -> None:
+    """The internvl-U arm. `getattr(module, "InternVLUPipeline")` succeeds here
+    and returns a MODULE, so the isinstance check correctly rejects it — and
+    the static ImportFrom resolution then answers from the AST."""
+    assert not isinstance(InternVLUPipeline, type)
+    assert _pipeline_class(ArmStubbedDep) == "internvlu.InternVLUPipeline"
 
 
 # pgw#1431: the boundary — self-loading needs its own marker (pgw#1421 ruling).
