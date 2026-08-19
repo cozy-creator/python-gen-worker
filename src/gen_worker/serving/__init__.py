@@ -60,6 +60,8 @@ from .loader import (
     load_endpoint,
     load_endpoint_module,
 )
+from .self_mint import SelfMint, SelfMintStatus
+from .serve_adoption import ServeAdoption
 from .residency import (
     InstanceSizer,
     Lease,
@@ -136,6 +138,9 @@ __all__ = [
     "load_endpoint",
     "load_endpoint_module",
     "mint_holes",
+    "SelfMint",
+    "SelfMintStatus",
+    "ServeAdoption",
     "model_lanes",
     "model_requires",
     "model_type",

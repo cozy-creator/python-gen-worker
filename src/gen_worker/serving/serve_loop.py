@@ -87,11 +87,18 @@ class _InstanceBackend:
         model_cls: type,
         load_context: LoadContext[Any],
         lane: Any = None,
+        on_loaded: Optional[Callable[[type, Any], None]] = None,
     ) -> None:
         self.model_cls = model_cls
         self.load_context = load_context
         self.model: Optional[Model[Any]] = None
         self.lane = lane
+        #: Called once the author's ``load(ctx)`` has RETURNED — the first
+        #: instant an adopt session's hole list is complete, because holes are
+        #: registered by the author's own ``ctx.compile`` calls inside that
+        #: load. pgw#1371's background mint triggers here; anything earlier
+        #: reads an empty work-list and mints nothing.
+        self._on_loaded = on_loaded
         #: Unmet machine floors, measured once at residency-admit. Non-empty
         #: means this instance is serving DEGRADED, and every request it
         #: serves says so (`invoke` warns the caller with these).
@@ -107,6 +114,13 @@ class _InstanceBackend:
         model: Model[Any] = self.model_cls()  # cheap __init__ — no GPU, by contract
         model.load(self.load_context)
         self.model = model
+        if self._on_loaded is not None:
+            try:
+                self._on_loaded(self.model_cls, self.lane)
+            except Exception:  # noqa: BLE001 — a hook never fails a load
+                logger.exception(
+                    "post-load hook raised for %s; the instance is loaded and "
+                    "serves", self.model_cls.__name__)
 
     def drop(self) -> None:
         model, self.model = self.model, None
@@ -145,6 +159,7 @@ class ServeLoop:
         engine: Optional[LoaderEngine] = None,
         lane_contract: str = "",
         compile_sink_for: Optional[Callable[[type, Any], Any]] = None,
+        on_loaded: Optional[Callable[[type, Any], None]] = None,
         output_dir: Optional[Path] = None,
         context_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
@@ -158,6 +173,7 @@ class ServeLoop:
             cls: loaded.lane(cls, lane_contract) for cls in loaded.models
         }
         self._compile_sink_for = compile_sink_for
+        self._on_loaded = on_loaded
         self._output_dir = output_dir
         self._context_kwargs = dict(context_kwargs or {})
         #: Live backends by residency key, so a lease hit reuses the author
@@ -192,6 +208,7 @@ class ServeLoop:
                     compile_sink=sink,
                 ),
                 lane,
+                self._on_loaded,
             )
             with self._backends_lock:
                 self._backends[key] = backend

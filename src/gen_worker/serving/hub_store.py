@@ -242,10 +242,14 @@ class HubGraphStore:
             return None
         if self._document is not None:
             return self._document
-        try:
-            answer = self._resolve()
-        except ReleaseNotStamped:
-            return None
+        # ``ReleaseNotStamped`` PROPAGATES. It used to be caught here and
+        # flattened into ``None``, which erased the one distinction the typed
+        # 404 exists to carry: "this release has no adopt story" (ordinary,
+        # serve eager) versus "the route answered and rebuilt to nothing"
+        # (drift, worth a defect). Both callers already catch it around this
+        # call — swallowing it made their handlers dead code and left every
+        # unstamped pod reporting the drift reason.
+        answer = self._resolve()
         closure = str(answer.get("env_lockfile_hash") or "")
         lanes: list[dict[str, Any]] = []
         if not answer.get("empty") and answer.get("lane_stamped"):
