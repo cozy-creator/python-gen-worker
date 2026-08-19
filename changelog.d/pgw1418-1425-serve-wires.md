@@ -22,3 +22,8 @@
   `models.memory.report_unevidenced_serving_facts` both collapse catalog-stamped serving facts, and
   pgw#1373 deleted the catalog). The baseline shrinks instead of accreting, which is the half of
   pgw#1425 that is about the instrument rather than the wires.
+- **Found by RUNNING the suite, not by reading it: unresolvable type hints emitted an EMPTY
+  moderation block.** The v1 collector swallowed a `get_type_hints` failure and fell back to
+  `__annotations__`, which under `from __future__ import annotations` — every endpoint module in
+  this repo — is a dict of STRINGS the walk skips. No media, no prompts, no error: the pgw#1418
+  silence one layer down. It now refuses, naming the struct.

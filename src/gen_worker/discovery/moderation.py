@@ -55,6 +55,29 @@ def _media_kind(t: type) -> str:
     return "media"
 
 
+
+def _hints_or_refuse(struct: type, path: str) -> Any:
+    """Resolved type hints, or a BUILD ERROR naming the struct.
+
+    The v1 collector swallowed a resolution failure and fell back to
+    ``__annotations__`` — which, under ``from __future__ import annotations``
+    (every endpoint module in this repo), is a dict of STRINGS. A string is not
+    a type, so the walk below skips it and the function emits an EMPTY
+    moderation block: no media, no prompts, no error, and an endpoint that
+    cannot serve an asset. That is the exact silence pgw#1418 cost a rented pod
+    to find, one layer down. Refuse instead.
+    """
+    try:
+        return typing.get_type_hints(struct, include_extras=True)
+    except Exception as exc:
+        raise ValueError(
+            f"{path or struct.__name__}: cannot resolve the type hints of "
+            f"{struct.__name__} ({type(exc).__name__}: {exc}) — the moderation "
+            f"block would be silently EMPTY, and an endpoint with no declared "
+            f"media inputs cannot be served one"
+        ) from exc
+
+
 def _annotation_carries_asset(ann: Any, _seen: Optional[Set[type]] = None) -> bool:
     """True when the annotation subtree can hold an input ``Asset``."""
     seen = _seen if _seen is not None else set()
@@ -83,10 +106,7 @@ def _annotation_carries_asset(ann: Any, _seen: Optional[Set[type]] = None) -> bo
             if ann in seen:
                 return False
             seen.add(ann)
-            try:
-                hints = typing.get_type_hints(ann, include_extras=True)
-            except Exception:
-                hints = getattr(ann, "__annotations__", {})
+            hints = _hints_or_refuse(ann, ann.__name__)
             return any(
                 _annotation_carries_asset(hints[field], seen)
                 for field in getattr(ann, "__struct_fields__", ()) or ()
@@ -169,10 +189,7 @@ def payload_moderation(payload_type: type) -> Dict[str, List[Dict[str, str]]]:
                 if ann in seen_structs:
                     return
                 seen_structs.add(ann)
-                try:
-                    hints = typing.get_type_hints(ann, include_extras=True)
-                except Exception:
-                    hints = getattr(ann, "__annotations__", {})
+                hints = _hints_or_refuse(ann, path)
                 for field in getattr(ann, "__struct_fields__", ()) or ():
                     if field in hints:
                         walk(hints[field], f"{path}.{field}" if path else field)

@@ -16,9 +16,10 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterator
 
+import msgspec
 import pytest
 
-from gen_worker import receipts
+from gen_worker import ImageAsset, receipts
 from gen_worker.discovery.moderation import payload_moderation
 from gen_worker.serving.loader import load_endpoint_module
 from gen_worker.serving.residency import ResidencyManager
@@ -26,6 +27,16 @@ from gen_worker.serving.serve_loop import ServeLoop
 
 FIXTURES = Path(__file__).resolve().parent / "release_fixtures"
 MODULE = "media_endpoint"
+
+_CLIP_BYTES = b"\x00\x00\x00\x18ftypmp42" + b"video" * 64
+_TRACK_BYTES = b"RIFF....WAVEfmt " + b"audio" * 64
+
+
+class UnorderedAssets(msgspec.Struct):
+    """Module scope on purpose: `get_type_hints` resolves against module
+    globals, and a locally-declared struct is the OTHER refusal below."""
+
+    images: set[ImageAsset]
 
 
 @pytest.fixture(scope="module")
@@ -73,8 +84,8 @@ def origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """
     root = tmp_path / "origin"
     root.mkdir()
-    (root / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"video" * 64)
-    (root / "track.wav").write_bytes(b"RIFF....WAVEfmt " + b"audio" * 64)
+    (root / "clip.mp4").write_bytes(_CLIP_BYTES)
+    (root / "track.wav").write_bytes(_TRACK_BYTES)
 
     handler = http.server.SimpleHTTPRequestHandler
     server = http.server.ThreadingHTTPServer(
@@ -149,15 +160,30 @@ def test_discovery_emits_the_block_on_the_manifest_row(media: ModuleType) -> Non
 
 def test_an_asset_on_an_unordered_container_is_a_build_error() -> None:
     """The input manifest is ORDERED; a set has no stable occurrence order."""
-    import msgspec
-
-    from gen_worker import ImageAsset
-
-    class Bad(msgspec.Struct):
-        images: set[ImageAsset]
-
     with pytest.raises(ValueError, match="unordered set/frozenset"):
-        payload_moderation(Bad)
+        payload_moderation(UnorderedAssets)
+
+
+def test_unresolvable_hints_REFUSE_instead_of_emitting_an_empty_block() -> None:
+    """Found by RUNNING this file, not by reading it.
+
+    Under `from __future__ import annotations` every annotation is a STRING
+    until `get_type_hints` resolves it. The v1 collector swallowed a resolution
+    failure and fell back to `__annotations__` — strings — which the walk skips,
+    so the block came out EMPTY: no media, no prompts, no error, and an
+    endpoint that cannot be served an asset. Same silence class as pgw#1418
+    itself, one layer down. It now refuses, naming the struct.
+    """
+    module = ModuleType("pgw1425_unresolvable")
+    exec(  # noqa: S102 — a REAL module whose annotations cannot be resolved
+        "from __future__ import annotations\n"
+        "import msgspec\n"
+        "class Payload(msgspec.Struct):\n"
+        "    image: SomeAssetTypeTheModuleNeverImported\n",
+        module.__dict__,
+    )
+    with pytest.raises(ValueError, match="cannot resolve the type hints"):
+        payload_moderation(module.Payload)
 
 
 # -- pgw#1418, half two: materialization at the serve seam ------------------
@@ -181,7 +207,7 @@ def test_the_serve_path_materializes_a_typed_media_input(
         request_id="pgw1418-drive",
         attempt=1,
     )
-    assert outcome.result.size_bytes == 8 + 5 * 64
+    assert outcome.result.size_bytes == len(_CLIP_BYTES)
     assert Path(outcome.result.local_path).exists()
     # A duplicate occurrence shares ONE worker-owned download.
     assert outcome.result.nested_paths == [outcome.result.local_path]
@@ -215,7 +241,7 @@ def test_the_attempt_directory_is_gone_when_materialization_fails(
     from gen_worker.api.errors import ValidationError
     from gen_worker.input_assets import inputs_dir_for_request
 
-    with pytest.raises(ValidationError, match="invalid_input_asset_url"):
+    with pytest.raises(ValidationError, match="unsupported_input_asset_scheme"):
         _loop().invoke(
             "analyze",
             {"input": {"audio": {"ref": "gopher://nope/track.wav"}}},
