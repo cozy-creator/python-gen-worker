@@ -486,3 +486,39 @@ def test_bytes_that_are_not_this_weight_refuse_rather_than_reshape(
     with pytest.raises(ValueError, match="are not this weight"):
         build_denoiser(UNet2DConditionModel, root / "unet", _Wrong(),
                        compute_dtype=torch.bfloat16)
+
+
+def test_a_packer_named_container_is_routed_to_the_key_mapping(
+        tmp_path: Path) -> None:
+    """The edge's routing decision. Our own reader answers a container that
+    already names its tensors the way the model does; one that does not is sent
+    through diffusers' single-file KEY MAPPING — which is the only thing this
+    lane borrows, and which refuses BY NAME when it recognizes nothing.
+    """
+    config = dict(
+        sample_size=8, in_channels=4, out_channels=4, layers_per_block=1,
+        block_out_channels=(32, 32),
+        down_block_types=("DownBlock2D", "DownBlock2D"),
+        up_block_types=("UpBlock2D", "UpBlock2D"), mid_block_type=None,
+        cross_attention_dim=32, norm_num_groups=8,
+    )
+    torch.manual_seed(5)
+    reference = _unet(config)
+    config_dir = tmp_path / "unet"
+    config_dir.mkdir()
+    reference.save_config(config_dir)
+
+    # Our names -> our reader, no mapping consulted, and it BUILDS.
+    ours = tmp_path / "ours.gguf"
+    _write_gguf(ours, reference.state_dict())
+    built = build_denoiser(UNet2DConditionModel, config_dir,
+                           SingleFileGguf(ours), compute_dtype=torch.bfloat16)
+    assert gguf_torch.gguf_leaves(built)
+
+    # A packer's names -> the mapping, which recognizes none of these and says so.
+    foreign = tmp_path / "packer.gguf"
+    _write_gguf(foreign, {"model.diffusion_model." + k: v
+                          for k, v in reference.state_dict().items()})
+    with pytest.raises(ValueError, match="key mapping found no weights"):
+        build_denoiser(UNet2DConditionModel, config_dir,
+                       SingleFileGguf(foreign), compute_dtype=torch.bfloat16)

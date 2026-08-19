@@ -55,46 +55,55 @@ class GgufTensorSource(Protocol):
 class SingleFileGguf:
     """The community-ingest edge: one ``.gguf`` container on disk.
 
-    The container's tensor names are its packer's, not ours, so this is the one
-    source that needs a translation — and it is diffusers' own
-    ``checkpoint_mapping_fn``, applied to diffusers' ``GGUFParameter`` values
-    (whose ``__torch_function__`` carries the GGML type through the splits and
-    concatenations those converters do). We take the mapping and drop the
-    quantizer: the values are converted to :class:`~gen_worker.models.gguf_torch.QuantizedTensor`
-    and decoded by OUR kernels, on OUR leaves.
+    OUR reader answers first (:func:`gen_worker.models.gguf_torch.read_gguf`).
+    When the container already names its tensors the way the model does — the
+    normalized case, and plenty of community packs — that is the whole job, and
+    it is the better reader for it: it honours ``comfy.gguf.orig_shape.*``, so a
+    conv or 5-D weight keeps its true shape instead of the ``[out, in*kh*kw]``
+    that block geometry alone can derive.
 
-    When the container already names its tensors the way the model does — which
-    is what the normalized store will produce — diffusers' own rule
-    (``_should_convert_state_dict_to_diffusers``) skips the translation and the
-    bytes pass straight through.
+    Only a container whose names are its PACKER's needs a translation, and that
+    is the one thing we borrow: diffusers' ``checkpoint_mapping_fn``, applied to
+    diffusers' ``GGUFParameter`` values (whose ``__torch_function__`` carries the
+    GGML type through the splits and concatenations those converters do). We take
+    the mapping and drop the quantizer — the values become
+    :class:`~gen_worker.models.gguf_torch.QuantizedTensor` and are decoded by OUR
+    kernels, on OUR leaves.
     """
 
     path: Path
 
     def tensors(self, model: Any, config: Mapping[str, Any]) -> Dict[str, Any]:
+        wanted = set(model.state_dict())
+        native = gguf_torch.read_gguf(self.path)
+        if wanted <= set(native.tensors):
+            return dict(native.tensors)
+        logger.info(
+            "gguf: %s names its tensors its packer's way (%d of %d model keys "
+            "present); translating through the single-file key mapping",
+            self.path.name, len(wanted & set(native.tensors)), len(wanted))
+        return self._mapped(model, config)
+
+    def _mapped(self, model: Any, config: Mapping[str, Any]) -> Dict[str, Any]:
         from diffusers.loaders import single_file_model as sfm
         from diffusers.loaders import single_file_utils as sfu
 
         read: Any = sfu.load_single_file_checkpoint
-        needs_mapping: Any = sfm._should_convert_state_dict_to_diffusers
         mapping_class_of: Any = sfm._get_single_file_loadable_mapping_class
         loadable: Any = sfm.SINGLE_FILE_LOADABLE_CLASSES
 
-        checkpoint = read(str(self.path))
-        if needs_mapping(model.state_dict(), checkpoint):
-            mapping_class = mapping_class_of(type(model))
-            if mapping_class is None:
-                raise ValueError(
-                    f"gguf: {type(model).__name__} has no single-file key "
-                    f"mapping, and {self.path.name} does not name its tensors "
-                    "the way the model does — nothing can say which tensor is "
-                    "which weight")
-            convert = loadable[mapping_class]["checkpoint_mapping_fn"]
-            checkpoint = convert(config=dict(config), checkpoint=checkpoint)
-            if not checkpoint:
-                raise ValueError(
-                    f"gguf: the {mapping_class} key mapping found no weights in "
-                    f"{self.path.name}")
+        mapping_class = mapping_class_of(type(model))
+        if mapping_class is None:
+            raise ValueError(
+                f"gguf: {type(model).__name__} has no single-file key mapping, "
+                f"and {self.path.name} does not name its tensors the way the "
+                "model does — nothing can say which tensor is which weight")
+        checkpoint = loadable[mapping_class]["checkpoint_mapping_fn"](
+            config=dict(config), checkpoint=read(str(self.path)))
+        if not checkpoint:
+            raise ValueError(
+                f"gguf: the {mapping_class} key mapping found no weights in "
+                f"{self.path.name}")
         return {key: _installable(value) for key, value in checkpoint.items()}
 
 
