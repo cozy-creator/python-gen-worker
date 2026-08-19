@@ -267,6 +267,7 @@ class StreamingLoader:
                 report.weights_streamed_bytes / report.seconds / 1e9
             )
         self.last_report = report
+        self._place_uninstalled(built.pipeline, device)
         self._warn_on_lane(lane, report)
         logger.info(
             "ctx.load: %s resident on %s — %.2f GiB streamed in %.2fs "
@@ -282,6 +283,59 @@ class StreamingLoader:
             report.windows,
         )
         return built.pipeline
+
+    def _place_uninstalled(self, pipeline: Any, device: Any) -> None:
+        """Place tensors the CONTAINER did not carry (pgw#1454).
+
+        This engine installs each tensor the container names, straight onto the
+        device. A tensor that is NOT in the container is never visited, so it
+        materialises wherever `__init__` put it — the host — and nothing moved
+        it. `from_pretrained` cannot have this bug: it builds on CPU and then
+        `.to(device)` moves parameters and buffers together, whatever their
+        provenance.
+
+        Measured: CLIP's `embeddings.position_ids` is a NON-PERSISTENT buffer,
+        so a modern `state_dict()` omits it by design (sd1.5's raw mirror
+        carries 197 keys, the reconverted tree 196). The engine then served a
+        text encoder whose weights were all on CUDA and whose position ids were
+        on the CPU, and the first `nn.Embedding` forward died on the mismatch.
+        A conversion step that is individually correct produced a tree this
+        loader could not serve.
+
+        Deliberately NOT `pipeline.to(device)`: that would walk and re-copy
+        everything this engine just streamed, throwing away the whole point.
+        Only what is still off-target moves, and only once.
+        """
+        import torch
+
+        target = torch.device(device)
+        if target.type == "meta":
+            return
+        moved = 0
+        seen: set[int] = set()
+        components = getattr(pipeline, "components", None) or {}
+        roots = [m for m in components.values() if isinstance(m, torch.nn.Module)]
+        if not roots and isinstance(pipeline, torch.nn.Module):
+            roots = [pipeline]
+        for root in roots:
+            for module in root.modules():
+                if id(module) in seen:
+                    continue
+                seen.add(id(module))
+                for leaf, held in list(module._buffers.items()):
+                    # `meta` is left ALONE on purpose: a tensor still on meta
+                    # was never installed, and moving it would fabricate
+                    # uninitialised memory and hide the very mismatch the
+                    # survivors check above exists to raise.
+                    if (held is not None and held.device != target
+                            and held.device.type != "meta"):
+                        module._buffers[leaf] = held.to(target)
+                        moved += 1
+        if moved:
+            logger.info(
+                "ctx.load: placed %d tensor(s) the container did not carry "
+                "onto %s (pgw#1454)", moved, target,
+            )
 
     # -- planning ----------------------------------------------------------
 
