@@ -1,5 +1,8 @@
 """The torch GGML dequant kernels are BIT-EXACT against the `gguf` package.
 
+pgw#1498: ported from city96's ComfyUI-GGUF so ggml is a weight STORAGE format
+inside the ordinary torch serving path.
+
 The reference is ``gguf.quants.dequantize`` — the numpy implementation that
 defines the format. Two independent inputs, because each catches what the other
 cannot:

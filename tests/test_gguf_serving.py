@@ -1,5 +1,8 @@
-"""pgw#1498's SERVING PATH: a GGUF snapshot loads as ggml block bytes on our
-own leaves, and everything downstream of the loader sees it.
+"""A GGUF snapshot serves as ggml block bytes on our own leaves, and everything
+downstream of the loader sees it.
+
+pgw#1498 (wiring lane): the storage layer was correct and UNREACHABLE — nothing
+on the serving path constructed it.
 
 The core module (``models/gguf_dequant`` + ``models/gguf_torch``) was correct
 and unreachable — nothing constructed it, because ``load_gguf_pipeline`` handed

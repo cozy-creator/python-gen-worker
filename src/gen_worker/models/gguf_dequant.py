@@ -21,7 +21,7 @@ fallback would be slower than not serving the rung at all, so an unsupported
 qtype raises instead of silently degrading.
 
 Correctness is pinned to the ``gguf`` package's own numpy implementation:
-``tests/test_gguf_dequant_pgw1498.py`` asserts BIT-EXACT equality against
+``tests/test_ggml_decode.py`` asserts BIT-EXACT equality against
 ``gguf.quants.dequantize`` over random block bytes for every type here.
 """
 

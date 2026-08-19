@@ -15,7 +15,7 @@
   class this leaf was punned from" is one concept, so `structural_base` is one function and
   `w8a8_lora.branch_modules` targets a pun it has never heard of by construction. With two
   spellings a GGML Linear was invisible to adapter targeting while every walk still looked
-  correct; the red arm is on record in `tests/test_gguf_wiring_pgw1498.py`.
+  correct; the red arm is on record in `tests/test_gguf_serving.py`.
 
 - **The `dequant_ahead` tier dial is driven from the residency lease**, through the same
   `apply_low_vram_config(stream_budget_bytes=...)` entry point pgw#1497's `partial_stream` rung
