@@ -378,6 +378,36 @@ ERNIE_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "use_karras_sigmas": False,
 }
 
+#: diffusers/LTX-2.3-Distilled-Diffusers `scheduler/scheduler_config.json`,
+#: fetched VERBATIM at revision `432e0d3c2d1769aaa4d295f9243f7062bf6b47ee` —
+#: which is not a mirror of convenience but the exact `source_repo` /
+#: `source_revision` the fleet's own clone recipe
+#: (`jobs/catalog/launch_ltx_2026-07-07.toml`) used to produce
+#: `tensorhub/ltx-2.3-distilled` `prod`, and still that repo's HEAD.
+#:
+#: LTX-2 is FLOW-MATCHING, so there is no beta schedule — the shape is a shift
+#: ladder, like FLUX.2 Klein's. It is NOT Klein's ladder and must not be filled
+#: in by analogy with it: `use_dynamic_shifting` is **false** here against
+#: Klein's true, `shift` is 1.0 against 3.0, and `base_shift` / `max_shift` are
+#: 0.95 / 2.05 against 0.5 / 1.15. Every value below was read, none inferred.
+LTX2_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "FlowMatchEulerDiscreteScheduler",
+    "num_train_timesteps": 1000,
+    "shift": 1.0,
+    "base_shift": 0.95,
+    "max_shift": 2.05,
+    "use_dynamic_shifting": False,
+    "base_image_seq_len": 1024,
+    "max_image_seq_len": 4096,
+    "time_shift_type": "exponential",
+    "shift_terminal": None,
+    "invert_sigmas": False,
+    "stochastic_sampling": False,
+    "use_beta_sigmas": False,
+    "use_exponential_sigmas": False,
+    "use_karras_sigmas": False,
+}
+
 #: REAL — a tensorfs library document. Live on deploy lane
 #: ``a55e45a571cdb6188``.
 SDXL_DIFFUSERS_BF16: Final = _library("sdxl.diffusers-bf16", 1)
@@ -420,6 +450,22 @@ FLUX2_KLEIN_DIFFUSERS_BF16: Final = _library("flux2-klein.diffusers-bf16", 1)
 #: REAL as of tensorfs#124's second half (tensorfs#136). It was a
 #: ``MissingContract`` sentinel until this document was vendored, and clearing
 #: it took NO code change — the property the sentinel shape exists to have.
+
+
+#: REAL as of tensorfs#135 — LTX-2's own transformer-only lane document, 144
+#: declarations covering 4186 of 4186 tensors of the shipped
+#: `LTX2VideoTransformer3DModel` header. Derived from the on-disk safetensors
+#: HEADERS of all eight shards by ranged read, never from a constructed
+#: pipeline. It declares dtype PER TENSOR (3896 BF16 + 290 F32 adaptive-norm
+#: modulation tables) and that is load-bearing rather than pedantic: a
+#: flattened all-BF16 variant of the same header identifies as
+#: `flux2-klein.diffusers-bf16@1` through the real matcher, i.e. the real
+#: checkpoint would silently resolve to another family's lane.
+LTX2_DIFFUSERS_BF16: Final = _library("ltx-2.diffusers-bf16", 1)
+
+#: NO DOCUMENT YET — tensorfs#124 owes it (blocked on HF access to the BFL
+#: repos), so this is a ``MissingContract`` sentinel and ``Model[Flux1]``
+#: refuses loudly, naming the document it wants.
 #:
 #: THE SENTINEL WAS RIGHT TWICE OVER, and the second reason was only measured
 #: when the document was authored. ``Flux1`` once pointed at
@@ -1368,6 +1414,85 @@ class MusicGenDefaults(msgspec.Struct, frozen=True):
     cfg: bool = True
 
 
+class Ltx2Defaults(msgspec.Struct, frozen=True):
+    """LTX-2 (Lightricks LTX-2.3) — a 22B JOINT audio+video DiT that denoises
+    both modalities in one pass. Values are SOURCED, field for field, from the
+    family owner's own shipped ``register_family("ltx-2", LtxDefaults)`` row
+    (``ltx-video-2.3/src/ltx_video_23/main.py:854-870``), which is the
+    vocabulary this type replaces.
+
+    NOT A ``Knob`` ANYWHERE, and that is the se#769 rule applied rather than an
+    oversight: a ``Knob`` is for a value the wire exposes and the platform must
+    CLAMP. This endpoint exposes neither ``steps`` nor ``guidance`` and does not
+    clamp them — the distilled schedule is FIXED and an override is REJECTED
+    with a typed 400, never narrowed (the ie#345 preset-bucket policy, restated
+    at ``main.py`` "no steps/guidance knobs … overrides would mix recipes, so
+    they are rejected, not ignored"). A knob that can only ever refuse is not a
+    knob. So these are plain fields, the :class:`MiniMaxH3Defaults` idiom, and
+    for the same reason H3 carries no ``steps``: the duration/canvas presets fix
+    the step count.
+
+    ``sigmas`` is the whole recipe here — 8 FIXED sigmas is what "distilled"
+    MEANS for this checkpoint, and ``stage2_sigmas`` is the 3-sigma tail the
+    two-stage 1080p refine runs after the latent upsample. Both are the
+    diffusers distilled constants the endpoint imports verbatim
+    (``diffusers.pipelines.ltx2.utils.DISTILLED_SIGMA_VALUES`` and
+    ``STAGE_2_DISTILLED_SIGMA_VALUES``), which the family owner's docstring
+    records as byte-identical to the values the file used to hardcode. Mirroring
+    a differently-distilled LTX-2 checkpoint is a catalog row, not a code
+    change — which is the entire reason this vocabulary exists (th#1116).
+
+    DELIBERATELY ABSENT — ``step_distilled``, and this is a RECORDED REFUSAL by
+    the family owner rather than a gap for a later lane to fill. The served
+    checkpoint IS a distillation, but ``ltx-video-2.3/README.md`` states that
+    the hub stamps every ``ltx-2`` row ``distilled=false`` today, so declaring
+    the truth "would fail the lane closed". Re-adding the field here would
+    reverse a decision whose cost the owner measured, and the fixed ``sigmas``
+    tuple already carries the fact structurally. ``guidance_2`` is absent too
+    (there is no expert pair — that is :class:`Wan22`'s axis), and so is any
+    ``.Lora`` overlay: the endpoint's dynamic-LoRA surface takes per-request
+    ``weight`` on the wire and registers no lora VOCABULARY, so there is no
+    per-checkpoint strength range to source.
+    """
+
+    #: The distilled recipe pins CFG off. ``main.py:867``.
+    guidance: float = 1.0
+    #: The audio half's own guidance scale — the joint-DiT axis no
+    #: image family has. ``main.py:868``.
+    audio_guidance: float = 1.0
+    #: The 8 fixed base-pass sigmas.
+    sigmas: tuple[float, ...] = (
+        1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875,
+    )
+    #: The 3-sigma tail for the two-stage refine after the 2x latent upsample.
+    stage2_sigmas: tuple[float, ...] = (0.909375, 0.725, 0.421875)
+    #: ``do_classifier_free_guidance`` is never true on the served path, and the
+    #: endpoint declares exactly why: ``Fork("cfg", served=(False,),
+    #: unserved=(True,), reason="default_value", why="the distilled recipe pins
+    #: guidance 1.0 and audio guidance 1.0 (LtxDefaults), so
+    #: do_classifier_free_guidance is never true")`` (``main.py``, the
+    #: ``Compile.forks`` block). A real second value exists for this family —
+    #: ``tensorhub/ltx-2.3-dev`` is a 30-step CFG recipe — so this is a
+    #: per-checkpoint row, not a constant. Same shape as
+    #: :class:`Flux1Defaults.cfg`.
+    cfg: bool = False
+    #: The Gemma-3 text-sequence pin. Plain int, NOT a Knob, for the
+    #: :class:`Flux1Defaults` reason — no endpoint exposes it. The tokenizer
+    #: pads ``padding="max_length"`` to exactly this, so the sequence dim
+    #: entering the DiT is constant by construction
+    #: (``ltx_video_23/pipeline_ltx2_audio.py:34``).
+    max_sequence_length: int = 1024
+
+
+class Ltx2UpsamplerDefaults(msgspec.Struct, frozen=True):
+    """The LTX-2 2x spatial LATENT upsampler has no serving knobs — it takes its
+    scale from the checkpoint's own ``rational_spatial_scale`` and everything
+    else from the two-stage recipe on the DiT beside it. Empty on purpose, for
+    the same reason as :class:`RifeDefaults`: the type exists for its NAME and
+    its ingest fingerprint, so an auxiliary slot can be classified and typed
+    like any other. Fields stay additive if a knob is ever ruled."""
+
+
 # ── the model types (launch set, pgw#1376 point 1) ───────────────────────────
 
 
@@ -1751,6 +1876,60 @@ class MusicGen(ModelType[MusicGenDefaults]):
     Defaults = MusicGenDefaults
 
 
+class Ltx2(ModelType[Ltx2Defaults]):
+    """LTX-2 — the joint audio+video DiT ``ltx-video-2.3`` serves.
+
+    The root is ``ltx-2``, NOT the endpoint slug ``ltx-video-2.3``: the family
+    owner's own shipped call is ``register_family("ltx-2", LtxDefaults)``, and
+    the endpoint slug has never been the vocabulary name. Both served
+    checkpoints — ``tensorhub/ltx-2.3-distilled`` (the sole recommended
+    inference) and the ``v1.1`` re-mirror — plus the unserved
+    ``tensorhub/ltx-2.3-dev`` fine-tune base share it; they differ in
+    ``Defaults`` VALUES (sigmas, ``cfg``), which is what a per-checkpoint row
+    is for.
+
+    The 2x spatial latent upsampler is NOT under this root — see
+    :class:`Ltx2Upsampler` for the measurement that separates them.
+    """
+
+    name = "ltx-2"
+    contracts = ("ltx-2.*",)
+    canonical_contract = LTX2_DIFFUSERS_BF16
+    canonical_scheduler_config = LTX2_SCHEDULER_CONFIG
+    Defaults = Ltx2Defaults
+
+
+class Ltx2Upsampler(ModelType[Ltx2UpsamplerDefaults]):
+    """The LTX-2 2x spatial latent upsampler — a small AUXILIARY model with its
+    own checkpoint (``tensorhub/ltx-2.3-upsampler``), bound beside the DiT to
+    serve the two-stage 1080p/4K recipe. The :class:`Rife` mould exactly: name
+    + fingerprint seam only, no canonical lane, no ``Defaults`` vocabulary
+    beyond the base.
+
+    A SEPARATE type from :class:`Ltx2`, and the separation is MEASURED rather
+    than argued. Their safetensors headers share **ZERO** keys: the DiT is 4186
+    tensors over 144 patterns (``LTX2VideoTransformer3DModel`` —
+    ``transformer_blocks.{i}.attn{1,2}``, a parallel ``audio_attn`` tower, the
+    two cross-modal seams, F32 adaptive-norm modulation tables), and this is 72
+    tensors over 24 patterns (``LTX2LatentUpsamplerModel`` — ``initial_conv``,
+    ``res_blocks.{i}.conv{1,2}``, ``upsampler.{i}``), a pure 3-D convnet. That
+    fails the :class:`Flux2KleinDefaults` one-root standard at the first
+    clause: those modules "diff to nothing but the type name and one VRAM
+    floor", and these diff to everything.
+
+    NO ``canonical_contract`` AND NO ``MissingContract`` SENTINEL. Its artifact
+    is a plain diffusers-layout repo and inventing a tensorfs contract name for
+    it would be a guess; a sentinel would be a standing lie with a to-do
+    attached, where absence is simply honest. ``Model[Ltx2Upsampler]`` therefore
+    states ``lanes=()`` explicitly — the eager-permanent tier — exactly as
+    ``wan-2.2``'s ``RifeModel`` does for :class:`Rife`.
+    """
+
+    name = "ltx-2-upsampler"
+    contracts = ("ltx-2-upsampler.*",)
+    Defaults = Ltx2UpsamplerDefaults
+
+
 MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     SDXL,
     SD15,
@@ -1770,6 +1949,10 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     ZImage,
     StableAudio,
     MusicGen,
+
+
+    Ltx2,
+    Ltx2Upsampler,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
@@ -1816,6 +1999,10 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Ernie.name: Ernie.Defaults,
         StableAudio.name: StableAudio.Defaults,
         MusicGen.name: MusicGen.Defaults,
+
+
+        Ltx2.name: Ltx2.Defaults,
+        Ltx2Upsampler.name: Ltx2Upsampler.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }
@@ -1846,6 +2033,12 @@ __all__ = [
     "FLUX1_DIFFUSERS_BF16",
     "FLUX2_KLEIN_DIFFUSERS_BF16",
     "FLUX2_KLEIN_SCHEDULER_CONFIG",
+    "LTX2_DIFFUSERS_BF16",
+    "LTX2_SCHEDULER_CONFIG",
+    "Ltx2",
+    "Ltx2Defaults",
+    "Ltx2Upsampler",
+    "Ltx2UpsamplerDefaults",
     "Flux1",
     "Flux1Defaults",
     "Flux2Klein",

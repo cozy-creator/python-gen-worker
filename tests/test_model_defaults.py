@@ -495,6 +495,13 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
         "krea-2", "anima", "ernie", "qwen-image", "z-image",
         # pgw#1430 (se#769 audio lane): the fleet's audio modality.
         "stable-audio", "musicgen",
+        # pgw#1420 (se#769): LTX-2 and its 2x spatial latent upsampler. TWO
+        # roots, not one — their headers share ZERO keys (4186 tensors of joint
+        # audio+video DiT against 72 of 3-D convnet), so the Flux2Klein
+        # one-root standard ("diff to nothing but the type name and one VRAM
+        # floor") is failed at its first clause. The upsampler is the Rife
+        # mould: name + fingerprint, no canonical lane.
+        "ltx-2", "ltx-2-upsampler",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
