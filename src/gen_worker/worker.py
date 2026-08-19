@@ -355,12 +355,14 @@ class HubBindingResolver:
         if not digest:
             return []
         bare = digest.split(":", 1)[-1]
-        keys = [snapshot_dir_key(digest)]
+        # BARE FIRST, because that is what production writes: all 13 trees in
+        # this box's CAS are bare hex, and the hub's volume manifest is 38/38
+        # bare. The tagged spelling is tried second because the hub also stores
+        # 1999/1999 tagged digests in its artifact metadata, so a route that
+        # answers from there would hand the worker the other spelling.
+        keys = [snapshot_dir_key(bare)]
         if bare != digest:
-            # The legacy spelling. Kept as a FALLBACK, not as an equal: a tree
-            # written by an older wheel is still readable, and a fresh one is
-            # written tagged.
-            keys.append(snapshot_dir_key(bare))
+            keys.append(snapshot_dir_key(digest))
         return [self.snapshots_root / key for key in keys]
 
     def tree_for(self, model_cls: type, checkpoint_ref: str) -> Path:

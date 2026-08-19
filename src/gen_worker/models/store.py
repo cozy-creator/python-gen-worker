@@ -1339,14 +1339,22 @@ class ModelStore:
             # re-adoption, e2e#117 live find #7) and must not short-circuit.
             want = ""
             if snapshot is not None and snapshot.digest:
-                # pgw#1490: NO STRIP. th#1941 — the composed manifest digest IS
-                # the directory name, and it is ALGORITHM-TAGGED
-                # (`sha256:<hex>`, hub-side `runtime.go:2665`). `cozy_snapshot`
-                # writes exactly that, so stripping the prefix here meant this
-                # short-circuit could NEVER fire for a digest-carrying
-                # snapshot: every boot re-walked and re-resolved a tree the pod
-                # already held. The WRITER wins, because changing it would
-                # rename every staged tree and orphan every pre-warmed volume.
+                # pgw#1490: ACCEPT BOTH SPELLINGS, and do not pick a side.
+                #
+                # MEASURED on the standing stack, because this was reported as
+                # a live defect and it is not one: `endpoint_volume_manifest.
+                # snapshot_digest` is 38/38 BARE hex, every one of the 13 trees
+                # in the box's CAS is named bare hex, and so the strip that
+                # used to be here was a NO-OP in production and this
+                # short-circuit fired exactly as intended. But
+                # `repo_artifact_file_metadata.snapshot_digest` is 1999/1999
+                # ALGORITHM-TAGGED, so both spellings are genuinely live
+                # hub-side and which one reaches the wire is a property of the
+                # route that answered. A residency answer must not be wrong
+                # because two producers spell one digest two ways, so the
+                # comparison admits either and the WRITER keeps deciding the
+                # name on disk — changing that would rename every staged tree
+                # and orphan every pre-warmed volume.
                 want = snapshot.digest.strip().lower()
             if cached is not None and cached.exists() and (
                 not want or cached.name.lower() in (want, want.split(":", 1)[-1])

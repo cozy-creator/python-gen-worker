@@ -338,10 +338,12 @@ def test_the_dispatch_resolves_the_tree_BOOT_materialized(
     * `ModelBinding.manifest_digest` has never had a sender (its own proto
       comment says so), so every dispatch hit "carries no manifest_digest; the
       worker has no other fetch pointer" before it looked at anything; and
-    * the two producers of a tree disagreed about the algorithm prefix.
-      `Snapshot.digest` is `sha256:<hex>` and `cozy_snapshot` writes the tree
-      under exactly that, while the resolver STRIPPED the prefix and looked
-      for `<hex>` — a miss for bytes the pod was holding.
+    * and a digest can arrive in two spellings. MEASURED on the standing
+      stack rather than assumed: the hub's volume manifest is 38/38 BARE hex
+      and every tree in this box's CAS is bare, so the resolver's old strip
+      was a no-op — but the hub's artifact metadata is 1999/1999
+      `sha256:`-tagged, so both spellings are live somewhere. The lookup tries
+      both rather than picking a side.
 
     So the resolver asks the store that materialized the ref. This test drives
     the real pull and then the real `tree_for` over a dispatch whose binding
@@ -382,9 +384,12 @@ def test_the_dispatch_resolves_the_tree_BOOT_materialized(
 
         assert tree.is_dir(), f"{tree} is not a materialized tree"
         assert tree.parent.name == "snapshots"
-        assert tree.name.startswith("sha256:"), (
-            "the tree is written under the ALGORITHM-TAGGED digest, which the "
-            f"proto calls the worker's snapshot directory name; got {tree.name}")
+        # The WRITER names the tree; the resolver must find it whichever
+        # spelling the config carried. This fixture's snapshot is tagged, and
+        # production's is bare — both have to resolve, which is the assertion.
+        digest = str(snapshot.digest)
+        assert tree.name in (digest, digest.split(":", 1)[-1]), (
+            f"tree {tree.name} is neither spelling of {digest}")
     finally:
         origin.close()
 
