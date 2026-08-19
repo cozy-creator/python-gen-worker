@@ -278,3 +278,10 @@ CI-SKIPPED tests/test_weight_streaming_native_store.py|the installed tensorfs pr
 # says placement is the WORKER's decision is measured on every runner.
 CI-SKIPPED tests/test_bridge_placement.py|this host's nvml is version-mismatched; torch's p#p check raises inside pipeline.to(cuda)
 CI-SKIPPED tests/test_engine_placement.py|this host's nvml is version-mismatched; torch's p#p check raises inside pipeline.to(cuda)
+
+# pgw#1466: the bridge-placement suite's OTHER skip. `test_bridge_placement.py`
+# already has a row above for the nvml case; this is the distinct one where the
+# tiny SD pipeline is simply not in the runner's HF cache. CI runners do not
+# pre-populate that cache, so the row is a CI fact rather than a defect, and the
+# property it guards is measured on an authoring box that has the model.
+CI-SKIPPED tests/test_bridge_placement.py|hf-internal-testing/tiny-stable-diffusion-pipe is not in the local hf cache (<path>)

@@ -22,3 +22,13 @@ src/gen_worker/host_canary.py::os.environ[<dynamic>]  SCOPED  the probe's restor
 # generated (inductor entries are content-addressed). The sanctioned window
 # is post-scrub (env_seal docstring).
 src/gen_worker/entrypoint.py::os.environ[<dynamic>]  PLUMBING  pgw#783 per-group inductor/triton cache isolation dirs
+
+# pgw#1464: the mint child composes a CUDA root and points CUDA_HOME at it,
+# because AOTI resolves CUDA_HOME at the LINK step — after the codegen and the
+# kernel work are already paid for, so an unset one costs a whole compile and
+# attributes the loss to nothing. This is toolchain LOCATION, never serving
+# state: it says where the linker finds libraries, not what gets generated.
+# It is also strictly conditional — `_ensure_cuda_home` returns early when the
+# operator has already stated a CUDA_HOME, and never second-guesses it, so this
+# writer cannot override a deliberate choice.
+src/gen_worker/serving/mint_child.py::os.environ[CUDA_HOME]  PLUMBING  pgw#1464 composed CUDA root for the AOTI link step; skipped when already set
