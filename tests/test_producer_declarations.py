@@ -1,10 +1,9 @@
-"""The producer plane's declarations on ``@entrypoint`` (pgw#1406 / th#2173).
+"""The producer plane's declarations on ``@entrypoint`` — what a function may write.
 
-pgw#983 deleted ``@job``. All 27 conversion producers in ``cozy-creator/jobs``
-are ``@job`` functions and NOTHING there is written against ``@entrypoint``;
-the plane keeps running only because ``conversion/pyproject.toml:198`` pins
-the pre-#983 SDK. These tests pin the successor: the three declarations, what
-they emit, and what they refuse.
+pgw#1406: pgw#983 deleted ``@job`` and every one of the 27 conversion producers
+in ``cozy-creator/jobs`` is one, so ``@entrypoint`` grew the declaration set
+they carry. These tests pin it: what the four kwargs mean, what reaches the
+manifest, and what each one refuses.
 
 The kwargs' semantics are v1's (``git show 722e30b9^:src/gen_worker/api/jobs.py``)
 with two deliberate deltas, both named at their assertion:
