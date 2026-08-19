@@ -41,8 +41,13 @@ def add_subparser(sub: Any) -> None:
     derive.add_argument(
         "--checkpoint",
         required=True,
+        action="append",
+        default=[],
+        metavar="[SLOT=]PATH",
         help="CONFIG-ONLY checkpoint tree the author's load path resolves "
-        "(subset snapshot; weights never transit the derive)",
+        "(subset snapshot; weights never transit the derive). Repeat as "
+        "`slot=path` to give a SECONDARY model slot its own tree (pgw#1508); "
+        "the bare form is the primary model's.",
     )
     # pgw#1489: a derive STATES the compile stack it traced under, and reads it
     # from the endpoint's own `uv.lock` — the one file the derive, the mint and
@@ -81,10 +86,28 @@ def _run_derive(args: argparse.Namespace) -> int:
     if not root.is_dir():
         print(f"error: --dir {root} is not a directory", file=sys.stderr)
         return 2
-    checkpoint = Path(args.checkpoint).resolve()
-    if not checkpoint.is_dir():
-        print(f"error: --checkpoint {checkpoint} is not a directory", file=sys.stderr)
+    trees: dict[str, Path] = {}
+    for raw in args.checkpoint:
+        slot, _sep, rest = raw.partition("=")
+        if not (_sep and slot.isidentifier()):
+            slot, rest = "", raw
+        if slot in trees:
+            owner = f"slot {slot!r}" if slot else "the primary model"
+            print(f"error: --checkpoint given twice for {owner}", file=sys.stderr)
+            return 2
+        resolved = Path(rest).resolve()
+        if not resolved.is_dir():
+            print(f"error: --checkpoint {resolved} is not a directory", file=sys.stderr)
+            return 2
+        trees[slot] = resolved
+    if "" not in trees:
+        print(
+            "error: --checkpoint names only secondary slots; the primary "
+            "model's tree is the bare form",
+            file=sys.stderr,
+        )
         return 2
+    checkpoint = trees.pop("")
     prime_sys_path(root)
     try:
         module = importlib.import_module(args.module)
@@ -103,6 +126,7 @@ def _run_derive(args: argparse.Namespace) -> int:
             checkpoint_dir=checkpoint,
             lockfile=lockfile,
             graph_cas=Path(args.graph_cas).resolve() if args.graph_cas else None,
+            slot_checkpoints=trees,
         )
     except DeriveError as exc:
         print(f"derive error: {exc}", file=sys.stderr)

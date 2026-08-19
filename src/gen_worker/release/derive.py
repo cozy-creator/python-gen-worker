@@ -66,7 +66,7 @@ import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any, Optional
 
 from ..serving.entrypoints import ENTRYPOINT_ATTR
@@ -1247,6 +1247,7 @@ def _derive_lane(
     checkpoint_dir: Path,
     warnings: list[str],
     program_sink: Optional[Any] = None,
+    slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
 ) -> Optional[Any]:
     """One lane's instrumented runs, merged across defaults variants.
 
@@ -1327,26 +1328,51 @@ def _derive_lane(
             # slot, loaded under the SAME hollow session. Every slot named in
             # a signature must be fillable at trace or the release cannot
             # state its graph set.
+            #
+            # pgw#1508: EACH SLOT GETS ITS OWN TREE. This comment said "an
+            # auxiliary model with its own checkpoint" and then handed every
+            # aide the PRIMARY's `checkpoint_dir`, so h3's `generate`
+            # (video -> minimax-h3, rife -> rife-4.25) tried to build a RIFE
+            # interpolator out of the DiT's tree and refused on a missing
+            # `flownet`. The binding table has been per-slot since 0.9.0; the
+            # derive's world-model now matches it. A slot with no entry falls
+            # back to the primary tree, which is every single-slot endpoint
+            # and is why their documents do not move.
             aides: dict[str, Any] = {}
             for plan, _payloads in plans:
                 for slot_name, slot_cls in plan.model_slots:
                     if slot_cls is cls or slot_name in aides:
                         continue
+                    slot_tree = slot_checkpoints.get(slot_name, checkpoint_dir)
                     aide = slot_cls()
                     try:
                         aide.load(
                             TraceLoadContext(
                                 lane=resolved,
-                                checkpoint_dir=checkpoint_dir,
+                                checkpoint_dir=slot_tree,
                                 model_type=model_model_type(slot_cls),
                                 defaults_instance=None,
                             )
                         )
                     except Exception as exc:
+                        # Name the SLOT and the TREE IT WAS GIVEN. The failure
+                        # that produced pgw#1508 read as a broken aide class
+                        # when it was a wrong checkpoint, and one line saying
+                        # which tree was used is the difference between a
+                        # one-read diagnosis and an afternoon.
+                        shared = (
+                            " (the PRIMARY checkpoint — this slot has no "
+                            "--checkpoint-ref of its own; an auxiliary model "
+                            "with a separate checkpoint needs "
+                            f"`--checkpoint-ref {slot_name}=<ref>`)"
+                            if slot_name not in slot_checkpoints
+                            else ""
+                        )
                         raise DeriveError(
                             f"lane {handle!r}: entrypoint {plan.name!r} slot "
                             f"{slot_name!r} ({slot_cls.__name__}) failed to "
-                            f"load under the trace session: "
+                            f"load from {slot_tree}{shared} under the trace "
+                            f"session: "
                             f"{type(exc).__name__}: {exc}"
                         ) from exc
                     aides[slot_name] = aide
@@ -1445,8 +1471,17 @@ def derive_release(
     checkpoint_dir: Path,
     lockfile: Optional[Path] = None,
     graph_cas: Optional[Path] = None,
+    slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
 ) -> ReleaseDeriveResult:
-    """Derive the release metadata document for one endpoint module."""
+    """Derive the release metadata document for one endpoint module.
+
+    ``checkpoint_dir`` is the PRIMARY model's tree. ``slot_checkpoints`` maps a
+    secondary model slot to its OWN tree (pgw#1508) -- an auxiliary model is a
+    different model with a different checkpoint, which the serving binding
+    table has said since 0.9.0 and the derive used to contradict. A slot with
+    no entry falls back to the primary tree, so every single-slot endpoint
+    derives exactly the bytes it did before.
+    """
 
     torchcg = _torchcg()
     program_sink = _program_sink(graph_cas)
@@ -1540,6 +1575,7 @@ def derive_release(
             lane_graphs = _derive_lane(
                 torchcg, cls, lane, plans, checkpoint_dir, warnings,
                 program_sink=program_sink,
+                slot_checkpoints=slot_checkpoints,
             )
             if lane_graphs is None:
                 # Traced, nothing marked (pgw#1488). No lane row: an empty one

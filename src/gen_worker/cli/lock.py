@@ -43,17 +43,29 @@ def add_subparser(sub: Any) -> None:
         help="endpoint project root — the directory holding pyproject.toml "
              "and endpoint.toml (default: cwd)",
     )
+    # pgw#1508: REPEATABLE, and each may name the SLOT it belongs to. An
+    # entrypoint with two model slots is two models with two checkpoints —
+    # h3's `generate` is video -> minimax-h3 plus rife -> rife-4.25 — and the
+    # serving binding table has been per-slot since 0.9.0. The BARE form is
+    # the primary/single-slot case and behaves exactly as it always has.
     parser.add_argument(
         "--checkpoint-ref",
-        default="",
+        action="append",
+        default=[],
+        metavar="[SLOT=]OWNER/NAME@REV",
         help="owner/name@revision to trace against. Required for an endpoint "
-             "that declares a model slot; a weightless endpoint needs none.",
+             "that declares a model slot; a weightless endpoint needs none. "
+             "Repeat with `slot=ref` to give a SECONDARY model slot its own "
+             "checkpoint; the bare form is the primary model's.",
     )
     parser.add_argument(
         "--checkpoint",
-        default="",
+        action="append",
+        default=[],
+        metavar="[SLOT=]PATH",
         help="a local checkpoint tree, INSTEAD of resolving --checkpoint-ref "
-             "through the weight CAS (for a tree the store does not hold)",
+             "through the weight CAS (for a tree the store does not hold). "
+             "Repeatable as `slot=path`, same rule as --checkpoint-ref.",
     )
     parser.add_argument(
         "--graph-cas",
@@ -90,19 +102,80 @@ def _say(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def _checkpoint_tree(args: argparse.Namespace) -> tuple[Optional[Path], str]:
-    """(tree, ref-string). Both may be absent — a weightless endpoint has none."""
-    if args.checkpoint:
-        tree = Path(args.checkpoint).resolve()
+def _split_slot(value: str) -> tuple[str, str]:
+    """``slot=rest`` -> ("slot", "rest"); a bare value -> ("", value).
+
+    Split on the FIRST ``=`` and only when the left side is a plain
+    identifier, so a checkpoint ref or a path that happens to contain ``=``
+    is not mistaken for a slot spelling.
+    """
+
+    slot, sep, rest = value.partition("=")
+    if sep and slot.isidentifier():
+        return slot, rest
+    return "", value
+
+
+def _one_tree(checkpoint: str, ref_text: str) -> tuple[Optional[Path], str]:
+    if checkpoint:
+        tree = Path(checkpoint).resolve()
         if not tree.is_dir():
             raise ws.WorkspaceError(f"--checkpoint {tree} is not a directory")
         # A local tree still needs an identity for the skip key. Without one,
         # swapping the tree under a stable path would reuse a stale trace.
-        return tree, args.checkpoint_ref or f"local:{tree}"
-    if not args.checkpoint_ref:
+        return tree, ref_text or f"local:{tree}"
+    if not ref_text:
         return None, ""
-    ref = ws.parse_checkpoint_ref(args.checkpoint_ref)
+    ref = ws.parse_checkpoint_ref(ref_text)
     return ws.resolve_checkpoint(ref), str(ref)
+
+
+def _checkpoint_tree(
+    args: argparse.Namespace,
+) -> tuple[Optional[Path], str, dict[str, Path], tuple[str, ...]]:
+    """(primary tree, primary ref, per-slot trees, per-slot ref strings).
+
+    Everything may be absent — a weightless endpoint has no checkpoint at all.
+    The per-slot halves are EMPTY for every endpoint that names one model, so
+    the reuse key and the derive are bit-for-bit what they were (pgw#1508).
+    """
+
+    refs: dict[str, str] = {}
+    trees: dict[str, str] = {}
+    for raw in args.checkpoint_ref:
+        slot, value = _split_slot(raw)
+        if slot in refs:
+            raise ws.WorkspaceError(
+                "--checkpoint-ref given twice for "
+                + (f"slot {slot!r}" if slot else "the primary model")
+            )
+        refs[slot] = value
+    for raw in args.checkpoint:
+        slot, value = _split_slot(raw)
+        if slot in trees:
+            raise ws.WorkspaceError(
+                "--checkpoint given twice for "
+                + (f"slot {slot!r}" if slot else "the primary model")
+            )
+        trees[slot] = value
+
+    primary_tree, primary_ref = _one_tree(trees.get("", ""), refs.get("", ""))
+    slot_trees: dict[str, Path] = {}
+    slot_refs: list[str] = []
+    for slot in sorted(set(refs) | set(trees)):
+        if not slot:
+            continue
+        tree, ref_text = _one_tree(trees.get(slot, ""), refs.get(slot, ""))
+        if tree is None:
+            raise ws.WorkspaceError(
+                f"slot {slot!r} was named with no resolvable checkpoint"
+            )
+        slot_trees[slot] = tree
+        # Sorted and slot-qualified so the reuse key moves when an AUXILIARY
+        # checkpoint moves — otherwise swapping rife under a stable primary
+        # would silently reuse a trace of the old one.
+        slot_refs.append(f"{slot}={ref_text}")
+    return primary_tree, primary_ref, slot_trees, tuple(slot_refs)
 
 
 def run_lock(args: argparse.Namespace) -> int:
@@ -142,7 +215,7 @@ def run_lock(args: argparse.Namespace) -> int:
 
     # ------------------------------------------------------------------- trace
     try:
-        tree, ref_text = _checkpoint_tree(args)
+        tree, ref_text, slot_trees, slot_refs = _checkpoint_tree(args)
     except ws.WorkspaceError as exc:
         _say(f"error: {exc}")
         return 2
@@ -185,6 +258,9 @@ def run_lock(args: argparse.Namespace) -> int:
         checkpoint_ref=ref_text,
         trace_device=device,
         lockfile=lockfile,
+        # pgw#1508: an AUXILIARY checkpoint is an input too. Empty for every
+        # single-slot endpoint, so their reuse keys do not move.
+        extra=slot_refs,
     )
 
     existing: Optional[el.DeriveBlock]
@@ -218,6 +294,7 @@ def run_lock(args: argparse.Namespace) -> int:
              "document moved with them")
         return _check_by_rederive(
             config, root, out, existing, tree, graph_cas_root, device, lockfile,
+            slot_trees,
         )
 
     cas = ws.local_cas(graph_cas_root)
@@ -258,7 +335,9 @@ def run_lock(args: argparse.Namespace) -> int:
             "say so rather than emit an empty document."
         )
 
-    traced = _trace(config, root, tree, graph_cas_root, device, lockfile)
+    traced = _trace(
+        config, root, tree, graph_cas_root, device, lockfile, slot_trees,
+    )
     if traced is None:
         return 1
     result, elapsed = traced
@@ -368,6 +447,7 @@ def _trace(
     graph_cas_root: Path,
     device: str,
     lockfile: Optional[Path] = None,
+    slot_trees: Optional[dict[str, Path]] = None,
 ) -> Optional[tuple[Any, float]]:
     """Import the author's module and derive it. ``None`` = said why, failed.
 
@@ -397,6 +477,7 @@ def _trace(
             checkpoint_dir=tree if tree is not None else root,
             lockfile=lockfile if lockfile is not None else lockfile_beside(root),
             graph_cas=graph_cas_root,
+            slot_checkpoints=slot_trees or {},
         )
     except DeriveError as exc:
         _say(f"error: derive: {exc}")
@@ -416,6 +497,7 @@ def _check_by_rederive(
     graph_cas_root: Path,
     device: str,
     lockfile: Optional[Path] = None,
+    slot_trees: Optional[dict[str, Path]] = None,
 ) -> int:
     """``--check``'s expensive arm: does the committed DOCUMENT still hold?
 
@@ -425,7 +507,9 @@ def _check_by_rederive(
     and NOTHING IS WRITTEN either way: `--check` is a question.
     """
 
-    traced = _trace(config, root, tree, graph_cas_root, device, lockfile)
+    traced = _trace(
+        config, root, tree, graph_cas_root, device, lockfile, slot_trees,
+    )
     if traced is None:
         return 1
     result, elapsed = traced
