@@ -128,6 +128,13 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         LoadContext,
         RequestContext,
     )
+    from .serving.engine_runtime import (
+        EngineBootError,
+        EngineHandle,
+        EngineSpec,
+        LlamaServer,
+        VllmServer,
+    )
     from .serving.entrypoints import entrypoint
     from .api.resources import Resources
     from .serving.model import Model
@@ -172,6 +179,15 @@ _EXPORTS: Final[dict[str, str]] = {
     # ctx splits into LoadContext (load moment) + RequestContext (request
     # moment); Adapter slots are explicit entrypoint parameters.
     "Adapter": "serving.context",
+    # pgw#1421: the ENGINE-HOSTED tier's author surface. A spec DECLARES the
+    # engine (`LlamaServer`/`VllmServer`); `ctx.engine(spec)` boots and
+    # supervises it and hands back an `EngineHandle` with a `base_url`. This
+    # is F3's eager-permanent world — external binaries only.
+    "EngineBootError": "serving.engine_runtime",
+    "EngineHandle": "serving.engine_runtime",
+    "EngineSpec": "serving.engine_runtime",
+    "LlamaServer": "serving.engine_runtime",
+    "VllmServer": "serving.engine_runtime",
     "Resources": "api.resources",
     "DistillationAdapter": "serving.context",
     "ExpectedOutput": "api.types",
@@ -263,6 +279,12 @@ __all__ = [
     "Model",
     "Resources",
     "entrypoint",
+    # pgw#1421: the engine-hosted tier (external binaries only).
+    "EngineBootError",
+    "EngineHandle",
+    "EngineSpec",
+    "LlamaServer",
+    "VllmServer",
     # The decorators + bindings.
     # pgw#1294: run-once submitted functions. Same (ctx, payload) -> Struct
     # contract as @endpoint, so one body promotes between them unchanged.

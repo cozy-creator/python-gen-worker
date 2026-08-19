@@ -267,6 +267,19 @@ KIND_SNAPSHOT_PULL = "snapshot_pull"
 # needs no hub schema change. See `boot_stages.py` for why the total is a UNION
 # and never a sum.
 KIND_BOOT_STAGES = "boot_stages"
+# pgw#1421: the ENGINE-HOSTED tier's boot — an external engine binary
+# (`llama-server`, `vllm serve`) started, health-waited and stopped by the
+# worker. Its own KIND because nothing else on the pod can answer "why is this
+# endpoint not serving yet" for a tier whose work happens in another PROCESS:
+# `boot_stages` decomposes THIS process's cold start and an engine subprocess
+# is invisible to every one of its spans, exactly as it is invisible to torch's
+# allocator. The phase vocabulary is CLOSED (`serving.engine_runtime`
+# ENGINE_PHASES) so a reader can group on (kind, phase) rather than regex a
+# sentence; `duration_ms` on the `engine_healthy` row is the measured boot wall.
+# A DEGRADED rung is deliberately NOT reported here — it rides
+# KIND_SERVE_DEGRADE, which is the countable quality-confession channel
+# (th#2075's ingest), so the two questions stay two rows.
+KIND_ENGINE_BOOT = "engine_boot"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.

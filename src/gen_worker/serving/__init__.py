@@ -30,6 +30,15 @@ from .context import (
     LoaderEngine,
     RequestContext,
 )
+from .engine_runtime import (
+    EngineBootError,
+    EngineCommand,
+    EngineHandle,
+    EngineSpec,
+    LlamaServer,
+    VllmServer,
+    boot_engine,
+)
 from .envelope import (
     AdapterRow,
     DecodedRequest,
@@ -88,6 +97,13 @@ from .model import (
 from .placement import DeviceFacts, Shortfall, device_facts, shortfalls, warn_if_degraded
 
 __all__ = [
+    "boot_engine",
+    "VllmServer",
+    "LlamaServer",
+    "EngineSpec",
+    "EngineHandle",
+    "EngineCommand",
+    "EngineBootError",
     "DeviceFacts",
     "Shortfall",
     "device_facts",

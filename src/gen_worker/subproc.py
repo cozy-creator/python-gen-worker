@@ -38,8 +38,9 @@ class LineTail:
     captures output must keep reading for the process's whole life.
 
     ``run_process`` uses it to bound a run-to-completion tool;
-    ``runtimes.server`` uses it to bound an engine BOOT while keeping the
-    child alive afterwards.
+    ``serving.engine_runtime`` uses it to bound an engine BOOT while keeping
+    the child alive afterwards (pgw#1421 — the v1 ``runtimes.server`` this
+    line used to name was deleted by the pgw#1373 hardcut).
     """
 
     __slots__ = ("_proc", "_on_line", "_window", "_thread")
