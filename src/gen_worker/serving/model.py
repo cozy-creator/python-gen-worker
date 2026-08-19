@@ -38,6 +38,11 @@ MT = TypeVar("MT")
 MODEL_TYPE_ATTR = "__cozy_model_type__"
 LANES_ATTR = "__cozy_lanes__"
 REQUIRES_ATTR = "__cozy_requires__"
+#: pgw#1431 fix (b). The author's REASON that this model's pipeline has no
+#: class `ctx.load` can drive — the v2 successor to v1's `Slot(str)` escape
+#: hatch, and the pipeline-level twin of `Slot(layouts_undeclarable=)`, which
+#: says the same thing one level down about the BYTES.
+SELF_LOADING_ATTR = "__cozy_self_loading__"
 
 
 class ModelDeclarationError(TypeError):
@@ -360,11 +365,13 @@ class Model(Generic[MT]):
     __cozy_model_type__: ClassVar[Any] = None
     __cozy_lanes__: ClassVar[tuple[Any, ...] | None] = None
     __cozy_requires__: ClassVar[dict[str, Any]] = {}
+    __cozy_self_loading__: ClassVar[str] = ""
 
     def __init_subclass__(
         cls,
         *,
         lanes: tuple[Any, ...] | Mapping[Any, Any] | None = None,
+        self_loading: str | None = None,
         **kwargs: Any,
     ) -> None:
         if "requires" in kwargs:
@@ -376,6 +383,27 @@ class Model(Generic[MT]):
                 "mapping value is the lane's VRAM floor (None/\"\" for none); "
                 "the sm floor is derived from the contract, not written."
             )
+        if self_loading is not None:
+            # pgw#1431 fix (b). A REASON IS MANDATORY, verbatim the rule
+            # `Slot(layouts_undeclarable=)` already enforces one level down: an
+            # escape hatch with no stated reason is the silence the rung exists
+            # to replace, and it is the only thing standing between this marker
+            # and a way to quietly silence a class discovery could have read.
+            if not isinstance(self_loading, str):
+                raise ModelDeclarationError(
+                    f"{cls.__qualname__}: self_loading= must be a string "
+                    f"reason, got {type(self_loading).__name__}"
+                )
+            reason = self_loading.strip()
+            if not reason:
+                raise ModelDeclarationError(
+                    f"{cls.__qualname__}: self_loading= needs a REASON. Say "
+                    "why `ctx.load` cannot drive this pipeline — a bespoke "
+                    "loader, an external server, pipeline code that ships "
+                    "inside the checkpoint. A blank escape is the silence "
+                    "this declaration replaces."
+                )
+            cls.__cozy_self_loading__ = reason
         super().__init_subclass__(**kwargs)
         if Model in cls.__bases__ and _declared_model_type(cls) is None and not any(
             isinstance(parameter, TypeVar)
