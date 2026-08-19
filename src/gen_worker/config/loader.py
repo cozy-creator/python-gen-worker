@@ -43,6 +43,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     # TENSORHUB_CACHE_DIR does.
     "COZY_WEIGHTS_CAS": "weights_cas_root",
     "COZY_GRAPH_CAS": "graph_cas_root",
+    "BAKED_PROGRAM_CAS_ROOT": "baked_program_cas_root",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "GEN_WORKER_CONFIG_SNAPSHOT_PATH": "config_snapshot_path",
     "WORKER_CONFIG_GENERATION": "boot_config_generation",

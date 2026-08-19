@@ -41,6 +41,38 @@ def tensorhub_cas_dir() -> Path:
     return tensorhub_cache_dir() / "cas"
 
 
+#: Where the IMAGE build bakes this release's serialized ExportedPrograms.
+#: tensorhub's `image.DeriveCASImagePath`, one spelling, and the two repos
+#: must not drift — a mismatch here is not an error, it is a permanent silent
+#: cache miss, which is exactly the defect pgw#1462 part 2 exists to close.
+BAKED_PROGRAM_CAS_DIR = "/app/.tensorhub/derive-cas"
+
+
+def baked_program_cas_dir() -> Path | None:
+    """The image's read-only exported-program CAS, or None when there is none.
+
+    THE POD'S OWN CAS IS NOT THIS DIRECTORY, and that is the whole bug.
+    `tensorhub_cas_dir()` is `<TENSORHUB_CACHE_DIR>/cas` — `/tmp/tensorhub-cache/cas`
+    by default — while the builder bakes the release's graph blobs into
+    `/app/.tensorhub/derive-cas`. th#2162 concluded that no hub route was needed
+    because *"pgw's miner already falls through to its local CAS by content
+    address"*; the fallthrough is real but it has never looked in the baked
+    directory, so those blobs have been unreachable since the day they were
+    first baked.
+
+    Settings-driven so a non-container run (e2e, bare-metal dev, cozy-local)
+    points it somewhere real, exactly as `endpoint_lock_path` does. An empty
+    setting DISABLES the tier rather than guessing.
+    """
+
+    configured = current_or(_STANDALONE).baked_program_cas_root.strip()
+    root = Path(configured).expanduser() if configured else Path(BAKED_PROGRAM_CAS_DIR)
+    # Absence is the ordinary case on any image whose build used a committed
+    # endpoint.lock (no derive step ran, so nothing was baked). It is not a
+    # failure and must not read as one.
+    return root if root.is_dir() else None
+
+
 def open_worker_cas(root: Path | None = None) -> LocalCAS:
     """Open the worker's one tensorfs store.
 
