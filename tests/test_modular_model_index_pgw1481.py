@@ -54,7 +54,9 @@ def _modularize(source: Path, **overrides: object) -> None:
 
 
 @pytest.fixture(scope="module")
-def modular_source(tmp_path_factory: pytest.TempPathFactory):
+def modular_source(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, type, dict[str, object]]:
     target = tmp_path_factory.mktemp("pgw1481")
     pipeline_cls = build_source(target)
     classic = json.loads((target / "model_index.json").read_text())
@@ -62,7 +64,7 @@ def modular_source(tmp_path_factory: pytest.TempPathFactory):
     return target, pipeline_cls, classic
 
 
-def test_modular_index_loads(modular_source) -> None:
+def test_modular_index_loads(modular_source: tuple[Path, type, dict[str, object]]) -> None:
     """Every component a modular index declares must reach the skeleton.
 
     THE RED ARM: restore ``len(spec) != 2: continue`` in ``skeleton.build`` and
