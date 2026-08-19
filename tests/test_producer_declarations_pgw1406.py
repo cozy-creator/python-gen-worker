@@ -35,7 +35,11 @@ import pytest
 from gen_worker.api.errors import MediaNotDeclaredError, PublishNotDeclaredError
 from gen_worker.discovery.entrypoints_v2 import discover_entrypoints
 from gen_worker.serving.context import RequestContext
-from gen_worker.serving.entrypoints import ENTRYPOINT_ATTR, EntrypointDeclarationError
+from gen_worker.serving.entrypoints import (
+    ENTRYPOINT_ATTR,
+    EntrypointDeclarationError,
+    EntrypointSpec,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "release_fixtures"
 MODULE = "producer_endpoint"
@@ -55,8 +59,9 @@ def rows(producers: ModuleType) -> dict[str, dict]:
     return {row["name"]: row for row in discover_entrypoints(MODULE)}
 
 
-def spec(fn: object) -> object:
-    return getattr(fn, ENTRYPOINT_ATTR)
+def spec(fn: object) -> EntrypointSpec:
+    stamped: EntrypointSpec = getattr(fn, ENTRYPOINT_ATTR)
+    return stamped
 
 
 # -- the declarations reach the spec ----------------------------------------
