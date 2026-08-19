@@ -23,6 +23,8 @@ The memo is therefore parent-seeded and on disk, keyed by
 
 from __future__ import annotations
 
+import importlib.util
+
 import json
 import os
 import time
@@ -208,6 +210,24 @@ def test_memo_file_is_versioned_and_keyed_by_the_triple(
 # ---------------------------------------------------------------------------
 
 
+#: pgw#1438: `aot_compile_pool` spawns `python -m gen_worker.aot_compile_child`
+#: (`ENTRY_CHILD_MODULE`), and cd46c957 deleted that module while keeping the
+#: pool. The tier is not RETIRED — pgw#1373 states it "stays for pgw#1371/#1372"
+#: — it is a parent with no child until one of those lanes wires it to
+#: `gen_worker.serving` or deletes it, and which of those happens is their
+#: decision, not this lane's. So the rows that need a live child are STAGED on
+#: that decision (census disposition, counted and printed), never deleted: the
+#: subject still exists and a deleted row would have to be rewritten from
+#: scratch the day it lands.
+_NO_ENTRY_CHILD = pytest.mark.skipif(
+    importlib.util.find_spec(pool.ENTRY_CHILD_MODULE) is None,
+    # Kept under the census normalizer's 120-char key truncation (conftest.py
+    # `_norm`), which otherwise cuts mid-phrase and leaves a trailing space the
+    # census FILE's own `.strip()` then removes — a key that can never match.
+    reason="pgw#1371/#1372: gen_worker.aot_compile_child is absent, so the entry pool can spawn no child",
+)
+
+@_NO_ENTRY_CHILD
 def test_pooled_children_stop_repaying_the_toolchain_hash(
     tmp_path: Path,
 ) -> None:

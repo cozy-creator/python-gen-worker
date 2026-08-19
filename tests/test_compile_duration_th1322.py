@@ -12,20 +12,21 @@ What is real here:
 * The events cross a REAL TCP gRPC socket to the hub-double, emitted through the
   REAL `activity.bind_sink` the real `Worker` transport installed. Read back off
   the wire, never from a spy.
-* The emitters are the PRODUCTION functions: `aot_mint._emit_phase_event` and
-  `compile_cache.emit_jit_compile_event`. Nothing is re-implemented for the test.
-* The JIT compile that has to be comparable against an AOT mint is the INTAKE
-  compile on a serving pod, emitted by the executor's proof window through
-  `emit_jit_compile_event`; the mint child runs no JIT recipe.
-* The `mint_child` phase clock is driven through the real `frame()` funnel, in a
-  real subprocess-free path, and the resulting `MintReport` is what the parent
-  emitter consumes.
+* The emitter is the PRODUCTION function `compile_cache.emit_jit_compile_event`.
+  Nothing is re-implemented for the test.
+* The JIT compile it measures is the INTAKE compile a serving pod pays for
+  itself.
+
+pgw#1373 (cd46c957) deleted `aot_mint` and `mint_child`, so the AOT half of the
+original comparison — `aot_mint._emit_phase_event` and the child `frame()`
+clock — has no subject left. The rows that drove them are removed with that
+reason recorded at each site rather than skipped. `mint_process.MintReport`
+survives and is still held to its round-trip below.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib
 import sys
 import time
 from pathlib import Path
@@ -123,28 +124,13 @@ def test_emit_event_never_invents_a_duration() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_child_phase_clock_measures_spans_not_frames(capsys: Any) -> None:
-    """`frame()` is the single funnel every child phase transition goes
-    through, so the span table comes out of it. Repeat frames for the same
-    phase (step/note updates) must NOT restart or split that phase's span —
-    `warmup_forward` emits one frame per warm job."""
-    child = importlib.reload(importlib.import_module("gen_worker.mint_child"))
-
-    child.frame(phase="load", note="env seal")
-    time.sleep(0.05)
-    child.frame(phase="warmup_forward", step=0, total=2)
-    child.frame(phase="warmup_forward", step=1, total=2, note="txt2img")
-    time.sleep(0.05)
-    child.frame(phase="warmup_forward", step=2, total=2, note="turbo")
-    child.frame(phase="seal_publish", note="packing")
-    phases = child._close_phases()
-
-    assert set(phases) == {"load", "warmup_forward", "seal_publish"}, phases
-    assert phases["load"] >= 0.05, phases
-    assert phases["warmup_forward"] >= 0.05, phases
-    # One span for the phase, not three: the frames are progress, the phase is
-    # the span.
-    capsys.readouterr()
+# `test_child_phase_clock_measures_spans_not_frames` lived here. Its subject was
+# `gen_worker.mint_child.frame()` — the mint child's phase-transition funnel —
+# and cd46c957 (pgw#1373) DELETED that module with the v1 mint runtime. There is
+# no successor to point it at: `mint_process` survives and still names
+# `MINT_CHILD_MODULE = "gen_worker.mint_child"` as the module it spawns, which
+# is an orphan of the same hardcut, filed rather than papered over here
+# (pgw#1438; the mint wiring is pgw#1371's).
 
 
 def test_child_report_carries_the_phase_table() -> None:
@@ -164,82 +150,39 @@ def test_child_report_carries_the_phase_table() -> None:
 
 
 # --------------------------------------------------------------------------
-# Both routes, over a real socket, in the same shape
+# The surviving route, over a real socket
 # --------------------------------------------------------------------------
+#
+# This was `test_both_mint_routes_report_duration_over_real_grpc`. The AOT half
+# drove `aot_mint._emit_phase_event`, and cd46c957 (pgw#1373) deleted
+# `aot_mint.py` with the v1 mint runtime — so the two-route COMPARISON it
+# asserted has one route left to compare. The JIT half is untouched and is what
+# stays: the real production emitter, a real gRPC socket, and the `n_graphs`
+# assertion that is the reason this file exists.
 
 
+def test_the_jit_mint_route_reports_duration_over_real_grpc() -> None:
+    """A JIT mint lands a numeric `duration_ms` on the hub under a
+    `phase=minted` roll-up, with its per-shape spans as their own events.
 
-def test_both_mint_routes_report_duration_over_real_grpc() -> None:
-    """The headline assertion: an AOT mint and a JIT mint each land a numeric
-    `duration_ms` on the hub, under the same `phase=minted` roll-up, with their
-    per-entry / per-phase spans as their own events.
-
-    That is what makes "AOT vs JIT mint duration" one grouped query over
-    `worker_activity_events` instead of a regex over one side's prose and a grep
-    of the other side's (nonexistent) pod log.
+    `duration_ms` (proto field 17) is the point: a duration parsed out of
+    free-text `detail` is not indexable and is silently NULL the first time the
+    formatting changes.
     """
-    aot_mint = importlib.import_module("gen_worker.aot_mint")
-
-    with hub_double(modules=("harness.toy_endpoints",)) as (sched, _harness):
+    with hub_double() as (sched, _harness):
         conn = sched.wait_connection(0)
 
-        # ---- AOT route: the REAL _emit_phase_event over a REAL phase table.
-        # The table shape is aot_mint._mint_phase_table's own output contract
-        # (v1: totals + phases + per-entry timings), not an invention.
-        table = {
-            "v": 1,
-            "n_entries": 2,
-            "autotune": {"mode": "max-autotune-no-cudagraphs"},
-            "inductor_configs": {"compile_threads": 8},
-            "totals": {
-                "export_s": 120.0, "compile_s": 900.0, "warm_s": 60.0,
-                "package_s": 12.0, "declare_s": 3.0, "total_s": 1101.5,
-            },
-            "phases": {"inductor_compile": 900.0},
-            "entries": {
-                "unet_cfg": {"export_s": 80.0, "compile_s": 700.0, "warm_s": 40.0},
-                "vae_decode": {"export_s": 40.0, "compile_s": 200.0, "warm_s": 20.0},
-            },
-        }
-
-        class _Spec:
-            family = "sdxl"
-
-            @staticmethod
-            def execution_lane_label() -> str:
-                return "w8a8"
-
-        aot_mint._emit_phase_event(_Spec(), table)
-
-        # ---- JIT route (pgw#1010: the INTAKE compile a serving pod pays for
-        # itself — the only JIT left, and the executor emits it through the
-        # REAL production emitter).
+        # pgw#1010: the INTAKE compile a serving pod pays for itself — the only
+        # JIT left, emitted through the REAL production emitter.
         cc.emit_jit_compile_event(
             {"boot": 612.5}, family="sdxl", execution_lane="w8a8",
             route="intake",
             audit=cc.GraphAudit(unique_graphs=8, graph_breaks=0))
 
-        aot = _wait_for_phases(
-            conn, aot_mint.MINT_PHASES_KIND,
-            {"minted", "entry:unet_cfg", "entry:vae_decode"})
         jit = _wait_for_phases(
             conn, activity_mod.KIND_JIT_COMPILE, {"minted", "shape:boot"})
 
-    # The roll-ups: the numbers a comparison groups on, in a column. ONE query
-    # over (kind, phase='minted') now yields both, in the same unit.
-    assert aot["minted"].duration_ms == 1_101_500
     assert jit["minted"].duration_ms == 612_500
-
-    # The per-entry / per-phase spans: Paul's "why is AOT mint so much slower
-    # than JIT mint?" is answered by these, not by the totals.
-    assert aot["entry:unet_cfg"].duration_ms == 820_000   # 80 + 700 + 40
-    assert aot["entry:vae_decode"].duration_ms == 260_000  # 40 + 200 + 20
-    # Entry spans deliberately do NOT reconstruct total_s: package/declare/pack
-    # are per-mint, not per-entry, so a reader must never sum children into a
-    # roll-up.
-    assert (aot["entry:unet_cfg"].duration_ms
-            + aot["entry:vae_decode"].duration_ms) < aot["minted"].duration_ms
-
     assert jit["shape:boot"].duration_ms == 612_500
     assert "route=intake" in jit["minted"].detail
     # `n_graphs` finally has a caller. It read 0 on every event on
@@ -250,7 +193,7 @@ def test_both_mint_routes_report_duration_over_real_grpc() -> None:
 
     # Every timed event is COMPLETED, which is what makes it durable hub-side
     # (th#1250 records terminal updates unconditionally).
-    for update in list(aot.values()) + list(jit.values()):
+    for update in jit.values():
         assert update.state == pb.ActivityState.ACTIVITY_STATE_COMPLETED
         assert update.duration_ms > 0, update
 
@@ -299,17 +242,10 @@ def test_an_intake_compile_that_produced_nothing_is_not_reported_at_all(
 
 
 def test_telemetry_never_fails_the_compile_it_measures() -> None:
-    """Every emitter is wrapped: a broken sink, a bad table, a report with junk
-    in it — none of them may raise into a mint. The compile is the product; the
-    measurement is not allowed to cost it."""
-    aot_mint = importlib.import_module("gen_worker.aot_mint")
+    """The emitter is wrapped: a bad table must not raise into a compile. The
+    compile is the product; the measurement is not allowed to cost it.
 
-    class _Exploding:
-        family = "sdxl"
-
-        @staticmethod
-        def execution_lane_label() -> str:
-            raise RuntimeError("boom")
-
-    aot_mint._emit_phase_event(_Exploding(), {"totals": {"total_s": 1.0}})
+    cd46c957 (pgw#1373) deleted `aot_mint._emit_phase_event`, so the AOT arm of
+    this test went with it. The claim is unchanged for the emitter that is left.
+    """
     cc.emit_jit_compile_event({"a": "not-a-number"}, family="sdxl")  # type: ignore[dict-item]

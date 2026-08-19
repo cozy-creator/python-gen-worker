@@ -62,36 +62,37 @@ def test_the_ban_is_explained_without_spelling_the_directive() -> None:
     )
 
 
-def test_the_canonical_example_carries_the_aot_host_toolchain() -> None:
+def test_the_doc_teaches_the_aot_host_toolchain_layer() -> None:
     """pgw#1017: the AUTHOR installs it, and the docs must say so.
 
     A custom Dockerfile is author-owned content — the platform verifies the
-    toolchain at build time (`aot_preconditions.CHECK_CXX_TOOLCHAIN`) rather
-    than injecting a layer into someone else's file. That only works if the
-    canonical file an author copies has the layer.
+    toolchain at build time rather than injecting a layer into someone else's
+    file. That only works if the file an author is TAUGHT to copy has the layer.
 
-    WHETHER the layer is there is the registry's question now
-    (`build_guarantees.cxx_toolchain`, checked over every example). What is
-    asserted here is what that row deliberately does not enforce: the SHAPE of
-    the layer, which is a measured size argument rather than a platform
+    This was `test_the_canonical_example_carries_the_aot_host_toolchain` and it
+    read `examples/micro-diffusion/Dockerfile`. 56d89b7f (pgw#1373) deleted
+    `examples/` — every one of them declared against the v1 SDK — so there is no
+    canonical example in this repo to read, and the row's other half (the doc
+    and the example teach the SAME layer) has nothing left to agree with. The
+    doc is now the only place the layer is taught here, so the doc is what is
+    asserted. The SHAPE argument below is why: `build_guarantees.cxx_toolchain`
+    asks whether a layer exists; this asks whether it is the +80 MB one rather
+    than the +250 MB one, which is a measured size argument and not a platform
     refusal.
     """
-    path = REPO / "examples" / "micro-diffusion" / "Dockerfile"
-    content = path.read_text()
-    assert "ca-certificates curl g++" in content, (
-        "micro-diffusion declares an AOT export, so its image must carry a C++ "
-        "compiler; the build refuses without one (aot precondition "
-        "cxx_toolchain)"
+    doc = DOC.read_text()
+    assert "ca-certificates curl g++" in doc, (
+        "an endpoint declaring an AOT export needs a C++ compiler in its "
+        "image; the build refuses without one (aot precondition cxx_toolchain)"
     )
-    assert "--no-install-recommends" in content
-    instructions = "\n".join(
-        line for line in content.splitlines()
-        if not line.lstrip().startswith("#")
-    )
-    assert "build-essential" not in instructions, (
-        "build-essential drags ~250 MB of make/dpkg-dev the AOTI wrapper "
-        "compile never invokes; g++ with recommends off is +80 MB"
-    )
-    assert "ca-certificates curl g++" in DOC.read_text(), (
-        "the doc and the example must teach the same toolchain layer"
+    assert "--no-install-recommends" in doc
+    # The doc NAMES build-essential in order to warn against it. That is the
+    # opposite of the deleted example's assertion (where the word appearing in
+    # an instruction was the defect) and it is the right claim for prose: the
+    # teaching must be explicit, because an author reaching for a C++ compiler
+    # reaches for build-essential by habit.
+    assert "build-essential" in doc, (
+        "the doc must say WHY not build-essential, not merely omit it: it "
+        "drags ~250 MB of make/dpkg-dev the AOTI wrapper compile never "
+        "invokes, against +80 MB for g++ with recommends off"
     )
