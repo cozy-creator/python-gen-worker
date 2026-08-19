@@ -696,7 +696,7 @@ torchvision = [
 # uv.lock behind, which breaks `uv sync --locked` — the first step of every CI
 # job — for every open PR; `scripts/lint_lock_pin_agreement.py` now refuses that
 # tree locally and as CI's first step.
-torchcg = { git = "https://github.com/cozy-creator/torchcg", rev = "b5509c0dc89f027245b9cd56e103227b7afadb4c" }
+torchcg = { git = "https://github.com/cozy-creator/torchcg", rev = "20e54d41c7f853e809fc985e795e1cdd539b3215" }
 # Saying which pins were deleted requires naming them.
 # retired-name: historical rationale, not a live reference.
 # pgw#1310 deleted the `hashrepo` / `torch-compiled-graphs` git pins that stood

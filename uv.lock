@@ -687,7 +687,7 @@ requires-dist = [
 provides-extras = ["torch", "vision", "images", "audio", "video", "signing", "dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "torchcg", git = "https://github.com/cozy-creator/torchcg?rev=b5509c0dc89f027245b9cd56e103227b7afadb4c" }]
+dev = [{ name = "torchcg", git = "https://github.com/cozy-creator/torchcg?rev=20e54d41c7f853e809fc985e795e1cdd539b3215" }]
 
 [[package]]
 name = "gguf"
@@ -2235,7 +2235,7 @@ wheels = [
 [[package]]
 name = "torchcg"
 version = "0.1.0"
-source = { git = "https://github.com/cozy-creator/torchcg?rev=b5509c0dc89f027245b9cd56e103227b7afadb4c#b5509c0dc89f027245b9cd56e103227b7afadb4c" }
+source = { git = "https://github.com/cozy-creator/torchcg?rev=20e54d41c7f853e809fc985e795e1cdd539b3215#20e54d41c7f853e809fc985e795e1cdd539b3215" }
 dependencies = [
     { name = "safetensors" },
     { name = "tensorfs" },

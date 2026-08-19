@@ -115,6 +115,11 @@ def _run_derive(args: argparse.Namespace) -> int:
 
     for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
+    # pgw#1449: named, and named SEPARATELY from the warnings — an entrypoint
+    # with no traced coverage is a property of the document a reader has to
+    # be able to see without parsing prose.
+    for name, reason in result.unenumerable_entrypoints:
+        print(f"entrypoint {name}: NOT enumerated -- {reason}", file=sys.stderr)
     if result.eager_permanent:
         # pgw#1392: two different reasons reach "no lanes" and the log must
         # not conflate them — a model held eagerly (`lanes=()`), or NO MODEL
