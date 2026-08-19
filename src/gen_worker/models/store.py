@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, c
 from .. import activity as activity_mod
 from .. import boot_phases as boot_mod
 from .. import progress as progress_mod
+from .. import weight_position
 from ..capability import InsufficientDiskError
 from ..lifecycle_intents import IntentRegistry
 from ..pb import worker_scheduler_pb2 as pb
@@ -1348,9 +1349,17 @@ class ModelStore:
             # is one, so it advances that scope's clock and no other.
             dl_counter = activity_mod.scoped_counter(
                 f"download:{ref}", progress_mod.UNIT_BYTES, total=known_total)
+            # pgw#1455: the counter above is IN-MEMORY on the hub and rides
+            # whichever activity is open — none, for a steady-state
+            # materialization. The position is the durable fact the
+            # `model_download_pending` explain reads, so it is emitted on the
+            # activity stream from this same funnel, which is the one layer
+            # that sees every materialization path and knows the ref.
+            position = weight_position.FetchPosition(ref, total_bytes=known_total)
 
             def _progress(done: int, total: Optional[int]) -> None:
                 nonlocal last_progress
+                position.progress(done, total)
                 dl_counter.set_done(float(done))
                 if total:
                     dl_counter.set_total(float(total))
@@ -1367,6 +1376,7 @@ class ModelStore:
                     self._loop,
                 )
 
+            position.open()
             await self._event(
                 ref, pb.MODEL_STATE_DOWNLOADING, identity=operation_identity,
                 bytes_total=known_total,
@@ -1509,6 +1519,10 @@ class ModelStore:
                 raise
             finally:
                 dl_counter.finish()
+                # Where the transfer STOPPED, whether it finished or raised —
+                # a fetch that ends with no terminal row is one nobody can
+                # distinguish from a fetch still running.
+                position.close(ok=fetch_exc is None)
                 if fetch_span is not None:
                     net = int(net_scope.network_bytes)
                     if net > 0:
