@@ -36,8 +36,17 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import msgspec
 
+from . import boot_phases as boot_mod
+from . import content_credentials
 from . import hostfacts
+from . import process_role
+from . import receipts
+from . import serve_posture
+from . import worker_credential
+from .capability_renewal import renew_capability_while_running
 from .config import Settings
+from .input_assets import cleanup_input_assets, manifest_from_run_job
+from .stage_timing import stage_ms_for_metrics
 from .host_move_guard import install as _install_host_move_guard
 from .models.cache_paths import tensorhub_cache_dir, tensorhub_cas_dir
 from .models.cozy_snapshot import snapshot_dir_key
@@ -459,6 +468,31 @@ class Worker:
         # defensiveness: a pod that cannot adopt can still SERVE, and a worker
         # that refuses to boot over its compiled-graph story is strictly worse
         # than one that serves eager and says why.
+        # pgw#1425: ARM THE RECEIPT GATE BEFORE THE ADOPT, not only at HelloAck.
+        # Boot-adopt runs before the stream is up, so a gate armed only at
+        # HelloAck leaves the pod's FIRST artifacts — the ones it pulls by key
+        # from the hub store — outside it. v1 had the same window and it was
+        # silently OPEN; with the gate failing closed it would instead refuse
+        # every boot-adopt and self-mint the lot. Neither is right, and the
+        # fix is neither: `HelloAck.file_base_url` IS the tensorhub base URL
+        # (`worker_scheduler.proto`: "tensorhub base URL for capability-token
+        # HTTP calls"), which this pod already knows as TENSORHUB_URL. So arm
+        # from settings now and re-arm from the ack later — `configure` is
+        # idempotent and drops the JWKS cache, so the authoritative value
+        # simply replaces this one.
+        hub_base = str(getattr(settings, "tensorhub_url", "") or "").strip()
+        if hub_base:
+            receipts.configure(hub_base, worker_credential.current)
+        else:
+            # Not a refusal to boot: the pod serves, and every hub-delivered
+            # artifact refuses until the ack arms the gate. Said out loud
+            # because "nothing adopted" would otherwise read as "nothing to
+            # adopt".
+            logger.warning(
+                "receipts: no TENSORHUB_URL, so the gate is UNARMED for the "
+                "boot-adopt window — hub-delivered artifacts will be refused "
+                "and self-minted until HelloAck arms it"
+            )
         try:
             self.adoption = self._build_adoption()
         except Exception:  # noqa: BLE001 — adoption never costs a boot
@@ -522,6 +556,13 @@ class Worker:
         self.worker_session_id = uuid.uuid4().hex
         self.file_base_url = ""
 
+        # pgw#1425: THE SDK IS UP. Author modules are imported, every
+        # `@entrypoint` is harvested and the serve stack is built — the phase
+        # the whole boot table is anchored on, and the one the v2 rewrite never
+        # marked, which is why every pod's phase series was empty.
+        boot_mod.mark_once(
+            boot_mod.PHASE_SDK_READY, function=",".join(self.functions)
+        )
         self.phase = pb.WORKER_PHASE_READY
         self.draining = False
         self.drained = asyncio.Event()
@@ -645,6 +686,34 @@ class Worker:
             "hello acked: functions=%s file_base_url=%s",
             self.functions, self.file_base_url or "(none)",
         )
+        # pgw#1425: THE HELLOACK WIRING MOMENT. Three modules take their hub
+        # half here and nowhere else, and the v2 rewrite called none of them.
+        # `mark_once`, not `mark`: this coroutine runs again on every
+        # RECONNECT, and "process start -> hello" measured on the third
+        # reconnect of a six-hour-old worker is not a boot number.
+        boot_mod.mark_once(boot_mod.PHASE_HELLO)
+        if self.functions:
+            # THE cold-boot number: the hub has acked a Hello advertising these
+            # functions, so from this instant it may dispatch to this pod.
+            boot_mod.mark_once(
+                boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
+                function=",".join(self.functions),
+            )
+        if not self.file_base_url:
+            # The gate stays UNSET, which now refuses (pgw#1425). Say so: a
+            # session with no file API is a hub-side fact this pod cannot fix,
+            # and the operator must be able to see why nothing arms.
+            logger.error(
+                "hello acked with NO file_base_url: the compiled-graph receipt "
+                "gate cannot arm, so every hub-delivered artifact will be "
+                "refused and self-minted, and C2PA remote signing is "
+                "unavailable"
+            )
+            return
+        receipts.configure(self.file_base_url, worker_credential.current)
+        content_credentials.configure_remote_signer(
+            self.file_base_url, worker_credential.current
+        )
 
     async def on_disconnect(self) -> None:
         logger.warning("hub stream disconnected; %d job(s) in flight", len(self._jobs))
@@ -657,6 +726,16 @@ class Worker:
             self._on_cancel_job(msg.cancel_job)
         elif which == "drain":
             self.start_drain(int(msg.drain.deadline_ms))
+        elif which == "serve_posture":
+            # pgw#1425: the operator's eager-only order (§4.32 item 4).
+            # `apply_command` owns idempotence — the hub REPLAYS the order to a
+            # reconnecting worker — so this handler must not try to dedupe.
+            posture = msg.serve_posture
+            serve_posture.apply_command(
+                bool(posture.eager_only),
+                actor=str(getattr(posture, "actor", "") or ""),
+                reason=str(getattr(posture, "reason", "") or ""),
+            )
         else:
             # Named, not swallowed: this build implements no residency
             # reconciliation (model_op) and no posture command.
@@ -816,6 +895,7 @@ class Worker:
         inline: Optional[bytes] = None
         message = ""
         adjustments: Tuple[Dict[str, str], ...] = ()
+        stages: Optional[Any] = None
         started = accepted_at
         try:
             self._check_lane(run)
@@ -832,6 +912,36 @@ class Worker:
             inflight = postmortem.note_inflight(
                 "request", str(run.function_name), request_id=str(run.request_id)
             )
+            # pgw#1425: the capability token this job writes with expires
+            # MID-FLIGHT on any long request, and nothing else refreshes it —
+            # the token carries no refresh and the hub does not push. The
+            # renewal loop lives on the event loop while the author's body runs
+            # on a worker thread; `on_context` is how it reaches the context
+            # object that holds the token.
+            renew: Optional[asyncio.Task[None]] = None
+            ctx_box: List[Any] = []
+
+            def _bind_context(ctx: Any, box: List[Any] = ctx_box) -> None:
+                box.append(ctx)
+
+            if run.capability_token and self.file_base_url:
+                renew = asyncio.create_task(
+                    renew_capability_while_running(
+                        file_base_url=self.file_base_url,
+                        request_id=str(run.request_id),
+                        attempt=int(run.attempt),
+                        get_worker_jwt=worker_credential.current,
+                        get_token=lambda: (
+                            ctx_box[0]._worker_capability_token or ""
+                            if ctx_box else str(run.capability_token or "")
+                        ),
+                        set_token=lambda t: (
+                            setattr(ctx_box[0], "_worker_capability_token", t)
+                            if ctx_box else None
+                        ),
+                    ),
+                    name=f"cap-renew-{run.request_id}",
+                )
             try:
                 outcome = await asyncio.to_thread(
                     functools.partial(
@@ -839,13 +949,26 @@ class Worker:
                         str(run.function_name),
                         envelope,
                         request_id=str(run.request_id),
+                        attempt=int(run.attempt),
+                        # pgw#1418: the ordered, credential-free input manifest.
+                        # Without it the serve path materialized nothing and
+                        # every Image/Video/AudioAsset reached the author with
+                        # `local_path` unset.
+                        input_assets=manifest_from_run_job(run.input_assets),
                         context=self._request_context_facts(run),
+                        on_context=_bind_context,
                     )
                 )
             finally:
                 postmortem.clear_inflight(inflight)
+                if renew is not None:
+                    renew.cancel()
+                # The attempt's input directory is worker-owned scratch and
+                # nothing downstream reads it once the body has returned.
+                cleanup_input_assets(str(run.request_id), int(run.attempt))
             inline = msgspec.msgpack.encode(outcome.result)
             adjustments = outcome.adjustments
+            stages = outcome.stages
             status = pb.JOB_STATUS_OK
         except asyncio.CancelledError:
             await self._send_result(*key, pb.JOB_STATUS_CANCELED, safe_message="canceled")
@@ -865,15 +988,22 @@ class Worker:
         finally:
             self._canceled.discard(key)
         now = time.monotonic()
+        runtime_ms = int((now - started) * 1000)
+        metrics = pb.JobMetrics(
+            runtime_ms=runtime_ms,
+            queue_ms=int((started - accepted_at) * 1000),
+        )
+        # pgw#1425: the per-stage breakdown, closed against `runtime_ms` so
+        # every emitted stage plus `resid.unattributed` sums to it. Before this
+        # the `JobResult.metrics` of every v2 request carried two numbers and
+        # the whole stage series was empty.
+        metrics.stage_ms.update(stage_ms_for_metrics(stages, runtime_ms))
         await self._send_result(
             *key,
             status,
             inline=inline,
             safe_message=message,
-            metrics=pb.JobMetrics(
-                runtime_ms=int((now - started) * 1000),
-                queue_ms=int((started - accepted_at) * 1000),
-            ),
+            metrics=metrics,
             adjustments=adjustments,
         )
 
@@ -942,6 +1072,13 @@ class Worker:
 
         activity_mod.bind_sink(self._send, loop)
         boot_mod.bind_sink(self._send, loop)
+
+        # pgw#1425: THIS is the serving process, and it says so where the wire
+        # that carries the claim is bound — so the fact and its transport
+        # arrive together. Compile children's pid rows are read beside this
+        # session; without the declaration they are attributed to nothing.
+        process_role.declare(process_role.ROLE_SERVING)
+        process_role.emit_boot_role()
 
         heartbeat = asyncio.create_task(self._heartbeat(), name="heartbeat")
         transport_task = asyncio.create_task(self.transport.run(), name="transport")

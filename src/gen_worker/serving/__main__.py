@@ -33,6 +33,7 @@ from typing import Any, Mapping
 
 import msgspec
 
+from .. import receipts
 from .context import DeployBinding
 from .host import EndpointHost
 from .loader import load_endpoint
@@ -303,6 +304,13 @@ def _serve_envelopes(args: argparse.Namespace, loaded: Any) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    # pgw#1425: this is the cozy-local / local-drive shape — the compiled-graph
+    # store is the operator's own directory, so hub-signed receipts do not
+    # apply and the gate is DECLARED off rather than left unset. A process
+    # that declares neither posture refuses; that is the point.
+    receipts.trust_local_store(
+        "gen_worker.serving CLI: the store is a local directory the operator "
+        "owns, not a hub delivery")
     if args.envelope and args.payload:
         raise SystemExit("--payload and --envelope are two modes; pick one")
     if args.envelope:

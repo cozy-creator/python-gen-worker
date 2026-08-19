@@ -98,30 +98,14 @@ class FactsUnavailable(
 SlotEvidence = Union[ServingFacts, FactsUnavailable]
 
 
-def facts_or_degrade(
-    evidence: SlotEvidence, *, slot: str, what: str,
-) -> "tuple[ServingFacts, str]":
-    """The stamped facts, plus the sentence to CONFESS if nobody stamped them.
-
-    The ONE place the union is collapsed. pgw#1333 made this raise, and the
-    attribution it built was right — the message blames the *sender* that
-    skipped the stamp, never the checkpoint's catalog row. What was wrong was
-    the refusal: a wire gap on our own side is not grounds to decline a paid
-    customer request (pgw#1339 / th#2099). So the gap now degrades — an empty
-    :class:`ServingFacts` and a non-empty reason — and the caller serves while
-    saying exactly whose stamp is missing.
-
-    An empty second element means there is nothing to confess.
-    """
-    if isinstance(evidence, ServingFacts):
-        return evidence, ""
-    return ServingFacts(), (
-        f"slot {slot!r}: no serving facts were resolved for this checkpoint "
-        f"({what}) — {evidence.owed_by} did not stamp objective/distilled/"
-        f"distilled_status, so there is no evidence to check the invoked "
-        f"function's declared serving contract against. This is a wire gap, "
-        f"NOT a claim about the checkpoint's catalog row; the request still "
-        f"serves and this slot's declared contract goes UNCHECKED.")
+# pgw#1425: `facts_or_degrade` is DELETED, not baselined. It collapsed the
+# `SlotEvidence` union, whose only producer is `dispatch.order_from_binding` —
+# which reads `objective`/`distilled`/`distilled_status` off a CATALOG-stamped
+# `ModelBinding`. pgw#1373 deleted the catalog/declaration architecture, so
+# there is no stamp to read and no declared serving contract to check one
+# against: producer and consumer died in one ruling. `SlotEvidence` itself
+# survives for `child_contract`; the rest of the chain is pgw#1425's
+# remaining-69 triage.
 
 
 __all__ = [
@@ -130,5 +114,4 @@ __all__ = [
     "FactsUnavailable",
     "ServingFacts",
     "SlotEvidence",
-    "facts_or_degrade",
 ]
