@@ -172,6 +172,66 @@ def test_a_no_lane_endpoint_stamps_the_explicit_eager_marker(
     assert document["checkpoint_defaults_schema"] is None
 
 
+def test_a_contractless_endpoint_traces_under_a_derived_lane(
+    config_only_tree: Path, tmp_path: Path
+) -> None:
+    """pgw#1488 fix (1) + (3): no contract, no `lanes=`, and it still traces.
+
+    The twin fixture is `tiny_endpoint` with its `lanes=` emptied and nothing
+    else changed, so this is a controlled measurement rather than an
+    assertion about a second endpoint: SAME graphs, DIFFERENT lane name.
+    A contract handle is a name, not a key — which is the whole argument for
+    letting a contract be optional without rekeying anything that exists.
+    """
+
+    declared = tmp_path / "declared.json"
+    derived = tmp_path / "derived.json"
+    assert _derive("tiny_endpoint", config_only_tree, declared) == 0
+    assert _derive("derived_twin_endpoint", config_only_tree, derived) == 0
+
+    (contract_lane,) = json.loads(declared.read_bytes())["graphs"]["lanes"]
+    document = json.loads(derived.read_bytes())
+    (derived_lane,) = document["graphs"]["lanes"]
+
+    assert contract_lane["contract"] == "tiny.diffusers-fp32@1"
+    assert derived_lane["contract"] == "derived.sdxl@1"
+    assert [record["graph"] for record in derived_lane["graphs"]] == [
+        record["graph"] for record in contract_lane["graphs"]
+    ]
+    assert len(derived_lane["graphs"]) == 4
+
+    # The lane row says WHICH KIND of identity it carries. `document: null` is
+    # a bug on a declared contract (pgw#1391) and the honest state on a derived
+    # one, and a reader cannot tell those apart from a null alone.
+    row = document["lane_contracts"]["derived.sdxl@1"]
+    assert row == {"stamp": "derived.sdxl@1", "document": None, "digest": "",
+                   "derived": True}
+
+
+def test_an_unmarked_endpoint_traces_and_reports_nothing_to_compile(
+    config_only_tree: Path, tmp_path: Path
+) -> None:
+    """The middle state: traced, and the author marked no compile target.
+
+    Before pgw#1488 this endpoint could not be derived at all — its model type
+    has no canonical contract, so the derive refused the class by name, and the
+    remedy that refusal named (`lanes=()`) silently disabled compilation. Now
+    `load` RUNS and zero graphs is a measurement.
+    """
+
+    out = tmp_path / "unmarked.json"
+    assert _derive("unmarked_endpoint", config_only_tree, out) == 0
+    document = json.loads(out.read_bytes())
+    assert document["graphs"]["lanes"] == []
+    assert document["lane_contracts"] == {}
+    # It is NOT weightless and NOT eager-by-declaration: the entrypoint's
+    # envelope is published exactly as a compiled endpoint's is.
+    assert set(document["entrypoints"]) == {"analyze"}
+    assert document["entrypoints"]["analyze"]["model_slots"] == {
+        "model": "UnmarkedModel"
+    }
+
+
 def test_binding_enumeration_reaches_adapter_and_cfg_arms(
     config_only_tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

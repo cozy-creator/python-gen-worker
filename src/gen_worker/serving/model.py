@@ -24,8 +24,13 @@ typed skeleton, not a toolbox; nothing else goes on it without a Paul ruling.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import re
+import textwrap
 import typing
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:  # keep the base import-weightless
@@ -43,6 +48,16 @@ REQUIRES_ATTR = "__cozy_requires__"
 #: hatch, and the pipeline-level twin of `Slot(layouts_undeclarable=)`, which
 #: says the same thing one level down about the BYTES.
 SELF_LOADING_ATTR = "__cozy_self_loading__"
+#: pgw#1488 (Paul: "A NORMAL TRACE MUST JUST WORK"). The author's REASON that
+#: this model is served EAGER FOREVER. It is the ONLY way to be eager: an
+#: absent lane declaration means "I state no layout contract", which now
+#: TRACES under a derived identity instead of silently disabling compilation.
+EAGER_ONLY_ATTR = "__cozy_eager_only__"
+
+#: Producer namespace of a DERIVED lane handle. Reserved: a tensorfs contract
+#: is named after the model that publishes it, so nothing real is ever called
+#: ``derived.*`` and a reader can tell the two apart at a glance.
+DERIVED_LANE_PRODUCER = "derived"
 
 
 class ModelDeclarationError(TypeError):
@@ -168,6 +183,101 @@ def lane_dtype(lane: Any, *, where: str) -> Any:
             f"None is not an answer."
         )
     return dtype
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedLane:
+    """The lane of a model class that states NO layout contract (pgw#1488).
+
+    Paul's ruling: *"Traces should just trace."* A contract document is fleet
+    METADATA — a name, a price, a published layout — and metadata cannot be a
+    precondition for producing the artifacts it describes. So a class that
+    names no contract still has exactly one lane; its handle is derived from
+    the model type, deterministically, and the same derivation runs at trace
+    and at serve so both ends address the same row.
+
+    Nothing is lost by deriving it. A lane handle is a NAME, not a key: graph
+    identity is ``cg-graph-v1`` (the canonical trace + ingress + passes) and
+    artifact identity is ``cg-key-v1`` (graph + sm + toolchain), and the
+    contract string appears in neither. That is why a contract-declaring class
+    keeps every byte it had — the handle it publishes is unchanged — while a
+    contract-less class stops being refused.
+
+    ``dtype`` is None here on purpose and is NOT a gap: with no contract the
+    load dtype is the CHECKPOINT's own (``serving.checkpoint_dtype``), read at
+    the two places that hold a checkpoint tree.
+    """
+
+    stamp: str
+    dtype: Any = None
+
+
+def _slug(name: str) -> str:
+    """A class name as a contract-handle path segment."""
+    text = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return text or "model"
+
+
+def derived_lane(cls: type) -> DerivedLane:
+    """The derived lane of ``cls`` — the same answer on every machine."""
+
+    return DerivedLane(
+        stamp=f"{DERIVED_LANE_PRODUCER}.{_slug(model_type(cls).__name__)}@1"
+    )
+
+
+def is_derived_lane(lane: Any) -> bool:
+    """Whether this lane's identity was derived rather than declared."""
+
+    return isinstance(lane, DerivedLane)
+
+
+def eager_only_reason(cls: type) -> str:
+    """The class's declared eager-forever REASON, or ``""``."""
+
+    return str(getattr(cls, EAGER_ONLY_ATTR, "") or "").strip()
+
+
+def _calls_ctx_compile(fn: Any) -> bool:
+    """Whether ``load`` calls ``ctx.compile(...)`` — statically, by AST.
+
+    pgw#1469 measured the mirror of the refusal that already existed: a lane
+    with no compile mark refuses, but a compile mark with no lane was SILENT —
+    ``load`` was never called at all, so nothing observed the mark, and the
+    author got a green lock with a byte-identical document. Under pgw#1488 the
+    unmarked case traces by default, so the only way to reach that silence is
+    to declare ``eager_only=`` AND mark a target, and this is what makes that
+    contradiction a refusal for free: no author code runs, no model loads.
+
+    Parsed rather than grepped — the string ``ctx.compile`` appears in comments
+    and docstrings that say a model deliberately does NOT compile, and a
+    substring check would refuse exactly the classes that documented
+    themselves best.
+    """
+
+    try:
+        source = textwrap.dedent(inspect.getsource(fn))
+    except (OSError, TypeError):  # exec'd/builtin source is not readable
+        return False
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:  # pragma: no cover - dedent of a nested def
+        return False
+    definition = tree.body[0] if tree.body else None
+    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    # The ctx parameter: `load(self, ctx)`, the ruled signature (pgw#1382).
+    names = {argument.arg for argument in definition.args.args[1:2]}
+    for node in ast.walk(definition):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "compile"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in names
+        ):
+            return True
+    return False
 
 
 def _parse_lanes(
@@ -338,8 +448,14 @@ class Model(Generic[MT]):
         class SdxlModel(Model[SDXL], lanes=(contracts.SDXL_DIFFUSERS_BF16,)):
             def load(self, ctx: LoadContext[SDXL]) -> None: ...
 
-    ``lanes=`` omitted means one lane — the model type's canonical contract;
-    ``lanes=()`` states eager-permanent explicitly.
+    ``lanes=`` omitted (or ``lanes=()``) means the author states NO layout
+    contract: the class gets its model type's canonical contract when one is
+    published, and otherwise a DERIVED lane (:class:`DerivedLane`) — either
+    way it TRACES. Eager-forever is a separate declaration and never an
+    inference from an absent one::
+
+        class RifeModel(Model[Rife], eager_only="frame interpolation runs "
+                        "eager; there is no compile target"): ...
 
     The MAPPING form declares each lane together with what that lane needs of
     a machine, in the ie#740 grammar — one line, one place::
@@ -366,12 +482,14 @@ class Model(Generic[MT]):
     __cozy_lanes__: ClassVar[tuple[Any, ...] | None] = None
     __cozy_requires__: ClassVar[dict[str, Any]] = {}
     __cozy_self_loading__: ClassVar[str] = ""
+    __cozy_eager_only__: ClassVar[str] = ""
 
     def __init_subclass__(
         cls,
         *,
         lanes: tuple[Any, ...] | Mapping[Any, Any] | None = None,
         self_loading: str | None = None,
+        eager_only: str | None = None,
         **kwargs: Any,
     ) -> None:
         if "requires" in kwargs:
@@ -404,6 +522,42 @@ class Model(Generic[MT]):
                     "this declaration replaces."
                 )
             cls.__cozy_self_loading__ = reason
+        if eager_only is not None:
+            # pgw#1488 fix (3). Same mandatory-reason pattern as
+            # `self_loading=`, for the same reason: this is the ONE state in
+            # which nothing is compiled, ever, and a state that costs the
+            # fleet performance has to say why in the header where anyone
+            # reviewing the class will read it.
+            if not isinstance(eager_only, str):
+                raise ModelDeclarationError(
+                    f"{cls.__qualname__}: eager_only= must be a string reason, "
+                    f"got {type(eager_only).__name__}"
+                )
+            eager_reason = eager_only.strip()
+            if not eager_reason:
+                raise ModelDeclarationError(
+                    f"{cls.__qualname__}: eager_only= needs a REASON. Say why "
+                    "this model compiles NOTHING, ever — measured no win, no "
+                    "compilable module, an auxiliary model another slot "
+                    "drives. Eager-forever is the one posture that costs the "
+                    "fleet throughput silently, so it states its case."
+                )
+            if lanes:
+                raise ModelDeclarationError(
+                    f"{cls.__qualname__}: eager_only= and a non-empty lanes= "
+                    "contradict each other — a declared lane exists to key "
+                    "compiled graphs, and this class compiles none. Keep one."
+                )
+            if _calls_ctx_compile(cls.__dict__.get("load")):
+                raise ModelDeclarationError(
+                    f"{cls.__qualname__}: eager_only="
+                    f"{eager_reason!r} while load() marks a compile target "
+                    "via ctx.compile(). That mark can never produce a graph — "
+                    "pgw#1469 measured exactly this pair going through as a "
+                    "green lock with a byte-identical document. Drop the mark, "
+                    "or drop eager_only= and let the lock trace."
+                )
+            cls.__cozy_eager_only__ = eager_reason
         super().__init_subclass__(**kwargs)
         if Model in cls.__bases__ and _declared_model_type(cls) is None and not any(
             isinstance(parameter, TypeVar)
@@ -422,25 +576,25 @@ class Model(Generic[MT]):
         # The lanes this class actually serves, and their floors, from the ONE
         # `lanes=` declaration — or the model type's canonical contract when
         # `lanes=` is omitted (which declares no floor).
-        if lanes is not None:
+        if lanes:
             contracts, floors = _parse_lanes(cls, lanes)
             cls.__cozy_lanes__ = contracts
             cls.__cozy_requires__ = floors
-        elif declared is not None:
-            # pgw#1391: OMITTING `lanes=` IS THE se#757 TRAP, so it is checked
-            # here too. `model_lanes()` falls through to the model type's
-            # `canonical_contract`, and the class that declares nothing is
-            # exactly the one that used to claim `sd15.diffusers-bf16@1` — a
-            # document that existed nowhere — all the way into a published
-            # manifest. Validating the fall-through target at declaration is
-            # what makes discovery refuse it, because discovery IMPORTS the
-            # author module: the guarantee rides on `__init_subclass__` rather
-            # than on any particular consumer remembering to enumerate lanes.
-            # (pgw#1394 deleted discovery's `_lane_stamps` for good reasons;
-            # this seam is why that deletion costs the fence nothing.)
-            canonical = getattr(declared, "canonical_contract", None)
-            if canonical is not None:
-                lane_dtype(canonical, where=f"{cls.__qualname__} (lanes= omitted)")
+        elif lanes is not None:
+            # `lanes=()` — the author states no contract, which is what an
+            # omitted `lanes=` says too. pgw#1488 collapses the two: neither is
+            # eager-forever, and both fall through to `model_lanes`.
+            cls.__cozy_lanes__ = ()
+            cls.__cozy_requires__ = {}
+        # pgw#1391 VALIDATED the omitted-`lanes=` fall-through HERE and refused
+        # a canonical contract tensorfs publishes no readable document for.
+        # pgw#1488 deletes that refusal rather than moving it: the fall-through
+        # can no longer strand anyone, because `model_lanes` answers a DERIVED
+        # lane when the canonical contract is missing or unreadable. The se#757
+        # trap it was built for — a class silently CLAIMING a stamp that names
+        # no document — is closed by the same change from the other side: an
+        # unreadable contract is not borrowed at all, so no false stamp can be
+        # published, and the class traces under a handle that says `derived.`.
 
     # -- lifecycle hooks (the load/unload contract, pgw#1382) ---------------
 
@@ -477,22 +631,52 @@ def model_type(cls: type) -> type:
 
 
 def model_lanes(cls: type) -> tuple[Any, ...]:
-    """The model class's lanes — declared, or the model type's canonical
-    contract when ``lanes=`` was omitted. ``()`` is explicit eager-permanent."""
+    """The model class's lanes. ``()`` ONLY for ``eager_only=`` (pgw#1488).
+
+    Three states, each a word rather than an inference:
+
+    * ``eager_only="<reason>"`` -> ``()``. Nothing is traced, nothing compiled,
+      and the reason travels to whoever asks why.
+    * ``lanes=<contracts>`` -> exactly those. Unchanged, byte for byte: a
+      contract-declaring class publishes the handle it always did.
+    * ``lanes=()`` -> a DERIVED lane. The author stated no contract, so none is
+      borrowed — and it TRACES, which is the whole of fix (3): an empty tuple
+      used to disable compilation with no output whatsoever.
+    * ``lanes=`` omitted -> the model type's canonical contract when tensorfs
+      publishes a readable one (the convenience that spelling exists for),
+      else a DERIVED lane. This is fix (1): a missing contract document stops
+      being a reason to refuse to trace.
+
+    The old refusal ("omits lanes= and its model type has no canonical contract
+    yet (tensorfs#111); declare lanes= explicitly, or lanes=() for
+    eager-permanent") is DELETED. It cost anima a throwaway one-tensor contract
+    document, invented purely to be allowed to run torch.export, and its own
+    suggested remedy (``lanes=()``) silently disabled compilation instead.
+    """
 
     declared_type = model_type(cls)  # also validates cls
+    if eager_only_reason(cls):
+        return ()
     lanes = getattr(cls, LANES_ATTR, None)
-    if lanes is not None:
+    if lanes:
         return tuple(lanes)
+    if lanes is not None:
+        # `lanes=()` WRITTEN OUT: the author states no contract for this class,
+        # so none is borrowed — not even the model type's canonical one, which
+        # would publish a layout claim the author never made. It traces under
+        # its own derived name.
+        return (derived_lane(cls),)
     canonical = getattr(declared_type, "canonical_contract", None)
-    if canonical is None:
-        raise ModelDeclarationError(
-            f"{cls.__qualname__} omits lanes= and its model type "
-            f"{declared_type.__name__} has no canonical contract yet "
-            "(tensorfs#111); declare lanes= explicitly, or lanes=() for "
-            "eager-permanent"
-        )
-    return (canonical,)
+    if canonical is not None:
+        try:
+            lane_dtype(canonical, where=f"{cls.__qualname__} (lanes= omitted)")
+        except ModelDeclarationError:
+            # A canonical contract that cannot state its own load dtype is not
+            # a lane; borrowing its stamp would publish a claim about a layout
+            # nobody can read. Derive instead — and say `derived.` in the name.
+            return (derived_lane(cls),)
+        return (canonical,)
+    return (derived_lane(cls),)
 
 
 def model_requires(cls: type) -> dict[str, Any]:
@@ -505,12 +689,18 @@ def model_requires(cls: type) -> dict[str, Any]:
 
 
 __all__ = [
+    "DERIVED_LANE_PRODUCER",
     "DTYPELESS_UPSTREAM_LANES",
+    "EAGER_ONLY_ATTR",
     "LANES_ATTR",
     "LaneContract",
     "MODEL_TYPE_ATTR",
     "Model",
     "REQUIRES_ATTR",
+    "DerivedLane",
+    "derived_lane",
+    "eager_only_reason",
+    "is_derived_lane",
     "model_requires",
     "ModelDeclarationError",
     "lane_handle",

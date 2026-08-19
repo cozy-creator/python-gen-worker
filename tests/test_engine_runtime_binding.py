@@ -167,7 +167,9 @@ def test_the_lock_census_names_the_engine_runtime(declarations: Any) -> None:
 # --------------------------------------------------------------------------
 
 
-class UnmarkedGgufModel(Model[SDXL], lanes=()):
+class UnmarkedGgufModel(
+    Model[SDXL], eager_only="an external engine owns the weights and the graph"
+):
     """Engine-hosted and NOT marked — the mistake a migrating author makes.
 
     An engine-hosted model is self-loading by construction, so this class is

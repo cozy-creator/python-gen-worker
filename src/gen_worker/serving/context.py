@@ -80,12 +80,19 @@ def _torch_dtype_from_name(name: str) -> Any:
     return candidate if isinstance(candidate, torch.dtype) else None
 
 
-def _lane_torch_dtype(lane: Any) -> Any:
+def _lane_torch_dtype(lane: Any, *, checkpoint_dir: Any = None) -> Any:
     """The lane's load dtype as a REAL ``torch.dtype``, or None.
 
     Shared by both eager bridges (`serving/context.py` and
     `release/trace_context.py`) so the two cannot drift — pgw#1447 already
     proved they drift when they are two copies.
+
+    ``checkpoint_dir`` (pgw#1488) is the fallback source for a lane that
+    declares no dtype — a DERIVED lane, which by construction has no contract
+    to read one from. Precision is graph identity, so "no answer" is not an
+    outcome the trace can take: the checkpoint's own dtype is read instead
+    (``serving.checkpoint_dtype``). Both bridges pass their tree, so the trace
+    and the serve resolve the SAME precision for the same lane.
 
     Prefers ``Contract.torch_dtype`` (the object) over ``Contract.dtype`` (the
     spelling). Every non-AttributeError read is treated as "this contract
@@ -94,8 +101,10 @@ def _lane_torch_dtype(lane: Any) -> Any:
     protective arm, kept identical and applied to BOTH spellings, since a
     dtype-less document raises the same way whichever attribute is asked for.
     """
+    from .checkpoint_dtype import checkpoint_dtype
+
     if lane is None:
-        return None
+        return checkpoint_dtype(checkpoint_dir)
     for attr in ("torch_dtype", "dtype"):
         try:
             value = getattr(lane, attr)
@@ -106,7 +115,7 @@ def _lane_torch_dtype(lane: Any) -> Any:
                 "ctx.load: lane %r declares no load dtype; the eager bridge "
                 "takes the checkpoint's own", lane,
             )
-            return None
+            return checkpoint_dtype(checkpoint_dir)
         if value is None:
             continue
         if isinstance(value, str):
@@ -118,9 +127,9 @@ def _lane_torch_dtype(lane: Any) -> Any:
                 "torch dtype; loading in the checkpoint's own precision "
                 "(pgw#1448)", lane, value,
             )
-            return None
+            return checkpoint_dtype(checkpoint_dir)
         return value
-    return None
+    return checkpoint_dtype(checkpoint_dir)
 
 
 def _rejected_torch_dtype(exc: TypeError) -> bool:
@@ -485,7 +494,7 @@ class LoadContext(Generic[MT_co]):
         FLEET CONSEQUENCE: any timing ever taken through this bridge was fp32
         timing and must be re-baselined, not compared.
         """
-        return _lane_torch_dtype(self._lane)
+        return _lane_torch_dtype(self._lane, checkpoint_dir=self.checkpoint_dir)
 
     def engine(self, spec: Any) -> Any:
         """Boot the EXTERNAL engine that serves this checkpoint — the one

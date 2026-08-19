@@ -50,7 +50,7 @@ class StandInSpec(EngineSpec, frozen=True, kw_only=True):
 
 class StandInModel(
     Model[SDXL],
-    lanes=(),
+    eager_only="an external engine process owns the weights and the graph",
     self_loading="served by an external engine process over HTTP",
 ):
     def load(self, ctx: LoadContext[SDXL]) -> None:

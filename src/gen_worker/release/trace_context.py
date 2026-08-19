@@ -85,7 +85,7 @@ class TraceLoadContext:
         # `torch.bfloat16`; diffusers refuses the string with a warning and
         # silently loads fp32, so this read decides the precision the whole
         # trace runs at.
-        dtype = _lane_torch_dtype(self.lane)
+        dtype = _lane_torch_dtype(self.lane, checkpoint_dir=self.checkpoint_dir)
         try:
             loaded = from_pretrained(self.checkpoint_dir, torch_dtype=dtype)
         except TypeError as exc:

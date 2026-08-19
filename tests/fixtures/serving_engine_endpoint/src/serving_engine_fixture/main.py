@@ -58,7 +58,7 @@ class FakePipeline:
 
 class GgufModel(
     Model[SDXL],
-    lanes=(),
+    eager_only="an external llama.cpp server owns the weights and the graph",
     self_loading="served by llama-server, which self-loads a GGUF; the "
                  "block-quantized container is the external-binary class "
                  "the streaming engine refuses by design",
@@ -80,7 +80,7 @@ class GgufModel(
 
 class VllmModel(
     Model[SDXL],
-    lanes=(),
+    eager_only="an external vLLM server owns the weights and the graph",
     self_loading="served by vLLM, which self-loads the checkpoint directory; "
                  "ctx.load is never called",
 ):
@@ -93,7 +93,10 @@ class VllmModel(
         ))
 
 
-class PytorchModel(Model[SDXL], lanes=()):
+class PytorchModel(
+    Model[SDXL],
+    eager_only="the fixture's in-process arm compiles nothing",
+):
     """THE CONTROL: boots no engine, so the census must not name it."""
 
     def load(self, ctx: LoadContext[SDXL]) -> None:

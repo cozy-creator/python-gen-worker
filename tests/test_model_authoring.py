@@ -114,6 +114,12 @@ def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
     }
 
 
+def _sdxl_contract() -> Any:
+    from gen_worker._vendor.tensorfs import contracts
+
+    return contracts.SDXL_DIFFUSERS_BF16
+
+
 def test_model_header_declarations_and_refusals() -> None:
     with pytest.raises(ModelDeclarationError, match=r"Model\[SDXL\]"):
         type("Bare", (Model,), {})
@@ -126,11 +132,61 @@ def test_model_header_declarations_and_refusals() -> None:
         class StringLane(Model[SDXL], lanes=("sdxl.diffusers-bf16@1",)):
             pass
 
-    class EagerPermanent(Model[SDXL], lanes=()):
+    # pgw#1488. `lanes=()` is NO LONGER eager-permanent: it says "this class
+    # states no layout contract", and a class that states none still traces —
+    # under a DERIVED lane, named after the model type so both the trace and
+    # the serve address the same row. No contract is borrowed (not even SDXL's
+    # canonical one): borrowing would publish a layout claim nobody made.
+    class NoContractDeclared(Model[SDXL], lanes=()):
+        pass
+
+    (derived,) = model_lanes(NoContractDeclared)
+    assert lane_handle(derived) == "derived.sdxl@1"
+    assert derived.dtype is None  # the checkpoint's own dtype decides
+    assert model_type(NoContractDeclared) is SDXL
+
+    # Eager-forever is a DECLARATION with a mandatory reason, mirroring
+    # `self_loading=` — never an inference from an empty tuple.
+    class EagerPermanent(
+        Model[SDXL], eager_only="the fixture compiles nothing on purpose"
+    ):
         pass
 
     assert model_lanes(EagerPermanent) == ()
     assert model_type(EagerPermanent) is SDXL
+
+    with pytest.raises(ModelDeclarationError, match="eager_only= needs a REASON"):
+        class BlankEager(Model[SDXL], eager_only="   "):
+            pass
+
+    with pytest.raises(ModelDeclarationError, match="must be a string reason"):
+        class UnreasonedEager(Model[SDXL], eager_only=True):  # type: ignore[arg-type]
+            pass
+
+    with pytest.raises(ModelDeclarationError, match="contradict each other"):
+        class BothWays(
+            Model[SDXL],
+            lanes={_sdxl_contract(): None},
+            eager_only="but it also declares a lane",
+        ):
+            pass
+
+    # pgw#1469's gap, closed statically: a compile mark under an eager-forever
+    # declaration can never produce a graph, and used to pass as a green lock
+    # with a byte-identical document.
+    with pytest.raises(ModelDeclarationError, match="can never produce a graph"):
+        class MarkedButEager(Model[SDXL], eager_only="measured no win"):
+            def load(self, ctx: object) -> None:
+                ctx.compile(object())  # type: ignore[attr-defined]
+
+    # ...and the same words in a DOCSTRING are not a mark. A class that
+    # documents "no ctx.compile here" is the best-behaved one on the fleet and
+    # a substring check would refuse exactly it.
+    class DocumentedEager(Model[SDXL], eager_only="compute-bound; measured no win"):
+        def load(self, ctx: object) -> None:
+            """No ctx.compile(): torch.compile measured no win here."""
+
+    assert model_lanes(DocumentedEager) == ()
 
     class OmittedLanes(Model[SDXL]):
         pass

@@ -1,4 +1,9 @@
-"""A lanes=() module: eager-permanent, stated by an explicit empty document."""
+"""An `eager_only=` module: eager-permanent, DECLARED, with the reason.
+
+pgw#1488: `lanes=()` no longer says this. An absent lane declaration means
+"no layout contract stated", which traces; eager-forever is its own word and
+carries the author's reason for it.
+"""
 
 from __future__ import annotations
 
@@ -17,8 +22,11 @@ class Out(msgspec.Struct):
     echoed: str
 
 
-class EagerModel(Model[Any], lanes=()):
-    """lanes=() -> nothing compiles, ever; the document says so."""
+class EagerModel(
+    Model[Any],
+    eager_only="the fixture's subject IS the no-compile document",
+):
+    """eager_only= -> nothing compiles, ever; the document says so."""
 
 
 @entrypoint
