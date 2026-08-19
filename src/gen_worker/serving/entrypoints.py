@@ -26,7 +26,17 @@ ruling, 2026-08-17 — one parameter-order rule across the SDK, matching
     def generate(ctx: RequestContext, payload: GenerateInput,
                  video: H3Model) -> GenerateOutput: ...
 
+    @entrypoint(kind="conversion",    # a PRODUCER (pgw#1406)
+                publishes=True, env=("HF_TOKEN", "CIVITAI_API_KEY"))
+    def cast_dtype(ctx: RequestContext, payload: CastDtypeInput
+                   ) -> PublishResult: ...
+
 * first: ``ctx`` annotated :class:`~gen_worker.serving.context.RequestContext`
+  — ONE class for inference and producers alike (pgw#1294/pgw#1306: *no kind
+  selects a different class, because no kind decides what a body may write —
+  the declaration does*). It carries the publisher surface
+  (``save_checkpoint``, ``mktemp``, ``source_path``) and REFUSES it typed
+  unless ``publishes=True`` was declared.
 * second: the payload, a ``msgspec.Struct`` — the wire schema
 * remaining, in any order and **possibly none**: model SLOTS (params
   annotated with a :class:`~gen_worker.serving.model.Model` subclass) and
@@ -44,6 +54,15 @@ The decorator validates at import (typed refusal names the exact defect) and
 stamps :data:`ENTRYPOINT_ATTR` with an :class:`EntrypointSpec` — the whole
 publish-time extraction surface, readable without executing author code
 beyond import.
+
+**THE KWARG RULE (pgw#1406).** Decorator kwargs are declarations about
+PLACEMENT AND AUTHORITY; the signature carries MODEL SLOTS. ``resources=``
+(pgw#1396) and ``kind=`` are placement; ``publishes=`` / ``env=`` /
+``emits_media=`` are authority, and together they are the producer plane's
+whole declaration set — pgw#983 deleted ``@job`` and this is where its 27
+conversion producers land (th#2173). The "``resources=`` is the ONE kwarg"
+sentence described the surface on the day it had one; it was never the
+principle.
 """
 
 from __future__ import annotations
@@ -106,6 +125,34 @@ class EntrypointSpec:
     #: function (pgw#1394) and because `music-analysis` declares three
     #: different vCPU floors across three functions of one endpoint.
     resources: Any = None
+    #: pgw#1406: this function MAY write tensors/repos to the hub. The
+    #: declaration says MAY write; the request still says WHERE. It is the ONE
+    #: justification for the hub minting the repo-write capability grant
+    #: (th#2049), and the SDK stamps the same fact onto the context so the
+    #: publisher surface refuses undeclared code before a byte moves — one
+    #: fact, two enforcers, no drift.
+    publishes: bool = False
+    #: pgw#1406: the environment-variable NAMES this function reads. Values are
+    #: release config and never manifest data; the hub validates config-layer
+    #: env writes against this declaration.
+    env: Tuple[str, ...] = ()
+    #: pgw#1406: TRI-STATE. ``None`` = undeclared, the inference default (media
+    #: IS the product of a request, and the hub grants ``upload_media``
+    #: unconditionally on the request path). ``True`` = declared. ``False`` =
+    #: an explicit opt-OUT, which the SDK enforces at the media surface. See
+    #: the decorator docstring for why this one does not reach the hub.
+    emits_media: bool | None = None
+    #: pgw#1406: the WORKLOAD KIND, the hub's own vocabulary
+    #: (``internal/functionkind``: inference | training | conversion | dataset
+    #: | eval). ``""`` is undeclared and means ``inference``. NOT a write
+    #: declaration — th#2052 cut that and ``publishes=`` replaced it — but the
+    #: hub still derives three PLACEMENT facts from it, which is why a producer
+    #: cannot leave it at the default. See the decorator docstring.
+    kind: str = ""
+    #: The class the author annotated on ``ctx``. The serve loop constructs
+    #: THIS class, so a producer that annotates ``JobContext`` receives the
+    #: publisher surface and an inference entrypoint is unchanged.
+    ctx_type: type | None = None
 
     @property
     def model_params(self) -> Tuple[Tuple[str, type], ...]:
@@ -184,18 +231,78 @@ def _slot_of(fn: Callable[..., Any], name: str, annotation: Any) -> SlotSpec:
     )
 
 
+_ENV_NAME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+#: The hub's workload-kind vocabulary, verbatim from
+#: `internal/functionkind/functionkind.go:All`. NOT invented here — every value
+#: is one the hub normalizes and reads, and `""` is the undeclared default that
+#: `Normalize` maps onto `inference`.
+KINDS = ("inference", "training", "conversion", "dataset", "eval")
+
+
+def _validate_env_decl(fn: Callable[..., Any], env: Any) -> Tuple[str, ...]:
+    """The declared env-var NAMES, validated at decoration.
+
+    Semantics are v1's verbatim (`api/decorators.py:_validate_env_decl`,
+    deleted with the catalog by pgw#983): a list/tuple of upper-snake names,
+    <=64 chars, no repeats, a bare string refused rather than iterated into
+    characters. Only the refusal TEXT changed, to name the author's line the
+    way every other `@entrypoint` refusal does.
+    """
+    if env is None:
+        return ()
+    if isinstance(env, str) or not isinstance(env, (list, tuple)):
+        raise _refuse(
+            fn,
+            f"env= must be a list/tuple of environment-variable NAMES, got "
+            f"{type(env).__name__} — a bare string would iterate into "
+            "characters, so it is refused rather than accepted",
+        )
+    out: list[str] = []
+    for name in env:
+        candidate = str(name or "").strip()
+        if (
+            not candidate
+            or len(candidate) > 64
+            or not ("A" <= candidate[0] <= "Z")
+            or any(c not in _ENV_NAME_CHARS for c in candidate)
+        ):
+            raise _refuse(
+                fn,
+                f"env= name {name!r} is not a valid environment-variable name "
+                "(UPPER_SNAKE, starting with a letter, <=64 chars)",
+            )
+        if candidate in out:
+            raise _refuse(fn, f"env= repeats {name!r}")
+        out.append(candidate)
+    return tuple(out)
+
+
 @overload
 def entrypoint(fn: F) -> F: ...
 @overload
-def entrypoint(*, resources: Any) -> Callable[[F], F]: ...
+def entrypoint(
+    *,
+    resources: Any = ...,
+    kind: str = ...,
+    publishes: bool = ...,
+    env: Any = ...,
+    emits_media: bool | None = ...,
+) -> Callable[[F], F]: ...
 
 
 def entrypoint(
-    fn: F | None = None, *, resources: Any = None
+    fn: F | None = None,
+    *,
+    resources: Any = None,
+    kind: str = "",
+    publishes: bool = False,
+    env: Any = None,
+    emits_media: bool | None = None,
 ) -> F | Callable[[F], F]:
     """Mark a module-level function as an entrypoint (contract above).
 
-    ``resources=`` is the ONE kwarg this decorator takes, and it is the
+    ``resources=`` is the PLACEMENT kwarg, and it is the
     STAFFING ENVELOPE (se#755/pgw#1396): the machine this function is placed
     on — ``Resources(vcpus=…, max_gpu_count=…,
     max_gpus_per_execution_group=…, parallel=…, requires=…)``. It is FUNCTION
@@ -224,11 +331,80 @@ def entrypoint(
     ``requires=`` term, at ``recommended`` only) is deliberate: vCPUs are
     selectable and filterable at both providers, host RAM on a RunPod GPU pod
     is neither, so a host-RAM MINIMUM stays forbidden (Paul, 2026-07-11).
+
+    ``kind=`` is the second PLACEMENT kwarg, and a producer CANNOT leave it at
+    the default. The vocabulary is the hub's own — `internal/functionkind`:
+    ``inference`` (the default) | ``training`` | ``conversion`` | ``dataset``
+    | ``eval`` — so nothing is invented here. th#2052 cut kind from deciding
+    WRITES and ``publishes=`` replaced it for that, but ``functionkind.go``
+    itself draws the remaining line: *"Naming a ref is a READ; writing one is
+    the function's `publishes` declaration and is not derived here."* The hub
+    still derives three PLACEMENT facts from kind, and all three are wrong for
+    a producer that leaves it at ``inference``:
+
+    * ``NamesReservedRefs(kind) != inference`` — an inference row gets NO
+      preflight resolution and NO dispatch-time read grant for the reserved
+      ``source`` / ``text_encoder`` / ``destination`` / dataset-pin payload
+      fields. A ported conversion producer would reach its body with
+      ``ctx.source_path is None`` and raise on its own first line.
+    * ``WorkerCapabilityTokenTTL`` — 1h for inference, 24h for conversion. A
+      multi-hour quantization would spend its life renewing.
+    * ``SizesDiskFromSource`` — true for conversion and eval only. An
+      inference-kind row sizes a pod's disk without looking at the 13.9 GB
+      source it is about to download.
+
+    ``publishes=`` / ``env=`` / ``emits_media=`` are the AUTHORITY kwargs
+    (pgw#1406) — the producer plane's declaration set, carried over verbatim
+    from the ``@job`` pgw#983 deleted so the 27 ``cozy-creator/jobs``
+    conversion producers have a migration target (th#2173):
+
+    * ``publishes=True`` — this function MAY write tensors/repos to the hub.
+      MAY write; the request still says WHERE. It is the hub's ONE
+      justification for minting the repo-write capability grant (th#2049),
+      and it reaches that decision UNCHANGED: the hub already decodes
+      ``functions[].publishes``, and ``entrypoints[]`` folds into
+      ``Functions`` at ``builder.ParseManifest``'s one decode site. The SDK
+      stamps the same fact onto the context, so ``ctx.save_checkpoint`` /
+      ``gen_worker.convert.publish_flavors`` refuse undeclared code before a
+      byte moves — one fact, two enforcers.
+    * ``env=("HF_TOKEN", "CIVITAI_API_KEY")`` — the env-var NAMES this code
+      reads. Values are release config and never manifest data; the hub
+      validates config-layer env writes against the declaration and already
+      decodes ``functions[].env``.
+    * ``emits_media=`` — TRI-STATE, and the one that does NOT reach the hub.
+      Measured at tensorhub master before this was written: the request path
+      grants ``upload_media`` UNCONDITIONALLY
+      (``capability_subject_th2068.go:124``, ``UploadsMedia: true``) because
+      a request's product IS media; only the JOB path gates it on a
+      declaration. So a producer porting here LOSES NOTHING by declaring it
+      and a hub read could only NARROW — which would fire on every existing
+      endpoint that saves an image without declaring one. The kwarg is
+      therefore accepted (so a producer ports verbatim) and enforced
+      SDK-side: ``None`` is the undeclared inference default, ``True``
+      declares emission, and an explicit ``False`` refuses the media surface
+      at the call site.
+
+      ON THE WIRE IT RIDES A JOB-KIND ROW ONLY (th#2177 narrowed this, and
+      was right). The paragraph above is true of a row dispatched as a
+      REQUEST and does not survive one dispatched as a JOB:
+      ``jobCapabilitySubject`` sets ``UploadsMedia: d.EmitsMedia`` from
+      ``endpoint_release_jobs.emits_media``, a column that already exists —
+      so on that path the declaration is READ and it GATES, and withholding
+      it would silently downgrade every producer that declared media. An
+      INFERENCE row still emits nothing, because nothing there can store or
+      read it; that half of th#2087's fence stays.
     """
 
     if fn is None:
         def bind(inner: F) -> F:
-            return entrypoint(inner, resources=resources)  # type: ignore[call-overload,no-any-return]
+            return entrypoint(  # type: ignore[call-overload,no-any-return]
+                inner,
+                resources=resources,
+                kind=kind,
+                publishes=publishes,
+                env=env,
+                emits_media=emits_media,
+            )
         return bind
 
     from .context import RequestContext
@@ -236,9 +412,32 @@ def entrypoint(
     if not inspect.isfunction(fn):
         raise EntrypointDeclarationError(
             f"@entrypoint marks module-level functions, got "
-            f"{type(fn).__name__} — the only kwarg is resources= "
-            "(pgw#1396); the Model class header carries lanes="
+            f"{type(fn).__name__} — the kwargs are resources= (pgw#1396) and "
+            "publishes=/env=/emits_media= (pgw#1406); the Model class header "
+            "carries lanes="
         )
+    if not isinstance(publishes, bool):
+        raise _refuse(
+            fn,
+            f"publishes= is a bool DECLARATION, got "
+            f"{type(publishes).__name__} — it says this function MAY write to "
+            "the hub; the request still says where",
+        )
+    if emits_media is not None and not isinstance(emits_media, bool):
+        raise _refuse(
+            fn,
+            f"emits_media= is a bool or None (undeclared), got "
+            f"{type(emits_media).__name__}",
+        )
+    declared_kind = str(kind or "").strip().lower()
+    if declared_kind and declared_kind not in KINDS:
+        raise _refuse(
+            fn,
+            f"kind= must be one of {KINDS}, got {kind!r} — the vocabulary is "
+            "the hub's (internal/functionkind), so a value it does not "
+            "normalize would silently become 'inference'",
+        )
+    declared_env = _validate_env_decl(fn, env)
     if resources is not None:
         from ..api.resources import Resources
 
@@ -285,6 +484,11 @@ def entrypoint(
         parameters[0], parameters[1], parameters[2:],
     )
 
+    # ONE context class, for inference and producers alike (pgw#1294/pgw#1306:
+    # "no kind selects a different class, because no kind decides what a body
+    # may write — the declaration does"). `RequestContext` carries the
+    # publisher surface and refuses it unless `publishes=True` was declared,
+    # so a producer needs no second annotation to migrate here (th#2173).
     ctx_type = _annotation_class(hints.get(ctx_parameter.name))
     if ctx_type is None or not issubclass(ctx_type, RequestContext):
         raise _refuse(
@@ -328,6 +532,11 @@ def entrypoint(
         slots=slots,
         return_type=return_type,
         resources=resources,
+        kind=declared_kind,
+        publishes=bool(publishes),
+        env=declared_env,
+        emits_media=emits_media,
+        ctx_type=ctx_type,
     )
     setattr(fn, ENTRYPOINT_ATTR, spec)
     return fn

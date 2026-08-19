@@ -283,7 +283,7 @@ class ServeLoop:
                         model_slots[first_slot], picks[first_slot]
                     )
 
-            ctx = self._make_context(request_id, primary_binding)
+            ctx = self._make_context(request_id, primary_binding, spec)
             for warning in degraded:
                 ctx.warn(warning)
             arguments = [
@@ -312,11 +312,29 @@ class ServeLoop:
         )
 
     def _make_context(
-        self, request_id: str, binding: Optional[DeployBinding]
+        self,
+        request_id: str,
+        binding: Optional[DeployBinding],
+        spec: Optional[Any] = None,
     ) -> RequestContext[Any]:
         kwargs: Dict[str, Any] = dict(self._context_kwargs)
         if self._output_dir is not None:
             kwargs.setdefault("local_output_dir", str(self._output_dir))
+        if spec is not None:
+            # pgw#1406: the AUTHORITY declarations, stamped from the spec onto
+            # the context the body receives. This is the SDK half of "one
+            # fact, two enforcers": the hub mints the repo-write grant off the
+            # same `publishes` it read on the manifest row, and the publisher
+            # surface refuses undeclared code here, before a byte moves.
+            #
+            # `emits_media` is stamped only when the author DECLARED it. Left
+            # absent it stays `None` — the base reads that as "not job-scoped",
+            # media is the product of a request, and behaviour is unchanged for
+            # every endpoint that never says the word.
+            kwargs["publishes"] = bool(getattr(spec, "publishes", False))
+            declared_media = getattr(spec, "emits_media", None)
+            if declared_media is not None:
+                kwargs["emits_media"] = bool(declared_media)
         return RequestContext(
             request_id,
             binding=binding

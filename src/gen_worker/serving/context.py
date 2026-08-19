@@ -33,6 +33,7 @@ identity — new graphs a rebind introduces are simply holes (partial-hit).
 from __future__ import annotations
 
 import logging
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -44,6 +45,7 @@ import msgspec
 
 from ..families.base import GenerationDefaults
 from ..request_context import RequestContext as _BaseRequestContext
+from ..request_context import _PublisherMixin
 
 if TYPE_CHECKING:
     from ..models.defaults_decode import CarriesDefaults
@@ -296,14 +298,28 @@ class LoadContext(Generic[MT_co]):
         return decoded
 
 
-class RequestContext(_BaseRequestContext[D]):
+class RequestContext(_PublisherMixin, _BaseRequestContext[D]):
     """What entrypoints receive — request facts + the salvaged base surface.
 
     The base class (`gen_worker.request_context`) contributes
     ``raise_if_cancelled``, ``save_image``, ``clamp``, ``generator``,
     ``progress``, ``log`` and the rest; this subclass adds the pgw#1382
     request facts. Constructible bare (``RequestContext("req-1")``) for
-    local/unit use — deployment facts then read as absent."""
+    local/unit use — deployment facts then read as absent.
+
+    **IT IS ALSO THE PRODUCER CONTEXT (pgw#1406).** ``_PublisherMixin``
+    contributes ``save_checkpoint`` / ``open_checkpoint_stream``, the
+    reserved ``source``/``destination``/``text_encoder``/``candidate`` payload
+    contract, and ``hf_token``; :meth:`mktemp` completes it. There is
+    deliberately no second class for producers, because pgw#1294/pgw#1306
+    already ruled the shape: *"no kind selects a different class, because no
+    kind decides what a body may write — the declaration does"*. Every one of
+    those surfaces refuses typed unless the ``@entrypoint`` declared
+    ``publishes=True`` (:meth:`_require_publish_declaration`), so an inference
+    entrypoint gains reach it cannot use and a ported ``@job`` producer gains
+    nothing it did not already have. That is what makes pgw#983's deletion of
+    ``@job`` recoverable by re-decorating rather than by rewriting 27
+    producers (th#2173)."""
 
     def __init__(
         self,
@@ -314,6 +330,21 @@ class RequestContext(_BaseRequestContext[D]):
     ) -> None:
         super().__init__(request_id, **base_kwargs)
         self._serve_binding = binding
+        self._mktemp_root: Optional[Path] = None
+
+    def mktemp(self) -> Path:
+        """A request-scoped scratch directory. Contents are NOT persisted.
+
+        Each call returns a fresh subdir, so a producer can use it as
+        ``out_dir`` for successive conversions without collision."""
+        if self._mktemp_root is None:
+            self._mktemp_root = Path(
+                tempfile.mkdtemp(
+                    prefix=f"txform-{self.request_id or 'x'}-",
+                    dir=tempfile.gettempdir(),
+                )
+            )
+        return Path(tempfile.mkdtemp(dir=str(self._mktemp_root)))
 
     @property
     def checkpoint_ref(self) -> str:

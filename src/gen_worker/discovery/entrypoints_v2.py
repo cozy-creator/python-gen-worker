@@ -55,9 +55,13 @@ from typing import Any, Dict, List, Set
 
 from .schema import type_schema_and_hash
 
-#: A v2 entrypoint is an inference handler. The vocabulary is the hub's
-#: (`validation._KNOWN_KINDS`); the v2 surface declares no other kind today,
-#: and inventing one here would be a value space no hub reader names.
+#: The DEFAULT kind: an entrypoint that declares nothing is an inference
+#: handler, which is also what the hub's `functionkind.Normalize("")` returns.
+#: pgw#1406 gave `@entrypoint` a `kind=` kwarg so a PRODUCER can say otherwise
+#: — the sentence that used to sit here ("the v2 surface declares no other kind
+#: today, and inventing one here would be a value space no hub reader names")
+#: was right about the second half and is why `KINDS` is copied verbatim from
+#: `internal/functionkind.All` rather than invented.
 ENTRYPOINT_KIND = "inference"
 
 class EntrypointDiscoveryError(ValueError):
@@ -295,8 +299,20 @@ def _adapter_slot(slot: Any) -> Dict[str, Any]:
     }
 
 
+def _is_job_kind(kind: str) -> bool:
+    """The hub's ``functionkind.IsJob``, mirrored: every non-inference kind is
+    submitted rather than invoked.
+
+    One line, and it reads off the same `KINDS` tuple `@entrypoint` validates
+    against — which is itself copied verbatim from `internal/functionkind.All`
+    — so this is a mirror of one authority, not a second vocabulary.
+    """
+    return str(kind or "").strip().lower() not in ("", ENTRYPOINT_KIND)
+
+
 def _entrypoint_row(spec: Any) -> Dict[str, Any]:
     resources = _resources([spec])
+    row_kind = getattr(spec, "kind", "") or ENTRYPOINT_KIND
     input_schema, input_sha = type_schema_and_hash(spec.payload_type)
     output_schema, output_sha = type_schema_and_hash(spec.return_type)
     slots: List[Dict[str, Any]] = []
@@ -308,7 +324,14 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         "module": spec.fn.__module__,
         "declared_module": spec.fn.__module__,
         "class_name": "",
-        "kind": ENTRYPOINT_KIND,
+        # pgw#1406: the author's `kind=` when declared, else the inference
+        # default. `manifestFunction.Kind` already decodes it and the hub
+        # derives three PLACEMENT facts from it — reserved-ref resolution,
+        # capability TTL, source-sized disk — none of which a conversion
+        # producer can get from the `inference` default. Nothing is invented:
+        # the value space is `internal/functionkind.All`, validated at
+        # decoration against `serving.entrypoints.KINDS`.
+        "kind": row_kind,
         "input_schema": input_schema,
         "payload_schema_sha256": input_sha,
         "output_schema": output_schema,
@@ -323,6 +346,42 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # weightless entrypoint gets that meaning rather than a silent
         # fall-back to release-level class resolution.
         **({"resources": resources} if resources is not None else {}),
+        # pgw#1406, the PRODUCER declarations. Both keys are already decoded
+        # by the hub ON A FUNCTION ROW — `manifestFunction.Publishes` /
+        # `.Env` (`internal/builder/manifest_contract.go`) — and
+        # `entrypoints[]` folds into `Functions` at ParseManifest's one decode
+        # site, so `publishes` reaches `ReleaseFunctionSchema.Publishes` ->
+        # the capability JWT's `publishes` claim -> `callerDeclaresHubWrite`
+        # WITHOUT A HUB CHANGE. Emitted only when declared, so every existing
+        # v2 row stays byte-identical (the hub's own tags are `omitempty`).
+        #
+        # `emits_media` rides ONLY a job-kind row, and the fence is narrowed
+        # rather than reversed (th#2177's correction to this lane's first
+        # ruling, accepted). Both halves are measured:
+        #
+        #   * on the REQUEST path the hub grants `upload_media`
+        #     UNCONDITIONALLY (`capability_subject_th2068.go:124`,
+        #     `UploadsMedia: true`) and `manifestFunction` has no field and
+        #     `endpoint_function_schemas` no COLUMN for it, so emitting it on
+        #     an inference row is exactly the mirror-with-no-reader th#2087's
+        #     fence exists to catch;
+        #   * on the JOB path it is READ and it GATES —
+        #     `jobCapabilitySubject` sets `UploadsMedia: d.EmitsMedia` from
+        #     `endpoint_release_jobs.emits_media`, a column that already
+        #     exists. Withholding the key there would silently downgrade every
+        #     producer that declared media to no media at all.
+        #
+        # So the first ruling was right about requests and did not survive a
+        # row dispatched as a job. `_is_job_kind` mirrors the hub's
+        # `functionkind.IsJob` off the one `KINDS` tuple this repo already
+        # copies verbatim, so there is no second vocabulary to drift.
+        **({"publishes": True} if spec.publishes else {}),
+        **({"env": list(spec.env)} if spec.env else {}),
+        **(
+            {"emits_media": bool(spec.emits_media)}
+            if spec.emits_media is not None and _is_job_kind(row_kind)
+            else {}
+        ),
     }
 
 

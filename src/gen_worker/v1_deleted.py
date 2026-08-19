@@ -40,7 +40,16 @@ class V1SdkDeleted(ImportError):
 #: refusal can be specific about the ONE name the author actually wrote.
 REPLACEMENTS: Final[dict[str, str]] = {
     "endpoint": "@entrypoint on a module-level function (gen_worker.entrypoint)",
-    "job": "@entrypoint — jobs have no v2 successor yet; see se#757",
+    # pgw#1406 built the successor this line said did not exist. The three
+    # `@job` kwargs the producer plane actually uses carry over VERBATIM, and
+    # the one RequestContext carries the publisher surface, so the port is a
+    # re-decoration — which is what the 27 conversion producers in
+    # `cozy-creator/jobs` need to hear at the refusal (th#2173, jobs#297).
+    "job": (
+        "@entrypoint(publishes=…, env=…, emits_media=…) — the same kwargs, "
+        "and ctx: RequestContext carries mktemp/source/save_checkpoint; "
+        "see pgw#1406"
+    ),
     "worker_function": "@entrypoint",
     "variant_of": "one @entrypoint per variant; the request envelope picks",
     "Slot": "a Model subclass annotation on the @entrypoint parameter",
