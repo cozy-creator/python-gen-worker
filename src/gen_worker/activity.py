@@ -163,6 +163,20 @@ KIND_APPLIED_ATTENTION = "applied_attention"
 # (`boot_adopt.REASONS`, countable hub-side); `detail` names family, function,
 # derived key and the sentence; `duration_ms` is the derivation's own wall.
 KIND_BOOT_ADOPT = "boot_adopt"
+# pgw#1441: the PER-BOOT roll-up, and it needs its own kind for exactly the
+# reason `warmup_summary` above does. `boot_adopt`'s `phase` is a PER-KEY gate
+# token (`hit`/`miss`/`no_export_declaration`, one row per graph); pgw#1371's
+# adopt outcome is a PER-BOOT verdict over all of them. Emitting both under one
+# kind gives that kind two vocabularies, and the hub keys `info.Activities` on
+# kind alone — so `count(*) where kind='boot_adopt' and phase='reused'` reads 0
+# on every pre-#1371 pod, which is indistinguishable from "nothing reused".
+# Same trap as pgw#1067's, caught before it shipped rather than after.
+#
+# `phase` is `reused` (this boot adopted everything and mints nothing) /
+# `minting` (holes remain) / `empty_lane`. THE COUNTS ARE NUMERIC, not prose:
+# `step` = graphs adopted, `total_steps` = graphs claimed, so the reuse ratio
+# is a query rather than a regex over `detail`. `detail` keeps the sentence.
+KIND_BOOT_ADOPT_SUMMARY = "boot_adopt_summary"
 # pgw#1328: the ADOPT-ONLY role's answer where an eager-capable pod would have
 # served eager and minted (§4.28). It is the only thing that role produces on a
 # miss, so it must be readable off-pod or the role is unobservable. `phase` is
@@ -510,6 +524,7 @@ class Activity:
 def emit_event(
     kind: str, detail: str, phase: str = "", duration_ms: int = 0,
     *, family: str = "", compiled_graph_key: str = "", graph_class: str = "",
+    step: int = 0, total_steps: int = 0,
 ) -> None:
     """One self-contained COMPLETED ActivityUpdate — a countable typed
     EVENT (pgw#680 ``guard_miss``), not a running activity.
@@ -526,10 +541,18 @@ def emit_event(
     Deliberately bypasses :func:`begin`: begin() swaps the module-global
     ``_current``, and ending an event would strand a concurrently open
     long-running activity (background mint) without its progress beat.
+    ``step``/``total_steps`` (pgw#1441) carry a COUNT this event is about, in
+    the typed numeric columns rather than interpolated into ``detail``. An
+    event whose whole point is a ratio -- "N of M graphs adopted" -- is
+    otherwise only readable by regexing a sentence, which is how a reader ends
+    up building a metric on a column that renders 0 because nothing writes it.
+    Leave both 0 when the event is not about a count.
+
     Thread-safe; without a bound sink it lands on the logger like every
     other report."""
     _emit(pb.ActivityUpdate(
         kind=kind, phase=phase[:300], seq=_next_seq(),
+        step=max(0, int(step)), total_steps=max(0, int(total_steps)),
         state=pb.ActivityState.ACTIVITY_STATE_COMPLETED,
         detail=detail[:2000],
         family=str(family or "")[:200],
