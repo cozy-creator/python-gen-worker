@@ -51,7 +51,15 @@ class TraceLoadContext:
         self.checkpoint_dir = Path(checkpoint_dir)
         self.model_type = model_type
         self.defaults_instance = defaults_instance
-        self.log = logging.getLogger("gen_worker.release.trace")
+        # pgw#1510 follow-up: PRIVATE, for the same reason the request half's
+        # is. The serving `LoadContext` exposes no `log` at all, so a public
+        # one here is a name the author can reach at trace and not at serve --
+        # and it answered a Logger, so an author who logged inside `load()`
+        # got "'Logger' object is not callable" where serve gives a plain
+        # AttributeError. Now both say the same thing. Kept (rather than
+        # deleted) under the private name so the next internal log line does
+        # not re-add `self.log` by muscle memory.
+        self._log = logging.getLogger("gen_worker.release.trace")
         #: Modules the author marked via ctx.compile() -- discovery hooks
         #: exactly these during the payload drives.
         self.marked_modules: list[Any] = []

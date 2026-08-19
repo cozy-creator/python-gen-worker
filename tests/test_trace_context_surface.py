@@ -22,13 +22,14 @@ pinning the instance would have let the next one through.
 from __future__ import annotations
 
 import inspect
+import logging
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from gen_worker.release.trace_context import TraceLoadContext, TraceRequestContext
-from gen_worker.request_context import RequestContext
+from gen_worker.request_context import JobContext, RequestContext
 from gen_worker.serving.context import LoadContext
 
 
@@ -107,12 +108,7 @@ def test_ctx_log_is_callable_with_the_documented_author_spelling(
 
 
 def test_the_load_context_shares_no_member_of_a_different_kind() -> None:
-    """The same sweep for the load half.
-
-    `TraceLoadContext` keeps a private logger, which is fine BECAUSE the
-    serving `LoadContext` exposes no `log` at all — asserted rather than
-    assumed, since that is the only reason the private name is safe.
-    """
+    """The same sweep for the load half."""
 
     load_ctx = TraceLoadContext(lane=None, checkpoint_dir=Path("."))
     wrong = [
@@ -121,13 +117,94 @@ def test_the_load_context_shares_no_member_of_a_different_kind() -> None:
         if serving != trace
     ]
     assert wrong == []
-    assert _serving_kind(LoadContext, "log") is None
 
 
-def test_the_derive_logger_is_private_so_the_public_name_stays_the_method(
-    request_ctx: TraceRequestContext,
+#: The serving classes each trace class is the trace-time counterpart of.
+#: The request side is a FAMILY: `JobContext` carries members `RequestContext`
+#: does not (`checkpoint_dir`), and an entrypoint can receive either.
+_COUNTERPARTS: dict[str, tuple[type, ...]] = {
+    "load": (LoadContext,),
+    "request": (RequestContext, JobContext),
+}
+
+
+def _family_kind(family: tuple[type, ...], name: str) -> str | None:
+    for owner in family:
+        kind = _serving_kind(owner, name)
+        if kind is not None:
+            return kind
+    return None
+
+
+def _sibling(which: str) -> tuple[type, ...]:
+    return _COUNTERPARTS["request" if which == "load" else "load"]
+
+
+@pytest.mark.parametrize("which", ["load", "request"])
+def test_a_trace_context_never_borrows_a_name_the_contract_gave_ITS_SIBLING(
+    which: str,
 ) -> None:
-    import logging
+    """The fence the first pass missed, and the reason it missed it.
 
-    assert isinstance(request_ctx._log, logging.Logger)
-    assert not isinstance(request_ctx.log, logging.Logger)
+    The shared-member sweep compares only names present on BOTH sides, so a
+    trace class carrying a name its OWN counterpart does not define is
+    invisible to it. `TraceLoadContext.log` was exactly that: serving
+    `LoadContext` has no `log`, so nothing paired with it, while
+    `RequestContext.log` IS a method — an author who logged inside `load()`
+    got "'Logger' object is not callable" where serve gives a plain
+    AttributeError.
+
+    So: a name its own counterpart does not define, but the SIBLING context
+    does, must not be public here at all. The authoring contract already gave
+    that word a meaning; a trace context answering something else under it is
+    the trap.
+
+    Deliberately NOT a flat union of both contexts — that produced a false
+    positive on `checkpoint_dir`, which genuinely means two different things
+    (a bound-tree property on `LoadContext`, a keyed scratch method on
+    `RequestContext`). Each trace class is judged against ITS OWN counterpart
+    first; the sibling only decides whether a name is spoken for.
+    """
+
+    instance: Any = (
+        TraceLoadContext(lane=None, checkpoint_dir=Path("."))
+        if which == "load"
+        else TraceRequestContext(lane=None, checkpoint_ref="x", step_budget=1)
+    )
+    own, sibling = _COUNTERPARTS[which], _sibling(which)
+    borrowed = [
+        f"{name}: the contract calls it {_family_kind(sibling, name)}, "
+        f"this context answers {_trace_kind(instance, name)}"
+        for name in sorted(n for n in dir(instance) if not n.startswith("_"))
+        if _family_kind(own, name) is None
+        and _family_kind(sibling, name) is not None
+        and _family_kind(sibling, name) != _trace_kind(instance, name)
+    ]
+    assert borrowed == []
+
+
+def test_that_fence_would_have_CAUGHT_the_defect_it_was_written_for() -> None:
+    """Red-proof the fence itself, or it is decoration.
+
+    A sweep that cannot go red is worth nothing, and this one is a sweep over
+    a `dir()` — the easiest kind to make vacuously green.
+    """
+
+    # The precondition the rule rests on: `log` is spoken for on the request
+    # context and absent from the load one. If that ever stops being true the
+    # fence stops meaning anything, so it is asserted rather than assumed.
+    assert _family_kind(_COUNTERPARTS["request"], "log") == "callable"
+    assert _family_kind(_COUNTERPARTS["load"], "log") is None
+
+    class Regressed:
+        log = logging.getLogger("would-be-regression")
+
+    borrowed = [
+        name
+        for name in dir(Regressed())
+        if not name.startswith("_")
+        and _family_kind(_COUNTERPARTS["load"], name) is None
+        and _family_kind(_COUNTERPARTS["request"], name) == "callable"
+        and _trace_kind(Regressed(), name) != "callable"
+    ]
+    assert borrowed == ["log"]
