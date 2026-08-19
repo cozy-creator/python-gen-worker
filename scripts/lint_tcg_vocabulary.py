@@ -25,9 +25,9 @@ legitimate use is recognised by a PROOF AT THE LINE instead — a
 CORRECTED at tcg#56 (2026-08-19), because the paragraph that stood here had gone
 stale in BOTH of its claims and a reader would have planned against it.
 
-It said the exemption existed because `GraphClassDeclaration.graph_class` (a
-dataclass field holding a display NAME) and `GRAPH_CLASS_BLOCK` (the
-artifact-metadata block key) were "equal strings from different vocabularies".
+It said the exemption existed because the declaration's display-name FIELD and
+the artifact-metadata BLOCK key were "equal strings from different vocabularies"
+— they were spelled `GraphClassDeclaration.graph_class` and `GRAPH_CLASS_BLOCK`.  # graph-class-spelling: quoting the dead spellings is the whole point of the correction
 That collision is GONE: tcg#56 renamed the field to `.name` and the block to
 `graph_specialization`, so they are now two different words and cannot be
 confused for one another. The ambiguity this paragraph warned about was itself

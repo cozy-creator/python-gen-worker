@@ -88,7 +88,7 @@ class DeriveBlock:
     #: The derive document, verbatim ASCII JSON.
     document: str
     #: ``cuda`` or ``cpu`` — the device CLASS traced, `derive._trace_device`'s
-    #: answer. A cpu-traced graph is a DIFFERENT graph class, not a degraded
+    #: answer. A cpu-traced graph is a DIFFERENT graph specialization, not a degraded
     #: cuda one, so it is stated rather than assumed by every reader.
     trace_device: str
     #: The endpoint identity the derive stamped (``module:Class``).
