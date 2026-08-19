@@ -7,7 +7,7 @@ CONTRACT_FILES: Final = (
     "KEY_GRAMMAR_DIGEST",
     "call_ingress_v1.json",
     "compiled_graph_key_vectors.json",
-    "graph_class_identity_v3.json",
+    "graph_class_identity_v4.json",
     "ingress_selection_v1.json",
     "literal_identity_v1.json",
     "recipe_v1.json",

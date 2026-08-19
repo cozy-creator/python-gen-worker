@@ -18,16 +18,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from ..tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
+from tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
 
 from .document import DocumentError, GraphSetDocument, LaneGraphs
 from .graph_identity import EnvIdentity, is_graph_hash
+from .lane import LaneError, require_pass_ref
 from .requirements import RequirementsError, RequirementsManifest
 
 _REF_PREFIX = "torchcg/v2"
@@ -117,6 +119,26 @@ def _manifest_ref(graph: str, env: EnvIdentity) -> str:
     return f"{_REF_PREFIX}/manifests/{_require_graph(graph)}/{env.value}"
 
 
+def _side_table_ref(pass_name: str, key: str) -> str:
+    """A transform pass's minted side table, addressed by (pass, domain key).
+
+    Not positioned under a graph: a side table is produced BEFORE discovery
+    (tcg#52's PASS -> DISCOVERY -> EXPORT), so no graph hash exists yet. It is
+    also env-independent -- it is checkpoint bytes, not compiler output -- so
+    a bucket minted on a mint pod is the same bucket a serving pod reads.
+    """
+
+    try:
+        require_pass_ref(pass_name)
+    except LaneError as exc:
+        raise StoreError(str(exc)) from exc
+    if not re.fullmatch(r"[0-9a-f]{8,64}", str(key)):
+        raise StoreError(
+            f"a side-table key is the canonical hex domain-key address, got {key!r}"
+        )
+    return f"{_REF_PREFIX}/sidetables/{pass_name}/{key}"
+
+
 def _digest_file(path: Path) -> CASRef:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -188,6 +210,9 @@ class LocalGraphStore:
             raise StoreError(
                 f"artifact ({graph}, {env.value}) failed CAS verification: {exc}"
             ) from exc
+        return self._copy_out(blob, destination)
+
+    def _copy_out(self, blob: str | Path, destination: str | Path) -> Path:
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
@@ -272,6 +297,56 @@ class LocalGraphStore:
             raise StoreError(
                 f"manifest ({graph}, {env.value}) is unreadable: {exc}"
             ) from exc
+
+    # -- transform side tables (tcg#52) -------------------------------------
+
+    def has_side_table(self, pass_name: str, key: str) -> bool:
+        return self.cas.read_ref(_side_table_ref(pass_name, key)) is not None
+
+    def fetch_side_table(
+        self, pass_name: str, key: str, destination: str | Path
+    ) -> Path | None:
+        ref = self.cas.read_ref(_side_table_ref(pass_name, key))
+        if ref is None:
+            return None
+        try:
+            blob = self.cas.verify_object(ref)
+        except (DigestMismatch, FileNotFoundError, ValueError) as exc:
+            raise StoreError(
+                f"side table ({pass_name}, {key}) failed CAS verification: {exc}"
+            ) from exc
+        return self._copy_out(blob, destination)
+
+    def publish_side_table(self, pass_name: str, key: str, path: str | Path) -> str:
+        """First bucket wins; identical bytes are idempotent, divergence refuses.
+
+        A side table is a deterministic function of (checkpoint, pass, domain
+        key), so two buckets under one address is a bug to surface -- the same
+        rule the artifact position runs under.
+        """
+
+        source = Path(path)
+        if not source.is_file():
+            raise StoreError(f"side table {source} is not a file")
+        candidate = self._admit_file(source)
+        ref_name = _side_table_ref(pass_name, key)
+        current = self.cas.read_ref(ref_name)
+        if current is not None:
+            if current == candidate:
+                return str(candidate)
+            raise StoreError(
+                f"side-table position ({pass_name}, {key}) already holds different "
+                f"bytes; a deterministic pass diverged"
+            )
+        try:
+            self.cas.compare_and_swap_ref(ref_name, candidate, expected=None)
+        except RefConflict:
+            if self.cas.read_ref(ref_name) != candidate:
+                raise StoreError(
+                    f"side-table position ({pass_name}, {key}) already holds "
+                    f"different bytes; a deterministic pass diverged"
+                ) from None
+        return str(candidate)
 
 
 __all__ = [

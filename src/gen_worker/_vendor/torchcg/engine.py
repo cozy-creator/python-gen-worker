@@ -9,7 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
-from ..tensorfs import LocalCAS
+from tensorfs import LocalCAS
 
 from .artifact import build_metadata, pack_artifact, read_metadata
 from .compiler import _compile_exported_program, _package_compiled_files
@@ -130,9 +130,20 @@ def _admit_constant_table(plan: _GraphClassPlan, constants: tuple[DeclaredConsta
     bindable = {constant.fqn for constant in constants if constant.source != "computed"}
     package_only = sorted(bindable - program)
     if package_only:
+        # The two sides are INDEPENDENT witnesses -- the exported program's
+        # signature and the AOTI package's own table -- which is exactly what
+        # makes this check worth having. But independent tools also NAME
+        # things differently: a module attribute torch lifts as `const` can
+        # come back from the package as `_tensor_constant0`. So the refusal
+        # states whose vocabulary each side is speaking, instead of implying
+        # the package invented a constant.
         raise AdmissionError(
-            f"compiled package declares {len(package_only)} constant(s) the exported "
-            f"program never lifted: {package_only[:6]!r}"
+            f"compiled package declares {len(package_only)} constant(s) that are not "
+            f"in the exported program's lifted set: {package_only[:6]!r}. "
+            f"Package vocabulary: {sorted(package)[:6]!r}; export vocabulary: "
+            f"{sorted(program)[:6]!r}. A pure NAMING divergence (torch's "
+            f"`const` vs inductor's `_tensor_constant0`) is a bare, unnamed "
+            f"module attribute; a named attribute keeps its fqn on both sides."
         )
     folded_weights = sorted(_program_state_dict_fqns(plan.spec.program) - package)
     if folded_weights:

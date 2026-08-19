@@ -99,11 +99,9 @@ def metadata(
         inputs=(CallInput("value", 0, "value", 0, (), "value", "float32", (2,)),),
     )
     graph: Dict[str, Any] = {
-        "v": 3,
+        "v": 4,
         "constant_fqns": [],
-        "lifted_inputs": [],
-        "pytree": {"in": "leaf", "out": "leaf", "ingress": ingress.as_dict()},
-        "specialization": {},
+        "ingress": ingress.as_dict(),
     }
     declaration = GraphClassDeclaration(
         graph_class=graph_class,

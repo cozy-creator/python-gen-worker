@@ -86,6 +86,26 @@ def contract_digest() -> str:
 
 
 
+def _place_constants(program: "Any", target_arch: str) -> None:
+    """Move the program's lifted constants onto the device being compiled for.
+
+    The derive can only give us real constant VALUES, not real constant
+    placement: a cuda trace on a GPU-less publish box fakes them and swaps the
+    real cpu tensors back before serializing, so a loaded blob reads
+    ``weights: cuda`` / ``constants: cpu``. Measured on a 4070: the values
+    survive, the placement does not, and AOTI rejects the mix. One device is
+    the compile's own, so the mint owns this move.
+    """
+    import torch
+
+    if not target_arch.strip().lower().startswith("sm_"):
+        return
+    constants = getattr(program, "constants", None) or {}
+    for name, value in list(constants.items()):
+        if isinstance(value, torch.Tensor) and value.device.type != "cuda":
+            constants[name] = value.to("cuda")
+
+
 def compile_one(request: Mapping[str, Any]) -> Path:
     """Deserialize one graph blob and AOTI-compile it into ``destination``."""
     # pgw#1444/pgw#840, BEFORE any work: this child must BE the parent. It is
@@ -109,39 +129,33 @@ def compile_one(request: Mapping[str, Any]) -> Path:
         )
     import torch
 
-    from .._vendor.torchcg import Engine, GraphClassSpec, RuntimeCompatibility
+    from .._vendor.torchcg import CallIngress, Engine, GraphClassSpec, RuntimeCompatibility
     from .._vendor.tensorfs import LocalCAS
 
     program = torch.export.load(str(request["blob"]))
-    # pgw#1456: the graph interface is FIVE fields, not two. torchcg derives
-    # `constant_fqns` (and `literal_values`) from the exported program itself
-    # and accepts them absent, but `lifted_inputs` and `specialization` are the
-    # caller's to state — and a stub without them is refused by name before any
-    # compilation starts, which is why the v2 mint path had never compiled a
-    # single graph from any caller.
-    #
-    # `lifted_inputs` is EMPTY for these programs and that is a statement, not
-    # a placeholder: the parameters and buffers a trace lifts are exactly what
-    # `constant_fqns` enumerates (torchcg reads `graph_signature.parameters`,
-    # `.buffers` and `.lifted_tensor_constants`), so listing them here would
-    # double-count the same tensors in one identity.
-    #
-    # `specialization` is EMPTY for the same kind of reason: v1 filled it with
-    # `shape_strategy`/`warm_changes_key`/`fork.*` off a declaration this path
-    # no longer has, and a v2 derive registers CONCRETE shapes — every row
-    # comes back with `symbols: {}`. An empty specialization says "nothing was
-    # specialized", which is true here; inventing a strategy would put a fact
-    # nobody measured into the graph-class key.
+    # pgw#1458: the derive traces on cuda, but the swap-back that keeps the
+    # lifted constants' REAL values (they key the graph, so faking them would
+    # collide every model that differs only in its constant table) brings them
+    # back CPU-placed. Values are authoritative for identity; PLACEMENT is the
+    # mint's, and this is the one line that says so. Without it AOTI refuses
+    # the mixed placement minutes into the compile, from inside its own
+    # assertion, naming no graph class.
+    _place_constants(program, str(request["target_arch"]))
+    # tcg#55: the graph interface is DERIVED, and there is no longer a `graph=`
+    # parameter to state it with. This child supplies an ExportedProgram, an
+    # identity, and the call INGRESS -- the one fact torch cannot know, because
+    # parameter names and argument nesting live in the author's forward
+    # signature, not in the traced graph. pgw#1456 was a hand-built two-field
+    # dict; its fix was a hand-built five-field dict; both were writing down
+    # facts nothing read (`lifted_inputs` and `specialization` had no reader in
+    # either repo and are deleted upstream) or facts torchcg already derives
+    # (`constant_fqns`, `literal_values`, `placement`). A stub is now
+    # unrepresentable rather than merely refused.
     spec = GraphClassSpec(
         graph_class=str(request["graph"]),
         target=str(request["target"]),
         program=program,
-        graph={
-            "v": 3,
-            "pytree": {"ingress": request["ingress"]},
-            "lifted_inputs": [],
-            "specialization": {},
-        },
+        ingress=CallIngress.decode(request["ingress"]),
     )
     runtime = RuntimeCompatibility(
         str(request["target_arch"]), toolchain=dict(request["toolchain"]))

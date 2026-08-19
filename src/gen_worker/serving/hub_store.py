@@ -32,7 +32,7 @@ and the route answers something else::
                  "content_digest": "...", "artifact_path": "...",
                  "requirements_manifest": {...},
                  "transport": {"snapshot_digest": ..., "files": [...]}}, ...],
-     "targets": [...], "unobserved_targets": [...]}
+     "targets": [...], "unobserved_targets": [...], "passes": [...]}
 
 The lane's graph document is REBUILT from that answer rather than shipped
 whole: the hub stores the derive's rows, not the derive's bytes, and the
@@ -286,6 +286,16 @@ class HubGraphStore:
                 "targets": targets,
                 "graphs": records,
                 "unobserved_targets": sorted(set(unobserved) - observed),
+                # tcg#52: the transform passes that ran BEFORE these graphs
+                # were derived are a cg-graph-v1 derivation input, so they
+                # are part of the row, not decoration -- `AdoptSession`
+                # refuses a boot whose ran-pass set differs from this. Carried
+                # through from the hub's answer rather than assumed: an
+                # endpoint with no passes says so with an empty list.
+                "passes": [
+                    str(name) for name in (answer.get("passes") or [])
+                    if isinstance(name, str)
+                ],
             })
         try:
             self._document = GraphSetDocument.decode(

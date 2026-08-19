@@ -442,6 +442,7 @@ def _adopt_answer(
         "empty": False,
         "targets": list(lane.targets),
         "unobserved_targets": list(lane.unobserved_targets),
+        "passes": list(lane.passes),
         "graphs": [row(hit, "hit"), row(hole, "miss")],
         "hits": 1,
         "misses": 1,
@@ -462,8 +463,10 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     # rows, not the derive's bytes.
     rebuilt = store.get_graphs("release-1")
     assert rebuilt is not None and rebuilt.closure == document.closure
-    assert [r.graph for r in rebuilt.lanes[0].graphs] == sorted(
-        [hit.graph, hole.graph], key=lambda g: g)
+    # pgw#1384: graph order is SEMANTIC, not canonical — the producer states
+    # it (default-parameter classes first) and the miner mints holes in that
+    # order, so the rebuild preserves the answer's order rather than sorting.
+    assert [r.graph for r in rebuilt.lanes[0].graphs] == [hit.graph, hole.graph]
     # The ORDERED hole list pgw#1371's background mint consumes.
     assert store.misses == (hole.graph,)
 

@@ -292,12 +292,20 @@ class CallIngress:
 
     @classmethod
     def from_graph(cls, graph: Mapping[str, Any]) -> CallIngress:
-        pytree = graph.get("pytree")
-        if not isinstance(pytree, Mapping):
-            raise IngressError("ingress_invalid", "graph pytree must be an object")
-        ingress = pytree.get("ingress")
+        if "pytree" in graph:
+            # tcg#55: v3 nested the ingress under a `pytree` object whose
+            # other members (`in`, `out`) were read by nothing. Refuse the old
+            # shape BY NAME rather than reaching into it -- these bytes key to
+            # a graph class no v4 producer can derive.
+            raise IngressError(
+                "ingress_retired_format",
+                "graph interface nests its ingress under the RETIRED v3 "
+                "'pytree' object; tcg#55 promoted it to a top-level 'ingress'. "
+                "Graph classes are content addressed -- re-derive.",
+            )
+        ingress = graph.get("ingress")
         if not isinstance(ingress, Mapping):
-            raise IngressError("ingress_invalid", "graph pytree declares no call ingress")
+            raise IngressError("ingress_invalid", "graph interface declares no call ingress")
         return cls.decode(ingress)
 
     def bind(

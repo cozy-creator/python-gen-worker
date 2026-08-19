@@ -50,11 +50,9 @@ def _declaration(
         graph_class="unet/h=64",
         target="unet",
         graph={
-            "v": 3,
+            "v": 4,
             "constant_fqns": ["w.weight"],
-            "lifted_inputs": [],
-            "pytree": {"ingress": ingress.as_dict()},
-            "specialization": {},
+            "ingress": ingress.as_dict(),
         },
         graph_witness=graph_witness,
         range_digest=ingress.digest() if range_digest is None else range_digest,

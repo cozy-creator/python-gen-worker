@@ -434,6 +434,7 @@ def all_miss_answer(document: GraphSetDocument) -> dict:
         "empty": False,
         "targets": list(lane.targets),
         "unobserved_targets": list(lane.unobserved_targets),
+        "passes": list(lane.passes),
         "graphs": [
             {
                 "graph_hash": record.graph,

@@ -31,6 +31,11 @@ _PATH_SEPARATOR = "."
 #: ``<producer>.<format>@<major>`` -- the tensorfs contract-handle spelling.
 _CONTRACT_RE = re.compile(r"[a-z0-9][a-z0-9._-]*[a-z0-9]@[1-9][0-9]*\Z")
 
+#: ``<name>@<major>`` -- one transform pass. Versioned because a pass NAME is
+#: a ``cg-graph-v1`` derivation input (tcg#52): two lanes differing only by a
+#: pass are different graphs, exactly as two lanes differing by a pin are.
+_PASS_RE = re.compile(r"[a-z0-9][a-z0-9-]*[a-z0-9]@[1-9][0-9]*\Z")
+
 
 class LaneError(ValueError):
     """An execution-lane declaration is incomplete or noncanonical."""
@@ -46,6 +51,30 @@ def require_contract_ref(value: object) -> str:
             f"got {value!r}"
         )
     return value
+
+
+def require_pass_ref(value: object) -> str:
+    """Validate one transform-pass spelling: ``<name>@<major>``, nothing else."""
+
+    if not isinstance(value, str) or _PASS_RE.fullmatch(value) is None:
+        raise LaneError(
+            f"a pass name is '<name>@<major>' (e.g. 'precompute-and-free@1'); "
+            f"got {value!r}"
+        )
+    return value
+
+
+def require_passes(names: object) -> tuple[str, ...]:
+    """Validate a lane's pass tuple: canonical, ordered as given, no repeats."""
+
+    if names is None:
+        return ()
+    if not isinstance(names, (tuple, list)):
+        raise LaneError("a lane's passes must be a tuple of pass names")
+    passes = tuple(require_pass_ref(name) for name in names)
+    if len(set(passes)) != len(passes):
+        raise LaneError(f"a lane names a pass twice: {passes!r}")
+    return passes
 
 
 def require_targets(paths: object) -> tuple[str, ...]:
@@ -78,13 +107,21 @@ class LaneRef:
     resolver from the registry entry (interim: the model-type pointer table,
     until the canonical per-model-type entries land in tensorfs
     ``spec/v1/contracts``). Serve code reads it back as ``ctx.lane.dtype``.
+
+    ``passes`` is the lane's TRANSFORM binding (tcg#52): the ordered pass
+    names that MAKE this lane's format. It is resolved from the registry
+    entry exactly like ``dtype`` -- an fp8 lane's weights are fp8 because
+    something converted them, and a precompute lane's blocks hold a side
+    table because something folded them. Empty means no pass, stated.
     """
 
     contract: str
     dtype: Any = None
+    passes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         require_contract_ref(self.contract)
+        object.__setattr__(self, "passes", require_passes(self.passes))
 
 
 def resolve_target(roots: Mapping[str, object], path: str) -> object:
@@ -121,6 +158,8 @@ __all__ = [
     "LaneError",
     "LaneRef",
     "require_contract_ref",
+    "require_pass_ref",
+    "require_passes",
     "require_targets",
     "resolve_target",
 ]
