@@ -624,3 +624,73 @@ def test_a_graph_blob_with_no_route_costs_its_graph_and_names_its_owner(
     ref = cas.put_bytes(b"a serialized ExportedProgram")
     got = store.fetch_program(str(ref), tmp_path / "have.pt2")
     assert got.read_bytes() == b"a serialized ExportedProgram"
+
+
+def test_the_reuse_hit_is_a_wire_fact_a_rental_can_capture(
+    binding: DeployBinding, document: GraphSetDocument, tmp_path: Path,
+    wire: List[tuple],
+) -> None:
+    """`boot_adopt` phase=`minting` on the pod that pays, `reused` on the one
+    that does not — the two-line evidence a demonstration rental captures.
+
+    A serve pod's stdout goes nowhere (pgw#760), so "this pod adopted N graphs
+    and compiled none" cannot be a log line: it is the single observation the
+    whole mint-and-reuse program is judged on.
+    """
+    from gen_worker.serving.residency import ResidencyManager
+    from gen_worker.serving.serve_loop import ServeLoop, manifest_sizer
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "config.json").write_text(json.dumps({"seed": 3}))
+    expected = [r.graph for r in document.lanes[0].graphs]
+
+    class Resolver:
+        def resolve(self, model_cls: type, checkpoint_ref: str) -> DeployBinding:
+            return DeployBinding(
+                checkpoint_ref=checkpoint_ref, checkpoint_dir=tree,
+                model="sdxl", defaults=dict(OVERRIDES))
+
+        def default_pick(self, model_cls: type, slot_name: str) -> str:
+            return "ckpt:tiny@1"
+
+    cas = tmp_path / "podcas"          # ONE pod CAS across both boots
+    mints: List[SelfMint] = []
+
+    def boot(tag: str, compiler: FakeCompiler) -> ServeAdoption:
+        def arm(adoption: ServeAdoption) -> None:
+            mint = a_mint(adoption.store, tmp_path, compiler, tag)
+            mints.append(mint)
+            mint.arm(adoption)
+
+        adoption = ServeAdoption(
+            "release-1", sm=SM, artifacts_dir=tmp_path / f"adopted-{tag}",
+            cas_dir=cas, transport=StubTransport(all_miss_answer(document)),
+            installed=INSTALLED, loader=counting_loader([]), on_adopted=arm)
+        loop = ServeLoop(
+            load_endpoint(FIXTURE_DIR),
+            residency=ResidencyManager(
+                64 * 1024**3,
+                manifest_sizer({"ckpt:tiny@1": 1024}, headroom_bytes=1024)),
+            resolver=Resolver(), lane_contract=LANE,
+            compile_sink_for=adoption.sink_for, on_loaded=adoption.loaded,
+            output_dir=tmp_path / f"out-{tag}")
+        loop.invoke("generate", {"input": {"prompt": tag}}, request_id=tag)
+        return adoption
+
+    paying = FakeCompiler()
+    boot("first", paying)
+    assert mints[0].join(timeout=60.0).state == self_mint_mod.COMPLETE
+    assert sorted(paying.calls) == sorted(expected)
+
+    reusing = FakeCompiler()
+    boot("second", reusing)
+    assert mints[1].join(timeout=60.0).state == self_mint_mod.NOTHING_TO_MINT
+    assert reusing.calls == [], "the second pod compiled: that is not reuse"
+
+    phases = [e[1] for e in wire if e[0] == "boot_adopt"]
+    assert phases == ["minting", "reused"], (
+        f"the reuse hit must be readable off-pod, got {wire}")
+    detail = [e[2] for e in wire if e[0] == "boot_adopt"][1]
+    assert f"{len(expected)} graph(s) adopted" in detail and "0 hole(s)" in detail
+    assert [e for e in wire if e[0] == self_mint_mod.KIND_SKIPPED]

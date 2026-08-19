@@ -93,6 +93,8 @@ class ServeAdoption:
         self.store: Any = None
         #: Why this pod serves eager, when it does. Empty while adopting.
         self.refusal: str = ""
+        #: The lane the session was built against, for the outcome event.
+        self.contract: str = ""
 
     # -- the ServeLoop seam -------------------------------------------------
 
@@ -133,6 +135,8 @@ class ServeAdoption:
                 return
             self._triggered = True
             hook = self._on_adopted
+            contract = self.contract
+        self._say_outcome(contract)
         if hook is None:
             return
         try:
@@ -186,6 +190,7 @@ class ServeAdoption:
         self.store = (
             worker_store(self.cas_dir, store) if self.cas_dir is not None else store
         )
+        self.contract = contract
         self.adoption = AdoptSession(
             self.store, document, contract, self.sm,
             loader=self._loader,
@@ -196,6 +201,35 @@ class ServeAdoption:
             "adopt: release=%s lane=%s sm=%s — %d adopted, %d hole(s)",
             self.release_id, contract, self.sm,
             len(self.adoption.adopted), len(self.adoption.holes),
+        )
+
+    def _say_outcome(self, contract: str) -> None:
+        """THE REUSE FACT, on the wire, counted — emitted after the load.
+
+        A serve pod's stdout goes nowhere (pgw#760), so "this pod adopted N
+        graphs and compiled none" cannot be a log line: it is the single
+        observation the whole mint-and-reuse program is judged on, and it has
+        to be readable off-pod. `boot_adopt` is the hub-known kind for exactly
+        this, and the two boots of a reuse proof read straight off it:
+
+            first  boot -> adopted=0 holes=N   (this pod pays)
+            second boot -> adopted=N holes=0   (this pod reuses)
+
+        Emitted from :meth:`loaded`, not from :meth:`_build`, because the
+        counts are only final once the author's ``ctx.compile`` calls have
+        run — at build time every record is still unclaimed.
+        """
+        session = self.adoption
+        if session is None:
+            return
+        adopted, holes = len(session.adopted), len(session.holes)
+        activity_mod.emit_event(
+            activity_mod.KIND_BOOT_ADOPT,
+            f"release={self.release_id} lane={contract} sm={self.sm}: "
+            f"{adopted} graph(s) adopted from the store, {holes} hole(s) for "
+            f"the background mint, {len(session.unclaimed)} unclaimed",
+            phase="reused" if holes == 0 and adopted else (
+                "minting" if holes else "empty_lane"),
         )
 
     def _refuse(self, phase: str, detail: str) -> None:
