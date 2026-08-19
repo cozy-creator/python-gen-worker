@@ -55,6 +55,8 @@ from .models.cache_paths import tensorhub_cache_dir, tensorhub_cas_dir
 from .models.cozy_snapshot import snapshot_dir_key
 from .models.disk_gc import tree_bytes
 from .models.projection import SNAPSHOTS_DIR
+from .models.store import ModelStore
+from .residency_goal import ResidencyGoal
 from .discovery.names import slugify_name
 from . import postmortem
 from .procsplit import is_compute_child
@@ -571,6 +573,25 @@ class Worker:
         boot_mod.mark_once(
             boot_mod.PHASE_SDK_READY, function=",".join(self.functions)
         )
+        # pgw#1483 / th#2204: THE RESIDENCY SEAM. `ModelStore` was never
+        # constructed anywhere in `src/` — and `WorkerMessage.model_event` is
+        # built INSIDE it, so the hub was waiting for a fact no live object on
+        # this pod could state. `_send` is the store's emit: the same wire
+        # every other WorkerMessage rides. `rescan_disk()` is boot-time truth
+        # — on a warm pod with the endpoint volume attached, this is what
+        # turns 134 GB of already-staged bytes into a residency the pod can
+        # ANSWER with instead of re-downloading.
+        self.store = ModelStore(
+            self._send,
+            cache_dir=self.resolver.snapshots_root.parent,
+            vram_budget_bytes=int(budget) or None,
+        )
+        try:
+            self.store.rescan_disk()
+        except Exception as exc:  # noqa: BLE001 — a cold CAS is not a boot failure
+            logger.warning("disk rescan at boot failed: %s: %s", type(exc).__name__, exc)
+        self.residency_goal = ResidencyGoal(self.store)
+
         self.phase = pb.WORKER_PHASE_READY
         self.draining = False
         self.drained = asyncio.Event()
@@ -669,19 +690,35 @@ class Worker:
         free = hostfacts.free_vram_bytes()
         if free is not None:
             delta.free_vram_bytes = int(free)
+        # th#2204: THE ECHO. The hub reads this to tell a pod that ANSWERED the
+        # residency goal from one that never spoke — its own doc calls it
+        # "receipt only", and receipt was precisely the fact missing when
+        # placement re-elected the same silent worker every six minutes at
+        # $3.29/hr. Only a fully reconciled generation is echoed: a goal still
+        # fetching is accepted, not answered, and collapsing the two would let
+        # the hub read a 134 GB transfer as satisfied.
+        observed = int(self.residency_goal.observed_generation)
+        if observed > 0:
+            delta.observed_residency_generation = observed
         return delta
 
     def build_hello(self) -> pb.Hello:
         # NO `resources`: the split parent measures the silicon in a process
         # that imported no tenant code and stamps every relayed Hello, so
         # anything measured here would be replaced before the hub saw it.
-        # NO `models`/`lifecycle_snapshot`: this build carries no residency
-        # ledger and no intent registry, and an invented one is worse than an
-        # absent one.
+        # NO `lifecycle_snapshot`: this build carries no intent registry, and
+        # an invented one is worse than an absent one.
+        # `models` IS carried now (pgw#1483): the store's residency snapshot is
+        # this pod's BOOT BASELINE, replayed hub-side through
+        # ApplyModelResidency. On a warm pod with the endpoint volume attached
+        # this is the cheapest possible answer to th#2204 — the hub learns the
+        # 134 GB is already here before it ever declares a goal, so the park
+        # never happens rather than being unparked later.
         return pb.Hello(
             protocol_version=PROTOCOL_VERSION,
             worker_id=self.worker_id,
             release_id=self.release_id,
+            models=self.store.residency_snapshot(),
             state=self._state_delta(),
             in_flight=[
                 pb.InFlightJob(request_id=rid, attempt=att)
@@ -705,6 +742,14 @@ class Worker:
         # RECONNECT, and "process start -> hello" measured on the third
         # reconnect of a six-hour-old worker is not a boot number.
         boot_mod.mark_once(boot_mod.PHASE_HELLO)
+        # pgw#1483 / th#2204: TAKE THE RESIDENCY GOAL. This must sit ABOVE the
+        # `file_base_url` early return below — a session with no file API is a
+        # hub-side fact that has nothing to do with weights, and putting the
+        # residency consumer under that return would reproduce this issue's
+        # silence on exactly the pods least able to explain it. Non-blocking:
+        # a 134 GB fetch reconciles on its own task while the transport keeps
+        # reading.
+        self.residency_goal.apply(ack.desired_residency)
         if self.functions:
             # THE cold-boot number: the hub has acked a Hello advertising these
             # functions, so from this instant it may dispatch to this pod.
