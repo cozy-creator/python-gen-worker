@@ -55,6 +55,12 @@ def _build_parser() -> argparse.ArgumentParser:
     from . import release as _release_mod
     _release_mod.add_subparser(sub)
 
+    # pgw#1466 — the endpoint-level surface: lock pins, sync materializes,
+    # serve stays resident, run executes one. Four front doors onto ONE
+    # serving core; see each module's docstring.
+    from . import lock as _lock_mod
+    _lock_mod.add_subparser(sub)
+
     return parser
 
 
