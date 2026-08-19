@@ -85,7 +85,10 @@ class EndpointHost:
         # device error instead of a named fallback. An explicit `device=` from
         # a caller that has already decided still wins; only the DEFAULT is
         # probed.
-        device = str(device) or serving_device()
+        # `device or ""` and not `str(device)`: a caller handing `None` means
+        # "you decide", and `str(None)` is the string "None" — a device name
+        # torch would reject three frames later with nothing pointing here.
+        device = str(device or "") or serving_device()
         self.loaded = loaded
         self.binding = binding
         self.lanes: Dict[type, Any] = {
