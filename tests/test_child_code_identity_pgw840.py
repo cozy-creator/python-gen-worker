@@ -176,3 +176,61 @@ def test_the_reports_identity_survives_the_wire(tmp_path: Path) -> None:
         b'{"entry":"share-000","status":"compiled"}',
         type=pool.EntryReport)
     assert old.code_digest == "" and old.spans == {}
+
+
+# --- pgw#1446: the missing-contract refusal, and what it must NOT do --------
+
+
+def _guard_row() -> Any:
+    """The minimum `_Running` the guard reads: it only uses `row.entry`."""
+    return type("_Row", (), {"entry": "share-000"})()
+
+
+def test_an_unverifiable_child_report_is_refused_when_the_contract_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pgw#840's hazard, reached through pgw#1444's recorded cause.
+
+    A child REPORTED code the parent cannot check, because a module
+    `_CONTRACT_MODULES` names is absent. That is a broken install, not the
+    frozen case, and the artifact must not be packed.
+    """
+    monkeypatch.setattr(pool, "_CONTRACT_MISSING", ["aot_compile_child.py"])
+    box = object.__new__(pool.EntryCompilePool)
+    report = pool.EntryReport(entry="share-000", code_digest="deadbeefdeadbeef")
+
+    with pytest.raises(pool.EntryCompileFailed, match="CANNOT CHECK IT"):
+        pool.EntryCompilePool._verify_child_code(box, _guard_row(), report)
+
+
+def test_a_missing_contract_alone_does_not_refuse_a_child_that_reported_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE pgw#1446 REGRESSION, and it is about measurements.
+
+    pgw#1444 refused on `_CONTRACT_MISSING` unconditionally. `entry_phases` is
+    banked AFTER this gate, so that raise emptied it and broke pgw#1189's law
+    — the attempt that FAILED is exactly the attempt whose measurement the
+    next one sizes against (pgw#877 states it three lines above the call
+    site). It also fired on a tier Paul PARKED on pgw#1371/#1372 (`c4f2caaa`),
+    which cannot run at all, so it protected nothing while breaking staged
+    tests.
+
+    No reported digest means no artifact of unknown origin — nothing to
+    refuse, and the measurements survive.
+    """
+    monkeypatch.setattr(pool, "_CONTRACT_MISSING", ["aot_compile_child.py"])
+    monkeypatch.setattr(pool, "CODE_DIGEST", "")
+    box = object.__new__(pool.EntryCompilePool)
+    report = pool.EntryReport(entry="share-000", code_digest="")
+
+    pool.EntryCompilePool._verify_child_code(box, _guard_row(), report)  # no raise
+
+
+def test_the_missing_contract_cause_is_recorded_rather_than_silent() -> None:
+    """The half of pgw#1444 that was right and stays: an empty digest whose
+    cause is a DELETED module is inspectable, where before it was
+    indistinguishable from zipimport."""
+    assert pool.CODE_DIGEST == "" and pool._CONTRACT_MISSING == [
+        "aot_compile_child.py"
+    ], (pool.CODE_DIGEST, pool._CONTRACT_MISSING)
