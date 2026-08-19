@@ -454,8 +454,15 @@ class Worker:
         # Both halves existed and neither was constructed here, so every
         # `ctx.compile` on every real serving pod was a pass-through and the
         # mint had no work-list to read. `None` back is the eager bridge, with
-        # a stated reason — never a boot failure.
-        self.adoption = self._build_adoption()
+        # a stated reason — never a boot failure. The try is the invariant, not
+        # defensiveness: a pod that cannot adopt can still SERVE, and a worker
+        # that refuses to boot over its compiled-graph story is strictly worse
+        # than one that serves eager and says why.
+        try:
+            self.adoption = self._build_adoption()
+        except Exception:  # noqa: BLE001 — adoption never costs a boot
+            logger.exception("adopt: could not be set up; this pod serves eager")
+            self.adoption = None
         try:
             # The deploy's active lane. A single-lane model needs none; a
             # multi-lane one has no boot-time wire field yet (RunJob.lane is
