@@ -228,6 +228,20 @@ def load_allowlist() -> Tuple[Dict[Tuple[str, str], str], List[str]]:
 #: A gate lives here ONLY with a threat a reader can evaluate. "It is useful"
 #: and "it is off by default" are not threats.
 BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
+    ("src/gen_worker/serving/mint_child.py", "CUDA_HOME"): (
+        "NOT OURS TO OWN (pgw#1464). CUDA_HOME is the CUDA toolchain's own "
+        "variable, like PATH — the operator states where their toolkit is (a "
+        "devel base image, a distro package, a developer box that cannot write "
+        "to /usr/local). The conditional is a DEFERENCE check, not a feature "
+        "switch: `_ensure_cuda_home` returns early when it is set and composes "
+        "a fallback root only when nobody has said. Threat if made "
+        "unconditional: we would export a composed ~/.cache root OVER a real "
+        "toolkit, pointing the linker at a partial tree that lacks headers the "
+        "operator's image has — and AOTI resolves CUDA_HOME at the LINK step, "
+        "so the loss surfaces minutes in, after the codegen and kernel work "
+        "are already paid for, attributed to nothing. Cannot be a Settings "
+        "field: the value's producer is the environment we are deferring to, "
+        "not our config."),
     ("src/gen_worker/host_move_guard.py", "GEN_WORKER_HOST_MOVE_GUARD"):
         "RULED EXCEPTION. Safety guard, ON by default, disabled only with =0. "
         "Threat: a silent host-RAM offload turns a serving pod into a "
