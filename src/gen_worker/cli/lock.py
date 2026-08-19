@@ -195,7 +195,7 @@ def run_lock(args: argparse.Namespace) -> int:
         _say("lock --check: inputs moved — re-deriving to see whether the "
              "document moved with them")
         return _check_by_rederive(
-            config, root, out, existing, tree, lockfile, graph_cas_root, device,
+            config, root, out, existing, tree, graph_cas_root, device,
         )
 
     cas = ws.local_cas(graph_cas_root)
@@ -236,7 +236,7 @@ def run_lock(args: argparse.Namespace) -> int:
             "say so rather than emit an empty document."
         )
 
-    traced = _trace(config, root, tree, lockfile, graph_cas_root, device)
+    traced = _trace(config, root, tree, graph_cas_root, device)
     if traced is None:
         return 1
     result, elapsed = traced
@@ -334,7 +334,6 @@ def _trace(
     config: Any,
     root: Path,
     tree: Optional[Path],
-    lockfile: Path,
     graph_cas_root: Path,
     device: str,
 ) -> Optional[tuple[Any, float]]:
@@ -377,7 +376,6 @@ def _check_by_rederive(
     out: Path,
     existing: el.DeriveBlock,
     tree: Optional[Path],
-    lockfile: Path,
     graph_cas_root: Path,
     device: str,
 ) -> int:
@@ -389,7 +387,7 @@ def _check_by_rederive(
     and NOTHING IS WRITTEN either way: `--check` is a question.
     """
 
-    traced = _trace(config, root, tree, lockfile, graph_cas_root, device)
+    traced = _trace(config, root, tree, graph_cas_root, device)
     if traced is None:
         return 1
     result, elapsed = traced
