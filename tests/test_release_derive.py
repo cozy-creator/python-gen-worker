@@ -557,3 +557,33 @@ def test_the_blocker_itself_can_go_red(config_only_tree: Path, tmp_path: Path) -
         capture_output=True, text=True, env=env, check=False,
     )
     assert proc.returncode != 0 and "not importable in a real release env" in proc.stderr
+
+
+def test_the_default_lockfile_is_the_one_BESIDE_the_endpoint(
+    config_only_tree: Path, tmp_path: Path
+) -> None:
+    """The production shape: no `--lockfile`, and the lock is found anyway.
+
+    tensorhub's builder runs `gen-worker release derive --module M --checkpoint
+    /derive/checkpoint` with no lockfile flag, in an image whose `WORKDIR /app`
+    holds `pyproject.toml` and `uv.lock` (docs/dockerfile.md). `--dir` defaults
+    to that cwd, so the endpoint's own lock is beside it — which is the ONLY
+    reason a required lockfile does not break the fleet's derive path. This
+    reproduces that layout with real files rather than trusting the Dockerfile.
+    """
+
+    endpoint = tmp_path / "app"
+    endpoint.mkdir()
+    for module in FIXTURES.glob("*.py"):
+        (endpoint / module.name).symlink_to(module)
+    (endpoint / "uv.lock").write_text(LOCK)
+
+    from gen_worker.cli import main
+
+    out = tmp_path / "beside.json"
+    assert main([
+        "release", "derive", "--dir", str(endpoint), "--module", "tiny_endpoint",
+        "--checkpoint", str(config_only_tree), "--out", str(out),
+    ]) == 0
+    stack = json.loads(out.read_bytes())["graphs"]["stack"]
+    assert ["torch", "2.13.0"] in stack
