@@ -27,7 +27,15 @@ import threading
 import time
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+
+#: A compile stack, in EITHER of its two canonical shapes. torchcg's own
+#: `require_stack` has always accepted both — `document.stack` and
+#: `compile_stack()` return the ORDERED tuple-of-pairs, and a caller that
+#: happens to hold a dict should not have to convert. Annotating only the
+#: Mapping half made every caller passing a real stack a type error while
+#: working perfectly at runtime (both call sites do `dict(stack)`).
+CompileStack = Union[Mapping[str, str], Sequence[Tuple[str, str]]]
 
 import msgspec
 
@@ -180,7 +188,7 @@ class EndpointHost:
         sm: str = "",
         loader: Any = None,
         artifacts_dir: Optional[Path] = None,
-        stack: Optional[Mapping[str, str]] = None,
+        stack: Optional[CompileStack] = None,
     ) -> None:
         """Instantiate each referenced Model class and run its ``load(ctx)``.
 

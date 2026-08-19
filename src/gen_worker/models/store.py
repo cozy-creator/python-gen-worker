@@ -380,6 +380,17 @@ class ModelStore:
             if self._loop is not None and not self._loop.is_closed():
                 asyncio.run_coroutine_threadsafe(coro, self._loop)
             else:
+                # pgw#1490: LOUD. This branch drops a wire fact, and it dropped
+                # them silently — a store touched before any loop exists (the
+                # `Worker.__init__` boot rescan, entrypoint.py's construction
+                # site) populated the disk tier perfectly and delivered ZERO
+                # ModelEvents, with nothing anywhere saying so. A residency the
+                # hub never hears is the same as no residency at all.
+                logger.warning(
+                    "model event DROPPED ref=%s state=%s: no event loop is "
+                    "bound to this store yet (call bind_loop, or emit from "
+                    "inside the loop)", ref, state,
+                )
                 coro.close()
             return
         loop.create_task(coro)
@@ -669,6 +680,16 @@ class ModelStore:
         """A digest-carrying snapshot for ``ref`` was seen this connection
 : snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
+
+    def banked_snapshot(self, ref: WireRef) -> Optional[pb.Snapshot]:
+        """The snapshot identity this store holds for ``ref``, if any.
+
+        pgw#1490: the dispatch-time resolver asks THIS, because the store is
+        what materialized the tree and therefore what knows its digest. The
+        wire's `ModelBinding.manifest_digest` has never had a sender.
+        """
+        with self._identity_lock:
+            return self._snapshots.get(ref)
 
     def bank_snapshot(self, ref: WireRef, snapshot: pb.Snapshot) -> None:
         """Make hub metadata available without starting a download."""
@@ -1318,10 +1339,26 @@ class ModelStore:
             # re-adoption, e2e#117 live find #7) and must not short-circuit.
             want = ""
             if snapshot is not None and snapshot.digest:
-                want = snapshot.digest.split(":", 1)[-1].strip().lower()
-            # th#1941: the composed manifest digest IS the directory name, so
-            # there is exactly one acceptable spelling per fetch identity.
-            if cached is not None and cached.exists() and (not want or cached.name == want):
+                # pgw#1490: ACCEPT BOTH SPELLINGS, and do not pick a side.
+                #
+                # MEASURED on the standing stack, because this was reported as
+                # a live defect and it is not one: `endpoint_volume_manifest.
+                # snapshot_digest` is 38/38 BARE hex, every one of the 13 trees
+                # in the box's CAS is named bare hex, and so the strip that
+                # used to be here was a NO-OP in production and this
+                # short-circuit fired exactly as intended. But
+                # `repo_artifact_file_metadata.snapshot_digest` is 1999/1999
+                # ALGORITHM-TAGGED, so both spellings are genuinely live
+                # hub-side and which one reaches the wire is a property of the
+                # route that answered. A residency answer must not be wrong
+                # because two producers spell one digest two ways, so the
+                # comparison admits either and the WRITER keeps deciding the
+                # name on disk — changing that would rename every staged tree
+                # and orphan every pre-warmed volume.
+                want = snapshot.digest.strip().lower()
+            if cached is not None and cached.exists() and (
+                not want or cached.name.lower() in (want, want.split(":", 1)[-1])
+            ):
                 if ref in self._verified:
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
