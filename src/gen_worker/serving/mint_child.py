@@ -85,6 +85,7 @@ def contract_digest() -> str:
     return combined.hexdigest()[:16]
 
 
+
 def compile_one(request: Mapping[str, Any]) -> Path:
     """Deserialize one graph blob and AOTI-compile it into ``destination``."""
     # pgw#1444/pgw#840, BEFORE any work: this child must BE the parent. It is
@@ -112,11 +113,35 @@ def compile_one(request: Mapping[str, Any]) -> Path:
     from .._vendor.tensorfs import LocalCAS
 
     program = torch.export.load(str(request["blob"]))
+    # pgw#1456: the graph interface is FIVE fields, not two. torchcg derives
+    # `constant_fqns` (and `literal_values`) from the exported program itself
+    # and accepts them absent, but `lifted_inputs` and `specialization` are the
+    # caller's to state — and a stub without them is refused by name before any
+    # compilation starts, which is why the v2 mint path had never compiled a
+    # single graph from any caller.
+    #
+    # `lifted_inputs` is EMPTY for these programs and that is a statement, not
+    # a placeholder: the parameters and buffers a trace lifts are exactly what
+    # `constant_fqns` enumerates (torchcg reads `graph_signature.parameters`,
+    # `.buffers` and `.lifted_tensor_constants`), so listing them here would
+    # double-count the same tensors in one identity.
+    #
+    # `specialization` is EMPTY for the same kind of reason: v1 filled it with
+    # `shape_strategy`/`warm_changes_key`/`fork.*` off a declaration this path
+    # no longer has, and a v2 derive registers CONCRETE shapes — every row
+    # comes back with `symbols: {}`. An empty specialization says "nothing was
+    # specialized", which is true here; inventing a strategy would put a fact
+    # nobody measured into the graph-class key.
     spec = GraphClassSpec(
         graph_class=str(request["graph"]),
         target=str(request["target"]),
         program=program,
-        graph={"v": 3, "pytree": {"ingress": request["ingress"]}},
+        graph={
+            "v": 3,
+            "pytree": {"ingress": request["ingress"]},
+            "lifted_inputs": [],
+            "specialization": {},
+        },
     )
     runtime = RuntimeCompatibility(
         str(request["target_arch"]), toolchain=dict(request["toolchain"]))
