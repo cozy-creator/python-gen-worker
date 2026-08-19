@@ -68,8 +68,8 @@ def add_subparser(sub: Any) -> None:
 def _run_derive(args: argparse.Namespace) -> int:
     import importlib
 
+    from ..discovery.discover import prime_sys_path
     from ..release.derive import DeriveError, derive_release
-    from .run import _ensure_sys_path
 
     root = Path(args.dir).resolve()
     if not root.is_dir():
@@ -79,7 +79,7 @@ def _run_derive(args: argparse.Namespace) -> int:
     if not checkpoint.is_dir():
         print(f"error: --checkpoint {checkpoint} is not a directory", file=sys.stderr)
         return 2
-    _ensure_sys_path(root)
+    prime_sys_path(root)
     try:
         module = importlib.import_module(args.module)
     except Exception as exc:  # noqa: BLE001 - author import errors are the check

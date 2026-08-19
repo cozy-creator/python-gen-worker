@@ -165,6 +165,39 @@ def _fail_build_input(*messages: str) -> None:
     sys.exit(1)
 
 
+def prime_sys_path(root: Path) -> None:
+    """Put an endpoint tree on ``sys.path`` so its own imports resolve.
+
+    ``<root>`` then ``<root>/src``, each only when absent, front-inserted so a
+    same-named installed package cannot shadow the tree being read. Discovery
+    and the release derive both read an UNINSTALLED source tree, so both need
+    this and both must do it identically — a derive that primed the path
+    differently from the discovery that produced the manifest would derive
+    against a different module than the one the image ships.
+
+    pgw#1440: this is the one implementation. It was inlined here and copied
+    into the v1 `cli/run.py` as `_ensure_sys_path`, whose own docstring said it
+    existed to "match discover.py's sys.path priming" — a duplicate that named
+    its own original. pgw#1373 (`cd46c957`) deleted the v1 SDK and with it that
+    copy, leaving `cli/release.py` importing a symbol that no longer existed,
+    so `gen-worker release derive` raised `ModuleNotFoundError` on the second
+    line of its handler. Two copies of one rule is what let a deletion break a
+    caller silently; there is now one, and it is exported.
+
+    ROOT THEN SRC, in that order, because each insert goes to position 0 — so
+    the resulting precedence is ``src`` ahead of ``root``, which is what a
+    ``src/``-layout endpoint needs. Reversing the two statements silently
+    reverses the precedence, so the order here is load-bearing, not stylistic.
+    """
+    root = Path(root)
+    root_text, src = str(root), root / "src"
+    if root_text not in sys.path:
+        sys.path.insert(0, root_text)
+    src_text = str(src)
+    if src.exists() and src_text not in sys.path:
+        sys.path.insert(0, src_text)
+
+
 
 def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     """The complete endpoint.lock manifest for the project at ``root``.
@@ -182,12 +215,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     # Discovery also runs in an uninstalled source tree, so the tree is on the
     # path — and `_audit_source_only_imports` below is what stops that
     # injection from hiding a module the built wheel forgot to package.
-    root_str = str(root)
-    src_str = str(root / "src")
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
-    if (root / "src").exists() and src_str not in sys.path:
-        sys.path.insert(0, src_str)
+    prime_sys_path(root)
     top_level = cfg.main.split(".", 1)[0]
     preloaded = frozenset(sys.modules)
 
