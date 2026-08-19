@@ -291,3 +291,62 @@ def test_priming_omits_a_src_dir_that_does_not_exist(tmp_path: Path) -> None:
         assert str(root / "src") not in sys.path
     finally:
         sys.path[:] = saved
+
+
+def test_the_blob_keeps_ONE_device_story_and_carries_no_weights(
+    config_only_tree: Path, tmp_path: Path
+) -> None:
+    """pgw#1465: the graph's device and the state dict's device must AGREE.
+
+    `_demote_fakes_to_meta` rewrote every fake tensor to META. Its rationale
+    was real -- a phantom storage must not make the archive claim bytes it
+    does not have -- but the cure destroyed the device, and pgw#1458 made the
+    device load-bearing. One blob then told TWO device stories (1,922 graph
+    node metas on cuda:0 against 686 state-dict entries on meta), AOTI reads
+    both, and every sd1.5 class died on `FakeTensorDeviceMismatchError`.
+
+    So this reads the blob's OWN recorded devices -- the same archive metadata
+    a CPU-side check can read without a GPU -- and asserts they are the single
+    device the trace ran on, plus that no real weight rode along.
+    """
+
+    import json
+    import zipfile
+
+    out = tmp_path / "doc.json"
+    cas = tmp_path / "graph-cas"
+    assert _derive(
+        "tiny_endpoint", config_only_tree, out, "--graph-cas", str(cas)
+    ) == 0
+
+    written = [
+        path for path in cas.rglob("*")
+        if path.is_file() and zipfile.is_zipfile(path)
+    ]
+    assert written, "the derive stored no exported-program blob to inspect"
+
+    for blob in written:
+        devices: set[str] = set()
+        payload = 0
+        with zipfile.ZipFile(blob) as archive:
+            for name in archive.namelist():
+                if name.endswith(
+                    ("model_weights_config.json", "model_constants_config.json")
+                ):
+                    for entry in json.loads(archive.read(name))["config"].values():
+                        devices.add(str(entry["tensor_meta"]["device"]["type"]))
+                elif "/weights/" in name and not name.endswith(".json"):
+                    payload += archive.getinfo(name).file_size
+        assert "meta" not in devices, (
+            f"{blob.name} records META-device tensors: the demotion is back, and "
+            f"a meta state dict against a device-stamped graph is the pgw#1465 "
+            f"two-device-stories failure AOTI refuses"
+        )
+        assert len(devices) <= 1, (
+            f"{blob.name} tells more than one device story {sorted(devices)!r}; "
+            f"AOTI reads the graph AND the state dict and refuses a mismatch"
+        )
+        assert payload == 0, (
+            f"{blob.name} carries {payload} bytes of weight payload; a graph "
+            f"artifact carries structure and the miner binds real weights"
+        )
