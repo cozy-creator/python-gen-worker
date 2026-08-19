@@ -250,6 +250,11 @@ class HubGraphStore:
         # call — swallowing it made their handlers dead code and left every
         # unstamped pod reporting the drift reason.
         answer = self._resolve()
+        # `env_lockfile_hash` is the HUB's field name and it is a misnomer:
+        # the hub echoes the derive document's `closure`, which is the derive
+        # process's INSTALLED set, never a lockfile hash (pgw#1472 — one
+        # definition, and this wire spelling is owed a rename in tensorhub's
+        # th#2133 schema). Read under the name it actually carries.
         closure = str(answer.get("env_lockfile_hash") or "")
         lanes: list[dict[str, Any]] = []
         if not answer.get("empty") and answer.get("lane_stamped"):

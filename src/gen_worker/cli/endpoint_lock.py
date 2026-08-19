@@ -163,11 +163,11 @@ def torchcg_format_versions() -> tuple[int, int]:
 def tracer_digest() -> str:
     """A fingerprint of the CODE THAT TRACES: torchcg plus gen_worker's derive.
 
-    The env closure (``uv.lock``) is the right identity when both are resolved
-    from the lockfile — but the cozy-local shape Paul asked for runs them off
-    ``PYTHONPATH`` from working trees, where the lockfile mentions neither. In
-    that shape a tracer change is invisible to the closure, so a saved trace
-    would be reused across a fix that changes what tracing MEANS.
+    The env closure covers both when both are INSTALLED — but the cozy-local
+    shape Paul asked for runs them off ``PYTHONPATH`` from working trees, where
+    no distribution names them. In that shape a tracer change is invisible to
+    the closure, so a saved trace would be reused across a fix that changes
+    what tracing MEANS.
 
     That is not hypothetical: tcg#57 changed the hollow session's default
     device and pgw#1465 deleted the meta demotion. Both alter the emitted
@@ -260,7 +260,6 @@ def inputs_digest(
     module_name: str,
     checkpoint_ref: str,
     trace_device: str,
-    lockfile: Optional[Path],
     extra: Iterable[str] = (),
 ) -> str:
     """Hash everything the derive READS. Unchanged inputs => skippable re-run.
@@ -269,9 +268,13 @@ def inputs_digest(
     digest is that it can be computed in milliseconds before deciding whether to
     spend ~165s; a digest over outputs could only be checked after paying.
 
-    ``lockfile`` (``uv.lock``) is the env-identity closure — torch's version
-    changes what a trace means, so a lock derived under a different closure is
-    not reusable even when the author source is byte-identical.
+    The env input is ``env_closure_hash()`` — the SAME value the reused document
+    carries stamped (pgw#1472). This field used to be the `uv.lock` file digest,
+    which was wrong in a way only the one-definition rule makes visible: a reuse
+    carries the saved ``[derive]`` block through UNTOUCHED, closure included, so
+    an env that moved without its lock moving would have handed back a document
+    stamped with a closure this process no longer restates — unadoptable, and
+    silently.
     """
     h = hashlib.sha256()
 
@@ -287,14 +290,17 @@ def inputs_digest(
     # instead of a silently-misread document.
     field("interface_v", str(interface_v))
     field("document_v", str(document_v))
-    # The tracer's own source. See `tracer_digest`: in the cozy-local shape the
-    # lockfile does not mention torchcg or gen_worker, so this is the only thing
-    # standing between a tracer fix and a silently-reused pre-fix graph set.
+    # The tracer's own source. See `tracer_digest`: in the cozy-local shape
+    # neither torchcg nor gen_worker is an installed distribution, so this is
+    # the only thing standing between a tracer fix and a silently-reused
+    # pre-fix graph set.
     field("tracer", tracer_digest())
     field("module", module_name)
     field("checkpoint_ref", checkpoint_ref)
     field("trace_device", trace_device)
-    field("lockfile", _file_digest(lockfile) if lockfile and lockfile.is_file() else "")
+    from ..env_identity import env_closure_hash
+
+    field("env_closure", env_closure_hash())
     for path in source_files(root):
         field(f"src:{path.relative_to(root).as_posix()}", _file_digest(path))
     for item in extra:

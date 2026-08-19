@@ -292,7 +292,7 @@ class ServeAdoption:
 
     def _build(self, lane: Any) -> None:
         from .._vendor.torchcg.adopt import AdoptSession
-        from .._vendor.torchcg.graph_identity import installed_closure
+        from ..env_identity import env_closure
         from .mint_store import worker_store
         from .hub_store import (
             BrokerReleaseGraphTransport,
@@ -326,8 +326,11 @@ class ServeAdoption:
         if getattr(document, "eager_permanent", False):
             self._refuse("eager_permanent", "the release document is eager-permanent")
             return
+        # pgw#1472: `_installed` is a TEST seam. Production has exactly one
+        # answer — this process's own installed set, via the one function the
+        # publish-time derive also stamped from.
         installed = (
-            self._installed if self._installed is not None else installed_closure()
+            self._installed if self._installed is not None else env_closure()
         )
         # ONE store for both directions: the adopt reads through it (local CAS
         # before the hub, so a restarted pod adopts what it already minted) and

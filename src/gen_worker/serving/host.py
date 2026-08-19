@@ -184,7 +184,7 @@ class EndpointHost:
         """
         from .._vendor.torchcg import EnvironmentMismatch
         from .._vendor.torchcg.adopt import AdoptSession
-        from .._vendor.torchcg.graph_identity import installed_closure
+        from ..env_identity import env_closure
 
         started = time.monotonic()
 
@@ -219,7 +219,10 @@ class EndpointHost:
             from .model import lane_handle
 
             lane_contract = lane_handle(self.lanes[lane_bearing[0]])
-            installed_map = dict(installed) if installed is not None else installed_closure()
+            # pgw#1472: `installed=` is a TEST seam. Production has exactly one
+            # answer — this process's own installed set, via the one function
+            # the publish-time derive also stamped from.
+            installed_map = dict(installed) if installed is not None else env_closure()
             try:
                 session = AdoptSession(
                     store,
