@@ -236,8 +236,8 @@ def plan_residency(
 
     Deterministic: ties break on name, so the same tree and the same budget
     always produce the same split. That is a hard requirement, not a
-    nicety — a mint's traced graph class and a residency reservation both
-    depend on the answer.
+    nicety — a mint's traced graph specializations and a residency reservation
+    both depend on the answer.
     """
     streams = max(1, int(streams))
     pair = MemoryBudget.of(budget_bytes)
