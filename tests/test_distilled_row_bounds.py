@@ -21,6 +21,8 @@ never failed is not known to be able to fail.
 
 from __future__ import annotations
 
+from typing import Any
+
 import msgspec
 import pytest
 
@@ -66,7 +68,7 @@ FAMILIES = [
 
 @pytest.mark.parametrize("cls,row,steps,guidance,naive_floors", FAMILIES)
 def test_shipped_bounds_preserve_the_distilled_row(
-    cls: type[msgspec.Struct],
+    cls: type[Any],
     row: dict[str, object],
     steps: int,
     guidance: float,
@@ -92,7 +94,7 @@ def test_shipped_bounds_preserve_the_distilled_row(
 
 @pytest.mark.parametrize("cls,row,steps,guidance,naive_floors", FAMILIES)
 def test_the_naive_port_would_corrupt_the_distilled_row(
-    cls: type[msgspec.Struct],
+    cls: type[Any],
     row: dict[str, object],
     steps: int,
     guidance: float,
@@ -120,7 +122,10 @@ def test_the_naive_port_would_corrupt_the_distilled_row(
         ],
         frozen=True,
     )
-    decoded = decode_defaults(naive, row, model_name=f"naive-{cls.__name__}")
+    # `defstruct` is typed `type[Struct]`, so the per-family knob attributes are
+    # invisible to mypy here — same reason the endpoints annotate their
+    # lazily-wrapped pipelines `Any`.
+    decoded: Any = decode_defaults(naive, row, model_name=f"naive-{cls.__name__}")
     lo, hi = decoded.guidance.lo, decoded.guidance.hi
     corrupted = (
         decoded.steps.default != steps
@@ -141,7 +146,7 @@ def test_the_naive_port_would_corrupt_the_distilled_row(
 #: ``(max lo, min hi)`` — so the platform knob must be the WIDEST envelope any
 #: lane in the family declares, and every narrowing belongs in the CHECKPOINT
 #: ROW. This table is the audit; the test below is the gate.
-DECLARED_LANE_BOUNDS = {
+DECLARED_LANE_BOUNDS: dict[type[Any], dict[str, list[tuple[str, float, float]]]] = {
     Krea2Defaults: {
         "steps": [("raw main.py:313", 20, 80), ("turbo main.py:340", 1, 16)],
         "guidance": [("raw main.py:316", 1.0, 10.0),
@@ -165,7 +170,7 @@ DECLARED_LANE_BOUNDS = {
     "cls", list(DECLARED_LANE_BOUNDS), ids=lambda c: c.__name__
 )
 def test_platform_knob_is_the_widest_declared_envelope(
-    cls: type[msgspec.Struct],
+    cls: type[Any],
 ) -> None:
     """The platform knob must admit EVERY lane the family declares.
 
