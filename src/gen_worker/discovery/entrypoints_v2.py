@@ -84,6 +84,40 @@ def _entrypoint_specs(module: Any) -> List[Any]:
     return out
 
 
+def _deferred_imports(tree: ast.AST) -> Dict[str, str]:
+    """Local name -> dotted path, for imports written INSIDE ``load``.
+
+    pgw#1431. An endpoint whose upstream runtime is source-built cannot import
+    it at module top: the package is not on PyPI and compiles CUDA extensions,
+    so a discovery runner has nothing to import. The SDK's own convention says
+    to defer it (``trellis-3d/main.py:1-7``: *"deferring a source-built extra
+    ... is exactly what keeps discovery (and the CPU test suite) importable"*).
+
+    A deferred import binds no module-level name, so the ``getattr(module, …)``
+    lookup below finds nothing and the whole parse used to yield "" — which
+    :func:`_pipeline_class_or_refuse` turns into a hard publish refusal. The
+    convention that keeps discovery importable was the one that made discovery
+    refuse.
+
+    Reading the ``ImportFrom`` node recovers the dotted name and imports
+    NOTHING, so it keeps the promise the rest of this function makes: no author
+    code runs at discovery. ``import a.b.c`` is deliberately not handled — it
+    binds ``a``, so the pipeline would be spelled ``a.b.c.Name`` as an
+    ``ast.Attribute`` rather than the ``ast.Name`` this parse accepts.
+    """
+    found: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        if node.level:  # a relative import inside load(); no dotted path to state
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            found[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return found
+
+
 def _pipeline_class(model_cls: type) -> str:
     """The dotted pipeline class ``load()`` builds, read STATICALLY.
 
@@ -94,6 +128,17 @@ def _pipeline_class(model_cls: type) -> str:
     class header makes. Unreadable (a dynamic class, no ``load``) returns "",
     and the caller decides what an absent one means; guessing a pipeline here
     would be a manifest that lies about what the worker will build.
+
+    Two resolutions, in order of authority (pgw#1431):
+
+    1. the name bound on the endpoint's MODULE — a real class object, so the
+       answer carries its true ``__module__``/``__qualname__`` even when the
+       import site spells an alias or a re-export;
+    2. failing that, a ``from x.y import Name`` written INSIDE ``load`` — the
+       dotted path read off the AST, importing nothing.
+
+    (2) is strictly a fallback: when the class is importable at discovery, (1)
+    is what runs, so this change cannot move any answer that already resolved.
     """
     load = getattr(model_cls, "load", None)
     if load is None:
@@ -103,6 +148,7 @@ def _pipeline_class(model_cls: type) -> str:
     except (OSError, TypeError, SyntaxError):
         return ""
     module = inspect.getmodule(model_cls)
+    deferred = _deferred_imports(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -117,6 +163,9 @@ def _pipeline_class(model_cls: type) -> str:
         target = getattr(module, arg.id, None)
         if isinstance(target, type):
             return f"{target.__module__}.{target.__qualname__}"
+        dotted = deferred.get(arg.id)
+        if dotted:
+            return dotted
     return ""
 
 
