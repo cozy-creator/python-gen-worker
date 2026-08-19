@@ -454,6 +454,57 @@ def test_a_resident_ref_opens_no_download_record(
         origin.close()
 
 
+def test_the_record_opens_LAZILY_when_the_resident_check_was_wrong(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """THE SAFETY VALVE, and it must be exercised, not asserted about.
+
+    The resident pre-check is an OPTIMIZATION and the downloader is the
+    authority: a ref residency believes is held may still need bytes (a partial
+    CAS, an evicted tree). Here residency holds a RAM-tier entry for a ref with
+    nothing on disk, so the pre-check declines to declare a transfer — and then
+    9 MiB genuinely move. The record must open on the first byte, advance, and
+    close. A fix that suppressed the declaration unconditionally would leave
+    this fetch invisible, which is th#2204's defect rebuilt one step over."""
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            # Resident by residency's reckoning, with NO bytes on disk.
+            store.residency.track_ram(_REF, object())
+            wire.model_events.clear()
+            wire.updates.clear()
+            await store.ensure_local(_REF, snapshot)
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        downloading = [
+            e for e in wire.model_events
+            if e.state == pb.MODEL_STATE_DOWNLOADING
+        ]
+        assert downloading, (
+            "a fetch that really moved bytes must declare itself even when the "
+            "resident pre-check said otherwise")
+        assert downloading[0].bytes_done > 0, (
+            "the lazy open states the position that provoked it")
+        assert wire.open_download_records() == {}, "and it must still close"
+        steps = [r.step for r in wire.positions()]
+        assert steps[-1] == (OBJECTS * OBJECT_BYTES) // MIB
+    finally:
+        origin.close()
+
+
 def test_a_transfer_that_dies_midway_leaves_no_open_record(
     tmp_path: Path, _fine_cadence: Any
 ) -> None:

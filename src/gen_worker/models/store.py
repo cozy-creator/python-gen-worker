@@ -1387,7 +1387,12 @@ class ModelStore:
                 dl_counter.set_done(float(done))
                 if total:
                     dl_counter.set_total(float(total))
-                if not download_open and int(done) > 0:
+                if not download_open:
+                    if int(done) <= 0:
+                        # The fetch loop ticks at zero before it moves anything.
+                        # Declaring HERE is how the phantom got created; a
+                        # position of 0 is not a transfer.
+                        return
                     # A byte moved on a materialization we declined to declare:
                     # the ref was not as resident as the resolver believed. Open
                     # now, so a real fetch always has a record to advance.
