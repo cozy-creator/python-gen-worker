@@ -19,7 +19,9 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 pytest.importorskip("transformers")
-pytest.importorskip("torchcg")
+# se#786/pgw#1462: the derive imports the VENDORED torchcg (the miner's copy),
+# which ships in this wheel — so this is a hard import, never a skip.
+import gen_worker._vendor.torchcg  # noqa: E402,F401
 
 FIXTURES = Path(__file__).resolve().parent / "release_fixtures"
 
@@ -350,3 +352,94 @@ def test_the_blob_keeps_ONE_device_story_and_carries_no_weights(
             f"{blob.name} carries {payload} bytes of weight payload; a graph "
             f"artifact carries structure and the miner binds real weights"
         )
+
+
+# se#786 / pgw#1462 / th#2192 — THE BARE RELEASE ENV, AND THE PROGRAM BLOB.
+#
+# Measured 2026-08-19 in `serverless-endpoints/sdxl`'s own venv (the release
+# env, built from its uv.lock): `release derive` refused with
+# "torchcg is a release dependency there ... gen-worker deliberately does not
+# bundle it", and NO endpoint in the fleet pins torchcg. Every other production
+# site — `serving/mint_child.py`, `serving/host.py`, `serving/hub_store.py` —
+# imports `gen_worker._vendor.torchcg`, so an endpoint-pinned torchcg would let
+# the publish-time TRACE and the serving-time MINT run different compilers.
+#
+# The blocker below is the whole test: this env HAS both distributions
+# installed as dev dependencies, so without it the assertion would pass on a
+# derive that never touched the vendored copy.
+
+_BLOCKER = """
+import sys
+class _NoTopLevel:
+    BLOCKED = {"torchcg", "tensorfs"}
+    def find_module(self, name, path=None):
+        return None
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in self.BLOCKED:
+            raise ImportError(
+                "top-level %s is not importable in a real release env" % name
+            )
+        return None
+sys.meta_path.insert(0, _NoTopLevel())
+"""
+
+
+def test_derive_runs_in_a_release_env_with_no_top_level_torchcg_or_tensorfs(
+    config_only_tree: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "bare.json"
+    cas = tmp_path / "graph-cas"
+    sitecustomize = tmp_path / "sitecustomize.py"
+    sitecustomize.write_text(_BLOCKER)
+
+    import os
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(tmp_path), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+    )
+    completed = subprocess.run(
+        [
+            sys.executable, "-m", "gen_worker.cli", "release", "derive",
+            "--dir", str(FIXTURES), "--module", "tiny_endpoint",
+            "--checkpoint", str(config_only_tree),
+            "--graph-cas", str(cas),
+            "--out", str(out),
+        ],
+        capture_output=True, text=True, timeout=900, check=False, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr[-4000:]
+
+    # th#2192's consequence, asserted on the OUTPUT: an empty `program` is the
+    # miner's `MissingProgramDigest`, so a derive that stores no blob is not a
+    # mintable derive. `--graph-cas` is the only thing that fills it.
+    document = json.loads(out.read_bytes())
+    programs = [
+        record["program"]
+        for lane in document["graphs"]["lanes"]
+        for record in lane["graphs"]
+    ]
+    assert programs and all(p.strip() for p in programs), document["graphs"]
+    assert cas.is_dir() and any(cas.rglob("*")), "the graph CAS holds no blob"
+
+
+def test_the_blocker_itself_can_go_red(config_only_tree: Path, tmp_path: Path) -> None:
+    """The negative control: with the blocker armed, the OLD import fails.
+
+    Without this, a blocker that silently stopped blocking would make the test
+    above pass for the wrong reason — the exact fixture-instead-of-emitter hole
+    that kept th#2192 green.
+    """
+    import os
+
+    sitecustomize = tmp_path / "sitecustomize.py"
+    sitecustomize.write_text(_BLOCKER)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(tmp_path), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", "import torchcg"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode != 0 and "not importable in a real release env" in proc.stderr

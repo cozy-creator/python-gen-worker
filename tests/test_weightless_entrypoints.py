@@ -139,7 +139,7 @@ def test_discovery_publishes_a_row_with_no_slots(weightless: ModuleType) -> None
 def test_derive_renders_an_envelope_with_no_model_field(
     weightless: ModuleType, tmp_path: Path
 ) -> None:
-    pytest.importorskip("torchcg")
+    # se#786/pgw#1462: vendored torchcg ships in the wheel — never a skip.
     from gen_worker.release.derive import derive_release
 
     result = derive_release(weightless, checkpoint_dir=tmp_path)
