@@ -51,9 +51,12 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 55 -> 54: pgw#1270 deleted the duplicate worker package/runner surface.
     # pgw#1277: 54 -> 53. compiled_graph_key.py was relaxed here; its successor
     # gen_worker/graph_facts.py needs no relaxation, so the ground is kept.
-    "disallow_any_generics": (53, 285),
+    # 53 -> 52 / 25 -> 24 / 227 -> 226 (pgw#1466): tcg#56's rename retired a
+    # relaxed module across all three flags at once. Recording the ground the
+    # rename took, which is what this guard exists to make someone do.
+    "disallow_any_generics": (52, 285),
     # 26 -> 25: PR 6, request_context.
-    "warn_return_any": (25, 48),
+    "warn_return_any": (24, 48),
     # 20 -> 19: pgw#1270 deleted the duplicate worker package/runner surface.
     "disallow_untyped_calls": (19, 37),
     "disallow_untyped_decorators": (3, 9),
@@ -95,7 +98,7 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # hoisted its shared rig into tests/harness/split.py; all three are typed
     # clean, so four more unchecked modules came off with none added.
     # 231 -> 227: pgw#1373 deleted the v1 SDK and its test corpus.
-    "ignore_errors": (227, 2016),
+    "ignore_errors": (226, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted
