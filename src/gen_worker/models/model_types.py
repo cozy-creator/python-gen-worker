@@ -241,6 +241,24 @@ def _library(name: str, version: int) -> TensorLayoutContract:
 
 #: stabilityai/stable-diffusion-xl-base-1.0 scheduler_config.json — SDXL's
 #: training-time noise schedule (scaled_linear 0.00085/0.012, epsilon).
+#:
+#: ONE DELIBERATE DIVERGENCE from the upstream file (se#791): ``timestep_spacing``
+#: is ``"trailing"``, not upstream's ``"leading"``. Lin et al. (arXiv:2305.08891,
+#: "Common Diffusion Noise Schedules and Sample Steps are Flawed") name leading
+#: spacing as flaw #3: a 28-step leading ladder starts at t≈946 and NEVER visits
+#: the max-noise step, so the sampler cannot resolve the terminal-SNR ambiguity
+#: and biases every sample toward mid-brightness — the "washed out" look. Trailing
+#: starts at t=999 and costs nothing. ``steps_offset: 1`` is retained verbatim but
+#: is INERT under trailing (every diffusers ``set_timesteps`` reads it only on the
+#: ``leading`` branch); it is kept so a request that overrides the SPACING back to
+#: leading still gets upstream's exact ladder.
+#:
+#: SCOPE, so nobody over-reads this constant: ingest synthesizes it ONLY into a
+#: classified tree that ships NO ``scheduler_config.json`` — single-file imports
+#: (the Civitai finetune half of the SDXL catalog). A full diffusers tree ships
+#: its own file with ``leading`` and keeps it, because the tree IS the
+#: checkpoint's choice (Paul's tree-only ruling). Making the whole fleet trailing
+#: is a separate owner call, not this constant.
 SDXL_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "_class_name": "EulerDiscreteScheduler",
     "beta_start": 0.00085,
@@ -249,7 +267,7 @@ SDXL_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "num_train_timesteps": 1000,
     "prediction_type": "epsilon",
     "steps_offset": 1,
-    "timestep_spacing": "leading",
+    "timestep_spacing": "trailing",
     "interpolation_type": "linear",
     "trained_betas": None,
     "use_karras_sigmas": False,
@@ -258,6 +276,15 @@ SDXL_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "skip_prk_steps": True,
     "clip_sample": False,
 }
+
+#: "Align Your Steps" 10-step SDXL ladder (NVIDIA, arXiv:2404.13687) — the
+#: optimized sigma schedule that reaches near-28-step quality in 10 steps, and
+#: the cheapest speed lever this family has that costs no weights and no
+#: distillation. A PRESET, NOT A DEFAULT (se#791): it goes on a checkpoint row
+#: as ``SdxlDefaults(timesteps=SDXL_AYS_10)``, where the endpoint's pinned-ladder
+#: path already owns the step count. Pairing it with Detail Daemon or any other
+#: sigma rewriter is a conflict — both rewrite the same schedule; pick one.
+SDXL_AYS_10: Final[tuple[int, ...]] = (999, 845, 730, 587, 443, 310, 193, 116, 53, 13)
 
 #: runwayml/stable-diffusion-v1-5 scheduler_config.json — SD1.x's
 #: training-time noise schedule (same betas, PNDM-class shipping config).
@@ -713,7 +740,8 @@ class SdxlConfig(msgspec.Struct, frozen=True):
     covers trees shipping none); only the adapter overlay declares a
     scheduler demand. ``timesteps`` empty = derive from steps (a pinned
     ladder like DMD2's 999/749/499/249 goes here — a fused merge keeps its
-    ladder HERE while its scheduler ships in its tree).
+    ladder HERE while its scheduler ships in its tree; :data:`SDXL_AYS_10` is
+    the ready-made Align-Your-Steps preset for an undistilled checkpoint).
 
     Platform values: steps 28 / guidance 6.0 from the live sdxl.schema.json
     registry entry; [lo, hi] soft ranges mirror the contract file's endpoint
@@ -723,6 +751,21 @@ class SdxlConfig(msgspec.Struct, frozen=True):
     guidance: Knob[float] = Knob(6.0, lo=1.5, hi=15.0, name="guidance")
     cfg: bool = True
     timesteps: tuple[int, ...] = ()
+    #: The Lin et al. CFG-rescale factor (arXiv:2305.08891 eq. 15), applied by
+    #: the pipeline as ``guidance_rescale``. INERT when ``cfg`` is False — there
+    #: is no conditional/unconditional pair to rescale between — which is why a
+    #: distilled row needs no override to be safe.
+    #:
+    #: 0.6 is a REAL DEFAULT, not a neutral one (se#791). CFG at scale 6 inflates
+    #: the predicted noise's standard deviation; rescaling it back toward the
+    #: conditional branch's own std is what restores contrast and saturation. The
+    #: endpoint served 0.0 for every epsilon checkpoint (only v-prediction got the
+    #: rescale) and that is the washed-out carrier Paul reported. The paper's own
+    #: figure is 0.7; 0.6 is the same fix backed off one notch because the
+    #: paper's number assumes the zero-terminal-SNR RETRAIN this fleet does not
+    #: have, and over-rescaling reads as crushed blacks.
+    guidance_rescale: Knob[float] = Knob(
+        0.6, lo=0.0, hi=1.0, name="guidance_rescale")
 
 
 class SdxlDefaults(SdxlConfig, frozen=True):
@@ -745,6 +788,29 @@ class SdxlDefaults(SdxlConfig, frozen=True):
     #: adapter harmful — the endpoint warns and ignores the adapter (never an
     #: error). Ingest may infer True from the merge classification.
     step_distilled: bool = False
+    #: FreeU (arXiv:2309.11497) — reweight the UNet's skip connections against
+    #: its backbone features to recover the detail the skips smear. OFF by
+    #: default: it is a TASTE knob, not a correctness fix, and the values that
+    #: help a photoreal checkpoint over-sharpen an illustration one.
+    #:
+    #: A CHECKPOINT fact, deliberately NOT on :class:`SdxlConfig`, and the reason
+    #: is structural rather than editorial (se#791): FreeU patches the UNet's
+    #: forward, so it is a LOAD-TIME decision — it must be known before the
+    #: endpoint decides whether the UNet may adopt a compiled artifact. A
+    #: per-request or per-adapter FreeU could only ever be applied under an
+    #: already-armed graph that was traced without it, where it would silently do
+    #: nothing. Only the checkpoint is known that early.
+    enable_freeu: bool = False
+    #: The four FreeU coefficients — mild by design. ``b`` scales backbone
+    #: features, ``s`` attenuates the skips; the official SDXL numbers
+    #: (b1 1.3 / b2 1.4 / s1 0.9 / s2 0.2) are noticeably heavier and are a fine
+    #: per-checkpoint row for a curator who wants them. Plain floats, not Knobs:
+    #: no endpoint exposes them per-request (the load-time argument above), and
+    #: "a knob that can only ever refuse is not a knob".
+    freeu_b1: float = 1.1
+    freeu_b2: float = 1.2
+    freeu_s1: float = 0.6
+    freeu_s2: float = 0.4
 
 
 class SdxlLoraDefaults(SdxlConfig, frozen=True):
