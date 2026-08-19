@@ -174,7 +174,7 @@ class CheckpointMaterialization:
     def failed(self) -> bool:
         return self.state == STATE_FAILED
 
-    def phase(self) -> "pb.WorkerPhase.ValueType":
+    def phase(self) -> "pb.WorkerPhase":
         """This worker's startup phase, as the hub's own vocabulary.
 
         The hub reads these directly (``applyStateDeltaLocked``): ERROR and a

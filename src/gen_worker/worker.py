@@ -752,7 +752,7 @@ class Worker:
         return sorted(self.loaded.entrypoints)
 
     @property
-    def phase(self) -> "pb.WorkerPhase.ValueType":
+    def phase(self) -> "pb.WorkerPhase":
         """This worker's startup phase. DERIVED, never assigned.
 
         It used to be the constant `WORKER_PHASE_READY`, set in `__init__`
