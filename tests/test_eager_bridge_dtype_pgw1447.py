@@ -171,3 +171,43 @@ def test_a_model_with_no_lane_never_mentions_dtype_at_all():
     ctx.load(NoLane)
     assert calls["kwargs"] == [], "an eager-permanent model has no dtype to pass"
     assert "to" not in calls
+
+
+# --------------------------------------------------------------------------
+# SECOND SITE — the DERIVE's own bridge (release/trace_context.py).
+#
+# Fixing only the serve-path copy left the derive broken, and the derive is the
+# one path that ALWAYS takes an eager bridge (a trace binds no streaming
+# engine). Two implementations of one contract; both are asserted here so they
+# cannot drift apart again.
+
+
+def test_the_derive_bridge_also_survives_a_loader_that_refuses_torch_dtype():
+    from gen_worker.release.trace_context import TraceLoadContext
+
+    calls = {"attempts": []}
+
+    class RefusesLikeModularPipeline:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            calls["attempts"].append(sorted(kwargs))
+            if "torch_dtype" in kwargs:
+                raise TypeError(
+                    "MiniMaxH3StreamingPipeline: ['torch_dtype'] are neither "
+                    "pipeline arguments nor components of this pipeline"
+                )
+            return cls()
+
+        def to(self, dtype):
+            calls["to"] = dtype
+            return self
+
+    ctx = TraceLoadContext(
+        checkpoint_dir=Path("/nonexistent/fixture"),
+        lane=_Lane("bfloat16"),
+    )
+    got = ctx.load(RefusesLikeModularPipeline)
+
+    assert isinstance(got, RefusesLikeModularPipeline)
+    assert calls["attempts"] == [["torch_dtype"], []]
+    assert calls["to"] == "bfloat16", "the derive must honour the lane dtype too"

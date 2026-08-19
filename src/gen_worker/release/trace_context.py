@@ -19,6 +19,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..serving.context import _rejected_torch_dtype
+
 class TraceLoadContext:
     """What ``Model.load`` sees under ``gen-worker release derive``.
 
@@ -67,9 +69,24 @@ class TraceLoadContext:
                 f"ctx.load() needs a loader with from_pretrained "
                 f"(a diffusers/transformers class); got {loader!r}"
             )
-        loaded = from_pretrained(
-            self.checkpoint_dir, torch_dtype=getattr(self.lane, "dtype", None)
-        )
+        # pgw#1447, SECOND SITE. This is a separate implementation of the same
+        # eager bridge `serving/context.py` carries, and it had the identical
+        # defect: a `ModularPipeline` does not consume `torch_dtype` in
+        # `from_pretrained`, so `**kwargs` funnels it into the constructor and
+        # a strict pipeline refuses it. Fixing only the serve-path copy left
+        # the DERIVE — the one path that ALWAYS takes an eager bridge, because
+        # a trace has no streaming engine — still broken. Two bridges, one
+        # contract; the predicate is shared so they cannot drift.
+        dtype = getattr(self.lane, "dtype", None)
+        try:
+            loaded = from_pretrained(self.checkpoint_dir, torch_dtype=dtype)
+        except TypeError as exc:
+            if not _rejected_torch_dtype(exc):
+                raise
+            loaded = from_pretrained(self.checkpoint_dir)
+            to = getattr(loaded, "to", None)
+            if dtype is not None and callable(to):
+                to(dtype)
         # Adapter application mutates WEIGHTS (or injects adapter layers);
         # at trace every parameter is fake and no adapter bytes exist, so the
         # enumeration's fake-adapter arms must not hit real LoRA I/O. The
