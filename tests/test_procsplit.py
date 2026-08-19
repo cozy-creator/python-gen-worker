@@ -5,6 +5,7 @@ Sections keep their incident id; the full narratives live in the tracker.
 
 from __future__ import annotations
 
+import inspect
 import asyncio
 import json
 import signal
@@ -1604,3 +1605,108 @@ def test_a_complete_census_first_time_never_retries_pgw1417(
     out = _census(monkeypatch, devices=True, readings=[_real_facts()])
     assert "capability_unreadable" not in out and "census_unreadable" not in out
     assert out["hardware"]["gpu_sm"] == "89"
+
+
+# ---------------------------------------------------------------------------
+# pgw#1436: the census must say WHY, and the retry must be able to differ.
+#
+# Five rentals produced the identical `gpu_capability_incompatible` refusal and
+# could not distinguish "the fix worked, this host is bad" from "the fix did
+# not work", because the only signal that separates them was written to a pod's
+# stderr and read by nothing. These arms fence both halves WITHOUT a GPU.
+# ---------------------------------------------------------------------------
+
+
+def test_a_capability_gap_reports_the_PROBE_REASON_not_the_symptom_pgw1436(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`capability_unreadable` alone restates "gpu_sm is empty". The fleet needs
+    the class and the detail — the answer `cuda_state()` already computes and
+    the census used to throw away."""
+    from gen_worker.procsplit import measure as measure_mod
+
+    monkeypatch.setattr(
+        measure_mod, "_capability_reason",
+        lambda: ("cuda_error", "CUDA driver initialization failed (err 3)"),
+    )
+    out = _census(monkeypatch, devices=True,
+                  readings=[_card_but_no_capability()])
+
+    assert out["capability_reason_class"] == "cuda_error"
+    assert "err 3" in out["capability_detail"]
+    # and the human string carries it too, so a log reader is not left with the
+    # symptom while the machine-readable field has the cause.
+    assert "cuda_error" in out["capability_unreadable"]
+
+
+def test_the_census_REPORTS_its_gaps_so_the_parent_can_respawn_pgw1436(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent decides to re-spawn on `census_gaps`. If the census does not
+    report them, the parent has to re-derive the gap rule from field emptiness
+    — two implementations of one predicate, which is how they drift."""
+    gap = _census(monkeypatch, devices=True, readings=[_card_but_no_capability()])
+    assert gap["census_gaps"] == ["capability"]
+
+    whole = _census(monkeypatch, devices=True, readings=[_real_facts()])
+    assert whole["census_gaps"] == []
+    assert "capability_reason_class" not in whole  # absent when nothing is wrong
+
+
+def test_a_FROZEN_cuda_init_is_only_cleared_by_a_FRESH_PROCESS_pgw1436() -> None:
+    """THE ARM THAT WOULD HAVE CAUGHT pgw#1417.
+
+    `torch.cuda.is_available()` initialises CUDA once per process: a first call
+    made before the runtime is ready freezes False for that process's lifetime.
+    So an IN-PROCESS retry re-asks a question that cannot answer differently,
+    and pgw#1417's loop was itself an instrument that could not fail
+    differently on retry.
+
+    The freeze is FAKED — this must fence the behaviour on any machine,
+    including the cardless boxes every agent lane runs on, where a real GPU
+    probe is unavailable and `gpu_sm` is legitimately empty.
+    """
+    class _FrozenRuntime:
+        """Answers False forever once asked too early; a NEW instance is a new
+        process."""
+
+        def __init__(self, ready: bool) -> None:
+            self._ready = ready
+            self._frozen: bool | None = None
+
+        def is_available(self) -> bool:
+            if self._frozen is None:       # lazy init, exactly once
+                self._frozen = self._ready
+            return self._frozen
+
+        def becomes_ready(self) -> None:
+            self._ready = True             # the driver mount lands
+
+    # One process, asked before the runtime is up, then retried in-process.
+    proc = _FrozenRuntime(ready=False)
+    assert proc.is_available() is False
+    proc.becomes_ready()
+    assert proc.is_available() is False, (
+        "in-process retry recovered — the freeze is not being modelled, and "
+        "this arm would not have caught pgw#1417"
+    )
+
+    # A FRESH process, same host, now that the runtime is up.
+    assert _FrozenRuntime(ready=True).is_available() is True
+
+
+def test_the_parent_RESPAWNS_the_census_on_a_capability_gap_pgw1436() -> None:
+    """The parent must re-spawn rather than trust `measure`'s in-process loop,
+    and must NOT re-spawn for a `device` gap (NVML holds no cache, so the
+    in-process loop already covers it and a second interpreter is pure cost)."""
+    from gen_worker.procsplit import parent as parent_mod
+
+    assert parent_mod._CENSUS_SPAWNS >= 2, (
+        "a single spawn is not a retry; a frozen CUDA init needs a fresh "
+        "interpreter to clear"
+    )
+    src = inspect.getsource(parent_mod.ParentControl._measure_host)
+    assert "_measure_host_once" in src, "the spawn must be a separate call"
+    assert '"capability" not in gaps' in src, (
+        "the parent must re-spawn on the CAPABILITY gap specifically"
+    )

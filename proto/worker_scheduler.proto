@@ -207,6 +207,27 @@ message WorkerResources {
   // measured value — an unreadable CUDA runtime leaves the field off the
   // wire rather than shipping "" as an answer.
   string cuda_version = 14;
+  // pgw#1436: WHY this worker has no `gpu_sm`, when it has a card.
+  //
+  // The same argument th#1798 made for `driver_version` one field up, about a
+  // different fact: the classification existed only on the FAILURE carrier
+  // (`HardwareUnsuitable.reason_class`), so a worker that DIED of a bad CUDA
+  // runtime was diagnosable and a worker that merely registered without a
+  // capability was not — it says `class=gpu`, looks healthy, and then refuses
+  // every request with `gpu_capability_incompatible` because pgw#984 derives
+  // `min_sm` on every v2 release.
+  //
+  // Measured: three rented pods (two machine classes, three driver versions)
+  // all shipped a card with no SM, and the reason was written to the pod's
+  // stderr and read by nothing — five rentals of mystery for a fact the census
+  // already had. Same vocabulary as HardwareUnsuitable, deliberately: one
+  // classification, two carriers.
+  //
+  // Additive, and ABSENT MEANS NOTHING WENT WRONG: a healthy worker leaves
+  // both off the wire rather than shipping "" as an answer.
+  string capability_reason_class = 15; // torch_unavailable | cuda_unavailable |
+                                       // driver_too_old | cuda_error | unknown
+  string capability_detail       = 16; // the probe's raw reason, verbatim
 }
 
 // Worker -> orchestrator: this worker's boot-time hardware suitability probe
