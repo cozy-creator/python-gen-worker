@@ -159,6 +159,15 @@ class _FakeHub(BaseHTTPRequestHandler):
         if "/publishes/" in self.path and self.path.endswith("/complete"):
             pid = self.path.split("/publishes/")[1].split("/")[0]
             st.setdefault("complete_attempts", []).append(pid)
+            # pgw#1435 / th#2182: the front door alone is down, and only for
+            # the LAST call. `proxy_posts` cannot express this — it fails the
+            # declare too, so nothing is ever staged and the shape under test
+            # (16-18 GB uploaded, staged, AUDITED, then destroyed) never
+            # occurs. Counted BEFORE any state moves: the hub never saw it.
+            if st.get("proxy_completes", 0) > 0:
+                st["proxy_completes"] -= 1
+                self._send_proxy_page(int(st.get("proxy_status", 503)))
+                return
             completed = st.setdefault("v2_completed", {})
             if pid in completed:
                 self._send(200, {
