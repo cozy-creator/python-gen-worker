@@ -44,12 +44,10 @@ def add_subparser(sub: Any) -> None:
         help="CONFIG-ONLY checkpoint tree the author's load path resolves "
         "(subset snapshot; weights never transit the derive)",
     )
-    derive.add_argument(
-        "--lockfile",
-        default=None,
-        help="uv.lock to hash as the env-identity closure (default: the "
-        "installed distribution set of THIS env)",
-    )
+    # pgw#1472 DELETED `--lockfile`. A document's env closure is the installed
+    # set of the process that derives it, always — the one definition a mint
+    # child and a serving pod can also restate. A flag that switched the
+    # SOURCE of an identity gave `closure` two meanings and no single one.
     derive.add_argument(
         "--graph-cas",
         default=None,
@@ -90,7 +88,6 @@ def _run_derive(args: argparse.Namespace) -> int:
         result = derive_release(
             module,
             checkpoint_dir=checkpoint,
-            lockfile=Path(args.lockfile).resolve() if args.lockfile else None,
             graph_cas=Path(args.graph_cas).resolve() if args.graph_cas else None,
         )
     except DeriveError as exc:

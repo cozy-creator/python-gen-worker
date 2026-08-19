@@ -29,7 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 import msgspec
 
@@ -143,12 +143,12 @@ def _parser() -> argparse.ArgumentParser:
                              "`release.compiled_graphs`")
     parser.add_argument("--sm", default="", help="this GPU's sm (e.g. sm_89)")
     parser.add_argument(
-        "--env-lockfile", default="",
-        help="uv.lock stating this boot's env identity (pgw#1472). Default: "
-             "the endpoint's own uv.lock when it has one, which is the SAME "
-             "file `gen-worker lock` hashed into the document being adopted. "
-             "`--env-lockfile=-` forces the installed distribution set "
-             "instead, which is what a release-image derive stamps.")
+        "--drift-lockfile", default="",
+        help="uv.lock to DIAGNOSE this env against (pgw#1472). Default: the "
+             "endpoint's own uv.lock when it has one; `-` skips the report. "
+             "This is a drift signal and never an identity: env identity is "
+             "the installed set of this process, the one thing the derive, "
+             "the mint child and this pod can all restate.")
     parser.add_argument("--artifacts-dir", default=".compiled-graphs")
     parser.add_argument("--mint", action="store_true",
                         help="after boot, fill this (lane x sm)'s holes "
@@ -255,58 +255,29 @@ def _toolchain() -> Mapping[str, str]:
     return dict(toolchain_digest())
 
 
-def _stated_env(
-    args: argparse.Namespace, document: Any
-) -> "Optional[Mapping[str, str]]":
-    """This boot's env identity, from the SAME source the document was stamped
-    from (pgw#1472).
+def _report_env_drift(args: argparse.Namespace, document: Any) -> None:
+    """Print how far this image drifted from its lock. NEVER a gate (pgw#1472).
 
-    `gen-worker lock` hashes the endpoint's `uv.lock`; a serving process
-    otherwise restates `importlib.metadata`, and the two are incomparable by
-    construction (PEP 503 spelling, PEP 440 local segments, platform-conditional
-    lock entries). So a locally derived document was adoptable by NOTHING —
-    including the local serve it exists for. Reading the endpoint's own lock
-    here is what makes `gen-worker lock` and this runner agree.
-
-    `None` means "no lock offered": the adopt session falls back to the
-    installed set, which is what a release-image derive stamps and therefore
-    the right answer on a pod.
-
-    The comparison between the two is a DRIFT REPORT and never a gate — it is
-    printed, normalized, and then ignored.
+    This boot's env identity is not chosen here and cannot be: it is
+    `env_closure_hash()` of this process, the one definition the publish-time
+    derive, the mint child and this pod all restate. What a lockfile is good
+    for is telling an operator that the image stopped matching what it claims
+    to have been built from — a typed signal, printed and then ignored.
     """
     if document is None:
-        return None
-    from ..env_identity import (
-        EnvIdentityError,
-        closure_drift,
-        closure_entries_from_lockfile,
-        describe_drift,
-        lockfile_beside,
-    )
+        return
+    from ..env_identity import describe_lockfile_drift, env_closure_hash, lockfile_beside
 
-    given = str(args.env_lockfile or "").strip()
+    given = str(args.drift_lockfile or "").strip()
     if given == "-":
-        return None  # the operator asked for the installed set, explicitly
+        return
     lockfile = Path(given) if given else lockfile_beside(args.endpoint_dir)
-    if lockfile is None:
-        return None
-    try:
-        stated = closure_entries_from_lockfile(lockfile)
-    except EnvIdentityError as exc:
-        raise SystemExit(f"--env-lockfile: {exc}")
-
-    from .._vendor.torchcg.graph_identity import installed_closure
-
-    drift = closure_drift(installed_closure(), stated)
-    summary = describe_drift(drift)
+    line = describe_lockfile_drift(lockfile) if lockfile is not None else "no lockfile"
     print(
-        f"adopt: env identity stated from {lockfile} "
-        f"({len(stated)} packages); installed-vs-lock drift: "
-        f"{summary or 'none'}",
+        f"adopt: env identity {env_closure_hash()[:16]}... (installed set of "
+        f"this process); {line}",
         file=sys.stderr,
     )
-    return stated
 
 
 def _serve_envelopes(args: argparse.Namespace, loaded: Any) -> int:
@@ -382,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         loaded, binding, lane_contract=args.lane, output_dir=Path(args.output_dir)
     )
     store, document = _adoption_source(args, loaded.module_name)
-    installed = _stated_env(args, document)
+    _report_env_drift(args, document)
     # No `loader=`: pgw#1460. The byte-identical raw `aoti_load_package` that
     # used to sit here discarded the record and armed a WEIGHTLESS package with
     # an empty constant buffer. `torchcg.serve.aoti_loader` (tcg#58) is the
@@ -391,7 +362,6 @@ def main(argv: list[str] | None = None) -> int:
     host.setup(
         store=store, document=document, sm=args.sm,
         artifacts_dir=Path(args.artifacts_dir),
-        installed=installed,
     )
     if host.adoption is not None:
         report: dict[str, Any] = {

@@ -204,27 +204,48 @@ def test_binding_enumeration_reaches_adapter_and_cfg_arms(
     assert "refused by the author's own validation" in stderr
 
 
-def test_lockfile_closure_is_the_env_identity(
+def test_the_derive_stamps_THIS_PROCESSS_INSTALLED_SET_and_has_no_other_source(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
+    """pgw#1472: one definition, and the CLI cannot be asked for another.
+
+    The document's closure has to be restatable by the mint child and by the
+    serving pod, which are different processes in different runs. The only
+    thing all three can measure is the installed set, so the derive states it —
+    and the `--lockfile` flag that used to switch the SOURCE is gone, because a
+    flag that changes what an identity MEANS gives it no meaning.
+    """
+
+    from gen_worker.env_identity import env_closure_hash
+
+    out = tmp_path / "derived.json"
+    assert _derive("tiny_endpoint", config_only_tree, out) == 0
+    assert json.loads(out.read_bytes())["graphs"]["closure"] == env_closure_hash()
+
     lockfile = tmp_path / "uv.lock"
     lockfile.write_text(
         'version = 1\n\n[[package]]\nname = "torch"\nversion = "2.13.0"\n'
-        '\n[[package]]\nname = "diffusers"\nversion = "0.39.0"\n'
     )
-    out_locked = tmp_path / "locked.json"
-    out_installed = tmp_path / "installed.json"
-    assert _derive(
-        "tiny_endpoint", config_only_tree, out_locked, "--lockfile", str(lockfile)
-    ) == 0
-    assert _derive("tiny_endpoint", config_only_tree, out_installed) == 0
-    locked = json.loads(out_locked.read_bytes())
-    installed = json.loads(out_installed.read_bytes())
-    assert locked["graphs"]["closure"] != installed["graphs"]["closure"]
-    # Env identity never leaks into GRAPH identity: same graphs either way.
-    assert [record["graph"] for lane in locked["graphs"]["lanes"] for record in lane["graphs"]] == [
-        record["graph"] for lane in installed["graphs"]["lanes"] for record in lane["graphs"]
+    with pytest.raises(SystemExit) as refusal:
+        _derive(
+            "tiny_endpoint", config_only_tree, tmp_path / "no.json",
+            "--lockfile", str(lockfile),
+        )
+    assert refusal.value.code != 0
+
+
+def test_env_identity_never_leaks_into_GRAPH_identity(
+    config_only_tree: Path, tmp_path: Path
+) -> None:
+    first = tmp_path / "a.json"
+    second = tmp_path / "b.json"
+    assert _derive("tiny_endpoint", config_only_tree, first) == 0
+    assert _derive("tiny_endpoint", config_only_tree, second) == 0
+    a, b = json.loads(first.read_bytes()), json.loads(second.read_bytes())
+    graphs = lambda d: [  # noqa: E731
+        r["graph"] for lane in d["graphs"]["lanes"] for r in lane["graphs"]
     ]
+    assert graphs(a) == graphs(b)
 
 
 # --- the sys.path priming the derive shares with discovery -------------------

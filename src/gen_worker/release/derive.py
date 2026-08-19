@@ -173,7 +173,7 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
     goes into a tensorfs ``LocalCAS`` and only its digest travels in the
     release document, beside the cg-graph-v1 hash and the ingress spec.
     Portability needs no new fence: an ExportedProgram is torch-coupled and
-    the document's own lockfile closure pins torch -- the same validity rule
+    the document's own env closure pins torch -- the same validity rule
     compiled artifacts already live under.
     """
 
@@ -911,23 +911,6 @@ def _unique_component(instance: Any, name: str, component: Any) -> bool:
     return seen <= 1
 
 
-def _closure_entries_from_lockfile(lockfile: Path) -> dict[str, str]:
-    """The lockfile closure, from the ONE definition (pgw#1472).
-
-    Kept as a name here because callers and fences reference it, but the body
-    moved to :mod:`gen_worker.env_identity`: the SERVING side has to restate
-    this exact set or adoption refuses, and a second implementation of "what
-    packages are we" is precisely how the two ends came to disagree.
-    """
-
-    from ..env_identity import EnvIdentityError, closure_entries_from_lockfile
-
-    try:
-        return closure_entries_from_lockfile(lockfile)
-    except EnvIdentityError as exc:
-        raise DeriveError(str(exc)) from exc
-
-
 def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
     """msgspec JSON Schema of the class-header model type's Defaults.
 
@@ -1266,18 +1249,27 @@ def derive_release(
     module: ModuleType,
     *,
     checkpoint_dir: Path,
-    lockfile: Optional[Path] = None,
     graph_cas: Optional[Path] = None,
 ) -> ReleaseDeriveResult:
-    """Derive the release metadata document for one endpoint module."""
+    """Derive the release metadata document for one endpoint module.
+
+    The document's `closure` is THIS process's installed set (pgw#1472,
+    :func:`gen_worker.env_identity.env_closure_hash`) — there is no second
+    source and no flag that picks one. The derive runs inside the release
+    image, so the mint child and the serving pod restate the same value from
+    the same image; a stamp that any of the three cannot restate is an
+    unadoptable release.
+    """
 
     torchcg = _torchcg()
     program_sink = _program_sink(graph_cas)
 
-    if lockfile is not None:
-        closure = torchcg.closure_hash(_closure_entries_from_lockfile(lockfile))
-    else:
-        closure = torchcg.closure_hash(torchcg.installed_closure())
+    from ..env_identity import EnvIdentityError, env_closure_hash
+
+    try:
+        closure = env_closure_hash()
+    except EnvIdentityError as exc:
+        raise DeriveError(str(exc)) from exc
 
     cls = _lane_model_class(module)
     endpoint_name = f"{module.__name__}:{cls.__name__ if cls else ''}".rstrip(":")

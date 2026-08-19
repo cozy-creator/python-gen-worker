@@ -142,14 +142,20 @@ def run_lock(args: argparse.Namespace) -> int:
 
     device = ws.trace_device()
     graph_cas_root = Path(args.graph_cas).resolve() if args.graph_cas else ws.graph_cas_root()
-    lockfile = root / "uv.lock"
+    from ..env_identity import describe_lockfile_drift, lockfile_beside
+
+    # pgw#1472: a lockfile is a DIAGNOSTIC here and nothing else. The identity
+    # this run stamps is `env_closure_hash()` of the process doing the tracing,
+    # which is also what invalidates a saved trace (`inputs_digest`).
+    lockfile = lockfile_beside(root)
+    if lockfile is not None:
+        _say(f"lock: {describe_lockfile_drift(lockfile)}")
 
     want = el.inputs_digest(
         root=root,
         module_name=config.main,
         checkpoint_ref=ref_text,
         trace_device=device,
-        lockfile=lockfile if lockfile.is_file() else None,
     )
 
     existing: Optional[el.DeriveBlock]
@@ -216,7 +222,6 @@ def run_lock(args: argparse.Namespace) -> int:
         result = derive_release(
             module,
             checkpoint_dir=tree if tree is not None else root,
-            lockfile=lockfile if lockfile.is_file() else None,
             graph_cas=graph_cas_root,
         )
     except DeriveError as exc:
