@@ -425,6 +425,15 @@ jobs:
       - name: pgw#1460 guard - no raw AOTI package load in src/gen_worker
         run: uv run python scripts/lint_raw_aoti_load.py
 
+      # pgw#1480: `phase` is a typed wire column, so a phase enum is an
+      # INSTRUMENT — an operator counts by it and a proof condition is written
+      # against it. `BOOT_ENDED_UNCOMPILED` was defined and referenced by
+      # nothing, so se#780's headline pass condition ("must be ABSENT") was
+      # absent unconditionally and could not fail. 18 of 23 members are in that
+      # state; the census records them and this gate stops the set growing.
+      - name: pgw#1480 guard - no unwired phase-vocabulary members
+        run: uv run python scripts/lint_phase_enum_emitters.py
+
       # GATING (pgw#1328, superseding pgw#1327's narrow precursor): the
       # ADOPT-ONLY serve role adopts by key and refuses or routes on a miss
       # (§4.28/§4.29), so it must not be able to compile. This walks the
