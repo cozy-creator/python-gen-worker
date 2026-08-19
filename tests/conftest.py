@@ -289,9 +289,17 @@ def _fresh_receipt_gate():
     """
     from gen_worker import receipts as _receipts
 
-    _receipts.reset()
+    # pgw#1425: `reset()` restores the DEFAULT posture, which now REFUSES.
+    # A unit rig's store is the rig's own tmpdir, so it declares the
+    # user-controlled posture explicitly — the same sentence cozy-local says.
+    # A test that wants the refusal asserts it by calling `reset()` itself.
+    def _rig_posture() -> None:
+        _receipts.reset()
+        _receipts.trust_local_store("pytest rig: the store is the test's tmpdir")
+
+    _rig_posture()
     yield
-    _receipts.reset()
+    _rig_posture()
 
 
 @pytest.fixture(scope="session", autouse=True)

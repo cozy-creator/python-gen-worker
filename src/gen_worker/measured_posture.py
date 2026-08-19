@@ -168,7 +168,8 @@ REASON_BELOW_DECLARED_MINIMUM = "below_declared_minimum"
 # and at request time; this reader is a version-skew backstop, and a backstop
 # that fatals turns a hub-side stamping gap into a customer-visible outage —
 # which is exactly what it did to sd15 and anima on 0.120.0.
-# Doubles as the `serve_degrade` phase token (`memory.UNEVIDENCED_FACTS_PHASE`).
+# pgw#1425: its one reader (`memory.UNEVIDENCED_FACTS_PHASE`) went with the
+# catalog pgw#1373 deleted. Kept as the wire vocabulary's token, unused.
 REASON_SERVING_FACTS_UNEVIDENCED = "serving_facts_unevidenced"
 
 #: Shortfall resources.

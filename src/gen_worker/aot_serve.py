@@ -46,6 +46,7 @@ from . import activity as activity_mod
 from . import aot_constants
 from . import aot_identity
 from . import local_compiled_graph_store
+from . import postmortem
 from .compiled_graph_adopt import AdoptOutcome
 from . import serve_posture
 from . import shape_growth
@@ -1341,9 +1342,19 @@ def wrap_module(
                 "aot-serve: %s REFUSED input outside the declared envelope (%s: %s); "
                 "serving this request eager, artifact stays armed",
                 label, exc.reason, exc)
+            # pgw#1425: NAME THE REQUEST. pgw#1414 stamps an in-flight marker
+            # around tenant execution and nothing read it, so this event — the
+            # one that says an armed compiled lane served a request eager —
+            # named a family and a target and no request at all, which is
+            # precisely the row an operator needs to subtract from the compiled
+            # measurement. '' when nothing is in flight (a boot-time refusal),
+            # and the word `<none>` rather than an empty tail, so an absent
+            # attribution reads as an answer instead of a truncation.
+            inflight = postmortem.current_inflight_request()
             activity_mod.emit_event(
                 "aot_ingress_refused",
-                f"family={meta.get('family')} target={label}: {exc}",
+                f"family={meta.get('family')} target={label} "
+                f"request={inflight or '<none>'}: {exc}",
                 phase=exc.reason,
             )
             report_ingress_refusal(state, exc.reason, str(exc))

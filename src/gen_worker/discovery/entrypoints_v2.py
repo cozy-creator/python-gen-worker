@@ -53,6 +53,7 @@ import pkgutil
 import textwrap
 from typing import Any, Dict, List, Set
 
+from .moderation import payload_moderation
 from .schema import type_schema_and_hash
 
 #: The DEFAULT kind: an entrypoint that declares nothing is an inference
@@ -412,6 +413,7 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
     row_kind = getattr(spec, "kind", "") or ENTRYPOINT_KIND
     input_schema, input_sha = type_schema_and_hash(spec.payload_type)
     output_schema, output_sha = type_schema_and_hash(spec.return_type)
+    moderation = payload_moderation(spec.payload_type)
     slots: List[Dict[str, Any]] = []
     for slot in spec.slots:
         slots.append(_model_slot(slot) if slot.kind == "model" else _adapter_slot(slot))
@@ -436,6 +438,14 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # A v2 entrypoint returns one struct; streaming is not part of the
         # ratified surface, so the cardinality fact is stated, never omitted.
         "incremental_output": False,
+        # pgw#1418: WHICH payload paths are media, and which are prompts. The
+        # hub decodes exactly this key to recognize typed media inputs — it
+        # deliberately will not sniff URL-shaped strings — so without it no
+        # `@entrypoint` taking an Image/Video/AudioAsset can be served, and
+        # every prompt-moderation declaration is silently absent. Emitted only
+        # when the payload declares one, so a text-only row stays byte
+        # identical.
+        **({"moderation": moderation} if moderation else {}),
         "slots": slots,
         # `None` is ABSENT (no model slot, no `resources=`); a dict is
         # PRESENT, and a present-but-empty block is the hub's explicit CPU

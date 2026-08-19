@@ -366,12 +366,10 @@ gen_worker.artifact_meta.compiled_graph_metadata_fields()
 gen_worker.artifact_meta.try_read_metadata()
 gen_worker.boot_phases.BootCompleteness.explain()
 gen_worker.boot_phases.completeness()
-gen_worker.boot_phases.mark_once()
 gen_worker.boot_phases.render_phase_table()
 gen_worker.boot_stages.emit()
 gen_worker.capability.HardwareUnmetError.axes()
 gen_worker.capability.InsufficientDiskError.axes()
-gen_worker.capability_renewal.renew_capability_while_running()
 gen_worker.cli.args.build_payload()
 gen_worker.cli.protocol.gen_worker_version()
 gen_worker.cli.sockaddr.cleanup_listener()
@@ -379,7 +377,6 @@ gen_worker.cli.sockaddr.create_client()
 gen_worker.cli.sockaddr.create_listener()
 gen_worker.cli.sockaddr.display()
 gen_worker.compile_posture.install()
-gen_worker.content_credentials.configure_remote_signer()
 gen_worker.cuda_root.torch_cuda_home()
 gen_worker.dispatch.AdapterOrder
 gen_worker.dispatch.order_from_binding()
@@ -387,7 +384,6 @@ gen_worker.env_seal.assert_seal_unchanged()  # pgw#1373: its caller was the v1 e
 gen_worker.families.base.register_family()
 gen_worker.file_hash.sha256_file()
 gen_worker.graph_facts.subject_digest()
-gen_worker.input_assets.materialize_input_assets()
 gen_worker.models.attention_modes.most_sparse_mode()
 gen_worker.models.execution_lanes.ExecutionLaneUnavailableError
 gen_worker.models.execution_lanes.execution_lane_body_of_binding()
@@ -400,7 +396,6 @@ gen_worker.models.machine_fit.lane_candidates()
 gen_worker.models.memory.cuda_allocated_bytes()
 gen_worker.models.memory.rearm_offload()
 gen_worker.models.memory.release_unused_pinned_host_cache()
-gen_worker.models.memory.report_unevidenced_serving_facts()
 gen_worker.models.pinned_swap.prestage_module()
 gen_worker.models.provision.AppliedAttentionScope
 gen_worker.models.provision.AppliedLaneScope
@@ -421,21 +416,45 @@ gen_worker.models.tensor_layout_contract.normalize_layout_undeclarable()
 gen_worker.models.traceability.untraceable_reason()
 gen_worker.numerics_ladder.compare_outputs()
 gen_worker.numerics_ladder.declared_thresholds()
-gen_worker.postmortem.current_inflight_request()
-gen_worker.process_role.declare()
-gen_worker.process_role.emit_boot_role()
-gen_worker.receipts.configure()
 gen_worker.request_context.JobContext.metric()
 gen_worker.request_context._PublisherMixin.materialize_blob()
 gen_worker.request_context._PublisherMixin.resolve_dataset()
-gen_worker.serve_posture.apply_command()
-gen_worker.serving_facts.facts_or_degrade()
-gen_worker.stage_timing.StageTimer.handler_close()
-gen_worker.stage_timing.StageTimer.handler_open()
-gen_worker.stage_timing.StageTimer.record_pre()
-gen_worker.stage_timing.stage_ms_for_metrics()
 gen_worker.topology.device_group_scope
 gen_worker.topology.pin_cuda_device_for_group()
 gen_worker.warm_spans.WarmLedger
 gen_worker.wire_snapshots.index_snapshots()
 gen_worker.worker_fatal.report_worker_error_async()
+
+# pgw#1425 — THIRTEEN ROWS WIRED AND TWO SENTENCED, 2026-08-18. All fifteen were
+# appended wholesale by pgw#1373's `--write-baseline` (722e30b9, +79 rows) when
+# `cd46c957` deleted `executor.py` and took every caller with it. That
+# regeneration is what made pgw#1418 cost a rented pod to rediscover: the guard
+# had already computed the answer.
+#
+# WIRED into the v2 serve path (`worker.py` / `serving/serve_loop.py` /
+# `aot_serve.py`), so they leave this file by acquiring a production caller:
+#   input_assets.materialize_input_assets — the payload seam, before the leases
+#   stage_timing.{handler_open,handler_close,record_pre,stage_ms_for_metrics}
+#   capability_renewal.renew_capability_while_running — per-job renewal task
+#   postmortem.current_inflight_request — names the request on `aot_ingress_refused`
+#   boot_phases.mark_once — sdk_ready / hello / first_request_servable / eager_ready
+#   process_role.{declare,emit_boot_role} — at the transport bind
+#   receipts.configure + content_credentials.configure_remote_signer — at HelloAck
+#   serve_posture.apply_command — the ServePosture SchedulerMessage arm
+#
+# SENTENCED, with the ruling that kills them, because a row removed without a
+# reason is the silence this issue exists to reverse:
+#   serving_facts.facts_or_degrade
+#   models.memory.report_unevidenced_serving_facts
+# Both collapse a `SlotEvidence`, whose ONLY producer is
+# `dispatch.order_from_binding`, which reads `objective`/`distilled`/
+# `distilled_status` off a CATALOG-stamped `ModelBinding`. pgw#1373 DELETED the
+# catalog/declaration architecture under Paul's hardcut mandate, so there is no
+# stamp to read and `@entrypoint` declares no serving contract to check one
+# against — producer and consumer both gone, in one ruling. The v2 successor for
+# "this instance is serving degraded, and every request it serves says so" is
+# `serving/placement.warn_if_degraded`, taken at residency-admit and stained onto
+# every request through `ctx.warn` (`serve_loop._InstanceBackend.load`). The dead
+# chain itself (`dispatch.order_from_binding` -> `SlotEvidence` ->
+# `measured_posture.REASON_SERVING_FACTS_UNEVIDENCED`) is a DELETE that belongs
+# with pgw#1425's remaining-69 triage, not smuggled into the P0 lane.

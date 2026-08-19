@@ -31,11 +31,19 @@ import asyncio
 import inspect
 import logging
 import threading
+import time
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 
+from .. import boot_phases
+from ..input_assets import (
+    InputManifestEntry,
+    cleanup_input_assets,
+    materialize_input_assets,
+)
+from ..stage_timing import StageTimer
 from .context import DeployBinding, LoadContext, LoaderEngine, RequestContext
 from .envelope import DecodedRequest, decode_envelope
 from .host import ServeDispatchError
@@ -64,11 +72,20 @@ class BindingResolver(Protocol):
 @dataclass(frozen=True, slots=True)
 class InvokeOutcome:
     """One served request: the entrypoint's result + the request facts the
-    envelope reply carries (``ctx.warn`` rows, adjustments)."""
+    envelope reply carries (``ctx.warn`` rows, adjustments, stage timings)."""
 
     result: Any
     warnings: Tuple[str, ...]
     adjustments: Tuple[Dict[str, str], ...]
+    #: pgw#1425: this request's :class:`~gen_worker.stage_timing.StageTimer`.
+    #: ``RequestContext`` has always FILLED one; until this field existed
+    #: nothing read it out, so every served request reported a bare
+    #: ``runtime_ms`` and the stage breakdown died with the context object.
+    #: Handed out RAW rather than rendered because
+    #: :func:`~gen_worker.stage_timing.stage_ms_for_metrics` closes the
+    #: breakdown against ``runtime_ms``, and the dispatch — not the loop — is
+    #: what measures that.
+    stages: Optional[StageTimer] = None
 
 
 class _InstanceBackend:
@@ -114,6 +131,12 @@ class _InstanceBackend:
         model: Model[Any] = self.model_cls()  # cheap __init__ — no GPU, by contract
         model.load(self.load_context)
         self.model = model
+        # pgw#1425: the FIRST user-visible "could have answered a request".
+        # `mark_once` because this runs on every residency admission and only
+        # the first one is a boot number.
+        boot_phases.mark_once(
+            boot_phases.PHASE_EAGER_READY, function=self.model_cls.__name__
+        )
         if self._on_loaded is not None:
             try:
                 self._on_loaded(self.model_cls, self.lane)
@@ -224,7 +247,10 @@ class ServeLoop:
         envelope: Any,
         *,
         request_id: str,
+        attempt: int = 0,
+        input_assets: Sequence[InputManifestEntry] = (),
         context: Optional[Mapping[str, Any]] = None,
+        on_context: Optional[Callable[[RequestContext[Any]], None]] = None,
     ) -> InvokeOutcome:
         """Serve one request end-to-end. See the module docstring for the
         walk; every step before ``spec.fn`` refuses typed.
@@ -235,6 +261,19 @@ class ServeLoop:
         and the inline-output preference. They cannot ride ``context_kwargs``,
         which is constructed once per ServeLoop: a capability token is minted
         per request and expires.
+
+        ``input_assets`` is the dispatch's ordered, credential-free input
+        manifest (``RunJob.input_assets``) and ``attempt`` its attempt number;
+        together with the token and file API base out of ``context`` they are
+        everything :func:`~gen_worker.input_assets.materialize_input_assets`
+        needs. pgw#1418: the v1 executor called it and the v2 rewrite did not,
+        so every typed media input reached the author with ``local_path``
+        unset and every asset-taking endpoint failed the request.
+
+        ``on_context`` is handed this request's :class:`RequestContext` the
+        instant it exists — the seam a caller needs to renew the capability
+        token mid-flight, since the token lives on the context and the context
+        is built in here.
         """
         spec = self.loaded.entrypoints.get(function)
         if spec is None:
@@ -264,9 +303,52 @@ class ServeLoop:
         picks = dict(decoded.model_picks)
         adapters = dict(decoded.adapter_values)
 
+        # THE PAYLOAD SEAM (pgw#1418). Everything the author's body sees is
+        # decoded now, so this is the one instant where a typed media input
+        # can be turned into bytes on disk — and it happens BEFORE any weight
+        # moves, exactly where the v1 executor put it: a request whose input
+        # cannot be fetched must not first pay for a model load.
+        #
+        # The context is built here rather than after the leases for the same
+        # reason it was: `materialize_input_assets` needs the request's
+        # capability token, `on_context` needs to hand it to the renewal loop
+        # before the first long wait, and the primary binding is a pure
+        # resolver lookup that never needed a lease to compute.
+        primary_binding: Optional[DeployBinding] = None
+        if spec.model_params:
+            first_slot = spec.model_params[0][0]
+            primary_binding = self._resolver.resolve(
+                model_slots[first_slot], picks[first_slot]
+            )
+        ctx = self._make_context(request_id, primary_binding, spec, context)
+        if on_context is not None:
+            on_context(ctx)
+
+        per_request = dict(context or {})
+        input_fetch_t0 = time.monotonic()
+        try:
+            materialize_input_assets(
+                decoded.payload,
+                request_id,
+                attempt=int(attempt),
+                manifest=tuple(input_assets),
+                file_base_url=str(per_request.get("file_api_base_url") or ""),
+                capability_token=str(
+                    per_request.get("worker_capability_token") or ""
+                ),
+            )
+        except BaseException:
+            # `materialize_input_assets` already cleared its own attempt
+            # directory; this only guarantees it for anything that raised
+            # around it. The refusal itself is typed and propagates.
+            cleanup_input_assets(request_id, int(attempt))
+            raise
+        # A PRE-handler stage: input fetch is not the author's runtime, and
+        # folding it in makes every asset-taking endpoint look slow.
+        ctx._stages.record_pre("input_fetch", time.monotonic() - input_fetch_t0)
+
         with ExitStack() as leases:
             models: Dict[str, Model[Any]] = {}
-            primary_binding: Optional[DeployBinding] = None
             #: Unmet machine floors of the instances this request actually
             #: uses — a load-time fact, so it stains EVERY request the
             #: degraded instance serves, not just the one that loaded it.
@@ -305,40 +387,44 @@ class ServeLoop:
                     )
                 models[slot_name] = backend.model
                 degraded.extend(backend.degraded)
-                if primary_binding is None:
-                    # The FIRST slot in signature order is the request's
-                    # primary routing fact (ctx.checkpoint_ref).
-                    first_slot = spec.model_params[0][0]
-                    primary_binding = self._resolver.resolve(
-                        model_slots[first_slot], picks[first_slot]
-                    )
 
-            ctx = self._make_context(request_id, primary_binding, spec, context)
             for warning in degraded:
                 ctx.warn(warning)
             arguments = [
                 models[slot.name] if slot.kind == "model" else adapters[slot.name]
                 for slot in spec.slots
             ]
-            result = spec.fn(ctx, decoded.payload, *arguments)
-            if inspect.iscoroutine(result):
-                # AN `async def` ENTRYPOINT IS DRIVEN HERE, INSIDE ITS LEASE.
-                # `@entrypoint` accepts one (an async function IS a function),
-                # and returning the coroutine unawaited made the result a
-                # coroutine OBJECT — msgpack then failed the job with
-                # "Encoding objects of type coroutine is unsupported", after
-                # the leases had already been released. Awaiting it anywhere
-                # above this line would run author code outside its residency
-                # lease, which is the one thing the lease exists to prevent.
-                #
-                # `asyncio.run` is correct rather than lucky: `invoke` is
-                # called from `asyncio.to_thread`, so this thread has no
-                # running loop of its own to conflict with.
-                result = asyncio.run(result)
+            # The author's own span. Everything outside it — envelope decode,
+            # input fetch, admission, weight load — is platform time, and
+            # `handler_open`/`handler_close` are what let a slow request be
+            # attributed to the right side of that line.
+            ctx._stages.handler_open()
+            try:
+                result = spec.fn(ctx, decoded.payload, *arguments)
+                if inspect.iscoroutine(result):
+                    # AN `async def` ENTRYPOINT IS DRIVEN HERE, INSIDE ITS
+                    # LEASE. `@entrypoint` accepts one (an async function IS a
+                    # function), and returning the coroutine unawaited made the
+                    # result a coroutine OBJECT — msgpack then failed the job
+                    # with "Encoding objects of type coroutine is unsupported",
+                    # after the leases had already been released. Awaiting it
+                    # anywhere above this line would run author code outside
+                    # its residency lease, which is the one thing the lease
+                    # exists to prevent.
+                    #
+                    # `asyncio.run` is correct rather than lucky: `invoke` is
+                    # called from `asyncio.to_thread`, so this thread has no
+                    # running loop of its own to conflict with.
+                    result = asyncio.run(result)
+            finally:
+                # CLOSE THE SPAN ON THE FAILING PATH TOO: a handler that raised
+                # after 90 s is the sample most worth having.
+                ctx._stages.handler_close()
         return InvokeOutcome(
             result=result,
             warnings=ctx.warnings,
             adjustments=ctx.adjustments,
+            stages=ctx._stages,
         )
 
     def _make_context(
