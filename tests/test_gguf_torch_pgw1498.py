@@ -13,6 +13,8 @@ be true.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -232,10 +234,115 @@ def test_a_conv_lora_flattens_into_the_rank_product() -> None:
 
 def test_a_dense_tensor_refuses_the_attach_path() -> None:
     quantized, _, _ = _stack()
-    with pytest.raises(ValueError, match="dense, not block bytes"):
+    with pytest.raises(ValueError, match="never held block bytes"):
         attach_lora(quantized.fc1, [_patch(64, 32)], name="bias")
     with pytest.raises(ValueError, match="punned leaf"):
         attach_lora(quantized.norm, [_patch(32, 32)])
+
+
+# --- the budget dial -------------------------------------------------------
+
+
+def test_a_full_surplus_decodes_everything_once_and_answers_identically() -> None:
+    """The surplus tier: same outputs, no per-forward decode left."""
+    quantized, reference, _ = _stack()
+    ids, img = _inputs()
+    before = quantized(ids, img)
+
+    done = gguf_torch.dequant_ahead(quantized, surplus_bytes=math.inf,
+                                    dtype=torch.float32)
+    assert sorted(done) == ["conv.weight", "embed.weight", "fc1.weight",
+                            "fc2.weight"]
+    assert gguf_torch.quantized_bytes(quantized) == 0
+    assert gguf_torch.peak_transient_bytes(quantized, dtype=torch.float32) == 0
+    assert torch.equal(quantized(ids, img), before)
+    assert torch.equal(quantized(ids, img), reference(ids, img))
+    for leaf in gguf_leaves(quantized).values():
+        assert leaf.weight.dtype is torch.float32
+
+
+def test_a_zero_surplus_leaves_every_weight_quantized() -> None:
+    """The constrained tier is the same call with the dial at zero."""
+    quantized, _, _ = _stack()
+    resident = gguf_torch.quantized_bytes(quantized)
+    assert gguf_torch.dequant_ahead(quantized, surplus_bytes=0,
+                                    dtype=torch.float32) == []
+    assert gguf_torch.quantized_bytes(quantized) == resident
+
+
+def test_a_partial_surplus_graduates_largest_first_and_shrinks_the_transient() -> None:
+    """The dial between the endpoints. Largest first is the ordering that also
+    lowers the transient headroom a fit plan must reserve, which is the reason
+    it is the ordering."""
+    quantized, reference, _ = _stack()
+    ids, img = _inputs()
+    before = quantized(ids, img)
+    assert gguf_torch.peak_transient_bytes(quantized, dtype=torch.float32) == 64 * 32 * 4
+
+    # Buy the three 2048-element weights (embed, fc1, fc2) and not the 512-element
+    # conv, so what is left is strictly smaller than what was bought.
+    price = sum(64 * 32 * 4 - getattr(quantized, n).weight.numel()
+                for n in ("embed", "fc1", "fc2"))
+    done = gguf_torch.dequant_ahead(quantized, surplus_bytes=price,
+                                    dtype=torch.float32)
+
+    assert sorted(done) == ["embed.weight", "fc1.weight", "fc2.weight"]
+    assert gguf_torch.quantized_bytes(quantized) > 0  # conv still pays per forward
+    assert gguf_torch.peak_transient_bytes(quantized, dtype=torch.float32) == 16 * 8 * 2 * 2 * 4
+    assert torch.equal(quantized(ids, img), before)
+    assert torch.equal(quantized(ids, img), reference(ids, img))
+
+
+def test_lora_semantics_are_identical_on_both_sides_of_the_dial() -> None:
+    """A weight decoded at load takes the SAME attach path as one decoded per
+    forward — the tier must not be observable through the adapter."""
+    per_forward, reference, _ = _stack()
+    at_load, _, _ = _stack()
+    gguf_torch.dequant_ahead(at_load, surplus_bytes=math.inf, dtype=torch.float32)
+
+    patch = _patch(64, 32)
+    attach_lora(per_forward.fc1, [patch])
+    attach_lora(at_load.fc1, [patch])
+    with torch.no_grad():
+        reference.fc1.weight.add_(patch.delta(reference.fc1.weight))
+
+    ids, img = _inputs()
+    assert torch.equal(at_load(ids, img), per_forward(ids, img))
+    assert torch.equal(at_load(ids, img), reference(ids, img))
+
+    assert detach_lora(at_load) == 1
+    assert detach_lora(per_forward) == 1
+    assert torch.equal(at_load(ids, img), per_forward(ids, img))
+
+
+def test_the_dial_never_requantizes() -> None:
+    """Turning the dial up is one-way by construction: there is no path back to
+    block bytes, which is the rung.py rule (the ladder SELECTS artifacts)."""
+    quantized, _, _ = _stack()
+    gguf_torch.dequant_ahead(quantized, surplus_bytes=math.inf,
+                             dtype=torch.float32)
+    assert gguf_torch.dequant_ahead(quantized, surplus_bytes=math.inf,
+                                    dtype=torch.float32) == []
+    assert not hasattr(gguf_torch, "requantize")
+
+
+def test_the_fuse_gate_refuses_a_gguf_leaf_instead_of_inventing_a_grid() -> None:
+    """The other half of the reconciliation, at the site of the check.
+
+    ``adapter_fidelity.grid_of_module`` reads the grid off the module's
+    ``weight``. On a GGML leaf that is BLOCK BYTES, so the unguarded answer
+    would be a "uint8 grid" — a fuse gated against a fiction. It refuses.
+    """
+    from gen_worker.models import adapter_fidelity
+
+    quantized, _, _ = _stack()
+    with pytest.raises(ValueError, match="no fuse into a quantized grid"):
+        adapter_fidelity.grid_of_module(quantized.fc1,
+                                        path=adapter_fidelity.PATH_FUSE)
+    # …and an ordinary Linear is untouched by the new arm.
+    plain = nn.Linear(4, 4)
+    assert adapter_fidelity.grid_of_module(
+        plain, path=adapter_fidelity.PATH_FUSE).dtype == "float32"
 
 
 # --- install refusals ------------------------------------------------------

@@ -7,12 +7,21 @@ tiling, no compiled graphs. This module makes GGML a weight STORAGE format
 inside the same torch serving path as bf16, so a 4-bit flux/wan/sdxl runs on a
 small card with everything else intact.
 
-**The weights stay quantized.** Nothing here converts a checkpoint to bf16 up
-front — that would forfeit the whole point (4x the residency). Each leaf holds
-its own block bytes on the device and, once per forward, decodes them
+**The weights stay quantized — as far as the lease says they must.** Each leaf
+holds its own block bytes on the device and, once per forward, decodes them
 (:mod:`gen_worker.models.gguf_dequant`), matmuls at compute precision, and drops
 the dense copy. Residency is the quantized size; peak transient is ONE leaf's
 dense weight; the decode is memory-bound and costs ~10-20% of step time.
+
+That is one end of a DIAL, not the only setting (Paul, 2026-08-19). A worker
+handed surplus memory should use it: :func:`dequant_ahead` decodes as many
+weights ONCE at load as the surplus pays for, largest first, because paying a
+per-forward decode every step for the life of the endpoint is worse than paying
+it once. ``surplus_bytes=0`` is the constrained tier, ``math.inf`` the surplus
+tier, anything between graduates per layer. Nothing is ever RE-quantized — the
+dial only moves a weight from "decoded every step" to "decoded once", and the
+ladder still SELECTS artifacts rather than manufacturing them (``rung.py``).
+LoRA semantics are identical on both sides of the dial.
 
 Three deliberate divergences from the reference (city96's ComfyUI-GGUF, which
 these kernels and the attach-never-merge LoRA are ported from):
@@ -75,6 +84,12 @@ SPEC_ATTR = "gguf_specs"
 
 #: Per-leaf attribute: ``{"weight": (LoraPatch, ...)}`` applied post-dequant.
 ADAPTER_ATTR = "gguf_adapters"
+
+#: Per-leaf attribute: the specs of tensors :func:`dequant_ahead` already
+#: decoded. They are dense now, but the lane still owns them — an adapter may
+#: still attach, and residency reporting must not lose track of where the bytes
+#: came from.
+MATERIALIZED_ATTR = "gguf_materialized"
 
 #: (plain class, kind) -> punned class. One class object per pair: the module
 #: TYPE enters the compiled graph's composition digest and must be stable for
@@ -141,9 +156,11 @@ class LoraPatch:
 def _materialize(leaf: Any, name: str, dtype: Any) -> Any:
     """One tensor of ``leaf``, dense and at ``dtype``, for THIS forward.
 
-    Dense already (norms, biases the packer left in F32) -> a cast. Block bytes
-    -> decode, then every attached adapter on top. The dense copy is a local:
-    it dies when the caller's op returns.
+    Three cases, one expression. Block bytes -> decode. Already dense, because
+    the packer left it alone (norms, biases) or because :func:`dequant_ahead`
+    decoded it at load -> a cast, which is free when the dtype already matches.
+    Then every attached adapter, in BOTH cases: LoRA semantics must not depend
+    on which side of the budget dial a leaf landed on.
     """
     tensor = getattr(leaf, name, None)
     if tensor is None:
@@ -151,12 +168,17 @@ def _materialize(leaf: Any, name: str, dtype: Any) -> Any:
 
     spec = getattr(leaf, SPEC_ATTR, {}).get(name)
     if spec is None:
-        return tensor.to(dtype)
+        weight = tensor.to(dtype)
+    else:
+        weight = gguf_dequant.dequantize(
+            tensor, spec.qtype, spec.shape,
+            dtype=getattr(leaf, "dequant_dtype", None) or dtype)
 
-    weight = gguf_dequant.dequantize(
-        tensor, spec.qtype, spec.shape, dtype=getattr(leaf, "dequant_dtype", None) or dtype)
-    for patch in getattr(leaf, ADAPTER_ATTR, {}).get(name, ()):
-        weight = weight + patch.delta(weight)
+    patches = getattr(leaf, ADAPTER_ATTR, {}).get(name, ())
+    if patches:
+        weight = weight.to(dtype)
+        for patch in patches:
+            weight = weight + patch.delta(weight)
     return weight.to(dtype)
 
 
@@ -321,6 +343,7 @@ def install_quantized_weights(
                 leaf.__class__ = punned_class(type(leaf), kind)
                 setattr(leaf, SPEC_ATTR, {})
                 setattr(leaf, ADAPTER_ATTR, {})
+                setattr(leaf, MATERIALIZED_ATTR, {})
                 punned.append(path)
             getattr(leaf, SPEC_ATTR)[attr] = value.spec
             _install_buffer(leaf, attr, _detached(value.blocks, device))
@@ -383,6 +406,95 @@ def _install_buffer(leaf: Any, name: str, tensor: Any) -> None:
     leaf.register_buffer(name, tensor, persistent=True)
 
 
+# ---------------------------------------------------------------------------
+# the budget dial
+# ---------------------------------------------------------------------------
+
+def dequant_ahead(model: Any, *, surplus_bytes: float, dtype: Any) -> List[str]:
+    """Decode as many weights ONCE at load as ``surplus_bytes`` pays for.
+
+    Paul, 2026-08-19: quantized-resident and fully-dequantized are the two
+    ENDPOINTS OF ONE DIAL, set from the residency lease at load time. A worker
+    handed surplus memory should use it — a single dequant pass beats paying a
+    per-forward decode on every step for the life of the endpoint — and a
+    constrained worker pays per forward. Nothing is ever re-quantized: this only
+    ever moves a weight from "decoded every step" to "decoded once".
+
+    ``surplus_bytes`` is the lease's headroom over the quantized-resident plan,
+    so ``0`` is the constrained tier, ``math.inf`` the surplus tier, and
+    anything between graduates per layer. The price of one weight is the DELTA
+    (dense minus its blocks), because its blocks are dropped.
+
+    LARGEST FIRST, and the order is not arbitrary. Per-step decode saved is
+    proportional to bytes either way, so that alone would not pick an order —
+    but the transient headroom the fit plan must reserve is set by the LARGEST
+    still-quantized weight, and largest-first is the only order that shrinks it.
+    Spending continues past a weight too big for what is left, so a small
+    remainder is not stranded.
+
+    Returns the materialized ``"<path>.<tensor>"`` keys, largest first.
+    """
+    import torch
+
+    itemsize = torch.empty((), dtype=dtype).element_size()
+    candidates: List[Tuple[int, int, str, Any, str]] = []
+    for path, leaf in gguf_leaves(model).items():
+        for name, spec in getattr(leaf, SPEC_ATTR, {}).items():
+            blocks = getattr(leaf, name)
+            dense = _elements(spec.shape) * itemsize
+            price = dense - blocks.numel() * blocks.element_size()
+            candidates.append((dense, price, path, leaf, name))
+    candidates.sort(key=lambda c: -c[0])
+
+    spent = 0
+    done: List[str] = []
+    for dense, price, path, leaf, name in candidates:
+        if spent + price > surplus_bytes:
+            continue
+        materialize(leaf, name, dtype=dtype)
+        spent += price
+        done.append(f"{path}.{name}")
+
+    logger.info("gguf-torch: dequant-ahead materialized %d/%d weights for "
+                "%d bytes of a %s surplus", len(done), len(candidates), spent,
+                surplus_bytes)
+    return done
+
+
+def materialize(leaf: Any, name: str, *, dtype: Any) -> None:
+    """Decode one weight once and drop its blocks. The leaf STAYS punned, so
+    adapters keep applying exactly as they did on the quantized side."""
+    specs = getattr(leaf, SPEC_ATTR, {})
+    spec = specs.get(name)
+    if spec is None:
+        return
+    dense = gguf_dequant.dequantize(getattr(leaf, name), spec.qtype, spec.shape,
+                                    dtype=dtype)
+    del specs[name]
+    getattr(leaf, MATERIALIZED_ATTR)[name] = spec
+    _install_buffer(leaf, name, dense.contiguous())
+
+
+def peak_transient_bytes(model: Any, *, dtype: Any) -> int:
+    """The largest weight still decoded per forward — the headroom a fit plan
+    must reserve on top of the resident bytes. Falls as the dial turns up."""
+    import torch
+
+    itemsize = torch.empty((), dtype=dtype).element_size()
+    return max(
+        (_elements(spec.shape) * itemsize
+         for leaf in gguf_leaves(model).values()
+         for spec in getattr(leaf, SPEC_ATTR, {}).values()),
+        default=0)
+
+
+def _elements(shape: Any) -> int:
+    total = 1
+    for dim in shape:
+        total *= int(dim)
+    return total
+
+
 def quantized_bytes(model: Any) -> int:
     """Resident bytes of block storage — the number the small-card ladder cares
     about. Honest precisely because ``.shape`` was not made to lie."""
@@ -420,9 +532,10 @@ def attach_lora(leaf: Any, patches: Iterable[LoraPatch], *,
     """
     if not is_gguf_leaf(leaf):
         raise ValueError("gguf-torch: attach_lora expects a punned leaf")
-    if name not in getattr(leaf, SPEC_ATTR, {}):
+    if name not in getattr(leaf, SPEC_ATTR, {}) and \
+            name not in getattr(leaf, MATERIALIZED_ATTR, {}):
         raise ValueError(
-            f"gguf-torch: {name!r} on this leaf is dense, not block bytes — "
+            f"gguf-torch: {name!r} on this leaf never held block bytes — "
             "apply the adapter through the ordinary LoRA path")
     getattr(leaf, ADAPTER_ATTR)[name] = tuple(patches)
 
@@ -559,16 +672,20 @@ __all__ = [
     "ADAPTER_ATTR",
     "BASE_ATTR",
     "LEAF_MARKER",
+    "MATERIALIZED_ATTR",
     "SPEC_ATTR",
     "GgufRead",
     "LoraPatch",
     "QuantSpec",
     "QuantizedTensor",
     "attach_lora",
+    "dequant_ahead",
     "detach_lora",
     "gguf_leaves",
     "install_quantized_weights",
     "is_gguf_leaf",
+    "materialize",
+    "peak_transient_bytes",
     "punned_class",
     "quantized_bytes",
     "quantized_tensors_from_views",
