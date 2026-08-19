@@ -530,7 +530,7 @@ class Activity:
 
 #: pgw#1176 / th#1839: compiled-graph identity travels as TYPED WIRE FIELDS.
 #:
-#: ``ActivityUpdate.family`` / ``.cell_key`` / ``.graph_class`` (proto fields
+#: ``ActivityUpdate.family`` / ``.cell_key`` / ``.graph_specialization`` (proto fields
 #: 18-20) land in the hub's existing ``worker_activity_events`` columns. The
 #: prose form they replace was measured: ``detail LIKE 'ref=%#'||cell_key||'
 #: %'`` matched one of three rows correctly, because four emitters spelled
@@ -584,13 +584,7 @@ def emit_event(
         family=str(family or "")[:200],
         # proto field 19 is still spelled `cell_key` — see the note above.
         cell_key=str(compiled_graph_key or "")[:200],
-        # tcg#56: proto field 20 is still spelled `graph_class`, for the same
-        # reason `cell_key` is. The proto's canonical copy lives in tensorhub
-        # and BOTH generated trees must move with it in one window, so the wire
-        # spelling is renamed by the tensorhub leg of tcg#56, not here. pgw's
-        # own vocabulary is already `graph_specialization`; this line is the
-        # single place the two names meet.
-        graph_class=str(graph_specialization or "")[:300],
+        graph_specialization=str(graph_specialization or "")[:300],
         duration_ms=max(0, int(duration_ms)),
         updated_at_unix_ms=int(time.time() * 1000),
     ))

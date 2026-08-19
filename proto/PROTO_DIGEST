@@ -3,7 +3,7 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-2a6de856b32c55a2fa8241630dffd6a77cb1ce25bcb625b63b0640a8017d93a3
+bc26a69f55ffc6baba73ab7bd8dbc596c16f980ace63e189a47a946546de2fcb
 
 # th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
 # `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
@@ -58,3 +58,19 @@
 #
 # tensorhub's canonical copy carries the byte-identical hunk at
 # 584bd5d65868166d9fc66369840931e78983b2405f5ebdff7830c9e75c851e64.
+
+# tcg#56: `ActivityUpdate.graph_class` -> `graph_specialization` (field 20),
+# applied SURGICALLY here and byte-identically to tensorhub's canonical hunk at
+# 2c04cf4d4955d8f879cc35d424767031d6b564dd1eee08635ac015dd07fa936d — NOT via
+# scripts/vendor-proto.sh, which would DELETE th#1941's composed-manifest hunks
+# for the same reason th#2082 / th#2148 / pgw#1436 record above. The two digests
+# therefore stay legitimately different.
+#
+# NAME ONLY. The field NUMBER is unchanged, so the binary wire is byte-identical
+# and a hub or worker on an older build is unaffected; only the JSON name moves
+# (`graphClass` -> `graphSpecialization`). That is what makes the two-repo
+# landing window safe in either order.
+#
+# `activity.py` previously carried a one-line bridge (pgw's own vocabulary was
+# already `graph_specialization` while the wire still said `graph_class`); this
+# commit deletes it, so the two names are one again.
