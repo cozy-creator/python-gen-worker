@@ -236,7 +236,11 @@ class TraceRequestContext:
         #: None = run the author's full step count.
         self.step_budget = step_budget
         self.checkpoint_ref = checkpoint_ref or "trace:config-only"
-        self.log = logging.getLogger("gen_worker.release.trace")
+        # pgw#1510: PRIVATE. `log` is a METHOD on this surface because it is a
+        # method on the serving RequestContext; binding the Logger to the
+        # public name is what made `ctx.log("...")` die "'Logger' object is
+        # not callable" mid-drive.
+        self._log = logging.getLogger("gen_worker.release.trace")
         self._checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
         # pgw#1458: the trace DEVICE, which is not `cuda_ready()`. A derive on
         # a GPU-less publish box traces on fake cuda, and author code that
@@ -286,7 +290,30 @@ class TraceRequestContext:
     def warn(self, message: str) -> None:
         """Caller-visible advisory at serve; recorded AND logged at trace."""
         self._warnings.append(str(message))
-        self.log.warning("trace: %s", message)
+        self._log.warning("trace: %s", message)
+
+    def log(self, message: str, level: str = "info", **fields: Any) -> None:
+        """The operator diagnostic stream, answered as a METHOD (pgw#1510).
+
+        At serve this rides ``request.log`` to the hub. At trace there is no
+        request and no event lane, so it goes to the derive's own logger --
+        really where trace can be real, which is this module's rule for every
+        member it answers.
+
+        It exists as a METHOD and not as a bound ``Logger`` because that is
+        what the serving ``RequestContext`` is: an author writing the
+        documented ``ctx.log("...")`` got ``'Logger' object is not callable``
+        mid-drive, and the derive died on a line that is correct at serve.
+        The KIND of a member is part of the surface, not an implementation
+        detail -- ``test_trace_context_surface`` now compares every member's
+        kind against the serving class so this cannot recur silently.
+        """
+
+        self._log.info(
+            "trace: %s%s",
+            message,
+            f" {fields!r}" if fields else "",
+        )
 
     # -- egress -------------------------------------------------------------
     def step_callback(
@@ -596,7 +623,7 @@ class TraceRequestContext:
 
         del payload
         self.unanswered_calls.append((str(endpoint), str(function)))
-        self.log.warning(
+        self._log.warning(
             "trace: ctx.call_endpoint(%r, %r) answered EMPTY -- this trace "
             "cannot reach a peer endpoint, so graphs reached only through its "
             "result are unobserved and will mint on first live encounter.",
