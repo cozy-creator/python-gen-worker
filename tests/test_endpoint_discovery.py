@@ -289,7 +289,7 @@ def test_the_marker_is_ORTHOGONAL_to_lanes() -> None:
     """A self-loading model still has weights, still has a lane, still needs a
     VRAM floor. `trellis-3d` declares both; coupling them would strand its
     floor the way pgw#1423 strands hunyuan's."""
-    from tensorfs import contracts
+    from gen_worker._vendor.tensorfs import contracts
 
     from gen_worker.models import Trellis2
     from gen_worker.serving.model import LANES_ATTR, REQUIRES_ATTR, Model
