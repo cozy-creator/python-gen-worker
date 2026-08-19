@@ -166,7 +166,7 @@ def programs(tmp_path: Path) -> Callable[[str, Path], Path]:
 
 def counting_loader(
     armed: List[str], served: List[str] | None = None,
-) -> Callable[[Path, Any], Any]:
+) -> Callable[[Path, Any, Any], Any]:
     """The artifact loader — the ONE stub, because bytes-to-callable is the
     AOTInductor runtime's job on the target GPU.
 
@@ -174,10 +174,17 @@ def counting_loader(
     forward was swapped in) and ``served`` records it at CALL time (a request
     ran through that forward). Collapsing them is how "it armed" gets
     mistaken for "it served", which are the two separate claims here.
+
+    THREE arguments since pgw#1460/tcg#58: the third is the LIVE MODULE whose
+    resident tensors the compiled graph binds by reference. This stub asserts
+    it, because "the loader USES the record" is precisely what this file
+    asserted while production discarded it.
     """
 
-    def load(path: Path, record: Any) -> Callable[..., Any]:
+    def load(path: Path, record: Any, module: Any) -> Callable[..., Any]:
         assert path.is_file(), "an armed artifact must exist on disk"
+        assert isinstance(module, torch.nn.Module), (
+            "the loader is handed the module its constants bind from")
         armed.append(record.graph)
 
         def compiled(sample: torch.Tensor) -> torch.Tensor:

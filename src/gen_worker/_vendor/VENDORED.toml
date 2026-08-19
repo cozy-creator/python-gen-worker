@@ -299,8 +299,18 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "8e8c5ca6"
+rev = "12c99841"
 subdir = "src/torchcg"
+# pgw#1460 / tcg#58 RE-VENDOR (2026-08-19), from `12c99841`. The NEW FILE is
+# `serve.py` — the bytes->callable half of adoption, which upstream had left as
+# a seam with no implementation, so both of this repo's loaders were raw
+# `aoti_load_package` calls against WEIGHTLESS artifacts. `ArtifactLoader` now
+# takes the live module as a third argument and `torchcg.serve.aoti_loader` is
+# the DEFAULT, which is what makes a raw loader unwritable here rather than
+# merely discouraged. Also picked up in the same span: tcg#57 (`hollow.py` —
+# host egress inside a trace session; the session put the tensor on the trace
+# device, so the session owes the `.cpu()`), which is derive-side and lands
+# here only because a vendor is taken whole.
 # tcg#55/pgw#1458 RE-VENDOR (2026-08-19), from `ad399093`. Two upstream changes
 # land together because they are one ruling ("torchcg does too much"):
 #
@@ -486,11 +496,11 @@ rewrites = [
 "writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
 
 [packages.torchcg.files]
-"__init__.py" = "0268e80f3d154c71979efad0169babd13e0abe78c10d619c5c235df475aadcaa"
+"__init__.py" = "562d1439f5788a0aef4b6f724a2d4c2ef10b4ff33d4b12f87ef914b1b0af8a0a"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
 "_wrapper_split.py" = "1d5a3bc1ccabadeaa2b8b54f1492cba10723e53074a0022b8c7453565a86a4ce"
-"adopt.py" = "8c2b243aeaddb4639c456bdec22e8d09f1dfe50925966e3a560a8b32616008dd"
+"adopt.py" = "5ffab538a7eaef05f2ca48d3608abc8875c1bddbeb1498976dfed3f75520cfb2"
 "artifact.py" = "a3c96d845be49c752bd608dbb4b36fb192cb449937716d8d835aeba2e28d12ba"
 "cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
 "compiler.py" = "6ee54b26286b215eef8867dffb133d023a6808379574ac69f8007a64c477045a"
@@ -508,7 +518,7 @@ rewrites = [
 "document.py" = "b9c4a36f0d6e3fd0c7fda9953d1a60264274ddb8b1b7b400709000ddb64b26ea"
 "engine.py" = "d8275ad146c73ae5516ea7d60acc1fd63cdddb3036f4833f7741913fe340a1a9"
 "graph_identity.py" = "6ce4d8d7b106409db531fae16c56ef335d0ffd04f4fcf290d855b7f5b977fa8e"
-"hollow.py" = "e988a9a79ee9b17b9d7fabe11d4a2cb1043a1a23edf1be77378aac3c9caba432"
+"hollow.py" = "edbfbc7b158c34db61a60bbd95287ef68b08d532d47b032f89ddcc0abdc71b77"
 "host_isa.py" = "679aa81547be2d60ae6593b6e8f75dd29dcd56ab85d8e858e219b5af5d0eadc4"
 "identity.py" = "a460a24836cbd46cc9e65bd684b9f6258f6718e5c56102f26a7071f01574a99e"
 "ingress.py" = "fa9b814dbfcd43e2a7cfdd2ed48299a7fa5a570aa73d3e2269448c974074d558"
@@ -518,8 +528,9 @@ rewrites = [
 "quantize.py" = "cb579b4a2c91af02211f6339147584338b278a2da4e1f8f60084b742fce21da6"
 "recipe.py" = "cc6fe9007a7f459ede5ced2cfd5d072e3c807552329d0e1920ade88de8b829a6"
 "requirements.py" = "3b34858258d41c4faaa133c2d9c340507c4e18928c324f5665b4fe4fac4c7bda"
-"runner.py" = "53145e7f9d22f3f5eea578d4dbc46415bbed6b1cc51046186270ee4e52834047"
+"runner.py" = "745a988f58d6be77cb781e9a2e70a80ce503c35d74b581cfea104778ec5c62b5"
 "selection.py" = "1addd68533008d32b9d36c7877ac4c5fe43fce5f2c8737dda976f681f9145738"
+"serve.py" = "cc7d7cfb57f344dec63881d0fd2ad3848d1cf31d80f670f76f2e6f042cd2272e"
 "spans.py" = "4776fac2006967b1f17ffcbec03e50147d511120fd50cf085ac3b6b4702e5539"
 "storage.py" = "ccc9d6f8ac1a242b493028eaeed6a1fcd3a02a885c99ba2223bc71df7b69efe4"
 "store.py" = "60b12c4f36b40ea4f48464821367852df8bb530294f5535319cfe48aa3adbebb"

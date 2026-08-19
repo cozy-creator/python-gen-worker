@@ -46,12 +46,20 @@ logger = logging.getLogger(__name__)
 #: exact shape that made this gap invisible for as long as it existed.
 KIND_ADOPT_REFUSED = "adopt_refused"
 
-
-def aoti_loader(path: Path, record: Any) -> Any:
-    """Load one packaged compiled graph as its graph specialization's forward."""
-    import torch._inductor
-
-    return torch._inductor.aoti_load_package(str(path))
+# pgw#1460: THERE IS NO ARTIFACT LOADER IN THIS MODULE ANY MORE, and its
+# absence is the fix. What lived here was
+# `torch._inductor.aoti_load_package(str(path))` — the `GraphRecord` accepted
+# and discarded — so every adopted graph ran with an EMPTY constant buffer
+# (torchcg mints WEIGHTLESS artifacts by sealed policy; constants ship beside
+# them and bind by reference) and with the author's nested kwargs where the
+# package wanted flat positional feeds. Wrong numerics or a hard AOTI error,
+# on the exact path the adopt-and-reuse program is judged on.
+#
+# The bytes->callable path is torchcg's own (`torchcg.serve.aoti_loader`,
+# tcg#58) and it is the DEFAULT `AdoptSession` loader, so stating nothing is
+# both correct and the only reasonable thing to write. `loader=` below survives
+# as a TEST seam and nothing else; `scripts/lint_raw_aoti_load.py` is what
+# keeps a raw one from growing back here or anywhere else in `src/`.
 
 
 class ServeAdoption:
@@ -70,7 +78,7 @@ class ServeAdoption:
         cas_dir: Optional[Path] = None,
         transport: Any = None,
         installed: Optional[Mapping[str, str]] = None,
-        loader: Optional[Callable[[Path, Any], Any]] = None,
+        loader: Optional[Callable[[Path, Any, Any], Any]] = None,
         on_adopted: Optional[Callable[["ServeAdoption"], None]] = None,
     ) -> None:
         self.release_id = str(release_id)
@@ -82,7 +90,9 @@ class ServeAdoption:
         self.cas_dir = Path(cas_dir) if cas_dir is not None else None
         self._transport = transport
         self._installed = dict(installed) if installed is not None else None
-        self._loader = loader if loader is not None else aoti_loader
+        #: `None` = torchcg's own production loader (tcg#58). A value here
+        #: is a TEST DOUBLE; production never states one.
+        self._loader = loader
         self._on_adopted = on_adopted
         self._lock = threading.Lock()
         self._settled = False
@@ -277,4 +287,4 @@ class ServeAdoption:
         }
 
 
-__all__ = ["KIND_ADOPT_REFUSED", "ServeAdoption", "aoti_loader"]
+__all__ = ["KIND_ADOPT_REFUSED", "ServeAdoption"]

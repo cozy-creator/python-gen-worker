@@ -6,10 +6,32 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from .identity import GRAPH_SPECIALIZATION_BLOCK
-from .storage import StoredCompiledGraph
+
+
+class VerifiedGraph(Protocol):
+    """One artifact whose bytes have already been verified against its metadata.
+
+    ``storage.StoredCompiledGraph`` (v1, keyed) and ``serve.MaterializedGraph``
+    (v2, positioned by graph x env) are the two producers. The runner needs
+    nothing else from either, so it names the three facts instead of one of the
+    two store grammars -- that is what lets the ADOPT path reach the same gated
+    loader the exact-key path reaches.
+    """
+
+    @property
+    def key(self) -> str: ...
+
+    @property
+    def metadata(self) -> Mapping[str, object]: ...
+
+    @property
+    def package(self) -> Path: ...
+
+    @property
+    def literals(self) -> Path | None: ...
 
 
 class ConstantBindingError(RuntimeError):
@@ -26,7 +48,7 @@ class _Constant:
     source: str
 
 
-def _constants(graph: StoredCompiledGraph) -> tuple[_Constant, ...]:
+def _constants(graph: VerifiedGraph) -> tuple[_Constant, ...]:
     graph_specialization = graph.metadata[GRAPH_SPECIALIZATION_BLOCK]
     assert isinstance(graph_specialization, Mapping)  # artifact validation owns this boundary
     rows = graph_specialization["constants"]
@@ -101,7 +123,7 @@ class CompiledGraphRunner:
     key: str
     name: str
     calls: int
-    _graph: StoredCompiledGraph
+    _graph: VerifiedGraph
     _constants: tuple[_Constant, ...]
     _package: Any
     _bound_values: dict[str, Any]
@@ -113,7 +135,7 @@ class CompiledGraphRunner:
         raise TypeError("compiled-graph runners are created only by Engine.runner")
 
     @classmethod
-    def _from_verified_graph(cls, graph: StoredCompiledGraph) -> CompiledGraphRunner:
+    def _from_verified_graph(cls, graph: VerifiedGraph) -> CompiledGraphRunner:
         """Load one graph after Engine has resolved and admitted its exact bytes."""
 
         self = object.__new__(cls)
@@ -277,4 +299,4 @@ class CompiledGraphRunner:
         return result
 
 
-__all__ = ["CompiledGraphRunner", "ConstantBindingError"]
+__all__ = ["CompiledGraphRunner", "ConstantBindingError", "VerifiedGraph"]

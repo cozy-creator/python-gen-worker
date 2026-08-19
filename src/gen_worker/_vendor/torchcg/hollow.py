@@ -553,14 +553,54 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
                 **_remap_device(dict(kwargs or {}), device),
             )
 
+    #: Every op that takes a tensor OFF the device and onto the host. A fake
+    #: tensor answers these with zeros; a real one has to be copied first.
+    _HOST_EGRESS = (
+        torch.Tensor.numpy,
+        torch.Tensor.__array__,
+        torch.Tensor.tolist,
+        torch.Tensor.item,
+    )
+
     class FakeEgress(TorchFunctionMode):
         def __torch_function__(
             self, func: Any, types: Any, args: Any = (), kwargs: Any = None
         ) -> Any:
             kwargs = kwargs or {}
             host = args[0] if args else None
+            # tcg#57: the session put this tensor on the trace device — the
+            # author never asked for it there — so the session owes the
+            # `.cpu()` at host egress. Outside a session the same code works
+            # because the tensor was on cpu to begin with; a redirection that
+            # is visible to the author is a redirection that breaks them.
+            #
+            # Real, not hypothetical: diffusers' `EulerDiscreteScheduler.
+            # set_timesteps` does `np.array(sigmas)`, which reaches
+            # `Tensor.__array__` — note that is a DIFFERENT function from
+            # `Tensor.numpy`, so listing only the latter (as this shim did)
+            # misses the numpy-protocol path entirely.
+            if (
+                func in _HOST_EGRESS
+                and isinstance(host, torch.Tensor)
+                and not isinstance(host, FakeTensor)
+                and host.device.type != "cpu"
+            ):
+                # The copy MUST run with torch-function dispatch disabled.
+                # `OneTraceDevice` answers `Tensor.cpu` with `args[0]`
+                # unchanged — deliberately, so author code cannot pull weights
+                # off the trace device — which makes a plain `host.cpu()` here
+                # a silent no-op that returns the cuda tensor and fails one
+                # frame later. Disabling dispatch is what distinguishes "the
+                # session moving its own tensor back" from "the author trying
+                # to re-home one".
+                with torch._C.DisableTorchFunction():
+                    moved = host.detach().to("cpu")
+                return func(moved, *args[1:], **kwargs)
             if isinstance(host, FakeTensor):
-                if func is torch.Tensor.numpy:
+                # `__array__` alongside `numpy`: `np.array(t)` and `t.numpy()`
+                # are the same egress through two different functions, and a
+                # fake tensor has to answer both (tcg#57).
+                if func in (torch.Tensor.numpy, torch.Tensor.__array__):
                     import numpy
 
                     return numpy.zeros(
@@ -582,7 +622,27 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
                     return 0.0
             return func(*args, **kwargs)
 
-    with OneTraceDevice(), FakeEgress():
+    # tcg#57: the DEFAULT device has to be the trace device too, or the session
+    # has two devices while claiming one.
+    #
+    # `_remap_device` only rewrites a device the author NAMES. A factory call
+    # that names none (`torch.linspace(0, 1, n)`) is not remapped and lands on
+    # cpu — so inside a cuda session, unnamed factories produce cpu tensors
+    # while named ones produce cuda tensors. Author code that round-trips a
+    # device through a tensor it just made gets the two mixed:
+    #
+    #     sigmas = torch.linspace(...)                      # -> cpu (unnamed)
+    #     torch.cat([sigmas, torch.zeros(1, device=sigmas.device)])
+    #                              # `sigmas.device` is cpu, REMAPPED to cuda
+    #                              # -> cat(cpu, cuda) -> RuntimeError
+    #
+    # That is real, not hypothetical: it is diffusers' `EulerDiscreteScheduler.
+    # __init__`, so every SDXL derive died in `load()` before tracing anything.
+    # Setting the default makes the unnamed case land where the named case is
+    # already redirected, which is what "ONE trace device" was always supposed
+    # to mean — and it makes `_remap_device` a no-op for correct author code
+    # rather than the thing that breaks it.
+    with torch.device(device), OneTraceDevice(), FakeEgress():
         yield
 
 

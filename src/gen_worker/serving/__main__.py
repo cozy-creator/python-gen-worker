@@ -248,15 +248,6 @@ def _toolchain() -> Mapping[str, str]:
     return dict(toolchain_digest())
 
 
-def _aoti_loader(path: Path, record: Any) -> Any:
-    # The AOTInductor runtime load: the packaged compiled graph becomes the
-    # module forward for its graph specialization. Exact-env by construction — the
-    # audit already ran before any author code touched an artifact.
-    import torch._inductor
-
-    return torch._inductor.aoti_load_package(str(path))
-
-
 def _serve_envelopes(args: argparse.Namespace, loaded: Any) -> int:
     """Envelope mode: the production dispatch loop, locally — the
     signature-derived envelope through ServeLoop with residency leases
@@ -330,9 +321,14 @@ def main(argv: list[str] | None = None) -> int:
         loaded, binding, lane_contract=args.lane, output_dir=Path(args.output_dir)
     )
     store, document = _adoption_source(args, loaded.module_name)
+    # No `loader=`: pgw#1460. The byte-identical raw `aoti_load_package` that
+    # used to sit here discarded the record and armed a WEIGHTLESS package with
+    # an empty constant buffer. `torchcg.serve.aoti_loader` (tcg#58) is the
+    # default and the only sanctioned path — stating one here is what the
+    # `lint_raw_aoti_load` fence exists to stop.
     host.setup(
         store=store, document=document, sm=args.sm,
-        loader=_aoti_loader, artifacts_dir=Path(args.artifacts_dir),
+        artifacts_dir=Path(args.artifacts_dir),
     )
     if host.adoption is not None:
         report: dict[str, Any] = {
