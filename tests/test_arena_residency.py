@@ -1,13 +1,15 @@
-"""pgw#1507: the varena facade's CPU-testable halves.
+"""The arena residency layout and its (path, offset, len) triples.
 
 The layout arithmetic and the triple resolution decide every byte the arena
 ever maps, and both are decidable without a card. What is left for the GPU is
-the driver's own behaviour, which is varena#1/#2's ground and is verified in
-the pgw#1507 end-to-end run.
+the driver's own behaviour, which is varena#1/#2's ground and is verified by
+`benchmarks/arena_facade_pgw1507.py`.
 
 Real ``nn.Module`` trees and real safetensors files throughout — no mocks. A
 mock leaf would agree with whatever the layout believes about it, which is the
 one thing worth checking.
+
+# pgw#1507: the varena facade behind pgw#1497's planner contract.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import json
 import struct
 from pathlib import Path
+from typing import Any, List, Tuple
 
 import pytest
 
@@ -59,11 +62,11 @@ class Pyramid(nn.Module):
         # can own it. pgw#1497 measured what happens when nobody places it.
         self.register_buffer("position_ids", torch.arange(16))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover
+    def forward(self, x: Any) -> Any:  # pragma: no cover
         return self.norm(self.small(self.odd(self.mid(self.big(x)))))
 
 
-def specs_for(module: nn.Module, name: str = "root"):
+def specs_for(module: nn.Module, name: str = "root") -> List[Tuple[str, List[Any]]]:
     """The layout's input, derived from a real tree exactly as the facade does."""
     leaves, _costs, _adapters = discover_leaves([(name, module)])
     out = []
@@ -275,7 +278,7 @@ def test_adapter_leaves_land_in_the_core_and_can_never_stream():
             self.lora_A = nn.Linear(base.in_features, r, bias=False)
             self.lora_B = nn.Linear(r, base.out_features, bias=False)
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover
+        def forward(self, x: Any) -> Any:  # pragma: no cover
             return self.base_layer(x) + self.lora_B(self.lora_A(x))
 
     class Adapted(nn.Module):

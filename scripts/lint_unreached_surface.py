@@ -209,6 +209,23 @@ DEFINED_LABELS: Set[str] = set()
 # allowlists follow, and what stops this table becoming the place dead code
 # goes to be forgotten.
 EXEMPT_TARGETS: dict[str, str] = {
+    # pgw#1507: the varena facade. Reached today only by
+    # `benchmarks/arena_facade_pgw1507.py`, and that is a DECISION, not an
+    # oversight: a ladder rung takes a MEASURED latency price, and the price
+    # this mechanism measured on the 4070 is WORSE than `partial_stream`'s at
+    # every streaming budget (2.81/3.95/4.22 against 1.91/3.16/3.56). Putting
+    # it on the LADDER now would add a rung `select_auto_mode` must never
+    # choose. It gets its production caller when roadmap phase 3 gives it the
+    # thing it is actually for — one compiled artifact across every budget,
+    # which is what its stable virtual addresses buy and what the software rung
+    # structurally cannot do. THE WIRING IS OWED BY THAT LANE; if phase 3 is
+    # abandoned, these two rows are the deletion notice for the whole module.
+    "gen_worker.models.arena_residency.ArenaResidency":
+        "ladder/serving wiring owed by roadmap phase 3 (compiled cells over "
+        "stable arena addresses); measured slower than partial_stream until then",
+    "gen_worker.models.arena_residency.safetensors_triples":
+        "the (path, offset, len) seam; its production producer is pgw#1498's "
+        "CAS-native ingest, and it is wired with the same phase-3 lane",
     # pgw#1372: the residency engine (Paul's admission-before-allocation
     # ruling). Its production caller is the entrypoint DISPATCH LOOP, which
     # wraps every invocation in ResidencyManager.lease — that loop builds on
