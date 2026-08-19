@@ -209,11 +209,25 @@ class ServeAdoption:
         A serve pod's stdout goes nowhere (pgw#760), so "this pod adopted N
         graphs and compiled none" cannot be a log line: it is the single
         observation the whole mint-and-reuse program is judged on, and it has
-        to be readable off-pod. `boot_adopt` is the hub-known kind for exactly
-        this, and the two boots of a reuse proof read straight off it:
+        to be readable off-pod. The two boots of a reuse proof read straight
+        off it:
 
-            first  boot -> adopted=0 holes=N   (this pod pays)
-            second boot -> adopted=N holes=0   (this pod reuses)
+            first  boot -> phase=minting  step=0 total_steps=N
+            second boot -> phase=reused   step=N total_steps=N
+
+        **Its own kind, `boot_adopt_summary` (pgw#1441).** `boot_adopt` is a
+        PER-KEY event whose `phase` is `hit`/`miss`/`no_export_declaration` —
+        one row per graph. This is a PER-BOOT verdict over all of them, and
+        putting both under one kind gives that kind two `phase` vocabularies:
+        `count(*) where kind='boot_adopt' and phase='reused'` then reads 0 on
+        every pod that predates this code, which is indistinguishable from
+        "nothing reused". `warmup`/`warmup_summary` is the same split, made
+        for the same reason, one incident earlier (pgw#1067).
+
+        **The counts are NUMERIC.** `step` = graphs adopted, `total_steps` =
+        graphs claimed, so the reuse ratio is a query instead of a regex over
+        `detail`. Prose in `detail` alone is how a reader ends up building a
+        metric on whatever nearby column looks numeric.
 
         Emitted from :meth:`loaded`, not from :meth:`_build`, because the
         counts are only final once the author's ``ctx.compile`` calls have
@@ -224,12 +238,14 @@ class ServeAdoption:
             return
         adopted, holes = len(session.adopted), len(session.holes)
         activity_mod.emit_event(
-            activity_mod.KIND_BOOT_ADOPT,
+            activity_mod.KIND_BOOT_ADOPT_SUMMARY,
             f"release={self.release_id} lane={contract} sm={self.sm}: "
             f"{adopted} graph(s) adopted from the store, {holes} hole(s) for "
             f"the background mint, {len(session.unclaimed)} unclaimed",
             phase="reused" if holes == 0 and adopted else (
                 "minting" if holes else "empty_lane"),
+            step=adopted,
+            total_steps=adopted + holes,
         )
 
     def _refuse(self, phase: str, detail: str) -> None:

@@ -191,10 +191,14 @@ def counting_loader(
 
 @pytest.fixture()
 def wire(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
+    """Captured events as (kind, phase, detail, kwargs) — the kwargs matter
+    because pgw#1441 moved the reuse COUNTS into typed numeric fields, and a
+    recorder that dropped them could not tell a wired count from prose."""
     seen: List[tuple] = []
     monkeypatch.setattr(
         activity_mod, "emit_event",
-        lambda kind, detail, phase="", **kw: seen.append((kind, phase, detail)))
+        lambda kind, detail, phase="", **kw: seen.append(
+            (kind, phase, detail, kw)))
     return seen
 
 
@@ -688,9 +692,22 @@ def test_the_reuse_hit_is_a_wire_fact_a_rental_can_capture(
     assert mints[1].join(timeout=60.0).state == self_mint_mod.NOTHING_TO_MINT
     assert reusing.calls == [], "the second pod compiled: that is not reuse"
 
-    phases = [e[1] for e in wire if e[0] == "boot_adopt"]
+    phases = [e[1] for e in wire if e[0] == "boot_adopt_summary"]
     assert phases == ["minting", "reused"], (
         f"the reuse hit must be readable off-pod, got {wire}")
-    detail = [e[2] for e in wire if e[0] == "boot_adopt"][1]
+    rows = [e for e in wire if e[0] == "boot_adopt_summary"]
+    detail = rows[1][2]
     assert f"{len(expected)} graph(s) adopted" in detail and "0 hole(s)" in detail
     assert [e for e in wire if e[0] == self_mint_mod.KIND_SKIPPED]
+
+    # pgw#1441: THE COUNTS ARE NUMERIC, so the reuse ratio is a query and not
+    # a regex over a sentence. Paying boot 0/N, reusing boot N/N.
+    assert rows[0][3]["step"] == 0
+    assert rows[0][3]["total_steps"] == len(expected)
+    assert rows[1][3]["step"] == len(expected)
+    assert rows[1][3]["total_steps"] == len(expected)
+
+    # And the per-BOOT roll-up never lands in the per-KEY kind, whose `phase`
+    # vocabulary is hit/miss/no_export_declaration. One kind, one vocabulary.
+    assert not [e for e in wire if e[0] == "boot_adopt"], (
+        "the per-boot roll-up collided with the per-key event's kind")
