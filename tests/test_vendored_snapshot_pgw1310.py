@@ -407,3 +407,69 @@ def test_no_deleted_project_is_required_from_an_index() -> None:
 )
 def test_the_vendored_packages_import_with_no_third_party_present(module: str) -> None:
     __import__(module)
+
+
+def test_no_vendored_module_imports_its_sibling_by_its_INDEX_name() -> None:
+    """pgw#1457 incident: the re-vendor's one rewrite is easy to forget.
+
+    Vendoring `torchcg` applies exactly one transformation — `from tensorfs
+    import ...` becomes `from ..tensorfs import ...` — because upstream
+    torchcg depends on tensorfs as a normal package and here there is no such
+    package to depend on. Nothing wrote that rule down, so a straight
+    `git archive | tar -x` re-vendor dropped it and shipped four modules
+    importing a PyPI project that is PERMANENTLY DELETED (ie#738).
+
+    It passed every gate: the digest fence recorded the wrong bytes faithfully,
+    the tests passed because the dev venv happens to have a real `tensorfs`
+    installed, and only mypy noticed — as a type mismatch between two classes
+    with the same name, which reads as a nuisance rather than as "this wheel
+    cannot be installed". This fence states the rule so the next re-vendor
+    cannot silently skip it.
+    """
+    offenders = []
+    for package in MANIFEST["packages"]:
+        root = VENDOR / package
+        siblings = {name for name in MANIFEST["packages"] if name != package}
+        for path in sorted(root.rglob("*.py")):
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                stripped = line.strip()
+                for sibling in siblings:
+                    if stripped.startswith((f"from {sibling} ", f"import {sibling}")):
+                        offenders.append(f"{package}/{path.relative_to(root)}:{number}: {stripped}")
+    assert not offenders, (
+        "a vendored module imports a sibling by its INDEX name, which resolves "
+        "to a deleted PyPI project (or, worse, to a DIFFERENT installed copy) "
+        "instead of the snapshot beside it. Re-vendoring rewrites these to "
+        "relative imports:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_dev_torchcg_pin_is_the_rev_the_snapshot_was_taken_from() -> None:
+    """pgw#1457 incident #2: pgw runs TWO torchcg copies, by design.
+
+    `_vendor/torchcg` serves the mint and the serving path; the DERIVE imports
+    torchcg from the env it runs in, against the `[tool.uv.sources]` dev pin
+    (in production, the release env's own pin). That is deliberate — but it
+    means a re-vendor that moves only the vendored half leaves two versions
+    live in one tree, and the failure lands two tools away from the cause:
+    the derive died on `TypeError: unexpected keyword 'session'` while the
+    signature was verifiably present in the vendored tree. Both facts true at
+    once is the worst kind of bug report.
+
+    They are a MATCHED PAIR, so this asserts it rather than trusting a comment.
+    """
+    import re
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    match = re.search(
+        r'^torchcg = \{ git = "[^"]*torchcg", rev = "([0-9a-f]+)"', pyproject, re.M
+    )
+    assert match, "the dev torchcg source pin is gone; this fence needs updating with it"
+    pinned = match.group(1)
+    vendored = str(MANIFEST["packages"]["torchcg"]["rev"])
+    assert pinned.startswith(vendored) or vendored.startswith(pinned), (
+        f"the derive's torchcg ({pinned[:12]}) is not the rev the vendored "
+        f"snapshot was taken from ({vendored}). Both halves move together or "
+        f"the derive and the mint disagree about the same library — bump the "
+        f"pin in [tool.uv.sources], re-lock, and re-vendor in one change."
+    )

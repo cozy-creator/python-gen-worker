@@ -9,7 +9,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
-from tensorfs import LocalCAS
+from ..tensorfs import LocalCAS
 
 from .artifact import build_metadata, pack_artifact, read_metadata
 from .compiler import _compile_exported_program, _package_compiled_files
