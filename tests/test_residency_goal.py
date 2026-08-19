@@ -1,4 +1,6 @@
-"""pgw#1483 / th#2204: the v2 worker ANSWERS the hub's residency goal.
+"""The v2 worker ANSWERS the hub's residency goal.
+
+# pgw#1483 / th#2204: `HelloAck.desired_residency` had no consumer on v2.
 
 th#2204 measured the absence on a live rented H100 at $3.29/hr: the hub sent
 `HelloAck(desired_generation=3 disk=2 hot=0 resolutions=0)`, the worker acked the
