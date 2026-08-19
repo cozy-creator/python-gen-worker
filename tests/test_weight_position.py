@@ -32,10 +32,12 @@ from typing import Any
 import pytest
 
 from gen_worker import activity, weight_position
+from gen_worker import config as gw_config
 from gen_worker.models.cozy_snapshot import ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
-from gen_worker.models.refs import TensorhubRef, WireRef
+from gen_worker.models.refs import TensorhubRef, WireRef, normalize_model_ref
 from gen_worker.models.store import ModelStore
+from gen_worker.serving.reserved_repos import materialize_reserved_inputs_async
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.weight_position import MIB, FetchPosition
 
@@ -496,4 +498,84 @@ def test_a_transfer_that_dies_midway_leaves_no_open_record(
         assert weight_position.PHASE_ABANDONED in [
             r.phase for r in wire.positions()]
     finally:
+        origin.close()
+
+
+# ---------------------------------------------------------------------------
+# pgw#1485 — THE JOB PLANE'S FETCH IS A SECOND FUNNEL, and it was silent.
+#
+# `serving/reserved_repos._materialize_one` — the only writer of
+# `ctx.source_path`, and the door all 25 reserved-`source` producers enter
+# through — calls the `models.download.ensure_local` FREE FUNCTION, not
+# `ModelStore`'s. It passed no `progress=` at all, so a pod that pulled 20.5 GB
+# of reserved-repo weights left ZERO `weight_fetch` rows. pgw#1455's "the funnel
+# sees every materialization path (startup prefetch, DesiredResidency disk_refs,
+# hot instances, RunJob delivery)" was true of the serving plane and FALSE here.
+# ---------------------------------------------------------------------------
+
+class _Ctx:
+    """The producer-context surface `_materialize_one` actually touches."""
+
+    def __init__(self) -> None:
+        self.source_path = ""
+
+    def _set_source_path(self, path: str) -> None:
+        self.source_path = path
+
+    def raise_if_cancelled(self, _reason: str) -> None:
+        return None
+
+
+class _Payload:
+    """A producer payload naming one reserved `source` repo."""
+
+    def __init__(self, ref: str) -> None:
+        self.source = {"ref": ref}
+
+
+def test_the_job_planes_reserved_repo_fetch_reports_positions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _fine_cadence: Any
+) -> None:
+    """A reserved-repo materialization leaves the same advancing byte positions
+    a serving-path fetch does. 20.5 GB moved and 0 rows written is the reading
+    this closes."""
+    origin = _Origin()
+    try:
+        monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path / "cache"))
+        gw_config.reload_for_test()
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        resolved = _resolved(files)
+        ref = normalize_model_ref("acme/model-a")
+        wire = _Wire()
+        ctx, payload = _Ctx(), _Payload("acme/model-a")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            await materialize_reserved_inputs_async(ctx, payload, {ref: resolved})
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        assert ctx.source_path, "the reserved path must still be filled"
+        assert str(tmp_path) in ctx.source_path, (
+            "the CAS override did not take; this test would be measuring a\n"
+            f"shared cache: {ctx.source_path}")
+        rows = wire.positions()
+        assert rows, (
+            "the job plane's reserved-repo fetch emitted NO weight_fetch rows — "
+            "20.5 GB of silence is the defect this closes")
+        phases = [r.phase for r in rows]
+        assert phases[0] == weight_position.PHASE_STARTED
+        assert phases[-1] == weight_position.PHASE_FETCHED
+        steps = [r.step for r in rows]
+        assert steps[-1] == (OBJECTS * OBJECT_BYTES) // MIB
+        assert steps[-1] > steps[0], f"the position must advance; got {steps}"
+        assert all(_detail(r)["ref"] == str(ref) for r in rows)
+    finally:
+        gw_config.reload_for_test()
         origin.close()

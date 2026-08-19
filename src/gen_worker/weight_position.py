@@ -47,9 +47,10 @@ that cost rental #6 — absence has to render as a row that says zero.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
-from typing import Optional
+from typing import Any, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -191,3 +192,35 @@ class FetchPosition:
             )
         except Exception:  # pragma: no cover — telemetry never fails a fetch
             logger.debug("weight position event dropped", exc_info=True)
+
+
+def snapshot_bytes(snapshot: Any) -> int:
+    """Total declared bytes of a resolved snapshot (0 when unknown).
+
+    The position's denominator, wherever a fetch is instrumented. Kept here so
+    every call site computes it the same way.
+    """
+    files = getattr(snapshot, "files", None) or ()
+    try:
+        return sum(int(getattr(f, "size_bytes", 0) or 0) for f in files)
+    except (TypeError, ValueError):
+        return 0
+
+
+@contextlib.contextmanager
+def track(ref: str, total_bytes: int = 0) -> Iterator[FetchPosition]:
+    """Open a position, hand it over, and CLOSE IT ON EVERY EXIT PATH.
+
+    pgw#1485: the close being structural is the whole point. Hand
+    ``position.progress`` to the fetch's ``progress=`` callback inside the
+    block; a fetch that raises, is cancelled, or is killed still leaves a
+    terminal row saying where it stopped.
+    """
+    position = FetchPosition(ref, total_bytes=total_bytes)
+    position.open()
+    try:
+        yield position
+    except BaseException:
+        position.close(ok=False)
+        raise
+    position.close(ok=True)
