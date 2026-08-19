@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
+from ..tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
 
 from .artifact import ArtifactError, _fsync_dir, unpack_artifact
 from .identity import CompiledGraphKey, is_compiled_graph_key

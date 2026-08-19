@@ -683,7 +683,16 @@ torchvision = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 # pgw#1370: dev-only (see the dev extra) — release envs pin their own torchcg.
-torchcg = { git = "https://github.com/cozy-creator/torchcg", rev = "ad39909303554ffb1c3cbaf2a98d5c89f627219b" }
+# pgw#1457: THIS REV AND `_vendor/VENDORED.toml`'s ARE A MATCHED PAIR, and the
+# fence `test_the_dev_torchcg_pin_is_the_rev_the_snapshot_was_taken_from`
+# asserts it. pgw runs two torchcg copies on purpose — the vendored snapshot
+# serves the mint and the serving path, this pin serves the DERIVE, which
+# imports torchcg from the env it runs in. A re-vendor that moves only the
+# vendored half leaves two versions live in one tree, and the failure lands two
+# tools away from the cause: the derive raised `TypeError: unexpected keyword
+# 'session'` while that exact signature was verifiably present in the vendored
+# tree. Bump both, re-lock, re-vendor — one change.
+torchcg = { git = "https://github.com/cozy-creator/torchcg", rev = "8d7ab5773b98e4ffd8560dfda58e8065b248fce7" }
 # Saying which pins were deleted requires naming them.
 # retired-name: historical rationale, not a live reference.
 # pgw#1310 deleted the `hashrepo` / `torch-compiled-graphs` git pins that stood

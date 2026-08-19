@@ -25,7 +25,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
+from ..tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
 
 from .document import DocumentError, GraphSetDocument, LaneGraphs
 from .graph_identity import EnvIdentity, is_graph_hash

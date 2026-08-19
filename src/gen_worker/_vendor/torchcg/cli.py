@@ -8,7 +8,7 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from tensorfs import LocalCAS
+from ..tensorfs import LocalCAS
 
 from .artifact import read_metadata, unpack_artifact
 from .engine import Engine

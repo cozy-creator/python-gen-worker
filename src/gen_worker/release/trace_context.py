@@ -14,8 +14,10 @@ the SPELLING; that spelling is frozen by the Paul-reviewed ``main_v2.py``.
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -175,11 +177,50 @@ class StepBudgetReached(Exception):
     """
 
 
+class TraceSurfaceUnavailable(RuntimeError):
+    """An author touched a ctx member the derive genuinely cannot answer.
+
+    Reserved for members whose whole content is BYTES OR A PEER that do not
+    exist at trace time -- a dataset to resolve, a blob to materialize, a
+    checkpoint stream to open. Everything else on the surface is answered:
+    really where trace can be real, as a recorder where the derive wants the
+    observation, as a stated empty where the fact simply has no trace value.
+
+    A no-op is wrong for these three because a fabricated path or an empty
+    file makes author code read something that is not there and fail two
+    frames later, naming the author's line instead of the derive's gap.
+    """
+
+
 class TraceRequestContext:
     """What entrypoints see under ``gen-worker release derive``.
 
-    No ``is_trace`` here either (deleted from the author surface); warns and
-    clamps are collected as log lines.
+    pgw#1461: this used to answer FIVE members while the serving
+    ``RequestContext`` answers 48. The authoring guide's own canonical
+    example (``ctx.for_request``) raised ``AttributeError`` straight into a
+    hard ``DeriveError``, so most real endpoints could not derive at all --
+    and every release fixture passed because none of them called a missing
+    member. A surface with holes is not a surface; the derive must answer
+    everything an author may write, and the fence
+    (``test_trace_context_surface_pgw1461``) is what keeps it that way when
+    a new serving member lands.
+
+    Three answer kinds, chosen per member and never by accident:
+
+    * **Real** -- ``for_request``, ``generator``, ``clamp``, ``mktemp``,
+      ``stage``, ``workflow_checkpoint``. These are pure functions of things
+      a trace HAS, so answering them with a stub would be a lie for no gain.
+      ``for_request`` in particular is the guide's canonical line and it
+      clones schedulers, which is exactly what changes the observed graph.
+    * **Recorder** -- ``progress``, ``adjusted``/``adjustments``, ``warn``/
+      ``warnings``, ``log``. The derive wants the observation, and a test
+      can read it back.
+    * **Stated empty** -- ``models``, ``loras``, ``config``, the job-side
+      paths. Empty is a statement here, not a placeholder: a trace resolves
+      no checkpoint, applies no adapter and has no dataset.
+
+    No ``is_trace`` (deleted from the author surface): author code branching
+    on it corrupts compilation coverage.
     """
 
     def __init__(
@@ -188,12 +229,31 @@ class TraceRequestContext:
         lane: Any,
         checkpoint_ref: str = "",
         step_budget: Optional[int] = None,
+        checkpoint_dir: Optional[Path] = None,
+        device: Any = None,
     ) -> None:
         self.lane = lane
         #: None = run the author's full step count.
         self.step_budget = step_budget
         self.checkpoint_ref = checkpoint_ref or "trace:config-only"
         self.log = logging.getLogger("gen_worker.release.trace")
+        self._checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
+        # pgw#1458: the trace DEVICE, which is not `cuda_ready()`. A derive on
+        # a GPU-less publish box traces on fake cuda, and author code that
+        # reads ctx.device must see the device the graph is being stamped
+        # with -- reading the host's real availability here would place a
+        # tensor on cpu inside a cuda trace and produce the mixed placement
+        # AOTI rejects.
+        self._device = device
+        self._warnings: list[str] = []
+        self._adjustments: list[dict[str, str]] = []
+        #: (progress, stage, extra) recorded in call order.
+        self.progress_events: list[tuple[Optional[float], Optional[str], dict[str, Any]]] = []
+        #: Endpoints this trace answered EMPTY because it cannot reach a peer.
+        #: The derive reports these: graphs past such a call are unobserved,
+        #: which is a stated outcome, not a silent one.
+        self.unanswered_calls: list[tuple[str, str]] = []
+        self._temporaries: list[Any] = []
 
     # -- knobs / control ----------------------------------------------------
     def clamp(
@@ -205,26 +265,42 @@ class TraceRequestContext:
         hi: Optional[float] = None,
         reason: str = "",
     ) -> float:
-        """Same arithmetic as the serving ctx; trace records nothing."""
-        del reason
+        """Same arithmetic as the serving ctx, and the same RECORD.
+
+        pgw#1461: "trace records nothing" was the old comment and it was the
+        whole bug in miniature -- a clamp that changes the executed arm, and
+        therefore the observed graph, left no trace of having happened.
+        """
         applied = float(requested)
         if lo is not None and applied < lo:
             applied = float(lo)
         if hi is not None and applied > hi:
             applied = float(hi)
+        if applied != float(requested):
+            self.adjusted(field, requested, applied, reason)
         return applied
 
     def raise_if_cancelled(self, message: str = "request cancelled") -> None:
         del message
 
     def warn(self, message: str) -> None:
-        """Caller-visible advisory at serve; a log line at trace."""
+        """Caller-visible advisory at serve; recorded AND logged at trace."""
+        self._warnings.append(str(message))
         self.log.warning("trace: %s", message)
 
     # -- egress -------------------------------------------------------------
-    def step_callback(self, total_steps: int) -> Callable[..., dict[str, Any]]:
-        """A diffusers ``callback_on_step_end`` that enforces the step budget."""
-        del total_steps
+    def step_callback(
+        self, num_inference_steps: int = 0, **kwargs: Any
+    ) -> Callable[..., dict[str, Any]]:
+        """A diffusers ``callback_on_step_end`` that enforces the step budget.
+
+        The parameter is spelled ``num_inference_steps`` to match the serving
+        context exactly: it was ``total_steps`` here, so an author passing it
+        BY KEYWORD -- which is how diffusers callers usually write it -- got a
+        TypeError at trace and a working call at serve. A member that exists
+        with the wrong signature is still a hole in the surface (pgw#1461).
+        """
+        del num_inference_steps, kwargs
         seen = 0
         budget = self.step_budget
 
@@ -241,6 +317,7 @@ class TraceRequestContext:
 
         return callback
 
+    # -- egress: stub assets; nothing is encoded or uploaded at trace ------
     def save_image(self, image: Any, *, format: str = "webp", **_: Any) -> Any:
         """A stub asset: nothing is encoded or uploaded at trace time."""
         del image
@@ -248,5 +325,289 @@ class TraceRequestContext:
 
         return ImageAsset(ref=f"trace://image.{format}")
 
+    def save_video(self, video: Any, ref: Optional[str] = None, *, format: str = "mp4",
+                   **_: Any) -> Any:
+        del video
+        from ..api.types import VideoAsset
 
-__all__ = ["StepBudgetReached", "TraceLoadContext", "TraceRequestContext"]
+        return VideoAsset(ref=ref or f"trace://video.{format}")
+
+    def save_audio(self, audio: Any, ref: Optional[str] = None, *, format: str = "wav",
+                   **_: Any) -> Any:
+        del audio
+        from ..api.types import AudioAsset
+
+        return AudioAsset(ref=ref or f"trace://audio.{format}")
+
+    def save_bytes(self, ref: str, data: bytes, **_: Any) -> Any:
+        del data
+        from ..api.types import Asset
+
+        return Asset(ref=f"trace://{ref}")
+
+    def save_file(self, ref: str, local_path: Any, *, create: bool = False, **_: Any) -> Any:
+        del local_path, create
+        from ..api.types import Asset
+
+        return Asset(ref=f"trace://{ref}")
+
+    def save_checkpoint(self, ref: str, local_path: Any, format: Optional[str] = None,
+                        **_: Any) -> Any:
+        del local_path, format
+        from ..api.types import Asset
+
+        return Asset(ref=f"trace://{ref}")
+
+    # -- real: pure functions of things a trace actually has ---------------
+    def for_request(
+        self,
+        pipeline: Any,
+        *,
+        slot: str = "",
+        sampler: str = "",
+        seed: Optional[int] = None,
+        generator: Optional[Any] = None,
+        scheduler_config: Optional[dict[str, Any]] = None,
+        schedulers: Optional[Sequence[str]] = None,
+    ) -> Any:
+        """The per-request view, for REAL -- the guide's canonical line.
+
+        Answered by the serving implementation rather than stubbed, because
+        the clone it performs is exactly what can change the observed graph:
+        a different sampler is a different scheduler is a different denoise
+        call. A stub returning ``pipeline`` would derive graphs for a
+        pipeline no request ever runs, and nothing downstream could tell.
+        """
+
+        from ..view import for_request as _view_for_request
+
+        del slot
+        gen = generator
+        if gen is None and seed is not None:
+            gen = self.generator(seed)
+        return _view_for_request(
+            pipeline, sampler=sampler, objective="", generator=gen,
+            scheduler_config=scheduler_config, schedulers=schedulers,
+        )
+
+    @property
+    def device(self) -> Any:
+        """The device THIS TRACE is stamping, not the host's availability."""
+
+        import torch
+
+        if self._device is not None:
+            return torch.device(self._device) if isinstance(self._device, str) else self._device
+        return torch.device("cpu")
+
+    def generator(self, seed: Optional[int] = None) -> Any:
+        import torch
+
+        # A fake-cuda trace has no real cuda device to seed a generator on;
+        # the generator's DEVICE is not part of graph identity (its outputs
+        # are, and at trace they are zeros), so cpu is the honest home.
+        gen = torch.Generator()
+        if seed is not None:
+            gen.manual_seed(int(seed))
+        return gen
+
+    def mktemp(self) -> Path:
+        holder = tempfile.TemporaryDirectory(prefix="trace-ctx-")
+        self._temporaries.append(holder)
+        return Path(holder.name)
+
+    def checkpoint_dir(self, *, key: str = "") -> Path:
+        """The CONFIG-ONLY subset the derive resolved; there are no weights."""
+
+        del key
+        if self._checkpoint_dir is None:
+            raise TraceSurfaceUnavailable(
+                "ctx.checkpoint_dir() has no config-only tree in this trace: "
+                "the derive was constructed without one. This is the derive's "
+                "gap, not the endpoint's."
+            )
+        return self._checkpoint_dir
+
+    @contextlib.contextmanager
+    def stage(self, name: str) -> Iterator[None]:
+        """Bracketing is real; only the timing sink is absent at trace."""
+
+        del name
+        yield
+
+    def workflow_checkpoint(self, key: str, fn: Callable[[], Any]) -> Any:
+        """No resume at trace, so the work always RUNS -- which is the point.
+
+        Answering from a cache would skip exactly the code whose graphs the
+        derive exists to observe.
+        """
+
+        del key
+        return fn()
+
+    def position(self, phase: str = "") -> Optional[float]:
+        del phase
+        return None
+
+    # -- recorders: the derive wants the observation, and tests read it back
+    def progress(
+        self,
+        progress: Optional[float] = None,
+        stage: Optional[str] = None,
+        **extra: Any,
+    ) -> None:
+        self.progress_events.append((progress, stage, dict(extra)))
+
+    def adjusted(self, field: str, requested: Any, applied: Any, reason: str = "") -> None:
+        self._adjustments.append({
+            "field": str(field), "requested": str(requested),
+            "applied": str(applied), "reason": str(reason),
+        })
+
+    @property
+    def adjustments(self) -> tuple[dict[str, str], ...]:
+        return tuple(self._adjustments)
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        return tuple(self._warnings)
+
+    # -- stated empties: empty is the TRUE value at trace, not a placeholder
+    @property
+    def models(self) -> dict[str, str]:
+        return {}
+
+    @property
+    def loras(self) -> dict[str, Any]:
+        """No adapter is applied at trace -- TraceLoadContext no-ops the calls."""
+        return {}
+
+    @property
+    def config(self) -> dict[str, Any]:
+        return {}
+
+    @property
+    def cancelled(self) -> bool:
+        return False
+
+    @property
+    def boot_warmup(self) -> bool:
+        return False
+
+    @property
+    def publishes(self) -> bool:
+        """Nothing is published from a trace; egress returns stub refs."""
+        return False
+
+    @property
+    def emits_media(self) -> bool:
+        """TRUE: the media egress path is code whose graphs must be observed."""
+        return True
+
+    @property
+    def request_id(self) -> str:
+        return "trace"
+
+    @property
+    def execution_lane(self) -> str:
+        return str(getattr(self.lane, "contract", "") or "")
+
+    @property
+    def hf_token(self) -> str:
+        return ""
+
+    # -- job-side surface: the same three kinds, for the training half ------
+    @property
+    def candidate(self) -> dict[str, Any]:
+        return {}
+
+    @property
+    def candidate_path(self) -> Optional[str]:
+        return None
+
+    @property
+    def source(self) -> dict[str, Any]:
+        return {}
+
+    @property
+    def source_path(self) -> Optional[str]:
+        return None
+
+    @property
+    def destination(self) -> dict[str, Any]:
+        return {}
+
+    @property
+    def resume_from(self) -> dict[str, Any]:
+        return {}
+
+    @property
+    def resume_from_path(self) -> Optional[str]:
+        return None
+
+    @property
+    def text_encoder(self) -> dict[str, Any]:
+        return {}
+
+    @property
+    def text_encoder_path(self) -> Optional[str]:
+        return None
+
+    @property
+    def dataset_paths(self) -> dict[str, str]:
+        return {}
+
+    # -- the three that are BYTES OR A PEER, and so refuse by name ---------
+    def resolve_dataset(self, ref: str, **_: Any) -> str:
+        raise TraceSurfaceUnavailable(
+            f"ctx.resolve_dataset({ref!r}) needs real dataset bytes and a trace "
+            f"has none. A fabricated path would fail two frames later inside "
+            f"the endpoint's own reader, naming the author's line instead of "
+            f"this gap. Guard the call, or derive this endpoint with a "
+            f"dataset-free enumeration arm."
+        )
+
+    def materialize_blob(self, digest: str, dest: Any, *, origin: str = "payload") -> Any:
+        del dest, origin
+        raise TraceSurfaceUnavailable(
+            f"ctx.materialize_blob({digest!r}) needs real payload bytes and a "
+            f"trace has none. An empty file at the destination would be worse "
+            f"than this refusal: the endpoint would read it and fail obscurely."
+        )
+
+    def open_checkpoint_stream(self, ref: str, **_: Any) -> Any:
+        raise TraceSurfaceUnavailable(
+            f"ctx.open_checkpoint_stream({ref!r}) streams real checkpoint bytes "
+            f"and the derive runs against a CONFIG-ONLY subset -- there is "
+            f"nothing to stream. ctx.load() is the weights-free path."
+        )
+
+    def call_endpoint(
+        self, endpoint: str, function: str, payload: dict[str, Any], **_: Any
+    ) -> dict[str, Any]:
+        """A peer endpoint the derive cannot reach: answered EMPTY, and STATED.
+
+        Refusing would make every composing endpoint underivable, which is
+        the pgw#1461 defect in a new place. Answering silently would claim
+        coverage the trace does not have. So it answers empty and records the
+        call: graphs past this point are unobserved, exactly like an
+        unobserved target, and the derive reports it rather than implying it.
+        """
+
+        del payload
+        self.unanswered_calls.append((str(endpoint), str(function)))
+        self.log.warning(
+            "trace: ctx.call_endpoint(%r, %r) answered EMPTY -- this trace "
+            "cannot reach a peer endpoint, so graphs reached only through its "
+            "result are unobserved and will mint on first live encounter.",
+            endpoint, function,
+        )
+        return {}
+
+
+__all__ = [
+    "StepBudgetReached",
+    "TraceLoadContext",
+    "TraceRequestContext",
+    "TraceSurfaceUnavailable",
+]
