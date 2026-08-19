@@ -1128,7 +1128,7 @@ class JobAccepted(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
 
 class JobResult(_message.Message):
-    __slots__ = ("request_id", "attempt", "status", "inline", "blob_ref", "safe_message", "metrics", "adjustments")
+    __slots__ = ("request_id", "attempt", "status", "inline", "blob_ref", "safe_message", "metrics", "adjustments", "traceback")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     ATTEMPT_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
@@ -1137,6 +1137,7 @@ class JobResult(_message.Message):
     SAFE_MESSAGE_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
     ADJUSTMENTS_FIELD_NUMBER: _ClassVar[int]
+    TRACEBACK_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     attempt: int
     status: JobStatus
@@ -1145,7 +1146,8 @@ class JobResult(_message.Message):
     safe_message: str
     metrics: JobMetrics
     adjustments: _containers.RepeatedCompositeFieldContainer[Adjustment]
-    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., status: _Optional[_Union[JobStatus, str]] = ..., inline: _Optional[bytes] = ..., blob_ref: _Optional[str] = ..., safe_message: _Optional[str] = ..., metrics: _Optional[_Union[JobMetrics, _Mapping]] = ..., adjustments: _Optional[_Iterable[_Union[Adjustment, _Mapping]]] = ...) -> None: ...
+    traceback: str
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., status: _Optional[_Union[JobStatus, str]] = ..., inline: _Optional[bytes] = ..., blob_ref: _Optional[str] = ..., safe_message: _Optional[str] = ..., metrics: _Optional[_Union[JobMetrics, _Mapping]] = ..., adjustments: _Optional[_Iterable[_Union[Adjustment, _Mapping]]] = ..., traceback: _Optional[str] = ...) -> None: ...
 
 class Adjustment(_message.Message):
     __slots__ = ("field", "requested", "applied", "reason")

@@ -45,6 +45,8 @@ from . import serve_posture
 from . import worker_credential
 from .capability_renewal import renew_capability_while_running
 from .config import Settings
+from .failure_traceback import MAX_BYTES as MAX_TRACEBACK_BYTES
+from .failure_traceback import traceback_tail
 from .input_assets import cleanup_input_assets, manifest_from_run_job
 from .stage_timing import stage_ms_for_metrics
 from .host_move_guard import install as _install_host_move_guard
@@ -756,6 +758,7 @@ class Worker:
         safe_message: str = "",
         metrics: Optional[pb.JobMetrics] = None,
         adjustments: Tuple[Dict[str, str], ...] = (),
+        traceback_tail: str = "",
     ) -> None:
         result = pb.JobResult(
             request_id=request_id,
@@ -763,6 +766,11 @@ class Worker:
             status=status,
             safe_message=safe_message[:512],
         )
+        # pgw#1474: already bounded by `failure_traceback.traceback_tail`; the
+        # slice is this layer declining to put an unbounded string on a wire it
+        # owns, not a second policy. `safe_message` above is the same posture.
+        if traceback_tail:
+            result.traceback = traceback_tail[:MAX_TRACEBACK_BYTES]
         if inline is not None:
             result.inline = inline
         if metrics is not None:
@@ -894,6 +902,10 @@ class Worker:
         status = pb.JOB_STATUS_FATAL
         inline: Optional[bytes] = None
         message = ""
+        # Empty on the success path and on every terminal that carries no
+        # exception; the hub reads an empty traceback as `no_traceback_reported`
+        # rather than as an absent field.
+        tb = ""
         adjustments: Tuple[Dict[str, str], ...] = ()
         stages: Optional[Any] = None
         started = accepted_at
@@ -973,17 +985,26 @@ class Worker:
         except asyncio.CancelledError:
             await self._send_result(*key, pb.JOB_STATUS_CANCELED, safe_message="canceled")
             raise
+        # pgw#1474 / th#2201: EVERY arm below ships the traceback tail beside
+        # the repr. `f"{type(exc).__name__}: {exc}"` was the whole diagnostic
+        # surface of a body failure, and it cost a $0.50, 455-GPU-second
+        # flagship run to learn nothing but the five characters `'keys'` — the
+        # exception object was in hand at this exact site the entire time.
         except (EnvelopeError, ServeDispatchError, msgspec.ValidationError) as exc:
             status, message = pb.JOB_STATUS_INVALID, f"{type(exc).__name__}: {exc}"
+            tb = traceback_tail(exc)
             logger.warning("job %s attempt=%d rejected: %s", *key, exc)
         except NeverFits as exc:
             status, message = pb.JOB_STATUS_FATAL, f"{type(exc).__name__}: {exc}"
+            tb = traceback_tail(exc)
             logger.error("job %s attempt=%d cannot ever fit: %s", *key, exc)
         except (CheckpointUnresolved, ResidencyError) as exc:
             status, message = pb.JOB_STATUS_RETRYABLE, f"{type(exc).__name__}: {exc}"
+            tb = traceback_tail(exc)
             logger.error("job %s attempt=%d unplaceable: %s", *key, exc)
         except Exception as exc:  # noqa: BLE001 — the terminal must still ship
             status, message = pb.JOB_STATUS_FATAL, f"{type(exc).__name__}: {exc}"
+            tb = traceback_tail(exc)
             logger.exception("job %s attempt=%d failed", *key)
         finally:
             self._canceled.discard(key)
@@ -1005,6 +1026,7 @@ class Worker:
             safe_message=message,
             metrics=metrics,
             adjustments=adjustments,
+            traceback_tail=tb,
         )
 
     # ---- drain / shutdown --------------------------------------------------

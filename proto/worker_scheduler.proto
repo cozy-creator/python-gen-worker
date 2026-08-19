@@ -1146,6 +1146,17 @@ message JobResult {
   // Adjustments warn-and-serve; catalog-LOCKED recipe fields refuse typed
   // upstream instead.
   repeated Adjustment adjustments = 8;
+  // th#2201 / pgw#1474: the TRACEBACK TAIL of the exception that failed the
+  // body, formatted by the worker at its own catch site and bounded there
+  // (last frames, tail-truncated, secret-scrubbed). Empty when the run did not
+  // raise — and also empty from a worker older than the wheel that fills it,
+  // which the hub renders as `no_traceback_reported` rather than as nothing.
+  //
+  // It exists because `safe_message` is `f"{type}: {exc}"` and nothing else:
+  // a $0.50 flagship job failure delivered the five characters `'keys'`, with
+  // the module, the line and the raising library all thrown away on a pod that
+  // was retired 19 seconds later.
+  string traceback = 9;
 }
 
 // One caller-visible adjustment: the worker served the request but modified
