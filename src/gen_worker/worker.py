@@ -38,7 +38,7 @@ import msgspec
 from . import hostfacts
 from .config import Settings
 from .host_move_guard import install as _install_host_move_guard
-from .models.cache_paths import tensorhub_cas_dir
+from .models.cache_paths import tensorhub_cache_dir, tensorhub_cas_dir
 from .models.cozy_snapshot import snapshot_dir_key
 from .models.disk_gc import tree_bytes
 from .models.projection import SNAPSHOTS_DIR
@@ -450,6 +450,19 @@ class Worker:
         self.resolver = HubBindingResolver()
         budget = residency_budget(int(vram_budget_bytes))
         self.residency = ResidencyManager(int(budget), SnapshotSizer(self.resolver))
+        # pgw#1371/pgw#1372: ADOPT-FIRST BOOT, then fill this pod's own holes.
+        # Both halves existed and neither was constructed here, so every
+        # `ctx.compile` on every real serving pod was a pass-through and the
+        # mint had no work-list to read. `None` back is the eager bridge, with
+        # a stated reason — never a boot failure. The try is the invariant, not
+        # defensiveness: a pod that cannot adopt can still SERVE, and a worker
+        # that refuses to boot over its compiled-graph story is strictly worse
+        # than one that serves eager and says why.
+        try:
+            self.adoption = self._build_adoption()
+        except Exception:  # noqa: BLE001 — adoption never costs a boot
+            logger.exception("adopt: could not be set up; this pod serves eager")
+            self.adoption = None
         try:
             # The deploy's active lane. A single-lane model needs none; a
             # multi-lane one has no boot-time wire field yet (RunJob.lane is
@@ -457,6 +470,14 @@ class Worker:
             self.serve = ServeLoop(
                 self.loaded, residency=self.residency, resolver=self.resolver,
                 lane_contract=lane, output_dir=output_dir,
+                compile_sink_for=(
+                    self.adoption.sink_for if self.adoption is not None else None
+                ),
+                # The mint's trigger: fired when the author's load(ctx) has
+                # RETURNED, which is the first instant the hole list is whole.
+                on_loaded=(
+                    self.adoption.loaded if self.adoption is not None else None
+                ),
             )
         except EndpointLoadError as exc:
             # A multi-lane model needs the deploy's lane pick, which no wire
@@ -508,6 +529,75 @@ class Worker:
         self._drain_task: Optional[asyncio.Task[None]] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop_requested = False
+
+    # ---- adopt-first boot + the background mint ---------------------------
+
+    def _build_adoption(self) -> Any:
+        """This pod's :class:`ServeAdoption`, or ``None`` — the eager bridge.
+
+        The two facts an adopt needs are the pod's OWN release id (the hub
+        refuses a credential adopting for a sibling release) and this card's
+        sm — artifacts are per-sm and there is no such thing as adopting for
+        a GPU you cannot see. Missing either is a stated eager pod, not a
+        refusal: a CPU-only worker and an unstamped release are both ordinary.
+
+        The mint is constructed WITH the adoption and armed BY it — the hook
+        fires the instant the session registers its holes, which is the first
+        model load. It is never armed from here, because at this point in boot
+        no model has loaded and the work-list does not exist yet.
+        """
+        release_id = (self.settings.worker_release_id or "").strip()
+        _, sm = hostfacts.device_identity()
+        if not release_id or not sm:
+            logger.info(
+                "adopt: serving eager (release_id=%r sm=%r) — a pod adopts "
+                "for its own release, on the card it can see",
+                release_id, sm,
+            )
+            return None
+        from .serving.self_mint import production_mint
+        from .serving.serve_adoption import ServeAdoption
+
+        artifacts = tensorhub_cache_dir() / "compiled-graphs"
+        #: Filled by the hook below, at the first model load. A list rather
+        #: than an attribute assignment so `mint_facts()` reads either a whole
+        #: mint or none, never a half-built one.
+        self._mint_box: List[Any] = []
+
+        def _arm(adoption: Any) -> None:
+            # The trigger (pgw#1371): holes are registered, so the mint has a
+            # work-list. It runs on its own daemon thread, CPU-reserved and
+            # niced against this process — the serving loop is never involved.
+            mint = production_mint(
+                store=adoption.store, artifacts_dir=artifacts,
+                cas_dir=tensorhub_cas_dir(), sm=sm,
+            )
+            self._mint_box.append(mint)
+            mint.arm(adoption)
+
+        return ServeAdoption(
+            release_id, sm=sm, artifacts_dir=artifacts,
+            cas_dir=tensorhub_cas_dir(), on_adopted=_arm,
+        )
+
+    def mint_facts(self) -> Dict[str, Any]:
+        """The counted observable, for anything that asks this worker what
+        its background mint is doing.
+
+        Three answers, all distinct and none of them a bare zero: no adoption
+        was attempted at all, an adoption was attempted and refused (with the
+        reason), or a mint exists and has a named state plus its counts.
+        """
+        adoption = getattr(self, "adoption", None)
+        if adoption is None:
+            return {"adopting": False, "mint": "not_armed",
+                    "refusal": "no release id or no visible GPU"}
+        facts: Dict[str, Any] = dict(adoption.facts())
+        boxed = getattr(self, "_mint_box", [])
+        facts["mint"] = (
+            boxed[-1].status().facts() if boxed else "not_armed"
+        )
+        return facts
 
     # ---- state snapshots --------------------------------------------------
 
@@ -789,6 +879,13 @@ class Worker:
     async def _heartbeat(self) -> None:
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_MS / 1000.0)
+            # The mint's own counted observable, once per beat. Its counter
+            # already rides the hub's activity stream from the mint's own
+            # thread; this is the LOCAL reading, and it exists so that
+            # "adopting=False" and "mint=not_armed" are legible on a pod
+            # somebody is looking at rather than only inferable from an
+            # absence of events.
+            logger.debug("mint: %s", self.mint_facts())
             try:
                 await self._send(pb.WorkerMessage(state_delta=self._state_delta()))
             except Exception:  # a missed beat must not kill the loop
