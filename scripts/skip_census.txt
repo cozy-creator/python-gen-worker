@@ -277,3 +277,4 @@ CI-SKIPPED tests/test_weight_streaming_native_store.py|the installed tensorfs pr
 # own" — needs no GPU and runs everywhere, so the half of the contract that
 # says placement is the WORKER's decision is measured on every runner.
 CI-SKIPPED tests/test_bridge_placement.py|this host's nvml is version-mismatched; torch's p#p check raises inside pipeline.to(cuda)
+CI-SKIPPED tests/test_engine_placement.py|this host's nvml is version-mismatched; torch's p#p check raises inside pipeline.to(cuda)

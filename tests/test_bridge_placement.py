@@ -37,6 +37,8 @@ from diffusers import StableDiffusionPipeline  # noqa: E402
 
 from gen_worker.serving.context import DeployBinding, LoadContext  # noqa: E402
 
+from harness.nvml import nvml_is_healthy  # noqa: E402
+
 #: The smallest real diffusers pipeline that exists. Not a hand-built double:
 #: the defect was in what `from_pretrained` returns, so a fake that skips
 #: `from_pretrained` could not have caught it.
@@ -84,27 +86,9 @@ def _load(device: str) -> Any:
     return LoadContext(binding=binding, device=device).load(StableDiffusionPipeline)
 
 
-def _nvml_is_healthy() -> bool:
-    """Whether this host's NVML matches its driver.
-
-    A mismatched NVML (`nvidia-smi` -> "Driver/library version mismatch") does
-    not stop raw CUDA — a matmul and `nn.Module.to("cuda")` both work — but a
-    diffusers `pipeline.to("cuda")` walks torch's PeerToPeerAccess check, which
-    calls `nvmlInit_v2_` and raises `INTERNAL ASSERT FAILED` under some import
-    orders. That is a fact about the HOST, not about placement, and it must not
-    read as this defect regressing.
-    """
-    try:
-        import ctypes
-
-        return ctypes.CDLL("libnvidia-ml.so.1").nvmlInit_v2() == 0
-    except Exception:  # noqa: BLE001 - unreadable NVML is unhealthy NVML
-        return False
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 @pytest.mark.skipif(
-    not _nvml_is_healthy(),
+    not nvml_is_healthy(),
     # Kept under the census normalizer's 120-char key truncation (conftest
     # `_norm`): a longer reason is cut mid-phrase, leaving a trailing space the
     # census FILE's own `.strip()` removes — a disposition that never matches.
