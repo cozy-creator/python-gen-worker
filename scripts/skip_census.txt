@@ -260,3 +260,20 @@ STAGED tests/test_seal_lib_memo_pgw832.py|pgw#1371/#1372: gen_worker.aot_compile
 # developer box, which is where the drift they guard against is introduced.
 CI-SKIPPED tests/test_lane_contracts.py|no sibling tensorfs checkout
 CI-SKIPPED tests/test_weight_streaming_native_store.py|the installed tensorfs predates tensorfs#115 — it carries no tensorstreamreader, which is the whole subject of this suit
+
+# pgw#1452 — the placement row's CUDA arm. Skipped only on a host whose NVML
+# does not match its driver: raw CUDA still works there (a matmul and
+# `nn.Module.to("cuda")` both pass), but a diffusers `pipeline.to("cuda")`
+# walks torch's PeerToPeerAccess check, which calls `nvmlInit_v2_` and raises
+# INTERNAL ASSERT under some import orders. A HOST fault, not a placement
+# fault, and gated on a direct NVML probe rather than on the exception — so a
+# genuine placement regression on a healthy box still goes red.
+#
+# WHAT IS UNVERIFIED WHILE IT SKIPS: nothing on a healthy driver, and nothing
+# in CI either way — `ubuntu-latest` has no CUDA device, so this arm has never
+# run in CI and cannot (pgw#953). The property WAS verified by hand on the
+# authoring box, standalone, where the same load places every component on
+# `cuda:0`. The second row in that file — "the bridge names no device of its
+# own" — needs no GPU and runs everywhere, so the half of the contract that
+# says placement is the WORKER's decision is measured on every runner.
+CI-SKIPPED tests/test_bridge_placement.py|this host's nvml is version-mismatched; torch's p#p check raises inside pipeline.to(cuda)
