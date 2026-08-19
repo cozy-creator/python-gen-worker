@@ -1292,6 +1292,9 @@ class ErnieDefaults(msgspec.Struct, frozen=True):
     #: made true on the pipeline by ``_pin_text_sequence`` (``:269-304``, which
     #: sets ``tokenizer.model_max_length``). Plain int, MiniMaxH3 idiom — no
     #: endpoint exposes it on the wire.
+    max_sequence_length: int = 512
+
+
 class QwenImageDefaults(msgspec.Struct, frozen=True):
     """Qwen-Image — text-to-image AND native editing under ONE vocabulary root.
 
