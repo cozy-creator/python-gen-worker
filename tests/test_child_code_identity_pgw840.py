@@ -115,10 +115,10 @@ def _template(tmp_path: Path) -> pool.EntryJob:
 #: scratch the day it lands.
 _NO_ENTRY_CHILD = pytest.mark.skipif(
     importlib.util.find_spec(pool.ENTRY_CHILD_MODULE) is None,
-    reason=(
-        "pgw#1371/#1372: gen_worker.aot_compile_child is absent, so the entry "
-        "pool can spawn no child — STAGED on the mint/adopt wiring decision"
-    ),
+    # Kept under the census normalizer's 120-char key truncation (conftest.py
+    # `_norm`), which otherwise cuts mid-phrase and leaves a trailing space the
+    # census FILE's own `.strip()` then removes — a key that can never match.
+    reason="pgw#1371/#1372: gen_worker.aot_compile_child is absent, so the entry pool can spawn no child",
 )
 
 @_NO_ENTRY_CHILD

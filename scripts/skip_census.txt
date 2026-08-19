@@ -235,3 +235,28 @@ STAGED tests/convert/test_p8_convert_publish_contract.py|pgw#566 open: normalize
 # what is unverified on the runner is only "the real module agrees", and that is
 # verified on every developer box and before every real rental.
 CI-SKIPPED tests/test_pod_mint_rig_pgw1347.py|pgw#1347: podguard is a tracker-checkout peer, absent here
+
+# pgw#1438 — the compile/mint tier is a PARENT WITH NO CHILD. cd46c957 deleted
+# `aot_compile_child.py` and `mint_child.py` while KEEPING their spawners
+# (`aot_compile_pool.ENTRY_CHILD_MODULE`, `mint_process.MINT_CHILD_MODULE` still
+# name them), and pgw#1373 states the tier "stays for pgw#1371/#1372" — so it is
+# PARKED, not retired, and these rows are staged rather than deleted: the subject
+# still exists and a deleted row would have to be rewritten from scratch the day
+# the wiring lands. The skip is conditioned on `find_spec(ENTRY_CHILD_MODULE)`,
+# so they come back BY THEMSELVES rather than waiting for someone to remember.
+#
+# 🔻 WHAT IS UNVERIFIED WHILE THEY ARE STAGED, stated plainly: the pgw#840
+# child-code-identity guard is not merely untested here, it is DISABLED in
+# production. `_CONTRACT_MODULES` names the missing child, so `_code_digest()`
+# returns "" through its zipimport arm and the guard opens
+# `if not CODE_DIGEST: return`. Nothing measures that anywhere today.
+STAGED tests/test_child_code_identity_pgw840.py|pgw#1371/#1372: gen_worker.aot_compile_child is absent, so the entry pool can spawn no child
+STAGED tests/test_seal_lib_memo_pgw832.py|pgw#1371/#1372: gen_worker.aot_compile_child is absent, so the entry pool can spawn no child
+
+# pgw#1438 — the two rows the pgw#966 guard reported UNCLASSIFIED on master
+# (run 32205660335). Both are sibling-checkout questions: CI clones this repo
+# alone, so a row that compares against a peer checkout or against an installed
+# tensorfs newer than the pinned one cannot run there. Both ARE measured on a
+# developer box, which is where the drift they guard against is introduced.
+CI-SKIPPED tests/test_lane_contracts.py|no sibling tensorfs checkout
+CI-SKIPPED tests/test_weight_streaming_native_store.py|the installed tensorfs predates tensorfs#115 — it carries no tensorstreamreader, which is the whole subject of this suit
