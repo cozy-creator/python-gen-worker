@@ -27,7 +27,7 @@ import os
 import logging
 import sys
 import time
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Tuple
 
 if TYPE_CHECKING:  # heavy edges stay off this module's import scope
     from ..hostfacts import HostFacts
@@ -60,22 +60,47 @@ def measure() -> Dict[str, Any]:
             break
         out.pop("hardware_error", None)
         out["hardware"] = facts.as_dict()
-        if not _census_is_empty(facts) or attempt == attempts - 1:
+        gaps = _census_gaps(facts)
+        if not gaps or attempt == attempts - 1:
             break
+        # Progressive: the CUDA runtime takes longer to come up than the
+        # driver does, so the attempt that closes a `capability` gap is
+        # usually later than the one that closes a `device` gap.
+        backoff = _CENSUS_BACKOFF_S * (attempt + 1)
         logger.warning(
-            "host census empty on attempt %d/%d while %s exists — a GPU was "
-            "assigned to this container, so this is UNREADABLE, not absent; "
-            "retrying in %.1fs (pgw#1414)",
-            attempt + 1, attempts,
+            "host census incomplete on attempt %d/%d (missing: %s) while %s "
+            "exists — a GPU was assigned to this container, so this is "
+            "UNREADABLE, not absent; retrying in %.1fs (pgw#1414/#1417)",
+            attempt + 1, attempts, ", ".join(gaps),
             next((n for n in _GPU_DEVICE_NODES if os.path.exists(n)), "?"),
-            _CENSUS_BACKOFF_S,
+            backoff,
         )
-        time.sleep(_CENSUS_BACKOFF_S)
+        time.sleep(backoff)
 
     if "hardware_error" not in out and gpu_devices_present():
         facts_dict = out.get("hardware") or {}
-        if not (facts_dict.get("gpu_count") or facts_dict.get("gpu_name")
-                or facts_dict.get("driver_version")):
+        if (facts_dict.get("gpu_count") or facts_dict.get("gpu_name")
+                or facts_dict.get("driver_version")) and not facts_dict.get("gpu_sm"):
+            # pgw#1417: the card came back, its COMPUTE CAPABILITY did not.
+            # Distinct from `census_unreadable` and distinctly worse to leave
+            # silent: this host registers as `class=gpu` and looks healthy,
+            # then refuses EVERY request with `gpu_capability_incompatible`,
+            # because pgw#984 derives `min_sm` on every v2 release. Not
+            # reporting an SM is not the same as not having one.
+            out["capability_unreadable"] = (
+                f"GPU {facts_dict.get('gpu_name') or '(unnamed)'} "
+                f"(driver {facts_dict.get('driver_version') or '?'}) was read, "
+                f"but its compute capability was not, across {attempts} "
+                f"attempt(s). `gpu_sm` is empty, so every request carrying a "
+                f"derived min_sm will refuse gpu_capability_incompatible. The "
+                f"CUDA RUNTIME, not the driver, answers this — the driver is "
+                f"clearly up."
+            )
+            logger.error(
+                "capability_unreadable: %s (pgw#1417)", out["capability_unreadable"]
+            )
+        elif not (facts_dict.get("gpu_count") or facts_dict.get("gpu_name")
+                  or facts_dict.get("driver_version")):
             # THE TYPED STATE. Not `hardware_error` — nothing raised — and not
             # silence, which is what let a cpu-class Hello leave this host.
             out["census_unreadable"] = (
@@ -156,7 +181,7 @@ _GPU_DEVICE_NODES = ("/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-uvm")
 #: pgw#1414: a cold-start driver mount can lose a race with this census.
 #: Bounded, and short: the parent's whole measurement runs under
 #: `_MEASURE_TIMEOUT_S`, and a pod waiting here is a pod not serving.
-_CENSUS_RETRIES = 3
+_CENSUS_RETRIES = 4
 _CENSUS_BACKOFF_S = 1.5
 
 
@@ -177,9 +202,31 @@ def gpu_devices_present() -> bool:
     return any(os.path.exists(node) for node in _GPU_DEVICE_NODES)
 
 
-def _census_is_empty(facts: "HostFacts") -> bool:
-    """Nothing was learned about the silicon — not "a small GPU", nothing."""
-    return not facts.gpu_count and not facts.gpu_name and not facts.driver_version
+#: What a host holding GPU device nodes still OWES after a census attempt.
+#: pgw#1417: this was `_census_is_empty`, and "empty" was the wrong question.
+#: It asked *did we learn anything* when a GPU worker must answer *did we learn
+#: everything a GPU worker has to report*. Round 4 of the rental proof recovered
+#: `driver="580.173.02" gpu="NVIDIA GeForce RTX 4090" count=1` on the retry and
+#: BROKE OUT — because that satisfied "not empty" — while `gpu_sm` was still 0.
+#: The pod then registered `class=gpu` with no SM and every request refused
+#: `gpu_capability_incompatible`, since pgw#984 derives `min_sm` on EVERY v2
+#: release. A card with no capability is not a partial success; it is a worker
+#: that cannot be given work.
+#:
+#: The two gaps have DIFFERENT causes and appear at different times, which is
+#: why they are named separately: `device` is the driver mount (nvidia-smi/NVML)
+#: and `capability` is the CUDA RUNTIME (`cuda_ready()` +
+#: `torch.cuda.get_device_capability()`, `models/hub_policy.py:71`). The runtime
+#: comes up AFTER the driver, so a census can legitimately see the card one
+#: attempt before it can see the capability — which is exactly what round 4
+#: measured.
+def _census_gaps(facts: "HostFacts") -> Tuple[str, ...]:
+    """`()` when this census is complete enough to register a GPU worker."""
+    if not (facts.gpu_count or facts.gpu_name or facts.driver_version):
+        return ("device",)
+    if not facts.gpu_sm:
+        return ("capability",)
+    return ()
 
 
 def probe_hardware() -> "HostFacts":

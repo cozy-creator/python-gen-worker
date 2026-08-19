@@ -1486,8 +1486,19 @@ def _census(
     # this test's imports rather than about the code under test.
     monkeypatch.setattr("os.path.exists", lambda _p: devices)
     monkeypatch.setattr("time.sleep", lambda _s: None)
-    calls = iter(readings)
-    monkeypatch.setattr(measure_mod, "probe_hardware", lambda: next(calls))
+    # The LAST reading persists: a census condition that has not cleared by
+    # the final attempt has not cleared, and a helper that ran out of readings
+    # would raise StopIteration into the caller's `except Exception` and
+    # masquerade as `hardware_error`.
+    calls = list(readings)
+    state = {"i": 0}
+
+    def _next() -> Any:
+        reading = calls[min(state["i"], len(calls) - 1)]
+        state["i"] += 1
+        return reading
+
+    monkeypatch.setattr(measure_mod, "probe_hardware", _next)
     return measure_mod.measure()
 
 
@@ -1498,10 +1509,22 @@ def _blank_facts() -> Any:
 
 
 def _real_facts() -> Any:
+    """A COMPLETE census: card, driver AND compute capability."""
     from gen_worker.hostfacts import HostFacts
 
     return HostFacts(gpu_count=1, gpu_name="NVIDIA GeForce RTX 4090",
-                     driver_version="550.54", vram_total_bytes=24 << 30)
+                     driver_version="550.54", vram_total_bytes=24 << 30,
+                     gpu_sm="89")
+
+
+def _card_but_no_capability() -> Any:
+    """pgw#1417's ROUND-4 SHAPE, verbatim from the rented 4090: the driver is
+    up and names the card, and the CUDA runtime has not answered yet, so
+    `gpu_sm` is empty. `_census_is_empty` called this a success."""
+    from gen_worker.hostfacts import HostFacts
+
+    return HostFacts(gpu_count=1, gpu_name="NVIDIA GeForce RTX 4090",
+                     driver_version="580.173.02", vram_total_bytes=24 << 30)
 
 
 def test_an_empty_census_beside_gpu_device_nodes_is_UNREADABLE_pgw1414(
@@ -1538,3 +1561,46 @@ def test_a_genuinely_CARDLESS_host_stays_quiet_pgw1414(
     out = _census(monkeypatch, devices=False, readings=[_blank_facts()])
     assert "census_unreadable" not in out, out
     assert not out["hardware"].get("gpu_count")
+
+
+def test_a_card_without_its_CAPABILITY_keeps_retrying_pgw1417(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROUND 4 OF THE RENTAL PROOF, and the reason `empty` was the wrong test.
+
+    The retry recovered `driver=580.173.02 gpu=RTX 4090 count=1` and stopped,
+    because that is not "empty" — while `gpu_sm` was still 0. The pod then
+    registered `class=gpu` with no SM and refused every request with
+    `gpu_capability_incompatible`, since pgw#984 derives `min_sm` on every v2
+    release. The driver and the CUDA runtime come up at different times, so
+    seeing the card is NOT evidence of seeing its capability.
+    """
+    out = _census(monkeypatch, devices=True,
+                  readings=[_card_but_no_capability(), _real_facts()])
+    assert "capability_unreadable" not in out, out
+    assert "census_unreadable" not in out, out
+    assert out["hardware"]["gpu_sm"] == "89", out["hardware"]
+
+
+def test_a_capability_that_never_arrives_is_TYPED_not_silent_pgw1417(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card whose capability never reads must not register quietly as a GPU
+    worker: it looks healthy and refuses every request, which is the shape
+    that billed for 703 declines one layer down."""
+    out = _census(monkeypatch, devices=True,
+                  readings=[_card_but_no_capability()] * 4)
+    assert out.get("capability_unreadable"), out
+    assert "gpu_capability_incompatible" in out["capability_unreadable"]
+    assert "CUDA RUNTIME" in out["capability_unreadable"]
+    # NOT the device-level state: the device was read perfectly well.
+    assert "census_unreadable" not in out, out
+
+
+def test_a_complete_census_first_time_never_retries_pgw1417(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The healthy path must not pay the backoff. One reading, no state."""
+    out = _census(monkeypatch, devices=True, readings=[_real_facts()])
+    assert "capability_unreadable" not in out and "census_unreadable" not in out
+    assert out["hardware"]["gpu_sm"] == "89"
