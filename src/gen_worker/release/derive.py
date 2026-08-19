@@ -33,10 +33,15 @@ cap warns and traces the deterministic prefix. Author code wrapped in
 ``torch.inference_mode()`` composes fine with the fake-tensor drive -- no
 special handling; traced graphs are identical.
 
-torchcg is imported TOP-LEVEL and lazily: the derive runs inside the release
-env, torchcg is a release dependency there, and the env's pinned rev is the
-one whose version already sits in the lockfile-closure env identity. A
-missing torchcg is a typed refusal, never a silent fallback.
+torchcg and tensorfs are imported from ``gen_worker._vendor`` -- the SAME
+snapshots the serving miner compiles with (``serving/mint_child.py``,
+``serving/host.py``, ``serving/hub_store.py`` all import
+``gen_worker._vendor.torchcg``). The derive used to import a top-level
+``torchcg`` on the theory that it is a release dependency whose pinned rev is
+part of env identity; since pgw#1310 vendored both packages that theory is
+inverted -- an endpoint-pinned torchcg would let the publish-time TRACE and
+the serving-time MINT disagree about the compiler, which is the exact drift
+the old refusal claimed to prevent (se#786, pgw#1462).
 """
 
 from __future__ import annotations
@@ -130,15 +135,16 @@ class ReleaseDeriveResult:
 
 
 def _torchcg() -> ModuleType:
-    try:
-        import torchcg
-    except ImportError as exc:
-        raise DeriveError(
-            "gen-worker release derive runs INSIDE the release env, and "
-            "torchcg is a release dependency there (the env's pinned rev is "
-            "part of env identity). Install/pin torchcg in the endpoint's "
-            "environment; gen-worker deliberately does not bundle it."
-        ) from exc
+    """The VENDORED torchcg -- the one the miner compiles with.
+
+    Never a top-level ``torchcg``: if an endpoint pinned one, the trace and
+    the mint would run different compilers and their graph identities could
+    disagree silently. The vendored rev is recorded in
+    ``gen_worker/_vendor/VENDORED.toml``.
+    """
+
+    from .._vendor import torchcg
+
     return torchcg
 
 
@@ -152,8 +158,7 @@ def _hollow() -> ModuleType:
 
     import importlib
 
-    _torchcg()
-    return importlib.import_module("torchcg.hollow")
+    return importlib.import_module("gen_worker._vendor.torchcg.hollow")
 
 
 def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
@@ -178,7 +183,8 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
     import io
 
     import torch
-    from tensorfs import LocalCAS
+
+    from .._vendor.tensorfs import LocalCAS
 
     cas = LocalCAS(Path(cas_root))
 
