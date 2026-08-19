@@ -31,7 +31,26 @@ from gen_worker._vendor.tensorfs.contract import (
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = ROOT / "tests" / "testdata" / "contract-vectors"
 DOCUMENTS = ROOT / "src" / "gen_worker" / "_vendor" / "tensorfs" / "_contracts"
-UPSTREAM = ROOT.parent.parent.parent / "tensorfs"
+def _sibling_tensorfs() -> Path:
+    """The neighbouring tensorfs checkout, from a worktree OR the main clone.
+
+    The old spelling was `ROOT.parent.parent.parent / "tensorfs"`, which is
+    correct for exactly one layout. From a worktree
+    (`~/cozy/.worktrees/python-gen-worker/<branch>`) it lands on
+    `~/cozy/tensorfs` and the drift checks run; from the MAIN checkout
+    (`~/cozy/python-gen-worker`) the same three hops land on `/home/tensorfs`,
+    which does not exist, so both checks SKIP. An instrument that is invisible
+    exactly where reviewers and CI run it reports green by not looking.
+    """
+
+    for ancestor in ROOT.parents:
+        candidate = ancestor / "tensorfs"
+        if (candidate / ".git").exists():
+            return candidate
+    return ROOT.parent / "tensorfs"  # a stable non-existent path -> honest skip
+
+
+UPSTREAM = _sibling_tensorfs()
 
 CORPUS = json.loads((VECTORS / "contract-vectors.json").read_text())
 
@@ -92,6 +111,8 @@ def test_the_library_loads_and_names_what_the_corpus_names() -> None:
         "HIDREAM_O1_DIFFUSERS_BF16",
         "WAN22_DIFFUSERS_BF16",
         "FLUX2_KLEIN_DIFFUSERS_BF16",
+        # tensorfs#136 — the last of the five sentinels to clear.
+        "FLUX1_DIFFUSERS_BF16",
     ):
         assert getattr(contracts, constant).dtype == "bfloat16"
     assert contracts.SD15_DIFFUSERS_BF16.digest != contracts.SD2_DIFFUSERS_BF16.digest
@@ -158,25 +179,60 @@ def test_the_document_property_is_the_canonical_json_string() -> None:
     assert document == json.dumps(parsed, sort_keys=True, separators=(",", ":"))
 
 
-def test_the_corpus_matches_the_sibling_tensorfs_checkout() -> None:
+def _upstream_blob(path: str) -> bytes | None:
+    """One upstream file AT `contract_plane_rev`, or None if unavailable.
+
+    THE REV, NOT THE SIBLING'S WORKING TREE, and the difference is the whole
+    point of pinning one. Both drift checks below used to read
+    `UPSTREAM / <path>` — whatever the neighbouring checkout happened to have
+    checked out — which asserts that this repo is always at tensorfs TIP. That
+    contradicts `contract_plane_rev` existing at all, and it goes red for
+    reasons that have nothing to do with the change under test: while tensorfs
+    is under active multi-lane development its master gains a lane document
+    every few hours, so every vendor PR inherits an unrelated failure and the
+    honest fix looks like "vendor three other lanes' documents".
+
+    A snapshot is faithful to the REV IT RECORDS. That is what is asserted.
+    """
+
+    import subprocess
+
+    if not (UPSTREAM / ".git").exists():
+        return None
+    manifest = tomllib.loads(
+        (ROOT / "src" / "gen_worker" / "_vendor" / "VENDORED.toml").read_text()
+    )
+    rev = manifest["packages"]["tensorfs"]["contract_plane_rev"]
+    done = subprocess.run(
+        ["git", "-C", str(UPSTREAM), "show", f"{rev}:{path}"],
+        capture_output=True,
+    )
+    # An unfetched rev is "cannot check here", never "drifted": the sibling is
+    # a convenience, and CI has no sibling at all.
+    return done.stdout if done.returncode == 0 else None
+
+
+def test_the_corpus_matches_the_pinned_upstream_rev() -> None:
     """The vendored corpus is a SNAPSHOT; when the real repo is beside us,
-    prove the snapshot has not drifted from it."""
+    prove the snapshot has not drifted from the rev it claims."""
 
-    upstream = UPSTREAM / "spec" / "v1" / "contract-vectors" / "contract-vectors.json"
-    if not upstream.exists():
-        pytest.skip("no sibling tensorfs checkout")
+    theirs = _upstream_blob("spec/v1/contract-vectors/contract-vectors.json")
+    if theirs is None:
+        pytest.skip("no sibling tensorfs checkout carrying contract_plane_rev")
     ours = (VECTORS / "contract-vectors.json").read_bytes()
-    assert hashlib.sha256(upstream.read_bytes()).hexdigest() == hashlib.sha256(ours).hexdigest()
+    assert hashlib.sha256(theirs).hexdigest() == hashlib.sha256(ours).hexdigest()
 
 
-def test_the_vendored_documents_match_the_sibling_tensorfs_checkout() -> None:
-    upstream = UPSTREAM / "spec" / "v1" / "contracts"
-    if not upstream.exists():
-        pytest.skip("no sibling tensorfs checkout")
+def test_the_vendored_documents_match_the_pinned_upstream_rev() -> None:
+    checked = 0
     for path in DOCUMENTS.glob("*.json"):
-        theirs = upstream / path.name
-        assert theirs.exists(), f"{path.name} is not an upstream document"
-        assert path.read_bytes() == theirs.read_bytes(), f"{path.name} drifted from upstream"
+        theirs = _upstream_blob(f"spec/v1/contracts/{path.name}")
+        if theirs is None:
+            pytest.skip("no sibling tensorfs checkout carrying contract_plane_rev")
+        assert path.read_bytes() == theirs, f"{path.name} drifted from upstream"
+        checked += 1
+    # A loop that checked nothing is not a passing drift check.
+    assert checked == len(list(DOCUMENTS.glob("*.json"))) >= 14
 
 
 def test_the_contract_plane_rev_is_recorded_in_vendored_toml() -> None:
@@ -217,38 +273,44 @@ def test_a_dtypeless_FRAGMENT_is_importable_but_refuses_as_a_serve_lane() -> Non
             def load(self, ctx: object) -> None: ...
 
 
-def test_flux1_points_at_no_document_rather_than_one_that_cannot_match() -> None:
-    """tensorfs#124's finding, and the reason the sentinel machinery stayed.
+def test_the_two_flux_roots_resolve_to_their_own_documents() -> None:
+    """tensorfs#124, both halves, and the reason the sentinel machinery stayed.
 
-    `Flux1.canonical_contract` used to be `dit.blocks-fused-qkv@1`, which
-    declares `blocks.{i}.attn.qkv.weight` REQUIRED and matches 0 of the 169
-    tensors in a real Flux transformer header (the tree is
-    `transformer_blocks.*` / `single_transformer_blocks.*`). That is a
-    GUARANTEED refusal wearing a resolved lane's clothes — the pgw#1391 bug
-    exactly. Pointing at a document that does not exist yet is strictly safer,
-    because it refuses by NAME and says what is owed.
+    `Flux1.canonical_contract` was a `MissingContract` from pgw#1393 until
+    tensorfs#136 authored `flux1.diffusers-bf16@1`, and clearing it took NO
+    code change in `model_types.py` — vendoring the document was the whole
+    edit. That is the property the sentinel shape exists to have, and this is
+    the second time it has been exercised (tensorfs#121 cleared four).
+
+    Before either document existed, `Flux1.canonical_contract` pointed at
+    `dit.blocks-fused-qkv@1`, which declares `blocks.{i}.attn.qkv.weight`
+    REQUIRED and matches 0 tensors in a real Flux transformer header (the tree
+    is `transformer_blocks.*` / `single_transformer_blocks.*`) — a GUARANTEED
+    refusal wearing a resolved lane's clothes, the pgw#1391 bug exactly. The
+    quieter hazard, measured upstream when the document was authored, was the
+    OTHER flux document: `flux2-klein.diffusers-bf16@1` explains 308 of a
+    FLUX.1 transformer's 1160 tensors with no dtype or rank refusal, so it won
+    every FLUX.1 file outright. Two roots, two documents, and neither may
+    borrow the other's.
     """
 
     from gen_worker.models import Flux1, Flux2Klein
-    from gen_worker.models.model_types import MissingContract, MissingContractError
-    from gen_worker.serving import Model, ModelDeclarationError
+    from gen_worker.serving import Model
 
-    assert isinstance(Flux1.canonical_contract, MissingContract)
-    with pytest.raises(MissingContractError, match="flux1.diffusers-bf16@1"):
-        Flux1.canonical_contract.stamp
-
-    with pytest.raises(ModelDeclarationError, match="DOES NOT EXIST"):
-
-        class Flux1Model(Model[Flux1]):
-            def load(self, ctx: object) -> None: ...
-
-    # Klein DOES have its own document now, so it must resolve.
+    assert Flux1.canonical_contract.stamp == "flux1.diffusers-bf16@1"
+    assert Flux1.canonical_contract.dtype == "bfloat16"
     assert Flux2Klein.canonical_contract.stamp == "flux2-klein.diffusers-bf16@1"
     assert Flux2Klein.canonical_contract.dtype == "bfloat16"
+    # Separate documents, separate digests — never one shared "flux" lane.
+    assert Flux1.canonical_contract.digest != Flux2Klein.canonical_contract.digest
+
+    class Flux1Model(Model[Flux1]):
+        def load(self, ctx: object) -> None: ...
 
     class KleinModel(Model[Flux2Klein]):
         def load(self, ctx: object) -> None: ...
 
+    assert Flux1Model.__cozy_model_type__ is Flux1
     assert KleinModel.__cozy_model_type__ is Flux2Klein
 
 

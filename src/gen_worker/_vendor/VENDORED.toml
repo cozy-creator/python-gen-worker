@@ -199,15 +199,44 @@ read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "write
 # out of a source-vendored wheel. Taking it straight would have imported a
 # module that cannot exist here.
 #
-# ELEVEN documents, not six: `contract_plane_rev` advanced from `c3a831d` to
-# `107b8ac` (tensorfs#121) and then `2abc1b76` (tensorfs#124) inside pgw#1391
-# itself, and those bumps are the whole point rather than a chore. #121
-# authored the four se#757 blocker-A lane documents (`sd15`, `sd2`,
+# TWENTY documents, not six, and this bump is the se#769 WAVE-WIDE SYNC — one
+# writer, one cut rev, the whole wave's lane documents at once. Before it, five
+# lanes were each bumping this file on their own schedule and racing through
+# one table; the arbitration was that the qwen lane landed a SUBSET (honest for
+# pgw's own set-equality fence, but it hand-trimmed the vendored corpus to match
+# rather than shipping upstream's bytes), everyone else held, and this sync
+# brings the set back to EQUAL the real upstream corpus.
+#
+# `contract_plane_rev` advanced c3a831d -> `107b8ac` (tensorfs#121) ->
+# `2abc1b76` (#124/#125) -> `b8bb39fd` (#134) -> `272103e4`, the cut. The
+# documents arriving here belong to OTHER LANES and are vendored bytes-only,
+# named so the ownership is readable rather than implied:
+#
+#   flux1.diffusers-bf16          se#778   tensorfs#136
+#   qwen-image / z-image          se#776   tensorfs#131   (already present)
+#   internvl-u.diffusers-bf16     se#779   tensorfs#137
+#   ltx-2.diffusers-bf16          se#772   tensorfs#135
+#   trellis2.dit-bf16             se#775   tensorfs#132
+#   ernie.diffusers-bf16          se#—     tensorfs#142
+#   minimax.h3-dit-fp8-rowwise    —        tensorfs#128
+#   sdxl.diffusers-fp8-rowwise    —        tensorfs#128
+#
+# #121 authored the four se#757 blocker-A lane documents (`sd15`, `sd2`,
 # `hidream-o1`, `wan22` — sd15 and sd2 are SEPARATE documents with separate
 # digests) and gave `minimax.h3-dit-diffusers@1` the top-level `dtype` it owed;
-# #124 added `flux2-klein.diffusers-bf16@1`. Clearing the four
-# `MissingContract` sentinels in `models/model_types.py` took NO code change,
-# which is the property the sentinel shape exists to have.
+# #124 added `flux2-klein.diffusers-bf16@1` and then `flux1.diffusers-bf16@1`.
+# Clearing the FIVE `MissingContract` sentinels in `models/model_types.py` took
+# NO code change, which is the property the sentinel shape exists to have —
+# `Flux1.canonical_contract` resolves now purely because its document is here.
+#
+# THE FENCE READS TWO TABLES AND A BUMP MUST TOUCH BOTH. `contract_plane_files`
+# is the contract-plane inventory; `[packages.tensorfs.files]` is the
+# path -> sha256 table `test_every_vendored_file_matches_its_recorded_digest`
+# enforces AS A SET. Updating one and not the other is the defect this sync
+# exists to stop repeating — and the failure modes differ, so neither catches
+# the other: the digest fence caught three documents "only on disk", while a
+# list that silently GREW duplicate rows (34 entries for a 20-document library)
+# was invisible to it, because the fence reads the other table.
 #
 # Two documents RE-DIGESTED across that bump and it is deliberate upstream:
 # `minimax.h3-dit-diffusers@1` gained its dtype, and `sdxl.diffusers-bf16@1`
@@ -222,14 +251,19 @@ read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "write
 # They are FRAGMENTS (a family-shared block spelling and two CLIP component
 # spellings) that a `lanes=` header never names on its own. Do not "fix" them,
 # and do not let a declaration-time dtype read treat them as lanes.
-contract_plane_rev = "b8bb39fdef1ce0c327bc482db0563ba97e114372"
+contract_plane_rev = "272103e414184c7935105afa48416b95fd5a10ee"
 contract_plane_files = [
   "contract.py",
   "contracts.py",
   "_contracts/dit.blocks-fused-qkv.v1.json",
+  "_contracts/ernie.diffusers-bf16.v1.json",
+  "_contracts/flux1.diffusers-bf16.v1.json",
   "_contracts/flux2-klein.diffusers-bf16.v1.json",
   "_contracts/hidream-o1.diffusers-bf16.v1.json",
+  "_contracts/internvl-u.diffusers-bf16.v1.json",
+  "_contracts/ltx-2.diffusers-bf16.v1.json",
   "_contracts/minimax.h3-dit-diffusers.v1.json",
+  "_contracts/minimax.h3-dit-fp8-rowwise.v1.json",
   "_contracts/minimax.h3-dit-native.v1.json",
   "_contracts/qwen-image.diffusers-bf16.v1.json",
   "_contracts/sd15.diffusers-bf16.v1.json",
@@ -237,11 +271,13 @@ contract_plane_files = [
   "_contracts/sdxl.clip-g-fused-qkv.v1.json",
   "_contracts/sdxl.clip-g-split-qkv.v1.json",
   "_contracts/sdxl.diffusers-bf16.v1.json",
+  "_contracts/sdxl.diffusers-fp8-rowwise.v1.json",
+  "_contracts/trellis2.dit-bf16.v1.json",
   "_contracts/wan22.diffusers-bf16.v1.json",
   "_contracts/z-image.diffusers-bf16.v1.json",
 ]
 rewrites = [
-  "`contract.py` (pgw#1391): the parse/validate/canonical/digest half is restored in pure Python instead of `from .native import contract_info`, because pgw#1310 rules a compiled extension out of a source-vendored wheel — the `planner.py` precedent exactly. The PUBLIC SURFACE is upstream's attribute for attribute (`Contract.from_document`, `.name/.version/.digest/.stamp/.label/.document/.description/.tensors/.sets`, the RAISING `.dtype`, `MissingDtype`, `TensorDecl`/`Fusion`/`Permute`), so a future pure-Python upstream re-vendor is a deletion rather than a migration. It adds one name upstream does not export, `ContractError`, carrying the kebab-case `reason` label the Rust and Go validators already share — the refusal corpus is keyed on it. Conformance is NOT asserted: `tests/test_lane_contracts.py` runs upstream's released `spec/v1/contract-vectors` corpus (tensorfs#114, the same one the Rust and Go implementations satisfy), vendored at `tests/testdata/contract-vectors/`, over the THIRTEEN VENDORED DOCUMENTS plus the two anonymous customs — 15 golden digests and 19 typed refusals. A SHA-256 over a hand-built line rendering cannot agree by luck. It has already caught a real divergence rather than merely certifying agreement: tensorfs#121 relaxed the contract-name grammar to admit a hyphen in the PRODUCER segment (`hidream-o1`, `flux-2`, `wan-2`; a LEADING hyphen still refuses) and the port refused `hidream-o1.diffusers-bf16` until it followed. NO KNOWN DIVERGENCE TODAY.",
+  "`contract.py` (pgw#1391): the parse/validate/canonical/digest half is restored in pure Python instead of `from .native import contract_info`, because pgw#1310 rules a compiled extension out of a source-vendored wheel — the `planner.py` precedent exactly. The PUBLIC SURFACE is upstream's attribute for attribute (`Contract.from_document`, `.name/.version/.digest/.stamp/.label/.document/.description/.tensors/.sets`, the RAISING `.dtype`, `MissingDtype`, `TensorDecl`/`Fusion`/`Permute`), so a future pure-Python upstream re-vendor is a deletion rather than a migration. It adds one name upstream does not export, `ContractError`, carrying the kebab-case `reason` label the Rust and Go validators already share — the refusal corpus is keyed on it. Conformance is NOT asserted: `tests/test_lane_contracts.py` runs upstream's released `spec/v1/contract-vectors` corpus (tensorfs#114, the same one the Rust and Go implementations satisfy), vendored at `tests/testdata/contract-vectors/`, over the TWENTY VENDORED DOCUMENTS plus the two anonymous customs — 22 golden digests and 19 typed refusals. A SHA-256 over a hand-built line rendering cannot agree by luck. It has already caught a real divergence rather than merely certifying agreement: tensorfs#121 relaxed the contract-name grammar to admit a hyphen in the PRODUCER segment (`hidream-o1`, `flux-2`, `wan-2`; a LEADING hyphen still refuses) and the port refused `hidream-o1.diffusers-bf16` until it followed. NO KNOWN DIVERGENCE TODAY.",
   "`tensors.py`: `TensorReader._map` maps through a pure-Python `_MappedObject` (an `mmap` exported via PEP 688) instead of the compiled `tensorfs.native.MappedObject`, because pgw#1310 rules a compiled extension out of a source-vendored wheel. Upstream's weak-mapping ownership rule is preserved exactly; see the paragraph above. No other file is edited, so the remaining digests are upstream's verbatim.",
   "`planner.py` REPLACES `chunking.py` (pgw#1365): a pure-Python port of `crates/tensorfs-core/src/planner/{mod,safetensors,gguf}.rs` at `read_plane_rev`, because upstream deleted the Python chunker at `00c57c1` in favour of the Rust planner and pgw#1310 rules a compiled extension out of a source-vendored wheel. Conformance is asserted against upstream's released `spec/v1/planner-vectors` corpus, vendored at `tests/testdata/planner-vectors/`. Two knowing divergences, both tested by name: `plan_chunks` cuts a >64 MiB blob on the fixed grid (tensorhub's single-PUT promotion cap — pgw#1366), and a duplicate GGUF metadata key is planned as `gguf-v1` here and `blob-v1` upstream, because `gguf.read_header` does not record metadata keys.",
   "`local.py`: one line — `from .chunking import plan_chunks` becomes `from .planner import plan_chunks`. Every other line is `8bafdfbb`'s verbatim.",
@@ -344,9 +380,14 @@ rewrites = [
 [packages.tensorfs.files]
 "__init__.py" = "a66ced3cd03e042989602b9e122e4b3988be6be6611aacdb05b852c8a968ec7b"
 "_contracts/dit.blocks-fused-qkv.v1.json" = "95681781643548fc3bb696b84fee3d4c421f42e5fa5633c82fa6aae31f8e51e0"
+"_contracts/ernie.diffusers-bf16.v1.json" = "b4879a6c02962b873c81495acd561922c0271b809a6816f217d580b174a92514"
+"_contracts/flux1.diffusers-bf16.v1.json" = "74deb96dc6e295496ef107f12dd34932d31deadb14c8dec264cfbabccb405fa6"
 "_contracts/flux2-klein.diffusers-bf16.v1.json" = "7f792d62c7e7bd7bb8fa2cca84204f4911b8022c95417f004c2eb733b043974f"
 "_contracts/hidream-o1.diffusers-bf16.v1.json" = "c74f3489b21b8acdbf1acce919d1dade4128c59829ced2f36e89dc937836e347"
+"_contracts/internvl-u.diffusers-bf16.v1.json" = "8ca4c24045ee7b41b153ccfc34a913414806a0685a9f18a9a4630a4920482327"
+"_contracts/ltx-2.diffusers-bf16.v1.json" = "524334e6ddc686e165f8cd924422351bf4d0abc8d3a64aa3f40834f408501b2c"
 "_contracts/minimax.h3-dit-diffusers.v1.json" = "40fedde5e31dbed2bb5c34b350f76d2961c3e40ef61a03c102c1ae9aab99e1e1"
+"_contracts/minimax.h3-dit-fp8-rowwise.v1.json" = "08249c337eda48c7b63d269eb0501b445abc43dd58ea323afb13f2e44af01a2b"
 "_contracts/minimax.h3-dit-native.v1.json" = "d8c738a10c688bfbcb7b3135a5de1b903c3eea1cba55d50ba2cde220607b154f"
 "_contracts/qwen-image.diffusers-bf16.v1.json" = "d9671ac9cd9f32035897cab2dd909d7445ab1ed53425a4d84e1ff0592cd466fe"
 "_contracts/sd15.diffusers-bf16.v1.json" = "01f3cdfca73430bf2f53546b8fbdfc9c946bb6c45ed8882e67abcf66e3b778ff"
@@ -354,6 +395,8 @@ rewrites = [
 "_contracts/sdxl.clip-g-fused-qkv.v1.json" = "2fe796a2c14d615e972655144b4cc6c2a01bd74d400c9dbe0eb2b3887d78ca98"
 "_contracts/sdxl.clip-g-split-qkv.v1.json" = "5d82d4dcad7ca97cc5291a4fc60e4916e24e6bc8baa14e0429be428b99d9d09a"
 "_contracts/sdxl.diffusers-bf16.v1.json" = "6612c3d61e495f62d9f06096c11a2182a8a440d969e4faa0f23258eec35abe60"
+"_contracts/sdxl.diffusers-fp8-rowwise.v1.json" = "f082ff98421cd21827d10ed2a69f6447e8694dcf43baf08a7c47d2de6b373c20"
+"_contracts/trellis2.dit-bf16.v1.json" = "84bc7689d8f86372affc03cf2f25d895e55bfc824af395fd5af6cc54fdd50f0f"
 "_contracts/wan22.diffusers-bf16.v1.json" = "bca462c22c83e43e28516fa21a7d7798d73f3a46c242f61a37d532701903e13b"
 "_contracts/z-image.diffusers-bf16.v1.json" = "876eea29cb8974f4562ed52da63a0c7ac8af5127b669ec15f6025ca8f73ce534"
 "contract.py" = "b007d534da4f0a131bc7fe79001472cf08a94be0feedf229c0bba32fbb8c1d38"
