@@ -348,7 +348,13 @@ def probe_hardware() -> "HostFacts":
     except Exception:
         pass
     try:
-        from .models.hub_policy import detect_worker_capabilities
+        # `..models`, not `.models`: this probe came from `gen_worker/lifecycle.py`
+        # in pgw#1373, where one dot reached `gen_worker.models`. From
+        # `gen_worker/procsplit/` it reaches `gen_worker.procsplit.models`, which
+        # does not exist — and the `except` below swallowed that ModuleNotFoundError,
+        # so EVERY worker reported an empty `gpu_sm` and refused every request
+        # carrying a derived `min_sm` (pgw#1417/#1436).
+        from ..models.hub_policy import detect_worker_capabilities
 
         caps = detect_worker_capabilities()
         installed_libs = tuple(str(x) for x in (caps.installed_libs or []))

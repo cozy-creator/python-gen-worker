@@ -988,13 +988,17 @@ def component_load_dtypes(
 
     Empty for every uniform composition, which is the common case: the caller
     then keeps its single scalar ``torch_dtype`` and nothing changes."""
-    # CYCLE: api.tree reaches back into loading (FP8_STORAGE_FIT_FACTOR).
-    from ..api.tree import component_dtypes
+    from ..families.facts import component_classes, component_dtypes_for_classes
 
-    cls = pipeline_cls if isinstance(pipeline_cls, type) else None
-    return dict(component_dtypes(
-        cls, model_index_classes=model_index_component_classes(path),
-    ))
+    classes: Dict[str, str] = {}
+    if isinstance(pipeline_cls, type):
+        classes.update(component_classes(pipeline_cls))
+    # The snapshot's own model_index.json is AUTHORITATIVE where present: a
+    # fine-tune may substitute a component class, and the bytes on disk decide.
+    for part, class_name in model_index_component_classes(path).items():
+        if str(class_name or "").strip():
+            classes[str(part)] = str(class_name).strip()
+    return dict(component_dtypes_for_classes(classes))
 
 
 def model_index_entry(path: str | Path, component: str) -> Optional[tuple]:
