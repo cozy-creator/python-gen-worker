@@ -118,3 +118,67 @@ def test_the_bridge_names_no_device_of_its_own() -> None:
         f"no placement decision was handed down, so the bridge must place "
         f"nothing; components landed on {devices}"
     )
+
+
+# -- and the worker's own decision is PROBED, never assumed ----------------
+
+
+def test_the_host_default_device_is_not_a_literal() -> None:
+    """pgw#1452, the other end of the same defect.
+
+    The bridge places what the worker decided — but the worker's DEFAULT was
+    the literal string `"cuda"`, which is an enumeration of what a pod usually
+    is, not a measurement of this machine. That default feeds both arms
+    (`engine_for(device=)` and `_placed`), so on a host with no card it turned
+    a boot into a bare torch device error instead of a named CPU fallback.
+    """
+    import inspect
+
+    from gen_worker.serving.host import EndpointHost
+
+    default = inspect.signature(EndpointHost).parameters["device"].default
+    assert default == "", (
+        f"EndpointHost defaults `device` to {default!r} — a literal device "
+        f"name is a claim about the host that nothing measured"
+    )
+
+
+def test_the_probed_device_agrees_with_this_hosts_real_card() -> None:
+    """The probe is the strong one: `hostfacts.cuda_state` allocates, runs an
+    op, synchronizes and frees, so a card that is present but will not answer
+    reads as unreadable rather than as usable."""
+    from gen_worker.hostfacts import cuda_state
+    from gen_worker.serving.placement import serving_device
+
+    assert serving_device() == ("cuda" if cuda_state().present else "cpu")
+
+
+def test_a_cardless_host_falls_back_to_cpu_and_says_so() -> None:
+    """Run in a REAL cardless process rather than with a patched probe:
+    `CUDA_VISIBLE_DEVICES=""` is how a CPU-only box actually presents, and the
+    fallback has to be loud there — cozy-local on a CPU-only machine is a
+    supported way to run, and serving on the wrong processor SILENTLY is the
+    defect this replaces.
+    """
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import logging,sys;"
+        "logging.basicConfig(level=logging.WARNING,stream=sys.stderr);"
+        "from gen_worker.serving.placement import serving_device;"
+        "print(serving_device())"
+    )
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [p for p in sys.path if p] + [env.get("PYTHONPATH", "")]
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip().splitlines()[-1] == "cpu", done.stdout
+    assert "PLACEMENT" in done.stderr and "pgw#1452" in done.stderr, (
+        f"the CPU fallback must name itself; stderr was {done.stderr[-2000:]!r}"
+    )

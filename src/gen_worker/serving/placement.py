@@ -134,6 +134,43 @@ def device_facts(index: int = 0) -> DeviceFacts:
         return DeviceFacts(name="unknown device", vram_gib=0.0, sm=0)
 
 
+def serving_device() -> str:
+    """The device this worker serves on, PROBED — never assumed (pgw#1452).
+
+    The host used to default to the literal string ``"cuda"``. That is an
+    enumeration of what a pod usually is, not a measurement of what this
+    machine is, and it reaches two places at once: ``engine_for(device=)`` on
+    the streaming arm and ``_placed`` on the eager bridge. On a host with no
+    card it turns a boot into a bare ``torch`` device error rather than a
+    sentence naming the fallback.
+
+    So it is asked the strong way. ``hostfacts.cuda_state`` is the
+    probe-BY-ALLOCATION verdict (allocate, op, synchronize, free) rather than
+    ``is_available()``, which is why a card that is present but will not answer
+    reads as ``device_unreadable`` and takes the CPU arm with its probe class
+    named — instead of failing on the first tensor with no explanation.
+
+    The fallback is LOUD by design, exactly as ``derive._trace_device``'s is:
+    cozy-local on a CPU-only box is a supported way to run (Paul, 2026-08-18:
+    *"still run anyway"*), and serving on the wrong processor silently is the
+    defect this replaces.
+    """
+
+    from ..hostfacts import cuda_state
+
+    state = cuda_state()
+    if state.present:
+        return "cuda"
+    logger.warning(
+        "PLACEMENT: no usable CUDA device on this host (%s%s), so this "
+        "endpoint loads and serves on the CPU. Every timing taken here is a "
+        "CPU timing (pgw#1452).",
+        state.state,
+        f", {state.probe_class}: {state.detail}" if state.probe_class else "",
+    )
+    return "cpu"
+
+
 def shortfalls(
     model_cls: type, lane: Any, *, facts: Optional[DeviceFacts] = None
 ) -> Tuple[Shortfall, ...]:
@@ -210,6 +247,7 @@ __all__ = [
     "DeviceFacts",
     "Shortfall",
     "device_facts",
+    "serving_device",
     "shortfalls",
     "warn_if_degraded",
 ]

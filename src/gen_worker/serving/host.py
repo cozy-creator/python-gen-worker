@@ -36,7 +36,7 @@ from .context import DeployBinding, LoadContext, LoaderEngine, RequestContext
 from .entrypoints import EntrypointSpec
 from .loader import LoadedEndpoint
 from .model import Model, model_type
-from .placement import warn_if_degraded
+from .placement import serving_device, warn_if_degraded
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +73,22 @@ class EndpointHost:
         *,
         lane_contract: str = "",
         engine: Optional[LoaderEngine] = None,
-        device: str = "cuda",
+        device: str = "",
         io: str = "buffered",
         output_dir: Optional[Path] = None,
         context_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
+        # pgw#1452: the default was the literal `"cuda"` — an enumeration of
+        # what a pod usually is, not a measurement of what THIS machine is. It
+        # feeds both arms (`engine_for(device=)` and the eager bridge's
+        # `_placed`), so on a CPU-only host it turned a boot into a bare torch
+        # device error instead of a named fallback. An explicit `device=` from
+        # a caller that has already decided still wins; only the DEFAULT is
+        # probed.
+        # `device or ""` and not `str(device)`: a caller handing `None` means
+        # "you decide", and `str(None)` is the string "None" — a device name
+        # torch would reject three frames later with nothing pointing here.
+        device = str(device or "") or serving_device()
         self.loaded = loaded
         self.binding = binding
         self.lanes: Dict[type, Any] = {
