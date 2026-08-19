@@ -304,12 +304,25 @@ class LoadContext(Generic[MT_co]):
             "ctx.load: eager from_pretrained bridge for %s (pgw#1380's "
             "native loader engine is not bound)", pipeline_cls.__name__,
         )
+        # pgw#1473: a VARIANT-ONLY tree (`*.fp16.safetensors`, which is what
+        # every fp16 mirror ships) is invisible to `from_pretrained` unless it
+        # is told. Detected off the tree the worker already resolved, never
+        # configured — an author stating a fact about bytes they did not
+        # publish is the second source of truth that drifts. `None` for every
+        # published/converted checkpoint, which is why it runs unconditionally.
+        from .variants import detect_variant
+
+        extra: dict[str, Any] = {}
+        variant = detect_variant(self.checkpoint_dir)
+        if variant is not None:
+            extra["variant"] = variant
         dtype = self._lane_dtype()
         if dtype is None:
-            no_lane: P = from_pretrained(self.checkpoint_dir)
+            no_lane: P = from_pretrained(self.checkpoint_dir, **extra)
             return self._placed(no_lane)
         try:
-            bridged: P = from_pretrained(self.checkpoint_dir, torch_dtype=dtype)
+            bridged: P = from_pretrained(
+                self.checkpoint_dir, torch_dtype=dtype, **extra)
             return self._placed(bridged)
         except TypeError as exc:
             if not _rejected_torch_dtype(exc):
@@ -323,7 +336,7 @@ class LoadContext(Generic[MT_co]):
             "loading without it and applying the lane dtype post-load "
             "(pgw#1447)", pipeline_cls.__name__,
         )
-        loaded: P = from_pretrained(self.checkpoint_dir)
+        loaded: P = from_pretrained(self.checkpoint_dir, **extra)
         to = getattr(loaded, "to", None)
         if callable(to):
             to(dtype)
