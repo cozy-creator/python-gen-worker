@@ -54,6 +54,7 @@ import queue
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -348,14 +349,108 @@ class ArtifactUnreadable(RuntimeError):
     """The built artifact could not be read for its own dependencies."""
 
 
+#: Inside an AOTI ``.pt2`` package, compiled objects live under this prefix.
+_AOTI_PREFIX = "model/data/aotinductor/"
+
+
+def artifact_package(artifact: Path) -> Path:
+    """The single FILE that IS this artifact — what gets published.
+
+    ``Engine.compile`` resolves a minted key into ``destination`` and leaves an
+    UNPACKED DIRECTORY there (``metadata.json`` + ``model.pt2``), so the thing
+    the compiler hands back is not itself publishable: ``publish_artifact``
+    requires a file, by design — a directory has no single digest to address
+    it by.
+
+    The package file is that digest's subject. Measured on a real sd1.5 mint:
+    ``model.pt2`` is 10,817,910 B of stored-compression zip beside a 147,031 B
+    ``metadata.json``.
+
+    A path that is already a file passes through, so a compiler that returns
+    the package directly needs no special case here.
+    """
+    path = Path(artifact)
+    if path.is_file():
+        return path
+    if not path.is_dir():
+        raise ArtifactUnreadable(f"{path} is neither a file nor a directory")
+    packages = sorted(path.glob("*.pt2"))
+    if len(packages) == 1:
+        return packages[0]
+    if not packages:
+        raise ArtifactUnreadable(
+            f"{path} is an unpacked artifact directory carrying no .pt2 "
+            f"package (holds: {sorted(p.name for p in path.iterdir())})")
+    raise ArtifactUnreadable(
+        f"{path} holds {len(packages)} .pt2 packages "
+        f"({sorted(p.name for p in packages)}); an artifact position is ONE "
+        f"set of bytes and this cannot be resolved without guessing")
+
+
+def compiled_object_bytes(artifact: Path) -> bytes:
+    """The ELF bytes of the compiled object, wherever it actually lives.
+
+    The publish target and the ELF-read target are DIFFERENT OBJECTS, and
+    conflating them is what broke the runtime mint (pgw#1471): publishing wants
+    the package, while ``DT_NEEDED`` lives on the compiled shared object INSIDE
+    it. Pointing one path at both consumers forced a choice that made one of
+    them wrong.
+
+    So this reaches in. Measured layout of a real artifact::
+
+        <destination>/
+          metadata.json                        147,031 B
+          model.pt2                         10,817,910 B   zip, stored
+            └─ model/data/aotinductor/<graph>/
+                 <hash>.wrapper.so            4,278,048 B   \\x7fELF
+
+    A bare ELF file passes through unchanged, so a caller holding the object
+    itself is unaffected.
+    """
+    path = Path(artifact)
+    package = artifact_package(path)
+    raw = package.read_bytes()
+    if raw[:4] == b"\x7fELF":
+        # Already the object — an older layout, or a caller who reached in
+        # themselves. Nothing to unwrap.
+        return raw
+    if not zipfile.is_zipfile(package):
+        raise ArtifactUnreadable(
+            f"{package} is neither an ELF object nor a .pt2 package")
+    with zipfile.ZipFile(package) as bundle:
+        objects = [
+            name for name in bundle.namelist()
+            if name.startswith(_AOTI_PREFIX) and name.endswith(".so")
+        ]
+        if not objects:
+            # NOT an error: an artifact whose kernels are all embedded
+            # Triton/SASS names no shared object, and `needed_libraries`
+            # already treats "constrains nothing" as a correct answer.
+            return b""
+        if len(objects) > 1:
+            raise ArtifactUnreadable(
+                f"{package} carries {len(objects)} compiled objects "
+                f"({sorted(objects)}); one artifact position is one object and "
+                f"choosing between them would be a guess")
+        return bundle.read(objects[0])
+
+
 def needed_libraries(artifact: Path) -> Tuple[str, ...]:
     """The artifact's own ELF ``DT_NEEDED`` sonames, in link order.
 
     A direct ELF read rather than a shell out to ``readelf``: the mint runs on
     a serving pod whose image is not guaranteed to carry binutils, and the
     manifest is not optional.
+
+    pgw#1471: the bytes come from :func:`compiled_object_bytes`, which unwraps
+    the ``.pt2`` package. The ELF assertion below STAYS exactly as it was — it
+    is what caught this defect, and relaxing it to accept whatever the caller
+    passed would have turned a loud failure into a manifest full of nothing.
     """
-    raw = Path(artifact).read_bytes()
+    raw = compiled_object_bytes(Path(artifact))
+    if not raw:
+        # No compiled object in the package: embedded-kernel artifact.
+        return ()
     if raw[:4] != b"\x7fELF":
         raise ArtifactUnreadable(f"{artifact} is not an ELF object")
     if raw[4] != 2:  # ELFCLASS64
@@ -954,8 +1049,14 @@ class BackgroundMint:
 
         published = ""
         if self.store is not None:
+            # pgw#1471: PUBLISH takes the package FILE, not the unpacked
+            # directory the compiler returns. `publish_artifact` requires a
+            # file because an artifact position addresses ONE set of bytes by
+            # digest, and a directory has no digest. `_manifest` reads the same
+            # package and unwraps to the ELF object inside it.
+            package = artifact_package(artifact)
             outcome = self.store.publish_artifact(
-                record.graph, env, artifact, self._manifest(env, artifact))
+                record.graph, env, package, self._manifest(env, package))
             published = str(getattr(outcome, "value", outcome) or "")
 
         armed = False
