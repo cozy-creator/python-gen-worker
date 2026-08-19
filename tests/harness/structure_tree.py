@@ -61,7 +61,12 @@ def build_config_only_tree(root: Path) -> Path:
     # `save_config` rather than a hand-written dict: the config the class
     # ACCEPTS is the class's business, and hand-writing it is how a fixture
     # starts lying about a library that moved.
-    UNet2DConditionModel(**DENOISER_CONFIG).save_config(str(component))
+    #
+    # The ignore is diffusers' typing, not ours: `save_config` is real and
+    # inherited from `ConfigMixin` (verified on the MRO), but diffusers does not
+    # surface it on the model subclass for mypy. Narrow, and on the one line.
+    UNet2DConditionModel(**DENOISER_CONFIG).save_config(  # type: ignore[attr-defined]
+        str(component))
     (root / "model_index.json").write_text(json.dumps(
         {
             "_class_name": "StableDiffusionPipeline",
