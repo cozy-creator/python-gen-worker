@@ -70,13 +70,20 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from . import gguf_dequant
+from .fp8_storage import BASE_ATTR, structural_base
 
 logger = logging.getLogger(__name__)
 
-#: Class attribute marking a punned leaf, and (on the class) the plain class it
-#: was punned from. Structural markers, never name checks.
+#: Class attribute marking a punned leaf. Structural marker, never a name check.
 LEAF_MARKER = "_cozy_gguf_leaf"
-BASE_ATTR = "_cozy_gguf_base"
+
+#: ``BASE_ATTR`` and :func:`structural_base` are IMPORTED, not redefined. "the
+#: plain class this leaf was punned from" is ONE concept with ONE spelling, so
+#: every module walker that already resolves an fp8-storage leaf
+#: (``w8a8_lora.branch_modules`` above all) resolves a GGML leaf by construction
+#: rather than by a second lookup somebody has to remember to add. Two attribute
+#: names left a GGML Linear invisible to LoRA branch targeting while every walk
+#: still looked correct — pgw#1498's wiring lane, red arm on record.
 
 #: Per-leaf attribute: ``{"weight": QuantSpec, ...}`` for the tensors that are
 #: block bytes. A tensor absent from this map is dense and used as-is.
@@ -291,12 +298,6 @@ def is_gguf_leaf(module: Any) -> bool:
     return bool(getattr(type(module), LEAF_MARKER, False))
 
 
-def structural_base(module: Any) -> type:
-    """A punned leaf's structure-relevant class. Consumers that select modules
-    by EXACT type (LoRA branch targeting) must ask this instead of ``type()``."""
-    return getattr(type(module), BASE_ATTR, type(module))
-
-
 def gguf_leaves(model: Any) -> Dict[str, Any]:
     """``path -> leaf`` for every punned leaf under ``model``."""
     return {n: m for n, m in model.named_modules() if is_gguf_leaf(m)}
@@ -411,10 +412,15 @@ def _install_parameter(leaf: Any, name: str, tensor: Any) -> None:
     import torch
 
     param = leaf._parameters.get(name)
-    if param is not None:
+    # A `meta` placeholder holds no storage to point anywhere, and `set_data`
+    # refuses it outright ("incompatible tensor type"). Config-only construction
+    # (`gguf_diffusers.build_denoiser`) makes that the NORMAL case rather than an
+    # edge: every parameter arrives as a meta placeholder and is replaced here.
+    if param is not None and param.device.type != "meta":
         param.data = tensor
         param.requires_grad_(False)
         return
+    leaf._parameters.pop(name, None)
     leaf._buffers.pop(name, None)
     leaf.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
 
@@ -428,6 +434,10 @@ def _install_buffer(leaf: Any, name: str, tensor: Any) -> None:
     unchanged.
     """
     param = leaf._parameters.get(name)
+    if param is not None and param.device.type == "meta":
+        # Nothing holds a meta placeholder worth following, and `set_data`
+        # refuses it. Drop it; the buffer registration below is the whole move.
+        param = None
     if param is not None and param.data.data_ptr() != tensor.data_ptr():
         # Rebind the outgoing Parameter onto the new storage before dropping it,
         # so anything still holding it (accelerate device hooks, an earlier

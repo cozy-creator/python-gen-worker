@@ -1,5 +1,8 @@
 """A layer stack holding GGML block bytes computes what dequantized-eager does.
 
+pgw#1498: the storage layer — punned leaves, the install path, the dequant-ahead
+budget dial, and the two byte sources (a `.gguf` container, and the CAS).
+
 The claim under test is the whole lane: weights RESIDE quantized, each forward
 decodes its own weight, and the answer is the one you would get from a model
 whose weights had been dequantized up front — with an attached LoRA on top, and
@@ -41,7 +44,7 @@ from gen_worker.models.gguf_torch import (
 )
 
 #: The types `gguf.quants.quantize` implements. The K-quants' DECODE is pinned
-#: bit-exactly in tests/test_gguf_dequant_pgw1498.py; the packing side is
+#: bit-exactly in tests/test_ggml_decode.py; the packing side is
 #: llama-quantize's, so the stack here is built from what we can pack locally.
 LINEAR_QTYPE = "Q4_0"
 CONV_QTYPE = "Q5_1"

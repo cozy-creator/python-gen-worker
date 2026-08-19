@@ -229,13 +229,20 @@ def route_denoiser_keys(
 
 def branch_execution_lane(model: Any) -> str:
     """The denoiser's base weight lane for branch policy/stamping:
-    ``"w8a8"`` | ``"fp8-hooks"`` | ``""`` (plain resident). Both fp8 GEMM
-    dispatch branches (rowwise sm_90+, pertensor sm_89) are the w8a8 lane;
-    the additive LoRA branch is orthogonal to the scaling mode."""
+    ``"w8a8"`` | ``"fp8-hooks"`` | ``"gguf"`` | ``""`` (plain resident). Both
+    fp8 GEMM dispatch branches (rowwise sm_90+, pertensor sm_89) are the w8a8
+    lane; the additive LoRA branch is orthogonal to the scaling mode."""
     if getattr(model, "_cozy_w8a8_mode", "") in ("rowwise", "pertensor"):
         return "w8a8"
     if getattr(model, "_cozy_fp8_storage_applied", False):
         return "fp8-hooks"
+    # pgw#1498: a GGML-storage denoiser traces differently from a plain one —
+    # every Linear decodes its weight inside forward — so it is its own graph
+    # family, and its bucketed branch lanes are `gguf-lora<N>`.
+    from .gguf_torch import is_gguf_leaf
+
+    if any(is_gguf_leaf(m) for _, m in model.named_modules()):
+        return "gguf"
     return ""
 
 
@@ -249,7 +256,15 @@ def branch_modules(model: Any) -> Dict[str, Any]:
     :func:`fp8_storage.structural_base`, so an fp8-storage leaf is
     targeted as the plain class it was restructured from (its branch reads
     the compute-dtype activation and adds onto the compute-dtype output —
-    the fp8 storage is never touched, exactly as under the hook lane)."""
+    the fp8 storage is never touched, exactly as under the hook lane).
+
+    pgw#1498: a GGML-storage leaf is targeted by the SAME rule and for the same
+    reason — ``structural_base`` is one function over one shared marker, so a
+    pun this walk has never heard of is admitted by construction. The branch
+    wraps the punned ``forward``, which means it adds onto the DECODED output;
+    the block bytes are never touched. Order is load-bearing: block bytes are
+    installed first (``install_quantized_weights`` REFUSES a leaf that already
+    carries an instance forward), branches second."""
     import torch.nn as nn
 
     fp8_cls = fp8_scaled_linear_class()

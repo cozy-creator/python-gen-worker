@@ -653,10 +653,11 @@ def detect_gguf_snapshot(path: Path) -> Optional[tuple[Path, str]]:
 
 @unregistered_decode_path(
     reason="gguf.native@1 is a TOPOLOGY contract; no QUANT contract names the "
-           "k-quant block encodings this reads, and diffusers' "
-           "GGUFQuantizationConfig decodes them inside its own loader. So the "
-           "bytes are decodable here and unnameable in the decode-set until "
-           "the platform registers a descriptor for them.",
+           "ggml block encodings this decodes (`models/gguf_dequant.py`), so "
+           "the bytes are decodable here and unnameable in the decode-set "
+           "until the platform registers a descriptor for them. That "
+           "registration is the tensorhub-side half of pgw#1498's storage "
+           "ruling and is what closes this exemption.",
 )
 def load_gguf_pipeline(
     cls: Any,
@@ -664,11 +665,28 @@ def load_gguf_pipeline(
     gguf_file: Path,
     *,
     components: Optional[Dict[str, Any]] = None,
+    source: Optional[Any] = None,
 ) -> Any:
-    """Load a GGUF denoiser into the remaining components' base tree."""
+    """Load a GGUF denoiser into the remaining components' base tree.
+
+    The decode is OURS (``models/gguf_torch``), not diffusers'
+    ``GGUFQuantizationConfig``: the weights reside as ggml block bytes on
+    punned Linear/Conv/Embedding leaves and each forward decodes its own
+    weight. That is what buys this lane the rest of the torch stack — attached
+    LoRA, honest residency accounting (block bytes are uint8 BUFFERS, so every
+    VRAM walk reports the quantized size), the ``dequant_ahead`` budget dial,
+    and quantized convs and embeddings, none of which the delegated path has.
+
+    ``source`` overrides where the block bytes come from
+    (:mod:`gen_worker.models.gguf_diffusers`). The default is the community
+    ``.gguf`` edge; the normalized store is
+    :class:`~gen_worker.models.gguf_diffusers.NormalizedTensors`, one
+    constructor away, live when the ingest half lands.
+    """
 
     import torch
-    from diffusers import GGUFQuantizationConfig
+
+    from .gguf_diffusers import SingleFileGguf, build_denoiser
 
     path = Path(path)
     index = json.loads((path / "model_index.json").read_text("utf-8"))
@@ -687,11 +705,12 @@ def load_gguf_pipeline(
     module_name, class_name = index[component]
     denoiser_cls = getattr(importlib.import_module(str(module_name)), str(class_name))
     compute = torch.bfloat16
-    denoiser = denoiser_cls.from_single_file(
-        str(third_party_dir(gguf_file, why="GGUF from_single_file wants a real file")),
-        config=str(third_party_dir(path / component, why="GGUF config dir")),
-        quantization_config=GGUFQuantizationConfig(compute_dtype=compute),
-        torch_dtype=compute,
+    denoiser = build_denoiser(
+        denoiser_cls,
+        third_party_dir(path / component, why="GGUF config dir"),
+        source or SingleFileGguf(
+            third_party_dir(gguf_file, why="the community .gguf edge reads a real file")),
+        compute_dtype=compute,
     )
     kwargs = dict(components or {})
     kwargs[component] = denoiser
@@ -702,6 +721,15 @@ def load_gguf_pipeline(
         text_encoder = getattr(pipe, name, None)
         if text_encoder is not None and hasattr(text_encoder, "parameters"):
             apply_fp8_storage(text_encoder, compute_dtype=compute)
+    # The compiled-graph identity of a GGML-storage denoiser is not the plain
+    # one: its Linears decode inside forward. Stamping the lane is what keeps a
+    # published graph from being adopted by a pipeline that does not trace like
+    # it — and what gives the bucketed LoRA lanes a `gguf-lora<N>` family.
+    try:
+        setattr(pipe, _WEIGHT_LANE_ATTR, EXECUTION_LANE_GGUF)
+    except Exception:  # noqa: BLE001 — diffusers __setattr__ registers components
+        logger.warning("could not stamp the gguf weight lane on %s",
+                       type(pipe).__name__)
     return pipe
 
 
@@ -841,9 +869,20 @@ _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 #: distinct compiled graph-identity lane. Bucketed LoRA lanes
 #: (``w8a8_lora.lora_execution_lane``) are these bases with a rank suffix and are
 #: decomposed by ``compile_cache.execution_lane_bucket``, so the BASE set is complete.
+#: pgw#1498. GGML block bytes resident, decoded per leaf per forward
+#: (``models/gguf_torch``). A LOCAL lane token, not a wire one: the shared
+#: ``models/execution_lanes`` vocabulary is byte-identical with tensorhub's
+#: ``precision/lane.go`` and a pgw-only weights token there would be a lane the
+#: hub refuses. The consequence of leaving it out of THAT table is honest and
+#: small — no compiled graph is published or adopted under this lane, so it
+#: serves eager, which is where the port lands anyway (whether the decode ops
+#: fuse is UNMEASURED; see the pgw#1498 tracker section).
+EXECUTION_LANE_GGUF = "gguf"
+
 STAMPABLE_BASE_EXECUTION_LANES: Tuple[str, ...] = (
     "",              # loading.py (plain/bf16-resident, folded)
     "fp8-hooks",     # loading.py fp8 storage cast
+    "gguf",          # loading.py load_gguf_pipeline (models/gguf_torch.py)
     "w8a8",          # models/w8a8.py
     "w4a4",          # models/w4a4.py
     "svdq-native",   # models/svdq_native.py
@@ -1433,8 +1472,9 @@ def contract_loaded_component(
     if component in denoiser_components() and detect_gguf_snapshot(weights):
         raise ComponentExecutionLaneUnsupported(
             f"component {component!r} of {weights} is a GGUF denoiser: it is "
-            f"dequantized by the pipeline's own gguf loader, so there is no "
-            f"component-level production loader to borrow"
+            f"built from its config and filled with block bytes by the "
+            f"pipeline's own gguf loader, so there is no component-level "
+            f"production loader to borrow"
         )
     # hf.fp8-blockwise@1: a transformers component tree (the conditioner /
     # text encoder position), so it is detected on the component dir and
