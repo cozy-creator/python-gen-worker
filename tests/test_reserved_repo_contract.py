@@ -1,4 +1,6 @@
-"""The reserved-repo materialization the hardcut deleted (pgw#1475).
+"""The reserved-repo payload contract: `source`, its three siblings, datasets.
+
+# pgw#1475: the v2 serve path had no writer for `ctx.source_path`.
 
 `executor.py` held `_materialize_reserved_repo`, whose last line was
 `(set_path or ctx._set_source_path)(str(path))`. pgw#1373 deleted the file and
