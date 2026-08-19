@@ -138,11 +138,15 @@ def _transformers_migration(
         return None
     if not isinstance(module, PreTrainedModel):
         return None
+    # `conversion_mapping` is where this lives; `modeling_utils` re-exports it
+    # without declaring it, which mypy is right to refuse — a re-export nobody
+    # promised is a name that can move without a deprecation.
+    from transformers.conversion_mapping import get_model_conversion_mapping
     from transformers.core_model_loading import (
+        WeightConverter,
         WeightRenaming,
         rename_source_key,
     )
-    from transformers.modeling_utils import get_model_conversion_mapping
 
     try:
         transforms = get_model_conversion_mapping(module)
@@ -153,8 +157,28 @@ def _transformers_migration(
             f"checkpoint's names cannot be migrated the way from_pretrained "
             f"migrates them"
         ) from exc
+    # `WeightRenaming` and `WeightConverter` are SIBLINGS under
+    # `WeightTransform`, so each arm is selected by what it IS rather than by
+    # "not the other one" — and a third kind this code has never seen is
+    # refused by name instead of being dropped into neither list, which would
+    # silently skip a transform `from_pretrained` applies.
     renamings = [t for t in transforms if isinstance(t, WeightRenaming)]
-    converters = [t for t in transforms if not isinstance(t, WeightRenaming)]
+    converters = [
+        t for t in transforms
+        if isinstance(t, WeightConverter) and not isinstance(t, WeightRenaming)
+    ]
+    unknown = [
+        type(t).__name__ for t in transforms
+        if not isinstance(t, (WeightRenaming, WeightConverter))
+    ]
+    if unknown:
+        raise KeyMigrationError(
+            f"{type(module).__name__}: transformers' conversion mapping "
+            f"carries transform kind(s) {sorted(set(unknown))} that are "
+            f"neither a WeightRenaming nor a WeightConverter. Ignoring one "
+            f"would silently skip something from_pretrained applies, so the "
+            f"migration is refused rather than half-applied."
+        )
     # The skeleton's OWN key set is what decides whether `base_model_prefix`
     # is added or stripped — the model answering about itself.
     meta_state_dict: Dict[str, None] = {
