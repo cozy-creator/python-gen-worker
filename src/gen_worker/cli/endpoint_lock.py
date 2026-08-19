@@ -160,6 +160,41 @@ def torchcg_format_versions() -> tuple[int, int]:
     return int(GRAPH_INTERFACE_FORMAT), int(DOCUMENT_FORMAT)
 
 
+def tracer_digest() -> str:
+    """A fingerprint of the CODE THAT TRACES: torchcg plus gen_worker's derive.
+
+    The env closure (``uv.lock``) is the right identity when both are resolved
+    from the lockfile — but the cozy-local shape Paul asked for runs them off
+    ``PYTHONPATH`` from working trees, where the lockfile mentions neither. In
+    that shape a tracer change is invisible to the closure, so a saved trace
+    would be reused across a fix that changes what tracing MEANS.
+
+    That is not hypothetical: tcg#57 changed the hollow session's default
+    device and pgw#1465 deleted the meta demotion. Both alter the emitted
+    graphs, and neither moved ``uv.lock``. Without this field the skip check
+    would happily serve pre-fix graphs that no mint can compile.
+
+    Best-effort by construction: a tracer we cannot locate contributes the empty
+    string rather than raising, because a missing fingerprint must not break a
+    lock — it only costs a re-derive.
+    """
+    h = hashlib.sha256()
+    for module_name in ("torchcg", "gen_worker.release"):
+        try:
+            module = __import__(module_name, fromlist=["__file__"])
+            origin = Path(getattr(module, "__file__", "") or "")
+        except Exception:  # noqa: BLE001 - absence is an answer, not a failure
+            continue
+        if not origin.is_file():
+            continue
+        for path in sorted(origin.parent.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            h.update(path.name.encode("utf-8"))
+            h.update(_file_digest(path).encode("ascii"))
+    return h.hexdigest()
+
+
 def program_digests(document: Mapping[str, Any]) -> tuple[str, ...]:
     """Every exported-program CAS digest the document names, deduped + sorted.
 
@@ -252,6 +287,10 @@ def inputs_digest(
     # instead of a silently-misread document.
     field("interface_v", str(interface_v))
     field("document_v", str(document_v))
+    # The tracer's own source. See `tracer_digest`: in the cozy-local shape the
+    # lockfile does not mention torchcg or gen_worker, so this is the only thing
+    # standing between a tracer fix and a silently-reused pre-fix graph set.
+    field("tracer", tracer_digest())
     field("module", module_name)
     field("checkpoint_ref", checkpoint_ref)
     field("trace_device", trace_device)
@@ -317,7 +356,8 @@ def derive_is_reusable(
         return Reuse(
             False,
             "inputs changed (author source, uv.lock closure, checkpoint ref, "
-            "trace device or a torchcg format version)",
+            "trace device, a torchcg format version, or the tracer's own "
+            "source)",
         )
     try:
         document = block.decoded()
