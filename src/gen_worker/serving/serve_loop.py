@@ -50,6 +50,10 @@ from .host import ServeDispatchError
 from .loader import LoadedEndpoint
 from .model import Model, lane_handle, model_type
 from .placement import warn_if_degraded
+from .reserved_repos import (
+    materialize_reserved_inputs,
+    reserved_context_kwargs,
+)
 from .residency import InstanceSizer, ResidencyManager
 
 logger = logging.getLogger(__name__)
@@ -185,6 +189,7 @@ class ServeLoop:
         on_loaded: Optional[Callable[[type, Any], None]] = None,
         output_dir: Optional[Path] = None,
         context_kwargs: Optional[Mapping[str, Any]] = None,
+        hf_token: str = "",
     ) -> None:
         self.loaded = loaded
         self.residency = residency
@@ -199,6 +204,10 @@ class ServeLoop:
         self._on_loaded = on_loaded
         self._output_dir = output_dir
         self._context_kwargs = dict(context_kwargs or {})
+        #: The pod's HF credential — a producer-contract fact (`ctx.hf_token`)
+        #: AND what an upstream-mirror reserved repo downloads with. Pod-wide,
+        #: never per-request: it is the machine's credential, not the caller's.
+        self._hf_token = str(hf_token or "")
         #: Live backends by residency key, so a lease hit reuses the author
         #: object instead of rebuilding it. Guarded: leases serialize per
         #: key, but two DIFFERENT keys mutate this table concurrently.
@@ -249,6 +258,7 @@ class ServeLoop:
         request_id: str,
         attempt: int = 0,
         input_assets: Sequence[InputManifestEntry] = (),
+        snapshots: Optional[Mapping[str, Any]] = None,
         context: Optional[Mapping[str, Any]] = None,
         on_context: Optional[Callable[[RequestContext[Any]], None]] = None,
     ) -> InvokeOutcome:
@@ -269,6 +279,13 @@ class ServeLoop:
         needs. pgw#1418: the v1 executor called it and the v2 rewrite did not,
         so every typed media input reached the author with ``local_path``
         unset and every asset-taking endpoint failed the request.
+
+        ``snapshots`` is the dispatch's ref-keyed resolved-repo map
+        (``wire_snapshots.resolved_repos(run.snapshots, run.models)``), which
+        the RESERVED REPO fields materialize against. pgw#1475: the same
+        hardcut deleted that step too, so ``ctx.source_path`` had a reader in
+        every conversion producer and no writer anywhere in ``src/``, and 25 of
+        27 died on their own first line at 0 GPU-seconds.
 
         ``on_context`` is handed this request's :class:`RequestContext` the
         instant it exists — the seam a caller needs to renew the capability
@@ -320,7 +337,9 @@ class ServeLoop:
             primary_binding = self._resolver.resolve(
                 model_slots[first_slot], picks[first_slot]
             )
-        ctx = self._make_context(request_id, primary_binding, spec, context)
+        ctx = self._make_context(
+            request_id, primary_binding, spec, context, payload=decoded.payload
+        )
         if on_context is not None:
             on_context(ctx)
 
@@ -346,6 +365,24 @@ class ServeLoop:
         # A PRE-handler stage: input fetch is not the author's runtime, and
         # folding it in makes every asset-taking endpoint look slow.
         ctx._stages.record_pre("input_fetch", time.monotonic() - input_fetch_t0)
+
+        # THE SAME SEAM, ONE FIELD OVER (pgw#1475). A reserved `source` /
+        # `text_encoder` / `candidate` / `resume_from` names a REPO the
+        # platform materializes before the body runs, and the body reads only
+        # `ctx.source_path`. Here, and not after the leases, for the v1 reason
+        # and one more: a weightless producer takes no lease at all, so
+        # anything placed inside the ExitStack below would never run for the
+        # 27 conversion producers this exists for.
+        source_fetch_t0 = time.monotonic()
+        materialize_reserved_inputs(
+            ctx,
+            decoded.payload,
+            snapshots or {},
+            hf_token=str(per_request.get("hf_token") or self._hf_token or ""),
+        )
+        ctx._stages.record_pre(
+            "source_fetch", time.monotonic() - source_fetch_t0
+        )
 
         with ExitStack() as leases:
             models: Dict[str, Model[Any]] = {}
@@ -394,6 +431,18 @@ class ServeLoop:
                 models[slot.name] if slot.kind == "model" else adapters[slot.name]
                 for slot in spec.slots
             ]
+            # pgw#1475, SAME FAMILY, found by the writer-less-setter fence this
+            # issue added rather than by a rented pod: `_set_execution_lane`
+            # also lost its only caller with `executor.py`, so every v2 request
+            # read the property's "bf16-w16a16+eager" DEFAULT no matter what it
+            # ran — and a body that declared `handles=[...]` branched on it.
+            # The executing lane is the PRIMARY slot's; a weightless entrypoint
+            # has none and keeps the default.
+            if spec.model_params:
+                primary_lane, primary_handle = self._lane_of(spec.model_params[0][1])
+                if primary_lane is not None:
+                    ctx._set_execution_lane(primary_handle)
+
             # The author's own span. Everything outside it — envelope decode,
             # input fetch, admission, weight load — is platform time, and
             # `handler_open`/`handler_close` are what let a slow request be
@@ -433,6 +482,7 @@ class ServeLoop:
         binding: Optional[DeployBinding],
         spec: Optional[Any] = None,
         per_request: Optional[Mapping[str, Any]] = None,
+        payload: Any = None,
     ) -> RequestContext[Any]:
         kwargs: Dict[str, Any] = dict(self._context_kwargs)
         # Per-request facts WIN over the loop's construction-time defaults:
@@ -440,6 +490,15 @@ class ServeLoop:
         kwargs.update({k: v for k, v in (per_request or {}).items() if v is not None})
         if self._output_dir is not None:
             kwargs.setdefault("local_output_dir", str(self._output_dir))
+        if self._hf_token:
+            kwargs.setdefault("hf_token", self._hf_token)
+        if payload is not None:
+            # pgw#1475: the reserved STRUCTS, stamped at construction because
+            # the mixin that holds them takes them as constructor arguments.
+            # `ctx.source` is read beside `ctx.source_path` — `source_from_ctx`
+            # builds its `Source` from `info["ref"]` and `info["attributes"]`
+            # — so a path with no info is the same defect one field over.
+            kwargs.update(reserved_context_kwargs(payload))
         if spec is not None:
             # pgw#1406: the AUTHORITY declarations, stamped from the spec onto
             # the context the body receives. This is the SDK half of "one

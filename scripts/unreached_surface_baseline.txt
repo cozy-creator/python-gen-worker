@@ -418,12 +418,22 @@ gen_worker.numerics_ladder.compare_outputs()
 gen_worker.numerics_ladder.declared_thresholds()
 gen_worker.request_context.JobContext.metric()
 gen_worker.request_context._PublisherMixin.materialize_blob()
-gen_worker.request_context._PublisherMixin.resolve_dataset()
 gen_worker.topology.device_group_scope
 gen_worker.topology.pin_cuda_device_for_group()
 gen_worker.warm_spans.WarmLedger
-gen_worker.wire_snapshots.index_snapshots()
 gen_worker.worker_fatal.report_worker_error_async()
+
+# pgw#1475 — TWO MORE ROWS WIRED, 2026-08-19, and they are the ELEVENTH member of
+# the pgw#1425 family: `_PublisherMixin.resolve_dataset()` (the reserved
+# `payload.datasets` contract) and `wire_snapshots.index_snapshots()` (the
+# ref-keyed snapshot view a reserved `source` materializes against) both acquired
+# a production caller in `serving/reserved_repos.py`. Both were appended by the
+# same `--write-baseline` sweep. The row this issue was actually filed on —
+# `RequestContext._set_source_path` — was NEVER on this list: private names are
+# not collected as surface at all, which is why the guard that computed the whole
+# orphan family the day `executor.py` died said nothing about the one that killed
+# 25 of 27 conversion producers. That blind spot now has its own unbaselineable
+# check (`writerless_private_setters`), and it found two more within the hour.
 
 # pgw#1425 — THIRTEEN ROWS WIRED AND TWO SENTENCED, 2026-08-18. All fifteen were
 # appended wholesale by pgw#1373's `--write-baseline` (722e30b9, +79 rows) when

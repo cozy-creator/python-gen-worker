@@ -29,6 +29,61 @@ class AmbiguousManifestError(ValidationError):
     message. Deterministic: no retry changes it."""
 
 
+def resolved_repo_from_snapshot(snap: Any) -> Any:
+    """``pb.Snapshot`` -> the typed ``WorkerResolvedRepo`` the download layer
+    speaks: the ONE wire-boundary conversion. Everything downstream
+    (``ensure_local``, ``ensure_snapshot_async``) is typed — no dict laundering.
+
+    DIRECT FIELD ACCESS on ``digest``/``chunks``, deliberately — not
+    ``getattr(f, "digest", "")``. These were read defensively once, and the
+    default turned "the generated stub does not have this field" into "the hub
+    sent an empty value": the vendored proto WAS stale, so every v2 snapshot
+    arrived blank on the production gRPC path and nothing said why.
+    """
+    from .models.hub_client import (
+        WorkerResolvedChunk,
+        WorkerResolvedRepo,
+        WorkerResolvedRepoFile,
+    )
+
+    return WorkerResolvedRepo(
+        snapshot_digest=snap.digest,
+        files=[
+            WorkerResolvedRepoFile(
+                path=f.path,
+                size_bytes=int(f.size_bytes),
+                url=f.url or None,
+                digest=f.digest or "",
+                chunks=tuple(
+                    WorkerResolvedChunk(
+                        sha256=(c.sha256 or "").strip().lower(),
+                        url=c.url,
+                        length=int(c.len),
+                    )
+                    for c in f.chunks
+                ),
+            )
+            for f in snap.files
+        ],
+    )
+
+
+def resolved_repos(
+    wire: Mapping[str, Any],
+    bindings: Iterable[Any] = (),
+) -> Dict[str, Any]:
+    """:func:`index_snapshots`, with every entry already converted to the
+    typed ``WorkerResolvedRepo``. The shape a materializer wants.
+
+    Keys are plain ``str`` — still canonical refs, but the serve layer holds
+    no ``WireRef`` vocabulary and a NewType key would make an invariant
+    ``Mapping`` refuse it there for no gain."""
+    return {
+        str(ref): resolved_repo_from_snapshot(snap)
+        for ref, snap in index_snapshots(wire, bindings).items()
+    }
+
+
 def index_snapshots(
     wire: Mapping[str, Any],
     bindings: Iterable[Any] = (),
@@ -65,4 +120,9 @@ def index_snapshots(
     return out
 
 
-__all__ = ["AmbiguousManifestError", "index_snapshots"]
+__all__ = [
+    "AmbiguousManifestError",
+    "index_snapshots",
+    "resolved_repo_from_snapshot",
+    "resolved_repos",
+]

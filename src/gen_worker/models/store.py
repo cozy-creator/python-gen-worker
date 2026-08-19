@@ -29,6 +29,7 @@ from ..lifecycle_intents import IntentRegistry
 from ..pb import worker_scheduler_pb2 as pb
 from ..redact import sanitize as _sanitize
 from ..topology import current_device_group
+from ..wire_snapshots import resolved_repo_from_snapshot
 from . import cozy_snapshot, disk_gc, disk_telemetry, projection
 from . import residency as residency_mod
 from . import staging as staging_mod
@@ -37,11 +38,7 @@ from .config_identity import CANONICAL_JSON_MAX_BYTES, canonical_json_digest
 from .cozy_snapshot import _norm_rel_path, delete_blobs
 from .download import ensure_local, lookup_provider_for_ref
 from .errors import MissingSnapshotError, UrlExpiredError
-from .hub_client import (
-    WorkerResolvedChunk,
-    WorkerResolvedRepo,
-    WorkerResolvedRepoFile,
-)
+from .hub_client import WorkerResolvedRepo
 from .loading import safetensors_file_valid
 from .refs import WireRef
 from .residency import Residency
@@ -75,43 +72,13 @@ _DISK_GC_GRACE_S = 300.0
 # with ModelEvent emission. Single-loop, per-ref asyncio locks.
 
 def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
-    """pb.Snapshot -> the typed resolved-manifest struct: the ONE
-    wire-boundary conversion; everything downstream (ensure_local,
-    ensure_snapshot_async) is typed — no dict laundering."""
+    """pb.Snapshot -> the typed resolved-manifest struct.
 
-    return WorkerResolvedRepo(
-        snapshot_digest=snap.digest,
-        files=[
-            WorkerResolvedRepoFile(
-                path=f.path,
-                size_bytes=int(f.size_bytes),
-                url=f.url or None,
-                # The algorithm-tagged digest and the
-                # ordered chunk list. Dropping these here is what would make
-                # every chunked snapshot look like a whole file with no URL.
-                #
-                # DIRECT FIELD ACCESS, deliberately — not `getattr(f, "digest",
-                # "")`. These were read defensively at first, and the default
-                # turned "the generated stub does not have this field" into
-                # "the hub sent an empty value": the vendored proto WAS stale
-                # (no `digest`/`chunks` at all), so every v2 snapshot arrived
-                # blank on the production gRPC path and nothing said why. A
-                # missing field must be an AttributeError at import-adjacent
-                # code, not a silent empty string — same class as guarding a
-                # digest check on the legacy field's truthiness.
-                digest=f.digest or "",
-                chunks=tuple(
-                    WorkerResolvedChunk(
-                        sha256=(c.sha256 or "").strip().lower(),
-                        url=c.url,
-                        length=int(c.len),
-                    )
-                    for c in f.chunks
-                ),
-            )
-            for f in snap.files
-        ],
-    )
+    ONE spelling, in ``wire_snapshots`` — the v2 serve path needs the same
+    conversion for reserved repo fields (pgw#1475) and a second copy here is
+    how the two would drift.
+    """
+    return cast("WorkerResolvedRepo", resolved_repo_from_snapshot(snap))
 
 def _is_terminal_download_error(exc: BaseException) -> bool:
     if isinstance(exc, (UrlExpiredError, InsufficientDiskError, MissingSnapshotError)):

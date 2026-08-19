@@ -345,8 +345,15 @@ def entrypoint(
     * ``NamesReservedRefs(kind) != inference`` — an inference row gets NO
       preflight resolution and NO dispatch-time read grant for the reserved
       ``source`` / ``text_encoder`` / ``destination`` / dataset-pin payload
-      fields. A ported conversion producer would reach its body with
-      ``ctx.source_path is None`` and raise on its own first line.
+      fields, so the dispatch carries no snapshot for them and
+      ``serving/reserved_repos.py`` has nothing to pin against.
+      **Do NOT read a ``ctx.source_path is None`` failure as proof that
+      ``kind=`` is wrong.** pgw#1475 is exactly that symptom with ``kind=
+      "conversion"`` correctly declared: the SDK's own materialization step
+      had been deleted with ``executor.py``, and this note sent the first
+      reader hunting for a declaration that was already right. Check
+      ``git grep -n _set_source_path -- src/`` for a WRITER before suspecting
+      the kind.
     * ``WorkerCapabilityTokenTTL`` — 1h for inference, 24h for conversion. A
       multi-hour quantization would spend its life renewing.
     * ``SizesDiskFromSource`` — true for conversion and eval only. An
