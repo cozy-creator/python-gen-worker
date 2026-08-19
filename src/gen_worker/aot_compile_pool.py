@@ -2204,21 +2204,43 @@ class EntryCompilePool:
         Refused, not warned: an artifact compiled by unknown code must not be
         packed into a compiled graph whose identity claims the parent's.
         """
-        if _CONTRACT_MISSING:
-            # pgw#1444, the C10 case: this guard was OFF and said nothing.
-            # `cd46c957` deleted `aot_compile_child.py`, `_CONTRACT_MODULES`
-            # kept naming it, `_code_digest()` returned "" for a reason that
-            # has nothing to do with zipimport, and the branch below skipped
-            # the check on every entry. A guard disabled by an upstream
-            # deletion must be LOUD, because the alternative is exactly what
-            # happened: it looked like it was running.
+        if _CONTRACT_MISSING and report.code_digest:
+            # pgw#1444's C10 fix, CORRECTED by pgw#1446. The silence is what
+            # was wrong — `cd46c957` deleted `aot_compile_child.py`,
+            # `_CONTRACT_MODULES` kept naming it, `_code_digest()` returned ""
+            # through a branch written for zipimport, and the check below
+            # skipped on every entry while still reading as a guard. That is
+            # fixed by RECORDING the cause in `_CONTRACT_MISSING`, which is
+            # inspectable and non-silent.
+            #
+            # Refusing UNCONDITIONALLY on it was wrong twice over, and both
+            # were measured:
+            #   1. It pre-empted the measurement fold. `entry_phases` is
+            #      banked below, AFTER this gate, so a blanket raise here
+            #      emptied it — breaking pgw#1189's law that the attempt which
+            #      FAILED is exactly the attempt whose measurement the next one
+            #      sizes against. pgw#877 states that rule three lines above
+            #      the call site; this violated it.
+            #   2. It fired on a tier that cannot run. Paul PARKED this tier on
+            #      pgw#1371/#1372 (`c4f2caaa`, pgw#1438: "PARKED ... not
+            #      retired"), staged its tests behind
+            #      `find_spec(ENTRY_CHILD_MODULE)` so they return by themselves
+            #      when the wiring lands, and there is no production path to
+            #      the pool at all. A fatal refusal there protects nothing that
+            #      can execute while breaking tests that were deliberately kept.
+            #
+            # So the refusal is now conditioned on a child having actually
+            # REPORTED a digest — i.e. real work whose provenance we cannot
+            # check, which is the hazard pgw#840 names. No report digest means
+            # no artifact of unknown origin to refuse.
             raise EntryCompileFailed(
                 row.entry,
-                f"entry {row.entry!r}: the code-identity check cannot run — "
-                f"this install is missing {_CONTRACT_MISSING}, which "
+                f"entry {row.entry!r}: a child reported code "
+                f"{report.code_digest} and this parent CANNOT CHECK IT — the "
+                f"install is missing {_CONTRACT_MISSING}, which "
                 f"`_CONTRACT_MODULES` names as part of the parent/child "
-                f"contract. That is a BROKEN INSTALL, not the frozen case, so "
-                f"it refuses instead of skipping: pgw#840 exists because an "
+                f"contract. A BROKEN INSTALL, not the frozen case, so it "
+                f"refuses instead of skipping: pgw#840 exists because an "
                 f"artifact compiled by unknown code must not be packed into a "
                 f"compiled graph whose identity claims this parent's.")
         if not CODE_DIGEST:
