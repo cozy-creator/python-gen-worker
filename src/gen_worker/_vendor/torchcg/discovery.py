@@ -234,10 +234,16 @@ def _demote_example_inputs(program: Any) -> None:
             continue
 
 
-def _restore_literal_values(
-    contract: str, path: str, program: Any, session: Any
-) -> None:
-    """Put real values back under any lifted constant the session faked."""
+def _assert_literal_values_are_real(contract: str, path: str, program: Any) -> None:
+    """A lifted constant must carry its VALUE, never a fake stand-in.
+
+    ``graph_hash`` folds the literal digest in, so a graph whose constants
+    were faked keys off a table of ZEROS and collides with every model that
+    differs only in those constants (pgw#1458). The session used to fake them
+    on a GPU-less cuda derive and swap the real values back here; since tcg#64
+    it never fakes a value-bearing tensor at all, so this is the standing
+    assertion that the property holds rather than a repair step.
+    """
 
     from torch._subclasses.fake_tensor import FakeTensor
 
@@ -245,20 +251,12 @@ def _restore_literal_values(
     faked = sorted(name for name, value in constants.items() if isinstance(value, FakeTensor))
     if not faked:
         return
-    if session is not None:
-        session.restore_constants(program)
-        faked = sorted(
-            name for name, value in (getattr(program, "constants", None) or {}).items()
-            if isinstance(value, FakeTensor)
-        )
-        if not faked:
-            return
     raise DiscoveryError(
         f"lane {contract!r} target {path!r}: lifted constant(s) {faked[:6]!r} are "
-        f"FAKE and no session holds their real values. The graph hash folds the "
-        f"literal digest in, so this graph would key off a table of ZEROS and "
-        f"collide with every other model that differs only in these constants "
-        f"(pgw#1458). Pass the HollowSession the modules were virtualized under."
+        f"FAKE, so this graph would key off a table of ZEROS and collide with "
+        f"every other model that differs only in these constants (pgw#1458). A "
+        f"hollow session keeps buffers and constants REAL; something else "
+        f"replaced these."
     )
 
 
@@ -288,16 +286,15 @@ def discover_modules(
     holds no opinion on WHERE the bytes go -- bytes-at-rest is tensorfs's
     charter, so the caller owns the sink.
 
-    ``session`` (pgw#1458) is the :class:`~torchcg.hollow.HollowSession` the
-    modules were virtualized under, when they were. Reaching a uniform cuda
-    trace on a GPU-less publish box means FAKING the lifted tensor constants,
-    which destroys their values -- and ``graph_hash`` folds the literal digest
-    in, so two models differing only in their constant tables would collide on
-    one identity. The session carries the real values and they are restored
-    here, before the hash is taken and before the sink sees the program. A
-    module whose program carries faked constants and no session to restore
-    them from is REFUSED: a silently zeroed literal digest is exactly the
-    class of defect this pass exists to delete.
+    ``session`` (pgw#1458, tcg#64) is the :class:`~torchcg.hollow.
+    HollowSession` the modules were virtualized under, when they were. It
+    carries the two devices a GPU-less cuda derive needs -- the drive ran on
+    one that exists, the graph is stamped with the one the session states --
+    and ``session.restate`` is applied to each exported program HERE, before
+    the hash, which is what makes the key independent of the box that derived
+    it. A program whose lifted constants are FAKE is still refused by name --
+    a silently zeroed literal digest is exactly the class of defect this pass
+    exists to delete -- but under tcg#64 no session can produce one.
 
     ``transforms`` (tcg#52) is the SEALED :class:`~torchcg.transform.
     TransformSet` of the lane's PASS phase. Passing it is what makes PASS ->
@@ -387,7 +384,13 @@ def discover_modules(
                     f"(strict={strict}) failed for the observed call: "
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
-            _restore_literal_values(contract, path, program, session)
+            # tcg#64: the drive ran on a device that EXISTS; the graph is
+            # stamped with the device the session STATES. This is the one
+            # place the two meet, and it is before the hash, so a GPU-less
+            # box derives the same key a GPU box derives.
+            if session is not None:
+                session.restate(program)
+            _assert_literal_values_are_real(contract, path, program)
             _demote_example_inputs(program)
             names = _param_names(module, args, kwargs)
             try:

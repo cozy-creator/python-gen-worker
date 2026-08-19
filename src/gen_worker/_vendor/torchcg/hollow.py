@@ -12,27 +12,44 @@ supplies the session that makes that code run hollow:
   literal digest reads), then every parameter becomes a FAKE tensor in the
   session's one ``FakeTensorMode``. Tokenizers, schedulers and processors
   load real from the config-only tree; they never carry weights.
-* **One stated trace device** -- author code's device asks are remapped to
-  the SESSION's device at the torch-function boundary. **This is not device
-  neutrality and never was** (pgw#1458): the trace stamps a concrete device
-  into every node's meta, so a cpu-remapped derive emits a device-CPU
-  artifact, and a cuda mint of it dies four layers down inside AOTInductor's
-  own ``Expected: cpu, Got: cuda:0``. The device is established at TRACE time
-  and cannot be re-homed downstream -- four escalating attempts to move it
-  were each defeated by a different layer.
+* **Two devices, named honestly** (tcg#64) -- the STATED trace device, which
+  the graphs are stamped with, and the DRIVE device, where the run's real
+  tensors actually live. They are the same device whenever this host can hold
+  a real tensor there, and they differ on exactly one shape: a GPU-less box
+  stating ``cuda``.
 
-  What IS neutral is the ARCH. Device (``cpu`` vs ``cuda``) is not arch
-  (``sm_86`` vs ``sm_90``): a fake-``cuda`` trace needs no silicon --
-  measured, with ``torch.cuda.is_available() == False`` -- and one such trace
-  serves every ``sm``, because the sm enters at ARTIFACT level through
-  ``RuntimeCompatibility``. So the session states a device CLASS, the
-  declaration records it (derived from the program), and a mismatched mint
-  refuses by name before it compiles.
+  Splitting them is what makes a normal trace just work. The stated device
+  used to be forced onto the drive as well, so a GPU-less ``cuda`` derive had
+  to fake every real tensor the author's code touched -- and a full diffusers
+  pipeline does not survive that: ``encode_prompt`` moves real token ids to
+  the execution device, the scheduler reads real sigmas with ``.item()``, and
+  fakifying them either runs a real cuda kernel on a box with no GPU or trips
+  fake-tensor data-dependence. The drive now runs on a device that EXISTS, so
+  every one of those reads gets its real value, exactly as it does on a GPU.
 
-  Device uniformity must be TOTAL. Parameters, buffers AND lifted tensor
-  constants all move; leaving any one real-on-cpu yields either
-  ``FakeTensorDeviceMismatchError`` or -- worse, because it exports cleanly --
-  a MIXED ``['cpu','cuda:0']`` placement that only AOTI rejects.
+  It costs nothing in identity because the drive does not decide identity.
+  Discovery is two passes: the drive only records each marked module's call
+  STRUCTURE (dtype and shape), and the graph is produced by a second,
+  independent ``torch.export`` of that module alone. So the drive's device
+  reaches the graph through one channel only -- the device stamped into the
+  exported program -- and :func:`restate_program` restates it afterwards.
+  Measured line-for-line: a cpu export restated onto cuda is byte-identical
+  to a native fake-cuda export, and a GPU-less sd1.5 derive reproduces the
+  graph keys of the GPU-traced one.
+
+  The stated device is still a REAL decision (pgw#1458): it is stamped into
+  every node's meta and therefore into the graph's identity, and a mint for a
+  different class refuses by name (``RuntimeCompatibility.key``). What is
+  gone is the HOST deciding it -- ``cuda`` needs no silicon.
+
+  What was never device is the ARCH. Device (``cpu`` vs ``cuda``) is not arch
+  (``sm_86`` vs ``sm_90``): one cuda trace serves every ``sm``, because the sm
+  enters at ARTIFACT level through ``RuntimeCompatibility``.
+
+  Device uniformity must be TOTAL on the stated side. Parameters, buffers AND
+  lifted tensor constants all carry the stated device; leaving any one
+  real-on-cpu yields a MIXED ``['cpu','cuda:0']`` placement that exports
+  cleanly and only AOTI rejects.
 * **Fake egress** -- scalarization of a fake tensor (``.numpy()``,
   ``.item()``, ``.tolist()``, ``bool()``) answers canonical ZEROS instead of
   refusing. Observation is structure-only; a value-dependent branch in author
@@ -50,7 +67,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -59,8 +76,9 @@ class HollowError(RuntimeError):
 
 
 #: The device class a compiled-graph derive traces on unless told otherwise.
-#: The fleet's compiled graphs are all cuda; a cpu trace is for tests and for
-#: cpu-target endpoints, and it is a DIFFERENT graph specialization, not a fallback.
+#: The fleet's compiled graphs are all cuda, and this needs no GPU to state
+#: (tcg#64). A cpu trace is for tests and for cpu-target endpoints, and it is a
+#: DIFFERENT graph specialization, never a fallback for a missing device.
 DEFAULT_TRACE_DEVICE = "cuda"
 
 
@@ -77,20 +95,22 @@ class TraceDeviceUnavailable(HollowError):
 
 @dataclass(frozen=True, slots=True)
 class HollowSession:
-    """The one fake mode and the one trace DEVICE of a derive run.
+    """The one fake mode, the STATED trace device, and where the drive runs.
 
-    ``real_constants`` holds the true values of every tensor this session had
-    to fake in order to reach device uniformity, keyed by module FQN. They are
-    not decoration: ``graph_hash`` folds ``_literal_digest`` in, so a graph
-    whose lifted constants were faked would key off a table of ZEROS, and two
-    models differing only in their constant tables would collide on one graph
-    identity. :meth:`restore_constants` puts the real values back into the
-    exported program before it is serialized.
+    ``device`` is what the graphs are stamped with and therefore part of their
+    identity. :attr:`drive_device` is where the run's real tensors physically
+    live; it is ``device`` whenever this host can hold one there and ``cpu``
+    otherwise. A GPU-less ``cuda`` session is the whole point of the split.
+
+    Nothing value-bearing is ever faked. The session that HAD to fake buffers
+    and lifted constants -- and therefore had to carry a table of their real
+    values to keep the literal digest honest -- was the session that forced
+    the stated device onto the drive. It does not any more (tcg#64), so that
+    table is gone rather than empty.
     """
 
     fake_mode: Any
     device: str = DEFAULT_TRACE_DEVICE
-    real_constants: dict[str, Any] = field(default_factory=dict)
 
     @property
     def device_type(self) -> str:
@@ -98,11 +118,11 @@ class HollowSession:
 
     @property
     def materializes_real_tensors(self) -> bool:
-        """Can a REAL tensor live on this session's device, here, now?
+        """Can a REAL tensor live on this session's STATED device, here, now?
 
         cpu always. cuda only with visible silicon -- and the publish derive
-        deliberately runs on boxes without any, which is why the constants
-        have to be faked and restored rather than moved.
+        deliberately runs on boxes without any, which is what
+        :attr:`drive_device` answers.
         """
 
         if self.device_type == "cpu":
@@ -111,21 +131,36 @@ class HollowSession:
 
         return bool(torch.cuda.is_available())
 
-    def restore_constants(self, program: Any) -> Any:
-        """Put every faked lifted constant's REAL value back on the program.
+    @property
+    def drive_device(self) -> str:
+        """Where the author's code actually runs -- a device that EXISTS.
 
-        Called after ``torch.export`` and before serialization. Without it the
-        literal digest -- and therefore ``cg-graph-v1`` -- would be computed
-        over zeros.
+        The single place the fallback is decided, so no caller can compute a
+        second answer. Every real value the drive reads (``.item()`` on a
+        sigma, token ids moved to the execution device, an ``encode_prompt``
+        kernel) is a real value on this device.
         """
 
-        constants = getattr(program, "constants", None)
-        if not constants or not self.real_constants:
-            return program
-        for name, value in self.real_constants.items():
-            if name in constants:
-                constants[name] = value
-        return program
+        return self.device if self.materializes_real_tensors else "cpu"
+
+    @property
+    def drive_device_type(self) -> str:
+        return str(self.drive_device).split(":", 1)[0]
+
+    def restate(self, program: Any) -> tuple[str, ...]:
+        """Restate one exported program on this session's STATED device.
+
+        A no-op when the drive already ran there. Otherwise it is the ONLY
+        place the drive's device is corrected, and it happens before the graph
+        is hashed, so the key a GPU-less box derives is the key a GPU box
+        derives. Returns the value-bearing tensors that had to stay on the
+        drive device (see :func:`restate_program`); ``()`` for a weights-free
+        program, which is every program this session produces today.
+        """
+
+        if self.drive_device_type == self.device_type:
+            return ()
+        return restate_program(program, self.device)
 
 
 #: The pt2 archive members that record a per-tensor device, in the shape
@@ -174,6 +209,13 @@ def load_exported_program(path: Any) -> Any:
     the check is POSITIVE and happens first: read the archive's own recorded
     devices and say the sentence. Everything downstream of the load is
     developer-box-and-pod-only (pgw has no GPU CI lane), and this is the line.
+
+    The loaded program is then restated onto its own GRAPH's device (tcg#64).
+    That is a no-op for a weights-free program, which is fake all the way
+    through and therefore uniform already. It matters for the one case that is
+    not: a value-bearing buffer a GPU-less derive could not move stayed real
+    on cpu under a cuda graph, and this -- running where the device exists --
+    is where it lands.
     """
 
     import torch
@@ -187,7 +229,28 @@ def load_exported_program(path: Any) -> Any:
             f"CPU-side check must read the recorded placement "
             f"(exported_program_devices) instead of loading the blob."
         )
-    return torch.export.load(str(path))
+    program = torch.export.load(str(path))
+    graph_device = program_graph_device(program)
+    if graph_device is not None:
+        restate_program(program, graph_device)
+    return program
+
+
+def program_graph_device(program: Any) -> Any:
+    """The device an exported program's GRAPH is stated on, or ``None``.
+
+    The graph's device -- not the state dict's -- is the one that entered
+    ``cg-graph-v1`` and the one AOTI compiles for.
+    """
+
+    import torch
+
+    for node in program.graph_module.graph.nodes:
+        value = node.meta.get("val")
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            if isinstance(item, torch.Tensor):
+                return item.device
+    return None
 
 
 def _numpy_dtype(dtype: Any) -> Any:
@@ -270,23 +333,23 @@ def _tensor_attributes(submodule: Any) -> list[tuple[str, Any]]:
 
 
 def virtualize_parameters(module: Any, session: HollowSession, *, dtype: Any = None) -> None:
-    """Move every tensor of ``module`` onto the session's ONE trace device.
+    """Move every tensor of ``module`` onto the session's DRIVE device.
 
     ``dtype`` restates the author's ``torch_dtype=`` ask: floating parameters
     take it, integer parameters keep their own -- exactly what a real
     ``from_pretrained(torch_dtype=...)`` load produces.
 
     Parameters are always faked (a 10 GiB denoiser must cost nothing).
-    Buffers and lifted constants are faked only when the session's device
-    cannot hold a real tensor here -- and then their REAL values are captured
-    on the session, because the literal digest reads them.
+    Buffers and lifted constants stay REAL -- the drive device is a device
+    that exists, so there is never a reason to destroy a value here. The
+    stated device is applied afterwards, to the exported program
+    (:func:`restate_program`), which is the only thing that carries it.
     """
 
     import torch
 
-    device = session.device
-    real_ok = session.materializes_real_tensors
-    for prefix, submodule in module.named_modules():
+    device = session.drive_device
+    for _prefix, submodule in module.named_modules():
         for name, param in list(submodule._parameters.items()):
             if param is None:
                 continue
@@ -312,37 +375,123 @@ def virtualize_parameters(module: Any, session: HollowSession, *, dtype: Any = N
                     f"for the trace's literal digest. A module that moves its "
                     f"buffers to meta cannot be derived hollow."
                 )
-            submodule._buffers[name] = _rehome(
-                buffer, session, f"{prefix}.{name}" if prefix else name, real_ok
-            )
+            submodule._buffers[name] = _rehome(buffer, device)
         for name, value in _tensor_attributes(submodule):
-            setattr(
-                submodule,
-                name,
-                _rehome(value, session, f"{prefix}.{name}" if prefix else name, real_ok),
-            )
+            setattr(submodule, name, _rehome(value, device))
 
 
-def _rehome(value: Any, session: HollowSession, fqn: str, real_ok: bool) -> Any:
-    """Put one value-bearing tensor on the trace device, keeping its value.
+def _rehome(value: Any, device: str) -> Any:
+    """Put one value-bearing tensor on the drive device, keeping its value.
 
-    Real move when the device can hold one; otherwise a fake stand-in plus a
-    recorded real value, so ``restore_constants`` can put the truth back
-    before the program is serialized. A tensor already on the device is
-    untouched -- the cpu-trace path is bit-for-bit what it was.
+    A real move, always: the drive device can hold a real tensor by
+    construction. A tensor already there is untouched.
     """
 
-    if value.device.type == session.device_type:
+    if value.device.type == str(device).split(":", 1)[0]:
         return value
-    if real_ok:
-        return value.to(session.device)
-    import torch
+    return value.to(device)
 
-    session.real_constants[fqn] = value.detach().cpu()
-    with session.fake_mode:
-        return torch.empty(
-            tuple(int(d) for d in value.shape), dtype=value.dtype, device=session.device
-        )
+
+def restate_program(program: Any, device: Any) -> tuple[str, ...]:
+    """Restate an ``ExportedProgram``'s device, in place. Returns what stayed.
+
+    The whole device content of an exported program is METADATA: the fake
+    tensor in each node's ``meta['val']``, the ``device=`` a factory node
+    burnt in, and the placement of the state dict and the constant table.
+    None of it is computation, which is why this runs on a host that has no
+    such device at all -- and why the graph a GPU-less box derives is the same
+    graph, key for key, that a GPU box derives. Measured line-for-line against
+    a native fake-cuda export.
+
+    A weights-free program is FAKE all the way through, so the usual case
+    moves everything and returns ``()``. A tensor carrying a real VALUE (a
+    computed buffer, a lifted constant) can only be moved where a real tensor
+    can live: on a host without the device it stays where it is and its name
+    is returned. That is deliberate -- a value is the one thing a restate must
+    never destroy, the literal digest reads it (``.cpu()``, so the placement
+    does not change the key), and the mint re-homes it on a machine that has
+    the device (:func:`load_exported_program`).
+    """
+
+    import torch
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    # The restate runs INSIDE the session, so `OneTraceDevice` is live -- and
+    # `torch.device` construction goes through `__torch_function__`, so
+    # `torch.device("cuda", 0)` evaluated in here comes back `cpu:0`. The shim
+    # is doing its job (redirect every device ask to the drive device); it
+    # simply cannot tell the session's own repair from author code asking for
+    # a device it must not get. Measured, and it fails SILENTLY: every move
+    # became a no-op and the derive emitted cpu-stamped graphs while reporting
+    # a cuda trace. So the whole restate is the one thing in the session that
+    # opts out of the session's own redirection.
+    with torch._C.DisableTorchFunction():
+        return _restate(program, device, torch, FakeTensor)
+
+
+def _restate(program: Any, device: Any, torch: Any, FakeTensor: Any) -> tuple[str, ...]:
+    target = torch.device(device)
+    if target.type != "cpu" and target.index is None:
+        # torch normalizes a device-less `cuda` ask to `cuda:0` on the tensors
+        # it creates, so a restate that left it un-indexed would produce a
+        # `placement` of ('cuda',) where a native trace says ('cuda:0',).
+        target = torch.device(target.type, 0)
+    stranded: list[str] = []
+    # A non-strict export does not copy the module's parameters: the same
+    # FakeTensor object is the module's parameter, the program's state-dict
+    # entry AND a placeholder's `meta['val']`. So re-homing by assigning
+    # `fake_device` re-homes the LIVE MODULE, and the next observed call of the
+    # same target then exports cuda parameters against cpu synthesized inputs
+    # -- `FakeTensorDeviceMismatchError: cpu and cuda:0`, raised from a module
+    # nobody moved. Substituting a fresh fake tensor keeps the restate a
+    # property of the PROGRAM, which is what it is supposed to be. The memo
+    # preserves aliasing: one input object still maps to one output object, so
+    # a program that shared a tensor across nodes still shares it.
+    moved: dict[int, Any] = {}
+
+    def move(value: Any, fqn: str = "") -> Any:
+        if not isinstance(value, torch.Tensor) or value.device.type == target.type:
+            return value
+        if isinstance(value, FakeTensor):
+            known = moved.get(id(value))
+            if known is None:
+                with value.fake_mode:
+                    known = torch.empty_strided(
+                        value.shape, value.stride(), dtype=value.dtype, device=target
+                    )
+                known.requires_grad_(value.requires_grad)
+                if getattr(value, "_is_param", False):
+                    known._is_param = True
+                moved[id(value)] = known
+            return known
+        try:
+            return value.to(target)
+        except (RuntimeError, AssertionError, AttributeError):
+            stranded.append(fqn or f"<{value.device.type} node value>")
+            return value
+
+    for holder in ("_state_dict", "_constants"):
+        table = getattr(program, holder, None)
+        if not isinstance(table, dict):
+            continue
+        for name, value in list(table.items()):
+            table[name] = move(value, name)
+
+    for graph_module in program.graph_module.modules():
+        if not isinstance(graph_module, torch.fx.GraphModule):
+            continue
+        for node in graph_module.graph.nodes:
+            if "device" in node.kwargs:
+                node.kwargs = {**node.kwargs, "device": target}
+            if node.op == "call_function" and node.target is torch.ops.aten.to.device:
+                arguments = list(node.args)
+                arguments[1] = target
+                node.args = tuple(arguments)
+            for key in ("val", "example_value"):
+                if key in node.meta:
+                    node.meta[key] = torch.utils._pytree.tree_map(move, node.meta[key])
+
+    return tuple(sorted(set(stranded)))
 
 
 def _hollow_diffusers(session: HollowSession) -> Any:
@@ -655,11 +804,12 @@ def hollow_session(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[HollowSession
     too -- the shims never touch non-fake tensors and ``torch.export``
     re-enters the session's own mode for hollow modules.
 
-    ``device`` is the trace DEVICE CLASS, and it is a real decision, not a
-    formality: it is stamped into every node's meta and therefore into the
-    graph's identity, and a mint for a different class refuses by name
-    (``RuntimeCompatibility.key``). It needs no silicon -- a fake-cuda trace
-    is measured working with ``torch.cuda.is_available() == False``.
+    ``device`` is the STATED trace device class, and it is a real decision,
+    not a formality: it is stamped into every node's meta and therefore into
+    the graph's identity, and a mint for a different class refuses by name
+    (``RuntimeCompatibility.key``). It needs no silicon (tcg#64): the drive
+    runs on ``session.drive_device`` -- a device that exists -- and each
+    exported program is restated onto the stated device before it is hashed.
     """
 
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -669,8 +819,8 @@ def hollow_session(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[HollowSession
     )
     with (
         _loader_interception(session),
-        _hollow_module_moves(session.device),
-        observation_shims(session.device),
+        _hollow_module_moves(session.drive_device),
+        observation_shims(session.drive_device),
     ):
         yield session
 
@@ -684,5 +834,7 @@ __all__ = [
     "exported_program_devices",
     "load_exported_program",
     "observation_shims",
+    "program_graph_device",
+    "restate_program",
     "virtualize_parameters",
 ]
