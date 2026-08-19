@@ -511,3 +511,39 @@ gen_worker.serving.engine_runtime.process_vram_bytes()
 #             caller and the ratchet will say so by going red on STALE.
 #     EXPIRY: none. A guard's undo living beside its do is the correct shape.
 gen_worker.serving.weightless_program.uninstall()
+
+# pgw#1498's GGUF-as-torch-weights lane (#1058, `d47b5c59` — `feef87cc` /
+# `52cd05ba` / `cf600a71`) landed `models/gguf_torch.py` with nine public
+# callables and no production caller. Measured at `f420bb5b^`: this guard
+# ALREADY exited 1 there, so master was red before pgw#1497 merged and pgw#1497
+# then stacked a `[stale-exemption]` on top of it. That second red is fixed in
+# its own lane; these rows are the first.
+#
+# Added by the pgw#1497 fix-forward lane rather than deleted, for the reason the
+# pgw#1421/pgw#1425 block above states and this lane learned the hard way in the
+# same hour: guessing another lane's intent about public surface is how a wire
+# gets silenced — or, in pgw#1497's case, how a PROD endpoint's import gets
+# deleted. They are OWED, not accepted.
+#
+#     OWNER:  pgw#1498. The dequant path is the whole point of that issue: a
+#             Linear that dequantizes its own GGML block bytes per forward.
+#             `read_gguf`/`quantized_tensors_from_views`/
+#             `install_quantized_weights`/`structural_base` are the ingest and
+#             install seam, `dequant_ahead`/`peak_transient_bytes`/
+#             `quantized_bytes` the residency arithmetic, and
+#             `attach_lora`/`detach_lora` the attach-never-merge half. Wire them
+#             into the serving path, or say which successor already does.
+#     EXPIRY: 2026-08-21, set by the program owner, not by this lane. The
+#             wiring lane is ACTIVE and its own PR should remove these rows
+#             sooner; the date is a backstop, not a deadline. If they outlive
+#             it, pgw#1498 shipped a quant engine nothing on the pod calls, and
+#             that is a finding rather than a lint row.
+gen_worker.models.gguf_torch.attach_lora()
+gen_worker.models.gguf_torch.dequant_ahead()
+gen_worker.models.gguf_torch.detach_lora()
+gen_worker.models.gguf_torch.install_quantized_weights()
+gen_worker.models.gguf_torch.peak_transient_bytes()
+gen_worker.models.gguf_torch.quantized_bytes()
+gen_worker.models.gguf_torch.quantized_tensors_from_views()
+gen_worker.models.gguf_torch.read_gguf()
+gen_worker.models.gguf_torch.structural_base()
