@@ -12,6 +12,12 @@ supplies the session that makes that code run hollow:
   literal digest reads), then every parameter becomes a FAKE tensor in the
   session's one ``FakeTensorMode``. Tokenizers, schedulers and processors
   load real from the config-only tree; they never carry weights.
+* **Lazy pipeline completion** (tcg#65) -- ``diffusers.ModularPipeline.from_pretrained``
+  returns a pipeline whose ``from_pretrained`` components are all ``None``:
+  it builds SPECS and defers the build to whoever holds the object. At serve
+  that caller exists; a derive has none, so it marked an empty pipeline and
+  armed nothing. The wrapped loader finishes the build in-session, so every
+  component is born hollow through the loaders above.
 * **Two devices, named honestly** (tcg#64) -- the STATED trace device, which
   the graphs are stamped with, and the DRIVE device, where the run's real
   tensors actually live. They are the same device whenever this host can hold
@@ -520,6 +526,101 @@ def _hollow_diffusers(session: HollowSession) -> Any:
     return classmethod(from_pretrained)
 
 
+def attach_lazy_components(pipeline: Any, *, dtype: Any = None) -> tuple[str, ...]:
+    """Build the components a LAZY loader declared and did not construct.
+
+    A classic ``DiffusionPipeline.from_pretrained`` returns a pipeline
+    CARRYING every component, so intercepting the component loaders is
+    enough to make that load hollow. A lazy pipeline loader returns the same
+    registry with every ``from_pretrained`` component ``None`` and defers the
+    build to whoever holds the object -- at serve, the streaming engine that
+    passes the components in. A derive has no such caller: it gets exactly
+    what the loader returned and marks what the pipeline carries, which is
+    nothing (pgw#1450 -- eleven declared names, eleven ``None`` attributes,
+    "no DiT resolves on this pipeline").
+
+    Duck-typed on the object's own surface, never on its class: an object
+    that NAMES unbuilt components and EXPOSES the call that builds them gets
+    that call made, here, inside the session -- so each component goes
+    through the intercepted loaders and is born hollow. An object without
+    that surface is left alone; nothing here knows any pipeline by name.
+
+    Then the postcondition, because the lazy build swallows per-component
+    failures into a log line (tcg#59's doctrine: intercept-or-REFUSE, never
+    silently pass through). A component the pipeline says it can build and
+    then has not built is named and refused -- it is the difference between
+    a traced DiT and a derive that arms nothing.
+
+    Returns the names attached, ``()`` when there was nothing to do.
+    """
+
+    build = getattr(pipeline, "load_components", None)
+    if not callable(build):
+        return ()
+    unbuilt = _buildable_names(pipeline)
+    if not unbuilt:
+        return ()
+    if dtype is None:
+        build(names=list(unbuilt))
+    else:
+        build(names=list(unbuilt), torch_dtype=dtype)
+    still_missing = _buildable_names(pipeline)
+    if still_missing:
+        raise HollowError(
+            f"{type(pipeline).__name__} declares component(s) "
+            f"{list(still_missing)} it can build and did not build them; the "
+            f"pipeline carries None under those names, so a trace would mark "
+            f"nothing and the derive would arm no graphs. The build reports "
+            f"the per-component cause on the diffusers logger."
+        )
+    return unbuilt
+
+
+def _buildable_names(pipeline: Any) -> tuple[str, ...]:
+    """Declared components that are unset AND have somewhere to load from.
+
+    A declared-but-absent optional (no source in the index) is legitimately
+    ``None`` and is not a defect -- the same distinction the lazy build makes
+    when it skips a spec with no source.
+    """
+
+    specs = getattr(pipeline, "_component_specs", None)
+    if not isinstance(specs, Mapping):
+        return ()
+    names = []
+    for name, spec in specs.items():
+        if getattr(spec, "default_creation_method", None) != "from_pretrained":
+            continue
+        if not getattr(spec, "pretrained_model_name_or_path", None):
+            continue
+        if getattr(pipeline, name, None) is None:
+            names.append(name)
+    return tuple(names)
+
+
+def _hollow_lazy_pipeline(original: Any) -> Any:
+    """Wrap a pipeline loader that returns SPECS where a load returns objects.
+
+    ``torch_dtype`` is consumed here rather than forwarded: a lazy pipeline
+    constructor does not take it (it lands in ``**kwargs`` and is dropped
+    with a warning, or refused by a strict author subclass), while the
+    component build it defers is exactly where the dtype belongs. So the ask
+    reaches the components, which is what a classic load does with it.
+    """
+
+    def from_pretrained(cls: Any, /, *args: Any, **kwargs: Any) -> Any:
+        dtype = kwargs.pop("torch_dtype", None)
+        if dtype is None:
+            dtype = kwargs.pop("dtype", None)
+        else:
+            kwargs.pop("dtype", None)
+        pipeline = original.__func__(cls, *args, **kwargs)
+        attach_lazy_components(pipeline, dtype=dtype)
+        return pipeline
+
+    return classmethod(from_pretrained)
+
+
 def _hollow_transformers(session: HollowSession) -> Any:
     def from_pretrained(cls: Any, /, pretrained_model_name_or_path: Any, **kwargs: Any) -> Any:
         subfolder = kwargs.get("subfolder") or ""
@@ -548,10 +649,15 @@ def _hollow_transformers(session: HollowSession) -> Any:
 def _loader_interception(session: HollowSession) -> Iterator[None]:
     """Patch the model-bearing loaders of whichever libraries are present.
 
-    Library-level, never family-level: the patch knows ``ModelMixin`` and
-    ``PreTrainedModel``, not what any endpoint builds with them. A library
-    that is not installed is simply not patched -- pure-transformers authors
-    and pure-diffusers authors both resolve.
+    Library-level, never family-level: the patch knows ``ModelMixin``,
+    ``PreTrainedModel`` and ``ModularPipeline``, not what any endpoint builds
+    with them. A library that is not installed is simply not patched --
+    pure-transformers authors and pure-diffusers authors both resolve.
+
+    The first two are the WEIGHT-BEARING loaders and are REPLACED: they build
+    from config and virtualize. The third is a LAZY pipeline loader and is
+    WRAPPED: it does not read weights, it hands back a registry of unbuilt
+    components, and the wrap makes it finish the job (:func:`attach_lazy_components`).
     """
 
     patched: list[tuple[Any, Any]] = []
@@ -563,12 +669,23 @@ def _loader_interception(session: HollowSession) -> Iterator[None]:
         import transformers.modeling_utils as _tmu
     except ImportError:
         _tmu = None
+    try:
+        import diffusers.modular_pipelines.modular_pipeline as _dmp
+    except ImportError:
+        _dmp = None
     if _dmu is None and _tmu is None:
         raise HollowError(
             "hollow instantiation intercepts diffusers and/or transformers "
             "loaders, and neither library is importable in this env"
         )
     try:
+        if _dmp is not None:
+            patched.append(
+                (_dmp.ModularPipeline, _dmp.ModularPipeline.__dict__["from_pretrained"])
+            )
+            _dmp.ModularPipeline.from_pretrained = _hollow_lazy_pipeline(
+                _dmp.ModularPipeline.__dict__["from_pretrained"]
+            )
         if _dmu is not None:
             patched.append((_dmu.ModelMixin, _dmu.ModelMixin.__dict__["from_pretrained"]))
             _dmu.ModelMixin.from_pretrained = _hollow_diffusers(session)
@@ -828,6 +945,7 @@ def hollow_session(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[HollowSession
 __all__ = [
     "DEFAULT_TRACE_DEVICE",
     "HollowError",
+    "attach_lazy_components",
     "HollowSession",
     "TraceDeviceUnavailable",
     "hollow_session",
