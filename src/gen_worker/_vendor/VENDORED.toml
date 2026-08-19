@@ -208,7 +208,8 @@ read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "write
 # brings the set back to EQUAL the real upstream corpus.
 #
 # `contract_plane_rev` advanced c3a831d -> `107b8ac` (tensorfs#121) ->
-# `2abc1b76` (#124/#125) -> `b8bb39fd` (#134) -> `272103e4`, the cut. The
+# `2abc1b76` (#124/#125) -> `b8bb39fd` (#134) -> `272103e4` -> `86bfa80f`
+# (tensorfs#140, the audio lane's document — pgw#1442, this bump). The
 # documents arriving here belong to OTHER LANES and are vendored bytes-only,
 # named so the ownership is readable rather than implied:
 #
@@ -220,6 +221,18 @@ read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "write
 #   ernie.diffusers-bf16          se#—     tensorfs#142
 #   minimax.h3-dit-fp8-rowwise    —        tensorfs#128
 #   sdxl.diffusers-fp8-rowwise    —        tensorfs#128
+#   stable-audio.diffusers-fp16   se#769   tensorfs#140   (THIS bump, pgw#1442)
+#
+# `stable-audio.diffusers-fp16` is the FIRST vendored document whose top-level
+# dtype is `float16` rather than `bfloat16` — the served checkpoints histogram
+# {F16: 445} and the hub records dtype=fp16, so the document describes the
+# bytes the fleet actually serves. Do not "correct" it toward its siblings, and
+# do not widen its per-tensor `dtypes` to admit BF16: a bf16 repack of this
+# architecture would be a SEPARATE document (`stable-audio.diffusers-bf16@1`),
+# the way sdxl carries both a bf16 and an fp8-rowwise lane. It is also the only
+# document serving TWO checkpoints deliberately — `stable-audio-open` and
+# `foundation-1` share an identical transformer header sha256 and differ only
+# in weight values, which is a checkpoint row rather than a second layout.
 #
 # #121 authored the four se#757 blocker-A lane documents (`sd15`, `sd2`,
 # `hidream-o1`, `wan22` — sd15 and sd2 are SEPARATE documents with separate
@@ -251,7 +264,7 @@ read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "write
 # They are FRAGMENTS (a family-shared block spelling and two CLIP component
 # spellings) that a `lanes=` header never names on its own. Do not "fix" them,
 # and do not let a declaration-time dtype read treat them as lanes.
-contract_plane_rev = "272103e414184c7935105afa48416b95fd5a10ee"
+contract_plane_rev = "86bfa80fd42cf8c107f16ab649a2afcebc45dd88"
 contract_plane_files = [
   "contract.py",
   "contracts.py",
@@ -272,6 +285,7 @@ contract_plane_files = [
   "_contracts/sdxl.clip-g-split-qkv.v1.json",
   "_contracts/sdxl.diffusers-bf16.v1.json",
   "_contracts/sdxl.diffusers-fp8-rowwise.v1.json",
+  "_contracts/stable-audio.diffusers-fp16.v1.json",
   "_contracts/trellis2.dit-bf16.v1.json",
   "_contracts/wan22.diffusers-bf16.v1.json",
   "_contracts/z-image.diffusers-bf16.v1.json",
@@ -396,6 +410,7 @@ rewrites = [
 "_contracts/sdxl.clip-g-split-qkv.v1.json" = "5d82d4dcad7ca97cc5291a4fc60e4916e24e6bc8baa14e0429be428b99d9d09a"
 "_contracts/sdxl.diffusers-bf16.v1.json" = "6612c3d61e495f62d9f06096c11a2182a8a440d969e4faa0f23258eec35abe60"
 "_contracts/sdxl.diffusers-fp8-rowwise.v1.json" = "f082ff98421cd21827d10ed2a69f6447e8694dcf43baf08a7c47d2de6b373c20"
+"_contracts/stable-audio.diffusers-fp16.v1.json" = "ad06436e3b67c92a843ad8778a7fdfc04cf237e9fcedd1718552d3c8e9d1958a"
 "_contracts/trellis2.dit-bf16.v1.json" = "84bc7689d8f86372affc03cf2f25d895e55bfc824af395fd5af6cc54fdd50f0f"
 "_contracts/wan22.diffusers-bf16.v1.json" = "bca462c22c83e43e28516fa21a7d7798d73f3a46c242f61a37d532701903e13b"
 "_contracts/z-image.diffusers-bf16.v1.json" = "876eea29cb8974f4562ed52da63a0c7ac8af5127b669ec15f6025ca8f73ce534"
