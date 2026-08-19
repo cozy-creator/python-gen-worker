@@ -492,3 +492,22 @@ gen_worker.serving.engine_runtime.process_vram_bytes()
 # spellings of one state is how a caller ends up asking a two-answer question
 # about a three-state gate, and "not configured" collapsing `local` into `unset`
 # is exactly the fail-open that issue closed.
+
+# pgw#1485: `weightless_program.uninstall()` is DELIBERATELY test-only, and the
+# ratchet is right that it has no production caller — it is the SUITE's half of
+# a process-wide monkeypatch, not a runtime capability.
+#
+# `install()` replaces `torch.export.pt2_archive._package._load_state_dict` for
+# the whole process and `mint_child` calls it. pgw#1468's two stock-path guards
+# then measure whichever test ran before them on the same xdist worker: their
+# fixture snapshot-and-restored a symbol that was ALREADY patched, so the red
+# arm silently stopped being red. Both flipped to failing on a branch whose only
+# change was test distribution. Restoring the pristine loader needs the closure
+# the patch captured, which only this module can reach — so the alternative to
+# this line is a test reaching into `__closure__` itself, which is worse.
+#
+#     OWNER:  pgw#1485. If production ever needs to unpatch (a worker that
+#             serves after a mint child ran in-process), this acquires a real
+#             caller and the ratchet will say so by going red on STALE.
+#     EXPIRY: none. A guard's undo living beside its do is the correct shape.
+gen_worker.serving.weightless_program.uninstall()
