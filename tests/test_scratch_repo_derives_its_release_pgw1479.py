@@ -81,7 +81,7 @@ def test_derives_its_release_reads_the_reserved_grammar(ref: str, expected: bool
 # HubClient.publish_v2 — the guard that fired before any HTTP.
 # --------------------------------------------------------------------------
 
-def _publish(destination_repo: str, release: str):
+def _publish(destination_repo: str, release: str) -> None:
     """Drive publish_v2 far enough to clear (or trip) the release guard.
 
     The guard is the FIRST thing after the empty-files check, and the next step
