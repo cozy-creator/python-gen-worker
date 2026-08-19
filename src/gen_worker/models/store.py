@@ -1189,7 +1189,17 @@ class ModelStore:
 
         Returns True when the answer was given; False means "not resident,
         fetch it" and the caller falls through to the funnel.
+
+        **The answer is VERIFIED, not assumed** (pgw#1511). A tree is residency
+        only if it matches its manifest; a present-but-incomplete tree is
+        quarantined and answered False. See the comment at the check itself for
+        what this cost the fleet when it was `is_dir()` alone.
         """
+        # The quarantine below emits EVICTED through Residency, and this can
+        # run before anything else has bound the store's loop (boot calls it
+        # first). Without this the eviction of a tree we just refused is
+        # dropped, and the hub keeps the residency this pod has disowned.
+        self.bind_loop()
         if snapshot is None:
             snapshot = self._snapshots.get(ref)
         if snapshot is None or not snapshot.digest:
@@ -1217,6 +1227,48 @@ class ModelStore:
                 # and calling that satisfied would strand the goal forever.
                 return False
             tree = existing
+
+        # pgw#1511: VERIFY BEFORE ASSERTING. Everything above this line is a
+        # statement about a DIRECTORY ENTRY — `candidate.is_dir()` — and that
+        # was the whole test. A tree left incomplete by an interrupted or
+        # superseded materialization is a directory that exists, so this
+        # answered `already_resident`, published ON_DISK, and (below) added the
+        # ref to `self._verified`, which permanently suppresses
+        # `_materialize_local`'s first-use `_verify_snapshot_tree` for the rest
+        # of the process. The bytes were then never checked by anyone, and the
+        # first thing to notice was the tenant's loader — `SafetensorError:
+        # header too large`, blamed on the checkpoint.
+        #
+        # It is not enough to verify here and carry on: a residency answer that
+        # cannot be substantiated must never become an answer at all. So a bad
+        # tree is QUARANTINED (the partial and its bad blobs are deleted, so
+        # re-materialization re-downloads instead of re-linking the same bytes)
+        # and this returns False, which sends the caller down the ordinary
+        # fetch path.
+        #
+        # `_verify_snapshot_tree` is the INHERITED checker and it is used here
+        # precisely because it is PROJECTION-AWARE. A projected tree's tensor
+        # containers are ~128 B TFSSTUB1 pointer stubs and its other files are
+        # CAS symlinks; by construction they do not hold the bytes their
+        # manifest entries name. A validator that opened one naively would get
+        # a loud parse failure that is CORRECT behaviour, score it as
+        # corruption, and delete the model on every boot — pgw#1308 finding 3,
+        # where two callers read that same correct failure and reached opposite
+        # wrong conclusions. So stubs and symlinks go to `verify_projection`
+        # (structural) and only files holding real bytes are hashed. That is
+        # also why this is not a re-download tax on every warm pod.
+        ok, bad = await asyncio.to_thread(self._verify_snapshot_tree, tree, snapshot)
+        if not ok:
+            logger.error(
+                "residency REFUSED for %s at %s: the tree is present but does "
+                "not match its manifest (%d bad file(s)) — quarantining and "
+                "falling through to a fetch. This pod will NOT advertise these "
+                "weights as resident; a tree that cannot be substantiated is "
+                "not residency (pgw#1511)",
+                ref, tree, len(bad),
+            )
+            await asyncio.to_thread(self._quarantine_snapshot, ref, tree, bad)
+            return False
 
         identity = self._snapshot_identity(ref, snapshot)
         with self._identity_lock:

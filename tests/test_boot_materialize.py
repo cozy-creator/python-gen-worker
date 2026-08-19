@@ -428,3 +428,96 @@ def _fine_cadence(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(wp, "STRIDE_MIB", 1)
     monkeypatch.setattr(wp, "MIN_INTERVAL_S", 0.0)
     return None
+
+
+# ---------------------------------------------------------------------------
+# pgw#1511: a tree that EXISTS is not a tree that is RESIDENT
+# ---------------------------------------------------------------------------
+
+
+def test_a_TRUNCATED_warm_tree_is_refused_quarantined_and_refetched(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """The fleet incident: two endpoints, two volumes, 20x apart, identical
+    `SafetensorError: header too large` on read.
+
+    Every write path in the stack is airtight — the CAS hashes and size-checks
+    every object before committing it, `project_snapshot` builds in a scratch
+    directory and renames, and tensorfs' materializer re-hashes each object AND
+    the whole file and refuses a short read. So the bytes were never
+    short-WRITTEN. What happened is that a tree left incomplete by an
+    interrupted materialization is still a DIRECTORY THAT EXISTS, and
+    `announce_resident` tested exactly that and nothing else: it answered
+    `already_resident`, published ON_DISK, marked the ref `_verified` (which
+    suppresses the first-use digest check for the rest of the process), and the
+    worker advertised ready. The first component to notice was the tenant's
+    loader.
+
+    So: stage a good tree, TRUNCATE one weight file in it the way an
+    interrupted write would, and boot a second store on that CAS. The pod must
+    refuse the residency rather than advertise it.
+    """
+    origin = _Origin()
+    try:
+        snapshot = _blobs(origin)
+        cas = tmp_path / "endpoint-volume-cas"
+
+        async def stage() -> None:
+            wire = _Wire()
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            mat = CheckpointMaterialization(_store(wire, cas))
+            mat.configure(_config(1, _REF, snapshot))
+            await _settle(mat)
+
+        asyncio.run(stage())
+
+        # The damage, applied to the STAGED tree exactly as a half-finished
+        # write leaves it: the file is present, and short.
+        trees = [p for p in (cas / "snapshots").iterdir() if p.is_dir()]
+        assert len(trees) == 1, f"expected one staged tree, got {trees}"
+        weights = sorted(trees[0].rglob("*.safetensors"))
+        assert weights, f"no weight files in {trees[0]}"
+        victim = weights[0]
+        full = victim.stat().st_size
+        # The tree's files are read-only HARD LINKS into the CAS objects, so
+        # this truncates the object itself — a more faithful reproduction than
+        # damaging a private copy would be, and it means recovery has to
+        # re-download rather than re-link the same bad bytes.
+        mode = victim.stat().st_mode
+        victim.chmod(0o644)
+        with victim.open("r+b") as handle:
+            handle.truncate(max(1, full // 3))
+        victim.chmod(mode)
+        assert victim.stat().st_size < full
+
+        warm = _Wire()
+        outcome: List[str] = []
+
+        async def boot() -> None:
+            store = _store(warm, cas)
+            activity.bind_sink(warm.send, asyncio.get_running_loop())
+            store.rescan_disk()
+            mat = CheckpointMaterialization(store)
+            mat.configure(_config(1, _REF, snapshot))
+            await _settle(mat)
+            outcome.append(mat.state)
+
+        asyncio.run(boot())
+
+        phases = [u.phase for u in warm.positions()]
+        assert PHASE_ALREADY_RESIDENT not in phases, (
+            "a truncated tree was answered as ALREADY RESIDENT — that is the "
+            "incident: the pod advertises weights it does not have, and the "
+            f"first reader gets `header too large`. positions={phases}")
+        assert outcome == [STATE_READY], (
+            f"the pod must recover by re-fetching, not stall; state={outcome}")
+        # And the recovery is real, judged by the SAME verifier that rejected
+        # the damage — not by raw file size, because a projected tree's files
+        # are pointer stubs by design and sizing them proves nothing.
+        final = [p for p in (cas / "snapshots").iterdir() if p.is_dir()]
+        assert len(final) == 1, f"expected one tree after recovery, got {final}"
+        checker = _store(_Wire(), cas)
+        ok, bad = checker._verify_snapshot_tree(final[0], snapshot)
+        assert ok, f"the recovered tree still fails verification: {bad}"
+    finally:
+        origin.close()
