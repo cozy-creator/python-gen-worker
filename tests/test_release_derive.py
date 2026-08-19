@@ -223,3 +223,71 @@ def test_lockfile_closure_is_the_env_identity(
     assert [record["graph"] for lane in locked["graphs"]["lanes"] for record in lane["graphs"]] == [
         record["graph"] for lane in installed["graphs"]["lanes"] for record in lane["graphs"]
     ]
+
+
+# --- the sys.path priming the derive shares with discovery -------------------
+
+
+def test_the_derive_cli_can_resolve_its_own_imports() -> None:
+    """pgw#1440 REGRESSION. `_run_derive` imported `_ensure_sys_path` from
+    `cli/run.py`, which pgw#1373 (`cd46c957`) deleted with the v1 SDK, so
+    `gen-worker release derive` raised `ModuleNotFoundError` on the second
+    line of its handler — every derive, on every tree.
+
+    Asserted by RESOLVING the handler's imports rather than by grepping for
+    the module: the failure was an import that could not be satisfied, so the
+    check has to be one that a second dead import would also fail.
+    """
+    from gen_worker.cli import release as release_cli
+
+    source = Path(release_cli.__file__).read_text()
+    assert "cli.run" not in source and "from .run import" not in source
+
+    # The real gate: run the handler's own import block in a clean process.
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "from gen_worker.discovery.discover import prime_sys_path;"
+         "from gen_worker.release.derive import DeriveError, derive_release;"
+         "print('ok')"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+
+def test_priming_puts_src_ahead_of_root_and_repeats_cleanly(tmp_path: Path) -> None:
+    """The ORDER is load-bearing and was nearly lost in the extraction.
+
+    Both inserts go to position 0, so writing them root-then-src yields
+    `src` ahead of `root` — which is what a `src/`-layout endpoint needs.
+    Swapping the two statements reverses the precedence silently, and the
+    only thing that catches it is an assertion on the resulting order.
+    """
+    from gen_worker.discovery.discover import prime_sys_path
+
+    root = tmp_path / "endpoint"
+    (root / "src").mkdir(parents=True)
+    saved = list(sys.path)
+    try:
+        prime_sys_path(root)
+        assert sys.path.index(str(root / "src")) < sys.path.index(str(root))
+        before = list(sys.path)
+        prime_sys_path(root)  # idempotent: no duplicate entries
+        assert sys.path == before
+    finally:
+        sys.path[:] = saved
+
+
+def test_priming_omits_a_src_dir_that_does_not_exist(tmp_path: Path) -> None:
+    """A flat endpoint has no `src/`, and a path entry to a missing directory
+    is a silent import-order hazard rather than a harmless no-op."""
+    from gen_worker.discovery.discover import prime_sys_path
+
+    root = tmp_path / "flat"
+    root.mkdir()
+    saved = list(sys.path)
+    try:
+        prime_sys_path(root)
+        assert str(root) in sys.path
+        assert str(root / "src") not in sys.path
+    finally:
+        sys.path[:] = saved

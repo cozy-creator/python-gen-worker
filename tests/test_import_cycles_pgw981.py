@@ -129,13 +129,28 @@ def test_no_module_fails_to_import_for_any_other_reason(outcomes: List[Outcome])
 
 @pytest.mark.parametrize(
     "module",
-    ["gen_worker.cli.serve", "gen_worker.cli.run", "gen_worker.cli.invoke", "gen_worker.cli"],
+    [
+        "gen_worker.cli.release",
+        "gen_worker.cli.models_export",
+        "gen_worker.cli.protocol",
+        "gen_worker.cli.args",
+        "gen_worker.cli",
+    ],
 )
 def test_cli_entry_orders(module: str) -> None:
-    """The four entry orders into the cli package, named individually.
+    """Every entry order into the cli package, named individually.
 
-    `cli/__init__` reaching `run` before `serve` is what masked the original
-    defect, so "the CLI works" was never evidence about `cli.serve`.
+    `cli/__init__` reaching one submodule before another is what masked the
+    original defect, so "the CLI works" was never evidence about any single
+    entry point.
+
+    pgw#1440: the list used to name `cli.serve`, `cli.run` and `cli.invoke`,
+    all three of which pgw#1373 (`cd46c957`) deleted with the v1 SDK — so
+    three of the four parametrizations had been failing on master ever since,
+    and the one surviving name (`gen_worker.cli`) is the one that proves the
+    least. Re-pointed at the modules the package ACTUALLY has. The `cli.run`
+    row is the same stale reference that left `cli/release.py` importing a
+    deleted symbol; this is that fallout, in the test half.
     """
     outcome = _import_alone(module)
     assert outcome.returncode == 0, f"{module} as a first import:\n{outcome.stderr}"
