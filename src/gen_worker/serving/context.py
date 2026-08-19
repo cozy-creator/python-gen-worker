@@ -179,6 +179,7 @@ class LoadContext(Generic[MT_co]):
         self._lane = lane
         self._engine = engine
         self._compile_sink = compile_sink
+        self._engines: list[Any] = []
 
     @property
     def checkpoint_dir(self) -> Path:
@@ -291,6 +292,72 @@ class LoadContext(Generic[MT_co]):
                 "takes the checkpoint's own", self._lane,
             )
             return None
+
+    def engine(self, spec: Any) -> Any:
+        """Boot the EXTERNAL engine that serves this checkpoint — the one
+        spelling for the engine-hosted tier (pgw#1421)::
+
+            self.engine = ctx.engine(LlamaServer(extra_args=["-ngl", "99"]))
+
+        The sibling of :meth:`load`, and the same division of labour: the
+        author declares (which engine, which flags), the platform supplies
+        (which checkpoint tree, which port, which environment) and supervises
+        (boot ladder, real-liveness health wait, typed events, teardown).
+
+        Returns an ``EngineHandle`` whose ``base_url`` an entrypoint POSTs to.
+
+        THE HANDLE IS REGISTERED HERE, which is what makes teardown
+        structural: ``EndpointHost.evict`` stops every engine this context
+        started AFTER the author's ``unload``, whether or not ``unload`` was
+        written. An engine subprocess is invisible to torch's allocator, so a
+        forgotten stop is not a tidy-up debt — it is VRAM the next residency
+        admit cannot see and cannot reclaim. ``EngineHandle.stop`` is
+        idempotent, so an author who stops it in ``unload`` anyway is right
+        and costs nothing.
+
+        This is the ONLY tier that gets a real file out of the store: Paul's
+        2026-08-19 ruling narrowed the #1303 ladder's tier 3 to external
+        binaries and AOT ``.so`` delivery, and made it permanent there. A
+        serving pytorch endpoint that reaches a materialized view is a defect
+        signal; ``llama-server -m`` reaching one is the design.
+        """
+        from .engine_runtime import EngineSpec, boot_engine
+
+        if not isinstance(spec, EngineSpec):
+            raise TypeError(
+                f"ctx.engine({spec!r}): expected an EngineSpec declaration "
+                "(gen_worker.LlamaServer / gen_worker.VllmServer), not a "
+                "command or a base URL. The spec states WHAT engine and WHICH "
+                "flags; the checkpoint tree, the port and the supervision are "
+                "the platform's half."
+            )
+        handle = boot_engine(spec, self.checkpoint_dir)
+        self._engines.append(handle)
+        return handle
+
+    @property
+    def engines(self) -> tuple[Any, ...]:
+        """Every engine this context started, in boot order."""
+        return tuple(self._engines)
+
+    def stop_engines(self) -> None:
+        """Stop every engine this context started, newest first.
+
+        BEST-EFFORT AND UNCONDITIONAL: called by the host after the author's
+        ``unload``, so an author who never wrote one still gets the process
+        reaped. Each stop is idempotent and a raising stop cannot prevent the
+        next one — the whole point is that no single failure strands a
+        VRAM-holding subprocess.
+        """
+        while self._engines:
+            handle = self._engines.pop()
+            try:
+                handle.stop()
+            except Exception:
+                logger.exception(
+                    "stopping engine %r raised; continuing with the rest",
+                    getattr(handle, "runtime", handle),
+                )
 
     def compile(self, target: Any) -> Any:
         """Imperative module marking, the torch.compile idiom (Paul ruling)::

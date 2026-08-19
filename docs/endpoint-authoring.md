@@ -808,55 +808,82 @@ retrieves the result. Token endpoints should yield one
 tokens_per_second=)` at the end of the stream — billing reads it from the
 terminal `StreamResult.usage`.
 
-## Engine-hosted runtimes
+## Engine-hosted runtimes (external binaries)
 
-`@endpoint(runtime="vllm")` (or `"llama-server"`) makes the worker boot the
-engine server around `setup()`: download the bound model, start the
-subprocess, wait for `/health`, and inject a `ServerHandle` (base_url +
-process control) into any setup parameter annotated with it:
+Some models are not served by a Python pipeline at all: `llama-server` reads
+a GGUF, `vllm serve` reads a directory, and both speak HTTP. That tier is
+PERMANENT (Paul, 2026-08-19 — the #1303 file-access ladder's tier 3 narrows
+to external binaries and AOT `.so` delivery, and stays there), and it is the
+only tier that gets real files out of the store.
+
+Declare the engine and let the platform run it. `ctx.engine(...)` is the
+sibling of `ctx.load(...)`:
 
 ```python
-from gen_worker.runtimes.server import ServerHandle
+from gen_worker import LlamaServer, LoadContext, Model, entrypoint
 
-@endpoint(model=HF("org/llm"), resources=Resources(gpu=True), runtime="vllm")
-class Chat:
-    def setup(self, model: str, server: ServerHandle) -> None:
-        self.base_url = server.base_url
+class QwenMtpModel(Model[Qwen36MtpGguf], lanes=()):
+    def load(self, ctx: LoadContext[Qwen36MtpGguf]) -> None:
+        self.engine = ctx.engine(LlamaServer(
+            n_ctx=32768,
+            extra_args=["--alias", "qwen3.6-27b-mtp-gguf", "-fa", "on"],
+        ))
+
+@entrypoint
+async def chat(ctx, payload: ChatIn, model: QwenMtpModel) -> AsyncIterator[...]:
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "POST", f"{model.engine.base_url}/v1/chat/completions", json=...,
+        ) as response:
+            ...
 ```
 
-The worker aborts the boot on failure and stops the server at teardown.
+`lanes=()` is the honest declaration here: an engine-hosted model performs no
+pytorch streaming load, so `ctx.lane` has nothing to answer and raises by
+design.
+
+The spec is a DECLARATION — engine + flags, and nothing else. The checkpoint
+tree, the port, the environment and the supervision are the platform's half:
+
+* the checkpoint tree comes from the deploy binding, materialized to real
+  files for the binary that cannot read our store;
+* the port is allocated free unless you pin one;
+* **boot is bounded by SILENCE, never by a clock.** There is no
+  `boot_timeout_s` and there will not be one: every line the engine prints is
+  proof it is still loading, so a 35B cold load takes as long as it takes and
+  an engine that says nothing for 15 minutes is called wedged. Raise
+  `stall_window_s` only for an engine with a known-silent phase longer than
+  that — never to "fix" a boot that failed;
+* the boot ABORTS on engine death, and the whole ladder failing raises
+  `EngineBootError`;
+* **teardown is structural.** The host stops every engine the load context
+  started after your `unload`, whether or not you wrote one. `stop` signals
+  the process GROUP (vLLM's workers survive a bare SIGTERM to the parent and
+  keep the card pinned) and is idempotent, so stopping it yourself is fine.
+
+Every phase is a typed event on `engine_boot`: `engine_planned` (the ladder),
+`engine_started` (argv + port), `engine_healthy` (with the measured boot wall
+in `duration_ms`), `engine_boot_failed`, `engine_stopped` — and a degraded
+rung additionally confesses on `serve_degrade`, which is the countable
+quality channel.
 
 ### llama.cpp / GGUF
 
-For `runtime="llama-server"` the bound snapshot may be the `.gguf` file or
-a dir holding exactly one GGUF model (split shards count as one; several
-quants fail closed — pin the flavor). Unless `-ngl`/`-c` are pinned in
-`extra_args`, the worker reads the GGUF header and sizes `-ngl` + context
-to the free-VRAM budget, degrading through fewer GPU layers (down to
-CPU-only) instead of failing the boot. The serve image provides the
-`llama-server` binary (native-build image class); gen-worker adds no
-Python binding dependency.
+`LlamaServer` resolves the checkpoint tree to its single logical GGUF model
+(split shards count as one; several distinct quants fail closed — pin the
+flavor). Unless you pin `-ngl`/`-c` in `extra_args`, it reads the GGUF header
+and sizes `-ngl` + context to the free-VRAM budget, then degrades through
+half the GPU layers and finally CPU-only rather than failing the boot. The
+serve image provides the `llama-server` binary; gen-worker adds no Python
+binding dependency.
 
-`gen_worker.runtimes.llama` has the streaming client half —
-`chat_deltas(server, messages, ...)` / `completion_deltas(server, prompt,
-...)` are sync generators yielding `IncrementalTokenDelta` then one
-`TokenUsage`, so a handler is one `yield from`:
+### vLLM
 
-```python
-from gen_worker.runtimes.llama import chat_deltas
-from gen_worker.runtimes.server import ServerHandle
-
-@endpoint(model=Hub("org/llm-gguf"), resources=Resources(gpu=True),
-          runtime="llama-server")
-class Chat:
-    def setup(self, model: str, server: ServerHandle) -> None:
-        self.server = server
-
-    def chat(self, ctx, p: ChatIn) -> Iterator[IncrementalTokenDelta]:
-        yield from chat_deltas(self.server, p.messages,
-                               max_tokens=p.max_tokens,
-                               cancelled=lambda: ctx.cancelled)
-```
+`VllmServer` runs `vllm serve <checkpoint>` with the OpenAI-compatible API
+and `/health`. It has ONE rung: vLLM sizes itself from
+`--gpu-memory-utilization` and refuses rather than degrades, and a ladder
+whose lower rungs cannot work would read as resilience the endpoint does not
+have.
 
 ## RequestContext
 

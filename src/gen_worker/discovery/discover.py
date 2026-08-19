@@ -30,6 +30,7 @@ from gen_worker.discovery.entrypoints_v2 import (
     assert_manifest_advertises_something,
     discover_entrypoints,
     entrypoints_block,
+    lift_engine_runtimes,
 )
 from gen_worker.discovery.execution_lanes import (
     derive_execution_lanes,
@@ -202,9 +203,10 @@ def prime_sys_path(root: Path) -> None:
 def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     """The complete endpoint.lock manifest for the project at ``root``.
 
-    ``entrypoints[]`` + the two DERIVED censuses this image can prove about
-    itself (``execution_lanes``, ``decode_set``). No hand-maintained lists,
-    and no second declaration vocabulary.
+    ``entrypoints[]`` + the DERIVED censuses this image can prove about itself
+    (``execution_lanes``, ``decode_set``, and ``engine_runtimes`` when
+    anything hosts an external engine). No hand-maintained lists, and no
+    second declaration vocabulary.
     """
     if root is None:
         root = Path.cwd()
@@ -239,10 +241,18 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                 for e in exclusions
             ]
 
+    # pgw#1421: the THIRD derived census — which external engine binaries
+    # this image's models boot. Lifted off the slots (which is where the
+    # static read lands them) so `entrypoints[]` keeps exactly the fields the
+    # hub decodes. Omitted entirely when nothing hosts an engine, so a lock
+    # carrying this block IS an engine-hosted endpoint.
+    engine_runtimes = lift_engine_runtimes(entrypoints)
+
     manifest: Dict[str, Any] = {
         "entrypoints": entrypoints_block(entrypoints),
         "execution_lanes": manifest_block(derived),
         "decode_set": decode_set_manifest_block(decode_set),
+        **({"engine_runtimes": engine_runtimes} if engine_runtimes else {}),
     }
     # A manifest that advertises nothing is a BUILD failure, never a warning
     # the bake outlives (pgw#1387).

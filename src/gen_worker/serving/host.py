@@ -305,6 +305,14 @@ class EndpointHost:
                     "unload(%s) raised; eviction proceeds (best-effort, "
                     "never correctness)", model_cls.__name__,
                 )
+            # pgw#1421: engine-hosted teardown is STRUCTURAL, not remembered.
+            # An external engine subprocess (`llama-server`, `vllm serve`) is
+            # invisible to torch's allocator, so an unload that forgot to stop
+            # it — or raised before reaching the stop — leaves VRAM the next
+            # admit can neither see nor reclaim. This runs whatever `unload`
+            # did, and `EngineHandle.stop` is idempotent so an author who did
+            # stop it pays nothing.
+            instance.load_context.stop_engines()
             del self.instances[model_cls]
 
     def teardown(self) -> None:

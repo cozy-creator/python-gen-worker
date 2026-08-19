@@ -194,6 +194,111 @@ def _pipeline_class(model_cls: type) -> str:
     return ""
 
 
+def _engine_runtime(model_cls: type) -> str:
+    """The EXTERNAL ENGINE ``load()`` boots, read STATICALLY (pgw#1421).
+
+    ``ctx.engine(LlamaServer(...))`` is the engine-hosted tier's one spelling,
+    and this is the parse that turns it into a word the endpoint.lock can
+    state: ``"llama-server"``, ``"vllm"``, or ``""`` for a model that boots no
+    engine (every pytorch endpoint in the fleet).
+
+    Same promise as :func:`_pipeline_class` — no author code runs beyond the
+    import that already happened. Two resolutions, in order of authority:
+
+    1. the spec class bound on the endpoint's MODULE, whose ``runtime`` class
+       constant is the authority;
+    2. failing that, a ``from gen_worker… import LlamaServer`` resolved off the
+       AST, matched against ``ENGINE_SPEC_RUNTIMES``.
+
+    (2) exists for the same reason the pipeline-class fallback does: a stubbed
+    heavy dep can bind a MODULE where a class was expected. It is deliberately
+    keyed on the import RESOLVING INTO gen_worker, so an author's own class
+    that happens to be called ``LlamaServer`` is never read as this one.
+    """
+    from ..serving.engine_runtime import ENGINE_SPEC_RUNTIMES, EngineSpec
+
+    load = getattr(model_cls, "load", None)
+    if load is None:
+        return ""
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(load)))
+    except (OSError, TypeError, SyntaxError):
+        return ""
+    module = inspect.getmodule(model_cls)
+    static: Dict[str, str] = {}
+    try:
+        module_source = inspect.getsource(module) if module is not None else ""
+    except (OSError, TypeError):
+        module_source = ""
+    if module_source:
+        try:
+            static.update(_import_sites(ast.parse(module_source)))
+        except SyntaxError:
+            pass
+    static.update(_import_sites(tree))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "engine"):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Call):
+            continue
+        spec_fn = node.args[0].func
+        if not isinstance(spec_fn, ast.Name):
+            continue
+        target = getattr(module, spec_fn.id, None)
+        if isinstance(target, type) and issubclass(target, EngineSpec):
+            runtime = str(getattr(target, "runtime", "") or "")
+            if runtime:
+                return runtime
+        dotted = static.get(spec_fn.id, "")
+        if dotted.startswith("gen_worker."):
+            runtime = ENGINE_SPEC_RUNTIMES.get(dotted.rsplit(".", 1)[-1], "")
+            if runtime:
+                return runtime
+    return ""
+
+
+def lift_engine_runtimes(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The ``engine_runtimes`` census: every external engine binary this image
+    will BOOT, and which declaration asked for it.
+
+    A DERIVED census in the shape of ``execution_lanes`` and ``decode_set`` —
+    what the image can prove about itself, never a hand-maintained list. It
+    exists because "which engine does this endpoint start" was answerable in
+    v1 only by reading ``@endpoint(runtime=...)``, which the hardcut deleted,
+    and an operator staring at a pod that is not serving needs the answer
+    without the source.
+
+    Empty for every pytorch endpoint, and omitted from the manifest then, so a
+    lock that carries this block is exactly a lock whose endpoint hosts an
+    engine.
+
+    It LIFTS: the two keys `_model_slot` parked on the slot are POPPED here,
+    so the `entrypoints[]` block the hub decodes carries exactly the fields it
+    decoded before this landed. A derived fact with no hub reader belongs in
+    the lock's own census, never as a `functions[].slots[]` field — a mirror
+    with no reader is the th#2087 shape, and this one would additionally be a
+    field the hub's slot normalizer would have to learn to ignore.
+    """
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        for slot in row.get("slots", []):
+            runtime = slot.pop("engine_runtime", "") or ""
+            model_class = slot.pop("model_class", "") or ""
+            if not runtime:
+                continue
+            out.append({
+                "entrypoint": row["name"],
+                "slot": slot["name"],
+                "model_class": model_class,
+                "runtime": runtime,
+            })
+    out.sort(key=lambda r: (str(r["entrypoint"]), str(r["slot"])))
+    return out
+
+
 def _model_slot(slot: Any) -> Dict[str, Any]:
     """A model slot in the hub's `functions[].slots[]` vocabulary.
 
@@ -253,6 +358,16 @@ def _model_slot(slot: Any) -> Dict[str, Any]:
     family = getattr(declared, "name", "") or ""
     if family:
         out["family"] = family
+    # pgw#1421. Both keys are OMITTED unless this slot hosts an engine, so
+    # every pytorch row is byte-identical to what it was. They do not travel
+    # to the hub as slot fields — `lift_engine_runtimes` lifts them into the
+    # lock's own `engine_runtimes` census, which is where a DERIVED fact about
+    # the image belongs (`execution_lanes`' shape), rather than inventing a
+    # `functions[].slots[]` field no hub reader decodes.
+    runtime = _engine_runtime(model_cls)
+    if runtime:
+        out["engine_runtime"] = runtime
+        out["model_class"] = f"{model_cls.__module__}.{model_cls.__qualname__}"
     return out
 
 
@@ -494,6 +609,26 @@ def _pipeline_class_or_refuse(rows: List[Dict[str, Any]]) -> None:
             # fix (c) becoming the green path — for MARKED slots only.
             if slot.get("self_loading"):
                 continue
+            runtime = slot.get("engine_runtime") or ""
+            if runtime:
+                # pgw#1421: engine-hosted and UNMARKED. Discovery knows exactly
+                # what this slot boots, so the generic "could not read the
+                # pipeline class" below would be false AND its advice
+                # unfollowable — `ctx.load(SomePipeline)` is a load the
+                # streaming engine refuses BY DESIGN for this class of
+                # container (`serving/streaming/engine.py`: block-quantized
+                # containers are the external-binary class, not the pytorch
+                # path). An engine-hosted model is self-loading BY
+                # CONSTRUCTION; the fix is the marker, and this says so.
+                raise EntrypointDiscoveryError(
+                    f"@entrypoint {row['name']!r} slot {slot['name']!r} is "
+                    f"ENGINE-HOSTED ({runtime}): its load() boots an external "
+                    "engine, so there is no Python pipeline class to name. "
+                    "Declare it — class YourModel(Model[X], lanes=(), "
+                    f'self_loading="served by {runtime}; ctx.load drives no '
+                    'part of it") — rather than inventing a class name to get '
+                    "past this."
+                )
             raise EntrypointDiscoveryError(
                 f"@entrypoint {row['name']!r} slot {slot['name']!r}: could not "
                 "read the pipeline class from the model's load(). Publish "
@@ -589,5 +724,6 @@ __all__ = [
     "EntrypointDiscoveryError",
     "assert_manifest_advertises_something",
     "discover_entrypoints",
+    "lift_engine_runtimes",
     "entrypoints_block",
 ]
