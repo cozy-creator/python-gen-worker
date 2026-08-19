@@ -601,3 +601,26 @@ def test_a_minted_artifact_the_fleet_cannot_take_is_still_banked_and_stated(
     assert store.facts() == {"tier": "local+hub", "local_only": 1}
     said = [e for e in wire if e[0] == "self_mint_publish_local_only"]
     assert len(said) == 1 and "pgw#1368" in said[0][2]
+
+
+def test_a_graph_blob_with_no_route_costs_its_graph_and_names_its_owner(
+    tmp_path: Path,
+) -> None:
+    """The mint's INPUT leg is the third unwired one, and it must fail TYPED.
+
+    th#2133's adopt answer carries each graph's ``program`` digest and presigns
+    only the compiled ARTIFACT, so a pod whose CAS has never seen the
+    serialized graph has no route to it. That is a per-graph refusal naming its
+    owner — never an ``AttributeError``, and never a re-trace.
+    """
+    from gen_worker.serving.mint_store import ProgramBlobUnreachable
+
+    cas = LocalCAS(tmp_path / "cas")
+    store = TieredGraphStore(LocalGraphStore(cas), None)
+    with pytest.raises(ProgramBlobUnreachable, match="pgw#1370"):
+        store.fetch_program("sha256:" + "0" * 64, tmp_path / "blob.pt2")
+
+    # A blob this pod ALREADY holds needs no route: a digest is a digest.
+    ref = cas.put_bytes(b"a serialized ExportedProgram")
+    got = store.fetch_program(str(ref), tmp_path / "have.pt2")
+    assert got.read_bytes() == b"a serialized ExportedProgram"

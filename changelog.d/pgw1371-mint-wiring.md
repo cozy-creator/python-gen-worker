@@ -26,6 +26,13 @@
   and the fleet leg's absence is one typed `self_mint_publish_local_only` event naming
   pgw#1368/th#2132, never a per-graph failure.
 
+- **A third unwired leg, named rather than crashed: the mint's INPUT.** th#2133's adopt answer
+  carries each graph's `program` digest and presigns only the compiled ARTIFACT, so a pod whose CAS
+  has never seen the serialized `ExportedProgram` has no route to it. `TieredGraphStore.fetch_program`
+  serves it from the pod's own CAS by content address when it is there and otherwise raises a typed
+  `ProgramBlobUnreachable` naming pgw#1370 and the hub — a per-graph `MintFailure`, never an
+  `AttributeError`, and never a re-trace.
+
 - **`HubGraphStore.get_graphs` stops swallowing `ReleaseNotStamped`.** Flattening the typed 404 into
   `None` erased the only distinction it carries — "no adopt story, serve eager" versus "answered and
   rebuilt to nothing" — and made both callers' handlers dead code.

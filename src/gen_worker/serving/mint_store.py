@@ -43,6 +43,14 @@ logger = logging.getLogger(__name__)
 KIND_PUBLISH_LOCAL_ONLY = "self_mint_publish_local_only"
 
 
+class ProgramBlobUnreachable(RuntimeError):
+    """The serialized graph this hole must compile cannot be fetched.
+
+    Costs its own graph and names its owner. NEVER a re-trace: running author
+    code at mint time is exactly what the blob-in design removes.
+    """
+
+
 class TieredGraphStore:
     """Local CAS first, hub second — for reads AND for the mint's publishes.
 
@@ -93,19 +101,37 @@ class TieredGraphStore:
         return self.upstream.get_manifest(graph, env)
 
     def fetch_program(self, digest: str, destination: Path) -> Path:
-        """One graph's serialized ``ExportedProgram`` — the mint's input.
+        """One graph's serialized ``ExportedProgram`` — the mint's INPUT.
 
-        Upstream only: the blob is release content addressed by the document,
-        and a pod that has never seen it cannot have it locally.
+        Upstream first when it can, then the pod's own CAS by content address:
+        a digest is a digest, so a blob this pod already holds needs no hop.
+
+        **A THIRD UNWIRED LEG, named rather than crashed.** th#2133's adopt
+        answer carries each graph's ``program`` digest and NO transport for
+        it — its ``transport.files`` presign the compiled ARTIFACT, not the
+        serialized graph — so a pod whose CAS has never seen the blob has no
+        route to it. pgw#1370 owns publishing the blob and the hub owns
+        answering with a way to fetch it. Until then this raises a typed
+        refusal per graph, which the mint records as a ``MintFailure`` naming
+        the owner instead of dying on an ``AttributeError``.
         """
         fetch = getattr(self.upstream, "fetch_program", None)
-        if fetch is None:
-            fetch = getattr(self.local, "fetch_program", None)
-        if fetch is None:
-            raise AttributeError(
-                "neither store tier exposes `fetch_program`, so this mint has "
-                "no way to fetch the serialized graph it must compile")
-        return Path(fetch(digest, destination))
+        if fetch is not None:
+            return Path(fetch(digest, destination))
+        cas = getattr(self.local, "cas", None)
+        if cas is not None and cas.contains(digest):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(Path(cas.object_path(digest)).read_bytes())
+            return destination
+        raise ProgramBlobUnreachable(
+            f"graph blob {digest} is not in this pod's CAS and the adopt "
+            f"answer offers no transport for it: th#2133's per-graph rows "
+            f"carry the `program` DIGEST but presign only the compiled "
+            f"artifact. pgw#1370 owns publishing the serialized "
+            f"ExportedProgram and the hub owns answering with a fetch route. "
+            f"This mint will NEVER re-trace to work around it (author code "
+            f"does not run at mint time)."
+        )
 
     # -- the mint's publish -------------------------------------------------
 
@@ -159,4 +185,9 @@ def worker_store(cas_dir: Path, upstream: Optional[Any] = None) -> TieredGraphSt
     return TieredGraphStore(LocalGraphStore(LocalCAS(Path(cas_dir))), upstream)
 
 
-__all__ = ["KIND_PUBLISH_LOCAL_ONLY", "TieredGraphStore", "worker_store"]
+__all__ = [
+    "KIND_PUBLISH_LOCAL_ONLY",
+    "ProgramBlobUnreachable",
+    "TieredGraphStore",
+    "worker_store",
+]
