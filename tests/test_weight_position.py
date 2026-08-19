@@ -34,7 +34,7 @@ import pytest
 from gen_worker import activity, weight_position
 from gen_worker.models.cozy_snapshot import ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
-from gen_worker.models.refs import TensorhubRef
+from gen_worker.models.refs import TensorhubRef, WireRef
 from gen_worker.models.store import ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.weight_position import MIB, FetchPosition
@@ -324,6 +324,10 @@ def test_a_frozen_or_regressing_position_emits_nothing_new(_fine_cadence: Any) -
 # opened only when there is a transfer, closed on every exit path.
 # ---------------------------------------------------------------------------
 
+#: The ref every record-lifecycle test materializes.
+_REF = WireRef("acme/model-a")
+
+
 def _pb_snapshot(files: list[tuple[str, bytes, str]]) -> pb.Snapshot:
     """The wire form `ModelStore.ensure_local` takes, over the same blobs."""
     resolved = _resolved(files)
@@ -363,7 +367,7 @@ def test_a_real_fetch_opens_advances_and_closes_the_record(
 
         async def run() -> None:
             activity.bind_sink(wire.send, asyncio.get_running_loop())
-            await store.ensure_local("acme/model-a", snapshot)
+            await store.ensure_local(_REF, snapshot)
             for _ in range(8):
                 await asyncio.sleep(0)
 
@@ -416,17 +420,17 @@ def test_a_resident_ref_opens_no_download_record(
         async def run() -> None:
             activity.bind_sink(wire.send, asyncio.get_running_loop())
             # Attempt 3: the cold fetch that made the pod warm.
-            await store.ensure_local("acme/model-a", snapshot)
+            await store.ensure_local(_REF, snapshot)
             for _ in range(8):
                 await asyncio.sleep(0)
-            assert store.residency.tier("acme/model-a") is not None
+            assert store.residency.tier(_REF) is not None
             wire.updates.clear()
             wire.model_events.clear()
 
             # Attempt 4, WARM POD REUSE — with the cached-path lookup missing.
             store.disk_local_path = lambda ref: None  # type: ignore[method-assign]
-            store._verified.discard("acme/model-a")
-            await store.ensure_local("acme/model-a", snapshot)
+            store._verified.discard(_REF)
+            await store.ensure_local(_REF, snapshot)
             for _ in range(8):
                 await asyncio.sleep(0)
 
@@ -468,7 +472,7 @@ def test_a_transfer_that_dies_midway_leaves_no_open_record(
 
         async def run() -> None:
             activity.bind_sink(wire.send, asyncio.get_running_loop())
-            task = asyncio.ensure_future(store.ensure_local("acme/model-a", snapshot))
+            task = asyncio.ensure_future(store.ensure_local(_REF, snapshot))
             # Let the record open and the transfer start, then kill it.
             await asyncio.sleep(0.05)
             task.cancel()
