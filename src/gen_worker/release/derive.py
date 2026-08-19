@@ -44,6 +44,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import inspect
+import logging
 import itertools
 import json
 import types
@@ -68,6 +69,8 @@ from .trace_context import (
     TraceLoadContext,
     TraceRequestContext,
 )
+
+_LOG = logging.getLogger("gen_worker.release.derive")
 
 DOCUMENT_KIND = "gen-worker.release-metadata@1"
 
@@ -182,6 +185,45 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
         return str(cas.put_bytes(buffer.getvalue()))
 
     return sink
+
+
+def _trace_device() -> str:
+    """The DEVICE CLASS this derive traces on -- and it is a real choice.
+
+    pgw#1458: a graph's device is established at TRACE time and cannot be
+    re-homed downstream, so a cpu-traced graph cannot be cuda-minted. torchcg
+    records the class in the declaration and refuses the mismatch by name
+    (`RuntimeCompatibility.key`), which is the whole point -- but the refusal
+    is only useful if the derive states the class DELIBERATELY rather than
+    inheriting a default that happens to be wrong for the host.
+
+    A fake-cuda trace needs no silicon in principle, and torchcg proves that
+    for plain modules. It does NOT yet hold for a full diffusers pipeline on a
+    GPU-less box: `encode_prompt` moves real token ids to the execution device
+    and the fake-tensor path runs a real cuda kernel for them
+    (`No CUDA GPUs are available`). Until that is closed, this states the
+    truth about the host instead of failing at the first pipeline call.
+
+    So: cuda when there IS a device, cpu otherwise, and the fallback SAYS what
+    it costs. A cpu-derived document is not a degraded cuda one -- it is a
+    different graph class, and a cuda mint of it refuses by name rather than
+    serving something wrong.
+    """
+
+    try:
+        import torch
+    except ImportError:  # pragma: no cover - torch is the derive's premise
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    _LOG.warning(
+        "derive: no CUDA device is visible, so this derive traces on CPU and "
+        "produces CPU-CLASS graphs. They are a different graph class from the "
+        "cuda graphs a GPU pod serves — a cuda mint of this document refuses "
+        "by name (pgw#1458), it does not silently serve. Derive on a "
+        "CUDA-bearing host to publish servable graphs."
+    )
+    return "cpu"
 
 
 def _demote_fakes_to_meta(torch: Any, program: Any) -> None:
@@ -1072,7 +1114,7 @@ def _derive_lane(
         # degrade quietly — torchcg raises `DiscoveryError` naming the faked
         # constants — but a digest taken over faked values would be a lie,
         # so the wiring is the point, not the refusal.
-        with hollow.hollow_session() as session:
+        with hollow.hollow_session(_trace_device()) as session:
             try:
                 model.load(load_ctx)
             except hollow.HollowError as exc:

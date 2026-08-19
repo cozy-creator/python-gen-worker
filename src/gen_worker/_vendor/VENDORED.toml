@@ -299,7 +299,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "8d7ab577"
+rev = "d132d872"
 subdir = "src/torchcg"
 # tcg#55/pgw#1458 RE-VENDOR (2026-08-19), from `ad399093`. Two upstream changes
 # land together because they are one ruling ("torchcg does too much"):
@@ -464,7 +464,7 @@ rewrites = [
 "adopt.py" = "6e8cc489a720fb9c88c401c648862705b8584a2ce62b156a6b7261fb1ad6a184"
 "artifact.py" = "e9281e4bae4154f93694efa994133e001362c5db271855e03e921110b1fee019"
 "cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
-"compiler.py" = "8450b10e90ca8c6d8c411654d963ebc16dd3580bfe1427cce3966fc2b03972a7"
+"compiler.py" = "a0a06109eec956388c8ff261e65b8dd6f6a7b45dbb3ac434fe2e60f14e410923"
 "contracts/KEY_GRAMMAR_DIGEST" = "0503f3251f2eb48b794961736f021915cd56c14930798ac844c90112fa2af69d"
 "contracts/__init__.py" = "093c5cbe1800d0cd19a8d57cb1493ae0509a4016b95470f514f05db9bad892c4"
 "contracts/call_ingress_v1.json" = "3af3437ec20b15156892055ab89bf21621378cee9f0f72f63bc4626f69f242dc"
