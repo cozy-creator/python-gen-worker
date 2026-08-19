@@ -15,13 +15,50 @@ from .ingress import CallIngress, IngressError
 
 _GRAPH_CLASS_CANONICAL_FORMAT = 1
 _GRAPH_DIGEST_HEX = 16
-_GRAPH_INTERFACE_FIELDS = frozenset(
-    ("v", "constant_fqns", "lifted_inputs", "pytree", "specialization")
-)
+
+#: tcg#55. The graph interface is now DERIVED, never supplied: every field is
+#: a fact the ``ExportedProgram`` already encodes, plus the one fact it cannot
+#: (the call ingress, which comes from the real call's parameter names and
+#: nesting). v3's ``lifted_inputs``, ``specialization`` and ``pytree``
+#: in/out spellings were read by NOTHING in this repo or in the gen-worker --
+#: a parallel metadata layer that only existed to be validated, and therefore
+#: only existed to be stubbed wrong (pgw#1456's two-field stub).
+GRAPH_INTERFACE_FORMAT = 4
+_GRAPH_INTERFACE_FIELDS = frozenset(("v", "constant_fqns", "ingress"))
+#: The retired v3 spelling, kept ONLY so bytes carrying it refuse BY NAME.
+_RETIRED_V3_FIELDS = frozenset(("lifted_inputs", "specialization", "pytree"))
 
 
 class DeclarationError(ValueError):
     """A graph or runtime cannot state a complete v1 declaration."""
+
+
+class RetiredGraphInterface(DeclarationError):
+    """Bytes carry the retired v3 graph interface (tcg#55).
+
+    Named rather than generic on purpose: graph classes are CONTENT
+    ADDRESSED, so there is nothing to migrate -- the next derive republishes
+    under the v4 key. What must never happen is a v3 document being coerced
+    into a v4 shape and silently keying to something no producer ever
+    derived.
+    """
+
+
+def _refuse_retired_interface(graph: Mapping[str, Any]) -> None:
+    """Refuse a v3-shaped graph interface by name, before anything else."""
+
+    present = _RETIRED_V3_FIELDS & set(graph)
+    version = graph.get("v")
+    if not present and version != 3:
+        return
+    raise RetiredGraphInterface(
+        f"graph interface is the RETIRED v3 shape "
+        f"(v={version!r}, retired field(s) {sorted(present)!r}); tcg#55 derives "
+        f"constant_fqns from the exported program, deletes lifted_inputs and "
+        f"specialization (nothing ever read them), and promotes "
+        f"pytree.ingress to a top-level 'ingress'. Graph classes are content "
+        f"addressed: re-derive to republish under a v{GRAPH_INTERFACE_FORMAT} key."
+    )
 
 
 class _Symbols:
@@ -356,6 +393,7 @@ class GraphClassDeclaration:
             ) from exc
         if not isinstance(canonical_graph, dict) or not canonical_graph:
             raise DeclarationError("graph_class graph interface must be a non-empty object")
+        _refuse_retired_interface(canonical_graph)
         graph_fields = set(canonical_graph)
         if graph_fields not in (
             _GRAPH_INTERFACE_FIELDS,
@@ -365,21 +403,19 @@ class GraphClassDeclaration:
                 "graph_class graph interface fields must be exactly "
                 f"{sorted(_GRAPH_INTERFACE_FIELDS)!r}, with literal_values only when present"
             )
-        if type(canonical_graph.get("v")) is not int or canonical_graph.get("v") != 3:
-            raise DeclarationError("graph_class graph interface v must be 3")
-        for field in ("constant_fqns", "lifted_inputs"):
-            values = canonical_graph.get(field)
-            if not isinstance(values, list) or not all(
-                isinstance(value, str) and value for value in values
-            ) or values != sorted(set(values)):
-                raise DeclarationError(
-                    f"graph_class graph interface {field} must be sorted unique strings"
-                )
-        if not isinstance(canonical_graph.get("pytree"), dict) or not isinstance(
-            canonical_graph.get("specialization"), dict
+        if (
+            type(canonical_graph.get("v")) is not int
+            or canonical_graph.get("v") != GRAPH_INTERFACE_FORMAT
         ):
             raise DeclarationError(
-                "graph_class graph interface pytree and specialization must be objects"
+                f"graph_class graph interface v must be {GRAPH_INTERFACE_FORMAT}"
+            )
+        values = canonical_graph.get("constant_fqns")
+        if not isinstance(values, list) or not all(
+            isinstance(value, str) and value for value in values
+        ) or values != sorted(set(values)):
+            raise DeclarationError(
+                "graph_class graph interface constant_fqns must be sorted unique strings"
             )
         try:
             ingress = CallIngress.from_graph(canonical_graph)
@@ -396,7 +432,7 @@ class GraphClassDeclaration:
         ):
             raise DeclarationError("range_digest must be 32 lowercase hexadecimal characters")
         if self.range_digest != ingress.digest():
-            raise DeclarationError("range_digest does not restate graph.pytree.ingress")
+            raise DeclarationError("range_digest does not restate graph.ingress")
         fork = tuple((str(name), value) for name, value in self.fork)
         if any(not name or name != name.strip() for name, _ in fork):
             raise DeclarationError("graph_class fork names must be non-empty canonical strings")
@@ -437,14 +473,34 @@ class GraphClassDeclaration:
         object.__setattr__(self, "graph", canonical_graph)
         object.__setattr__(self, "fork", fork)
         object.__setattr__(self, "class_dims", class_dims)
+        # tcg#55/pgw#1458: placement is ALWAYS recorded, including the
+        # single-device case. It used to be dropped ("single-device placement
+        # must be omitted"), which made the artifact's own device invisible in
+        # its declaration -- so a cuda mint of a cpu-traced program could only
+        # surface as AOTInductor's internal `Expected: cpu, Got: cuda:0`
+        # assertion, four layers down, after the compile had already started.
+        # It is DERIVED from the program, so recording it adds no supplied
+        # field and no producer-can-lie seam.
         canonical_placement = tuple(sorted({str(device) for device in self.placement if device}))
-        if len(canonical_placement) == 1:
-            raise DeclarationError("single-device placement must be omitted")
         object.__setattr__(self, "placement", canonical_placement)
+
+    @property
+    def device_types(self) -> tuple[str, ...]:
+        """The DEVICE CLASSES this graph was traced on (``cpu``, ``cuda``).
+
+        Device is not arch. One cuda-traced graph serves every ``sm_NN`` --
+        the arch enters at ARTIFACT level through
+        :class:`RuntimeCompatibility` -- but it does not serve a cpu mint,
+        because the trace itself stamps the device into every node's meta
+        (and therefore into ``graph_witness``). Derived from placement, so
+        there is nothing here a producer could state wrongly.
+        """
+
+        return tuple(sorted({device.split(":", 1)[0] for device in self.placement}))
 
     def facts(self) -> dict[str, object]:
         facts: dict[str, object] = {
-            "v": 3,
+            "v": GRAPH_INTERFACE_FORMAT,
             "target": self.target,
             "fork": [[name, value] for name, value in self.fork],
             "class_dims": [[name, value] for name, value in self.class_dims],
@@ -454,7 +510,7 @@ class GraphClassDeclaration:
             "strict": self.strict,
             "lora_bucket": self.lora_bucket,
         }
-        if len(self.placement) > 1:
+        if self.placement:
             facts["placement"] = list(self.placement)
         return facts
 
@@ -470,56 +526,62 @@ class GraphClassDeclaration:
 
 @dataclass(frozen=True, slots=True)
 class GraphClassSpec:
-    """A named exported program ready for local resolution or minting."""
+    """One exported program plus the only facts torch cannot know about it.
+
+    tcg#55 (Paul: "torchcg does too much"). The producer used to hand over a
+    ``graph`` interface mapping restating facts the ``ExportedProgram``
+    already encodes. That mapping is gone. What is left is an
+    ``ExportedProgram``, an IDENTITY (``graph_class``/``target``), and the
+    call INGRESS -- and the ingress is the one genuinely unknowable fact,
+    because the parameter names and argument nesting of the call live in the
+    author's ``forward`` signature, not in the traced graph.
+
+    Every other interface field is derived in :meth:`declare`. A producer
+    cannot state ``constant_fqns`` wrongly, because there is no parameter to
+    state it with. The remaining constant-table checks are against an
+    INDEPENDENT witness -- the compiled AOTI package's own
+    ``get_constant_fqns()``, at admission (``engine._admit_constant_table``)
+    and again at bind (``runner.bind``) -- never derived-against-derived.
+    """
 
     graph_class: str
     target: str
     program: object
-    graph: Mapping[str, Any]
+    ingress: CallIngress
     fork: tuple[tuple[str, Any], ...] = ()
     class_dims: tuple[tuple[str, int], ...] = ()
     strict: bool = True
     lora_bucket: int = 0
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.ingress, CallIngress):
+            raise DeclarationError(
+                "a graph class is declared from a typed CallIngress; the v3 raw "
+                "graph-interface mapping is retired (tcg#55). Decode it first: "
+                "CallIngress.decode(...)"
+            )
+
     def declare(self) -> GraphClassDeclaration:
-        graph_witness = _graph_digest(self.program)
+        graph: dict[str, Any] = {
+            "v": GRAPH_INTERFACE_FORMAT,
+            "constant_fqns": list(_constant_names(self.program)),
+            "ingress": self.ingress.as_dict(),
+        }
         literals = _literal_digest(self.program)
-        placement = _placement(self.program)
-        graph = dict(self.graph)
-        constant_fqns = list(_constant_names(self.program))
-        stated_constants = graph.get("constant_fqns")
-        if stated_constants not in (None, constant_fqns):
-            raise DeclarationError(
-                "graph interface constant_fqns disagrees with the exported program"
-            )
-        graph["constant_fqns"] = constant_fqns
         if literals:
-            stated = graph.get("literal_values")
-            if stated not in (None, literals):
-                raise DeclarationError(
-                    "graph interface literal_values disagrees with the exported program"
-                )
             graph["literal_values"] = literals
-        elif "literal_values" in graph:
-            raise DeclarationError(
-                "graph interface states literal_values but the exported program has none"
-            )
-        try:
-            range_digest = CallIngress.from_graph(graph).digest()
-        except IngressError as exc:
-            raise DeclarationError(f"graph_class call ingress is invalid: {exc}") from exc
         return GraphClassDeclaration(
             self.graph_class,
             self.target,
             graph,
-            graph_witness,
-            range_digest,
+            _graph_digest(self.program),
+            self.ingress.digest(),
             fork=self.fork,
             class_dims=self.class_dims,
             strict=self.strict,
             lora_bucket=self.lora_bucket,
             literal_values=literals,
-            placement=placement if len(placement) > 1 else (),
+            placement=_placement(self.program),
         )
 
 
@@ -574,7 +636,32 @@ class RuntimeCompatibility:
     def host_isa(self) -> dict[str, str]:
         return dict(self._host_isa)
 
+    @property
+    def device_type(self) -> str:
+        """The DEVICE CLASS this runtime compiles for -- ``cpu`` or ``cuda``."""
+
+        return "cpu" if self.sm.startswith("cpu") else "cuda"
+
     def key(self, declaration: GraphClassDeclaration) -> CompiledGraphKey:
+        # pgw#1458: a program's device is established at TRACE time and cannot
+        # be re-homed downstream -- four escalating attempts to move it were
+        # each defeated by a different layer, and the terminal one was
+        # AOTInductor's own internal `Expected: cpu, Got: cuda:0`. That
+        # assertion fires minutes into a compile, names no graph class, and is
+        # unreachable from a log. The declaration knows the trace device
+        # (derived, always recorded), and this runtime knows the compile
+        # device, so the disagreement is a one-line refusal BEFORE any work.
+        traced = declaration.device_types
+        if traced and self.device_type not in traced:
+            raise DeclarationError(
+                f"graph class {declaration.graph_class!r} was TRACED on "
+                f"{list(traced)!r} and this runtime compiles for "
+                f"{self.device_type!r} ({self.sm}). Device is established at "
+                f"trace time and cannot be re-homed into an exported program "
+                f"(pgw#1458); re-derive the graph on {self.device_type!r}. "
+                f"Note device is not arch: one {self.device_type!r} trace "
+                f"serves every sm."
+            )
         return from_axes(
             {
                 "graph": declaration.class_hash,

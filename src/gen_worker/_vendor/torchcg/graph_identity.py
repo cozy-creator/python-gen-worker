@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .declaration import DeclarationError, _canonical_graph, _literal_digest
@@ -42,8 +42,10 @@ def is_graph_hash(value: object) -> bool:
     return isinstance(value, str) and _GRAPH_RE.fullmatch(value) is not None
 
 
-def graph_hash(program: object, ingress: CallIngress) -> str:
-    """Content-hash one derived graph: canonical trace + ingress contract.
+def graph_hash(
+    program: object, ingress: CallIngress, *, passes: Sequence[str] = ()
+) -> str:
+    """Content-hash one derived graph: canonical trace + ingress + passes.
 
     The payload is the sole v1 canonical serialization of the exported program
     (graph nodes, symbol ranges, signature -- the ``declaration`` renderer,
@@ -51,6 +53,15 @@ def graph_hash(program: object, ingress: CallIngress) -> str:
     the literal-constant digest when the trace baked literal tensor values in.
     Parameters and buffers contribute names, dtypes and shapes only: weights
     are checkpoint-side and never part of graph identity.
+
+    ``passes`` (tcg#52) are the transform passes that ran BEFORE this trace,
+    in the order the lane names them. They are a derivation input exactly as
+    pins are: two lanes differing only by a pass are DIFFERENT graphs. A
+    transformed module usually traces differently anyway -- the pass name is
+    here so that a pass which does NOT change the trace still cannot share an
+    identity with the untransformed lane. The line is always written
+    (``passes -`` when there are none), because "no pass" is a stated
+    property of the lane, never an absent row.
     """
 
     try:
@@ -64,6 +75,10 @@ def graph_hash(program: object, ingress: CallIngress) -> str:
             ingress.as_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
         )
     )
+    for name in passes:
+        if not isinstance(name, str) or not name.strip():
+            raise GraphIdentityError("a pass name must be a non-empty string")
+    lines.append("passes " + (",".join(passes) if passes else "-"))
     lines.append(f"literals {literals or '-'}")
     digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:_DIGEST_HEX]
     return f"{GRAPH_SCHEME}-{digest}"

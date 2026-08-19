@@ -30,16 +30,12 @@ def _exported(literal: Any, value: Any) -> tuple[Any, tuple[Any, ...]]:
 
 def _spec(program: Any, args: tuple[Any, ...]) -> GraphClassSpec:
     ingress = build_call_ingress(program, ("value",), args, {})
+    # tcg#55: the ingress is the ONLY graph fact a producer still supplies.
     return GraphClassSpec(
         graph_class="model/literal",
         target="denoiser",
         program=program,
-        graph={
-            "v": 3,
-            "lifted_inputs": [],
-            "pytree": {"in": "", "out": "", "ingress": ingress.as_dict()},
-            "specialization": {},
-        },
+        ingress=ingress,
     )
 
 

@@ -19,11 +19,13 @@ from typing import Any
 
 from .graph_identity import GraphIdentityError, is_graph_hash
 from .ingress import CallIngress, IngressError
-from .lane import LaneError, require_contract_ref, require_targets
+from .lane import LaneError, require_contract_ref, require_passes, require_targets
 
 DOCUMENT_FORMAT = 1
 _DOCUMENT_FIELDS = frozenset(("v", "closure", "lanes"))
-_LANE_FIELDS = frozenset(("contract", "targets", "graphs", "unobserved_targets"))
+_LANE_FIELDS = frozenset(
+    ("contract", "targets", "graphs", "unobserved_targets", "passes")
+)
 _GRAPH_FIELDS = frozenset(("graph", "target", "ingress", "program"))
 
 
@@ -75,17 +77,25 @@ class LaneGraphs:
 
     A lane IS its contract reference (Paul's main_v2 review ruling): the
     handle is the row key, and there is no separate name.
+
+    ``passes`` (tcg#52) restates the transform passes that ran before these
+    graphs were derived. It is not decoration: it is a ``cg-graph-v1``
+    derivation input, so a serving boot whose ran-pass set differs from this
+    row is adopting graphs for a module it does not have -- ``AdoptSession``
+    refuses that at construction.
     """
 
     contract: str
     targets: tuple[str, ...]
     graphs: tuple[GraphRecord, ...]
     unobserved_targets: tuple[str, ...] = ()
+    passes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         try:
             require_contract_ref(self.contract)
             require_targets(self.targets)
+            object.__setattr__(self, "passes", require_passes(self.passes))
         except LaneError as exc:
             raise DocumentError(f"lane graphs restate an invalid lane: {exc}") from exc
         # pgw#1384: GRAPH ORDER IS SEMANTIC, not canonical. The serving
@@ -133,6 +143,7 @@ class LaneGraphs:
             "targets": list(self.targets),
             "graphs": [record.as_dict() for record in self.graphs],
             "unobserved_targets": list(self.unobserved_targets),
+            "passes": list(self.passes),
         }
 
 
@@ -209,10 +220,12 @@ class GraphSetDocument:
             raw_graphs = raw_lane.get("graphs")
             raw_targets = raw_lane.get("targets")
             raw_unobserved = raw_lane.get("unobserved_targets")
+            raw_passes = raw_lane.get("passes")
             if (
                 not isinstance(raw_graphs, list)
                 or not isinstance(raw_targets, list)
                 or not isinstance(raw_unobserved, list)
+                or not isinstance(raw_passes, list)
             ):
                 raise DocumentError("lane arrays are malformed")
             records: list[GraphRecord] = []
@@ -242,6 +255,7 @@ class GraphSetDocument:
                     targets=tuple(raw_targets),
                     graphs=tuple(records),
                     unobserved_targets=tuple(raw_unobserved),
+                    passes=tuple(raw_passes),
                 )
             )
         try:

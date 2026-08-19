@@ -27,12 +27,15 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .document import GraphRecord, GraphSetDocument, LaneGraphs
 from .graph_identity import EnvIdentity
 from .requirements import assert_exact_env
 from .store import GraphStore, StoreError
+
+if TYPE_CHECKING:  # torch-free import closure: transform.py is torch-shaped
+    from .transform import TransformSet
 
 #: Turns one fetched artifact into the callable that replaces the target
 #: module's forward for its graph class. The real AOTInductor loader arrives
@@ -183,6 +186,7 @@ class AdoptSession:
         loader: ArtifactLoader,
         artifacts_dir: str | Path,
         installed: Mapping[str, str],
+        transforms: TransformSet | None = None,
     ) -> None:
         lane = next((row for row in document.lanes if row.contract == contract), None)
         if lane is None:
@@ -195,6 +199,13 @@ class AdoptSession:
         self.env = EnvIdentity(closure=document.closure, sm=sm)
         # The exact-env audit, BEFORE any artifact or module is touched.
         assert_exact_env(self.env, installed=installed, sm=sm)
+        # And the PASS audit, in the same breath and for the same reason
+        # (tcg#52): a pass name is a cg-graph-v1 derivation input, so a boot
+        # whose ran-pass set differs from the document's lane row is about to
+        # arm graphs derived from a module it does not have. Refusing here is
+        # what makes "a pass after export" unrepresentable on the serve side
+        # -- the set is stated before any author code is adopted.
+        self.passes = self._reconcile_passes(lane, transforms)
         self._store = store
         self._loader = loader
         self._artifacts_dir = Path(artifacts_dir)
@@ -206,6 +217,17 @@ class AdoptSession:
         self._adopted: set[str] = set()
         self._holes: dict[str, Hole] = {}
         self._ambiguous: set[str] = set()
+
+    @staticmethod
+    def _reconcile_passes(
+        lane: LaneGraphs, transforms: TransformSet | None
+    ) -> tuple[str, ...]:
+        from .transform import TransformOrderError, require_transform_set
+
+        try:
+            return require_transform_set(lane.contract, transforms, lane.passes)
+        except TransformOrderError as exc:
+            raise AdoptError(str(exc)) from exc
 
     # -- ctx.compile --------------------------------------------------------
 
@@ -245,6 +267,12 @@ class AdoptSession:
         return dispatcher
 
     def _adopt_module(self, module: Any) -> None:
+        from .transform import seal_for_export
+
+        # Export-bound from here: a pass handed this module later is refused
+        # from the pass side too (TransformSession.run), so the ordering holds
+        # whichever end someone starts from.
+        seal_for_export(module)
         signature = _forward_parameters(module)
         claimed = [
             record
