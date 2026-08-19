@@ -73,6 +73,7 @@ def _recording_to(moved: List[Any]) -> Any:
     return to
 
 
+# pgw#1486: the ladder is consulted before placement, not after.
 def test_the_ladder_is_asked_while_the_pipeline_is_still_on_the_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,6 +114,7 @@ def test_the_ladder_is_asked_while_the_pipeline_is_still_on_the_host(
     )
 
 
+# pgw#1486: an offload rung owns placement; the bridge must not re-move it.
 def test_an_offload_rung_places_its_own_components(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -145,6 +147,7 @@ def test_an_offload_rung_places_its_own_components(
     )
 
 
+# pgw#1452: a pipeline that fits is still placed where the worker said.
 def test_a_resident_rung_still_places_the_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -165,6 +168,7 @@ def test_a_resident_rung_still_places_the_pipeline(
     )
 
 
+# pgw#1486: a ladder that cannot size an object never refuses the load.
 def test_a_ladder_that_cannot_size_the_pipeline_does_not_block_the_load(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -185,6 +189,7 @@ def test_a_ladder_that_cannot_size_the_pipeline_does_not_block_the_load(
     assert moved == [("cuda",)]
 
 
+# pgw#1486: admission check — no compiled graph over relocating weights.
 def test_compile_will_not_arm_over_hook_managed_weights() -> None:
     """The ADMISSION half. Under an offload rung accelerate moves a module's
     weights on and off the device per forward, so a compiled graph's bound
@@ -216,6 +221,7 @@ def test_compile_will_not_arm_over_hook_managed_weights() -> None:
     assert len(sink_calls) == 1, "the sink must not be reached under a rung"
 
 
+# pgw#1486: the bottom rung parked modules on `meta` and broke `pipe.device`.
 def test_pipeline_device_never_answers_meta_to_endpoint_code() -> None:
     """The bottom rung's own defect. `enable_sequential_cpu_offload` parks
     modules on `meta`, so `pipeline.device` — the public property endpoint code

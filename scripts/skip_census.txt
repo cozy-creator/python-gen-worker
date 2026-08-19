@@ -285,3 +285,14 @@ CI-SKIPPED tests/test_engine_placement.py|this host's nvml is version-mismatched
 # pre-populate that cache, so the row is a CI fact rather than a defect, and the
 # property it guards is measured on an authoring box that has the model.
 CI-SKIPPED tests/test_bridge_placement.py|hf-internal-testing/tiny-stable-diffusion-pipe is not in the local hf cache (<path>)
+
+# pgw#1486: the VRAM-fit suite's fixture skip, and it is the SAME fact as the
+# `test_bridge_placement.py` row above — both build the real tiny SD pipeline,
+# because the properties under test are things that happen to what
+# `from_pretrained` returns, and a hand-built double that never calls it could
+# not catch either defect. CI runners do not pre-populate the HF cache.
+# The load-bearing proof for this suite is not CI: it is the local 4070 run
+# recorded in the tracker (master puts 7.14 GiB on a 7.62 GiB card and OOMs;
+# the fix engages `model_offload` pre-placement, 0.51 GiB resident, and serves),
+# plus the red arm in a detached master worktree where 4 of the 6 cases fail.
+CI-SKIPPED tests/test_vram_fit.py|hf-internal-testing/tiny-stable-diffusion-pipe is not in the local hf cache (<path>)
