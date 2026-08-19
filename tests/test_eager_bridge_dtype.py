@@ -1,4 +1,8 @@
-"""pgw#1447: the eager `from_pretrained` bridge and `torch_dtype`.
+"""The eager `from_pretrained` bridge and `torch_dtype`.
+
+# pgw#1447: a kwargs-STRICT pipeline refuses the keyword.
+# pgw#1448: the lane handed it a STRING, so kwargs-ACCEPTING pipelines ran fp32.
+
 
 `ctx.load`'s docstring states the author contract as *"No ``torch_dtype=`` (the
 lane contract IS the dtype)"* — and twelve lines below it, the eager bridge
