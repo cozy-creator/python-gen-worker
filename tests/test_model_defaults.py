@@ -8,11 +8,13 @@ directions, and clamp caller-visibility through the REAL
 
 from __future__ import annotations
 
+import pathlib
 import warnings
 
 import msgspec
 import pytest
 
+from gen_worker.models import model_types
 from gen_worker.models import (
     LORA_OVERLAYS,
     MODEL_TYPES,
@@ -461,6 +463,59 @@ def test_the_serving_interaction_matrix(
 
 
 # ── the vocabulary registry + ingest fingerprint seam ────────────────────────
+
+
+def test_no_defaults_field_comment_dangles_without_its_field() -> None:
+    """THE FENCE (pgw#1446). A `#:` block whose field line is gone reads as a
+    documented field and is not one.
+
+    pgw#1426 dropped `ErnieDefaults.max_sequence_length` in a rebase and left its
+    four-line `#:` comment behind, running straight into the next `class`
+    statement. Nothing here noticed: no pgw code reads that field, the module
+    imports, mypy is clean, and the struct is still valid — the ONLY consumer is
+    an endpoint in another repository, so it surfaced days later as
+    `"ErnieDefaults" has no attribute "max_sequence_length"` in that endpoint's
+    mypy gate, on a pin bump, pointing at the wrong repo.
+
+    A surviving comment is what made it invisible in review: the diff read as
+    "field documented" rather than "field deleted". So the assertion is
+    structural — every `#:` block in a Defaults struct must be followed by a
+    field declaration.
+    """
+    import re
+
+    source = (
+        pathlib.Path(model_types.__file__).read_text(encoding="utf-8")
+    )
+    dangling: list[str] = []
+    for match in re.finditer(
+        r"class (\w*Defaults)\(msgspec\.Struct.*?(?=\nclass |\Z)", source, re.S
+    ):
+        name, body = match.group(1), match.group(0)
+        lines = body.split("\n")
+        for i, line in enumerate(lines):
+            if not line.strip().startswith("#:"):
+                continue
+            nxt = None
+            for cand in lines[i + 1:]:
+                if cand.strip().startswith("#:") or not cand.strip():
+                    continue
+                nxt = cand
+                break
+            # `nxt is None` is the pgw#1426 shape EXACTLY and the arm this test
+            # first got wrong: the comment block ends the struct body, so a scan
+            # that only inspects a FOLLOWING line finds nothing and the fence
+            # cannot fail. Red-verified against the real breakage.
+            if nxt is None or not re.match(r"^    \w+\s*:", nxt):
+                dangling.append(
+                    f"{name}: comment {line.strip()[:60]!r} is followed by "
+                    f"{(nxt or '<END OF STRUCT>').strip()[:40]!r}, not a field"
+                )
+                break
+    assert not dangling, (
+        "a Defaults field comment survives with no field under it — the field "
+        "was deleted and its documentation was not:\n  " + "\n  ".join(dangling)
+    )
 
 
 def test_every_model_type_exports_a_defaults_vocabulary() -> None:
