@@ -1,0 +1,50 @@
+[
+  {
+    "streams": 2,
+    "ms_per_step": 386.6578303198912,
+    "ratio": 3.5641738119538338,
+    "device_peak": 1595146240,
+    "streamed": 232,
+    "window": 121634816,
+    "resident": 369098752,
+    "fits": true,
+    "page_ins": 12912,
+    "identical": true
+  },
+  {
+    "streams": 4,
+    "ms_per_step": 406.2632302401471,
+    "ratio": 3.7448944581925168,
+    "device_peak": 1595146240,
+    "streamed": 234,
+    "window": 243269632,
+    "resident": 247463936,
+    "fits": true,
+    "page_ins": 13068,
+    "identical": true
+  },
+  {
+    "streams": 8,
+    "ms_per_step": 441.4397124000243,
+    "ratio": 4.069147807483723,
+    "device_peak": 1794375680,
+    "streamed": 238,
+    "window": 620756992,
+    "resident": 69206016,
+    "fits": false,
+    "page_ins": 13308,
+    "identical": true
+  },
+  {
+    "streams": 16,
+    "ms_per_step": 415.42661327985115,
+    "ratio": 3.8293616208825747,
+    "device_peak": 2415132672,
+    "streamed": 238,
+    "window": 1241513984,
+    "resident": 69206016,
+    "fits": false,
+    "page_ins": 13308,
+    "identical": true
+  }
+]

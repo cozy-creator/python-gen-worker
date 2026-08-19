@@ -1,0 +1,192 @@
+{
+  "torch": "2.13.0+cu130",
+  "device": "NVIDIA GeForce RTX 4070 Laptop GPU",
+  "load_at_start": "17:26:33 up 14:00,  1 user,  load average: 3.17, 6.10, 6.47",
+  "config": {
+    "prompt": "a photograph of an astronaut riding a horse",
+    "steps": 25,
+    "size": 512,
+    "guidance": 7.5,
+    "seed": 1507,
+    "dtype": "fp16"
+  },
+  "varena": "0.1.0",
+  "weight_basis_bytes": 1965162888,
+  "eager": {
+    "ms_per_step": 107.64427280024393,
+    "device_peak_bytes": 2872311808,
+    "torch_peak_bytes": 2302029824
+  },
+  "layout": {
+    "granularity": 2097152,
+    "regions": 239,
+    "core_leaves": 252,
+    "virtual_bytes": 2225078272,
+    "weight_bytes": 1965162888,
+    "tax_bytes": 259915384,
+    "tax_fraction": 0.13226149627958983
+  },
+  "arena_resident_equivalent": {
+    "ms_per_step": 109.95679355983157,
+    "device_peak_bytes": 3325296640,
+    "bitwise_identical_to_eager": true,
+    "max_abs_diff": 0.0,
+    "arena_stats": {
+      "granularity": 2097152,
+      "budget_bytes": 4611686018427387904,
+      "committed_bytes": 2225078272,
+      "mapped_bytes": 2225078272,
+      "signature": 1,
+      "backed_regions": 239,
+      "layout_tax_bytes": 259915384,
+      "page_ins": 0,
+      "unbacks": 0,
+      "unpinned_slots": 0
+    }
+  },
+  "cycles": [
+    {
+      "freed_bytes": 2155872256,
+      "claimed_bytes": 2155872256,
+      "mapped_before": 2225078272,
+      "mapped_after_demote": 69206016,
+      "mapped_after_promote": 2225078272,
+      "signature_before": 1,
+      "signature_after_demote": 239,
+      "signature_after_promote": 239,
+      "signature_advanced_on_demote": true,
+      "signature_stable_across_promote": true,
+      "every_resident_region_is_backed": true,
+      "bitwise_identical_to_eager": true
+    },
+    {
+      "freed_bytes": 2155872256,
+      "claimed_bytes": 2155872256,
+      "mapped_before": 2225078272,
+      "mapped_after_demote": 69206016,
+      "mapped_after_promote": 2225078272,
+      "signature_before": 239,
+      "signature_after_demote": 477,
+      "signature_after_promote": 477,
+      "signature_advanced_on_demote": true,
+      "signature_stable_across_promote": true,
+      "every_resident_region_is_backed": true,
+      "bitwise_identical_to_eager": true
+    },
+    {
+      "freed_bytes": 2155872256,
+      "claimed_bytes": 2155872256,
+      "mapped_before": 2225078272,
+      "mapped_after_demote": 69206016,
+      "mapped_after_promote": 2225078272,
+      "signature_before": 477,
+      "signature_after_demote": 715,
+      "signature_after_promote": 715,
+      "signature_advanced_on_demote": true,
+      "signature_stable_across_promote": true,
+      "every_resident_region_is_backed": true,
+      "bitwise_identical_to_eager": true
+    }
+  ],
+  "pricing": [
+    {
+      "fraction": 0.5,
+      "budget_bytes": 982581444,
+      "ms_per_step": 302.282172839914,
+      "device_peak_bytes": 2085879808,
+      "streamed_leaves": 217,
+      "resident_leaves": 22,
+      "plan_resident_bytes": 918552576,
+      "plan_window_bytes": 62914560,
+      "plan_fits": true,
+      "host_bytes": 1306525696,
+      "bitwise_identical_to_eager": true,
+      "max_abs_diff": 0.0,
+      "arena_stats": {
+        "granularity": 2097152,
+        "budget_bytes": 981467136,
+        "committed_bytes": 981467136,
+        "mapped_bytes": 922746880,
+        "signature": 12672,
+        "backed_regions": 22,
+        "layout_tax_bytes": 259915384,
+        "page_ins": 11742,
+        "unbacks": 11740,
+        "unpinned_slots": 0
+      }
+    },
+    {
+      "fraction": 0.25,
+      "budget_bytes": 491290722,
+      "ms_per_step": 425.48652272002073,
+      "device_peak_bytes": 1595146240,
+      "streamed_leaves": 233,
+      "resident_leaves": 6,
+      "plan_resident_bytes": 360710144,
+      "plan_window_bytes": 121634816,
+      "plan_fits": true,
+      "host_bytes": 1864368128,
+      "bitwise_identical_to_eager": true,
+      "max_abs_diff": 0.0,
+      "arena_stats": {
+        "granularity": 2097152,
+        "budget_bytes": 490733568,
+        "committed_bytes": 490733568,
+        "mapped_bytes": 364904448,
+        "signature": 25678,
+        "backed_regions": 6,
+        "layout_tax_bytes": 259915384,
+        "page_ins": 24732,
+        "unbacks": 24730,
+        "unpinned_slots": 0
+      }
+    },
+    {
+      "fraction": 0.05,
+      "budget_bytes": 98258144,
+      "ms_per_step": 454.5022223200067,
+      "device_peak_bytes": 1328807936,
+      "streamed_leaves": 238,
+      "resident_leaves": 1,
+      "plan_resident_bytes": 69206016,
+      "plan_window_bytes": 155189248,
+      "plan_fits": false,
+      "host_bytes": 2155872256,
+      "bitwise_identical_to_eager": true,
+      "max_abs_diff": 0.0,
+      "arena_stats": {
+        "granularity": 2097152,
+        "budget_bytes": 224395264,
+        "committed_bytes": 224395264,
+        "mapped_bytes": 73400320,
+        "signature": 38991,
+        "backed_regions": 1,
+        "layout_tax_bytes": 259915384,
+        "page_ins": 38040,
+        "unbacks": 38038,
+        "unpinned_slots": 0
+      }
+    }
+  ],
+  "cold_load": {
+    "page_cache_warm": {
+      "loader_seconds": 0.3129092950039194,
+      "arena_refill_seconds": 0.37228013199637644,
+      "loader_gbps": 5.493738778128876,
+      "arena_gbps": 4.617603197843317,
+      "loader_over_arena": 0.8405210703185338
+    },
+    "page_cache_evicted": {
+      "loader_seconds": 3.885940942003799,
+      "arena_refill_seconds": 3.0284341189981205,
+      "loader_gbps": 0.442374692167496,
+      "arena_gbps": 0.567633919198051,
+      "loader_over_arena": 1.2831518828910047
+    },
+    "weight_bytes": 1719041928,
+    "mismatched_tensors_warm": 0,
+    "mismatched_tensors_evicted": 0,
+    "mismatched_sample": []
+  },
+  "load_at_end": "17:28:49 up 14:02,  1 user,  load average: 2.38, 4.76, 5.92"
+}

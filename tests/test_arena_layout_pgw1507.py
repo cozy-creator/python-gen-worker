@@ -24,7 +24,6 @@ import torch.nn as nn  # noqa: E402
 from gen_worker.models.arena_residency import (  # noqa: E402
     CORE_REGION,
     DEFAULT_GRANULARITY,
-    ArenaLayout,
     dlpack_dtype,
     plan_layout,
     safetensors_triples,
@@ -256,6 +255,84 @@ def test_a_non_contiguous_leaf_keeps_its_whole_leaf_out_of_the_arena():
     assert "root.weird" not in layout.by_name()
     assert "root.plain" in layout.by_name()
     assert ArenaResidency is not None  # the facade is what applies this filter
+
+
+def test_adapter_leaves_land_in_the_core_and_can_never_stream():
+    """pgw#1507's LoRA clause, and it is the SAME code as the streamed rung's.
+
+    An attach-based adapter is a pair of tiny leaves NEXT TO the base layer, so
+    the base layer streams through its own region exactly as an unpatched one
+    does and the adapters are forced resident. MEASURED on the 4070 with 96
+    attached pairs: 192 adapter leaves, all in the core, none ever streamed,
+    36 of their base layers streaming, outputs bitwise identical at every
+    budget. This is the arithmetic half of that.
+    """
+
+    class LoRALinear(nn.Module):
+        def __init__(self, base: nn.Linear, r: int = 8) -> None:
+            super().__init__()
+            self.base_layer = base
+            self.lora_A = nn.Linear(base.in_features, r, bias=False)
+            self.lora_B = nn.Linear(r, base.out_features, bias=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:  # pragma: no cover
+            return self.base_layer(x) + self.lora_B(self.lora_A(x))
+
+    class Adapted(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.to_q = LoRALinear(nn.Linear(2048, 2048, bias=False))
+
+    _leaves, _costs, adapters = discover_leaves([("unet", Adapted())])
+    assert adapters == {"unet.to_q.lora_A", "unet.to_q.lora_B"}
+
+    layout = plan_layout(
+        specs_for(Adapted(), name="unet"),
+        granularity=GRAN,
+        min_stream_bytes=MIB,
+        exclude=adapters,
+    )
+    assert set(layout.core_names) == adapters
+    # The base layer keeps its own region and therefore still streams.
+    assert "unet.to_q.base_layer" in layout.by_name()
+    plan = plan_residency(
+        layout.costs(), budget_bytes=0, streams=2, min_stream_bytes=0,
+        exclude=(CORE_REGION,),
+    )
+    assert plan.streamed == ("unet.to_q.base_layer",)
+    assert not any(name in plan.streamed for name in adapters)
+
+
+def test_binding_across_the_meta_boundary_replaces_the_parameter():
+    """The cold-load defect, in one test.
+
+    ``Parameter.data = other`` is the normal bind and it preserves the
+    Parameter's identity. Across the META boundary torch REFUSES it
+    ("incompatible tensor type"), which is how the cold-load leg died on the
+    card — so a meta parameter, which has never held a byte and has no
+    identity worth preserving, is REPLACED instead.
+    """
+    from gen_worker.models.stream_residency import bind_tensor
+
+    real = nn.Linear(4, 4, bias=False)
+    with torch.device("meta"):
+        empty = nn.Linear(4, 4, bias=False)
+
+    # The refusal is real and is what the facade routes around.
+    with pytest.raises(RuntimeError, match="incompatible tensor type"):
+        bind_tensor(empty, "weight", real.weight.detach().clone(), True)
+
+    # The facade's rule: replace, do not fill.
+    value = real.weight.detach().clone()
+    empty._parameters["weight"] = nn.Parameter(value, requires_grad=False)
+    assert not empty.weight.is_meta
+    assert torch.equal(empty.weight, real.weight)
+
+    # And an ordinary bind still preserves identity, which is why it is the
+    # default: hooks and LoRA wrappers hold the object across every promote.
+    identity = real.weight
+    bind_tensor(real, "weight", torch.ones(4, 4), True)
+    assert real.weight is identity
 
 
 # ---------------------------------------------------------------------------

@@ -496,6 +496,75 @@ class ArenaResidency:
     def over(cls, obj: Any, **kwargs: Any) -> "ArenaResidency":
         return cls(module_roots(obj), **kwargs)
 
+    @classmethod
+    def arm(cls, pipeline: Any, **kwargs: Any) -> "ArenaResidency":
+        """Arm the facade on a diffusers pipeline, the way the rung arms.
+
+        The same three obligations ``_apply_partial_stream`` discharges, and
+        each of them is a defect pgw#1497 MEASURED on this card rather than a
+        precaution:
+
+        1. **Components no rung may hook are excluded AND placed.** An
+           exclusion is a statement about hooks, never about residency — the
+           dtype-fragile VAE excluded and then left to nobody killed the first
+           decode with ``weight type torch.HalfTensor``.
+        2. **The component vocabulary is not all modules.** A pipeline's
+           ``components`` holds tokenizers, schedulers and feature extractors;
+           handing one to ``named_modules`` raises, and the rung then silently
+           served on a coarser one.
+        3. **The handle is stamped on the pipeline and the execution-device
+           repair is installed.** Parking leaves on the host makes
+           ``pipeline.device`` — a PUBLIC answer — report the host, and the
+           pipeline then builds ``input_ids`` there and dies in the first
+           embedding with ``index is on cpu``. The repair already exists and is
+           mechanism-agnostic: it asks the stamped handle where the model
+           executes, so the arena gets it by being stamped.
+        """
+        from .memory import (
+            STREAM_RESIDENCY_ATTR,
+            _named_components,
+            install_execution_device_fallback,
+            unhookable_components,
+        )
+
+        excluded = set(unhookable_components(pipeline))
+        roots = [
+            (name, module)
+            for name, module in _named_components(pipeline)
+            if name not in excluded and hasattr(module, "named_modules")
+        ]
+        if not roots and hasattr(pipeline, "named_modules"):
+            roots = [(type(pipeline).__name__, pipeline)]
+        if not roots:
+            raise ValueError(
+                f"arena residency: no hookable nn.Module tree on "
+                f"{type(pipeline).__name__}"
+            )
+        device = kwargs.get("device") or "cuda"
+        components = getattr(pipeline, "components", None)
+        for name in sorted(excluded):
+            module = components.get(name) if isinstance(components, dict) else None
+            if module is None or not hasattr(module, "to"):
+                continue
+            try:
+                module.to(device)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "arena residency: could not keep excluded component %r on "
+                    "%s (%s: %s); it will not serve", name, device, type(exc).__name__, exc,
+                )
+        residency = cls(roots, **kwargs)
+        try:
+            setattr(pipeline, STREAM_RESIDENCY_ATTR, residency)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "arena residency: could not stamp the handle on %s; "
+                "`pipeline.device` will keep answering with the host while the "
+                "tail is parked there", type(pipeline).__name__,
+            )
+        install_execution_device_fallback()
+        return residency
+
     # -- read side ----------------------------------------------------------
 
     @property
@@ -669,6 +738,11 @@ class ArenaResidency:
         """
         torch = self._torch
         resident = set(plan.all_resident)
+        if all(self._is_cold(region) for region in self.layout.regions):
+            self._adopt_cold(plan)
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+            return
         for region in self.layout.regions:
             cold = self._is_cold(region)
             if region.name in resident:
@@ -692,6 +766,54 @@ class ArenaResidency:
                 self._install_hook(region)
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
+
+    def _adopt_cold(self, plan: ResidencyPlan) -> None:
+        """A wholly cold tree: ONE batch, both destinations, one engine pass.
+
+        MEASURED, and it is the whole cold-load story: adopting region by
+        region costs one ``submit``/``wait`` round trip EACH — 239 of them on
+        sd1.5 — and each round trip drains the engine's queue to empty, so the
+        disk never has more than one region's reads outstanding and the io_uring
+        queue depth buys nothing. Handing the engine every triple at once is
+        what lets it keep the queue full, and it is also the shape pgw#1498's
+        CAS ingest will want.
+        """
+        torch = self._torch
+        resident = set(plan.all_resident)
+        base = int(self.reservation.base_ptr)
+        requests: List[Tuple[str, int, int, int, int]] = []
+        pending_host: Dict[str, List[Any]] = {}
+        for region in self.layout.regions:
+            if region.name in resident:
+                self.reservation.back(region.offset, region.span)
+                for slot in region.slots:
+                    path, offset, length = self._triple(slot)
+                    requests.append((str(path), offset, length, 0, base + slot.offset))
+            else:
+                mirrors: List[Any] = []
+                for slot in region.slots:
+                    dtype = _dtype_of(torch, slot)
+                    template = torch.empty(slot.shape, dtype=dtype, device="meta")
+                    pinned = staging.alloc_pinned_like(torch, template)
+                    if pinned is None:
+                        self.unpinned_slots += 1
+                        pinned = torch.empty(slot.shape, dtype=dtype, device="cpu")
+                    path, offset, length = self._triple(slot)
+                    requests.append((str(path), offset, length, int(pinned.data_ptr()), 0))
+                    mirrors.append(pinned)
+                pending_host[region.name] = mirrors
+        self._engine_for().submit(requests, 0).wait()
+        torch.cuda.synchronize(self.device)
+        for region in self.layout.regions:
+            if region.name in resident:
+                for slot in region.slots:
+                    self._bind(slot, self._view(slot))
+                self._backed[region.name] = True
+            else:
+                self._host[region.name] = pending_host[region.name]
+                self._rebind_off_device(region)
+                self._backed[region.name] = False
+                self._install_hook(region)
 
     def _is_cold(self, region: RegionSpec) -> bool:
         """True when this region's weights are not in the process yet.
@@ -903,9 +1025,29 @@ class ArenaResidency:
         return getattr(module, "_parameters" if slot.is_param else "_buffers")[slot.attr]
 
     def _bind(self, slot: SlotSpec, value: Any) -> None:
+        """Point a module's parameter or buffer at ``value``.
+
+        ``Parameter.data = ...`` is the normal move and it preserves the
+        Parameter's identity, which matters: hooks, LoRA wrappers and anything
+        holding the object keep working across every promote and demote.
+
+        A META parameter is the one case where it cannot be used — torch
+        REFUSES ``set_data`` across the meta boundary ("incompatible tensor
+        type"), measured on the cold-load leg. There is no identity worth
+        preserving there either: a meta parameter is a declared shape that has
+        never held a byte, so the object is replaced rather than filled.
+        """
         module = self._leaves.get(slot.leaf)
-        if module is not None:
-            bind_tensor(module, slot.attr, value, slot.is_param)
+        if module is None:
+            return
+        if slot.is_param:
+            current = module._parameters.get(slot.attr)
+            if current is None or bool(current.is_meta) or bool(value.is_meta):
+                import torch.nn as nn
+
+                module._parameters[slot.attr] = nn.Parameter(value, requires_grad=False)
+                return
+        bind_tensor(module, slot.attr, value, slot.is_param)
 
     def _rebind_off_device(self, region: RegionSpec) -> None:
         """Point every slot at its host mirror, or at meta when there is none.

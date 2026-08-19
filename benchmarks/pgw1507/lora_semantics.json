@@ -1,0 +1,26 @@
+{
+  "attached": 96,
+  "adapter_leaves_in_core": 192,
+  "adapter_leaves_with_own_region": 0,
+  "full": {
+    "identical": true,
+    "streamed": 0,
+    "streamed_adapters": 0,
+    "streamed_base_layers": 0,
+    "max_abs_diff": 0.0
+  },
+  "25pct": {
+    "identical": true,
+    "streamed": 232,
+    "streamed_adapters": 0,
+    "streamed_base_layers": 36,
+    "max_abs_diff": 0.0
+  },
+  "5pct": {
+    "identical": true,
+    "streamed": 238,
+    "streamed_adapters": 0,
+    "streamed_base_layers": 36,
+    "max_abs_diff": 0.0
+  }
+}

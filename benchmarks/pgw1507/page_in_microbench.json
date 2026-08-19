@@ -1,0 +1,8 @@
+{
+  "back(4MiB) + unback(4MiB)": 97.80891001355485,
+  "back(4MiB) on ALREADY-BACKED (idempotent)": 0.18245000319438986,
+  "DLPack export + from_dlpack": 6.0946949997742195,
+  "H2D copy 4MiB pinned -> arena": 375.98595748931984,
+  "H2D copy 4MiB pinned -> torch buffer": 368.50900751232984,
+  "signature()": 0.06971510010771453
+}
