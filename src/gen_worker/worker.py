@@ -468,6 +468,31 @@ class Worker:
         # defensiveness: a pod that cannot adopt can still SERVE, and a worker
         # that refuses to boot over its compiled-graph story is strictly worse
         # than one that serves eager and says why.
+        # pgw#1425: ARM THE RECEIPT GATE BEFORE THE ADOPT, not only at HelloAck.
+        # Boot-adopt runs before the stream is up, so a gate armed only at
+        # HelloAck leaves the pod's FIRST artifacts — the ones it pulls by key
+        # from the hub store — outside it. v1 had the same window and it was
+        # silently OPEN; with the gate failing closed it would instead refuse
+        # every boot-adopt and self-mint the lot. Neither is right, and the
+        # fix is neither: `HelloAck.file_base_url` IS the tensorhub base URL
+        # (`worker_scheduler.proto`: "tensorhub base URL for capability-token
+        # HTTP calls"), which this pod already knows as TENSORHUB_URL. So arm
+        # from settings now and re-arm from the ack later — `configure` is
+        # idempotent and drops the JWKS cache, so the authoritative value
+        # simply replaces this one.
+        hub_base = str(getattr(settings, "tensorhub_url", "") or "").strip()
+        if hub_base:
+            receipts.configure(hub_base, worker_credential.current)
+        else:
+            # Not a refusal to boot: the pod serves, and every hub-delivered
+            # artifact refuses until the ack arms the gate. Said out loud
+            # because "nothing adopted" would otherwise read as "nothing to
+            # adopt".
+            logger.warning(
+                "receipts: no TENSORHUB_URL, so the gate is UNARMED for the "
+                "boot-adopt window — hub-delivered artifacts will be refused "
+                "and self-minted until HelloAck arms it"
+            )
         try:
             self.adoption = self._build_adoption()
         except Exception:  # noqa: BLE001 — adoption never costs a boot
