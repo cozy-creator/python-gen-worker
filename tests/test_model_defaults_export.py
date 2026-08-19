@@ -27,116 +27,92 @@ def _validator(schema: dict[str, object]) -> jsonschema.Draft202012Validator:
     return jsonschema.Draft202012Validator(schema)
 
 
-#: THE PINNED LAUNCH SET. Hoisted out of the test body (pgw#1432) so a FENCE can
-#: read it: it is the THIRD registration site a new ModelType owes, beside the
-#: `MODEL_TYPES` tuple and `defaults_vocabularies()`, and it was the only one of
-#: the three with nothing asserting it against the registry.
-LAUNCH_SET_NAMES: list[str] = [
-    "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
-    # pgw#1422: the two qwen3.6 LLM roots — the first NON-DIFFUSION
-    # vocabularies in the export (max_tokens/temperature/top_p, no steps
-    # and no guidance).
-    "qwen3.6-27b-mtp", "qwen3.6-35b-a3b",
-    # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b).
-    "flux1", "flux2-klein",
-    "qwen-image", "z-image",
-    # pgw#1427 (se#769 wave 3).
-    "krea-2", "anima", "ernie",
-    # pgw#1430 (se#769 audio lane): stable-audio covers stable-audio-open
-    # AND foundation-1 (one root, two checkpoint rows); musicgen is its own
-    # root — transformers, autoregressive, no scheduler.
-    "stable-audio", "musicgen",
-    # pgw#1420 (se#769): LTX-2 and its 2x spatial latent upsampler — TWO roots,
-    # their headers sharing ZERO keys. Added here by the pgw#1432 fence below,
-    # which named them on the first rebase that brought them in; the pinned
-    # list had gone stale exactly as predicted, one lane later.
-    "ltx-2", "ltx-2-upsampler",
-    # pgw#1432 (se#769 vlm lane): InternVL-U is a unified VLM serving
-    # TEXT-TO-IMAGE, so it is an ordinary diffusion vocabulary here despite
-    # the name — one sourced `steps` knob and nothing else, the Rife shape.
-    "internvl-u",
-    # pgw#1424 (se#769 3D lane): the two 3D roots, declaring OPPOSITE lane
-    # facts — trellis2 carries a real lane document (trellis2.dit-bf16@1),
-    # hunyuan3d deliberately carries NONE and no MissingContract sentinel
-    # either, because every core model in its repo is a pickle and no
-    # safetensors-shaped document can ever describe one.
-    "trellis2", "hunyuan3d",
-    "sdxl.lora", "sd15.lora",
-]
+def test_the_document_names_exactly_the_registry() -> None:
+    """pgw#1445 — DERIVED from the registry, not pinned by hand.
 
+    This used to be a hand-maintained ``LAUNCH_SET_NAMES`` list, and the list was
+    a SERIALIZATION POINT: every ModelType PR had to edit it, so two could never
+    be in flight concurrently without one going stale. It went stale for four
+    lanes in a row (audio, LTX-2, pgw#1432, and master itself), and it failed in
+    the worst available place — the full ``tests`` job, which is red for
+    unrelated reasons, so a lane that diffed the failure COUNT against the known
+    baseline concluded "not mine" and enqueued. Paul's minimum-hand-specification
+    ruling: derive what can be derived.
 
-def test_the_document_names_the_launch_set() -> None:
-    doc = export_document()
-    assert doc["names"] == LAUNCH_SET_NAMES
-    schemas = doc["schemas"]
-    assert isinstance(schemas, dict)
-    assert set(schemas) == set(doc["names"])  # type: ignore[arg-type]
+    WHAT IS ASSERTED HERE IS NOT CIRCULAR, and the distinction is the whole
+    design. ``export_document()`` builds its names as
+    ``list(defaults_vocabularies())`` (``defaults_export.py:58``), so comparing
+    the export against that mapping would test the emitter against its own
+    input and prove nothing. ``MODEL_TYPES`` and ``LORA_OVERLAYS`` are a
+    DIFFERENT source — the declaration tuples — so the export is checked against
+    them instead.
 
-
-def test_the_pinned_list_above_cannot_go_STALE_against_the_registry() -> None:
-    """pgw#1432 — the FENCE for the list in the test above.
-
-    A new ModelType has THREE registration sites: the ``MODEL_TYPES`` tuple,
-    ``defaults_vocabularies()`` (what the export emitter actually reads), and
-    the pinned ``names`` list in the test above. The first two are fenced —
-    pgw#1001 asserts ``MODEL_TYPES`` ⊆ ``defaults_vocabularies()`` — and the
-    third was not, so a type registered in both fenced sites still shipped a
-    stale export list.
-
-    THAT GAP IS EXPENSIVE OUT OF PROPORTION TO ITS SIZE, because of WHERE it
-    fails. The pinned list lives in the full ``tests`` job, which is red on
-    master for unrelated reasons; a lane that adds a ModelType, sees ``tests``
-    red, and diffs the COUNT against the known baseline concludes "not mine"
-    and enqueues. Only diffing failure NAMES catches it, and nothing forced
-    anyone to.
-
-    So this asserts the pinned list against the registry rather than against a
-    human's memory, and it fails by NAMING the missing family instead of
-    printing a list diff.
+    WHAT IS DELIBERATELY *NOT* ASSERTED: the exact sequence within the base
+    block. That order is ``defaults_vocabularies()`` insertion order, and no
+    independent source defines it — the mapping's order genuinely differs from
+    the ``MODEL_TYPES`` tuple's today (the tuple runs ``... Flux2Klein, Krea2,
+    Anima, Ernie, QwenImage, ZImage ...`` while the emitter runs
+    ``... flux2-klein, qwen-image, z-image, krea-2, anima, ernie ...``). Pinning
+    it again would recreate exactly the hand-maintained list this issue deletes.
+    The ORDERING PROPERTY the docstring actually promises — base types first,
+    then the overlays — IS checked, because that one is structural rather than
+    incidental.
     """
 
     from gen_worker.models.model_types import LORA_OVERLAYS, MODEL_TYPES
 
-    registry = {mt.name for mt in MODEL_TYPES} | {ov.name for ov in LORA_OVERLAYS}
-    # Deliberately the CONSTANT, not `export_document()["names"]`. The document
-    # is built from `defaults_vocabularies()`, so comparing against it would
-    # only re-assert pgw#1001's fence and leave the pinned list unguarded —
-    # which is the exact hole this closes.
-    pinned = set(LAUNCH_SET_NAMES)
+    base = [mt.name for mt in MODEL_TYPES]
+    overlays = [ov.name for ov in LORA_OVERLAYS]
+    names = cast("list[str]", export_document()["names"])
 
-    missing = sorted(registry - pinned)
+    # NON-VACUITY FIRST: set equality against an empty registry is trivially
+    # true, so an import that silently produced no types would PASS every
+    # assertion below. Anchors that have been in the launch set since it
+    # existed, and a floor, so "the registry went empty" fails here loudly
+    # instead of passing quietly.
+    assert len(base) >= 7, f"the model-type registry collapsed to {base}"
+    assert "sdxl" in base, "sdxl vanished from MODEL_TYPES — the registry is wrong"
+    assert "sdxl.lora" in overlays, "the LoRA overlays vanished from LORA_OVERLAYS"
+
+    registry = set(base) | set(overlays)
+    emitted = set(names)
+
+    missing = sorted(registry - emitted)
     assert not missing, (
-        f"{missing} are registered in MODEL_TYPES/LORA_OVERLAYS but absent from "
-        "LAUNCH_SET_NAMES — the pinned export list is stale and the document would "
-        "ship without them. Add them to LAUNCH_SET_NAMES."
+        f"{missing} are registered in MODEL_TYPES/LORA_OVERLAYS but the export "
+        "document does not name them — they would ship with NO SCHEMA. Register "
+        "them in `defaults_vocabularies()`, which is what the emitter reads."
     )
-    stale = sorted(pinned - registry)
-    assert not stale, (
-        f"{stale} are pinned in LAUNCH_SET_NAMES but no longer in "
-        "MODEL_TYPES/LORA_OVERLAYS — a deleted family left its name behind."
+    extra = sorted(emitted - registry)
+    assert not extra, (
+        f"{extra} are named by the export document but are in neither "
+        "MODEL_TYPES nor LORA_OVERLAYS — a deleted family left its vocabulary "
+        "behind in `defaults_vocabularies()`."
     )
 
-    # MEMBERSHIP IS NOT ENOUGH: the sibling assertion compares LISTS, and the
-    # emitted order is `defaults_vocabularies()` INSERTION order — which is not
-    # the `MODEL_TYPES` tuple order and genuinely differs from it today
-    # (the tuple runs ... Flux2Klein, Krea2, Anima, Ernie, QwenImage, ZImage ...
-    # while the emitter runs ... flux2-klein, qwen-image, z-image, krea-2 ...).
-    # So a set-equal fence stays green while the sibling stays red on a
-    # reordering, which is the same "green fence, red job" split this whole
-    # test exists to close. Checked here so the reordering case ALSO fails by
-    # naming the position rather than printing two long lists.
-    emitted = cast("list[str]", export_document()["names"])
-    if emitted != LAUNCH_SET_NAMES:
-        first = next(
-            i for i, (a, b) in enumerate(zip(emitted, LAUNCH_SET_NAMES)) if a != b
-        )
-        raise AssertionError(
-            f"LAUNCH_SET_NAMES is in the wrong ORDER (membership is fine): at "
-            f"index {first} the export emits {emitted[first]!r} but the pinned "
-            f"list has {LAUNCH_SET_NAMES[first]!r}. The order is "
-            f"`defaults_vocabularies()` insertion order, NOT the MODEL_TYPES "
-            f"tuple order — match the mapping, not the tuple."
-        )
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    assert not duplicates, (
+        f"{duplicates} appear more than once in the export document; "
+        "`defaults_vocabularies()` is a mapping, so a repeat means two families "
+        "share a name."
+    )
+
+    # The ordering PROPERTY the docstring promises: "base types first, then the
+    # LoRA overlays". Structural, and checkable without pinning a sequence.
+    overlay_positions = [names.index(n) for n in overlays]
+    base_positions = [names.index(n) for n in base]
+    assert min(overlay_positions) > max(base_positions), (
+        "the export interleaves LoRA overlays with base types; "
+        "`export_document` documents base types first, then the overlays"
+    )
+
+    schemas = export_document()["schemas"]
+    assert isinstance(schemas, dict)
+    assert set(schemas) == emitted, (
+        "every named family must carry a schema — "
+        f"named-without-schema: {sorted(emitted - set(schemas))}, "
+        f"schema-without-name: {sorted(set(schemas) - emitted)}"
+    )
 
 
 def test_every_schema_is_valid_2020_12_and_round_trips_platform_values() -> None:
