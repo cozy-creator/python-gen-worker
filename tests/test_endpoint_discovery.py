@@ -1,4 +1,8 @@
-"""pgw#1431: `pipeline_class` must survive a DEFERRED import.
+"""What v2 discovery can READ off an endpoint's `load()` — and what it cannot.
+
+`pipeline_class` is the hub's required field on every model slot, recovered by
+parsing `ctx.load(<PlainName>)`. These tests fix which spellings resolve, which
+do not, and where the boundary sits.
 
 The three arms below are the ones measured against `e0725c71` when the defect
 was found. They are kept as fixtures because each answers a different question,
@@ -79,6 +83,7 @@ def test_the_control_arm_resolves_through_the_module() -> None:
     assert got == f"{RealPipeline.__module__}.{RealPipeline.__qualname__}"
 
 
+# pgw#1431: a deferred import bound no module-level name, so discovery refused.
 def test_a_deferred_import_resolves_to_its_dotted_path() -> None:
     """pgw#1431, the fix. Nothing is imported to answer this — `trellis2` is
     not installed in this environment, and that is the point."""
@@ -100,6 +105,7 @@ def test_a_deferred_import_under_an_alias_resolves_to_the_real_name() -> None:
     )
 
 
+# pgw#1431: the boundary — self-loading needs its own marker (pgw#1421 ruling).
 def test_a_self_loading_model_still_reads_as_absent() -> None:
     """The BOUNDARY of this fix, asserted so it cannot quietly widen.
 
