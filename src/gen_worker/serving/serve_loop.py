@@ -54,7 +54,7 @@ from .reserved_repos import (
     materialize_reserved_inputs,
     reserved_context_kwargs,
 )
-from .residency import InstanceSizer, ResidencyManager
+from .residency import InstanceSizer, ResidencyError, ResidencyManager
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +97,15 @@ class _InstanceBackend:
 
     ``load`` runs the author's ``Model()`` + ``load(ctx)`` (inside the
     manager's serialized load gate); ``drop`` runs the author's ``unload``
-    — best-effort tidiness, never correctness. The host tiers
-    (``demote_to_host``/``promote_to_device``) belong to the pgw#1380
-    native-loader wave: until it lands the loop runs the manager with a
-    zero host budget, so eviction is always a drop, and these arms refuse
-    loudly rather than pretend."""
+    — best-effort tidiness, never correctness.
+
+    The host tiers ride pgw#1497's
+    :class:`~gen_worker.models.stream_residency.StreamedResidency`: a demote
+    is a re-plan at a budget of zero (every leaf to pinned host RAM), a
+    promote a re-plan at the instance's full weight size. The SAME object and
+    the SAME arithmetic serve the partial case, so the warm tier is not a
+    second implementation of the offload rung — it is that rung at its two
+    end stops."""
 
     def __init__(
         self,
@@ -120,6 +124,9 @@ class _InstanceBackend:
         #: load. pgw#1371's background mint triggers here; anything earlier
         #: reads an empty work-list and mints nothing.
         self._on_loaded = on_loaded
+        #: pgw#1497's partial-residency handle for this instance, built on the
+        #: first tier move (or handed over by a rung engaged during load).
+        self._stream_residency: Optional[Any] = None
         #: Unmet machine floors, measured once at residency-admit. Non-empty
         #: means this instance is serving DEGRADED, and every request it
         #: serves says so (`invoke` warns the caller with these).
@@ -150,6 +157,18 @@ class _InstanceBackend:
                     "serves", self.model_cls.__name__)
 
     def drop(self) -> None:
+        residency, self._stream_residency = self._stream_residency, None
+        if residency is not None:
+            try:
+                # Un-hook before the author's unload: a live forward hook
+                # holding a cast-buffer view outlives the tree it was
+                # installed on and keeps the pinned host copies alive.
+                residency.release()
+            except Exception:
+                logger.exception(
+                    "releasing the streamed residency of %s raised; the drop "
+                    "proceeds", self.model_cls.__name__,
+                )
         model, self.model = self.model, None
         if model is None:
             return
@@ -161,17 +180,74 @@ class _InstanceBackend:
                 "correctness)", self.model_cls.__name__,
             )
 
+    def _residency(self) -> Any:
+        """This instance's :class:`StreamedResidency`, built on first use.
+
+        Built lazily and over the LIVE object, because the tree only exists
+        once the author's ``load`` has run, and a rung engaged during that
+        load may already own it.
+        """
+        if self._stream_residency is not None:
+            return self._stream_residency
+        if self.model is None:
+            raise ResidencyError(
+                f"{self.model_cls.__name__}: a tier move was ordered on an "
+                f"instance that holds no model object"
+            )
+        # A rung armed during the author's own load already owns this tree.
+        # Building a second handle over the same modules would give two
+        # planners two disagreeing views of one resident set.
+        from ..models.memory import stream_residency_of
+        from ..models.stream_residency import StreamedResidency
+
+        for component in (getattr(self.model, "pipe", None), self.model):
+            armed = stream_residency_of(component) if component is not None else None
+            if armed is not None:
+                self._stream_residency = armed
+                return armed
+
+        # No `device=`: the execution device is DERIVED from where this
+        # instance's weights already are. Probing the machine instead would
+        # answer "cuda" for a pipeline the CPU rung deliberately put on the
+        # host, and the first promote would move it somewhere nobody asked.
+        residency = StreamedResidency.over(self.model, budget_bytes=0)
+        if not residency.costs:
+            raise ResidencyError(
+                f"{self.model_cls.__name__}: no nn.Module tree found under the "
+                f"author's model object, so its weights cannot be tiered — "
+                f"run this instance with host_budget_bytes=0 so eviction drops "
+                f"it instead"
+            )
+        self._stream_residency = residency
+        return residency
+
     def demote_to_host(self) -> None:
-        raise NotImplementedError(
-            "host-tier staging rides the pgw#1380 native loader; run the "
-            "ResidencyManager with host_budget_bytes=0 until it lands"
+        residency = self._residency()
+        moved = (
+            residency.demote_to_host()
+            if residency.plan is not None
+            else self._engage_at(residency, 0)
+        )
+        logger.info(
+            "residency: %s demoted to host (%d bytes to pinned host RAM)",
+            self.model_cls.__name__, moved,
         )
 
     def promote_to_device(self) -> None:
-        raise NotImplementedError(
-            "host-tier staging rides the pgw#1380 native loader; run the "
-            "ResidencyManager with host_budget_bytes=0 until it lands"
-        )
+        residency = self._residency()
+        if residency.plan is None:
+            self._engage_at(residency, residency.total_bytes)
+            return
+        residency.promote_to_device()
+
+    @staticmethod
+    def _engage_at(residency: Any, budget_bytes: int) -> int:
+        """First tier move on an un-engaged instance: engage at ``budget``."""
+        from ..models.stream_residency import MemoryBudget
+
+        residency.budget = MemoryBudget.of(int(budget_bytes))
+        plan = residency.engage()
+        return int(plan.streamed_bytes)
 
 
 class ServeLoop:
@@ -238,6 +314,13 @@ class ServeLoop:
                     lane=lane,
                     engine=self._engine,
                     compile_sink=sink,
+                    # pgw#1497: ADMISSION-FIRST. The `partial_stream` rung
+                    # sizes its resident set from the bytes residency admitted
+                    # this instance for, not from an activation estimate, so
+                    # that number travels with the load moment.
+                    weight_budget_bytes=self.residency.weight_budget_bytes(
+                        binding.checkpoint_ref, key[2]
+                    ),
                 ),
                 lane,
                 self._on_loaded,

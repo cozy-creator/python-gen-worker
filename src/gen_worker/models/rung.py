@@ -48,6 +48,13 @@ class Rung:
     run_mode: str
     latency: float
     touches_host_ram: bool
+    #: pgw#1497. True for a rung only the ADMISSION path can select, because
+    #: its budget comes from a residency lease. Neither ``select_auto_mode``
+    #: (a proactive decider, no lease) nor the reactive OOM descent (no lease
+    #: at the moment it fires) may produce one, and a run-mode-only
+    #: :func:`price` does not describe one — a caller standing on such a rung
+    #: passes its NAME.
+    admission_only: bool = False
 
 
 # Wire run modes (Go-mirrored: tensorhub profiling.RunMode). Values are the
@@ -60,6 +67,61 @@ RUN_CPU = "cpu"
 NATIVE = Rung("native", "", "", RUN_NATIVE, 1.0, False)
 FP8_STORAGE = Rung("fp8_storage", "", "fp8", RUN_FP8_STORAGE, 1.05, False)
 MODEL_OFFLOAD = Rung("model_offload", "model_offload", "", RUN_OFFLOAD, 2.5, True)
+# pgw#1497 — per-LEAF-MODULE budgeted residency, the tail cast per forward from
+# pinned host RAM (`models.stream_residency`). The only rung with a BUDGET: the
+# others move a whole component (model_offload), every leaf unconditionally
+# (sequential) or a fixed group (group_offload), and none of them can be asked
+# for a number.
+#
+# ITS POSITION IS MEASURED, AND IT IS NOT WHERE THE ISSUE PREDICTED.
+# pgw#1497 specified it "between fp8_storage and model_offload". On the card
+# that is false. sd1.5, 512^2, 25 steps, CFG, fp16, eager, one config, RTX
+# 4070, best of 2 timed runs after a warmup:
+#
+#   rung                        ms/step   x native   peak VRAM
+#   resident                      119.6      1.00      2.81 GB
+#   model_offload                 187.2      1.57      1.88 GB
+#   partial_stream @50% budget    228.9      1.91      1.89 GB
+#   partial_stream @25% budget    377.7      3.16      1.35 GB
+#   partial_stream @5%  budget    426.4      3.56      1.04 GB
+#   group_offload                 550.2      4.60      0.82 GB
+#   sequential                    903.6      7.55      0.65 GB
+#
+# At EQUAL peak VRAM (1.89 vs 1.88 GB) model_offload is faster — 1.57x against
+# 1.91x — because its offload tax is per-CALL (measured: 1.69 s per generation,
+# fixed) while streaming is per-STEP. So this rung does not belong above it.
+# What it does that model_offload cannot is go LOWER: model_offload is
+# whole-component granular and bottoms out near 1.9 GB here, and this rung
+# keeps serving down to 1.04 GB at 3.56x — still 1.3x faster than
+# group_offload and 2.1x faster than sequential, the only other rungs that
+# reach that floor. Hence: below model_offload, above group_offload.
+#
+# The PRICE is that interval read off the measurements. At the 25% budget —
+# the regime it is actually selected in, a budget model_offload cannot meet —
+# it sits 52% of the way from model_offload to group_offload on the measured
+# scale ((3.16-1.57)/(4.60-1.57)), which maps onto the declared [2.5, 3.0]
+# interval as 2.76. Filed as 2.8.
+#
+# CAVEAT, recorded because it is the honest reading of the same run: the
+# ladder's OTHER declared prices are stale against this card (model_offload
+# 2.5 declared / 1.57 measured, group_offload 3.0 / 4.60, sequential 4.0 /
+# 7.55). The ORDER is right and the magnitudes are not. Re-deriving them is a
+# separate issue; interpolating into the declared interval keeps this rung
+# consistent with its neighbours rather than correct against a scale nothing
+# else uses.
+#
+# ADMISSION-FIRST, its defining constraint: the budget is the residency
+# lease's, never an activation estimate. `select_auto_mode` NEVER returns it —
+# a proactive decider has no lease to read — and `apply_low_vram_config`
+# REFUSES it without an explicit `stream_budget_bytes`. The mechanism ported
+# here is the one ComfyUI drives from hand-fitted per-architecture activation
+# lambdas; taking the mechanism without the estimator is the whole point. The
+# reactive descent does not enter it either (`_walk` sends any resident token
+# to `model_offload`): a load-time OOM has no lease in hand when it fires.
+PARTIAL_STREAM = Rung(
+    "partial_stream", "partial_stream", "", RUN_OFFLOAD, 2.8, True,
+    admission_only=True,
+)
 GROUP_OFFLOAD = Rung("group_offload", "group_offload", "", RUN_OFFLOAD, 3.0, True)
 SEQUENTIAL = Rung("sequential", "sequential", "", RUN_OFFLOAD, 4.0, True)
 # touches_host_ram: a CPU-placed pipeline keeps its WHOLE tree in host RAM —
@@ -70,7 +132,8 @@ CPU = Rung("cpu", "cpu", "", RUN_CPU, 40.0, True)
 
 #: The ONE ordering, best first. ``descend`` walks it; nothing else may.
 LADDER: tuple[Rung, ...] = (
-    NATIVE, FP8_STORAGE, MODEL_OFFLOAD, GROUP_OFFLOAD, SEQUENTIAL, CPU,
+    NATIVE, FP8_STORAGE, MODEL_OFFLOAD, PARTIAL_STREAM, GROUP_OFFLOAD, SEQUENTIAL,
+    CPU,
 )
 
 #: The reactive placement tail, shallowest first (gw#463): a load-time CUDA
@@ -165,12 +228,26 @@ def run_mode_of(name: Optional[str]) -> str:
     return r.run_mode if r is not None else ""
 
 
-def price(run_mode: str) -> float:
-    """Honest latency multiplier vs a native run, by wire run mode. Coarse
-    order-of-magnitude guidance (the hub's measured fit-matrix latency is
-    authoritative when available); monotonic down the ladder."""
+def price(mode_or_rung: str) -> float:
+    """Honest latency multiplier vs a native run.
+
+    Takes either a RUNG NAME — the exact price of the rung the caller is
+    standing on — or a wire run mode, which is coarse order-of-magnitude
+    guidance (the hub's measured fit-matrix latency is authoritative when
+    available); monotonic down the ladder.
+
+    The run-mode scan skips ``admission_only`` rungs. Three rungs now project
+    onto ``RUN_OFFLOAD`` and they span the ladder, so the run-mode answer has
+    to name which one it describes: it describes the shallowest rung a
+    PROACTIVE walk can land on, because that is the only kind of walk a caller
+    holding nothing but a run mode has taken. A caller who knows it is on
+    ``partial_stream`` passes that name and gets that rung's own number.
+    """
+    exact = _BY_NAME.get(str(mode_or_rung or ""))
+    if exact is not None:
+        return exact.latency
     for r in LADDER:
-        if r.run_mode == run_mode:
+        if r.run_mode == mode_or_rung and not r.admission_only:
             return r.latency
     return 1.0
 

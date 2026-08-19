@@ -53,8 +53,8 @@ _GIB = 1024 ** 3
 Mode = str  # "auto" | "off" | "vae_only" | "model_offload" | "group_offload" | "sequential" | "cpu"
 
 _VALID_MODES: tuple[str, ...] = (
-    "auto", "off", "vae_only", "model_offload", "group_offload", "sequential",
-    "cpu",
+    "auto", "off", "vae_only", "partial_stream", "model_offload",
+    "group_offload", "sequential", "cpu",
 )
 
 _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB = 8.0
@@ -1183,6 +1183,183 @@ def _pin_unhookable_components(
         )
 
 
+#: The typed phase a `partial_stream` arming FAILURE confesses under. A rung
+#: that could not arm and fell through to a coarser one is a placement the
+#: operator asked for and did not get — pgw#1497 measured that exact silence on
+#: the card (a component-vocabulary AttributeError, a warning, a pipeline that
+#: served on `model_offload`, and nothing off the pod said so).
+PARTIAL_STREAM_UNARMED_PHASE = "partial_stream_unarmed"
+
+#: Set on a pipeline the `partial_stream` rung armed: its
+#: :class:`~gen_worker.models.stream_residency.StreamedResidency`, so the tail
+#: can be trimmed or promoted later without rediscovering the tree.
+STREAM_RESIDENCY_ATTR = "_cozy_stream_residency"
+
+
+def stream_residency_of(pipeline: Any) -> Any:
+    """The `partial_stream` handle armed on ``pipeline``, or None."""
+    return getattr(pipeline, STREAM_RESIDENCY_ATTR, None)
+
+
+def _apply_partial_stream(
+    pipeline: Any,
+    applied: Dict[str, Any],
+    *,
+    budget_bytes: Any,
+    log: logging.Logger,
+    device: str = "cuda",
+) -> bool:
+    """Arm pgw#1497's per-leaf budgeted residency. False = could not.
+
+    ``budget_bytes`` is the DEVICE bytes this pipeline's weights may occupy,
+    and it is the caller's — the residency lease's — number. Nothing here
+    estimates it, and the whole rung refuses rather than invent one.
+
+    The dtype-fragile and content-shared union is excluded exactly as every
+    other rung excludes it: those components are handed to the ring by nobody
+    and stay wherever they are.
+    """
+    def _unarmed(reason: str) -> bool:
+        """The rung did not arm. Say so on BOTH channels and fall through.
+
+        A warning alone was the defect: the pipeline still served, on a
+        coarser rung than the budget asked for, and nothing off the pod
+        recorded it. Placement the operator did not get is a degradation.
+        """
+        _confess_serve_degrade(
+            phase=PARTIAL_STREAM_UNARMED_PHASE,
+            line=transition_line(
+                event="refused", phase="load", from_rung="partial_stream",
+                to_rung="model_offload", detail=reason,
+            ),
+            detail=(
+                f"pipeline={type(pipeline).__name__}: the partial_stream rung "
+                f"could NOT arm under its {budget_bytes} byte budget "
+                f"({reason}); this pipeline falls through to a COARSER rung "
+                f"and the per-leaf budget it was admitted for is not being "
+                f"honoured."
+            ),
+            log=log,
+        )
+        return False
+
+    try:
+        from .stream_residency import MemoryBudget, StreamedResidency
+    except Exception as exc:  # noqa: BLE001 — torch-less host
+        return _unarmed(f"{type(exc).__name__}: {exc}")
+
+    excluded = set(unhookable_components(pipeline))
+    # `_named_components` answers the pipeline's whole COMPONENT vocabulary,
+    # and a real sd1.5 pipeline puts a CLIPTokenizer, a scheduler and a feature
+    # extractor in it. Measured on the card: without this filter the rung
+    # raised `CLIPTokenizer has no attribute named_modules` and fell through to
+    # `model_offload` — silently, because the fall-through is a warning and the
+    # pipeline still served.
+    roots = [
+        (name, module)
+        for name, module in _named_components(pipeline)
+        if name not in excluded and hasattr(module, "named_modules")
+    ]
+    if not roots:
+        # A bare module (a lane ModuleDict, a test tree) is its own root.
+        roots = [(type(pipeline).__name__, pipeline)] if hasattr(
+            pipeline, "named_modules"
+        ) else []
+    if not roots:
+        return _unarmed("no hookable nn.Module tree on this pipeline")
+
+    # The excluded components are kept OUT of the ring, and that makes placing
+    # them this rung's job — exactly as `_apply_group_offload` keeps its own
+    # `exclude_modules` resident. MEASURED on the 4070: sd1.5's VAE is
+    # `force_upcast`, so it is dtype-fragile and excluded, and with nobody
+    # moving it the first decode died with `Input type (torch.cuda.HalfTensor)
+    # and weight type (torch.HalfTensor) should be the same`. An exclusion is a
+    # statement about HOOKS, never about residency.
+    components = getattr(pipeline, "components", None)
+    for name in sorted(excluded):
+        module = components.get(name) if isinstance(components, dict) else None
+        if module is None or not hasattr(module, "to"):
+            continue
+        try:
+            module.to(device)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "low_vram: partial_stream could not keep excluded component %r "
+                "on %s (%s: %s); it will not serve",
+                name, device, type(exc).__name__, exc,
+            )
+
+    try:
+        residency = StreamedResidency(
+            roots, device=device, budget_bytes=MemoryBudget.of(budget_bytes)
+        )
+        plan = residency.engage()
+    except Exception as exc:  # noqa: BLE001
+        return _unarmed(f"{type(exc).__name__}: {exc}")
+
+    try:
+        # Before the handle is visible, not after: the device repair below
+        # READS it, and diffusers' `__setattr__` treats attribute names as
+        # component registrations, so a failed set must not go unnoticed.
+        setattr(pipeline, STREAM_RESIDENCY_ATTR, residency)
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "low_vram: could not stamp the partial_stream handle on %s; "
+            "`pipeline.device` will keep answering with the host while the "
+            "tail is parked there",
+            type(pipeline).__name__,
+        )
+    # The rung parks leaves on the host, so `pipeline.device` stops answering
+    # with the execution device. Install the repair HERE too, not only on the
+    # `apply_low_vram_config` path, so a direct caller gets a coherent
+    # pipeline rather than an embedding that dies on a host-side index.
+    install_execution_device_fallback()
+    applied["partial_stream"] = True
+    applied["stream_budget_bytes"] = int(plan.budget_bytes)
+    # The RAM half of the assigned pair, REPORTED — enforcement is the named
+    # pgw#1497 follow-up. `host_bytes` is what the pinned tail costs the host.
+    applied["stream_ram_budget_bytes"] = int(plan.ram_budget_bytes)
+    applied["stream_host_bytes"] = int(plan.host_bytes)
+    applied["stream_host_fits"] = bool(plan.host_fits)
+    applied["stream_resident_bytes"] = int(plan.resident_bytes)
+    applied["stream_streamed_bytes"] = int(plan.streamed_bytes)
+    applied["stream_window_bytes"] = int(plan.window_bytes)
+    applied["stream_resident_leaves"] = len(plan.all_resident)
+    applied["stream_streamed_leaves"] = len(plan.streamed)
+
+    if not plan.streamed:
+        # The budget held the whole tree. That is not a degradation and must
+        # not be reported as one — the rung armed and then had nothing to do.
+        log.info(
+            "low_vram: partial_stream armed on %s and streams nothing — the "
+            "%.2f GiB budget holds all %d leaves; serving fully resident",
+            type(pipeline).__name__, budget_bytes / _GIB, len(plan.all_resident),
+        )
+        return True
+
+    if not plan.fits:
+        # The confession the `fits` property exists for: even the streaming
+        # window is over the lease. It serves, and it says so.
+        log.warning(
+            "low_vram: partial_stream is OVER ITS LEASE on %s — %.2f GiB of "
+            "in-flight cast window against a %.2f GiB budget. It serves; the "
+            "budget arithmetic upstream is what needs looking at.",
+            type(pipeline).__name__, plan.window_bytes / _GIB,
+            budget_bytes / _GIB,
+        )
+    log.warning(
+        "DEGRADED_MODE=engaged model=%s phase=load rung=resident->"
+        "partial_stream: %d of %d leaves (%.2f GiB) rest in pinned host RAM "
+        "and cast per forward; %.2f GiB stays resident under a %.2f GiB "
+        "budget, %.2f GiB reserved for the in-flight cast window",
+        type(pipeline).__name__, len(plan.streamed),
+        len(plan.streamed) + len(plan.all_resident),
+        plan.streamed_bytes / _GIB, plan.resident_bytes / _GIB,
+        budget_bytes / _GIB, plan.window_bytes / _GIB,
+    )
+    return True
+
+
 def _apply_group_offload(
     pipeline: Any,
     applied: Dict[str, bool],
@@ -1634,6 +1811,19 @@ def install_execution_device_fallback() -> bool:
 
     def device(self: Any) -> Any:
         got = original_getter(self)
+        # pgw#1497. The SAME repair, for the rung one line below `meta` in
+        # severity. `partial_stream` parks leaves on the host, so the original
+        # getter — which answers with the first parameter it finds — reports
+        # `cpu` for a pipeline that executes on the card. The pipeline then
+        # builds `input_ids` on the host and the first embedding dies with
+        # `index is on cpu, different from other tensors on cuda:0`. MEASURED
+        # on the 4070: sd1.5 at a 5% budget and SDXL armed from the host, both
+        # of them at exactly the budgets the rung exists for. This is the rung
+        # breaking a public answer, so this is where it is repaired.
+        armed = getattr(self, STREAM_RESIDENCY_ATTR, None)
+        armed_device = getattr(armed, "device", None) if armed is not None else None
+        if armed_device is not None and getattr(armed, "plan", None) is not None:
+            return armed_device
         if getattr(got, "type", None) != "meta":
             return got
         if getattr(reentry, "active", False):
@@ -1668,15 +1858,37 @@ def apply_low_vram_config(
     model_size_gb: Optional[float] = None,
     peak_vram_gb: Optional[float] = None,
     offload_to_disk_path: Optional[str] = None,
+    stream_budget_bytes: int = 0,
+    stream_ram_budget_bytes: int = 0,
 ) -> Dict[str, Any]:
     """Apply a low-VRAM configuration to a diffusers pipeline.
 
     ``mode="auto"`` runs :func:`select_auto_mode` against free VRAM. Returns a
     dict describing what was applied. Idempotent per pipeline object.
+
+    ``stream_budget_bytes`` / ``stream_ram_budget_bytes`` are pgw#1497's
+    ADMISSION PAIR — the {VRAM, RAM} profile this model was assigned (Paul,
+    2026-08-19). The RAM half is REPORTED, not yet enforced (see
+    :class:`~gen_worker.models.stream_residency.MemoryBudget`); the signature
+    carries the pair now so enforcement is a change of behaviour, not shape.
+    ``stream_budget_bytes`` is the VRAM half and is the ADMISSION number: the device bytes
+    this pipeline's weights were leased. Passing it upgrades any offload rung
+    ``auto`` would otherwise have chosen to ``partial_stream``, which moves
+    only the bytes that did not fit instead of a whole component. Omitting it
+    is not a smaller version of that — the rung REFUSES without it, because a
+    budget nobody handed down is exactly the activation estimate this port
+    exists to avoid.
     """
     log = logger or _LOG
     if mode not in _VALID_MODES:
         raise ValueError(f"invalid low-VRAM mode: {mode!r}; expected one of {_VALID_MODES}")
+    if mode == "partial_stream" and int(stream_budget_bytes) <= 0:
+        raise ValueError(
+            "partial_stream needs an explicit stream_budget_bytes: its resident "
+            "set is sized by the RESIDENCY LEASE, never by an activation "
+            "estimate (pgw#1497). A caller with no lease in hand wants "
+            "model_offload."
+        )
 
     # pgw#1499: arm the reactive in-rung ladders on EVERY rung, including the
     # resident ones. The rung answers "where do the weights live"; these answer
@@ -1708,12 +1920,43 @@ def apply_low_vram_config(
         effective_mode = "model_offload"
     if mode == "auto":
         effective_mode = _gguf_resident_override(pipeline, effective_mode, log)
+    # pgw#1497. `select_auto_mode` cannot pick this rung — it is a proactive
+    # decider and has no lease to read — so the UPGRADE happens here, where the
+    # caller's lease number is in scope. Any offload rung the free-VRAM walk
+    # chose becomes the fine-grained one, because the coarse rung's whole
+    # disadvantage is that it moves a component when it needed to move a few
+    # leaves. The budget is the SMALLER of the lease and what the card actually
+    # has free: both are facts, and admitting more than the card holds would
+    # OOM under a lease that was written when the card was emptier.
+    if effective_mode in ("model_offload", "group_offload", "sequential") and int(
+        stream_budget_bytes
+    ) > 0:
+        headroom = int(
+            max(0.0, get_available_vram_gb() - _DEFAULT_SAFETY_MARGIN_GB) * _GIB
+        )
+        budget = min(int(stream_budget_bytes), headroom) if headroom else 0
+        if budget > 0:
+            log.info(
+                "low_vram: upgrading %s -> partial_stream under a %.2f GiB "
+                "budget (lease %.2f GiB, free-VRAM headroom %.2f GiB)",
+                effective_mode, budget / _GIB,
+                int(stream_budget_bytes) / _GIB, headroom / _GIB,
+            )
+            effective_mode = "partial_stream"
+            stream_budget_bytes = budget
+        else:
+            log.info(
+                "low_vram: keeping %s — the card has no free headroom to hold "
+                "a partial_stream resident set (lease %.2f GiB)",
+                effective_mode, int(stream_budget_bytes) / _GIB,
+            )
 
     applied: Dict[str, Any] = {
         "mode": effective_mode,
         "vae_slicing": False,
         "vae_tiling": False,
         "attention_slicing": False,
+        "partial_stream": False,
         "model_offload": False,
         "group_offload": False,
         "sequential_offload": False,
@@ -1782,6 +2025,31 @@ def apply_low_vram_config(
                 "low_vram: CPU RAM tight (%.1f GB free); enabling disk offload at %s",
                 get_available_ram_gb(), offload_to_disk_path,
             )
+
+    if effective_mode == "partial_stream":
+        from .stream_residency import MemoryBudget as _MemoryBudget
+
+        if _apply_partial_stream(
+            pipeline,
+            applied,
+            budget_bytes=_MemoryBudget(
+                vram_bytes=int(stream_budget_bytes),
+                ram_bytes=max(0, int(stream_ram_budget_bytes)),
+            ),
+            log=log,
+        ):
+            setattr(pipeline, _COZY_MODE_ATTR, "partial_stream")
+            if applied.get("stream_streamed_leaves"):
+                _report_offload_engaged(pipeline, "partial_stream", applied, log)
+            return applied
+        # It could not arm (no torch, no hookable tree, a meta/aliased leaf).
+        # The next rung down is the honest answer, not a resident placement.
+        log.warning(
+            "low_vram: partial_stream did not arm; descending to model_offload"
+        )
+        applied["partial_stream"] = False
+        effective_mode = "model_offload"
+        applied["mode"] = effective_mode
 
     if effective_mode == "model_offload":
         _pin_unhookable_components(pipeline, applied, log)
