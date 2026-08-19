@@ -237,7 +237,14 @@ class CompiledGraphCall:
     record: GraphRecord
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self.runner(*self.record.ingress.feeds(args, kwargs))
+        # STRAIGHT THROUGH (tcg#61). The package carries the export's own
+        # `in_spec` and flattens with it, so the author's call is exactly what
+        # it wants. `CallIngress` still owns DISPATCH -- `_matches` is what
+        # decides this graph may answer this call at all -- but it does not
+        # own the calling convention, and the version of this line that
+        # thought it did died on the first real artifact with
+        # `Ran into a kwarg keyword mismatch`.
+        return self.runner(*args, **kwargs)
 
 
 __all__ = [

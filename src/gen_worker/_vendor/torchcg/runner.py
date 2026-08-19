@@ -288,13 +288,29 @@ class CompiledGraphRunner:
         self._bound_values = values
         self._bound = True
 
-    def __call__(self, *feeds: object) -> Any:
+    def __call__(self, *args: object, **kwargs: object) -> Any:
+        """Invoke the graph with the AUTHOR'S OWN call, unflattened (tcg#61).
+
+        The loaded package is torch's ``AOTICompiledModel``, and its
+        ``__call__`` performs its own ``tree_flatten((args, reorder_kwargs(
+        kwargs, in_spec)))`` against the ``in_spec`` the export recorded. So
+        the flattening is torch's, not ours, and it wants the call in the
+        shape the author writes it -- handing it pre-flattened positional
+        feeds is met with ``ValueError: Ran into a kwarg keyword mismatch:
+        Got the following keywords [] but expected [...]``.
+
+        This is the ruling ("shed everything derivable from the
+        ExportedProgram") arriving at the one place it is load-bearing: the
+        argument structure IS in the artifact, so a second copy of it here
+        could only ever disagree with the first.
+        """
+
         if not self._bound:
             raise ConstantBindingError(
                 "constants_unbound",
                 f"refusing to invoke graph {self.name!r} before complete binding",
             )
-        result = self._package(*feeds)
+        result = self._package(*args, **kwargs)
         self.calls += 1
         return result
 

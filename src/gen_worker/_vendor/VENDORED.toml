@@ -299,8 +299,16 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "12c99841"
+rev = "6c91b83d"
 subdir = "src/torchcg"
+# pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
+# stops pre-flattening the call: the loaded package is torch's
+# `AOTICompiledModel` and it re-flattens with the export's OWN `in_spec`, so it
+# wants the AUTHOR'S call shape. Measured on a 4070 against sd1.5's 14 real
+# minted specializations -- everything upstream of the call was correct and the
+# call itself died on `Ran into a kwarg keyword mismatch`. With it, sd1.5 serves
+# 26/26 unet calls through AOTI.
+#
 # pgw#1460 / tcg#58 RE-VENDOR (2026-08-19), from `12c99841`. The NEW FILE is
 # `serve.py` — the bytes->callable half of adoption, which upstream had left as
 # a seam with no implementation, so both of this repo's loaders were raw
@@ -528,9 +536,9 @@ rewrites = [
 "quantize.py" = "cb579b4a2c91af02211f6339147584338b278a2da4e1f8f60084b742fce21da6"
 "recipe.py" = "cc6fe9007a7f459ede5ced2cfd5d072e3c807552329d0e1920ade88de8b829a6"
 "requirements.py" = "3b34858258d41c4faaa133c2d9c340507c4e18928c324f5665b4fe4fac4c7bda"
-"runner.py" = "745a988f58d6be77cb781e9a2e70a80ce503c35d74b581cfea104778ec5c62b5"
+"runner.py" = "5293d1f296485963e400dd57332c44ba890a5df6bb0a92fc251e3977a1d9fb2f"
 "selection.py" = "1addd68533008d32b9d36c7877ac4c5fe43fce5f2c8737dda976f681f9145738"
-"serve.py" = "cc7d7cfb57f344dec63881d0fd2ad3848d1cf31d80f670f76f2e6f042cd2272e"
+"serve.py" = "a1f3b6fe5e46305bc9aea9848ac5935537b7bb37e2586ae3f0393f66cead2ade"
 "spans.py" = "4776fac2006967b1f17ffcbec03e50147d511120fd50cf085ac3b6b4702e5539"
 "storage.py" = "ccc9d6f8ac1a242b493028eaeed6a1fcd3a02a885c99ba2223bc71df7b69efe4"
 "store.py" = "60b12c4f36b40ea4f48464821367852df8bb530294f5535319cfe48aa3adbebb"
