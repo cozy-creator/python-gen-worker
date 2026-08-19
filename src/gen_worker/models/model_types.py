@@ -591,6 +591,81 @@ class RifeDefaults(msgspec.Struct, frozen=True):
     knob is ever ruled."""
 
 
+class QwenTextGenDefaults(msgspec.Struct, frozen=True):
+    """The AUTOREGRESSIVE sampling vocabulary — the first non-diffusion
+    ``Defaults`` in this module, and the axes both qwen3.6 roots share as ONE
+    nominal type (the ``SdxlConfig`` idiom).
+
+    None of the diffusion vocabulary means anything here: there are no steps,
+    no guidance, no cfg, no timesteps and no scheduler. A decode is one
+    autoregressive pass per token, so the knobs are the sampler's —
+    ``max_tokens`` / ``temperature`` / ``top_p``.
+
+    🔴 ``max_tokens`` DELIBERATELY CARRIES NO ``hi``, and that is the one
+    judgement in this vocabulary. Both endpoints clamp it — 32768 for the 27b
+    (``qwen3.6-27b-mtp-gguf/main.py:83``) and 16384 for the 35b
+    (``qwen3.6-35b-a3b/main.py:98``) — but each of those numbers is a CARD
+    BUDGET, not a model fact, and both comments say so in the endpoint's own
+    words ("32k with q8_0 KV fits the 48GB class next to the 17.9GB q4
+    weights", ``:31-32``; "KV pre-allocation cap for the 48GB class",
+    ``:26``). The checkpoints themselves declare
+    ``max_position_embeddings: 262144``.
+
+    Promoting a 48GB budget to the platform layer would repeat pgw#1393's
+    MEASURED ``Flux1.guidance`` defect one field over: ``defaults_decode``
+    only ever NARROWS, so a platform ``hi`` of 16384 makes a legitimate
+    262k-context checkpoint row UNREACHABLE and no larger card could widen
+    back out. The endpoints keep their own narrower wire clamps, which is
+    where a card budget belongs. ``lo=1`` IS sourced (both clamps).
+
+    ``temperature``/``top_p`` carry a default and NO bounds: neither endpoint
+    declares a range, and inventing a sampling envelope is the same defect.
+    They stay ``Knob`` rather than plain values because the wire exposes both
+    (``CompletionInput.temperature``/``top_p``), so a per-checkpoint row can
+    narrow them later without a schema change.
+    """
+
+    max_tokens: Knob[int] = Knob(256, lo=1, name="max_tokens")
+    temperature: Knob[float] = Knob(0.7, name="temperature")
+    top_p: Knob[float] = Knob(0.95, name="top_p")
+
+
+class QwenMtpDefaults(QwenTextGenDefaults, frozen=True):
+    """Qwen3.6-27B-MTP, served as GGUF through llama.cpp with MTP speculative
+    decoding. Values from the family owner's own
+    ``register_family("qwen3.6-27b-mtp", QwenMtpDefaults)`` row
+    (``qwen3.6-27b-mtp-gguf/src/qwen36_27b_mtp_gguf/main.py:35-43``):
+    ``max_tokens`` 256, ``temperature`` 0.6, ``top_p`` 0.95.
+
+    ``temperature`` 0.6 is the ONLY axis on which this root differs from
+    :class:`QwenA3bDefaults` (0.7) — which is precisely why the two are
+    separate roots rather than one shared vocabulary, unlike pgw#1393's
+    ``Flux1`` where dev and schnell register byte-identical schemas.
+
+    The speculative-decoding knobs (``--spec-draft-n-max 6``) are NOT here:
+    they are engine flags on the endpoint's own launch line, invisible to the
+    wire, and a caller cannot set them.
+    """
+
+    temperature: Knob[float] = Knob(0.6, name="temperature")
+
+
+class QwenA3bDefaults(QwenTextGenDefaults, frozen=True):
+    """Qwen3.6-35B-A3B, served fp8 through vLLM. Values from the family
+    owner's own ``register_family("qwen3.6-35b-a3b", QwenA3bDefaults)`` row
+    (``qwen3.6-35b-a3b/src/qwen36_35b_a3b/main.py:30-37``): ``max_tokens``
+    256, ``temperature`` 0.7, ``top_p`` 0.95 — i.e. the shared base
+    unchanged, so this type adds no field of its own.
+
+    Upstream ``generation_config.json`` independently corroborates
+    ``top_p: 0.95``. It also carries ``temperature: 1.0`` and ``top_k: 20``;
+    0.7 is the family owner's SERVING choice and is what this vocabulary
+    ports, per the "source from the family's own endpoint code" rule.
+    ``top_k`` is deliberately absent — no endpoint in this family exposes it,
+    so there is nothing to clamp and nothing sourced to default it to.
+    """
+
+
 class Flux1Defaults(msgspec.Struct, frozen=True):
     """FLUX.1 — BFL's rectified-flow DiT (dev, schnell, and the Flex.2-preview
     redistill). Values are SOURCED from the shipped flux endpoints, which are
@@ -789,6 +864,79 @@ class Rife(ModelType[RifeDefaults]):
     Defaults = RifeDefaults
 
 
+class Qwen36Mtp(ModelType[QwenMtpDefaults]):
+    """Qwen3.6-27B-MTP — an autoregressive LLM served as GGUF by llama.cpp.
+
+    NAME + FINGERPRINT SEAM ONLY, no canonical lane, and unlike :class:`Rife`
+    this one can never acquire one. A serve-lane document's top-level
+    ``dtype`` is MANDATORY (pgw#1391) and is defined as the serve-side load
+    dtype in TORCH SPELLING; GGUF block-quant containers (``UD-Q4_K_XL``,
+    ``IQ4_NL``, …) have no torch spelling at all, which
+    ``serving/streaming/engine.py`` states as a live refusal: "Sub-byte and
+    block-quantized containers are the external-binary class (the #1303
+    ladder's tier 3), not the serving pytorch path". The upstream repo also
+    ships no ``config.json`` and no ``model_index.json`` — there is no
+    safetensors header to derive a document FROM.
+
+    Do not read that as "tensorfs cannot handle GGUF": it ships a real
+    ``gguf-v1`` PLANNER profile and chunks these files properly. Storage and
+    serve-lane description are different layers, and only the second one is
+    closed here.
+
+    ``canonical_scheduler_config`` is ``{}`` by DEFINITION, not by
+    unreachability: the field exists so ingest can synthesize a missing
+    ``scheduler/scheduler_config.json`` for a diffusers pipeline
+    constructor's scheduler invariant. An autoregressive decoder has no noise
+    schedule and no such invariant.
+    """
+
+    name = "qwen3.6-27b-mtp"
+    contracts = ("qwen3.6-27b-mtp.*",)
+    Defaults = QwenMtpDefaults
+
+
+class Qwen36A3b(ModelType[QwenA3bDefaults]):
+    """Qwen3.6-35B-A3B — a hybrid linear-attention/full-attention MoE
+    (``Qwen3_5MoeForConditionalGeneration``, ``full_attention_interval: 4``),
+    served fp8 by vLLM.
+
+    NAME + FINGERPRINT SEAM ONLY — but for a NARROWER reason than
+    :class:`Qwen36Mtp`, and the distinction matters because a later lane
+    could legitimately author the document this one does not.
+
+    The packaging is mixed, MEASURED by ranged header reads rather than
+    assumed from the repo's advertised dtype: ``outside.safetensors`` is
+    336/336 BF16, and every layer shard is ~784 BF16 beside ~774 F8_E4M3
+    (``config.json``'s ``quantization_config.modules_to_not_convert``
+    corroborates it — the whole vision tower is excluded from conversion).
+    **That is expressible and is NOT a blocker**: the top-level ``dtype`` is
+    the LANE's load dtype while per-tensor ``dtypes`` carries the matcher's
+    constraint, and ``sdxl.diffusers-fp8-rowwise@1`` already ships exactly
+    this shape — a flat ``float8_e4m3fn`` lane over 257 per-tensor
+    declarations of which many are ``["BF16"]`` (both text encoders are
+    entirely BF16 inside an "fp8" document).
+
+    What actually leaves this type lane-less is the SERVE PATH: vLLM
+    self-loads a directory, so ``ctx.load`` is never called, the endpoint
+    declares ``lanes=()`` (eager-permanent — the tier :class:`MiniMaxH3`'s
+    docstring names, "EXTERNAL-BINARY runtimes only"), and ``ctx.lane`` would
+    raise. A lane document would therefore have no consumer on the path this
+    family is actually served by, and publishing one invites a future author
+    to point ``lanes={document: …}`` at it — asserting a pytorch streaming
+    load that this endpoint does not perform. Absent is the honest state, not
+    a placeholder for missing work.
+
+    A3B names the ACTIVE parameter count, not the resident one: 8 of 256
+    experts fire per token, but all 256 stay resident — 37.5 GB, not ~3 GB.
+    That is a placement fact for the endpoint's own floor, recorded here only
+    so the name cannot mislead a reader of this file.
+    """
+
+    name = "qwen3.6-35b-a3b"
+    contracts = ("qwen3.6-35b-a3b.*",)
+    Defaults = QwenA3bDefaults
+
+
 class Flux1(ModelType[Flux1Defaults]):
     """FLUX.1 — dev, schnell and the Flex.2-preview redistill under ONE root.
 
@@ -836,6 +984,8 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     Wan22,
     MiniMaxH3,
     Rife,
+    Qwen36Mtp,
+    Qwen36A3b,
     Flux1,
     Flux2Klein,
 )
@@ -873,6 +1023,8 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Wan22.name: Wan22.Defaults,
         MiniMaxH3.name: MiniMaxH3.Defaults,
         Rife.name: Rife.Defaults,
+        Qwen36Mtp.name: Qwen36Mtp.Defaults,
+        Qwen36A3b.name: Qwen36A3b.Defaults,
         Flux1.name: Flux1.Defaults,
         Flux2Klein.name: Flux2Klein.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
@@ -918,6 +1070,11 @@ __all__ = [
     "MINIMAX_H3_DIT_DIFFUSERS",
     "MiniMaxH3",
     "MiniMaxH3Defaults",
+    "Qwen36A3b",
+    "Qwen36Mtp",
+    "QwenA3bDefaults",
+    "QwenMtpDefaults",
+    "QwenTextGenDefaults",
     "Rife",
     "RifeDefaults",
     "MODEL_TYPES",
