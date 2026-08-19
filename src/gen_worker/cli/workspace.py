@@ -65,18 +65,15 @@ def graph_cas_root() -> Path:
 
 
 def trace_device() -> str:
-    """The device CLASS this host traces on. ``derive._trace_device`` IS the law.
+    """The device CLASS a trace states. ``derive._trace_device`` IS the law.
 
-    Imported rather than reimplemented: the CLI deciding "cuda" while the derive
-    decides "cpu" would write a lock whose ``trace_device`` disagrees with the
-    document inside it, and the skip check would then hit forever or miss
+    Imported rather than reimplemented: the CLI answering this differently
+    from the derive would write a lock whose ``trace_device`` disagrees with
+    the document inside it, and the skip check would then hit forever or miss
     forever. There is one answer to this question and it lives in the derive.
 
-    Note for this box specifically: the answer comes from
-    ``torch.cuda.is_available()``, which uses the CUDA driver API. NVML is
-    broken here (userspace 595.84 against a 570.211.01 kernel module), so
-    ``nvidia-smi`` and ``pynvml`` both report no GPU while the device works
-    perfectly. Never health-check the GPU through NVML in this codebase.
+    Since tcg#64 the answer does not depend on the host at all -- `lock` is an
+    author-time command and a trace needs no GPU.
     """
     from ..release.derive import _trace_device
 
