@@ -464,9 +464,13 @@ def test_the_serving_interaction_matrix(
 
 
 def test_the_launch_vocabulary_is_the_ruled_set() -> None:
+    # se#769 wave 3 (pgw#1427) appends krea-2, anima and ernie. The list is
+    # pinned deliberately: a type appearing here without a ruling is the thing
+    # this assertion exists to catch, so growing it is an EDIT, never a fixup.
     assert [mt.name for mt in MODEL_TYPES] == [
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
         "qwen3.6-27b-mtp", "qwen3.6-35b-a3b", "flux1", "flux2-klein",
+        "krea-2", "anima", "ernie",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
