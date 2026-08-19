@@ -202,7 +202,7 @@ class TraceRequestContext:
     and every release fixture passed because none of them called a missing
     member. A surface with holes is not a surface; the derive must answer
     everything an author may write, and the fence
-    (``test_trace_context_surface_pgw1461``) is what keeps it that way when
+    (``test_trace_context_surface``) is what keeps it that way when
     a new serving member lands.
 
     Three answer kinds, chosen per member and never by accident:
