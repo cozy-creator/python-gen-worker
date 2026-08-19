@@ -119,6 +119,11 @@ PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 _CONTRACT_MODULES = ("aot_compile_child.py", "aot_compile_pool.py")
 
 
+#: Contract modules this install does not have. Non-empty means the code
+#: identity check CANNOT run and the reason is a DEFECT, not the frozen case —
+#: `_verify_child_code` refuses on it instead of skipping.
+_CONTRACT_MISSING: list[str] = []
+
 def _code_digest() -> str:
     """A digest of the parent/child contract source, taken AT IMPORT.
 
@@ -136,13 +141,33 @@ def _code_digest() -> str:
     """
 
     here = Path(__file__).resolve().parent
-    digest = hashlib.sha256()
+    digests: list[bytes] = []
+    missing: list[str] = []
     for name in _CONTRACT_MODULES:
         try:
-            digest.update(hashlib.sha256((here / name).read_bytes()).digest())
-        except OSError:  # zipimport / frozen: no source to compare
-            return ""
-    return digest.hexdigest()[:16]
+            digests.append(hashlib.sha256((here / name).read_bytes()).digest())
+        except OSError:
+            missing.append(name)
+    if not digests:
+        # zipimport / frozen: no source ANYWHERE. The only honest fail-open —
+        # we genuinely cannot prove either way.
+        return ""
+    if missing:
+        # pgw#1444: a NAMED contract module is absent while its sibling is
+        # present. That is a broken install, not an unprovable one, and it
+        # must not read as the frozen case. `cd46c957` deleted
+        # `aot_compile_child.py` and left this module naming it, so
+        # `_code_digest()` returned "" and `_verify_child_code`'s
+        # `if not CODE_DIGEST: return` became a silent no-op — the pgw#840
+        # guard turned OFF by an unrelated deletion, with nothing anywhere
+        # saying so. Recorded rather than raised: this module is import-time
+        # reachable and a raise here would take the import with it.
+        _CONTRACT_MISSING.extend(missing)
+        return ""
+    combined = hashlib.sha256()
+    for digest in digests:
+        combined.update(digest)
+    return combined.hexdigest()[:16]
 
 
 #: Computed once per process, so parent and child each carry their OWN.
@@ -2179,6 +2204,23 @@ class EntryCompilePool:
         Refused, not warned: an artifact compiled by unknown code must not be
         packed into a compiled graph whose identity claims the parent's.
         """
+        if _CONTRACT_MISSING:
+            # pgw#1444, the C10 case: this guard was OFF and said nothing.
+            # `cd46c957` deleted `aot_compile_child.py`, `_CONTRACT_MODULES`
+            # kept naming it, `_code_digest()` returned "" for a reason that
+            # has nothing to do with zipimport, and the branch below skipped
+            # the check on every entry. A guard disabled by an upstream
+            # deletion must be LOUD, because the alternative is exactly what
+            # happened: it looked like it was running.
+            raise EntryCompileFailed(
+                row.entry,
+                f"entry {row.entry!r}: the code-identity check cannot run — "
+                f"this install is missing {_CONTRACT_MISSING}, which "
+                f"`_CONTRACT_MODULES` names as part of the parent/child "
+                f"contract. That is a BROKEN INSTALL, not the frozen case, so "
+                f"it refuses instead of skipping: pgw#840 exists because an "
+                f"artifact compiled by unknown code must not be packed into a "
+                f"compiled graph whose identity claims this parent's.")
         if not CODE_DIGEST:
             return  # no source to compare (zipimport) — cannot prove either way
         if report.code_digest == CODE_DIGEST:

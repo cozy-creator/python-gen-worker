@@ -22,6 +22,7 @@ import hashlib
 import json
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, List
 
 import pytest
@@ -711,3 +712,90 @@ def test_the_reuse_hit_is_a_wire_fact_a_rental_can_capture(
     # vocabulary is hit/miss/no_export_declaration. One kind, one vocabulary.
     assert not [e for e in wire if e[0] == "boot_adopt"], (
         "the per-boot roll-up collided with the per-key event's kind")
+
+
+# --- pgw#1444: the compile child must BE the parent ------------------------
+
+
+def test_a_skewed_compile_child_refuses_before_it_compiles(tmp_path: Path) -> None:
+    """pgw#840's hazard on the v2 mint path, which had NO protection at all.
+
+    The child produces the bytes the parent publishes and arms, while every
+    decision around it runs in the parent — sound only while both are the same
+    code. `python -m gen_worker.serving.mint_child` resolves whatever the
+    interpreter's path yields, so a second checkout, an inherited PYTHONPATH or
+    a stale wheel silently substitutes a different compiler.
+
+    Refused in the CHILD, before any work: a skewed child then costs nothing,
+    where the v1 shape (child reports, parent judges) paid for the whole
+    compile first.
+    """
+    from gen_worker.serving.mint_child import (
+        ContractModuleMissing,
+        compile_one,
+        contract_digest,
+    )
+
+    mine = contract_digest()
+    assert mine and mine != "", "the contract digest must have a real source"
+
+    with pytest.raises(ContractModuleMissing, match="DIFFERENT gen_worker"):
+        compile_one({"contract": "0" * 16})
+
+    # An unstamped request (an older parent) still runs: absent is not skew,
+    # and refusing it would break the mint on a mixed-version rollout.
+    with pytest.raises(KeyError):  # got past the check, died on a real field
+        compile_one({})
+
+
+def test_a_missing_contract_module_refuses_instead_of_skipping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE C10 REGRESSION. A guard whose digest source vanished must say so.
+
+    `cd46c957` deleted the module v1's `_CONTRACT_MODULES` named; the digest
+    became `""`; `if not CODE_DIGEST: return` turned the pgw#840 check into a
+    no-op that still looked like a guard. Here an absent NAMED module is a
+    typed refusal, distinguished from the frozen case where nothing is
+    readable and we honestly cannot prove either way.
+    """
+    from gen_worker.serving import mint_child
+
+    monkeypatch.setattr(
+        mint_child, "CONTRACT_MODULES", ("mint.py", "not_a_real_module.py"))
+    with pytest.raises(mint_child.ContractModuleMissing, match="partial install"):
+        mint_child.contract_digest()
+
+    # Frozen/zipimport: NOTHING is readable, so there is no claim to make.
+    monkeypatch.setattr(
+        mint_child, "CONTRACT_MODULES", ("nope_a.py", "nope_b.py"))
+    assert mint_child.contract_digest() == mint_child.NO_SOURCE
+
+
+def test_the_mint_stamps_its_contract_into_every_child_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent half: without the stamp the child has nothing to compare."""
+    import subprocess
+
+    from gen_worker.serving.mint_child import contract_digest
+
+    seen: List[dict] = []
+
+    def fake_run(argv: Any, **kw: Any) -> Any:
+        request = json.loads(Path(argv[-1]).read_text())
+        seen.append(request)
+        Path(request["result"]).write_text(str(elf(tmp_path / "a.so")))
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    compile_one = mint_mod._child_compiler(
+        cas=tmp_path / "cas", target_arch="sm_89", toolchain={"cc": "1"})
+    compile_one(
+        tmp_path / "blob.pt2",
+        SimpleNamespace(
+            graph="g", target="unet",
+            ingress=SimpleNamespace(as_dict=lambda: {})),
+        tmp_path / "out.so")
+
+    assert seen and seen[0]["contract"] == contract_digest()

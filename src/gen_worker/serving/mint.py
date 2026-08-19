@@ -61,6 +61,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from .. import activity as activity_mod
 from .. import compile_posture
 from ..stall import SilenceWindow
+from .mint_child import ContractModuleMissing, contract_digest
 
 logger = logging.getLogger(__name__)
 
@@ -708,6 +709,12 @@ def _child_compiler(
                 "cas": str(cas),
                 "destination": str(destination),
                 "result": str(result),
+                # pgw#1444/pgw#840: THIS parent's contract source, so the
+                # child can refuse before compiling if it is a different
+                # gen_worker. The child recomputes its own and compares —
+                # cheaper and stricter than the v1 shape (child reports,
+                # parent judges after the work is already done).
+                "contract": contract_digest(),
             }))
             proc = subprocess.run(
                 [sys.executable, "-m", "gen_worker.serving.mint_child",
@@ -1074,6 +1081,7 @@ __all__ = [
     "SERVING_RESERVE_CPUS",
     "ArtifactUnreadable",
     "ChildCompileFailed",
+    "ContractModuleMissing",
     "MissingProgramDigest",
     "PROGRAM_DIGEST_FIELD",
     "artifact_constraints",
