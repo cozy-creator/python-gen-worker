@@ -14,6 +14,8 @@ be true.
 from __future__ import annotations
 
 import math
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -57,14 +59,14 @@ class Tiny(nn.Module):
         self.conv = nn.Conv2d(8, 16, kernel_size=2)
         self.norm = nn.LayerNorm(32)
 
-    def forward(self, ids: torch.Tensor, img: torch.Tensor) -> torch.Tensor:
+    def forward(self, ids: Any, img: Any) -> Any:
         h = self.embed(ids)
         h = self.fc2(torch.relu(self.fc1(h)))
         h = self.norm(h)
         return h.sum() + self.conv(img).sum()
 
 
-def _pack(weight: torch.Tensor, name: str) -> tuple[QuantizedTensor, torch.Tensor]:
+def _pack(weight: Any, name: str) -> tuple[QuantizedTensor, Any]:
     """``(installable block bytes, what they decode to)`` for one weight.
 
     A GGML row is the flattened per-output row — that is why the logical shape
@@ -92,13 +94,13 @@ def _stack() -> tuple[Tiny, Tiny, dict[str, object]]:
     }
     tensors: dict[str, object] = {}
     for key, qname in plan.items():
-        module = reference.get_submodule(key.rsplit(".", 1)[0])
-        packed, dense = _pack(module.weight, qname)
+        param = reference.get_parameter(key)
+        packed, dense = _pack(param, qname)
         tensors[key] = packed
         # The reference holds exactly what the blocks decode to, so any
         # difference in the outputs is the LANE's, never the quantizer's.
         with torch.no_grad():
-            module.weight.copy_(dense)
+            param.copy_(dense)
     for key in ("fc1.bias", "fc2.bias", "conv.bias"):
         tensors[key] = reference.get_parameter(key).detach().clone()
 
@@ -111,7 +113,7 @@ def _stack() -> tuple[Tiny, Tiny, dict[str, object]]:
     return quantized, reference, tensors
 
 
-def _inputs() -> tuple[torch.Tensor, torch.Tensor]:
+def _inputs() -> tuple[Any, Any]:
     torch.manual_seed(7)
     return torch.randint(0, 64, (3, 5)), torch.randn(2, 8, 6, 6)
 
@@ -424,7 +426,7 @@ def test_installed_blocks_do_not_alias_the_source() -> None:
 # --- the .gguf edge --------------------------------------------------------
 
 
-def _write_gguf(path, raw, qtype) -> None:
+def _write_gguf(path: Path, raw: np.ndarray, qtype: Any) -> None:
     writer = gguf.GGUFWriter(str(path), arch="llama")
     # `raw_shape` is the BYTE shape; the writer derives the logical shape from
     # the block geometry and stores it in GGUF's reversed `ne` order.
@@ -435,7 +437,7 @@ def _write_gguf(path, raw, qtype) -> None:
     writer.close()
 
 
-def _packed_weight():
+def _packed_weight() -> tuple[np.ndarray, Any, Any]:
     torch.manual_seed(11)
     weight = torch.randn(64, 32)
     qtype = gguf.GGMLQuantizationType[LINEAR_QTYPE]
@@ -444,7 +446,7 @@ def _packed_weight():
     return raw, qtype, dense
 
 
-def test_a_written_gguf_round_trips_through_the_edge_reader(tmp_path) -> None:
+def test_a_written_gguf_round_trips_through_the_edge_reader(tmp_path: Path) -> None:
     """A real container, written and read back — the community-ingest edge,
     proved without downloading anything."""
     raw, qtype, dense = _packed_weight()
@@ -466,7 +468,7 @@ def test_a_written_gguf_round_trips_through_the_edge_reader(tmp_path) -> None:
                        torch.nn.functional.linear(x, dense, model.fc1.bias))
 
 
-def test_the_served_path_reads_block_bytes_out_of_the_cas(tmp_path) -> None:
+def test_the_served_path_reads_block_bytes_out_of_the_cas(tmp_path: Path) -> None:
     """The NORMALIZED path, Paul 2026-08-19: the store hands back per-tensor
     block bytes and the serving side never sees a container.
 
