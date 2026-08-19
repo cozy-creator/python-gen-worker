@@ -44,10 +44,18 @@ def add_subparser(sub: Any) -> None:
         help="CONFIG-ONLY checkpoint tree the author's load path resolves "
         "(subset snapshot; weights never transit the derive)",
     )
-    # pgw#1472 DELETED `--lockfile`. A document's env closure is the installed
-    # set of the process that derives it, always — the one definition a mint
-    # child and a serving pod can also restate. A flag that switched the
-    # SOURCE of an identity gave `closure` two meanings and no single one.
+    # pgw#1489: a derive STATES the compile stack it traced under, and reads it
+    # from the endpoint's own `uv.lock` — the one file the derive, the mint and
+    # every serving pod share by construction. This is not a flag that switches
+    # the source of an identity (the defect pgw#1472 named): there IS no other
+    # source any more, and a derive without a lock refuses by name.
+    derive.add_argument(
+        "--lockfile",
+        default=None,
+        help="the endpoint's uv.lock, whose torch/triton/nvidia-* rows are "
+        "this document's compile stack — the env half of every artifact key "
+        "(default: the uv.lock beside --dir)",
+    )
     derive.add_argument(
         "--graph-cas",
         default=None,
@@ -85,9 +93,15 @@ def _run_derive(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        from ..env_identity import lockfile_beside
+
+        lockfile = (
+            Path(args.lockfile).resolve() if args.lockfile else lockfile_beside(root)
+        )
         result = derive_release(
             module,
             checkpoint_dir=checkpoint,
+            lockfile=lockfile,
             graph_cas=Path(args.graph_cas).resolve() if args.graph_cas else None,
         )
     except DeriveError as exc:

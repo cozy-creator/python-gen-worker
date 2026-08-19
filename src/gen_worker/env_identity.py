@@ -23,6 +23,7 @@ peak-VRAM stamp (tcg#62) ride the artifact's requirements manifest.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections import deque
 from pathlib import Path
@@ -37,6 +38,9 @@ from ._vendor.torchcg.graph_identity import (
 #: What `uv` writes beside a project, and therefore what every end reads.
 #: Named once so the CLI, the derive and the serve runner cannot disagree.
 LOCKFILE_NAME = "uv.lock"
+
+#: What a CUDA bucket is CALLED: `cu126`, `cu130`, `cu1300`.
+_BUCKET_RE = re.compile(r"cu[0-9]{3,4}")
 
 
 class EnvIdentityError(ValueError):
@@ -55,8 +59,8 @@ def _packages(lockfile: Path | str) -> list[dict[str, Any]]:
     return rows
 
 
-def lock_entries(lockfile: Path | str) -> dict[str, str]:
-    """`{name: version}` for every package a SINGLE-flavor `uv.lock` resolves.
+def lock_entries(lockfile: Path | str, *, bucket: str = "") -> dict[str, str]:
+    """`{name: version}` for every package a `uv.lock` resolves.
 
     Verbatim: uv already writes PEP 503 names, and re-normalizing a key input
     is the drift-papering that pgw#1489 deleted. NOT a key on its own — the
@@ -66,22 +70,52 @@ def lock_entries(lockfile: Path | str) -> dict[str, str]:
     """
 
     path = Path(lockfile)
-    entries: dict[str, str] = {}
+    forked: dict[str, list[str]] = {}
     for package in _packages(path):
         name = package.get("name")
         version = package.get("version")
         if not isinstance(name, str) or not isinstance(version, str):
             continue
-        known = entries.get(name)
-        if known is not None and known != version:
-            raise EnvIdentityError(
-                f"lockfile {path} resolves {name!r} to both {known!r} and "
-                f"{version!r} — it locks several CUDA buckets "
-                f"({', '.join(cuda_buckets(path)) or 'unnamed'}); state which "
-                f"one this env materialized"
-            )
-        entries[name] = version
+        versions = forked.setdefault(name, [])
+        if version not in versions:
+            versions.append(version)
+    entries: dict[str, str] = {}
+    for name, versions in forked.items():
+        if len(versions) == 1:
+            entries[name] = versions[0]
+            continue
+        entries[name] = _resolve_fork(path, name, versions, bucket)
     return entries
+
+
+def _resolve_fork(path: Path, name: str, versions: list[str], bucket: str) -> str:
+    """One name, several resolutions: the CUDA line decides, or nobody does.
+
+    uv FORKS a resolution per index marker, so a lock can legitimately state
+    `torch` at both `2.13.0` and `2.13.0+cu130` — pgw's own lock does, and a
+    reader that raises on it fails closed on the repo that most needs it
+    (measured, pgw#1472). The fork is a CUDA fork: its branches differ by the
+    PEP 440 local segment, which is the bucket. So the host's own bucket picks
+    its branch, exactly as it picks a flavored lock's extra.
+
+    A fork this cannot attribute to a CUDA line is refused with both versions
+    named. Guessing would key artifacts to an environment nobody has.
+    """
+
+    if bucket:
+        matched = [v for v in versions if v.partition("+")[2] == bucket]
+        if len(matched) == 1:
+            return matched[0]
+    if not is_compile_relevant(name):
+        # Outside the compile stack a fork cannot reach the key; the first
+        # resolution is as good as any, and `compile_stack` drops it anyway.
+        return sorted(versions)[0]
+    raise EnvIdentityError(
+        f"lockfile {path} resolves {name!r} {len(versions)} ways "
+        f"({', '.join(sorted(versions))}) and this env "
+        + (f"is {bucket!r}, which matches none of them"
+           if bucket else "states no CUDA bucket to pick one")
+    )
 
 
 def _root(packages: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -109,11 +143,16 @@ def cuda_buckets(lockfile: Path | str) -> tuple[str, ...]:
     extras = root.get("optional-dependencies")
     if not isinstance(extras, dict):
         return ()
+    # A bucket is an extra NAMED for a CUDA line (`cu130`) that pins a
+    # compile-stack package. The name test is not decoration: pgw's own
+    # pyproject has an extra called `torch`, and an extra is only a bucket when
+    # the author meant it as one.
     return tuple(
         sorted(
             name
             for name, pins in extras.items()
-            if isinstance(pins, list)
+            if _BUCKET_RE.fullmatch(str(name))
+            and isinstance(pins, list)
             and any(
                 isinstance(pin, dict) and is_compile_relevant(str(pin.get("name") or ""))
                 for pin in pins
@@ -148,7 +187,7 @@ def compile_stack_from_lockfile(
     buckets = cuda_buckets(path)
     try:
         if not buckets:
-            return compile_stack(lock_entries(path))
+            return compile_stack(lock_entries(path, bucket=bucket))
         if not bucket:
             raise EnvIdentityError(
                 f"lockfile {path} locks {len(buckets)} CUDA buckets "

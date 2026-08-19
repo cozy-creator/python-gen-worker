@@ -279,7 +279,9 @@ def test_a_multi_bucket_lock_refuses_to_guess(flavor_lock: Path) -> None:
         compile_stack_from_lockfile(flavor_lock)
     with pytest.raises(EnvIdentityError, match="which its author never locked"):
         compile_stack_from_lockfile(flavor_lock, bucket="cu999")
-    with pytest.raises(EnvIdentityError, match="several CUDA buckets"):
+    # The raw reader resolves a fork by bucket too, and refuses to guess when
+    # it cannot attribute one — the same rule, one level down.
+    with pytest.raises(EnvIdentityError, match=r"resolves 'torch' 2 ways"):
         lock_entries(flavor_lock)
 
 
@@ -295,3 +297,43 @@ def test_a_single_resolution_lock_ignores_the_host_bucket(lockfile: Path) -> Non
 def test_the_host_reports_its_bucket_and_resolves_nothing() -> None:
     bucket = cuda_bucket()
     assert bucket == "" or (bucket.startswith("cu") and bucket[2:].isdigit())
+
+
+def test_a_FORKED_lock_is_read_by_the_host_s_bucket(tmp_path: Path) -> None:
+    """pgw#1472 measured this and concluded a lock cannot be an identity.
+
+    uv forks a resolution per index marker, so a lock legitimately states
+    `torch` at both `2.13.0` and `2.13.0+cu130` — pgw's own does. The fork is a
+    CUDA fork: its branches differ by the PEP 440 local segment, which IS the
+    bucket, so the host's bucket picks its branch. A reader that raised here
+    failed closed on the repo that most needs it.
+    """
+
+    path = tmp_path / "uv.lock"
+    path.write_text(
+        _lock()
+        + '\n[[package]]\nname = "torch"\nversion = "2.13.0+cu130"\n'
+    )
+    assert dict(compile_stack_from_lockfile(path, bucket="cu130"))["torch"] == (
+        "2.13.0+cu130"
+    )
+    with pytest.raises(EnvIdentityError, match="resolves 'torch' 2 ways"):
+        compile_stack_from_lockfile(path)
+    with pytest.raises(EnvIdentityError, match="matches none of them"):
+        compile_stack_from_lockfile(path, bucket="cu126")
+
+
+def test_pgws_OWN_lockfile_reads_cleanly() -> None:
+    """The measured case, on the real file: 17 rows and a flavored torch."""
+
+    repo = Path(__file__).resolve().parents[1] / "uv.lock"
+    stack = dict(compile_stack_from_lockfile(repo, bucket=cuda_bucket() or "cu130"))
+    assert stack["torch"].startswith("2.") and "+cu" in stack["torch"]
+    assert len(stack) > 5 and "pytest" not in stack
+
+
+def test_an_extra_is_a_BUCKET_only_when_it_is_named_for_one() -> None:
+    """pgw's own pyproject has an extra called `torch`. It is not a CUDA line."""
+
+    repo = Path(__file__).resolve().parents[1] / "uv.lock"
+    assert cuda_buckets(repo) == ()

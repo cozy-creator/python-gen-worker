@@ -260,6 +260,7 @@ def inputs_digest(
     module_name: str,
     checkpoint_ref: str,
     trace_device: str,
+    lockfile: Optional[Path] = None,
     extra: Iterable[str] = (),
 ) -> str:
     """Hash everything the derive READS. Unchanged inputs => skippable re-run.
@@ -268,13 +269,15 @@ def inputs_digest(
     digest is that it can be computed in milliseconds before deciding whether to
     spend ~165s; a digest over outputs could only be checked after paying.
 
-    The env input is ``env_closure_hash()`` — the SAME value the reused document
-    carries stamped (pgw#1472). This field used to be the `uv.lock` file digest,
-    which was wrong in a way only the one-definition rule makes visible: a reuse
-    carries the saved ``[derive]`` block through UNTOUCHED, closure included, so
-    an env that moved without its lock moving would have handed back a document
-    stamped with a closure this process no longer restates — unadoptable, and
-    silently.
+    The env input is the endpoint's ``uv.lock``, by FILE DIGEST — the same file
+    the document's compile stack is read from (pgw#1489). The hazard pgw#1472
+    named here (a reuse carrying a saved ``[derive]`` block whose env this
+    process no longer restates) is answered by construction rather than by
+    hashing the process: the block's stack came from this lock, so a lock that
+    moves re-derives, and a lock that has not moved states the same stack it
+    stated before. What the venv happens to have installed is a diagnostic the
+    verb prints, never a reuse key — an artifact is not invalidated by a docs
+    extra.
     """
     h = hashlib.sha256()
 
@@ -298,9 +301,7 @@ def inputs_digest(
     field("module", module_name)
     field("checkpoint_ref", checkpoint_ref)
     field("trace_device", trace_device)
-    from ..env_identity import env_closure_hash
-
-    field("env_closure", env_closure_hash())
+    field("lockfile", _file_digest(lockfile) if lockfile and lockfile.is_file() else "")
     for path in source_files(root):
         field(f"src:{path.relative_to(root).as_posix()}", _file_digest(path))
     for item in extra:
