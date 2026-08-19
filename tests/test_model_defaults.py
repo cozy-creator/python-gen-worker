@@ -762,26 +762,24 @@ def test_a_base_handlers_wire_floor_really_would_corrupt_a_distilled_row() -> No
     corruption is silent by construction -- no exception, just a different
     recipe -- so nothing else would have caught a mechanical port.
     """
-    import msgspec
-
     from gen_worker.models.defaults_decode import decode_defaults
 
-    # z-image's base wire floor ge=1.0 (main.py:278) against Turbo's pinned 0.0.
-    Ported = msgspec.defstruct(
-        "Ported",
-        [("guidance", Knob[float], Knob(4.0, lo=1.0, hi=15.0, name="guidance"))],
-        frozen=True, bases=(msgspec.Struct,),
-    )
-    corrupted = decode_defaults(Ported, {"guidance": {"default": 0.0}})
+    class PortedZImage(msgspec.Struct, frozen=True):
+        """z-image's BASE wire floor ge=1.0 (main.py:278) ported as-is."""
+
+        guidance: Knob[float] = Knob(4.0, lo=1.0, hi=15.0, name="guidance")
+
+    class PortedQwen(msgspec.Struct, frozen=True):
+        """qwen's BASE wire floor ge=10 (main.py:317) ported as-is."""
+
+        steps: Knob[int] = Knob(30, lo=10, hi=80, name="steps")
+
+    # Against Turbo's pinned guidance 0.0.
+    corrupted = decode_defaults(PortedZImage, {"guidance": {"default": 0.0}})
     assert corrupted.guidance.default == 1.0, "the port silently serves CFG on"
 
-    # qwen's base wire floor ge=10 (main.py:317) against Lightning's 8 steps.
-    Ported2 = msgspec.defstruct(
-        "Ported2",
-        [("steps", Knob[int], Knob(30, lo=10, hi=80, name="steps"))],
-        frozen=True, bases=(msgspec.Struct,),
-    )
-    corrupted2 = decode_defaults(Ported2, {"steps": {"default": 8}})
+    # Against Lightning's 8 steps.
+    corrupted2 = decode_defaults(PortedQwen, {"steps": {"default": 8}})
     assert corrupted2.steps.default == 10, "the port silently serves 10 steps"
 
     # And the SHIPPED floors do not do that -- the same two rows, decoded
