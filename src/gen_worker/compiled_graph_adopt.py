@@ -122,6 +122,14 @@ class EagerPhase(StrEnum):
     #: `scripts/lint_phase_enum_emitters.py` stops it growing. WIRE-OR-DELETE
     #: per member is a RULING and not a lint decision, because the hub groups
     #: historical `worker_activity_events` by these values.
+    #:
+    #: ✅ **`BOOT_ENDED_UNCOMPILED` IS WIRED (pgw#1480 fix).** Its emitter is
+    #: `ServeAdoption._say_boot_end` (`serving/serve_adoption.py`), on kind
+    #: `self_mint_skipped` — the wire contract this docstring always claimed —
+    #: keyed on three facts (the release DECLARED, zero armed graph
+    #: specializations, no mint in flight), never on a timer. Its census row is
+    #: gone, so the gate now guards the reference rather than excusing it.
+    #: The other 17 remain censused and dead.
 
     #: The arming brain has not answered yet (boot in flight, setup unfinished).
     ARM_PENDING = "arm_pending"

@@ -59,6 +59,25 @@ PERMANENT_REFUSALS = frozenset({
     "EnvironmentMismatch",   # the same, arriving as an exception type name
 })
 
+#: The refusal phases that mean the RELEASE NEVER DECLARED compiled serving
+#: (pgw#1480). Orthogonal to :data:`PERMANENT_REFUSALS`, which answers "will a
+#: retry help" — this one answers "was anything promised".
+#:
+#: The boot-end verdict below stays SILENT on these, and that silence is the
+#: whole reason the verdict is trustworthy: `boot_ended_uncompiled` must mean
+#: **DECLARED and didn't**, never "this pod runs eager". An eager-by-design
+#: release is the contract working, and an instrument that fires on it is an
+#: alarm operators learn to ignore.
+#:
+#: `no_document` is deliberately NOT here. The release IS stamped — it declared
+#: compiled serving and simply has no lane document for THIS (lane x sm) — so a
+#: pod serving eager under it is exactly the "declared compile, served eager"
+#: shape se#780's row 6 exists to catch.
+EAGER_BY_DESIGN_REFUSALS = frozenset({
+    "eager_permanent",      # the release document (or the model class) says eager
+    "release_not_stamped",  # nothing was ever declared for this release at all
+})
+
 # pgw#1460: THERE IS NO ARTIFACT LOADER IN THIS MODULE ANY MORE, and its
 # absence is the fix. What lived here was
 # `torch._inductor.aoti_load_package(str(path))` — the `GraphRecord` accepted
@@ -92,7 +111,9 @@ class ServeAdoption:
         transport: Any = None,
         installed: Optional[Mapping[str, str]] = None,
         loader: Optional[Callable[[Path, Any, Any], Any]] = None,
-        on_adopted: Optional[Callable[["ServeAdoption"], None]] = None,
+        #: The mint trigger. May ANSWER with its mint's status (anything
+        #: carrying `.running`); `None` back means "unknown" (pgw#1480).
+        on_adopted: Optional[Callable[["ServeAdoption"], Any]] = None,
     ) -> None:
         self.release_id = str(release_id)
         self.sm = str(sm)
@@ -116,6 +137,11 @@ class ServeAdoption:
         self.store: Any = None
         #: Why this pod serves eager, when it does. Empty while adopting.
         self.refusal: str = ""
+        #: The refusal's PHASE alone (pgw#1480). `refusal` is a joined
+        #: sentence, and classifying a refusal by substring-matching a sentence
+        #: is how a vocabulary becomes folklore — the boot-end verdict needs the
+        #: token, so the token is carried.
+        self.refusal_phase: str = ""
         #: Whether that refusal is PERMANENT for this pod (pgw#1472). Read off
         #: the object rather than scraped: `sink_for` swallows every failure
         #: into eager-forever by design, so "refused once, will refuse always"
@@ -157,20 +183,112 @@ class ServeAdoption:
         reported ``nothing_to_mint`` on a pod with two real holes.)
 
         Fires once. Never raises — a mint that will not start is an eager pod.
+
+        **It is also BOOT-END (pgw#1480).** The ``ServeLoop`` makes instances
+        lazily under residency leases, so there is no single boot-end moment in
+        v2 — but there IS a first moment at which this pod's compiled-serving
+        story is finished and a request is about to be served against it, and
+        this is that moment: the sink was handed over, the author's
+        ``ctx.compile`` calls have run, the adopt session is settled, and the
+        mint (if any) has been given its chance. Everything after this is
+        serving. So the terminal verdict is taken here, on FACTS, never on a
+        timer.
         """
         with self._lock:
-            if self._triggered or self.adoption is None:
+            if self._triggered:
                 return
             self._triggered = True
+            session = self.adoption
             hook = self._on_adopted
             contract = self.contract
-        self._say_outcome(contract)
-        if hook is None:
+        if session is None:
+            # A refused adopt: no session, no counts, and `_refuse` already
+            # said why on the wire. The only thing left to decide is whether
+            # the release had DECLARED anything, which the verdict owns.
+            self._say_boot_end(armed=0, claimed=0, mint_running=False)
             return
-        try:
-            hook(self)
-        except Exception:  # noqa: BLE001 — the pod serves either way
-            logger.exception("adopt: the post-load mint trigger raised")
+        self._say_outcome(contract)
+        armed, holes = len(session.adopted), len(session.holes)
+        mint_running = False
+        if hook is not None:
+            try:
+                # The hook may answer with its mint's status (anything with a
+                # `.running`). An unanswering hook is READ AS A RUNNING MINT
+                # when there are holes: a false alarm on a pod that is about to
+                # fix itself is worse than a missed one, because the operator
+                # stops reading the instrument (tracker: "a wrongly placed
+                # emitter is WORSE than a dead one").
+                started = hook(self)
+                running = getattr(started, "running", None)
+                mint_running = bool(holes) if running is None else bool(running)
+            except Exception:  # noqa: BLE001 — the pod serves either way
+                logger.exception("adopt: the post-load mint trigger raised")
+        self._say_boot_end(armed=armed, claimed=armed + holes,
+                           mint_running=mint_running)
+
+    def _say_boot_end(
+        self, *, armed: int, claimed: int, mint_running: bool
+    ) -> None:
+        """`boot_ended_uncompiled` — THE EMIT THIS PHASE NEVER HAD (pgw#1480).
+
+        `EagerPhase.BOOT_ENDED_UNCOMPILED` was defined and emitted by nothing,
+        so ``self_mint_skipped/boot_ended_uncompiled`` read ABSENT on every pod
+        that has ever run — **including every pod it exists to condemn** — and
+        se#780 was about to judge an 80 GB rental on that absence being its
+        PASS. A proof condition written against an instrument that cannot fire
+        is not a weak proof; it is not a proof.
+
+        The predicate is three FACTS, all of them owned by this object at this
+        instant, and not one of them a clock:
+
+        1. **DECLARED** — the release promised compiled serving. Either a lane
+           document was resolved for this (release x lane x sm) (a session
+           exists), or the adopt refused for a reason that is not
+           :data:`EAGER_BY_DESIGN_REFUSALS`. A pod that was never promised
+           anything is silent: eager is its contract.
+        2. **ZERO ARMED** — no graph specialization adopted. Not "few", not
+           "some holes": pgw#844's rule is that this token means *nothing is
+           dispatchable*, never "partial", so one armed specialization silences
+           it.
+        3. **TERMINAL** — no mint is running that could end the eager window.
+           A boot whose mint is in flight is `mint_in_progress`, a different
+           and non-terminal state; `boot_adopt_summary phase='minting' step=0`
+           already carries it and is the row se#780 should read for boot 1.
+
+        Deliberately on the kind the enum's own wire contract names —
+        ``self_mint_skipped``, which tensorhub already stores and already knows
+        (`ActivityKindSelfMintSkipped`) — so the fleet query is live with NO
+        hub-side change. `step`/`total_steps` carry armed/claimed as NUMBERS,
+        because "0 of 6 armed" as prose in `detail` is a metric nobody can
+        group by.
+        """
+        from ..compiled_graph_adopt import EagerPhase
+        from .self_mint import KIND_SKIPPED
+
+        if armed or mint_running:
+            return
+        declared = self.adoption is not None or (
+            bool(self.refusal_phase)
+            and self.refusal_phase not in EAGER_BY_DESIGN_REFUSALS
+        )
+        if not declared:
+            return
+        why = (
+            f"the release declared {claimed} graph specialization(s) for this "
+            f"(lane x sm) and none armed"
+            if self.adoption is not None
+            else f"the adopt refused ({self.refusal})"
+        )
+        activity_mod.emit_event(
+            KIND_SKIPPED,
+            f"release={self.release_id} lane={self.contract or '(unresolved)'} "
+            f"sm={self.sm}: boot ended with ZERO armed graph specializations "
+            f"and no mint in flight — {why}. This pod serves EAGER for the "
+            f"rest of its life against a release that declared compile.",
+            phase=EagerPhase.BOOT_ENDED_UNCOMPILED.value,
+            step=armed,
+            total_steps=claimed,
+        )
 
     def _build(self, lane: Any) -> None:
         from .._vendor.torchcg.adopt import AdoptSession
@@ -278,6 +396,7 @@ class ServeAdoption:
 
     def _refuse(self, phase: str, detail: str) -> None:
         self.refusal = f"{phase}: {detail}"
+        self.refusal_phase = phase
         self.refusal_permanent = phase in PERMANENT_REFUSALS
         logger.warning(
             "adopt: serving eager (%s) — %s",
@@ -319,4 +438,9 @@ class ServeAdoption:
         }
 
 
-__all__ = ["KIND_ADOPT_REFUSED", "ServeAdoption"]
+__all__ = [
+    "EAGER_BY_DESIGN_REFUSALS",
+    "KIND_ADOPT_REFUSED",
+    "PERMANENT_REFUSALS",
+    "ServeAdoption",
+]
