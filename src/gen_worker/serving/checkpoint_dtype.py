@@ -10,9 +10,10 @@ The checkpoint is the answer. Two sources, in order of how directly they know:
 1. the root config's ``torch_dtype``/``dtype`` (``model_index.json`` for a
    diffusers pipeline, ``config.json`` for a bare module) — what the packager
    SAID;
-2. the safetensors headers — what the tensors ARE. Headers are read as headers
-   (an 8-byte length and a JSON blob at the front of the file), so this costs
-   a few KB and never opens a weight.
+2. the safetensors headers — what the tensors ARE, read through
+   ``models.safetensors_header.read_header``, the ONE header reader in this
+   repo (bounded length, projection-stub aware). Headers are headers, so this
+   costs a few KB and never opens a weight.
 
 (1) leads because a packager who states a dtype is stating the serving
 intent — an fp32 file saved from a bf16 recipe is real. (2) is the fallback
@@ -28,13 +29,9 @@ precision a derived lane runs at.
 from __future__ import annotations
 
 import json
-import logging
-import struct
 from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
-
-_LOG = logging.getLogger("gen_worker.serving.checkpoint_dtype")
 
 #: safetensors dtype spellings -> torch attribute names.
 _ST_DTYPES = {
@@ -48,10 +45,6 @@ _ST_DTYPES = {
 
 #: Root config files, most specific first.
 _CONFIGS = ("model_index.json", "config.json")
-
-#: Header prefix cap. A safetensors header is JSON metadata; anything past
-#: this is a corrupt or hostile file, not a header we want in memory.
-_MAX_HEADER = 100 * 1024 * 1024
 
 
 def torch_dtype(name: Any) -> Any:
@@ -89,21 +82,25 @@ def _config_dtype(tree: Path) -> Any:
 
 
 def _header_dtypes(path: Path) -> Counter[str]:
-    """The floating dtype tally of one safetensors file's header."""
+    """The floating dtype tally of one safetensors file's header.
+
+    Through `read_header`, never a second hand-rolled reader: the declared
+    header length comes off the file and sizes an allocation, and this repo
+    keeps exactly one bound on that (pgw#1013). It is also the only reader
+    that knows a projection stub from a real file.
+    """
+
+    from ..models.safetensors_header import read_header
 
     tally: Counter[str] = Counter()
     try:
-        with path.open("rb") as handle:
-            raw = handle.read(8)
-            if len(raw) != 8:
-                return tally
-            length = struct.unpack("<Q", raw)[0]
-            if length <= 0 or length > _MAX_HEADER:
-                return tally
-            header = json.loads(handle.read(length).decode("utf-8"))
-    except (OSError, ValueError, struct.error):
-        return tally
-    if not isinstance(header, dict):
+        header = read_header(
+            path,
+            why="a lane with no contract takes its load dtype from the "
+                "checkpoint, and a header that reads as empty would silently "
+                "become the loader's default precision instead",
+        )
+    except Exception:  # noqa: BLE001 - a dtype PROBE never kills a load
         return tally
     for name, entry in header.items():
         if name == "__metadata__" or not isinstance(entry, dict):

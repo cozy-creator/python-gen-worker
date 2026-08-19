@@ -198,3 +198,58 @@ def test_check_refuses_when_there_is_no_lock_to_check(
     endpoint: Path, checkpoint: Path, tmp_path: Path
 ) -> None:
     assert _lock(endpoint, checkpoint, tmp_path / "graph-cas", "--check")[0] == 2
+
+
+# --------------------------------------------------------------------------
+# The derived lane's load dtype: the CHECKPOINT decides, because no contract
+# is there to. Precision is graph identity, so "whatever the loader defaults
+# to" is not an answer a trace can take.
+# --------------------------------------------------------------------------
+
+
+def _safetensors(path: Path, dtypes: dict[str, int]) -> None:
+    """A real safetensors file: 8-byte length, JSON header, no payload read."""
+
+    import struct
+
+    header: dict[str, object] = {}
+    offset = 0
+    for spelling, count in dtypes.items():
+        for index in range(count):
+            header[f"w{spelling}{index}"] = {
+                "dtype": spelling, "shape": [1], "data_offsets": [offset, offset + 2],
+            }
+            offset += 2
+    blob = json.dumps(header).encode("utf-8")
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + b"\0" * offset)
+
+
+def test_a_derived_lane_takes_its_dtype_from_the_checkpoint(tmp_path: Path) -> None:
+    import torch
+
+    from gen_worker.serving.checkpoint_dtype import checkpoint_dtype
+
+    assert checkpoint_dtype(None) is None
+    assert checkpoint_dtype(tmp_path / "nowhere") is None
+
+    # No config at all — the many checkpoints that ship raw shards. The
+    # MAJORITY of declared tensors decides, not the file that sorts first:
+    # a pipeline keeps its text encoder and VAE beside the denoiser.
+    tree = tmp_path / "raw"
+    tree.mkdir()
+    _safetensors(tree / "a-encoder.safetensors", {"F32": 2})
+    _safetensors(tree / "b-denoiser.safetensors", {"BF16": 9})
+    assert checkpoint_dtype(tree) is torch.bfloat16
+
+    # A stated dtype leads: the packager is stating serving intent, and an
+    # fp32 file saved from a bf16 recipe is a real thing.
+    (tree / "model_index.json").write_text(
+        json.dumps({"_class_name": "X", "torch_dtype": "float16"}), encoding="utf-8"
+    )
+    assert checkpoint_dtype(tree) is torch.float16
+
+    # Nothing readable anywhere is None — the loader keeps its own default,
+    # stated rather than invented.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert checkpoint_dtype(empty) is None
