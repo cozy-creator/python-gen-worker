@@ -35,6 +35,7 @@ from gen_worker import activity, weight_position
 from gen_worker.models.cozy_snapshot import ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from gen_worker.models.refs import TensorhubRef
+from gen_worker.models.store import ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.weight_position import MIB, FetchPosition
 
@@ -96,13 +97,38 @@ class _Wire:
 
     def __init__(self) -> None:
         self.updates: list[pb.ActivityUpdate] = []
+        self.model_events: list[pb.ModelEvent] = []
 
     async def send(self, msg: pb.WorkerMessage) -> None:
-        if msg.WhichOneof("msg") == "activity_update":
+        which = msg.WhichOneof("msg")
+        if which == "activity_update":
             self.updates.append(msg.activity_update)
+        elif which == "model_event":
+            self.model_events.append(msg.model_event)
 
     def positions(self) -> list[pb.ActivityUpdate]:
         return [u for u in self.updates if u.kind == activity.KIND_WEIGHT_FETCH]
+
+    def open_download_records(self) -> dict[str, pb.ModelEvent]:
+        """The hub's own bookkeeping rule, replayed over what we emitted.
+
+        `connect_worker.go` OPENS `ModelDownloads[ref]` on DOWNLOADING and
+        removes it on ON_DISK / FAILED / EVICTED — nothing else. Whatever this
+        returns is a row that would still read `downloading` on the hub after
+        the worker was finished with it: th#2205's idle-retire veto and
+        th#2204's placement livelock, both.
+        """
+        open_rows: dict[str, pb.ModelEvent] = {}
+        for event in self.model_events:
+            if event.state == pb.MODEL_STATE_DOWNLOADING:
+                open_rows[event.ref] = event
+            elif event.state in (
+                pb.MODEL_STATE_ON_DISK,
+                pb.MODEL_STATE_FAILED,
+                pb.MODEL_STATE_EVICTED,
+            ):
+                open_rows.pop(event.ref, None)
+        return open_rows
 
 
 def _detail(update: pb.ActivityUpdate) -> dict[str, str]:
@@ -284,3 +310,186 @@ def test_a_frozen_or_regressing_position_emits_nothing_new(_fine_cadence: Any) -
         assert [u.step for u in wire] == [0, 4, 6]
     finally:
         weight_position.FetchPosition._emit = original  # type: ignore[method-assign]
+
+
+# ---------------------------------------------------------------------------
+# pgw#1485 — THE RECORD ITSELF, through the same funnel.
+#
+# The positions above are the DIAGNOSTIC. The `model_download` record is the
+# LIABILITY: an open one vetoes idle retirement (th#2205 — 92 idle minutes on
+# an A100 at $1.59/hr, $2.44 of a $4.75 run, and nine pods over six days) and
+# parks placement forever (th#2204 — a rented H100 at $3.29/hr re-electing the
+# same worker until an operator intervened). One producer, two victims. So the
+# same funnel that reports positions is tested for the record's LIFECYCLE:
+# opened only when there is a transfer, closed on every exit path.
+# ---------------------------------------------------------------------------
+
+def _pb_snapshot(files: list[tuple[str, bytes, str]]) -> pb.Snapshot:
+    """The wire form `ModelStore.ensure_local` takes, over the same blobs."""
+    resolved = _resolved(files)
+    return pb.Snapshot(
+        digest=resolved.snapshot_digest,
+        files=[
+            pb.SnapshotFile(
+                path=f.path, size_bytes=f.size_bytes, digest=f.digest, url=f.url,
+            )
+            for f in resolved.files
+        ],
+    )
+
+
+def _store(wire: _Wire, cas: Path) -> ModelStore:
+    """The production object, over a real CAS root, emitting onto `wire`."""
+    return ModelStore(wire.send, cache_dir=cas)
+
+
+def test_a_real_fetch_opens_advances_and_closes_the_record(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """THE CONTROL, and it must keep passing: a genuine transfer through
+    `ModelStore` still opens a download record, advances positions while the
+    bytes move, and closes the record with ON_DISK. A fix that stops the
+    phantom by stopping the instrument fails here."""
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            await store.ensure_local("acme/model-a", snapshot)
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        states = [e.state for e in wire.model_events]
+        assert pb.MODEL_STATE_DOWNLOADING in states, (
+            f"a real transfer must declare itself; got {states}")
+        assert pb.MODEL_STATE_ON_DISK in states
+        assert wire.open_download_records() == {}, (
+            "the record a completed fetch opened must be closed")
+        # And pgw#1455's positions still advance through the funnel.
+        steps = [r.step for r in wire.positions()]
+        assert steps and steps[-1] == (OBJECTS * OBJECT_BYTES) // MIB
+        assert steps[-1] > steps[0]
+    finally:
+        origin.close()
+
+
+def test_a_resident_ref_opens_no_download_record(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """th#2205's MEASURED shape: a WARM pod re-dispatched against weights it
+    already holds.
+
+    The incident's record read `0 of 15,980,165,697 bytes @ 0.00/s` for 1h54m
+    while the job it was opened for ran to completion and the pod billed
+    another 92 minutes idle. Its mechanism is exactly this: the cached-path
+    short-circuit misses, the downloader resolves every object out of the local
+    CAS and moves ZERO bytes, so `_progress` never fires — and the ON_DISK that
+    would have closed the record is suppressed as same-tier residency spam.
+    Nothing advances it and nothing closes it, forever.
+
+    The short-circuit miss is reproduced by making the resolver's path lookup
+    answer None while residency still holds the ref, which is the state the hub
+    log proves the pod was in. Everything else — the CAS, the fetch, the events
+    — is the production path.
+    """
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            # Attempt 3: the cold fetch that made the pod warm.
+            await store.ensure_local("acme/model-a", snapshot)
+            for _ in range(8):
+                await asyncio.sleep(0)
+            assert store.residency.tier("acme/model-a") is not None
+            wire.updates.clear()
+            wire.model_events.clear()
+
+            # Attempt 4, WARM POD REUSE — with the cached-path lookup missing.
+            store.disk_local_path = lambda ref: None  # type: ignore[method-assign]
+            store._verified.discard("acme/model-a")
+            await store.ensure_local("acme/model-a", snapshot)
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        assert wire.open_download_records() == {}, (
+            "a ref the pod ALREADY HOLDS must not leave a `downloading` record: "
+            f"{[(e.ref, e.bytes_done, e.bytes_total) for e in wire.open_download_records().values()]}"
+        )
+        assert not [
+            e for e in wire.model_events
+            if e.state == pb.MODEL_STATE_DOWNLOADING
+        ], "a transfer that moves no bytes must not be declared at all"
+        # ...and it says so on the position stream, so "the pod already had it"
+        # is a ROW rather than th#2204's `no_position_reported` silence.
+        phases = [r.phase for r in wire.positions()]
+        assert weight_position.PHASE_ALREADY_RESIDENT in phases, phases
+    finally:
+        origin.close()
+
+
+def test_a_transfer_that_dies_midway_leaves_no_open_record(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """The same class, reached the other way: a download whose PROCESS ends
+    mid-flight. Cancellation unwinds the funnel; if the close is not structural
+    the record outlives the transfer that owned it and is indistinguishable
+    from one still running."""
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            task = asyncio.ensure_future(store.ensure_local("acme/model-a", snapshot))
+            # Let the record open and the transfer start, then kill it.
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # The terminal is handed to the loop rather than awaited while the
+            # cancellation unwinds; give it its turn.
+            await asyncio.sleep(0.1)
+
+        asyncio.run(run())
+
+        states = [e.state for e in wire.model_events]
+        assert pb.MODEL_STATE_DOWNLOADING in states, (
+            f"the transfer should have declared itself before dying; got {states}")
+        assert wire.open_download_records() == {}, (
+            "a cancelled transfer must close the record it opened")
+        assert [
+            e.error for e in wire.model_events
+            if e.state == pb.MODEL_STATE_FAILED
+        ] == ["download_canceled"]
+        assert weight_position.PHASE_ABANDONED in [
+            r.phase for r in wire.positions()]
+    finally:
+        origin.close()

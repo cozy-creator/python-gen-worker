@@ -63,6 +63,11 @@ PHASE_FETCHING = "fetching"
 PHASE_FETCHED = "fetched"
 #: The fetch raised or was cancelled; position is where it stopped.
 PHASE_ABANDONED = "abandoned"
+#: pgw#1485: the ref was ALREADY RESIDENT — nothing was transferred and no
+#: `model_download` record was opened hub-side. A distinct word, because
+#: "fetched at position 0" and "there was nothing to fetch" are different facts
+#: and th#2204 cost a rental to the first being unsayable.
+PHASE_ALREADY_RESIDENT = "already_resident"
 
 #: Emit at most one row per this many MiB of advance...
 STRIDE_MIB = 256
@@ -137,14 +142,30 @@ class FetchPosition:
             return
         self._emit(PHASE_FETCHING)
 
-    def close(self, ok: bool = True) -> None:
+    def close(self, ok: bool = True, *, resident: bool = False) -> None:
         """The terminal position. Emitted whether or not it advanced — where
         the transfer STOPPED is the fact, and a fetch that moved less than one
-        MiB has to leave a row saying so."""
+        MiB has to leave a row saying so.
+
+        ``resident=True`` says the ref was already on the pod and no transfer
+        happened at all (pgw#1485)."""
         if self._closed:
             return
         self._closed = True
+        if ok and resident:
+            self._emit(PHASE_ALREADY_RESIDENT)
+            return
         self._emit(PHASE_FETCHED if ok else PHASE_ABANDONED)
+
+    def already_resident(self) -> None:
+        """Open AND close in one row: the resolver found the ref resident, so
+        there is no transfer to report positions for. One row, so the reader
+        can tell "the pod already had it" from "nothing ever ran"."""
+        if self._closed:
+            return
+        self._opened = True
+        self._closed = True
+        self._emit(PHASE_ALREADY_RESIDENT)
 
     # -- emission -----------------------------------------------------------
 
