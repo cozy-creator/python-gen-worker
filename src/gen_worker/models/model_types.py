@@ -304,6 +304,41 @@ FLUX2_KLEIN_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "use_karras_sigmas": False,
 }
 
+#: baidu/ERNIE-Image ``scheduler/scheduler_config.json``, fetched VERBATIM from
+#: the HUB's revision-pinned clone (``tensorhub/ernie-image@prod``,
+#: ``source_repo baidu/ERNIE-Image``, ``source_revision
+#: 5346b31d68c9c23758ba56ef8be5e9dc174c7f99``). ``ernie-image-turbo`` ships a
+#: BYTE-IDENTICAL file (both ``sha256:96031c39fcd4651ae…``, 482 B), so one
+#: config covers the family.
+#:
+#: NOT filled by analogy with :data:`FLUX2_KLEIN_SCHEDULER_CONFIG`, and the
+#: contrast is the reason to say so: ERNIE is flow-matching too, but ships
+#: ``shift 4.0`` with ``use_dynamic_shifting`` FALSE against Klein's 3.0/TRUE.
+#: The temptation is live rather than hypothetical — ingest currently
+#: MISCLASSIFIES both ernie checkpoints as flux (``metadata.model_family
+#: "flux"``, ``model_family_variant "flux2"``, because ``model_index.json``
+#: declares ``vae: AutoencoderKLFlux2`` and ``_class_name
+#: ErnieImagePipeline`` is not in the family map), so the wrong analogy is
+#: exactly the one a reader is handed. Copying Klein's numbers would have
+#: silently changed this family's sigma ladder.
+ERNIE_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "FlowMatchEulerDiscreteScheduler",
+    "num_train_timesteps": 1000,
+    "shift": 4.0,
+    "base_shift": 0.5,
+    "max_shift": 1.15,
+    "use_dynamic_shifting": False,
+    "base_image_seq_len": 256,
+    "max_image_seq_len": 4096,
+    "time_shift_type": "exponential",
+    "shift_terminal": None,
+    "invert_sigmas": False,
+    "stochastic_sampling": False,
+    "use_beta_sigmas": False,
+    "use_exponential_sigmas": False,
+    "use_karras_sigmas": False,
+}
+
 #: REAL — a tensorfs library document. Live on deploy lane
 #: ``a55e45a571cdb6188``.
 SDXL_DIFFUSERS_BF16: Final = _library("sdxl.diffusers-bf16", 1)
@@ -775,6 +810,189 @@ class Flux2KleinDefaults(msgspec.Struct, frozen=True):
     max_sequence_length: int = 512
 
 
+class Krea2Defaults(msgspec.Struct, frozen=True):
+    """Krea 2 — a 12.9B single-stream MMDiT (rectified flow) with a Qwen3-VL-4B
+    text encoder and the Qwen-Image f8 VAE, served as TWO checkpoints under one
+    vocabulary: the undistilled Raw mirror and the TDM-distilled Turbo mirror.
+
+    Ported from the family owner's own ``Krea2Defaults``
+    (``krea-2/src/krea_2/main.py:72-85``, the ``register_family("krea-2", ...)``
+    row this vocabulary replaces). Values: ``steps`` 28 (``:83``) and
+    ``guidance`` 3.5 (``:84``) — diffusers' own ``Krea2Pipeline`` signature
+    defaults, which the endpoint states are deliberately the UNCONFIGURED stamp
+    rather than either lane's card recipe (``:76-81``).
+
+    BOUNDS ARE NOT THE RAW HANDLER'S WIRE ENVELOPE, and that is load-bearing
+    twice over. ``_merge_int_knob`` clamps a checkpoint row's default INTO the
+    platform range, so a floor copied from the Raw lane silently rewrites the
+    Turbo checkpoint. Both cases were RED/GREEN VERIFIED against the real
+    ``defaults_decode`` merge functions, not reasoned about:
+
+    * ``steps`` — Raw's wire floor is ``ge=20`` (``:313``) but Turbo's published
+      TDM recipe is 8 (``:94``). MEASURED: platform ``lo=20`` decodes the Turbo
+      row's 8 to **20**. So ``lo=1``; ``hi=80`` is Raw's own ceiling (``:313``),
+      which already admits Turbo's ``le=16`` (``:340``).
+    * ``guidance`` — Raw's wire floor is ``ge=1.0`` (``:316``) but the Turbo lane
+      PINS guidance to 0.0 (``_TURBO_GUIDANCE``, ``:95``) and the distill is only
+      valid guidance-free (``:517-518``). MEASURED: platform ``lo=1.0`` against
+      the Turbo row decodes to ``lo=1.0, hi=0.0`` — an EMPTY RANGE. That is the
+      defect :class:`Flux1Defaults` records for schnell (see its docstring),
+      reproduced in a SECOND family, which is what makes it a class rather than
+      an anecdote. Floor is 0.0; ``hi`` 10.0 is Raw's ceiling (``:316``).
+
+    The endpoints keep their narrower wire bounds; the platform envelope has to
+    admit the family's real checkpoints.
+
+    DELIBERATELY ABSENT — endpoint PAYLOAD vocabulary, not ModelType state (the
+    :class:`Flux2KleinDefaults` exclusion): the ``AspectRatio`` enum and the
+    1mp/2mp preset grids (``:117-149``), the ``megapixels`` tier (``:311``),
+    ``output_format`` (``:321``), and ``_KREA2_TOKEN_DIV`` (``:177``, a
+    compile-geometry constant). Also absent: ``canonical_scheduler_config`` —
+    krea-2's checkpoints are not in the hub at all (see :class:`Krea2`), so the
+    file is UNREACHABLE rather than nonexistent, and inventing one is forbidden.
+    """
+
+    steps: Knob[int] = Knob(28, lo=1, hi=80, name="steps")
+    guidance: Knob[float] = Knob(3.5, lo=0.0, hi=10.0, name="guidance")
+    #: Krea 2 Raw runs a REAL uncond forward — but as two SEQUENTIAL batch-1
+    #: calls rather than a batch-2 pass (``krea-2/src/krea_2/main.py:160-163``,
+    #: ``:200-205``). Still the CFG mechanism, so True; the Turbo row sets False.
+    #: Note the contrast with ``Flux1Defaults.cfg``, False because FLUX.1's
+    #: guidance is a distillation EMBEDDING and no uncond forward exists at all
+    #: — a different reason for a different value.
+    cfg: bool = True
+    #: The Turbo mirror IS a TDM timestep distillation and its row sets True
+    #: (``:499`` declares ``distilled=True``); Raw is not (``:464``).
+    step_distilled: bool = False
+    #: ``krea-2/src/krea_2/main.py:152``, passed as a call argument at ``:446``.
+    #: A plain int, NOT a Knob (the :class:`MiniMaxH3Defaults` idiom): no
+    #: endpoint exposes it on the wire, so there is nothing to clamp
+    #: caller-visibly.
+    max_sequence_length: int = 512
+
+
+class AnimaDefaults(msgspec.Struct, frozen=True):
+    """Anima (``circlestone-labs/Anima``) — an anime-focused ~2B text-to-image
+    DiT on NVIDIA's Cosmos-Predict2-2B backbone. ComfyUI-native (a split
+    checkpoint, not a diffusers repo), run through DiffSynth's
+    ``AnimaImagePipeline``.
+
+    Ported from ``anima/src/anima/main.py:110-122``. Values: ``steps`` 35
+    (``:119``) and ``guidance`` 4.5 (``:120``) — the model card recipe the
+    docstring quotes at ``:111`` ("CFG ~4-5, 30-50 steps"); ``negative`` ""
+    (``:121``).
+
+    BOUNDS — the same clamp-direction reasoning as :class:`Krea2Defaults`, and
+    this family has the sharpest instance of it. Both RED/GREEN VERIFIED:
+
+    * ``steps`` — the base handler's wire floor is ``ge=30`` (``:313``) while the
+      turbo distill regime is 10 (``_TURBO_STEPS``, ``:133``). MEASURED: platform
+      ``lo=30`` decodes an already-distilled row's 10 to **30** — three times the
+      work at the wrong regime, silently. ``hi=50`` (``:313``). ``lo=1`` rather
+      than the widest DECLARED floor of 10: a step count's physical floor is 1,
+      every other family in :data:`MODEL_TYPES` spells it that way, and a floor
+      of 1 cannot clamp any row UP — the only direction that corrupts. Widening
+      below what a lane declares is safe here precisely because the hazard is
+      one-directional.
+    * ``guidance`` — base wire floor ``ge=1.5`` (``:314``); the turbo lane pins
+      CFG to 1.0 (``_TURBO_CFG``, ``:134``). MEASURED: ``lo=1.5`` decodes the
+      turbo row's 1.0 to **1.5**, i.e. CFG ON for a distill that is only valid
+      with it off. ``lo=1.0``, ``hi=10.0`` (``:314``).
+
+    That path is REACHABLE IN PRODUCTION, which is why the floors matter here
+    and are not defensive: ``generate_turbo`` reads ``resolved.defaults`` for an
+    already-distilled bind (``:549-560``), and that is exactly the row the
+    platform knob merges.
+
+    ``negative`` is a plain ``str``, not a ``Knob`` — ``Knob`` is numeric
+    (``SupportsClamp``) and a default negative prompt has no range to clamp.
+    Read at ``:525``.
+
+    DELIBERATELY ABSENT:
+
+    * ``max_sequence_length`` — anima declares NO ``compile=`` block at all and
+      therefore no ``Compile(text_len=)`` pin (``:469-478``, where the omission
+      is stated as load-bearing: torch.compile measured no win, and a compile
+      declaration would classify the function as hub-delivered). There is no
+      text-sequence pin to source, so the field stays out. This is the one field
+      where anima honestly differs from krea-2 and ernie.
+    * ``canonical_scheduler_config`` — the prod checkpoint holds THREE files
+      (DiT, text encoder, VAE) and none is a scheduler config; DiffSynth builds
+      the scheduler in code. This is the HONEST empty of the "do not invent"
+      rule (the value does not exist), NOT the unreachable empty.
+    * a ``.Lora`` overlay — the endpoint declares ``lora_bucket=32`` (``:468``)
+      and the fleet binds ``tensorhub/anima-turbo-lora@prod`` at weight 1.0
+      (``e2e/manifests/bindings.yaml:141``), but ``lora_bucket`` is an
+      ``@endpoint`` declaration about adapter RANK, not a defaults vocabulary,
+      and no anima code registers a lora Defaults struct. Same call and same
+      reason as :class:`Flux1Defaults`.
+    * the ``AspectRatio`` enum and preset grid (``:137-158``) and
+      ``output_format`` — endpoint payload vocabulary.
+    """
+
+    steps: Knob[int] = Knob(35, lo=1, hi=50, name="steps")
+    guidance: Knob[float] = Knob(4.5, lo=1.0, hi=10.0, name="guidance")
+    negative: str = ""
+    #: The base lane runs a real CFG walk (``cfg_scale`` through DiffSynth with
+    #: the wire floor at 1.5, ``anima/src/anima/main.py:314``, ``:520-524``); the
+    #: turbo overlay/distilled row sets False (``:590`` serves at ``_TURBO_CFG``).
+    cfg: bool = True
+    #: The curated turbo distill's row sets True; the base is undistilled
+    #: (``:506`` declares ``distilled=False``).
+    step_distilled: bool = False
+
+
+class ErnieDefaults(msgspec.Struct, frozen=True):
+    """Baidu ERNIE-Image — an 8B single-stream DiT (Apache 2.0) served through
+    diffusers' ``ErnieImagePipeline`` as a full checkpoint plus a step-distilled
+    Turbo.
+
+    Ported from ``ernie/src/ernie/main.py:84-98``. Values: ``steps`` 28 (``:95``,
+    which the docstring records as ie#533's CORRECTED base value — the card's 50
+    is "more of a max than a recommendation"), ``guidance`` 4.0 (``:96``),
+    ``negative`` "" (``:97``).
+
+    BOUNDS:
+
+    * ``steps`` — base wire is ``ge=1, le=100`` (``:235``) and the distilled
+      recipe is 8 (``_DISTILLED_STEPS``, ``:81``), which a floor of 1 already
+      admits. NO hazard here, and it is worth stating that it was checked rather
+      than assumed: ``lo=1, hi=100`` also admits Turbo's ``le=16`` (``:254``).
+    * ``guidance`` — base wire floor is ``ge=1.5`` (``:238``, chosen so the
+      batch-2 CFG graph shape stays invariant) but the Turbo class PINS guidance
+      to 1.0 (``:458``). MEASURED: platform ``lo=1.5`` decodes the Turbo row's
+      1.0 to **1.5**. So ``lo=1.0`` — the value both real checkpoints actually
+      reach — and ``hi=15.0`` (``:238``). The floor is 1.0 rather than 0.0
+      because no ernie lane pins guidance off; sourcing stops at the family's
+      real checkpoints rather than widening for a checkpoint that does not exist.
+
+    ``canonical_scheduler_config`` IS recorded for this family
+    (:data:`ERNIE_SCHEDULER_CONFIG`) — fetched verbatim from the hub's
+    revision-pinned clone, byte-identical across base and Turbo.
+
+    DELIBERATELY ABSENT: the ``AspectRatio`` preset grid (``:66-74``), ``use_pe``
+    (``:242`` — a payload switch for the prompt-enhancer LLM), ``output_format``,
+    and ``_ERNIE_LATENT_SCALE`` (``:135``, compile geometry).
+    """
+
+    steps: Knob[int] = Knob(28, lo=1, hi=100, name="steps")
+    guidance: Knob[float] = Knob(4.0, lo=1.0, hi=15.0, name="guidance")
+    negative: str = ""
+    #: The base pipeline cats the latent batch x2 when guidance > 1 and chunks
+    #: the prediction (``ernie/src/ernie/main.py:186-190``) — a genuine batch-2
+    #: CFG graph. The Turbo class is the distilled release at CFG 1.0, batch-1,
+    #: and its row sets False.
+    cfg: bool = True
+    #: Turbo rows set True (``:437`` declares ``distilled=True``); the base class
+    #: is undistilled (``:398``).
+    step_distilled: bool = False
+    #: ``ernie/src/ernie/main.py:77``, the ``Compile(text_len=)`` declaration,
+    #: made true on the pipeline by ``_pin_text_sequence`` (``:269-304``, which
+    #: sets ``tokenizer.model_max_length``). Plain int, MiniMaxH3 idiom — no
+    #: endpoint exposes it on the wire.
+    max_sequence_length: int = 512
+
+
 # ── the model types (launch set, pgw#1376 point 1) ───────────────────────────
 
 
@@ -976,6 +1194,114 @@ class Flux2Klein(ModelType[Flux2KleinDefaults]):
     Defaults = Flux2KleinDefaults
 
 
+class Krea2(ModelType[Krea2Defaults]):
+    """Krea 2 (Raw + TDM Turbo).
+
+    NO ``canonical_contract``, and uniquely in se#769 the reason is not merely
+    that tensorfs ships no ``krea-2.*`` document yet: **the checkpoints are not
+    in the hub at all.** krea-2 is ``wave: blocked`` on ie#632
+    (``e2e/manifests/fleet.yaml:497-505``) for a MIRROR defect —
+    ``tensorhub/krea-2-raw``'s mirrored ``model_index`` declares
+    ``text_encoder_select_layers`` that upstream ``krea/Krea-2-Raw`` never
+    carried (th#1675 class). The recorded verdict is *"fix the mirror, not the
+    endpoint"*, and the deploy bindings are deliberately kept live for a
+    one-command redeploy (``e2e/manifests/bindings.yaml:295-301``).
+
+    So there is no header to derive a document FROM. Both available shortcuts
+    are wrong: deriving one from the defective mirror bakes in the defect, and
+    deriving one from upstream bytes documents a packaging the fleet does not
+    serve. The document waits on the mirror fix. Declaring a contract now would
+    be the standing lie the ``MissingContract`` sentinel was retired for.
+
+    The endpoint is NOT a corpse — it is a deploy-blocked live product with a
+    quality probe (ie#531) and a production incident (a 24 GB card broke 0.3.3
+    with ``model_load_failure_streak``, 2026-08-01) behind it.
+    """
+
+    name = "krea-2"
+    contracts = ("krea-2.*",)
+    Defaults = Krea2Defaults
+
+
+class Anima(ModelType[AnimaDefaults]):
+    """Anima — Cosmos-Predict2-2B backbone, DiffSynth-native split checkpoint.
+
+    NO ``canonical_contract`` yet: the ``anima.*`` lane document is owed and its
+    header evidence is already derived (685 flat-BF16 tensors in
+    ``split_files/diffusion_models/anima-base-v1.0.safetensors``). It lands in
+    the same commit as the document.
+
+    ⚠️ FOR WHOEVER AUTHORS THAT DOCUMENT: every anima DiT tensor is ``net.*``
+    **on disk**. The endpoint STRIPS that prefix at construction
+    (``anima/src/anima/main.py:281-285``) and bridges it for artifact swaps
+    (``_cozy_w8a8_key_map``, ``:223-224``), so every reference in handler code
+    shows the STRIPPED name. tensorfs matches the safetensors HEADER, so the
+    document must spell ``net.blocks.*``; one written from the pipeline code
+    matches ZERO tensors and passes review. Author tensor names from a header
+    dump only — handler code is authoritative for ``Defaults`` VALUES, never for
+    tensor NAMES.
+
+    MEASURED, as a proof rather than a claim (the flux1 lane's form: "I authored
+    from headers" is a claim; "my intersection check would zero if I hadn't" is
+    a proof) — against the real header of
+    ``tensorhub/anima@prod`` checkpoint ``sha256:9474851b0309…``::
+
+        header names   n real header = 685/685
+        stripped names n real header =   0/685
+
+    Exclusions, all measured on that same header:
+
+    * the VAE — anima ships the Qwen-Image VAE
+      (``split_files/vae/qwen_image_vae.safetensors``, 194 tensors), and a shared
+      VAE makes family detection TIE (the tensorfs#122 regression). ``DiT n VAE
+      = 0``, so the transformer-only document is cleanly separable.
+    * the text encoder — Qwen3-0.6B (310 tensors); ``DiT n TE = 0``.
+    * NO T5 TOWER IS EXPOSED, checked because ``net.llm_adapter.embed.weight`` is
+      ``[32128, 1024]`` and 32128 IS the T5 vocab size, which makes this look
+      like a T5 declaration and is exactly the shape the never-declare rule
+      targets. It is not one: the 118 ``llm_adapter`` tensors are anima's OWN
+      in-model adapter grammar (``net.llm_adapter.blocks.N.self_attn.q_proj``),
+      and a T5-grammar probe (``SelfAttention``/``EncDecAttention``/
+      ``DenseReluDense``/``relative_attention_bias``/``encoder.block.``) matches
+      **0 of 685**. The adapter merely CONSUMES T5 token ids — the endpoint uses
+      T5-XXL as a tokenizer only (``anima/src/anima/main.py:5-8``). Safe to
+      declare; the vocab-size coincidence is not a shared tower.
+    """
+
+    name = "anima"
+    contracts = ("anima.*",)
+    Defaults = AnimaDefaults
+
+
+class Ernie(ModelType[ErnieDefaults]):
+    """Baidu ERNIE-Image (base + step-distilled Turbo).
+
+    NO ``canonical_contract`` yet: the ``ernie.*`` lane document is owed and its
+    header evidence is derived (409 flat-BF16 tensors over 8 transformer
+    shards, ``layers.{0..35}``). It lands in the same commit as the document.
+
+    ⚠️ FOR WHOEVER AUTHORS THAT DOCUMENT: ERNIE is **split-QKV**
+    (``layers.0.self_attention.to_q/to_k/to_v.weight``, each ``[4096, 4096]``,
+    confirmed against ``transformer/config.json``: ``hidden_size 4096``,
+    ``num_layers 36``, ``num_attention_heads 32``). It therefore matches ZERO of
+    :data:`DIT_BLOCKS_FUSED_QKV` — the fragment that silently captured
+    :class:`Flux1`. Do not reach for it because it is "close".
+
+    Cover the TRANSFORMER ONLY. Measured: ``tensorhub/ernie-image`` and
+    ``ernie-image-turbo`` are digest-identical on the VAE, all four
+    ``text_encoder`` shards and all four ``pe`` shards, and differ on all eight
+    transformer shards — so a document covering the VAE or TE would tie the two
+    checkpoints to each other. The VAE also carries an ``I64`` tensor among 250
+    BF16, so a flat-bf16 document over it would refuse the fleet's own
+    checkpoint.
+    """
+
+    name = "ernie"
+    contracts = ("ernie.*",)
+    canonical_scheduler_config = ERNIE_SCHEDULER_CONFIG
+    Defaults = ErnieDefaults
+
+
 MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     SDXL,
     SD15,
@@ -988,6 +1314,9 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     Qwen36A3b,
     Flux1,
     Flux2Klein,
+    Krea2,
+    Anima,
+    Ernie,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
