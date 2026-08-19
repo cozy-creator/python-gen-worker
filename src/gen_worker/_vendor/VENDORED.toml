@@ -231,15 +231,17 @@ contract_plane_files = [
   "_contracts/hidream-o1.diffusers-bf16.v1.json",
   "_contracts/minimax.h3-dit-diffusers.v1.json",
   "_contracts/minimax.h3-dit-native.v1.json",
+  "_contracts/qwen-image.diffusers-bf16.v1.json",
   "_contracts/sd15.diffusers-bf16.v1.json",
   "_contracts/sd2.diffusers-bf16.v1.json",
   "_contracts/sdxl.clip-g-fused-qkv.v1.json",
   "_contracts/sdxl.clip-g-split-qkv.v1.json",
   "_contracts/sdxl.diffusers-bf16.v1.json",
   "_contracts/wan22.diffusers-bf16.v1.json",
+  "_contracts/z-image.diffusers-bf16.v1.json",
 ]
 rewrites = [
-  "`contract.py` (pgw#1391): the parse/validate/canonical/digest half is restored in pure Python instead of `from .native import contract_info`, because pgw#1310 rules a compiled extension out of a source-vendored wheel — the `planner.py` precedent exactly. The PUBLIC SURFACE is upstream's attribute for attribute (`Contract.from_document`, `.name/.version/.digest/.stamp/.label/.document/.description/.tensors/.sets`, the RAISING `.dtype`, `MissingDtype`, `TensorDecl`/`Fusion`/`Permute`), so a future pure-Python upstream re-vendor is a deletion rather than a migration. It adds one name upstream does not export, `ContractError`, carrying the kebab-case `reason` label the Rust and Go validators already share — the refusal corpus is keyed on it. Conformance is NOT asserted: `tests/test_lane_contracts.py` runs upstream's released `spec/v1/contract-vectors` corpus (tensorfs#114, the same one the Rust and Go implementations satisfy), vendored at `tests/testdata/contract-vectors/`, over the ELEVEN VENDORED DOCUMENTS plus the two anonymous customs — 13 golden digests and 19 typed refusals. A SHA-256 over a hand-built line rendering cannot agree by luck. It has already caught a real divergence rather than merely certifying agreement: tensorfs#121 relaxed the contract-name grammar to admit a hyphen in the PRODUCER segment (`hidream-o1`, `flux-2`, `wan-2`; a LEADING hyphen still refuses) and the port refused `hidream-o1.diffusers-bf16` until it followed. NO KNOWN DIVERGENCE TODAY.",
+  "`contract.py` (pgw#1391): the parse/validate/canonical/digest half is restored in pure Python instead of `from .native import contract_info`, because pgw#1310 rules a compiled extension out of a source-vendored wheel — the `planner.py` precedent exactly. The PUBLIC SURFACE is upstream's attribute for attribute (`Contract.from_document`, `.name/.version/.digest/.stamp/.label/.document/.description/.tensors/.sets`, the RAISING `.dtype`, `MissingDtype`, `TensorDecl`/`Fusion`/`Permute`), so a future pure-Python upstream re-vendor is a deletion rather than a migration. It adds one name upstream does not export, `ContractError`, carrying the kebab-case `reason` label the Rust and Go validators already share — the refusal corpus is keyed on it. Conformance is NOT asserted: `tests/test_lane_contracts.py` runs upstream's released `spec/v1/contract-vectors` corpus (tensorfs#114, the same one the Rust and Go implementations satisfy), vendored at `tests/testdata/contract-vectors/`, over the THIRTEEN VENDORED DOCUMENTS plus the two anonymous customs — 15 golden digests and 19 typed refusals. A SHA-256 over a hand-built line rendering cannot agree by luck. It has already caught a real divergence rather than merely certifying agreement: tensorfs#121 relaxed the contract-name grammar to admit a hyphen in the PRODUCER segment (`hidream-o1`, `flux-2`, `wan-2`; a LEADING hyphen still refuses) and the port refused `hidream-o1.diffusers-bf16` until it followed. NO KNOWN DIVERGENCE TODAY.",
   "`tensors.py`: `TensorReader._map` maps through a pure-Python `_MappedObject` (an `mmap` exported via PEP 688) instead of the compiled `tensorfs.native.MappedObject`, because pgw#1310 rules a compiled extension out of a source-vendored wheel. Upstream's weak-mapping ownership rule is preserved exactly; see the paragraph above. No other file is edited, so the remaining digests are upstream's verbatim.",
   "`planner.py` REPLACES `chunking.py` (pgw#1365): a pure-Python port of `crates/tensorfs-core/src/planner/{mod,safetensors,gguf}.rs` at `read_plane_rev`, because upstream deleted the Python chunker at `00c57c1` in favour of the Rust planner and pgw#1310 rules a compiled extension out of a source-vendored wheel. Conformance is asserted against upstream's released `spec/v1/planner-vectors` corpus, vendored at `tests/testdata/planner-vectors/`. Two knowing divergences, both tested by name: `plan_chunks` cuts a >64 MiB blob on the fixed grid (tensorhub's single-PUT promotion cap — pgw#1366), and a duplicate GGUF metadata key is planned as `gguf-v1` here and `blob-v1` upstream, because `gguf.read_header` does not record metadata keys.",
   "`local.py`: one line — `from .chunking import plan_chunks` becomes `from .planner import plan_chunks`. Every other line is `8bafdfbb`'s verbatim.",
@@ -326,12 +328,14 @@ rewrites = [
 "_contracts/hidream-o1.diffusers-bf16.v1.json" = "c74f3489b21b8acdbf1acce919d1dade4128c59829ced2f36e89dc937836e347"
 "_contracts/minimax.h3-dit-diffusers.v1.json" = "40fedde5e31dbed2bb5c34b350f76d2961c3e40ef61a03c102c1ae9aab99e1e1"
 "_contracts/minimax.h3-dit-native.v1.json" = "d8c738a10c688bfbcb7b3135a5de1b903c3eea1cba55d50ba2cde220607b154f"
+"_contracts/qwen-image.diffusers-bf16.v1.json" = "d9671ac9cd9f32035897cab2dd909d7445ab1ed53425a4d84e1ff0592cd466fe"
 "_contracts/sd15.diffusers-bf16.v1.json" = "01f3cdfca73430bf2f53546b8fbdfc9c946bb6c45ed8882e67abcf66e3b778ff"
 "_contracts/sd2.diffusers-bf16.v1.json" = "3ef484feb44e38adc278d75f002bbdf2375600fd5026ecf27d47cc0a2e406d83"
 "_contracts/sdxl.clip-g-fused-qkv.v1.json" = "2fe796a2c14d615e972655144b4cc6c2a01bd74d400c9dbe0eb2b3887d78ca98"
 "_contracts/sdxl.clip-g-split-qkv.v1.json" = "5d82d4dcad7ca97cc5291a4fc60e4916e24e6bc8baa14e0429be428b99d9d09a"
 "_contracts/sdxl.diffusers-bf16.v1.json" = "6612c3d61e495f62d9f06096c11a2182a8a440d969e4faa0f23258eec35abe60"
 "_contracts/wan22.diffusers-bf16.v1.json" = "bca462c22c83e43e28516fa21a7d7798d73f3a46c242f61a37d532701903e13b"
+"_contracts/z-image.diffusers-bf16.v1.json" = "876eea29cb8974f4562ed52da63a0c7ac8af5127b669ec15f6025ca8f73ce534"
 "contract.py" = "b007d534da4f0a131bc7fe79001472cf08a94be0feedf229c0bba32fbb8c1d38"
 "contracts.py" = "7435a6e9569ce5da748c50aece447b74e427d841f5d757740b5fb4958b25dee9"
 "gguf.py" = "ced89fc42009ab2e69406d2726c9b0caf43254c51ab16bdcf37c5ad239a2d7be"
