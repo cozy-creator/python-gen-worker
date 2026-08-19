@@ -1,6 +1,6 @@
 """The store a serving worker adopts from and mints into (pgw#1371).
 
-One ``GraphStore``, two tiers, and the reason they are one object is that a
+One ``GraphStore``, three tiers, and the reason they are one object is that a
 worker must not have two answers to "do I have this graph".
 
 * **LOCAL** — a ``LocalGraphStore`` over the pod's own tensorfs CAS. Every
@@ -14,6 +14,13 @@ worker must not have two answers to "do I have this graph".
   fleet's already-minted artifacts, and it is READ-ONLY by construction:
   ``publish_artifact`` raises, because the fleet publish is the
   intent/complete control-plane leg, not the adopt route.
+* **BAKED** — the IMAGE's read-only exported-program CAS
+  (``/app/.tensorhub/derive-cas``), consulted for ``fetch_program`` ONLY.
+  pgw#1462 part 2. th#2162 argued no hub route was needed for graph blobs
+  because the miner *"already falls through to its local CAS by content
+  address"* — it does, but into ``<TENSORHUB_CACHE_DIR>/cas``, which is NOT
+  where the builder bakes them. Every baked blob has been unreachable since
+  the first image carried one, silently, because a cache miss reports nothing.
 
 **THE UPSTREAM PUBLISH IS A STATED HOLE, NOT A SWALLOWED ERROR.** The fleet
 leg (``compiled_graphs.publish_intent`` / ``publish_complete``) is allowlisted
@@ -60,9 +67,16 @@ class TieredGraphStore:
     upstream tier when it can take them.
     """
 
-    def __init__(self, local: Any, upstream: Any = None) -> None:
+    def __init__(self, local: Any, upstream: Any = None, baked: Any = None) -> None:
         self.local = local
         self.upstream = upstream
+        #: The IMAGE's read-only exported-program CAS (pgw#1462 part 2). A
+        #: THIRD tier and deliberately not a second `local`: nothing is ever
+        #: written here, it is consulted for `fetch_program` ONLY, and it holds
+        #: serialized graphs rather than compiled artifacts. Folding it into
+        #: the local tier would make a read-only directory look writable to
+        #: every publish path.
+        self.baked = baked
         self._lock = threading.Lock()
         #: Graphs this pod minted that the fleet did not receive. Counted, and
         #: named — an empty tuple after a mint that landed graphs is the proof
@@ -103,32 +117,78 @@ class TieredGraphStore:
     def fetch_program(self, digest: str, destination: Path) -> Path:
         """One graph's serialized ``ExportedProgram`` — the mint's INPUT.
 
-        Upstream first when it can, then the pod's own CAS by content address:
-        a digest is a digest, so a blob this pod already holds needs no hop.
+        THREE tiers, cheapest-and-most-trusted first: an upstream that can
+        serve one, then the pod's own CAS, then the IMAGE's baked CAS. All
+        three are keyed by CONTENT ADDRESS, so the order is a cost decision
+        and never a correctness one — a digest is a digest.
 
-        **A THIRD UNWIRED LEG, named rather than crashed.** th#2133's adopt
-        answer carries each graph's ``program`` digest and NO transport for
-        it — its ``transport.files`` presign the compiled ARTIFACT, not the
-        serialized graph — so a pod whose CAS has never seen the blob has no
-        route to it. pgw#1370 owns publishing the blob and the hub owns
-        answering with a way to fetch it. Until then this raises a typed
-        refusal per graph, which the mint records as a ``MintFailure`` naming
-        the owner instead of dying on an ``AttributeError``.
+        **THE BAKED TIER IS pgw#1462 PART 2, and it closes a gap that was
+        assumed closed.** th#2162 argued no hub route was needed because
+        *"pgw's miner already falls through to its local CAS by content
+        address"*. The fallthrough is real; the directory was wrong. The pod's
+        CAS is ``<TENSORHUB_CACHE_DIR>/cas`` (``/tmp/tensorhub-cache/cas``) and
+        the builder bakes to ``/app/.tensorhub/derive-cas``, so every baked blob
+        has been unreachable since the first image carried one — a permanent
+        silent miss, which is why nothing ever reported it.
+
+        **THE BYTES ARE VERIFIED BEFORE THEY ARE TRUSTED, BY THE STORE'S OWN
+        SCRUB.** These bytes are fed straight to a compiler, so each tier is
+        probed with ``verify_object`` — presence AND integrity in one call —
+        rather than with ``contains`` plus a hash written here. Two reasons it
+        is that call and not the obvious one: a second implementation of
+        integrity checking is a second thing that can disagree, and the two
+        tensorfs snapshots in this tree DISAGREE about ``contains`` — the
+        vendored one rehashes and RAISES ``DigestMismatch``, tensorfs master's
+        is "presence, not integrity" and answers True for bytes corrupted in
+        place. ``verify_object`` means the same thing in both, so this code
+        does not silently change behaviour when the vendor is re-synced.
+
+        **A CORRUPT TIER IS A MISS, NOT A DEATH** — the next tier may hold a
+        good copy, and preferring it is strictly better than refusing. But the
+        corruption is REMEMBERED: if nothing serves the blob, the refusal names
+        it, because "no tier had it" and "a tier had it and it was rotten" have
+        very different remedies.
+
+        A blob no tier holds stays a TYPED PER-GRAPH refusal — it costs its own
+        graph and never the boot.
         """
         fetch = getattr(self.upstream, "fetch_program", None)
         if fetch is not None:
             return Path(fetch(digest, destination))
-        cas = getattr(self.local, "cas", None)
-        if cas is not None and cas.contains(digest):
+        rotten: list[str] = []
+        for tier, cas in (("this pod's own", getattr(self.local, "cas", None)),
+                          ("the image's baked", self.baked)):
+            if cas is None:
+                continue
+            try:
+                source = Path(cas.verify_object(digest))
+            except FileNotFoundError:
+                continue  # an ordinary miss: this tier does not hold it
+            except Exception as exc:  # noqa: BLE001 - any scrub failure is an answer
+                rotten.append(f"{tier} CAS ({type(exc).__name__}: {exc})")
+                continue
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(Path(cas.object_path(digest)).read_bytes())
+            destination.write_bytes(source.read_bytes())
             return destination
+        if rotten:
+            raise ProgramBlobUnreachable(
+                f"graph blob {digest} is present but does not survive its own "
+                f"integrity scrub in " + "; ".join(rotten) + " — the object was "
+                f"truncated or corrupted at rest, and no other tier holds a good "
+                f"copy. Refusing to compile bytes that are not the graph the "
+                f"release stamped."
+            )
         raise ProgramBlobUnreachable(
-            f"graph blob {digest} is not in this pod's CAS and the adopt "
-            f"answer offers no transport for it: th#2133's per-graph rows "
-            f"carry the `program` DIGEST but presign only the compiled "
-            f"artifact. pgw#1370 owns publishing the serialized "
-            f"ExportedProgram and the hub owns answering with a fetch route. "
+            f"graph blob {digest} is in neither this pod's CAS nor the image's "
+            f"baked program CAS, and the adopt answer offers no transport for "
+            f"it: th#2133's per-graph rows carry the `program` DIGEST but "
+            f"presign only the compiled artifact. An image whose build used a "
+            f"COMMITTED endpoint.lock bakes no programs (th#2162 renders no "
+            f"derive step for it), which is the ordinary way to reach this, and "
+            f"the blobs are NOT regenerable here: a re-trace reproduces the "
+            f"graph identity but not the serialized bytes, so it would address "
+            f"different digests than the release stamped. pgw#1370 owns "
+            f"emitting these blobs where the pod can reach them. "
             f"This mint will NEVER re-trace to work around it (author code "
             f"does not run at mint time)."
         )
@@ -177,12 +237,29 @@ class TieredGraphStore:
         }
 
 
-def worker_store(cas_dir: Path, upstream: Optional[Any] = None) -> TieredGraphStore:
-    """The store a real serving pod uses, over its own tensorfs CAS."""
+def worker_store(
+    cas_dir: Path,
+    upstream: Optional[Any] = None,
+    baked_root: Optional[Path] = None,
+) -> TieredGraphStore:
+    """The store a real serving pod uses, over its own tensorfs CAS.
+
+    ``baked_root`` is the IMAGE's read-only exported-program CAS; omitted, it
+    is resolved from settings (`baked_program_cas_dir`), which is what both
+    production call sites want. Passing it explicitly is for tests and for a
+    cozy-local run whose blobs are somewhere else.
+    """
     from .._vendor.tensorfs import LocalCAS
+    from ..models.cache_paths import baked_program_cas_dir
+
     from .._vendor.torchcg.store import LocalGraphStore
 
-    return TieredGraphStore(LocalGraphStore(LocalCAS(Path(cas_dir))), upstream)
+    root = baked_program_cas_dir() if baked_root is None else Path(baked_root)
+    # A read-only tier: LocalCAS is opened on an EXISTING directory only, so a
+    # missing bake never creates one. `LocalCAS.__init__` mkdirs, so absence is
+    # decided before it is constructed, not by it.
+    baked = LocalCAS(root) if root is not None and Path(root).is_dir() else None
+    return TieredGraphStore(LocalGraphStore(LocalCAS(Path(cas_dir))), upstream, baked)
 
 
 __all__ = [

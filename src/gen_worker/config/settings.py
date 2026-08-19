@@ -64,6 +64,12 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # CLI installs Settings at process entry like every other entry point.
     weights_cas_root: str = ""
     graph_cas_root: str = ""
+    # pgw#1462 part 2: the IMAGE's read-only exported-program CAS — where the
+    # builder bakes this release's serialized ExportedPrograms. Distinct from
+    # `graph_cas_root` (the CLI's own store) and from the pod's
+    # `<TENSORHUB_CACHE_DIR>/cas` (where its own mints land). Empty = "use the
+    # baked container default"; see `models/cache_paths.baked_program_cas_dir`.
+    baked_program_cas_root: str = ""
     # NOT "the worker's JWT". It is the BOOTSTRAP copy — the
     # value the hub injected at pod create, frozen there forever and updated by
     # nothing. The live credential is rotated over the scheduler stream at ~80 %
