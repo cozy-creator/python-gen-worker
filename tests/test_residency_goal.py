@@ -142,6 +142,72 @@ def test_a_goal_for_a_resident_ref_is_ANSWERED_and_opens_no_record(
         origin.close()
 
 
+def test_a_FRESH_process_on_a_warm_volume_answers_its_FIRST_goal(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """th#2204's pod, reproduced: the bytes outlive the process.
+
+    Pod orq6abdjo28it6 booted onto network volume 5u85rpu7m2, which already held
+    all 134 GB of `tensorhub/minimax-h3:serve-narrowed`. Its FIRST residency goal
+    was for weights it already had, and it was a brand-new process with no banked
+    identity to recognise them by — which is why the resident short-circuits
+    inside the funnel could not save it and why it needed a fetch it could not
+    perform. It answered nothing, and the hub re-elected it for 13 minutes.
+
+    So: stage through one store, destroy it, and boot a SECOND store on the same
+    CAS root. The volume is the only thing that survives.
+    """
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        cas = tmp_path / "endpoint-volume-cas"
+
+        async def stage() -> None:
+            wire = _Wire()
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            goal = ResidencyGoal(_store(wire, cas))
+            goal.apply(_goal(1, _REF, snapshot))
+            await _drain(goal)
+
+        asyncio.run(stage())
+
+        warm = _Wire()
+
+        async def boot() -> None:
+            store = _store(warm, cas)
+            activity.bind_sink(warm.send, asyncio.get_running_loop())
+            store.rescan_disk()  # boot-time truth, exactly as the Worker does
+            goal = ResidencyGoal(store)
+            # Generation 1 again: the hub does not know this pod ever existed.
+            goal.apply(_goal(1, _REF, snapshot))
+            await _drain(goal)
+            assert goal.observed_generation == 1, (
+                "the pod must ANSWER its first goal; an unanswered goal is what "
+                "placement re-elected the same sole worker over, at $3.29/hr"
+            )
+
+        asyncio.run(boot())
+
+        phases = [u.phase for u in warm.positions()]
+        assert phases == [PHASE_ALREADY_RESIDENT], (
+            f"a warm volume answers, it does not fetch; position stream said {phases}")
+        states = [e.state for e in warm.model_events]
+        assert pb.MODEL_STATE_DOWNLOADING not in states, (
+            f"nothing to transfer, so nothing to declare; got {states}")
+        assert pb.MODEL_STATE_ON_DISK in states, (
+            "without this the hub has no residency for the ref and parks forever — "
+            f"the measured livelock; got {states}"
+        )
+        assert warm.open_download_records() == {}
+    finally:
+        origin.close()
+
+
 def test_a_goal_for_an_absent_ref_OPENS_the_instrumented_funnel(
     tmp_path: Path, _fine_cadence: Any
 ) -> None:
