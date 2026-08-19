@@ -1,262 +1,330 @@
-"""ONE definition of "what environment is this", for every party (pgw#1472).
+"""ONE definition of "what environment is this", for both ends (pgw#1472).
 
-A release document's `closure` is the env half of the compile identity. The
-publish-time derive stamps it, the mint child folds it into the ck1 key
-alongside `env_seal`, and a serving pod must RESTATE it or adoption refuses.
-pgw#1367's trace-once-at-publish architecture makes those three DIFFERENT
-processes by design, so the value has exactly one job: **be restatable to the
-same string by any of them.** Two spellings of it fragment the whole
-[release x sm] serving table.
+**The env half of an artifact key is the COMPILE STACK** — torch, triton and
+the `nvidia-*` libraries — read off the endpoint's own `uv.lock` (Paul,
+2026-08-19, DESIGN-RULINGS addendum 4 as corrected; pgw#1489). Nothing else
+in a lockfile can change what inductor emits, so nothing else is allowed to
+split the artifact pool.
 
-**Ruled: the closure is over the INSTALLED SET AS OBSERVED BY A RUNNING
-PROCESS**, computed by :func:`env_closure` / :func:`env_closure_hash` and by
-nothing else. It is the only definition every party CAN restate: the derive
-runs inside the release image, the mint child runs inside it, the serving pod
-runs inside it. A lockfile closure is restatable by no running process at all —
-which is the defect this module exists to have ended.
+What this module used to do, and why it stopped: it stated the WHOLE resolved
+package set as the identity, and the serving side restated its own
+`importlib.metadata` set to check it. Two representations of one environment,
+structurally unable to agree — pgw#1472 measured three independent reasons
+(PEP 503 spelling, the `+cu129` local segment a lock cannot express, and
+platform-conditional rows like `colorama`) and 43-package diffs between envs
+that serve identically. Both halves are gone. The lock is read once, the
+compile stack is selected from it by `torchcg.compile_stack`, and that same
+selection is what a serving process compares against. One representation.
 
-This reverses the 2026-08-19 coordinator ruling (*"lockfile at both ends"*).
-Three measured facts decided it:
-
-1. **A lockfile is not readable as a closure at all in the general case.** pgw's
-   own `uv.lock` resolves `torch` to BOTH `2.13.0` and `2.13.0+cu130` — uv forks
-   the resolution per index marker. There is no single "the lock's package set".
-2. **`env_seal` — the OTHER axis of the same compile key — is already
-   installed-observed** (it digests the torch/triton tree on disk). Making
-   `closure` a lockfile hash would leave one key folding two contradictory
-   answers to "which environment".
-3. **Production already does it.** `derive_runner.go` passes no `--lockfile`, so
-   the fleet stamps `installed_closure()` inside the release image and the pod
-   restates it from that same image. The migration cost of the alternative was
-   moving a currently-green fleet; the cost of this one is zero.
-
-A lockfile is still a useful DIFFERENT thing, and it is spelled differently
-here on purpose (the th#2137 lesson: never two names for one authority):
-:func:`lockfile_packages` reads it, :func:`closure_drift` compares it against
-the installed set as a **typed drift signal that is never a gate**, normalized
-on both sides so it reports real divergence instead of PEP 503 spelling and PEP
-440 local segments. Nothing in this module calls a lockfile "env identity".
+Everything else a pod must satisfy is ADMISSION metadata checked at adopt,
+never a key input: the ELF-derived driver range (pgw#1471) and the measured
+peak-VRAM stamp (tcg#62) ride the artifact's requirements manifest.
 """
 
 from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass
+from collections import deque
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
-#: What `uv` writes beside a project. Named once so every reader of a lockfile
-#: — all of them diagnostics — spells the filename the same way.
+from ._vendor.torchcg.graph_identity import (
+    GraphIdentityError,
+    compile_stack,
+    is_compile_relevant,
+)
+
+#: What `uv` writes beside a project, and therefore what every end reads.
+#: Named once so the CLI, the derive and the serve runner cannot disagree.
 LOCKFILE_NAME = "uv.lock"
 
-_SEPARATORS = re.compile(r"[-_.]+")
+#: What a CUDA bucket is CALLED: `cu126`, `cu130`, `cu1300`.
+_BUCKET_RE = re.compile(r"cu[0-9]{3,4}")
 
 
 class EnvIdentityError(ValueError):
-    """The installed set cannot be observed, or a lockfile cannot be read."""
+    """A lockfile cannot be read, or states no compile stack."""
 
 
-# --- THE definition --------------------------------------------------------
-
-
-def env_closure() -> dict[str, str]:
-    """`{name: version}` of the distributions THIS process can import.
-
-    The one measurement of "which environment am I". Called by the derive that
-    stamps a document, by the boot that restates it, and by the reuse key that
-    decides whether a saved trace still describes this env — so that all three
-    are one function and cannot drift apart.
-    """
-
-    from ._vendor.torchcg.graph_identity import GraphIdentityError, installed_closure
-
-    try:
-        return installed_closure()
-    except GraphIdentityError as exc:
-        raise EnvIdentityError(f"cannot observe this process's env: {exc}") from exc
-
-
-def env_closure_hash() -> str:
-    """The 64-hex env closure of this process — the stamped/restated value.
-
-    `closure_hash` canonicalizes names the way package indexes compare them, so
-    this is stable across the `PyYAML`/`pyyaml` spelling that `importlib` and
-    `uv` disagree on.
-    """
-
-    from ._vendor.torchcg.graph_identity import GraphIdentityError, closure_hash
-
-    try:
-        return closure_hash(env_closure())
-    except GraphIdentityError as exc:
-        raise EnvIdentityError(f"cannot state this process's env identity: {exc}") from exc
-
-
-# --- lockfiles: a different thing, deliberately named differently ----------
-
-
-def normalize_name(name: str) -> str:
-    """The PEP 503 normalized distribution name.
-
-    `PyYAML`, `pyyaml` and `Py.YAML` are ONE distribution. Comparing them raw
-    is not strictness, it is a bug with no upside — it makes a drift report
-    fire on ten packages that are identical.
-    """
-
-    return _SEPARATORS.sub("-", str(name)).lower()
-
-
-def normalize_version(version: str) -> str:
-    """The version without its PEP 440 LOCAL segment (`2.13.0+cu129` ->
-    `2.13.0`).
-
-    Stripping it is a real loss and it is stated rather than hidden: `+cu129`
-    against `+cu130` is exactly the kind of difference a compiled artifact
-    cares about. But a lockfile CANNOT express it — uv records the version and
-    the wheel URL separately — so a comparison that keeps it can only ever
-    report a difference that is not one. Identity does not go through here: it
-    is `env_closure_hash`, which keeps the local segment because an installed
-    distribution can state it.
-    """
-
-    return str(version).split("+", 1)[0]
-
-
-def lockfile_packages(lockfile: Path | str) -> dict[str, str]:
-    """`{name: version}` for every package a `uv.lock` resolves — a DIAGNOSTIC.
-
-    Explicitly NOT an env identity and never hashed into one. A lock enumerates
-    the resolution for every marker, so on any real multi-index project it does
-    not even name one set: pgw's own lock resolves `torch` to `2.13.0` under one
-    marker and `2.13.0+cu130` under another. That fork is reported here, per
-    package, instead of being collapsed into a number nobody could restate.
-    """
-
+def _packages(lockfile: Path | str) -> list[dict[str, Any]]:
     path = Path(lockfile)
     try:
         parsed = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise EnvIdentityError(f"cannot read lockfile {path}: {exc}") from exc
-    entries: dict[str, str] = {}
-    forked: dict[str, set[str]] = {}
-    for package in parsed.get("package", ()):
+    rows = [row for row in parsed.get("package", ()) if isinstance(row, dict)]
+    if not rows:
+        raise EnvIdentityError(f"lockfile {path} states no resolved packages")
+    return rows
+
+
+def lock_entries(lockfile: Path | str, *, bucket: str = "") -> dict[str, str]:
+    """`{name: version}` for every package a `uv.lock` resolves.
+
+    Verbatim: uv already writes PEP 503 names, and re-normalizing a key input
+    is the drift-papering that pgw#1489 deleted. NOT a key on its own — the
+    key input is :func:`compile_stack_from_lockfile`, which selects from this.
+    Refuses a multi-flavor lock by name, because "the version of nvidia-cublas"
+    is not a question that lock answers (see :func:`cuda_buckets`).
+    """
+
+    path = Path(lockfile)
+    forked: dict[str, list[str]] = {}
+    for package in _packages(path):
         name = package.get("name")
         version = package.get("version")
         if not isinstance(name, str) or not isinstance(version, str):
             continue
-        known = entries.get(name)
-        if known is not None and known != version:
-            forked.setdefault(name, {known}).add(version)
-        entries[name] = version
-    if not entries:
-        raise EnvIdentityError(f"lockfile {path} states no resolved packages")
+        versions = forked.setdefault(name, [])
+        if version not in versions:
+            versions.append(version)
+    entries: dict[str, str] = {}
     for name, versions in forked.items():
-        # Recorded, not raised: this reader feeds a drift report, and a report
-        # that dies on the very property that killed lockfile-as-identity is
-        # useless exactly where it is most informative.
-        entries[name] = "/".join(sorted(versions))
+        if len(versions) == 1:
+            entries[name] = versions[0]
+            continue
+        entries[name] = _resolve_fork(path, name, versions, bucket)
     return entries
 
 
+def _resolve_fork(path: Path, name: str, versions: list[str], bucket: str) -> str:
+    """One name, several resolutions: the CUDA line decides, or nobody does.
+
+    uv FORKS a resolution per index marker, so a lock can legitimately state
+    `torch` at both `2.13.0` and `2.13.0+cu130` — pgw's own lock does, and a
+    reader that raises on it fails closed on the repo that most needs it
+    (measured, pgw#1472). The fork is a CUDA fork: its branches differ by the
+    PEP 440 local segment, which is the bucket. So the host's own bucket picks
+    its branch, exactly as it picks a flavored lock's extra.
+
+    A fork this cannot attribute to a CUDA line is refused with both versions
+    named. Guessing would key artifacts to an environment nobody has.
+    """
+
+    if bucket:
+        matched = [v for v in versions if v.partition("+")[2] == bucket]
+        if len(matched) == 1:
+            return matched[0]
+    if not is_compile_relevant(name):
+        # Outside the compile stack a fork cannot reach the key; the first
+        # resolution is as good as any, and `compile_stack` drops it anyway.
+        return sorted(versions)[0]
+    raise EnvIdentityError(
+        f"lockfile {path} resolves {name!r} {len(versions)} ways "
+        f"({', '.join(sorted(versions))}) and this env "
+        + (f"is {bucket!r}, which matches none of them"
+           if bucket else "states no CUDA bucket to pick one")
+    )
+
+
+def _root(packages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The lock's own project row — where the flavor extras are declared."""
+
+    for row in packages:
+        source = row.get("source")
+        if isinstance(source, dict) and ("virtual" in source or "editable" in source):
+            return row
+    return None
+
+
+def cuda_buckets(lockfile: Path | str) -> tuple[str, ...]:
+    """The CUDA buckets this lock resolves, e.g. ``("cu126", "cu130")``.
+
+    Empty when the lock states ONE resolution — the pre-flavor shape, and the
+    shape every endpoint has until its author adopts conflicting extras. A
+    bucket is an author-declared extra whose pin is the compile stack's own
+    torch, so this reads the lock rather than pattern-matching a name.
+    """
+
+    root = _root(_packages(lockfile))
+    if root is None:
+        return ()
+    extras = root.get("optional-dependencies")
+    if not isinstance(extras, dict):
+        return ()
+    # A bucket is an extra NAMED for a CUDA line (`cu130`) that pins a
+    # compile-stack package. The name test is not decoration: pgw's own
+    # pyproject has an extra called `torch`, and an extra is only a bucket when
+    # the author meant it as one.
+    return tuple(
+        sorted(
+            name
+            for name, pins in extras.items()
+            if _BUCKET_RE.fullmatch(str(name))
+            and isinstance(pins, list)
+            and any(
+                isinstance(pin, dict) and is_compile_relevant(str(pin.get("name") or ""))
+                for pin in pins
+            )
+        )
+    )
+
+
+def compile_stack_from_lockfile(
+    lockfile: Path | str, *, bucket: str = ""
+) -> tuple[tuple[str, str], ...]:
+    """The endpoint's compile stack: the env half of every artifact key.
+
+    THE key input, and the only one this module produces. Reads the rows the
+    endpoint's author locked, never what happens to be installed.
+
+    ``bucket`` names the CUDA line this env materialized (``uv sync --extra
+    cu130``). It is required exactly when the lock resolves more than one —
+    the author locks every flavor in ONE file (conflicting extras) and the
+    host picks by driver at bootstrap, so a lock with three buckets cannot
+    answer "which nvidia-cublas" without being told. It is IGNORED for a
+    single-resolution lock, which has nothing to pick.
+
+    The bucket is not a separate key component, deliberately: a flavored
+    torch states it IN its version (``2.8.0+cu126``) and every nvidia pin
+    below it differs per bucket, so the versions ARE the bucket. Keying it
+    twice is the second-representation defect this issue exists to delete.
+    """
+
+    path = Path(lockfile)
+    packages = _packages(path)
+    buckets = cuda_buckets(path)
+    try:
+        if not buckets:
+            return compile_stack(lock_entries(path, bucket=bucket))
+        if not bucket:
+            raise EnvIdentityError(
+                f"lockfile {path} locks {len(buckets)} CUDA buckets "
+                f"({', '.join(buckets)}); state the one this env materialized"
+            )
+        if bucket not in buckets:
+            raise EnvIdentityError(
+                f"lockfile {path} locks {', '.join(buckets)}; this env is "
+                f"{bucket!r}, which its author never locked"
+            )
+        return compile_stack(_bucket_entries(path, packages, bucket))
+    except GraphIdentityError as exc:
+        raise EnvIdentityError(f"lockfile {path}: {exc}") from exc
+
+
+def _bucket_entries(
+    path: Path, packages: list[dict[str, Any]], bucket: str
+) -> dict[str, str]:
+    """Every compile-stack row reachable from one bucket's own torch pin.
+
+    A flavored lock pins the bucket's torch in the project's extra, and THAT
+    package row pins its own nvidia set — so the resolution is read out of the
+    lock's dependency edges rather than guessed from version numbers.
+    """
+
+    by_name_version: dict[tuple[str, str], dict[str, Any]] = {}
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for row in packages:
+        name, version = row.get("name"), row.get("version")
+        if isinstance(name, str) and isinstance(version, str):
+            by_name_version[(name, version)] = row
+            by_name.setdefault(name, []).append(row)
+
+    root = _root(packages)
+    pins = (root or {}).get("optional-dependencies", {}).get(bucket, [])
+    # BREADTH-FIRST from the bucket's own torch, and the SHALLOWEST edge wins.
+    # Depth matters: a package shared between buckets (cudnn is locked once)
+    # carries edges to ONE bucket's cublas, and a depth-first walk would let
+    # that stale edge overwrite the pin torch itself states. The bucket's
+    # answer is the one its torch names.
+    frontier = deque(
+        pin for pin in pins
+        if isinstance(pin, dict) and is_compile_relevant(str(pin.get("name") or ""))
+    )
+    found: dict[str, str] = {}
+    while frontier:
+        pin = frontier.popleft()
+        name = str(pin.get("name") or "")
+        version = pin.get("version")
+        if not isinstance(version, str):
+            rows = by_name.get(name, [])
+            if len(rows) != 1:
+                raise EnvIdentityError(
+                    f"lockfile {path}: {name!r} is named without a version by "
+                    f"bucket {bucket!r} and resolves {len(rows)} ways; the "
+                    f"lock cannot say which one this bucket links"
+                )
+            version = str(rows[0].get("version") or "")
+        if name in found:
+            continue
+        found[name] = version
+        entry: dict[str, Any] = by_name_version.get((name, version)) or {}
+        for dependency in entry.get("dependencies", []) or []:
+            if isinstance(dependency, dict) and is_compile_relevant(
+                str(dependency.get("name") or "")
+            ):
+                frontier.append(dependency)
+    return found
+
+
+def cuda_bucket() -> str:
+    """This host's CUDA bucket, from the torch it actually materialized.
+
+    One of the two variables a HOST contributes (the other is sm). Read off
+    the installed torch because that is what `uv sync --extra` produced — the
+    host does not resolve anything, it reports which flavor it received.
+    ``""`` when there is no CUDA torch here, which a single-resolution lock
+    does not care about.
+    """
+
+    try:
+        import torch
+
+        line = str(getattr(torch.version, "cuda", "") or "")
+    except Exception:  # noqa: BLE001 - absence is an answer
+        return ""
+    parts = line.split(".")
+    if len(parts) < 2 or not parts[0].isdigit():
+        return ""
+    return f"cu{parts[0]}{parts[1]}"
+
+
 def lockfile_beside(endpoint_dir: Path | str) -> Path | None:
-    """The endpoint's own `uv.lock`, or `None` — never a guess elsewhere."""
+    """The endpoint's own `uv.lock`, or `None` — never a guess elsewhere.
+
+    This is the SAME file `gen-worker lock` reads for the document it writes,
+    which is the whole point: a derive and a serve read one file, not two
+    sources that have to be reconciled.
+    """
 
     candidate = Path(endpoint_dir) / LOCKFILE_NAME
     return candidate if candidate.is_file() else None
 
 
-@dataclass(frozen=True, slots=True)
-class DriftRow:
-    """One package on which the installed set and a lockfile differ."""
+def installed_stack_drift(stated: Mapping[str, str] | tuple[tuple[str, str], ...]) -> tuple[str, ...]:
+    """DIAGNOSTIC ONLY: how the venv's compile stack differs from the lock's.
 
-    name: str
-    #: ``missing`` (locked, not installed), ``extra`` (installed, not locked),
-    #: ``version`` (both, different versions). A closed vocabulary.
-    kind: str
-    stated: str = ""
-    installed: str = ""
-
-    def __str__(self) -> str:  # pragma: no cover - diagnostics
-        if self.kind == "version":
-            return f"{self.name} {self.stated} != {self.installed}"
-        if self.kind == "missing":
-            return f"{self.name} {self.stated} stated, not installed"
-        return f"{self.name} {self.installed} installed, not stated"
-
-
-def closure_drift(
-    installed: Mapping[str, str], stated: Mapping[str, str]
-) -> tuple[DriftRow, ...]:
-    """How far the running env is from what a lockfile resolves. NEVER a gate.
-
-    NORMALIZED on both sides, so every row is a real divergence rather than a
-    spelling. Sorted by name so two runs of the same pair produce the same
-    report. Adoption does not consult this: identity is `env_closure_hash` and
-    this is the signal that tells an operator the image drifted from its lock.
+    Nothing gates on this and nothing keys on it — that is the pgw#1489 line,
+    and `scripts/lint_no_installed_set_keying.py` holds it. It exists because
+    one divergence here is genuinely fatal at RUN time (an artifact compiled
+    against the lock's torch, loaded into a venv with a different one), and a
+    warning naming the package beats a segfault. It compares the compile
+    stack only, so it cannot fire on a docs extra, and it strips the `+cu129`
+    local segment a lockfile cannot express.
     """
 
-    live = {normalize_name(n): normalize_version(v) for n, v in installed.items()}
-    want = {normalize_name(n): normalize_version(v) for n, v in stated.items()}
-    rows: list[DriftRow] = []
-    for name in sorted(set(want) - set(live)):
-        rows.append(DriftRow(name, "missing", stated=want[name]))
-    for name in sorted(set(live) - set(want)):
-        rows.append(DriftRow(name, "extra", installed=live[name]))
-    for name in sorted(set(live) & set(want)):
-        if live[name] != want[name]:
-            rows.append(
-                DriftRow(name, "version", stated=want[name], installed=live[name])
-            )
+    import importlib.metadata
+
+    want = dict(stated)
+    rows: list[str] = []
+    for name, version in sorted(want.items()):
+        try:
+            found = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            rows.append(f"{name} {version} locked, not installed")
+            continue
+        if found.split("+", 1)[0] != version.split("+", 1)[0]:
+            rows.append(f"{name} {version} locked, {found} installed")
     return tuple(rows)
-
-
-def describe_drift(rows: tuple[DriftRow, ...], *, limit: int = 8) -> str:
-    """A one-line drift summary. ``""`` when the sets agree.
-
-    Deliberately says the COUNT before the examples: a report that shows six
-    rows out of sixty reads as "six problems".
-    """
-
-    if not rows:
-        return ""
-    counts = {kind: sum(1 for r in rows if r.kind == kind)
-              for kind in ("missing", "extra", "version")}
-    head = ", ".join(f"{n} {k}" for k, n in counts.items() if n)
-    shown = "; ".join(str(row) for row in rows[:limit])
-    more = f" (+{len(rows) - limit} more)" if len(rows) > limit else ""
-    return f"{len(rows)} package(s) differ ({head}): {shown}{more}"
-
-
-def describe_lockfile_drift(lockfile: Path | str) -> str:
-    """The drift line a boot or a lock run prints. Never raises, never gates."""
-
-    try:
-        stated = lockfile_packages(lockfile)
-    except EnvIdentityError as exc:
-        return f"lockfile drift unavailable: {exc}"
-    try:
-        installed = env_closure()
-    except EnvIdentityError as exc:  # pragma: no cover - a dead env
-        return f"lockfile drift unavailable: {exc}"
-    summary = describe_drift(closure_drift(installed, stated))
-    return (
-        f"installed-vs-{Path(lockfile)} ({len(stated)} locked, "
-        f"{len(installed)} installed): {summary or 'none'}"
-    )
 
 
 __all__ = [
     "LOCKFILE_NAME",
-    "DriftRow",
     "EnvIdentityError",
-    "closure_drift",
-    "describe_drift",
-    "describe_lockfile_drift",
-    "env_closure",
-    "env_closure_hash",
+    "compile_stack_from_lockfile",
+    "installed_stack_drift",
+    "is_compile_relevant",
+    "lock_entries",
     "lockfile_beside",
-    "lockfile_packages",
-    "normalize_name",
-    "normalize_version",
 ]

@@ -149,20 +149,42 @@ def run_lock(args: argparse.Namespace) -> int:
 
     device = ws.trace_device()
     graph_cas_root = Path(args.graph_cas).resolve() if args.graph_cas else ws.graph_cas_root()
-    from ..env_identity import describe_lockfile_drift, lockfile_beside
+    from ..env_identity import (
+        EnvIdentityError,
+        compile_stack_from_lockfile,
+        cuda_bucket,
+        installed_stack_drift,
+        lockfile_beside,
+    )
 
-    # pgw#1472: a lockfile is a DIAGNOSTIC here and nothing else. The identity
-    # this run stamps is `env_closure_hash()` of the process doing the tracing,
-    # which is also what invalidates a saved trace (`inputs_digest`).
+    # pgw#1489: the endpoint's own uv.lock IS the env identity — its
+    # torch/triton/nvidia rows are the compile stack this trace runs under and
+    # the env half of every artifact key. The venv is compared to it as a
+    # DIAGNOSTIC (a wrong torch costs a failed load and a re-mint, never a
+    # wrong answer), and the lock's file digest is what invalidates a saved
+    # trace (`inputs_digest`).
     lockfile = lockfile_beside(root)
-    if lockfile is not None:
-        _say(f"lock: {describe_lockfile_drift(lockfile)}")
+    if lockfile is None:
+        _say(f"error: no uv.lock beside {root}; a lock states the compile "
+             f"stack it traced under, and there is no second source for it")
+        return 1
+    try:
+        stack = compile_stack_from_lockfile(lockfile, bucket=cuda_bucket())
+    except EnvIdentityError as exc:
+        _say(f"error: {exc}")
+        return 1
+    _say("lock: compile stack "
+         + ", ".join(f"{name} {version}" for name, version in stack[:2])
+         + f" (+{max(len(stack) - 2, 0)} more)")
+    for row in installed_stack_drift(dict(stack)):
+        _say(f"warning: compile-stack drift vs this venv: {row}")
 
     want = el.inputs_digest(
         root=root,
         module_name=config.main,
         checkpoint_ref=ref_text,
         trace_device=device,
+        lockfile=lockfile,
     )
 
     existing: Optional[el.DeriveBlock]
@@ -195,7 +217,7 @@ def run_lock(args: argparse.Namespace) -> int:
         _say("lock --check: inputs moved — re-deriving to see whether the "
              "document moved with them")
         return _check_by_rederive(
-            config, root, out, existing, tree, graph_cas_root, device,
+            config, root, out, existing, tree, graph_cas_root, device, lockfile,
         )
 
     cas = ws.local_cas(graph_cas_root)
@@ -236,7 +258,7 @@ def run_lock(args: argparse.Namespace) -> int:
             "say so rather than emit an empty document."
         )
 
-    traced = _trace(config, root, tree, graph_cas_root, device)
+    traced = _trace(config, root, tree, graph_cas_root, device, lockfile)
     if traced is None:
         return 1
     result, elapsed = traced
@@ -336,8 +358,15 @@ def _trace(
     tree: Optional[Path],
     graph_cas_root: Path,
     device: str,
+    lockfile: Optional[Path] = None,
 ) -> Optional[tuple[Any, float]]:
-    """Import the author's module and derive it. ``None`` = said why, failed."""
+    """Import the author's module and derive it. ``None`` = said why, failed.
+
+    ``lockfile`` is the endpoint's ``uv.lock`` — the compile stack this trace
+    runs under and the env half of every artifact key (pgw#1489). Absent, the
+    one beside ``root`` is used; a derive with neither refuses by name rather
+    than restating what happens to be installed.
+    """
 
     from ..discovery.discover import prime_sys_path
     from ..release.derive import DeriveError, derive_release
@@ -354,11 +383,14 @@ def _trace(
         + ("" if device == "cuda" else " — CPU-class graphs are NOT servable on "
                                        "a GPU; a cuda mint refuses by name")
     )
+    from ..env_identity import lockfile_beside
+
     started = time.monotonic()
     try:
         result = derive_release(
             module,
             checkpoint_dir=tree if tree is not None else root,
+            lockfile=lockfile if lockfile is not None else lockfile_beside(root),
             graph_cas=graph_cas_root,
         )
     except DeriveError as exc:
@@ -378,6 +410,7 @@ def _check_by_rederive(
     tree: Optional[Path],
     graph_cas_root: Path,
     device: str,
+    lockfile: Optional[Path] = None,
 ) -> int:
     """``--check``'s expensive arm: does the committed DOCUMENT still hold?
 
@@ -387,7 +420,7 @@ def _check_by_rederive(
     and NOTHING IS WRITTEN either way: `--check` is a question.
     """
 
-    traced = _trace(config, root, tree, graph_cas_root, device)
+    traced = _trace(config, root, tree, graph_cas_root, device, lockfile)
     if traced is None:
         return 1
     result, elapsed = traced

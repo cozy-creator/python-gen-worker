@@ -37,7 +37,7 @@ from gen_worker._vendor.torchcg.document import (
     GraphSetDocument,
     LaneGraphs,
 )
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity, closure_hash
+from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
 from gen_worker._vendor.torchcg.requirements import RequirementsManifest
 from gen_worker._vendor.torchcg.store import LocalGraphStore
 from gen_worker.serving import DeployBinding, EndpointHost, load_endpoint
@@ -51,9 +51,8 @@ from gen_worker.serving.serve_adoption import ServeAdoption
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
 LANE = "sdxl.diffusers-bf16@1"
 SM = "sm_89"
-INSTALLED = {"torch": torch.__version__}
-CLOSURE = closure_hash(INSTALLED)
-ENV = EnvIdentity(closure=CLOSURE, sm=SM)
+STACK: tuple[tuple[str, str], ...] = (("torch", torch.__version__),)
+ENV = EnvIdentity(stack=STACK, sm=SM)
 OVERRIDES: dict[str, Any] = {"steps": {"default": 2, "lo": 1, "hi": 8}}
 #: A well-formed store address — rows are keyed by cg-graph-v1 hashes.
 GRAPH_HASH = "cg-graph-v1-" + "0" * 56
@@ -110,7 +109,7 @@ def document(binding: DeployBinding, tmp_path: Path) -> GraphSetDocument:
         )
         for record in lane.graphs
     )
-    return GraphSetDocument(closure=CLOSURE, lanes=(LaneGraphs(
+    return GraphSetDocument(stack=STACK, lanes=(LaneGraphs(
         contract=lane.contract, graphs=stamped, targets=lane.targets,
         unobserved_targets=lane.unobserved_targets),))
 
@@ -223,7 +222,7 @@ def booted(
     host.setup(
         store=store, document=document, sm=SM,
         loader=counting_loader(armed, served),
-        artifacts_dir=tmp_path / f"adopted-{tag}", installed=INSTALLED)
+        artifacts_dir=tmp_path / f"adopted-{tag}", stack=STACK)
     return host
 
 
@@ -231,7 +230,7 @@ def a_mint(store: Any, tmp_path: Path, compiler: Any, tag: str, **kw: Any) -> Se
     return SelfMint(
         store=store, artifacts_dir=tmp_path / f"artifacts-{tag}",
         compiler=compiler, program_source=programs(tmp_path),
-        installed=INSTALLED, posture=compile_posture.FLEET, vcpus=4, **kw)
+        posture=compile_posture.FLEET, vcpus=4, **kw)
 
 
 # --------------------------------------------------------------------------
@@ -432,7 +431,7 @@ def all_miss_answer(document: GraphSetDocument) -> dict:
         "object": "release_compiled_graphs",
         "release_id": "release-1",
         "binding_generation": 0,
-        "env_lockfile_hash": document.closure,
+        "env_compile_stack": [list(row) for row in document.stack],
         "lane": lane.contract,
         "lane_stamped": True,
         "lane_contract": {"stamp": lane.contract, "contract_digest": "",
@@ -474,7 +473,7 @@ def test_the_serve_loop_seam_adopts_from_the_hub_and_arms_the_mint(
     armed: List[Any] = []
     adoption = ServeAdoption(
         "release-1", sm=SM, artifacts_dir=tmp_path / "adopted",
-        cas_dir=tmp_path / "podcas", transport=transport, installed=INSTALLED,
+        cas_dir=tmp_path / "podcas", transport=transport, stack=STACK,
         loader=counting_loader([]), on_adopted=armed.append,
     )
     loaded = load_endpoint(FIXTURE_DIR)
@@ -541,7 +540,7 @@ def test_the_production_loop_adopts_on_first_load_and_mints_what_it_missed(
         "release-1", sm=SM, artifacts_dir=tmp_path / "adopted",
         cas_dir=tmp_path / "podcas",
         transport=StubTransport(all_miss_answer(document)),
-        installed=INSTALLED, loader=counting_loader(armed, served),
+        stack=STACK, loader=counting_loader(armed, served),
         on_adopted=arm_the_mint,
     )
     loop = ServeLoop(
@@ -587,7 +586,7 @@ def test_an_unstamped_release_is_an_eager_pod_with_a_stated_reason(
     """Never a boot failure — and never a silence either."""
     adoption = ServeAdoption(
         "release-1", sm=SM, artifacts_dir=tmp_path / "a",
-        transport=StubTransport(None), installed=INSTALLED)
+        transport=StubTransport(None), stack=STACK)
     loaded = load_endpoint(FIXTURE_DIR)
     (model_cls,) = loaded.models
     assert adoption.sink_for(model_cls, loaded.lane(model_cls, LANE)) is None
@@ -679,7 +678,7 @@ def test_the_reuse_hit_is_a_wire_fact_a_rental_can_capture(
         adoption = ServeAdoption(
             "release-1", sm=SM, artifacts_dir=tmp_path / f"adopted-{tag}",
             cas_dir=cas, transport=StubTransport(all_miss_answer(document)),
-            installed=INSTALLED, loader=counting_loader([]), on_adopted=arm)
+            stack=STACK, loader=counting_loader([]), on_adopted=arm)
         loop = ServeLoop(
             load_endpoint(FIXTURE_DIR),
             residency=ResidencyManager(

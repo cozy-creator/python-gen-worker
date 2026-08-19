@@ -1,260 +1,339 @@
-"""pgw#1472: the env-identity closure has ONE definition and one producer.
+"""pgw#1489: the env half of an artifact key is the COMPILE STACK, and nothing else.
 
-The defect this file fences is not "a hash was wrong". It is that "the
-environment" had TWO producers and no single meaning: `gen-worker lock` stamped
-a document from the LOCKFILE while `release derive` and the pod stated the
-INSTALLED set — and a lockfile closure is restatable by no running process at
-all. pgw#1367 makes publish, mint and serve three different processes by
-design, so a value none of them can agree on fragments the whole
-[release x sm] serving table.
+The defect this file fences is not "a hash was wrong". It is that the key was
+a hash of the ENTIRE resolved package set — a second representation of what
+the endpoint's `uv.lock` already pins, structurally able to disagree with
+itself (pgw#1472's measurement: 43-package diffs between envs that serve
+identically), and able to split the artifact pool on a docs extra.
 
-⚠️ **Why no existing test could fail on it.** Every adopt test builds its
-document from the same `installed=` mapping it then audits against, so the two
-sources are ONE dict by construction. The fixture made the bug unrepresentable.
-The cases here therefore work from REAL lockfiles on disk, from a real
-`importlib.metadata` reading, and from a real FRESH SUBPROCESS — because
-"restatable by another process" is the whole subject.
+⚠️ **Why no earlier test could fail on it.** Every adopt test built its
+document from the same mapping it then audited against, so the two sources
+were ONE dict by construction and irrelevant drift was unrepresentable. The
+cases here therefore work from REAL lockfile bytes with a real irrelevant
+diff in them, because that difference is the whole subject.
 """
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
+from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
 from gen_worker.env_identity import (
     EnvIdentityError,
-    closure_drift,
-    describe_drift,
-    describe_lockfile_drift,
-    env_closure,
-    env_closure_hash,
+    compile_stack_from_lockfile,
+    cuda_bucket,
+    cuda_buckets,
+    installed_stack_drift,
+    lock_entries,
     lockfile_beside,
-    lockfile_packages,
-    normalize_name,
-    normalize_version,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
 
-LOCK = """\
-version = 1
-
-[[package]]
-name = "torch"
-version = "2.13.0"
-
-[[package]]
-name = "PyYAML"
-version = "6.0.3"
-
-[[package]]
-name = "colorama"
-version = "0.4.6"
-"""
+def _lock(**versions: str) -> str:
+    rows = {
+        "torch": "2.13.0",
+        "triton": "3.6.0",
+        "nvidia-cublas-cu12": "12.8.4.1",
+        "nvidia-cuda-runtime-cu12": "12.8.90",
+        "diffusers": "0.36.0",
+        "pillow": "11.1.0",
+        "colorama": "0.4.6",
+        "rich": "13.9.4",
+    }
+    rows.update(versions)
+    return "version = 1\n" + "".join(
+        f'\n[[package]]\nname = "{name}"\nversion = "{version}"\n'
+        for name, version in rows.items()
+    )
 
 
 @pytest.fixture()
 def lockfile(tmp_path: Path) -> Path:
     path = tmp_path / "uv.lock"
-    path.write_text(LOCK)
+    path.write_text(_lock())
     return path
 
 
-# -- RED: the two old producers cannot agree on ONE environment -------------
-
-
-def test_RED_the_two_old_paths_disagree_on_THIS_VERY_ENV(tmp_path: Path) -> None:
-    """The issue's own repro, run against the env the test is running in.
-
-    A lockfile written to state EXACTLY what is installed still hashes to a
-    different closure, for reasons no build can fix: `uv` normalizes names to
-    PEP 503 while `importlib.metadata` reports the DECLARED name, and a lock
-    cannot carry the PEP 440 local segment (`+cu129`) that every installed CUDA
-    wheel has. Two producers, one environment, two answers.
-    """
-
-    from gen_worker._vendor.torchcg.graph_identity import closure_hash
-
-    installed = env_closure()
-    # The most generous lockfile imaginable: uv's own spelling of this exact
-    # installed set, which is the best any real `uv.lock` could ever do.
-    as_uv_would_write_it = {
-        normalize_name(name): normalize_version(version)
-        for name, version in installed.items()
-    }
-    path = tmp_path / "uv.lock"
-    path.write_text(
-        "version = 1\n"
-        + "".join(
-            f'\n[[package]]\nname = "{n}"\nversion = "{v}"\n'
-            for n, v in sorted(as_uv_would_write_it.items())
-        )
+def test_the_stack_is_the_compiler_and_nothing_else(lockfile: Path) -> None:
+    assert compile_stack_from_lockfile(lockfile) == (
+        ("nvidia-cublas-cu12", "12.8.4.1"),
+        ("nvidia-cuda-runtime-cu12", "12.8.90"),
+        ("torch", "2.13.0"),
+        ("triton", "3.6.0"),
     )
-    assert closure_hash(lockfile_packages(path)) != env_closure_hash()
+    # And the reader still sees the whole lock — the selection is the key
+    # input, not the reading.
+    assert set(lock_entries(lockfile)) > set(dict(compile_stack_from_lockfile(lockfile)))
 
 
-def test_RED_a_real_lockfile_does_not_even_NAME_one_package_set() -> None:
-    """pgw's own `uv.lock` resolves `torch` twice — the killer fact.
+def test_IRRELEVANT_DRIFT_DOES_NOT_MOVE_THE_KEY(tmp_path: Path) -> None:
+    """THE pgw#1489 green arm, at the key level.
 
-    uv forks the resolution per index marker, so `torch` is `2.13.0` under one
-    and `2.13.0+cu130` under another. There is no "the lock's closure" to hash;
-    the old reader raised on exactly this, which is how a lockfile identity
-    fails CLOSED on the one repo that most needs it.
+    Two lockfiles that differ in every package that cannot reach the compiler
+    — a pillow bump, a dropped extra, a new dev tool — are ONE artifact env.
+    Under the closure key these were two pools and every artifact in the
+    second one had to be re-minted.
     """
 
-    entries = lockfile_packages(ROOT / "uv.lock")
-    assert "/" in entries["torch"], entries["torch"]
-
-
-# -- GREEN: the one function restates identically from a fresh process ------
-
-
-def test_GREEN_a_FRESH_PROCESS_restates_the_same_value() -> None:
-    """The property the whole architecture rests on.
-
-    Publish, mint and serve are three processes (pgw#1367). The identity they
-    fold into the ck1 key must survive that boundary, so it is measured across
-    a real subprocess fence rather than by calling the function twice.
-    """
-
-    proc = subprocess.run(
-        [sys.executable, "-c",
-         "import json,sys;sys.path.insert(0,%r);"
-         "from gen_worker.env_identity import env_closure_hash;"
-         "print(json.dumps(env_closure_hash()))" % str(ROOT / "src")],
-        capture_output=True, text=True, check=True,
+    mine = tmp_path / "mine.lock"
+    mine.write_text(_lock())
+    theirs = tmp_path / "theirs.lock"
+    theirs.write_text(
+        _lock(pillow="12.0.0", colorama="0.4.7", rich="14.1.0", diffusers="0.37.0")
+        + '\n[[package]]\nname = "pytest"\nversion = "9.0.0"\n'
     )
-    assert json.loads(proc.stdout) == env_closure_hash()
+
+    assert lock_entries(mine) != lock_entries(theirs)
+    assert compile_stack_from_lockfile(mine) == compile_stack_from_lockfile(theirs)
+    assert (
+        EnvIdentity(stack=compile_stack_from_lockfile(mine), sm="sm_89").value
+        == EnvIdentity(stack=compile_stack_from_lockfile(theirs), sm="sm_89").value
+    )
 
 
-def test_GREEN_every_party_reaches_the_one_function_and_not_a_second_copy() -> None:
-    """The derive, the boot host and the adopt session must not each observe
-    the env their own way — that is how two spellings were born the first
-    time. Asserted by RESOLVING their imports, not by grepping for a name."""
-
-    src = ROOT / "src" / "gen_worker"
-    for relative in (
-        "release/derive.py",
-        "serving/host.py",
-        "serving/serve_adoption.py",
-        "serving/__main__.py",
-        "cli/endpoint_lock.py",
-        "cli/lock.py",
-        "cli/release.py",
-    ):
-        assert "installed_closure" not in (src / relative).read_text(), (
-            f"{relative} observes the env itself; it must go through "
-            f"gen_worker.env_identity.env_closure"
-        )
+def test_a_compiler_bump_DOES_move_the_key(tmp_path: Path) -> None:
+    base = tmp_path / "a.lock"
+    base.write_text(_lock())
+    for bumped in ({"torch": "2.14.0"}, {"triton": "3.7.0"},
+                   {"nvidia-cublas-cu12": "12.9.0.1"}):
+        other = tmp_path / "b.lock"
+        other.write_text(_lock(**bumped))
+        assert (
+            EnvIdentity(stack=compile_stack_from_lockfile(base), sm="sm_89").value
+            != EnvIdentity(stack=compile_stack_from_lockfile(other), sm="sm_89").value
+        ), bumped
 
 
-def test_CONTROL_one_bumped_package_is_a_DIFFERENT_env() -> None:
-    """The control that the value still discriminates.
-
-    A restatable identity that returned a constant would pass every test
-    above. Bump exactly one real package's version and the closure must move.
-    """
-
-    from gen_worker._vendor.torchcg.graph_identity import closure_hash
-
-    installed = env_closure()
-    victim = sorted(installed)[0]
-    bumped = dict(installed, **{victim: installed[victim] + ".99"})
-    assert closure_hash(bumped) != env_closure_hash()
+def test_sm_is_the_other_free_variable(lockfile: Path) -> None:
+    stack = compile_stack_from_lockfile(lockfile)
+    assert (
+        EnvIdentity(stack=stack, sm="sm_89").value
+        != EnvIdentity(stack=stack, sm="sm_120").value
+    )
 
 
-# -- the lockfile is a DIFFERENT named thing, and only a diagnostic ---------
-
-
-def test_the_lockfile_reader_keeps_names_and_versions_VERBATIM(lockfile: Path) -> None:
-    entries = lockfile_packages(lockfile)
-    assert entries == {"torch": "2.13.0", "PyYAML": "6.0.3", "colorama": "0.4.6"}
-
-
-def test_a_forked_lockfile_REPORTS_the_fork_instead_of_dying(tmp_path: Path) -> None:
-    """A drift report that raises on the very property that killed
-    lockfile-as-identity is useless exactly where it is most informative."""
-
+def test_a_lock_with_no_torch_refuses_by_name(tmp_path: Path) -> None:
     path = tmp_path / "uv.lock"
-    path.write_text(LOCK + '\n[[package]]\nname = "torch"\nversion = "2.13.0+cu130"\n')
-    assert lockfile_packages(path)["torch"] == "2.13.0/2.13.0+cu130"
+    path.write_text('version = 1\n\n[[package]]\nname = "rich"\nversion = "13.9.4"\n')
+    with pytest.raises(EnvIdentityError, match="states torch"):
+        compile_stack_from_lockfile(path)
 
 
-def test_an_empty_lockfile_refuses_rather_than_reporting_nothing(tmp_path: Path) -> None:
-    path = tmp_path / "uv.lock"
-    path.write_text("version = 1\n")
+def test_the_reader_refuses_an_unreadable_or_empty_lock(tmp_path: Path) -> None:
+    with pytest.raises(EnvIdentityError, match="cannot read lockfile"):
+        lock_entries(tmp_path / "absent.lock")
+    empty = tmp_path / "uv.lock"
+    empty.write_text("version = 1\n")
     with pytest.raises(EnvIdentityError, match="no resolved packages"):
-        lockfile_packages(path)
+        lock_entries(empty)
 
 
-def test_lockfile_beside_finds_the_endpoints_own_and_never_guesses(
-    tmp_path: Path, lockfile: Path
-) -> None:
+def test_lockfile_beside_is_the_endpoint_s_own(tmp_path: Path, lockfile: Path) -> None:
     assert lockfile_beside(lockfile.parent) == lockfile
     assert lockfile_beside(tmp_path / "elsewhere") is None
 
 
-def test_drift_does_not_fire_on_SPELLING(lockfile: Path) -> None:
-    """THE case that makes the signal worth having.
+def test_the_derive_and_the_serve_runner_READ_THE_SAME_SOURCE(lockfile: Path) -> None:
+    """The whole issue, as one assertion.
 
-    `PyYAML` and `pyyaml` are one distribution. A drift report that lists them
-    is measuring its own normalization, and on one real endpoint that was TEN
-    of the rows.
+    `release/derive.py` stamps a document's stack from a lockfile; the serve
+    runner states this boot's stack from one. If those two ever stop being the
+    same function, a locally derived document becomes adoptable by nothing
+    again — silently, because the refusal turns into eager-forever.
     """
 
-    stated = lockfile_packages(lockfile)
-    installed = {"torch": "2.13.0", "pyyaml": "6.0.3", "colorama": "0.4.6"}
-    assert closure_drift(installed, stated) == ()
+    from gen_worker.release.derive import _compile_stack_from_lockfile
 
-
-def test_drift_does_not_fire_on_the_LOCAL_VERSION_SEGMENT(lockfile: Path) -> None:
-    stated = lockfile_packages(lockfile)
-    installed = {"torch": "2.13.0+cu129", "PyYAML": "6.0.3", "colorama": "0.4.6"}
-    assert closure_drift(installed, stated) == ()
-
-
-def test_drift_DOES_fire_on_a_real_difference_and_names_it(lockfile: Path) -> None:
-    stated = lockfile_packages(lockfile)
-    installed = {"torch": "2.12.0+cu129", "PyYAML": "6.0.3", "extra-thing": "1.0"}
-    rows = closure_drift(installed, stated)
-    assert {(r.name, r.kind) for r in rows} == {
-        ("colorama", "missing"),
-        ("extra-thing", "extra"),
-        ("torch", "version"),
-    }
-    summary = describe_drift(rows)
-    assert "3 package(s) differ" in summary
-    assert "torch 2.13.0 != 2.12.0" in summary
-    assert describe_drift(()) == ""
-
-
-def test_the_drift_line_never_raises_on_an_unreadable_lock(tmp_path: Path) -> None:
-    """It is a signal, not a gate: an absent or broken lock reports, it does
-    not stop a boot."""
-
-    assert "unavailable" in describe_lockfile_drift(tmp_path / "nope.lock")
-
-
-@pytest.mark.parametrize(
-    "raw,want",
-    [("PyYAML", "pyyaml"), ("typing_extensions", "typing-extensions"),
-     ("huggingface_hub", "huggingface-hub"), ("Py.YAML", "py-yaml")],
-)
-def test_pep503_name_normalization(raw: str, want: str) -> None:
-    assert normalize_name(raw) == want
-
-
-def test_local_version_segment_is_stripped_for_DRIFT_and_kept_for_IDENTITY() -> None:
-    assert normalize_version("2.13.0+cu129") == "2.13.0"
-    assert normalize_version("2.13.0rc1") == "2.13.0rc1"
-    # Identity does NOT go through normalize_version: `+cu129` vs `+cu130` is
-    # exactly the difference a compiled artifact cares about.
-    from gen_worker._vendor.torchcg.graph_identity import closure_hash
-
-    assert closure_hash({"torch": "2.13.0+cu129"}) != closure_hash(
-        {"torch": "2.13.0+cu130"}
+    assert _compile_stack_from_lockfile(lockfile) == compile_stack_from_lockfile(
+        lockfile
     )
+
+
+def test_a_derive_without_a_lockfile_refuses_instead_of_restating_the_env() -> None:
+    """No installed-set fallback survives: it was the second representation."""
+
+    import inspect
+
+    from gen_worker.release import derive
+
+    source = inspect.getsource(derive.derive_release)
+    assert "installed_closure" not in source
+    assert "pass `lockfile=`" in source
+
+
+def test_the_drift_report_is_DIAGNOSTIC_and_reads_the_stack_only(
+    lockfile: Path,
+) -> None:
+    """It may exist; it may not gate. Rows are strings for a log line."""
+
+    rows = installed_stack_drift(dict(compile_stack_from_lockfile(lockfile)))
+    assert all(isinstance(row, str) for row in rows)
+    # The fixture's nvidia pin is not installed here, so the diagnostic names
+    # it by package — and nothing anywhere acts on that.
+    assert any(row.startswith("nvidia-cublas-cu12 ") for row in rows)
+    # The `+cu130` local segment a lockfile cannot express is NOT drift.
+    assert not any(row.startswith("torch ") for row in
+                   installed_stack_drift({"torch": "2.13.0"}))
+    # A package that cannot reach the compiler cannot appear in it at all.
+    assert not any("pillow" in row or "colorama" in row for row in rows)
+
+
+#: A real `uv lock` output shape, minimized: ONE lock, two CUDA buckets as
+#: conflicting extras (the mechanism Paul verified 2026-08-19). `cudnn` is
+#: locked ONCE and shared, and its own edge names the OTHER bucket's cublas —
+#: which is exactly the trap a depth-first read falls into.
+FLAVOR_LOCK = """\
+version = 1
+
+[[package]]
+name = "endpoint"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.optional-dependencies]
+cu126 = [
+    { name = "torch", version = "2.8.0+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" } },
+]
+cu128 = [
+    { name = "torch", version = "2.8.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
+]
+
+[[package]]
+name = "torch"
+version = "2.8.0+cu126"
+source = { registry = "https://download.pytorch.org/whl/cu126" }
+dependencies = [
+    { name = "nvidia-cublas-cu12", version = "12.6.4.1" },
+    { name = "nvidia-cudnn-cu12" },
+    { name = "pillow", version = "11.1.0" },
+    { name = "triton", version = "3.4.0" },
+]
+
+[[package]]
+name = "torch"
+version = "2.8.0+cu128"
+source = { registry = "https://download.pytorch.org/whl/cu128" }
+dependencies = [
+    { name = "nvidia-cublas-cu12", version = "12.8.4.1" },
+    { name = "nvidia-cudnn-cu12" },
+    { name = "pillow", version = "11.1.0" },
+    { name = "triton", version = "3.4.0" },
+]
+
+[[package]]
+name = "nvidia-cublas-cu12"
+version = "12.6.4.1"
+
+[[package]]
+name = "nvidia-cublas-cu12"
+version = "12.8.4.1"
+
+[[package]]
+name = "nvidia-cudnn-cu12"
+version = "9.10.2.21"
+dependencies = [
+    { name = "nvidia-cublas-cu12", version = "12.8.4.1" },
+]
+
+[[package]]
+name = "triton"
+version = "3.4.0"
+
+[[package]]
+name = "pillow"
+version = "11.1.0"
+"""
+
+
+@pytest.fixture()
+def flavor_lock(tmp_path: Path) -> Path:
+    path = tmp_path / "flavor" / "uv.lock"
+    path.parent.mkdir()
+    path.write_text(FLAVOR_LOCK)
+    return path
+
+
+def test_one_lock_states_every_bucket_and_each_keys_apart(flavor_lock: Path) -> None:
+    assert cuda_buckets(flavor_lock) == ("cu126", "cu128")
+    early = dict(compile_stack_from_lockfile(flavor_lock, bucket="cu126"))
+    late = dict(compile_stack_from_lockfile(flavor_lock, bucket="cu128"))
+    assert early["torch"] == "2.8.0+cu126" and late["torch"] == "2.8.0+cu128"
+    # THE TRAP: cudnn is shared and its own edge names cu128's cublas. The
+    # bucket's answer is the one ITS torch states, not the deepest edge found.
+    assert early["nvidia-cublas-cu12"] == "12.6.4.1"
+    assert late["nvidia-cublas-cu12"] == "12.8.4.1"
+    # Shared, and therefore in both.
+    assert early["nvidia-cudnn-cu12"] == late["nvidia-cudnn-cu12"] == "9.10.2.21"
+    # A package that cannot reach the compiler is in neither.
+    assert "pillow" not in early and "pillow" not in late
+    assert (
+        EnvIdentity(stack=tuple(sorted(early.items())), sm="sm_89").value
+        != EnvIdentity(stack=tuple(sorted(late.items())), sm="sm_89").value
+    )
+
+
+def test_a_multi_bucket_lock_refuses_to_guess(flavor_lock: Path) -> None:
+    with pytest.raises(EnvIdentityError, match="locks 2 CUDA buckets"):
+        compile_stack_from_lockfile(flavor_lock)
+    with pytest.raises(EnvIdentityError, match="which its author never locked"):
+        compile_stack_from_lockfile(flavor_lock, bucket="cu999")
+    # The raw reader resolves a fork by bucket too, and refuses to guess when
+    # it cannot attribute one — the same rule, one level down.
+    with pytest.raises(EnvIdentityError, match=r"resolves 'torch' 2 ways"):
+        lock_entries(flavor_lock)
+
+
+def test_a_single_resolution_lock_ignores_the_host_bucket(lockfile: Path) -> None:
+    """Every endpoint today. The bucket is a question only a flavored lock asks."""
+
+    assert cuda_buckets(lockfile) == ()
+    assert compile_stack_from_lockfile(
+        lockfile, bucket="cu130"
+    ) == compile_stack_from_lockfile(lockfile)
+
+
+def test_the_host_reports_its_bucket_and_resolves_nothing() -> None:
+    bucket = cuda_bucket()
+    assert bucket == "" or (bucket.startswith("cu") and bucket[2:].isdigit())
+
+
+def test_a_FORKED_lock_is_read_by_the_host_s_bucket(tmp_path: Path) -> None:
+    """pgw#1472 measured this and concluded a lock cannot be an identity.
+
+    uv forks a resolution per index marker, so a lock legitimately states
+    `torch` at both `2.13.0` and `2.13.0+cu130` — pgw's own does. The fork is a
+    CUDA fork: its branches differ by the PEP 440 local segment, which IS the
+    bucket, so the host's bucket picks its branch. A reader that raised here
+    failed closed on the repo that most needs it.
+    """
+
+    path = tmp_path / "uv.lock"
+    path.write_text(
+        _lock()
+        + '\n[[package]]\nname = "torch"\nversion = "2.13.0+cu130"\n'
+    )
+    assert dict(compile_stack_from_lockfile(path, bucket="cu130"))["torch"] == (
+        "2.13.0+cu130"
+    )
+    with pytest.raises(EnvIdentityError, match="resolves 'torch' 2 ways"):
+        compile_stack_from_lockfile(path)
+    with pytest.raises(EnvIdentityError, match="matches none of them"):
+        compile_stack_from_lockfile(path, bucket="cu126")
+
+
+def test_pgws_OWN_lockfile_reads_cleanly() -> None:
+    """The measured case, on the real file: 17 rows and a flavored torch."""
+
+    repo = Path(__file__).resolve().parents[1] / "uv.lock"
+    stack = dict(compile_stack_from_lockfile(repo, bucket=cuda_bucket() or "cu130"))
+    assert stack["torch"].startswith("2.") and "+cu" in stack["torch"]
+    assert len(stack) > 5 and "pytest" not in stack
+
+
+def test_an_extra_is_a_BUCKET_only_when_it_is_named_for_one() -> None:
+    """pgw's own pyproject has an extra called `torch`. It is not a CUDA line."""
+
+    repo = Path(__file__).resolve().parents[1] / "uv.lock"
+    assert cuda_buckets(repo) == ()

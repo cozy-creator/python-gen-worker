@@ -29,7 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 import msgspec
 
@@ -143,12 +143,11 @@ def _parser() -> argparse.ArgumentParser:
                              "`release.compiled_graphs`")
     parser.add_argument("--sm", default="", help="this GPU's sm (e.g. sm_89)")
     parser.add_argument(
-        "--drift-lockfile", default="",
-        help="uv.lock to DIAGNOSE this env against (pgw#1472). Default: the "
-             "endpoint's own uv.lock when it has one; `-` skips the report. "
-             "This is a drift signal and never an identity: env identity is "
-             "the installed set of this process, the one thing the derive, "
-             "the mint child and this pod can all restate.")
+        "--env-lockfile", default="",
+        help="uv.lock stating this boot's COMPILE STACK (pgw#1489: torch, "
+             "triton, nvidia-*). Default: the endpoint's own uv.lock, which "
+             "is the SAME file `gen-worker lock` read for the document being "
+             "adopted. Absent, the document's own stamp is used.")
     parser.add_argument("--artifacts-dir", default=".compiled-graphs")
     parser.add_argument("--mint", action="store_true",
                         help="after boot, fill this (lane x sm)'s holes "
@@ -255,29 +254,48 @@ def _toolchain() -> Mapping[str, str]:
     return dict(toolchain_digest())
 
 
-def _report_env_drift(args: argparse.Namespace, document: Any) -> None:
-    """Print how far this image drifted from its lock. NEVER a gate (pgw#1472).
+def _stated_env(
+    args: argparse.Namespace, document: Any
+) -> "Optional[Mapping[str, str]]":
+    """This boot's COMPILE STACK, from the endpoint's own `uv.lock` (pgw#1489).
 
-    This boot's env identity is not chosen here and cannot be: it is
-    `env_closure_hash()` of this process, the one definition the publish-time
-    derive, the mint child and this pod all restate. What a lockfile is good
-    for is telling an operator that the image stopped matching what it claims
-    to have been built from — a typed signal, printed and then ignored.
+    The env half of an artifact key is torch/triton/nvidia-* and nothing else,
+    read off the same file `gen-worker lock` read when it stamped the document
+    being adopted. There is no second source any more: the installed-set
+    restatement this used to fall back to could never equal a lockfile
+    statement (PEP 503 spelling, PEP 440 local segments, platform-conditional
+    rows), and it split the pool on packages that cannot reach the compiler.
+
+    `None` means "no lock beside this endpoint": the adopt then keys by the
+    document's own stamp, and the venv is still compared to it diagnostically
+    inside the host.
     """
     if document is None:
-        return
-    from ..env_identity import describe_lockfile_drift, env_closure_hash, lockfile_beside
+        return None
+    from ..env_identity import (
+        EnvIdentityError,
+        compile_stack_from_lockfile,
+        cuda_bucket,
+        lockfile_beside,
+    )
 
-    given = str(args.drift_lockfile or "").strip()
-    if given == "-":
-        return
+    given = str(args.env_lockfile or "").strip()
     lockfile = Path(given) if given else lockfile_beside(args.endpoint_dir)
-    line = describe_lockfile_drift(lockfile) if lockfile is not None else "no lockfile"
+    if lockfile is None:
+        return None
+    # The host contributes two variables and resolves nothing: its sm, and
+    # the CUDA bucket its `uv sync --extra` materialized. Everything else the
+    # author locked (DESIGN-RULINGS 2026-08-19, the full-artifact-axis entry).
+    try:
+        stack = dict(compile_stack_from_lockfile(lockfile, bucket=cuda_bucket()))
+    except EnvIdentityError as exc:
+        raise SystemExit(f"--env-lockfile: {exc}")
     print(
-        f"adopt: env identity {env_closure_hash()[:16]}... (installed set of "
-        f"this process); {line}",
+        f"adopt: compile stack stated from {lockfile}: "
+        + ", ".join(f"{name} {version}" for name, version in sorted(stack.items())),
         file=sys.stderr,
     )
+    return stack
 
 
 def _serve_envelopes(args: argparse.Namespace, loaded: Any) -> int:
@@ -353,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
         loaded, binding, lane_contract=args.lane, output_dir=Path(args.output_dir)
     )
     store, document = _adoption_source(args, loaded.module_name)
-    _report_env_drift(args, document)
+    stack = _stated_env(args, document)
     # No `loader=`: pgw#1460. The byte-identical raw `aoti_load_package` that
     # used to sit here discarded the record and armed a WEIGHTLESS package with
     # an empty constant buffer. `torchcg.serve.aoti_loader` (tcg#58) is the
@@ -362,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     host.setup(
         store=store, document=document, sm=args.sm,
         artifacts_dir=Path(args.artifacts_dir),
+        stack=stack,
     )
     if host.adoption is not None:
         report: dict[str, Any] = {

@@ -36,9 +36,32 @@ def config_only_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tiny_tree.save_config_only(tmp_path_factory.mktemp("tiny-config-only"))
 
 
+#: A derive STATES the compile stack it traced under, and reads it from the
+#: endpoint's uv.lock (pgw#1489) — so every derive here states one. Restating
+#: the installed set instead is exactly what that issue deleted.
+LOCK = (
+    'version = 1\n'
+    '\n[[package]]\nname = "torch"\nversion = "2.13.0"\n'
+    '\n[[package]]\nname = "triton"\nversion = "3.7.1"\n'
+    '\n[[package]]\nname = "nvidia-cublas"\nversion = "13.1.1.3"\n'
+    '\n[[package]]\nname = "diffusers"\nversion = "0.39.0"\n'
+)
+
+
+@pytest.fixture(scope="module")
+def lockfile(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    path = tmp_path_factory.mktemp("tiny-lock") / "uv.lock"
+    path.write_text(LOCK)
+    return path
+
+
 def _derive(module: str, tree: Path, out: Path, *extra: str) -> int:
     from gen_worker.cli import main
 
+    if "--lockfile" not in extra:
+        default = out.parent / "default-uv.lock"
+        default.write_text(LOCK)
+        extra = ("--lockfile", str(default), *extra)
     return main(
         [
             "release",
@@ -94,7 +117,7 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
 
 
 def test_document_is_byte_stable_across_a_subprocess_fence(
-    config_only_tree: Path, tmp_path: Path
+    config_only_tree: Path, tmp_path: Path, lockfile: Path
 ) -> None:
     """Two FRESH interpreters derive identical bytes.
 
@@ -127,6 +150,8 @@ def test_document_is_byte_stable_across_a_subprocess_fence(
                 "tiny_endpoint",
                 "--checkpoint",
                 str(config_only_tree),
+                "--lockfile",
+                str(lockfile),
                 "--out",
                 str(out),
             ],
@@ -264,48 +289,55 @@ def test_binding_enumeration_reaches_adapter_and_cfg_arms(
     assert "refused by the author's own validation" in stderr
 
 
-def test_the_derive_stamps_THIS_PROCESSS_INSTALLED_SET_and_has_no_other_source(
+def test_the_compile_stack_is_the_env_identity_and_only_the_compiler_is_in_it(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """pgw#1472: one definition, and the CLI cannot be asked for another.
+    """pgw#1489: the derive stamps the lock's COMPILE STACK, not its closure.
 
-    The document's closure has to be restatable by the mint child and by the
-    serving pod, which are different processes in different runs. The only
-    thing all three can measure is the installed set, so the derive states it —
-    and the `--lockfile` flag that used to switch the SOURCE is gone, because a
-    flag that changes what an identity MEANS gives it no meaning.
+    Two lockfiles differing only in a package no compiler can see stamp the
+    SAME env; a torch bump stamps a different one. Env identity never leaks
+    into graph identity either way.
     """
 
-    from gen_worker.env_identity import env_closure_hash
+    stack_only = tmp_path / "a.lock"
+    stack_only.write_text(LOCK)
+    drifted = tmp_path / "b.lock"
+    drifted.write_text(LOCK.replace('"0.39.0"', '"0.40.0"')
+                       + '\n[[package]]\nname = "pillow"\nversion = "12.0.0"\n')
+    bumped = tmp_path / "c.lock"
+    bumped.write_text(LOCK.replace('"2.13.0"', '"2.14.0"'))
 
-    out = tmp_path / "derived.json"
-    assert _derive("tiny_endpoint", config_only_tree, out) == 0
-    assert json.loads(out.read_bytes())["graphs"]["closure"] == env_closure_hash()
+    documents = {}
+    for tag, lock in (("stack", stack_only), ("drift", drifted), ("bump", bumped)):
+        out = tmp_path / f"{tag}.json"
+        assert _derive("tiny_endpoint", config_only_tree, out,
+                       "--lockfile", str(lock)) == 0
+        documents[tag] = json.loads(out.read_bytes())
 
-    lockfile = tmp_path / "uv.lock"
-    lockfile.write_text(
-        'version = 1\n\n[[package]]\nname = "torch"\nversion = "2.13.0"\n'
-    )
-    with pytest.raises(SystemExit) as refusal:
-        _derive(
-            "tiny_endpoint", config_only_tree, tmp_path / "no.json",
-            "--lockfile", str(lockfile),
-        )
-    assert refusal.value.code != 0
-
-
-def test_env_identity_never_leaks_into_GRAPH_identity(
-    config_only_tree: Path, tmp_path: Path
-) -> None:
-    first = tmp_path / "a.json"
-    second = tmp_path / "b.json"
-    assert _derive("tiny_endpoint", config_only_tree, first) == 0
-    assert _derive("tiny_endpoint", config_only_tree, second) == 0
-    a, b = json.loads(first.read_bytes()), json.loads(second.read_bytes())
-    graphs = lambda d: [  # noqa: E731
-        r["graph"] for lane in d["graphs"]["lanes"] for r in lane["graphs"]
+    assert documents["stack"]["graphs"]["stack"] == documents["drift"]["graphs"]["stack"]
+    assert documents["stack"]["graphs"]["stack"] != documents["bump"]["graphs"]["stack"]
+    assert ["diffusers", "0.39.0"] not in documents["stack"]["graphs"]["stack"]
+    assert ["torch", "2.13.0"] in documents["stack"]["graphs"]["stack"]
+    # Env identity never leaks into GRAPH identity: same graphs every time.
+    graphs = [
+        [record["graph"] for lane in document["graphs"]["lanes"]
+         for record in lane["graphs"]]
+        for document in documents.values()
     ]
-    assert graphs(a) == graphs(b)
+    assert graphs[0] == graphs[1] == graphs[2]
+
+
+def test_a_derive_with_no_lockfile_refuses_instead_of_restating_the_env(
+    config_only_tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from gen_worker.cli import main
+
+    code = main([
+        "release", "derive", "--dir", str(FIXTURES), "--module", "tiny_endpoint",
+        "--checkpoint", str(config_only_tree), "--out", str(tmp_path / "x.json"),
+    ])
+    assert code == 1
+    assert "pass `lockfile=`" in capsys.readouterr().err
 
 
 # --- the sys.path priming the derive shares with discovery -------------------
@@ -466,7 +498,7 @@ sys.meta_path.insert(0, _NoTopLevel())
 
 
 def test_derive_runs_in_a_release_env_with_no_top_level_torchcg_or_tensorfs(
-    config_only_tree: Path, tmp_path: Path
+    config_only_tree: Path, tmp_path: Path, lockfile: Path
 ) -> None:
     out = tmp_path / "bare.json"
     cas = tmp_path / "graph-cas"
@@ -485,6 +517,7 @@ def test_derive_runs_in_a_release_env_with_no_top_level_torchcg_or_tensorfs(
             "--dir", str(FIXTURES), "--module", "tiny_endpoint",
             "--checkpoint", str(config_only_tree),
             "--graph-cas", str(cas),
+            "--lockfile", str(lockfile),
             "--out", str(out),
         ],
         capture_output=True, text=True, timeout=900, check=False, env=env,
@@ -524,3 +557,33 @@ def test_the_blocker_itself_can_go_red(config_only_tree: Path, tmp_path: Path) -
         capture_output=True, text=True, env=env, check=False,
     )
     assert proc.returncode != 0 and "not importable in a real release env" in proc.stderr
+
+
+def test_the_default_lockfile_is_the_one_BESIDE_the_endpoint(
+    config_only_tree: Path, tmp_path: Path
+) -> None:
+    """The production shape: no `--lockfile`, and the lock is found anyway.
+
+    tensorhub's builder runs `gen-worker release derive --module M --checkpoint
+    /derive/checkpoint` with no lockfile flag, in an image whose `WORKDIR /app`
+    holds `pyproject.toml` and `uv.lock` (docs/dockerfile.md). `--dir` defaults
+    to that cwd, so the endpoint's own lock is beside it — which is the ONLY
+    reason a required lockfile does not break the fleet's derive path. This
+    reproduces that layout with real files rather than trusting the Dockerfile.
+    """
+
+    endpoint = tmp_path / "app"
+    endpoint.mkdir()
+    for module in FIXTURES.glob("*.py"):
+        (endpoint / module.name).symlink_to(module)
+    (endpoint / "uv.lock").write_text(LOCK)
+
+    from gen_worker.cli import main
+
+    out = tmp_path / "beside.json"
+    assert main([
+        "release", "derive", "--dir", str(endpoint), "--module", "tiny_endpoint",
+        "--checkpoint", str(config_only_tree), "--out", str(out),
+    ]) == 0
+    stack = json.loads(out.read_bytes())["graphs"]["stack"]
+    assert ["torch", "2.13.0"] in stack

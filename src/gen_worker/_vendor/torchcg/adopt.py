@@ -200,7 +200,7 @@ class AdoptSession:
         *,
         loader: ArtifactLoader | None = None,
         artifacts_dir: str | Path,
-        installed: Mapping[str, str],
+        stack: Mapping[str, str],
         transforms: TransformSet | None = None,
     ) -> None:
         lane = next((row for row in document.lanes if row.contract == contract), None)
@@ -211,9 +211,11 @@ class AdoptSession:
                 f"({'lanes: ' + repr(available) if available else 'eager-permanent document'})"
             )
         self.lane: LaneGraphs = lane
-        self.env = EnvIdentity(closure=document.closure, sm=sm)
-        # The exact-env audit, BEFORE any artifact or module is touched.
-        assert_exact_env(self.env, installed=installed, sm=sm)
+        self.env = document.env(sm)
+        # The exact-env audit, BEFORE any artifact or module is touched. Both
+        # sides are the endpoint's own lockfile stack now (pgw#1489), so this
+        # fires on a real compile-stack difference and on nothing else.
+        assert_exact_env(self.env, stack=stack, sm=sm)
         # And the PASS audit, in the same breath and for the same reason
         # (tcg#52): a pass name is a cg-graph-v1 derivation input, so a boot
         # whose ran-pass set differs from the document's lane row is about to

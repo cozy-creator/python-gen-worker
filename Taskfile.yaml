@@ -163,6 +163,7 @@ tasks:
       - cmd: uv run python scripts/lint_compiled_graph_key_layout_fence.py
       - cmd: uv run python scripts/lint_serving_process_compiles.py
       - cmd: uv run python scripts/lint_raw_aoti_load.py
+      - cmd: uv run python scripts/lint_no_installed_set_keying.py
       - cmd: uv run python scripts/lint_phase_enum_emitters.py
       - cmd: uv run python scripts/check_cozy_runtime_env_digest.py
       - cmd: uv run python scripts/check_worker_value_contracts_digest.py

@@ -20,7 +20,7 @@ SPECULATED ``{document, artifacts, misses}`` shape before the route landed,
 and the route answers something else::
 
     {"object": "release_compiled_graphs", "release_id": "...",
-     "binding_generation": 0, "env_lockfile_hash": "<64hex>",
+     "binding_generation": 0, "env_compile_stack": [["torch", "2.13.0"], ...],
      "lane": "sdxl.diffusers-bf16@1", "lane_stamped": true,
      "lane_contract": {"stamp": ..., "contract_digest": ..., "document": {...},
                        "requires": ...},
@@ -214,7 +214,7 @@ class HubGraphStore:
         document = self.get_graphs(self._release_id)
         if document is None:
             raise StoreError(f"release {self._release_id} stamped no graph document")
-        return EnvIdentity(closure=document.closure, sm=self._sm)
+        return document.env(self._sm)
 
     def _entry(self, graph: str, env: EnvIdentity) -> Optional[Mapping[str, Any]]:
         if env != self._env():
@@ -250,12 +250,24 @@ class HubGraphStore:
         # call — swallowing it made their handlers dead code and left every
         # unstamped pod reporting the drift reason.
         answer = self._resolve()
-        # `env_lockfile_hash` is the HUB's field name and it is a misnomer:
-        # the hub echoes the derive document's `closure`, which is the derive
-        # process's INSTALLED set, never a lockfile hash (pgw#1472 — one
-        # definition, and this wire spelling is owed a rename in tensorhub's
-        # th#2133 schema). Read under the name it actually carries.
-        closure = str(answer.get("env_lockfile_hash") or "")
+        # pgw#1489: the release states its COMPILE STACK (torch/triton/nvidia
+        # rows of its uv.lock). The old `env_lockfile_hash` was a digest of
+        # the whole resolved set — a second representation of the endpoint's
+        # lock that split the artifact pool on packages that cannot reach the
+        # compiler. A hub still answering only that shape cannot be adopted
+        # from, and says so rather than keying on a hash of the wrong thing.
+        raw_stack = answer.get("env_compile_stack")
+        if not isinstance(raw_stack, (list, tuple)) or not raw_stack:
+            raise StoreError(
+                f"release {self._release_id} answers no `env_compile_stack`; "
+                f"the artifact key is (trace digest, sm, compile stack) since "
+                f"pgw#1489 and this hub still states only a closure hash"
+            )
+        stack = [
+            [str(row[0]), str(row[1])]
+            for row in raw_stack
+            if isinstance(row, (list, tuple)) and len(row) == 2
+        ]
         lanes: list[dict[str, Any]] = []
         if not answer.get("empty") and answer.get("lane_stamped"):
             records: list[dict[str, Any]] = []
@@ -304,7 +316,7 @@ class HubGraphStore:
             })
         try:
             self._document = GraphSetDocument.decode(
-                {"v": 1, "closure": closure, "lanes": lanes}
+                {"v": 2, "stack": stack, "lanes": lanes}
             )
         except DocumentError as exc:
             raise StoreError(

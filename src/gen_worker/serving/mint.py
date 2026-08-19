@@ -853,7 +853,6 @@ class BackgroundMint:
     cas_dir: Optional[Path] = None
     target_arch: str = ""
     toolchain: Mapping[str, str] = field(default_factory=dict)
-    installed: Mapping[str, str] = field(default_factory=dict)
     #: Fetch one serialized graph by digest: (digest, destination) -> path.
     #: Defaults to the store's own ``fetch_program``.
     program_source: Optional[Callable[[str, Path], Path]] = None
@@ -1141,7 +1140,6 @@ def mint_holes(
     target_arch: str = "",
     toolchain: Optional[Mapping[str, str]] = None,
     artifacts_dir: Path,
-    installed: Optional[Mapping[str, str]] = None,
     program_source: Optional[Callable[[str, Path], Path]] = None,
     posture: Optional[compile_posture.CompilePosture] = None,
     reserve: int = SERVING_RESERVE_CPUS,
@@ -1158,7 +1156,6 @@ def mint_holes(
         cas_dir=cas_dir,
         target_arch=target_arch,
         toolchain=dict(toolchain or {}),
-        installed=dict(installed or {}),
         program_source=program_source,
         posture=posture or compile_posture.current(),
         reserve=reserve,

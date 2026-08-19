@@ -27,7 +27,7 @@ from gen_worker._vendor.tensorfs import LocalCAS
 from gen_worker._vendor.torchcg import EnvironmentMismatch
 from gen_worker._vendor.torchcg.discovery import discover_lane
 from gen_worker._vendor.torchcg.document import GraphRecord, GraphSetDocument
-from gen_worker._vendor.torchcg.graph_identity import EnvIdentity, closure_hash
+from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
 from gen_worker._vendor.torchcg.requirements import RequirementsManifest
 from gen_worker._vendor.torchcg.store import LocalGraphStore, StoreError
 from gen_worker.serving import (
@@ -43,9 +43,8 @@ from gen_worker.serving.hub_store import HubGraphStore
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
 LANE = "sdxl.diffusers-bf16@1"
 SM = "sm_89"
-INSTALLED = {"torch": torch.__version__}
-CLOSURE = closure_hash(INSTALLED)
-ENV = EnvIdentity(closure=CLOSURE, sm=SM)
+STACK: tuple[tuple[str, str], ...] = (("torch", torch.__version__),)
+ENV = EnvIdentity(stack=STACK, sm=SM)
 
 #: Hub per-checkpoint overrides — mutable deploy state, decoded by
 #: ``LoadContext.defaults()`` against ``SDXL.Defaults``. Small step knob so
@@ -231,7 +230,7 @@ def publish_document(host: EndpointHost) -> GraphSetDocument:
             )
 
     lane_graphs = discover_lane(LANE, ("unet",), {"unet": model.pipe.unet}, drive)
-    return GraphSetDocument(closure=CLOSURE, lanes=(lane_graphs,))
+    return GraphSetDocument(stack=STACK, lanes=(lane_graphs,))
 
 
 def manifest() -> RequirementsManifest:
@@ -281,7 +280,7 @@ def test_adopt_first_boot_swaps_via_ctx_compile_and_hands_ordered_holes(
         store=store, document=document, sm=SM,
         loader=counting_loader(calls),
         artifacts_dir=tmp_path / "adopted",
-        installed=INSTALLED,
+        stack=STACK,
     )
 
     # THE handoff for pgw#1371: ordered holes carrying full GraphRecords.
@@ -326,12 +325,12 @@ def test_exact_env_mismatch_refuses_loudly_before_author_code(
     document = publish_document(host)
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
     refused = fresh_host(binding, tmp_path)
-    with pytest.raises(EnvironmentMismatch, match="build-system bug"):
+    with pytest.raises(EnvironmentMismatch, match=r"torch 0.0.0-divergent != stamped"):
         refused.setup(
             store=store, document=document, sm=SM,
             loader=counting_loader([]),
             artifacts_dir=tmp_path / "adopted",
-            installed={"torch": "0.0.0-divergent"},
+            stack={"torch": "0.0.0-divergent"},
         )
     # The audit fired BEFORE any author model was even instantiated.
     assert refused.instances == {}
@@ -342,7 +341,7 @@ def test_exact_env_mismatch_refuses_loudly_before_author_code(
 def test_eager_permanent_metadata_is_a_clean_noop(
     binding: DeployBinding, tmp_path: Path
 ) -> None:
-    eager = GraphSetDocument(closure=CLOSURE, lanes=())
+    eager = GraphSetDocument(stack=STACK, lanes=())
     booted = fresh_host(binding, tmp_path)
     booted.setup(document=eager, sm=SM)
     assert booted.adoption is None
@@ -361,7 +360,7 @@ def test_a_store_less_boot_still_forms_the_full_mint_worklist(
     booted = fresh_host(binding, tmp_path)
     booted.setup(
         document=document, sm=SM, loader=counting_loader([]),
-        artifacts_dir=tmp_path / "adopted", installed=INSTALLED,
+        artifacts_dir=tmp_path / "adopted", stack=STACK,
     )
     # Metadata known, artifacts unreachable: everything is stated mint work.
     assert [h.reason for h in booted.holes] == ["miss", "miss"]
@@ -447,7 +446,7 @@ def _adopt_answer(
         "object": "release_compiled_graphs",
         "release_id": "release-1",
         "binding_generation": 0,
-        "env_lockfile_hash": document.closure,
+        "env_compile_stack": [list(row) for row in document.stack],
         "lane": lane.contract,
         "lane_stamped": True,
         "lane_contract": {"stamp": lane.contract, "contract_digest": "",
@@ -476,7 +475,7 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     # The document is REBUILT from the answer — the hub stores the derive's
     # rows, not the derive's bytes.
     rebuilt = store.get_graphs("release-1")
-    assert rebuilt is not None and rebuilt.closure == document.closure
+    assert rebuilt is not None and rebuilt.stack == document.stack
     # pgw#1384: graph order is SEMANTIC, not canonical — the producer states
     # it (default-parameter classes first) and the miner mints holes in that
     # order, so the rebuild preserves the answer's order rather than sorting.
@@ -490,7 +489,7 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
         store=store, document=rebuilt, sm=SM,
         loader=counting_loader(calls),
         artifacts_dir=tmp_path / "adopted",
-        installed=INSTALLED,
+        stack=STACK,
     )
     assert transport.asks == 1  # ONE ask per boot, cached thereafter
     assert [h.record.graph for h in adopted_host.holes] == [hole.graph]
@@ -508,7 +507,7 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
         store=tampered_store, document=tampered_store.get_graphs("release-1"),
         sm=SM, loader=counting_loader([]),
         artifacts_dir=tmp_path / "adopted-2",
-        installed=INSTALLED,
+        stack=STACK,
     )
     reasons = {h.record.graph: h.reason for h in tampered_host.holes}
     assert reasons[hit.graph].startswith("store_error:")
