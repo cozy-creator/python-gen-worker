@@ -906,28 +906,20 @@ def _unique_component(instance: Any, name: str, component: Any) -> bool:
 
 
 def _closure_entries_from_lockfile(lockfile: Path) -> dict[str, str]:
-    import tomllib
+    """The lockfile closure, from the ONE definition (pgw#1472).
+
+    Kept as a name here because callers and fences reference it, but the body
+    moved to :mod:`gen_worker.env_identity`: the SERVING side has to restate
+    this exact set or adoption refuses, and a second implementation of "what
+    packages are we" is precisely how the two ends came to disagree.
+    """
+
+    from ..env_identity import EnvIdentityError, closure_entries_from_lockfile
 
     try:
-        parsed = tomllib.loads(lockfile.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise DeriveError(f"cannot read lockfile {lockfile}: {exc}") from exc
-    entries: dict[str, str] = {}
-    for package in parsed.get("package", ()):
-        name = package.get("name")
-        version = package.get("version")
-        if not isinstance(name, str) or not isinstance(version, str):
-            continue
-        known = entries.get(name)
-        if known is not None and known != version:
-            raise DeriveError(
-                f"lockfile {lockfile} resolves {name!r} to both {known!r} and "
-                f"{version!r}; a release env has ONE resolved closure"
-            )
-        entries[name] = version
-    if not entries:
-        raise DeriveError(f"lockfile {lockfile} states no resolved packages")
-    return entries
+        return closure_entries_from_lockfile(lockfile)
+    except EnvIdentityError as exc:
+        raise DeriveError(str(exc)) from exc
 
 
 def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
