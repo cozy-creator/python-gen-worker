@@ -152,6 +152,17 @@ _BEAT_INTERVAL_FALLBACK_S = 10.0
 # here KILLS NO WORK (the Hello ships without parent-measured resources and the
 # pod serves).
 _MEASURE_TIMEOUT_S = 180.0
+#: pgw#1436. How many times the parent re-spawns the census when it comes back
+#: WITHOUT a compute capability. A fresh interpreter is the only thing that can
+#: clear torch's per-process CUDA-init freeze, so this is the retry that
+#: actually retries; `measure`'s in-process loop cannot.
+#:
+#: THREE, not more: each spawn is a full interpreter plus a real CUDA probe, and
+#: the whole census sits inside `_MEASURE_TIMEOUT_S` on the boot path. A host
+#: whose runtime has not answered by the third fresh process is not racing, it
+#: is broken — and pgw#1436 makes it say so by name instead of paying more.
+_CENSUS_SPAWNS = 3
+_CENSUS_SPAWN_BACKOFF_S = 2.0
 _MEASURE_BEFORE_SPAWN_S = 60.0
 _ATTESTATION_REPORT_MIN_INTERVAL_S = 300.0
 _CAPABILITY_REPORT_MIN_INTERVAL_S = 300.0
@@ -1473,7 +1484,50 @@ class ParentControl:
     # ---- hardware + canary (parent-owned, PRE-IMPORT) ---------------------
 
     async def _measure_host(self) -> None:
-        """Measure the silicon in a process that has imported no tenant code."""
+        """Measure the silicon in a process that has imported no tenant code.
+
+        pgw#1436: RE-SPAWNS on a capability gap, because retrying in-process
+        cannot work. `torch.cuda.is_available()` initialises CUDA lazily and
+        once per process — a first call made before the runtime is ready
+        freezes False for that process's lifetime, so `measure`'s own loop
+        re-asks a question torch has already answered permanently. Measured:
+        three rented pods, two machine classes, three driver versions, 4
+        in-process attempts each, recovered on NONE. A fresh interpreter is the
+        only thing that clears it.
+
+        A `device` gap is NOT re-spawned for here — NVML holds no such cache, so
+        `measure`'s in-process loop already handles it and a second process
+        would only pay the interpreter twice.
+        """
+        best: Optional[Dict[str, Any]] = None
+        for spawn in range(_CENSUS_SPAWNS):
+            await self._measure_host_once()
+            current = self._measurement or {}
+            # A RE-SPAWN MUST NEVER MAKE THE ANSWER WORSE. A later spawn that
+            # times out, crashes or prints nothing yields `{}`, and assigning
+            # that over a good earlier reading would turn a partial census into
+            # NO census — the failure this whole issue is about, re-introduced
+            # by its own fix. Keep the reading with the fewest gaps.
+            if best is None or len(current.get("census_gaps") or []) < len(
+                best.get("census_gaps") or []
+            ):
+                if current or best is None:
+                    best = current
+            gaps = list(current.get("census_gaps") or [])
+            if "capability" not in gaps or spawn == _CENSUS_SPAWNS - 1:
+                break
+            logger.warning(
+                "host census still missing CAPABILITY after spawn %d/%d — "
+                "torch freezes a failed CUDA init per PROCESS, so re-measuring "
+                "in a FRESH interpreter (pgw#1436)",
+                spawn + 1, _CENSUS_SPAWNS,
+            )
+            await asyncio.sleep(_CENSUS_SPAWN_BACKOFF_S * (spawn + 1))
+        if best is not None:
+            self._measurement = best
+
+    async def _measure_host_once(self) -> None:
+        """One census subprocess. Never raises; leaves `_measurement` alone."""
         cmd = list(self._measure_cmd)
         env = dict(os.environ)
         for name in _CHILD_FORBIDDEN_ENVS:
@@ -1496,6 +1550,9 @@ class ParentControl:
             logger.warning("host measurement subprocess failed", exc_info=True)
             return
         finally:
+            # pgw#1436: set on EVERY spawn. A later spawn only ever improves the
+            # measurement, and a Hello that waited for the last one would pay the
+            # full re-spawn budget on a host that will never answer.
             self._measured.set()
         try:
             self._measurement = json.loads(raw.decode() or "{}")
@@ -1555,6 +1612,15 @@ class ParentControl:
             # term, so the fact has to arrive from a LIVE worker and not only
             # from `HardwareUnsuitable`. Unmeasurable stays "" -> off the wire.
             cuda_version=hw.cuda_version,
+            # pgw#1436: WHY there is no gpu_sm, when there is a card. Same
+            # argument as the two fields above and the same vocabulary as
+            # HardwareUnsuitable — a live worker that registers `class=gpu`
+            # with no capability was, until now, undiagnosable from the hub
+            # while a DEAD one was. Absent when nothing went wrong: measure()
+            # only sets these on a real capability gap, so a healthy host
+            # leaves both off the wire rather than shipping "" as an answer.
+            capability_reason_class=str(m.get("capability_reason_class") or ""),
+            capability_detail=str(m.get("capability_detail") or ""),
             installed_libs=list(hw.installed_libs),
             gen_worker_version=str(m.get("gen_worker_version") or ""),
             image_digest=self._settings.worker_image_digest,

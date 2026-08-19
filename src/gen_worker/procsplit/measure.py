@@ -51,6 +51,21 @@ def measure() -> Dict[str, Any]:
     # CUDA probe runs later. A driver mount landing between them gives exactly
     # that incident — a cpu Hello from a pod whose probe then passes — which is
     # why the retry is likely to fix it outright.
+    #
+    # ⚠️ pgw#1436: THE IN-PROCESS RETRY BELOW CANNOT RECOVER A CAPABILITY GAP,
+    # and that is measured, not theorised. `torch.cuda.is_available()`
+    # initialises CUDA lazily and ONCE PER PROCESS; a first call made before the
+    # runtime is ready freezes False for the life of the process, so every later
+    # attempt in this loop re-asks a question torch has already answered
+    # permanently. Three rented pods across two machine classes and three driver
+    # versions retried 4x with backoff and recovered on NONE of them — which a
+    # genuine driver-mount race could never explain.
+    #
+    # The loop is KEPT because it does work for a `device` gap (NVML has no such
+    # cache), and it is now bounded by `_CENSUS_RETRIES_INPROC`. The gap set is
+    # REPORTED to the parent, which re-spawns this module in a FRESH process —
+    # the only thing that can clear a frozen CUDA init. See
+    # `parent._measure_host`.
     attempts = _CENSUS_RETRIES if gpu_devices_present() else 1
     for attempt in range(attempts):
         try:
@@ -61,6 +76,10 @@ def measure() -> Dict[str, Any]:
         out.pop("hardware_error", None)
         out["hardware"] = facts.as_dict()
         gaps = _census_gaps(facts)
+        # pgw#1436: the parent re-spawns on this. Reported every time, so an
+        # incomplete census is machine-visible one level up instead of being
+        # re-derived there from field emptiness.
+        out["census_gaps"] = list(gaps)
         if not gaps or attempt == attempts - 1:
             break
         # Progressive: the CUDA runtime takes longer to come up than the
@@ -87,6 +106,25 @@ def measure() -> Dict[str, Any]:
             # then refuses EVERY request with `gpu_capability_incompatible`,
             # because pgw#984 derives `min_sm` on every v2 release. Not
             # reporting an SM is not the same as not having one.
+            # pgw#1436: ASK THE QUESTION THAT HAS AN ANSWER.
+            #
+            # Everything above this line restates the SYMPTOM ("gpu_sm is
+            # empty"). `gpu_sm` is empty because `device_identity()` gates on
+            # `cuda_ready()` — a bare `torch.cuda.is_available()` that swallows
+            # every exception and returns False — so the reason is discarded at
+            # the point of use. `cuda_state()` is the three-valued verdict built
+            # on a real allocate/op/synchronize probe, and `cuda_ready`'s own
+            # docstring says anything REPORTING to the fleet must call it
+            # instead, "because this predicate cannot express it". The census is
+            # exactly that caller and never called it.
+            #
+            # Vocabulary is HardwareUnsuitable's, deliberately: the same
+            # reason_class/detail pair the FAILURE carrier already ships
+            # (torch_unavailable | cuda_unavailable | driver_too_old |
+            # cuda_error | unknown). One classification, two carriers.
+            reason_class, detail = _capability_reason()
+            out["capability_reason_class"] = reason_class
+            out["capability_detail"] = detail
             out["capability_unreadable"] = (
                 f"GPU {facts_dict.get('gpu_name') or '(unnamed)'} "
                 f"(driver {facts_dict.get('driver_version') or '?'}) was read, "
@@ -94,10 +132,11 @@ def measure() -> Dict[str, Any]:
                 f"attempt(s). `gpu_sm` is empty, so every request carrying a "
                 f"derived min_sm will refuse gpu_capability_incompatible. The "
                 f"CUDA RUNTIME, not the driver, answers this — the driver is "
-                f"clearly up."
+                f"clearly up. Probe says {reason_class}: {detail}"
             )
             logger.error(
-                "capability_unreadable: %s (pgw#1417)", out["capability_unreadable"]
+                "capability_unreadable: %s (pgw#1417/#1436)",
+                out["capability_unreadable"],
             )
         elif not (facts_dict.get("gpu_count") or facts_dict.get("gpu_name")
                   or facts_dict.get("driver_version")):
@@ -183,6 +222,29 @@ _GPU_DEVICE_NODES = ("/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-uvm")
 #: `_MEASURE_TIMEOUT_S`, and a pod waiting here is a pod not serving.
 _CENSUS_RETRIES = 4
 _CENSUS_BACKOFF_S = 1.5
+
+
+def _capability_reason() -> Tuple[str, str]:
+    """Why the CUDA runtime would not answer — `(reason_class, detail)`.
+
+    pgw#1436. `cuda_state()` allocates, so it is never on a hot path; this is
+    called at most once per census, only when a card was read and its
+    capability was not. Vocabulary matches `HardwareUnsuitable.reason_class`
+    so the hub classifies a LIVE worker's degradation with the same words it
+    already uses for a dead one.
+
+    Never raises: a diagnostic that fails must not cost the census its
+    measurement, which is the whole failure mode this issue exists to end.
+    """
+    try:
+        from ..hostfacts import cuda_state
+
+        state = cuda_state()
+        klass = (getattr(state, "probe_class", "") or "").strip() or "unknown"
+        detail = (getattr(state, "detail", "") or "").strip()
+        return klass, detail or "(probe returned no detail)"
+    except Exception as exc:  # noqa: BLE001 — a probe never changes an outcome
+        return "unknown", f"cuda_state() itself failed: {type(exc).__name__}: {exc}"
 
 
 def gpu_devices_present() -> bool:
