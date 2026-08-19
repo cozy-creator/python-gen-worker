@@ -60,6 +60,10 @@ class EngineModel(Model[SDXL], lanes=(TINY_DIFFUSERS_FP32,)):
 @entrypoint
 def generate(ctx: RequestContext, payload: In, model: EngineModel) -> Out:
     ctx.raise_if_cancelled()
+    # pgw#1510: the documented operator-diagnostic line. It is CORRECT at
+    # serve, and it used to kill the drive with "'Logger' object is not
+    # callable" — so a real derive has to execute it.
+    ctx.log("engine wrapper: resolved pipeline", level="info", side=32)
     with torch.inference_mode():
         model.engine.pipeline(
             prompt=payload.prompt,
