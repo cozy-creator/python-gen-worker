@@ -72,6 +72,11 @@ from .trace_context import (
 
 _LOG = logging.getLogger("gen_worker.release.derive")
 
+#: A hollow derive's REAL tensors are config-computed buffers and lifted
+#: constants -- KB to MB. Anything past this is a checkpoint weight that
+#: escaped hollow instantiation, and it must never reach a graph blob.
+_REAL_TENSOR_BYTES_CEILING = 64 * 1024 * 1024
+
 DOCUMENT_KIND = "gen-worker.release-metadata@1"
 
 #: Auto-enumeration cross-product cap. Overflow warns and traces the
@@ -178,7 +183,7 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
     cas = LocalCAS(Path(cas_root))
 
     def sink(graph: str, program: Any) -> str:
-        _demote_fakes_to_meta(torch, program)
+        _assert_weights_free(torch, program)
         buffer = io.BytesIO()
         torch.export.save(program, buffer)
         del graph
@@ -226,44 +231,54 @@ def _trace_device() -> str:
     return "cpu"
 
 
-def _demote_fakes_to_meta(torch: Any, program: Any) -> None:
-    """Replace the traced program's FAKE tensors with META tensors.
+def _assert_weights_free(torch: Any, program: Any) -> None:
+    """Prove the blob carries no weights -- WITHOUT rewriting anyone's device.
 
-    A derive traces under ``FakeTensorMode``, and ``torch.export.save`` writes
-    a fake tensor's PHANTOM storage -- the archive then claims a shape whose
-    bytes are not there, and ``torch.export.load`` dies with
-    ``setStorage: ... out of bounds for storage of size N`` (measured on the
-    real SDXL UNet: a [1280, 320] bf16 parameter wanting 819,200 bytes over a
-    23,040-byte storage). Meta tensors are shape+dtype ONLY, which is exactly
-    what a graph artifact should carry: the miner binds the checkpoint's real
-    weights before it compiles. So this is the honest serialization, not a
-    workaround -- and it is the same reason the blob holds no weights.
+    This used to be ``_demote_fakes_to_meta``, which replaced every fake tensor
+    with a META one. The rationale was real -- ``torch.export.save`` must not
+    write a phantom storage that makes the archive claim bytes it does not have
+    -- but the cure destroyed the device, and pgw#1458 made the device
+    load-bearing. The result was one blob with TWO device stories: 1,922 graph
+    node metas on ``cuda:0`` against 686 state-dict entries on ``meta``, and
+    AOTI reads BOTH, so every sd1.5 class died on
+    ``FakeTensorDeviceMismatchError cuda:0 and meta`` -- the mirror image of
+    the failure the device work had just fixed. ``meta`` has no device
+    sub-type, so it cannot express "no bytes, on cuda"; a fake tensor already
+    does.
 
-    Buffers hollow_session computed for REAL are left alone; only fakes move.
+    Measured, which is why the rewrite is gone rather than adjusted: saving a
+    fake-parameter program writes **0 bytes** of weight payload and records the
+    fake tensor's OWN device in ``model_weights_config.json`` (cpu trace ->
+    cpu, cuda trace -> cuda), and the cpu blob reloads with its state dict
+    intact. Shape + dtype + device + no bytes is exactly the property the
+    demotion was reaching for, and the fake tensor has it already.
+
+    What survives is the INVARIANT, asserted instead of enforced by rewriting:
+    a real tensor with real storage in the state dict would put weights in a
+    graph artifact. Buffers hollow_session computed for REAL are legitimate and
+    small (their values are what a literal-bearing trace digests), so the
+    refusal names a size floor rather than realness.
     """
 
     from torch._subclasses.fake_tensor import FakeTensor
 
-    def demote(value: Any) -> Any:
-        if not isinstance(value, FakeTensor):
-            return value
-        meta = torch.empty_strided(
-            value.shape, value.stride(), dtype=value.dtype, device="meta"
+    heavy = []
+    for holder in ("state_dict", "constants"):
+        for name, value in (getattr(program, holder, None) or {}).items():
+            if not isinstance(value, torch.Tensor) or isinstance(value, FakeTensor):
+                continue
+            if value.device.type == "meta":
+                continue
+            if value.numel() * value.element_size() > _REAL_TENSOR_BYTES_CEILING:
+                heavy.append(f"{holder}.{name} ({value.numel() * value.element_size()} bytes)")
+    if heavy:
+        raise DeriveError(
+            f"the derive is about to serialize {len(heavy)} REAL tensor(s) far too "
+            f"large to be config-derived buffers into a graph blob: {heavy[:6]!r}. "
+            f"A graph artifact carries structure, never weights -- the miner binds "
+            f"the checkpoint's real tensors before it compiles. Something was "
+            f"loaded with weights instead of hollow."
         )
-        if isinstance(value, torch.nn.Parameter):
-            return torch.nn.Parameter(meta, requires_grad=False)
-        return meta
-
-    for holder in (
-        getattr(program, "state_dict", None),
-        getattr(program, "constants", None),
-    ):
-        if not isinstance(holder, dict):
-            continue
-        for name, value in list(holder.items()):
-            demoted = demote(value)
-            if demoted is not value:
-                holder[name] = demoted
 
 
 def _lane_model_class(module: ModuleType) -> Optional[type]:
