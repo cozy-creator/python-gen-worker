@@ -65,6 +65,64 @@ logger = logging.getLogger(__name__)
 _DTYPE_REJECTIONS = ("torch_dtype", "'dtype'", '"dtype"')
 
 
+def _torch_dtype_from_name(name: str) -> Any:
+    """``'bfloat16'`` -> ``torch.bfloat16``, or None if it is not one.
+
+    Guarded with ``isinstance`` because ``getattr(torch, 'load')`` is a
+    perfectly good attribute that is not a dtype, and handing a FUNCTION to
+    ``torch_dtype=`` would be a worse failure than handing it a string.
+    """
+    try:
+        import torch
+    except Exception:  # pragma: no cover - torch-free serve role
+        return None
+    candidate = getattr(torch, name.replace("torch.", "", 1), None)
+    return candidate if isinstance(candidate, torch.dtype) else None
+
+
+def _lane_torch_dtype(lane: Any) -> Any:
+    """The lane's load dtype as a REAL ``torch.dtype``, or None.
+
+    Shared by both eager bridges (`serving/context.py` and
+    `release/trace_context.py`) so the two cannot drift — pgw#1447 already
+    proved they drift when they are two copies.
+
+    Prefers ``Contract.torch_dtype`` (the object) over ``Contract.dtype`` (the
+    spelling). Every non-AttributeError read is treated as "this contract
+    declares no top-level dtype", which is a LEGAL state tensorfs signals by
+    RAISING (``MissingDtype``) rather than answering None — the pgw#1386
+    protective arm, kept identical and applied to BOTH spellings, since a
+    dtype-less document raises the same way whichever attribute is asked for.
+    """
+    if lane is None:
+        return None
+    for attr in ("torch_dtype", "dtype"):
+        try:
+            value = getattr(lane, attr)
+        except AttributeError:
+            continue  # this contract object does not carry that spelling
+        except Exception:
+            logger.info(
+                "ctx.load: lane %r declares no load dtype; the eager bridge "
+                "takes the checkpoint's own", lane,
+            )
+            return None
+        if value is None:
+            continue
+        if isinstance(value, str):
+            resolved = _torch_dtype_from_name(value)
+            if resolved is not None:
+                return resolved
+            logger.warning(
+                "ctx.load: lane %r names dtype %r, which does not resolve to a "
+                "torch dtype; loading in the checkpoint's own precision "
+                "(pgw#1448)", lane, value,
+            )
+            return None
+        return value
+    return None
+
+
 def _rejected_torch_dtype(exc: TypeError) -> bool:
     """Did this ``TypeError`` come from passing ``torch_dtype``?
 
@@ -278,19 +336,27 @@ class LoadContext(Generic[MT_co]):
         kill the load before reaching it. ``getattr(lane, "dtype", None)`` does
         NOT swallow a non-AttributeError, which is why the plain read did.
         Any other error still propagates.
+
+        pgw#1448 — AND IT MUST RETURN A ``torch.dtype``, NOT A STRING. This
+        read used to answer ``Contract.dtype``, which is the contract's
+        SPELLING (``'bfloat16'``), while the sibling attribute
+        ``Contract.torch_dtype`` is the real object (``torch.bfloat16``)::
+
+            contracts.MINIMAX_H3_DIT_DIFFUSERS.dtype        -> 'bfloat16'  (str)
+            contracts.MINIMAX_H3_DIT_DIFFUSERS.torch_dtype  -> torch.bfloat16
+
+        diffusers REFUSES a string ``torch_dtype`` with a warning and falls
+        back to **fp32**, so every kwargs-accepting pipeline loaded through the
+        eager bridge was loading at the wrong precision — silently. Measured by
+        the local lane on a 4070: sd1.5 at **13 s/it**, ~20-40x off, because
+        fp32 doubles the weights on a 7.63 GiB card. **The precision bug IS the
+        performance bug**, and it is invisible: a scroll-past warning, then a
+        model that works and is slow.
+
+        FLEET CONSEQUENCE: any timing ever taken through this bridge was fp32
+        timing and must be re-baselined, not compared.
         """
-        if self._lane is None:
-            return None
-        try:
-            return self._lane.dtype
-        except AttributeError:
-            return None
-        except Exception:
-            logger.info(
-                "ctx.load: lane %r declares no load dtype; the eager bridge "
-                "takes the checkpoint's own", self._lane,
-            )
-            return None
+        return _lane_torch_dtype(self._lane)
 
     def compile(self, target: Any) -> Any:
         """Imperative module marking, the torch.compile idiom (Paul ruling)::

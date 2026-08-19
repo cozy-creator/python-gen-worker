@@ -19,7 +19,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..serving.context import _rejected_torch_dtype
+from ..serving.context import _lane_torch_dtype, _rejected_torch_dtype
+
 
 class TraceLoadContext:
     """What ``Model.load`` sees under ``gen-worker release derive``.
@@ -77,7 +78,12 @@ class TraceLoadContext:
         # the DERIVE — the one path that ALWAYS takes an eager bridge, because
         # a trace has no streaming engine — still broken. Two bridges, one
         # contract; the predicate is shared so they cannot drift.
-        dtype = getattr(self.lane, "dtype", None)
+        # pgw#1448: the real `torch.dtype`, never the contract's SPELLING.
+        # `Contract.dtype` is `'bfloat16'` (str) and `Contract.torch_dtype` is
+        # `torch.bfloat16`; diffusers refuses the string with a warning and
+        # silently loads fp32, so this read decides the precision the whole
+        # trace runs at.
+        dtype = _lane_torch_dtype(self.lane)
         try:
             loaded = from_pretrained(self.checkpoint_dir, torch_dtype=dtype)
         except TypeError as exc:
