@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from ..hostfacts import cuda_ready
+from .. import scratchrepo
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -622,11 +623,35 @@ class RequestContext(Generic[D]):
     def _repo_job_release(self) -> str:
         """The release a repo-CAS checkpoint publish attaches to, or "".
 
-        th#1987 made it mandatory hub-side; it is the caller's
-        `destination.release`, carried through the execution hints. Empty means
-        the invoke named none — a caller-side defect the publish refuses by
-        name rather than a transfer problem."""
+        It is the caller's `destination.release`, carried through the execution
+        hints. Empty means the invoke named none — which is th#2202's ORDINARY
+        case, not a defect: see :meth:`_checkpoint_release`."""
         return str((self._execution_hints or {}).get("destination_release") or "").strip()
+
+    def _checkpoint_release(self, repo: str) -> str:
+        """THE release `ctx.save_checkpoint` publishes under, or "" to let the
+        hub derive one. Raises when neither is available.
+
+        th#2202. This is a NAMED decision rather than an inline `if` because
+        the `if` was wrong for a year of cost and nothing could see it at $0:
+        the only carrier for `destination.release` is the reserved
+        `destination:{ref,release}` object, and an endpoint whose typed input
+        declares the scalar `destination_repo` with `forbid_unknown_fields`
+        can never be handed that key. So this raised at step 200 of a paid-for
+        training run, on the SCRATCH repo the hub itself named — a repo no
+        author ever names a release for, and one the hub cuts a release for on
+        every publish. The refusal survives for a destination that HAS an
+        author, which is where th#1987's deliberation rule lives.
+        """
+        release = self._repo_job_release()
+        if release or scratchrepo.is_scratch_name(repo):
+            return release
+        raise RuntimeError(
+            f"cannot publish into {repo!r}: the request named no "
+            "`destination.release`, and th#1987 made it mandatory for a repo "
+            "with an author — the hub refuses the declare with "
+            "`release_required`. Cut a release and invoke with "
+            "destination={ref, release}.")
 
     def _tensor_upload_execution_kind(self) -> str:
         hints = dict(self._execution_hints or {})

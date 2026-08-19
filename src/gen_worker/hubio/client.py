@@ -37,6 +37,7 @@ from gen_worker.transfer.grants import TransferGrant, upload
 from gen_worker.transfer.journal import TransferJournal, TransferSession
 
 from .. import activity as _activity
+from .. import scratchrepo
 from ..http_origin import is_definite_hub_answer, response_is_from_hub
 from ..models.cache_paths import open_worker_cas
 from ..stall import SilenceWindow
@@ -603,7 +604,16 @@ class HubClient:
             raise HubPublishError("publish_v2 requires at least one file")
         attaches_to_no_release = release == COMPILED_GRAPH_NO_RELEASE
         release = "" if release == COMPILED_GRAPH_NO_RELEASE else release.strip()
-        if not release and not attaches_to_no_release:
+        # th#2202: a SCRATCH repo DERIVES its release, so an empty one is legal
+        # there and the body simply omits the field. This precondition is the
+        # SDK's mirror of the hub's own rule and must not be stricter than it:
+        # the scratch repo is the destination the hub hands EVERY publishing
+        # run, and a callee whose typed input declares the scalar
+        # `destination_repo` can never be told a `destination.release` — so this
+        # refusal used to make `ctx.save_checkpoint` impossible, client-side,
+        # before any HTTP, at step 200 of a paid-for training run.
+        derives = scratchrepo.derives_its_release(destination_repo)
+        if not release and not attaches_to_no_release and not derives:
             raise HubReleaseRequiredError(
                 f"publish into {destination_repo!r} names no release: th#1987 "
                 "made `release` mandatory. Cut one "
