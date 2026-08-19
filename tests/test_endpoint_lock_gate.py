@@ -87,6 +87,15 @@ def _write_endpoint(root: Path, *, extra_field: str = "") -> None:
         '[tool.gen_worker]\nmain = "lockcheck_fixture.main"\n',
         encoding="utf-8",
     )
+    # pgw#1489: an endpoint STATES the compile stack it traced under, and
+    # `lock` reads it from the uv.lock beside the endpoint — the same file the
+    # image carries at `WORKDIR /app`. A tree without one is not a lockable
+    # endpoint, and the verb says so rather than restating the installed set.
+    (root / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "torch"\nversion = "2.13.0"\n'
+        '\n[[package]]\nname = "triton"\nversion = "3.7.1"\n',
+        encoding="utf-8",
+    )
 
 
 @pytest.fixture()
