@@ -99,6 +99,20 @@ CHILD_ONLY: Dict[str, str] = {
         "no boot or dispatch path imports `gen_worker.release`. Serialization "
         "is not inductor orchestration — it holds no GIL-bound compile."
     ),
+    "_vendor.torchcg.hollow": (
+        "the weights-free DERIVE SESSION (tcg#45), and it sits behind the two "
+        "modules already declared here rather than beside them. Its "
+        "`torch.export.load` is the device-checked reader on the publish-time "
+        "path — the archive it opens is one the derive itself just wrote. "
+        "Structural, not a promise: torchcg's package root DELIBERATELY does "
+        "not re-export `hollow` (`_vendor/torchcg/__init__.py` says so in "
+        "prose), so it cannot be reached as `torchcg.hollow_session` by "
+        "accident; its only two importers in this tree are "
+        "`_vendor.torchcg.discovery` and `release.derive`, both CHILD_ONLY "
+        "above, and the serving package imports neither. A serving module that "
+        "starts importing any of the three goes red here — this row exempts "
+        "`hollow`, not its importers."
+    ),
     "serving.mint_child": (
         "pgw#1371's runtime-mint COMPILE CHILD. Its `torch.export.load` + "
         "`Engine.compile` are the whole point of the module, and it is a "
