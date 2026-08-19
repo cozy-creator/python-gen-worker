@@ -46,7 +46,7 @@ ARM_SEAM = "arm_compiled_graph"
 #: "did this arm resolve through TCG", not "which line did it happen on". A
 #: shared resolve is the OPPOSITE of a weakening here: two seams that each
 #: re-derived the artifact are the pgw#816/#822 class one level up.
-ARM_RESOLVER = "_resolve_graph_class"
+ARM_RESOLVER = "_resolve_graph_specialization"
 
 #: pgw#1329: there are TWO arm seams and they differ in exactly one axis, the
 #: constant SOURCE. The fence must state both, and must state what each one
@@ -491,19 +491,19 @@ def check_allowlist(
 def run_red_proofs() -> int:
     """Exercise the current fence's rejection paths before auditing src."""
     good = """
-def _resolve_graph_class():
+def _resolve_graph_specialization():
     engine = open_worker_engine()
     engine.resolve()
     engine.runner()
 def arm_compiled_graph():
-    resolved = _resolve_graph_class()
+    resolved = _resolve_graph_specialization()
     resolved.runner.bind()
     _marker()
     dispatch = EntryDispatch()
     dispatch.add()
     wrap_module()
 def arm_compiled_graph_from_store():
-    resolved = _resolve_graph_class()
+    resolved = _resolve_graph_specialization()
     resolved.runner.bind()
     dispatch = EntryDispatch()
     dispatch.add()
@@ -524,7 +524,7 @@ def unwrap():
             # exact-key admission is what makes an arm an arm.
             {ARM_MODULE: good.replace(
                 "def arm_compiled_graph_from_store():\n"
-                "    resolved = _resolve_graph_class()\n",
+                "    resolved = _resolve_graph_specialization()\n",
                 "def arm_compiled_graph_from_store():\n"
                 "    resolved = load_package()\n",
             )},
@@ -534,9 +534,9 @@ def unwrap():
             # the store arm claims a module it does not have.
             {ARM_MODULE: good.replace(
                 "def arm_compiled_graph_from_store():\n"
-                "    resolved = _resolve_graph_class()\n",
+                "    resolved = _resolve_graph_specialization()\n",
                 "def arm_compiled_graph_from_store():\n"
-                "    resolved = _resolve_graph_class()\n"
+                "    resolved = _resolve_graph_specialization()\n"
                 "    wrap_module()\n",
             )},
             "ARM SEAM OVERREACH",

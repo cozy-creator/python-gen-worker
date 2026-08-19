@@ -1,4 +1,4 @@
-"""Canonical declarations for one exported AOTInductor graph class."""
+"""Canonical declarations for one exported AOTInductor graph specialization."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class DeclarationError(ValueError):
 class RetiredGraphInterface(DeclarationError):
     """Bytes carry the retired v3 graph interface (tcg#55).
 
-    Named rather than generic on purpose: graph classes are CONTENT
+    Named rather than generic on purpose: graph specializations are CONTENT
     ADDRESSED, so there is nothing to migrate -- the next derive republishes
     under the v4 key. What must never happen is a v3 document being coerced
     into a v4 shape and silently keying to something no producer ever
@@ -56,7 +56,7 @@ def _refuse_retired_interface(graph: Mapping[str, Any]) -> None:
         f"(v={version!r}, retired field(s) {sorted(present)!r}); tcg#55 derives "
         f"constant_fqns from the exported program, deletes lifted_inputs and "
         f"specialization (nothing ever read them), and promotes "
-        f"pytree.ingress to a top-level 'ingress'. Graph classes are content "
+        f"pytree.ingress to a top-level 'ingress'. Graph specializations are content "
         f"addressed: re-derive to republish under a v{GRAPH_INTERFACE_FORMAT} key."
     )
 
@@ -248,9 +248,9 @@ def _canonical_graph(program: object) -> tuple[str, ...]:
 
 def _graph_digest(program: object) -> str:
     # 64 bits, DERIVED and deliberately kept at v1. This graph-body witness is
-    # one fact folded into GraphClassDeclaration.class_hash, which is itself a
+    # one fact folded into GraphSpecializationDeclaration.specialization_hash, which is itself a
     # 16-hex choke point. Birthday bound P ~= N^2 / 2^65: about 3e-12 at 10^4
-    # graph classes and 3e-8 at 10^6. Widening only this site rekeys the corpus
+    # graph specializations and 3e-8 at 10^6. Widening only this site rekeys the corpus
     # while leaving graph-axis collision resistance at 64 bits, so BOTH
     # choke points move together or neither does.
     payload = "\n".join(_canonical_graph(program)).encode("utf-8")
@@ -357,42 +357,46 @@ def _placement(program: object) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
-class GraphClassDeclaration:
+class GraphSpecializationDeclaration:
     """Immutable graph facts shared by lookup, mint, and admission."""
 
-    graph_class: str
+    name: str
     target: str
     graph: Mapping[str, Any]
     graph_witness: str
     range_digest: str
     fork: tuple[tuple[str, Any], ...] = ()
-    class_dims: tuple[tuple[str, int], ...] = ()
+    specialization_dims: tuple[tuple[str, int], ...] = ()
     strict: bool = True
     lora_bucket: int = 0
     literal_values: str = ""
     placement: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        graph_class = self.graph_class.strip()
+        name = self.name.strip()
         target = self.target.strip()
-        if not graph_class or not target:
-            raise DeclarationError("graph_class and target must be non-empty")
-        if "\\" in graph_class or any(
-            part in ("", ".", "..") for part in graph_class.split("/")
+        if not name or not target:
+            raise DeclarationError("graph specialization name and target must be non-empty")
+        if "\\" in name or any(
+            part in ("", ".", "..") for part in name.split("/")
         ):
-            raise DeclarationError(f"unsafe graph_class name {graph_class!r}")
+            raise DeclarationError(f"unsafe graph specialization name {name!r}")
         if not isinstance(self.graph, Mapping) or not self.graph:
-            raise DeclarationError("graph_class graph interface must be a non-empty object")
+            raise DeclarationError(
+                "graph specialization graph interface must be a non-empty object"
+            )
         try:
             canonical_graph = json.loads(
                 json.dumps(dict(self.graph), sort_keys=True, allow_nan=False)
             )
         except (TypeError, ValueError) as exc:
             raise DeclarationError(
-                f"graph_class graph interface is not finite JSON: {exc}"
+                f"graph specialization graph interface is not finite JSON: {exc}"
             ) from exc
         if not isinstance(canonical_graph, dict) or not canonical_graph:
-            raise DeclarationError("graph_class graph interface must be a non-empty object")
+            raise DeclarationError(
+                "graph specialization graph interface must be a non-empty object"
+            )
         _refuse_retired_interface(canonical_graph)
         graph_fields = set(canonical_graph)
         if graph_fields not in (
@@ -400,7 +404,7 @@ class GraphClassDeclaration:
             _GRAPH_INTERFACE_FIELDS | {"literal_values"},
         ):
             raise DeclarationError(
-                "graph_class graph interface fields must be exactly "
+                "graph specialization graph interface fields must be exactly "
                 f"{sorted(_GRAPH_INTERFACE_FIELDS)!r}, with literal_values only when present"
             )
         if (
@@ -408,19 +412,19 @@ class GraphClassDeclaration:
             or canonical_graph.get("v") != GRAPH_INTERFACE_FORMAT
         ):
             raise DeclarationError(
-                f"graph_class graph interface v must be {GRAPH_INTERFACE_FORMAT}"
+                f"graph specialization graph interface v must be {GRAPH_INTERFACE_FORMAT}"
             )
         values = canonical_graph.get("constant_fqns")
         if not isinstance(values, list) or not all(
             isinstance(value, str) and value for value in values
         ) or values != sorted(set(values)):
             raise DeclarationError(
-                "graph_class graph interface constant_fqns must be sorted unique strings"
+                "graph specialization graph interface constant_fqns must be sorted unique strings"
             )
         try:
             ingress = CallIngress.from_graph(canonical_graph)
         except IngressError as exc:
-            raise DeclarationError(f"graph_class call ingress is invalid: {exc}") from exc
+            raise DeclarationError(f"graph specialization call ingress is invalid: {exc}") from exc
         if len(self.graph_witness) != _GRAPH_DIGEST_HEX or any(
             character not in "0123456789abcdef" for character in self.graph_witness
         ):
@@ -435,27 +439,31 @@ class GraphClassDeclaration:
             raise DeclarationError("range_digest does not restate graph.ingress")
         fork = tuple((str(name), value) for name, value in self.fork)
         if any(not name or name != name.strip() for name, _ in fork):
-            raise DeclarationError("graph_class fork names must be non-empty canonical strings")
+            raise DeclarationError(
+                "graph specialization fork names must be non-empty canonical strings"
+            )
         try:
             json.dumps([[name, value] for name, value in fork], allow_nan=False)
         except (TypeError, ValueError) as exc:
-            raise DeclarationError(f"graph_class fork is not finite JSON: {exc}") from exc
+            raise DeclarationError(f"graph specialization fork is not finite JSON: {exc}") from exc
         if fork != tuple(sorted(fork, key=lambda item: item[0])):
-            raise DeclarationError("graph_class fork must be sorted by name")
-        class_dims = tuple((str(name), value) for name, value in self.class_dims)
+            raise DeclarationError("graph specialization fork must be sorted by name")
+        specialization_dims = tuple((str(name), value) for name, value in self.specialization_dims)
         if any(
             not name
             or name != name.strip()
             or type(value) is not int
-            for name, value in class_dims
+            for name, value in specialization_dims
         ):
-            raise DeclarationError("graph_class dimensions must be canonical name/integer pairs")
-        if class_dims != tuple(sorted(class_dims, key=lambda item: item[0])):
-            raise DeclarationError("graph_class dimensions must be sorted by name")
+            raise DeclarationError(
+                "graph specialization dimensions must be canonical name/integer pairs"
+            )
+        if specialization_dims != tuple(sorted(specialization_dims, key=lambda item: item[0])):
+            raise DeclarationError("graph specialization dimensions must be sorted by name")
         if type(self.strict) is not bool:
-            raise DeclarationError("graph_class strict must be a boolean")
+            raise DeclarationError("graph specialization strict must be a boolean")
         if type(self.lora_bucket) is not int:
-            raise DeclarationError("graph_class lora_bucket must be an integer")
+            raise DeclarationError("graph specialization lora_bucket must be an integer")
         if self.literal_values and (
             len(self.literal_values) != 32
             or any(character not in "0123456789abcdef" for character in self.literal_values)
@@ -468,11 +476,11 @@ class GraphClassDeclaration:
             raise DeclarationError(
                 "graph interface literal_values must exactly match the compiled-graph payload"
             )
-        object.__setattr__(self, "graph_class", graph_class)
+        object.__setattr__(self, "name", name)
         object.__setattr__(self, "target", target)
         object.__setattr__(self, "graph", canonical_graph)
         object.__setattr__(self, "fork", fork)
-        object.__setattr__(self, "class_dims", class_dims)
+        object.__setattr__(self, "specialization_dims", specialization_dims)
         # tcg#55/pgw#1458: placement is ALWAYS recorded, including the
         # single-device case. It used to be dropped ("single-device placement
         # must be omitted"), which made the artifact's own device invisible in
@@ -503,7 +511,7 @@ class GraphClassDeclaration:
             "v": GRAPH_INTERFACE_FORMAT,
             "target": self.target,
             "fork": [[name, value] for name, value in self.fork],
-            "class_dims": [[name, value] for name, value in self.class_dims],
+            "specialization_dims": [[name, value] for name, value in self.specialization_dims],
             "range_digest": self.range_digest,
             "graph": dict(self.graph),
             "graph_witness": self.graph_witness,
@@ -515,23 +523,23 @@ class GraphClassDeclaration:
         return facts
 
     @property
-    def class_hash(self) -> str:
+    def specialization_hash(self) -> str:
         # 64 bits, DERIVED and deliberately kept at v1. THIS is the `graph`
-        # axis's graph-class identity and the second 16-hex choke point; the
+        # axis's graph-specialization identity and the second 16-hex choke point; the
         # other is _graph_digest, which produces one fact above. The axis has
         # the MINIMUM of the two. Birthday bound P ~= N^2 / 2^65: about 3e-12
-        # at 10^4 graph classes and 3e-8 at 10^6. Widen both or neither.
+        # at 10^4 graph specializations and 3e-8 at 10^6. Widen both or neither.
         return _facts_digest(self.facts())[:_GRAPH_DIGEST_HEX]
 
 
 @dataclass(frozen=True, slots=True)
-class GraphClassSpec:
+class GraphSpecialization:
     """One exported program plus the only facts torch cannot know about it.
 
     tcg#55 (Paul: "torchcg does too much"). The producer used to hand over a
     ``graph`` interface mapping restating facts the ``ExportedProgram``
     already encodes. That mapping is gone. What is left is an
-    ``ExportedProgram``, an IDENTITY (``graph_class``/``target``), and the
+    ``ExportedProgram``, an IDENTITY (``name``/``target``), and the
     call INGRESS -- and the ingress is the one genuinely unknowable fact,
     because the parameter names and argument nesting of the call live in the
     author's ``forward`` signature, not in the traced graph.
@@ -544,24 +552,24 @@ class GraphClassSpec:
     and again at bind (``runner.bind``) -- never derived-against-derived.
     """
 
-    graph_class: str
+    name: str
     target: str
     program: object
     ingress: CallIngress
     fork: tuple[tuple[str, Any], ...] = ()
-    class_dims: tuple[tuple[str, int], ...] = ()
+    specialization_dims: tuple[tuple[str, int], ...] = ()
     strict: bool = True
     lora_bucket: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.ingress, CallIngress):
             raise DeclarationError(
-                "a graph class is declared from a typed CallIngress; the v3 raw "
+                "a graph specialization is declared from a typed CallIngress; the v3 raw "
                 "graph-interface mapping is retired (tcg#55). Decode it first: "
                 "CallIngress.decode(...)"
             )
 
-    def declare(self) -> GraphClassDeclaration:
+    def declare(self) -> GraphSpecializationDeclaration:
         graph: dict[str, Any] = {
             "v": GRAPH_INTERFACE_FORMAT,
             "constant_fqns": list(_constant_names(self.program)),
@@ -570,14 +578,14 @@ class GraphClassSpec:
         literals = _literal_digest(self.program)
         if literals:
             graph["literal_values"] = literals
-        return GraphClassDeclaration(
-            self.graph_class,
+        return GraphSpecializationDeclaration(
+            self.name,
             self.target,
             graph,
             _graph_digest(self.program),
             self.ingress.digest(),
             fork=self.fork,
-            class_dims=self.class_dims,
+            specialization_dims=self.specialization_dims,
             strict=self.strict,
             lora_bucket=self.lora_bucket,
             literal_values=literals,
@@ -642,19 +650,19 @@ class RuntimeCompatibility:
 
         return "cpu" if self.sm.startswith("cpu") else "cuda"
 
-    def key(self, declaration: GraphClassDeclaration) -> CompiledGraphKey:
+    def key(self, declaration: GraphSpecializationDeclaration) -> CompiledGraphKey:
         # pgw#1458: a program's device is established at TRACE time and cannot
         # be re-homed downstream -- four escalating attempts to move it were
         # each defeated by a different layer, and the terminal one was
         # AOTInductor's own internal `Expected: cpu, Got: cuda:0`. That
-        # assertion fires minutes into a compile, names no graph class, and is
+        # assertion fires minutes into a compile, names no graph specialization, and is
         # unreachable from a log. The declaration knows the trace device
         # (derived, always recorded), and this runtime knows the compile
         # device, so the disagreement is a one-line refusal BEFORE any work.
         traced = declaration.device_types
         if traced and self.device_type not in traced:
             raise DeclarationError(
-                f"graph class {declaration.graph_class!r} was TRACED on "
+                f"graph specialization {declaration.name!r} was TRACED on "
                 f"{list(traced)!r} and this runtime compiles for "
                 f"{self.device_type!r} ({self.sm}). Device is established at "
                 f"trace time and cannot be re-homed into an exported program "
@@ -664,7 +672,7 @@ class RuntimeCompatibility:
             )
         return from_axes(
             {
-                "graph": declaration.class_hash,
+                "graph": declaration.specialization_hash,
                 "sm": self.sm,
                 "toolchain": toolchain_axis_digest(self.toolchain),
             }

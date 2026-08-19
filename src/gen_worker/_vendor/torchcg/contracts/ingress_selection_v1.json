@@ -26,7 +26,7 @@
       ]
     }
   },
-  "note": "Which declared graph class serves one call, and how far the ones that do not sit from it. torchcg owns CallIngress identity; these vectors own what a serve host DOES with several of them. The reference implementation is torchcg.selection and tests/test_selection.py replays every row through it. A change to a selection implementation that is not a change to this file is a fleet that disagrees about admission, which is invisible until it serves wrong. OUT OF SCOPE by construction: eager fallback, sticky de-arm, shape-growth reporting, event emission and refusal wording are host policy; the candidate set is the host's and selection never asks why a class is absent.",
+  "note": "Which declared graph specialization serves one call, and how far the ones that do not sit from it. torchcg owns CallIngress identity; these vectors own what a serve host DOES with several of them. The reference implementation is torchcg.selection and tests/test_selection.py replays every row through it. A change to a selection implementation that is not a change to this file is a fleet that disagrees about admission, which is invisible until it serves wrong. OUT OF SCOPE by construction: eager fallback, sticky de-arm, shape-growth reporting, event emission and refusal wording are host policy; the candidate set is the host's and selection never asks why a specialization is absent.",
   "rungs": {
     "dtype_mismatch": 1,
     "input_excluded": 3,
@@ -74,7 +74,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -139,7 +139,7 @@
           }
         },
         {
-          "class": "denoiser.hires",
+          "specialization": "denoiser.hires",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -214,7 +214,7 @@
           "batch": 2
         }
       },
-      "name": "one_class_admits",
+      "name": "one_specialization_admits",
       "note": "The base case: exactly one class admits, the symbolic batch binds, and no feed needs normalizing. Admission is the ABSENCE of a miss, so an admitted selection carries no ranking at all."
     },
     {
@@ -252,7 +252,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -373,7 +373,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.f64",
+          "specialization": "denoiser.f64",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -494,7 +494,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.bf16",
+          "specialization": "denoiser.bf16",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -562,10 +562,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.bf16",
+            "specialization": "denoiser.bf16",
             "distance": [
               1
             ],
@@ -623,7 +623,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -691,10 +691,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.base",
+            "specialization": "denoiser.base",
             "distance": [
               1,
               5
@@ -755,7 +755,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -876,7 +876,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -997,7 +997,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -1118,7 +1118,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -1274,7 +1274,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -1339,7 +1339,7 @@
           }
         },
         {
-          "class": "denoiser.lora",
+          "specialization": "denoiser.lora",
           "ingress": {
             "excluded_inputs": [],
             "flat_arity": 5,
@@ -1467,7 +1467,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -1535,10 +1535,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.base",
+            "specialization": "denoiser.base",
             "distance": [
               6
             ],
@@ -1592,7 +1592,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -1660,10 +1660,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.base",
+            "specialization": "denoiser.base",
             "distance": [
               2
             ],
@@ -1719,7 +1719,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -1784,7 +1784,7 @@
           }
         },
         {
-          "class": "denoiser.hires",
+          "specialization": "denoiser.hires",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -1849,7 +1849,7 @@
           }
         },
         {
-          "class": "denoiser.lora",
+          "specialization": "denoiser.lora",
           "ingress": {
             "excluded_inputs": [],
             "flat_arity": 5,
@@ -1942,10 +1942,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.base",
+            "specialization": "denoiser.base",
             "distance": [
               1
             ],
@@ -1960,7 +1960,7 @@
             }
           },
           {
-            "class": "denoiser.hires",
+            "specialization": "denoiser.hires",
             "distance": [
               1,
               4,
@@ -1985,7 +1985,7 @@
             }
           },
           {
-            "class": "denoiser.lora",
+            "specialization": "denoiser.lora",
             "distance": [
               6
             ],
@@ -2039,7 +2039,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -2104,7 +2104,7 @@
           }
         },
         {
-          "class": "denoiser.hires",
+          "specialization": "denoiser.hires",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -2172,10 +2172,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.base",
+            "specialization": "denoiser.base",
             "distance": [
               1
             ],
@@ -2190,7 +2190,7 @@
             }
           },
           {
-            "class": "denoiser.hires",
+            "specialization": "denoiser.hires",
             "distance": [
               1,
               4,
@@ -2256,7 +2256,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.zulu",
+          "specialization": "denoiser.zulu",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -2321,7 +2321,7 @@
           }
         },
         {
-          "class": "denoiser.alpha",
+          "specialization": "denoiser.alpha",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -2389,10 +2389,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.alpha",
+            "specialization": "denoiser.alpha",
             "distance": [
               1
             ],
@@ -2407,7 +2407,7 @@
             }
           },
           {
-            "class": "denoiser.zulu",
+            "specialization": "denoiser.zulu",
             "distance": [
               1
             ],
@@ -2463,7 +2463,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -2531,10 +2531,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.base",
+            "specialization": "denoiser.base",
             "distance": [
               4,
               4
@@ -2593,7 +2593,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -2661,10 +2661,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.base",
+            "specialization": "denoiser.base",
             "distance": [
               4
             ],
@@ -2720,7 +2720,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.a",
+          "specialization": "denoiser.a",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -2785,7 +2785,7 @@
           }
         },
         {
-          "class": "denoiser.b",
+          "specialization": "denoiser.b",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -2856,13 +2856,13 @@
           "denoiser.b"
         ],
         "normalizations": [],
-        "outcome": "class_ambiguous",
+        "outcome": "specialization_ambiguous",
         "ranked": [],
         "selected": "",
         "symbols": {}
       },
       "name": "two_admitting_classes_are_a_defect",
-      "note": "The declaration failed to discriminate two graph classes by ingress. That is a defect to surface, never a coin to flip: an outcome that picked one would serve a different graph on a different pod for the same request."
+      "note": "The declaration failed to discriminate two graph specializations by ingress. That is a defect to surface, never a coin to flip: an outcome that picked one would serve a different graph on a different pod for the same request."
     },
     {
       "call": {
@@ -2901,7 +2901,7 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [],
         "selected": "",
         "symbols": {}
@@ -2946,7 +2946,7 @@
       },
       "candidates": [
         {
-          "class": "denoiser.base",
+          "specialization": "denoiser.base",
           "ingress": {
             "excluded_inputs": [
               "lora_a",
@@ -3014,10 +3014,10 @@
       "expect": {
         "ambiguous": [],
         "normalizations": [],
-        "outcome": "no_class_admits",
+        "outcome": "no_specialization_admits",
         "ranked": [
           {
-            "class": "denoiser.base",
+            "specialization": "denoiser.base",
             "distance": [
               3
             ],

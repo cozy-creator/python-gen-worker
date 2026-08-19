@@ -83,16 +83,16 @@ ConstantFQN = NewType("ConstantFQN", str)
 #: ``BF16``). Validated against ``torch``'s own attribute table at read time.
 TorchDtype = NewType("TorchDtype", str)
 
-#: The graph class the constant table belongs to.
-GraphClassName = NewType("GraphClassName", str)
+#: The graph specialization the constant table belongs to.
+GraphSpecializationName = NewType("GraphSpecializationName", str)
 
 #: WHICH weight-set a store supplies — the checkpoint ref, digest or snapshot
 #: id the constants were read from.
 #:
 #: This is the one INSTANCE-level fact on this path, and it is carried
-#: separately from the graph-class identity on purpose (§4.27: class identity
-#: is checkpoint-free by construction). A graph class is the family level; a
-#: graph class bound to one weight-set is an instance of it, and the same
+#: separately from the graph-specialization identity on purpose (§4.27: class identity
+#: is checkpoint-free by construction). A graph specialization is the family level; a
+#: graph specialization bound to one weight-set is an instance of it, and the same
 #: ``.so`` serving sixteen fine-tunes is sixteen instances of one class. A
 #: store-sourced arm is therefore keyed by (compiled-graph key, weight-set
 #: ref) — the module-sourced arm could only ever say "whatever that module
@@ -183,12 +183,12 @@ def parse_weight_set_ref(raw: object) -> WeightSetRef:
     return WeightSetRef(raw)
 
 
-def parse_graph_class_name(raw: object) -> GraphClassName:
+def parse_graph_specialization_name(raw: object) -> GraphSpecializationName:
     if not isinstance(raw, str) or not raw or raw != raw.strip():
         raise ConstantManifestError(
-            "graph_class_malformed", f"graph class name must be non-empty: {raw!r}"
+            "graph_specialization_malformed", f"graph specialization name must be non-empty: {raw!r}"
         )
-    return GraphClassName(raw)
+    return GraphSpecializationName(raw)
 
 
 def _parse_shape(raw: object, fqn: ConstantFQN) -> Tuple[int, ...]:
@@ -250,7 +250,7 @@ class ConstantSpec:
 class ConstantManifest:
     """The artifact's whole declared constant table, v1, validated."""
 
-    graph_class: GraphClassName
+    graph_specialization: GraphSpecializationName
     target: str
     constants: Tuple[ConstantSpec, ...]
 
@@ -269,9 +269,9 @@ class ConstantManifest:
 
 
 def parse_constant_manifest(
-    graph_class: Mapping[str, Any], *, compiled_graph_format: object
+    graph_specialization: Mapping[str, Any], *, compiled_graph_format: object
 ) -> ConstantManifest:
-    """Read one artifact's ``graph_class`` block as a v1 constant manifest.
+    """Read one artifact's ``graph_specialization`` block as a v1 constant manifest.
 
     ``compiled_graph_format`` is the artifact envelope's own version stamp.
     An envelope this reader does not know is refused BEFORE its rows are
@@ -285,16 +285,16 @@ def parse_constant_manifest(
             f"constant manifest reader is v{CONSTANT_MANIFEST_FORMAT}; artifact "
             f"declares compiled_graph_format={compiled_graph_format!r}",
         )
-    name = parse_graph_class_name(graph_class.get("name"))
-    raw_target = graph_class.get("target")
+    name = parse_graph_specialization_name(graph_specialization.get("name"))
+    raw_target = graph_specialization.get("target")
     if not isinstance(raw_target, str) or not raw_target.strip():
         raise ConstantManifestError(
-            "target_malformed", f"graph class {name!r} names no target"
+            "target_malformed", f"graph specialization {name!r} names no target"
         )
-    rows = graph_class.get("constants")
+    rows = graph_specialization.get("constants")
     if not isinstance(rows, (list, tuple)):
         raise ConstantManifestError(
-            "constants_malformed", f"graph class {name!r} constants must be an array"
+            "constants_malformed", f"graph specialization {name!r} constants must be an array"
         )
     specs: List[ConstantSpec] = []
     seen: Dict[ConstantFQN, int] = {}
@@ -336,7 +336,7 @@ def parse_constant_manifest(
             )
         )
     return ConstantManifest(
-        graph_class=name, target=raw_target.strip(), constants=tuple(specs)
+        graph_specialization=name, target=raw_target.strip(), constants=tuple(specs)
     )
 
 
@@ -373,7 +373,7 @@ class StoreConstantPlan:
     name, dtype and shape, and cannot read a constant that is not in it.
     """
 
-    graph_class: GraphClassName
+    graph_specialization: GraphSpecializationName
     weight_set: WeightSetRef
     fqns: Tuple[ConstantFQN, ...]
     elements: int
@@ -433,13 +433,13 @@ def plan_store_constants(
         if faults:
             raise ConstantResolutionError(
                 reason,
-                f"graph class {manifest.graph_class!r}: {len(faults)} declared "
+                f"graph specialization {manifest.graph_specialization!r}: {len(faults)} declared "
                 f"constant(s) {reason.removeprefix('constant_')} in the store: "
                 f"{sorted(faults)[:6]!r}",
                 faults,
             )
     return StoreConstantPlan(
-        graph_class=manifest.graph_class,
+        graph_specialization=manifest.graph_specialization,
         weight_set=parse_weight_set_ref(store.weight_set),
         fqns=tuple(planned),
         elements=elements,
@@ -610,7 +610,7 @@ __all__ = [
     "ConstantSpec",
     "ConstantStore",
     "ConstantStoreError",
-    "GraphClassName",
+    "GraphSpecializationName",
     "SafetensorsConstantStore",
     "StoreConstantPlan",
     "TensorFacts",
@@ -618,7 +618,7 @@ __all__ = [
     "WeightSetRef",
     "parse_constant_manifest",
     "parse_fqn",
-    "parse_graph_class_name",
+    "parse_graph_specialization_name",
     "parse_torch_dtype",
     "parse_weight_set_ref",
     "plan_store_constants",

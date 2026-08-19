@@ -223,7 +223,7 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
 
     status: str
     #: pgw#1176: EVERY entry the child packed — ``(key, artifact path, sha256)``
-    #: per graph class. A mint produces N independently keyed artifacts, so a
+    #: per graph specialization. A mint produces N independently keyed artifacts, so a
     #: report that named one would be reporting a subset of its own work. The
     #: parent arms and publishes each; a failure on one costs that one.
     entries: Tuple[Tuple[str, str, str], ...] = ()
@@ -876,7 +876,7 @@ __all__ = [
 #
 # pgw#1215 step 4: the serving parent supervises compile children directly
 # (`mint_supervisor`), so there is no `mint_delegate` retry loop giving every
-# attempt a fresh `child-N` directory and re-paying every finished graph class.
+# attempt a fresh `child-N` directory and re-paying every finished graph specialization.
 # What survives is the request VOCABULARY, and it belongs to the module that
 # owns the child protocol: `scripts/
 # micro_mint_rig.py` (the pre-publish proof harness) and any operator running

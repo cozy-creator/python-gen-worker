@@ -66,7 +66,7 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
     (lane,) = document["graphs"]["lanes"]
     assert lane["contract"] == "tiny.diffusers-fp32@1"
     assert lane["unobserved_targets"] == []
-    # 2 Size values x {CFG batch-2 generate, batch-1 turbo} = 4 graph classes.
+    # 2 Size values x {CFG batch-2 generate, batch-1 turbo} = 4 graph specializations.
     assert len(lane["graphs"]) == 4
     assert {record["target"] for record in lane["graphs"]} == {"unet"}
     batches = sorted(

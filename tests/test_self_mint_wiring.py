@@ -438,7 +438,7 @@ def all_miss_answer(document: GraphSetDocument) -> dict:
         "graphs": [
             {
                 "graph_hash": record.graph,
-                "graph_class": "",
+                "graph_specialization": "",
                 "program": record.program,
                 "module_path": record.target,
                 "ingress_digest": record.ingress.digest(),

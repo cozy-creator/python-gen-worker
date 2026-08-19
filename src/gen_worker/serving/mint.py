@@ -35,7 +35,7 @@ graphs it is missing. Four properties, each load-bearing:
 
 **THE PROPERTY THAT MADE THE OLD PATH INVISIBLE, stated so it is not
 re-lost.** pgw#1383 root-caused pod ``j56tate13oav13``: the retired supervisor
-ran its terminus adopt — an arm plus a numerics verify per graph class, on the
+ran its terminus adopt — an arm plus a numerics verify per graph specialization, on the
 live pipeline — straight from a coroutine, and ``activity._emit``'s bound sink
 ships every report as a task on THAT event loop. The seal phase it had just
 declared was created and never ran; neither did any heartbeat or any abort. The
@@ -978,7 +978,7 @@ class BackgroundMint:
                 f"({type(exc).__name__}: {exc}). A successor adopts it at "
                 f"boot; this worker keeps serving eager for it.",
                 phase=type(exc).__name__,
-                graph_class=str(record.graph)[:300],
+                graph_specialization=str(record.graph)[:300],
             )
 
         return MintedHole(

@@ -2,14 +2,14 @@
 
 A pipeline that carries `torch.compiler.disable`d work in its forward path
 cannot be exported. `torch.export(strict=True)` does not degrade around it — it
-refuses, per graph class, with `Unsupported: Skip inlining
+refuses, per graph specialization, with `Unsupported: Skip inlining
 torch.compiler.disable()d function`.
 
 THE CASE THIS EXISTS FOR. Offload hooks. diffusers' group offloading marks
 `ModuleGroup.onload_` (verified on diffusers 0.39.0:
 `ModuleGroup.onload_._torchdynamo_disable is True`); accelerate's model/
 sequential offload marks `CpuOffload.pre_forward`. Either puts disabled work in
-a forward path, and then every one of a family's declared graph classes refuses,
+a forward path, and then every one of a family's declared graph specializations refuses,
 one at a time, for the same reason.
 
 **It is not a card-size story.** sdxl refused on a 16 GiB A4000 and z-image on a

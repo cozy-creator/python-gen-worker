@@ -4,7 +4,7 @@
   "_row": "1328x1328 (2mp tier) -> patch grid 83x83 = 6889 image tokens",
   "_notes": [
     "STATUS: READY BUT BLOCKED \u2014 declaration.py raises MintRefused at import until B1 (img_shapes is inexpressible in the #739 vocabulary) and B2 (the edit lane's class set is unbounded) clear. Do not hand-edit around it: the blockers are precisely why a hand-written request would be wrong.",
-    "pgw#739: `dynamic` derives from declaration.py's class rows (hand rows are refused). Under static-rows the request must NAME its row via `class_dims` \u2014 14 declared rows sit at the single served fork coordinate, so the coordinate alone does not identify an artifact.",
+    "pgw#739: `dynamic` derives from declaration.py's class rows (hand rows are refused). Under static-rows the request must NAME its row via `specialization_dims` \u2014 14 declared rows sit at the single served fork coordinate, so the coordinate alone does not identify an artifact.",
     "SHAPE STRATEGY IS static-rows, AND IT IS FORCED BY A MEASURED REFUSAL, NOT BY #730. Declared-dynamic export is refused verbatim: 'Constraints violated (img_tok)! - You marked img_tok as dynamic but your code specialized it to be a constant (6889).' Root cause: img_shapes carries the token count as PYTHON INTS ([[(1, H//16, W//16)]], pipeline_qwenimage.py:648) and pos_embed computes seq_lens = frame*height*width from them and slices rope to that length (transformer_qwenimage.py:925). The count enters the graph twice \u2014 once as a symbolic tensor dim, once as a baked constant \u2014 and the constant wins.",
     "#730 does NOT hold this lane. transformer_qwenimage.py has ZERO nn.Conv layers (counted 2026-07-28) and #730 S4 names qwen's class in the UNHELD set. static-rows here is img_shapes' doing.",
     "TRANSPOSED ROWS DO NOT DEDUPE ON QWEN, unlike flux2 and ltx. There the rope coordinates arrive as TENSOR inputs so the graph is a function of token count alone; here the patch grid is BAKED from img_shapes' python ints, so (1,69,92) and (1,92,69) bake different rope constants at the same 6348 tokens. 14 declared rows yield only 8 distinct token counts but 14 distinct artifacts \u2014 which is why H_pat and W_pat are separate declared dims.",
@@ -40,7 +40,7 @@
   "fork": {
     "condition_images": 0
   },
-  "class_dims": {
+  "specialization_dims": {
     "B": 1,
     "T_img": 6889,
     "H_pat": 83,

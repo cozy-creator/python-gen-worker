@@ -75,7 +75,7 @@ if mode == "short" and index == 0:
 elif mode == "collide":
     names = ["cls/dim=0"]
 elif mode == "refuse-midway":
-    # pgw#1183 at the graph class: pack the first half, then refuse. The
+    # pgw#1183 at the graph specialization: pack the first half, then refuse. The
     # artifacts that already exist must be REPORTED, not discarded.
     names = mine[:1]
 else:
@@ -128,7 +128,7 @@ for name in names:
         while True:
             time.sleep(60)
     artifact = out / (name.replace("/", "__") + ".tar.gz")
-    artifact.write_text("packed graph class " + name)
+    artifact.write_text("packed graph specialization " + name)
     row = {{
         "name": name, "key": "ek1-" + name.replace("/", "-"),
         "artifact": str(artifact), "metadata": json.dumps({{"name": name}}),
@@ -146,9 +146,9 @@ report.write_bytes(json.dumps({{
     "declared_classes": declared,
     "targeted_classes": targeted,
     "detail": (
-        f"{{len(classes)}} graph class(es) packed before the share refused: "
-        f"graph class {{mine[1] if len(mine) > 1 else '?'}} refused"
-        if refused else f"{{len(classes)}} packed graph class(es)"),
+        f"{{len(classes)}} graph specialization(es) packed before the share refused: "
+        f"graph specialization {{mine[1] if len(mine) > 1 else '?'}} refused"
+        if refused else f"{{len(classes)}} packed graph specialization(es)"),
     "elapsed_s": 0.05, "peak_rss_bytes": 1024 * 1024,
     "phases": {{"lowering_s": 0.5, "codegen_s": 0.5, "graph_passes_s": 0.5,
                "host_compile_s": 0.5}},
@@ -167,7 +167,7 @@ report.write_bytes(json.dumps({{
     "code_digest": {digest!r}, "code_dir": {code_dir!r},
 }}).encode())
 if mode == "wedged-after-report":
-    # pgw#1243, the observed wedge: every graph class packed, the report
+    # pgw#1243, the observed wedge: every graph specialization packed, the report
     # written — and then the interpreter never comes down. Two production
     # mints did exactly this for 78.9 and 62 minutes.
     acc = 0

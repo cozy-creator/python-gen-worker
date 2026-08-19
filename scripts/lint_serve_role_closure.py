@@ -366,7 +366,7 @@ def check_model_free(
             problems.append(
                 f"pgw#1331: the MODEL-FREE serve surface imports {library!r} in "
                 f"{module} (reached via {_chain(module, via)}). The serve path "
-                f"calls graph classes and bare math; a model library on it is "
+                f"calls graph specializations and bare math; a model library on it is "
                 f"seconds of process start and gigabytes of host RAM bought to "
                 f"run reshapes. Move the model code to the family's DECLARATION "
                 f"half, or take the module out of SERVE_ROLE_MODULES and mean it.")

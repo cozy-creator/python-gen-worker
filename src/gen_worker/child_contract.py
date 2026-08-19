@@ -2,7 +2,7 @@
 
 pgw#1215 (th#1834 Phase 3). These types lived in ``mint_process``, whose OTHER
 half is the out-of-process mint DRIVER — and that driver is being replaced by a
-serving parent that supervises compile children directly, one graph class each.
+serving parent that supervises compile children directly, one graph specialization each.
 The vocabulary is not:
 five modules that survive the rewrite already import it (``executor``,
 ``boot_key``, ``boot_adopt``, ``measure_child``, ``local_serve``), plus both

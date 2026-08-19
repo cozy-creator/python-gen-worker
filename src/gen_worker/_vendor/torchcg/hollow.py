@@ -60,7 +60,7 @@ class HollowError(RuntimeError):
 
 #: The device class a compiled-graph derive traces on unless told otherwise.
 #: The fleet's compiled graphs are all cuda; a cpu trace is for tests and for
-#: cpu-target endpoints, and it is a DIFFERENT graph class, not a fallback.
+#: cpu-target endpoints, and it is a DIFFERENT graph specialization, not a fallback.
 DEFAULT_TRACE_DEVICE = "cuda"
 
 

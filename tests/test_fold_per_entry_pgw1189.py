@@ -1,4 +1,4 @@
-"""pgw#1189 — an ABANDONED mint's per-graph-class partition was dropped, so the
+"""pgw#1189 — an ABANDONED mint's per-graph-specialization partition was dropped, so the
 one question the compile loop kept re-opening was structurally unanswerable.
 
 pgw#830 measures the child's whole wall (`child_seal_s`, `child_setup_s`,
@@ -20,7 +20,7 @@ measurement on disk instead of one bare 'no compiled graph produced' row."*
 
 **pgw#1215 moved WHERE the property lives, and it is stronger there.** There is
 no fold any more, because there is nothing to fold onto: a compile child traces,
-compiles and packs its own share, so it MEASURES per graph class and the parent
+compiles and packs its own share, so it MEASURES per graph specialization and the parent
 records what it reported the moment the share is collected — inside
 ``EntryCompilePool._collect``, before any gate that can raise and long before
 ``compile()`` returns. The rows below pin that, by making the run FAIL after

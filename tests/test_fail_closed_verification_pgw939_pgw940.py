@@ -28,7 +28,7 @@ from gen_worker._vendor.torchcg import (
     CallIngress,
     CallInput,
     DeclarationError,
-    GraphClassDeclaration,
+    GraphSpecializationDeclaration,
 )
 
 
@@ -36,7 +36,7 @@ def _declaration(
     *,
     range_digest: str | None = None,
     graph_witness: str = "a" * 16,
-) -> GraphClassDeclaration:
+) -> GraphSpecializationDeclaration:
     ingress = CallIngress(
         parameters=("sample",),
         flat_arity=1,
@@ -46,8 +46,8 @@ def _declaration(
         ),),
         symbols=(("s0", (16, 160)),),
     )
-    return GraphClassDeclaration(
-        graph_class="unet/h=64",
+    return GraphSpecializationDeclaration(
+        name="unet/h=64",
         target="unet",
         graph={
             "v": 4,
@@ -56,7 +56,7 @@ def _declaration(
         },
         graph_witness=graph_witness,
         range_digest=ingress.digest() if range_digest is None else range_digest,
-        class_dims=(("h", 64),),
+        specialization_dims=(("h", 64),),
     )
 
 
@@ -66,7 +66,7 @@ def test_tcg_declaration_is_the_closed_identity_control() -> None:
     assert declaration.range_digest == CallIngress.from_graph(
         declaration.graph
     ).digest()
-    assert len(declaration.class_hash) == 16
+    assert len(declaration.specialization_hash) == 16
     assert "family" not in declaration.facts()
 
 

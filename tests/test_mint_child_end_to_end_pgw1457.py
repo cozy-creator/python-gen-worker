@@ -6,7 +6,7 @@ test around it stopped at a hand-built request or a hand-seeded artifact. Two
 separate defects lived in that gap:
 
 * pgw#1456 -- ``mint_child`` hand-built a two-field graph interface that
-  ``GraphClassDeclaration`` refused by name before any compilation started.
+  ``GraphSpecializationDeclaration`` refused by name before any compilation started.
   Its first fix hand-built a FIVE-field one. tcg#55 deleted the parameter
   entirely, so there is nothing left to hand-build.
 * pgw#1458 -- the derive stamped a device the mint could not compile for, and
@@ -118,12 +118,12 @@ def test_the_child_request_carries_no_graph_interface_to_get_wrong(
 def test_the_child_refuses_a_retired_v3_interface_by_name(tmp_path: Path) -> None:
     """Old bytes name themselves rather than being coerced into a v4 key.
 
-    Graph classes are content addressed, so a v3 document has nothing to
+    Graph specializations are content addressed, so a v3 document has nothing to
     migrate -- it re-derives. What must never happen is one being reshaped
     into something no producer ever derived.
     """
 
-    from gen_worker._vendor.torchcg import CallIngress, GraphClassDeclaration
+    from gen_worker._vendor.torchcg import CallIngress, GraphSpecializationDeclaration
     from gen_worker._vendor.torchcg.declaration import RetiredGraphInterface
 
     request = _request(tmp_path)
@@ -136,6 +136,6 @@ def test_the_child_refuses_a_retired_v3_interface_by_name(tmp_path: Path) -> Non
         "specialization": {},
     }
     with pytest.raises(RetiredGraphInterface, match="RETIRED v3 shape"):
-        GraphClassDeclaration(
+        GraphSpecializationDeclaration(
             "denoiser/h=8", "projection", retired, "0" * 16, ingress.digest()
         )

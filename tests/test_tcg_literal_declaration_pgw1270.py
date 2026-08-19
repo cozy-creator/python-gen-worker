@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from gen_worker._vendor.torchcg import (
     DeclarationError,
-    GraphClassSpec,
+    GraphSpecialization,
     build_call_ingress,
 )
 
@@ -28,11 +28,11 @@ def _exported(literal: Any, value: Any) -> tuple[Any, tuple[Any, ...]]:
     return torch.export.export(_LiteralModule(literal), args), args
 
 
-def _spec(program: Any, args: tuple[Any, ...]) -> GraphClassSpec:
+def _spec(program: Any, args: tuple[Any, ...]) -> GraphSpecialization:
     ingress = build_call_ingress(program, ("value",), args, {})
     # tcg#55: the ingress is the ONLY graph fact a producer still supplies.
-    return GraphClassSpec(
-        graph_class="model/literal",
+    return GraphSpecialization(
+        name="model/literal",
         target="denoiser",
         program=program,
         ingress=ingress,

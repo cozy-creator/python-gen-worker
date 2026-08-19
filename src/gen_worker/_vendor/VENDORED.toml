@@ -299,7 +299,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "d132d872"
+rev = "8e8c5ca6"
 subdir = "src/torchcg"
 # tcg#55/pgw#1458 RE-VENDOR (2026-08-19), from `ad399093`. Two upstream changes
 # land together because they are one ruling ("torchcg does too much"):
@@ -417,6 +417,35 @@ subdir = "src/torchcg"
 # does not write, and `None` compares unequal to a real runtime fact forever
 # (th#2098). The rewrite list is back to ONE row, and that row is a relative
 # import.
+#
+# tcg#56 RE-VENDOR (2026-08-19), `d132d872` -> `8e8c5ca6`. VOCABULARY ONLY, and
+# it is a REKEY. Paul: "each model has a 'graph' and then has many 'graph
+# specializations'". `GraphClassSpec` -> `GraphSpecialization`,
+# `GraphClassDeclaration` -> `GraphSpecializationDeclaration`, `GRAPH_CLASS_BLOCK`
+# -> `GRAPH_SPECIALIZATION_BLOCK` (value `graph_class` -> `graph_specialization`),
+# `class_hash`/`class_dims` -> `specialization_hash`/`specialization_dims`, and
+# the display-name field is now `.name`.
+#
+# WHY IT REKEYS: `facts()` emits the literal key `class_dims` and the hash is
+# sha256 over that JSON WITH ITS KEYS, so renaming the key moves the `graph` axis
+# of every cg-key-v1 -- `680f3e1a251975b7` -> `9d08563a90465af6` on the shipped
+# vector. Folded into v4 rather than cutting v5: v4 already rekeyed this week and
+# specializations are content addressed, so the next derive republishes. One
+# fleet-wide invalidation instead of two. `graph_witness` is UNCHANGED
+# (`54ceeee7225e57c9`) -- it digests the program BODY, not the fact keys, which
+# bounds the rekey to exactly the renamed key.
+#
+# WHY BOTH HALVES MOVE IN THIS COMMIT: `GRAPH_SPECIALIZATION_BLOCK` is read via
+# `metadata.get(...)`, so a producer/consumer spelling mismatch returns `None`,
+# reads as a cache MISS, and RE-MINTS THE FLEET rather than raising. The vendored
+# snapshot serves the mint and the serving path; the dev pin serves the derive.
+# Splitting them is money, not a warning -- which is what
+# `scripts/lint_tcg_vocabulary.py` has existed for since pgw#1299.
+#
+# The contract file is renamed with it:
+# `contracts/graph_class_identity_v4.json` -> `graph_specialization_identity_v4.json`
+# (`CONTRACT_FILES` moved too, so the old name is a loud `ValueError`, not a
+# silent miss). File COUNT is unchanged at 38, as a pure rename should be.
 rewrites = [
   "`from tensorfs import ...` -> `from ..tensorfs import ...` in cli.py, engine.py, storage.py, store.py (4 lines; upstream's own dependency, vendored beside it). Upstream itself dropped `hashrepo` for `tensorfs` at tcg#28, so this rewrite is now only the relative-import prefix.",
 ]
@@ -457,41 +486,41 @@ rewrites = [
 "writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
 
 [packages.torchcg.files]
-"__init__.py" = "ae42af2d071d35cb227385a732692087c3d366703ef1764c22f62a83f8dd594b"
+"__init__.py" = "0268e80f3d154c71979efad0169babd13e0abe78c10d619c5c235df475aadcaa"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
-"_wrapper_split.py" = "f21e644e5345c7e2b7fd2b8f5b3ce4ac8216f263fc38768d45609469feb20870"
-"adopt.py" = "6e8cc489a720fb9c88c401c648862705b8584a2ce62b156a6b7261fb1ad6a184"
-"artifact.py" = "e9281e4bae4154f93694efa994133e001362c5db271855e03e921110b1fee019"
+"_wrapper_split.py" = "1d5a3bc1ccabadeaa2b8b54f1492cba10723e53074a0022b8c7453565a86a4ce"
+"adopt.py" = "8c2b243aeaddb4639c456bdec22e8d09f1dfe50925966e3a560a8b32616008dd"
+"artifact.py" = "a3c96d845be49c752bd608dbb4b36fb192cb449937716d8d835aeba2e28d12ba"
 "cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
-"compiler.py" = "a0a06109eec956388c8ff261e65b8dd6f6a7b45dbb3ac434fe2e60f14e410923"
+"compiler.py" = "6ee54b26286b215eef8867dffb133d023a6808379574ac69f8007a64c477045a"
 "contracts/KEY_GRAMMAR_DIGEST" = "0503f3251f2eb48b794961736f021915cd56c14930798ac844c90112fa2af69d"
-"contracts/__init__.py" = "093c5cbe1800d0cd19a8d57cb1493ae0509a4016b95470f514f05db9bad892c4"
+"contracts/__init__.py" = "9693f0ebc4672ef35d6b56b8973022e268de89d7456ed0fae8e218461360381d"
 "contracts/call_ingress_v1.json" = "3af3437ec20b15156892055ab89bf21621378cee9f0f72f63bc4626f69f242dc"
 "contracts/compiled_graph_key_vectors.json" = "a274c5702b8c167ca119758d9fb1f98c40ddfdb3dbf6c58b4aacd580803e8c2b"
-"contracts/graph_class_identity_v4.json" = "10ff93c02ae82b35971b9a5baa46421958ed93d70f868834a1e8136bb9727a28"
-"contracts/ingress_selection_v1.json" = "a0a8fc83c8c467f23b6ab81af1899547b43dabfd9c726e446cc9ef8b899c1714"
+"contracts/graph_specialization_identity_v4.json" = "295b1281b339e97a986719c7ad17e362e68f97930e98cfeffd60e693d10aab48"
+"contracts/ingress_selection_v1.json" = "28e2c5922f5be4d336d1d53299e190bfdf322dec6e2d9284954da14939e2de4a"
 "contracts/literal_identity_v1.json" = "50cb80e750a8124a45b982415258d8590c37f90ca804326588dfde1b368c6863"
-"contracts/recipe_v1.json" = "5806ac79b6d61ed15bdc1cf3c244f2d741b5269e714a774df41a7b95476e1cfe"
+"contracts/recipe_v1.json" = "d319b5f2e4a3d5c13587da2b7d7cdc25c83b92e0b5b22311c317948c3e610d1a"
 "contracts/toolchain_identity_v1.json" = "f4114c38ae373f62ddcb2aae5498ffbee30630e80adf11fee99e68bcbdb24282"
-"declaration.py" = "c3cece98c123c3f4a336d2a4339fab31128559536125f3c487b105749375b018"
-"discovery.py" = "555daba176636d41313885f648ddc6da318835f2692f29a8a0b336010fba0d99"
-"document.py" = "3eb75bc744722d50007093f0a27b6fcbcfd9cc239df5d5a25bfd1b646b457e63"
-"engine.py" = "048de5184c65bdaacb02f1be737065b0548ae67d119f83a0020e4201778fe54a"
+"declaration.py" = "8b42bae864a4127cc5e418915f8395d980b8a439a51fd4d6f5ecbb42ba613b21"
+"discovery.py" = "33c95279c008b1f4c7d27d77c255ed4db84d6abeff7c788b738b56a7fc8eb855"
+"document.py" = "b9c4a36f0d6e3fd0c7fda9953d1a60264274ddb8b1b7b400709000ddb64b26ea"
+"engine.py" = "d8275ad146c73ae5516ea7d60acc1fd63cdddb3036f4833f7741913fe340a1a9"
 "graph_identity.py" = "6ce4d8d7b106409db531fae16c56ef335d0ffd04f4fcf290d855b7f5b977fa8e"
-"hollow.py" = "a10bff043581d1733fe8b285b7f228a00116452b5d571c4a8c9836a24fdb2e59"
+"hollow.py" = "e988a9a79ee9b17b9d7fabe11d4a2cb1043a1a23edf1be77378aac3c9caba432"
 "host_isa.py" = "679aa81547be2d60ae6593b6e8f75dd29dcd56ab85d8e858e219b5af5d0eadc4"
-"identity.py" = "ea309c7e24c7cbb0609c720742e16991ab263d772b1876bccda9b1e9fd725262"
-"ingress.py" = "264806ff2dc166b8b59d6c20b11feda1978bb5058a79381469ea6ba7cd8dfa2e"
+"identity.py" = "a460a24836cbd46cc9e65bd684b9f6258f6718e5c56102f26a7071f01574a99e"
+"ingress.py" = "fa9b814dbfcd43e2a7cfdd2ed48299a7fa5a570aa73d3e2269448c974074d558"
 "introspection.py" = "99310298249ee2ada91544bcdbd91f06e33a44f136c525cb268ca8d7125aa9e5"
 "lane.py" = "bdbc92c07f7eb7dbe56e98f02496774f257ad30f400b7c25b4a9c39ed0814aee"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "quantize.py" = "cb579b4a2c91af02211f6339147584338b278a2da4e1f8f60084b742fce21da6"
-"recipe.py" = "ad2f5ca28db2e605a08f0b95c5067be33058d096bfd67fdd040b9c76d36c75cb"
+"recipe.py" = "cc6fe9007a7f459ede5ced2cfd5d072e3c807552329d0e1920ade88de8b829a6"
 "requirements.py" = "3b34858258d41c4faaa133c2d9c340507c4e18928c324f5665b4fe4fac4c7bda"
-"runner.py" = "075d7e743a82555e7ac1b15eb7ca54df9d0bcdc914de649a675fa5d973c8c693"
-"selection.py" = "ddc1b64f36a2e9d119b2d55ac6962d0e589825a1046c1b6e7b34d90d8f2bfadb"
-"spans.py" = "7a9722b5068c36ce62350e4ffe0eea07aa4ee5506330c9816069054001a10472"
+"runner.py" = "53145e7f9d22f3f5eea578d4dbc46415bbed6b1cc51046186270ee4e52834047"
+"selection.py" = "1addd68533008d32b9d36c7877ac4c5fe43fce5f2c8737dda976f681f9145738"
+"spans.py" = "4776fac2006967b1f17ffcbec03e50147d511120fd50cf085ac3b6b4702e5539"
 "storage.py" = "ccc9d6f8ac1a242b493028eaeed6a1fcd3a02a885c99ba2223bc71df7b69efe4"
 "store.py" = "60b12c4f36b40ea4f48464821367852df8bb530294f5535319cfe48aa3adbebb"
 "transform.py" = "34a82af6cbf7def844730b0a21416e478e81684b92480b6055d177d5f3219071"

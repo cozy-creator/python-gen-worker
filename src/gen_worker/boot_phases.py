@@ -111,7 +111,7 @@ PHASE_DECLARATION_COMPOSE = "declaration_compose"
 #: `detail` carries `nodes=` — a class's trace cost is meaningless without the
 #: graph size it paid for. Never a roll-up: 36 classes is 36 rows.
 PHASE_TRACE_FOR_KEY = "trace_for_key"
-#: Per-class hashing + the fold into `combined_graph_hash`.
+#: Per-specialization hashing + the fold into `combined_graph_hash`.
 PHASE_KEY_FOLD = "key_fold"
 #: One worker->hub compiled graph control-plane round trip (publish-intent /
 #: publish-complete). `function` names the leg. NOTE: there is no worker-side

@@ -14,13 +14,13 @@ from ..tensorfs import LocalCAS
 from .artifact import build_metadata, pack_artifact, read_metadata
 from .compiler import _compile_exported_program, _package_compiled_files
 from .declaration import (
-    GraphClassDeclaration,
-    GraphClassSpec,
+    GraphSpecialization,
+    GraphSpecializationDeclaration,
     RuntimeCompatibility,
     _literal_digest_for,
 )
 from .host_isa import HostISAError, _admit_host
-from .identity import GRAPH_CLASS_BLOCK, CompiledGraphKey, toolchain_axis_digest
+from .identity import GRAPH_SPECIALIZATION_BLOCK, CompiledGraphKey, toolchain_axis_digest
 from .introspection import DeclaredConstant, declared_constants
 from .runner import CompiledGraphRunner
 from .storage import (
@@ -43,11 +43,11 @@ class EnsureOutcome(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class _GraphClassPlan:
+class _GraphSpecializationPlan:
     """The one declaration and exact key used by both resolve and mint."""
 
-    spec: GraphClassSpec
-    declaration: GraphClassDeclaration
+    spec: GraphSpecialization
+    declaration: GraphSpecializationDeclaration
     runtime: RuntimeCompatibility
     key: CompiledGraphKey
 
@@ -101,10 +101,10 @@ def _write_literals(
     return _literal_digest_for(program, (constant.fqn for constant in literals))
 
 
-def _compile_package(plan: _GraphClassPlan, workspace: Path) -> Path:
+def _compile_package(plan: _GraphSpecializationPlan, workspace: Path) -> Path:
     files = _compile_exported_program(plan.spec.program)
     return _package_compiled_files(
-        plan.declaration.graph_class,
+        plan.declaration.name,
         files,
         workspace / "model.pt2",
     )
@@ -119,7 +119,9 @@ def _program_state_dict_fqns(program: object) -> set[str]:
     }
 
 
-def _admit_constant_table(plan: _GraphClassPlan, constants: tuple[DeclaredConstant, ...]) -> None:
+def _admit_constant_table(
+    plan: _GraphSpecializationPlan, constants: tuple[DeclaredConstant, ...]
+) -> None:
     """Prove the package did not invent a constant or compile in a weight."""
 
     stated = plan.declaration.graph.get("constant_fqns")
@@ -160,9 +162,9 @@ class Engine:
         self._store = _CompiledGraphStore(cas)
 
     @staticmethod
-    def _plan(spec: GraphClassSpec, runtime: RuntimeCompatibility) -> _GraphClassPlan:
+    def _plan(spec: GraphSpecialization, runtime: RuntimeCompatibility) -> _GraphSpecializationPlan:
         declaration = spec.declare()
-        return _GraphClassPlan(spec, declaration, runtime, runtime.key(declaration))
+        return _GraphSpecializationPlan(spec, declaration, runtime, runtime.key(declaration))
 
     @staticmethod
     def _admit_host_metadata(metadata: Mapping[str, object]) -> None:
@@ -175,20 +177,22 @@ class Engine:
             raise AdmissionError(f"artifact host ISA is unsupported: {exc}") from exc
 
     @staticmethod
-    def _admit(plan: _GraphClassPlan, compiled_graph: StoredCompiledGraph) -> None:
+    def _admit(plan: _GraphSpecializationPlan, compiled_graph: StoredCompiledGraph) -> None:
         metadata = compiled_graph.metadata
-        graph_class = metadata.get(GRAPH_CLASS_BLOCK)
-        if not isinstance(graph_class, Mapping):
-            raise AdmissionError("compiled graph records no graph_class")
-        expected_graph_class: dict[str, object] = {
-            "name": plan.declaration.graph_class,
+        graph_specialization = metadata.get(GRAPH_SPECIALIZATION_BLOCK)
+        if not isinstance(graph_specialization, Mapping):
+            raise AdmissionError("compiled graph records no graph_specialization")
+        expected_graph_specialization: dict[str, object] = {
+            "name": plan.declaration.name,
             "target": plan.declaration.target,
-            "class_hash": plan.declaration.class_hash,
+            "specialization_hash": plan.declaration.specialization_hash,
             "graph": dict(plan.declaration.graph),
             "graph_witness": plan.declaration.graph_witness,
             "range_digest": plan.declaration.range_digest,
             "fork": [[name, value] for name, value in plan.declaration.fork],
-            "class_dims": [[name, value] for name, value in plan.declaration.class_dims],
+            "specialization_dims": [
+                [name, value] for name, value in plan.declaration.specialization_dims
+            ],
             "strict": plan.declaration.strict,
             "lora_bucket": plan.declaration.lora_bucket,
             "literal_values": plan.declaration.literal_values,
@@ -196,8 +200,8 @@ class Engine:
         }
         mismatches = [
             field
-            for field, expected in expected_graph_class.items()
-            if graph_class.get(field) != expected
+            for field, expected in expected_graph_specialization.items()
+            if graph_specialization.get(field) != expected
         ]
         if metadata.get("sm") != plan.runtime.sm:
             mismatches.append("sm")
@@ -279,13 +283,13 @@ class Engine:
         graph = self.resolve(key, destination)
         return None if graph is None else CompiledGraphRunner._from_verified_graph(graph)
 
-    def _mint(self, plan: _GraphClassPlan) -> StoreResult:
+    def _mint(self, plan: _GraphSpecializationPlan) -> StoreResult:
         """Compile, package, verify, and publish one plan into the local CAS."""
 
         with tempfile.TemporaryDirectory(prefix="torchcg-mint-") as raw:
             workspace = Path(raw)
             package = _compile_package(plan, workspace)
-            constants = declared_constants(package, plan.declaration.graph_class)
+            constants = declared_constants(package, plan.declaration.name)
             _admit_constant_table(plan, constants)
             literals = workspace / "constants.safetensors"
             literal_payload_values = _write_literals(plan.spec.program, constants, literals)
@@ -295,15 +299,18 @@ class Engine:
                     "or literal serialization"
                 )
             metadata = build_metadata(
-                graph_class={
-                    "name": plan.declaration.graph_class,
+                graph_specialization={
+                    "name": plan.declaration.name,
                     "target": plan.declaration.target,
-                    "class_hash": plan.declaration.class_hash,
+                    "specialization_hash": plan.declaration.specialization_hash,
                     "graph": dict(plan.declaration.graph),
                     "graph_witness": plan.declaration.graph_witness,
                     "range_digest": plan.declaration.range_digest,
                     "fork": [[name, value] for name, value in plan.declaration.fork],
-                    "class_dims": [[name, value] for name, value in plan.declaration.class_dims],
+                    "specialization_dims": [
+                        [name, value]
+                        for name, value in plan.declaration.specialization_dims
+                    ],
                     "strict": plan.declaration.strict,
                     "lora_bucket": plan.declaration.lora_bucket,
                     "literal_values": plan.declaration.literal_values,
@@ -325,11 +332,11 @@ class Engine:
 
     def compile(
         self,
-        spec: GraphClassSpec,
+        spec: GraphSpecialization,
         runtime: RuntimeCompatibility,
         destination: str | Path,
     ) -> EnsureResult:
-        """Compile or reuse one self-derived graph class under sealed policy."""
+        """Compile or reuse one self-derived graph specialization under sealed policy."""
 
         plan = self._plan(spec, runtime)
         try:
@@ -359,7 +366,7 @@ class Engine:
         *,
         target: str,
         toolchain: Mapping[str, str],
-        recipe: Callable[[], GraphClassSpec],
+        recipe: Callable[[], GraphSpecialization],
     ) -> EnsureResult:
         """Reuse an admitted exact key, compiling only on a miss or quarantine."""
 

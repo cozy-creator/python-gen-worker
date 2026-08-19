@@ -147,9 +147,9 @@ _HANDLE_LITERAL = re.compile(r"^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$")
 def _iter_modules(root: Path) -> List[Path]:
     # pgw#1332: skip the subtrees that are not ours to change. `_vendor` is the
     # one that matters here and it is a REAL finding shape, not a nuisance:
-    # torchcg's `recipe.py` computes a compiled graph-key axis (`GraphClassVariant.key`)
+    # torchcg's `recipe.py` computes a compiled graph-key axis (`GraphSpecializationVariant.key`)
     # AND reads `.layouts` — but that `layouts` is the TRACED-LAYOUT axis of a
-    # graph-class row (torchcg G15), a different concept that happens to share
+    # graph-specialization row (torchcg G15), a different concept that happens to share
     # the word with §1.33's demand/conversion vocabulary. torchcg says so
     # explicitly: it RECORDS the token and never enumerates, interprets or forks
     # §1.32/§1.33. Either way the snapshot is byte-identical to a pinned

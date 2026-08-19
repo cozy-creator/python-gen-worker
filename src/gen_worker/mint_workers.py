@@ -102,12 +102,12 @@ class DevicePeakKey(NamedTuple):
     """WHAT was measured, and under WHICH conditions.
 
     Every axis is here because the number is meaningless without it: the same
-    graph class costs a different amount on a different card, under a different
+    graph specialization costs a different amount on a different card, under a different
     toolchain, at a different weight lane, and in a different PHASE of the mint.
     A row that cannot say all five is not a measurement, it is a number.
     """
 
-    graph_class: str
+    graph_specialization: str
     #: The card, both ways it can be named: a human-legible SKU slug
     #: (``h100-80gb-hbm3``) and the arch the kernels were built for
     #: (``sm_90``). A compiled graph minted at the wrong arch is unadoptable, so the
@@ -148,7 +148,7 @@ def record_entry_device_peak(
     allocated, reserved = max(0, int(allocated_bytes)), max(0, int(reserved_bytes))
     if allocated <= 0 and reserved <= 0:
         return
-    if not str(key.graph_class or "").strip():
+    if not str(key.graph_specialization or "").strip():
         # A row with no subject cannot be looked up and would silently
         # accumulate every class into one entry.
         return

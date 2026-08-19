@@ -115,7 +115,7 @@ def _run_derive(args: argparse.Namespace) -> int:
         )
         print(f"{result.endpoint}: {why}", file=sys.stderr)
     for lane_name, hashes in result.lane_graphs.items():
-        print(f"lane {lane_name}: {len(hashes)} graph class(es)", file=sys.stderr)
+        print(f"lane {lane_name}: {len(hashes)} graph specialization(es)", file=sys.stderr)
         for graph in hashes:
             print(f"  {graph}", file=sys.stderr)
     print(f"document sha256: {result.digest}", file=sys.stderr)

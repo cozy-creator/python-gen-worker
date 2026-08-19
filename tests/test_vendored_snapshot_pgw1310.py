@@ -219,7 +219,7 @@ def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() 
     key would be a codegen defect nothing else here notices.
 
     Proved by EXECUTING the pairing — fold a pinned class through
-    `GraphClassVariant.key()` (which reaches `identity.from_axes` and
+    `GraphSpecializationVariant.key()` (which reaches `identity.from_axes` and
     `toolchain_axis_digest`) and project an ingress onto a call signature —
     rather than by reading the import list, which would pass on a tree where
     the shared symbols had changed shape.
@@ -227,8 +227,8 @@ def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() 
     from gen_worker._vendor.torchcg.identity import is_compiled_graph_key
     from gen_worker._vendor.torchcg.ingress import CallIngress, CallInput
     from gen_worker._vendor.torchcg.recipe import (
-        GraphClassHash,
-        GraphClassVariant,
+        GraphSpecializationHash,
+        GraphSpecializationVariant,
         IngressDigest,
         LayoutContract,
         ParameterKind,
@@ -251,8 +251,8 @@ def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() 
             ),
         ),
     )
-    variant = GraphClassVariant(
-        class_hash=GraphClassHash("0123456789abcdef"),
+    variant = GraphSpecializationVariant(
+        specialization_hash=GraphSpecializationHash("0123456789abcdef"),
         ingress_digest=IngressDigest(ingress.digest()),
         ingress=ingress,
         layout=LayoutContract("bf16"),

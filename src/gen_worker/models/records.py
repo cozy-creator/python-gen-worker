@@ -12,7 +12,7 @@ seam — rather than a class with a back-reference. A back-reference would
 re-import the whole executor and put us back where we started.
 
 `abandon_background_mint` is NOT ours (th#1834's ruling, 2026-08-13): under
-per-graph-class accretion there is no project called "the mint" to abandon, so
+per-graph-specialization accretion there is no project called "the mint" to abandon, so
 what survives is *"stop supervising further compiles for this record, and give
 the card back"* — a supervision verb with a residency side effect. It stays
 with the mint supervisor and arrives here as an injected callable on
@@ -133,7 +133,7 @@ class _TeardownRecord(_Record, Protocol):
 class AbandonBackgroundMint(Protocol):
     """th#1834's ruled seam, typed here so the contract is checked and not
     merely described. The body behind it — one background-mint task today, a
-    per-graph-class supervisor after the reroute — is the supervisor's to
+    per-graph-specialization supervisor after the reroute — is the supervisor's to
     change without touching this module."""
 
     def __call__(

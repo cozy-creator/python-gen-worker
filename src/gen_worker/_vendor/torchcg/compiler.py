@@ -235,17 +235,17 @@ def _package_aoti(output: str, files: Mapping[str, Sequence[object]]) -> object:
 
 
 def _package_compiled_files(
-    graph_class: str,
+    name: str,
     files: Sequence[object],
     output: str | Path,
 ) -> Path:
-    """Package one named graph class into a `.pt2` file."""
+    """Package one named graph specialization into a `.pt2` file."""
 
-    name = str(graph_class).strip()
+    name = str(name).strip()
     if not name:
-        raise CompileError("graph_class name must not be empty")
+        raise CompileError("graph specialization name must not be empty")
     if not files:
-        raise CompileError("cannot package a graph_class with no compiled files")
+        raise CompileError("cannot package a graph specialization with no compiled files")
     target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:

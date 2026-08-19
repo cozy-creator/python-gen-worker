@@ -511,7 +511,7 @@ def _build_module_class() -> type:
                     out_features, dtype=compute_dtype, device=meta))
             else:
                 self.bias = None
-            # DECLARED slots, not plain attributes: the with-LoRA graph class
+            # DECLARED slots, not plain attributes: the with-LoRA graph specialization
             # must be a structural fact at trace time, and a plain `None`
             # attribute makes `register_buffer` refuse the name outright
             # ("attribute 'lora_a' already exists"). A declared None slot

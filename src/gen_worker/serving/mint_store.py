@@ -164,7 +164,7 @@ class TieredGraphStore:
                     f"publish_complete) has no worker-side caller at HEAD — "
                     f"pgw#1368/th#2132 own restoring it.",
                     phase=type(exc).__name__,
-                    graph_class=str(graph)[:300],
+                    graph_specialization=str(graph)[:300],
                 )
             logger.warning(
                 "self-mint: %s published locally only: %s", graph, exc)

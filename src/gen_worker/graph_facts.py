@@ -87,8 +87,8 @@ def envelope_facts(block: Mapping[str, Any]) -> Dict[str, Any]:
 
     pgw#1176: a MANIFEST fact, never a key axis. It digests the UNION of the
     ladder across the whole declaration, which is a property of the collection;
-    per graph class the tracing-relevant half of it is already inside that
-    class's own hash via ``range_digest`` and ``class_dims``. Keying on it
+    per graph specialization the tracing-relevant half of it is already inside that
+    class's own hash via ``range_digest`` and ``specialization_dims``. Keying on it
     re-minted 35 unchanged classes every time an author added an aspect ratio.
 
     ``overlay`` is the behavior-posture slot (pgw#1059 amendment 5): a typed,
@@ -159,9 +159,9 @@ def subject_digest(subjects: Iterable[SlotSubject]) -> str:
     return facts_digest(subject_facts(subs))
 
 
-def manifest_digest(class_hashes: Iterable[str]) -> str:
+def manifest_digest(specialization_hashes: Iterable[str]) -> str:
     """The coverage LABEL of one declaration's class set — 16 hex of sha256
-    over the newline-joined SORTED per-class hashes.
+    over the newline-joined SORTED per-specialization hashes.
 
     This is ``combined_graph_hash``'s arithmetic, VERBATIM (pgw#716: sorted by
     the hash string itself, single ``\\n`` joins, no trailing newline, UTF-8
@@ -177,9 +177,9 @@ def manifest_digest(class_hashes: Iterable[str]) -> str:
     A manifest is a VIEW. The moment it becomes something a pod downloads or a
     hub hands back as one row, the wrong atom is back.
     """
-    rows = [str(h) for h in class_hashes]
+    rows = [str(h) for h in specialization_hashes]
     for row in rows:
-        _refuse_key_shaped("manifest digest", "class_hash", row)
+        _refuse_key_shaped("manifest digest", "specialization_hash", row)
     joined = "\n".join(sorted(rows))
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 

@@ -885,7 +885,7 @@ def select_auto_mode(
     (what is actually available right now) — a second model on an occupied
     card must see the reduced free space. The resident REFINEMENT (off vs
     vae_only) is made against TOTAL capacity, a per-SKU constant, so the
-    traced graph class and mint object set are deterministic per SKU
+    traced graph specialization and mint object set are deterministic per SKU
     (pgw#750).
 
     ``peak_vram_gb`` is the endpoint's DECLARED per-request peak

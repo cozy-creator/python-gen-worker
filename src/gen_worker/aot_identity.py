@@ -1,6 +1,6 @@
 """The identity the hub named for one compiled-graph adoption.
 
-Artifact admission, graph-class identity, toolchain compatibility, and graph
+Artifact admission, graph-specialization identity, toolchain compatibility, and graph
 witness verification belong to TCG. The worker retains only this typed
 projection of the hub's resolve/arm decision so it can require the exact
 ``compiled_graph_key`` before handing bytes to TCG and preserve receipt

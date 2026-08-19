@@ -211,7 +211,7 @@ def _trace_device() -> str:
 
     So: cuda when there IS a device, cpu otherwise, and the fallback SAYS what
     it costs. A cpu-derived document is not a degraded cuda one -- it is a
-    different graph class, and a cuda mint of it refuses by name rather than
+    different graph specialization, and a cuda mint of it refuses by name rather than
     serving something wrong.
     """
 
@@ -223,7 +223,7 @@ def _trace_device() -> str:
         return "cuda"
     _LOG.warning(
         "derive: no CUDA device is visible, so this derive traces on CPU and "
-        "produces CPU-CLASS graphs. They are a different graph class from the "
+        "produces CPU-CLASS graphs. They are a different graph specialization from the "
         "cuda graphs a GPU pod serves — a cuda mint of this document refuses "
         "by name (pgw#1458), it does not silently serve. Derive on a "
         "CUDA-bearing host to publish servable graphs."
@@ -551,7 +551,7 @@ def _literal_axis(annotation: Any) -> Optional[list[Any]]:
     count, step ladder); a STRING literal names a host-side policy
     (``SdxlScheduler``, ``ImageFormat``) that never changes a marked
     module's shapes, and cross-producting it would explode the enumeration
-    for zero graph classes. A string axis that DOES bear shape is spelled as
+    for zero graph specializations. A string axis that DOES bear shape is spelled as
     a StrEnum, which enumerates on the branch above.
     """
 

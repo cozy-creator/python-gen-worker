@@ -824,7 +824,7 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 #    ExportedProgram crossed a process boundary by `torch.export.save`/`.load`
 #    and a structure-only program's PARAMETERS are FAKE tensors with no storage
 #    to serialize. th#1834 Phase 3 deleted the crossing — the process that
-#    traces a graph class is the process that compiles it — so machinery that
+#    traces a graph specialization is the process that compiles it — so machinery that
 #    repairs a round trip nobody takes is a second, silent way to hold a
 #    program.
 #

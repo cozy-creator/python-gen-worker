@@ -30,7 +30,7 @@ from typing import (
 )
 
 from gen_worker._vendor.torchcg import (
-    GRAPH_CLASS_BLOCK,
+    GRAPH_SPECIALIZATION_BLOCK,
     CallIngress,
     CallInput,
     CompiledGraphRunner,
@@ -85,8 +85,8 @@ RECAST_EVENT = "aot_input_recast"
 #: since tcg#37 it is the CONTRACT's constant, stated once in
 #: ``ingress_selection_v1`` and read here rather than re-typed.
 AOTI_ALIGNMENT = tcg_selection.AOTI_ALIGNMENT
-#: THE compiled-graph artifact metadata/package version. v1 = ONE graph class
-#: per artifact: TCG metadata carries one ``graph_class`` block, never an
+#: THE compiled-graph artifact metadata/package version. v1 = ONE graph specialization
+#: per artifact: TCG metadata carries one ``graph_specialization`` block, never an
 #: ``entries`` map.
 #:
 #: DESIGN-RULINGS §1.38b (Paul, 2026-08-13): *"we are pre-launch, so we should
@@ -179,23 +179,23 @@ def is_aot_ref(ref: str, family: str = "") -> bool:
 
 
 def entry_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
-    """Return one graph class in the shape used by the numerics probe.
+    """Return one graph specialization in the shape used by the numerics probe.
 
     pgw#1176: the plural ``entries_from_meta`` is GONE with the multi-entry
     artifact. A caller that wants several entries holds several artifacts.
     """
-    graph_class = meta.get(GRAPH_CLASS_BLOCK)
-    if not isinstance(graph_class, Mapping):
-        raise ValueError("compiled graph metadata has no graph_class")
-    graph = graph_class.get("graph")
+    graph_specialization = meta.get(GRAPH_SPECIALIZATION_BLOCK)
+    if not isinstance(graph_specialization, Mapping):
+        raise ValueError("compiled graph metadata has no graph_specialization")
+    graph = graph_specialization.get("graph")
     if not isinstance(graph, Mapping):
-        raise ValueError("compiled graph class has no graph contract")
+        raise ValueError("compiled graph specialization has no graph contract")
     return {
         **dict(graph),
-        "name": str(graph_class.get("name") or ""),
-        "target": str(graph_class.get("target") or ""),
-        "fork": list(graph_class.get("fork") or ()),
-        "class_dims": list(graph_class.get("class_dims") or ()),
+        "name": str(graph_specialization.get("name") or ""),
+        "target": str(graph_specialization.get("target") or ""),
+        "fork": list(graph_specialization.get("fork") or ()),
+        "specialization_dims": list(graph_specialization.get("specialization_dims") or ()),
     }
 
 
@@ -579,7 +579,7 @@ def ingress_report(
     if present:
         return ((IngressMiss(
             "input_excluded",
-            f"this graph class REFUSES input(s) {list(present)!r}: the call "
+            f"this graph specialization REFUSES input(s) {list(present)!r}: the call "
             f"carries them, so it must be served by the class that declares "
             f"them (pgw#790 — a branchless class fed an adapter would return "
             f"the base model and look correct)",
@@ -764,7 +764,7 @@ class TCGEntryRunner:
             return
         activity_mod.emit_event(
             event,
-            f"family={self.family} graph_class={self.entry} "
+            f"family={self.family} graph_specialization={self.entry} "
             f"target={self.module_name} input={name}: {reason}",
             phase=reason,
         )
@@ -887,7 +887,7 @@ class EntryDispatch:
     #: class that failed for cause would be the thing that rule forbids.
     de_armed: Dict[str, str] = field(default_factory=dict)
     #: The entry :meth:`select` last routed to — the only way the fail-soft
-    #: wrapper one frame up can name the graph class that raised.
+    #: wrapper one frame up can name the graph specialization that raised.
     last_selected: str = ""
     #: Calls served by entries that have since DE-ARMED. Banked rather than
     #: discarded: those executions happened, and `execution_count` is the
@@ -914,7 +914,7 @@ class EntryDispatch:
         """De-arm ONE entry, sticky for the boot. True when it was armed.
 
         This is the whole replacement for the old compiled graph-wide revoke: a
-        compiled graph-attributable failure in one graph class costs that class, and
+        compiled graph-attributable failure in one graph specialization costs that class, and
         every sibling keeps serving compiled.
         """
         label = str(name)
@@ -1009,12 +1009,12 @@ class EntryDispatch:
         selection = choice.selection
         if choice.admitted and choice.runner is not None:
             return selection.selected, choice.runner
-        if selection.outcome is tcg_selection.SelectionOutcome.CLASS_AMBIGUOUS:
+        if selection.outcome is tcg_selection.SelectionOutcome.SPECIALIZATION_AMBIGUOUS:
             names = sorted(selection.ambiguous)
             raise IngressContractError(
                 "entry_ambiguous",
                 f"{len(names)} entries admit this call ({names[:6]!r}) — "
-                f"the declaration does not discriminate these graph classes "
+                f"the declaration does not discriminate these graph specializations "
                 f"by ingress contract")
         # A total miss. The exhaustive ranking is already in the selection —
         # tcg#37 computes it ONLY on the refusal path, so the hot path still
@@ -1042,7 +1042,7 @@ class EntryDispatch:
         name, runner = self.select(args, kwargs)
         # Recorded BEFORE the call so a raising entry can be de-armed BY NAME
         # (§4.31 per entry): the wrapper catches the exception a frame up and
-        # has no other way to know which of N graph classes produced it.
+        # has no other way to know which of N graph specializations produced it.
         self.last_selected = name
         return runner(*args, **kwargs)
 
@@ -1066,7 +1066,7 @@ class EntryDispatch:
         return out
 
     def entry_calls(self) -> Dict[str, int]:
-        """Per-entry served-call counts — which graph class actually served."""
+        """Per-entry served-call counts — which graph specialization actually served."""
         return {name: runner.calls for name, runner in self.runners}
 
     def excludes(self, names: Sequence[str]) -> bool:
@@ -1143,7 +1143,7 @@ def lifted_call_kwargs(module: Any) -> Dict[str, Any]:
     artifact interaction at all and the call arguments stay pointer-stable
     (what cudagraph static inputs require).
 
-    ``bucket=0`` is its own branchless graph class with no lifted signature,
+    ``bucket=0`` is its own branchless graph specialization with no lifted signature,
     so it has no binding and gets no kwargs.
     """
     binding = lora_lifted.lifted_binding(module)
@@ -1213,7 +1213,7 @@ def assert_lifted_contract(module: Any, contract: CallIngress) -> None:
             "lifted_inputs_unbindable",
             f"artifact declares lifted adapter input(s) "
             f"{sorted(wanted & declared)!r} but the module has no lifted "
-            "binding to supply them (bucket=0 is a different graph class)")
+            "binding to supply them (bucket=0 is a different graph specialization)")
 
 
 def wrap_module(
@@ -1280,7 +1280,7 @@ def wrap_module(
                 phase=reason,
                 family=str(meta.get("family") or ""),
                 compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
-                graph_class=name,
+                graph_specialization=name,
             )
             siblings = tuple(getattr(runner, "runners", ()) or ())
             if siblings:  # siblings still serve
@@ -1396,7 +1396,7 @@ def wrap_module(
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
             # Reaching here means the arm order was violated. The gate did
-            # its job (no segfault); THIS graph class is structurally
+            # its job (no segfault); THIS graph specialization is structurally
             # unusable.
             logger.error(
                 "aot-serve: %s invoked with unbound constants (%s); eager for "
@@ -1565,7 +1565,7 @@ def _tcg_destination(cache_dir: Optional[Path], compiled_graph_key: str) -> Path
 
 
 @dataclass(frozen=True)
-class ResolvedGraphClass:
+class ResolvedGraphSpecialization:
     """One exact key, resolved and loaded, before any constant source is asked.
 
     Everything both arms share. The two arms differ ONLY in where the
@@ -1577,16 +1577,16 @@ class ResolvedGraphClass:
     key: str
     runner: CompiledGraphRunner
     metadata: Dict[str, Any]
-    graph_class: Mapping[str, Any]
+    graph_specialization: Mapping[str, Any]
     graph: Mapping[str, Any]
     name: str
     target: str
 
 
-def _resolve_graph_class(
+def _resolve_graph_specialization(
     compiled_graph_key: str, cache_dir: Optional[Path]
-) -> ResolvedGraphClass:
-    """Resolve one exact key and validate its declared graph class.
+) -> ResolvedGraphSpecialization:
+    """Resolve one exact key and validate its declared graph specialization.
 
     TCG is the only artifact/store authority. The first resolve establishes
     the immutable extraction directory and admitted metadata; ``runner`` is
@@ -1629,28 +1629,28 @@ def _resolve_graph_class(
             "compiled_graph_unavailable", f"TCG could not load {key!r}"
         )
     metadata = dict(compiled_graph.metadata)
-    graph_class = metadata.get(GRAPH_CLASS_BLOCK)
-    if not isinstance(graph_class, Mapping):
+    graph_specialization = metadata.get(GRAPH_SPECIALIZATION_BLOCK)
+    if not isinstance(graph_specialization, Mapping):
         raise AdoptError(
             "contract_invalid",
-            "TCG admitted a compiled graph with no graph_class declaration",
+            "TCG admitted a compiled graph with no graph_specialization declaration",
         )
-    graph = graph_class.get("graph")
+    graph = graph_specialization.get("graph")
     if not isinstance(graph, Mapping):
         raise AdoptError(
-            "contract_invalid", "TCG graph_class records no worker ingress contract"
+            "contract_invalid", "TCG graph_specialization records no worker ingress contract"
         )
-    name = str(graph_class.get("name") or "").strip()
-    target = str(graph_class.get("target") or "").strip()
+    name = str(graph_specialization.get("name") or "").strip()
+    target = str(graph_specialization.get("target") or "").strip()
     if not name or not target:
         raise AdoptError(
-            "contract_invalid", "TCG graph_class must name both graph class and target"
+            "contract_invalid", "TCG graph_specialization must name both graph specialization and target"
         )
-    return ResolvedGraphClass(
+    return ResolvedGraphSpecialization(
         key=key,
         runner=runner,
         metadata=metadata,
-        graph_class=graph_class,
+        graph_specialization=graph_specialization,
         graph=graph,
         name=name,
         target=target,
@@ -1665,7 +1665,7 @@ def arm_compiled_graph(
     *,
     declared: Sequence[str] = (),
 ) -> Dict[str, Any]:
-    """Resolve, bind, then register one exact TCG graph class.
+    """Resolve, bind, then register one exact TCG graph specialization.
 
     The MODULE-SOURCED arm: the live eager module supplies the constant
     table, so the whole pipeline must be resident. That is a POLICY choice
@@ -1677,9 +1677,9 @@ def arm_compiled_graph(
     succeeds.
     """
 
-    resolved = _resolve_graph_class(compiled_graph_key, cache_dir)
+    resolved = _resolve_graph_specialization(compiled_graph_key, cache_dir)
     key, runner = resolved.key, resolved.runner
-    metadata, graph_class = resolved.metadata, resolved.graph_class
+    metadata, graph_specialization = resolved.metadata, resolved.graph_specialization
     graph, name, target = resolved.graph, resolved.name, resolved.target
 
     family = str(getattr(cfg, "family", "") or "")
@@ -1691,7 +1691,7 @@ def arm_compiled_graph(
         runner.bind(resident_constants(module), device=device)
     except ConstantBindingError as exc:
         reason = ADOPT_OOM_REASON if exc.reason == "out_of_memory" else exc.reason
-        raise AdoptError(reason, f"graph class {name!r}: {exc}") from exc
+        raise AdoptError(reason, f"graph specialization {name!r}: {exc}") from exc
 
     marker = _marker(pipeline)
     dispatch = _dispatch_for(marker, target)
@@ -1727,10 +1727,10 @@ def arm_compiled_graph(
     marker["entries"][name] = {
         "compiled_graph_key": key,
         "target": target,
-        "class_hash": str(graph_class.get("class_hash") or ""),
+        "specialization_hash": str(graph_specialization.get("specialization_hash") or ""),
     }
     logger.info(
-        "aot-serve: armed TCG graph class %s on %s (%d constants, key=%s)",
+        "aot-serve: armed TCG graph specialization %s on %s (%d constants, key=%s)",
         name,
         target,
         len(runner.declared_fqns),
@@ -1741,10 +1741,10 @@ def arm_compiled_graph(
 
 @dataclass(frozen=True)
 class StoreArmedGraph:
-    """One graph class armed with NO module anywhere on the path.
+    """One graph specialization armed with NO module anywhere on the path.
 
     The record is deliberately split along the family/instance line
-    (pgw#1326, §4.27). ``key``/``graph_class``/``target`` are CLASS-level and
+    (pgw#1326, §4.27). ``key``/``graph_specialization``/``target`` are CLASS-level and
     checkpoint-free — the same three for every fine-tune sharing one ``.so``.
     ``weight_set`` and ``constants`` are INSTANCE-level: which checkpoint this
     binding is of, and the tensors it bound. Two of these over one ``key``
@@ -1758,7 +1758,7 @@ class StoreArmedGraph:
     """
 
     key: str
-    graph_class: str
+    graph_specialization: str
     target: str
     family: str
     weight_set: aot_constants.WeightSetRef
@@ -1800,14 +1800,14 @@ class StoreArmedGraph:
         return dispatch_states(self.target, self.dispatch)
 
     def disarm(self, reason: str) -> bool:
-        """De-arm this graph class, sticky for the boot (§4.31).
+        """De-arm this graph specialization, sticky for the boot (§4.31).
 
         The store arm's half of :func:`disarm_entry`. It drops the entry and
         NOT the constants: the runner's installed pointers are ``user_managed``
         and the container is still loaded, so freeing the tensors here would
         turn a de-arm into a use-after-free."""
 
-        return self.dispatch.remove(self.graph_class, str(reason))
+        return self.dispatch.remove(self.graph_specialization, str(reason))
 
 
 def arm_compiled_graph_from_store(
@@ -1819,7 +1819,7 @@ def arm_compiled_graph_from_store(
     cache_dir: Optional[Path] = None,
     declared: Sequence[str] = (),
 ) -> StoreArmedGraph:
-    """Arm one exact graph class from STORE bytes, by manifest FQN.
+    """Arm one exact graph specialization from STORE bytes, by manifest FQN.
 
     The same resolve, the same ingress contract and the same
     ``CompiledGraphRunner.bind`` as :func:`arm_compiled_graph` — with the
@@ -1830,7 +1830,7 @@ def arm_compiled_graph_from_store(
 
     Order is the contract:
 
-    1. resolve the exact key (quarantine, admission, graph-class validation);
+    1. resolve the exact key (quarantine, admission, graph-specialization validation);
     2. parse the declared constant table as a versioned, typed manifest;
     3. check the WHOLE table against the store's headers — a refusal here
        has allocated no device memory and registered no entry;
@@ -1842,18 +1842,18 @@ def arm_compiled_graph_from_store(
     marked failed and un-bindable.
     """
 
-    resolved = _resolve_graph_class(compiled_graph_key, cache_dir)
+    resolved = _resolve_graph_specialization(compiled_graph_key, cache_dir)
     family = str(getattr(cfg, "family", "") or "")
     target_device = str(device or "").strip()
     if not target_device:
         raise AdoptError(
             "device_missing",
-            f"graph class {resolved.name!r}: a store-sourced arm has no module to "
+            f"graph specialization {resolved.name!r}: a store-sourced arm has no module to "
             f"take a device from, so the caller must name one",
         )
 
     manifest = aot_constants.parse_constant_manifest(
-        resolved.graph_class,
+        resolved.graph_specialization,
         compiled_graph_format=resolved.metadata.get(COMPILED_GRAPH_FORMAT_KEY),
     )
     plan = aot_constants.plan_store_constants(manifest, store)
@@ -1875,7 +1875,7 @@ def arm_compiled_graph_from_store(
             raise
         raise AdoptError(
             ADOPT_OOM_REASON,
-            f"graph class {resolved.name!r}: reading {len(plan)} store-sourced "
+            f"graph specialization {resolved.name!r}: reading {len(plan)} store-sourced "
             f"constant(s) onto {target_device} exhausted device memory "
             f"({type(exc).__name__}: {exc})",
         ) from exc
@@ -1883,7 +1883,7 @@ def arm_compiled_graph_from_store(
         resolved.runner.bind(constants, device=target_device)
     except ConstantBindingError as exc:
         reason = ADOPT_OOM_REASON if exc.reason == "out_of_memory" else exc.reason
-        raise AdoptError(reason, f"graph class {resolved.name!r}: {exc}") from exc
+        raise AdoptError(reason, f"graph specialization {resolved.name!r}: {exc}") from exc
 
     dispatch = EntryDispatch(declared=tuple(str(item) for item in declared))
     entry_runner = TCGEntryRunner(
@@ -1898,7 +1898,7 @@ def arm_compiled_graph_from_store(
         "weight_set": str(plan.weight_set),
     }
     logger.info(
-        "aot-serve: armed TCG graph class %s on %s from the store "
+        "aot-serve: armed TCG graph specialization %s on %s from the store "
         "(%d constants, %d store-sourced, weight_set=%s, key=%s)",
         resolved.name,
         resolved.target,
@@ -1909,7 +1909,7 @@ def arm_compiled_graph_from_store(
     )
     return StoreArmedGraph(
         key=resolved.key,
-        graph_class=resolved.name,
+        graph_specialization=resolved.name,
         target=resolved.target,
         family=family,
         weight_set=plan.weight_set,
@@ -1921,7 +1921,7 @@ def arm_compiled_graph_from_store(
 
 
 def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
-    """De-arm ONE graph class, sticky for the boot. True when it was armed.
+    """De-arm ONE graph specialization, sticky for the boot. True when it was armed.
 
     The per-entry half of §4.31, reachable from outside a serve call: the
     mint's parity gate refuses an entry here rather than un-arming a compiled graph,
@@ -1968,7 +1968,7 @@ def dispatch_states(target: str, dispatch: EntryDispatch) -> Dict[str, Dict[str,
 
 
 def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
-    """Per-entry SERVE STATE — what this pod actually serves, per graph class.
+    """Per-entry SERVE STATE — what this pod actually serves, per graph specialization.
 
     pgw#1176 §1.4: the pod never claims "compiled graph X armed". It reports, per entry,
     ``armed`` / ``de_armed(reason)`` / ``pending`` — so there is no unit left
@@ -2059,7 +2059,7 @@ def enable(
     ``fleet_compiled_graphs`` treats it as a genuine match and
     skips the self-mint.
 
-    pgw#1176: a miss here is a miss for ONE graph class. Nothing about it
+    pgw#1176: a miss here is a miss for ONE graph specialization. Nothing about it
     un-arms a sibling, and the caller's retry/mint policy is per class too.
 
     pgw#923: the outcome is RETURNED rather than narrated. A classified refusal
@@ -2085,7 +2085,7 @@ def enable(
             reason, exc)
         return AdoptOutcome.miss(
             reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
-    entry = dict(meta.get(GRAPH_CLASS_BLOCK) or {})
+    entry = dict(meta.get(GRAPH_SPECIALIZATION_BLOCK) or {})
     armed = len(armed_entries(pipeline))
     logger.info(
         "aot-serve: armed %s entry %s (sku=%s torch=%s precision=%s, "
@@ -2226,7 +2226,7 @@ def armed_metadata(pipeline: Any) -> Dict[str, Any]:
 
 
 def armed_entries(pipeline: Any) -> Dict[str, str]:
-    """``entry name -> entry key`` for every graph class ARMED right now.
+    """``entry name -> entry key`` for every graph specialization ARMED right now.
 
     pgw#1176: this — not a compiled graph-level boolean — is what the pod may claim. A
     subset is a legitimate steady state, so "how many, and which" is the only
@@ -2247,7 +2247,7 @@ def armed_entries(pipeline: Any) -> Dict[str, str]:
 
 
 def is_armed(pipeline: Any) -> bool:
-    """Whether this pipeline is serving ANY compiled graph class right now.
+    """Whether this pipeline is serving ANY compiled graph specialization right now.
 
     pgw#1176: there is NO every-target rule. A key advertises ONE class, an
     entry arms whole or not at all, and a

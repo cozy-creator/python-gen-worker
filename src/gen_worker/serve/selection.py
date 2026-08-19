@@ -1,6 +1,6 @@
 """pgw#1328 x tcg#37: ingress selection is READ FROM THE CONTRACT, not re-derived.
 
-Ranking several armed graph classes against one live call — which admits, which
+Ranking several armed graph specializations against one live call — which admits, which
 is closest, which normalizations a feed needs — is tcg#37's
 ``ingress_selection_v1``: a schema, a rung table, two normalization domains and
 20 vectors, with ``torchcg.selection`` as the torch-free reference
@@ -39,7 +39,7 @@ from typing import Generic, Optional, Sequence, Tuple, TypeVar
 
 from .._vendor.torchcg.ingress import CallIngress
 from .._vendor.torchcg.selection import (
-    FeedNormalization, GraphClassCandidate, Selection, SelectionError,
+    FeedNormalization, GraphSpecializationCandidate, Selection, SelectionError,
     SelectionOutcome, describe_call, select)
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ R = TypeVar("R")
 
 @dataclass(frozen=True)
 class Candidate(Generic[R]):
-    """One ARMED graph class, as this pod's dispatch holds it.
+    """One ARMED graph specialization, as this pod's dispatch holds it.
 
     ``runner`` is the host's own object; the contract never sees it. Keeping it
     on the candidate is what lets one walk answer both "which class" and "call
@@ -97,7 +97,7 @@ class CallUndescribable(ValueError):
     The only member today is ``input_name_collision``: two candidate classes
     spell one input name from different coordinates, so no single presented
     call can stand for both. That is a DECLARATION defect — the same class as
-    ``class_ambiguous`` and reported like one — not a property of the call.
+    ``specialization_ambiguous`` and reported like one — not a property of the call.
     """
 
     def __init__(self, reason: str, detail: str) -> None:
@@ -117,7 +117,7 @@ def choose(
     and falls back) and an adopt-only one (which renders it as a refusal).
     """
     rows = tuple(
-        GraphClassCandidate(name=c.name, ingress=c.ingress) for c in candidates)
+        GraphSpecializationCandidate(name=c.name, ingress=c.ingress) for c in candidates)
     try:
         call = describe_call(rows, args, kwargs)
     except SelectionError as exc:

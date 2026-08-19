@@ -1374,7 +1374,7 @@ def cxx_toolchain_present() -> bool:
     A C compiler is NOT enough: AOTI forces inductor's C++ wrapper and links
     a real ``.so``. Measured on a real L4 (release `39ac3726`, 0.84.0) — the
     endpoint image carries a C compiler, so ``toolchain_present()`` passed,
-    and the mint spent **336 s** loading, exporting both graph classes and
+    and the mint spent **336 s** loading, exporting both graph specializations and
     reaching the linker before torch said
     ``InvalidCxxCompiler: No working C++ compiler found ... (None, 'g++')``.
     """

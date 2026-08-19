@@ -289,7 +289,7 @@ def needs_viewer_identity(receipt: Receipt) -> bool:
     One spelling, two readers: :func:`refuse_untrusted_publisher` opens with
     it, and the caller asks it BEFORE resolving an identity — a platform-tier
     compiled graph is adoptable by any pod, so demanding an identity to arm one would
-    turn a resolver outage into a refusal of the one compiled graph class that never
+    turn a resolver outage into a refusal of the one compiled graph specialization that never
     needed a resolver.
     """
     return receipt.publisher_tier != COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM

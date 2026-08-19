@@ -30,7 +30,7 @@ from typing import (
     Tuple,
 )
 
-from gen_worker._vendor.torchcg import ARTIFACT_KIND, GRAPH_CLASS_BLOCK
+from gen_worker._vendor.torchcg import ARTIFACT_KIND, GRAPH_SPECIALIZATION_BLOCK
 
 from ..compiled_graph_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
@@ -339,7 +339,7 @@ def _abandon_adopt(
         "adopt_headroom_refused", detail, phase=adopt_fit.REASON,
         family=family,
         compiled_graph_key=str((meta or {}).get("compiled_graph_key") or ""),
-        graph_class=entry,
+        graph_specialization=entry,
     )
 
 
@@ -353,7 +353,7 @@ def arm_aot(
     """Arm ONE exported ``.pt2`` ENTRY on ``pipe``. The whole AOT arm, in one
     place, for every source of such an artifact.
 
-    pgw#1176: the unit is one graph class. ``declared`` is every class name
+    pgw#1176: the unit is one graph specialization. ``declared`` is every class name
     this pod's declaration traces to, threaded to the dispatch so a call no
     ARMED entry admits reads as "declared, pending compile" (silent eager)
     rather than as an undeclared shape.
@@ -414,10 +414,10 @@ def arm_aot(
         # component name (pgw#740: the vocabulary is not repeated in live
         # code; a guessed name on a non-UNet family would silently skip the
         # install and waste the arm).
-        graph_class = (meta or {}).get(GRAPH_CLASS_BLOCK) or {}
+        graph_specialization = (meta or {}).get(GRAPH_SPECIALIZATION_BLOCK) or {}
         targets: list[str] = []
-        if isinstance(graph_class, Mapping):
-            target = str(graph_class.get("target") or "").strip()
+        if isinstance(graph_specialization, Mapping):
+            target = str(graph_specialization.get("target") or "").strip()
             targets = [target] if target else []
         # ...and among them the BRANCH-CAPABLE one: `decoder` sorts first
         # among entry names, and a lifted forward on a module with no branch
@@ -441,7 +441,7 @@ def arm_aot(
             # its two known causes; this closes it for every future one, by
             # refusing to leave the branch silently.
             lifted_install_error = (
-                f"no lifted target resolved: graph_class target="
+                f"no lifted target resolved: graph_specialization target="
                 f"{targets or '<absent>'}, branch-capable="
                 f"{sorted(branch_capable) or '<none>'}"
                 + ("; the compiled graph envelope was unreadable" if meta is None else ""))
@@ -516,7 +516,7 @@ def arm_aot(
         family = str((meta or {}).get("family") or getattr(cfg, "family", "") or "")
         # The compiled graph's OWN recorded lane.
         lane = str((meta or {}).get("weight_lane") or "")
-        # pgw#1176: one artifact, one graph class — so this row is always
+        # pgw#1176: one artifact, one graph specialization — so this row is always
         # `entries=1`, and that is the point rather than a degenerate case.
         # pgw#1175: it MEASURES and sizes nothing; no bank reads it.
         entries = 1 if (meta or {}).get("entry") else 0
@@ -587,13 +587,13 @@ def arm_aot(
         # is also the first point that needs a way BACK DOWN. Both spans below
         # are abandonable: the entry de-arms, its runner is released, the
         # pipeline serves eager and the worker stays alive.
-        graph_class = (meta or {}).get(GRAPH_CLASS_BLOCK) or {}
+        graph_specialization = (meta or {}).get(GRAPH_SPECIALIZATION_BLOCK) or {}
         _entry_name = str(
-            graph_class.get("name") if isinstance(graph_class, Mapping) else ""
+            graph_specialization.get("name") if isinstance(graph_specialization, Mapping) else ""
         )
         _no_room = adopt_fit.refusal(
             "the §4.32 parity gate's forwards" if verify_numerics
-            else "serving through the freshly armed graph class",
+            else "serving through the freshly armed graph specialization",
             _budget_device)
         if _no_room:
             _emit_adopt_budget(0, False)
@@ -621,7 +621,7 @@ def arm_aot(
             # so it is asked about the state the arm actually leaves behind,
             # not about the state before the gate ran.
             _no_room = adopt_fit.refusal(
-                "serving through the freshly armed graph class", _budget_device)
+                "serving through the freshly armed graph specialization", _budget_device)
             if _no_room:
                 _emit_adopt_budget(_peak_after_verify - _peak_after_load, False)
                 _abandon_adopt(pipe, meta, _no_room, entry=_entry_name)
@@ -640,14 +640,14 @@ def arm_aot(
         # function returns; the numbers still ride `compiled_graph_numerics`.
         meta = aot_serve.armed_metadata(pipe)
         # pgw#1176: THE PARITY REFUSAL IS PER ENTRY, never an `unwrap` of the whole
-        # pipeline: the probe measures ONE graph class against the eager callable it
+        # pipeline: the probe measures ONE graph specialization against the eager callable it
         # was traced from, so a divergence condemns that class and says nothing about
         # its siblings. The refused
         # entry de-arms sticky, its siblings keep serving compiled, and it is
         # not published.
-        graph_class = meta.get(GRAPH_CLASS_BLOCK) or {}
+        graph_specialization = meta.get(GRAPH_SPECIALIZATION_BLOCK) or {}
         entry = str(
-            graph_class.get("name") if isinstance(graph_class, Mapping) else ""
+            graph_specialization.get("name") if isinstance(graph_specialization, Mapping) else ""
         )
         aot_serve.disarm_entry(pipe, entry, "numerics_refused")
         outcome = AdoptOutcome.miss(

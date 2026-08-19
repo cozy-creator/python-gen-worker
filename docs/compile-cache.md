@@ -212,7 +212,7 @@ deleted by pgw#1270 and not re-pointed — pgw#1304):
 - **Mint.** `mint_child.lane_verdict_for` loads the endpoint once per
   candidate combination (the swap happens at model load, so comparing lanes
   means loading once each), runs `aot_mint.bench_step` — one forward of the
-  family's dominant declared graph class, on its own declared example feed,
+  family's dominant declared graph specialization, on its own declared example feed,
   under `torch.compile` — and times it with a fixed warmup/median protocol.
   The winner's pipeline is the one that gets exported. Candidates come from
   a capability-only candidate walk (⚠️ named `kernel_path.candidate_axes`, which

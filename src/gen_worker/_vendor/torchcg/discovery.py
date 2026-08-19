@@ -3,7 +3,7 @@
 DISCOVERY, not declaration-driven enumeration: torchcg hooks the lane's
 compile-target modules, the author's own code runs with the author's sample
 inputs, and every distinct call the marked modules actually receive is one
-graph class. The OBSERVED ingress set IS the lane's graph set.
+graph specialization. The OBSERVED ingress set IS the lane's graph set.
 
 Two passes, deliberately separated:
 
@@ -281,7 +281,7 @@ def discover_modules(
     provenance and hands them here keyed by that name.
 
     ``program_sink`` (Paul, 2026-08-20) receives ``(graph_hash,
-    ExportedProgram)`` for each NEW graph class and returns the CAS digest it
+    ExportedProgram)`` for each NEW graph specialization and returns the CAS digest it
     stored the serialized program under. The whole traced graph is kept, not
     just its hash: trace() runs once, ever, and the runtime miner downloads
     the graph and runs inductor rather than re-tracing author code. torchcg

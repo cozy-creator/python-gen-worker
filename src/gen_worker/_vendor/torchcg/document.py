@@ -40,7 +40,7 @@ class GraphRecord:
     graph: str
     target: str
     ingress: CallIngress
-    #: CAS digest of the SERIALIZED ExportedProgram for this graph class
+    #: CAS digest of the SERIALIZED ExportedProgram for this graph specialization
     #: (Paul, 2026-08-20: the derive stores the whole traced graph, not just
     #: its hash -- "we only ever need to run trace() once" now holds
     #: literally, and the runtime miner downloads this blob and runs inductor
@@ -101,7 +101,7 @@ class LaneGraphs:
         # pgw#1384: GRAPH ORDER IS SEMANTIC, not canonical. The serving
         # lane's hole list inherits document order and the miner mints holes
         # in that order, so the PRODUCER states the order -- the derive puts
-        # the default-parameter graph classes (what an all-defaults payload
+        # the default-parameter graph specializations (what an all-defaults payload
         # exercises) FIRST. Determinism still holds: the producer's
         # enumeration is deterministic, so identical inputs still yield
         # identical bytes. Only duplicates are refused here.

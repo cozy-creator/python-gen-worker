@@ -74,9 +74,9 @@ class _Pipe:
 
 
 def _tcg_metadata() -> Dict[str, Any]:
-    """One TCG graph class naming its own target, with no worker package map."""
+    """One TCG graph specialization naming its own target, with no worker package map."""
     return {
-        "graph_class": {
+        "graph_specialization": {
             "name": "transformer/adapter=true,cfg=true",
             "target": "transformer",
         },
@@ -85,7 +85,7 @@ def _tcg_metadata() -> Dict[str, Any]:
 
 @pytest.fixture()
 def armed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drive the arm through one valid TCG graph-class metadata row."""
+    """Drive the arm through one valid TCG graph-specialization metadata row."""
     from gen_worker import aot_serve
 
     monkeypatch.setattr(
@@ -113,7 +113,7 @@ def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
     first among the entry names, and installing a lifted forward on a module
     with no branch container fails by name"* — a premise that needed ONE
     artifact carrying SEVERAL entries so there was a set to sort and a wrong
-    first element to pick. An artifact now carries one graph class, so that
+    first element to pick. An artifact now carries one graph specialization, so that
     shape is unconstructible and a row that built it would assert against
     nothing real. What survives of it is the second assert below: the install
     lands on the branch-capable denoiser and nowhere else.

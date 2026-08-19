@@ -37,7 +37,7 @@ paying VRAM per weight set.
 
 | axis | lives on | examples |
 |---|---|---|
-| class | the family class | buckets, graph classes, signatures, loop, scheduler |
+| class | the family class | buckets, graph specializations, signatures, loop, scheduler |
 | checkpoint | the instance | weights binding, `inst.tuned`, the ref label |
 | request | `ctx` | cancellation, logging, progress, seed, assets |
 
@@ -144,7 +144,7 @@ updating a second list.
 
 ## Product grid ≠ family buckets
 
-Aspect ratios and megapixel tiers are endpoint policy; a resolution graph class
+Aspect ratios and megapixel tiers are endpoint policy; a resolution graph specialization
 is family truth. Declare the mapping and the build fails on a bucket the family
 lacks, while the boot warm plan derives from the same mapping:
 
@@ -265,7 +265,7 @@ SDXL = GraphModelSpec(
 
 `Runner.layouts` is a different axis and keeps its own meaning: which layouts
 that GRAPH CLASS has traced variants for. A model may accept fp8 bytes for a
-component it has no fp8 graph class for.
+component it has no fp8 graph specialization for.
 
 ## Declaring what only the ENDPOINT knows
 
