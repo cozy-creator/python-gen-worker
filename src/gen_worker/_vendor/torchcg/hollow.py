@@ -350,26 +350,46 @@ def virtualize_parameters(module: Any, session: HollowSession, *, dtype: Any = N
     that exists, so there is never a reason to destroy a value here. The
     stated device is applied afterwards, to the exported program
     (:func:`restate_program`), which is the only thing that carries it.
+
+    **With one exception, and it is a difference in KIND rather than a
+    carve-out (tcg#66).** A lifted constant that is itself on ``meta`` is not
+    value-bearing at all: it was DERIVED FROM THE PARAMETERS during
+    ``__init__``, and this session put those on meta a moment earlier. The
+    canonical producer is ``torch.nn.utils.weight_norm``, which every
+    DAC/BigVGAN-derived audio VAE applies to every conv: it deletes the
+    ``weight`` Parameter and installs a plain tensor ATTRIBUTE
+    ``weight = _weight_norm(weight_v, weight_g, dim)``. Fed meta parents, that
+    attribute is meta -- and a meta tensor cannot be copied, only
+    re-allocated. So it is virtualized exactly like the parameters it came
+    from, and the module's own pre-forward hook recomputes it from them on
+    the first call anyway.
+
+    A meta BUFFER still refuses, and the asymmetry is the point: a buffer's
+    value is a function of CONFIG and feeds the trace's literal digest, so a
+    meta one is a real loss of information. A meta attribute is downstream of
+    tensors this session deliberately emptied, so there is no information to
+    lose.
     """
 
     import torch
 
     device = session.drive_device
+
+    def hollow_like(value: Any) -> Any:
+        target = (
+            dtype if dtype is not None and value.dtype.is_floating_point else value.dtype
+        )
+        with session.fake_mode:
+            return torch.empty(
+                tuple(int(d) for d in value.shape), dtype=target, device=device
+            )
+
     for _prefix, submodule in module.named_modules():
         for name, param in list(submodule._parameters.items()):
             if param is None:
                 continue
-            target = (
-                dtype
-                if dtype is not None and param.dtype.is_floating_point
-                else param.dtype
-            )
-            with session.fake_mode:
-                hollow = torch.empty(
-                    tuple(int(d) for d in param.shape), dtype=target, device=device
-                )
             submodule._parameters[name] = torch.nn.Parameter(
-                hollow, requires_grad=False
+                hollow_like(param), requires_grad=False
             )
         for name, buffer in list(submodule._buffers.items()):
             if buffer is None:
@@ -383,7 +403,11 @@ def virtualize_parameters(module: Any, session: HollowSession, *, dtype: Any = N
                 )
             submodule._buffers[name] = _rehome(buffer, device)
         for name, value in _tensor_attributes(submodule):
-            setattr(submodule, name, _rehome(value, device))
+            replacement = (
+                hollow_like(value) if value.device.type == "meta"
+                else _rehome(value, device)
+            )
+            setattr(submodule, name, replacement)
 
 
 def _rehome(value: Any, device: str) -> Any:
@@ -391,8 +415,22 @@ def _rehome(value: Any, device: str) -> Any:
 
     A real move, always: the drive device can hold a real tensor by
     construction. A tensor already there is untouched.
+
+    A meta tensor has no value to keep, so it is not this function's job and
+    it REFUSES by name rather than letting torch raise ``Cannot copy out of
+    meta tensor`` from three frames down (tcg#66). Deciding what a storageless
+    tensor should become needs the session; every caller that has one routes
+    it to :func:`virtualize_parameters`'s fake path instead. Never wrapped in
+    a broad ``try/except`` -- that is how a loud, correct, by-name refusal
+    becomes a silently dropped component.
     """
 
+    if value.device.type == "meta":
+        raise HollowError(
+            "_rehome moves a REAL tensor onto the drive device and was handed "
+            "a meta one, which has no storage to move. A storageless tensor is "
+            "virtualized, not copied."
+        )
     if value.device.type == str(device).split(":", 1)[0]:
         return value
     return value.to(device)

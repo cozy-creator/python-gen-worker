@@ -306,7 +306,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "b5509c0dc89f027245b9cd56e103227b7afadb4c"
+rev = "20e54d41c7f853e809fc985e795e1cdd539b3215"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's
@@ -533,7 +533,7 @@ rewrites = [
 "document.py" = "797a3f17f46e971ce165c7c64503efece8219c04c80530036727d7c838f173f7"
 "engine.py" = "d8275ad146c73ae5516ea7d60acc1fd63cdddb3036f4833f7741913fe340a1a9"
 "graph_identity.py" = "88c731a681eb1e0b878f30bc33fcaa4efdbfc16bdc612fd6d406a088e299e567"
-"hollow.py" = "2e24782b350bf4634171d8c3eb90bf3a1131527c69a4dc14234d7380b4276b36"
+"hollow.py" = "d0654b626ce367535e9a0f0782fb952e52128c395316932f4c5ad973b260429b"
 "host_isa.py" = "679aa81547be2d60ae6593b6e8f75dd29dcd56ab85d8e858e219b5af5d0eadc4"
 "identity.py" = "a460a24836cbd46cc9e65bd684b9f6258f6718e5c56102f26a7071f01574a99e"
 "ingress.py" = "fa9b814dbfcd43e2a7cfdd2ed48299a7fa5a570aa73d3e2269448c974074d558"

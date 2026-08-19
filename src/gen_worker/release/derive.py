@@ -109,6 +109,43 @@ class DeriveError(RuntimeError):
     """The release derive cannot state this endpoint's graph set."""
 
 
+class PayloadEnumerationRefused(DeriveError):
+    """THIS ENTRYPOINT's payload cannot be auto-enumerated (pgw#1449).
+
+    A property of one signature, never of the module -- so it is caught per
+    entrypoint, stated in the document, and the entrypoints that CAN be
+    enumerated are derived anyway. Deliberately a NARROW subclass with
+    exactly one raise site: catching ``DeriveError`` instead would swallow
+    slot-order violations, empty enums and non-msgspec payloads, which are
+    author defects that must still take the module down.
+
+    The distinction is the one the derive already draws for a combination
+    the author refuses with ``ValidationError``: an enumeration the derive
+    cannot reach is counted and named, not treated as a broken endpoint.
+    """
+
+    def __init__(self, owner: str, field: str, annotation: Any) -> None:
+        self.owner = owner
+        self.field = field
+        self.annotation = _render_annotation(annotation)
+        super().__init__(
+            f"{owner}: required payload field {field!r} of type "
+            f"{annotation!r} cannot be auto-synthesized for the trace. Give "
+            f"it a default, or reshape it so the schema states its axes "
+            f"(enum fields enumerate)."
+        )
+
+
+def _render_annotation(annotation: Any) -> str:
+    """A stable spelling of a type for the document (never ``repr`` noise)."""
+
+    name = getattr(annotation, "__name__", None)
+    if name and not typing.get_args(annotation):
+        module = getattr(annotation, "__module__", "")
+        return f"{module}.{name}" if module and module != "builtins" else str(name)
+    return str(annotation).replace("typing.", "")
+
+
 def model_model_type(cls: type) -> Optional[type]:
     """The class-header model type, or None for an undeclared base."""
     try:
@@ -146,6 +183,10 @@ class ReleaseDeriveResult:
     #: Lanes that TRACED and found nothing marked via ``ctx.compile``. Zero
     #: graphs because the author marked zero modules — measured, not assumed.
     unmarked_lanes: tuple[str, ...] = ()
+    #: pgw#1449: entrypoints the enumerator could not build a trace payload
+    #: for, name -> the typed reason. They are STATED, not silently dropped,
+    #: and they no longer take the module's other entrypoints down with them.
+    unenumerable_entrypoints: tuple[tuple[str, str], ...] = ()
 
     @property
     def eager_permanent(self) -> bool:
@@ -554,11 +595,7 @@ def _synthesize_field(owner: str, name: str, annotation: Any) -> Any:
         return False
     if _optional_none(annotation):
         return None
-    raise DeriveError(
-        f"{owner}: required payload field {name!r} of type {annotation!r} "
-        f"cannot be auto-synthesized for the trace. Give it a default, or "
-        f"reshape it so the schema states its axes (enum fields enumerate)."
-    )
+    raise PayloadEnumerationRefused(owner, name, annotation)
 
 
 def _literal_axis(annotation: Any) -> Optional[list[Any]]:
@@ -1335,8 +1372,10 @@ def derive_release(
     entrypoints: dict[str, Any] = {}
     warnings: list[str] = []
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
+    unenumerable: list[tuple[str, str]] = []
     for plan in _entrypoints(module, cls):
         owner = f"@entrypoint {plan.name}"
+        refusal: Optional[PayloadEnumerationRefused] = None
         if cls is None:
             # pgw#1392: a WEIGHTLESS entrypoint has no lane, so there is no
             # trace subject and no pass is ever run. `traced_passes` says 0
@@ -1345,7 +1384,19 @@ def derive_release(
             # auto-generated API docs are the point of this block.
             payloads: tuple[Any, ...] = ()
         else:
-            payloads, capped = _auto_payloads(owner, plan.payload_type)
+            try:
+                payloads, capped = _auto_payloads(owner, plan.payload_type)
+            except PayloadEnumerationRefused as exc:
+                # pgw#1449: ONE unenumerable signature used to cost the whole
+                # module — `gen-worker lock` died here and wrote NO lock, so
+                # the entrypoints the enumerator CAN reach never got written
+                # either. The derive is a pre-warming completeness aid, never
+                # a correctness gate: an endpoint that derives 2 of 3
+                # entrypoints is strictly more useful than one that derives
+                # none, and the third is STATED rather than dropped.
+                refusal = exc
+                payloads = ()
+                capped = False
             if capped:
                 warnings.append(
                     f"{owner}: enum cross-product exceeds the cap "
@@ -1353,7 +1404,8 @@ def derive_release(
                     f"rest is first-encounter discovery (eager + background "
                     f"mint)"
                 )
-        plans.append((plan, payloads))
+        if refusal is None:
+            plans.append((plan, payloads))
         entrypoints[plan.name] = {
             "envelope_schema": _envelope_schema(plan),
             # Renders EMPTY for a weightless entrypoint — an honest {}, never
@@ -1364,6 +1416,25 @@ def derive_release(
             },
             "traced_passes": len(payloads),
         }
+        if refusal is not None:
+            # A TYPED row, not a warning string: the hub and the miner read
+            # this document, and "this entrypoint has no traced coverage, for
+            # this reason" is a fact about the release, not a log line. The
+            # key is absent on every enumerable entrypoint, so a document that
+            # has no refusals is byte-identical to one derived before this.
+            entrypoints[plan.name]["unenumerable"] = {
+                "field": refusal.field,
+                "type": refusal.annotation,
+                "reason": "payload_field_not_synthesizable",
+            }
+            unenumerable.append((plan.name, str(refusal)))
+            warnings.append(
+                f"{owner}: NOT enumerated — {refusal.field!r} "
+                f"({refusal.annotation}) cannot be synthesized. This "
+                f"entrypoint has no traced coverage; it serves eager and "
+                f"mints on first encounter. Every other entrypoint is "
+                f"unaffected."
+            )
 
     if cls is not None:
         requires = model_requires(cls)
@@ -1450,6 +1521,7 @@ def derive_release(
         eager_only=eager_only,
         derived_lanes=tuple(derived_lanes),
         unmarked_lanes=tuple(unmarked_lanes),
+        unenumerable_entrypoints=tuple(unenumerable),
     )
 
 
@@ -1457,6 +1529,7 @@ __all__ = [
     "DOCUMENT_KIND",
     "ENUM_CAP",
     "DeriveError",
+    "PayloadEnumerationRefused",
     "ReleaseDeriveResult",
     "derive_release",
 ]

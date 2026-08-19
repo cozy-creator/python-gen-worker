@@ -278,6 +278,12 @@ def run_lock(args: argparse.Namespace) -> int:
     graphs = sum(len(h) for h in result.lane_graphs.values())
     programs = el.program_digests(json.loads(result.document))
     _say_posture(result)
+    # pgw#1449: an entrypoint the enumerator could not reach no longer kills
+    # the lock — it is written with everything that COULD be enumerated and
+    # the rest is stated. Said here as well as in the document because the
+    # operator running this verb is the one who can reshape the signature.
+    for name, reason in result.unenumerable_entrypoints:
+        _say(f"lock: entrypoint {name} NOT enumerated -- {reason}")
     _say(
         f"lock: traced {graphs} specialization(s), {len(programs)} exported "
         f"program(s) in the CAS at {graph_cas_root} ({elapsed:.1f}s)"
@@ -292,6 +298,9 @@ def run_lock(args: argparse.Namespace) -> int:
         "trace_device": device,
         "specializations": graphs,
         "programs": len(programs),
+        "unenumerable_entrypoints": [
+            name for name, _reason in result.unenumerable_entrypoints
+        ],
         "seconds": round(elapsed, 1),
     }))
     return 0
