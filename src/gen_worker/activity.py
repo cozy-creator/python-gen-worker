@@ -280,6 +280,19 @@ KIND_BOOT_STAGES = "boot_stages"
 # KIND_SERVE_DEGRADE, which is the countable quality-confession channel
 # (th#2075's ingest), so the two questions stay two rows.
 KIND_ENGINE_BOOT = "engine_boot"
+# pgw#1455: the serving-path weight download's BYTE POSITION, in integral MiB
+# on the typed `step`/`total_steps` columns. Its own KIND because it is the only
+# fact that separates "downloading" from "downloading is PROGRESSING": rental #6
+# parked a request on `model_download_pending` for 49 minutes with 0 rows in
+# `worker_activity_events`, and the scheduler's `attempts` counter — its own 1 Hz
+# placement poll — carries no download information at all. `snapshot_pull` is a
+# terminal roll-up of a pull that ALREADY FINISHED, so it answers nothing about
+# one in flight; `warmup`'s byte counter rides whichever activity happens to be
+# open, which for a steady-state materialization is none. The hub keys
+# `info.Activities` on kind alone and reads THIS kind's `step` into the
+# `model_download_pending` decline explain (th#2191). Phases are a closed
+# vocabulary (`weight_position.PHASE_*`).
+KIND_WEIGHT_FETCH = "weight_fetch"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.
