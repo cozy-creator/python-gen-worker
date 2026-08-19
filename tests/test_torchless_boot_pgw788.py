@@ -130,9 +130,22 @@ def test_capability_probe_is_not_memoized_across_the_boundary(torchless):
 
 def test_boot_modules_import_without_torch(torchless):
     """entrypoint is what calls establish(); it must be importable torchless."""
+    import gen_worker
+
+    # `gen_worker.entrypoint` is TWO things: the pod's process main (this
+    # module) and the `@entrypoint` decorator the package re-exports. Importing
+    # the module BINDS it on the package and clobbers the decorator for the
+    # rest of this interpreter — after which any author module doing
+    # `from gen_worker import entrypoint` dies with
+    # `TypeError: 'module' object is not callable`. Under xdist that made a
+    # green suite depend on which file this one shared a worker with.
+    # Repaired here because this is the only importer; the NAME COLLISION
+    # itself is the real defect and belongs to whoever owns the public surface.
+    decorator = gen_worker.entrypoint
     for name in ("gen_worker.env_seal", "gen_worker.host_isa",
                  "gen_worker.guard_closure", "gen_worker.entrypoint"):
         __import__(name)
+    gen_worker.entrypoint = decorator
 
 
 # ---------------------------------------------------------------------------

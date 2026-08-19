@@ -98,8 +98,12 @@ def test_the_wire_has_no_syntax_left_for_subtraction() -> None:
     assert "components" not in fields, (
         "ModelBinding.components IS the subtraction; it must stay deleted")
     assert "manifest_digest" in fields
+    # pgw#1415: 9 -> 10. Tag 9 was claimed here while tensorhub still had it
+    # free, and th#2140 then spent it on `model`; the hub is the only SENDER
+    # of either field, so the hub's number stands and this one moved. The
+    # SUBTRACTION this test guards is untouched by that.
     assert pb.ModelBinding.DESCRIPTOR.fields_by_name[
-        "manifest_digest"].number == 9
+        "manifest_digest"].number == 10
     assert "provenance" in {f.name for f in pb.Snapshot.DESCRIPTOR.fields}
 
 
