@@ -90,7 +90,7 @@ from .requirements import (
     assert_exact_env,
     rank,
 )
-from .runner import CompiledGraphRunner, ConstantBindingError
+from .runner import CompiledGraphRunner, ConstantBindingError, VerifiedGraph
 from .selection import (
     FeedNormalization,
     GraphSpecializationCandidate,
@@ -106,6 +106,14 @@ from .selection import (
     SpecializationReport,
     describe_call,
     select,
+)
+from .serve import (
+    CompiledGraphCall,
+    MaterializedGraph,
+    aoti_loader,
+    materialize,
+    module_device,
+    resident_constants,
 )
 from .storage import (
     QuarantinedArtifact,
@@ -219,11 +227,18 @@ __all__ = [
     "require_targets",
     "resolve_target",
     "CompiledGraphKey",
+    "CompiledGraphCall",
     "CompiledGraphRunner",
     "CallIngress",
     "CallInput",
     "SpecializationReport",
     "ConstantBindingError",
+    "MaterializedGraph",
+    "VerifiedGraph",
+    "aoti_loader",
+    "materialize",
+    "module_device",
+    "resident_constants",
     "GRAPH_INTERFACE_FORMAT",
     "DeclarationError",
     "RetiredGraphInterface",

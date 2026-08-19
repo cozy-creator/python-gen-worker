@@ -29,18 +29,28 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .artifact import ArtifactError
 from .document import GraphRecord, GraphSetDocument, LaneGraphs
 from .graph_identity import EnvIdentity
 from .requirements import assert_exact_env
+from .runner import ConstantBindingError
 from .store import GraphStore, StoreError
 
 if TYPE_CHECKING:  # torch-free import closure: transform.py is torch-shaped
     from .transform import TransformSet
 
 #: Turns one fetched artifact into the callable that replaces the target
-#: module's forward for its graph specialization. The real AOTInductor loader arrives
-#: with the runtime mint wave; the seam keeps adoption testable without a GPU.
-ArtifactLoader = Callable[[Path, GraphRecord], Callable[..., Any]]
+#: module's forward for its graph specialization.
+#:
+#: Three arguments, and every one of them is load-bearing (tcg#58): the
+#: ARTIFACT is weightless by sealed policy, the RECORD's ingress is what maps
+#: the author's nested call onto the package's flat positional feeds, and the
+#: live MODULE is the only place the constant table's values exist on the
+#: device. A loader handed fewer than three cannot produce a callable that
+#: serves -- which is exactly the shape every consumer wrote until tcg#58.
+#: :func:`torchcg.serve.aoti_loader` is the production implementation and the
+#: default; the seam stays open only so adoption is testable without a GPU.
+ArtifactLoader = Callable[[Path, GraphRecord, Any], Callable[..., Any]]
 
 HOLE_MISS = "miss"
 
@@ -116,9 +126,14 @@ class _ForwardDispatcher:
     restores the eager class forward untouched.
     """
 
-    __slots__ = ("eager_forward", "_entries")
+    __slots__ = ("eager_forward", "module", "_entries")
 
     def __init__(self, module: Any) -> None:
+        #: The module this dispatcher fronts, kept because arming needs it:
+        #: the loader binds the compiled graph's constants to THESE tensors
+        #: (tcg#58), and the late-mint :meth:`AdoptSession.arm` reaches the
+        #: module only through here.
+        self.module = module
         self.eager_forward = module.forward
         self._entries: list[tuple[GraphRecord, Callable[..., Any]]] = []
 
@@ -183,7 +198,7 @@ class AdoptSession:
         contract: str,
         sm: str,
         *,
-        loader: ArtifactLoader,
+        loader: ArtifactLoader | None = None,
         artifacts_dir: str | Path,
         installed: Mapping[str, str],
         transforms: TransformSet | None = None,
@@ -299,8 +314,27 @@ class AdoptSession:
                 continue
             self._arm(dispatcher, record, artifact)
 
+    def _load(self, dispatcher: _ForwardDispatcher, artifact: Path, record: GraphRecord) -> Any:
+        """The loader call, with the module it must bind against (tcg#58)."""
+
+        loader = self._loader
+        if loader is None:
+            from .serve import aoti_loader
+
+            loader = aoti_loader
+        return loader(Path(artifact), record, dispatcher.module)
+
     def _arm(self, dispatcher: _ForwardDispatcher, record: GraphRecord, artifact: Path) -> None:
-        compiled = self._loader(Path(artifact), record)
+        try:
+            compiled = self._load(dispatcher, Path(artifact), record)
+        except (ArtifactError, ConstantBindingError) as exc:
+            # Bytes that will not verify, or a constant table that will not
+            # bind to THIS module, is a hole with a stated reason -- never a
+            # dead boot and never a silent arm. Both refusals are typed at
+            # their source precisely so this arm can be narrow: anything else
+            # escaping the loader is a bug and keeps escaping.
+            self._holes[record.graph] = Hole(record, f"{type(exc).__name__}: {exc}")
+            return
         try:
             dispatcher.arm(record, compiled)
         except AmbiguousStructure as exc:

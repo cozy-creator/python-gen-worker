@@ -415,6 +415,16 @@ jobs:
       - name: pgw#1215 guard - no export/AOTI compile in the serving process
         run: uv run python scripts/lint_serving_process_compiles.py
 
+      # pgw#1460: torchcg artifacts are WEIGHTLESS by sealed policy, so a bare
+      # `aoti_load_package(path)` arms an EMPTY constant buffer and takes flat
+      # feeds its caller does not have. BOTH v2 adopt loaders were exactly that
+      # — the `GraphRecord` accepted and discarded — and every test that
+      # covered them injected a stub. `torchcg.serve.aoti_loader` is the
+      # sanctioned path AND the default, so the right amount of code at a call
+      # site is none.
+      - name: pgw#1460 guard - no raw AOTI package load in src/gen_worker
+        run: uv run python scripts/lint_raw_aoti_load.py
+
       # GATING (pgw#1328, superseding pgw#1327's narrow precursor): the
       # ADOPT-ONLY serve role adopts by key and refuses or routes on a miss
       # (§4.28/§4.29), so it must not be able to compile. This walks the

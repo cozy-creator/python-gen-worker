@@ -238,8 +238,22 @@ def manifest() -> RequirementsManifest:
     return RequirementsManifest(include_set=(("torch", torch.__version__),), sm_compiled=SM)
 
 
-def counting_loader(calls: "list[str]") -> "Callable[[Path, Any], Callable[..., Any]]":
-    def load(path: Path, record: Any) -> "Callable[..., Any]":
+def counting_loader(
+    calls: "list[str]",
+) -> "Callable[[Path, Any, Any], Callable[..., Any]]":
+    """The ONE stub: bytes-to-callable needs a real AOTI package and a GPU.
+
+    THREE arguments since pgw#1460/tcg#58, and the third is asserted rather
+    than ignored: the production loader binds the compiled graph's constants
+    to the LIVE MODULE that claimed the record, so a double that drops the
+    module models a loader that cannot exist. That omission is the whole
+    reason this stub stayed green over two raw, unservable loaders.
+    """
+
+    def load(path: Path, record: Any, module: Any) -> "Callable[..., Any]":
+        assert isinstance(module, torch.nn.Module), (
+            "the loader is handed the module its constants bind from")
+
         def compiled(sample: torch.Tensor) -> torch.Tensor:
             calls.append(record.graph)
             return sample
