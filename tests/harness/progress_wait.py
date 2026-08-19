@@ -5,7 +5,7 @@ code; it is asserting that today's runner is fast enough. pgw#795 is what that
 costs: a 15-second deadline in a file the release never touched failed the
 0.78.0 publish job TWICE, after observing 2 of the 3 events it wanted. Worse
 than the delay: the clock also LIED about the cause. The real defect was a race
-with a ~2 s worker-side promotion (see tests/test_residency_republish_pgw628.py),
+with a ~2 s worker-side promotion,
 and a wall clock cannot tell "slow" from "this can never happen now" — so it
 reported the only thing it knows, and two releases were spent believing it.
 

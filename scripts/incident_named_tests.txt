@@ -86,7 +86,6 @@ tests/test_ref_grammar_conformance_th1276.py
 tests/test_regional_marks_pgw1082.py
 tests/test_repack_engine_pgw740.py
 tests/test_report_throttle_boot_pgw763.py
-tests/test_residency_republish_pgw628.py
 tests/test_resolved_manifest_pgw1246.py
 tests/test_retired_env_names_pgw1305.py
 tests/test_rigboot_pgw1120.py
@@ -120,7 +119,6 @@ tests/test_topology_fuzz_pgw867.py
 tests/test_topology_rename_skew_th1375.py
 tests/test_torchless_boot_pgw788.py
 tests/test_turbo_overlay_gw627.py
-tests/test_two_run_reuse_pgw1096.py
 tests/test_unbounded_read_guard_pgw1013.py
 tests/test_untrusted_pickle_and_secret_sources_pgw498_pgw884.py
 tests/test_upload_phase_split_pgw1125.py

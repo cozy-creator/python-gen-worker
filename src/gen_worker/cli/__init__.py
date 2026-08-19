@@ -2,12 +2,13 @@
 
 Subcommands:
 
-- ``run``    — invoke ONE endpoint method one-shot (loads the model, runs, exits).
-- ``serve``  — persistent local dev server: load models once, serve many
-               requests warm over NDJSON on stdin/stdout + a Unix socket.
-- ``invoke`` — client for ``serve``: fire one request by function name.
-- ``job``    — list this package's ``@job`` functions, or run ONE of them
-               locally with no hub (``job run <name> --payload file.json``).
+- ``models export`` — emit this package's model vocabulary.
+- ``release derive`` — run the instrumented derive inside the release env and
+  emit the release metadata document.
+
+pgw#1373 deleted the v1 subcommands (``run``, ``serve``, ``invoke``,
+``prefetch``, ``families``, ``model``, ``job``) with the declaration surface
+they drove. Local serving is ``python -m gen_worker.serving``.
 
 See ``docs/local-dev.md``.
 

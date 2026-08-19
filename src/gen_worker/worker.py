@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 import importlib
 import json
 import logging
@@ -768,6 +769,33 @@ class Worker:
                 envelope["models"] = named
         return envelope
 
+    def _request_context_facts(self, run: pb.RunJob) -> Dict[str, Any]:
+        """The per-request half of the handler's ``RequestContext``.
+
+        pgw#1438: the v2 rewrite carried the PAYLOAD across and nothing else,
+        so `RunJob.capability_token` reached no context and every file
+        operation raised ``worker_capability_token is required for file
+        operations`` — that is `ctx.save_image`, `save_bytes`, `save_file`,
+        `save_audio`, `save_video`, i.e. the OUTPUT of every media endpoint.
+        The token is minted per request and expires, so it can never ride
+        `ServeLoop`'s construction-time `context_kwargs`.
+
+        `file_base_url` comes off the HelloAck rather than the RunJob: the hub
+        names one file API per session, and a per-dispatch override would let
+        one job's blobs land somewhere the session never agreed to.
+        """
+        hints: Dict[str, Any] = {}
+        if run.media_bytes == pb.MEDIA_BYTES_INLINE:
+            # The client asked for bytes back in the result rather than a link.
+            hints["output_format"] = "inline"
+        return {
+            "owner": str(run.org or "") or None,
+            "invoker_id": str(run.invoker_id or "") or None,
+            "file_api_base_url": self.file_base_url or None,
+            "worker_capability_token": str(run.capability_token or "") or None,
+            "execution_hints": hints or None,
+        }
+
     def _check_lane(self, run: pb.RunJob) -> None:
         lane = str(run.lane or "").strip()
         if lane and lane not in self.lanes:
@@ -806,10 +834,13 @@ class Worker:
             )
             try:
                 outcome = await asyncio.to_thread(
-                    self.serve.invoke,
-                    str(run.function_name),
-                    envelope,
-                    request_id=str(run.request_id),
+                    functools.partial(
+                        self.serve.invoke,
+                        str(run.function_name),
+                        envelope,
+                        request_id=str(run.request_id),
+                        context=self._request_context_facts(run),
+                    )
                 )
             finally:
                 postmortem.clear_inflight(inflight)

@@ -219,10 +219,23 @@ class ServeLoop:
     # -- the one public operation -------------------------------------------
 
     def invoke(
-        self, function: str, envelope: Any, *, request_id: str
+        self,
+        function: str,
+        envelope: Any,
+        *,
+        request_id: str,
+        context: Optional[Mapping[str, Any]] = None,
     ) -> InvokeOutcome:
         """Serve one request end-to-end. See the module docstring for the
-        walk; every step before ``spec.fn`` refuses typed."""
+        walk; every step before ``spec.fn`` refuses typed.
+
+        ``context`` carries the PER-REQUEST context facts the dispatch owns
+        rather than the loop — the caller's org, the capability token that
+        authorizes this request's writes, the file API base the HelloAck named,
+        and the inline-output preference. They cannot ride ``context_kwargs``,
+        which is constructed once per ServeLoop: a capability token is minted
+        per request and expires.
+        """
         spec = self.loaded.entrypoints.get(function)
         if spec is None:
             raise ServeDispatchError(
@@ -300,7 +313,7 @@ class ServeLoop:
                         model_slots[first_slot], picks[first_slot]
                     )
 
-            ctx = self._make_context(request_id, primary_binding, spec)
+            ctx = self._make_context(request_id, primary_binding, spec, context)
             for warning in degraded:
                 ctx.warn(warning)
             arguments = [
@@ -333,8 +346,12 @@ class ServeLoop:
         request_id: str,
         binding: Optional[DeployBinding],
         spec: Optional[Any] = None,
+        per_request: Optional[Mapping[str, Any]] = None,
     ) -> RequestContext[Any]:
         kwargs: Dict[str, Any] = dict(self._context_kwargs)
+        # Per-request facts WIN over the loop's construction-time defaults:
+        # the token, the owner and the file API base belong to this dispatch.
+        kwargs.update({k: v for k, v in (per_request or {}).items() if v is not None})
         if self._output_dir is not None:
             kwargs.setdefault("local_output_dir", str(self._output_dir))
         if spec is not None:
