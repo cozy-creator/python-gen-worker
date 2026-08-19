@@ -3,7 +3,7 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-bc26a69f55ffc6baba73ab7bd8dbc596c16f980ace63e189a47a946546de2fcb
+5f7cec2795c92fe9b5cee41114a75ca6e6f46deac0c171d91454272ba59ab51c
 
 # th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
 # `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
@@ -74,3 +74,15 @@ bc26a69f55ffc6baba73ab7bd8dbc596c16f980ace63e189a47a946546de2fcb
 # `activity.py` previously carried a one-line bridge (pgw's own vocabulary was
 # already `graph_specialization` while the wire still said `graph_class`); this
 # commit deletes it, so the two names are one again.
+
+# th#2201 / pgw#1474: `JobResult.traceback = 9` — the traceback TAIL of the
+# exception that failed a job body, formatted and bounded at this worker's own
+# catch site (last frames, tail-truncated, secret-scrubbed). ADDITIVE; nothing
+# existing moves, and a hub older than th#2201 simply ignores it. Applied to
+# this vendored copy byte-identically to tensorhub's canonical hunk; the two
+# copies still differ only by this repo's th#1941 composed-manifest hunks, so
+# the two digests stay legitimately different.
+#
+# It exists because `safe_message` was `f"{type(exc).__name__}: {exc}"` and
+# nothing else: a $0.50, 455-GPU-second flagship job failure delivered the five
+# characters `'keys'` to its submitter, on a pod retired 19 seconds later.
