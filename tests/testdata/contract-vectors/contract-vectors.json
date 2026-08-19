@@ -8,6 +8,18 @@
       "stamp": "dit.blocks-fused-qkv@1"
     },
     {
+      "name": "ernie.diffusers-bf16.v1",
+      "file": "contracts/ernie.diffusers-bf16.v1.json",
+      "digest": "b4e726e157035529a98a594a211b3d085cc5c3577182ed1e3b9bb4c1d5811c67",
+      "stamp": "ernie.diffusers-bf16@1"
+    },
+    {
+      "name": "flux1.diffusers-bf16.v1",
+      "file": "contracts/flux1.diffusers-bf16.v1.json",
+      "digest": "392e9b54605ef75e18e7b7a29da3501f59215c091c228a16d18d403463320a63",
+      "stamp": "flux1.diffusers-bf16@1"
+    },
+    {
       "name": "flux2-klein.diffusers-bf16.v1",
       "file": "contracts/flux2-klein.diffusers-bf16.v1.json",
       "digest": "4d9fada187e6e086a1c4c496d81b785ce9419fc089e64d0141f6427b88e9d40d",
@@ -20,10 +32,28 @@
       "stamp": "hidream-o1.diffusers-bf16@1"
     },
     {
+      "name": "internvl-u.diffusers-bf16.v1",
+      "file": "contracts/internvl-u.diffusers-bf16.v1.json",
+      "digest": "9ee028aea999f92c4d93609f59ba476f0c6aad8dee3269cee1a22abec97d199d",
+      "stamp": "internvl-u.diffusers-bf16@1"
+    },
+    {
+      "name": "ltx-2.diffusers-bf16.v1",
+      "file": "contracts/ltx-2.diffusers-bf16.v1.json",
+      "digest": "71038ae11883111d367077eec59a457b97c8746439c3b7bc0885555e26b7aa12",
+      "stamp": "ltx-2.diffusers-bf16@1"
+    },
+    {
       "name": "minimax.h3-dit-diffusers.v1",
       "file": "contracts/minimax.h3-dit-diffusers.v1.json",
       "digest": "22bbb607d3e4351c18ac55e8d86c8a8a3d03296309b80e4419d4bc5153481f28",
       "stamp": "minimax.h3-dit-diffusers@1"
+    },
+    {
+      "name": "minimax.h3-dit-fp8-rowwise.v1",
+      "file": "contracts/minimax.h3-dit-fp8-rowwise.v1.json",
+      "digest": "69a2cc8f338ba925d4415f67719f1ed1643e9d31f43e4af04d9b2ff1dc035d1f",
+      "stamp": "minimax.h3-dit-fp8-rowwise@1"
     },
     {
       "name": "minimax.h3-dit-native.v1",
@@ -62,22 +92,22 @@
       "stamp": "sdxl.diffusers-bf16@1"
     },
     {
+      "name": "sdxl.diffusers-fp8-rowwise.v1",
+      "file": "contracts/sdxl.diffusers-fp8-rowwise.v1.json",
+      "digest": "7b78f2e44382dc5a3fe413e0f8f0a62ba63efefc810123304151c2ded931ee37",
+      "stamp": "sdxl.diffusers-fp8-rowwise@1"
+    },
+    {
+      "name": "trellis2.dit-bf16.v1",
+      "file": "contracts/trellis2.dit-bf16.v1.json",
+      "digest": "f9763a5aa4b82d552c7b582d7b540cd0fdf576cc5bd234bb9e73ec617738ab52",
+      "stamp": "trellis2.dit-bf16@1"
+    },
+    {
       "name": "wan22.diffusers-bf16.v1",
       "file": "contracts/wan22.diffusers-bf16.v1.json",
       "digest": "91036beea9878c462311d97a878a5dc94128283182fbf0948b30118852d97bd5",
       "stamp": "wan22.diffusers-bf16@1"
-    },
-    {
-      "name": "custom-interleaved",
-      "document": "{\n    \"format\": \"tensorfs-contract-v1\",\n    \"tensors\": [\n        {\"role\": \"b.{i}.qkv\", \"pattern\": \"b.{i}.qkv.weight\", \"rank\": 2,\n         \"fusion\": {\"axis\": 0, \"groups\": 56,\n                    \"parts\": [{\"role\": \"q\", \"share\": 1}, {\"role\": \"k\", \"share\": 1},\n                              {\"role\": \"v\", \"share\": 1}]}},\n        {\"role\": \"b.{i}.qkv#q\", \"pattern\": \"b.{i}.q.weight\", \"rank\": 2, \"required\": false,\n         \"fusion\": {\"axis\": 0, \"groups\": 56, \"parts\": [{\"role\": \"\", \"share\": 1}]}}\n    ]\n}",
-      "digest": "d57b11915fe4e389472da10707d7307bf03636d522b12887f39c7efbf1abe9b1",
-      "stamp": "sha256:d57b11915fe4e389472da10707d7307bf03636d522b12887f39c7efbf1abe9b1"
-    },
-    {
-      "name": "custom-rich",
-      "document": "{\n    \"format\": \"tensorfs-contract-v1\",\n    \"description\": \"vector fixture: every declaration branch\",\n    \"dtype\": \"bfloat16\",\n    \"tensors\": [\n        {\"role\": \"blocks.{i}.attn.qkv\", \"pattern\": \"blocks.{i}.attn.qkv_proj.weight\",\n         \"rank\": 2, \"dtypes\": [\"BF16\", \"F16\"],\n         \"fusion\": {\"axis\": 0, \"parts\": [{\"role\": \"q\", \"share\": 2}, {\"role\": \"k\", \"share\": 1},\n                                         {\"role\": \"v\", \"share\": 1}]}},\n        {\"role\": \"blocks.{i}.rope\", \"pattern\": \"blocks.{i}.rope.weight\", \"required\": false,\n         \"permute\": {\"view\": [4, \"shape[0]/2\", \"auto\", \"shape[1]\"], \"axes\": [0, 2, 1, 3]}}\n    ],\n    \"sets\": {\"adaln\": [\"blocks.{i}.adaln.weight\", \"norm_out.weight\"], \"rope\": [\"blocks.{i}.rope.weight\"]}\n}",
-      "digest": "840107df52fe82b735067c3649b14cde234235ac28792be6f915c357fc786a0f",
-      "stamp": "sha256:840107df52fe82b735067c3649b14cde234235ac28792be6f915c357fc786a0f"
     },
     {
       "name": "qwen-image.diffusers-bf16.v1",
@@ -90,6 +120,18 @@
       "file": "contracts/z-image.diffusers-bf16.v1.json",
       "digest": "f726fae567c094783ac5aa41822b77f4ae3387bfc07daf22f3ca189ed74c1af5",
       "stamp": "z-image.diffusers-bf16@1"
+    },
+    {
+      "name": "custom-rich",
+      "document": "{\n    \"format\": \"tensorfs-contract-v1\",\n    \"description\": \"vector fixture: every declaration branch\",\n    \"dtype\": \"bfloat16\",\n    \"tensors\": [\n        {\"role\": \"blocks.{i}.attn.qkv\", \"pattern\": \"blocks.{i}.attn.qkv_proj.weight\",\n         \"rank\": 2, \"dtypes\": [\"BF16\", \"F16\"],\n         \"fusion\": {\"axis\": 0, \"parts\": [{\"role\": \"q\", \"share\": 2}, {\"role\": \"k\", \"share\": 1},\n                                         {\"role\": \"v\", \"share\": 1}]}},\n        {\"role\": \"blocks.{i}.rope\", \"pattern\": \"blocks.{i}.rope.weight\", \"required\": false,\n         \"permute\": {\"view\": [4, \"shape[0]/2\", \"auto\", \"shape[1]\"], \"axes\": [0, 2, 1, 3]}}\n    ],\n    \"sets\": {\"adaln\": [\"blocks.{i}.adaln.weight\", \"norm_out.weight\"], \"rope\": [\"blocks.{i}.rope.weight\"]}\n}",
+      "digest": "840107df52fe82b735067c3649b14cde234235ac28792be6f915c357fc786a0f",
+      "stamp": "sha256:840107df52fe82b735067c3649b14cde234235ac28792be6f915c357fc786a0f"
+    },
+    {
+      "name": "custom-interleaved",
+      "document": "{\n    \"format\": \"tensorfs-contract-v1\",\n    \"tensors\": [\n        {\"role\": \"b.{i}.qkv\", \"pattern\": \"b.{i}.qkv.weight\", \"rank\": 2,\n         \"fusion\": {\"axis\": 0, \"groups\": 56,\n                    \"parts\": [{\"role\": \"q\", \"share\": 1}, {\"role\": \"k\", \"share\": 1},\n                              {\"role\": \"v\", \"share\": 1}]}},\n        {\"role\": \"b.{i}.qkv#q\", \"pattern\": \"b.{i}.q.weight\", \"rank\": 2, \"required\": false,\n         \"fusion\": {\"axis\": 0, \"groups\": 56, \"parts\": [{\"role\": \"\", \"share\": 1}]}}\n    ]\n}",
+      "digest": "d57b11915fe4e389472da10707d7307bf03636d522b12887f39c7efbf1abe9b1",
+      "stamp": "sha256:d57b11915fe4e389472da10707d7307bf03636d522b12887f39c7efbf1abe9b1"
     }
   ],
   "refusals": [

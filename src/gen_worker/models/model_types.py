@@ -417,20 +417,28 @@ Z_IMAGE_DIFFUSERS_BF16: Final = _library("z-image.diffusers-bf16", 1)
 #: migratable, and it is what ``Flux2Klein.canonical_contract`` points at.
 FLUX2_KLEIN_DIFFUSERS_BF16: Final = _library("flux2-klein.diffusers-bf16", 1)
 
-#: NO DOCUMENT YET — tensorfs#124 owes it (blocked on HF access to the BFL
-#: repos), so this is a ``MissingContract`` sentinel and ``Model[Flux1]``
-#: refuses loudly, naming the document it wants.
+#: REAL as of tensorfs#124's second half (tensorfs#136). It was a
+#: ``MissingContract`` sentinel until this document was vendored, and clearing
+#: it took NO code change — the property the sentinel shape exists to have.
 #:
-#: THAT IS DELIBERATE, AND IT IS SAFER THAN WHAT IT REPLACED. ``Flux1``
-#: pointed at ``dit.blocks-fused-qkv@1``, which is a family-PLURAL
-#: block-spelling FRAGMENT in the timm/native ``blocks.{i}.attn.qkv``
-#: spelling — it declares that pattern ``required: true`` and matches ZERO of
-#: the 169 tensors in a real Flux transformer header, whose tree is
-#: ``transformer_blocks.*``/``single_transformer_blocks.*``. So it was not a
-#: lane that MIGHT fail; it was a guaranteed refusal dressed as a resolved
-#: lane, which is exactly the silent lie pgw#1391 exists to kill. Pointing at
-#: nothing beats pointing at something that cannot match, and spelling the
-#: fragment in ``lanes=`` explicitly does not rescue it either.
+#: THE SENTINEL WAS RIGHT TWICE OVER, and the second reason was only measured
+#: when the document was authored. ``Flux1`` once pointed at
+#: ``dit.blocks-fused-qkv@1``, a family-PLURAL block-spelling FRAGMENT in the
+#: timm/native ``blocks.{i}.attn.qkv`` spelling: it declares that pattern
+#: ``required: true`` and matches ZERO tensors in a real Flux transformer
+#: header, whose tree is
+#: ``transformer_blocks.*``/``single_transformer_blocks.*``. That was a
+#: guaranteed refusal dressed as a resolved lane. But the alternative on offer
+#: was worse and quieter — ``flux2-klein.diffusers-bf16@1`` explains 308 of a
+#: FLUX.1 transformer's 1160 tensors with NO dtype or rank refusal, so it WON
+#: every FLUX.1 file until this document existed (measured upstream on dev,
+#: schnell and Flex.2-preview alike). Pointing at nothing beat both.
+#:
+#: The document is transformer-only and covers all three checkpoints the fleet
+#: serves: FLUX.1-dev 1160/1160, FLUX.1-schnell 1156/1156 (the four-tensor
+#: ``guidance_embedder`` delta is declared optional) and ostris/Flex.2-preview
+#: 808/808, whose ``x_embedder`` is 196 channels wide rather than 64 — its
+#: declarations constrain rank and dtype and never shape.
 FLUX1_DIFFUSERS_BF16: Final = _library("flux1.diffusers-bf16", 1)
 
 #: REAL, and the only shipped document whose own ``description`` names the Flux
@@ -787,12 +795,26 @@ class Flux1Defaults(msgspec.Struct, frozen=True):
     and ``:277-280``); schnell pins ``guidance_scale=0.0``
     (``flux.1-schnell/main.py:388-389``). A Flex.2 row flips it on.
 
-    DELIBERATELY ABSENT: ``canonical_scheduler_config`` (Flux is flow-matching
-    — no beta schedule to record, and ``FlowMatchEulerDiscreteScheduler``'s
-    shift parameters are RESOLUTION-dependent; BFL's own
+    DELIBERATELY ABSENT: ``canonical_scheduler_config``, and the REASON was
+    corrected at tensorfs#136 — the old one ("BFL's
     ``scheduler/scheduler_config.json`` is HF-gated and unfetchable from the
-    workspace, so it stays ``{}`` like SD2/HiDreamO1/Wan22 rather than being
-    invented); no ``.Lora`` overlay (no flux endpoint registers a lora
+    workspace") has DISSOLVED and must not be left standing, because a ``{}``
+    with a stale reason gets cleared by the next reader who assumes it was
+    only ever an access problem. The file is fetchable: it is a whole-file
+    entry in the hub's own resolve manifest for ``tensorhub/flux1-dev`` and
+    ``tensorhub/flux1-schnell``, and both were read.
+
+    It stays ``{}`` on the MEASURED fact instead, which is a stronger reason
+    than the access one ever was: the two checkpoints under this one family
+    root DISAGREE. Both are ``FlowMatchEulerDiscreteScheduler`` with
+    ``base_shift`` 0.5, ``max_shift`` 1.15 and image_seq_len 256..4096, but
+    dev is ``shift`` 3.0 with ``use_dynamic_shifting`` TRUE while schnell is
+    ``shift`` 1.0 with it FALSE. One canonical schedule for the root would
+    therefore be wrong for one of the two, and copying FLUX.2 Klein's
+    (3.0/dynamic — see :data:`FLUX2_KLEIN_SCHEDULER_CONFIG`) by family
+    resemblance would be right for dev and wrong for schnell. The per-arm
+    values are CHECKPOINT facts and belong in the catalog row, not here.
+    No ``.Lora`` overlay (no flux endpoint registers a lora
     vocabulary, so there is no strength range or scheduler demand to source);
     no ``timesteps`` ladder (no flux endpoint passes one).
     """

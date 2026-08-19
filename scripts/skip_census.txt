@@ -169,6 +169,42 @@ LOCAL-ONLY tests/test_author_ci_harness_pgw1150.py|serverless-endpoints is not c
 # corpus does not, the test FAILS rather than skipping — a rename must not turn
 # this gate into a `continue` (WORKSPACE-GIT-POLICY, "read the COUNT").
 LOCAL-ONLY tests/test_planner_grid.py|no tensorfs checkout beside this repo (set tensorfs_repo)
+# pgw#1428. TWO rows, the same shape as the planner-vector row above and for the
+# same reason: the vendored contract library and the vendored conformance corpus
+# compared against tensorfs AT THE REV `VENDORED.toml` PINS. No CI runner has a
+# tensorfs checkout, so neither can run there — and what they add over what CI
+# already proves is only "the snapshot is faithful to the rev it claims".
+# Everything else about those bytes IS measured in CI: every vendored document
+# is digest-pinned in `[packages.tensorfs.files]` and enforced as a SET by
+# `test_every_vendored_file_matches_its_recorded_digest`, and all sixteen golden
+# vectors are re-derived through the pure-Python port and compared to Rust's own
+# digests.
+#
+# WHY THE REASON STRING CHANGED, since that is what put these keys here: these
+# checks used to read the sibling's WORKING TREE, which asserts this repo is
+# always at tensorfs TIP and contradicts pinning a rev at all. Worse, the path
+# they used (`ROOT.parent.parent.parent`) resolved only from a WORKTREE — from
+# the main checkout it landed on `/home/tensorfs` and both rows skipped
+# silently, including here. So they were already skipping in CI; they were just
+# skipping under a reason nobody had to classify. Naming them is the fix, not a
+# new exemption. Set up a sibling `~/cozy/tensorfs` with the pinned rev fetched
+# to run them anywhere.
+CI-SKIPPED tests/test_lane_contracts.py|no sibling tensorfs checkout carrying contract_plane_rev
+# PRE-EXISTING, classified here because this change is already in this file and
+# the census step is red on clean origin/master for exactly these two keys
+# (verified: master job 95860438657 fails with the same two, one of them under
+# this row's reason verbatim). Leaving it would keep a fleet-wide step red for
+# every PR in the repo.
+#
+# What it says: `tensorfs#115` added `TensorStreamReader`, and the tensorfs the
+# CI env INSTALLS predates it — so the native weight-streaming suite has no
+# subject to test there. This is a genuine CI-SKIPPED, not a LOCAL-ONLY: the
+# property is measured wherever a current tensorfs is installed, and it becomes
+# runnable in CI the moment the installed tensorfs advances past #115. It is a
+# STAGED-shaped row wearing CI-SKIPPED clothes; if it is still here after the
+# next tensorfs bump, that bump did not reach this env and the row should be
+# re-read rather than re-blessed.
+CI-SKIPPED tests/test_weight_streaming_native_store.py|the installed tensorfs predates tensorfs#115 — it carries no tensorstreamreader, which is the whole subject of this suit
 # pgw#978. The full local mint cycle: a real child spawn, a real torch.export +
 # AOTInductor compile, a real publish over the wire and a real second-process
 # adopt. It is opt-in EVERYWHERE, CI included — not because CI could run it and

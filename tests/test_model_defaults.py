@@ -598,9 +598,17 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     assert Rife.canonical_scheduler_config == {}
     # pgw#1393: Flux is FLOW-MATCHING — there is no beta schedule to record at
     # all, and FlowMatchEulerDiscreteScheduler's shift parameters are
-    # resolution-dependent. BFL's own scheduler_config.json is HF-gated and
-    # could not be fetched, so this stays empty rather than borrowing SDXL's
-    # scaled_linear betas.
+    # resolution-dependent, so this never borrows SDXL's scaled_linear betas.
+    #
+    # tensorfs#136 CORRECTED THE REASON. pgw#1393 recorded "HF-gated and could
+    # not be fetched", which has since dissolved: both files are whole-file
+    # entries in the hub's resolve manifest for tensorhub/flux1-dev and
+    # tensorhub/flux1-schnell, and both were read. It stays empty on the
+    # measured fact instead — the two checkpoints under this one root DISAGREE
+    # (dev shift 3.0 with use_dynamic_shifting True; schnell shift 1.0 with it
+    # False), so no single value is right for the root, and Klein's 3.0/dynamic
+    # would be right for dev and wrong for schnell. A `{}` whose reason has
+    # gone stale is the one the next reader clears wrongly.
     from gen_worker.models import Flux1, Flux2Klein
 
     assert Flux1.canonical_scheduler_config == {}
