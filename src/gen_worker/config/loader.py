@@ -38,6 +38,11 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "WORKER_JWT": "bootstrap_worker_jwt",
     "WORKER_RELEASE_ID": "worker_release_id",
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
+    # pgw#1466: the cozy-local store roots. Not GEN_WORKER_-prefixed because
+    # they name BOX-SHARED stores that other cozy tools read too, the way
+    # TENSORHUB_CACHE_DIR does.
+    "COZY_WEIGHTS_CAS": "weights_cas_root",
+    "COZY_GRAPH_CAS": "graph_cas_root",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "GEN_WORKER_CONFIG_SNAPSHOT_PATH": "config_snapshot_path",
     "WORKER_CONFIG_GENERATION": "boot_config_generation",

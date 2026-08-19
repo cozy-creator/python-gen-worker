@@ -100,3 +100,18 @@ models.model_types.SDXL.Lora	serverless-endpoints/sdxl/src/sdxl/main_v2.py:208	P
 # `h3_finetuner` and `image_lora_finetuner`, none of them in this tree and none
 # of them ever will be. Structurally what this file is for.
 serving.context.RequestContext.mktemp	jobs/conversion/src/conversion/transform.py:176	PROD
+
+# pgw#1461 added the TRACE-time half of the author request surface:
+# `TraceRequestContext` is what a `@entrypoint` is handed while the derive
+# drives it, so its callers are the SAME author lines that call the serving
+# `RequestContext` at run time — in endpoint repos, never in this tree. The
+# two `step_callback` rows above are the same shape and predate these.
+#
+# Verified with `lint_unreached_surface.py --siblings`, which reported
+# `6 corpora scanned across 6/6 siblings` — the COUNT, not just the verdict,
+# because that scan skips a missing sibling and still prints green.
+release.trace_context.TraceRequestContext.call_endpoint	jobs/conversion/src/conversion/quant/parity_judge.py:253	PROD
+release.trace_context.TraceRequestContext.materialize_blob	jobs/vlm_judge/src/vlm_judge/images.py:58	PROD
+release.trace_context.TraceRequestContext.mktemp	jobs/vlm_judge/src/vlm_judge/clips/judge.py:243	PROD
+release.trace_context.TraceRequestContext.resolve_dataset	jobs/h3_finetuner/src/h3_finetuner/train.py:137	PROD
+release.trace_context.TraceRequestContext.workflow_checkpoint	private-inference-endpoints/dj-pipeline/src/dj_pipeline/main.py:249	PROD

@@ -145,7 +145,15 @@ def test_workflow_checkpoint_always_RUNS_the_work_at_trace() -> None:
     """Answering from a cache would skip the code the derive exists to see."""
 
     ran = []
-    result = _ctx().workflow_checkpoint("k", lambda: ran.append(1) or "value")
+
+    def work() -> str:
+        # A named function, not `lambda: ran.append(1) or "value"`: `append`
+        # returns None, so the `or` was load-bearing punctuation rather than a
+        # choice, and mypy reads it as the mistake it usually is.
+        ran.append(1)
+        return "value"
+
+    result = _ctx().workflow_checkpoint("k", work)
     assert result == "value" and ran == [1]
 
 

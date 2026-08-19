@@ -57,6 +57,13 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Path to the discovery manifest (endpoint.lock). Default is the baked
     # container location; non-container runs (e2e, bare-metal dev) override it.
     endpoint_lock_path: str = "/app/.tensorhub/endpoint.lock"
+    # pgw#1466 cozy-local store roots. Empty = "use the box default"; the
+    # defaults live in `cli/workspace.py` beside the code that explains WHY
+    # weights and graphs are separate stores, not here as bare strings.
+    # Fields rather than direct env reads (§1.18): these are config, and the
+    # CLI installs Settings at process entry like every other entry point.
+    weights_cas_root: str = ""
+    graph_cas_root: str = ""
     # NOT "the worker's JWT". It is the BOOTSTRAP copy — the
     # value the hub injected at pod create, frozen there forever and updated by
     # nothing. The live credential is rotated over the scheduler stream at ~80 %

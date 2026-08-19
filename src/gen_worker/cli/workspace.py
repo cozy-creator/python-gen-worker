@@ -22,19 +22,18 @@ right for one of them wrong for the other.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 #: The box-shared tensorfs weight CAS. This path is not a preference — it is
 #: where the store on this machine already is, populated by the hub client.
-#: Overridable for tests and for a second box layout, never guessed.
-WEIGHTS_CAS_ENV = "COZY_WEIGHTS_CAS"
+#: Overridable via the `COZY_WEIGHTS_CAS` config key (Settings field
+#: `weights_cas_root`), never guessed.
 DEFAULT_WEIGHTS_CAS = Path.home() / ".cache" / "tensorhub" / "cas"
 
 #: Exported programs (from `lock`) and compiled artifacts (from `sync`).
-GRAPH_CAS_ENV = "COZY_GRAPH_CAS"
+#: Config key `COZY_GRAPH_CAS` (Settings field `graph_cas_root`).
 DEFAULT_GRAPH_CAS = Path.home() / ".cache" / "cozy" / "graph-cas"
 
 
@@ -42,12 +41,27 @@ class WorkspaceError(RuntimeError):
     """A store or a ref could not be resolved to something on disk."""
 
 
+def _settings() -> Any:
+    """Installed Settings, or a zero-config default.
+
+    §1.18: config is loaded ONCE by the pipeline and passed; a module reading
+    `os.environ` itself is a second loader that can disagree with the first.
+    `current_or` takes the fallback AS A VALUE so the zero-config case is
+    visible here rather than hidden in an env read — which matters because this
+    module is imported both by the CLI (which installs Settings at process
+    entry) and by scripts that never bring a worker up.
+    """
+    from .. import config
+
+    return config.current_or(config.Settings())
+
+
 def weights_cas_root() -> Path:
-    return Path(os.environ.get(WEIGHTS_CAS_ENV) or DEFAULT_WEIGHTS_CAS)
+    return Path(_settings().weights_cas_root or DEFAULT_WEIGHTS_CAS)
 
 
 def graph_cas_root() -> Path:
-    return Path(os.environ.get(GRAPH_CAS_ENV) or DEFAULT_GRAPH_CAS)
+    return Path(_settings().graph_cas_root or DEFAULT_GRAPH_CAS)
 
 
 def trace_device() -> str:
@@ -123,7 +137,7 @@ def resolve_checkpoint(ref: CheckpointRef, *, cas_root: Optional[Path] = None) -
     root = Path(cas_root) if cas_root is not None else weights_cas_root()
     if not root.is_dir():
         raise WorkspaceError(
-            f"no weight CAS at {root} (set {WEIGHTS_CAS_ENV} to point at one)"
+            f"no weight CAS at {root} (set COZY_WEIGHTS_CAS to point at one)"
         )
     ref_file = root / "refs" / ref.owner / ref.name / ref.rev
     if not ref_file.is_file():
@@ -174,8 +188,6 @@ def local_cas(root: Path) -> Any:
 __all__ = [
     "DEFAULT_GRAPH_CAS",
     "DEFAULT_WEIGHTS_CAS",
-    "GRAPH_CAS_ENV",
-    "WEIGHTS_CAS_ENV",
     "CheckpointRef",
     "WorkspaceError",
     "graph_cas_root",
