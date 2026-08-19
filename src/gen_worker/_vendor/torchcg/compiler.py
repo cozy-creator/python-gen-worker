@@ -118,6 +118,80 @@ def _aot_compile(
     return cast(Any, compiler)(graph_module, args, kwargs, options=options)
 
 
+def _compile_inputs(program: object) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Rebuild the call AOTInductor compiles against, from the program itself.
+
+    pgw#1465. This used to read ``program.example_inputs``, and the derive now
+    DROPS that field: a hollow trace's example inputs are fake tensors, torch
+    serializes them by pickling ``_reconstruct_fake_tensor``, and torch's own
+    loader then refuses that under ``weights_only=True`` -- so a blob that kept
+    them could not be reloaded at all, on any device. Keeping them was not an
+    option; reading them was the last place a compile depended on a field
+    carried alongside the graph rather than derived from it.
+
+    Everything needed is already in the program, exactly and by construction:
+
+    * ``graph_signature.user_inputs`` is the FLAT call in order. A ``str``
+      entry names a placeholder; anything else IS a specialized constant that
+      the trace baked (``return_dict=False``), and it is carried verbatim
+      because its value is part of the graph's identity.
+    * each placeholder's ``meta['val']`` is its exact dtype, shape and DEVICE
+      -- the same fake tensors the trace ran on, which is what a compile wants
+      (pgw#1458: reading a device from anywhere else is how a mixed placement
+      reaches AOTI).
+    * ``call_spec.in_spec`` restores the nesting, so a pipeline's
+      ``conditioning={"a": ..., "b": ...}`` comes back as the dict the
+      author's ``forward`` declares rather than three loose tensors.
+
+    Derived, so there is nothing here for a producer to get wrong -- the same
+    move tcg#55 made for the graph interface.
+    """
+
+    from torch.utils import _pytree as pytree
+
+    graph = getattr(getattr(program, "graph_module", None), "graph", None)
+    signature = getattr(program, "graph_signature", None)
+    in_spec = getattr(getattr(program, "call_spec", None), "in_spec", None)
+    if graph is None or signature is None or in_spec is None:
+        raise CompileError(
+            "program cannot state its own call: one of graph_module.graph, "
+            "graph_signature or call_spec.in_spec is absent"
+        )
+    values = {
+        node.name: node.meta.get("val")
+        for node in graph.nodes
+        if getattr(node, "op", "") == "placeholder"
+    }
+    leaves: list[Any] = []
+    for entry in getattr(signature, "user_inputs", ()) or ():
+        if not isinstance(entry, str):
+            # A specialized constant the trace baked in. Its VALUE is part of
+            # the graph, so it is replayed exactly, never re-defaulted.
+            leaves.append(entry)
+            continue
+        if entry not in values:
+            raise CompileError(
+                f"exported program names user input {entry!r} with no matching "
+                f"placeholder; its graph and signature disagree"
+            )
+        leaves.append(values[entry])
+    try:
+        rebuilt = pytree.tree_unflatten(leaves, in_spec)
+    except Exception as exc:
+        raise CompileError(
+            f"cannot rebuild the exported program's call from its own signature "
+            f"({len(leaves)} flat input(s)) and in_spec: {type(exc).__name__}: {exc}"
+        ) from exc
+    try:
+        args, kwargs = rebuilt
+    except (TypeError, ValueError) as exc:
+        raise CompileError(
+            f"exported program in_spec does not unflatten to (args, kwargs); "
+            f"got {type(rebuilt).__name__}"
+        ) from exc
+    return tuple(args), dict(kwargs or {})
+
+
 def _compile_exported_program(program: object) -> tuple[object, ...]:
     """Compile one ExportedProgram to the loose files used by `package_aoti`.
 
@@ -134,10 +208,7 @@ def _compile_exported_program(program: object) -> tuple[object, ...]:
     exported_module = getattr(program, "module", None)
     if not callable(exported_module):
         raise CompileError("program has no callable module(check_guards=False)")
-    try:
-        args, kwargs = program.example_inputs  # type: ignore[attr-defined]
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise CompileError("program has no (args, kwargs) example_inputs") from exc
+    args, kwargs = _compile_inputs(program)
 
     try:
         with _compiling_under_export_context(program):
