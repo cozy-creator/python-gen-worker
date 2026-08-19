@@ -34,7 +34,9 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
+
+from .host import CompileStack
 
 from .. import activity as activity_mod
 
@@ -109,7 +111,7 @@ class ServeAdoption:
         artifacts_dir: Path,
         cas_dir: Optional[Path] = None,
         transport: Any = None,
-        stack: Optional[Mapping[str, str]] = None,
+        stack: Optional[CompileStack] = None,
         loader: Optional[Callable[[Path, Any, Any], Any]] = None,
         #: The mint trigger. May ANSWER with its mint's status (anything
         #: carrying `.running`); `None` back means "unknown" (pgw#1480).
