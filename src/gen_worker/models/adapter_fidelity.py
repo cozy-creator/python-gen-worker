@@ -253,6 +253,12 @@ def _has_weight_scale(mod: Any) -> bool:
     return scale is not None and hasattr(scale, "numel")
 
 
+def _is_gguf_leaf(mod: Any) -> bool:
+    from .gguf_torch import LEAF_MARKER
+
+    return bool(getattr(type(mod), LEAF_MARKER, False))
+
+
 def grid_of_module(mod: Any, *, path: str) -> TargetGrid:
     """The REAL grid this module's arithmetic lands on — read off the module,
     never supplied by the caller. A detector that diffs in the SOURCE dtype
@@ -265,6 +271,18 @@ def grid_of_module(mod: Any, *, path: str) -> TargetGrid:
     weight = getattr(mod, "weight", None)
     if weight is None:
         raise ValueError(f"module {type(mod).__name__} carries no weight to fuse into")
+    if _is_gguf_leaf(mod):
+        # pgw#1498. A GGML leaf's `weight` is BLOCK BYTES (uint8), not the
+        # weight — `_dtype_name` would answer "uint8" and hand back a grid that
+        # means nothing, which is the worst outcome available here: a fuse
+        # gated against a fiction. There is no fuse path for this lane at all.
+        # Adapters attach to the leaf and are applied to the dequantized copy
+        # inside forward (`gguf_torch.attach_lora`), which never writes to the
+        # grid and is therefore not what this refusal is about.
+        raise ValueError(
+            f"module {type(mod).__name__} holds GGML block bytes: there is no "
+            "fuse into a quantized grid to gate — attach the adapter instead "
+            "(gguf_torch.attach_lora), which applies it post-dequant")
     if weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
         gran = _GRID_ROW if _has_weight_scale(mod) else _GRID_NONE
         return TargetGrid(PATH_FUSE, _dtype_name(weight.dtype), gran)
@@ -638,6 +656,16 @@ def gate_fuse(
     this is the enforcement, and it is per-adapter evidence rather
     than a blanket dtype ban, so a genuinely fuse-safe adapter (rel |D|/|W|
     well above the grid's half-ulp) is not refused for its neighbours' sake.
+
+    The ruling's premise is that a MERGE damages the quantization: the grid's
+    scales were fit to the base weights, so a delta written into them is
+    silently rounded, and on a small quant rounded away. That premise has no
+    referent where there is no merge. The GGML lane (pgw#1498) never writes to
+    the grid — the block bytes are read-only and byte-identical before and
+    after, and the adapter is added to a dense copy that lives for one op — so
+    it is not gated here and this refusal must not be extended to cover it.
+    ``grid_of_module`` refuses such a module outright rather than inventing a
+    "uint8 grid" to gate against.
     """
     return gate(evaluate_fuse(mapped, modules, ref=ref, grid=grid),
                 request_id=request_id)
