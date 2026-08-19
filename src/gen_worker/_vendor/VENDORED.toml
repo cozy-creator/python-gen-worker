@@ -222,7 +222,7 @@ read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "write
 # They are FRAGMENTS (a family-shared block spelling and two CLIP component
 # spellings) that a `lanes=` header never names on its own. Do not "fix" them,
 # and do not let a declaration-time dtype read treat them as lanes.
-contract_plane_rev = "2abc1b76e8ee4c857abbb00e3c259b3a6bc2f595"
+contract_plane_rev = "b8bb39fdef1ce0c327bc482db0563ba97e114372"
 contract_plane_files = [
   "contract.py",
   "contracts.py",
