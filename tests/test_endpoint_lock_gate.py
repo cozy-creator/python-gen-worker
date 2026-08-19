@@ -1,5 +1,8 @@
 """`gen-worker lock` as a COMMITTED SOURCE artifact: deterministic, checkable.
 
+pgw#1488: the lock is committed beside the endpoint, so it must serialize
+deterministically and `--check` must be able to say whether it is stale.
+
 endpoint.lock lives in git beside the endpoint, so two properties matter that
 did not matter when it was scratch output:
 
