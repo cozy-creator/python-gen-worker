@@ -441,6 +441,52 @@ FLUX1_DIFFUSERS_BF16: Final = _library("flux1.diffusers-bf16", 1)
 #: declaration instead of reading ``None`` at load.
 DIT_BLOCKS_FUSED_QKV: Final = _library("dit.blocks-fused-qkv", 1)
 
+#: NO DOCUMENT YET — tensorfs#139 owes it (se#769's audio lane authors it in the
+#: same wave). A ``MissingContract`` sentinel until that document lands and is
+#: re-vendored here, at which point it resolves with NO code change on this side
+#: — the property the sentinel shape exists to have (the ``sd15``/``sd2``/
+#: ``hidream-o1``/``wan22`` four did exactly this across pgw#1391's re-vendor).
+#:
+#: This is NOT the ``FLUX1_DIFFUSERS_BF16`` hazard. That one names a document
+#: that EXISTS and CANNOT MATCH — a guaranteed refusal dressed as a resolved
+#: lane. This one names a document that does not exist yet, which refuses
+#: loudly while naming exactly what it wants. Pointing at nothing beats pointing
+#: at something that cannot match.
+#:
+#: ``fp16``, not ``bf16``: the served checkpoints are fp16 and the document
+#: describes what the hub serves. MEASURED by ranged safetensors-header reads
+#: (``http=206``, header bytes only, zero weight bytes) against both prod
+#: manifests — the transformer histograms ``{F16: 445}`` on
+#: ``tensorhub/stable-audio-open`` AND ``tensorhub/foundation-1``, and the hub
+#: records ``dtype=fp16`` on both checkpoints. The endpoints' inherited
+#: ``plain.bf16@1`` layout string disagrees with every checkpoint the fleet
+#: actually ships and dies with the se#769 migration (umbrella ruling,
+#: 2026-08-18: the bytes win).
+STABLE_AUDIO_DIFFUSERS_FP16: Final = _library("stable-audio.diffusers-fp16", 1)
+
+#: stabilityai/stable-audio-open-1.0 ``scheduler/scheduler_config.json``, read
+#: VERBATIM from the served prod manifest rather than transcribed from a model
+#: card. BYTE-IDENTICAL VALUES on ``tensorhub/foundation-1``'s own
+#: ``scheduler/scheduler_config.json`` — which is one of the two measurements
+#: that put both checkpoints under ONE root (the other being an identical
+#: 445-tensor transformer header sha256). Unlike Flux, this family's schedule
+#: IS recordable: the repos are reachable and the file is 411 bytes of config.
+STABLE_AUDIO_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "CosineDPMSolverMultistepScheduler",
+    "num_train_timesteps": 1000,
+    "prediction_type": "v_prediction",
+    "sigma_data": 1.0,
+    "sigma_max": 500,
+    "sigma_min": 0.3,
+    "sigma_schedule": "exponential",
+    "solver_order": 2,
+    "solver_type": "midpoint",
+    "final_sigmas_type": "zero",
+    "euler_at_final": False,
+    "lower_order_final": True,
+    "rho": 7.0,
+}
+
 
 # ── bases ────────────────────────────────────────────────────────────────────
 
@@ -1189,6 +1235,115 @@ class ZImageDefaults(msgspec.Struct, frozen=True):
     #: ``_MAX_SEQUENCE_LENGTH`` (``:131``). A plain int for the same reason as
     #: :class:`QwenImageDefaults` — no endpoint exposes it on the wire.
     max_sequence_length: int = 512
+class StableAudioDefaults(msgspec.Struct, frozen=True):
+    """Stable Audio Open 1.0 — Stability's latent-diffusion text-to-audio DiT,
+    and every fine-tune of it. ``stable-audio-open`` and ``foundation-1`` are
+    ONE root with two checkpoint rows (se#769 audio lane, 2026-08-18).
+
+    That is MEASURED, not judged. Both prod checkpoints resolve to a
+    445-tensor transformer with the SAME header sha256
+    (``fe6b07a5b16620f48da3e5cb8352322d6f2c36ea5daa78bd2f1288f8cacdbdf8``) —
+    identical tensor names, shapes and dtypes — and their
+    ``scheduler_config.json`` values are byte-identical. No MECHANISM differs,
+    which is the only thing the :class:`Flux2Klein` split precedent splits on.
+    They differ in WEIGHTS (transformer digests ``398eedf2…`` vs ``316934bb…``,
+    read from the manifests without fetching a weight byte), which is what
+    makes ``foundation-1`` a real fine-tune rather than a rebrand — and a
+    weight difference is a CHECKPOINT ROW, never a second vocabulary. Same
+    one-root shape as :class:`Wan22` and :class:`Flux1`.
+
+    ⚠️ THE TWO LANES DISAGREE ON DEFAULTS, and only ``foundation-1`` registers
+    a family at all (``foundation-1/main.py:57``; ``stable-audio-open``
+    registers none). Resolved by the widest-envelope rule, which comes out
+    LOSSLESS here: both declare the SAME ``num_inference_steps`` envelope
+    ``ge=1, le=250`` (``stable-audio-open/main.py:73``,
+    ``foundation-1/main.py:66``), so the intersection clamps nothing. Only the
+    DEFAULT VALUES diverge, and a default value is a checkpoint row (th#1116 —
+    the ``Defaults`` class is the SCHEMA, the catalog owns the VALUES, stated
+    outright at ``foundation-1/main.py:49-52``).
+
+    🔴 The platform stamp is the BASE checkpoint's, and BOTH rows must be
+    populated: a schema stamp of 200 would move ``stable-audio-open`` from 100
+    to 200 steps — a 2× cost-per-request change on the flagship. Same reason
+    :class:`Flux1Defaults` takes the BFL base-card numbers rather than a
+    distilled row's.
+
+    DELIBERATELY ABSENT: ``duration_s`` (the 5/10/20/30/47 preset ladder is the
+    ie#345 shape-bucket table and is endpoint PAYLOAD vocabulary — the same
+    reason :class:`Flux2KleinDefaults` excludes the megapixel tiers); ``seed``;
+    ``step_distilled`` (neither checkpoint is a timestep distillation);
+    ``max_sequence_length`` (no audio endpoint pins the T5 length — the
+    pipeline's silent truncation is surfaced as a ``ctx.adjusted`` row instead,
+    ``stable-audio-open`` docstring). A ``.Lora`` overlay is absent: no audio
+    endpoint registers a lora vocabulary, so there is no strength range to
+    source.
+    """
+
+    #: 100 = the BASE lane's registered wire default
+    #: (``stable-audio-open/main.py:73``, whose own comment reads "50-100 steps
+    #: typical; quality plateaus past 100"). Corroborated from the other side:
+    #: ``foundation-1/main.py:54`` sets 200 while conceding "quality plateaus
+    #: past ~100". foundation-1's row sets 200. Envelope 1..250 is declared
+    #: IDENTICALLY by both lanes, so it is the widest and narrows nothing.
+    steps: Knob[int] = Knob(100, lo=1, hi=250, name="steps")
+    #: StableAudioPipeline does CLASSIC CFG, so this is a real guidance scale,
+    #: not FLUX.1's distillation embedding. 7.0/1.5..15.0 from the only lane
+    #: that exposes it on the wire (``stable-audio-open/main.py:76-78``);
+    #: ``foundation-1`` exposes no cfg knob and rides the pipeline default,
+    #: which is the same 7.0, so the envelope admits both checkpoints.
+    guidance: Knob[float] = Knob(7.0, lo=1.5, hi=15.0, name="guidance")
+    #: TRUE for the whole family, and it is a MECHANISM fact rather than a
+    #: preference: ``stable-audio-open/main.py:77`` records "CFG-mechanism
+    #: model (StableAudioPipeline does classic CFG)". Both checkpoints share
+    #: the pipeline, so one ``cfg`` bool DOES serve both — which is precisely
+    #: the test :class:`Flux2KleinDefaults` failed and this family passes.
+    cfg: bool = True
+    #: The recipe negative prompt. "" is the BASE lane's
+    #: (``stable-audio-open/main.py:68`` — no negative by default);
+    #: ``foundation-1``'s row sets "Low quality."
+    #: (``foundation-1/main.py:56``), which its handler applies as a
+    #: caller-visible ``ctx.adjusted`` row rather than a silent substitution.
+    negative: str = ""
+
+
+class MusicGenDefaults(msgspec.Struct, frozen=True):
+    """Meta MusicGen — a T5 encoder + AUTOREGRESSIVE transformer decoder
+    emitting EnCodec tokens (``MusicgenForConditionalGeneration``). Its own
+    root, and not a close call: different upstream, ``transformers`` rather
+    than ``diffusers``, and token-by-token decoding rather than a denoising
+    loop. Its core model shares ZERO tensor names with the StableAudio DiT
+    (measured: intersection 0 across every prefix).
+
+    NO ``steps`` field — an AR decoder has no denoising steps to clamp; length
+    is token count, which rides ``duration_s`` on the wire and snaps to
+    EnCodec's 50 Hz frame grid as a ``ctx.adjusted`` row
+    (``musicgen/main.py:141-146``). NO ``canonical_contract`` and NO
+    ``canonical_scheduler_config``: there is no scheduler at all, and the
+    checkpoint is a single-file ``transformers`` tree for which the hub
+    records NO ``file_layout`` — which th#1937/th#2109 rule CORRECT for a
+    transformers tree, not a gap to fill.
+
+    ⚠️ LICENCE, and it constrains deployment rather than this vocabulary:
+    MusicGen's WEIGHTS are CC BY-NC 4.0 with no revenue threshold, so this
+    family may never back a public paying endpoint (ie#548). The un-exposure
+    is deploy-time config (``e2e/manifests/fleet.yaml``), not a ``ModelType``
+    fact, and is owned by the deploy lane.
+    """
+
+    #: 3.0 = the model-card default the endpoint already registers
+    #: (``musicgen/main.py:73``, "MusicGen uses CFG over the T5 conditioning;
+    #: 3.0 is the model-card default"). Envelope 1.0..10.0 is that lane's.
+    guidance: Knob[float] = Knob(3.0, lo=1.0, hi=10.0, name="guidance")
+    #: AR sampling temperature — a knob no diffusion family has.
+    #: ``musicgen/main.py:74``. The wire bound is ``gt=0.0`` (exclusive); the
+    #: platform envelope uses an inclusive 0.0 floor and the endpoint keeps its
+    #: own narrower wire bound, the same division :class:`Flux2KleinDefaults`
+    #: documents.
+    temperature: Knob[float] = Knob(1.0, lo=0.0, hi=2.0, name="temperature")
+    #: Real CFG over the T5 conditioning (``musicgen/main.py:72``), so True —
+    #: same value as :class:`StableAudioDefaults`, reached by a different
+    #: mechanism.
+    cfg: bool = True
 
 
 # ── the model types (launch set, pgw#1376 point 1) ───────────────────────────
@@ -1525,6 +1680,53 @@ class ZImage(ModelType[ZImageDefaults]):
     canonical_contract = Z_IMAGE_DIFFUSERS_BF16
     canonical_scheduler_config = Z_IMAGE_SCHEDULER_CONFIG
     Defaults = ZImageDefaults
+class StableAudio(ModelType[StableAudioDefaults]):
+    """Stable Audio Open 1.0 and its fine-tunes — ``stable-audio-open`` and
+    ``foundation-1`` under ONE root, on measured evidence (see
+    :class:`StableAudioDefaults`: identical 445-tensor transformer header
+    sha256, byte-identical scheduler values, differing weight digests).
+
+    ⚠️ The fingerprint is ``stable-audio.*`` and must NEVER be ``flux*``. The
+    hub currently MIS-ROOTS ``tensorhub/stable-audio-open`` under the ``flux``
+    family — ``GET /api/v1/repos?family=flux`` returns it, because ingest could
+    not classify ``StableAudioPipeline`` and fell back:
+    ``"family_reason": "model_index.json _class_name=StableAudioPipeline not in
+    family map"``, ``model_family_variant: "flux2"``. That is a hub-side defect
+    (se#769 TRAP A), and the consequence for THIS table is that a bare
+    ``flux.*``/``flux2.*`` pattern would match a 2.5 GiB AUDIO checkpoint — a
+    family tie across two unrelated modalities.
+    """
+
+    name = "stable-audio"
+    contracts = ("stable-audio.*",)
+    canonical_contract = STABLE_AUDIO_DIFFUSERS_FP16
+    canonical_scheduler_config = STABLE_AUDIO_SCHEDULER_CONFIG
+    Defaults = StableAudioDefaults
+
+
+class MusicGen(ModelType[MusicGenDefaults]):
+    """Meta MusicGen text-to-music — name + fingerprint + ``Defaults`` only.
+
+    NO ``canonical_contract``, deliberately, and NOT as a placeholder: this is
+    the :class:`Rife` shape and the se#769 ratification behind it — when a
+    family genuinely has no lane, declare NO contract rather than a
+    ``MissingContract`` sentinel, which is "a standing lie with a to-do
+    attached". Absent is honest. Three measurements say the absence is real
+    rather than unfinished: the checkpoint is a single-file ``transformers``
+    tree; the hub records NO ``file_layout`` for it, which th#1937/th#2109 rule
+    CORRECT for a transformers tree; and the endpoint loads through
+    ``Slot(str)`` + ``MusicgenForConditionalGeneration.from_pretrained``, never
+    ``ctx.load(<PipelineClass>)``, so no loader consumes a lane document.
+
+    Its hub row carries ``model_family: "unknown"``
+    (``family_reason: "no architecture signature matched"``), so a
+    ``family=musicgen`` query returns zero items while the repo itself resolves
+    fine — absence in the family index is NOT absence of the model.
+    """
+
+    name = "musicgen"
+    contracts = ("musicgen.*",)
+    Defaults = MusicGenDefaults
 
 
 MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
@@ -1544,6 +1746,8 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     Ernie,
     QwenImage,
     ZImage,
+    StableAudio,
+    MusicGen,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
@@ -1588,6 +1792,8 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Krea2.name: Krea2.Defaults,
         Anima.name: Anima.Defaults,
         Ernie.name: Ernie.Defaults,
+        StableAudio.name: StableAudio.Defaults,
+        MusicGen.name: MusicGen.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }
@@ -1631,6 +1837,8 @@ __all__ = [
     "MINIMAX_H3_DIT_DIFFUSERS",
     "MiniMaxH3",
     "MiniMaxH3Defaults",
+    "MusicGen",
+    "MusicGenDefaults",
     "Qwen36A3b",
     "Qwen36Mtp",
     "QwenA3bDefaults",
@@ -1638,6 +1846,10 @@ __all__ = [
     "QwenTextGenDefaults",
     "Rife",
     "RifeDefaults",
+    "STABLE_AUDIO_DIFFUSERS_FP16",
+    "STABLE_AUDIO_SCHEDULER_CONFIG",
+    "StableAudio",
+    "StableAudioDefaults",
     "MODEL_TYPES",
     "QWEN_IMAGE_DIFFUSERS_BF16",
     "QWEN_IMAGE_SCHEDULER_CONFIG",
