@@ -306,7 +306,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "6c91b83d8fb2e45a6d568569dc15884c4d6b26e3"
+rev = "3d958bf9628f54f400ca6d1e570a6f8d4b066f4e"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's
@@ -511,11 +511,11 @@ rewrites = [
 "writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
 
 [packages.torchcg.files]
-"__init__.py" = "562d1439f5788a0aef4b6f724a2d4c2ef10b4ff33d4b12f87ef914b1b0af8a0a"
+"__init__.py" = "ed20294bb586c6209538dbe6f0d120ec5ff41ef24002ec2daf751e3e6abde891"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
 "_wrapper_split.py" = "1d5a3bc1ccabadeaa2b8b54f1492cba10723e53074a0022b8c7453565a86a4ce"
-"adopt.py" = "5ffab538a7eaef05f2ca48d3608abc8875c1bddbeb1498976dfed3f75520cfb2"
+"adopt.py" = "671af1e744a753f4b7dcf7a167825fad4f18c3e125768b6237e7ed489c3bcf2d"
 "artifact.py" = "a3c96d845be49c752bd608dbb4b36fb192cb449937716d8d835aeba2e28d12ba"
 "cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
 "compiler.py" = "6ee54b26286b215eef8867dffb133d023a6808379574ac69f8007a64c477045a"
@@ -530,9 +530,9 @@ rewrites = [
 "contracts/toolchain_identity_v1.json" = "f4114c38ae373f62ddcb2aae5498ffbee30630e80adf11fee99e68bcbdb24282"
 "declaration.py" = "8b42bae864a4127cc5e418915f8395d980b8a439a51fd4d6f5ecbb42ba613b21"
 "discovery.py" = "33c95279c008b1f4c7d27d77c255ed4db84d6abeff7c788b738b56a7fc8eb855"
-"document.py" = "b9c4a36f0d6e3fd0c7fda9953d1a60264274ddb8b1b7b400709000ddb64b26ea"
+"document.py" = "797a3f17f46e971ce165c7c64503efece8219c04c80530036727d7c838f173f7"
 "engine.py" = "d8275ad146c73ae5516ea7d60acc1fd63cdddb3036f4833f7741913fe340a1a9"
-"graph_identity.py" = "6ce4d8d7b106409db531fae16c56ef335d0ffd04f4fcf290d855b7f5b977fa8e"
+"graph_identity.py" = "9518c789b98cad8d84f1288ae549af21f0e2d359066e43f6ad6eb3a7f09a2e78"
 "hollow.py" = "edbfbc7b158c34db61a60bbd95287ef68b08d532d47b032f89ddcc0abdc71b77"
 "host_isa.py" = "679aa81547be2d60ae6593b6e8f75dd29dcd56ab85d8e858e219b5af5d0eadc4"
 "identity.py" = "a460a24836cbd46cc9e65bd684b9f6258f6718e5c56102f26a7071f01574a99e"
@@ -542,7 +542,7 @@ rewrites = [
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "quantize.py" = "cb579b4a2c91af02211f6339147584338b278a2da4e1f8f60084b742fce21da6"
 "recipe.py" = "cc6fe9007a7f459ede5ced2cfd5d072e3c807552329d0e1920ade88de8b829a6"
-"requirements.py" = "3b34858258d41c4faaa133c2d9c340507c4e18928c324f5665b4fe4fac4c7bda"
+"requirements.py" = "19b4e0e0203f0cc93052de2cc63deb2ceb3ca3b094b9885b87e7cf87f9bb6c6e"
 "runner.py" = "5293d1f296485963e400dd57332c44ba890a5df6bb0a92fc251e3977a1d9fb2f"
 "selection.py" = "1addd68533008d32b9d36c7877ac4c5fe43fce5f2c8737dda976f681f9145738"
 "serve.py" = "a1f3b6fe5e46305bc9aea9848ac5935537b7bb37e2586ae3f0393f66cead2ade"

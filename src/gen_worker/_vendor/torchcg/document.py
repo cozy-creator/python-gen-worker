@@ -2,8 +2,9 @@
 
 Stamped ONCE per release at publish time (pgw#1367 clause 3): per (lane,
 graph) the cg-graph-v1 content hash, the observed ingress contract, and the
-module-path provenance; plus the resolved lockfile-closure hash of the env
-the trace ran in. Serving pods ADOPT this document -- they never derive.
+module-path provenance; plus the COMPILE STACK of the env the trace ran in
+(pgw#1489: torch/triton/nvidia versions, read off the endpoint's uv.lock).
+Serving pods ADOPT this document -- they never derive.
 
 An endpoint with no lanes stamps an EXPLICIT empty document: eager-permanent
 is stated, never implied by an absent row.
@@ -17,12 +18,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .graph_identity import GraphIdentityError, is_graph_hash
+from .graph_identity import (
+    EnvIdentity,
+    GraphIdentityError,
+    is_graph_hash,
+    require_stack,
+)
 from .ingress import CallIngress, IngressError
 from .lane import LaneError, require_contract_ref, require_passes, require_targets
 
-DOCUMENT_FORMAT = 1
-_DOCUMENT_FIELDS = frozenset(("v", "closure", "lanes"))
+DOCUMENT_FORMAT = 2
+_DOCUMENT_FIELDS = frozenset(("v", "stack", "lanes"))
 _LANE_FIELDS = frozenset(
     ("contract", "targets", "graphs", "unobserved_targets", "passes")
 )
@@ -48,8 +54,8 @@ class GraphRecord:
     #: the mint lane**, which reads it as `PROGRAM_DIGEST_FIELD = "program"`
     #: (pgw#962) and raises `MissingProgramDigest` on an empty one. Empty
     #: only when the producer stored no blob. Portability is fenced by the
-    #: document's own closure: an ExportedProgram is torch-coupled, and the
-    #: lockfile closure pins torch.
+    #: document's own compile stack: an ExportedProgram is torch-coupled, and
+    #: the stack pins torch.
     program: str = ""
 
     def __post_init__(self) -> None:
@@ -151,26 +157,35 @@ class LaneGraphs:
 class GraphSetDocument:
     """The static release metadata: every lane's graphs, plus the trace env.
 
-    ``closure`` is the resolved lockfile-closure hash of the environment the
-    derive ran in -- the same value that, joined with a concrete sm, is the
-    artifact env identity. An empty ``lanes`` tuple is the explicit
-    eager-permanent marker.
+    ``stack`` is the COMPILE STACK the derive ran under -- the torch/triton/
+    nvidia rows of the endpoint's resolved lockfile, verbatim. Joined with a
+    concrete sm it is the artifact env identity (:meth:`env`), and it is the
+    whole env half of the key: no other package can reach codegen (pgw#1489).
+    An empty ``lanes`` tuple is the explicit eager-permanent marker.
     """
 
-    closure: str
+    stack: tuple[tuple[str, str], ...]
     lanes: tuple[LaneGraphs, ...] = field(default=())
 
     def __post_init__(self) -> None:
-        if not isinstance(self.closure, str) or len(self.closure) != 64 or any(
-            character not in "0123456789abcdef" for character in self.closure
-        ):
-            raise DocumentError(
-                "document closure must be the 64-hex resolved-closure hash"
-            )
+        try:
+            # Validated by the ONE definition of a stack, so a document and an
+            # artifact position can never disagree about what a stack is.
+            object.__setattr__(self, "stack", require_stack(self.stack))
+        except GraphIdentityError as exc:
+            raise DocumentError(f"document states an invalid compile stack: {exc}") from exc
         ordered = tuple(sorted(self.lanes, key=lambda lane: lane.contract))
         if len({lane.contract for lane in ordered}) != len(ordered):
             raise DocumentError("document repeats a lane contract")
         object.__setattr__(self, "lanes", ordered)
+
+    def env(self, sm: str) -> EnvIdentity:
+        """This document's env identity on a card: (compile stack, sm)."""
+
+        try:
+            return EnvIdentity(stack=self.stack, sm=sm)
+        except GraphIdentityError as exc:
+            raise DocumentError(str(exc)) from exc
 
     @property
     def eager_permanent(self) -> bool:
@@ -179,7 +194,7 @@ class GraphSetDocument:
     def as_dict(self) -> dict[str, Any]:
         return {
             "v": DOCUMENT_FORMAT,
-            "closure": self.closure,
+            "stack": [list(row) for row in self.stack],
             "lanes": [lane.as_dict() for lane in self.lanes],
         }
 
@@ -258,9 +273,16 @@ class GraphSetDocument:
                     passes=tuple(raw_passes),
                 )
             )
+        raw_stack = parsed.get("stack")
+        if not isinstance(raw_stack, list) or any(
+            not isinstance(row, list) or len(row) != 2 for row in raw_stack
+        ):
+            raise DocumentError("document stack must be [name, version] rows")
         try:
-            return cls(closure=parsed["closure"], lanes=tuple(lanes))
-        except GraphIdentityError as exc:  # pragma: no cover - closure re-validation
+            return cls(
+                stack=tuple((row[0], row[1]) for row in raw_stack), lanes=tuple(lanes)
+            )
+        except GraphIdentityError as exc:  # pragma: no cover - stack re-validation
             raise DocumentError(str(exc)) from exc
 
 

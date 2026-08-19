@@ -33,7 +33,7 @@ from gen_worker.serving import mint
 #: and its manifest/sm cross-check both read it, and a double that satisfies
 #: attribute access without satisfying the type is how this seam went wrong in
 #: the first place.
-ENV = EnvIdentity(closure="0" * 64, sm="sm_89")
+ENV = EnvIdentity(stack=(("torch", "2.13.0"),), sm="sm_89")
 
 #: A REAL cg-graph-v1 hash, taken from the sd1.5 mint on this box. The store
 #: addresses rows by these and refuses anything else (`_require_graph`) — the

@@ -443,6 +443,14 @@ jobs:
       - name: pgw#1460 guard - no raw AOTI package load in src/gen_worker
         run: uv run python scripts/lint_raw_aoti_load.py
 
+      # pgw#1489: an artifact's env identity is the COMPILE STACK read off the
+      # endpoint's uv.lock — torch/triton/nvidia and nothing else. The whole
+      # installed set was a second representation of that lock, unable to agree
+      # with it by construction, and it split the artifact pool on packages
+      # that cannot reach the compiler.
+      - name: pgw#1489 guard - the installed set is not an identity
+        run: uv run python scripts/lint_no_installed_set_keying.py
+
       # pgw#1480: `phase` is a typed wire column, so a phase enum is an
       # INSTRUMENT — an operator counts by it and a proof condition is written
       # against it. `BOOT_ENDED_UNCOMPILED` was defined and referenced by

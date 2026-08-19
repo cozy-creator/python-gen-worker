@@ -1,4 +1,4 @@
-"""Two-level compiled-graph identity (pgw#1368, ruling 2026-08-18).
+"""Two-level compiled-graph identity (pgw#1368; rekeyed by pgw#1489).
 
 Level 1 -- ``cg-graph-v1`` -- is a content hash of the DERIVED graph: the
 canonical serialization of the traced program plus its call-ingress contract.
@@ -7,12 +7,24 @@ name components, so two code versions that trace byte-identically produce ONE
 graph, and an edit that changes the trace changes the hash by construction
 (the pgw#1031 closure).
 
-Level 2 positions artifacts under a graph: ``graph -> [env -> .so]``, where
-env identity is the hash of the uv lockfile's RESOLVED CLOSURE plus the GPU
-``sm``. The image digest is deliberately NOT identity: docker is a thin
-wrapper over ``uv sync`` and cozy-local resolves the same lockfile in a bare
-venv, so both compute the same env hash. Adoption is EXACT-ENV; compatibility
-reasoning lives only in the miss-path ladder (``requirements.rank``).
+Level 2 positions artifacts under a graph: ``graph -> [env -> .so]``. The
+artifact key is **(trace digest, sm, compile stack)** and nothing else
+(Paul, 2026-08-19, DESIGN-RULINGS addendum 4 as corrected): the trace digest
+is the level-1 graph, ``sm`` is the only free hardware variable, and the
+COMPILE STACK is the compiler's own input signature -- torch, triton and the
+nvidia libraries, whose versions change what inductor EMITS.
+
+What died with pgw#1489, and why: the key used to be a hash of the WHOLE
+resolved package set. That is a second representation of an environment the
+endpoint's ``uv.lock`` already pins, and it split the artifact pool on drift
+that cannot reach the compiler -- a docs extra, a pillow bump, a dev tool
+(pgw#1472 measured 43-package diffs between envs that serve identically).
+The stack is READ from the lock at both ends, never recomputed from the
+installed set, so the two ends cannot spell the same environment differently.
+
+Everything else that a pod must satisfy is ADMISSION METADATA checked at
+adopt, never a key: the ELF-derived driver range and the measured peak-VRAM
+stamp ride the requirements manifest.
 """
 
 from __future__ import annotations
@@ -27,10 +39,9 @@ from .declaration import DeclarationError, _canonical_graph, _literal_digest
 from .ingress import CallIngress
 
 GRAPH_SCHEME = "cg-graph-v1"
-ENV_SCHEME = "cg-env-v1"
+ENV_SCHEME = "cg-env-v2"
 _DIGEST_HEX = 56
 _GRAPH_RE = re.compile(rf"{GRAPH_SCHEME}-[0-9a-f]{{{_DIGEST_HEX}}}\Z")
-_CLOSURE_RE = re.compile(r"[0-9a-f]{64}\Z")
 _SM_RE = re.compile(r"(sm_[0-9]{2,3}|cpu(-[a-z0-9_]+)?)\Z")
 
 
@@ -84,81 +95,102 @@ def graph_hash(
     return f"{GRAPH_SCHEME}-{digest}"
 
 
-def closure_hash(entries: Mapping[str, str]) -> str:
-    """Hash one resolved dependency closure: canonical name -> version.
+#: The distributions whose versions change what the compiler EMITS -- the
+#: compile stack, and the whole env half of an artifact key (pgw#1489).
+#: ``torch`` carries inductor and the AOTI runtime, ``triton`` compiles the
+#: kernels, and the ``nvidia-*`` wheels ARE the CUDA toolkit the generated
+#: code links against. Nothing else in a lockfile can reach codegen, so
+#: nothing else is allowed to split the artifact pool.
+STACK_NAMES = frozenset({"torch", "triton", "pytorch-triton"})
+STACK_PREFIXES = ("nvidia-",)
 
-    The caller states the closure -- normally the uv lockfile's resolved
-    package set, and for the boot-time audit the actually-installed
-    distribution set (``installed_closure``). Names are normalized the way
-    package indexes compare them, so ``Foo_Bar`` and ``foo-bar`` are one
-    entry rather than a phantom mismatch.
+
+def is_compile_relevant(name: str) -> bool:
+    """Whether one distribution name is part of the compile stack.
+
+    Spelling-tolerant on the SELECTION side only (``nvidia_cublas_cu12`` and
+    ``nvidia-cublas-cu12`` are one library). The selected pair goes into the
+    key VERBATIM: normalizing key inputs was the pgw#1472 disease, and it can
+    only ever paper over two sources that should have been one.
     """
 
+    handle = str(name).strip().lower().replace("_", "-")
+    return handle in STACK_NAMES or handle.startswith(STACK_PREFIXES)
+
+
+def compile_stack(entries: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """The compile-relevant subset of a stated package set, sorted by name.
+
+    The input is normally every ``[[package]]`` row of the endpoint's
+    ``uv.lock``. The output is the ~15 rows that decide what a mint produces;
+    a bump anywhere else leaves every existing artifact valid, which is the
+    entire point of the pgw#1489 rekey.
+    """
+
+    return require_stack(
+        [(name, version) for name, version in entries.items() if is_compile_relevant(name)]
+    )
+
+
+def require_stack(
+    entries: Sequence[tuple[str, str]] | Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
+    pairs = entries.items() if isinstance(entries, Mapping) else entries
     clean: dict[str, str] = {}
-    for name, version in entries.items():
+    for row in pairs:
+        if not isinstance(row, (tuple, list)) or len(row) != 2:
+            raise GraphIdentityError("a compile stack is [name, version] rows")
+        name, version = row
         if not isinstance(name, str) or not name.strip():
-            raise GraphIdentityError("closure entry names must be non-empty strings")
+            raise GraphIdentityError("compile stack names must be non-empty strings")
         if not isinstance(version, str) or not version.strip():
-            raise GraphIdentityError(f"closure entry {name!r} states no version")
-        canonical = re.sub(r"[-_.]+", "-", name.strip().lower())
-        known = clean.get(canonical)
+            raise GraphIdentityError(f"compile stack entry {name!r} states no version")
+        if not is_compile_relevant(name):
+            # The guard against the pgw#1489 regression: handing this the whole
+            # installed set is how the pool got split on a docs extra. Select
+            # with `compile_stack` and the caller cannot make that mistake.
+            raise GraphIdentityError(
+                f"{name.strip()!r} is not a compile-stack package; the key is "
+                f"torch/triton/nvidia-* only (use `compile_stack` to select)"
+            )
+        known = clean.get(name.strip())
         if known is not None and known != version.strip():
             raise GraphIdentityError(
-                f"closure entry {canonical!r} appears twice with different versions "
-                f"({known!r} and {version.strip()!r})"
+                f"compile stack entry {name.strip()!r} appears twice with different "
+                f"versions ({known!r} and {version.strip()!r})"
             )
-        clean[canonical] = version.strip()
-    if not clean:
-        raise GraphIdentityError("a resolved closure cannot be empty")
-    payload = json.dumps(
-        clean, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("ascii")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def installed_closure() -> dict[str, str]:
-    """The distribution set actually importable from this process's env.
-
-    This is the AUDIT side of env identity: the publish pipeline stamps the
-    lockfile's resolved closure, and a booting worker restates its own
-    installed set through the same ``closure_hash`` to assert env == metadata
-    (``requirements.assert_exact_env``).
-    """
-
-    import importlib.metadata
-
-    entries: dict[str, str] = {}
-    for distribution in importlib.metadata.distributions():
-        try:
-            name = distribution.name
-        except KeyError:
-            continue
-        if not name:
-            continue
-        entries[name] = distribution.version
-    if not entries:
-        raise GraphIdentityError("no installed distributions are visible")
-    return entries
+        clean[name.strip()] = version.strip()
+    if not any(is_compile_relevant(name) and name.strip().lower() == "torch"
+               for name in clean):
+        raise GraphIdentityError(
+            "a compile stack states torch: it is the compiler. Read the stack "
+            "off the endpoint's uv.lock (`compile_stack`), never off a guess"
+        )
+    return tuple(sorted(clean.items()))
 
 
 @dataclass(frozen=True, slots=True)
 class EnvIdentity:
-    """One artifact environment: (resolved-closure hash, sm).
+    """One artifact environment: (compile stack, sm) -- the key's env half.
 
-    ``closure`` is ``closure_hash`` output -- 64 hex characters. ``sm`` is the
-    concrete compile target (``sm_89``) or a cpu capability. CUDA driver
-    version is deliberately outside identity: it is a host preflight floor,
-    recorded in the requirements manifest, never an axis.
+    ``stack`` is ``[(name, version), ...]``, the compile-relevant rows of the
+    endpoint's resolved lockfile (:func:`compile_stack`), carried as the
+    VERSIONS THEMSELVES rather than as a digest of them: a refusal that can
+    say ``torch 2.13.0 != 2.14.0`` is worth more than one that says two
+    hashes differ, and there is nothing to look up to expand it.
+
+    ``sm`` is the concrete compile target (``sm_89``) or a cpu capability.
+    CUDA DRIVER version is deliberately outside identity -- it is a host
+    preflight floor recorded in the requirements manifest (pgw#1471), like
+    the measured peak-VRAM stamp. So is the ambient C++ toolchain: pinned by
+    the image, not fingerprinted (pgw#1467, stated residual).
     """
 
-    closure: str
+    stack: tuple[tuple[str, str], ...]
     sm: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.closure, str) or _CLOSURE_RE.fullmatch(self.closure) is None:
-            raise GraphIdentityError(
-                "env closure must be the 64-hex resolved-closure hash"
-            )
+        object.__setattr__(self, "stack", require_stack(self.stack))
         if not isinstance(self.sm, str) or _SM_RE.fullmatch(self.sm) is None:
             raise GraphIdentityError(
                 f"env sm must be a concrete 'sm_NN' or cpu capability, got {self.sm!r}"
@@ -167,13 +199,23 @@ class EnvIdentity:
     @property
     def value(self) -> str:
         payload = json.dumps(
-            {"closure": self.closure, "sm": self.sm},
+            {"sm": self.sm, "stack": [list(row) for row in self.stack]},
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
         ).encode("ascii")
         digest = hashlib.sha256(payload).hexdigest()[:_DIGEST_HEX]
         return f"{ENV_SCHEME}-{digest}"
+
+    def describe(self) -> str:
+        """The stack in words, for the refusal and the boot line."""
+
+        rows = dict(self.stack)
+        head = [f"{name} {rows[name]}" for name in ("torch", "triton") if name in rows]
+        others = len(rows) - len(head)
+        if others:
+            head.append(f"+{others} more")
+        return f"{', '.join(head)} @ {self.sm}"
 
     def __str__(self) -> str:
         return self.value
@@ -184,8 +226,11 @@ __all__ = [
     "EnvIdentity",
     "GRAPH_SCHEME",
     "GraphIdentityError",
-    "closure_hash",
+    "STACK_NAMES",
+    "STACK_PREFIXES",
+    "compile_stack",
     "graph_hash",
-    "installed_closure",
+    "is_compile_relevant",
     "is_graph_hash",
+    "require_stack",
 ]

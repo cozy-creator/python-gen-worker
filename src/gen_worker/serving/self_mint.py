@@ -155,7 +155,6 @@ class SelfMint:
     cas_dir: Optional[Path] = None
     target_arch: str = ""
     toolchain: Mapping[str, str] = field(default_factory=dict)
-    installed: Mapping[str, str] = field(default_factory=dict)
     #: The local seam (no GPU, no inductor). ``None`` runs the production
     #: one-child-process-per-graph compile.
     compiler: Optional[Compiler] = None
@@ -284,7 +283,6 @@ class SelfMint:
                 target_arch=self.target_arch,
                 toolchain=dict(self.toolchain),
                 artifacts_dir=Path(self.artifacts_dir),
-                installed=dict(self.installed),
                 program_source=self.program_source,
                 posture=self.posture,
                 reserve=self.reserve,
@@ -361,7 +359,6 @@ def production_mint(
     artifacts_dir: Path,
     cas_dir: Path,
     sm: str,
-    installed: Optional[Mapping[str, str]] = None,
     posture: Optional[compile_posture.CompilePosture] = None,
 ) -> SelfMint:
     """The mint a real serving pod runs: real child compiles, this host's sm.
@@ -378,7 +375,6 @@ def production_mint(
         cas_dir=Path(cas_dir),
         target_arch=str(sm),
         toolchain=dict(toolchain_digest()),
-        installed=dict(installed or {}),
         posture=posture,
     )
 

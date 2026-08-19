@@ -109,7 +109,7 @@ class ServeAdoption:
         artifacts_dir: Path,
         cas_dir: Optional[Path] = None,
         transport: Any = None,
-        installed: Optional[Mapping[str, str]] = None,
+        stack: Optional[Mapping[str, str]] = None,
         loader: Optional[Callable[[Path, Any, Any], Any]] = None,
         #: The mint trigger. May ANSWER with its mint's status (anything
         #: carrying `.running`); `None` back means "unknown" (pgw#1480).
@@ -123,7 +123,7 @@ class ServeAdoption:
         #: mint on that shape banks nothing and says so.
         self.cas_dir = Path(cas_dir) if cas_dir is not None else None
         self._transport = transport
-        self._installed = dict(installed) if installed is not None else None
+        self._stack = dict(stack) if stack is not None else None
         #: `None` = torchcg's own production loader (tcg#58). A value here
         #: is a TEST DOUBLE; production never states one.
         self._loader = loader
@@ -292,7 +292,7 @@ class ServeAdoption:
 
     def _build(self, lane: Any) -> None:
         from .._vendor.torchcg.adopt import AdoptSession
-        from ..env_identity import env_closure
+        from ..env_identity import installed_stack_drift
         from .mint_store import worker_store
         from .hub_store import (
             BrokerReleaseGraphTransport,
@@ -326,12 +326,13 @@ class ServeAdoption:
         if getattr(document, "eager_permanent", False):
             self._refuse("eager_permanent", "the release document is eager-permanent")
             return
-        # pgw#1472: `_installed` is a TEST seam. Production has exactly one
-        # answer — this process's own installed set, via the one function the
-        # publish-time derive also stamped from.
-        installed = (
-            self._installed if self._installed is not None else env_closure()
-        )
+        # pgw#1489: the env half of the key is the COMPILE STACK the
+        # document stamped off the endpoint's uv.lock. The pod's own venv is
+        # compared to it diagnostically — a mismatch there costs a failed
+        # artifact load and a re-mint, never a wrong answer, so it warns.
+        stack = self._stack if self._stack is not None else dict(document.stack)
+        for row in installed_stack_drift(dict(document.stack)):
+            logger.warning("adopt: compile-stack drift vs this venv: %s", row)
         # ONE store for both directions: the adopt reads through it (local CAS
         # before the hub, so a restarted pod adopts what it already minted) and
         # the mint publishes through it. Two objects here would mean two
@@ -344,7 +345,7 @@ class ServeAdoption:
             self.store, document, contract, self.sm,
             loader=self._loader,
             artifacts_dir=self.artifacts_dir,
-            installed=installed,
+            stack=stack,
         )
         logger.info(
             "adopt: release=%s lane=%s sm=%s — %d adopted, %d hole(s)",

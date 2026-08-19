@@ -180,9 +180,12 @@ class EndpointHost:
         sm: str = "",
         loader: Any = None,
         artifacts_dir: Optional[Path] = None,
-        installed: Optional[Mapping[str, str]] = None,
+        stack: Optional[Mapping[str, str]] = None,
     ) -> None:
         """Instantiate each referenced Model class and run its ``load(ctx)``.
+
+        ``stack`` is this env's compile stack (the torch/triton/nvidia rows of
+        the endpoint's ``uv.lock``); absent, the document's own stamp is used.
 
         With no ``document`` this is the EAGER bridge: ``ctx.compile`` is a
         transparent pass-through and the endpoint serves after load,
@@ -195,7 +198,7 @@ class EndpointHost:
         """
         from .._vendor.torchcg import EnvironmentMismatch
         from .._vendor.torchcg.adopt import AdoptSession
-        from ..env_identity import env_closure
+        from ..env_identity import installed_stack_drift
 
         started = time.monotonic()
 
@@ -209,7 +212,7 @@ class EndpointHost:
             )
 
         session = None
-        installed_map: Optional[Mapping[str, str]] = None
+        stack_rows: Optional[Mapping[str, str]] = None
         if document is not None and getattr(document, "eager_permanent", False):
             span(graphs_from="eager_permanent")
             document = None
@@ -230,10 +233,15 @@ class EndpointHost:
             from .model import lane_handle
 
             lane_contract = lane_handle(self.lanes[lane_bearing[0]])
-            # pgw#1472: `installed=` is a TEST seam. Production has exactly one
-            # answer — this process's own installed set, via the one function
-            # the publish-time derive also stamped from.
-            installed_map = dict(installed) if installed is not None else env_closure()
+            # The compile stack this boot claims (pgw#1489): the caller's,
+            # read from the endpoint's own uv.lock, or the document's own
+            # stamp when nobody stated one. The venv is compared against it
+            # DIAGNOSTICALLY — a torch that does not match what the artifacts
+            # were compiled against costs a failed load, not a wrong answer,
+            # so it warns by name and never gates.
+            stack_rows = dict(stack) if stack is not None else dict(document.stack)
+            for row in installed_stack_drift(dict(document.stack)):
+                logger.warning("adopt: compile-stack drift vs this venv: %s", row)
             try:
                 session = AdoptSession(
                     store,
@@ -243,7 +251,7 @@ class EndpointHost:
                     loader=loader,
                     artifacts_dir=artifacts_dir
                     or Path(".compiled-graphs"),
-                    installed=installed_map,
+                    stack=stack_rows,
                 )
             except EnvironmentMismatch as exc:
                 # The audit fired BEFORE any author code ran — a

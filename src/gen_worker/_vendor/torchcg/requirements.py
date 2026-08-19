@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .graph_identity import EnvIdentity, GraphIdentityError, closure_hash, is_graph_hash
+from .graph_identity import EnvIdentity, GraphIdentityError, is_graph_hash
 
 _MANIFEST_FIELDS = frozenset(
     ("v", "include_set", "sm_compiled", "cuda_floor", "autotuned_on")
@@ -155,32 +155,41 @@ class RequirementsManifest:
 
 
 def assert_exact_env(
-    stamped: EnvIdentity, *, installed: Mapping[str, str], sm: str
+    stamped: EnvIdentity, *, stack: Mapping[str, str] | Sequence[tuple[str, str]], sm: str
 ) -> None:
-    """Boot-time audit that pod env == release metadata env (pgw#1367).
+    """Boot-time audit that this pod's env == the artifact env (pgw#1367).
 
-    Restates the pod's own installed closure and sm through the same identity
-    the publish pipeline stamped. Any difference is a loud refusal, not a
-    compat decision -- exact-env adoption is the ruling.
+    ``stack`` is THIS process's compile stack, read from the endpoint's own
+    ``uv.lock`` -- the same file and the same rows the derive stamped, so the
+    two sides are one representation and a difference is a real difference
+    (pgw#1489 killed the installed-set restatement that could never agree).
+
+    Every divergence is named per package: ``torch 2.13.0 != 2.14.0`` is
+    actionable where two differing digests were not.
     """
 
     try:
-        observed = EnvIdentity(closure=closure_hash(installed), sm=sm)
+        observed = EnvIdentity(stack=stack, sm=sm)
     except GraphIdentityError as exc:
         raise EnvironmentMismatch(f"cannot state this pod's env identity: {exc}") from exc
-    if observed != stamped:
-        details: list[str] = []
-        if observed.closure != stamped.closure:
-            details.append(
-                f"resolved closure {observed.closure[:16]}... != "
-                f"stamped {stamped.closure[:16]}..."
-            )
-        if observed.sm != stamped.sm:
-            details.append(f"sm {observed.sm} != stamped {stamped.sm}")
-        raise EnvironmentMismatch(
-            "pod environment is not the release's stamped environment "
-            "(build-system bug surfacing): " + "; ".join(details)
-        )
+    if observed == stamped:
+        return
+    mine = dict(observed.stack)
+    theirs = dict(stamped.stack)
+    details: list[str] = []
+    for name in sorted(set(mine) | set(theirs)):
+        if name not in theirs:
+            details.append(f"{name} {mine[name]} here, absent from the artifact env")
+        elif name not in mine:
+            details.append(f"{name} {theirs[name]} stamped, absent here")
+        elif mine[name] != theirs[name]:
+            details.append(f"{name} {mine[name]} != stamped {theirs[name]}")
+    if observed.sm != stamped.sm:
+        details.append(f"sm {observed.sm} != stamped {stamped.sm}")
+    raise EnvironmentMismatch(
+        "this env is not the compile stack the artifacts were derived under "
+        "(a rebuild is the fix, never a cast): " + "; ".join(details)
+    )
 
 
 @dataclass(frozen=True, slots=True)
