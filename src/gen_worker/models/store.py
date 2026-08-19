@@ -31,11 +31,12 @@ from ..redact import sanitize as _sanitize
 from ..topology import current_device_group
 from ..wire_snapshots import resolved_repo_from_snapshot
 from . import cozy_snapshot, disk_gc, disk_telemetry, projection
+from .projection import SNAPSHOTS_DIR
 from . import residency as residency_mod
 from . import staging as staging_mod
 from .cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from .config_identity import CANONICAL_JSON_MAX_BYTES, canonical_json_digest
-from .cozy_snapshot import _norm_rel_path, delete_blobs
+from .cozy_snapshot import _norm_rel_path, delete_blobs, snapshot_dir_key
 from .download import ensure_local, lookup_provider_for_ref
 from .errors import MissingSnapshotError, UrlExpiredError
 from .hub_client import WorkerResolvedRepo
@@ -1144,6 +1145,75 @@ class ModelStore:
             )
         return snapshot
 
+    async def announce_resident(
+        self, ref: WireRef, snapshot: Optional[pb.Snapshot] = None,
+    ) -> bool:
+        """th#2204: the SATISFIED answer to a residency goal, as a fact.
+
+        A pod booted onto a warm endpoint volume already holds the tree the
+        hub is about to declare. Everything below `ensure_local` would still
+        work — the downloader resolves every object out of the local CAS — but
+        it works by opening a transfer record for a transfer that will move
+        zero bytes, and a fresh process has no banked identity with which to
+        recognise the bytes as its own. That is how th#2204 billed an H100 at
+        $3.29/hr with `no_position_reported`: the pod had the weights and no
+        vocabulary in which to SAY so.
+
+        So this states it directly and cheaply: the tree the goal's digest
+        names either exists on this pod or it does not. When it does, the pod
+        answers with `already_resident` on the position stream and `ON_DISK` on
+        the wire — which is what hub-side placement reads to make the ref
+        DISK-local and dispatch. No record is opened, because there is no
+        transfer to declare.
+
+        Returns True when the answer was given; False means "not resident,
+        fetch it" and the caller falls through to the funnel.
+        """
+        if snapshot is None:
+            snapshot = self._snapshots.get(ref)
+        if snapshot is None or not snapshot.digest:
+            return False
+        digest = str(snapshot.digest).strip()
+        # The tree name is `snapshot_dir_key(digest)`, but the two producers in
+        # this tree disagree about whether the algorithm prefix is part of the
+        # digest (`cozy_snapshot` keeps it, `worker.tree_for` strips it). This
+        # asks the disk instead of picking a side — a residency answer must not
+        # be wrong because two callers spell one digest two ways.
+        bare = digest.split(":", 1)[-1]
+        root = Path(self._cache_dir) / SNAPSHOTS_DIR
+        tree: Optional[Path] = None
+        for key in (snapshot_dir_key(digest), snapshot_dir_key(bare)):
+            candidate = root / key
+            if candidate.is_dir():
+                tree = candidate
+                break
+        if tree is None:
+            existing = self.disk_local_path(ref)
+            if existing is None or not existing.is_dir():
+                return False
+            if existing.name not in (snapshot_dir_key(digest), snapshot_dir_key(bare)):
+                # Resident at a DIFFERENT identity: those are not these bytes,
+                # and calling that satisfied would strand the goal forever.
+                return False
+            tree = existing
+
+        identity = self._snapshot_identity(ref, snapshot)
+        with self._identity_lock:
+            self._disk_identities[ref] = identity
+        if self.residency.tier(ref) is None:
+            # Registers the shared disk tier AND emits the ON_DISK ModelEvent
+            # through Residency's own event path.
+            self.residency.track_disk(ref, tree)
+        else:
+            # Already tracked (boot rescan): the tier transition will not fire
+            # again, so the answer is published as an identity confirmation —
+            # which `replace_desired_snapshots`' epoch bump has just armed.
+            await self._confirm_cached_identity(ref, identity)
+        self._verified.add(ref)
+        self._index.touch(ref)
+        _resident_position(ref, snapshot)
+        return True
+
     async def ensure_local(
         self,
         ref: WireRef,
@@ -1357,9 +1427,20 @@ class ModelStore:
                 # a record opened over RAM/VRAM residency is one that cannot be
                 # closed honestly at all.)
                 resident_tier in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
-                # Disk-resident at EXACTLY the identity being materialized.
+                # Disk-resident at exactly the DIGEST being materialized.
+                #
+                # th#2204: this used to compare the whole identity TUPLE,
+                # `(digest, generation)` — and the generation is the hub's
+                # causal fence for events, not a property of the bytes. Every
+                # HelloAck bumps it, so re-declaring an unchanged goal made the
+                # pod open a DOWNLOADING record for weights it already held,
+                # resolve every object out of the local CAS (zero bytes, so
+                # `_progress` never fires) and leave the hub with the exact
+                # 0-of-N phantom pgw#1485 was written to remove. Measured on the
+                # goal path the moment it had a consumer.
                 or (bool(operation_identity[0])
-                    and banked_disk_identity == operation_identity)
+                    and banked_disk_identity is not None
+                    and banked_disk_identity[0] == operation_identity[0])
             )
             #: True while a hub-side `model_download` record is OPEN for this
             #: materialization and unclosed.
