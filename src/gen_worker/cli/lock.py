@@ -1,0 +1,268 @@
+"""``gen-worker lock`` — discovery + the graph trace, in one command.
+
+pgw#1466, Paul's verb 1: "go through the code and produce the endpoint.lock".
+
+Two things were separate before and had no business being: discovery
+(``python -m gen_worker.discovery``, static, seconds) and the trace
+(``gen-worker release derive``, real author code on a real device, ~165s). Both
+answer "what does this endpoint consist of", both are invalidated by the same
+edit, and a lock carrying one without the other is a lock every later verb has
+to finish. So ``lock`` runs both and writes one file.
+
+The expensive half is skipped on a re-run. Paul: "re-runs don't need to
+regenerate". The skip key is a digest over the derive's INPUTS — author source,
+``uv.lock`` closure, checkpoint ref, trace device, torchcg's format versions —
+so it can be computed in milliseconds and answered before paying anything. See
+``endpoint_lock`` for why it is inputs and not outputs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+from . import endpoint_lock as el
+from . import workspace as ws
+
+
+def add_subparser(sub: Any) -> None:
+    parser = sub.add_parser(
+        "lock",
+        help="discover entrypoints and trace the graphs; write endpoint.lock",
+        description=__doc__,
+    )
+    parser.add_argument(
+        "endpoint_dir",
+        nargs="?",
+        default=".",
+        help="endpoint project root — the directory holding pyproject.toml "
+             "and endpoint.toml (default: cwd)",
+    )
+    parser.add_argument(
+        "--checkpoint-ref",
+        default="",
+        help="owner/name@revision to trace against. Required for an endpoint "
+             "that declares a model slot; a weightless endpoint needs none.",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default="",
+        help="a local checkpoint tree, INSTEAD of resolving --checkpoint-ref "
+             "through the weight CAS (for a tree the store does not hold)",
+    )
+    parser.add_argument(
+        "--graph-cas",
+        default="",
+        help=f"exported-program CAS root (default: {ws.DEFAULT_GRAPH_CAS})",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="re-trace even when the saved trace is reusable",
+    )
+    parser.add_argument(
+        "--discovery-only",
+        action="store_true",
+        help="write the discovery blocks and no [derive] — the bake-time shape",
+    )
+    parser.add_argument(
+        "-o", "--out",
+        default="",
+        help=f"lock path (default: <endpoint_dir>/{el.LOCK_FILENAME})",
+    )
+    parser.set_defaults(_handler=run_lock)
+
+
+def _say(message: str) -> None:
+    """Progress to stderr, so stdout stays the machine-readable summary."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def _checkpoint_tree(args: argparse.Namespace) -> tuple[Optional[Path], str]:
+    """(tree, ref-string). Both may be absent — a weightless endpoint has none."""
+    if args.checkpoint:
+        tree = Path(args.checkpoint).resolve()
+        if not tree.is_dir():
+            raise ws.WorkspaceError(f"--checkpoint {tree} is not a directory")
+        # A local tree still needs an identity for the skip key. Without one,
+        # swapping the tree under a stable path would reuse a stale trace.
+        return tree, args.checkpoint_ref or f"local:{tree}"
+    if not args.checkpoint_ref:
+        return None, ""
+    ref = ws.parse_checkpoint_ref(args.checkpoint_ref)
+    return ws.resolve_checkpoint(ref), str(ref)
+
+
+def run_lock(args: argparse.Namespace) -> int:
+    from ..discovery.discover import discover_manifest, prime_sys_path
+    from ..discovery.project import load_project_config
+
+    root = Path(args.endpoint_dir).resolve()
+    if not root.is_dir():
+        _say(f"error: {root} is not a directory")
+        return 2
+    out = Path(args.out).resolve() if args.out else root / el.LOCK_FILENAME
+
+    try:
+        config = load_project_config(root)
+    except Exception as exc:  # noqa: BLE001 - the author's config is the check
+        _say(f"error: {root}: {exc}")
+        return 2
+
+    # ---------------------------------------------------------------- discovery
+    started = time.monotonic()
+    try:
+        manifest = discover_manifest(root)
+    except Exception as exc:  # noqa: BLE001 - author import errors are the check
+        _say(f"error: discovery failed: {exc}")
+        return 1
+    entrypoints = manifest.get("entrypoints") or []
+    _say(
+        f"lock: discovered {len(entrypoints)} entrypoint(s) in "
+        f"{config.main} ({time.monotonic() - started:.1f}s)"
+    )
+
+    if args.discovery_only:
+        el.write_lock(out, manifest, None)
+        _say(f"lock: wrote {out} (discovery only, no [derive])")
+        print(json.dumps({"lock": str(out), "derive": "skipped:--discovery-only"}))
+        return 0
+
+    # ------------------------------------------------------------------- trace
+    try:
+        tree, ref_text = _checkpoint_tree(args)
+    except ws.WorkspaceError as exc:
+        _say(f"error: {exc}")
+        return 2
+
+    device = ws.trace_device()
+    graph_cas_root = Path(args.graph_cas).resolve() if args.graph_cas else ws.graph_cas_root()
+    lockfile = root / "uv.lock"
+
+    want = el.inputs_digest(
+        root=root,
+        module_name=config.main,
+        checkpoint_ref=ref_text,
+        trace_device=device,
+        lockfile=lockfile if lockfile.is_file() else None,
+    )
+
+    existing: Optional[el.DeriveBlock]
+    try:
+        existing = el.read_derive_block(out) if out.is_file() else None
+    except el.LockError as exc:
+        _say(f"lock: ignoring unusable saved trace: {exc}")
+        existing = None
+
+    cas = ws.local_cas(graph_cas_root)
+    reuse = el.derive_is_reusable(
+        existing,
+        want_inputs_digest=want,
+        want_trace_device=device,
+        cas_has=lambda digest: bool(cas.contains(digest)),
+    )
+    if reuse.ok and not args.force:
+        # The whole point of the verb. Rewrite the lock so freshly-discovered
+        # blocks land, but carry the saved [derive] through untouched — the
+        # bytes are the document's identity and re-encoding would break the
+        # digest that makes it verifiable.
+        el.write_lock(out, manifest, reuse.block)
+        assert reuse.block is not None
+        _say(f"lock: reusing saved trace ({reuse.reason})")
+        _say(f"lock: wrote {out}")
+        print(json.dumps({
+            "lock": str(out),
+            "derive": "reused",
+            "document_digest": reuse.block.document_digest,
+            "trace_device": reuse.block.trace_device,
+        }))
+        return 0
+    if args.force and existing is not None:
+        _say("lock: --force, re-tracing despite a saved trace")
+    else:
+        _say(f"lock: tracing — {reuse.reason}")
+
+    if tree is None:
+        # Weightless is legal (pgw#1392) and derive_release handles it, but a
+        # model-bearing endpoint reaching here with no tree would trace nothing
+        # and write a document that looks eager-permanent. Refuse by name.
+        _say(
+            "lock: no --checkpoint-ref/--checkpoint. Tracing a weightless "
+            "endpoint; if this endpoint declares a model slot the derive will "
+            "say so rather than emit an empty document."
+        )
+
+    prime_sys_path(root)
+    try:
+        module = importlib.import_module(config.main)
+    except Exception as exc:  # noqa: BLE001
+        _say(f"error: failed to import {config.main!r}: {exc}")
+        return 1
+
+    from ..release.derive import DeriveError, derive_release
+
+    _say(
+        f"lock: trace device is {device}-class"
+        + ("" if device == "cuda" else " — CPU-class graphs are NOT servable on "
+                                       "a GPU; a cuda mint refuses by name")
+    )
+    started = time.monotonic()
+    try:
+        result = derive_release(
+            module,
+            checkpoint_dir=tree if tree is not None else root,
+            lockfile=lockfile if lockfile.is_file() else None,
+            graph_cas=graph_cas_root,
+        )
+    except DeriveError as exc:
+        _say(f"error: derive: {exc}")
+        return 1
+    elapsed = time.monotonic() - started
+
+    for warning in result.warnings:
+        _say(f"warning: {warning}")
+
+    interface_v, _document_v = el.torchcg_format_versions()
+    block = el.DeriveBlock(
+        v=el.DERIVE_BLOCK_V,
+        interface_v=interface_v,
+        inputs_digest=want,
+        document_digest=result.digest,
+        document=result.document.decode("ascii"),
+        trace_device=device,
+        endpoint=result.endpoint,
+    )
+    el.write_lock(out, manifest, block)
+
+    graphs = sum(len(h) for h in result.lane_graphs.values())
+    programs = el.program_digests(json.loads(result.document))
+    for lane, hashes in result.lane_graphs.items():
+        _say(f"lock: lane {lane}: {len(hashes)} specialization(s)")
+    if result.eager_permanent:
+        why = ("no model class — weightless endpoint, nothing to compile"
+               if result.weightless else "no lanes — eager-permanent by declaration")
+        _say(f"lock: {result.endpoint}: {why}")
+    _say(
+        f"lock: traced {graphs} specialization(s), {len(programs)} exported "
+        f"program(s) in the CAS at {graph_cas_root} ({elapsed:.1f}s)"
+    )
+    _say(f"lock: wrote {out}")
+    print(json.dumps({
+        "lock": str(out),
+        "derive": "traced",
+        "endpoint": result.endpoint,
+        "document_digest": result.digest,
+        "trace_device": device,
+        "specializations": graphs,
+        "programs": len(programs),
+        "seconds": round(elapsed, 1),
+    }))
+    return 0
+
+
+__all__ = ["add_subparser", "run_lock"]
