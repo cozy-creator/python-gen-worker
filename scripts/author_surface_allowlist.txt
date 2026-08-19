@@ -94,3 +94,9 @@ release.trace_context.TraceRequestContext.step_callback	serverless-endpoints/sdx
 # pgw#1377 seam: the LoRA overlay vocabulary — authors read SDXL.Lora.Defaults
 # for the adapter recipe (the contract file's turbo branch).
 models.model_types.SDXL.Lora	serverless-endpoints/sdxl/src/sdxl/main_v2.py:208	PROD
+# pgw#1406: the PRODUCER half of that same RequestContext. `mktemp` is where a
+# conversion producer writes the tree it is about to publish, and its callers
+# are the 27 `cozy-creator/jobs` producers — 36 call sites across `conversion`,
+# `h3_finetuner` and `image_lora_finetuner`, none of them in this tree and none
+# of them ever will be. Structurally what this file is for.
+serving.context.RequestContext.mktemp	jobs/conversion/src/conversion/transform.py:176	PROD
