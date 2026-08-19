@@ -1,7 +1,7 @@
 """pgw#1497 — the `partial_stream` RUNG: its place on the ladder, and the
 admission-first budget that is the only thing allowed to size it.
 
-The mechanism has its own file (`test_stream_residency_pgw1497.py`). This one
+The mechanism has its own file (`test_stream_residency.py`). This one
 is about the rung: where it sits, who may select it, what it refuses, and
 whether the number the ladder prices it at was ever measured.
 """
