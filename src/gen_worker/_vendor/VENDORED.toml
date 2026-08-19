@@ -13,10 +13,17 @@
 # (per-file sha256) and separately proves the BEHAVIOUR the pinned rev exists
 # for, so neither fence can pass on a stale or hand-patched tree.
 #
-# To re-vendor: `git archive <rev> <subdir> | tar -x` into the package
-# directory (whose name is the TABLE KEY below, which is upstream's CURRENT
-# package name and not necessarily `subdir`'s last component), re-apply
-# `rewrites`, then regenerate the `files` tables.
+# To re-vendor: `task vendor -- <package> <rev>` (scripts/vendor_snapshot.py).
+# It extracts at the rev, re-applies the mechanical `rewrites`, regenerates the
+# `files` table, and moves the SAME rev in `pyproject.toml`'s `[tool.uv.sources]`
+# and in `uv.lock` — one act, because pgw#1477 is what a hand re-vendor that
+# forgot the third one costs: `uv sync --locked` is the FIRST step of every CI
+# job, and it dies naming neither file. Twice on 2026-08-19, 20 minutes apart.
+# Packages with NON-mechanical rewrites (tensorfs: hand-written pure-Python
+# ports of deleted upstream modules) are extracted by hand — `git archive <rev>
+# <subdir> | tar -x` into the package directory, whose name is the TABLE KEY
+# below (upstream's CURRENT package name, not necessarily `subdir`'s last
+# component) — and then re-pinned with `--pins-only`, which does everything else.
 
 [packages.tensorfs]
 repo = "https://github.com/cozy-creator/tensorfs"
@@ -299,7 +306,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "6c91b83d"
+rev = "6c91b83d8fb2e45a6d568569dc15884c4d6b26e3"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's

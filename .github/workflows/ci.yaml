@@ -188,6 +188,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # pgw#1477 — FIRST, ahead of uv itself, and stdlib-only so it can be.
+      # `uv sync --locked` (two steps down, and the first step of every other
+      # job in every other workflow) dies on a stale lock with a message that
+      # names neither file and no rev — so a torchcg re-vendor that moved
+      # pyproject.toml's pin and not uv.lock turned `fast gates`, `tests` and
+      # `drift` red simultaneously, at install, on PRs that had touched
+      # neither file. Twice on 2026-08-19, twenty minutes apart. Nothing in the
+      # required set could report it: a gate cannot fail on something it never
+      # got far enough to read.
+      #
+      # ~30 ms, no venv, no network. The `--selftest` arm runs here only, and
+      # is the reason this line is evidence: it builds a divergent tree in a
+      # tempdir and fails if the check stays green on it.
+      - name: pgw#1477 guard - uv.lock agrees with pyproject.toml's git pins
+        run: |
+          python3 scripts/lint_lock_pin_agreement.py --selftest
+          python3 scripts/lint_lock_pin_agreement.py
+
       # pgw#1264: `@v6` HERE ONLY, and the version is the point. `@v4` bundles
       # `@actions/cache` v3, which speaks the cache API GitHub retired, so
       # `enable-cache: true` on `@v4` is dead config that reads as a working
@@ -655,6 +673,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+
+      # pgw#1477: see `fast gates`. Same guard, same reason — this job's
+      # `uv sync --locked` is one of the three reds a stale lock produces.
+      - name: pgw#1477 guard - uv.lock agrees with pyproject.toml's git pins
+        run: python3 scripts/lint_lock_pin_agreement.py
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4

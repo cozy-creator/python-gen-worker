@@ -27,6 +27,25 @@ tasks:
     cmds:
       - scripts/probe_sync.sh {{.CLI_ARGS}}
 
+  lock-check:
+    desc: |
+      pgw#1477 — pyproject.toml's git pins, uv.lock and _vendor/VENDORED.toml
+      name the same revs. $0, no venv, no network, ~30ms. Run it before pushing:
+      a stale lock breaks `uv sync --locked`, the FIRST step of EVERY CI job,
+      so it costs three red checks that name neither file.
+    cmds:
+      - python3 scripts/lint_lock_pin_agreement.py
+
+  vendor:
+    desc: |
+      pgw#1477 — re-vendor an upstream snapshot as ONE act: extract at the rev,
+      re-apply the declared mechanical rewrites, regenerate the sha256 table,
+      move the pin in BOTH pyproject.toml and uv.lock, and stage it all.
+      Usage: task vendor -- torchcg <rev>
+      Hand-editing the pin instead is what broke master twice on 2026-08-19.
+    cmds:
+      - python3 scripts/vendor_snapshot.py {{.CLI_ARGS}}
+
   proto-vendor:
     desc: |
       pgw#944 — resync proto/worker_scheduler.proto from tensorhub (which owns
@@ -111,6 +130,10 @@ tasks:
     # A gate that runs a different command under the same name is a different
     # gate wearing its clothes.
     cmds:
+      # pgw#1477 FIRST, and with bare python3 — every line below it is a
+      # `uv run`, which silently RE-RESOLVES a stale lock instead of refusing
+      # it, so `task lint` was green on exactly the tree CI dies installing.
+      - cmd: python3 scripts/lint_lock_pin_agreement.py
       - cmd: uv run --extra dev mypy src/gen_worker tests tests_v2
       - cmd: uv run --extra dev ruff check src/gen_worker
         # Advisory, and this one IS matched by continue-on-error in CI:

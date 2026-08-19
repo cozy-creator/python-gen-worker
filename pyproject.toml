@@ -691,7 +691,11 @@ torchvision = [
 # vendored half leaves two versions live in one tree, and the failure lands two
 # tools away from the cause: the derive raised `TypeError: unexpected keyword
 # 'session'` while that exact signature was verifiably present in the vendored
-# tree. Bump both, re-lock, re-vendor — one change.
+# tree. Bump both, re-lock, re-vendor — one change, and pgw#1477 made it one
+# command: `task vendor -- torchcg <rev>`. Editing this line by hand leaves
+# uv.lock behind, which breaks `uv sync --locked` — the first step of every CI
+# job — for every open PR; `scripts/lint_lock_pin_agreement.py` now refuses that
+# tree locally and as CI's first step.
 torchcg = { git = "https://github.com/cozy-creator/torchcg", rev = "6c91b83d8fb2e45a6d568569dc15884c4d6b26e3" }
 # Saying which pins were deleted requires naming them.
 # retired-name: historical rationale, not a live reference.

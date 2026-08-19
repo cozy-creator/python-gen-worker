@@ -57,6 +57,12 @@ jobs:
       - name: proto drift check (vs PROTO_DIGEST)
         run: PROTO_SKIP_PEER=1 scripts/proto-drift-check.sh
 
+      # pgw#1477, same layer-1 argument: `uv sync --locked` below is where a
+      # stale lock kills this job, with a message naming neither pyproject.toml
+      # nor the divergent rev. This one names both, in ~30 ms, before uv exists.
+      - name: pgw#1477 guard - uv.lock agrees with pyproject.toml's git pins
+        run: python3 scripts/lint_lock_pin_agreement.py
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
