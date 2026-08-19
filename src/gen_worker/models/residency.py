@@ -223,13 +223,13 @@ def _obj_manages_own_device(obj: Any) -> bool:
 
 def _obj_offload_hooked(obj: Any) -> bool:
     """Any offload arming that parks weights in host RAM: the diffusers
-    CPU-offload modes plus the block-window rung."""
+    CPU-offload modes plus the pgw#1497 streamed-tail rung."""
     if _obj_manages_own_device(obj):
         return True
     try:
-        from .loading import block_offload_active
+        from .stream_residency import stream_residency_active
 
-        return bool(block_offload_active(obj))
+        return bool(stream_residency_active(obj))
     except Exception:
         return False
 

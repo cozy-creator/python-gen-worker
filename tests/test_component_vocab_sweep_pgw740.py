@@ -104,13 +104,19 @@ def test_both_moe_experts_are_lora_branch_targets() -> None:
     assert set(branch_targets(_WanMoE())) == {"transformer", "transformer_2"}
 
 
-def test_block_window_offload_defaults_to_every_denoiser() -> None:
-    """``apply_block_window_offload``'s default was a literal
-    ``("transformer","unet")`` in the signature — a default argument, so even
-    repointing it would have frozen the vocabulary at def time."""
+def test_stream_residency_reads_no_component_vocabulary_at_def_time() -> None:
+    """The rung that replaced the block-window offload (pgw#1497) takes no
+    component vocabulary at all — it discovers leaves from the tree it is
+    handed — so the def-time-frozen-default hazard this test was written for
+    cannot recur here. Assert the shape, not the deleted signature."""
     import inspect
 
-    from gen_worker.models.loading import apply_block_window_offload
+    from gen_worker.models.stream_residency import StreamedResidency
 
-    default = inspect.signature(apply_block_window_offload).parameters["components"].default
-    assert default is None, "a non-None default re-freezes the vocabulary at def time"
+    params = inspect.signature(StreamedResidency.__init__).parameters
+    assert "components" not in params
+    for name, param in params.items():
+        assert not isinstance(param.default, (tuple, list)) or not param.default, (
+            f"{name}: a non-empty sequence default re-freezes a vocabulary at "
+            "def time"
+        )
