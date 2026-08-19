@@ -146,13 +146,28 @@ from .rung import (
 def is_cuda_oom(exc: Optional[BaseException]) -> bool:
     """CUDA allocator exhaustion in any of its shapes: torch.cuda.OutOfMemoryError
     (class name match — no torch import needed) plus the allocator's RuntimeError
-    flavors ("CUDA error: out of memory", CUBLAS/CUDNN alloc failures)."""
+    flavors ("CUDA error: out of memory", CUBLAS/CUDNN alloc failures).
+
+    pgw#1499 adds ``torch.AcceleratorError`` — the ASYNCHRONOUS shape. A kernel
+    that runs out of memory device-side surfaces later, on whatever call next
+    synchronizes, as an AcceleratorError carrying cudaErrorMemoryAllocation
+    (code 2). Missing it made a real OOM read as an unclassified crash, so no
+    ladder ever ran. It also leaves the context's error state poisoned, which
+    is what :func:`discard_cuda_async_error` clears — every caller of this
+    predicate is about to retry something, so the clear belongs here rather
+    than in each of them.
+    """
     if exc is None:
         return False
     if type(exc).__name__ in ("OutOfMemoryError", "CUDAOutOfMemoryError"):
         return True
+    text = str(exc).lower()
+    if type(exc).__name__ == "AcceleratorError" and (
+        getattr(exc, "error_code", None) == 2 or "out of memory" in text
+    ):
+        discard_cuda_async_error()
+        return True
     if isinstance(exc, RuntimeError):
-        text = str(exc).lower()
         return (
             "out of memory" in text
             or "cuda oom" in text
@@ -160,6 +175,29 @@ def is_cuda_oom(exc: Optional[BaseException]) -> bool:
             or "cudnn_status_alloc_failed" in text
         )
     return False
+
+
+def discard_cuda_async_error() -> None:
+    """Flush a poisoned asynchronous CUDA error so the PROCESS survives it.
+
+    An async device-side failure sticks to the context: the next launch
+    re-reports it, and a worker that has already caught and handled the OOM
+    then dies on an error it has no live cause for. A trivial kernel plus a
+    synchronize forces the sticky error out where it can be swallowed once,
+    deliberately, right here — we already learned the fact from the synchronous
+    return. Always safe to call; no-op without CUDA.
+    """
+    try:
+        import torch
+
+        if not cuda_ready():
+            return
+        a = torch.tensor([1], dtype=torch.uint8, device="cuda")
+        b = torch.tensor([1], dtype=torch.uint8, device="cuda")
+        _ = a + b
+        torch.cuda.synchronize()
+    except Exception:  # noqa: BLE001 — dumping the error IS the point
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1640,6 +1678,15 @@ def apply_low_vram_config(
     if mode not in _VALID_MODES:
         raise ValueError(f"invalid low-VRAM mode: {mode!r}; expected one of {_VALID_MODES}")
 
+    # pgw#1499: arm the reactive in-rung ladders on EVERY rung, including the
+    # resident ones. The rung answers "where do the weights live"; these answer
+    # "this one op did not fit" — and the rung that most needs the second
+    # answer is `off`, where nothing was pre-tiled because everything fitted.
+    # Imported here, not at module scope: `oom_ladder` reads this module.
+    from . import oom_ladder
+
+    oom_ladder.install(pipeline, logger=log)
+
     prior = getattr(pipeline, _COZY_MODE_ATTR, None)
     if prior is not None:
         return {"mode": prior, "already_applied": True}
@@ -1844,6 +1891,7 @@ __all__ = [
     "place_pipeline",
     "touches_host_ram",
     "is_cuda_oom",
+    "discard_cuda_async_error",
     "transition_line",
     "PLACEMENT_LADDER",
     "select_auto_mode",
