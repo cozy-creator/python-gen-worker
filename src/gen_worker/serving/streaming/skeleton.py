@@ -131,9 +131,45 @@ def build(
     for name, spec in sorted(index.items()):
         if name.startswith("_"):
             continue
-        if not isinstance(spec, (list, tuple)) or len(spec) != 2:
-            continue
-        library, class_name = spec
+        # pgw#1481: an entry this walker cannot read is REFUSED BY NAME, never
+        # skipped. `continue` here collapsed nine specific failures into one
+        # "declares no nn.Module component" that named none of them — and that
+        # sentence is false when the index declares nine.
+        if not isinstance(spec, (list, tuple)) or len(spec) < 2:
+            raise SkeletonError(
+                f"{index_path} entry {name!r} is {spec!r}, which is not "
+                f"[library, class_name]"
+            )
+        library, class_name = spec[0], spec[1]
+        if len(spec) > 2:
+            # A MODULAR index entry: [library, class_name, {type_hint,
+            # pretrained_model_name_or_path, subfolder, variant, revision}].
+            # Its first two elements mean exactly what the classic ones mean,
+            # so it is loadable — but only while the metadata does not send us
+            # somewhere else. Anything that relocates the component is refused
+            # rather than silently read from `checkpoint_dir/<name>`.
+            meta = spec[2] if len(spec) == 3 and isinstance(spec[2], dict) else None
+            if meta is None:
+                raise SkeletonError(
+                    f"{index_path} entry {name!r} has {len(spec)} elements and no "
+                    f"trailing metadata object; expected [library, class_name] or a "
+                    f"modular [library, class_name, {{...}}]"
+                )
+            subfolder = meta.get("subfolder")
+            if subfolder is not None and str(subfolder) != name:
+                raise SkeletonError(
+                    f"{index_path} entry {name!r} is a modular entry whose "
+                    f"subfolder is {subfolder!r}, not {name!r}. The projected tree "
+                    f"is addressed by component name, so this component's weights "
+                    f"are not where streaming would look for them."
+                )
+            for field in ("variant", "revision"):
+                if meta.get(field) is not None:
+                    raise SkeletonError(
+                        f"{index_path} entry {name!r} is a modular entry pinning "
+                        f"{field}={meta[field]!r}. The projected tree carries one "
+                        f"cut of this component and cannot honour that pin."
+                    )
         if library is None or class_name is None:
             # A declared-but-absent optional component (safety checker and
             # friends). The pipeline takes None and says so itself.
