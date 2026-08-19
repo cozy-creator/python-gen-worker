@@ -96,6 +96,37 @@ def _aligned(n: int) -> int:
 
 
 @dataclass(frozen=True)
+class MemoryBudget:
+    """The {VRAM, RAM} PAIR a model is assigned (Paul, 2026-08-19).
+
+    A memory profile is assigned top-down — worker, then execution group, then
+    model — and BOTH halves determine what this rung may do: the resident set
+    spends the VRAM half, and the streaming tail and every demotion to the host
+    tier spend the RAM half. Pinned staging is a slice of the same RAM budget,
+    not free space beside it.
+
+    ``ram_bytes == 0`` means UNSTATED, not unlimited. The plan then reports its
+    host cost (:attr:`ResidencyPlan.host_bytes`) without a verdict on it.
+
+    **ENFORCEMENT IS A NAMED DEFERRAL** (pgw#1497 follow-up): partial unload
+    must REFUSE, or degrade further down the ladder, when the RAM half cannot
+    absorb what VRAM evicts. Today it plans against the VRAM half and reports
+    the RAM cost. The signature is the pair now so that landing enforcement is
+    a change of behaviour and not a change of shape.
+    """
+
+    vram_bytes: int
+    ram_bytes: int = 0
+
+    @classmethod
+    def of(cls, value: "int | MemoryBudget") -> "MemoryBudget":
+        """Accept either half of the migration: a bare VRAM int, or the pair."""
+        if isinstance(value, MemoryBudget):
+            return value
+        return cls(vram_bytes=max(0, int(value)))
+
+
+@dataclass(frozen=True)
 class LeafCost:
     """One leaf module's two prices.
 
@@ -134,6 +165,21 @@ class ResidencyPlan:
     #: subtle half of the port: without it a plan fits at rest and overshoots
     #: the instant two casts are in flight.
     window_bytes: int
+    #: The RAM half of the assigned pair, 0 when unstated. Reported, not yet
+    #: enforced — see :class:`MemoryBudget`.
+    ram_budget_bytes: int = 0
+
+    @property
+    def host_bytes(self) -> int:
+        """What this plan costs in HOST RAM: the pinned streaming tail."""
+        return self.streamed_bytes
+
+    @property
+    def host_fits(self) -> bool:
+        """False when the tail is over the stated RAM half. Always True while
+        the RAM half is unstated — an unstated budget is not a passed one, and
+        callers that need the distinction read ``ram_budget_bytes``."""
+        return not self.ram_budget_bytes or self.host_bytes <= self.ram_budget_bytes
 
     @property
     def device_bytes(self) -> int:
@@ -155,7 +201,7 @@ class ResidencyPlan:
 def plan_residency(
     costs: Sequence[LeafCost],
     *,
-    budget_bytes: int,
+    budget_bytes: "int | MemoryBudget",
     streams: int = DEFAULT_STREAMS,
     min_stream_bytes: int = DEFAULT_MIN_STREAM_BYTES,
     exclude: Iterable[str] = (),
@@ -194,7 +240,8 @@ def plan_residency(
     depend on the answer.
     """
     streams = max(1, int(streams))
-    budget = max(0, int(budget_bytes))
+    pair = MemoryBudget.of(budget_bytes)
+    budget = max(0, int(pair.vram_bytes))
     skip = {str(n) for n in exclude}
 
     forced: List[LeafCost] = []
@@ -236,6 +283,7 @@ def plan_residency(
         resident_bytes=mem,
         streamed_bytes=sum(c.resident_bytes for c in streamed),
         window_bytes=window,
+        ram_budget_bytes=max(0, int(pair.ram_bytes)),
     )
 
 
@@ -498,7 +546,7 @@ class StreamedResidency:
         roots: Sequence[Tuple[str, Any]],
         *,
         device: Any = None,
-        budget_bytes: int = 0,
+        budget_bytes: "int | MemoryBudget" = 0,
         streams: int = DEFAULT_STREAMS,
         min_stream_bytes: int = DEFAULT_MIN_STREAM_BYTES,
         exclude: Iterable[str] = (),
@@ -513,7 +561,7 @@ class StreamedResidency:
         self.device = torch.device(
             device if device is not None else tree_device(roots) or "cpu"
         )
-        self.budget_bytes = max(0, int(budget_bytes))
+        self.budget = MemoryBudget.of(budget_bytes)
         self.streams = max(1, int(streams))
         self.min_stream_bytes = int(min_stream_bytes)
         self._exclude = {str(n) for n in exclude}
@@ -534,7 +582,7 @@ class StreamedResidency:
         obj: Any,
         *,
         device: Any = None,
-        budget_bytes: int = 0,
+        budget_bytes: "int | MemoryBudget" = 0,
         **kwargs: Any,
     ) -> "StreamedResidency":
         """Build over whatever the caller has: a module, a diffusers pipeline
@@ -586,7 +634,7 @@ class StreamedResidency:
         return self._apply(
             plan_residency(
                 self._costs,
-                budget_bytes=self.budget_bytes,
+                budget_bytes=self.budget,
                 streams=self.streams,
                 min_stream_bytes=self.min_stream_bytes,
                 exclude=self._exclude,
@@ -594,20 +642,26 @@ class StreamedResidency:
             allow_promote=True,
         )
 
-    def rebudget(self, budget_bytes: int) -> ResidencyPlan:
+    def rebudget(self, budget_bytes: "int | MemoryBudget") -> ResidencyPlan:
         """Re-split at a new budget — partial unload down, partial load up.
 
         Downward is the eviction primitive: the cold tail is trimmed and
         nothing is promoted. ``rebudget(0)`` is a full demotion to the host
         tier; ``rebudget(self.total_bytes)`` promotes everything back.
         """
-        new_budget = max(0, int(budget_bytes))
-        allow_promote = self.plan is None or new_budget >= self.plan.budget_bytes
-        self.budget_bytes = new_budget
+        pair = MemoryBudget.of(budget_bytes)
+        # The RAM half survives a re-plan that only names a VRAM number: a
+        # demotion does not revoke the profile the model was assigned.
+        if not pair.ram_bytes and self.budget.ram_bytes:
+            pair = MemoryBudget(pair.vram_bytes, self.budget.ram_bytes)
+        allow_promote = (
+            self.plan is None or pair.vram_bytes >= self.plan.budget_bytes
+        )
+        self.budget = pair
         return self._apply(
             plan_residency(
                 self._costs,
-                budget_bytes=new_budget,
+                budget_bytes=pair,
                 streams=self.streams,
                 min_stream_bytes=self.min_stream_bytes,
                 exclude=self._exclude,
@@ -668,6 +722,7 @@ class StreamedResidency:
                     self._to_host(name)
                 for name in promote:
                     self._to_device(name)
+                self._place_residue()
             self.plan = plan
             for _, root in self._roots:
                 try:
@@ -700,7 +755,29 @@ class StreamedResidency:
                 by_name[n].resident_bytes for n in streamed if n in by_name
             ),
             window_bytes=planned.window_bytes,
+            ram_budget_bytes=planned.ram_budget_bytes,
         )
+
+    def _place_residue(self) -> None:
+        """Everything OUTSIDE the streaming tail must be ON the device.
+
+        Not an optimization — a correctness clause, and dropping it is a defect
+        MEASURED on the card: a tensor owned by a module that has children
+        (CLIP's ``position_ids``, an embedding table's siblings, a final norm
+        hanging off a container) is never a leaf, so nothing else here ever
+        touches it. Left on the host it takes down the first kernel that reads
+        it with ``index is on cpu, different from other tensors on cuda:0`` —
+        which is exactly how sd1.5 died at a 5% budget.
+        """
+        for root_name, root in self._roots:
+            for name, module in root.named_modules():
+                qualified = f"{root_name}.{name}" if name else root_name
+                if qualified in self._streamed:
+                    continue  # its tensors rest on the host BY DESIGN
+                for attr, is_param, tensor in _own_tensors(module):
+                    if tensor.is_meta or tensor.device == self.device:
+                        continue
+                    _assign(module, attr, tensor.to(self.device), is_param)
 
     def _ring_for(self) -> _CastRing:
         if self._ring is None:
@@ -847,6 +924,7 @@ __all__ = [
     "DEFAULT_STREAMS",
     "ENGAGED_ATTR",
     "LeafCost",
+    "MemoryBudget",
     "PlanTransition",
     "ResidencyPlan",
     "StreamedResidency",

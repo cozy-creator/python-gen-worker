@@ -194,7 +194,17 @@ class _InstanceBackend:
                 f"{self.model_cls.__name__}: a tier move was ordered on an "
                 f"instance that holds no model object"
             )
+        # A rung armed during the author's own load already owns this tree.
+        # Building a second handle over the same modules would give two
+        # planners two disagreeing views of one resident set.
+        from ..models.memory import stream_residency_of
         from ..models.stream_residency import StreamedResidency
+
+        for component in (getattr(self.model, "pipe", None), self.model):
+            armed = stream_residency_of(component) if component is not None else None
+            if armed is not None:
+                self._stream_residency = armed
+                return armed
 
         # No `device=`: the execution device is DERIVED from where this
         # instance's weights already are. Probing the machine instead would
@@ -233,7 +243,9 @@ class _InstanceBackend:
     @staticmethod
     def _engage_at(residency: Any, budget_bytes: int) -> int:
         """First tier move on an un-engaged instance: engage at ``budget``."""
-        residency.budget_bytes = int(budget_bytes)
+        from ..models.stream_residency import MemoryBudget
+
+        residency.budget = MemoryBudget.of(int(budget_bytes))
         plan = residency.engage()
         return int(plan.streamed_bytes)
 
@@ -302,6 +314,13 @@ class ServeLoop:
                     lane=lane,
                     engine=self._engine,
                     compile_sink=sink,
+                    # pgw#1497: ADMISSION-FIRST. The `partial_stream` rung
+                    # sizes its resident set from the bytes residency admitted
+                    # this instance for, not from an activation estimate, so
+                    # that number travels with the load moment.
+                    weight_budget_bytes=self.residency.weight_budget_bytes(
+                        binding.checkpoint_ref, key[2]
+                    ),
                 ),
                 lane,
                 self._on_loaded,

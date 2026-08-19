@@ -345,6 +345,27 @@ class ResidencyManager:
             slot = self._slots.get((str(checkpoint_ref), str(lane)))
             return slot.tier if slot is not None else Tier.ABSENT
 
+    def weight_budget_bytes(self, checkpoint_ref: str, lane: str) -> int:
+        """The DEVICE bytes this instance's weights are admitted for.
+
+        pgw#1497's admission-first seam, and the reason it is a method here
+        rather than a number the loader works out: this is the same figure
+        ``lease`` reserves against the budget before anything is allocated, so
+        the rung that sizes a resident set from it can never disagree with the
+        reservation that let the instance in. It is available BEFORE the
+        factory runs, which is when the load context that carries it is built.
+        """
+        try:
+            return int(self._sizer.resident_bytes(str(checkpoint_ref), str(lane)))
+        except Exception:  # noqa: BLE001 — a sizer that cannot answer means
+            # "no lease number", and the rung refuses on 0 rather than
+            # inventing one. Never a failed load.
+            logger.debug(
+                "weight_budget_bytes(%r, %r) unreadable", checkpoint_ref, lane,
+                exc_info=True,
+            )
+            return 0
+
     def reserved_bytes(self) -> Tuple[int, int]:
         """(vram reservations, host reservations) — the worker's own view."""
         with self._state:

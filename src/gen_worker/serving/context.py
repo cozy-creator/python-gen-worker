@@ -241,6 +241,7 @@ class LoadContext(Generic[MT_co]):
         engine: Optional[LoaderEngine] = None,
         compile_sink: Optional[Callable[[Any], Any]] = None,
         device: str = "",
+        weight_budget_bytes: int = 0,
     ) -> None:
         self._binding = binding
         self._model_type = model_type
@@ -256,6 +257,12 @@ class LoadContext(Generic[MT_co]):
         #: ladder was never consulted" (pgw#1486). Read by `compile()`, which
         #: may not arm a compiled graph over hook-managed weights.
         self._engaged_rung = ""
+        #: pgw#1497: the DEVICE bytes this instance's weights were ADMITTED
+        #: for — the residency lease's own number, handed down so the
+        #: `partial_stream` rung can size its resident set from it. 0 means no
+        #: lease was in scope (a local run, a fixture), and that rung then
+        #: refuses rather than invent a budget.
+        self._weight_budget_bytes = max(0, int(weight_budget_bytes))
 
     @property
     def checkpoint_dir(self) -> Path:
@@ -441,7 +448,11 @@ class LoadContext(Generic[MT_co]):
         try:
             from ..models.memory import apply_low_vram_config
 
-            applied = apply_low_vram_config(pipeline, mode="auto")
+            applied = apply_low_vram_config(
+                pipeline,
+                mode="auto",
+                stream_budget_bytes=self._weight_budget_bytes,
+            )
         except HostRamMoveRefusedError:
             # The guard did its job: this host cannot hold what the rung wanted
             # to move. Re-raising is right — the alternative is placing the
