@@ -493,12 +493,14 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
         "qwen3.6-27b-mtp", "qwen3.6-35b-a3b", "flux1", "flux2-klein",
         "krea-2", "anima", "ernie", "qwen-image", "z-image",
+        # pgw#1430 (se#769 audio lane): the fleet's audio modality.
+        "stable-audio", "musicgen",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
     # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b) are TWO
     # roots, and neither is spelled bare "flux".
-    from gen_worker.models import Flux1, Flux2Klein
+    from gen_worker.models import Flux1, Flux2Klein, MusicGen, StableAudio
 
     assert model_type_by_name("flux1") is Flux1
     assert model_type_by_name("flux2-klein") is Flux2Klein
@@ -546,6 +548,40 @@ def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
     assert Qwen36A3b.Defaults().temperature.default == 0.7
 
 
+def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None:
+    """pgw#1430 (se#769 audio lane).
+
+    ONE root serves stable-audio-open AND foundation-1: the two prod
+    checkpoints have the SAME 445-tensor transformer header sha256 and
+    byte-identical scheduler values, so no MECHANISM differs — the only thing
+    the :class:`Flux2Klein` split precedent splits on. They diverge only in
+    weight digests, which is a CHECKPOINT ROW. There is deliberately no
+    "foundation-1" model type.
+
+    MusicGen is the :class:`Rife` shape — name + fingerprint + Defaults, NO
+    contract. Absent is honest rather than unfinished, on four independent
+    measurements: a single-file `transformers` tree; the hub records no
+    `file_layout` (which th#1937/th#2109 rule CORRECT for transformers); the
+    endpoint loads through `Slot(str)`; and its served tree carries no
+    `model_index.json` at all, so the streaming branch that consumes a lane
+    document is unreachable for it.
+    """
+    from gen_worker.models import MusicGen, StableAudio
+
+    assert model_type_by_name("stable-audio") is StableAudio
+    assert model_type_by_name("foundation-1") is None
+    assert model_type_by_name("musicgen") is MusicGen
+
+    assert MusicGen.canonical_contract is None
+    assert MusicGen.canonical_scheduler_config == {}
+    # StableAudio DOES carry both, and the scheduler config is real (read from
+    # the served manifest, identical on both checkpoints) rather than {}.
+    assert StableAudio.canonical_scheduler_config["prediction_type"] == "v_prediction"
+    assert StableAudio.canonical_scheduler_config["_class_name"] == (
+        "CosineDPMSolverMultistepScheduler"
+    )
+
+
 def test_contract_stamps_classify_through_the_fingerprint() -> None:
     # A real registered stamp from tensorfs's built-in contracts.
     assert model_type_for_contract("sdxl.clip-g-fused-qkv@1") is SDXL
@@ -556,6 +592,46 @@ def test_contract_stamps_classify_through_the_fingerprint() -> None:
     assert model_type_for_contract("minimax.h3-dit-native@1") is MiniMaxH3
     assert model_type_for_contract("minimax.h3-dit-diffusers@1") is MiniMaxH3
     assert model_type_for_contract("rife.flownet@1") is Rife
+
+
+def test_the_audio_fingerprints_do_not_cross_claim_with_flux() -> None:
+    """pgw#1430 / se#769 TRAP A.
+
+    The hub MIS-ROOTS ``tensorhub/stable-audio-open`` under ``family=flux``
+    (ingest fell back after ``_class_name=StableAudioPipeline not in family
+    map``), and the mis-rooting is not arbitrary: MEASURED from the real
+    prod header, 432 of the StableAudio DiT's 445 tensors are spelled
+    ``transformer_blocks.*`` — the SAME spelling a FLUX transformer uses. The
+    collision is therefore real at the TENSOR level, which is where a
+    tensorfs document matches.
+
+    This test guards the level THIS module owns: the recorded contract STAMP.
+    The two namespaces must not be confused — a stamp collision would need
+    someone to widen a flux fingerprint to a bare ``flux*``, which is why the
+    RED arm below pins that it would in fact be caught.
+    """
+    from gen_worker.models import Flux1, Flux2Klein, MusicGen, StableAudio
+
+    assert model_type_for_contract("stable-audio.diffusers-fp16@1") is StableAudio
+    assert model_type_for_contract("musicgen.native@1") is MusicGen
+
+    # No audio stamp may land on a flux root, and no flux stamp on an audio one.
+    for stamp in ("stable-audio.diffusers-fp16@1", "musicgen.native@1"):
+        assert model_type_for_contract(stamp) not in (Flux1, Flux2Klein)
+    for stamp in ("flux1.diffusers-bf16@1", "flux2-klein.diffusers-bf16@1"):
+        assert model_type_for_contract(stamp) not in (StableAudio, MusicGen)
+
+    # RED ARM — the assertion above is only meaningful if a WIDER flux pattern
+    # would actually capture an audio stamp. Pin that it would, so nobody
+    # widens `flux1.*` to `flux*` believing the separation is structural.
+    from fnmatch import fnmatchcase
+
+    assert not fnmatchcase("stable-audio.diffusers-fp16@1", "flux*")
+    assert fnmatchcase("stable-audio.diffusers-fp16@1", "stable-audio.*")
+    # The separation rests on the NAME we chose, not on any guard — which is
+    # exactly why the document is named `stable-audio.*` and never `flux*`.
+    assert StableAudio.contracts == ("stable-audio.*",)
+    assert MusicGen.contracts == ("musicgen.*",)
     # Unrecognized = unclassified, legal and visible — never a guess.
     assert model_type_for_contract("flux.diffusers-bf16@1") is None
     # pgw#1393: the two flux roots fingerprint separately, and the SHARED

@@ -37,6 +37,13 @@ def test_the_document_names_the_launch_set() -> None:
         "qwen3.6-27b-mtp", "qwen3.6-35b-a3b",
         # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b).
         "flux1", "flux2-klein",
+        "qwen-image", "z-image",
+        # pgw#1427 (se#769 wave 3).
+        "krea-2", "anima", "ernie",
+        # pgw#1430 (se#769 audio lane): stable-audio covers stable-audio-open
+        # AND foundation-1 (one root, two checkpoint rows); musicgen is its own
+        # root — transformers, autoregressive, no scheduler.
+        "stable-audio", "musicgen",
         "sdxl.lora", "sd15.lora",
     ]
     schemas = doc["schemas"]
