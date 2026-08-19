@@ -1,4 +1,6 @@
-"""pgw#1453: a checkpoint whose key names predate the installed library.
+"""A checkpoint whose key names predate the installed library still loads.
+
+# pgw#1453: sd1.5's text_encoder matched 0 of 197 tensors on the streaming path.
 
 No mocks. A REAL diffusers pipeline is saved to real safetensors, then its
 containers are REWRITTEN under the names the *previous* library generation
