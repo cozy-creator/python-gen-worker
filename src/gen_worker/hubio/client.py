@@ -37,7 +37,7 @@ from gen_worker.transfer.grants import TransferGrant, upload
 from gen_worker.transfer.journal import TransferJournal, TransferSession
 
 from .. import activity as _activity
-from ..http_origin import is_definite_hub_answer
+from ..http_origin import is_definite_hub_answer, response_is_from_hub
 from ..models.cache_paths import open_worker_cas
 from ..stall import SilenceWindow
 from .publish_state import JOURNAL_NAME, STATE_NAME, ProducerRecovery
@@ -77,14 +77,21 @@ _EXPIRY_REPLAN_ATTEMPTS = 3
 _COMPLETE_TIMEOUT_S = 600.0
 
 # How long the client tolerates hearing NOTHING DEFINITE from the hub before
-# giving up — network errors, edge-masked 5xx, proxy-shaped 404s.
-# Silence-bounded, never attempt-counted: a hub restart is seconds and a tunnel
-# re-dial is minutes, and an attempt cap classifies both FATAL and throws away
-# paid GPU work at the finish line. Six verify-lengths, because a container
-# rebuild is tens of minutes and an hour parked on the CPU rig costs about what
-# re-downloading costs — and unlike the re-download it cannot fail the same
-# way twice. Waiting stays observable: the loop beats liveness every pass.
-_COMPLETE_SILENCE_WINDOW_S = 6.0 * _COMPLETE_TIMEOUT_S
+# giving up on the completion — network errors, edge-masked 5xx, proxy-shaped
+# 404s. Silence-bounded, never attempt-counted: a hub restart is seconds and a
+# tunnel re-dial is minutes, and an attempt cap classifies both FATAL and
+# throws away paid work at the finish line.
+#
+# BOUNDED BY THE HUB'S OWN PATIENCE, not by what the pod could afford to wait.
+# `note_progress()` below is a HEARTBEAT and the orchestrator's stall guard
+# refuses to be fooled by one — it kills a job whose DECLARED POSITION has not
+# moved for its 10-minute phase budget, and a retry loop does not move the
+# position. A window at or past that budget therefore does not buy patience; it
+# only guarantees that the verdict on the job is the guard's untyped
+# `job_progress_stalled` instead of this client's typed, classified refusal.
+# Four minutes rides out every front-door blip measured so far (a re-dial is
+# seconds to tens of seconds) and still leaves the client the one to speak.
+_COMPLETE_SILENCE_WINDOW_S = 240.0
 
 def _dtype_token(v: str) -> str:
     """Publish-body dtype hygiene: the internal dtype-axis colon
@@ -216,6 +223,24 @@ def _retry_after_s(resp: requests.Response) -> Optional[float]:
     except Exception:
         return None
     return min(value, _RETRY_MAX_DELAY_S) if value > 0 else None
+
+
+#: The classification for "the front door answered, the hub did not". Typed and
+#: RETRYABLE-WITHOUT-A-NEW-POD: the bytes are staged, the audit passed, and the
+#: only thing that failed is the edge. th#2182.
+FRONT_DOOR_UNAVAILABLE = "front_door_unavailable"
+
+
+def _non_hub_origin(resp: requests.Response) -> str:
+    """A non-hub response reduced to the two facts worth keeping: what status
+    rode on it and what media type it was. Never its body — a proxy's body is
+    a web page, and a web page in a failure `cause` is noise that survives into
+    every report built from it."""
+    try:
+        ctype = str(resp.headers.get("Content-Type") or "").split(";")[0].strip()
+    except Exception:  # noqa: BLE001 - header access must never mask the real error
+        ctype = ""
+    return f"HTTP {int(getattr(resp, 'status_code', 0))}, {ctype or 'no content-type'}"
 
 
 def _error_code_of(resp: requests.Response) -> str:
@@ -443,29 +468,47 @@ class HubClient:
         except Exception:  # noqa: BLE001 — best effort; the session TTL backstops it
             logger.debug("publish %s abort failed", publish_id, exc_info=True)
 
-    def _post_v2_complete(self, path: str) -> requests.Response:
-        """POST the hub's idempotent v2 completion.
+    @staticmethod
+    def _v2_complete_is_definite(resp: requests.Response) -> bool:
+        """Did the HUB answer this completion, or did the front door?
 
-        `_send_with_retries` decides "did we hear from the hub?" from the body's
-        SHAPE, and a v2 completion's refusal is a projection rather than an
-        error envelope — so it would read a real, typed, `retryable: false`
-        refusal as a proxy non-answer and retry it. The retry then finds the
-        session already terminal and returns 409 `publish_repudiated`: a
-        consequence in place of the cause, which is gone.
+        Three shapes are the hub speaking and end the loop:
 
-        Tensorhub makes this route idempotent: completing an already-promoted
-        session returns its terminal status and checkpoint id. Network-level
-        failures therefore retry safely, including a lost success response;
-        an HTTP answer of any status is the hub speaking and is returned as-is
-        for the typed handling below.
+          * 2xx/3xx — nothing in front of us fabricates a promotion.
+          * the th#1301 PROJECTION (`status.failure.code`) at ANY status — a v2
+            refusal is not an error envelope, so the generic shape heuristic
+            would read a real, typed, `retryable: false` repudiation as a proxy
+            non-answer and retry it. The retry then finds the session terminal
+            and returns 409 `publish_repudiated`: a consequence in place of the
+            cause, which is gone (pgw#743's defect, in a different route).
+          * the hub's `{"error": {...}}` envelope — `is_definite_hub_answer`.
+
+        Everything else did NOT come from the hub. This is the pgw#1435 /
+        th#2182 defect: this predicate used to be `lambda resp: True`, so the
+        690-byte ngrok "no healthy backend" HTML page that rides a transient
+        503 counted as a verdict, and TWO ingests — 16.2 GB and 17.9 GB, both
+        already uploaded, staged and AUDITED — were destroyed at their last
+        call, in two different lanes, in the same window. The completion is the
+        one call where a non-answer is most expensive and where retrying is
+        free: tensorhub's `/complete` is idempotent (an already-promoted
+        session returns its terminal status and checkpoint id) and RESUMABLE (a
+        retryable stage failure leaves the session live, so a later pass copies
+        only what is still missing).
         """
+        if HubClient._v2_failure(resp) is not None:
+            return True
+        return is_definite_hub_answer(resp)
+
+    def _post_v2_complete(self, path: str) -> requests.Response:
+        """POST the hub's idempotent, resumable v2 completion."""
         return _send_with_retries(
             f"POST {path}",
             lambda: _http_session().post(
                 f"{self.base_url}{path}", headers=self._headers(),
                 timeout=(_CONNECT_TIMEOUT_S, _COMPLETE_TIMEOUT_S),
             ),
-            definite=lambda resp: True,
+            silence_window_s=_COMPLETE_SILENCE_WINDOW_S,
+            definite=HubClient._v2_complete_is_definite,
         )
 
     def publish_v2(
@@ -841,6 +884,22 @@ class HubClient:
                         status=done.status_code, code=str(failure.get("code") or ""),
                         retryable=bool(failure.get("retryable")),
                     )
+                if not response_is_from_hub(done):
+                    # NOT the hub. Only the front door can answer here after
+                    # the retry above has run its silence window out, and its
+                    # answer is a web page: pasting 690 bytes of ngrok HTML
+                    # into a job's `cause` gives an operator `<!DOCTYPE html>`
+                    # and gives every consumer downstream nothing to group by.
+                    # Collapse it to what it actually is — one classified,
+                    # retryable token plus the status and the media type.
+                    raise _publish_refusal(
+                        f"publish {publish_id}: the hub never answered complete — "
+                        f"{FRONT_DOOR_UNAVAILABLE} ({_non_hub_origin(done)}). "
+                        "Every declared object is staged and audited; the "
+                        "session is live and /complete is idempotent, so a "
+                        "retry resumes it without re-uploading a byte",
+                        status=done.status_code, code=FRONT_DOOR_UNAVAILABLE,
+                        retryable=True)
                 raise _publish_refusal(
                     f"publish complete failed ({done.status_code}): {done.text[:800]}",
                     status=done.status_code, code=_error_code_of(done))
