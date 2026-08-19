@@ -58,6 +58,40 @@ MT_co = TypeVar("MT_co", covariant=True)
 
 logger = logging.getLogger(__name__)
 
+#: Substrings that identify a ``TypeError`` raised because the loader (or the
+#: class it constructs) would not take ``torch_dtype``. Narrow ON PURPOSE: a
+#: TypeError from INSIDE a model's own __init__ must keep propagating, so the
+#: retry below fires only when the rejected keyword is named.
+_DTYPE_REJECTIONS = ("torch_dtype", "'dtype'", '"dtype"')
+
+
+def _rejected_torch_dtype(exc: TypeError) -> bool:
+    """Did this ``TypeError`` come from passing ``torch_dtype``?
+
+    WHY THIS IS A TRY/EXCEPT AND NOT A SIGNATURE CHECK — measured, because the
+    obvious fix does not work. Both loader families take ``**kwargs`` and
+    NEITHER names ``torch_dtype`` in its signature::
+
+        ModularPipeline.from_pretrained   torch_dtype named: False  **kwargs: True
+        StableDiffusionXLPipeline...      torch_dtype named: False  **kwargs: True
+
+    so `"torch_dtype" in signature.parameters` is False for both (SDXL would
+    lose its dtype) and `has **kwargs` is True for both (H3 would still break).
+    The real difference is what the implementation DOES with the keyword:
+    ``DiffusionPipeline.from_pretrained`` reads ``torch_dtype`` (3 mentions in
+    its source) and consumes it; ``ModularPipeline.from_pretrained`` never
+    mentions it (0), so ``**kwargs`` funnels it through ``load_config`` into
+    the constructor — where a strict pipeline correctly refuses an argument
+    that is neither a pipeline argument nor a component (se#754/se#766's
+    ``MiniMaxH3StreamingPipeline``, which is where this was found).
+
+    Behaviour, not shape, is the discriminator — and asking is the only way to
+    read behaviour. Every loader that works today still takes the first branch
+    and is untouched; only the family that REFUSES gets the second.
+    """
+    text = str(exc)
+    return any(token in text for token in _DTYPE_REJECTIONS)
+
 
 @dataclass(frozen=True, slots=True)
 class Adapter:
@@ -207,11 +241,29 @@ class LoadContext(Generic[MT_co]):
             "native loader engine is not bound)", pipeline_cls.__name__,
         )
         dtype = self._lane_dtype()
-        if dtype is not None:
+        if dtype is None:
+            no_lane: P = from_pretrained(self.checkpoint_dir)
+            return no_lane
+        try:
             bridged: P = from_pretrained(self.checkpoint_dir, torch_dtype=dtype)
             return bridged
-        no_lane: P = from_pretrained(self.checkpoint_dir)
-        return no_lane
+        except TypeError as exc:
+            if not _rejected_torch_dtype(exc):
+                raise
+        # This loader does not SPEAK `torch_dtype`. Load without it and apply
+        # the lane's dtype afterwards, so the lane is honoured rather than
+        # silently dropped — `.to(dtype)` moves floating parameters and leaves
+        # ints/bools alone, which is what `from_pretrained(torch_dtype=)` does.
+        logger.info(
+            "ctx.load: %s.from_pretrained does not accept torch_dtype; "
+            "loading without it and applying the lane dtype post-load "
+            "(pgw#1447)", pipeline_cls.__name__,
+        )
+        loaded: P = from_pretrained(self.checkpoint_dir)
+        to = getattr(loaded, "to", None)
+        if callable(to):
+            to(dtype)
+        return loaded
 
     def _lane_dtype(self) -> Any:
         """The lane's load dtype, or None when the contract declares none.
