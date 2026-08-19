@@ -1585,6 +1585,9 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Flux2Klein.name: Flux2Klein.Defaults,
         QwenImage.name: QwenImage.Defaults,
         ZImage.name: ZImage.Defaults,
+        Krea2.name: Krea2.Defaults,
+        Anima.name: Anima.Defaults,
+        Ernie.name: Ernie.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }

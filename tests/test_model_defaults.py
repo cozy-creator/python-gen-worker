@@ -463,6 +463,28 @@ def test_the_serving_interaction_matrix(
 # ── the vocabulary registry + ingest fingerprint seam ────────────────────────
 
 
+def test_every_model_type_exports_a_defaults_vocabulary() -> None:
+    """THE FENCE (pgw#1439). ``MODEL_TYPES`` and ``defaults_vocabularies()`` are
+    two hand-maintained lists of the same thing, and nothing cross-checked them:
+    ``test_the_launch_vocabulary_is_the_ruled_set`` pins ``MODEL_TYPES`` ONLY.
+
+    pgw#1427 added three types to the tuple and to both lazy re-export lists,
+    passed every gate, and merged — while `defaults_vocabularies()`, whose own
+    docstring calls it "the export emitter's source", did not carry them. The
+    failure mode is silence: those families export NO defaults schema at all,
+    and nothing raises.
+
+    A subset assertion, not equality: the mapping legitimately carries the LoRA
+    overlays too, which are not ``ModelType``s.
+    """
+    missing = {mt.name for mt in MODEL_TYPES} - set(defaults_vocabularies())
+    assert not missing, (
+        f"{sorted(missing)} are in MODEL_TYPES but export no defaults "
+        f"vocabulary — the export emitter reads defaults_vocabularies(), so "
+        f"these families would ship no schema, silently. Add them there too."
+    )
+
+
 def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     # se#769 wave 3 (pgw#1427) appends krea-2, anima and ernie. The list is
     # pinned deliberately: a type appearing here without a ruling is the thing
