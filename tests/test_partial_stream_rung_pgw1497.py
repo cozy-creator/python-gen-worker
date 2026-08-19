@@ -16,7 +16,14 @@ import pytest
 from gen_worker.models import rung as rung_mod
 
 torch = pytest.importorskip("torch")
-nn = torch.nn
+
+# A real static import, not `nn = torch.nn`. The rebinding form leaves `nn` a
+# module-valued VARIABLE, so `class Block(nn.Module)` gives mypy no type to use
+# as a base and it reports `Name "nn.Module" is not defined` — 19 of the 23
+# errors that took master's `fast gates` red. The skip guard above still runs
+# first, so this import cannot fire on a torch-less host. Same idiom as
+# `test_engine_placement.py`.
+import torch.nn as nn  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +276,7 @@ def test_the_manager_answers_the_budget_from_the_same_sizer_admission_uses() -> 
 def test_the_load_context_carries_the_budget_down_to_the_ladder() -> None:
     from gen_worker.serving.context import DeployBinding, LoadContext
 
-    binding = DeployBinding(checkpoint_ref="ref", checkpoint_dir="/tmp")
+    binding = DeployBinding(checkpoint_ref="ref", checkpoint_dir=pathlib.Path("/tmp"))
     assert LoadContext(binding=binding)._weight_budget_bytes == 0
     assert (
         LoadContext(binding=binding, weight_budget_bytes=1234)._weight_budget_bytes
