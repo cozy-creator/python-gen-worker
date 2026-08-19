@@ -46,6 +46,19 @@ logger = logging.getLogger(__name__)
 #: exact shape that made this gap invisible for as long as it existed.
 KIND_ADOPT_REFUSED = "adopt_refused"
 
+#: The refusal phases that will NEVER fix themselves on this pod (pgw#1472).
+#: A refusal that is unconditional is indistinguishable from one that is
+#: correct — both read as "serving eager" — and that is how an env-identity
+#: mismatch could have made every pod eager forever while looking healthy. So
+#: the distinction is CARRIED, not inferred later from a log: `permanent`
+#: means "a successor with the same inputs refuses identically; stop waiting".
+PERMANENT_REFUSALS = frozenset({
+    "eager_permanent",       # the release document says so
+    "environment_mismatch",  # the pod is not the release's env; a retry cannot help
+    "no_document",           # the release is stamped with no lane for this (lane x sm)
+    "EnvironmentMismatch",   # the same, arriving as an exception type name
+})
+
 # pgw#1460: THERE IS NO ARTIFACT LOADER IN THIS MODULE ANY MORE, and its
 # absence is the fix. What lived here was
 # `torch._inductor.aoti_load_package(str(path))` — the `GraphRecord` accepted
@@ -103,6 +116,11 @@ class ServeAdoption:
         self.store: Any = None
         #: Why this pod serves eager, when it does. Empty while adopting.
         self.refusal: str = ""
+        #: Whether that refusal is PERMANENT for this pod (pgw#1472). Read off
+        #: the object rather than scraped: `sink_for` swallows every failure
+        #: into eager-forever by design, so "refused once, will refuse always"
+        #: has to be a state something can COUNT.
+        self.refusal_permanent: bool = False
         #: The lane the session was built against, for the outcome event.
         self.contract: str = ""
 
@@ -260,10 +278,24 @@ class ServeAdoption:
 
     def _refuse(self, phase: str, detail: str) -> None:
         self.refusal = f"{phase}: {detail}"
-        logger.warning("adopt: serving eager — %s", self.refusal)
+        self.refusal_permanent = phase in PERMANENT_REFUSALS
+        logger.warning(
+            "adopt: serving eager (%s) — %s",
+            "PERMANENT" if self.refusal_permanent else "retryable",
+            self.refusal,
+        )
+        # The COUNT is by `phase`, which is already a typed wire field: the
+        # permanence question is answered by `phase IN PERMANENT_REFUSALS`.
+        # No new wire field is invented here — `emit_event`'s keyword set is
+        # the proto's, and widening it is a coordinated proto/wire change, not
+        # something a serving module does on its own. What this fix adds is
+        # that the SET is named in code instead of being folklore, and that
+        # the answer is readable off the live object.
         activity_mod.emit_event(
             KIND_ADOPT_REFUSED,
-            f"release {self.release_id} sm={self.sm}: {detail}"[:2000],
+            f"release {self.release_id} sm={self.sm} "
+            f"({'PERMANENT' if self.refusal_permanent else 'retryable'}): "
+            f"{detail}"[:2000],
             phase=phase,
         )
 
