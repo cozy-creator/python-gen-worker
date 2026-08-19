@@ -107,6 +107,20 @@ _TIER_TO_PB = {
 _USE_RESIDENT_IDENTITY = object()
 _ResidencyIdentity = Tuple[str, int]
 
+def _resident_position(ref: "WireRef", snapshot: Optional[pb.Snapshot]) -> None:
+    """pgw#1485: one `already_resident` position row for a materialization that
+    transferred nothing because the pod already held the ref.
+
+    Without it a warm hit is INDISTINGUISHABLE from a fetch that never started
+    (th#2204's `no_position_reported`), and the only way anyone ever learned
+    which it was cost a rented H100.
+    """
+    total = (
+        sum(int(f.size_bytes) for f in snapshot.files)
+        if snapshot is not None else 0
+    )
+    weight_position.FetchPosition(ref, total_bytes=total).already_resident()
+
 @dataclass(frozen=True)
 class _MaterializedLocal:
     path: Path
@@ -1241,6 +1255,7 @@ class ModelStore:
                 if ref in self._verified:
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
+                    _resident_position(ref, snapshot)
                     return complete(cached)
                 # First use this boot: verify before trusting. A
                 # pod-churn-truncated snapshot used to fatal every load until
@@ -1252,6 +1267,7 @@ class ModelStore:
                     self._verified.add(ref)
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
+                    _resident_position(ref, snapshot)
                     return complete(cached)
                 logger.error(
                     "snapshot for %s failed first-use verification "
@@ -1324,12 +1340,65 @@ class ModelStore:
             # that sees every materialization path and knows the ref.
             position = weight_position.FetchPosition(ref, total_bytes=known_total)
 
+            # pgw#1485 / th#2205 / th#2204 — THE DOWNLOAD RECORD IS A
+            # LIABILITY, NOT A NOTE. A DOWNLOADING event OPENS a hub-side
+            # `ModelDownloads[ref]` row that ONLY `ON_DISK`/`FAILED`/`EVICTED`
+            # can close, and that open row (a) vetoes idle retirement and (b)
+            # parks placement. So it is opened only when there is a transfer to
+            # declare, and its close is structural — in the `finally` below,
+            # on every exit path including cancellation.
+            resident_tier = self.residency.tier(ref)
+            with self._identity_lock:
+                banked_disk_identity = self._disk_identities.get(ref)
+            already_resident = resident_tier is not None and (
+                # A LOADED object's bytes are on the pod by construction; there
+                # is no transfer to declare. (And `ON_DISK` — the only terminal
+                # that closes the record — would demote the hub's tier view, so
+                # a record opened over RAM/VRAM residency is one that cannot be
+                # closed honestly at all.)
+                resident_tier in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
+                # Disk-resident at EXACTLY the identity being materialized.
+                or (bool(operation_identity[0])
+                    and banked_disk_identity == operation_identity)
+            )
+            #: True while a hub-side `model_download` record is OPEN for this
+            #: materialization and unclosed.
+            download_open = False
+            #: True once a terminal ModelEvent for that record has been sent
+            #: (by us, or by Residency's own first-registration ON_DISK).
+            download_terminal = False
+
+            def _open_download_record(done: int, total: int) -> None:
+                """Declare the transfer. Called from the fetch thread."""
+                nonlocal download_open
+                download_open = True
+                assert self._loop is not None
+                asyncio.run_coroutine_threadsafe(
+                    self._event(ref, pb.MODEL_STATE_DOWNLOADING,
+                                identity=operation_identity,
+                                bytes_done=int(done), bytes_total=int(total),
+                                network_bytes=net_scope.network_bytes),
+                    self._loop,
+                )
+
             def _progress(done: int, total: Optional[int]) -> None:
                 nonlocal last_progress
                 position.progress(done, total)
                 dl_counter.set_done(float(done))
                 if total:
                     dl_counter.set_total(float(total))
+                if not download_open:
+                    if int(done) <= 0:
+                        # The fetch loop ticks at zero before it moves anything.
+                        # Declaring HERE is how the phantom got created; a
+                        # position of 0 is not a transfer.
+                        return
+                    # A byte moved on a materialization we declined to declare:
+                    # the ref was not as resident as the resolver believed. Open
+                    # now, so a real fetch always has a record to advance.
+                    last_progress = time.monotonic()
+                    _open_download_record(done, int(total or known_total))
+                    return
                 now = time.monotonic()
                 if now - last_progress < _PROGRESS_EVENT_MIN_INTERVAL_S:
                     return
@@ -1344,10 +1413,24 @@ class ModelStore:
                 )
 
             position.open()
-            await self._event(
-                ref, pb.MODEL_STATE_DOWNLOADING, identity=operation_identity,
-                bytes_total=known_total,
-            )
+            if already_resident:
+                # th#2205's exact shape: a WARM pod re-dispatched against
+                # weights it already holds. The fetch below is a no-op the
+                # downloader resolves out of the local CAS — it moves no bytes,
+                # so nothing would ever advance or close the record. Declare
+                # nothing; `_progress` opens one if a byte actually moves.
+                logger.info(
+                    "model_download not opened for %s: already_resident "
+                    "tier=%s digest=%s total_bytes=%d",
+                    ref, getattr(resident_tier, "name", resident_tier),
+                    operation_identity[0], known_total,
+                )
+            else:
+                await self._event(
+                    ref, pb.MODEL_STATE_DOWNLOADING, identity=operation_identity,
+                    bytes_total=known_total,
+                )
+                download_open = True
             failure_stage = pb.LIFECYCLE_INTENT_STAGE_FETCHING
             if registry is not None:
                 registry.transition(
@@ -1423,6 +1506,12 @@ class ModelStore:
                         self._pending_network_bytes[ref] = net_scope.network_bytes
                         self.residency.track_disk(ref, path)
                         self._pending_network_bytes.pop(ref, None)  # defensive: unconsumed if no event fired
+                        if tier_before is None:
+                            # A FIRST registration: Residency emitted ON_DISK
+                            # itself, which closes the record. Every other tier
+                            # is same-tier-suppressed there — pgw#1485's whole
+                            # defect — so the `finally` owns those.
+                            download_terminal = True
                         if tier_before is residency_mod.Tier.DISK and identity_changed:
                             # Residency suppresses same-tier event spam (track_disk
                             # above did not consume the pending value above). A
@@ -1434,6 +1523,7 @@ class ModelStore:
                                 identity=operation_identity,
                                 network_bytes=net_scope.network_bytes,
                             )
+                            download_terminal = True
                         # tree_bytes stats every file — off-loop (gw#407: no
                         # multi-GB directory walks on the event loop).
                         size = await asyncio.to_thread(disk_gc.tree_bytes, path)
@@ -1456,6 +1546,7 @@ class ModelStore:
                                 ref, pb.MODEL_STATE_FAILED,
                                 identity=operation_identity, error=vocab,
                             )
+                            download_terminal = True
                             raise
                         logger.warning(
                             "download of %s failed (attempt %d): %s; retrying in %.1fs",
@@ -1489,7 +1580,42 @@ class ModelStore:
                 # Where the transfer STOPPED, whether it finished or raised —
                 # a fetch that ends with no terminal row is one nobody can
                 # distinguish from a fetch still running.
-                position.close(ok=fetch_exc is None)
+                position.close(
+                    ok=fetch_exc is None,
+                    resident=already_resident and not download_open,
+                )
+                # pgw#1485: THE CLOSE OF THE HUB-SIDE RECORD, IN A `finally`.
+                # Every path that opened one closes it here if nothing already
+                # did — success whose ON_DISK was same-tier-suppressed
+                # (th#2205's 179-minute $1.59/hr row), and a transfer that died
+                # mid-way: cancellation, shutdown, any BaseException. A record
+                # whose close is conditional is a record that can be immortal.
+                if download_open and not download_terminal:
+                    download_terminal = True
+                    if fetch_exc is None:
+                        terminal_event = self._event(
+                            ref, pb.MODEL_STATE_ON_DISK,
+                            identity=operation_identity,
+                            network_bytes=net_scope.network_bytes,
+                        )
+                    else:
+                        terminal_event = self._event(
+                            ref, pb.MODEL_STATE_FAILED,
+                            identity=operation_identity,
+                            error=(
+                                "download_canceled"
+                                if isinstance(fetch_exc, asyncio.CancelledError)
+                                else self._error_vocab(fetch_exc)
+                            ),
+                        )
+                    if isinstance(fetch_exc, BaseException) and not isinstance(
+                        fetch_exc, Exception
+                    ):
+                        # Unwinding a cancellation/shutdown: awaiting here would
+                        # re-raise before the event left. Hand it to the loop.
+                        asyncio.ensure_future(terminal_event)
+                    else:
+                        await terminal_event
                 if fetch_span is not None:
                     net = int(net_scope.network_bytes)
                     if net > 0:

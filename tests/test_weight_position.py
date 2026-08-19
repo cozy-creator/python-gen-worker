@@ -32,9 +32,12 @@ from typing import Any
 import pytest
 
 from gen_worker import activity, weight_position
+from gen_worker import config as gw_config
 from gen_worker.models.cozy_snapshot import ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
-from gen_worker.models.refs import TensorhubRef
+from gen_worker.models.refs import TensorhubRef, WireRef, normalize_model_ref
+from gen_worker.models.store import ModelStore
+from gen_worker.serving.reserved_repos import materialize_reserved_inputs_async
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.weight_position import MIB, FetchPosition
 
@@ -96,13 +99,38 @@ class _Wire:
 
     def __init__(self) -> None:
         self.updates: list[pb.ActivityUpdate] = []
+        self.model_events: list[pb.ModelEvent] = []
 
     async def send(self, msg: pb.WorkerMessage) -> None:
-        if msg.WhichOneof("msg") == "activity_update":
+        which = msg.WhichOneof("msg")
+        if which == "activity_update":
             self.updates.append(msg.activity_update)
+        elif which == "model_event":
+            self.model_events.append(msg.model_event)
 
     def positions(self) -> list[pb.ActivityUpdate]:
         return [u for u in self.updates if u.kind == activity.KIND_WEIGHT_FETCH]
+
+    def open_download_records(self) -> dict[str, pb.ModelEvent]:
+        """The hub's own bookkeeping rule, replayed over what we emitted.
+
+        `connect_worker.go` OPENS `ModelDownloads[ref]` on DOWNLOADING and
+        removes it on ON_DISK / FAILED / EVICTED — nothing else. Whatever this
+        returns is a row that would still read `downloading` on the hub after
+        the worker was finished with it: th#2205's idle-retire veto and
+        th#2204's placement livelock, both.
+        """
+        open_rows: dict[str, pb.ModelEvent] = {}
+        for event in self.model_events:
+            if event.state == pb.MODEL_STATE_DOWNLOADING:
+                open_rows[event.ref] = event
+            elif event.state in (
+                pb.MODEL_STATE_ON_DISK,
+                pb.MODEL_STATE_FAILED,
+                pb.MODEL_STATE_EVICTED,
+            ):
+                open_rows.pop(event.ref, None)
+        return open_rows
 
 
 def _detail(update: pb.ActivityUpdate) -> dict[str, str]:
@@ -284,3 +312,321 @@ def test_a_frozen_or_regressing_position_emits_nothing_new(_fine_cadence: Any) -
         assert [u.step for u in wire] == [0, 4, 6]
     finally:
         weight_position.FetchPosition._emit = original  # type: ignore[method-assign]
+
+
+# ---------------------------------------------------------------------------
+# pgw#1485 — THE RECORD ITSELF, through the same funnel.
+#
+# The positions above are the DIAGNOSTIC. The `model_download` record is the
+# LIABILITY: an open one vetoes idle retirement (th#2205 — 92 idle minutes on
+# an A100 at $1.59/hr, $2.44 of a $4.75 run, and nine pods over six days) and
+# parks placement forever (th#2204 — a rented H100 at $3.29/hr re-electing the
+# same worker until an operator intervened). One producer, two victims. So the
+# same funnel that reports positions is tested for the record's LIFECYCLE:
+# opened only when there is a transfer, closed on every exit path.
+# ---------------------------------------------------------------------------
+
+#: The ref every record-lifecycle test materializes.
+_REF = WireRef("acme/model-a")
+
+
+def _pb_snapshot(files: list[tuple[str, bytes, str]]) -> pb.Snapshot:
+    """The wire form `ModelStore.ensure_local` takes, over the same blobs."""
+    resolved = _resolved(files)
+    return pb.Snapshot(
+        digest=resolved.snapshot_digest,
+        files=[
+            pb.SnapshotFile(
+                path=f.path, size_bytes=f.size_bytes, digest=f.digest, url=f.url,
+            )
+            for f in resolved.files
+        ],
+    )
+
+
+def _store(wire: _Wire, cas: Path) -> ModelStore:
+    """The production object, over a real CAS root, emitting onto `wire`."""
+    return ModelStore(wire.send, cache_dir=cas)
+
+
+def test_a_real_fetch_opens_advances_and_closes_the_record(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """THE CONTROL, and it must keep passing: a genuine transfer through
+    `ModelStore` still opens a download record, advances positions while the
+    bytes move, and closes the record with ON_DISK. A fix that stops the
+    phantom by stopping the instrument fails here."""
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            await store.ensure_local(_REF, snapshot)
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        states = [e.state for e in wire.model_events]
+        assert pb.MODEL_STATE_DOWNLOADING in states, (
+            f"a real transfer must declare itself; got {states}")
+        assert pb.MODEL_STATE_ON_DISK in states
+        assert wire.open_download_records() == {}, (
+            "the record a completed fetch opened must be closed")
+        # And pgw#1455's positions still advance through the funnel.
+        steps = [r.step for r in wire.positions()]
+        assert steps and steps[-1] == (OBJECTS * OBJECT_BYTES) // MIB
+        assert steps[-1] > steps[0]
+    finally:
+        origin.close()
+
+
+def test_a_resident_ref_opens_no_download_record(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """th#2205's MEASURED shape: a WARM pod re-dispatched against weights it
+    already holds.
+
+    The incident's record read `0 of 15,980,165,697 bytes @ 0.00/s` for 1h54m
+    while the job it was opened for ran to completion and the pod billed
+    another 92 minutes idle. Its mechanism is exactly this: the cached-path
+    short-circuit misses, the downloader resolves every object out of the local
+    CAS and moves ZERO bytes, so `_progress` never fires — and the ON_DISK that
+    would have closed the record is suppressed as same-tier residency spam.
+    Nothing advances it and nothing closes it, forever.
+
+    The short-circuit miss is reproduced by making the resolver's path lookup
+    answer None while residency still holds the ref, which is the state the hub
+    log proves the pod was in. Everything else — the CAS, the fetch, the events
+    — is the production path.
+    """
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            # Attempt 3: the cold fetch that made the pod warm.
+            await store.ensure_local(_REF, snapshot)
+            for _ in range(8):
+                await asyncio.sleep(0)
+            assert store.residency.tier(_REF) is not None
+            wire.updates.clear()
+            wire.model_events.clear()
+
+            # Attempt 4, WARM POD REUSE — with the cached-path lookup missing.
+            store.disk_local_path = lambda ref: None  # type: ignore[method-assign]
+            store._verified.discard(_REF)
+            await store.ensure_local(_REF, snapshot)
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        assert wire.open_download_records() == {}, (
+            "a ref the pod ALREADY HOLDS must not leave a `downloading` record: "
+            f"{[(e.ref, e.bytes_done, e.bytes_total) for e in wire.open_download_records().values()]}"
+        )
+        assert not [
+            e for e in wire.model_events
+            if e.state == pb.MODEL_STATE_DOWNLOADING
+        ], "a transfer that moves no bytes must not be declared at all"
+        # ...and it says so on the position stream, so "the pod already had it"
+        # is a ROW rather than th#2204's `no_position_reported` silence.
+        phases = [r.phase for r in wire.positions()]
+        assert weight_position.PHASE_ALREADY_RESIDENT in phases, phases
+    finally:
+        origin.close()
+
+
+def test_the_record_opens_LAZILY_when_the_resident_check_was_wrong(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """THE SAFETY VALVE, and it must be exercised, not asserted about.
+
+    The resident pre-check is an OPTIMIZATION and the downloader is the
+    authority: a ref residency believes is held may still need bytes (a partial
+    CAS, an evicted tree). Here residency holds a RAM-tier entry for a ref with
+    nothing on disk, so the pre-check declines to declare a transfer — and then
+    9 MiB genuinely move. The record must open on the first byte, advance, and
+    close. A fix that suppressed the declaration unconditionally would leave
+    this fetch invisible, which is th#2204's defect rebuilt one step over."""
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            # Resident by residency's reckoning, with NO bytes on disk.
+            store.residency.track_ram(_REF, object())
+            wire.model_events.clear()
+            wire.updates.clear()
+            await store.ensure_local(_REF, snapshot)
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        downloading = [
+            e for e in wire.model_events
+            if e.state == pb.MODEL_STATE_DOWNLOADING
+        ]
+        assert downloading, (
+            "a fetch that really moved bytes must declare itself even when the "
+            "resident pre-check said otherwise")
+        assert downloading[0].bytes_done > 0, (
+            "the lazy open states the position that provoked it")
+        assert wire.open_download_records() == {}, "and it must still close"
+        steps = [r.step for r in wire.positions()]
+        assert steps[-1] == (OBJECTS * OBJECT_BYTES) // MIB
+    finally:
+        origin.close()
+
+
+def test_a_transfer_that_dies_midway_leaves_no_open_record(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """The same class, reached the other way: a download whose PROCESS ends
+    mid-flight. Cancellation unwinds the funnel; if the close is not structural
+    the record outlives the transfer that owned it and is indistinguishable
+    from one still running."""
+    origin = _Origin()
+    try:
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        snapshot = _pb_snapshot(files)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            task = asyncio.ensure_future(store.ensure_local(_REF, snapshot))
+            # Let the record open and the transfer start, then kill it.
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # The terminal is handed to the loop rather than awaited while the
+            # cancellation unwinds; give it its turn.
+            await asyncio.sleep(0.1)
+
+        asyncio.run(run())
+
+        states = [e.state for e in wire.model_events]
+        assert pb.MODEL_STATE_DOWNLOADING in states, (
+            f"the transfer should have declared itself before dying; got {states}")
+        assert wire.open_download_records() == {}, (
+            "a cancelled transfer must close the record it opened")
+        assert [
+            e.error for e in wire.model_events
+            if e.state == pb.MODEL_STATE_FAILED
+        ] == ["download_canceled"]
+        assert weight_position.PHASE_ABANDONED in [
+            r.phase for r in wire.positions()]
+    finally:
+        origin.close()
+
+
+# ---------------------------------------------------------------------------
+# pgw#1485 — THE JOB PLANE'S FETCH IS A SECOND FUNNEL, and it was silent.
+#
+# `serving/reserved_repos._materialize_one` — the only writer of
+# `ctx.source_path`, and the door all 25 reserved-`source` producers enter
+# through — calls the `models.download.ensure_local` FREE FUNCTION, not
+# `ModelStore`'s. It passed no `progress=` at all, so a pod that pulled 20.5 GB
+# of reserved-repo weights left ZERO `weight_fetch` rows. pgw#1455's "the funnel
+# sees every materialization path (startup prefetch, DesiredResidency disk_refs,
+# hot instances, RunJob delivery)" was true of the serving plane and FALSE here.
+# ---------------------------------------------------------------------------
+
+class _Ctx:
+    """The producer-context surface `_materialize_one` actually touches."""
+
+    def __init__(self) -> None:
+        self.source_path = ""
+
+    def _set_source_path(self, path: str) -> None:
+        self.source_path = path
+
+    def raise_if_cancelled(self, _reason: str) -> None:
+        return None
+
+
+class _Payload:
+    """A producer payload naming one reserved `source` repo."""
+
+    def __init__(self, ref: str) -> None:
+        self.source = {"ref": ref}
+
+
+def test_the_job_planes_reserved_repo_fetch_reports_positions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _fine_cadence: Any
+) -> None:
+    """A reserved-repo materialization leaves the same advancing byte positions
+    a serving-path fetch does. 20.5 GB moved and 0 rows written is the reading
+    this closes."""
+    origin = _Origin()
+    try:
+        monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path / "cache"))
+        gw_config.reload_for_test()
+        blobs = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        files = [(p, b, origin.put(b)) for p, b in blobs]
+        resolved = _resolved(files)
+        ref = normalize_model_ref("acme/model-a")
+        wire = _Wire()
+        ctx, payload = _Ctx(), _Payload("acme/model-a")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            await materialize_reserved_inputs_async(ctx, payload, {ref: resolved})
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+
+        assert ctx.source_path, "the reserved path must still be filled"
+        assert str(tmp_path) in ctx.source_path, (
+            "the CAS override did not take; this test would be measuring a\n"
+            f"shared cache: {ctx.source_path}")
+        rows = wire.positions()
+        assert rows, (
+            "the job plane's reserved-repo fetch emitted NO weight_fetch rows — "
+            "20.5 GB of silence is the defect this closes")
+        phases = [r.phase for r in rows]
+        assert phases[0] == weight_position.PHASE_STARTED
+        assert phases[-1] == weight_position.PHASE_FETCHED
+        steps = [r.step for r in rows]
+        assert steps[-1] == (OBJECTS * OBJECT_BYTES) // MIB
+        assert steps[-1] > steps[0], f"the position must advance; got {steps}"
+        assert all(_detail(r)["ref"] == str(ref) for r in rows)
+    finally:
+        gw_config.reload_for_test()
+        origin.close()

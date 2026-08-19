@@ -48,7 +48,17 @@ def _restore_loader():
     was_disabled = noisy.disabled
     noisy.disabled = True
 
+    # pgw#1485: UNINSTALL FIRST, then snapshot. Snapshotting alone restores
+    # whatever was in place at setup — which, on an xdist worker where any
+    # earlier test called `install()` (mint_child does, on import-and-run
+    # paths), is the PATCHED loader. The stock arms then assert against our own
+    # patch and the red arm stops being red. Two of them flipped to failing on
+    # a run whose only change was test DISTRIBUTION.
+    weightless_program.uninstall()
     before = _package._load_state_dict
+    assert not getattr(before, "_pgw1468", False), (
+        "the pgw#1468 patch survived uninstall(); every stock-path assertion "
+        "in this module would be measuring our own loader")
     try:
         yield
     finally:

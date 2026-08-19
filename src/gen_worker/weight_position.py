@@ -47,9 +47,10 @@ that cost rental #6 — absence has to render as a row that says zero.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
-from typing import Optional
+from typing import Any, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,11 @@ PHASE_FETCHING = "fetching"
 PHASE_FETCHED = "fetched"
 #: The fetch raised or was cancelled; position is where it stopped.
 PHASE_ABANDONED = "abandoned"
+#: pgw#1485: the ref was ALREADY RESIDENT — nothing was transferred and no
+#: `model_download` record was opened hub-side. A distinct word, because
+#: "fetched at position 0" and "there was nothing to fetch" are different facts
+#: and th#2204 cost a rental to the first being unsayable.
+PHASE_ALREADY_RESIDENT = "already_resident"
 
 #: Emit at most one row per this many MiB of advance...
 STRIDE_MIB = 256
@@ -137,14 +143,30 @@ class FetchPosition:
             return
         self._emit(PHASE_FETCHING)
 
-    def close(self, ok: bool = True) -> None:
+    def close(self, ok: bool = True, *, resident: bool = False) -> None:
         """The terminal position. Emitted whether or not it advanced — where
         the transfer STOPPED is the fact, and a fetch that moved less than one
-        MiB has to leave a row saying so."""
+        MiB has to leave a row saying so.
+
+        ``resident=True`` says the ref was already on the pod and no transfer
+        happened at all (pgw#1485)."""
         if self._closed:
             return
         self._closed = True
+        if ok and resident:
+            self._emit(PHASE_ALREADY_RESIDENT)
+            return
         self._emit(PHASE_FETCHED if ok else PHASE_ABANDONED)
+
+    def already_resident(self) -> None:
+        """Open AND close in one row: the resolver found the ref resident, so
+        there is no transfer to report positions for. One row, so the reader
+        can tell "the pod already had it" from "nothing ever ran"."""
+        if self._closed:
+            return
+        self._opened = True
+        self._closed = True
+        self._emit(PHASE_ALREADY_RESIDENT)
 
     # -- emission -----------------------------------------------------------
 
@@ -170,3 +192,35 @@ class FetchPosition:
             )
         except Exception:  # pragma: no cover — telemetry never fails a fetch
             logger.debug("weight position event dropped", exc_info=True)
+
+
+def snapshot_bytes(snapshot: Any) -> int:
+    """Total declared bytes of a resolved snapshot (0 when unknown).
+
+    The position's denominator, wherever a fetch is instrumented. Kept here so
+    every call site computes it the same way.
+    """
+    files = getattr(snapshot, "files", None) or ()
+    try:
+        return sum(int(getattr(f, "size_bytes", 0) or 0) for f in files)
+    except (TypeError, ValueError):
+        return 0
+
+
+@contextlib.contextmanager
+def track(ref: str, total_bytes: int = 0) -> Iterator[FetchPosition]:
+    """Open a position, hand it over, and CLOSE IT ON EVERY EXIT PATH.
+
+    pgw#1485: the close being structural is the whole point. Hand
+    ``position.progress`` to the fetch's ``progress=`` callback inside the
+    block; a fetch that raises, is cancelled, or is killed still leaves a
+    terminal row saying where it stopped.
+    """
+    position = FetchPosition(ref, total_bytes=total_bytes)
+    position.open()
+    try:
+        yield position
+    except BaseException:
+        position.close(ok=False)
+        raise
+    position.close(ok=True)

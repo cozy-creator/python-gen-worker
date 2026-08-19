@@ -149,10 +149,34 @@ def install() -> None:
     _package._load_state_dict = _load_state_dict
 
 
+def uninstall() -> None:
+    """Restore torch's own loader. Idempotent; the companion to ``install()``.
+
+    pgw#1485: ``install()`` is PROCESS-WIDE, so any test asserting the stock
+    path is really measuring whichever test ran before it. The suite's
+    snapshot-and-restore fixture cannot fix that — it snapshots a state that is
+    already wrong, so the red arm silently stops being red. That is exactly what
+    happened when an unrelated change shifted the xdist distribution: two guards
+    went from passing to failing with no code of theirs involved. A guard whose
+    verdict depends on scheduling is not a guard.
+    """
+    from torch.export.pt2_archive import _package
+
+    patched = _package._load_state_dict
+    if not getattr(patched, "_pgw1468", False):
+        return
+    for cell in getattr(patched, "__closure__", None) or ():
+        candidate = cell.cell_contents
+        if callable(candidate) and not getattr(candidate, "_pgw1468", False):
+            _package._load_state_dict = candidate
+            return
+
+
 __all__ = [
     "SHARED_PAYLOAD",
     "WEIGHTS_DIR",
     "install",
     "is_weightless",
     "state_dict_from_config",
+    "uninstall",
 ]

@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 import msgspec
 
+from .. import weight_position
 from ..api.errors import ValidationError
 from ..models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from ..models.download import ensure_local
@@ -143,13 +144,46 @@ async def _materialize_one(
             f"payload.{field_name} needs a producer context; this context has "
             f"no {_SETTER_FOR[field_name]}"
         )
-    path = await ensure_local(
-        str(ref),
-        snapshot=snapshots.get(ref),
-        cache_dir=tensorhub_cas_dir(),
-        hf_token=hf_token or None,
-        fill_source_dir=tensorhub_fill_source_dir(),
-    )
+    snapshot = snapshots.get(ref)
+    # pgw#1485 / pgw#1455: THE JOB PLANE'S FETCH IS INSTRUMENTED TOO. This is a
+    # SECOND download funnel — the `models.download.ensure_local` FREE FUNCTION,
+    # not `ModelStore`'s — and it was called with no `progress=` at all, so a
+    # pod that pulled 20.5 GB of reserved-repo weights left ZERO `weight_fetch`
+    # rows. pgw#1455's "the funnel sees every materialization path (… RunJob
+    # delivery)" was true of the serving plane and false here; repaired by
+    # wiring, not by narrowing the claim. `track` closes the position on every
+    # exit path, so a fetch that dies mid-way still says where it stopped.
+    #
+    # SCOPED TO THE SNAPSHOT BRANCH DELIBERATELY. On the provider-direct
+    # branches `progress=` is not a passive observer: `download_hf` redirects
+    # into a `local_dir` staging tree and arms a progress-rate floor that can
+    # RAISE. Instrumenting those is a behaviour change and belongs to whoever
+    # measures it; emitting a position of 0 for them instead would manufacture
+    # exactly the frozen-transfer misreading pgw#1455 exists to prevent.
+    if snapshot is None:
+        logger.info(
+            "reserved repo fetch UNINSTRUMENTED field=%s ref=%s: no resolved "
+            "snapshot, provider-direct branch emits no weight_fetch positions",
+            field_name, ref,
+        )
+        path = await ensure_local(
+            str(ref),
+            cache_dir=tensorhub_cas_dir(),
+            hf_token=hf_token or None,
+            fill_source_dir=tensorhub_fill_source_dir(),
+        )
+    else:
+        with weight_position.track(
+            str(ref), weight_position.snapshot_bytes(snapshot),
+        ) as position:
+            path = await ensure_local(
+                str(ref),
+                snapshot=snapshot,
+                cache_dir=tensorhub_cas_dir(),
+                hf_token=hf_token or None,
+                fill_source_dir=tensorhub_fill_source_dir(),
+                progress=position.progress,
+            )
     setter(str(path))
     logger.info(
         "reserved repo materialized field=%s ref=%s path=%s",
