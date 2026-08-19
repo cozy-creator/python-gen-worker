@@ -56,7 +56,11 @@ from .models.cozy_snapshot import snapshot_dir_key
 from .models.disk_gc import tree_bytes
 from .models.projection import SNAPSHOTS_DIR
 from .models.store import ModelStore
-from .residency_goal import ResidencyGoal
+from .boot_materialize import (
+    REASON_MODEL_UNAVAILABLE,
+    CheckpointConfig,
+    CheckpointMaterialization,
+)
 from .discovery.names import slugify_name
 from . import postmortem
 from .procsplit import is_compute_child
@@ -294,10 +298,30 @@ def _picks_of(run: pb.RunJob) -> _DispatchPicks:
 class HubBindingResolver:
     """The hub's half of the deploy state, per dispatch.
 
-    ``resolve`` materializes a pick the hub already validated: the dispatch's
-    own ``ModelBinding`` row names the composed manifest digest, and this
-    worker's snapshot store either holds that tree or it does not. There is no
-    fallback — a miss names the pick and the path it looked for.
+    ``resolve`` materializes a pick the hub already validated. ``tree_for`` is
+    a PURE LOOKUP and stays one: pgw#1490 makes boot materialize every ref the
+    runtime config names before this worker advertises a function, so by the
+    time a dispatch arrives the tree is there. Dispatch-time fetching is not
+    missing — it is deliberately absent, because the local chain (``download``,
+    ``up``, then ``run``) has the same shape and for the same reason.
+
+    Which tree, though, is answered by THE STORE THAT PUT IT THERE, not by a
+    wire field. Two things made the digest route unusable on v2:
+
+    * ``ModelBinding.manifest_digest`` has NEVER had a sender (its own proto
+      comment says so — th#1941's hub leg is a parked draft), so every v2
+      dispatch reached a refusal that named a fetch pointer nobody sends; and
+    * the two producers of a tree name disagreed about the algorithm prefix.
+      ``Snapshot.digest`` is algorithm-tagged (``sha256:<hex>``) and the proto
+      calls it *"the worker's snapshot directory name — one key, one meaning"*;
+      ``cozy_snapshot`` writes exactly that, and this class used to STRIP the
+      prefix before looking, so the lookup could not succeed even for bytes
+      the pod held.
+
+    So the ref is resolved through the ``ModelStore``'s own residency first —
+    the same object, the same map, the same tree the boot pull produced — and
+    the digest path survives only as a fallback for a dispatch that does carry
+    one. A miss names the ref, what boot materialized, and every path tried.
     """
 
     def __init__(self, snapshots_root: Optional[Path] = None) -> None:
@@ -306,6 +330,13 @@ class HubBindingResolver:
             if snapshots_root is not None
             else tensorhub_cas_dir() / SNAPSHOTS_DIR
         )
+        #: Set by `Worker` once the store exists. `None` in the bare-resolver
+        #: unit paths, where the digest fallback below is the only route.
+        self._store: Optional[Any] = None
+
+    def bind_store(self, store: Any) -> None:
+        """Hand the resolver the store that materializes refs."""
+        self._store = store
 
     def _pick(self, model_cls: type, checkpoint_ref: str) -> _Pick:
         picks = _DISPATCH.get()
@@ -316,24 +347,50 @@ class HubBindingResolver:
                 f"for checkpoint {checkpoint_ref!r} "
                 f"(bound refs: {sorted(picks.by_ref) or '[]'})"
             )
-        if not pick.manifest_digest:
-            raise CheckpointUnresolved(
-                f"{model_cls.__name__}: binding for {checkpoint_ref!r} carries "
-                f"no manifest_digest; the worker has no other fetch pointer"
-            )
         return pick
+
+    def _digest_trees(self, digest: str) -> List[Path]:
+        """Both spellings of one digest's tree, authoritative one first."""
+        digest = str(digest or "").strip()
+        if not digest:
+            return []
+        bare = digest.split(":", 1)[-1]
+        keys = [snapshot_dir_key(digest)]
+        if bare != digest:
+            # The legacy spelling. Kept as a FALLBACK, not as an equal: a tree
+            # written by an older wheel is still readable, and a fresh one is
+            # written tagged.
+            keys.append(snapshot_dir_key(bare))
+        return [self.snapshots_root / key for key in keys]
 
     def tree_for(self, model_cls: type, checkpoint_ref: str) -> Path:
         pick = self._pick(model_cls, checkpoint_ref)
-        digest = pick.manifest_digest.split(":", 1)[-1]
-        tree = self.snapshots_root / snapshot_dir_key(digest)
-        if not tree.is_dir():
-            raise CheckpointUnresolved(
-                f"{model_cls.__name__}: checkpoint {checkpoint_ref!r} "
-                f"(manifest {pick.manifest_digest}) is not materialized on this "
-                f"worker — no tree at {tree}"
-            )
-        return tree
+        tried: List[Path] = []
+        if self._store is not None:
+            resident = self._store.disk_local_path(checkpoint_ref)
+            if resident is not None and Path(resident).is_dir():
+                return Path(resident)
+            snapshot = self._store.banked_snapshot(checkpoint_ref)
+            if snapshot is not None and snapshot.digest:
+                for tree in self._digest_trees(str(snapshot.digest)):
+                    if tree.is_dir():
+                        return tree
+                    tried.append(tree)
+        for tree in self._digest_trees(pick.manifest_digest):
+            if tree.is_dir():
+                return tree
+            tried.append(tree)
+        materialized = (
+            sorted(str(r) for r in self._store.disk_refs())
+            if self._store is not None else []
+        )
+        raise CheckpointUnresolved(
+            f"{model_cls.__name__}: checkpoint {checkpoint_ref!r} is not "
+            f"materialized on this worker. Boot materialized "
+            f"{materialized or '[]'}; the dispatch's manifest_digest is "
+            f"{pick.manifest_digest or '(unset — the hub sends none)'}; "
+            f"tried {[str(p) for p in tried] or '[]'}"
+        )
 
     def resolve(self, model_cls: type, checkpoint_ref: str) -> DeployBinding:
         pick = self._pick(model_cls, checkpoint_ref)
@@ -384,6 +441,15 @@ class HubBindingResolver:
         return _DISPATCH.get().by_slot.get(slot_name, "")
 
 
+class _Admission:
+    """The name `tree_for`'s refusals carry when ADMISSION is the caller.
+
+    `tree_for` takes the asking class so a refusal says who could not be
+    served; admission is not a model class, and saying so beats borrowing an
+    unrelated one.
+    """
+
+
 class SnapshotSizer:
     """Weight bytes from the materialized tree's tensorfs manifest.
 
@@ -400,21 +466,11 @@ class SnapshotSizer:
         cached = self._cache.get(checkpoint_ref)
         if cached is not None:
             return cached
-        picks = _DISPATCH.get()
-        pick = picks.by_ref.get(checkpoint_ref)
-        if pick is None:
-            raise CheckpointUnresolved(
-                f"admission asked for the size of {checkpoint_ref!r}, which "
-                f"this dispatch does not bind "
-                f"(bound refs: {sorted(picks.by_ref) or '[]'})"
-            )
-        digest = pick.manifest_digest.split(":", 1)[-1]
-        tree = self._resolver.snapshots_root / snapshot_dir_key(digest)
-        if not tree.is_dir():
-            raise CheckpointUnresolved(
-                f"admission needs the size of {checkpoint_ref!r}; no "
-                f"materialized tree at {tree}"
-            )
+        # ONE resolution, not a parallel one. Sizing a tree by re-deriving its
+        # path was the second place the prefix asymmetry lived, and a sizer
+        # that disagrees with the loader about which tree it is admits a model
+        # that is not the one that gets loaded.
+        tree = self._resolver.tree_for(_Admission, checkpoint_ref)
         size = int(tree_bytes(tree))
         self._cache[checkpoint_ref] = size
         return size
@@ -573,26 +629,38 @@ class Worker:
         boot_mod.mark_once(
             boot_mod.PHASE_SDK_READY, function=",".join(self.functions)
         )
-        # pgw#1483 / th#2204: THE RESIDENCY SEAM. `ModelStore` was never
+        # pgw#1483 / th#2204: THE MATERIALIZATION SEAM. `ModelStore` was never
         # constructed anywhere in `src/` — and `WorkerMessage.model_event` is
-        # built INSIDE it, so the hub was waiting for a fact no live object on
-        # this pod could state. `_send` is the store's emit: the same wire
-        # every other WorkerMessage rides. `rescan_disk()` is boot-time truth
-        # — on a warm pod with the endpoint volume attached, this is what
-        # turns 134 GB of already-staged bytes into a residency the pod can
-        # ANSWER with instead of re-downloading.
+        # built INSIDE it, so this pod had no live object capable of fetching
+        # a weight or stating that it held one. `_send` is the store's emit:
+        # the same wire every other WorkerMessage rides. `rescan_disk()` is
+        # boot-time truth — on a warm pod with the endpoint volume attached,
+        # this is what turns already-staged bytes into a residency the pod can
+        # answer with instead of re-downloading.
         self.store = ModelStore(
             self._send,
             cache_dir=self.resolver.snapshots_root.parent,
             vram_budget_bytes=int(budget) or None,
         )
-        try:
-            self.store.rescan_disk()
-        except Exception as exc:  # noqa: BLE001 — a cold CAS is not a boot failure
-            logger.warning("disk rescan at boot failed: %s: %s", type(exc).__name__, exc)
-        self.residency_goal = ResidencyGoal(self.store)
+        # ONE resolution of "where is this ref's tree". The store materializes
+        # it; the resolver hands it to `ctx.load`. Two answers to that question
+        # is how a pod ends up holding a checkpoint it cannot find.
+        self.resolver.bind_store(self.store)
+        # NOTE: the disk rescan is NOT here. `Worker` is constructed with no
+        # running event loop (`entrypoint.py`), and `ModelStore`'s event path
+        # closes its coroutine when it can find neither a running loop nor a
+        # bound one — so a rescan at construction populates the disk tier
+        # perfectly and delivers ZERO ModelEvents. It runs in `arun`, inside
+        # the loop, where the events it produces can actually reach the hub.
+        # pgw#1490: BOOT IS `up`. The refs this release serves are materialized
+        # before this worker advertises a single function, exactly as `run`
+        # requires `up` locally. Until then the worker is connected and NOT
+        # routable — which is what makes "never fetch inside a user request"
+        # true by construction, with no hub-side parking to enforce it.
+        self.materialization = CheckpointMaterialization(
+            self.store, announce=self._announce_readiness,
+        )
 
-        self.phase = pb.WORKER_PHASE_READY
         self.draining = False
         self.drained = asyncio.Event()
         self._jobs: Dict[Tuple[str, int], asyncio.Task[None]] = {}
@@ -681,26 +749,72 @@ class Worker:
     def functions(self) -> List[str]:
         return sorted(self.loaded.entrypoints)
 
+    @property
+    def phase(self) -> "pb.WorkerPhase.ValueType":
+        """This worker's startup phase. DERIVED, never assigned.
+
+        It used to be the constant `WORKER_PHASE_READY`, set in `__init__`
+        before a single weight existed on the pod — which is the worker half
+        of th#2204: the hub was told READY by a process that could not serve
+        anything, so the only thing left that could gate a dispatch was the
+        hub's own residency bookkeeping.
+        """
+        return self.materialization.phase()
+
     def _state_delta(self) -> pb.StateDelta:
+        # pgw#1490: READINESS IS THE ROUTING SIGNAL. A worker whose configured
+        # checkpoints are not on disk advertises them as LOADING, not
+        # AVAILABLE — the hub's `applyStateDeltaLocked` already renders that
+        # as `availability=starting` and routes elsewhere, like any web
+        # service in front of a pool. No residency accounting, no parking, no
+        # transfer-owner election: the pod says when it can serve.
+        ready = self.materialization.ready
         delta = pb.StateDelta(
             phase=self.phase,
-            available_functions=self.functions,
+            available_functions=self.functions if ready else [],
+            loading_functions=[] if ready else self.functions,
         )
         # 0 is the wire's "unmeasured"; only a real reading is reported.
         free = hostfacts.free_vram_bytes()
         if free is not None:
             delta.free_vram_bytes = int(free)
-        # th#2204: THE ECHO. The hub reads this to tell a pod that ANSWERED the
-        # residency goal from one that never spoke — its own doc calls it
-        # "receipt only", and receipt was precisely the fact missing when
-        # placement re-elected the same silent worker every six minutes at
-        # $3.29/hr. Only a fully reconciled generation is echoed: a goal still
-        # fetching is accepted, not answered, and collapsing the two would let
-        # the hub read a 134 GB transfer as satisfied.
-        observed = int(self.residency_goal.observed_generation)
-        if observed > 0:
-            delta.observed_residency_generation = observed
         return delta
+
+    async def _announce_readiness(self) -> None:
+        """Put this worker's readiness on the wire the instant it changes.
+
+        Called by `CheckpointMaterialization` on every transition, so the hub
+        learns "routable" at materialization time rather than up to one
+        heartbeat later — and learns "failed" as a TYPED per-function fact
+        rather than as an absence that looks identical to a slow boot.
+        """
+        if self.materialization.ready and self.functions:
+            boot_mod.mark_once(
+                boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
+                function=",".join(self.functions),
+            )
+        try:
+            await self._send(pb.WorkerMessage(state_delta=self._state_delta()))
+        except Exception:  # noqa: BLE001 — the heartbeat re-states this
+            logger.warning("readiness state delta send failed", exc_info=True)
+        if not self.materialization.failed:
+            return
+        # LOUD AND TYPED. `model_unavailable` is already in FnUnavailable's
+        # closed vocabulary and the hub's th#1100 policy re-probes it with
+        # backoff; the alternative — a pod that keeps retrying a hopeless pull
+        # forever — is th#2204's livelock wearing a different hat.
+        for fn in self.functions:
+            try:
+                await self._send(pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
+                    function_name=fn,
+                    reason=REASON_MODEL_UNAVAILABLE,
+                    detail=(
+                        "boot-time checkpoint materialization failed: "
+                        f"{self.materialization.failure}"
+                    ),
+                )))
+            except Exception:  # noqa: BLE001
+                logger.warning("fn_unavailable send failed for %s", fn, exc_info=True)
 
     def build_hello(self) -> pb.Hello:
         # NO `resources`: the split parent measures the silicon in a process
@@ -742,17 +856,22 @@ class Worker:
         # RECONNECT, and "process start -> hello" measured on the third
         # reconnect of a six-hour-old worker is not a boot number.
         boot_mod.mark_once(boot_mod.PHASE_HELLO)
-        # pgw#1483 / th#2204: TAKE THE RESIDENCY GOAL. This must sit ABOVE the
-        # `file_base_url` early return below — a session with no file API is a
-        # hub-side fact that has nothing to do with weights, and putting the
-        # residency consumer under that return would reproduce this issue's
-        # silence on exactly the pods least able to explain it. Non-blocking:
-        # a 134 GB fetch reconciles on its own task while the transport keeps
-        # reading.
-        self.residency_goal.apply(ack.desired_residency)
-        if self.functions:
-            # THE cold-boot number: the hub has acked a Hello advertising these
-            # functions, so from this instant it may dispatch to this pod.
+        # pgw#1490 / th#2204: TAKE THE CHECKPOINT CONFIG AND PULL. This must
+        # sit ABOVE the `file_base_url` early return below — a session with no
+        # file API is a hub-side fact that has nothing to do with weights, and
+        # putting the materialization under that return would strand exactly
+        # the pods least able to explain themselves. Non-blocking: the pull
+        # runs on its own task while the transport keeps reading, and the
+        # worker stays connected-and-unroutable until it finishes.
+        self.materialization.configure(
+            CheckpointConfig.from_wire(ack.desired_residency)
+        )
+        if self.functions and self.materialization.ready:
+            # THE cold-boot number, and it now means what it says: the pod
+            # holds its weights AND the hub has a Hello advertising these
+            # functions, so from this instant it may dispatch here. When the
+            # config named refs this pod had to fetch, the mark is stamped by
+            # the materialization's own readiness transition instead.
             boot_mod.mark_once(
                 boot_mod.PHASE_FIRST_REQUEST_SERVABLE,
                 function=",".join(self.functions),
@@ -1168,6 +1287,17 @@ class Worker:
 
         activity_mod.bind_sink(self._send, loop)
         boot_mod.bind_sink(self._send, loop)
+
+        # BOOT-TIME TRUTH, and it must run HERE. On a warm pod with the
+        # endpoint volume attached this is what turns already-staged bytes into
+        # a residency this pod can answer with instead of re-downloading — and
+        # every ON_DISK it produces is a ModelEvent, which only reaches the hub
+        # from inside the loop (see the construction-site note above).
+        self.store.bind_loop()
+        try:
+            self.store.rescan_disk()
+        except Exception as exc:  # noqa: BLE001 — a cold CAS is not a boot failure
+            logger.warning("disk rescan at boot failed: %s: %s", type(exc).__name__, exc)
 
         # pgw#1425: THIS is the serving process, and it says so where the wire
         # that carries the claim is bound — so the fact and its transport
