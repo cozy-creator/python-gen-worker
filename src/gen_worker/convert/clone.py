@@ -747,7 +747,9 @@ def run_clone(
     # th#1987: every published artifact attaches to an ALREADY-CUT release,
     # named by the invoking request. Resolved before the download so a clone
     # that could never publish costs nothing.
-    release = _destination_release(ctx, destination_release)
+    # th#2202: a SCRATCH destination derives its release hub-side, and since
+    # th#1901 that is what the hub rewrites EVERY producer's destination to.
+    release = _destination_release(ctx, destination_release, destination)
     layout_hint = str(target_layout or MULTI_FILE).strip().lower() or MULTI_FILE
     specs = normalize_outputs(outputs, layout_hint=layout_hint)
     include = normalize_source_include(source_include)

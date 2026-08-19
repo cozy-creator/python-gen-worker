@@ -19,4 +19,22 @@ def is_scratch_name(name: str) -> bool:
     return str(name or "").strip().lower().startswith(PREFIX)
 
 
-__all__ = ["PREFIX", "is_scratch_name"]
+def derives_its_release(ref: str) -> bool:
+    """Whether a publish into ``ref`` gets its release DERIVED by the hub.
+
+    th#2202: a scratch repo cuts its own release on every publish, because
+    th#1987's "name the release" is an act of DELIBERATION and nobody authors
+    ``_job-<request-id>`` — the hub names it, hard-privates it, TTLs it and
+    reaps it. So an empty ``release`` is LEGAL here and only here, and the SDK
+    must not refuse it: this precondition used to fire client-side, before any
+    HTTP, and killed a training run at its first checkpoint on a rented A100.
+
+    Accepts either ``owner/name`` or a bare name; selectors are ignored.
+    """
+    text = str(ref or "").strip().lower()
+    for sep in (":", "@", "#"):
+        text = text.split(sep, 1)[0]
+    return is_scratch_name(text.rsplit("/", 1)[-1])
+
+
+__all__ = ["PREFIX", "is_scratch_name", "derives_its_release"]

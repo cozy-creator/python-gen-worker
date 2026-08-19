@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .. import activity as _activity
+from .. import scratchrepo
 from ..api.errors import ValidationError
 from ..hubio.client import CommitFile, CommitResult, HubClient, files_from_tree
 from ..hubio.publish_state import JOURNAL_NAME
@@ -181,7 +182,7 @@ def _publish_leg(dest: str, artifact: str, stage: str, facts: Mapping[str, Any])
         phase=stage)
 
 
-def destination_release(ctx: Any, explicit: str = "") -> str:
+def destination_release(ctx: Any, explicit: str = "", dest: str = "") -> str:
     """THE release a producer's output attaches to: the explicit argument, else
     the invoking request's ``destination.release``.
 
@@ -189,6 +190,13 @@ def destination_release(ctx: Any, explicit: str = "") -> str:
     can name none has a caller-side defect. Refusing here — before a byte
     moves — names the field the invoke must carry instead of costing the run a
     multi-GB upload and a 400.
+
+    th#2202: ``dest`` is the repo actually being published into, and a SCRATCH
+    one DERIVES its release. Since th#1901 the hub rewrites EVERY producer's
+    destination to `<org>/_job-<request-id>` on the wire, so this is the
+    ordinary case, not the exception — and demanding a release the caller has
+    no payload member to state made the whole scalar-destination surface
+    unpublishable. Empty is returned and the hub cuts.
     """
     rel = str(explicit or "").strip()
     if rel:
@@ -196,6 +204,8 @@ def destination_release(ctx: Any, explicit: str = "") -> str:
     info = getattr(ctx, "destination", None) or {}
     if isinstance(info, dict):
         rel = str(info.get("release") or "").strip()
+    if not rel and scratchrepo.derives_its_release(dest):
+        return ""
     if not rel:
         raise ValueError(
             "release is required (th#1987): the invoke named no "
@@ -276,7 +286,7 @@ def publish_flavors(
     if callable(require):
         require("publish_flavors")
     dest = destination_ref(ctx, destination_repo)
-    release = destination_release(ctx, release)
+    release = destination_release(ctx, release, dest)
 
     client = HubClient.from_ctx(ctx)
     # A v2 publish mints a new identity and inherits nothing, so a publish into
