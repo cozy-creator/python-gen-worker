@@ -31,6 +31,10 @@ def test_the_document_names_the_launch_set() -> None:
     doc = export_document()
     assert doc["names"] == [
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
+        # pgw#1422: the two qwen3.6 LLM roots — the first NON-DIFFUSION
+        # vocabularies in the export (max_tokens/temperature/top_p, no steps
+        # and no guidance).
+        "qwen3.6-27b-mtp", "qwen3.6-35b-a3b",
         # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b).
         "flux1", "flux2-klein",
         "sdxl.lora", "sd15.lora",

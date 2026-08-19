@@ -466,7 +466,7 @@ def test_the_serving_interaction_matrix(
 def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert [mt.name for mt in MODEL_TYPES] == [
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
-        "flux1", "flux2-klein",
+        "qwen3.6-27b-mtp", "qwen3.6-35b-a3b", "flux1", "flux2-klein",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
@@ -477,6 +477,40 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert model_type_by_name("flux1") is Flux1
     assert model_type_by_name("flux2-klein") is Flux2Klein
     assert model_type_by_name("flux") is None
+    # pgw#1422: the two qwen3.6 LLM roots are likewise SEPARATE vocabularies
+    # (temperature 0.6 vs 0.7 — the family owner registered two schemas), and
+    # neither is spelled bare "qwen" or shares a root with `qwen-image`.
+    from gen_worker.models import Qwen36A3b, Qwen36Mtp
+
+    assert model_type_by_name("qwen3.6-27b-mtp") is Qwen36Mtp
+    assert model_type_by_name("qwen3.6-35b-a3b") is Qwen36A3b
+    assert model_type_by_name("qwen") is None
+    assert model_type_by_name("qwen3.6") is None
+
+
+def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
+    """pgw#1422. Both qwen3.6 roots are EXTERNAL-BINARY runtimes (llama.cpp,
+    vLLM) that never call `ctx.load`, so they carry no canonical contract —
+    the `Rife` shape, and an ABSENT contract rather than a `MissingContract`
+    sentinel. And `max_tokens` must never inherit an endpoint's card budget:
+    a platform `hi` only ever NARROWS a checkpoint row (the pgw#1393
+    `Flux1.guidance` defect), so a 16k/32k KV cap here would make the
+    family's real 262k context unreachable forever."""
+    from gen_worker.models import Qwen36A3b, Qwen36Mtp
+
+    for model_type in (Qwen36Mtp, Qwen36A3b):
+        assert model_type.canonical_contract is None
+        assert model_type.canonical_scheduler_config == {}
+        defaults = model_type.Defaults()
+        assert defaults.max_tokens.default == 256
+        assert defaults.max_tokens.lo == 1
+        assert defaults.max_tokens.hi is None
+        assert defaults.top_p.default == 0.95
+        # no bounds are sourced for the sampler knobs, so none are declared
+        assert (defaults.temperature.lo, defaults.temperature.hi) == (None, None)
+
+    assert Qwen36Mtp.Defaults().temperature.default == 0.6
+    assert Qwen36A3b.Defaults().temperature.default == 0.7
 
 
 def test_contract_stamps_classify_through_the_fingerprint() -> None:
