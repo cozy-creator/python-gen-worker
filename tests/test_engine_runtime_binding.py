@@ -1,6 +1,6 @@
 """pgw#1421, the WIDENING: the declaration binds to the runtime.
 
-The isolated arms (`test_engine_runtime_pgw1421.py`) prove the supervisor.
+The isolated arms (`test_engine_runtime.py`) prove the supervisor.
 These prove the two boundaries it has to cross for a real endpoint:
 
 * **DISCOVERY** reads an author's `ctx.engine(LlamaServer(...))` statically —
