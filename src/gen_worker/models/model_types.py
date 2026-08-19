@@ -286,6 +286,45 @@ SD15_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
 #: single VRAM floor) and rides the same schedule. FLUX.1's own repos are
 #: gated, so ``Flux1.canonical_scheduler_config`` stays empty — do not invent
 #: it by analogy with these numbers.
+#: `tensorhub/qwen-image` scheduler/scheduler_config.json, read VERBATIM from
+#: the hub tree the fleet serves (pgw#1426). BYTE-IDENTICAL on
+#: `tensorhub/qwen-image-edit-2511`, which is one more piece of the evidence
+#: that the two arms are one family. Flow-matching, so there is no beta
+#: schedule; `use_dynamic_shifting` makes the effective shift a function of
+#: image sequence length between `base_image_seq_len` and `max_image_seq_len`,
+#: which is exactly why no frozen triple could stand in for it.
+QWEN_IMAGE_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "FlowMatchEulerDiscreteScheduler",
+    "num_train_timesteps": 1000,
+    "shift": 1.0,
+    "base_shift": 0.5,
+    "max_shift": 0.9,
+    "use_dynamic_shifting": True,
+    "base_image_seq_len": 256,
+    "max_image_seq_len": 8192,
+    "time_shift_type": "exponential",
+    "shift_terminal": 0.02,
+    "invert_sigmas": False,
+    "stochastic_sampling": False,
+    "use_beta_sigmas": False,
+    "use_exponential_sigmas": False,
+    "use_karras_sigmas": False,
+}
+
+#: `tensorhub/z-image` scheduler/scheduler_config.json, read VERBATIM from the
+#: hub tree (pgw#1426). THE BASE CHECKPOINT'S, DELIBERATELY: the served
+#: `tensorhub/z-image-turbo` tree ships the same class at `shift: 3.0` against
+#: this `6.0`, and a canonical scheduler config is the FAMILY ROOT's training
+#: schedule, not an average. That difference costs nothing at serve time —
+#: ingest only synthesizes this into a tree that ships NO scheduler_config.json,
+#: and both served z-image trees ship their own.
+Z_IMAGE_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "FlowMatchEulerDiscreteScheduler",
+    "num_train_timesteps": 1000,
+    "use_dynamic_shifting": False,
+    "shift": 6.0,
+}
+
 FLUX2_KLEIN_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "_class_name": "FlowMatchEulerDiscreteScheduler",
     "num_train_timesteps": 1000,
@@ -355,6 +394,23 @@ SD15_DIFFUSERS_BF16: Final = _library("sd15.diffusers-bf16", 1)
 SD2_DIFFUSERS_BF16: Final = _library("sd2.diffusers-bf16", 1)
 HIDREAM_O1_DIFFUSERS_BF16: Final = _library("hidream-o1.diffusers-bf16", 1)
 WAN22_DIFFUSERS_BF16: Final = _library("wan22.diffusers-bf16", 1)
+
+#: REAL as of tensorfs#131 — the qwen-image and z-image transformer-only lane
+#: documents (45 and 56 declarations), both derived from the trees the fleet
+#: SERVES rather than from HuggingFace. `qwen-image.diffusers-bf16@1` covers
+#: BOTH shipped repos (`tensorhub/qwen-image` and
+#: `tensorhub/qwen-image-edit-2511`), whose transformers are byte-layout
+#: identical — 1933 tensors, zero name/shape/dtype diffs;
+#: `z-image.diffusers-bf16@1` likewise covers `tensorhub/z-image` and
+#: `tensorhub/z-image-turbo` (521 tensors, same measurement).
+#:
+#: THE Z-IMAGE DOCUMENT IS DELIBERATELY NOT THE HUGGINGFACE PACKAGING.
+#: `Tongyi-MAI/Z-Image-Turbo` ships its transformer in F32 (521/521, measured);
+#: the hub's served bf16 republish of the same revision is BF16 (521/521), with
+#: identical names and shapes. The document follows the served tree, so the F32
+#: packaging misses it entirely instead of half-matching.
+QWEN_IMAGE_DIFFUSERS_BF16: Final = _library("qwen-image.diffusers-bf16", 1)
+Z_IMAGE_DIFFUSERS_BF16: Final = _library("z-image.diffusers-bf16", 1)
 
 #: REAL as of tensorfs#124 — FLUX.2 Klein's own transformer-only lane document
 #: (29 declarations). This is what makes ``flux.2-klein-4b``/``-9b``
@@ -990,6 +1046,148 @@ class ErnieDefaults(msgspec.Struct, frozen=True):
     #: made true on the pipeline by ``_pin_text_sequence`` (``:269-304``, which
     #: sets ``tokenizer.model_max_length``). Plain int, MiniMaxH3 idiom — no
     #: endpoint exposes it on the wire.
+class QwenImageDefaults(msgspec.Struct, frozen=True):
+    """Qwen-Image — text-to-image AND native editing under ONE vocabulary root.
+
+    THE ONE-ROOT CALL IS A MEASUREMENT, NOT A JUDGEMENT (pgw#1426). The two
+    served checkpoints' transformers are byte-layout IDENTICAL: 1933 tensors
+    each, name sets equal, ZERO shape diffs, ZERO dtype diffs, both
+    ``_class_name: QwenImageTransformer2DModel`` with the same
+    ``axes_dims_rope [16, 56, 56]`` / ``num_layers 60`` /
+    ``attention_head_dim 128`` / ``joint_attention_dim 3584``, and byte-identical
+    ``scheduler_config.json``. The only config delta is ``zero_cond_t`` on the
+    edit arm — a forward-pass flag, not a tensor and not a knob.
+
+    Run against the standard :class:`Flux2KleinDefaults` states for SPLITTING a
+    root: the rope convention is IDENTICAL (same module, same axes), the
+    pipeline class DIFFERS (``QwenImagePipeline`` vs
+    ``QwenImageEditPlusPipeline``) — and the one that decides a DEFAULTS
+    vocabulary, the CFG MECHANISM, is identical. Both arms run true-CFG
+    (``do_true_cfg = true_cfg_scale > 1`` with a negative prompt), share one
+    guidance axis and one recipe resolver in the shipped endpoint
+    (``qwen-image/src/qwen_image/main.py:147-150``, ``:672-695``). ONE ``cfg``
+    bool IS the right platform default for both, so the condition Flux2Klein
+    names for a split is not met.
+
+    THE ENDPOINT'S TWO ``@endpoint`` CLASSES ARE A COMPILE FACT, NOT A
+    VOCABULARY FACT, and pgw#1112 says so in its own words: a compile target is
+    an attribute PATH on ONE pipeline object, both slots owned ``.transformer``,
+    so declaration order silently handed every mint to t2i. That is a reason for
+    two ``Model`` classes and two cells. It is not a reason for two roots — the
+    same shape :class:`Wan22` already serves with three model classes on one.
+    The shipped code agrees outright: ONE
+    ``register_family("qwen-image", QwenImageDefaults)`` (``:142``), both
+    classes' handlers typed ``RequestContext[QwenImageDefaults]``, and the edit
+    slot's ``family="qwen-image"`` declared EXPLICIT and called load-bearing
+    (``:823``).
+
+    Values, all sourced from the family's own v1 endpoint code:
+
+    ``steps`` 30 is ``QwenImageDefaults.steps`` (``:138``) — the ie#488 gate-4
+    H100 same-seed sweep, s30-cfg4 at parity with the 50-step card copy.
+    ``guidance`` 4.0 is ``:139`` (the true-CFG scale). The BOUNDS deliberately
+    do NOT copy the handler's wire envelope (``ge=10`` steps at ``:317``,
+    ``ge=1.5`` guidance at ``:324``): the platform knob must admit the Lightning
+    lane's published 8-step CFG-off recipe (``_TURBO_REGIME``, ``:430``), and
+    ``_merge_int_knob`` clamps a row's default INTO the platform range — a floor
+    of 10 would silently serve an 8-step Lightning row at 10 steps, and a
+    guidance floor of 1.5 would make its 1.0 unreachable. That is the same
+    measured trap :class:`Flux1Defaults` records for schnell's pinned 0.0. So
+    1..80 and 1.0..12.0, with the endpoint keeping its narrower wire bounds;
+    the upper bounds ARE the endpoint's (``:317``, ``:324``).
+
+    ``negative`` is the true-CFG unconditioned prompt and Qwen's convention is a
+    single SPACE, never the empty string (``:140``, enforced at ``:491-497``).
+
+    DELIBERATELY ABSENT. ``max_guidance`` (v1's ``:141``) does not come across:
+    it was a per-checkpoint CLAMP expressed as a second field because v1 had no
+    range type, and ``Knob.hi`` IS that clamp now — a checkpoint row narrows
+    ``guidance`` directly and ``ctx.clamp`` reports it caller-visibly. Carrying
+    both would be two spellings of one fact, with only one of them enforced. No
+    ``.Lora`` overlay: the Lightning adapters ride as deploy data and the family
+    owner's code fixes their regime in ENDPOINT constants (8 steps, CFG off,
+    plus a ln(3) exponential-shift scheduler override, ``:428-440``) — the
+    scheduler demand is a config-override MAPPING, which the platform's
+    ``SchedulerName`` vocabulary cannot spell, and no shipped code states a
+    strength range to source. Absent beats invented (the
+    :class:`Flux1Defaults` posture). No preset grids, megapixel tiers or the
+    1..3 ordered-reference bound — those are endpoint PAYLOAD vocabulary.
+    """
+
+    steps: Knob[int] = Knob(30, lo=1, hi=80, name="steps")
+    guidance: Knob[float] = Knob(4.0, lo=1.0, hi=12.0, name="guidance")
+    #: Both arms are true-CFG mechanism models (a second uncond forward). A
+    #: Lightning-fused row sets False.
+    cfg: bool = True
+    #: Both shipped handlers declare ``distilled=False`` (``:761``, ``:776``,
+    #: ``:842``, ``:864``) — Lightning arrives as an OVERLAY, never as distilled
+    #: base weights. A fused Lightning checkpoint's row sets True.
+    step_distilled: bool = False
+    #: The true-CFG unconditioned prompt. A single space, not "" (``:140``).
+    negative: str = " "
+    #: The text-sequence pin. A plain int, NOT a Knob (the :class:`MiniMaxH3`
+    #: idiom): no endpoint exposes it on the wire, so there is nothing to clamp
+    #: caller-visibly. 512 is the t2i lane's ``_TEXT_LEN`` (``:173``) and the
+    #: family root's value; the EDIT checkpoint's row sets 1024 (``:303``),
+    #: because its condition images' vision tokens ride BEFORE the user text
+    #: (~188 per image at 384^2, up to 3) and 512 would truncate the images
+    #: away. Same checkpoint-level shape as :class:`Flux1Defaults`' schnell 256.
+    max_sequence_length: int = 512
+
+
+class ZImageDefaults(msgspec.Struct, frozen=True):
+    """Z-Image — the undistilled base and the Decoupled-DMD Turbo distillation
+    under ONE vocabulary root, the same one-root shape as :class:`Wan22`.
+
+    Measured (pgw#1426): ``tensorhub/z-image`` and ``tensorhub/z-image-turbo``
+    ship the SAME transformer layout — 521 tensors, identical names, shapes and
+    dtypes, identical ``transformer/config.json`` (``dim 3840``, ``n_layers
+    30``, ``n_heads 30``). Turbo is a different training of one architecture,
+    which is a checkpoint row, not a second vocabulary.
+
+    Values, all sourced from ``z-image/src/z_image/main.py``:
+
+    ``steps`` 28 and ``guidance`` 4.0 are the base model card's own numbers, the
+    v1 ``ZImageDefaults`` schema stamp (``:90-91``). ``steps`` bounds are the
+    WIDEST envelope any z-image lane declares — the base handler's ``ge=1,
+    le=80`` (``:275``) rather than the turbo handler's ``le=16`` (``:296``),
+    because ``defaults_decode`` only ever NARROWS and a checkpoint row must be
+    able to state the tighter bound itself.
+
+    ``guidance``'s FLOOR IS 0.0 AND THAT IS LOAD-BEARING, not the base
+    handler's wire ``ge=1.0`` (``:278``). Both turbo lanes PIN
+    ``guidance=0.0`` (``:669``, ``:702``); since the knob merge only narrows, a
+    platform floor of 1.0 makes the distilled checkpoints' own rows
+    unreachable. This is exactly the empty-range defect
+    :class:`Flux1Defaults` records as MEASURED for schnell. The endpoint keeps
+    its narrower wire bound; the platform envelope has to admit the family's
+    real checkpoints.
+
+    DELIBERATELY ABSENT, for the reasons :class:`Flux1Defaults` gives: no
+    ``.Lora`` overlay (the PAI 2603 8-step distillation rides the deploy
+    binding as an adapter, and while its 8 steps and weight 0.8 ARE sourced
+    (``:244``, README), no shipped code states a STRENGTH RANGE or a
+    ``SchedulerName`` demand to source — a Knob needs a range, and inventing
+    one is the thing this vocabulary refuses to do); no ``timesteps`` ladder
+    (flow-matching derives its sigma ladder from the shift parameters, and no
+    z-image endpoint pins one); no aspect/megapixel grid, which is endpoint
+    PAYLOAD vocabulary.
+    """
+
+    steps: Knob[int] = Knob(28, lo=1, hi=80, name="steps")
+    guidance: Knob[float] = Knob(4.0, lo=0.0, hi=15.0, name="guidance")
+    #: The base is a CFG-mechanism model and z-image batches CFG into ONE
+    #: forward — ``latents.repeat(2,1,1,1)`` plus a list concatenation of the
+    #: prompt embeds, so the pytree arity doubles (``:179-184``). Both turbo
+    #: rows set False.
+    cfg: bool = True
+    #: The base handler declares ``distilled=False`` (``:580``). The official
+    #: Decoupled-DMD Turbo checkpoint's row sets True — its card recipe is 9
+    #: scheduler steps (``_TURBO_DMD_STEPS``, ``:245``), and the PAI 8-step
+    #: adapter (``:244``) reaches the same state as an overlay.
+    step_distilled: bool = False
+    #: ``_MAX_SEQUENCE_LENGTH`` (``:131``). A plain int for the same reason as
+    #: :class:`QwenImageDefaults` — no endpoint exposes it on the wire.
     max_sequence_length: int = 512
 
 
@@ -1300,6 +1498,33 @@ class Ernie(ModelType[ErnieDefaults]):
     contracts = ("ernie.*",)
     canonical_scheduler_config = ERNIE_SCHEDULER_CONFIG
     Defaults = ErnieDefaults
+class QwenImage(ModelType[QwenImageDefaults]):
+    """Qwen-Image — text-to-image AND native editing (Qwen-Image-Edit-2511)
+    under one vocabulary root.
+
+    Not a judgement call: the two served checkpoints' transformers are
+    byte-layout identical, and the endpoint registers ONE family for both arms.
+    See :class:`QwenImageDefaults` for the measurement and for why the
+    endpoint's two ``@endpoint`` classes are a COMPILE fact rather than a
+    vocabulary one.
+    """
+
+    name = "qwen-image"
+    contracts = ("qwen-image.*",)
+    canonical_contract = QWEN_IMAGE_DIFFUSERS_BF16
+    canonical_scheduler_config = QWEN_IMAGE_SCHEDULER_CONFIG
+    Defaults = QwenImageDefaults
+
+
+class ZImage(ModelType[ZImageDefaults]):
+    """Z-Image — the undistilled base and the Decoupled-DMD Turbo under one
+    vocabulary root (see :class:`ZImageDefaults`)."""
+
+    name = "z-image"
+    contracts = ("z-image.*",)
+    canonical_contract = Z_IMAGE_DIFFUSERS_BF16
+    canonical_scheduler_config = Z_IMAGE_SCHEDULER_CONFIG
+    Defaults = ZImageDefaults
 
 
 MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
@@ -1317,6 +1542,8 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     Krea2,
     Anima,
     Ernie,
+    QwenImage,
+    ZImage,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
@@ -1356,6 +1583,8 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Qwen36A3b.name: Qwen36A3b.Defaults,
         Flux1.name: Flux1.Defaults,
         Flux2Klein.name: Flux2Klein.Defaults,
+        QwenImage.name: QwenImage.Defaults,
+        ZImage.name: ZImage.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }
@@ -1407,6 +1636,10 @@ __all__ = [
     "Rife",
     "RifeDefaults",
     "MODEL_TYPES",
+    "QWEN_IMAGE_DIFFUSERS_BF16",
+    "QWEN_IMAGE_SCHEDULER_CONFIG",
+    "QwenImage",
+    "QwenImageDefaults",
     "ModelType",
     "MissingContract",
     "MissingContractError",
@@ -1429,6 +1662,10 @@ __all__ = [
     "WAN22_DIFFUSERS_BF16",
     "Wan22",
     "Wan22Defaults",
+    "Z_IMAGE_DIFFUSERS_BF16",
+    "Z_IMAGE_SCHEDULER_CONFIG",
+    "ZImage",
+    "ZImageDefaults",
     "defaults_vocabularies",
     "model_type_by_name",
     "model_type_for_contract",

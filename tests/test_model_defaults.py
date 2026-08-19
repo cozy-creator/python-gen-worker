@@ -470,7 +470,7 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert [mt.name for mt in MODEL_TYPES] == [
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
         "qwen3.6-27b-mtp", "qwen3.6-35b-a3b", "flux1", "flux2-klein",
-        "krea-2", "anima", "ernie",
+        "krea-2", "anima", "ernie", "qwen-image", "z-image",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
@@ -490,6 +490,13 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert model_type_by_name("qwen3.6-35b-a3b") is Qwen36A3b
     assert model_type_by_name("qwen") is None
     assert model_type_by_name("qwen3.6") is None
+    # pgw#1426: qwen-image covers t2i AND Qwen-Image-Edit-2511 (one root), and
+    # z-image covers the base AND the Decoupled-DMD Turbo.
+    from gen_worker.models import QwenImage, ZImage
+
+    assert model_type_by_name("qwen-image") is QwenImage
+    assert model_type_by_name("z-image") is ZImage
+    assert model_type_by_name("qwen-image-edit") is None
 
 
 def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
@@ -673,6 +680,118 @@ def test_flux_platform_floors_admit_the_distilled_checkpoints() -> None:
         "steps": {"default": 28, "hi": 100}, "cfg": True,
     })
     assert flex2.steps.hi == 100 and flex2.cfg is True
+
+
+def test_qwen_and_z_platform_values_are_the_shipped_endpoint_numbers() -> None:
+    """pgw#1426. Every number below is the family's OWN v1 endpoint code."""
+    from gen_worker.models import QwenImage, ZImage
+
+    q = QwenImage.Defaults()
+    # qwen-image/src/qwen_image/main.py:138-140.
+    assert q.steps.default == 30 and q.guidance.default == 4.0
+    assert q.negative == " ", "Qwen's uncond convention is a SPACE, never ''"
+    assert q.cfg is True and q.step_distilled is False
+    # :173 — the t2i pin; the edit checkpoint's ROW carries 1024 (:303).
+    assert q.max_sequence_length == 512
+    # v1's `max_guidance` clamp field does NOT come across: Knob.hi IS the clamp.
+    assert not hasattr(q, "max_guidance")
+
+    z = ZImage.Defaults()
+    # z-image/src/z_image/main.py:90-91.
+    assert z.steps.default == 28 and z.guidance.default == 4.0
+    assert z.cfg is True and z.step_distilled is False
+    assert z.max_sequence_length == 512  # :131
+
+    # Neither family registers a lora vocabulary with a sourceable strength
+    # range, so neither declares an overlay (the Flux1/Flux2Klein posture).
+    assert not hasattr(QwenImage, "Lora")
+    assert not hasattr(ZImage, "Lora")
+
+
+def test_qwen_and_z_platform_floors_admit_their_distilled_checkpoints() -> None:
+    """pgw#1426, and it is RED-CONTROLLED below rather than merely asserted.
+
+    Both families ship a distilled sibling, so a platform floor copied from the
+    BASE handler's wire envelope would silently rewrite the distilled row --
+    ``_merge_*_knob`` only narrows, and clamps a row's default INTO the range.
+    """
+    from gen_worker.models import QwenImage, ZImage
+
+    # z-image/src/z_image/main.py:245 — official Turbo's card recipe is 9
+    # scheduler steps, and :702 PINS guidance 0.0. The base handler's wire
+    # floor is ge=1.0 (:278); copying it would have made this row empty.
+    dmd = decode_model_defaults(ZImage, model="z-image", defaults={
+        "steps": {"default": 9}, "guidance": {"default": 0.0},
+        "cfg": False, "step_distilled": True,
+    })
+    assert dmd.steps.default == 9
+    assert dmd.guidance.default == 0.0 and dmd.guidance.lo == 0.0
+    assert dmd.cfg is False and dmd.step_distilled is True
+
+    # :244 — the PAI 2603 8-step distill reaches the same state as an overlay.
+    pai = decode_model_defaults(ZImage, model="z-image", defaults={
+        "steps": {"default": 8, "hi": 16}, "guidance": {"default": 0.0},
+        "cfg": False, "step_distilled": True,
+    })
+    assert pai.steps.default == 8 and pai.steps.hi == 16
+
+    # qwen-image/src/qwen_image/main.py:430 — the Lightning regime is 8 steps
+    # with CFG off. The base handler declares ge=10 (:317) and ge=1.5 (:324);
+    # either copied up would corrupt this row.
+    lightning = decode_model_defaults(QwenImage, model="qwen-image", defaults={
+        "steps": {"default": 8}, "guidance": {"default": 1.0},
+        "cfg": False, "step_distilled": True,
+    })
+    assert lightning.steps.default == 8
+    assert lightning.guidance.default == 1.0
+    assert lightning.cfg is False and lightning.step_distilled is True
+
+    # The edit checkpoint narrows ONLY the text pin (:303).
+    edit = decode_model_defaults(QwenImage, model="qwen-image", defaults={
+        "max_sequence_length": 1024,
+    })
+    assert edit.max_sequence_length == 1024
+    assert edit.steps.default == 30, "the edit row shares the family recipe"
+
+
+def test_a_base_handlers_wire_floor_really_would_corrupt_a_distilled_row() -> None:
+    """The RED control for the test above: prove the hazard is real HERE, so
+    the floors are known-good rather than merely never-exercised.
+
+    An assertion that has never failed is not known to be able to fail, and the
+    corruption is silent by construction -- no exception, just a different
+    recipe -- so nothing else would have caught a mechanical port.
+    """
+    from gen_worker.models.defaults_decode import decode_defaults
+
+    class PortedZImage(msgspec.Struct, frozen=True):
+        """z-image's BASE wire floor ge=1.0 (main.py:278) ported as-is."""
+
+        guidance: Knob[float] = Knob(4.0, lo=1.0, hi=15.0, name="guidance")
+
+    class PortedQwen(msgspec.Struct, frozen=True):
+        """qwen's BASE wire floor ge=10 (main.py:317) ported as-is."""
+
+        steps: Knob[int] = Knob(30, lo=10, hi=80, name="steps")
+
+    # Against Turbo's pinned guidance 0.0.
+    corrupted = decode_defaults(PortedZImage, {"guidance": {"default": 0.0}})
+    assert corrupted.guidance.default == 1.0, "the port silently serves CFG on"
+
+    # Against Lightning's 8 steps.
+    corrupted2 = decode_defaults(PortedQwen, {"steps": {"default": 8}})
+    assert corrupted2.steps.default == 10, "the port silently serves 10 steps"
+
+    # And the SHIPPED floors do not do that -- the same two rows, decoded
+    # through the real vocabularies, keep their own values.
+    from gen_worker.models import QwenImage, ZImage
+
+    assert decode_model_defaults(
+        ZImage, model="z-image", defaults={"guidance": {"default": 0.0}},
+    ).guidance.default == 0.0
+    assert decode_model_defaults(
+        QwenImage, model="qwen-image", defaults={"steps": {"default": 8}},
+    ).steps.default == 8
 
 
 def test_model_types_are_vocabularies_not_values() -> None:
