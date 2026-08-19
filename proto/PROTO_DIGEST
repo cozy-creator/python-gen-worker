@@ -3,7 +3,7 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-2770efb29eb60c9495c8bd2c12314f15f422ad774af14117654d77dbd13ac8ab
+2a6de856b32c55a2fa8241630dffd6a77cb1ce25bcb625b63b0640a8017d93a3
 
 # th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
 # `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
@@ -45,3 +45,16 @@
 # tensorhub PR #1219, whose proto hunk predates th#2140 and would RE-ADD the
 # collision at 9). So th#1941's `manifest_digest` moves 9 -> 10 here, and that
 # leg must land its sender at 10.
+
+# pgw#1436: `WorkerResources.capability_reason_class = 15` and
+# `capability_detail = 16` — WHY a worker with a card reports no `gpu_sm`.
+# ADDITIVE; nothing existing moves, and a healthy worker sends neither.
+#
+# Landed SURGICALLY here rather than by re-vendoring tensorhub's canonical
+# copy: this file still carries th#1941's composed-manifest hunks, which have
+# no tensorhub leg, so `vendor-proto.sh` would have DELETED them. The two
+# digests therefore stay legitimately different — the same situation
+# th#2082/th#2148 recorded, for the same reason.
+#
+# tensorhub's canonical copy carries the byte-identical hunk at
+# 584bd5d65868166d9fc66369840931e78983b2405f5ebdff7830c9e75c851e64.
