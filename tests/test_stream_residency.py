@@ -102,7 +102,7 @@ def test_budget_split_is_deterministic_and_largest_first() -> None:
     costs = _pyramid()
     first = plan_residency(costs, budget_bytes=14_000_000, min_stream_bytes=1)
     # Same inputs in a different order must give the same answer: a mint's
-    # traced graph class and a residency reservation both depend on it.
+    # traced graph specializations and a residency reservation both depend on it.
     shuffled = plan_residency(
         list(reversed(costs)), budget_bytes=14_000_000, min_stream_bytes=1
     )
