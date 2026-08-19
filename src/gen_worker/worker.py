@@ -614,7 +614,7 @@ class Worker:
         #: mint or none, never a half-built one.
         self._mint_box: List[Any] = []
 
-        def _arm(adoption: Any) -> None:
+        def _arm(adoption: Any) -> Any:
             # The trigger (pgw#1371): holes are registered, so the mint has a
             # work-list. It runs on its own daemon thread, CPU-reserved and
             # niced against this process — the serving loop is never involved.
@@ -623,7 +623,12 @@ class Worker:
                 cas_dir=tensorhub_cas_dir(), sm=sm,
             )
             self._mint_box.append(mint)
-            mint.arm(adoption)
+            # pgw#1480: the STATUS is returned, not dropped. `arm` answers
+            # `unavailable` when this pod has no compiler — a mint that never
+            # starts leaves the pod eager FOREVER, which is the terminal state
+            # `boot_ended_uncompiled` exists to name. Returning nothing made
+            # that indistinguishable from a mint that is running.
+            return mint.arm(adoption)
 
         return ServeAdoption(
             release_id, sm=sm, artifacts_dir=artifacts,

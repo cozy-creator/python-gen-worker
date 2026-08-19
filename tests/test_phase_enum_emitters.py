@@ -25,6 +25,14 @@ CENSUS = REPO / "scripts" / "phase_enum_census.txt"
 ENUM = REPO / "src" / "gen_worker" / "compiled_graph_adopt.py"
 POSTURE = REPO / "src" / "gen_worker" / "serve_posture.py"
 
+#: The exemplar this file drives the fence with: a member that is STILL
+#: censused as unwired. It was `BOOT_ENDED_UNCOMPILED` until pgw#1480's fix
+#: wired that one — which is the census doing its job, and the reason the
+#: exemplar is named ONCE here instead of being spelled into four arms. When
+#: this one gets wired too, move the name; do not delete the arm.
+DEAD_EXEMPLAR = "ARM_PENDING"
+DEAD_EXEMPLAR_VALUE = "arm_pending"
+
 
 def _run() -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -48,13 +56,28 @@ def test_the_fence_is_green_on_the_tree_as_it_stands() -> None:
     assert "phase-vocabulary fence: clean" in result.stdout
 
 
-def test_the_census_is_not_empty_and_names_the_member_that_started_this() -> None:
+def test_the_census_is_not_empty_and_still_names_dead_members() -> None:
     """If the census were empty the green above would be vacuous."""
 
     rows = [r for r in CENSUS.read_text().splitlines()
             if r.strip() and not r.startswith("#")]
-    assert len(rows) >= 18
-    assert "EagerPhase.BOOT_ENDED_UNCOMPILED" in rows
+    assert len(rows) >= 17
+    assert f"EagerPhase.{DEAD_EXEMPLAR}" in rows
+
+
+def test_the_member_that_started_this_is_WIRED_and_OFF_the_census() -> None:
+    """pgw#1480's fix, asserted from the fence's side.
+
+    `boot_ended_uncompiled` was the member se#780 wrote its headline pass
+    condition against, and it was referenced by nothing. It now has an emitter
+    (`ServeAdoption._say_boot_end`), so its census row MUST be gone — property
+    2 of the fence is exactly the check that would have caught a fix that wired
+    the member and left the row behind, pretending it was still dead."""
+
+    rows = CENSUS.read_text()
+    assert "EagerPhase.BOOT_ENDED_UNCOMPILED" not in rows
+    emitter = (REPO / "src" / "gen_worker" / "serving" / "serve_adoption.py")
+    assert "EagerPhase.BOOT_ENDED_UNCOMPILED" in emitter.read_text()
 
 
 def test_RED_when_a_new_member_arrives_unwired(restore: None) -> None:
@@ -84,12 +107,12 @@ def test_RED_when_a_censused_member_gains_a_reference(restore: None) -> None:
         POSTURE.read_text().replace(
             "REASON: str = EagerPhase.OPERATOR_EAGER_ONLY.value",
             "REASON: str = EagerPhase.OPERATOR_EAGER_ONLY.value\n"
-            "_WIRED_NOW = EagerPhase.BOOT_ENDED_UNCOMPILED.value",
+            f"_WIRED_NOW = EagerPhase.{DEAD_EXEMPLAR}.value",
         )
     )
     result = _run()
     assert result.returncode == 1
-    assert "BOOT_ENDED_UNCOMPILED" in result.stderr
+    assert DEAD_EXEMPLAR in result.stderr
     assert "graveyard" in result.stderr
 
 
@@ -109,14 +132,13 @@ def test_prose_naming_a_member_does_not_count_as_a_reference(
 
     The inverse of the docstring-stripping rule the raw-AOTI fence needed: here
     counting prose would mark a dead instrument live, which is the failure that
-    matters. `compile_cache.py` already carries exactly such a comment about
-    `boot_ended_uncompiled`, and the member is still correctly censused.
+    matters.
     """
 
     scratch = REPO / "src" / "gen_worker" / "_pgw1480_prose_probe.py"
     scratch.write_text(
         '"""probe."""\n'
-        "# EagerPhase.BOOT_ENDED_UNCOMPILED and 'boot_ended_uncompiled'\n"
+        f"# EagerPhase.{DEAD_EXEMPLAR} and {DEAD_EXEMPLAR_VALUE!r}\n"
     )
     try:
         result = _run()
