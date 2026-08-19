@@ -1368,7 +1368,7 @@ class ModelEvent(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ..., network_bytes: _Optional[int] = ...) -> None: ...
 
 class ActivityUpdate(_message.Message):
-    __slots__ = ("kind", "phase", "step", "total_steps", "seq", "state", "error", "detail", "updated_at_unix_ms", "counter", "counter_unit", "counter_done", "counter_total", "rate_per_s", "self_stalled", "stalled_for_ms", "duration_ms", "family", "cell_key", "graph_class")
+    __slots__ = ("kind", "phase", "step", "total_steps", "seq", "state", "error", "detail", "updated_at_unix_ms", "counter", "counter_unit", "counter_done", "counter_total", "rate_per_s", "self_stalled", "stalled_for_ms", "duration_ms", "family", "cell_key", "graph_specialization")
     KIND_FIELD_NUMBER: _ClassVar[int]
     PHASE_FIELD_NUMBER: _ClassVar[int]
     STEP_FIELD_NUMBER: _ClassVar[int]
@@ -1388,7 +1388,7 @@ class ActivityUpdate(_message.Message):
     DURATION_MS_FIELD_NUMBER: _ClassVar[int]
     FAMILY_FIELD_NUMBER: _ClassVar[int]
     CELL_KEY_FIELD_NUMBER: _ClassVar[int]
-    GRAPH_CLASS_FIELD_NUMBER: _ClassVar[int]
+    GRAPH_SPECIALIZATION_FIELD_NUMBER: _ClassVar[int]
     kind: str
     phase: str
     step: int
@@ -1408,8 +1408,8 @@ class ActivityUpdate(_message.Message):
     duration_ms: int
     family: str
     cell_key: str
-    graph_class: str
-    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: _Optional[bool] = ..., stalled_for_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., family: _Optional[str] = ..., cell_key: _Optional[str] = ..., graph_class: _Optional[str] = ...) -> None: ...
+    graph_specialization: str
+    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: _Optional[bool] = ..., stalled_for_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., family: _Optional[str] = ..., cell_key: _Optional[str] = ..., graph_specialization: _Optional[str] = ...) -> None: ...
 
 class BootPhase(_message.Message):
     __slots__ = ("boot_id", "ordinal", "parent_ordinal", "phase", "terminal", "started_at_unix_ms", "duration_ms", "process_uptime_ms", "bytes", "source", "ref", "artifact_kind", "artifact_key", "function", "outcome", "reason", "detail", "cumulative")

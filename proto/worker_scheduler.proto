@@ -1563,10 +1563,13 @@ message ActivityUpdate {
   // the prose form: `detail LIKE 'ref=%#'||cell_key||' %'` matched one of
   // three rows correctly, because four emitters spelled identity four ways.
   //
-  // `graph_class` is the pgw#1176 atom's unit — one artifact is ONE graph
-  // class, so the class name is what makes a per-entry event bisectable to
-  // the thing that failed. It has no column yet; carrying it on the wire is
-  // what lets the hub add one without a second proto cut.
+  // `graph_specialization` is the pgw#1176 atom's unit — one artifact is ONE
+  // graph specialization, so the specialization name is what makes a per-entry
+  // event bisectable to the thing that failed. tcg#56 renamed this field from
+  // `graph_class` (Paul: a target has ONE graph and MANY graph
+  // specializations). THE FIELD NUMBER IS UNCHANGED at 20, so the binary wire
+  // is byte-identical and a hub or worker on an older build is unaffected;
+  // only the JSON name moves (`graphClass` -> `graphSpecialization`).
   //
   // Additive: old readers ignore all three, and an emitter that states none
   // sends empty strings, which is the honest "this event is not about a
@@ -1575,7 +1578,7 @@ message ActivityUpdate {
   // first time the formatting changes.
   string family      = 18;
   string cell_key    = 19; // the `ek1` ENTRY key (pgw#1176), not a cell key
-  string graph_class = 20; // the entry/class name inside the declaration
+  string graph_specialization = 20; // the specialization name inside the declaration
 }
 
 enum ActivityState {
