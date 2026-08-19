@@ -907,36 +907,134 @@ def _defaults_variants(model_type: Optional[type]) -> list[Any]:
     return variants
 
 
+#: How far the provenance walk descends from the model instance (pgw#1506).
+#: `model.engine.pipeline.components[...]` is depth 2; the headroom is for a
+#: second wrapper, and the bound exists so a cyclic or pathological object
+#: graph refuses with a sentence instead of running forever.
+PROVENANCE_MAX_DEPTH = 4
+
+
+def _components_mapping(value: Any) -> Optional[Mapping[str, Any]]:
+    """``value.components`` when it is a Mapping -- the diffusers convention.
+
+    Read through ``try`` because ``components`` is a PROPERTY on every
+    diffusers pipeline and a half-built one can raise; a wrapper that cannot
+    answer is simply not a component holder.
+    """
+
+    try:
+        components = getattr(value, "components", None)
+    except Exception:
+        return None
+    return components if isinstance(components, Mapping) else None
+
+
+def _is_wrapper(value: Any) -> bool:
+    """A plain object that may HOLD a pipeline -- worth descending into.
+
+    Deliberately narrow. An ``nn.Module`` is never descended: its ``vars()``
+    is ``_parameters``/``_modules``/``_buffers``, so walking one would offer
+    provenance names for the marked module's own internals and turn a 10 GiB
+    denoiser into a traversal. Everything without an instance ``__dict__``
+    (msgspec Structs, primitives, containers) has no attributes to walk.
+    """
+
+    import torch
+
+    if isinstance(value, (torch.nn.Module, torch.Tensor)):
+        return False
+    if isinstance(value, (str, bytes, int, float, bool, Path)):
+        return False
+    return hasattr(value, "__dict__") and isinstance(getattr(value, "__dict__"), dict)
+
+
 def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
     """Deterministic provenance names for the author's ctx.compile marks.
 
     The author marks REAL objects; the document needs stable names. Names
     come from where the module actually lives on the model instance:
     component names of any ``.components``-bearing attribute (the diffusers
-    convention), then bare attribute names, then dotted
-    ``attribute.component`` as the disambiguated spelling. A marked module
-    that cannot be named on the instance is refused -- provenance is part of
-    the release row.
+    convention), then bare attribute names, then the dotted PATH as the
+    disambiguated spelling. A marked module that cannot be named on the
+    instance is refused -- provenance is part of the release row.
+
+    **The walk is RECURSIVE (pgw#1506).** It used to look exactly one level
+    deep -- ``vars(instance)`` plus ``.components`` on each value -- which
+    assumed the model holds its pipeline directly. That is sdxl's and sd15's
+    shape, not a rule: an endpoint with a runtime engine owns the engine and
+    the ENGINE owns the pipeline, so minimax-h3's DiT sits at
+    ``model.engine.pipeline.components['transformer']`` and the resolver
+    could not see it. The engine wrapper carries real state (an AdaLN cache,
+    conditioner buffers, the serve recipe), so it is a legitimate authoring
+    shape and the tracer is what had to learn to traverse it. Adding a
+    second reference to the pipeline on the model would have satisfied
+    depth 1 and left every other engine-wrapper endpoint broken.
+
+    Depth-1 endpoints are unaffected by construction: the candidate set at
+    depth 1 is offered exactly as before, and the recursion only ADDS names
+    that were previously unreachable.
     """
 
     candidates: dict[int, str] = {}
+    #: (owner path, component name, component) for every components mapping
+    #: found anywhere in the walk -- uniqueness is decided across ALL of them,
+    #: because "is this bare name unique?" is a question about the instance,
+    #: not about one attribute.
+    component_rows: list[tuple[str, str, Any]] = []
+    #: Paths not descended because the depth bound was reached. Named only if
+    #: a marked module turns out to be unnameable, where it is the likely why.
+    truncated: list[str] = []
 
     def offer(module: Any, name: str) -> None:
         identity = id(module)
         if identity not in candidates or len(name) < len(candidates[identity]):
             candidates[identity] = name
 
-    for attr, value in sorted(vars(instance).items()):
-        if value is None:
-            continue
-        offer(value, attr)
-        components = getattr(value, "components", None)
-        if isinstance(components, Mapping):
-            for name, component in sorted(components.items()):
-                if component is None or not isinstance(name, str):
-                    continue
-                unique = _unique_component(instance, name, component)
-                offer(component, name if unique else f"{attr}.{name}")
+    # Cycle safety by IDENTITY: an engine that back-references its model
+    # (`self.engine.model is self`) is an ordinary shape and must not loop.
+    visited: set[int] = {id(instance)}
+
+    def descend(node: Any, path: tuple[str, ...], depth: int) -> None:
+        try:
+            attributes = sorted(vars(node).items())
+        except TypeError:
+            return
+        for attr, value in attributes:
+            if value is None:
+                continue
+            here = (*path, attr)
+            name = ".".join(here)
+            offer(value, name)
+            components = _components_mapping(value)
+            if components is not None:
+                for component_name, component in sorted(components.items()):
+                    if component is None or not isinstance(component_name, str):
+                        continue
+                    component_rows.append((name, component_name, component))
+                # A pipeline's components ARE its provenance; there is nothing
+                # below them worth a name.
+                continue
+            if not _is_wrapper(value):
+                continue
+            if id(value) in visited:
+                continue
+            if depth + 1 > PROVENANCE_MAX_DEPTH:
+                truncated.append(name)
+                continue
+            visited.add(id(value))
+            descend(value, here, depth + 1)
+
+    descend(instance, (), 0)
+
+    by_name: dict[str, list[Any]] = {}
+    for _owner, component_name, component in component_rows:
+        by_name.setdefault(component_name, []).append(component)
+    for owner, component_name, component in component_rows:
+        # The bare name when it means ONE object across the whole instance,
+        # the full dotted path otherwise -- the same preference order as
+        # before, asked across every mapping the walk found instead of one.
+        unique = all(other is component for other in by_name[component_name])
+        offer(component, component_name if unique else f"{owner}.{component_name}")
 
     named: dict[str, Any] = {}
     for module in marked:
@@ -947,24 +1045,24 @@ def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
                 f"({type(module).__name__}) is not reachable as a model "
                 f"attribute or pipeline component; the release document "
                 f"cannot name its provenance"
+                + (
+                    f". The provenance walk stopped at depth "
+                    f"{PROVENANCE_MAX_DEPTH} on {sorted(set(truncated))!r}; if "
+                    f"the module lives below one of those, it is nested "
+                    f"deeper than the derive will look."
+                    if truncated
+                    else ""
+                )
             )
         if name in named and named[name] is not module:
             raise DeriveError(
-                f"two marked modules both resolve to provenance name {name!r}"
+                f"two marked modules both resolve to provenance name "
+                f"{name!r}; the release document names a graph's provenance "
+                f"and cannot pick between them. Give one of them a distinct "
+                f"attribute or component name."
             )
         named[name] = module
     return named
-
-
-def _unique_component(instance: Any, name: str, component: Any) -> bool:
-    seen = 0
-    for value in vars(instance).values():
-        components = getattr(value, "components", None)
-        if isinstance(components, Mapping) and components.get(name) is not None:
-            if components.get(name) is not component:
-                return False
-            seen += 1
-    return seen <= 1
 
 
 def _compile_stack_from_lockfile(lockfile: Path) -> tuple[tuple[str, str], ...]:
