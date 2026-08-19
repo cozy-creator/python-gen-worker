@@ -365,7 +365,7 @@ def install_quantized_weights(
             dense = _detached(value, device)
             if dense.is_floating_point():
                 dense = dense.to(compute_dtype)
-            _install_buffer(leaf, attr, dense)
+            _install_parameter(leaf, attr, dense)
 
         leaf.compute_dtype = compute_dtype
         leaf.dequant_dtype = dequant_dtype
@@ -395,15 +395,37 @@ def _detached(tensor: Any, device: Any) -> Any:
     return tensor.detach().to(device=device, copy=True)
 
 
+def _install_parameter(leaf: Any, name: str, tensor: Any) -> None:
+    """Install a DENSE tensor, keeping it a Parameter.
+
+    Load-bearing, and the opposite call from :func:`_install_buffer` on
+    purpose. diffusers resolves ``ModelMixin.dtype`` by walking for the first
+    floating-point PARAMETER, and a denoiser that casts to ``self.dtype``
+    inside forward breaks when that walk finds nothing. Installing a whole
+    checkpoint through here is exactly the case that would leave a model with
+    no floating-point parameters at all — every dense tensor demoted to a
+    buffer — so dense tensors stay parameters and only the block bytes become
+    buffers. The blocks need no such care: they are uint8 and the walk skips
+    them either way.
+    """
+    import torch
+
+    param = leaf._parameters.get(name)
+    if param is not None:
+        param.data = tensor
+        param.requires_grad_(False)
+        return
+    leaf._buffers.pop(name, None)
+    leaf.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+
+
 def _install_buffer(leaf: Any, name: str, tensor: Any) -> None:
     """Replace ``leaf.<name>`` with ``tensor`` as a persistent BUFFER.
 
-    Buffer, not Parameter, for the reason the fp8-storage lane found the hard
-    way: diffusers resolves ``ModelMixin.dtype`` from the first floating-point
-    PARAMETER, and a denoiser that casts to ``self.dtype`` inside forward breaks
-    when that answer is a storage dtype. Block bytes are uint8, so they would
-    not even be seen by that walk — but a leaf's dense bias would be, and
-    keeping one rule for both is the point. state_dict keys are unchanged.
+    Buffer, not Parameter, because block bytes are storage rather than
+    weights — nothing trains them, nothing should cast them, and they must not
+    appear in a ``parameters()`` walk that expects weights. state_dict keys are
+    unchanged.
     """
     param = leaf._parameters.get(name)
     if param is not None and param.data.data_ptr() != tensor.data_ptr():
@@ -486,7 +508,9 @@ def materialize(leaf: Any, name: str, *, dtype: Any) -> None:
                                     dtype=dtype)
     del specs[name]
     getattr(leaf, MATERIALIZED_ATTR)[name] = spec
-    _install_buffer(leaf, name, dense.contiguous())
+    # A Parameter, not a buffer: past the dial this leaf IS an ordinary dense
+    # layer and should look like one to every walk in the worker.
+    _install_parameter(leaf, name, dense.contiguous())
 
 
 def peak_transient_bytes(model: Any, *, dtype: Any) -> int:

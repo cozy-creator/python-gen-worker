@@ -160,6 +160,22 @@ def test_a_dtype_cast_cannot_touch_the_blocks() -> None:
         assert torch.equal(leaf.weight, before[name])
 
 
+def test_installing_a_whole_stack_leaves_the_model_with_float_parameters() -> None:
+    """diffusers reads ``ModelMixin.dtype`` off the first floating-point
+    PARAMETER, and a denoiser that casts to ``self.dtype`` inside forward breaks
+    when that walk finds nothing. Installing a checkpoint is exactly the case
+    that would demote every dense tensor to a buffer."""
+    quantized, _, _ = _stack()
+    floats = [n for n, p in quantized.named_parameters() if p.is_floating_point()]
+    assert "fc1.bias" in floats and "norm.weight" in floats
+    # …and the block bytes are NOT parameters.
+    assert not any(p.dtype is torch.uint8 for p in quantized.parameters())
+
+    # Past the dial a leaf is an ordinary dense layer and looks like one.
+    gguf_torch.dequant_ahead(quantized, surplus_bytes=math.inf, dtype=torch.float32)
+    assert "fc1.weight" in dict(quantized.named_parameters())
+
+
 def test_shape_does_not_lie() -> None:
     """The reference makes ``.shape`` report the DEQUANTIZED shape so ComfyUI's
     shape-sniffing model detection keeps working. We report the storage shape,
