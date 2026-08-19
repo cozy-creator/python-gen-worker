@@ -69,9 +69,12 @@ class Shortfall:
             return (
                 f"DEGRADED PLACEMENT: {self.device} has {self.actual:.1f} GiB "
                 f"of VRAM, but lane {self.lane} declares a floor of "
-                f"{self.declared:.1f} GiB. Running anyway — the residency "
-                f"ladder will engage host offload rungs, so expect a HEAVY "
-                f"slowdown (minutes where seconds are normal), not a failure. "
+                f"{self.declared:.1f} GiB. Running anyway — the load asks the "
+                f"offload ladder whether this pipeline fits BEFORE placing it "
+                f"and engages a host-offload rung when it does not, naming "
+                f"that rung in the log. Expect a HEAVY slowdown (minutes "
+                f"where seconds are normal) rather than a failure; if no rung "
+                f"is named, nothing was offloaded and it fit. "
                 f"A declared floor is a buying hint and a warning, never "
                 f"permission: any model runs on any machine."
             )

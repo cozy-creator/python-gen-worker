@@ -243,6 +243,10 @@ class LoadContext(Generic[MT_co]):
         #: means none was handed down — a bare `LoadContext(...)` places
         #: nothing, exactly as before.
         self._device = str(device or "")
+        #: The offload rung `_placed` engaged for this load, or "" for "the
+        #: ladder was never consulted" (pgw#1486). Read by `compile()`, which
+        #: may not arm a compiled graph over hook-managed weights.
+        self._engaged_rung = ""
 
     @property
     def checkpoint_dir(self) -> Path:
@@ -359,19 +363,94 @@ class LoadContext(Generic[MT_co]):
         was handed. An empty `_device` places nothing, so a bare
         `LoadContext(...)` and any caller that never had a placement decision
         behave exactly as before.
+
+        pgw#1486: the placement decision is now a FIT decision, and the order
+        is the whole point. `models.memory.select_auto_mode` nets the
+        requirement against `estimate_cuda_resident_gb(pipeline)` (pgw#1025,
+        correct: a pipeline must not be charged twice for bytes already on the
+        card) — so asking it AFTER a full `.to(device)` makes the requirement
+        net to zero, "it fits" trivially true, and the ladder answers its most
+        memory-hungry rung for a pipeline that is about to OOM. Measured on one
+        SDXL pipeline object at 1024^2 on a 7.62 GiB card: `model_offload`
+        asked before placement, `vae_only` asked after. The second OOMs.
         """
         if not self._device:
             return pipeline
         to = getattr(pipeline, "to", None)
         if not callable(to):
             return pipeline
+        from ..models.rung import touches_host_ram
+
+        mode = self._fit_rung(pipeline)
+        if mode and touches_host_ram(mode):
+            # The rung armed accelerate's hooks and OWNS placement from here:
+            # each component is onloaded for its own forward and evicted after.
+            # A `.to(device)` now would either undo the hooks or re-land the
+            # very bytes the rung just moved off — which is the OOM.
+            logger.info(
+                "ctx.load: %r engaged pre-placement; the rung places its own "
+                "components (pgw#1486)", mode,
+            )
+            return pipeline
         logger.info(
             "ctx.load: placing the bridged pipeline on %s — the worker's "
-            "decision, inherited (pgw#1452)", self._device,
+            "decision, inherited (pgw#1452); fit rung %r",
+            self._device, mode or "not consulted",
         )
         moved = to(self._device)
         # diffusers returns self; some component-wise `.to` return None.
         return pipeline if moved is None else moved
+
+    def _fit_rung(self, pipeline: P) -> str:
+        """Ask the shipped offload ladder which rung this pipeline needs,
+        while it is still on the host, and engage it.
+
+        Returns the engaged mode, or `""` when the ladder was not consulted at
+        all (no CUDA target, or the ladder could not read the pipeline). `""`
+        is deliberately distinct from `"off"`: "nobody asked" and "asked, and
+        the answer was full residency" are different facts, and only the
+        second licenses the unconditional placement below.
+
+        EAGER-BRIDGE SCOPE, stated here rather than inferred. The streaming
+        engine returns before `_placed` is ever reached and streams weights
+        onto the device itself; giving it a fit rung is a separate mechanism
+        (it would have to choose per-component destinations mid-stream, not
+        re-place a built pipeline). And this is an ADMISSION check, never a
+        catch-and-retry: an OOM inside a compiled graph is not catchable — it
+        is process death (pgw#1255 leg 2) — so the only honest place to decide
+        is before the weights land.
+        """
+        try:
+            import torch
+
+            if torch.device(self._device).type != "cuda":
+                return ""
+        except Exception:
+            return ""
+        from ..api.errors import HostRamMoveRefusedError
+
+        try:
+            from ..models.memory import apply_low_vram_config
+
+            applied = apply_low_vram_config(pipeline, mode="auto")
+        except HostRamMoveRefusedError:
+            # The guard did its job: this host cannot hold what the rung wanted
+            # to move. Re-raising is right — the alternative is placing the
+            # whole pipeline on a card that already refused it.
+            raise
+        except Exception as exc:
+            # A ladder that cannot read this pipeline must not stop it loading.
+            # Placement then proceeds exactly as it did before pgw#1486, which
+            # is the behaviour every non-diffusers `ctx.load` caller has today.
+            logger.warning(
+                "ctx.load: the offload ladder could not size this pipeline "
+                "(%s: %s); placing it whole, as before (pgw#1486)",
+                type(exc).__name__, exc,
+            )
+            return ""
+        mode = str(applied.get("mode") or "")
+        self._engaged_rung = mode
+        return mode
 
     def _lane_dtype(self) -> Any:
         """The lane's load dtype, or None when the contract declares none.
@@ -488,6 +567,25 @@ class LoadContext(Generic[MT_co]):
         (local runs, the eager bridge) it returns ``target`` untouched —
         marking is always safe."""
         if self._compile_sink is None:
+            return target
+        from ..models.rung import touches_host_ram
+
+        if touches_host_ram(self._engaged_rung):
+            # pgw#1486, the ADMISSION half. An offload rung hands each
+            # component's weights to accelerate, which onloads them for a
+            # forward and frees the device copy after — so the device pointers
+            # a compiled graph binds its constants to are dangling by the
+            # second call. That is not an OOM to catch; it is a use-after-free,
+            # and on the compiled path it is the SIGSEGV that takes the whole
+            # worker down (pgw#1255 leg 2). Serving eager here is a real
+            # degradation and is therefore said out loud, not logged at debug.
+            logger.warning(
+                "ctx.compile: serving EAGER for %s — the %r offload rung is "
+                "engaged, and a compiled graph cannot bind constants to "
+                "weights accelerate moves between host and device per forward "
+                "(pgw#1486). Fit the model on the card to get compiled speed.",
+                type(target).__name__, self._engaged_rung,
+            )
             return target
         return self._compile_sink(target)
 

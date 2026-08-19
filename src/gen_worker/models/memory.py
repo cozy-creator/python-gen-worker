@@ -29,6 +29,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -1550,6 +1551,77 @@ def _report_offload_engaged(
     )
 
 
+_execution_device_fallback_installed = False
+
+
+def install_execution_device_fallback() -> bool:
+    """Make ``pipeline.device`` never answer ``meta``. Idempotent.
+
+    ``enable_sequential_cpu_offload`` leaves every module on the meta device,
+    so diffusers' ``DiffusionPipeline.device`` — a PUBLIC property, and the one
+    thing endpoint code is told to ask — answers ``meta``. Endpoint code that
+    builds a generator on it then dies with ``RuntimeError: META device type
+    not an accelerator`` BEFORE any image. Measured on the real sdxl endpoint
+    at 1024^2 (pgw#1486): the bottom rung of this ladder, the one whose whole
+    job is "always works", did not work at all.
+
+    The endpoint is not at fault and must not be the fix. The worker tells
+    authors *"PLACEMENT is decided here, by the worker, never by author code"*
+    and `ctx.load`'s contract is that they never name a device — so asking the
+    pipeline where it lives is the documented-correct thing to do, and
+    `_execution_device` is a private diffusers attribute no endpoint should
+    reach for. The rung that breaks the answer repairs the answer, once, for
+    every endpoint.
+
+    Patching a foreign class is the same shape as ``host_move_guard``'s patch
+    of ``torch.nn.Module.to``, for the same reason: the call site is in author
+    code this worker does not own and cannot edit.
+    """
+    global _execution_device_fallback_installed
+    if _execution_device_fallback_installed:
+        return True
+    try:
+        from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+    except Exception:  # pragma: no cover - no diffusers, nothing to patch
+        return False
+
+    original_getter = DiffusionPipeline.device.fget  # type: ignore[attr-defined]
+    # `_execution_device` ENDS in `return self.device` when no component
+    # carries an accelerate hook — so a pipeline parked on `meta` with no hooks
+    # (a derive shell, a half-armed rung) would recurse until the stack blew.
+    # The guard is thread-local because two loads may run concurrently and a
+    # flag on the pipeline would have to survive diffusers' own `__setattr__`,
+    # which treats attribute names as component registrations.
+    reentry = threading.local()
+
+    def device(self: Any) -> Any:
+        got = original_getter(self)
+        if getattr(got, "type", None) != "meta":
+            return got
+        if getattr(reentry, "active", False):
+            return got
+        reentry.active = True
+        try:
+            # diffusers' own accelerate-aware answer to the same question:
+            # where the next forward will actually run.
+            resolved = self._execution_device
+        except Exception:  # pragma: no cover - upstream shape changed
+            return got
+        finally:
+            reentry.active = False
+        # No hook to read: `meta` really is the honest answer, and inventing a
+        # device here would send tensors somewhere the weights are not.
+        return got if getattr(resolved, "type", None) == "meta" else resolved
+
+    DiffusionPipeline.device = property(device)  # type: ignore[method-assign,assignment]
+    _execution_device_fallback_installed = True
+    _LOG.info(
+        "low_vram: `pipeline.device` now falls back to the execution device "
+        "when an offload rung parks modules on `meta` (pgw#1486)"
+    )
+    return True
+
+
 def apply_low_vram_config(
     pipeline: Any,
     *,
@@ -1630,6 +1702,11 @@ def apply_low_vram_config(
         setattr(pipeline, _COZY_MODE_ATTR, "vae_only")
         log.info("low_vram: vae_only applied (%s)", _applied_summary(applied))
         return applied
+
+    # Every rung from here down parks modules off the execution device, and
+    # some park them on `meta`. Repair `pipeline.device` BEFORE any of them
+    # arms, so no endpoint ever observes the meta answer (pgw#1486).
+    install_execution_device_fallback()
 
     cuda_ok = cuda_ready()
 
@@ -1761,6 +1838,7 @@ _RESIDENT_MODES = ("off", "vae_only")
 
 __all__ = [
     "apply_low_vram_config",
+    "install_execution_device_fallback",
     "low_vram_mode",
     "rearm_offload",
     "place_pipeline",
