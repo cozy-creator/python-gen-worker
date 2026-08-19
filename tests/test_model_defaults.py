@@ -502,6 +502,7 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
         # floor") is failed at its first clause. The upsampler is the Rife
         # mould: name + fingerprint, no canonical lane.
         "ltx-2", "ltx-2-upsampler",
+        "internvl-u",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
@@ -512,6 +513,14 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert model_type_by_name("flux1") is Flux1
     assert model_type_by_name("flux2-klein") is Flux2Klein
     assert model_type_by_name("flux") is None
+    # se#779: the family root is `internvl-u`, which is what the endpoint's own
+    # register_family() call used and what the hub's family column carries — NOT
+    # the endpoint slug `internvl-U`, whose capital U would never match.
+    from gen_worker.models import InternVLU
+
+    assert model_type_by_name("internvl-u") is InternVLU
+    assert model_type_by_name("internvl-U") is None
+    assert model_type_by_name("internvl") is None
     # pgw#1422: the two qwen3.6 LLM roots are likewise SEPARATE vocabularies
     # (temperature 0.6 vs 0.7 — the family owner registered two schemas), and
     # neither is spelled bare "qwen" or shares a root with `qwen-image`.

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import jsonschema
 import msgspec
@@ -27,28 +27,110 @@ def _validator(schema: dict[str, object]) -> jsonschema.Draft202012Validator:
     return jsonschema.Draft202012Validator(schema)
 
 
+#: THE PINNED LAUNCH SET. Hoisted out of the test body (pgw#1432) so a FENCE can
+#: read it: it is the THIRD registration site a new ModelType owes, beside the
+#: `MODEL_TYPES` tuple and `defaults_vocabularies()`, and it was the only one of
+#: the three with nothing asserting it against the registry.
+LAUNCH_SET_NAMES: list[str] = [
+    "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
+    # pgw#1422: the two qwen3.6 LLM roots — the first NON-DIFFUSION
+    # vocabularies in the export (max_tokens/temperature/top_p, no steps
+    # and no guidance).
+    "qwen3.6-27b-mtp", "qwen3.6-35b-a3b",
+    # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b).
+    "flux1", "flux2-klein",
+    "qwen-image", "z-image",
+    # pgw#1427 (se#769 wave 3).
+    "krea-2", "anima", "ernie",
+    # pgw#1430 (se#769 audio lane): stable-audio covers stable-audio-open
+    # AND foundation-1 (one root, two checkpoint rows); musicgen is its own
+    # root — transformers, autoregressive, no scheduler.
+    "stable-audio", "musicgen",
+    # pgw#1420 (se#769): LTX-2 and its 2x spatial latent upsampler — TWO roots,
+    # their headers sharing ZERO keys. Added here by the pgw#1432 fence below,
+    # which named them on the first rebase that brought them in; the pinned
+    # list had gone stale exactly as predicted, one lane later.
+    "ltx-2", "ltx-2-upsampler",
+    # pgw#1432 (se#769 vlm lane): InternVL-U is a unified VLM serving
+    # TEXT-TO-IMAGE, so it is an ordinary diffusion vocabulary here despite
+    # the name — one sourced `steps` knob and nothing else, the Rife shape.
+    "internvl-u",
+    "sdxl.lora", "sd15.lora",
+]
+
+
 def test_the_document_names_the_launch_set() -> None:
     doc = export_document()
-    assert doc["names"] == [
-        "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
-        # pgw#1422: the two qwen3.6 LLM roots — the first NON-DIFFUSION
-        # vocabularies in the export (max_tokens/temperature/top_p, no steps
-        # and no guidance).
-        "qwen3.6-27b-mtp", "qwen3.6-35b-a3b",
-        # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b).
-        "flux1", "flux2-klein",
-        "qwen-image", "z-image",
-        # pgw#1427 (se#769 wave 3).
-        "krea-2", "anima", "ernie",
-        # pgw#1430 (se#769 audio lane): stable-audio covers stable-audio-open
-        # AND foundation-1 (one root, two checkpoint rows); musicgen is its own
-        # root — transformers, autoregressive, no scheduler.
-        "stable-audio", "musicgen",
-        "sdxl.lora", "sd15.lora",
-    ]
+    assert doc["names"] == LAUNCH_SET_NAMES
     schemas = doc["schemas"]
     assert isinstance(schemas, dict)
     assert set(schemas) == set(doc["names"])  # type: ignore[arg-type]
+
+
+def test_the_pinned_list_above_cannot_go_STALE_against_the_registry() -> None:
+    """pgw#1432 — the FENCE for the list in the test above.
+
+    A new ModelType has THREE registration sites: the ``MODEL_TYPES`` tuple,
+    ``defaults_vocabularies()`` (what the export emitter actually reads), and
+    the pinned ``names`` list in the test above. The first two are fenced —
+    pgw#1001 asserts ``MODEL_TYPES`` ⊆ ``defaults_vocabularies()`` — and the
+    third was not, so a type registered in both fenced sites still shipped a
+    stale export list.
+
+    THAT GAP IS EXPENSIVE OUT OF PROPORTION TO ITS SIZE, because of WHERE it
+    fails. The pinned list lives in the full ``tests`` job, which is red on
+    master for unrelated reasons; a lane that adds a ModelType, sees ``tests``
+    red, and diffs the COUNT against the known baseline concludes "not mine"
+    and enqueues. Only diffing failure NAMES catches it, and nothing forced
+    anyone to.
+
+    So this asserts the pinned list against the registry rather than against a
+    human's memory, and it fails by NAMING the missing family instead of
+    printing a list diff.
+    """
+
+    from gen_worker.models.model_types import LORA_OVERLAYS, MODEL_TYPES
+
+    registry = {mt.name for mt in MODEL_TYPES} | {ov.name for ov in LORA_OVERLAYS}
+    # Deliberately the CONSTANT, not `export_document()["names"]`. The document
+    # is built from `defaults_vocabularies()`, so comparing against it would
+    # only re-assert pgw#1001's fence and leave the pinned list unguarded —
+    # which is the exact hole this closes.
+    pinned = set(LAUNCH_SET_NAMES)
+
+    missing = sorted(registry - pinned)
+    assert not missing, (
+        f"{missing} are registered in MODEL_TYPES/LORA_OVERLAYS but absent from "
+        "LAUNCH_SET_NAMES — the pinned export list is stale and the document would "
+        "ship without them. Add them to LAUNCH_SET_NAMES."
+    )
+    stale = sorted(pinned - registry)
+    assert not stale, (
+        f"{stale} are pinned in LAUNCH_SET_NAMES but no longer in "
+        "MODEL_TYPES/LORA_OVERLAYS — a deleted family left its name behind."
+    )
+
+    # MEMBERSHIP IS NOT ENOUGH: the sibling assertion compares LISTS, and the
+    # emitted order is `defaults_vocabularies()` INSERTION order — which is not
+    # the `MODEL_TYPES` tuple order and genuinely differs from it today
+    # (the tuple runs ... Flux2Klein, Krea2, Anima, Ernie, QwenImage, ZImage ...
+    # while the emitter runs ... flux2-klein, qwen-image, z-image, krea-2 ...).
+    # So a set-equal fence stays green while the sibling stays red on a
+    # reordering, which is the same "green fence, red job" split this whole
+    # test exists to close. Checked here so the reordering case ALSO fails by
+    # naming the position rather than printing two long lists.
+    emitted = cast("list[str]", export_document()["names"])
+    if emitted != LAUNCH_SET_NAMES:
+        first = next(
+            i for i, (a, b) in enumerate(zip(emitted, LAUNCH_SET_NAMES)) if a != b
+        )
+        raise AssertionError(
+            f"LAUNCH_SET_NAMES is in the wrong ORDER (membership is fine): at "
+            f"index {first} the export emits {emitted[first]!r} but the pinned "
+            f"list has {LAUNCH_SET_NAMES[first]!r}. The order is "
+            f"`defaults_vocabularies()` insertion order, NOT the MODEL_TYPES "
+            f"tuple order — match the mapping, not the tuple."
+        )
 
 
 def test_every_schema_is_valid_2020_12_and_round_trips_platform_values() -> None:
