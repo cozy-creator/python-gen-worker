@@ -55,6 +55,12 @@ LAUNCH_SET_NAMES: list[str] = [
     # TEXT-TO-IMAGE, so it is an ordinary diffusion vocabulary here despite
     # the name — one sourced `steps` knob and nothing else, the Rife shape.
     "internvl-u",
+    # pgw#1424 (se#769 3D lane): the two 3D roots, declaring OPPOSITE lane
+    # facts — trellis2 carries a real lane document (trellis2.dit-bf16@1),
+    # hunyuan3d deliberately carries NONE and no MissingContract sentinel
+    # either, because every core model in its repo is a pickle and no
+    # safetensors-shaped document can ever describe one.
+    "trellis2", "hunyuan3d",
     "sdxl.lora", "sd15.lora",
 ]
 

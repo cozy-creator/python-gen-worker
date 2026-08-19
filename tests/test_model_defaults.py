@@ -503,6 +503,8 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
         # mould: name + fingerprint, no canonical lane.
         "ltx-2", "ltx-2-upsampler",
         "internvl-u",
+        # pgw#1424 (se#769 3D lane): the two 3D roots.
+        "trellis2", "hunyuan3d",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
@@ -528,6 +530,11 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
 
     assert model_type_by_name("qwen3.6-27b-mtp") is Qwen36Mtp
     assert model_type_by_name("qwen3.6-35b-a3b") is Qwen36A3b
+    # pgw#1424 (se#769 3D lane): the two 3D roots.
+    from gen_worker.models import Hunyuan3d, Trellis2
+
+    assert model_type_by_name("trellis2") is Trellis2
+    assert model_type_by_name("hunyuan3d") is Hunyuan3d
     assert model_type_by_name("qwen") is None
     assert model_type_by_name("qwen3.6") is None
     # pgw#1426: qwen-image covers t2i AND Qwen-Image-Edit-2511 (one root), and
@@ -596,6 +603,58 @@ def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None
     assert StableAudio.canonical_scheduler_config["_class_name"] == (
         "CosineDPMSolverMultistepScheduler"
     )
+
+
+def test_the_two_3d_roots_declare_their_lanes_by_evidence() -> None:
+    """pgw#1424. The point is that the two 3D families declare OPPOSITE lane
+    facts, and each is falsifiable here rather than in prose."""
+    from gen_worker.models import Hunyuan3d, Trellis2
+    from gen_worker.models.model_types import MissingContract, Rife
+
+    # TRELLIS.2 HAS a real lane document (tensorfs#132).
+    assert Trellis2.canonical_contract is not None
+
+    # Hunyuan3D has NO canonical lane AND NO MissingContract sentinel — the
+    # Rife shape. Its checkpoint is a pickle, so no safetensors-shaped document
+    # can ever describe it; a sentinel would assert a document is OWED, which
+    # would be a standing lie with a to-do attached. Absent is honest.
+    assert Hunyuan3d.canonical_contract is None
+    assert Rife.canonical_contract is None  # the precedent it follows
+
+    # Red/green: `None` must mean ABSENT, never a sentinel that merely reads as
+    # falsy. A MissingContract refuses on every lane-ish read, so if one were
+    # substituted this assertion is the one that would catch it.
+    assert not isinstance(Hunyuan3d.canonical_contract, MissingContract)
+
+    # Neither noise schedule is invented. Both are {} for a stated reason:
+    # TRELLIS.2-4B ships no scheduler/ directory at all, and Hunyuan3D's shape
+    # DiT is flow-matching with no diffusers scheduler.
+    assert Trellis2.canonical_scheduler_config == {}
+    assert Hunyuan3d.canonical_scheduler_config == {}
+
+    # Zero-arg construction must be SERVABLE (they double as trace fixtures).
+    assert Trellis2.Defaults().steps.default == 12
+    assert Hunyuan3d.Defaults().num_shape_steps.default == 50
+    assert Hunyuan3d.Defaults().guidance_scale.default == 5.0
+
+
+def test_the_3d_fingerprints_do_not_claim_the_shared_dit_fragment() -> None:
+    """pgw#1424. The Flux1 trap checked for TRELLIS rather than assumed away:
+    ``dit.blocks-fused-qkv@1`` is a family-PLURAL timm-spelling fragment and
+    must classify to NOTHING. It is also a measured non-match against a real
+    TRELLIS header — it requires ``blocks.{i}.attn.qkv.weight`` while TRELLIS
+    spells ``blocks.{i}.self_attn.to_qkv.weight`` (0 of 640 tensors)."""
+    from gen_worker.models import Hunyuan3d, Trellis2
+
+    assert model_type_for_contract("trellis2.dit-bf16@1") is Trellis2
+    assert model_type_for_contract("dit.blocks-fused-qkv@1") is not Trellis2
+    assert model_type_for_contract("dit.blocks-fused-qkv@1") is None
+    # hunyuan3d has a fingerprint even with no document — the name seam is what
+    # lets a future stamp classify without claiming a lane.
+    assert model_type_for_contract("hunyuan3d.anything@1") is Hunyuan3d
+    # And neither may claim the other's stamp.
+    assert model_type_for_contract("hunyuan3d.anything@1") is not Trellis2
+    assert model_type_for_contract("trellis2.dit-bf16@1") is not Hunyuan3d
 
 
 def test_contract_stamps_classify_through_the_fingerprint() -> None:

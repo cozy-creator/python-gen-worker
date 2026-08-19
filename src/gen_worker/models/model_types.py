@@ -510,6 +510,17 @@ FLUX2_KLEIN_DIFFUSERS_BF16: Final = _library("flux2-klein.diffusers-bf16", 1)
 #: headers explains 0 of 658 and 0 of 194 respectively, so the exclusions are
 #: zero-intersection by construction.
 INTERNVL_U_DIFFUSERS_BF16: Final = _library("internvl-u.diffusers-bf16", 1)
+#: REAL as of tensorfs#132 — the TRELLIS.2 DiT lane document, 31 declarations
+#: covering all 640 tensors of every one of the five DiT checkpoints, derived
+#: from the real safetensors headers of ``microsoft/TRELLIS.2-4B`` at revision
+#: ``af44b45f2e35a493886929c6d786e563ec68364d``.
+#:
+#: Note the format segment: ``dit-bf16``, NOT ``diffusers-bf16``. TRELLIS.2
+#: ships upstream's own ``ckpts/`` layout and is not a diffusers tree at all;
+#: naming it ``diffusers`` would be the wrong-packaging claim tensorfs#124
+#: warns about, and a document derived from the wrong packaging is worse than
+#: no document because it would match, load, and be wrong.
+TRELLIS2_DIT_BF16: Final = _library("trellis2.dit-bf16", 1)
 
 #: REAL as of tensorfs#124's second half (tensorfs#136). It was a
 #: ``MissingContract`` sentinel until this document was vendored, and clearing
@@ -1533,6 +1544,101 @@ class MusicGenDefaults(msgspec.Struct, frozen=True):
     #: same value as :class:`StableAudioDefaults`, reached by a different
     #: mechanism.
     cfg: bool = True
+class Trellis2Defaults(msgspec.Struct, frozen=True):
+    """TRELLIS.2 — Microsoft's image-to-3D sparse-structure + SLAT flow stack.
+
+    ONE vocabulary root for all five DiT checkpoints. Not a judgement call:
+    ``ss_flow_img_dit_1_3B_64``, ``slat_flow_img2shape_dit_1_3B_{512,1024}``
+    and ``slat_flow_imgshape2tex_dit_1_3B_{512,1024}`` have IDENTICAL tensor
+    name sets — 640 each, frozenset equality asserted across all five real
+    safetensors headers — and differ only in ``input_layer``/``out_layer``
+    channel counts. That is an I/O fact, the :class:`Flux2Klein` 4B/9B case.
+
+    ``steps`` 12 is sourced TWICE and the two agree: the family owner's own
+    ``pipeline.json`` (``microsoft/TRELLIS.2-4B`` at revision
+    ``af44b45f2e35a493886929c6d786e563ec68364d``) sets ``params.steps = 12``
+    on ALL THREE samplers, and ``trellis-3d/main.py:56`` declares
+    ``num_steps ... = 12`` with the comment "Upstream default 12". Bounds
+    1..50 are that endpoint's own wire envelope (``msgspec.Meta(ge=1, le=50)``,
+    same line) — the only ``trellis2`` envelope any endpoint declares, so it
+    is trivially the widest.
+
+    ``cfg`` is True: all three samplers are ``FlowEulerGuidanceIntervalSampler``
+    and two of them carry ``guidance_strength: 7.5``, which is real
+    classifier-free guidance — a second uncond forward, batch 2 over the
+    guided interval. This is a residency fact the placer needs, which is why
+    it is here even though no endpoint exposes it.
+
+    DELIBERATELY ABSENT — ``guidance``, and the absence is EVIDENCE, not a gap.
+    ``pipeline.json`` carries THREE different guidance strengths for the three
+    stages: 7.5 for sparse-structure, 7.5 for shape SLAT, and **1.0 for
+    texture SLAT** (i.e. guidance off for texture), with three different
+    ``guidance_rescale`` values (0.7 / 0.5 / 0.0) and two different
+    ``guidance_interval``s. One platform scalar cannot be the default for all
+    three stages — the same reasoning :class:`Flux2KleinDefaults` applies to
+    ``cfg`` across families — and no endpoint exposes any of them on the wire,
+    so there is nothing for the platform to clamp. A per-stage vocabulary is a
+    real design question and would be invention today.
+
+    Also absent: ``canonical_scheduler_config``, and here ``{}`` is CORRECT BY
+    ABSENCE rather than conceded. ``microsoft/TRELLIS.2-4B`` ships no
+    ``scheduler/`` directory at all (22 files, complete listing checked) — its
+    samplers are flow-matching and take their parameters per call. There is no
+    file to fetch, so nothing is being deferred.
+
+    Also absent: the ``resolution`` and ``texture_size`` presets
+    (``trellis-3d/main.py:53``, ``:57``). Those are endpoint PAYLOAD
+    vocabulary under the ie#345 shape discipline, and a ModelType is name +
+    Defaults + fingerprint, nothing else.
+    """
+
+    #: pipeline.json params.steps (all three samplers) and
+    #: trellis-3d/main.py:56; bounds are that endpoint's wire envelope.
+    steps: Knob[int] = Knob(12, lo=1, hi=50, name="steps")
+    #: FlowEulerGuidanceIntervalSampler at guidance_strength 7.5 on the
+    #: sparse-structure and shape-SLAT stages IS classifier-free guidance.
+    cfg: bool = True
+
+
+class Hunyuan3dDefaults(msgspec.Struct, frozen=True):
+    """Hunyuan3D-2.1 — Tencent's image-to-3D shape DiT plus PBR texture paint.
+
+    TRANSCRIBED, not designed. Both fields and both values are lifted verbatim
+    from the family's own shipped v1 vocabulary,
+    ``hunyuan3d-2.1/src/hunyuan3d_2_1/main.py:72-73``, which called
+    ``register_family("hunyuan3d", Hunyuan3dDefaults)`` on the now-deleted v1
+    surface. That code is EVIDENCE, not a working import. Its own docstring
+    records the provenance: "Schema defaults are the upstream model-card
+    recipe — identical to the hub's neutral stamp."
+
+    WIRE NAMES ON PURPOSE. ``num_shape_steps`` is not normalized to ``steps``
+    the way :class:`Flux1Defaults` spells it, because this endpoint's
+    ``RuntimeFormula("a + b*num_shape_steps")``
+    (``hunyuan3d-2.1/main.py:217``) resolves its terms by SAME-NAMED lookup,
+    payload over ``ctx.defaults``. Renaming the field would silently break the
+    runtime estimate — the term would resolve from the payload alone and fall
+    back to nothing when the payload leaves it ``None``.
+
+    Both are ``Knob``s and not plain pins because the wire DOES expose both,
+    with bounds (``main.py:83-84``: ``ge=1, le=100`` and ``ge=1.0, le=15.0``),
+    so the platform has something to clamp caller-visibly.
+
+    DELIBERATELY ABSENT: ``canonical_scheduler_config``, and ``{}`` is CORRECT
+    BY ABSENCE here too. The shape DiT is FLOW-MATCHING with no diffusers
+    scheduler at all — ``main.py:13-17`` says so outright ("this is not a
+    diffusers-shaped lane — ``ctx.for_request``/scheduler-view machinery never
+    applies") and the endpoint's tests assert it. The one
+    ``scheduler_config.json`` in ``tencent/Hunyuan3D-2.1`` belongs to the PAINT
+    UNet, which is a different model; borrowing it would be a category error.
+
+    Also absent: ``octree_resolution`` (``main.py:80``). It is a payload-side
+    shape PRESET under the ie#345 discipline, which that line states in situ.
+    """
+
+    #: hunyuan3d-2.1/main.py:72; wire bounds from :83.
+    num_shape_steps: Knob[int] = Knob(50, lo=1, hi=100, name="num_shape_steps")
+    #: hunyuan3d-2.1/main.py:73; wire bounds from :84.
+    guidance_scale: Knob[float] = Knob(5.0, lo=1.0, hi=15.0, name="guidance_scale")
 
 
 class Ltx2Defaults(msgspec.Struct, frozen=True):
@@ -2023,6 +2129,65 @@ class MusicGen(ModelType[MusicGenDefaults]):
     name = "musicgen"
     contracts = ("musicgen.*",)
     Defaults = MusicGenDefaults
+class Trellis2(ModelType[Trellis2Defaults]):
+    """TRELLIS.2 — the sparse-structure and both SLAT flow DiTs under one
+    vocabulary root (see :class:`Trellis2Defaults` for the header evidence that
+    all five checkpoints are one architecture, and for why the per-stage
+    guidance strengths are NOT a platform scalar).
+
+    The fingerprint is ``trellis2.*``, matching ``trellis2.dit-bf16@1``.
+    ``dit.blocks-fused-qkv*`` is deliberately NOT a fingerprint pattern here,
+    for the same reason :class:`Flux1` refuses it — that document is
+    family-PLURAL. It is also, separately, a measured NON-match: it requires
+    ``blocks.{i}.attn.qkv.weight`` and TRELLIS spells its fused self-attention
+    ``blocks.{i}.self_attn.to_qkv.weight``, so it matches ZERO of the 640
+    tensors in a real TRELLIS DiT header.
+    """
+
+    name = "trellis2"
+    contracts = ("trellis2.*",)
+    canonical_contract = TRELLIS2_DIT_BF16
+    Defaults = Trellis2Defaults
+
+
+class Hunyuan3d(ModelType[Hunyuan3dDefaults]):
+    """Hunyuan3D-2.1 — image-to-3D shape DiT plus PBR texture paint.
+
+    NAME + FINGERPRINT + DEFAULTS ONLY. **No canonical lane, and deliberately
+    not a MissingContract sentinel either** — the :class:`Rife` shape, reached
+    by a different and stronger route.
+
+    ``Rife`` has no lane because inventing a contract name for a plain
+    diffusers-layout repo "would be a guess". Hunyuan3D's case is not a guess
+    that was declined; it is an IMPOSSIBILITY that was measured. The complete
+    file listing of ``tencent/Hunyuan3D-2.1`` carries exactly ONE
+    ``.safetensors`` — ``hunyuan3d-paintpbr-v2-1/image_encoder/model.safetensors``,
+    an image encoder, which is precisely the shared family-PLURAL class the
+    tensorfs#122 rule forbids declaring. Every core model is a PICKLE: the
+    shape DiT is ``hunyuan3d-dit-v2-1/model.fp16.ckpt`` (7,366,389,768 B), the
+    paint UNet and both VAEs are ``.bin``. A tensorfs document describes a
+    safetensors header, and there is no header to read.
+
+    The endpoint said so first. ``hunyuan3d-2.1/src/hunyuan3d_2_1/main.py:208-212``
+    ships ``layouts_undeclarable="pickle .ckpt — unclassifiable by the
+    header-reading derivation, and reading one to find out is the banned act"``.
+
+    Why NOT a :class:`MissingContract` sentinel, which is the normal way to
+    declare a lane whose document is merely late: a sentinel's own refusal text
+    instructs the reader to "author '<name>.v<n>.json' in tensorfs
+    spec/v1/contracts", i.e. it ASSERTS that a document is OWED. Since none can
+    ever exist, that would be a standing lie with a to-do attached. Absent is
+    the honest declaration. (Ratified by the se#769 umbrella, 2026-08-18.)
+
+    The consequence is a real platform gap and it is FILED, not worked around:
+    with ``lanes=()`` there is nowhere to declare this family's VRAM floor,
+    which upstream reports as ~29 GB for the combined shape+texture path. See
+    pgw#1423, pending a Paul ruling; the endpoint is staged behind it.
+    """
+
+    name = "hunyuan3d"
+    contracts = ("hunyuan3d.*",)
+    Defaults = Hunyuan3dDefaults
 
 
 class Ltx2(ModelType[Ltx2Defaults]):
@@ -2101,6 +2266,8 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     Ltx2,
     Ltx2Upsampler,
     InternVLU,
+    Trellis2,
+    Hunyuan3d,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
@@ -2150,6 +2317,8 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Ltx2.name: Ltx2.Defaults,
         Ltx2Upsampler.name: Ltx2Upsampler.Defaults,
         InternVLU.name: InternVLU.Defaults,
+        Trellis2.name: Trellis2.Defaults,
+        Hunyuan3d.name: Hunyuan3d.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }
@@ -2191,6 +2360,8 @@ __all__ = [
     "Flux2Klein",
     "Flux2KleinDefaults",
     "HIDREAM_O1_DIFFUSERS_BF16",
+    "Hunyuan3d",
+    "Hunyuan3dDefaults",
     "HiDreamO1",
     "HiDreamO1Defaults",
     "Knob",
@@ -2235,7 +2406,10 @@ __all__ = [
     "SdxlLoraDefaults",
     "SdxlConfig",
     "SupportsClamp",
+    "TRELLIS2_DIT_BF16",
     "TensorLayoutContract",
+    "Trellis2",
+    "Trellis2Defaults",
     "WAN22_DIFFUSERS_BF16",
     "Wan22",
     "Wan22Defaults",
