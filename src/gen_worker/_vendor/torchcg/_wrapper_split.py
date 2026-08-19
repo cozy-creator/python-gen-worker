@@ -286,7 +286,7 @@ def _reinline(source: str) -> str:
 # Compiler-path installation
 # ---------------------------------------------------------------------------
 
-# The outer worker already schedules several graph-class children. Keeping the
+# The outer worker already schedules several graph-specialization children. Keeping the
 # K+1 host fragments serial avoids a hidden second pool and still preserves the
 # measured total-CPU win from splitting one superlinear function. This is a
 # sealed library policy, not an environment or caller knob.

@@ -68,12 +68,12 @@ KIND_GUARD_MISS = "guard_miss"
 # a trend hub-side instead of as a fleet-wide mint refusal (pgw#691/#733).
 KIND_GUARD_LEAK = "guard_leak"
 # pgw#916: the AOT arm's counterpart of `guard_miss` — one tenant request
-# arrived at a graph class the armed compiled graph does not cover, was NAMED at ingress
+# arrived at a graph specialization the armed compiled graph does not cover, was NAMED at ingress
 # and served eager. `guard_miss` is a dynamo concept (a torch guard fired), so
 # an AOT-armed pod produced no shape-gap fact at all and the hub could not
 # count AOT coverage holes the way it counts dynamo ones. `phase` carries the
 # ingress reason token (`no_entry_admits` / `entry_ambiguous`), `detail` names
-# the family, the target, the missing DECLARED CLASS and the compiled graph.
+# the family, the target, the missing DECLARED SPECIALIZATION and the compiled graph.
 KIND_SHAPE_GAP = "shape_gap"
 # pgw#760 (error-visibility doctrine): a fail-soft outcome that changes what
 # or how this worker SERVES — or that a hub decision depends on — must ride
@@ -214,7 +214,7 @@ KIND_JIT_COMPILE = "jit_compile"
 # EMPTY on both stacks because no producer existed: `aot_mint` was reachable
 # only from `python -m gen_worker.aot_mint`, and no serving-pod code path
 # imported it. `phase=minted` carries the roll-up, `phase=entry:<name>` one
-# declared graph class, `phase=stage:<name>` a mint-wide span (package/seal).
+# declared graph specialization, `phase=stage:<name>` a mint-wide span (package/seal).
 KIND_AOT_MINT = "aot_mint_phases"
 # pgw#1134: a MEASURE-ONLY run (`gen_worker.measure_child`) — an operator
 # exporting and compiling a declared class set to find out what it costs, so a
@@ -549,7 +549,7 @@ class Activity:
 
 def emit_event(
     kind: str, detail: str, phase: str = "", duration_ms: int = 0,
-    *, family: str = "", compiled_graph_key: str = "", graph_class: str = "",
+    *, family: str = "", compiled_graph_key: str = "", graph_specialization: str = "",
     step: int = 0, total_steps: int = 0,
 ) -> None:
     """One self-contained COMPLETED ActivityUpdate — a countable typed
@@ -584,7 +584,13 @@ def emit_event(
         family=str(family or "")[:200],
         # proto field 19 is still spelled `cell_key` — see the note above.
         cell_key=str(compiled_graph_key or "")[:200],
-        graph_class=str(graph_class or "")[:300],
+        # tcg#56: proto field 20 is still spelled `graph_class`, for the same
+        # reason `cell_key` is. The proto's canonical copy lives in tensorhub
+        # and BOTH generated trees must move with it in one window, so the wire
+        # spelling is renamed by the tensorhub leg of tcg#56, not here. pgw's
+        # own vocabulary is already `graph_specialization`; this line is the
+        # single place the two names meet.
+        graph_class=str(graph_specialization or "")[:300],
         duration_ms=max(0, int(duration_ms)),
         updated_at_unix_ms=int(time.time() * 1000),
     ))

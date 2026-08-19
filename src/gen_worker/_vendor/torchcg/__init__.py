@@ -11,8 +11,8 @@ from .compiler import CompileError
 from .declaration import (
     GRAPH_INTERFACE_FORMAT,
     DeclarationError,
-    GraphClassDeclaration,
-    GraphClassSpec,
+    GraphSpecialization,
+    GraphSpecializationDeclaration,
     RetiredGraphInterface,
     RuntimeCompatibility,
 )
@@ -49,7 +49,7 @@ from .graph_identity import (
 )
 from .identity import (
     ARTIFACT_KIND,
-    GRAPH_CLASS_BLOCK,
+    GRAPH_SPECIALIZATION_BLOCK,
     REQUIRED_AXES,
     CompiledGraphKey,
     IdentityError,
@@ -92,9 +92,8 @@ from .requirements import (
 )
 from .runner import CompiledGraphRunner, ConstantBindingError
 from .selection import (
-    ClassReport,
     FeedNormalization,
-    GraphClassCandidate,
+    GraphSpecializationCandidate,
     IngressMiss,
     MissReason,
     NormalizationKind,
@@ -104,6 +103,7 @@ from .selection import (
     Selection,
     SelectionError,
     SelectionOutcome,
+    SpecializationReport,
     describe_call,
     select,
 )
@@ -222,7 +222,7 @@ __all__ = [
     "CompiledGraphRunner",
     "CallIngress",
     "CallInput",
-    "ClassReport",
+    "SpecializationReport",
     "ConstantBindingError",
     "GRAPH_INTERFACE_FORMAT",
     "DeclarationError",
@@ -231,10 +231,10 @@ __all__ = [
     "EnsureOutcome",
     "EnsureResult",
     "FeedNormalization",
-    "GRAPH_CLASS_BLOCK",
-    "GraphClassCandidate",
-    "GraphClassDeclaration",
-    "GraphClassSpec",
+    "GRAPH_SPECIALIZATION_BLOCK",
+    "GraphSpecializationCandidate",
+    "GraphSpecializationDeclaration",
+    "GraphSpecialization",
     "IdentityError",
     "REQUIRED_AXES",
     "IngressError",

@@ -36,16 +36,16 @@ from gen_worker.local_compiled_graph_store import MintProvenance
 
 import tcg_artifacts
 
-#: The fixture's graph-class hash, derived by TCG from the declaration
+#: The fixture's graph-specialization hash, derived by TCG from the declaration
 #: ``tcg_artifacts`` builds — read, never asserted, so a TCG fold change moves
 #: this with the key instead of leaving a stale literal behind.
-CLASS_HASH = str(tcg_artifacts.metadata()["graph_class"]["class_hash"])
+SPECIALIZATION_HASH = str(tcg_artifacts.metadata()["graph_specialization"]["specialization_hash"])
 
 
 def exported_compiled_graph_meta(
     *,
     sm: str = "sm_89",
-    graph_class: str = tcg_artifacts.GRAPH_CLASS,
+    graph_specialization: str = tcg_artifacts.GRAPH_CLASS,
     witness: str = "fedcba9876543210",
     toolchain: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
@@ -57,7 +57,7 @@ def exported_compiled_graph_meta(
     for two wheels.
     """
     return tcg_artifacts.metadata(
-        graph_class=graph_class, witness=witness, sm=sm, toolchain=toolchain)
+        graph_specialization=graph_specialization, witness=witness, sm=sm, toolchain=toolchain)
 
 
 def exported_compiled_graph_provenance(
@@ -78,5 +78,5 @@ def exported_compiled_graph_provenance(
     return MintProvenance(
         env_seal=env_seal, lane=lane,
         graph_contract=(graph_contract
-                        or graph_facts.manifest_digest([CLASS_HASH])),
+                        or graph_facts.manifest_digest([SPECIALIZATION_HASH])),
         sku=sku, gen_worker=gen_worker)

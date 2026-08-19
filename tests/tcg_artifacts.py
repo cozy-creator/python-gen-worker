@@ -27,7 +27,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from gen_worker._vendor.torchcg import CallIngress, CallInput, GraphClassDeclaration
+from gen_worker._vendor.torchcg import CallIngress, CallInput, GraphSpecializationDeclaration
 from gen_worker._vendor.torchcg.artifact import build_metadata, pack_artifact
 from gen_worker._vendor.torchcg.host_isa import _host_requirement
 
@@ -44,7 +44,7 @@ def host_isa() -> Dict[str, str]:
     return _host_requirement().facts()
 
 
-def aoti_package(path: Path, *, graph_class: str = GRAPH_CLASS,
+def aoti_package(path: Path, *, graph_specialization: str = GRAPH_CLASS,
                  filler: str = "") -> Path:
     """A code-only AOTInductor package TCG's introspection accepts.
 
@@ -75,7 +75,7 @@ def aoti_package(path: Path, *, graph_class: str = GRAPH_CLASS,
     shared_object[string_offset:payload_offset] = names
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as archive:
-        root = f"data/aotinductor/{graph_class}"
+        root = f"data/aotinductor/{graph_specialization}"
         wrapper = (
             "AOTInductorModelBase(1, 1, 0, device_str, std::move(cubin_dir), false)")
         if filler:
@@ -87,7 +87,7 @@ def aoti_package(path: Path, *, graph_class: str = GRAPH_CLASS,
 
 def metadata(
     *,
-    graph_class: str = GRAPH_CLASS,
+    graph_specialization: str = GRAPH_CLASS,
     witness: str = "fedcba9876543210",
     sm: str = "sm_89",
     toolchain: Optional[Mapping[str, str]] = None,
@@ -103,8 +103,8 @@ def metadata(
         "constant_fqns": [],
         "ingress": ingress.as_dict(),
     }
-    declaration = GraphClassDeclaration(
-        graph_class=graph_class,
+    declaration = GraphSpecializationDeclaration(
+        name=graph_specialization,
         target=TARGET,
         graph=graph,
         graph_witness=witness,
@@ -112,15 +112,15 @@ def metadata(
         literal_values="",
     )
     return build_metadata(
-        graph_class={
-            "name": declaration.graph_class,
+        graph_specialization={
+            "name": declaration.name,
             "target": declaration.target,
-            "class_hash": declaration.class_hash,
+            "specialization_hash": declaration.specialization_hash,
             "graph": dict(declaration.graph),
             "graph_witness": declaration.graph_witness,
             "range_digest": declaration.range_digest,
             "fork": [],
-            "class_dims": [],
+            "specialization_dims": [],
             "strict": True,
             "lora_bucket": 0,
             "literal_values": declaration.literal_values,
@@ -137,7 +137,7 @@ def metadata(
 def build(
     output: Path,
     *,
-    graph_class: str = GRAPH_CLASS,
+    graph_specialization: str = GRAPH_CLASS,
     witness: str = "fedcba9876543210",
     sm: str = "sm_89",
     toolchain: Optional[Mapping[str, str]] = None,
@@ -146,11 +146,11 @@ def build(
     """One real artifact at ``output``; its key is stamped in its metadata."""
     package = output.parent / f".{output.name}.pt2"
     output.parent.mkdir(parents=True, exist_ok=True)
-    aoti_package(package, graph_class=graph_class, filler=filler)
+    aoti_package(package, graph_specialization=graph_specialization, filler=filler)
     try:
         return pack_artifact(
             package, output,
-            metadata(graph_class=graph_class, witness=witness, sm=sm,
+            metadata(graph_specialization=graph_specialization, witness=witness, sm=sm,
                      toolchain=toolchain))
     finally:
         package.unlink(missing_ok=True)

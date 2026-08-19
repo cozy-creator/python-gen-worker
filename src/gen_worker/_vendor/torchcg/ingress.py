@@ -1,4 +1,4 @@
-"""Canonical call-ingress identity for one exported graph class."""
+"""Canonical call-ingress identity for one exported graph specialization."""
 
 from __future__ import annotations
 
@@ -296,12 +296,12 @@ class CallIngress:
             # tcg#55: v3 nested the ingress under a `pytree` object whose
             # other members (`in`, `out`) were read by nothing. Refuse the old
             # shape BY NAME rather than reaching into it -- these bytes key to
-            # a graph class no v4 producer can derive.
+            # a graph specialization no v4 producer can derive.
             raise IngressError(
                 "ingress_retired_format",
                 "graph interface nests its ingress under the RETIRED v3 "
                 "'pytree' object; tcg#55 promoted it to a top-level 'ingress'. "
-                "Graph classes are content addressed -- re-derive.",
+                "Graph specializations are content addressed -- re-derive.",
             )
         ingress = graph.get("ingress")
         if not isinstance(ingress, Mapping):

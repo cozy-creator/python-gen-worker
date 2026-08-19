@@ -20,7 +20,7 @@ re-layout of exactly the buffers canonical placement already allocates
 - the addend keeps its canonical placement — ``_Fp8ScaledLinear.forward`` is
   untouched, so the branch still reads the PRE-QUANT activation and adds onto
   the bf16 output;
-- ``bucket=0`` remains its own branchless graph class: it has no lifted
+- ``bucket=0`` remains its own branchless graph specialization: it has no lifted
   signature at all, and installing one is refused.
 
 VRAM is at parity with the shipped path (one flat pair replaces N per-module
@@ -84,7 +84,7 @@ class LiftedLoraPlan:
 
     Derived from the ALLOCATED branch buffers, so the layout mirrors canonical
     placement exactly and is a deterministic function of (module set, bucket) —
-    which is precisely the compiled graph's graph class. Offsets and shapes are
+    which is precisely the compiled graph's graph specialization. Offsets and shapes are
     plain ints, so the per-layer views are trace-time constants and the graph
     carries no indexing arithmetic.
     """
@@ -158,7 +158,7 @@ def build_plan(model: Any, bucket: int = 0) -> LiftedLoraPlan:
     """The flat layout for one ARMED denoiser (``enable_lora_branches`` first).
 
     Canonical placement is required: every branch-capable module must carry a
-    branch, because the flat layout IS the graph class and a per-coverage layout
+    branch, because the flat layout IS the graph specialization and a per-coverage layout
     would be a graph per adapter set. Sparse (eager-only) placement is
     therefore refused, as is a non-uniform branch compute dtype — one flat
     tensor has one dtype, and the alternative (a pair per dtype) would make the
@@ -168,7 +168,7 @@ def build_plan(model: Any, bucket: int = 0) -> LiftedLoraPlan:
     if not bucket:
         raise ValidationError(
             "cannot lift a LoRA adapter at rank bucket 0 — the branchless "
-            "pipeline is its own graph class and carries no adapter "
+            "pipeline is its own graph specialization and carries no adapter "
             "arguments; arm a bucket (Compile(lora_bucket=...)) first"
         )
     mods = branch_modules(model)

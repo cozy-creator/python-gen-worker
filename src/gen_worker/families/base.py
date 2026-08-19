@@ -24,7 +24,7 @@ Paul's naming ruling — so the family declares it and the family registers it::
 **The free-standing ``@family("sdxl")`` class decorator is GONE** (pgw#1332).
 It owned the word ``family`` while describing only a defaults vocabulary, and
 the typed ModelSpec SDK needs that word for the thing that actually is a family —
-graph classes, buckets, loop, instances. Resolving the collision in favour of
+graph specializations, buckets, loop, instances. Resolving the collision in favour of
 the family-owned schema means the registrar is now the plain function
 :func:`register_family`, which :class:`gen_worker.model.ModelSpec` calls for its
 own schemas. Nothing about the REGISTRY changed: same ``(name, kind)`` key,

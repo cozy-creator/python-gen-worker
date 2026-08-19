@@ -8,7 +8,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
 
-from .identity import GRAPH_CLASS_BLOCK
+from .identity import GRAPH_SPECIALIZATION_BLOCK
 from .storage import StoredCompiledGraph
 
 
@@ -27,24 +27,24 @@ class _Constant:
 
 
 def _constants(graph: StoredCompiledGraph) -> tuple[_Constant, ...]:
-    graph_class = graph.metadata[GRAPH_CLASS_BLOCK]
-    assert isinstance(graph_class, Mapping)  # artifact validation owns this boundary
-    rows = graph_class["constants"]
+    graph_specialization = graph.metadata[GRAPH_SPECIALIZATION_BLOCK]
+    assert isinstance(graph_specialization, Mapping)  # artifact validation owns this boundary
+    rows = graph_specialization["constants"]
     assert isinstance(rows, list)
     return tuple(
         _Constant(str(row["fqn"]), str(row["source"])) for row in rows if isinstance(row, Mapping)
     )
 
 
-def _load_package(path: Path, graph_class: str) -> Any:
+def _load_package(path: Path, name: str) -> Any:
     try:
         module = import_module("torch._inductor.package")
         loader = vars(module)["load_package"]
-        return cast(Any, loader)(str(path), model_name=graph_class)
+        return cast(Any, loader)(str(path), model_name=name)
     except (ImportError, KeyError, RuntimeError, OSError) as exc:
         raise ConstantBindingError(
             "package_load_failed",
-            f"cannot load compiled graph {graph_class!r}: {type(exc).__name__}: {exc}",
+            f"cannot load compiled graph {name!r}: {type(exc).__name__}: {exc}",
         ) from exc
 
 
@@ -99,7 +99,7 @@ class CompiledGraphRunner:
     """
 
     key: str
-    graph_class: str
+    name: str
     calls: int
     _graph: StoredCompiledGraph
     _constants: tuple[_Constant, ...]
@@ -117,21 +117,21 @@ class CompiledGraphRunner:
         """Load one graph after Engine has resolved and admitted its exact bytes."""
 
         self = object.__new__(cls)
-        graph_class = graph.metadata[GRAPH_CLASS_BLOCK]
-        assert isinstance(graph_class, Mapping)
+        graph_specialization = graph.metadata[GRAPH_SPECIALIZATION_BLOCK]
+        assert isinstance(graph_specialization, Mapping)
         self.key = graph.key
-        self.graph_class = str(graph_class["name"])
+        self.name = str(graph_specialization["name"])
         self._graph = graph
         self._constants = _constants(graph)
         try:
-            self._package = _load_package(graph.package, self.graph_class)
+            self._package = _load_package(graph.package, self.name)
         except ConstantBindingError as exc:
             oom = _oom_in_chain(exc)
             if oom is None:
                 raise
             raise ConstantBindingError(
                 "out_of_memory",
-                f"loading compiled graph {self.graph_class!r} exhausted device memory "
+                f"loading compiled graph {self.name!r} exhausted device memory "
                 f"({type(oom).__name__}: {oom})",
             ) from exc
         self._bound_values = {}
@@ -270,7 +270,7 @@ class CompiledGraphRunner:
         if not self._bound:
             raise ConstantBindingError(
                 "constants_unbound",
-                f"refusing to invoke graph {self.graph_class!r} before complete binding",
+                f"refusing to invoke graph {self.name!r} before complete binding",
             )
         result = self._package(*feeds)
         self.calls += 1

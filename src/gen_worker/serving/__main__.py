@@ -250,7 +250,7 @@ def _toolchain() -> Mapping[str, str]:
 
 def _aoti_loader(path: Path, record: Any) -> Any:
     # The AOTInductor runtime load: the packaged compiled graph becomes the
-    # module forward for its graph class. Exact-env by construction — the
+    # module forward for its graph specialization. Exact-env by construction — the
     # audit already ran before any author code touched an artifact.
     import torch._inductor
 

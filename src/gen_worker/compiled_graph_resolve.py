@@ -74,7 +74,7 @@ lie and none of them is checked anywhere downstream:
 4. **A PER-KEY FAULT DOES NOT SINK THE BATCH.** Ambiguity, incompleteness and
    transport-unavailability were whole-request refusals; they are per-answer
    STATUSES now, carrying the SAME typed codes they had as refusals so the
-   caller's vocabulary is unchanged. One duplicated row costs one graph class,
+   caller's vocabulary is unchanged. One duplicated row costs one graph specialization,
    not a boot's whole adoption. The refusals that stay whole-batch are the ones
    that are properties of the CALLER — answering those per key would report a
    hub fault as 256 misses.
@@ -447,7 +447,7 @@ def resolve_batch(
     Raises :class:`CompiledGraphResolveRefused` for a WHOLE-BATCH fault — a malformed
     request, a caller-scoped hub failure, or an answer set that does not
     answer the question asked. A PER-KEY fault is not a raise: it is an answer
-    with a ``refusal_code``, so one bad row costs one graph class.
+    with a ``refusal_code``, so one bad row costs one graph specialization.
     """
     fam, asked = _require_batch(family, keys)
 

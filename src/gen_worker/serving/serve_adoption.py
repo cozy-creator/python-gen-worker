@@ -48,7 +48,7 @@ KIND_ADOPT_REFUSED = "adopt_refused"
 
 
 def aoti_loader(path: Path, record: Any) -> Any:
-    """Load one packaged compiled graph as its graph class's forward."""
+    """Load one packaged compiled graph as its graph specialization's forward."""
     import torch._inductor
 
     return torch._inductor.aoti_load_package(str(path))

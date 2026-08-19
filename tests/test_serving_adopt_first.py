@@ -254,7 +254,7 @@ def test_adopt_first_boot_swaps_via_ctx_compile_and_hands_ordered_holes(
 ) -> None:
     document = publish_document(host)
     lane_graphs = document.lanes[0]
-    assert len(lane_graphs.graphs) == 2  # two buckets -> two graph classes
+    assert len(lane_graphs.graphs) == 2  # two buckets -> two graph specializations
     hit, hole = lane_graphs.graphs
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
     artifact = tmp_path / "minted.so"
@@ -398,7 +398,7 @@ def _adopt_answer(
     def row(record: GraphRecord, status: str) -> dict[str, Any]:
         base: dict[str, Any] = {
             "graph_hash": record.graph,
-            "graph_class": "",
+            "graph_specialization": "",
             "program": record.program,
             "module_path": record.target,
             "ingress_digest": record.ingress.digest(),

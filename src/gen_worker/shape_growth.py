@@ -74,7 +74,7 @@ class TurnGateBusy(Exception):
 
 @dataclass(frozen=True)
 class ShapeGap:
-    """One request that arrived at a graph class the armed compiled graph does not
+    """One request that arrived at a graph specialization the armed compiled graph does not
     serve.
 
     ``declared_class`` is the point of the type: dynamo healing keys on an
@@ -163,7 +163,7 @@ def report(gap: ShapeGap) -> bool:
             f"arm={gap.arm} family={gap.family} target={gap.target} "
             f"compiled_graph={gap.compiled_graph_key or '<none>'} class={gap.declared_class}: "
             f"request out of declared envelope: the armed compiled graph does not cover "
-            f"this graph class, so the request is served EAGER and named at "
+            f"this graph specialization, so the request is served EAGER and named at "
             f"ingress"
             + (f" — {gap.detail}" if gap.detail else ""),
             phase=gap.reason,

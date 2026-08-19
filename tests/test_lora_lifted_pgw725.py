@@ -455,7 +455,7 @@ def test_wrong_operand_layout_refuses() -> None:
 
 
 def test_over_bucket_adapter_refuses_instead_of_resizing() -> None:
-    """A wider set is a different graph class — a lifted unit never recompiles
+    """A wider set is a different graph specialization — a lifted unit never recompiles
     at swap time."""
     x = torch.randn(TOK, DIM, dtype=DT)
     model, binding = _lifted(x)

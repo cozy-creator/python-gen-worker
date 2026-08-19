@@ -117,7 +117,7 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     # HiDream-O1's flash ladder: its own module because it is NOT a member of
     # scheduler.py's closed declarable set — nothing can declare it while
     # GraphModelSpec.scheduler is single-valued (pgw#1346 K10).
-    # K9's packed shape axis, shared by the families whose graph classes are a
+    # K9's packed shape axis, shared by the families whose graph specializations are a
     # SET of (width, height) pairs rather than a product of two axes.
     # pgw#1346 B3b's two EAGER models. Both halves are model-free here, not
     # only the serving one: neither declaration builds a module, because
@@ -199,7 +199,7 @@ SERVE_ROLE_MODULES: Tuple[str, ...] = (
 #: table) bought to run a handful of reshapes and one Euler step, and it is what
 #: makes today's serve image un-shrinkable. ``transformers`` is here for the
 #: same reason and by the same argument — the text encoders are its models, and
-#: pgw#1331 makes them graph classes precisely so the serve path stops needing
+#: pgw#1331 makes them graph specializations precisely so the serve path stops needing
 #: the library that defines them.
 #:
 #: **This is not a claim that the modules cannot be installed.** The mint lane
@@ -258,7 +258,7 @@ OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
 #: tracer's output and is pgw#1327's own declared mint-side root).
 MINT_MACHINERY: Tuple[str, ...] = (
     "gen_worker.aot_compile_pool",
-    # pgw#1331: a family declaration mints its OWN graph classes through this
+    # pgw#1331: a family declaration mints its OWN graph specializations through this
     # bridge. It is the family surface's mint half, and the family surface is
     # on the serve path — which is exactly why it is named here: a serve-role
     # module that could reach it would be a pod that can compile.

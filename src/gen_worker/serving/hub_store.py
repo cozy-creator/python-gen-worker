@@ -25,7 +25,7 @@ and the route answers something else::
      "lane_contract": {"stamp": ..., "contract_digest": ..., "document": {...},
                        "requires": ...},
      "sm": "sm_89", "empty": false, "hits": 30, "misses": 6,
-     "graphs": [{"graph_hash": "cg-graph-v1:...", "graph_class": "...",
+     "graphs": [{"graph_hash": "cg-graph-v1:...", "graph_specialization": "...",
                  "status": "hit"|"miss"|"transport_unavailable",
                  "found": true, "program": "sha256:...",
                  "module_path": "...", "ingress": {...},

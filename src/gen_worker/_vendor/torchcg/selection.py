@@ -1,6 +1,6 @@
-"""Versioned ingress selection: which declared graph class serves one call.
+"""Versioned ingress selection: which declared graph specialization serves one call.
 
-`CallIngress` states what ONE graph class accepts. This module states what a
+`CallIngress` states what ONE graph specialization accepts. This module states what a
 serve host does with SEVERAL of them: which classes a call disqualifies, how the
 refused ones are ORDERED, the two feed normalizations a host may perform, and
 what a total miss is. Those semantics lived only in gen-worker's `aot_serve`
@@ -12,7 +12,7 @@ everything here is its reference implementation, and `tests/test_selection.py`
 replays every vector through it.
 
 **Scope.** Selection only. The candidate set is the host's — this module never
-asks why a class is absent, unarmed, or pending a compile. What a host DOES with
+asks why a specialization is absent, unarmed, or pending a compile. What a host DOES with
 an outcome (eager fallback, sticky de-arm, shape-growth reporting, event
 emission, refusal wording) is host policy and stays there.
 
@@ -68,7 +68,7 @@ class SelectionError(ValueError):
 
 
 class MissReason(StrEnum):
-    """Every way one call can miss one graph class's declared ingress.
+    """Every way one call can miss one graph specialization's declared ingress.
 
     Closed on purpose. A host that needs a reason this enum does not carry is
     describing something other than ingress selection, and inventing a member
@@ -132,10 +132,10 @@ class SelectionOutcome(StrEnum):
     ADMITTED = "admitted"
     #: No class admits the call. What the host does about it — serve eager,
     #: report shape growth, refuse — is host policy, not this contract.
-    NO_CLASS_ADMITS = "no_class_admits"
+    NO_CLASS_ADMITS = "no_specialization_admits"
     #: Two or more classes admit the call. A DEFECT to surface, never a coin to
     #: flip: the declaration failed to discriminate them by ingress.
-    CLASS_AMBIGUOUS = "class_ambiguous"
+    SPECIALIZATION_AMBIGUOUS = "specialization_ambiguous"
 
 
 def _canonical(value: object, what: str) -> str:
@@ -277,14 +277,14 @@ class PresentedCall:
 
 
 @dataclass(frozen=True, slots=True)
-class GraphClassCandidate:
-    """One graph class a host offers to selection, by name and ingress."""
+class GraphSpecializationCandidate:
+    """One graph specialization a host offers to selection, by name and ingress."""
 
     name: str
     ingress: CallIngress
 
     def __post_init__(self) -> None:
-        _canonical(self.name, "graph class name")
+        _canonical(self.name, "graph specialization name")
         if not isinstance(self.ingress, CallIngress):
             raise SelectionError("selection_invalid", "candidate ingress must be a CallIngress")
 
@@ -337,7 +337,7 @@ def miss_distance(misses: Sequence[IngressMiss]) -> tuple[int, ...]:
 
 
 @dataclass(frozen=True, slots=True)
-class ClassReport:
+class SpecializationReport:
     """Every way one call misses one class, plus the symbols it did bind."""
 
     name: str
@@ -345,7 +345,7 @@ class ClassReport:
     symbols: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
-        _canonical(self.name, "graph class name")
+        _canonical(self.name, "graph specialization name")
         if not isinstance(self.misses, tuple) or any(
             not isinstance(miss, IngressMiss) for miss in self.misses
         ):
@@ -364,16 +364,16 @@ class ClassReport:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "class": self.name,
+            "specialization": self.name,
             "distance": list(self.distance),
             "misses": [miss.as_dict() for miss in self.misses],
             "symbols": {name: value for name, value in self.symbols},
         }
 
     @classmethod
-    def decode(cls, raw: Mapping[str, Any]) -> ClassReport:
+    def decode(cls, raw: Mapping[str, Any]) -> SpecializationReport:
         if not isinstance(raw, Mapping) or set(raw) != {
-            "class",
+            "specialization",
             "distance",
             "misses",
             "symbols",
@@ -387,7 +387,7 @@ class ClassReport:
         if not isinstance(rows, list) or not isinstance(symbols, Mapping):
             raise SelectionError("selection_invalid", "class report arrays are malformed")
         report = cls(
-            name=raw["class"],
+            name=raw["specialization"],
             misses=tuple(IngressMiss.decode(row) for row in rows),
             symbols=tuple(sorted((str(k), int(v)) for k, v in symbols.items())),
         )
@@ -475,7 +475,7 @@ class Selection:
     selected: str = ""
     symbols: tuple[tuple[str, int], ...] = ()
     normalizations: tuple[FeedNormalization, ...] = ()
-    ranked: tuple[ClassReport, ...] = ()
+    ranked: tuple[SpecializationReport, ...] = ()
     ambiguous: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -483,7 +483,7 @@ class Selection:
             raise SelectionError("selection_invalid", "outcome must be a SelectionOutcome")
         admitted = self.outcome is SelectionOutcome.ADMITTED
         if admitted:
-            _canonical(self.selected, "selected graph class")
+            _canonical(self.selected, "selected graph specialization")
         elif self.selected or self.symbols or self.normalizations:
             raise SelectionError(
                 "selection_invalid", "only an admitted selection carries a class, symbols or a plan"
@@ -492,11 +492,11 @@ class Selection:
             raise SelectionError(
                 "selection_invalid", "only a total miss carries the exhaustive ranking"
             )
-        if self.ambiguous and self.outcome is not SelectionOutcome.CLASS_AMBIGUOUS:
+        if self.ambiguous and self.outcome is not SelectionOutcome.SPECIALIZATION_AMBIGUOUS:
             raise SelectionError(
                 "selection_invalid", "only an ambiguous selection names competing classes"
             )
-        if self.outcome is SelectionOutcome.CLASS_AMBIGUOUS and len(self.ambiguous) < 2:
+        if self.outcome is SelectionOutcome.SPECIALIZATION_AMBIGUOUS and len(self.ambiguous) < 2:
             raise SelectionError(
                 "selection_invalid", "an ambiguous selection names at least two classes"
             )
@@ -544,7 +544,7 @@ class Selection:
             normalizations=tuple(
                 FeedNormalization.decode(row) for row in raw["normalizations"]
             ),
-            ranked=tuple(ClassReport.decode(row) for row in raw["ranked"]),
+            ranked=tuple(SpecializationReport.decode(row) for row in raw["ranked"]),
             ambiguous=tuple(raw["ambiguous"]),
         )
 
@@ -646,7 +646,7 @@ def normalization_plan(
 
 def class_report(
     name: str, ingress: CallIngress, call: PresentedCall, *, first_only: bool = False
-) -> ClassReport:
+) -> SpecializationReport:
     """Every way `call` misses `ingress`, plus the symbols it did bind.
 
     A class ADMITS a call exactly when this report carries no miss. Every miss
@@ -667,13 +667,14 @@ def class_report(
 
     present = tuple(row for row in ingress.excluded_inputs if row in call.excluded_present)
     if present:
-        return ClassReport(
+        return SpecializationReport(
             name=name,
             misses=(
                 IngressMiss(
                     MissReason.INPUT_EXCLUDED,
                     present[0],
-                    f"this graph class REFUSES input(s) {list(present)!r}: the call carries "
+                    f"this graph specialization REFUSES input(s) {list(present)!r}: "
+                    "the call carries "
                     f"them, so it must be served by the class that declares them",
                 ),
             ),
@@ -683,7 +684,7 @@ def class_report(
             continue
         # An input the call does not carry at all: nothing further about this
         # class is measurable, so it is one miss and the deepest rung.
-        return ClassReport(
+        return SpecializationReport(
             name=name,
             misses=(
                 IngressMiss(
@@ -769,25 +770,27 @@ def class_report(
                 continue
             symbols[declared] = got
             owner.setdefault(declared, spec.name)
-    return ClassReport(
+    return SpecializationReport(
         name=name,
         misses=tuple(misses[:1]) if first_only else tuple(misses),
         symbols=tuple(sorted(symbols.items())),
     )
 
 
-def _candidates(candidates: Sequence[GraphClassCandidate]) -> tuple[GraphClassCandidate, ...]:
+def _candidates(
+    candidates: Sequence[GraphSpecializationCandidate],
+) -> tuple[GraphSpecializationCandidate, ...]:
     rows = tuple(sorted(candidates, key=lambda row: row.name))
     names = tuple(row.name for row in rows)
     if len(set(names)) != len(names):
         raise SelectionError(
-            "candidate_duplicate", "two candidates share one graph class name"
+            "candidate_duplicate", "two candidates share one graph specialization name"
         )
     return rows
 
 
-def select(candidates: Sequence[GraphClassCandidate], call: PresentedCall) -> Selection:
-    """Choose the graph class that serves `call`, or say why none does.
+def select(candidates: Sequence[GraphSpecializationCandidate], call: PresentedCall) -> Selection:
+    """Choose the graph specialization that serves `call`, or say why none does.
 
     Candidates are evaluated in ascending NAME order so a host that offers the
     same set in a different order reaches the same outcome and the same ranking.
@@ -799,8 +802,8 @@ def select(candidates: Sequence[GraphClassCandidate], call: PresentedCall) -> Se
     """
 
     rows = _candidates(candidates)
-    admitted: list[ClassReport] = []
-    missed: list[GraphClassCandidate] = []
+    admitted: list[SpecializationReport] = []
+    missed: list[GraphSpecializationCandidate] = []
     for row in rows:
         report = class_report(row.name, row.ingress, call, first_only=True)
         if report.admits:
@@ -816,7 +819,7 @@ def select(candidates: Sequence[GraphClassCandidate], call: PresentedCall) -> Se
         return Selection(outcome=SelectionOutcome.NO_CLASS_ADMITS, ranked=tuple(ranked))
     if len(admitted) > 1:
         return Selection(
-            outcome=SelectionOutcome.CLASS_AMBIGUOUS,
+            outcome=SelectionOutcome.SPECIALIZATION_AMBIGUOUS,
             ambiguous=tuple(report.name for report in admitted),
         )
     chosen = admitted[0]
@@ -859,7 +862,7 @@ def _presented(value: object) -> PresentedValue:
 
 
 def describe_call(
-    candidates: Sequence[GraphClassCandidate],
+    candidates: Sequence[GraphSpecializationCandidate],
     args: Sequence[object],
     kwargs: Mapping[str, object],
 ) -> PresentedCall:
@@ -895,7 +898,8 @@ def describe_call(
             if there != here:
                 raise SelectionError(
                     "input_name_collision",
-                    f"graph class {row.name!r} spells input {spec.name!r} at a different call "
+                    f"graph specialization {row.name!r} spells input {spec.name!r} "
+                    "at a different call "
                     f"coordinate than a sibling candidate; one call cannot describe both",
                 )
             if spec.name in feeds:
@@ -934,7 +938,7 @@ class SelectionVector:
 
     name: str
     note: str
-    candidates: tuple[GraphClassCandidate, ...]
+    candidates: tuple[GraphSpecializationCandidate, ...]
     call: PresentedCall
     expect: Selection
 
@@ -958,14 +962,16 @@ class SelectionVector:
         rows = raw["candidates"]
         if not isinstance(rows, list):
             raise SelectionError("selection_invalid", "vector candidates must be an array")
-        candidates: list[GraphClassCandidate] = []
+        candidates: list[GraphSpecializationCandidate] = []
         for row in rows:
-            if not isinstance(row, Mapping) or set(row) != {"class", "ingress"}:
+            if not isinstance(row, Mapping) or set(row) != {"specialization", "ingress"}:
                 raise SelectionError(
                     "selection_invalid", "vector candidate fields must be exactly class/ingress"
                 )
             candidates.append(
-                GraphClassCandidate(name=row["class"], ingress=CallIngress.decode(row["ingress"]))
+                GraphSpecializationCandidate(
+                    name=row["specialization"], ingress=CallIngress.decode(row["ingress"])
+                )
             )
         return cls(
             name=raw["name"],
@@ -1058,9 +1064,9 @@ __all__ = [
     "RECAST_TARGETS",
     "SELECTION_CONTRACT_FILE",
     "SELECTION_CONTRACT_VERSION",
-    "ClassReport",
+    "SpecializationReport",
     "FeedNormalization",
-    "GraphClassCandidate",
+    "GraphSpecializationCandidate",
     "IngressMiss",
     "MissReason",
     "NormalizationKind",

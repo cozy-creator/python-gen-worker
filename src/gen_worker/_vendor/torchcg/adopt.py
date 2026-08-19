@@ -38,7 +38,7 @@ if TYPE_CHECKING:  # torch-free import closure: transform.py is torch-shaped
     from .transform import TransformSet
 
 #: Turns one fetched artifact into the callable that replaces the target
-#: module's forward for its graph class. The real AOTInductor loader arrives
+#: module's forward for its graph specialization. The real AOTInductor loader arrives
 #: with the runtime mint wave; the seam keeps adoption testable without a GPU.
 ArtifactLoader = Callable[[Path, GraphRecord], Callable[..., Any]]
 
@@ -63,7 +63,7 @@ class Hole:
 
 
 class AmbiguousStructure(Exception):
-    """Two graph classes share one tensor structure; neither can be dispatched."""
+    """Two graph specializations share one tensor structure; neither can be dispatched."""
 
     def __init__(self, armed: GraphRecord) -> None:
         self.armed = armed
@@ -80,7 +80,7 @@ def _is_concrete(record: GraphRecord) -> bool:
 def _structure_key(record: GraphRecord) -> tuple[Any, ...]:
     """The dispatchable identity of a record's tensor structure.
 
-    Two graph classes whose tensor feeds are identical (they differ only in
+    Two graph specializations whose tensor feeds are identical (they differ only in
     baked-in literals) cannot be told apart at call time; arming both would
     be a coin flip, so the dispatcher refuses the pair instead.
     """

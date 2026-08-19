@@ -1,13 +1,13 @@
 """The closed v1 vocabulary for one family's compiled composition.
 
-A recipe NAMES a family's composition: which graph classes an endpoint's
+A recipe NAMES a family's composition: which graph specializations an endpoint's
 pipeline is made of, the loop between them, and the scheduler block that loop
 runs under.  It does not program it.  Payload parsing, CFG policy, residency,
 retries, telemetry, ingress ranking, and eager fallback are host code by
 definition, not vocabulary extensions.
 
-The document is machine-independent on purpose: it pins each class by its
-16-hex class hash and its exact ``CallIngress`` v1 declaration, never by a
+The document is machine-independent on purpose: it pins each specialization by its
+16-hex specialization hash and its exact ``CallIngress`` v1 declaration, never by a
 ``cg-key-v1`` value.  The key is folded at adopt time from the pod's own
 ``sm``/``toolchain`` facts, so one recipe digest is valid on every SKU.
 
@@ -16,7 +16,7 @@ sets, checkpoint refs, tuned values, and per-request defaults are
 unrepresentable here because every object below has a closed field set.  A
 family is the graph level; an instance is family x weight-set; a request is
 neither.  ``docs/RECIPE.md`` states the generation requirements that follow from
-that, including why a generated family class is a TYPE whose callables are
+that, including why a generated family specialization is a TYPE whose callables are
 reached through an instance.
 """
 
@@ -35,7 +35,7 @@ from .ingress import CallIngress, CallInput, IngressError, PathStep
 
 RECIPE_VERSION: Final = 1
 _DIGEST_HEX: Final = 32
-_CLASS_HASH_HEX: Final = 16
+_SPECIALIZATION_HASH_HEX: Final = 16
 _IDENTIFIER_MAX: Final = 48
 _HEX: Final = frozenset("0123456789abcdef")
 
@@ -73,7 +73,7 @@ BucketAxisName = NewType("BucketAxisName", str)
 ParameterName = NewType("ParameterName", str)
 SchedulerName = NewType("SchedulerName", str)
 LayoutContract = NewType("LayoutContract", str)
-GraphClassHash = NewType("GraphClassHash", str)
+GraphSpecializationHash = NewType("GraphSpecializationHash", str)
 IngressDigest = NewType("IngressDigest", str)
 RecipeDigest = NewType("RecipeDigest", str)
 
@@ -137,7 +137,7 @@ class LoopKind(StrEnum):
     ``staged`` is a composition the vocabulary fully describes: an ordered list
     of stages, each running once or a declared number of times.  ``host`` is the
     data-dependent loop of an autoregressive family — the recipe names the
-    per-step graph classes and who owns session state, and says outright that
+    per-step graph specializations and who owns session state, and says outright that
     the iteration is host-owned.  The vocabulary never pretends to describe a
     loop it cannot express.
     """
@@ -224,10 +224,10 @@ def parse_scheduler_name(value: object) -> SchedulerName:
 
 
 def parse_layout_contract(value: object) -> LayoutContract:
-    """Parse the tensor-layout contract token a graph class was traced against.
+    """Parse the tensor-layout contract token a graph specialization was traced against.
 
     The token set is the platform's tensor-layout vocabulary (DESIGN-RULINGS
-    §1.32/§1.33). This contract records which one a class was traced against and
+    §1.32/§1.33). This contract records which one a specialization was traced against and
     never enumerates, interprets, or forks it: the COMPATIBLE / CONVERTIBLE /
     PRODUCIBLE / INCOMPATIBLE verdict is the hub's join of this document with
     per-checkpoint layout metadata, which is a SEPARATE document.
@@ -247,10 +247,10 @@ def _hex(kind: str, value: object, width: int) -> str:
     return value
 
 
-def parse_class_hash(value: object) -> GraphClassHash:
-    """Parse the 16-hex graph-class hash that is the key's ``graph`` axis."""
+def parse_specialization_hash(value: object) -> GraphSpecializationHash:
+    """Parse the 16-hex graph-specialization hash that is the key's ``graph`` axis."""
 
-    return GraphClassHash(_hex("class hash", value, _CLASS_HASH_HEX))
+    return GraphSpecializationHash(_hex("specialization hash", value, _SPECIALIZATION_HASH_HEX))
 
 
 def parse_ingress_digest(value: object) -> IngressDigest:
@@ -408,24 +408,26 @@ class BucketAxis:
 
 
 @dataclass(frozen=True, slots=True)
-class GraphClassVariant:
-    """One graph class of one runner, pinned by identity, layout, and bucket.
+class GraphSpecializationVariant:
+    """One graph specialization of one runner, pinned by identity, layout, and bucket.
 
     ``layout`` names the tensor-layout contract this class was TRACED against.
     An fp8-rowwise trace and a bf16 trace are different graphs, so layout is an
-    axis of the class row, not a property of the weights bound to it later. The
+    axis of the specialization row, not a property of the weights bound to it later. The
     compiled backing accepts exactly its traced layout; an eager backing follows
     the fit ladder, which is host policy.
     """
 
-    class_hash: GraphClassHash
+    specialization_hash: GraphSpecializationHash
     ingress_digest: IngressDigest
     ingress: CallIngress
     layout: LayoutContract
     bucket: tuple[tuple[BucketAxisName, int], ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "class_hash", parse_class_hash(self.class_hash))
+        object.__setattr__(
+            self, "specialization_hash", parse_specialization_hash(self.specialization_hash)
+        )
         object.__setattr__(self, "layout", parse_layout_contract(self.layout))
         object.__setattr__(self, "ingress_digest", parse_ingress_digest(self.ingress_digest))
         if not isinstance(self.ingress, CallIngress):
@@ -456,11 +458,11 @@ class GraphClassVariant:
         return call_signature(self.ingress)
 
     def key(self, runtime: RuntimeAxes) -> CompiledGraphKey:
-        """Fold this pinned class with the pod's own axes into the exact key."""
+        """Fold this pinned specialization with the pod's own axes into the exact key."""
 
         return from_axes(
             {
-                "graph": str(self.class_hash),
+                "graph": str(self.specialization_hash),
                 "sm": runtime.sm,
                 "toolchain": toolchain_axis_digest(runtime.toolchain),
             }
@@ -475,18 +477,18 @@ class GraphClassVariant:
     def as_dict(self) -> dict[str, Any]:
         return {
             "bucket": {str(name): value for name, value in self.bucket},
-            "class_hash": str(self.class_hash),
+            "specialization_hash": str(self.specialization_hash),
             "ingress": self.ingress.as_dict(),
             "ingress_digest": str(self.ingress_digest),
             "layout": str(self.layout),
         }
 
     @classmethod
-    def decode(cls, raw: object) -> GraphClassVariant:
+    def decode(cls, raw: object) -> GraphSpecializationVariant:
         row = _fields(
             "variant",
             raw,
-            frozenset(("bucket", "class_hash", "ingress", "ingress_digest", "layout")),
+            frozenset(("bucket", "specialization_hash", "ingress", "ingress_digest", "layout")),
         )
         bucket = row["bucket"]
         if not isinstance(bucket, Mapping):
@@ -498,7 +500,7 @@ class GraphClassVariant:
                 RecipeRefusal.INGRESS_INVALID, f"variant call ingress is invalid: {exc}"
             ) from exc
         return cls(
-            class_hash=parse_class_hash(row["class_hash"]),
+            specialization_hash=parse_specialization_hash(row["specialization_hash"]),
             ingress_digest=parse_ingress_digest(row["ingress_digest"]),
             ingress=ingress,
             layout=parse_layout_contract(row["layout"]),
@@ -533,11 +535,11 @@ def _signature_shape(ingress: CallIngress) -> tuple[Any, ...]:
 
 @dataclass(frozen=True, slots=True)
 class RecipeRunner:
-    """One author-facing runner handle and the bucketed classes behind it."""
+    """One author-facing runner handle and the bucketed specializations behind it."""
 
     name: RunnerName
     axes: tuple[BucketAxisName, ...]
-    variants: tuple[GraphClassVariant, ...]
+    variants: tuple[GraphSpecializationVariant, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", parse_runner_name(self.name))
@@ -550,7 +552,8 @@ class RecipeRunner:
         object.__setattr__(self, "axes", axes)
         if not isinstance(self.variants, tuple) or not self.variants:
             raise RecipeError(
-                RecipeRefusal.RUNNER_INVALID, f"runner {self.name!r} declares no graph class"
+                RecipeRefusal.RUNNER_INVALID,
+                f"runner {self.name!r} declares no graph specialization",
             )
         buckets = [tuple(name for name, _ in variant.bucket) for variant in self.variants]
         if any(names != axes for names in buckets):
@@ -589,7 +592,7 @@ class RecipeRunner:
 
     @property
     def layouts(self) -> tuple[LayoutContract, ...]:
-        """The tensor-layout contracts this runner has classes for."""
+        """The tensor-layout contracts this runner has specializations for."""
 
         return tuple(sorted({variant.layout for variant in self.variants}))
 
@@ -597,7 +600,7 @@ class RecipeRunner:
         self,
         bucket: Mapping[BucketAxisName, int],
         layout: LayoutContract | None = None,
-    ) -> GraphClassVariant:
+    ) -> GraphSpecializationVariant:
         """Resolve one variant by EXACT bucket and layout.  This never ranks.
 
         Choosing a bucket for a live call is ingress selection, a separate
@@ -612,7 +615,8 @@ class RecipeRunner:
             if len(layouts) != 1:
                 raise RecipeError(
                     RecipeRefusal.LAYOUT_INVALID,
-                    f"runner {self.name!r} has classes for {[str(item) for item in layouts]!r}; "
+                    f"runner {self.name!r} has specializations for "
+                    f"{[str(item) for item in layouts]!r}; "
                     "name the traced layout rather than leaving it to a lookup",
                 )
             layout = layouts[0]
@@ -644,7 +648,7 @@ class RecipeRunner:
         return cls(
             name=parse_runner_name(row["name"]),
             axes=tuple(parse_bucket_axis_name(name) for name in axes),
-            variants=tuple(GraphClassVariant.decode(variant) for variant in variants),
+            variants=tuple(GraphSpecializationVariant.decode(variant) for variant in variants),
         )
 
 
@@ -702,12 +706,12 @@ class LoopStep:
 
 @dataclass(frozen=True, slots=True)
 class Loop:
-    """The loop between a family's classes, or the declaration that it is host-owned.
+    """The loop between a family's specializations, or the declaration that it is host-owned.
 
     An autoregressive family's iteration is data-dependent: it runs until the
     model says stop, and no count in a document can say that.  ``kind: host``
     is how the vocabulary says so out loud.  The recipe still states everything
-    it CAN: the per-step graph classes in order, and who owns the state threaded
+    it CAN: the per-step graph specializations in order, and who owns the state threaded
     between steps.  What it will not do is pretend a host loop is a counted one.
     """
 
@@ -729,7 +733,7 @@ class Loop:
         ):
             raise RecipeError(
                 RecipeRefusal.LOOP_INVALID,
-                "a host-owned loop states its per-step classes, never a repeat count; "
+                "a host-owned loop states its per-step specializations, never a repeat count; "
                 "the iteration is data-dependent and belongs to the host",
             )
 
@@ -869,7 +873,7 @@ class DeclaredRunner:
 
     Typed bindings are generated from the declaration, not from this document.
     The recipe a mint emits is the DRIFT ASSERTION against it and the adopt-time
-    reference: same runners, same classes, same ingresses, or the mint compiled
+    reference: same runners, same specializations, same ingresses, or the mint compiled
     something the bindings do not describe.
     """
 
@@ -925,7 +929,7 @@ class RecipeReference:
 
 @dataclass(frozen=True, slots=True)
 class Recipe:
-    """One family's composition: its classes, its loop, and its scheduler."""
+    """One family's composition: its specializations, its loop, and its scheduler."""
 
     family: FamilyName
     buckets: tuple[BucketAxis, ...]
@@ -1167,8 +1171,8 @@ __all__ = [
     "CallSignature",
     "DeclaredRunner",
     "FamilyName",
-    "GraphClassHash",
-    "GraphClassVariant",
+    "GraphSpecializationHash",
+    "GraphSpecializationVariant",
     "IngressDigest",
     "LayoutContract",
     "Loop",
@@ -1195,7 +1199,7 @@ __all__ = [
     "bucket_of",
     "call_signature",
     "parse_bucket_axis_name",
-    "parse_class_hash",
+    "parse_specialization_hash",
     "parse_family_name",
     "parse_ingress_digest",
     "parse_layout_contract",

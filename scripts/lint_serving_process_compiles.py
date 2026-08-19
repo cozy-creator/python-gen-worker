@@ -78,7 +78,7 @@ BANNED_CALLS: Tuple[Tuple[str, ...], ...] = (
 CHILD_ONLY: Dict[str, str] = {
     "_vendor.torchcg.discovery": (
         "the trace-once-at-publish instrumented derive (tcg#41/pgw#1370): "
-        "torch.export runs per OBSERVED call to hash graph classes into the "
+        "torch.export runs per OBSERVED call to hash graph specializations into the "
         "release document. It executes at PUBLISH time — the derive driver's "
         "CPU pass inside the release image (pgw#1370/th#2134), never on a "
         "serving pod (the ruling: serving pods are ADOPT-ONLY, no trace, no "

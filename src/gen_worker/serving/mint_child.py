@@ -169,7 +169,7 @@ def compile_one(request: Mapping[str, Any]) -> Path:
         )
     import torch
 
-    from .._vendor.torchcg import CallIngress, Engine, GraphClassSpec, RuntimeCompatibility
+    from .._vendor.torchcg import CallIngress, Engine, GraphSpecialization, RuntimeCompatibility
     from .._vendor.tensorfs import LocalCAS
 
     _ensure_cuda_home(str(request.get("target_arch", "")))
@@ -180,7 +180,7 @@ def compile_one(request: Mapping[str, Any]) -> Path:
     # back CPU-placed. Values are authoritative for identity; PLACEMENT is the
     # mint's, and this is the one line that says so. Without it AOTI refuses
     # the mixed placement minutes into the compile, from inside its own
-    # assertion, naming no graph class.
+    # assertion, naming no graph specialization.
     _place_constants(program, str(request["target_arch"]))
     # tcg#55: the graph interface is DERIVED, and there is no longer a `graph=`
     # parameter to state it with. This child supplies an ExportedProgram, an
@@ -192,8 +192,8 @@ def compile_one(request: Mapping[str, Any]) -> Path:
     # either repo and are deleted upstream) or facts torchcg already derives
     # (`constant_fqns`, `literal_values`, `placement`). A stub is now
     # unrepresentable rather than merely refused.
-    spec = GraphClassSpec(
-        graph_class=str(request["graph"]),
+    spec = GraphSpecialization(
+        name=str(request["graph"]),
         target=str(request["target"]),
         program=program,
         ingress=CallIngress.decode(request["ingress"]),

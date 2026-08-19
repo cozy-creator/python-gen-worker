@@ -1,4 +1,4 @@
-"""Complete, versioned attribution over one graph-class compile.
+"""Complete, versioned attribution over one graph-specialization compile.
 
 The totals form three nested partitions.  Each level has one explicit
 residual so a new or lost phase becomes visible instead of silently changing

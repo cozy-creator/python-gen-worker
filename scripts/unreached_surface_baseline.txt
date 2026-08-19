@@ -168,8 +168,8 @@ gen_worker.boot_phases.servable_ms()
 #   pgw#1178 the same day with OWNER: Phase 1 and EXPIRY: the per-entry atom.
 #   Phase 1 traced the ~82 `compile_cache.pack` call sites and reported they
 #   are not its tail: they exercise the JIT lane's OWN format, and format 3 is
-#   one graph class keyed by `ek1` while `torch-inductor-cache` is a whole-compiled graph
-#   FX-cache tarball with no per-class identity — so porting it is a category
+#   one graph specialization keyed by `ek1` while `torch-inductor-cache` is a whole-compiled graph
+#   FX-cache tarball with no per-specialization identity — so porting it is a category
 #   error, not a task, and the format DIES. That re-assigned the three rows
 #   back to this lane, and the expiry was discharged by deleting rather than
 #   by waiting.

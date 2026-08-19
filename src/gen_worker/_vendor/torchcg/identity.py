@@ -27,10 +27,10 @@ _TOOLCHAIN_DIGEST_HEX = 16
 #: stay fail-closed.
 REQUIRED_AXES: tuple[str, ...] = ("graph", "sm", "toolchain")
 
-#: The artifact-metadata block carrying graph-class facts. Public for the same
+#: The artifact-metadata block carrying graph-specialization facts. Public for the same
 #: reason: a consumer reading a block this package no longer writes fails at
 #: run time, not at import, and its fixtures keep the obsolete shape green.
-GRAPH_CLASS_BLOCK = "graph_class"
+GRAPH_SPECIALIZATION_BLOCK = "graph_specialization"
 
 #: The artifact `kind` this package writes and refuses on read. Public for the
 #: same reason again, and defined HERE rather than in `artifact` because this
@@ -147,12 +147,12 @@ def from_artifact_metadata(metadata: Mapping[str, Any]) -> CompiledGraphKey:
     sm = metadata.get("sm")
     if not isinstance(sm, str) or not sm.strip():
         raise IdentityError("artifact records no GPU compute capability")
-    graph_class = metadata.get(GRAPH_CLASS_BLOCK)
-    if not isinstance(graph_class, Mapping):
-        raise IdentityError(f"compiled graph records no {GRAPH_CLASS_BLOCK} object")
-    graph = graph_class.get("class_hash")
+    graph_specialization = metadata.get(GRAPH_SPECIALIZATION_BLOCK)
+    if not isinstance(graph_specialization, Mapping):
+        raise IdentityError(f"compiled graph records no {GRAPH_SPECIALIZATION_BLOCK} object")
+    graph = graph_specialization.get("specialization_hash")
     if not isinstance(graph, str) or not graph.strip():
-        raise IdentityError("compiled graph records no graph-class hash")
+        raise IdentityError("compiled graph records no graph-specialization hash")
     toolchain = metadata.get("toolchain")
     if (
         not isinstance(toolchain, Mapping)

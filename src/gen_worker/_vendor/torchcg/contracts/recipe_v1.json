@@ -1,10 +1,10 @@
 {
   "authority": "torchcg recipe v1",
-  "axis": "CLASS-LEVEL only, and checkpoint-free by closed field sets: buckets, graph classes, signatures, loop and scheduler are family facts identical for every checkpoint that family serves. Weight sets, checkpoint refs, tuned values and per-request defaults are unrepresentable, so a generated family class is a TYPE whose callables are reached through a fully resolved instance (family x weight-set); two handler parameters of one family type are two independent instances. See docs/RECIPE.md G11-G16.",
-  "digest": "935d16b97cdc444ce6b837051b9ebfc4",
+  "axis": "CLASS-LEVEL only, and checkpoint-free by closed field sets: buckets, graph specializations, signatures, loop and scheduler are family facts identical for every checkpoint that family serves. Weight sets, checkpoint refs, tuned values and per-request defaults are unrepresentable, so a generated family specialization is a TYPE whose callables are reached through a fully resolved instance (family x weight-set); two handler parameters of one family type are two independent instances. See docs/RECIPE.md G11-G16.",
+  "digest": "f502e393d50049560c88ba664edd5624",
   "digest_rule": "first 32 lowercase hex of SHA-256 over the recipe document as sorted, compact, ASCII, finite JSON -- the same rule CallIngress v1 uses",
-  "host_loop_digest": "ab0c40a70740ffad33708fd9fc1b49eb",
-  "host_loop_note": "The second document. LLMs and VLMs are first class and their iteration is data-dependent -- it runs until the model says stop -- so `loop.kind` is `host`: the recipe states the per-step graph classes in order and who owns the state threaded between them, and states outright that the iteration is the host's. A counted stage under a host loop is refused. The vocabulary never pretends to describe a loop it cannot express.",
+  "host_loop_digest": "504e63b8faed73a1484c1d9b87e39316",
+  "host_loop_note": "The second document. LLMs and VLMs are first class and their iteration is data-dependent -- it runs until the model says stop -- so `loop.kind` is `host`: the recipe states the per-step graph specializations in order and who owns the state threaded between them, and states outright that the iteration is the host's. A counted stage under a host loop is refused. The vocabulary never pretends to describe a loop it cannot express.",
   "host_loop_recipe": {
     "buckets": [],
     "family": "toy_llm",
@@ -30,7 +30,7 @@
         "variants": [
           {
             "bucket": {},
-            "class_hash": "7809c4d21be3f6a5",
+            "specialization_hash": "7809c4d21be3f6a5",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 3,
@@ -106,7 +106,7 @@
         "variants": [
           {
             "bucket": {},
-            "class_hash": "6f7a3b1c8d20e594",
+            "specialization_hash": "6f7a3b1c8d20e594",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 1,
@@ -145,7 +145,7 @@
     "v": 1
   },
   "identifier_grammar": "[a-z][a-z0-9_]*, 1..48 bytes",
-  "note": "recipe_v1 is a VOCABULARY, not a DSL: it names which graph classes compose one family, the loop between them, and the scheduler block that loop runs under. It pins class identity (class hash + CallIngress v1) and never a cg-key-v1 value, so one digest is valid on every SKU; the exact key is folded at adopt from the pod's own sm and toolchain axes. Selecting a bucket for a live call is ingress_selection_v1, not this contract. Each class row also NAMES the tensor-layout contract it was traced against (an fp8-rowwise trace and a bf16 trace are different graphs); per-checkpoint layout metadata is a separate hub document, and the hub JOINS the two for the ahead-of-time compatibility verdict. Typed bindings generate from the DECLARATION-time export, and this document asserts the mint did not drift from it.",
+  "note": "recipe_v1 is a VOCABULARY, not a DSL: it names which graph specializations compose one family, the loop between them, and the scheduler block that loop runs under. It pins class identity (specialization hash + CallIngress v1) and never a cg-key-v1 value, so one digest is valid on every SKU; the exact key is folded at adopt from the pod's own sm and toolchain axes. Selecting a bucket for a live call is ingress_selection_v1, not this contract. Each class row also NAMES the tensor-layout contract it was traced against (an fp8-rowwise trace and a bf16 trace are different graphs); per-checkpoint layout metadata is a separate hub document, and the hub JOINS the two for the ahead-of-time compatibility verdict. Typed bindings generate from the DECLARATION-time export, and this document asserts the mint did not drift from it.",
   "recipe": {
     "buckets": [
       {
@@ -194,7 +194,7 @@
             "bucket": {
               "resolution": 64
             },
-            "class_hash": "4d5c1e93b6720af8",
+            "specialization_hash": "4d5c1e93b6720af8",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 1,
@@ -228,7 +228,7 @@
             "bucket": {
               "resolution": 128
             },
-            "class_hash": "5e6f2a08c9143b7d",
+            "specialization_hash": "5e6f2a08c9143b7d",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 1,
@@ -270,7 +270,7 @@
             "bucket": {
               "resolution": 64
             },
-            "class_hash": "2f91b8c40ae7d135",
+            "specialization_hash": "2f91b8c40ae7d135",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 4,
@@ -355,7 +355,7 @@
             "bucket": {
               "resolution": 64
             },
-            "class_hash": "8b1d5f36c07a294e",
+            "specialization_hash": "8b1d5f36c07a294e",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 4,
@@ -440,7 +440,7 @@
             "bucket": {
               "resolution": 128
             },
-            "class_hash": "3ab47de205c1986f",
+            "specialization_hash": "3ab47de205c1986f",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 4,
@@ -525,7 +525,7 @@
             "bucket": {
               "resolution": 128
             },
-            "class_hash": "9c2e604718fb35a0",
+            "specialization_hash": "9c2e604718fb35a0",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 4,
@@ -614,7 +614,7 @@
         "variants": [
           {
             "bucket": {},
-            "class_hash": "1c0e7a4b39d5f682",
+            "specialization_hash": "1c0e7a4b39d5f682",
             "ingress": {
               "excluded_inputs": [],
               "flat_arity": 1,
@@ -661,7 +661,7 @@
     "v": 1
   },
   "reference": {
-    "digest": "935d16b97cdc444ce6b837051b9ebfc4",
+    "digest": "f502e393d50049560c88ba664edd5624",
     "family": "toy_diffusion",
     "v": 1
   },
@@ -683,7 +683,7 @@
       "reason": "declaration_drift"
     },
     {
-      "note": "A class hash (16 hex), ingress digest (32 hex), or recipe digest (32 hex) is not exactly that many lowercase hexadecimal characters.",
+      "note": "A specialization hash (16 hex), ingress digest (32 hex), or recipe digest (32 hex) is not exactly that many lowercase hexadecimal characters.",
       "reason": "digest_invalid"
     },
     {
@@ -703,7 +703,7 @@
       "reason": "ingress_invalid"
     },
     {
-      "note": "A layout token is outside the identifier grammar, or a variant lookup left the layout unnamed on a runner that has classes for more than one. Choosing a layout is the hub's join of this document with per-checkpoint layout metadata (a SEPARATE document, different lifecycle); this contract refuses rather than guess.",
+      "note": "A layout token is outside the identifier grammar, or a variant lookup left the layout unnamed on a runner that has specializations for more than one. Choosing a layout is the hub's join of this document with per-checkpoint layout metadata (a SEPARATE document, different lifecycle); this contract refuses rather than guess.",
       "reason": "layout_invalid"
     },
     {
@@ -743,7 +743,7 @@
       "reason": "runner_unknown"
     },
     {
-      "note": "A declared runner is run by no loop stage. The loop is the composition; a class no stage runs belongs to a different family.",
+      "note": "A declared runner is run by no loop stage. The loop is the composition; a specialization no stage runs belongs to a different family.",
       "reason": "runner_unused"
     },
     {

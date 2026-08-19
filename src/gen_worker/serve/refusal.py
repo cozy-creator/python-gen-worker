@@ -25,8 +25,8 @@ inferred from a string at the wire.
 
 THE EVIDENCE IS tcg#37's VOCABULARY
 ------------------------------------
-``torchcg.selection`` is the versioned contract for ranking graph classes
-against a call. Its :class:`~torchcg.selection.ClassReport` — class name, the
+``torchcg.selection`` is the versioned contract for ranking graph specializations
+against a call. Its :class:`~torchcg.selection.SpecializationReport` — class name, the
 misses, the ordinal rung tuple — is what a refusal carries, converted here into
 frozen worker-side rows so the refusal is a value that can cross a wire and be
 counted. torchcg deliberately excludes refusal WORDING from its contract (*"a
@@ -43,8 +43,8 @@ from enum import StrEnum
 from typing import Optional, Sequence, Tuple
 
 from .._vendor.torchcg.selection import (
-    ClassReport, MissReason, SelectionOutcome)
-from ..aot_constants import GraphClassName
+    SpecializationReport, MissReason, SelectionOutcome)
+from ..aot_constants import GraphSpecializationName
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +119,13 @@ class MissKind(StrEnum):
     #: every other one.
     INSUFFICIENT_ADOPT_VRAM = "insufficient_adopt_vram"
 
-    #: tcg#37 ``no_class_admits``: the call is outside every armed class's
+    #: tcg#37 ``no_specialization_admits``: the call is outside every armed class's
     #: declared ingress. Carries the ranking.
-    NO_CLASS_ADMITS = "no_class_admits"
+    NO_CLASS_ADMITS = "no_specialization_admits"
 
-    #: tcg#37 ``class_ambiguous``: more than one class admits. A DECLARATION
+    #: tcg#37 ``specialization_ambiguous``: more than one class admits. A DECLARATION
     #: defect to surface, never a coin to flip.
-    CLASS_AMBIGUOUS = "class_ambiguous"
+    SPECIALIZATION_AMBIGUOUS = "specialization_ambiguous"
 
     #: The class this call needs is declared but not armed. On an eager-capable
     #: pod this is the honest "the background compile has not reached it yet";
@@ -151,7 +151,7 @@ DISPOSITIONS: dict[MissKind, Disposition] = {
     MissKind.ARM_REFUSED: Disposition.ROUTE,
     MissKind.INSUFFICIENT_ADOPT_VRAM: Disposition.ROUTE,
     MissKind.NO_CLASS_ADMITS: Disposition.REFUSE,
-    MissKind.CLASS_AMBIGUOUS: Disposition.REFUSE,
+    MissKind.SPECIALIZATION_AMBIGUOUS: Disposition.REFUSE,
     MissKind.CLASS_UNARMED: Disposition.ROUTE,
     MissKind.MINT_FORBIDDEN: Disposition.REFUSE,
 }
@@ -188,21 +188,21 @@ class MissNote:
 
 @dataclass(frozen=True, slots=True)
 class CandidateMiss:
-    """One graph class that did NOT admit the call, and how far off it was.
+    """One graph specialization that did NOT admit the call, and how far off it was.
 
-    ``distance`` is tcg#37's :meth:`~torchcg.selection.ClassReport.distance` —
+    ``distance`` is tcg#37's :meth:`~torchcg.selection.SpecializationReport.distance` —
     the SORTED rung tuple. It is ORDINAL ONLY: the contract says so, and a
     reader that treats it as a score is reading a rank as a magnitude.
     """
 
-    graph_class: GraphClassName
+    graph_specialization: GraphSpecializationName
     distance: Tuple[int, ...] = ()
     misses: Tuple[MissNote, ...] = ()
 
     @classmethod
-    def of(cls, report: ClassReport) -> "CandidateMiss":
+    def of(cls, report: SpecializationReport) -> "CandidateMiss":
         return cls(
-            graph_class=GraphClassName(report.name),
+            graph_specialization=GraphSpecializationName(report.name),
             distance=tuple(report.distance),
             misses=tuple(MissNote.of(m) for m in report.misses),
         )
@@ -212,7 +212,7 @@ class CandidateMiss:
         more = len(self.misses) - MISS_SAMPLE
         if more > 0:
             notes = f"{notes} (+{more})"
-        return f"{self.graph_class}[{'.'.join(str(r) for r in self.distance)}] {notes}"
+        return f"{self.graph_specialization}[{'.'.join(str(r) for r in self.distance)}] {notes}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,10 +228,10 @@ class AdoptOnlyRefusal:
     function: str = ""
     family: str = ""
     compiled_graph_key: str = ""
-    graph_class: Optional[GraphClassName] = None
+    graph_specialization: Optional[GraphSpecializationName] = None
     selection: Optional[SelectionOutcome] = None
     candidates: Tuple[CandidateMiss, ...] = ()
-    unarmed: Tuple[GraphClassName, ...] = ()
+    unarmed: Tuple[GraphSpecializationName, ...] = ()
     detail: str = ""
     #: Set only by :func:`report`, so a refusal that reached the wire is
     #: distinguishable from one that was built and dropped.
@@ -258,8 +258,8 @@ class AdoptOnlyRefusal:
             f"key={self.compiled_graph_key or '-'}",
             f"disposition={self.disposition.value}",
         ]
-        if self.graph_class:
-            parts.append(f"graph_class={self.graph_class}")
+        if self.graph_specialization:
+            parts.append(f"graph_specialization={self.graph_specialization}")
         if self.selection is not None:
             parts.append(f"selection={self.selection.value}")
         if self.unarmed:
@@ -292,7 +292,7 @@ class AdoptOnlyRefused(RuntimeError):
 
 def from_selection(
     outcome: SelectionOutcome,
-    ranked: Sequence[ClassReport],
+    ranked: Sequence[SpecializationReport],
     ambiguous: Sequence[str],
     *,
     function: str = "",
@@ -311,11 +311,11 @@ def from_selection(
     """
     if outcome is SelectionOutcome.ADMITTED:
         raise ValueError("an admitted selection is not a refusal")
-    if outcome is SelectionOutcome.CLASS_AMBIGUOUS:
+    if outcome is SelectionOutcome.SPECIALIZATION_AMBIGUOUS:
         return AdoptOnlyRefusal(
-            kind=MissKind.CLASS_AMBIGUOUS, function=function, family=family,
+            kind=MissKind.SPECIALIZATION_AMBIGUOUS, function=function, family=family,
             compiled_graph_key=compiled_graph_key, selection=outcome,
-            unarmed=tuple(GraphClassName(n) for n in ambiguous),
+            unarmed=tuple(GraphSpecializationName(n) for n in ambiguous),
             detail=detail or (
                 f"{len(ambiguous)} classes admit this call — the declaration "
                 f"does not discriminate them by ingress contract"))
@@ -324,7 +324,7 @@ def from_selection(
         kind=kind, function=function, family=family,
         compiled_graph_key=compiled_graph_key, selection=outcome,
         candidates=tuple(CandidateMiss.of(r) for r in ranked),
-        unarmed=tuple(GraphClassName(n) for n in unarmed),
+        unarmed=tuple(GraphSpecializationName(n) for n in unarmed),
         detail=detail)
 
 
@@ -345,7 +345,7 @@ def report(refusal: AdoptOnlyRefusal) -> AdoptOnlyRefusal:
     return AdoptOnlyRefusal(
         kind=refusal.kind, function=refusal.function, family=refusal.family,
         compiled_graph_key=refusal.compiled_graph_key,
-        graph_class=refusal.graph_class, selection=refusal.selection,
+        graph_specialization=refusal.graph_specialization, selection=refusal.selection,
         candidates=refusal.candidates, unarmed=refusal.unarmed,
         detail=refusal.detail, reported=True)
 

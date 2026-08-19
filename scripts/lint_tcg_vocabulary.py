@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pgw#1299: TCG owns the compiled-graph metadata vocabulary; nobody respells it.
 
-`torchcg` exports `GRAPH_CLASS_BLOCK` and `ARTIFACT_KIND` for one
+`torchcg` exports `GRAPH_SPECIALIZATION_BLOCK` and `ARTIFACT_KIND` for one
 reason: a consumer that spells the string instead of importing it does not fail
 at import when TCG renames the key. It fails at run time, silently, and in the
 worst possible shape — every one of these sites is a `.get(...)` on an
@@ -12,26 +12,38 @@ warning.
 This has now been filed three times (pgw#1288 deleted four sites, pgw#1299
 found fourteen more). Remembering failed; this is the fence.
 
-WHAT IT LOOKS FOR is an AST string CONSTANT equal to `graph_class` or
+WHAT IT LOOKS FOR is an AST string CONSTANT equal to `graph_specialization` or
 `aot-inductor` anywhere under `src/gen_worker/`. AST rather than grep, so prose
 in a docstring or a comment is not a finding — the vocabulary is only at risk
 where it is a value the interpreter compares against.
 
 THERE IS NO PATH ALLOWLIST, deliberately, for the reason
-`lint_repo_ref_pins.py` states: a filename lets a real respelling hide. The one
+`lint_repo_ref_pins.py` states: a filename lets a real respelling hide. A
 legitimate use is recognised by a PROOF AT THE LINE instead — a
 `# tcg-vocab: <reason>` comment. Delete the reason and the line goes red.
 
-The legitimate use is real and worth naming, because conflating it with the
-metadata block would be its own bug. `GraphClassDeclaration.graph_class` is a
-DATACLASS FIELD holding a class NAME; `GRAPH_CLASS_BLOCK` is the
-ARTIFACT-METADATA BLOCK key. They are equal strings from different vocabularies.
-`boot_key.serialize_declaration` writes the field name into pgw's own boot-memo
-wire format, and a TCG field rename there is an `AttributeError` on
-`declaration.graph_class` — LOUD, which is precisely the failure mode this lint
-exists to prevent, already handled by Python. Substituting `GRAPH_CLASS_BLOCK`
-there would invent a coupling that does not exist: a rename of the metadata
-block would silently change pgw's on-disk boot memo format.
+CORRECTED at tcg#56 (2026-08-19), because the paragraph that stood here had gone
+stale in BOTH of its claims and a reader would have planned against it.
+
+It said the exemption existed because `GraphClassDeclaration.graph_class` (a
+dataclass field holding a display NAME) and `GRAPH_CLASS_BLOCK` (the
+artifact-metadata block key) were "equal strings from different vocabularies".
+That collision is GONE: tcg#56 renamed the field to `.name` and the block to
+`graph_specialization`, so they are now two different words and cannot be
+confused for one another. The ambiguity this paragraph warned about was itself
+an argument for the rename.
+
+It also cited `boot_key.serialize_declaration` as the one caller that must spell
+the field. **That module and that function no longer exist in this tree** — grep
+before believing it. There are currently ZERO `# tcg-vocab:` markers under
+`src/gen_worker/`, so the exemption has no users at all. It is kept because the
+mechanism is right and a future caller may earn one, not because anything needs
+it today.
+
+What the fence is still for is unchanged and is the whole point: every site is a
+`.get(...)` on an artifact-metadata dict, so a respelling returns `None`, the
+arming path reads an un-armed compiled graph as a cache miss, and the fleet
+re-mints. That failure is SILENT. Import the constant; never spell the string.
 
 Usage:
 
@@ -59,7 +71,7 @@ DEFAULT_ROOT = REPO / "src" / "gen_worker"
 
 #: value -> the authority a consumer must import from `torchcg`.
 OWNED: dict[str, str] = {
-    "graph_class": "GRAPH_CLASS_BLOCK",
+    "graph_specialization": "GRAPH_SPECIALIZATION_BLOCK",
     "aot-inductor": "ARTIFACT_KIND",
 }
 
@@ -127,26 +139,28 @@ def selftest() -> int:
     ok = True
     with tempfile.TemporaryDirectory() as tmp:
         bad = Path(tmp) / "bad.py"
-        bad.write_text('x = meta.get("graph_class")\ny = dict(kind="aot-inductor")\n')
+        bad.write_text('x = meta.get("graph_specialization")\ny = dict(kind="aot-inductor")\n')
         hits = scan_text(bad.read_text(), str(bad))
         if len(hits) != 2:
             print(f"SELFTEST FAIL: expected 2 findings, got {hits}")
             ok = False
 
         exempt = Path(tmp) / "exempt.py"
-        exempt.write_text('x = {"graph_class": d.graph_class}  # tcg-vocab: declaration field\n')
+        exempt.write_text(
+            'x = {"graph_specialization": 1}  # tcg-vocab: literal key in a test fixture\n'
+        )
         if scan_text(exempt.read_text(), str(exempt)):
             print("SELFTEST FAIL: a classified line must not be a finding")
             ok = False
 
         bare = Path(tmp) / "bare.py"
-        bare.write_text('x = meta.get("graph_class")  # tcg-vocab:\n')
+        bare.write_text('x = meta.get("graph_specialization")  # tcg-vocab:\n')
         if not scan_text(bare.read_text(), str(bare)):
             print("SELFTEST FAIL: a marker with no reason is not a proof")
             ok = False
 
         prose = Path(tmp) / "prose.py"
-        prose.write_text('"""Reads the graph_class block of an aot-inductor artifact."""\n')
+        prose.write_text('"""Reads the graph_specialization block of an aot-inductor artifact."""\n')
         if scan_text(prose.read_text(), str(prose)):
             print("SELFTEST FAIL: prose in a docstring is not a respelling")
             ok = False

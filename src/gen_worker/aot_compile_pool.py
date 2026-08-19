@@ -1,6 +1,6 @@
 """pgw#809: compile a compiled graph's entries K-wide instead of one at a time.
 
-A pgw#758 compiled graph is N independent graph-class entries; an sdxl compiled graph is 18.
+A pgw#758 compiled graph is N independent graph-specialization entries; an sdxl compiled graph is 18.
 ``aot_mint`` exports them from the live pipeline (serial by construction —
 one pipeline, one card, and the branch arm is toggled once for the whole
 branchless group) and then AOTI-compiles each one at ~420 s. The compiles
@@ -32,15 +32,15 @@ overlapped with anything: it is the first 36.04 s (median, P0-E §5c) of every
 child's serial life, ~22 min of a 36-class sdxl mint.
 
 So the program does not cross. The child receives the SHARE — which declared
-graph classes are its — plus the four facts it needs to build the weight-free
+graph specializations are its — plus the four facts it needs to build the weight-free
 pipeline itself (``function``, ``modules``, ``slots``, ``cfg``, exactly what
 ``boot_key.TraceJob`` carries), traces its rows with
 ``aot_mint.trace_for_key(compile_now=True)``, and packs each one with
-``aot_mint.pack_graph_classes``. One address space from trace to artifact.
+``aot_mint.pack_graph_specializations``. One address space from trace to artifact.
 
 The gates travel with the program, because they always ran beside it: every
 package-side gate (``program_package_drift``, ``eliminated_constants``,
-``input_contract``) is inside ``pack_graph_classes``, so it now runs in the
+``input_contract``) is inside ``pack_graph_specializations``, so it now runs in the
 child, against the program the child itself traced. That is strictly tighter
 than the old split — the parent used to gate ITS program against the CHILD's
 package, which could only ever catch divergence, and divergence is exactly
@@ -97,13 +97,13 @@ ENTRY_REPORT_NAME = "report.json"
 #: the end — so on the two 2026-08-18 fleet pods a pool 46 minutes into real
 #: compile work rolled up as `pool_busy_s 0 / n_entries 0` and was read as
 #: "the pool never dispatches" (pgw#1371's blocking-defect header; disproved
-#: against pod zco8e1bx0t1jgk, which completed the identical 36-class shape at
+#: against pod zco8e1bx0t1jgk, which completed the identical 36-specialization shape at
 #: 0.9989 efficiency in 3608 s). The child therefore writes one row per packed
-#: class into ``<slot>/classes/NNN.json`` the moment the artifact is on disk,
+#: specialization into ``<slot>/specializations/NNN.json`` the moment the artifact is on disk,
 #: and a position file at every phase boundary; the parent harvests both every
 #: poll. Progress rows are TELEMETRY AND LIVENESS EVIDENCE, never identity:
 #: the report stays the share's terminus and the artifact stays the atom.
-CLASS_ROW_DIRNAME = "classes"
+SPECIALIZATION_ROW_DIRNAME = "specializations"
 POSITION_NAME = "position.json"
 
 #: pgw#840: the directory that must be on the child's path for
@@ -629,7 +629,7 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     """One compile child's SHARE of a mint, as a file a human can re-run.
 
     pgw#1215 (th#1834 Phase 3 step 2b) turned this struct inside out. It used
-    to name ONE already-exported graph class and the file its
+    to name ONE already-exported graph specialization and the file its
     ``ExportedProgram`` had been ``torch.export.save``d to; the child
     ``torch.export.load``ed it back, at a **36.04 s median** (pgw#1216, P0-E
     §5c) — ~22 min of a 36-class sdxl mint spent deserializing what another
@@ -638,7 +638,7 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     So the program does not cross at all any more. This names what the child
     needs to BUILD the weight-free pipeline itself (``function`` / ``modules``
     / ``slots`` / ``cfg`` — the same four ``boot_key.TraceJob`` carries, and
-    for the same reason) plus WHICH declared graph classes are its share.
+    for the same reason) plus WHICH declared graph specializations are its share.
     The child then traces, compiles and packs them in ONE address space.
 
     Three fields died with the round trip and are not coming back, because the
@@ -664,7 +664,7 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     share: str = ""
     share_index: int = 0
     share_count: int = 1
-    #: pgw#1371 holes-only: the ORDERED graph-class names this mint exists to
+    #: pgw#1371 holes-only: the ORDERED graph-specialization names this mint exists to
     #: produce — the HOLES, i.e. the classes with no artifact for this pod's
     #: (lane x sm) anywhere the caller could see (store, boot adopt, disk).
     #: Empty means "the whole declaration" (the pre-holes behaviour, and the
@@ -675,7 +675,7 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     #: reported loudly (a stale hole list) and never fail the mint — coverage
     #: accretes, and a short holes mint is a smaller mint, not a short publish.
     hole_classes: Tuple[str, ...] = ()
-    #: pgw#1215 step 4: declared graph classes this pod ALREADY HAS as packed
+    #: pgw#1215 step 4: declared graph specializations this pod ALREADY HAS as packed
     #: artifacts, from an earlier attempt of the same mint. A child skips them
     #: before it exports — not after, and not at pack time — so a retry pays
     #: neither the trace nor the compile for work that is already on disk.
@@ -696,12 +696,12 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     device_lock: str = ""
 
 
-class PackedGraphClass(msgspec.Struct, frozen=True, kw_only=True):
-    """One graph class the child traced, compiled AND packed (pgw#1215).
+class PackedGraphSpecialization(msgspec.Struct, frozen=True, kw_only=True):
+    """One graph specialization the child traced, compiled AND packed (pgw#1215).
 
     The child hands back an ARTIFACT, not loose inductor files: it holds the
     ``_MintedEntry`` row in its own address space, so it is the only process
-    that can run ``aot_mint.pack_graph_classes`` over it. ``metadata`` is
+    that can run ``aot_mint.pack_graph_specializations`` over it. ``metadata`` is
     canonical JSON rather than a decoded map for the reason
     ``boot_key.TraceReport.blocks`` is: the parent hands it straight on, and a
     re-encode on either side is a place for two canonicalizations to disagree
@@ -721,9 +721,9 @@ class PackedGraphClass(msgspec.Struct, frozen=True, kw_only=True):
 class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     entry: str
     status: str = ""
-    #: pgw#1215: what this child produced, one row per graph class. Replaces
+    #: pgw#1215: what this child produced, one row per graph specialization. Replaces
     #: the loose-file list — the files never leave the child now.
-    classes: List[PackedGraphClass] = []
+    classes: List[PackedGraphSpecialization] = []
     #: How many classes the WHOLE declaration produced on this child's
     #: pipeline. Every child reports it, all must agree, and the union of the
     #: shares must be exactly that many — which proves the class set is whole
@@ -869,7 +869,7 @@ class _Running:
     #: share's terminus remains authoritative; these exist so a mint that dies
     #: mid-share still names what landed, and so the silence window judges
     #: progress toward the GOAL rather than only CPU heat.
-    classes_landed: List[PackedGraphClass] = dataclass_field(
+    classes_landed: List[PackedGraphSpecialization] = dataclass_field(
         default_factory=list)
     #: The child's last position beat (verbatim file content) and when the
     #: parent saw it change.
@@ -931,7 +931,7 @@ class PoolLedger:
     #: which is the pass every CHILD used to pay.
     seal_seed_s: float = 0.0
     entries: int = 0
-    #: pgw#1371: graph classes the children have streamed as PACKED, live.
+    #: pgw#1371: graph specializations the children have streamed as PACKED, live.
     #: ``busy_s`` above counts only REAPED shares — on the 2026-08-18 fleet
     #: pods that read a 46-minute, ~full-utilization pool as `pool_busy_s 0 /
     #: pool_efficiency 0.0` because no 18-class share had reached its report
@@ -1098,9 +1098,9 @@ def _read_report(path: Path) -> Optional[EntryReport]:
         return None
 
 
-def _read_class_row(path: Path) -> Optional[PackedGraphClass]:
+def _read_class_row(path: Path) -> Optional[PackedGraphSpecialization]:
     try:
-        return msgspec.json.decode(path.read_bytes(), type=PackedGraphClass)
+        return msgspec.json.decode(path.read_bytes(), type=PackedGraphSpecialization)
     except (OSError, msgspec.DecodeError, msgspec.ValidationError):
         return None
 
@@ -1230,17 +1230,17 @@ def _dir_mib(root: Path) -> Optional[float]:
 
 
 class EntryCompilePool:
-    """Trace, compile and pack a family's declared graph classes K-wide, out
+    """Trace, compile and pack a family's declared graph specializations K-wide, out
     of process.
 
     Not a general executor: it exists to hold pgw#809's three invariants —
-    named failure, group-wide sibling teardown, and assembly by graph-class
+    named failure, group-wide sibling teardown, and assembly by graph-specialization
     NAME rather than completion order.
 
     pgw#1215 changed what a child IS. It used to receive one already-exported
     ``ExportedProgram`` on disk; it now receives a SHARE of the declaration
     (``rows[i::K]``) and builds its own weight-free pipeline, so the process
-    that traces a graph class is the process that compiles and packs it. The
+    that traces a graph specialization is the process that compiles and packs it. The
     parent therefore stages nothing, holds no program, and produces nothing
     the children consume — which is why there is no producer iterator here any
     more: K children are dispatched once, and the loop only supervises.
@@ -1293,7 +1293,7 @@ class EntryCompilePool:
         #: pgw#1205: the same reading, kept PER ENTRY instead of collapsed.
         #: `peak_device_bytes` above answers "how big was the biggest compile"
         #: — one number for a whole compiled graph, which is the wrong granularity for
-        #: the only question anyone asks of it ("what does THIS graph class
+        #: the only question anyone asks of it ("what does THIS graph specialization
         #: cost a card"). Both survive: the max is what the existing phase-table
         #: field publishes, and these rows are what gets banked with their
         #: provenance. entry name -> (allocated, reserved).
@@ -1309,15 +1309,15 @@ class EntryCompilePool:
         self.oom_basis = ""
         self.entry_seconds: Dict[str, float] = {}
         self.entry_phases: Dict[str, Dict[str, float]] = {}
-        #: share -> how many graph classes the WHOLE declaration produced on
+        #: share -> how many graph specializations the WHOLE declaration produced on
         #: that child's pipeline. The evidence `_assert_shares_whole` reads.
         self.entry_declared: Dict[str, int] = {}
-        #: pgw#1215: share -> the graph classes a REFUSING child had already
+        #: pgw#1215: share -> the graph specializations a REFUSING child had already
         #: packed before it refused. They exist on disk; recording them is how
         #: "this share produced nothing" and "this share produced most of a
         #: compiled graph and then hit one bad class" stop reading the same.
-        self.refused_classes: Dict[str, List[PackedGraphClass]] = {}
-        #: pgw#1215: graph class -> that class's OWN `export_s`/`compile_s`
+        self.refused_classes: Dict[str, List[PackedGraphSpecialization]] = {}
+        #: pgw#1215: graph specialization -> that class's OWN `export_s`/`compile_s`
         #: and inductor phase split, as the child measured them. The pool's
         #: other tables are per SHARE, and a share is several classes — the
         #: only granularity anybody asks about a compile is the class.
@@ -1334,7 +1334,7 @@ class EntryCompilePool:
         #: ONCE per packed class — from the live harvest when the child
         #: streams, from the report otherwise — so the supervisor's
         #: per-class adopt/publish can never double-adopt one class.
-        self._on_row: Optional[Callable[[PackedGraphClass], None]] = None
+        self._on_row: Optional[Callable[[PackedGraphSpecialization], None]] = None
         self._rows_fired: set[str] = set()
         #: share -> how many of its rows matched the job's hole list
         #: (``EntryReport.targeted_classes``); -1 = the child reported none.
@@ -1428,11 +1428,11 @@ class EntryCompilePool:
         self, template: EntryJob,
         *, on_share: Optional[Callable[[str, int, int], None]] = None,
         on_class: Optional[Callable[[str, int, int], None]] = None,
-        on_row: Optional[Callable[[PackedGraphClass], None]] = None,
+        on_row: Optional[Callable[[PackedGraphSpecialization], None]] = None,
         should_abandon: Optional[Callable[[], bool]] = None,
-    ) -> Dict[str, PackedGraphClass]:
+    ) -> Dict[str, PackedGraphSpecialization]:
         """Dispatch this mint's declared classes K-wide and collect what the
-        children packed. ``{graph class name: PackedGraphClass}``.
+        children packed. ``{graph specialization name: PackedGraphSpecialization}``.
 
         ``template`` carries the WHAT (function, modules, slots, cfg,
         execution lane, out_dir); this method stamps the WHICH (share index of
@@ -1443,7 +1443,7 @@ class EntryCompilePool:
 
         Raises :class:`EntryCompileFailed` naming the FIRST share to fail,
         after tearing down every sibling group. Returns a dict ordered by
-        graph-class NAME, never by completion, so what gets packed cannot
+        graph-specialization NAME, never by completion, so what gets packed cannot
         depend on which child finished first.
 
         ``on_share(name, done, total)`` (pgw#824) fires as each share lands.
@@ -1476,7 +1476,7 @@ class EntryCompilePool:
         """
         width = max(1, int(self.width.workers))
         running: List[_Running] = []
-        done: Dict[str, PackedGraphClass] = {}
+        done: Dict[str, PackedGraphSpecialization] = {}
         by_share: Dict[str, List[str]] = {}
         failure: Optional[EntryCompileFailed] = None
         #: Every child reports how many classes the WHOLE declaration produced
@@ -1553,7 +1553,7 @@ class EntryCompilePool:
                     if packed_row.name in done:
                         failure = EntryCompileFailed(
                             finished.entry,
-                            f"{finished.entry}: graph class "
+                            f"{finished.entry}: graph specialization "
                             f"{packed_row.name!r} was "
                             f"packed by two shares — the declaration's row "
                             f"order is not stable across this pool's "
@@ -1628,12 +1628,12 @@ class EntryCompilePool:
             raise EntryCompileFailed(
                 "pool",
                 f"none of the {width} compile child(ren) reported how many "
-                f"graph classes this family declares, so there is no evidence "
+                f"graph specializations this family declares, so there is no evidence "
                 f"the shares cover it")
         if len(counts) > 1:
             raise EntryCompileFailed(
                 "pool",
-                f"the compile children disagree about how many graph classes "
+                f"the compile children disagree about how many graph specializations "
                 f"this family declares ({sorted(counts)!r} across "
                 f"{sorted(declared)!r}) — they composed different pipelines, "
                 f"so their shares do not partition one declaration")
@@ -1641,7 +1641,7 @@ class EntryCompilePool:
         if len(done) + int(have) != want:
             raise EntryCompileFailed(
                 "pool",
-                f"the {width} share(s) packed {len(done)} graph class(es) "
+                f"the {width} share(s) packed {len(done)} graph specialization(es) "
                 + (f"beside {have} already held " if have else "")
                 + f"but every child reported {want} declared — "
                 f"rows[i::{width}] did not partition the declaration and this "
@@ -1685,7 +1685,7 @@ class EntryCompilePool:
         if len(done) != targeted - skipped:
             raise EntryCompileFailed(
                 "pool",
-                f"the {width} share(s) packed {len(done)} graph class(es) "
+                f"the {width} share(s) packed {len(done)} graph specialization(es) "
                 f"but their shares matched {targeted} of the "
                 f"{len(template.hole_classes)} named hole(s)"
                 + (f" ({skipped} already held)" if skipped else "")
@@ -1695,7 +1695,7 @@ class EntryCompilePool:
         if stale > 0:
             detail = (
                 f"{stale} of {len(set(template.hole_classes))} named hole(s) "
-                f"matched NO declared graph class on any child's pipeline — "
+                f"matched NO declared graph specialization on any child's pipeline — "
                 f"the hole list is stale against this declaration; the "
                 f"{len(done)} matched class(es) minted normally")
             logger.warning("aot-pool: %s", detail)
@@ -1889,7 +1889,7 @@ class EntryCompilePool:
         """
         advanced = False
         slot = Path(row.job.report).parent
-        rows_dir = slot / CLASS_ROW_DIRNAME
+        rows_dir = slot / SPECIALIZATION_ROW_DIRNAME
         try:
             names = sorted(
                 p for p in rows_dir.iterdir() if p.suffix == ".json")
@@ -1907,7 +1907,7 @@ class EntryCompilePool:
             self.class_spans[packed.name] = dict(packed.spans or {})
             advanced = True
             logger.info(
-                "aot-pool: %s landed graph class %s live (%d landed pool-wide)",
+                "aot-pool: %s landed graph specialization %s live (%d landed pool-wide)",
                 row.entry, packed.name, self.ledger.classes_landed)
             if self._on_class is not None:
                 try:
@@ -1927,7 +1927,7 @@ class EntryCompilePool:
             advanced = True
         return advanced
 
-    def _fire_row(self, packed: PackedGraphClass) -> None:
+    def _fire_row(self, packed: PackedGraphSpecialization) -> None:
         """Deliver one packed class to ``on_row`` EXACTLY ONCE (pgw#1371).
 
         Deduplicated by class name across both arrival routes — the live
@@ -2001,7 +2001,7 @@ class EntryCompilePool:
             f"{'unreadable' if row.cpu_s is None else f'{row.cpu_s:.1f}s'} "
             f"and its work dir "
             f"{'unreadable' if row.work_mib is None else f'{row.work_mib:.1f}MiB'} "
-            f"are both flat, no graph class landed and its position beat is "
+            f"are both flat, no graph specialization landed and its position beat is "
             f"silent ({len(row.classes_landed)} class(es) landed before the "
             f"silence; last position "
             f"{row.position.strip()[:120] or '<none>'}). It is wedged, not "
@@ -2031,7 +2031,7 @@ class EntryCompilePool:
             self.entry_device_peaks[entry] = (
                 max(held_a, allocated), max(held_r, reserved))
 
-    def _collect(self, row: _Running) -> List[PackedGraphClass]:
+    def _collect(self, row: _Running) -> List[PackedGraphSpecialization]:
         elapsed = time.monotonic() - row.started
         reap_epoch = time.time()
         self.entry_seconds[row.entry] = round(elapsed, 2)
@@ -2043,7 +2043,7 @@ class EntryCompilePool:
             # PARENT's signal and says nothing about the compile. The report
             # carries the same classification the exit code does, so read it
             # there and let the ladder run unchanged. Without this a share
-            # that packed every one of its graph classes would be reported as
+            # that packed every one of its graph specializations would be reported as
             # a signal death and its artifacts thrown away.
             code = EXIT_COMPILED if report.status == COMPILED else EXIT_REFUSED
         # pgw#1309: BEFORE the gates below, every one of which can raise.
@@ -2086,7 +2086,7 @@ class EntryCompilePool:
                 raise EntryCompileFailed(
                     row.entry,
                     f"{row.entry}: child reported {len(report.classes)} packed "
-                    f"graph class(es) but {len(missing)} artifact(s) do not "
+                    f"graph specialization(es) but {len(missing)} artifact(s) do not "
                     f"exist (first: {missing[0] or '<no path>'}) — the pool's "
                     f"out_dir {row.job.out_dir!r} is not visible to this "
                     f"process")
@@ -2099,12 +2099,12 @@ class EntryCompilePool:
             self.entry_overlays[row.entry] = dict(report.overlays or {})
             self.entry_metrics_raw[row.entry] = dict(report.metrics_raw or {})
             # pgw#1205's per-class row, at the granularity the child measured
-            # it: one share is several graph classes, and "how big was the
+            # it: one share is several graph specializations, and "how big was the
             # biggest compile in this SHARE" answers nothing anybody asks.
             for packed in report.classes:
                 self.class_spans[packed.name] = dict(packed.spans or {})
             logger.info(
-                "aot-pool: %s packed %d graph class(es) in %.1fs spans=%s",
+                "aot-pool: %s packed %d graph specialization(es) in %.1fs spans=%s",
                 row.entry, len(report.classes), elapsed,
                 self.entry_phases[row.entry])
             return list(report.classes)
@@ -2353,7 +2353,7 @@ def _exit_note(code: Optional[int]) -> str:
 
 
 __all__ = [
-    "CLASS_ROW_DIRNAME",
+    "SPECIALIZATION_ROW_DIRNAME",
     "CODE_DIGEST",
     "COMPILED",
     "POSITION_NAME",

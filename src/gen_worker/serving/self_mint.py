@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 
 #: The counted observable. ``compile:`` prefixes into
 #: :data:`gen_worker.progress.STALL_WINDOW_S`'s 600s window, which is the
-#: right order of magnitude for one inductor compile of one graph class.
+#: right order of magnitude for one inductor compile of one graph specialization.
 COUNTER = "compile:self_mint_graphs"
 
 #: The activity kind. Deliberately the one the hub ALREADY consumes rather

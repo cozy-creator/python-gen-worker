@@ -14,11 +14,11 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import IO, Any, BinaryIO, cast
 
-from .declaration import DeclarationError, GraphClassDeclaration, _update_literal_digest
+from .declaration import DeclarationError, GraphSpecializationDeclaration, _update_literal_digest
 from .host_isa import HostISAError, _validate_host_facts
 from .identity import (
     ARTIFACT_KIND,
-    GRAPH_CLASS_BLOCK,
+    GRAPH_SPECIALIZATION_BLOCK,
     from_artifact_metadata,
     is_compiled_graph_key,
 )
@@ -63,7 +63,7 @@ _TOP_LEVEL_FIELDS = frozenset(
         _COMPILED_GRAPH_FORMAT_AXIS,
         "kind",
         "compiled_graph_key",
-        GRAPH_CLASS_BLOCK,
+        GRAPH_SPECIALIZATION_BLOCK,
         "sm",
         "toolchain",
         "host_isa",
@@ -77,7 +77,7 @@ _TOP_LEVEL_FIELDS = frozenset(
 #: consumer may extend — it is the closed answer to "what can a compiled graph
 #: state about itself".
 #:
-#: Public for the same reason `REQUIRED_AXES` and `GRAPH_CLASS_BLOCK` are: a
+#: Public for the same reason `REQUIRED_AXES` and `GRAPH_SPECIALIZATION_BLOCK` are: a
 #: consumer that re-declares the set fences a COPY, and the copy drifts. The
 #: field set needs it more sharply than the axes do, because the failure is
 #: silent — a consumer that assumes a field this package does not write reads
@@ -112,12 +112,12 @@ _GRAPH_CLASS_FIELDS = frozenset(
     (
         "name",
         "target",
-        "class_hash",
+        "specialization_hash",
         "graph",
         "graph_witness",
         "range_digest",
         "fork",
-        "class_dims",
+        "specialization_dims",
         "strict",
         "lora_bucket",
         "literal_values",
@@ -140,18 +140,18 @@ def _fsync_dir(path: Path) -> None:
         os.close(descriptor)
 
 
-def _validated_constants(graph_class: Mapping[str, Any]) -> list[dict[str, Any]]:
-    constants = graph_class.get("constants")
+def _validated_constants(graph_specialization: Mapping[str, Any]) -> list[dict[str, Any]]:
+    constants = graph_specialization.get("constants")
     if not isinstance(constants, list):
-        raise ArtifactError("graph_class constants must be an array")
+        raise ArtifactError("graph specialization constants must be an array")
     checked: list[dict[str, Any]] = []
     fqns: set[str] = set()
     for index, row in enumerate(constants):
         if not isinstance(row, Mapping):
-            raise ArtifactError("graph_class constant must be an object")
+            raise ArtifactError("graph specialization constant must be an object")
         if set(row) != _CONSTANT_FIELDS:
             raise ArtifactError(
-                "graph_class constant "
+                "graph specialization constant "
                 f"{index} fields must be exactly {sorted(_CONSTANT_FIELDS)!r}"
             )
         fqn = row.get("fqn")
@@ -159,23 +159,25 @@ def _validated_constants(graph_class: Mapping[str, Any]) -> list[dict[str, Any]]
         dtype = row.get("dtype")
         shape = row.get("shape")
         if not isinstance(fqn, str) or not fqn or fqn != fqn.strip():
-            raise ArtifactError(f"graph_class constant {index} fqn must be a non-empty string")
+            raise ArtifactError(
+                f"graph specialization constant {index} fqn must be a non-empty string"
+            )
         if fqn in fqns:
-            raise ArtifactError(f"graph_class constants contain duplicate fqn {fqn!r}")
+            raise ArtifactError(f"graph specialization constants contain duplicate fqn {fqn!r}")
         if source not in _CONSTANT_SOURCES:
             raise ArtifactError(
-                "graph_class constant "
+                "graph specialization constant "
                 f"{index} source must be one of {sorted(_CONSTANT_SOURCES)!r}"
             )
         if not isinstance(dtype, str) or not dtype or dtype != dtype.strip():
             raise ArtifactError(
-                f"graph_class constant {index} dtype must be a non-empty string"
+                f"graph specialization constant {index} dtype must be a non-empty string"
             )
         if not isinstance(shape, list) or not all(
             type(dimension) is int and dimension >= 0 for dimension in shape
         ):
             raise ArtifactError(
-                "graph_class constant "
+                "graph specialization constant "
                 f"{index} shape must be an array of non-negative integers"
             )
         fqns.add(fqn)
@@ -204,10 +206,10 @@ def _bounded_chunks(source: BinaryIO, offset: int, size: int) -> Iterator[bytes]
 
 
 def _verify_literals(path: Path | None, metadata: Mapping[str, Any]) -> None:
-    graph_class = cast(Mapping[str, Any], metadata[GRAPH_CLASS_BLOCK])
+    graph_specialization = cast(Mapping[str, Any], metadata[GRAPH_SPECIALIZATION_BLOCK])
     literal_rows = {
         cast(str, row["fqn"]): row
-        for row in cast(list[dict[str, Any]], graph_class["constants"])
+        for row in cast(list[dict[str, Any]], graph_specialization["constants"])
         if row["source"] == "literal"
     }
     if not literal_rows:
@@ -215,7 +217,9 @@ def _verify_literals(path: Path | None, metadata: Mapping[str, Any]) -> None:
             raise ArtifactError("artifact carries a literal payload but declares no literals")
         return
     if path is None:
-        raise ArtifactError("graph_class declares literal constants but carries no literal payload")
+        raise ArtifactError(
+            "graph specialization declares literal constants but carries no literal payload"
+        )
 
     try:
         total_size = path.stat().st_size
@@ -321,9 +325,9 @@ def _verify_literals(path: Path | None, metadata: Mapping[str, Any]) -> None:
                     shape=shape,
                     chunks=_bounded_chunks(source, data_start + start, end - start),
                 )
-            if digest.hexdigest()[:32] != graph_class["literal_payload_values"]:
+            if digest.hexdigest()[:32] != graph_specialization["literal_payload_values"]:
                 raise ArtifactError(
-                    "safetensors values do not match graph_class literal_payload_values"
+                    "safetensors values do not match graph_specialization literal_payload_values"
                 )
     except OSError:
         raise
@@ -381,28 +385,29 @@ def validate_metadata(
         _validate_host_facts(cast(dict[str, str], host_isa))
     except HostISAError as exc:
         raise ArtifactError(f"host_isa facts are invalid: {exc}") from exc
-    graph_class = metadata.get(GRAPH_CLASS_BLOCK)
-    if not isinstance(graph_class, dict):
-        raise ArtifactError("metadata must contain one graph_class object")
-    if set(graph_class) != _GRAPH_CLASS_FIELDS:
+    graph_specialization = metadata.get(GRAPH_SPECIALIZATION_BLOCK)
+    if not isinstance(graph_specialization, dict):
+        raise ArtifactError("metadata must contain one graph_specialization object")
+    if set(graph_specialization) != _GRAPH_CLASS_FIELDS:
         raise ArtifactError(
-            f"graph_class fields must be exactly {sorted(_GRAPH_CLASS_FIELDS)!r}"
+            f"graph specialization fields must be exactly {sorted(_GRAPH_CLASS_FIELDS)!r}"
         )
-    for field in ("name", "target", "class_hash", "graph_witness", "range_digest"):
-        if not isinstance(graph_class.get(field), str) or not graph_class[field].strip():
-            raise ArtifactError(f"graph_class {field!r} must be a non-empty string")
-    graph = graph_class.get("graph")
+    for field in ("name", "target", "specialization_hash", "graph_witness", "range_digest"):
+        value = graph_specialization.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ArtifactError(f"graph specialization {field!r} must be a non-empty string")
+    graph = graph_specialization.get("graph")
     if not isinstance(graph, dict) or not graph:
-        raise ArtifactError("graph_class graph must be a non-empty object")
-    literal_values = graph_class.get("literal_values")
-    literal_payload_values = graph_class.get("literal_payload_values")
-    placement = graph_class.get("placement")
-    fork = graph_class.get("fork")
-    class_dims = graph_class.get("class_dims")
-    strict = graph_class.get("strict")
-    lora_bucket = graph_class.get("lora_bucket")
+        raise ArtifactError("graph specialization graph must be a non-empty object")
+    literal_values = graph_specialization.get("literal_values")
+    literal_payload_values = graph_specialization.get("literal_payload_values")
+    placement = graph_specialization.get("placement")
+    fork = graph_specialization.get("fork")
+    specialization_dims = graph_specialization.get("specialization_dims")
+    strict = graph_specialization.get("strict")
+    lora_bucket = graph_specialization.get("lora_bucket")
     if not isinstance(literal_values, str):
-        raise ArtifactError("graph_class literal_values must be a string")
+        raise ArtifactError("graph specialization literal_values must be a string")
     if not isinstance(literal_payload_values, str) or (
         literal_payload_values
         and (
@@ -411,58 +416,62 @@ def validate_metadata(
         )
     ):
         raise ArtifactError(
-            "graph_class literal_payload_values must be empty or 32 lowercase "
+            "graph specialization literal_payload_values must be empty or 32 lowercase "
             "hexadecimal characters"
         )
     if not isinstance(placement, list) or not all(
         isinstance(device, str) and device and device == device.strip() for device in placement
     ):
-        raise ArtifactError("graph_class placement must be an array of non-empty strings")
+        raise ArtifactError("graph specialization placement must be an array of non-empty strings")
     if not isinstance(fork, list) or not all(
         isinstance(row, list) and len(row) == 2 and isinstance(row[0], str) for row in fork
     ):
-        raise ArtifactError("graph_class fork must be an array of name/value pairs")
-    if not isinstance(class_dims, list) or not all(
+        raise ArtifactError("graph specialization fork must be an array of name/value pairs")
+    if not isinstance(specialization_dims, list) or not all(
         isinstance(row, list)
         and len(row) == 2
         and isinstance(row[0], str)
         and type(row[1]) is int
-        for row in class_dims
+        for row in specialization_dims
     ):
-        raise ArtifactError("graph_class class_dims must be an array of name/integer pairs")
+        raise ArtifactError(
+            "graph specialization dims must be an array of name/integer pairs"
+        )
     if type(strict) is not bool:
-        raise ArtifactError("graph_class strict must be a boolean")
+        raise ArtifactError("graph specialization strict must be a boolean")
     if type(lora_bucket) is not int:
-        raise ArtifactError("graph_class lora_bucket must be an integer")
+        raise ArtifactError("graph specialization lora_bucket must be an integer")
     try:
-        declaration = GraphClassDeclaration(
-            graph_class=graph_class["name"],
-            target=graph_class["target"],
+        declaration = GraphSpecializationDeclaration(
+            name=graph_specialization["name"],
+            target=graph_specialization["target"],
             graph=graph,
-            graph_witness=graph_class["graph_witness"],
-            range_digest=graph_class["range_digest"],
+            graph_witness=graph_specialization["graph_witness"],
+            range_digest=graph_specialization["range_digest"],
             fork=tuple((row[0], row[1]) for row in fork),
-            class_dims=tuple((row[0], row[1]) for row in class_dims),
+            specialization_dims=tuple((row[0], row[1]) for row in specialization_dims),
             strict=strict,
             lora_bucket=lora_bucket,
             literal_values=literal_values,
             placement=tuple(placement),
         )
     except DeclarationError as exc:
-        raise ArtifactError(f"graph_class declaration is invalid: {exc}") from exc
+        raise ArtifactError(f"graph specialization declaration is invalid: {exc}") from exc
     if (
-        graph_class["name"] != declaration.graph_class
-        or graph_class["target"] != declaration.target
+        graph_specialization["name"] != declaration.name
+        or graph_specialization["target"] != declaration.target
     ):
-        raise ArtifactError("graph_class name and target must be canonical")
+        raise ArtifactError("graph specialization name and target must be canonical")
     if placement != list(declaration.placement):
-        raise ArtifactError("graph_class placement must be sorted and unique")
+        raise ArtifactError("graph specialization placement must be sorted and unique")
     if fork != [[name, value] for name, value in declaration.fork]:
-        raise ArtifactError("graph_class fork must be canonical")
-    if class_dims != [[name, value] for name, value in declaration.class_dims]:
-        raise ArtifactError("graph_class class_dims must be canonical")
-    if graph_class["class_hash"] != declaration.class_hash:
-        raise ArtifactError("graph_class class_hash does not restate its declaration facts")
+        raise ArtifactError("graph specialization fork must be canonical")
+    if specialization_dims != [[name, value] for name, value in declaration.specialization_dims]:
+        raise ArtifactError("graph specialization specialization_dims must be canonical")
+    if graph_specialization["specialization_hash"] != declaration.specialization_hash:
+        raise ArtifactError(
+            "graph specialization hash does not restate its declaration facts"
+        )
     expected = from_artifact_metadata(metadata).value
     stamped = metadata.get("compiled_graph_key")
     if not isinstance(stamped, str) or not is_compiled_graph_key(stamped):
@@ -471,23 +480,25 @@ def validate_metadata(
         raise ArtifactError(
             f"compiled_graph_key {stamped!r} does not restate artifact facts ({expected})"
         )
-    constants = _validated_constants(graph_class)
-    graph_class["constants"] = constants
+    constants = _validated_constants(graph_specialization)
+    graph_specialization["constants"] = constants
     needs_literals = any(row["source"] == "literal" for row in constants)
     if needs_literals and not literal_values:
-        raise ArtifactError("graph_class literal constants require a literal_values digest")
+        raise ArtifactError(
+            "graph specialization literal constants require a literal_values digest"
+        )
     if needs_literals and not literal_payload_values:
         raise ArtifactError(
-            "graph_class literal constants require a literal_payload_values digest"
+            "graph specialization literal constants require a literal_payload_values digest"
         )
     if not needs_literals and literal_payload_values:
         raise ArtifactError(
-            "graph_class literal_payload_values requires declared literal constants"
+            "graph specialization literal_payload_values requires declared literal constants"
         )
     if has_literals is not None and has_literals != needs_literals:
         if needs_literals:
             raise ArtifactError(
-                "graph_class declares literal constants but carries no literal payload"
+                "graph specialization declares literal constants but carries no literal payload"
             )
         raise ArtifactError("artifact carries a literal payload but declares no literals")
     return metadata
@@ -495,7 +506,7 @@ def validate_metadata(
 
 def build_metadata(
     *,
-    graph_class: Mapping[str, Any],
+    graph_specialization: Mapping[str, Any],
     sm: str,
     toolchain: Mapping[str, str],
     host_isa: Mapping[str, str],
@@ -505,7 +516,7 @@ def build_metadata(
     metadata: dict[str, Any] = {
         _COMPILED_GRAPH_FORMAT_AXIS: COMPILED_GRAPH_FORMAT,
         "kind": ARTIFACT_KIND,
-        GRAPH_CLASS_BLOCK: dict(graph_class),
+        GRAPH_SPECIALIZATION_BLOCK: dict(graph_specialization),
         "sm": str(sm),
         "toolchain": dict(toolchain),
         "host_isa": dict(host_isa),
@@ -620,18 +631,18 @@ def verify_package(package: str | Path, metadata: Mapping[str, Any]) -> None:
 
     package_path = Path(package)
     checked = validate_metadata(metadata)
-    graph_class = cast(dict[str, Any], checked[GRAPH_CLASS_BLOCK])
-    name = cast(str, graph_class["name"])
+    graph_specialization = cast(dict[str, Any], checked[GRAPH_SPECIALIZATION_BLOCK])
+    name = cast(str, graph_specialization["name"])
     try:
         names = _package_entry_names(package_path)
         if names != (name,):
             raise ArtifactError(
-                f"package entries {names!r} do not match graph_class {name!r}"
+                f"package entries {names!r} do not match graph_specialization {name!r}"
             )
         package_constants = [
             constant.as_manifest_row() for constant in declared_constants(package_path, name)
         ]
-        if package_constants != graph_class["constants"]:
+        if package_constants != graph_specialization["constants"]:
             raise ArtifactError("metadata constants do not match the package constant table")
         violations = code_only_violations(package_path, name)
     except PackageIntrospectionError as exc:

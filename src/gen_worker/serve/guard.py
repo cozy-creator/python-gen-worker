@@ -2,7 +2,7 @@
 
 Two promises, one mechanism. **pgw#1328:** a pod that adopts by key cannot
 compile, so importing :data:`~gen_worker.serve.role.MINT_MACHINERY` raises.
-**pgw#1331:** a pod that serves through compiled graph classes and bare typed
+**pgw#1331:** a pod that serves through compiled graph specializations and bare typed
 math needs no model library, so importing
 :data:`~gen_worker.serve.role.FORBIDDEN_LIBRARIES` raises too — and that one is
 the promise with the measurable payoff, because ``import diffusers`` alone is
@@ -79,7 +79,7 @@ class ModelLibraryUnavailable(ImportError):
         super().__init__(
             f"{module} is a model library and this process holds the "
             f"{role_mod.ServeRole.ADOPT_ONLY.value} serve role (pgw#1331): it "
-            f"serves through compiled graph classes and bare typed math, so it "
+            f"serves through compiled graph specializations and bare typed math, so it "
             f"has no model to construct. Blocked by the declared entry "
             f"{blocked!r}. If a family needs this, the need belongs in its "
             f"DECLARATION half, which runs on the mint lane.")

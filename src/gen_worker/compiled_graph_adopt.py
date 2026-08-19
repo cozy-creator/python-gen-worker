@@ -235,7 +235,7 @@ class CompiledGraphAdoption:
     #: adoption to that object's own warmup proof (its cache hit/miss deltas)
     #: instead of attributing another slot's evidence to it.
     pipeline_id: int = 0
-    #: pgw#1176: WHICH graph class this attempt was about, and the ``cg-key-v1`` key
+    #: pgw#1176: WHICH graph specialization this attempt was about, and the ``cg-key-v1`` key
     #: it was about. A boot resolves a KEY SET, so an attempt that MISSED has
     #: no artifact ``ref`` BY CONSTRUCTION — and a miss is the most common
     #: per-entry outcome there is. These two carry the identity a ref-less
