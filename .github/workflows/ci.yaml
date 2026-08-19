@@ -320,7 +320,7 @@ jobs:
           uv run python scripts/lint_materialization_hatch.py
 
       # GATING (pgw#1299): TCG owns the compiled-graph metadata vocabulary and
-      # exports it. A respelled `"graph_class"` / `"aot-inductor"` does not fail
+      # exports it. A respelled `"graph_specialization"` / `"aot-inductor"` does not fail
       # at import when TCG renames the key — it returns None from a `.get()`,
       # the arm reads an un-armed compiled graph as a cache miss, and the fleet
       # silently re-mints. AST-based, so prose is not a finding, and a genuinely
@@ -355,6 +355,19 @@ jobs:
         run: |
           uv run python scripts/lint_retired_sdk_spellings.py --selftest
           uv run python scripts/lint_retired_sdk_spellings.py
+
+      # tcg#56 (Paul): a target has ONE graph and MANY graph SPECIALIZATIONS.
+      # Same shape and same reason as the fence above, and it is not
+      # hypothetical: this rename ALREADY half-landed within hours of merging.
+      # A sibling lane's NEW file (`cli/endpoint_lock.py`) and this workflow's
+      # own comment both kept the dead spelling, and no other gate could see
+      # either — neither is code. The selftest proves it goes red on the real
+      # defect and proves it does NOT flag the many live, correct uses of the
+      # word `class` (pipeline_class, reason_class, tensor-layout classes).
+      - name: tcg#56 guard - no retired graph-class spelling survives
+        run: |
+          uv run python scripts/lint_retired_graph_class_spellings.py --selftest
+          uv run python scripts/lint_retired_graph_class_spellings.py
 
       # GATING (th#1987 / HARDCUT A9): the `:tag` ref production is DELETED.
       # A surviving pin fails on a rented pod at the resolve, not at the line
