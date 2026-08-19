@@ -219,13 +219,36 @@ def _model_slot(slot: Any) -> Dict[str, Any]:
     """
     from ..serving import model_type
 
+    from ..serving.model import SELF_LOADING_ATTR
+
     model_cls = slot.annotation
     out: Dict[str, Any] = {
         "name": slot.name,
         # `kind` is omitted rather than spelled "model": empty IS model on the
         # hub side (th#2140 5c) and every pre-5c manifest means exactly that.
-        "pipeline_class": _pipeline_class(model_cls),
     }
+    self_loading = str(getattr(model_cls, SELF_LOADING_ATTR, "") or "").strip()
+    readable = _pipeline_class(model_cls)
+    if self_loading:
+        # pgw#1431 fix (b). A marked slot states WHY it has no class instead of
+        # naming one, exactly as `layouts_undeclarable` does one level down for
+        # the bytes. `pipeline_class` and `self_loading` are mutually exclusive
+        # in the manifest: a slot either names its class or says why it has none.
+        if readable:
+            # Both would be true at once, and they contradict. Refuse naming
+            # BOTH sites — otherwise the marker becomes a way to silence a
+            # perfectly readable class, which is the se#757 silent-lie shape
+            # wearing a new hat.
+            raise EntrypointDiscoveryError(
+                f"{model_cls.__qualname__}: declares self_loading= "
+                f"({self_loading!r}) AND its load() calls "
+                f"ctx.load({readable.rsplit('.', 1)[-1]}) — those contradict. "
+                "self_loading= is for a pipeline ctx.load CANNOT drive; drop "
+                "the marker if it can, or drop the ctx.load call if it cannot."
+            )
+        out["self_loading"] = self_loading
+    else:
+        out["pipeline_class"] = readable
     declared = model_type(model_cls)
     family = getattr(declared, "name", "") or ""
     if family:
@@ -465,6 +488,11 @@ def _pipeline_class_or_refuse(rows: List[Dict[str, Any]]) -> None:
     for row in rows:
         for slot in row["slots"]:
             if slot.get("kind") == "adapter" or slot.get("pipeline_class"):
+                continue
+            # pgw#1431 fix (b): a slot that DECLARED why it has no class is
+            # answered, not silent. This is the ArmSelfLoading boundary from
+            # fix (c) becoming the green path — for MARKED slots only.
+            if slot.get("self_loading"):
                 continue
             raise EntrypointDiscoveryError(
                 f"@entrypoint {row['name']!r} slot {slot['name']!r}: could not "

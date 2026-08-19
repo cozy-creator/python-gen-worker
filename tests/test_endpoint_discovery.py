@@ -176,3 +176,132 @@ def test_an_absent_pipeline_class_still_refuses_at_publish() -> None:
 def test_an_adapter_slot_is_still_exempt() -> None:
     rows = [{"name": "generate", "slots": [{"name": "loras", "kind": "adapter"}]}]
     _pipeline_class_or_refuse(rows)  # does not raise
+
+
+# --------------------------------------------------------------------------- #
+# pgw#1431 fix (b): the `self_loading=` marker — the v2 successor to v1's       #
+# `Slot(str)` escape hatch, for pipelines `ctx.load` structurally cannot drive. #
+# --------------------------------------------------------------------------- #
+
+
+from gen_worker.models import Trellis2  # noqa: E402
+from gen_worker.serving.model import Model  # noqa: E402
+
+
+class PlainWithLoad(Model[Trellis2]):
+    """Unmarked, with a readable ctx.load — the control for the marker."""
+
+    def load(self, ctx):  # type: ignore[no-untyped-def]
+        self.pipe = ctx.load(RealPipeline)
+
+
+class MarkedAndReadable(
+    Model[Trellis2],
+    self_loading="claims ctx.load cannot drive it",
+):
+    """Declares the marker AND calls ctx.load — a contradiction, and the thing
+    `_model_slot` must refuse rather than silently prefer one of."""
+
+    def load(self, ctx):  # type: ignore[no-untyped-def]
+        self.pipe = ctx.load(RealPipeline)
+
+
+class _Slot:
+    """Only what `_model_slot` reads off a discovered parameter."""
+
+    def __init__(self, name, annotation):  # type: ignore[no-untyped-def]
+        self.name = name
+        self.annotation = annotation
+
+
+def _marked_model(reason="bespoke pipeline.json loader; ctx.load drives neither path"):  # type: ignore[no-untyped-def]
+    from gen_worker.models import Trellis2
+    from gen_worker.serving.model import Model
+
+    namespace = {"Model": Model, "Trellis2": Trellis2}
+    exec(  # noqa: S102 - the class header IS the thing under test
+        "class Marked(Model[Trellis2], self_loading=%r):\n"
+        "    def load(self, ctx):\n"
+        "        self.pipe = object()\n" % reason,
+        namespace,
+    )
+    return namespace["Marked"]
+
+
+def test_a_marked_slot_states_its_reason_instead_of_a_pipeline_class() -> None:
+    """The two keys are mutually exclusive in the manifest, exactly as
+    `layouts`/`layouts_undeclarable` are one level down: a slot either names
+    its class or says why it has none."""
+    from gen_worker.discovery.entrypoints_v2 import _model_slot
+
+    emitted = _model_slot(_Slot("model", _marked_model()))
+    assert emitted["self_loading"].startswith("bespoke pipeline.json loader")
+    assert "pipeline_class" not in emitted
+
+
+def test_an_unmarked_slot_still_emits_a_pipeline_class() -> None:
+    from gen_worker.discovery.entrypoints_v2 import _model_slot
+
+    emitted = _model_slot(_Slot("model", PlainWithLoad))
+    assert emitted["pipeline_class"].endswith(".RealPipeline")
+    assert "self_loading" not in emitted
+
+
+def test_declaring_the_marker_AND_a_readable_ctx_load_is_a_refusal() -> None:
+    """Both cannot be true at once. Without this refusal the marker is a way to
+    silence a class discovery could have read perfectly well — the se#757
+    silent-lie shape wearing a new hat."""
+    from gen_worker.discovery.entrypoints_v2 import _model_slot
+
+    with pytest.raises(EntrypointDiscoveryError, match="those contradict"):
+        _model_slot(_Slot("model", MarkedAndReadable))
+
+
+def test_a_marked_slot_passes_the_publish_gate_and_an_unmarked_one_does_not() -> None:
+    """The ArmSelfLoading boundary becomes the green path FOR MARKED SLOTS
+    ONLY. Widening the marker must not disarm the gate for everyone else."""
+    from gen_worker.discovery.entrypoints_v2 import _pipeline_class_or_refuse
+
+    marked = [{"name": "generate", "slots": [{"name": "model", "kind": "model", "self_loading": "bespoke loader"}]}]
+    _pipeline_class_or_refuse(marked)  # does not raise
+
+    unmarked = [{"name": "generate", "slots": [{"name": "model", "kind": "model", "pipeline_class": ""}]}]
+    with pytest.raises(EntrypointDiscoveryError, match="could not read the pipeline class"):
+        _pipeline_class_or_refuse(unmarked)
+
+
+def test_the_marker_demands_a_reason() -> None:
+    """Verbatim the rule `Slot(layouts_undeclarable=)` enforces one level down:
+    an escape hatch with no stated reason is the silence the rung replaces."""
+    from gen_worker.models import Trellis2
+    from gen_worker.serving.model import Model, ModelDeclarationError
+
+    namespace = {"Model": Model, "Trellis2": Trellis2}
+    for bad in ("", "   ", 123):
+        with pytest.raises(ModelDeclarationError):
+            exec(  # noqa: S102
+                "class B(Model[Trellis2], self_loading=%r):\n    pass" % (bad,),
+                dict(namespace),
+            )
+
+
+def test_the_marker_is_ORTHOGONAL_to_lanes() -> None:
+    """A self-loading model still has weights, still has a lane, still needs a
+    VRAM floor. `trellis-3d` declares both; coupling them would strand its
+    floor the way pgw#1423 strands hunyuan's."""
+    from tensorfs import contracts
+
+    from gen_worker.models import Trellis2
+    from gen_worker.serving.model import LANES_ATTR, REQUIRES_ATTR, Model
+
+    namespace = {"Model": Model, "Trellis2": Trellis2, "contracts": contracts}
+    exec(  # noqa: S102
+        "class Both(Model[Trellis2],\n"
+        "           lanes={contracts.TRELLIS2_DIT_BF16: 'vram24g'},\n"
+        "           self_loading='bespoke loader'):\n"
+        "    pass",
+        namespace,
+    )
+    both = namespace["Both"]
+    assert [c.stamp for c in getattr(both, LANES_ATTR)] == ["trellis2.dit-bf16@1"]
+    assert "min_vram_gb=24.0" in repr(getattr(both, REQUIRES_ATTR))
