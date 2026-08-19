@@ -183,7 +183,21 @@ def _materialize(leaf: Any, name: str, dtype: Any) -> Any:
 
 
 def _compute_dtype(leaf: Any, x: Any) -> Any:
-    return getattr(leaf, "compute_dtype", None) or x.dtype
+    """The dtype this op must run in.
+
+    THE ACTIVATION DECIDES, not the load-time declaration. A weight that does
+    not match its input is not a precision choice, it is a `RuntimeError` —
+    caught by running the stack at bf16 with fp32 activations, which is exactly
+    the mixed state a partially-cast pipeline is in. ``compute_dtype`` answers
+    only where the input carries no float dtype of its own: an Embedding is
+    indexed by int64, so its output precision cannot be read off its input.
+    ``dequant_dtype`` remains the separate knob for the DECODE's own precision.
+    """
+    import torch
+
+    if x is not None and x.is_floating_point():
+        return x.dtype
+    return getattr(leaf, "compute_dtype", None) or torch.get_default_dtype()
 
 
 @functools.lru_cache(maxsize=1)

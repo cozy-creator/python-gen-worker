@@ -173,6 +173,33 @@ def test_shape_does_not_lie() -> None:
     assert stored.numel() < 64 * 32 * 4
 
 
+def test_the_lane_runs_at_the_production_compute_dtype() -> None:
+    """Everything else here pins numerics in fp32. Production serves bf16.
+
+    RED before the fix: the punned forward cast the weight to the leaf's
+    declared ``compute_dtype`` while the activation kept its own, so a bf16
+    leaf fed an fp32 activation raised `RuntimeError: Input type (float) and
+    bias type (c10::BFloat16) should be the same`. The activation decides;
+    ``compute_dtype`` answers only for an Embedding, whose int64 indices carry
+    no float dtype to read.
+    """
+    quantized, reference, _ = _stack()
+    for leaf in gguf_leaves(quantized).values():
+        leaf.compute_dtype = torch.bfloat16
+    ids, img = _inputs()
+
+    # Mixed state on purpose: bf16 leaves, fp32 activations. The op runs in the
+    # activation's dtype and the embedding — whose input is int64 — in bf16.
+    got = quantized(ids, img)
+    assert torch.isclose(got.float(), reference(ids, img), rtol=5e-2, atol=5e-2)
+
+    # …and a fully bf16 stack, which is what production actually feeds.
+    all_bf16 = quantized(ids, img.to(torch.bfloat16))
+    assert all_bf16.dtype is torch.bfloat16
+    assert torch.isclose(all_bf16.float(), reference(ids, img),
+                         rtol=5e-2, atol=5e-2)
+
+
 # --- LoRA -----------------------------------------------------------------
 
 
