@@ -247,8 +247,28 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "66cd2f1a1ba2296217afcfbb8bf47e977c2975fb"
+rev = "ad399093"
 subdir = "src/torchcg"
+# pgw#1371 RE-VENDOR COMPLETION (2026-08-19). `af609a87`'s message says it
+# repinned torchcg to `ad399093`; the TREE was never re-vendored. What was
+# actually here was `66cd2f1` verbatim in every file, plus a HAND PATCH to
+# `document.py` adding the `program` field — which is exactly what
+# `test_every_vendored_file_matches_its_recorded_digest` caught, and it was
+# right to. Provenance established before re-recording (this is completing a
+# legitimate re-vendor, not rubber-stamping a patch): `ad399093` is upstream
+# `tcg#51: the sink is named program_sink`, and `66cd2f1..ad399093` touches
+# exactly two files, both re-copied dereferenced from `ad399093` here.
+#
+# ⚠️ THE HAND PATCH HAD ALREADY REVERTED A BEHAVIOUR, silently. `a671822`
+# (pgw#1384, an ancestor of `ad399093`) made GRAPH ORDER SEMANTIC — the
+# producer states it and the derive puts the default-parameter classes FIRST —
+# by replacing `LaneGraphs.__post_init__`'s `sorted(...)` with
+# `tuple(self.graphs)`. Patching the field onto `66cd2f1` kept the SORT, so
+# every release document decoded through this vendor was re-sorted by
+# (target, graph) and pgw#1384's guarantee was dead on arrival — including for
+# pgw#1371's hole work-list, which promises document order and inherits it
+# from right here. Re-vendoring restores it. A digest recorded over the patch
+# would have buried it permanently.
 # pgw#1372 BUMP: takes upstream's tcg#41 wave — execution lanes (`lane.py`),
 # two-level identity (`graph_identity.py`), the release graph-set document
 # (`document.py`), the mint-written requirements manifest + exact-env audit
@@ -363,8 +383,8 @@ rewrites = [
 "contracts/recipe_v1.json" = "5806ac79b6d61ed15bdc1cf3c244f2d741b5269e714a774df41a7b95476e1cfe"
 "contracts/toolchain_identity_v1.json" = "f4114c38ae373f62ddcb2aae5498ffbee30630e80adf11fee99e68bcbdb24282"
 "declaration.py" = "187be0a12f05b8bbdca01f3c180527abff66ed60a3fb1e6281704d24d9559d79"
-"discovery.py" = "95393f9524d9dc1d81771ba885bfd281fd32109e8a2095bf509644b9c25c4bc7"
-"document.py" = "e4d9bff07a76f207e5a1055cbb93cd53fa4bdaecd88dfd201a09dc4f02669f58"
+"discovery.py" = "859764747fb67252972aee791ffab019e4aceb0087ae3449e40e816fc36d2138"
+"document.py" = "996c124ac65d8fcdc5130416f9bb8061c2182a512b4105e344cb7103bb812245"
 "engine.py" = "f9953f6039460214511ea5dad40ce62b3bd51b3d6400f31e9e9339cc5b1c2d64"
 "graph_identity.py" = "9cca71bfb6edc4bb5384121accef41970bd1b8906c5a2dba427047ab27529fe1"
 "hollow.py" = "05cffb0127d299d53d66285dda2b10bc98c976d7d4902e396b65ad841d36e544"

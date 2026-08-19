@@ -136,6 +136,7 @@ def discover_lane(
     drive: Callable[[], object],
     *,
     strict: bool = False,
+    program_sink: Callable[[str, Any], str] | None = None,
 ) -> LaneGraphs:
     """Run the author's code once, derive every observed graph, state the rest.
 
@@ -163,7 +164,9 @@ def discover_lane(
                 f"{type(module).__name__}, which is not a torch.nn.Module"
             )
         modules[path] = module
-    return discover_modules(lane, modules, drive, strict=strict)
+    return discover_modules(
+        lane, modules, drive, strict=strict, program_sink=program_sink
+    )
 
 
 def discover_modules(
@@ -172,6 +175,7 @@ def discover_modules(
     drive: Callable[[], object],
     *,
     strict: bool = False,
+    program_sink: Callable[[str, Any], str] | None = None,
 ) -> LaneGraphs:
     """Discovery over MARKED modules (the imperative ``ctx.compile`` surface).
 
@@ -180,6 +184,14 @@ def discover_modules(
     ctx.compile(self.pipe.unet)``); nothing is spelled as a string. The
     caller (the derive) names each marked module for the document's
     provenance and hands them here keyed by that name.
+
+    ``program_sink`` (Paul, 2026-08-20) receives ``(graph_hash,
+    ExportedProgram)`` for each NEW graph class and returns the CAS digest it
+    stored the serialized program under. The whole traced graph is kept, not
+    just its hash: trace() runs once, ever, and the runtime miner downloads
+    the graph and runs inductor rather than re-tracing author code. torchcg
+    holds no opinion on WHERE the bytes go -- bytes-at-rest is tensorfs's
+    charter, so the caller owns the sink.
     """
 
     import torch
@@ -253,7 +265,20 @@ def discover_modules(
                 # class -- dedup is the point of content identity.
                 continue
             seen_graphs.add(graph)
-            records.append(GraphRecord(graph=graph, target=path, ingress=ingress))
+            program_digest = ""
+            if program_sink is not None:
+                try:
+                    program_digest = program_sink(graph, program)
+                except Exception as exc:
+                    raise DiscoveryError(
+                        f"lane {contract!r} target {path!r}: graph {graph} "
+                        f"could not be stored: {type(exc).__name__}: {exc}"
+                    ) from exc
+            records.append(
+                GraphRecord(
+                    graph=graph, target=path, ingress=ingress, program=program_digest
+                )
+            )
 
     unobserved = tuple(sorted(path for path, calls in observed.items() if not calls))
     return LaneGraphs(

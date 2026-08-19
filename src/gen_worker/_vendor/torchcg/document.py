@@ -38,12 +38,16 @@ class GraphRecord:
     graph: str
     target: str
     ingress: CallIngress
-    #: CAS digest of this graph class's SERIALIZED ExportedProgram. The NAME
-    #: is the contract with the mint lane, which reads it as
-    #: ``PROGRAM_DIGEST_FIELD = "program"`` (pgw#962) and raises
-    #: ``MissingProgramDigest`` on an empty one. Produced by the publish
-    #: derive (pgw#1370); the miner downloads the blob and runs inductor on
-    #: it rather than re-tracing author code.
+    #: CAS digest of the SERIALIZED ExportedProgram for this graph class
+    #: (Paul, 2026-08-20: the derive stores the whole traced graph, not just
+    #: its hash -- "we only ever need to run trace() once" now holds
+    #: literally, and the runtime miner downloads this blob and runs inductor
+    #: instead of re-tracing author code). **The NAME is the contract with
+    #: the mint lane**, which reads it as `PROGRAM_DIGEST_FIELD = "program"`
+    #: (pgw#962) and raises `MissingProgramDigest` on an empty one. Empty
+    #: only when the producer stored no blob. Portability is fenced by the
+    #: document's own closure: an ExportedProgram is torch-coupled, and the
+    #: lockfile closure pins torch.
     program: str = ""
 
     def __post_init__(self) -> None:
@@ -84,12 +88,17 @@ class LaneGraphs:
             require_targets(self.targets)
         except LaneError as exc:
             raise DocumentError(f"lane graphs restate an invalid lane: {exc}") from exc
-        ordered = tuple(
-            sorted(self.graphs, key=lambda record: (record.target, record.graph))
-        )
+        # pgw#1384: GRAPH ORDER IS SEMANTIC, not canonical. The serving
+        # lane's hole list inherits document order and the miner mints holes
+        # in that order, so the PRODUCER states the order -- the derive puts
+        # the default-parameter graph classes (what an all-defaults payload
+        # exercises) FIRST. Determinism still holds: the producer's
+        # enumeration is deterministic, so identical inputs still yield
+        # identical bytes. Only duplicates are refused here.
+        ordered = tuple(self.graphs)
         if len({record.graph for record in ordered}) != len(ordered):
             # Identical traces dedup by construction; a duplicate row here is
-            # a producer bug, not a second artifact.
+            # a producer bug, not a second graph.
             raise DocumentError(f"lane {self.contract!r} repeats a graph hash")
         for record in ordered:
             if record.target not in self.targets:
