@@ -458,3 +458,27 @@ gen_worker.worker_fatal.report_worker_error_async()
 # chain itself (`dispatch.order_from_binding` -> `SlotEvidence` ->
 # `measured_posture.REASON_SERVING_FACTS_UNEVIDENCED`) is a DELETE that belongs
 # with pgw#1425's remaining-69 triage, not smuggled into the P0 lane.
+
+# pgw#1421's engine-hosted boot (PR #1016, `86d0cef9`) landed two callables with
+# no production caller, an hour before pgw#1425 ran this ratchet. Rows added by
+# the pgw#1425 lane rather than deleted, because they are NOT that lane's
+# symbols and guessing another lane's intent is how a wire gets silenced — which
+# is the whole subject of pgw#1425. They are OWED, not accepted:
+#
+#     OWNER:  pgw#1421. `LoadContext.engine()` is the accessor the engine-hosted
+#             loader reads a slot's engine through, and `process_vram_bytes()`
+#             is its measured-residency reading; both look like the seam
+#             `serving/residency.py` is meant to size instances with. Wire them
+#             there, or say which successor already does it.
+#     EXPIRY: pgw#1421. If these outlive it, the engine-hosted boot shipped a
+#             loader whose engine handle and VRAM reading nothing on the pod
+#             ever asks for, and that is a finding rather than a lint row.
+gen_worker.serving.context.LoadContext.engine()
+gen_worker.serving.engine_runtime.process_vram_bytes()
+
+# pgw#1425 (same commit): `receipts.configured()` is DELETED, not listed. It was
+# the boolean `posture()` replaced, and it lost its caller in the fix itself —
+# the ratchet caught it within the hour, which is the instrument working. Two
+# spellings of one state is how a caller ends up asking a two-answer question
+# about a three-state gate, and "not configured" collapsing `local` into `unset`
+# is exactly the fail-open that issue closed.

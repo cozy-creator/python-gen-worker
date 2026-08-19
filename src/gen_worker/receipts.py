@@ -218,16 +218,18 @@ def trust_local_store(reason: str) -> None:
 
 
 def posture() -> str:
-    """:data:`POSTURE_ARMED` / :data:`POSTURE_LOCAL` / :data:`POSTURE_UNSET`."""
+    """:data:`POSTURE_ARMED` / :data:`POSTURE_LOCAL` / :data:`POSTURE_UNSET`.
+
+    THE question about this gate. It replaced the boolean ``configured()``,
+    which is deleted rather than kept beside it: two spellings of one state is
+    how a caller ends up asking the question that has only two answers when the
+    state has three — and "not configured" collapsing `local` into `unset` is
+    exactly the fail-open pgw#1425 closed.
+    """
     with _LOCK:
         if _CONFIG is not None:
             return POSTURE_ARMED
         return POSTURE_LOCAL if _LOCAL_TRUST else POSTURE_UNSET
-
-
-def configured() -> bool:
-    with _LOCK:
-        return _CONFIG is not None
 
 
 def reset() -> None:
@@ -770,7 +772,6 @@ __all__ = [
     "artifact_digest",
     "canonical_artifact_digest",
     "configure",
-    "configured",
     "gate_delivered_artifact",
     "needs_viewer_identity",
     "posture",
