@@ -104,11 +104,29 @@ def test_both_moe_experts_are_lora_branch_targets() -> None:
     assert set(branch_targets(_WanMoE())) == {"transformer", "transformer_2"}
 
 
-def test_stream_residency_reads_no_component_vocabulary_at_def_time() -> None:
-    """The rung that replaced the block-window offload (pgw#1497) takes no
-    component vocabulary at all — it discovers leaves from the tree it is
-    handed — so the def-time-frozen-default hazard this test was written for
-    cannot recur here. Assert the shape, not the deleted signature."""
+def test_block_window_offload_defaults_to_every_denoiser() -> None:
+    """``apply_block_window_offload``'s default was a literal
+    ``("transformer","unet")`` in the signature — a default argument, so even
+    repointing it would have frozen the vocabulary at def time.
+
+    pgw#1497 briefly deleted this function and this test with it, on the
+    evidence that nothing in `src/` called it. A PROD endpoint did
+    (`scripts/author_surface_allowlist.txt:48`), so both are back — and the
+    def-time hazard is back with them, which is why the assertion is restored
+    rather than replaced.
+    """
+    import inspect
+
+    from gen_worker.models.loading import apply_block_window_offload
+
+    default = inspect.signature(apply_block_window_offload).parameters["components"].default
+    assert default is None, "a non-None default re-freezes the vocabulary at def time"
+
+
+def test_the_rung_behind_it_reads_no_component_vocabulary_either() -> None:
+    """The implementation is now `StreamedResidency`, which takes no component
+    vocabulary at all — it discovers leaves from the tree it is handed — so the
+    def-time-frozen-default hazard cannot recur one layer down."""
     import inspect
 
     from gen_worker.models.stream_residency import StreamedResidency

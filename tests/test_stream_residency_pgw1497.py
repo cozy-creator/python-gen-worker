@@ -14,10 +14,19 @@ exercised here and only the OVERLAP is left for the card to prove.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 torch = pytest.importorskip("torch")
-nn = torch.nn
+
+# A real static import, not `nn = torch.nn`. The rebinding form leaves `nn` a
+# module-valued VARIABLE, so `class Block(nn.Module)` gives mypy no type to use
+# as a base and it reports `Name "nn.Module" is not defined` — 19 of the 23
+# errors that took master's `fast gates` red. The skip guard above still runs
+# first, so this import cannot fire on a torch-less host. Same idiom as
+# `test_engine_placement.py`.
+import torch.nn as nn  # noqa: E402
 
 from gen_worker.models.stream_residency import (  # noqa: E402
     DEFAULT_STREAMS,
@@ -40,6 +49,11 @@ from gen_worker.models.stream_residency import (  # noqa: E402
 class Block(nn.Module):
     def __init__(self, width: int) -> None:
         super().__init__()
+        # A plain int, not read back off `norm.normalized_shape`: `nn.Module`'s
+        # `__getattr__` is typed `Tensor | Module`, so reaching through a child
+        # to recover a shape is two mypy errors and one more indirection than
+        # the test needs.
+        self.width = width
         self.fc1 = nn.Linear(width, width * 2)
         self.fc2 = nn.Linear(width * 2, width)
         self.norm = nn.LayerNorm(width)
@@ -54,13 +68,16 @@ class Stack(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.blocks = nn.ModuleList([Block(256 - 16 * i) for i in range(8)])
+        # `nn.ModuleList` iterates as bare `Module`, so the per-block width is
+        # carried alongside as plain ints rather than reached back out of a
+        # child (which `Module.__getattr__` types `Tensor | Module`).
+        self.widths = [256 - 16 * i for i in range(8)]
+        self.blocks = nn.ModuleList([Block(w) for w in self.widths])
         self.proj = nn.Linear(256, 256)
 
     def forward(self, x):  # type: ignore[no-untyped-def]
         out = self.proj(x)
-        for block in self.blocks:
-            width = block.norm.normalized_shape[0]
+        for block, width in zip(self.blocks, self.widths):
             out = torch.cat([block(out[..., :width]), out[..., width:]], dim=-1)
         return out
 
@@ -411,27 +428,33 @@ def test_the_serve_loop_backend_tiers_a_real_author_model() -> None:
             torch.manual_seed(7)
             self.pipe = Stack().eval()
 
+    # The author object is deliberately NOT a `Model` subclass: these arms must
+    # work over whatever an author's `load` left behind, and `backend.model` is
+    # typed `Model[Any] | None`. Keep a typed local and inject through `cast`,
+    # so the test reads its own object and mypy is told the injection is
+    # intentional rather than silenced with an ignore.
+    author = AuthorModel()
     backend = _InstanceBackend.__new__(_InstanceBackend)
     backend.model_cls = AuthorModel
-    backend.model = AuthorModel()
+    backend.model = cast(Any, author)
     backend._stream_residency = None
 
     x = torch.randn(2, 256)
     with torch.no_grad():
-        want = backend.model.pipe(x).clone()
+        want = author.pipe(x).clone()
 
     backend.demote_to_host()
     assert backend._stream_residency is not None
     assert not backend._stream_residency.plan.resident
     with torch.no_grad():
-        assert torch.equal(backend.model.pipe(x), want), (
+        assert torch.equal(author.pipe(x), want), (
             "a host-tier instance must still compute the same answer"
         )
 
     backend.promote_to_device()
     assert not backend._stream_residency.plan.streamed
     with torch.no_grad():
-        assert torch.equal(backend.model.pipe(x), want)
+        assert torch.equal(author.pipe(x), want)
 
 
 def test_a_tier_move_on_a_weightless_instance_refuses_loudly() -> None:
@@ -446,7 +469,7 @@ def test_a_tier_move_on_a_weightless_instance_refuses_loudly() -> None:
 
     backend = _InstanceBackend.__new__(_InstanceBackend)
     backend.model_cls = Weightless
-    backend.model = Weightless()
+    backend.model = cast(Any, Weightless())
     backend._stream_residency = None
     with pytest.raises(ResidencyError, match="no nn.Module tree"):
         backend.demote_to_host()
