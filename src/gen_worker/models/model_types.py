@@ -408,6 +408,52 @@ LTX2_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "use_karras_sigmas": False,
 }
 
+#: InternVL-U/InternVL-U ``scheduler/scheduler_config.json``, fetched VERBATIM
+#: from the public ungated original at revision
+#: ``f012d760e69712bb47f7d3d09a24280f346cee01``.
+#:
+#: This one is worth reading twice, because the endpoint's own v1 file says it
+#: does not exist. ``internvl-U/src/internvl_u/main.py`` asserts in prose that
+#: ``InternVLUPipeline`` is "not a diffusers-shaped pipeline" and that the
+#: family has "NO diffusion vocabulary". Both statements are FALSE against the
+#: checkpoint: ``model_index.json`` is a standard diffusers component index
+#: (``_class_name: InternVLUPipeline``), and this scheduler config is a real
+#: file shipped beside it. A v1 comment's architecture claim is a hypothesis,
+#: not a fact — verify it against ``model_index.json`` before letting it talk
+#: you out of a value that exists.
+#:
+#: ``lambda_min_clipped`` is ``-Infinity`` in the upstream file itself; Python's
+#: json round-trips that spelling exactly, so ingest writes it back verbatim.
+INTERNVL_U_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "DPMSolverMultistepScheduler",
+    "algorithm_type": "dpmsolver++",
+    "beta_end": 0.02,
+    "beta_schedule": "linear",
+    "beta_start": 0.0001,
+    "dynamic_thresholding_ratio": 0.995,
+    "euler_at_final": False,
+    "final_sigmas_type": "zero",
+    "flow_shift": 3.0,
+    "lambda_min_clipped": float("-inf"),
+    "lower_order_final": True,
+    "num_train_timesteps": 1000,
+    "prediction_type": "flow_prediction",
+    "rescale_betas_zero_snr": False,
+    "sample_max_value": 1.0,
+    "solver_order": 2,
+    "solver_type": "midpoint",
+    "steps_offset": 0,
+    "thresholding": False,
+    "timestep_spacing": "linspace",
+    "trained_betas": None,
+    "use_beta_sigmas": False,
+    "use_exponential_sigmas": False,
+    "use_flow_sigmas": True,
+    "use_karras_sigmas": False,
+    "use_lu_lambdas": False,
+    "variance_type": None,
+}
+
 #: REAL — a tensorfs library document. Live on deploy lane
 #: ``a55e45a571cdb6188``.
 SDXL_DIFFUSERS_BF16: Final = _library("sdxl.diffusers-bf16", 1)
@@ -446,6 +492,24 @@ Z_IMAGE_DIFFUSERS_BF16: Final = _library("z-image.diffusers-bf16", 1)
 #: (29 declarations). This is what makes ``flux.2-klein-4b``/``-9b``
 #: migratable, and it is what ``Flux2Klein.canonical_contract`` points at.
 FLUX2_KLEIN_DIFFUSERS_BF16: Final = _library("flux2-klein.diffusers-bf16", 1)
+
+#: REAL as of tensorfs#137 — InternVL-U's generation-decoder lane document (46
+#: declarations explaining all 654 tensors of
+#: ``generation_decoder/model.safetensors``, zero unexplained).
+#:
+#: GENERATION DECODER ONLY, and the two exclusions are measured rather than
+#: intended. The VAE is ``AutoencoderKLQwenImage`` — literally qwen-image's
+#: autoencoder — and against the hub's served qwen-image tree the two VAEs have
+#: IDENTICAL tensor-name sets: 194 of 194, Jaccard 1.0, zero shape
+#: disagreements. Declaring it would tie detection ACROSS FAMILY LINES, where
+#: every earlier instance of the tensorfs#122 regression was within one family.
+#: The ``vlm`` component is excluded prospectively for the reason
+#: ``flux2-klein`` excludes its Qwen3 text encoder: an InternViT-300M tower over
+#: a stock Qwen3 language model, both of which a future InternViT or Qwen3 lane
+#: would collide with. Re-running the document's patterns against those two
+#: headers explains 0 of 658 and 0 of 194 respectively, so the exclusions are
+#: zero-intersection by construction.
+INTERNVL_U_DIFFUSERS_BF16: Final = _library("internvl-u.diffusers-bf16", 1)
 
 #: REAL as of tensorfs#124's second half (tensorfs#136). It was a
 #: ``MissingContract`` sentinel until this document was vendored, and clearing
@@ -855,6 +919,63 @@ class QwenA3bDefaults(QwenTextGenDefaults, frozen=True):
     ``top_k`` is deliberately absent — no endpoint in this family exposes it,
     so there is nothing to clamp and nothing sourced to default it to.
     """
+
+
+class InternVLUDefaults(msgspec.Struct, frozen=True):
+    """InternVL-U — OpenGVLab's unified VLM, serving TEXT-TO-IMAGE here.
+
+    Despite the name, this family is not a captioner on the serve path: the
+    endpoint is ``internvl-U``'s ``generate`` (``internvl-U/src/internvl_u/
+    main.py:1``, "InternVL-U text-to-image generation endpoint"), and the
+    checkpoint is a diffusers pipeline whose denoiser is an
+    ``InternVLUTransformer2DModel`` MMDiT. The ``vlm`` half is the conditioner,
+    the way a text encoder is elsewhere.
+
+    ONE FIELD, and the shortness is the point rather than an omission. The v1
+    endpoint declares exactly one per-checkpoint recipe value —
+    ``register_family("internvl-u", InternVLUDefaults)`` with
+    ``num_inference_steps: int = 20`` — and the wave rule is that a value which
+    cannot be sourced from the family's own code STAYS ABSENT. :class:`Rife` is
+    the precedent for a deliberately small vocabulary.
+
+    ``steps`` 20 is that value (the upstream README recipe, which the endpoint's
+    own docstring names as its neutral default). Bounds 1..50 are the endpoint's
+    wire envelope (``main.py`` ``GenerateInput.num_inference_steps``,
+    ``msgspec.Meta(ge=1, le=50)``). Copying a handler's envelope is normally the
+    pgw#1427 mistake — ``_merge_int_knob`` clamps a row's default INTO the
+    platform range, so a narrow platform floor silently rewrites a sibling
+    checkpoint's published recipe. It is safe HERE and only here because this
+    family has exactly ONE endpoint, ONE lane and ONE checkpoint, so 1..50 is
+    not a narrowing of anything: it is simultaneously the only and therefore the
+    widest envelope any ``internvl-u`` lane declares. If a second InternVL-U
+    checkpoint ever ships, this bound must be re-derived as the union.
+
+    The WIRE NAME is ``steps``, not the v1 spelling ``num_inference_steps``.
+    That longer name existed solely so ``RuntimeFormula("a + b*
+    num_inference_steps")`` could resolve the field by same-name lookup, and
+    ``RuntimeFormula`` died with the v1 surface (the runtime table is enumerated
+    by ``gen-worker release derive`` now). With its one reason gone, the field
+    takes the platform vocabulary every other type here uses.
+
+    DELIBERATELY ABSENT, each with a reason rather than an oversight:
+
+    * ``guidance`` / a cfg knob. The checkpoint's ``generation_decoder/
+      config.json`` does carry ``all_cfg_scale: 4.5`` and ``part_cfg_scale:
+      2.0``, but the endpoint exposes neither and never passes either — the
+      pipeline reads them from its own config. Lifting them here would create
+      platform vocabulary that no wire field feeds and no checkpoint row sets.
+    * ``max_sequence_length``. Real in the checkpoint (768), but unlike
+      :class:`Flux2KleinDefaults`' 512 — cited to a line where the endpoint
+      APPLIES it — nothing in this endpoint reads or passes it.
+    * ``cfg`` / ``step_distilled``. One checkpoint, no distilled sibling; both
+      would be facts about a variant that does not exist.
+    * The 16:9 / 9:16 / 1:1 preset grid, ``output_format`` and ``seed``
+      (``main.py`` ``_INTERNVL_U_ASPECTS``, ``GenerateInput``). Endpoint PAYLOAD
+      vocabulary, which :class:`Flux2KleinDefaults` excludes by name — a
+      ModelType is name + Defaults + fingerprint, nothing else.
+    """
+
+    steps: Knob[int] = Knob(20, lo=1, hi=50, name="steps")
 
 
 class Flux1Defaults(msgspec.Struct, frozen=True):
@@ -1570,6 +1691,34 @@ class MiniMaxH3(ModelType[MiniMaxH3Defaults]):
     Defaults = MiniMaxH3Defaults
 
 
+class InternVLU(ModelType[InternVLUDefaults]):
+    """InternVL-U — the unified VLM, serving text-to-image.
+
+    The family root is ``internvl-u``, NOT the endpoint slug ``internvl-U``:
+    that is the name the endpoint's own ``register_family("internvl-u", ...)``
+    call uses, and it is what the hub's family column carries.
+
+    ``canonical_contract`` is REAL (tensorfs#137), not a sentinel, and it points
+    at the generation decoder alone — the compile subject and the only component
+    that identifies this family. See :data:`INTERNVL_U_DIFFUSERS_BF16` for the
+    two measured exclusions.
+
+    The noise schedule IS recorded (:data:`INTERNVL_U_SCHEDULER_CONFIG`), fetched
+    verbatim from the public ungated original. It very nearly was not: the
+    endpoint's v1 file claims this family has no diffusion vocabulary, and the
+    upstream was recorded fleet-wide as ``http=401`` under a guessed org
+    (``OpenGVLab/InternVL-U``) when the weights are public at
+    ``InternVL-U/InternVL-U``. Neither claim survived contact with the
+    checkpoint. ``{}`` is correct only when a value genuinely does not exist —
+    never when it was merely unreachable, and never on a comment's say-so."""
+
+    name = "internvl-u"
+    contracts = ("internvl-u.*",)
+    canonical_contract = INTERNVL_U_DIFFUSERS_BF16
+    canonical_scheduler_config = INTERNVL_U_SCHEDULER_CONFIG
+    Defaults = InternVLUDefaults
+
+
 class Rife(ModelType[RifeDefaults]):
     """RIFE v4.25 frame interpolation — a small AUXILIARY model with its own
     checkpoint, bound beside a video model to serve the fps>24 delivery
@@ -1949,10 +2098,9 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     ZImage,
     StableAudio,
     MusicGen,
-
-
     Ltx2,
     Ltx2Upsampler,
+    InternVLU,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
@@ -1999,10 +2147,9 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         Ernie.name: Ernie.Defaults,
         StableAudio.name: StableAudio.Defaults,
         MusicGen.name: MusicGen.Defaults,
-
-
         Ltx2.name: Ltx2.Defaults,
         Ltx2Upsampler.name: Ltx2Upsampler.Defaults,
+        InternVLU.name: InternVLU.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }
