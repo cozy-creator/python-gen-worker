@@ -142,7 +142,11 @@ def test_derive_renders_an_envelope_with_no_model_field(
     # se#786/pgw#1462: vendored torchcg ships in the wheel — never a skip.
     from gen_worker.release.derive import derive_release
 
-    result = derive_release(weightless, checkpoint_dir=tmp_path)
+    # pgw#1489: a derive states the compile stack it traced under, read from
+    # the endpoint's own uv.lock. There is no installed-set fallback.
+    lockfile = tmp_path / "uv.lock"
+    lockfile.write_text('version = 1\n\n[[package]]\nname = "torch"\nversion = "2.13.0"\n')
+    result = derive_release(weightless, checkpoint_dir=tmp_path, lockfile=lockfile)
     document = json.loads(result.document)
 
     # No model class -> no lane, no trace subject, no contract.
@@ -171,7 +175,8 @@ def test_derive_renders_an_envelope_with_no_model_field(
     sys.path.insert(0, str(FIXTURES))
     try:
         eager = derive_release(
-            importlib.import_module("eager_endpoint"), checkpoint_dir=tmp_path
+            importlib.import_module("eager_endpoint"), checkpoint_dir=tmp_path,
+            lockfile=lockfile,
         )
     finally:
         sys.path.remove(str(FIXTURES))
