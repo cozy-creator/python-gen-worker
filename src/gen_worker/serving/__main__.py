@@ -217,12 +217,26 @@ def _adoption_source(
             # the whole eager bridge. Say it, then take it.
             print(f"adopt: {exc}", file=sys.stderr)
             return None, None
+        if args.mint:
+            # ONE store for the boot AND the mint. The hub store is read-only
+            # by construction, so a mint publishing through it would fail every
+            # graph; tiering it here — and BEFORE the AdoptSession is built —
+            # keeps a single answer to "do I have this graph".
+            from .mint_store import worker_store
+
+            store = worker_store(_mint_cas(args), store)
         return store, document
     from .._vendor.tensorfs import LocalCAS
     from .._vendor.torchcg.store import LocalGraphStore
 
     store = LocalGraphStore(LocalCAS(Path(args.graph_store)))
     return store, store.get_graphs(module_name)
+
+
+def _mint_cas(args: argparse.Namespace) -> Path:
+    """Where the mint's compile child admits artifacts, one spelling."""
+    return Path(
+        args.mint_cas or args.graph_store or (Path(args.artifacts_dir) / "cas"))
 
 
 def _toolchain() -> Mapping[str, str]:
@@ -335,9 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         box = SelfMint(
             store=store,
             artifacts_dir=Path(args.artifacts_dir),
-            cas_dir=Path(
-                args.mint_cas or args.graph_store
-                or (Path(args.artifacts_dir) / "cas")),
+            cas_dir=_mint_cas(args),
             target_arch=args.sm,
             toolchain=dict(_toolchain()),
         )
