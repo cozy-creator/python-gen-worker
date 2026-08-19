@@ -236,8 +236,28 @@ def test_a_vae_that_can_never_fit_says_so_instead_of_looping() -> None:
     pipe = _Pipeline(vae)
     with _Events():
         memory.apply_low_vram_config(pipe, mode="off")
-        with pytest.raises(RuntimeError, match="every tile the ladder has"):
-            pipe.vae.decode(torch.randn(1, 4, 24, 24))
+        with torch.no_grad():
+            with pytest.raises(RuntimeError, match="every tile the ladder has") as caught:
+                pipe.vae.decode(torch.randn(1, 4, 24, 24))
+    assert "AUTOGRAD" not in str(caught.value)
+
+
+def test_the_one_condition_under_which_tiling_cannot_help_is_named() -> None:
+    """MEASURED on a real card (sd1.5 VAE, 320² latent, RTX 4070): with grad
+    enabled every tile's activations are retained for backward, the retry
+    accumulates instead of bounding, and all four rungs fail. Under `no_grad`
+    the SAME decode succeeds on the first tiled rung. An operator reading four
+    identical OOMs must not have to infer that."""
+    vae = _tiny_vae()
+    vae.decoder = _CardTooSmall(vae.decoder, limit=0)
+    pipe = _Pipeline(vae)
+    with _Events():
+        memory.apply_low_vram_config(pipe, mode="off")
+        with torch.enable_grad():
+            with pytest.raises(RuntimeError) as caught:
+                pipe.vae.decode(torch.randn(1, 4, 24, 24))
+    assert "AUTOGRAD IS ENABLED" in str(caught.value)
+    assert "torch.no_grad()" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------

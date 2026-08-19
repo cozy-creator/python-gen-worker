@@ -265,6 +265,31 @@ def apply_tile_plan(vae: Any, plan: TilePlan) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _grad_warning() -> str:
+    """Empty unless autograd is on — in which case say so, because it is the
+    one condition under which tiling CANNOT help.
+
+    Measured on a real card (sd1.5 VAE, 320² latent, RTX 4070): with grad
+    enabled every tile's activations are retained for backward, so the tiled
+    retry accumulates instead of bounding, and the ladder walks all four rungs
+    down to an 8² tile and still fails. Under ``no_grad`` — which is what
+    diffusers' pipelines decode under — the SAME decode succeeds on the first
+    tiled rung at 2.7 GiB peak. Serving never wants the graph, so this is a
+    caller defect; the confession names it rather than leaving an operator to
+    infer it from four identical OOMs.
+    """
+    try:
+        import torch
+
+        if torch.is_grad_enabled():
+            return (" AUTOGRAD IS ENABLED for this decode, so every tile's "
+                    "activations are retained for backward and tiling cannot "
+                    "bound the peak — decode under `torch.no_grad()`.")
+    except Exception:  # noqa: BLE001 — a diagnostic may never be the failure
+        pass
+    return ""
+
+
 def _latent_geometry(args: Sequence[Any], kwargs: Dict[str, Any]) -> Tuple[int, int, int, int]:
     """``(h, w, frames, dtype_bytes)`` of the latent this decode was handed."""
     tensor = None
@@ -327,7 +352,8 @@ def _wrap_vae_decode(vae: Any, log: logging.Logger) -> bool:
             if state["rung"] >= len(ladder):
                 raise RuntimeError(
                     f"VAE decode ran out of memory at every tile the ladder has "
-                    f"({', '.join(str(p) for p in ladder)}); last failure: {failed}")
+                    f"({', '.join(str(p) for p in ladder)}); last failure: "
+                    f"{failed}.{_grad_warning()}")
             plan = ladder[state["rung"]]
             applied = apply_tile_plan(vae, plan)
             if not applied:
@@ -349,6 +375,7 @@ def _wrap_vae_decode(vae: Any, log: logging.Logger) -> bool:
                     f"(rung {state['rung'] + 1}/{len(ladder)}). The request still "
                     f"serves; a tiled decode re-runs the decoder per tile and "
                     f"blends overlaps, so this pod is serving DEGRADED."
+                    + _grad_warning()
                 ),
                 log=log,
             )
