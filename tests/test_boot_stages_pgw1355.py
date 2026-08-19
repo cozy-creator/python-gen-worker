@@ -218,27 +218,31 @@ def test_the_detail_grammar_is_the_one_the_renderer_already_parses() -> None:
     """Space-separated `k=v`, values never containing whitespace — the grammar
     `(\\w+)=(\\S+)` parses entirely, which e2e's `detailKV` already implements.
     A value with a space splits one pair into two and means something else."""
+    # `family` rather than `keys_from`: cd46c957 (pgw#1373) deleted the keyset
+    # ladder and with it the axis, so the roll-up promotes `classes`/`family`.
+    # The GRAMMAR is this test's subject and it is unchanged.
     table = _table(
-        StageSpan(stage=Stage.KEYSET, t0_ms=100, t1_ms=805_000,
-                  label="boot_adopt.key_set",
-                  attrs={"keys_from": "traced", "classes": "36"}),
+        StageSpan(stage=Stage.ADOPT_PULL, t0_ms=100, t1_ms=805_000,
+                  label="adopt.pull",
+                  attrs={"family": "sdxl", "classes": "36"}),
         wall_ms=830_000,
     )
     detail = boot_stages.rollup_detail(table)
     pairs = dict(tok.split("=", 1) for tok in detail.split(" ") if "=" in tok)
     assert pairs["v"] == "1"
     assert pairs["wall_ms"] == "830000"
-    assert pairs["keys_from"] == "traced"
+    assert pairs["family"] == "sdxl"
+    assert pairs["classes"] == "36"
     assert pairs["unmeasured_ms"] == str(830_000 - 804_900)
     for token in detail.split(" "):
         assert token.count("=") >= 1, f"{token!r} is not a k=v pair"
 
     stage_detail = boot_stages.stage_detail(table.spans[0])
     kv = dict(tok.split("=", 1) for tok in stage_detail.split(" "))
-    assert kv["stage"] == "keyset"
+    assert kv["stage"] == "adopt_pull"
     assert kv["t0_ms"] == "100"
     assert kv["t1_ms"] == "805000"
-    assert kv["keys_from"] == "traced"
+    assert kv["family"] == "sdxl"
 
 
 def test_an_empty_value_can_never_reach_the_wire() -> None:
@@ -344,17 +348,27 @@ def test_a_boot_that_never_reached_ready_still_reports_what_happened() -> None:
     assert Stage.MODEL_LOAD in {s.stage for s in table.spans}
 
 
-def test_the_keyset_stage_carries_where_the_keys_CAME_FROM() -> None:
-    """pgw#1353's whole finding is that every production pod reported
-    `keys_from=traced` — the FALLBACK — and nothing made that visible while it
-    was happening. It is the axis separating an 805 s boot from a 5 ms one."""
+def test_a_directly_recorded_stage_promotes_its_facts_to_the_rollup() -> None:
+    """A stage with no `boot_phases` span of its own still reaches the roll-up,
+    and the facts it carries are promoted onto the terminal line.
+
+    This replaces `test_the_keyset_stage_carries_where_the_keys_CAME_FROM`.
+    That test's subject was `keys_from`, pgw#1353's axis on the KEYSET ladder,
+    and cd46c957 (pgw#1373) deleted the ladder and stopped promoting the key —
+    deliberately: "a roll-up that keeps ASKING for a key nothing produces reads
+    as 'the boot had no key source' rather than 'that question no longer
+    exists'". What survives, and is worth a row, is the PROMOTION mechanism the
+    old test rode on.
+    """
     _drive_a_real_boot()
     boot_stages.record(
-        Stage.KEYSET, t0_ms=1, t1_ms=804_701, label="boot_adopt.key_set",
-        keys_from="traced", classes=36, family="sdxl")
+        Stage.ADOPT_PULL, t0_ms=1, t1_ms=804_701, label="adopt.pull",
+        classes=36, family="sdxl")
     table = boot_stages.collect()
-    assert table.attr("keys_from") == "traced"
-    assert "keys_from=traced" in boot_stages.rollup_detail(table)
+    assert table.attr("family") == "sdxl"
+    detail = boot_stages.rollup_detail(table)
+    assert "family=sdxl" in detail
+    assert "classes=36" in detail
 
 
 def test_the_derive_stage_covers_a_window_the_ladder_structurally_cannot() -> None:

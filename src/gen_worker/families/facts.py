@@ -36,8 +36,9 @@ component adds a row HERE.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 # Load dtypes a fact may name. Storage/quant lanes (fp8, nvfp4, nf4) are the
 # fit ladder's business and are never expressed here: this axis exists only to
@@ -102,6 +103,41 @@ def component_dtype_for_class(class_name: str) -> Optional[ComponentDtype]:
     return COMPONENT_DTYPES.get(str(class_name or "").strip())
 
 
+def component_classes(pipeline_cls: Any) -> Dict[str, str]:
+    """``{part_name: component class NAME}`` from a pipeline class's
+    ``__init__`` annotations.
+
+    diffusers annotates every component it composes (``vae:
+    AutoencoderKLWan``), so the class vocabulary is derivable with no snapshot
+    and no instantiation. Unannotated or non-class annotations are simply
+    absent; a snapshot's ``model_index.json`` is authoritative where one exists.
+
+    pgw#1373 re-homed this from the deleted ``api/tree.py``. The rest of that
+    module — ``derive_components``/``components_manifest``/``part_kind`` —
+    published the tree into the v1 ``functions[].slots[].components`` manifest
+    and died with that vocabulary. This half feeds the LOAD path, which did
+    not, so it lives beside the facts table it keys into.
+    """
+    if not isinstance(pipeline_cls, type):
+        return {}
+    try:
+        init = inspect.getattr_static(pipeline_cls, "__init__")
+    except AttributeError:
+        return {}
+    raw = getattr(init, "__annotations__", None) or {}
+    out: Dict[str, str] = {}
+    for name, ann in raw.items():
+        if name in ("self", "return", "args", "kwargs"):
+            continue
+        if isinstance(ann, type):
+            out[str(name)] = ann.__name__
+        elif isinstance(ann, str) and ann.isidentifier():
+            # PEP 563 / quoted annotation: the bare name is what the facts
+            # table keys on, so no resolution (and no import) is needed.
+            out[str(name)] = ann
+    return out
+
+
 def component_dtypes_for_classes(
     classes: Mapping[str, str],
 ) -> Dict[str, ComponentDtype]:
@@ -120,6 +156,7 @@ __all__ = [
     "COMPONENT_DTYPES",
     "LOAD_DTYPES",
     "ComponentDtype",
+    "component_classes",
     "component_dtype_for_class",
     "component_dtypes_for_classes",
 ]

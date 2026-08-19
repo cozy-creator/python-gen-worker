@@ -127,30 +127,36 @@ def test_no_module_fails_to_import_for_any_other_reason(outcomes: List[Outcome])
         pytest.fail(f"{len(broken)} module(s) fail to import on their own:\n\n{detail}")
 
 
-@pytest.mark.parametrize(
-    "module",
-    [
-        "gen_worker.cli.release",
-        "gen_worker.cli.models_export",
-        "gen_worker.cli.protocol",
-        "gen_worker.cli.args",
-        "gen_worker.cli",
-    ],
-)
+def _cli_entry_orders() -> List[str]:
+    """Every entry order into the cli package, DERIVED from the package.
+
+    pgw#1440 found this parametrization naming `cli.serve`, `cli.run` and
+    `cli.invoke` — all three deleted by pgw#1373 (`cd46c957`) — so three of the
+    four rows had been failing on master ever since, and the one surviving name
+    (`gen_worker.cli`) is the one that proves the least. The `cli.run` row is
+    the same stale reference that left `cli/release.py` importing a deleted
+    symbol; this was that fallout, in the test half.
+
+    pgw#1438 makes it derived rather than re-listed. A LIST is what went stale,
+    and the replacement list was already incomplete on the day it landed — it
+    omits `cli.sockaddr`. The package's own contents cannot go stale, and a
+    module added tomorrow is covered without anyone remembering to add it.
+    """
+    mods = sorted(
+        f"gen_worker.cli.{p.stem}"
+        for p in (PKG / "cli").glob("*.py")
+        if p.stem not in ("__init__", "__main__")
+    )
+    return ["gen_worker.cli", *mods]
+
+
+@pytest.mark.parametrize("module", _cli_entry_orders())
 def test_cli_entry_orders(module: str) -> None:
     """Every entry order into the cli package, named individually.
 
     `cli/__init__` reaching one submodule before another is what masked the
-    original defect, so "the CLI works" was never evidence about any single
-    entry point.
-
-    pgw#1440: the list used to name `cli.serve`, `cli.run` and `cli.invoke`,
-    all three of which pgw#1373 (`cd46c957`) deleted with the v1 SDK — so
-    three of the four parametrizations had been failing on master ever since,
-    and the one surviving name (`gen_worker.cli`) is the one that proves the
-    least. Re-pointed at the modules the package ACTUALLY has. The `cli.run`
-    row is the same stale reference that left `cli/release.py` importing a
-    deleted symbol; this is that fallout, in the test half.
+    original defect, so "the CLI works" was never evidence about any particular
+    submodule.
     """
     outcome = _import_alone(module)
     assert outcome.returncode == 0, f"{module} as a first import:\n{outcome.stderr}"

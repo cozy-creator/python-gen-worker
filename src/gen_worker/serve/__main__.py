@@ -33,7 +33,11 @@ def main() -> int:
     role.declare(role.ServeRole.ADOPT_ONLY)
     guard.install()
 
-    from ..worker_main import _run_main
+    # `entrypoint`, not `worker_main`: pgw#1373 renamed the module BACK because
+    # every hub-synthesized Dockerfile writes
+    # `ENTRYPOINT ["python3","-m","gen_worker.entrypoint"]` and the publish gate
+    # refuses an image whose entrypoint does not run it. This entry was missed.
+    from ..entrypoint import _run_main
 
     return int(_run_main())
 

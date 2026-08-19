@@ -193,7 +193,11 @@ def main() -> int:
 # pgw#1373: `probe_hardware` LIVES HERE NOW. It came from the deleted
 # `lifecycle.py`, and its obvious home looked like `hostfacts` — it returns a
 # `HostFacts`. That was wrong, and `lint_serve_role_closure` said so
-# immediately: the probe needs `topology` and `models.hub_policy`, and putting
+# immediately: the probe needs `topology` and `models.hub_policy` — NAMED FROM
+# THE PACKAGE ROOT, i.e. `gen_worker.topology` and `gen_worker.models.hub_policy`,
+# which from inside this package are `..topology` and `..models.hub_policy`.
+# Spelling them bare here is how a single dot got typed at the import below and
+# cost the fleet its `gpu_sm` (pgw#1438); the two dots are load-bearing. Putting
 # it in `hostfacts` put that edge on the MODEL-FREE serve surface, dragging
 # `models.residency -> models.memory -> structure_only -> diffusers` onto a
 # path whose whole point is that it never imports a model library. `hostfacts`
@@ -348,7 +352,25 @@ def probe_hardware() -> "HostFacts":
     except Exception:
         pass
     try:
-        from .models.hub_policy import detect_worker_capabilities
+        # 🔻 `..models`, NOT `.models`, and the defect was exactly this LEVEL —
+        # nothing else about the call was ever wrong. The probe came from
+        # `gen_worker/lifecycle.py` (pgw#1373), where ONE dot reached
+        # `gen_worker.models`. From `gen_worker/procsplit/` one dot reaches
+        # `gen_worker.procsplit.models`, which does not exist among this
+        # package's modules — and the `except Exception: pass` below swallowed
+        # the ModuleNotFoundError, so EVERY worker on EVERY pod reported an
+        # empty `gpu_sm`/`torch_version`/`cuda_version` and then refused every
+        # request carrying a pgw#984-derived `min_sm` (pgw#1417/#1436). It was
+        # unconditional, which is why sdxl reproduced it six times out of six.
+        #
+        # WHERE THE WRONG DOT CAME FROM, so the next reader does not retype it:
+        # the block comment at the top of this section says the probe "needs
+        # `topology` and `models.hub_policy`" — bare names, written from the
+        # PACKAGE ROOT's perspective, because that is where the probe lived when
+        # the sentence was written. Read from inside `procsplit/`, `models.…`
+        # transcribes to one dot. Every other relative import in this module is
+        # `..`; this was the only single dot in the file.
+        from ..models.hub_policy import detect_worker_capabilities
 
         caps = detect_worker_capabilities()
         installed_libs = tuple(str(x) for x in (caps.installed_libs or []))

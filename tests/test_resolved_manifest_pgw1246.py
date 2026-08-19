@@ -156,7 +156,13 @@ def test_the_deleted_vocabulary_is_absent_from_the_installed_package() -> None:
     import gen_worker
 
     root = pathlib.Path(gen_worker.__file__).resolve().parent
-    assert (root / "executor.py").exists(), root  # the sweep must see the WHOLE package
+    # The sweep must see the WHOLE package, so anchor it on a file that is
+    # certain to be there. `executor.py` was that anchor and cd46c957
+    # (pgw#1373) deleted it with the v1 runtime — an anchor that names a
+    # deleted file turns this row from "the vocabulary is gone" into "the
+    # anchor is gone", which is a different sentence. `worker.py` is the v2
+    # boot connector and cannot be absent from a working package.
+    assert (root / "worker.py").exists(), root
     banned = (
         "component_fetch_skipped",
         "_override_excluded_components",

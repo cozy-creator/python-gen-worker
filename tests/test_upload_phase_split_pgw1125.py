@@ -300,10 +300,13 @@ def test_a_real_serve_declares_the_sha256_of_the_bytes_it_uploaded() -> None:
             conn = scheduler.wait_connection(0)
             conn.wait_for(is_ready)
             conn.send(run_job=pb.RunJob(
-                request_id="r-1125-sha", attempt=1, function_name="large-usage",
+                request_id="r-1125-sha", attempt=1, function_name="save-a-large-file",
                 input_payload=msgspec.msgpack.encode(EchoIn(text="x")),
                 org=org_id, capability_token="cap-token",
-                media_bytes=pb.MEDIA_BYTES_INLINE,
+                # NOT MEDIA_BYTES_INLINE: an inline preference under the
+                # 4 MiB threshold returns the bytes to the client and
+                # performs no upload, which would pass this test without
+                # the upload it is about.
             ))
             res = conn.wait_for(is_result_for("r-1125-sha")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message

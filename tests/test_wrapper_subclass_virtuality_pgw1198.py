@@ -42,9 +42,8 @@ pytest.importorskip("accelerate")
 import torch.nn as nn  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
-MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
-if str(MICRO_SRC) not in sys.path:
-    sys.path.insert(0, str(MICRO_SRC))
+if str(REPO / "tests") not in sys.path:
+    sys.path.insert(0, str(REPO / "tests"))
 
 from gen_worker import meta_instantiation as mi  # noqa: E402
 from gen_worker.models import structure_only as so  # noqa: E402
@@ -155,17 +154,19 @@ class _Composed:
 
 @pytest.fixture(scope="module")
 def tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    from micro_diffusion.weights import SEED, materialize
+    """A config-only tree. pgw#1373 deleted `examples/micro-diffusion`, which
+    was where this came from; `harness.structure_tree` is the replacement and
+    builds it out of a REAL diffusers class instead of a vendored toy."""
+    from harness.structure_tree import build_config_only_tree
 
-    root = tmp_path_factory.mktemp("micro-tree")
-    return materialize(root, seed=SEED)
+    return build_config_only_tree(tmp_path_factory.mktemp("structure-tree"))
 
 
 @pytest.fixture()
 def quantized_target(tree: Path) -> Any:
     module, _facts = so.build_component(tree, "transformer", device="cpu")
     assert quantize_like_setup(module) > 0, (
-        "the micro denoiser must carry Linears for this to test anything")
+        "the denoiser must carry Linears for this to test anything")
     return module
 
 
@@ -230,9 +231,16 @@ def test_the_fence_still_FIRES_when_the_quantizer_left_real_weights(
     """The other direction, in the same walk. A fence that cannot fire is
     worse than no fence, and widening what counts as virtual must not have
     bought that."""
-    quantized_target.proj_out.weight = nn.Parameter(
-        real_quantized(tuple(quantized_target.proj_out.weight.shape)),
-        requires_grad=False)
+    # Any Linear will do, and NAMING one is how this row broke when the
+    # fixture family changed (`proj_out` was the deleted micro denoiser's).
+    # What the fence is about is a real-storage parameter anywhere under the
+    # component, so reach for the first one the walk would see.
+    victim = next(
+        m for _n, m in quantized_target.named_modules()
+        if isinstance(m, nn.Linear)
+    )
+    victim.weight = nn.Parameter(
+        real_quantized(tuple(victim.weight.shape)), requires_grad=False)
     pipe = _Composed(transformer=quantized_target)
 
     breaches = so.weight_free_breaches(pipe, ("transformer",))
