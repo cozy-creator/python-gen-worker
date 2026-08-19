@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from . import keymap as _keymap
 from . import skeleton as _skeleton
 from .source import StreamedTensor, TensorStream, WeightStore, component_of
 from .staging import DEFAULT_BUFFER_BYTES, DEFAULT_BUFFERS, StagingPool
@@ -382,15 +383,25 @@ class StreamingLoader:
             return
 
         slots = _slots(module)
+        # pgw#1453: the checkpoint's names may predate the installed library.
+        # `from_pretrained` absorbs that difference; this engine installs by
+        # EXACT name, so it asks the SAME library for the SAME migration rather
+        # than matching nothing (sd1.5's text_encoder: 0 of 197). Empty for
+        # every checkpoint the installed version already spells.
+        renames = _keymap.migration(module, (entry.name for entry in entries))
         placements: List[_Placement] = []
         unexpected: List[str] = []
         seen: set[str] = set()
         dtypes: set[str] = set(report.dtypes)
 
         for entry in entries:
-            slot = slots.get(entry.name)
+            name = renames.get(entry.name, entry.name)
+            slot = slots.get(name)
             if slot is None:
-                unexpected.append(entry.name)
+                unexpected.append(
+                    entry.name if name == entry.name
+                    else f"{entry.name} (migrated to {name})"
+                )
                 continue
             dtype = _torch_dtype(entry.dtype, f"{component}/{entry.name}")
             dtypes.add(entry.dtype.upper())
@@ -422,7 +433,16 @@ class StreamingLoader:
                 f"component {component!r} — {', '.join(sorted(unexpected)[:8])}"
                 + (" …" if len(unexpected) > 8 else "")
                 + ". A name the skeleton cannot place is a checkpoint the "
-                "code does not match; ctx.load never guesses."
+                "code does not match; ctx.load never guesses. "
+                + (
+                    f"{type(module).__name__}'s own library migration was "
+                    f"applied first and renamed {len(renames)} key(s), so this "
+                    f"is a difference the library does not know about "
+                    f"(pgw#1453)."
+                    if renames else
+                    f"{type(module).__name__}'s own library migration was "
+                    f"applied first and renamed nothing (pgw#1453)."
+                )
             )
 
         report.dtypes = tuple(sorted(dtypes))
