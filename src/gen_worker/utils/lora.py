@@ -117,9 +117,12 @@ _KOHYA_TE_ALIASES = (
 )
 
 
-def _te_prefix_to_component() -> tuple[tuple[str, str], ...]:
+def te_prefix_to_component() -> tuple[tuple[str, str], ...]:
     """Component prefix -> pipe attribute, longest first so ``text_encoder_2``
-    wins over ``text_encoder``. Read at call time."""
+    wins over ``text_encoder``. Read at call time.
+
+    Shared with :mod:`gen_worker.models.lora_fold`, which needs the same table
+    to route an adapter's text-encoder half — one alias table, not two."""
     dotted = tuple(
         (c, c) for c in sorted(text_encoder_components(), key=len, reverse=True)
     )
@@ -249,7 +252,7 @@ def _reject_te_keys_on_cast_te(
     block-window/layerwise cast — fail loud, never fight the hooks. Keys
     targeting an UNCAST encoder in a mixed setup stay on the peft path."""
     def component_of(key: str) -> str:
-        for prefix, comp in _te_prefix_to_component():
+        for prefix, comp in te_prefix_to_component():
             if key.startswith(prefix):
                 return comp
         return ""

@@ -60,6 +60,7 @@ class _Pipe:
 
     def __init__(self, unet: Any) -> None:
         self.unet = unet
+        self.text_encoder: Any = None
 
 
 def _adapter(unet: Any, seed: int, scale: float = 1.0) -> lora_fold.Adapter:
@@ -414,6 +415,47 @@ def test_a_quantized_leaf_refuses_the_fold_by_name() -> None:
 
     with pytest.raises(RefCompatibilitySurprise, match="QUANTIZED"):
         lora_fold.compute_deltas(unet, [_adapter(_tiny_unet(), 1)])
+
+
+def test_the_text_encoder_half_is_folded_too_and_not_dropped() -> None:
+    """A style LoRA usually carries a text-encoder half. Folding only the
+    denoiser would serve the adapter at the wrong strength with a clean log."""
+    import torch.nn as nn
+
+    class _TinyTE(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.q_proj = nn.Linear(8, 8, bias=False)
+
+        def forward(self, x: Any) -> Any:
+            return self.q_proj(x)
+
+    unet = _tiny_unet()
+    pipe = _Pipe(unet)
+    pipe.text_encoder = _TinyTE()
+    before = pipe.text_encoder.q_proj.weight.detach().clone()
+
+    torch.manual_seed(11)
+    sd, weight, ref = _adapter(unet, 5)
+    sd["text_encoder.q_proj.lora_A.weight"] = torch.randn(_RANK, 8) * 0.05
+    sd["text_encoder.q_proj.lora_B.weight"] = torch.randn(8, _RANK) * 0.05
+
+    with lora_fold.folded(pipe, [(sd, weight, ref)]) as stats:
+        assert stats["components"] == 2, stats
+        assert not torch.equal(pipe.text_encoder.q_proj.weight, before), (
+            "the text-encoder half must actually land")
+    assert torch.equal(pipe.text_encoder.q_proj.weight, before)
+
+
+def test_a_key_that_lands_on_no_component_refuses_rather_than_being_dropped() -> None:
+    unet = _tiny_unet()
+    sd, weight, ref = _adapter(unet, 6)
+    sd["text_encoder_2.q_proj.lora_A.weight"] = torch.randn(_RANK, 8) * 0.05
+    sd["text_encoder_2.q_proj.lora_B.weight"] = torch.randn(8, _RANK) * 0.05
+
+    with pytest.raises(RefCompatibilitySurprise, match="land on no component"):
+        with lora_fold.folded(_Pipe(unet), [(sd, weight, ref)]):
+            pass
 
 
 def test_an_empty_adapter_set_is_a_no_op_that_still_yields() -> None:

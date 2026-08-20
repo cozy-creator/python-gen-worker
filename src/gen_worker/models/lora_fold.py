@@ -115,10 +115,73 @@ def _delta(mod: Any, a: Any, b: Any, scale: float) -> Any:
     return out.mul_(float(scale))
 
 
+def fold_targets(pipe: Any) -> Dict[str, Any]:
+    """Every component an adapter half can land on: the denoisers, plus the
+    text encoders.
+
+    The text encoders are here because leaving them out is how a fold serves
+    HALF an adapter and says nothing. They are never quantized
+    (:func:`~.w8a8_lora.split_state_dict` is built on that), so the same
+    in-place fold applies to them unchanged.
+    """
+    from ..component_vocab import text_encoder_components
+
+    targets = dict(w8a8_lora.branch_targets(pipe))
+    for name in text_encoder_components():
+        module = getattr(pipe, name, None)
+        if module is not None and hasattr(module, "named_modules"):
+            targets.setdefault(name, module)
+    return targets
+
+
+def _route(
+    normalized: Dict[str, Any], targets: Mapping[str, Any],
+    denoisers: Sequence[str], *, ref: str,
+) -> Dict[str, Dict[str, Any]]:
+    """One adapter's keys partitioned by the component they adapt.
+
+    The denoiser half goes through :func:`~.w8a8_lora.route_denoiser_keys`
+    (the MoE contract, unchanged). The rest is text-encoder keys, routed by the
+    prefix table :mod:`gen_worker.utils.lora` already owns — one table, not two.
+    Anything that lands nowhere REFUSES: a dropped half is an adapter that
+    served at the wrong strength with a clean log, which is the whole class of
+    defect this module exists to remove.
+    """
+    from ..utils.lora import te_prefix_to_component
+
+    den, rest = w8a8_lora.split_state_dict(normalized)
+    routed: Dict[str, Dict[str, Any]] = {
+        comp: dict(keys) for comp, keys
+        in w8a8_lora.route_denoiser_keys(den, denoisers, ref=ref).items()
+    }
+    unrouted: List[str] = []
+    for key, tensor in rest.items():
+        for prefix, comp in te_prefix_to_component():
+            if key.startswith(prefix) and comp in targets:
+                # STRIPPED, unlike the denoiser half: `map_adapter` strips
+                # `unet.`/`transformer.` itself and knows no text-encoder
+                # prefix, so the routing that identified the component is also
+                # what removes it.
+                routed.setdefault(comp, {})[key[len(prefix):].lstrip(".")] = tensor
+                break
+        else:
+            unrouted.append(key)
+    if unrouted:
+        raise RefCompatibilitySurprise(
+            f"{len(unrouted)} adapter key(s) land on no component this "
+            f"pipeline carries (e.g. {', '.join(sorted(unrouted)[:3])}) — it "
+            f"has {', '.join(sorted(targets))}. Folding the rest would serve "
+            "a partial adapter and say nothing",
+            ref=ref, axis="component_missing",
+        )
+    return routed
+
+
 def compute_deltas(
     model: Any, adapters: Sequence[Adapter], *, pipe: Any = None,
+    keys: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """``module path -> ΔW`` for one denoiser and the whole adapter set.
+    """``module path -> ΔW`` for one component and the whole adapter set.
 
     The whole set settles into ONE delta per module before anything is written,
     so a refusal anywhere leaves the weights untouched — the same fail-closed
@@ -128,18 +191,26 @@ def compute_deltas(
     (``normalize_adapter_state_dict`` → ``split_state_dict`` → ``map_adapter``),
     not a second implementation: the kohya/SGM grammars, the alpha/rank scale
     and the typed refusals are already there and must not drift.
+
+    ``keys`` is this component's already-routed slice of each adapter, in
+    ``adapters`` order — what :func:`folded` computes once for the whole
+    pipeline. Omitted, the whole adapter is resolved against ``model``, which is
+    the single-denoiser case and what a caller holding one module wants.
     """
     import torch
 
     mods = w8a8_lora.branch_modules(model)
     deltas: Dict[str, Any] = {}
-    for state_dict, weight, ref in adapters:
-        normalized = w8a8_lora.normalize_adapter_state_dict(
-            pipe if pipe is not None else model, state_dict, ref=ref)
-        den, _rest = w8a8_lora.split_state_dict(normalized)
-        if not den:
+    for index, (state_dict, weight, ref) in enumerate(adapters):
+        if keys is not None:
+            slice_ = keys[index]
+        else:
+            normalized = w8a8_lora.normalize_adapter_state_dict(
+                pipe if pipe is not None else model, state_dict, ref=ref)
+            slice_, _rest = w8a8_lora.split_state_dict(normalized)
+        if not slice_:
             continue
-        mapped = w8a8_lora.map_adapter(den, model, ref=ref)
+        mapped = w8a8_lora.map_adapter(dict(slice_), model, ref=ref)
         quantized = sorted(p for p in mapped if not _plain_leaf(mods[p]))
         if quantized:
             raise RefCompatibilitySurprise(
@@ -239,10 +310,12 @@ def folded(
         with lora_fold.folded(pipe, riding, rebind=aot_serve.rearm_constants):
             pipe(...)
 
-    Every branch-capable denoiser the pipeline carries is folded, and they move
-    together: a refusal on the second expert leaves the first restored. Empty
-    ``adapters`` is a no-op that still yields, so the call site needs no
-    conditional.
+    EVERY component an adapter half names is folded — denoisers and text
+    encoders alike — and they move together: a refusal on the second leaves the
+    first restored. A key that lands on no component refuses rather than being
+    dropped, because a dropped half is an adapter that served at the wrong
+    strength with a clean log. Empty ``adapters`` is a no-op that still yields,
+    so the call site needs no conditional.
 
     ``rebind`` is MANDATORY when a compiled artifact is armed. The artifact sees
     the in-place write through its user-managed pointer, but AOTI's runtime
@@ -252,14 +325,28 @@ def folded(
     alternative is a green request whose numbers are silently wrong, which is
     precisely the defect this module exists to remove.
     """
-    targets = w8a8_lora.branch_targets(pipe)
+    targets = fold_targets(pipe)
     if not adapters or not targets:
         yield {}
         return
 
+    # Route every adapter ONCE for the whole pipeline, before any component is
+    # resolved: an unroutable key must refuse before the first weight moves.
+    denoisers = tuple(w8a8_lora.branch_targets(pipe))
+    per_adapter = [
+        _route(
+            w8a8_lora.normalize_adapter_state_dict(pipe, state_dict, ref=ref),
+            targets, denoisers, ref=ref,
+        )
+        for state_dict, _weight, ref in adapters
+    ]
+
     plan: List[Tuple[Any, Dict[str, Any]]] = []
-    for model in targets.values():
-        deltas = compute_deltas(model, adapters, pipe=pipe)
+    for comp, model in targets.items():
+        slices = [routed.get(comp, {}) for routed in per_adapter]
+        if not any(slices):
+            continue
+        deltas = compute_deltas(model, adapters, pipe=pipe, keys=slices)
         if deltas:
             plan.append((model, deltas))
     if not plan:
@@ -281,7 +368,7 @@ def folded(
 
     scopes: List[FoldScope] = []
     stats: Dict[str, Any] = {
-        "denoisers": len(plan),
+        "components": len(plan),
         "modules": sum(len(d) for _m, d in plan),
         "digest": adapter_digest(adapters),
     }
@@ -292,9 +379,9 @@ def folded(
                 rebind(model)
         stats["folded_bytes"] = sum(s.folded_bytes for s in scopes)
         logger.info(
-            "[request_id=%s] lora folded into weights: %d denoiser(s), "
+            "[request_id=%s] lora folded into weights: %d component(s), "
             "%d module(s), %d saved byte(s), set=%s",
-            request_id, stats["denoisers"], stats["modules"],
+            request_id, stats["components"], stats["modules"],
             stats["folded_bytes"], stats["digest"],
         )
         yield stats
