@@ -1,23 +1,17 @@
-"""pgw#1532: ``gen-worker compile`` succeeds only if the SERVING READER agrees.
+"""SERVABILITY: ``gen-worker compile`` succeeds only if the SERVING READER agrees.
 
-Measured on a 4070 the night this was filed: ``gen-worker compile`` ran fourteen
-real inductor/AOTI builds over 26 minutes, reported ``built=14 (of 14)``, exited
-0 — and boot-time adoption then saw **0 artifacts and 14 holes**. Two causes,
-both of them the same shape:
+The subject is one contract — *what this verb owes is not builds that returned,
+it is an endpoint the boot-time adopt path can arm* — and everything here is a
+precondition of it: that a built artifact lands in the band adoption addresses,
+that the graph-set document adoption enumerates through gets published, that the
+verdict and the exit code are computed from a reader rather than from a tally,
+and that the mint child can find a CUDA root on the box it is actually running
+on (no root, no artifact, so it belongs to the same claim).
 
-* ``Engine.compile`` banks its output in torchcg's own engine cache, keyed by
-  ``cg-key-v1``. NOTHING lands in the ``(cg-graph-v1, cg-env-v2)`` band adoption
-  reads unless somebody calls ``publish_artifact``. The runtime mint did. The
-  CLI did not.
-* Nothing in the CLI ever called ``put_graphs``, so even a correctly placed
-  artifact had no graph-set document to be enumerated through.
-
-Neither could be caught by anything ``compile`` measured, because it measured
-builds that returned. These tests drive the REAL ``compile_all`` — its work
-ledger, its store, its publish, its census — with only the inductor child
-replaced by a seam that emits a real torchcg artifact (``tests/tcg_artifacts``,
-no torch and no GPU). The red arms are the point: a build that publishes
-nowhere, and a run that never publishes its document, must both come out RED.
+Every test drives the REAL ``compile_all`` — its work ledger, its store, its
+publish, its census — with only the inductor child replaced by a seam emitting a
+real torchcg artifact (``tests/tcg_artifacts``: no torch, no GPU). The red arms
+are the point, because each of them was once GREEN.
 """
 
 from __future__ import annotations
@@ -162,6 +156,7 @@ def _run(endpoint: Path, cas: Path, **kwargs: Any) -> compile_cli.Report:
 def test_a_built_graph_lands_where_boot_time_adoption_reads_it(
     endpoint: Path, tmp_path: Path
 ) -> None:
+    # pgw#1533: `built=14 (of 14)`, rc 0, 26 min of real GPU work, 0 artifacts armed.
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
@@ -248,6 +243,7 @@ class PublishesNowhere:
 def test_a_compile_that_publishes_nowhere_fails_loudly(
     endpoint: Path, tmp_path: Path
 ) -> None:
+    # pgw#1533: the CLI never called `publish_artifact`; only the runtime mint did.
     cas = tmp_path / "graph-cas"
     real = LocalGraphStore(LocalCAS(cas))
     _seed_programs(real, tmp_path)
@@ -271,7 +267,8 @@ def test_a_compile_that_publishes_nowhere_fails_loudly(
 def test_an_unpublished_graph_set_document_is_a_gap_even_when_every_artifact_is_there(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """Findings #5 and #6 are independent, and either one alone serves eager.
+    """pgw#1533: the publish and the document are independent, and either gap alone
+    serves eager.
 
     Adoption enumerates lanes out of the document and never reaches the
     artifacts without one, so a store full of correctly addressed bytes and no
@@ -318,7 +315,7 @@ def test_an_artifact_under_the_wrong_env_is_absent_to_the_reader(
 
 
 def test_the_shell_learns_unservable_even_when_every_build_returned() -> None:
-    """The exact shape of the night this was filed: 14 BUILT, rc 0, 14 holes.
+    """pgw#1533: the exact shape of the night it was found — 14 BUILT, rc 0, 14 holes.
 
     Driven against a real ``Report`` rather than through argparse, because the
     thing under test is which fact the exit code is computed from.
@@ -353,7 +350,7 @@ def test_a_below_floor_no_op_is_not_an_unservable_run(
 
 
 # --------------------------------------------------------------------------
-# pgw#1532 finding #4 — the CUDA root the mint child points torch at
+# pgw#1533: the CUDA root the mint child points torch at — no root, no artifact
 # --------------------------------------------------------------------------
 
 
