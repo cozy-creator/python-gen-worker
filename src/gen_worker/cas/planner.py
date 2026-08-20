@@ -1,14 +1,15 @@
-"""The canonical object planner, in pure Python.
+"""The canonical object planner, in pure Python. FIRST-PARTY, not vendored.
 
-This module is a DECLARED REWRITE (see `VENDORED.toml`). It replaces
-`chunking.py`, the greedy small-tensor packer upstream deleted at `00c57c1`
-("pgw#1259: one chunker — the legacy Python data plane is gone") because its
-grid disagreed with the Rust planner's: packed tensors own no digest of their
-own and cannot be inherited by `TensorWriter`. Upstream's successor is
-`crates/tensorfs-core/src/planner/{mod,safetensors,gguf}.rs`, reachable from
-Python only through the compiled extension, and pgw#1310 rules a compiled
-extension out of a source-vendored wheel. So the grid is restored here in pure
-Python — the pgw#1344 precedent — and pinned to upstream's own released
+pgw#1575 moved this module out of `_vendor/tensorfs/`, where it had been
+masquerading as a vendored file it never was: it exists at NO upstream rev.
+Upstream deleted the Python chunker (`chunking.py`, the greedy small-tensor
+packer) at `00c57c1` — "pgw#1259: one chunker, the legacy Python data plane is
+gone" — because its grid disagreed with the Rust planner's: packed tensors own
+no digest of their own and cannot be inherited by `TensorWriter`. Upstream's
+successor is `crates/tensorfs-core/src/planner/{mod,safetensors,gguf}.rs`,
+reachable from Python only through the compiled extension, and pgw#1310 rules a
+compiled extension out of a source-vendored wheel. So the grid is restored here
+in pure Python — the pgw#1344 precedent — and pinned to upstream's own released
 conformance corpus (`spec/v1/planner-vectors`), vendored at
 `tests/testdata/planner-vectors/` and asserted object-for-object by
 `tests/test_planner_grid.py`.
@@ -41,8 +42,22 @@ import json
 from dataclasses import dataclass
 from typing import BinaryIO
 
-from . import gguf
-from .manifest import MAX_CHUNK_SIZE
+from .._vendor.tensorfs import gguf
+from .._vendor.tensorfs.manifest import MAX_CHUNK_SIZE
+
+# THE SAFETENSORS HEADER BOUND IS UPSTREAM'S, AND IT IS IMPORTED RATHER THAN
+# RESTATED. pgw#973 says one threat, one number, and it is right — but there
+# are two OWNERS here, not two copies of one number.
+# `models/safetensors_header.MAX_HEADER_BYTES` is 100 MiB (104_857_600) and is
+# a REFUSAL bound for readers. This one is `planner/safetensors.rs`'s
+# `MAX_HEADER_SIZE` (100_000_000, safetensors' own `tensor.rs` limit); it
+# decides a PLAN rather than a refusal — above it a file is `blob-v1`, not an
+# error — and the released `spec/v1/planner-vectors` corpus is keyed on it.
+# Swapping in the reader's number would make this port disagree with the Rust
+# planner for any header between the two, a dedup miss the conformance suite
+# cannot see. So it comes from the vendored snapshot, which states it once for
+# this lineage.
+from .._vendor.tensorfs.tensors import _MAX_HEADER_BYTES as _MAX_SAFETENSORS_HEADER_BYTES
 
 # `planner/mod.rs`: the tensor chunk grid constant. It is NOT a store admission
 # cap — a blob is one object of any size.
@@ -57,10 +72,6 @@ HEADER = "header"
 TENSOR = "tensor"
 BLOB = "blob"
 
-# safetensors 0.8.0's Rust reader refuses header lengths above 100,000,000
-# bytes (MAX_HEADER_SIZE in safetensors/src/tensor.rs). Match that format
-# boundary instead of conflating it with TensorFS's smaller object ceiling.
-_MAX_SAFETENSORS_HEADER_BYTES = 100_000_000
 # TensorFS v1 targets 64-bit Linux/POSIX. Safetensors decodes every shape
 # dimension into Rust usize before it checks tensor byte lengths.
 _MAX_USIZE = (1 << 64) - 1
@@ -176,6 +187,12 @@ def _tensor_spans(source: BinaryIO, size: int) -> tuple[int, tuple[tuple[int, in
         or header_end > size
     ):
         return None
+    # bound-justified: the four-clause refusal directly above caps
+    # `header_length` at `_MAX_SAFETENSORS_HEADER_BYTES` (100 MiB, the
+    # safetensors reference limit) AND at the file's own declared size before
+    # this line can run, so the allocation is bounded by a constant, not by
+    # the header the file claims. Upstream's `safetensors.rs::read_layout`
+    # applies the same two bounds in the same order.
     header_bytes = source.read(header_length)
     if len(header_bytes) != header_length or not header_bytes.startswith(b"{"):
         return None
@@ -361,9 +378,10 @@ def plan_chunks(source: BinaryIO, size: int) -> tuple[int, ...]:
     THE ONE DEVIATION, and it is upstream's counterpart's, not a preference.
     A blob above 64 MiB is still cut on the fixed grid here, because
     tensorhub's publish-v2 lane promotes an object with a SINGLE PUT
-    (`internal/s3/sha256_cas.go`: `verified promote: size %d is outside the
-    HashRepo single-PUT range 0..67108864`) and would refuse the whole-blob
-    entry terminally. Files at or below 64 MiB — every `config.json`, every
+    and would refuse the whole-blob entry terminally. Its refusal, quoted from
+    `internal/s3/sha256_cas.go` so a reader who hits it can grep for it, reads
+    "verified promote: size %d is outside the HashRepo single-PUT range
+    0..67108864". Files at or below 64 MiB — every `config.json`, every
     small non-tensor file — are already exactly blob-v1. The residual is
     tracked as pgw#1366: it closes when publish-v2 grants ride th#2064's
     multipart blob lane, and `test_the_oversized_blob_deviation_is_the_only_one`

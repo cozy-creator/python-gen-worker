@@ -35,6 +35,7 @@ pytest.importorskip("transformers")
 pytest.importorskip("safetensors")
 
 from gen_worker._vendor.tensorfs import LocalCAS, project_snapshot  # noqa: E402
+from cas_fixture import ingest_repository  # noqa: E402
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR  # noqa: E402
 from gen_worker.serving.streaming import (  # noqa: E402
     BridgeWeightStore,
@@ -64,7 +65,7 @@ WINDOW = 4096
 def _project(base: Path, source: Path, key: str) -> Path:
     """Ingest into a real CAS and project the tree, the chokepoint's way."""
     cas = LocalCAS(base)
-    manifest = cas.ingest_repository(source)
+    manifest = ingest_repository(cas, source)
     cas.compare_and_swap_ref(
         REF_PREFIX + key, cas.store_manifest(manifest), expected=None
     )

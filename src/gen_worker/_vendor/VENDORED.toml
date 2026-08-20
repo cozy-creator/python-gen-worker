@@ -27,277 +27,106 @@
 
 [packages.tensorfs]
 repo = "https://github.com/cozy-creator/tensorfs"
-rev = "8bafdfbb112be57cc96c0c71c38fd987091cbf51"
+rev = "da1f3d2f91efc0a12de4ed2b74a8d43009a577d5"
 subdir = "python/src/tensorfs"
-# Why THIS rev and not the tip: upstream `master` is a v0.1.0 genesis restart
-# that deleted this data plane outright (no `transfer`, `journal`, `chunking`);
-# `8bafdfbb` is the merge of tensorfs#41, the last lineage that still carries
-# `LocalCAS` + `download`/`upload` AND the pgw#1287 progress-emission fix
-# (`626a3de` per-object emission + `6c1f2ab` resident objects advance too).
-# A 31.6 GB snapshot reporting `0 / total` for its whole duration is what got
-# correctly-downloading pods condemned by the hub's 6-minute freshness window.
+# ONE REV, ONE LINEAGE (pgw#1575), on Paul's release-policy ruling of
+# 2026-08-20, verbatim: "it's fine if old wheels are on pypi historically. I
+# just mean, get rid of the vendored copies, etc. Remove the v1's from the
+# codebase fully."
 #
-# pgw#1308: the TRANSFER PLANE LEFT THIS SNAPSHOT and is now first-party at
-# `gen_worker/transfer/`. It was never storage — `TransferGrant.from_wire`
-# parses TENSORHUB's grant JSON, and the retry ladder, the fan-out width and
-# the per-object progress emission are this worker's policy about this
-# worker's uplink. Upstream agrees: current tensorfs has no Python transfer
-# plane at all (its client is the Rust `sync.rs` pack/blob lane, which a
-# pure-Python wheel cannot carry). So the two modules were pinned to a
-# lineage upstream had ABANDONED, and calling that a "vendored snapshot" was
-# the part that had stopped being true — a digest fence certifying fidelity
-# to a rev nobody would ever fix. The `daemon` module went with them, for the
-# adjacent reason: it is a FUSE client in a wheel that provably cannot mount
-# (pgw#1295 — `CAP_SYS_ADMIN` absent from the container's bounding set,
-# measured on a real pod), and nothing in this repo imported it.
+# This file used to declare a THREE-REV split and call it "the STEADY STATE …
+# a release-policy decision (Paul), not a lane's". The decision happened.
 #
-# What is LEFT is genuinely storage — `LocalCAS`, the chunk manifest, refs —
-# and it is byte-identical to `8bafdfbb` except for the `rewrites` below.
+# What the split was, and what was wrong with it. `rev` was `8bafdfbb` — and
+# that rev is not merely behind master, it shares NO ANCESTOR WITH IT AT ALL
+# (`git merge-base 8bafdfbb da1f3d2` finds nothing; upstream restarted at a
+# v0.1.0 genesis and the old lineage survives only on `shelf/tensorfsd`). It
+# was held for exactly five methods upstream deleted — `LocalCAS.ingest_file`,
+# `ingest_repository`, `collect_garbage`, `materialize`,
+# `materialize_repository` — and for a `planner.py` that exists at NO upstream
+# rev whatsoever. `read_plane_rev` and `contract_plane_rev` were master
+# ancestors bolted on beside it because the dead rev could not supply the
+# consumption plane or the contract plane.
 #
-# pgw#1330: THE SNAPSHOT IS SPLIT AT TWO REVS, ON PURPOSE, PERMANENTLY (see
-# the ownership ruling below), AND THIS IS THE ONLY RECORD OF IT. Every file in
-# `read_plane_files` comes from `read_plane_rev` below, NOT from `rev`. They are
-# the consumption plane the whole mixed-CAS cutover rests on — TFSSTUB1
-# render/parse, tree projection, the direct tensor reader and (pgw#1344) the
-# tensor WRITER — and they DID NOT EXIST at `8bafdfbb`.
+# Where the five went, and none of them needed a lineage:
 #
-# Why not simply bump `rev`: the newer lineage DELETED `LocalCAS.ingest_file`,
-# `LocalCAS.ingest_repository`, `LocalCAS.collect_garbage`,
-# `LocalCAS.materialize` and `LocalCAS.materialize_repository`.
+#   * `ingest_file` / `ingest_repository` — FIRST-PARTY, `gen_worker/cas/
+#     admission.py`. The old argument was that admission is the store's
+#     identity contract and forking it would put a second implementation of
+#     the hub's dedup rule in this repo. But the identity contract is the
+#     OBJECT GRID, and pgw#1365 had already forked that into `planner.py` and
+#     pinned it to upstream's released `spec/v1/planner-vectors` corpus. What
+#     was actually left in `local.py` was forty lines of plan, put, hash and
+#     refuse-if-it-moved, calling a module this repo already owned.
+#   * `collect_garbage` — FIRST-PARTY, `gen_worker/cas/retention.py`. Its own
+#     upstream docstring said "TensorFS deliberately owns no retention
+#     policy", and the policy was already `models/disk_gc.py`'s. Master has no
+#     successor at all: the Rust `ObjectStore` collects abandoned TEMPORARIES,
+#     which is a lease sweep, not a reachability pass.
+#   * `materialize` — UPSTREAM'S, and it moved rather than died:
+#     `TensorReader.materialize`, tier 3 of the access ladder Paul fixed on
+#     2026-08-17, which upstream's own no-whole-tree-materialization fence
+#     exempts by name. Two callers, `aot_delivery.py` and
+#     `models/materialized_view.py`, each carrying its inline
+#     `mixed-cas-hatch:` marker naming the §9 row it is priced under.
+#   * `materialize_repository` — DELETED. Zero callers since pgw#1308 step 6
+#     made the chokepoint PROJECT rather than materialize.
 #
-# pgw#1308 STEP 6 ANSWERED THE OWNERSHIP QUESTION, and the answer is NOT the
-# one this file used to imply. It said the split ends when the chokepoint
-# flips. It does not:
+# `planner.py` MOVED OUT (`gen_worker/cas/planner.py`). It was never a vendored
+# file: it is this repo's pure-Python port of
+# `crates/tensorfs-core/src/planner/{mod,safetensors,gguf}.rs`, written because
+# upstream deleted the Python chunker at `00c57c1` ("one chunker — the legacy
+# Python data plane is gone") and pgw#1310 rules a compiled extension out of a
+# source-vendored wheel. Carrying it under `_vendor/` made the digest table
+# certify fidelity to bytes no upstream rev has. Its two knowing divergences
+# are unchanged and still tested by name: `plan_chunks` cuts a >64 MiB blob on
+# the fixed grid (tensorhub's single-PUT promotion cap — pgw#1366), and a
+# duplicate GGUF metadata key plans as `gguf-v1` here and `blob-v1` upstream.
 #
-#   * `materialize_repository` — DEAD. The chokepoint projects (pgw#1308 step
-#     6, `models/cozy_snapshot.py:_publish_snapshot`), so this repo has zero
-#     callers. The definition below is all that is left of it.
-#   * `materialize` (single file) — KEPT, and the name is now the SHARED one.
-#     The pinned rev has always called it `materialize`; upstream called the
-#     same operation `extract()` until tensorfs#107 renamed it to match
-#     (Paul's #1303 ruling). So the two-spelling hazard that once made the
-#     hatch census read zero is gone: one name here and upstream. It is tier 3 of the access
-#     ladder — permanent, not separately priced — and upstream's own
-#     no-whole-tree-materialization fence exempts it by name. ONE live user
-#     since pgw#1342 — `aot_delivery.py`, declared to the lint against
-#     `docs/mixed-cas-layout.md` section 9 with an inline marker. The vendored
-#     `torchcg/storage.py` was the second until its blob cutover; it untars
-#     straight out of the store now and reaches no hatch.
-#   * `ingest_file` / `ingest_repository` — TENSORFS'S, not ours. Admission is
-#     the store's identity contract: the chunk grid, the whole-file digest,
-#     the concurrent-mutation refusal. Upstream did not abandon it the way it
-#     abandoned the Python transfer plane; it PORTED it to Rust
-#     (`Plan`/`HashedPlan`/`AdmittedObject`/`ObjectStore`) and added
-#     `TensorWriter`. Forking it first-party would put a second implementation
-#     of the rule that decides hub dedup in this repo.
-#   * `collect_garbage` — TENSORFS'S, same shape. Reachability over the
-#     store's own ref and manifest formats; its own docstring says tensorfs
-#     owns no retention policy, and the retention policy is already
-#     first-party in `models/disk_gc.py`.
+# `manifest.py` is now master's, which DROPS the 64 MiB cap on a chunkless
+# entry. The old note kept `8bafdfbb`'s stricter parser deliberately; that
+# reason is spent, because the stricter parser only ever refused a manifest
+# this repo cannot emit — `plan_chunks` still cuts an oversized blob for the
+# hub's sake, so nothing here produces a chunkless entry above the cap either
+# way. Relaxing the parser removes a divergence and adds no admission.
 #
-# So the split at two revs is the STEADY STATE. It ends when pgw can depend on
-# a PUBLISHED, COMPILED tensorfs — upstream's successors for ingest and GC are
-# the Rust extension, and pgw#1310 rules a compiled extension out of a
-# source-vendored wheel. That is a release-policy decision (Paul), not a lane's.
-# Do not "finish the bump": it would delete two symbols with no reachable
-# successor.
+# WHY IT IS STILL VENDORED AT ALL. pgw#1310 is unchanged: `[tool.uv.sources]`
+# is workspace-only metadata stripped from a published wheel, so a git pin
+# leaves every consumer of the artifact unable to resolve `gen-worker`.
+# tensorfs is NOT on PyPI today — `https://pypi.org/pypi/tensorfs/json` is a
+# 404 and the repo carries no `v*` tag — even though its release pipeline is
+# built and merged (`publish.yaml` + `wheels.yaml`: six abi3 platform wheels,
+# trusted publishing, a post-publish verify job) and `pyproject.toml` says
+# version 0.1.0. THE DAY A `v0.1.0` TAG IS CUT, this whole directory goes and
+# both rewrites below go with it, because the compiled extension becomes
+# installable. That is the end state; it is a tensorfs release act, not a pgw
+# lane's, and it is the only thing that retires pgw#1310.
 #
-# Why the split is SAFE rather than merely convenient: the three read-plane
-# modules import nothing from `local.py` at runtime beyond `object_path`,
-# `load_manifest` and `_store_lock` — all three present and unchanged at
-# `8bafdfbb` — plus `manifest.py` and `refs.py`. `refs.py` is byte-identical
-# across the two revs. `manifest.py` differs ONLY in that the newer rev drops
-# the 64 MiB cap on a chunkless entry; the older, STRICTER parser is the one
-# in force here, so nothing the read plane is handed can be a manifest the
-# storage half would have refused. `tests/test_projected_tree_pgw1330.py`
-# proves the pairing executes rather than asserting it from imports.
+# THE TWO SURVIVING REWRITES are listed under `rewrites` and both exist for
+# that same one reason — upstream reaches for `tensorfs.native`, and a
+# source-vendored wheel cannot carry the extension.
 #
-# pgw#1344: THE CONSUMPTION PLANE IS NOW A READ **AND WRITE** PLANE, and its
-# rev advances from `333bb10` to `21cec66` (tensorfs#106) to get `writer.py`.
-# `TensorWriter` composes a snapshot one tensor at a time in safetensors OR
-# GGUF on the seal planner's own object grid, which is the only way a converted
-# GGUF can share tensor objects with its safetensors source instead of being a
-# second copy of every byte. `convert/gguf_native.py` is its first caller.
-# `__init__.py` comes from this rev too and is now upstream's VERBATIM — the
-# pgw#1308 rewrite that used to live here is gone, because upstream itself no
-# longer re-exports a Python transfer plane. `project.py` is byte-identical at
-# both revs, so nothing about the projection half moved.
+# The 21 `_contracts/*.json` documents are upstream's VERBATIM and are the
+# wheel spelling of `spec/v1/contracts` (a source checkout symlinks them, so
+# they are copied dereferenced). They are the same files the Rust core embeds,
+# and the set is EQUAL to upstream's — `test_lane_contracts.py` runs upstream's
+# released `spec/v1/contract-vectors` corpus over them. Three of them declare
+# no top-level dtype on purpose — `dit.blocks-fused-qkv`,
+# `sdxl.clip-g-fused-qkv`, `sdxl.clip-g-split-qkv` — because they are FRAGMENTS
+# (a family-shared block spelling and two CLIP component spellings) that a
+# `lanes=` header never names on its own. Do not "fix" them, and do not let a
+# declaration-time dtype read treat them as lanes.
+# `stable-audio.diffusers-fp16` is the only document whose top-level dtype is
+# `float16`; the served checkpoints histogram {F16: 445} and the hub records
+# dtype=fp16, so do not correct it toward its siblings.
 #
-# ONE REWRITE IS REAL, and it is in `tensors.py`. At `21cec66` upstream's
-# `TensorReader._map` maps through the compiled extension
-# (`from .native import MappedObject`) and its comment says there is NO
-# fallback. pgw#1310 rules a compiled extension out of a source-vendored wheel,
-# so a straight take of that file would have deleted native tensor reads from
-# this repo outright. The rewrite restores the mapping in pure Python —
-# `_MappedObject`, an `mmap` exported through PEP 688's `__buffer__` — and it
-# is a restoration rather than a downgrade: upstream needed exactly two things
-# from the extension at that call site, a WEAK-REFERENCEABLE handle (so
-# `_maps` can stay the `WeakValueDictionary` that keeps an 8 GiB shard from
-# ending up resident) and a buffer that keeps its mapping alive for as long as
-# some view of it exists. A bare `mmap.mmap` supplies neither; a py3.12 class
-# with `__buffer__` supplies both, and py3.12 is this package's floor. Nothing
-# else in the file is touched, so every other line is still upstream's.
-# pgw#1365: THE ADMISSION GRID JOINS THE REWRITE, FOR THE SAME REASON, AND IT
-# IS THE LAST HALF OF THE SNAPSHOT THAT WAS STILL ANSWERING A RETIRED QUESTION.
-#
-# `chunking.py` at `8bafdfbb` was the GREEDY SMALL-TENSOR PACKER: tensors under
-# 64 MiB were accumulated into one object, and every non-tensor file was cut on
-# a fixed 64 MiB grid. Upstream DELETED that file at `00c57c1` ("pgw#1259: one
-# chunker — the legacy Python data plane is gone", Paul's ruling: two chunker
-# implementations, pick one, hard cut) because its grid disagreed with the Rust
-# planner's — a packed object spans two tensors, owns neither's digest, and can
-# therefore be inherited by nothing. The mixed-CAS ruling says verbatim "one
-# chunker (the Rust planner is canonical)". `hubio/client.py::publish_v2` calls
-# `LocalCAS.ingest_file`, so until this lane EVERY FLEET UPLOAD cut its objects
-# on the retired grid: measured against upstream's released conformance corpus,
-# 3 of 12 cases disagreed — a safetensors pair packed 3+5 bytes into one object
-# where the planner emits two, and BOTH GGUF cases were planned as raw blobs
-# because the retired module had no GGUF planner at all. That last one is the
-# expensive half: pgw#1344 had just taught `convert/gguf_native.py` to COMPOSE
-# GGUFs on the planner grid, and publishing one re-cut it.
-#
-# `planner.py` REPLACES it, and the pgw#1344 precedent is exactly why it is a
-# rewrite rather than a rev bump: upstream's successor is
-# `crates/tensorfs-core/src/planner/`, reachable from Python only through the
-# compiled extension, and pgw#1310 rules a compiled extension out of a
-# source-vendored wheel. So the grid is restored in pure Python and pinned to
-# the ORACLE UPSTREAM SHIPS — `spec/v1/planner-vectors`, the language-neutral
-# corpus Rust, Go and Python must all satisfy — vendored at
-# `tests/testdata/planner-vectors/` with its own digest and a sibling-checkout
-# comparison. All twelve cases now agree object-for-object AND digest-for-digest.
-# The safetensors structural proof (`_tensor_spans`) is the retired module's,
-# unchanged: it was already a faithful port of `safetensors.rs::read_layout`,
-# and only the packing it fed died.
-#
-# ONE DEVIATION, and it is the HUB's constraint, not a preference. `blob-v1` is
-# one unchunked object of ANY size; `plan_chunks` still cuts a blob above
-# 64 MiB on the fixed grid, because tensorhub's publish-v2 lane promotes an
-# object with a SINGLE PUT (`internal/s3/sha256_cas.go`: "verified promote:
-# size %d is outside the HashRepo single-PUT range 0..67108864") and would
-# refuse the whole-blob entry terminally. Files at or below 64 MiB are already
-# exactly `blob-v1`, so the residual is only large non-tensor files; it is
-# pgw#1366, it closes when publish-v2 grants ride th#2064's multipart blob
-# lane, and `test_the_oversized_blob_deviation_is_the_only_one` fails the
-# moment anyone widens it. `manifest.py` stays at `8bafdfbb` for the same
-# reason — its chunkless 64 MiB cap is the older, stricter parser, and nothing
-# this snapshot emits can violate it.
-read_plane_rev = "21cec66a580cb232210facbfccfa580a16d7196e"
-read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "writer.py"]
-# pgw#1391: A THIRD REV, AND THE SAME REASON AS THE SECOND — the CONTRACT plane
-# did not exist at either of the two above. `rev` predates tensorfs's genesis
-# restart entirely and `read_plane_rev` predates tensorfs#111/#113/#114, so
-# neither carries `contract.py`, `contracts.py` or `_contracts/`. This is the
-# plane that makes a lane stamp FALSIFIABLE: without it a `Model` header could
-# claim `sd15.diffusers-bf16@1`, a document that exists nowhere, and every
-# surface in this repo accepted it (pgw#1391's measured reproduction).
-#
-# `contracts.py` and the six `_contracts/*.v1.json` documents are upstream's
-# VERBATIM. The documents are the wheel spelling of `spec/v1/contracts` (a
-# source checkout symlinks them, so they are copied dereferenced) and are the
-# same files the Rust core embeds.
-#
-# `contract.py` is a REWRITE, listed below, for exactly the `planner.py`
-# reason: upstream's version delegates to the compiled extension
-# (`from .native import contract_info`) and pgw#1310 rules a compiled extension
-# out of a source-vendored wheel. Taking it straight would have imported a
-# module that cannot exist here.
-#
-# TWENTY documents, not six, and this bump is the se#769 WAVE-WIDE SYNC — one
-# writer, one cut rev, the whole wave's lane documents at once. Before it, five
-# lanes were each bumping this file on their own schedule and racing through
-# one table; the arbitration was that the qwen lane landed a SUBSET (honest for
-# pgw's own set-equality fence, but it hand-trimmed the vendored corpus to match
-# rather than shipping upstream's bytes), everyone else held, and this sync
-# brings the set back to EQUAL the real upstream corpus.
-#
-# `contract_plane_rev` advanced c3a831d -> `107b8ac` (tensorfs#121) ->
-# `2abc1b76` (#124/#125) -> `b8bb39fd` (#134) -> `272103e4` -> `86bfa80f`
-# (tensorfs#140, the audio lane's document — pgw#1442, this bump). The
-# documents arriving here belong to OTHER LANES and are vendored bytes-only,
-# named so the ownership is readable rather than implied:
-#
-#   flux1.diffusers-bf16          se#778   tensorfs#136
-#   qwen-image / z-image          se#776   tensorfs#131   (already present)
-#   internvl-u.diffusers-bf16     se#779   tensorfs#137
-#   ltx-2.diffusers-bf16          se#772   tensorfs#135
-#   trellis2.dit-bf16             se#775   tensorfs#132
-#   ernie.diffusers-bf16          se#—     tensorfs#142
-#   minimax.h3-dit-fp8-rowwise    —        tensorfs#128
-#   sdxl.diffusers-fp8-rowwise    —        tensorfs#128
-#   stable-audio.diffusers-fp16   se#769   tensorfs#140   (THIS bump, pgw#1442)
-#
-# `stable-audio.diffusers-fp16` is the FIRST vendored document whose top-level
-# dtype is `float16` rather than `bfloat16` — the served checkpoints histogram
-# {F16: 445} and the hub records dtype=fp16, so the document describes the
-# bytes the fleet actually serves. Do not "correct" it toward its siblings, and
-# do not widen its per-tensor `dtypes` to admit BF16: a bf16 repack of this
-# architecture would be a SEPARATE document (`stable-audio.diffusers-bf16@1`),
-# the way sdxl carries both a bf16 and an fp8-rowwise lane. It is also the only
-# document serving TWO checkpoints deliberately — `stable-audio-open` and
-# `foundation-1` share an identical transformer header sha256 and differ only
-# in weight values, which is a checkpoint row rather than a second layout.
-#
-# #121 authored the four se#757 blocker-A lane documents (`sd15`, `sd2`,
-# `hidream-o1`, `wan22` — sd15 and sd2 are SEPARATE documents with separate
-# digests) and gave `minimax.h3-dit-diffusers@1` the top-level `dtype` it owed;
-# #124 added `flux2-klein.diffusers-bf16@1` and then `flux1.diffusers-bf16@1`.
-# Clearing the FIVE `MissingContract` sentinels in `models/model_types.py` took
-# NO code change, which is the property the sentinel shape exists to have —
-# `Flux1.canonical_contract` resolves now purely because its document is here.
-#
-# THE FENCE READS TWO TABLES AND A BUMP MUST TOUCH BOTH. `contract_plane_files`
-# is the contract-plane inventory; `[packages.tensorfs.files]` is the
-# path -> sha256 table `test_every_vendored_file_matches_its_recorded_digest`
-# enforces AS A SET. Updating one and not the other is the defect this sync
-# exists to stop repeating — and the failure modes differ, so neither catches
-# the other: the digest fence caught three documents "only on disk", while a
-# list that silently GREW duplicate rows (34 entries for a 20-document library)
-# was invisible to it, because the fence reads the other table.
-#
-# Two documents RE-DIGESTED across that bump and it is deliberate upstream:
-# `minimax.h3-dit-diffusers@1` gained its dtype, and `sdxl.diffusers-bf16@1`
-# was re-declared COMPLETE over the shipped checkpoint header (detection
-# specificity is the count of a file's keys a contract explains, so a sampled
-# document loses to a complete document for a neighbouring architecture).
-# Both kept version `@1`, so any release published before this bump recorded a
-# digest that no longer matches the document behind the same stamp.
-#
-# Three vendored documents declare NO top-level dtype on purpose —
-# `dit.blocks-fused-qkv`, `sdxl.clip-g-fused-qkv`, `sdxl.clip-g-split-qkv`.
-# They are FRAGMENTS (a family-shared block spelling and two CLIP component
-# spellings) that a `lanes=` header never names on its own. Do not "fix" them,
-# and do not let a declaration-time dtype read treat them as lanes.
-contract_plane_rev = "86bfa80fd42cf8c107f16ab649a2afcebc45dd88"
-contract_plane_files = [
-  "contract.py",
-  "contracts.py",
-  "_contracts/dit.blocks-fused-qkv.v1.json",
-  "_contracts/ernie.diffusers-bf16.v1.json",
-  "_contracts/flux1.diffusers-bf16.v1.json",
-  "_contracts/flux2-klein.diffusers-bf16.v1.json",
-  "_contracts/hidream-o1.diffusers-bf16.v1.json",
-  "_contracts/internvl-u.diffusers-bf16.v1.json",
-  "_contracts/ltx-2.diffusers-bf16.v1.json",
-  "_contracts/minimax.h3-dit-diffusers.v1.json",
-  "_contracts/minimax.h3-dit-fp8-rowwise.v1.json",
-  "_contracts/minimax.h3-dit-native.v1.json",
-  "_contracts/qwen-image.diffusers-bf16.v1.json",
-  "_contracts/sd15.diffusers-bf16.v1.json",
-  "_contracts/sd2.diffusers-bf16.v1.json",
-  "_contracts/sdxl.clip-g-fused-qkv.v1.json",
-  "_contracts/sdxl.clip-g-split-qkv.v1.json",
-  "_contracts/sdxl.diffusers-bf16.v1.json",
-  "_contracts/sdxl.diffusers-fp8-rowwise.v1.json",
-  "_contracts/stable-audio.diffusers-fp16.v1.json",
-  "_contracts/trellis2.dit-bf16.v1.json",
-  "_contracts/wan22.diffusers-bf16.v1.json",
-  "_contracts/z-image.diffusers-bf16.v1.json",
-]
+# THE FENCE READS ONE TABLE NOW. `[packages.tensorfs.files]` is the
+# path -> sha256 inventory `test_every_vendored_file_matches_its_recorded_
+# digest` enforces AS A SET, and `test_the_tensorfs_snapshot_is_one_rev`
+# refuses the reappearance of a second `*_rev` key.
 rewrites = [
-  "`contract.py` (pgw#1391): the parse/validate/canonical/digest half is restored in pure Python instead of `from .native import contract_info`, because pgw#1310 rules a compiled extension out of a source-vendored wheel — the `planner.py` precedent exactly. The PUBLIC SURFACE is upstream's attribute for attribute (`Contract.from_document`, `.name/.version/.digest/.stamp/.label/.document/.description/.tensors/.sets`, the RAISING `.dtype`, `MissingDtype`, `TensorDecl`/`Fusion`/`Permute`), so a future pure-Python upstream re-vendor is a deletion rather than a migration. It adds one name upstream does not export, `ContractError`, carrying the kebab-case `reason` label the Rust and Go validators already share — the refusal corpus is keyed on it. Conformance is NOT asserted: `tests/test_lane_contracts.py` runs upstream's released `spec/v1/contract-vectors` corpus (tensorfs#114, the same one the Rust and Go implementations satisfy), vendored at `tests/testdata/contract-vectors/`, over the TWENTY VENDORED DOCUMENTS plus the two anonymous customs — 22 golden digests and 19 typed refusals. A SHA-256 over a hand-built line rendering cannot agree by luck. It has already caught a real divergence rather than merely certifying agreement: tensorfs#121 relaxed the contract-name grammar to admit a hyphen in the PRODUCER segment (`hidream-o1`, `flux-2`, `wan-2`; a LEADING hyphen still refuses) and the port refused `hidream-o1.diffusers-bf16` until it followed. NO KNOWN DIVERGENCE TODAY.",
-  "`tensors.py`: `TensorReader._map` maps through a pure-Python `_MappedObject` (an `mmap` exported via PEP 688) instead of the compiled `tensorfs.native.MappedObject`, because pgw#1310 rules a compiled extension out of a source-vendored wheel. Upstream's weak-mapping ownership rule is preserved exactly; see the paragraph above. No other file is edited, so the remaining digests are upstream's verbatim.",
-  "`planner.py` REPLACES `chunking.py` (pgw#1365): a pure-Python port of `crates/tensorfs-core/src/planner/{mod,safetensors,gguf}.rs` at `read_plane_rev`, because upstream deleted the Python chunker at `00c57c1` in favour of the Rust planner and pgw#1310 rules a compiled extension out of a source-vendored wheel. Conformance is asserted against upstream's released `spec/v1/planner-vectors` corpus, vendored at `tests/testdata/planner-vectors/`. Two knowing divergences, both tested by name: `plan_chunks` cuts a >64 MiB blob on the fixed grid (tensorhub's single-PUT promotion cap — pgw#1366), and a duplicate GGUF metadata key is planned as `gguf-v1` here and `blob-v1` upstream, because `gguf.read_header` does not record metadata keys.",
-  "`local.py`: one line — `from .chunking import plan_chunks` becomes `from .planner import plan_chunks`. Every other line is `8bafdfbb`'s verbatim.",
+  "`contract.py` (pgw#1391): the parse/validate/canonical/digest half is restored in pure Python instead of `from .native import contract_info`, because pgw#1310 rules a compiled extension out of a source-vendored wheel. The PUBLIC SURFACE is upstream's attribute for attribute (`Contract.from_document`, `.name/.version/.digest/.stamp/.label/.document/.description/.tensors/.sets`, the RAISING `.dtype`, `MissingDtype`, `TensorDecl`/`Fusion`/`Permute`), so a future re-vendor against a published wheel is a deletion rather than a migration. It adds one name upstream does not export, `ContractError`, carrying the kebab-case `reason` label the Rust and Go validators already share — the refusal corpus is keyed on it. Conformance is NOT asserted: `tests/test_lane_contracts.py` runs upstream's released `spec/v1/contract-vectors` corpus (tensorfs#114, the same one the Rust and Go implementations satisfy), vendored at `tests/testdata/contract-vectors/`, over the twenty-one vendored documents plus the two anonymous customs. A SHA-256 over a hand-built line rendering cannot agree by luck. It has already caught a real divergence rather than merely certifying agreement: tensorfs#121 relaxed the contract-name grammar to admit a hyphen in the PRODUCER segment (`hidream-o1`, `flux-2`, `wan-2`; a LEADING hyphen still refuses) and the port refused `hidream-o1.diffusers-bf16` until it followed. NO KNOWN DIVERGENCE TODAY.",
+  "`tensors.py`: `TensorReader._map` maps through a pure-Python `_MappedObject` (an `mmap` exported via PEP 688) instead of the compiled `tensorfs.native.MappedObject`, because pgw#1310 rules a compiled extension out of a source-vendored wheel. Upstream needed exactly two things from the extension at that call site — a WEAK-REFERENCEABLE handle, so `_maps` can stay the `WeakValueDictionary` that keeps an 8 GiB shard from ending up resident, and a buffer that keeps its mapping alive as long as some view of it exists. A bare `mmap.mmap` supplies neither; a py3.12 class with `__buffer__` supplies both, and py3.12 is this package's floor. Nothing else in the file is touched, so every other line is upstream's.",
 ]
 
 [packages.torchcg]
@@ -470,7 +299,7 @@ rewrites = [
 ]
 
 [packages.tensorfs.files]
-"__init__.py" = "a66ced3cd03e042989602b9e122e4b3988be6be6611aacdb05b852c8a968ec7b"
+"__init__.py" = "80affc975c054134411f4b22167d73aaa5ee5e969a71bff61e3b42afa7db2fcf"
 "_contracts/dit.blocks-fused-qkv.v1.json" = "95681781643548fc3bb696b84fee3d4c421f42e5fa5633c82fa6aae31f8e51e0"
 "_contracts/ernie.diffusers-bf16.v1.json" = "b4879a6c02962b873c81495acd561922c0271b809a6816f217d580b174a92514"
 "_contracts/flux1.diffusers-bf16.v1.json" = "74deb96dc6e295496ef107f12dd34932d31deadb14c8dec264cfbabccb405fa6"
@@ -495,13 +324,12 @@ rewrites = [
 "contract.py" = "b007d534da4f0a131bc7fe79001472cf08a94be0feedf229c0bba32fbb8c1d38"
 "contracts.py" = "7435a6e9569ce5da748c50aece447b74e427d841f5d757740b5fb4958b25dee9"
 "gguf.py" = "ced89fc42009ab2e69406d2726c9b0caf43254c51ab16bdcf37c5ad239a2d7be"
-"local.py" = "186401e38a14f74e70d20991fa47fdda4e10dc3f1c82b44c540eee73220b1f86"
-"manifest.py" = "a93ee850992c17dd90a57946441875d282367556703b9e9d1c8be057ea12bed4"
-"planner.py" = "3771ebd6d2a537c56736d740d0b0bfc72b74135dd84782509a923acd3b45ff4f"
-"project.py" = "2471c26e013b287a7554cecda51ff9b42c09f71cd6d6d57dd33ed4ef242c40cd"
+"local.py" = "8268a4134df41bafd192f4f31581bdc43ec8d7e1bd7b1b10c2785e1a74ca7a97"
+"manifest.py" = "6600d900fcd613091878c8558603126f5c732f163d91f2ce926fc85ec058ac79"
+"project.py" = "3d68606dfd76535c33418f79fc071edab8a5147c3f0d640d123625ddd9680598"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "refs.py" = "f3a144543f423a6b01043294b21104ababaafdbfb31798560de678b69f27ac2f"
-"tensors.py" = "12ce32fdecebb1fd61b898cab0c40d9b13835af0353e2af95b4fa160bd4a4ad6"
+"tensors.py" = "7876bc45dd13ca9bff141d437e16762189c74cd12b08e7439012e6cdc028f47c"
 "writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
 
 [packages.torchcg.files]

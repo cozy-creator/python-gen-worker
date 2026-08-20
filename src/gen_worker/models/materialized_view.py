@@ -58,7 +58,12 @@ import shutil
 from pathlib import Path
 
 
-from gen_worker._vendor.tensorfs import FileEntry, LocalCAS
+from gen_worker._vendor.tensorfs import (
+    FileEntry,
+    LocalCAS,
+    RepositoryManifest,
+    TensorReader,
+)
 
 from . import projection
 
@@ -107,12 +112,13 @@ def view_root_for(snapshot_root: Path | str) -> Path:
 
 def _materialize(cas: LocalCAS, entry: FileEntry, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    # The single-file hatch. It streams, it is atomic, and it verifies the
-    # reconstruction against the manifest's whole-file digest before the
-    # rename — so a view is known-good bytes, not merely copied ones. One
-    # name upstream and here since tensorfs#107 renamed `extract()` to
-    # `materialize()` (Paul's #1303 ruling).
-    cas.materialize(entry, destination)  # mixed-cas-hatch: author-slot-directory
+    # The single-file hatch — tier 3 of upstream's own access ladder. It
+    # streams, it is atomic, and it verifies the reconstruction against the
+    # manifest's whole-file digest before the rename, so a view is known-good
+    # bytes rather than merely copied ones. pgw#1575 moved it from `LocalCAS`
+    # to `TensorReader`, which is where the one-rev snapshot carries it.
+    with TensorReader(cas, RepositoryManifest((entry,))) as reader:
+        reader.materialize(entry.path, destination)  # mixed-cas-hatch: author-slot-directory
 
 
 def third_party_dir(path: Path | str, *, why: str) -> Path:

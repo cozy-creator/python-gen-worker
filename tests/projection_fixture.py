@@ -21,6 +21,7 @@ from gen_worker._vendor.tensorfs import (
     project_snapshot,
     read_entry,
 )
+from cas_fixture import ingest_repository
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR
 
 # safetensors dtype -> (itemsize, struct format for one element)
@@ -179,7 +180,7 @@ def build(
     else:
         write_model(source, dtype=dtype)
     cas = LocalCAS(base)
-    manifest = cas.ingest_repository(source)
+    manifest = ingest_repository(cas, source)
     # Exactly what `cozy_snapshot._pin_manifest` does, so `resolve_projection`
     # is exercised against the production pinning and not a test convention.
     cas.compare_and_swap_ref(REF_PREFIX + key, cas.store_manifest(manifest), expected=None)

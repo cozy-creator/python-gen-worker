@@ -25,6 +25,7 @@ from typing import cast
 import pytest
 
 from gen_worker._vendor.tensorfs import LocalCAS, RepositoryManifest
+from cas_fixture import ingest_repository
 from gen_worker._vendor.tensorfs.manifest import MAX_CHUNK_SIZE
 from gen_worker.convert.gguf_native import (
     GGUFUnsupported,
@@ -115,7 +116,7 @@ def snapshot(tmp_path_factory: pytest.TempPathFactory) -> tuple[LocalCAS, Reposi
     staged.mkdir()
     (staged / "model.safetensors").write_bytes(_safetensors_bytes(FIXTURE))
     (staged / "config.json").write_text(json.dumps(CONFIG))
-    manifest = cas.ingest_repository(staged)
+    manifest = ingest_repository(cas, staged)
     # The staged tree exists only to be admitted; from here the conversion sees
     # the store and nothing else.
     for path in sorted(staged.rglob("*"), reverse=True):

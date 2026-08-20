@@ -203,4 +203,6 @@ def test_the_seam_is_the_only_way_the_hatch_is_reached(tmp_path: Path) -> None:
 
     source = Path(materialized_view.__file__).read_text()
     assert source.count("# mixed-cas-hatch: author-slot-directory") == 1
-    assert "cas.materialize(" in source
+    # pgw#1575: the hatch is `TensorReader.materialize`, not `LocalCAS`'s —
+    # the one-rev snapshot carries it there.
+    assert "reader.materialize(" in source

@@ -256,6 +256,7 @@ def test_adapter_sizes_are_the_LOGICAL_sizes(tmp_path: Path) -> None:
     """
 
     from gen_worker._vendor.tensorfs import LocalCAS, project_snapshot
+    from cas_fixture import ingest_repository
     from gen_worker.models.projection import logical_size
     from gen_worker.utils.lora import find_adapter_file
 
@@ -270,7 +271,7 @@ def test_adapter_sizes_are_the_LOGICAL_sizes(tmp_path: Path) -> None:
     )
 
     cas = LocalCAS(base)
-    manifest = cas.ingest_repository(source)
+    manifest = ingest_repository(cas, source)
     cas.compare_and_swap_ref(
         projection.REF_PREFIX + "e" * 64, cas.store_manifest(manifest), expected=None
     )

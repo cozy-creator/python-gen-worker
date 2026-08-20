@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 from gen_worker._vendor.tensorfs import RefConflict
+from gen_worker.cas.retention import collect_garbage
 
 from .cache_paths import open_worker_cas
 
@@ -316,8 +317,8 @@ def sweep_orphan_blobs(cas_dir: Path) -> int:
     """Collect unpinned tensorfs objects after the writer safety grace."""
 
     return int(
-        open_worker_cas(cas_dir).collect_garbage(
-            older_than=_STALE_WRITER_TEMP_AGE_S
+        collect_garbage(
+            open_worker_cas(cas_dir), older_than=_STALE_WRITER_TEMP_AGE_S
         ).bytes_deleted
     )
 

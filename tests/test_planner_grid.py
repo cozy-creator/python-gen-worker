@@ -38,7 +38,8 @@ import pytest
 from gen_worker._vendor.tensorfs import gguf
 from gen_worker._vendor.tensorfs.local import LocalCAS
 from gen_worker._vendor.tensorfs.manifest import FileEntry
-from gen_worker._vendor.tensorfs.planner import (
+from gen_worker.cas import ingest_file
+from gen_worker.cas.planner import (
     BLOB_V1,
     GGUF_V1,
     MAX_OBJECT_SIZE,
@@ -336,7 +337,7 @@ def test_ingest_file_admits_on_the_planner_grid(tmp_path: Path) -> None:
     source.write_bytes(raw)
 
     cas = LocalCAS(tmp_path / "cas")
-    entry = cas.ingest_file(source, manifest_path="model.safetensors")
+    entry = ingest_file(cas, source, manifest_path="model.safetensors")
     assert tuple(chunk.length for chunk in entry.chunks) == (113, 3, 5)
     for chunk, declared in zip(entry.chunks, case["expected"]["objects"], strict=True):
         assert f"sha256:{chunk.digest.digest}" == declared["digest"]
@@ -366,9 +367,9 @@ def test_a_second_publish_moves_only_the_tensors_that_changed(tmp_path: Path) ->
     b.write_bytes(_assemble(build, _write_safetensors(build, changed, "b.safetensors")))
 
     cas = LocalCAS(tmp_path / "cas")
-    first = cas.ingest_file(a, manifest_path="model.safetensors")
+    first = ingest_file(cas, a, manifest_path="model.safetensors")
     resident = {chunk.digest.digest for chunk in first.chunks}
-    second = cas.ingest_file(b, manifest_path="model.safetensors")
+    second = ingest_file(cas, b, manifest_path="model.safetensors")
 
     new = [chunk for chunk in second.chunks if chunk.digest.digest not in resident]
     assert [chunk.length for chunk in new] == [1024], (

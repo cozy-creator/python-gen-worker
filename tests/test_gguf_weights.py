@@ -481,6 +481,7 @@ def test_the_served_path_reads_block_bytes_out_of_the_cas(tmp_path: Path) -> Non
     buffer are the bytes that were ingested.
     """
     from gen_worker._vendor.tensorfs import LocalCAS
+    from cas_fixture import ingest_repository
     from gen_worker._vendor.tensorfs.tensors import open_tensors
 
     raw, qtype, dense = _packed_weight()
@@ -489,7 +490,7 @@ def test_the_served_path_reads_block_bytes_out_of_the_cas(tmp_path: Path) -> Non
     _write_gguf(staged / "model.gguf", raw, qtype)
 
     cas = LocalCAS(tmp_path / "cas")
-    manifest = cas.ingest_repository(staged)
+    manifest = ingest_repository(cas, staged)
     with open_tensors(cas, manifest) as reader:
         view = reader["fc1.weight"]
         assert view.format == "gguf-v1"

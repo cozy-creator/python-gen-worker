@@ -148,7 +148,17 @@ def test_the_scan_yields_the_event_loop_between_grants(
 
     real_contains = LocalCAS.contains
 
+    # pgw#1575: the probe counts the GRANTS, not every `contains` call in the
+    # process. Since the vendored tensorfs went to one master-ancestor rev,
+    # `compare_and_swap_ref` answers "is the target there?" with `contains`
+    # (one `lstat`) instead of rehashing the object, so pinning the manifest
+    # adds a call this probe used to be able to ignore. Keying on the grant
+    # digests measures the scan itself and is immune to the next such change.
+    grant_digests = {str(digest) for digest in digests}
+
     def slow_contains(self: Any, ref: Any, *, size: int | None = None) -> bool:
+        if str(ref) not in grant_digests:
+            return bool(real_contains(self, ref, size=size))
         scanned.append(time.monotonic())
         time.sleep(0.05)
         try:
