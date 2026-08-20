@@ -402,6 +402,24 @@ def _symbol_ranges(program: object) -> dict[str, tuple[int, int]]:
     return ranges
 
 
+def symbol_terms(name: str) -> tuple[int, str]:
+    """``'8*s1'`` -> ``(8, 's1')``; ``'s1'`` -> ``(1, 's1')``.
+
+    A dynamic axis is often a DERIVED dim -- a latent side a UNet accepts only
+    in multiples of eight is exported as ``8*s1``, and torch spells the
+    placeholder's dim with that expression. The coefficient is therefore
+    carried by the symbol's own NAME rather than by a second schema field, and
+    every guard reads it from here: the stride a value must satisfy, and the
+    ROOT two axes must agree on when they share one (``8*s1`` and ``16*s1``
+    are one degree of freedom, not two).
+    """
+
+    head, _, tail = name.partition("*")
+    if tail and head.lstrip("-").isdigit():
+        return int(head), tail
+    return 1, name
+
+
 def _placeholder_values(program: object) -> dict[str, object]:
     values: dict[str, object] = {}
     graph = getattr(getattr(program, "graph_module", None), "graph", None)
@@ -465,6 +483,18 @@ def build_call_ingress(
                 continue
             bounds = ranges.get(text)
             if bounds is None:
+                # A derived dim: torch bounds the ROOT and spells the axis as
+                # the expression, so the axis's own range is the root's,
+                # scaled. Recorded in the units the CALL presents, which is
+                # what every guard compares against.
+                coefficient, root = symbol_terms(text)
+                root_bounds = ranges.get(root) if coefficient > 1 else None
+                if root_bounds is not None:
+                    bounds = (
+                        coefficient * root_bounds[0],
+                        coefficient * root_bounds[1],
+                    )
+            if bounds is None:
                 raise IngressError(
                     "range_invalid", f"input {leaf.name!r} symbol {text!r} has no finite range"
                 )
@@ -498,4 +528,5 @@ __all__ = [
     "PathStep",
     "build_call_ingress",
     "exported_input_name",
+    "symbol_terms",
 ]

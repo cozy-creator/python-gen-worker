@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Final
 
-from .ingress import CallIngress, CallInput
+from .ingress import CallIngress, CallInput, symbol_terms
 
 #: The corpus schema this module reads and writes. A corpus stamping any other
 #: value is refused, never best-effort decoded: a host that silently accepted a
@@ -757,19 +757,35 @@ def class_report(
                     )
                 )
                 continue
-            prior = symbols.get(declared)
-            if prior is not None and prior != got:
+            # tcg#77: a DERIVED dim (`8*s1`) is a range AND a stride. An
+            # in-range value that is not a multiple of it is refused by the
+            # graph's own shape guards, so it is refused here -- same rung,
+            # because "this axis does not admit that value" is one family.
+            stride, root = symbol_terms(declared)
+            if got % stride:
+                misses.append(
+                    IngressMiss(
+                        MissReason.RANGE_VIOLATION,
+                        spec.name,
+                        f"input {spec.name!r} dim {position} (symbol {declared!r}) = {got} "
+                        f"is not a multiple of {stride}",
+                    )
+                )
+                continue
+            bound = got // stride
+            prior = symbols.get(root)
+            if prior is not None and prior != bound:
                 misses.append(
                     IngressMiss(
                         MissReason.SYMBOL_INCONSISTENT,
                         spec.name,
-                        f"symbol {declared!r} = {got} on input {spec.name!r} dim {position} "
-                        f"but {prior} on input {owner[declared]!r}",
+                        f"symbol {root!r} = {bound} on input {spec.name!r} dim {position} "
+                        f"but {prior} on input {owner[root]!r}",
                     )
                 )
                 continue
-            symbols[declared] = got
-            owner.setdefault(declared, spec.name)
+            symbols[root] = bound
+            owner.setdefault(root, spec.name)
     return SpecializationReport(
         name=name,
         misses=tuple(misses[:1]) if first_only else tuple(misses),

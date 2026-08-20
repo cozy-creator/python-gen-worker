@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from ..release.derive import DYNAMIC_AXES
 from . import endpoint_lock as el
 from . import workspace as ws
 
@@ -76,6 +77,19 @@ def add_subparser(sub: Any) -> None:
         "--force",
         action="store_true",
         help="re-trace even when the saved trace is reusable",
+    )
+    # pgw#1548. OFF is the default and stays the default until a measurement
+    # says otherwise per model: a dynamic axis collapses a fan of graph
+    # specializations into one, and whether that costs serving time is an
+    # empirical question inductor answers differently per architecture.
+    parser.add_argument(
+        "--dynamic-axes",
+        choices=list(DYNAMIC_AXES),
+        default="off",
+        help="export these axes as torch.export Dims instead of one graph "
+             "per observed shape: `batch` collapses the CFG axis, `aspect` "
+             "collapses the aspect-ratio buckets, `all` both "
+             "(default: off — one graph per observed shape)",
     )
     parser.add_argument(
         "--discovery-only",
@@ -294,7 +308,7 @@ def run_lock(args: argparse.Namespace) -> int:
              "document moved with them")
         return _check_by_rederive(
             config, root, out, existing, tree, graph_cas_root, device, lockfile,
-            slot_trees,
+            slot_trees, dynamic_axes=getattr(args, "dynamic_axes", "off"),
         )
 
     store = ws.local_graph_store(graph_cas_root)
@@ -340,6 +354,7 @@ def run_lock(args: argparse.Namespace) -> int:
 
     traced = _trace(
         config, root, tree, graph_cas_root, device, lockfile, slot_trees,
+        dynamic_axes=getattr(args, "dynamic_axes", "off"),
     )
     if traced is None:
         return 1
@@ -456,6 +471,7 @@ def _trace(
     device: str,
     lockfile: Optional[Path] = None,
     slot_trees: Optional[dict[str, Path]] = None,
+    dynamic_axes: str = "off",
 ) -> Optional[tuple[Any, float]]:
     """Import the author's module and derive it. ``None`` = said why, failed.
 
@@ -486,6 +502,7 @@ def _trace(
             lockfile=lockfile if lockfile is not None else lockfile_beside(root),
             graph_cas=graph_cas_root,
             slot_checkpoints=slot_trees or {},
+            dynamic_axes=dynamic_axes,
         )
     except DeriveError as exc:
         _say(f"error: derive: {exc}")
@@ -506,6 +523,7 @@ def _check_by_rederive(
     device: str,
     lockfile: Optional[Path] = None,
     slot_trees: Optional[dict[str, Path]] = None,
+    dynamic_axes: str = "off",
 ) -> int:
     """``--check``'s expensive arm: does the committed DOCUMENT still hold?
 
@@ -517,6 +535,7 @@ def _check_by_rederive(
 
     traced = _trace(
         config, root, tree, graph_cas_root, device, lockfile, slot_trees,
+        dynamic_axes=dynamic_axes,
     )
     if traced is None:
         return 1

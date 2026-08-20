@@ -30,6 +30,7 @@ from .document import (
     GraphSetDocument,
     LaneGraphs,
 )
+from .dynamic import DimPolicy
 from .engine import (
     AdmissionError,
     Engine,
@@ -205,6 +206,7 @@ __all__ = [
     "CompileError",
     "COMPILED_GRAPH_FORMAT",
     "DOCUMENT_FORMAT",
+    "DimPolicy",
     "DiscoveryError",
     "DocumentError",
     "ENV_SCHEME",

@@ -28,10 +28,12 @@ import inspect
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from .artifact import ArtifactError
 from .document import GraphRecord, GraphSetDocument, LaneGraphs
+from .ingress import symbol_terms
 from .requirements import assert_exact_env
 from .runner import ConstantBindingError
 from .store import GraphStore, StoreError
@@ -171,13 +173,29 @@ def _structure_key(record: GraphRecord) -> tuple[Any, ...]:
     )
 
 
-def _row_mismatch(row: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
+def _row_mismatch(
+    row: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    bounds: Mapping[str, tuple[int, int]] = MappingProxyType({}),
+    symbols: dict[str, tuple[int, str]] | None = None,
+) -> str | None:
     """Why this ONE ingress row refuses this call, or ``None`` when it passes.
 
     THE single source for both the match decision and the diagnosis (tcg#76):
     ``_matches`` is ``every row answers None``, and the first-mismatch trace
     prints exactly what this function refused on — one predicate, so the guard
     and its explanation cannot drift into telling two stories.
+
+    tcg#77: a SYMBOLIC dim is not a wildcard. ``bounds`` is the record's own
+    ``ingress.symbol_bounds`` and ``symbols`` is the binding table the caller
+    carries ACROSS the record's rows, so a dynamic record guards exactly what
+    it was exported for: the value is inside the exported range, and one
+    symbol takes one value everywhere it appears (a batch symbol shared by
+    ``sample`` and ``encoder_hidden_states`` refuses a call that disagrees
+    with itself). Without the table each row would answer alone and the
+    dispatcher would enter a graph whose shape env refuses the call —
+    a wrong answer, not a slow one.
     """
     import torch
 
@@ -207,19 +225,75 @@ def _row_mismatch(row: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> st
             f"{tuple(value.shape)}) != expected rank {len(row.shape)} (shape "
             f"{tuple(row.shape)})"
         )
-    for got, want in zip(value.shape, row.shape, strict=True):
-        if isinstance(want, int) and int(got) != want:
+    for axis, (got, want) in enumerate(zip(value.shape, row.shape, strict=True)):
+        got = int(got)
+        if isinstance(want, int):
+            if got != want:
+                return (
+                    f"input {row.param!r}: shape {tuple(value.shape)} != expected "
+                    f"{tuple(row.shape)}"
+                )
+            continue
+        span = bounds.get(want)
+        if span is None:
+            # A record whose shape names a symbol its ingress does not bound
+            # cannot be dispatched at all; `CallIngress` refuses to construct
+            # one, so reaching here means a hand-built record.
             return (
-                f"input {row.param!r}: shape {tuple(value.shape)} != expected "
-                f"{tuple(row.shape)}"
+                f"input {row.param!r}: dim {axis} names symbol {want!r}, which "
+                f"this record declares no range for"
             )
+        low, high = span
+        if not low <= got <= high:
+            return (
+                f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} "
+                f"outside the exported range [{low}, {high}] "
+                f"(received shape {tuple(value.shape)})"
+            )
+        stride, root = symbol_terms(want)
+        if got % stride:
+            return (
+                f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} is "
+                f"not a multiple of {stride}, which this graph's shape guards "
+                f"require (received shape {tuple(value.shape)})"
+            )
+        if symbols is not None:
+            bound = got // stride
+            prior = symbols.get(root)
+            if prior is not None and prior[0] != bound:
+                return (
+                    f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} "
+                    f"puts {root} at {bound}, but input {prior[1]!r} put it at "
+                    f"{prior[0]}"
+                )
+            symbols.setdefault(root, (bound, row.name))
+    return None
+
+
+def _record_mismatch(
+    record: GraphRecord, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[int, str] | None:
+    """(rows passed, the first failure's sentence), or ``None`` when it matches.
+
+    ONE walk answers both questions (tcg#76's property, kept): the match
+    decision is "this returned None" and the diagnosis is what it returned.
+    The symbol table lives here rather than in a row because symbol
+    consistency is a RECORD-level fact (tcg#77).
+    """
+
+    bounds = record.ingress.symbol_bounds
+    symbols: dict[str, tuple[int, str]] = {}
+    passed = 0
+    for row in record.ingress.inputs:
+        sentence = _row_mismatch(row, args, kwargs, bounds, symbols)
+        if sentence is not None:
+            return passed, sentence
+        passed += 1
     return None
 
 
 def _matches(record: GraphRecord, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
-    return all(
-        _row_mismatch(row, args, kwargs) is None for row in record.ingress.inputs
-    )
+    return _record_mismatch(record, args, kwargs) is None
 
 
 def _first_mismatch(
@@ -230,13 +304,13 @@ def _first_mismatch(
     A record with no failing row never reaches here — ``_matches`` would have
     dispatched it.
     """
-    passed = 0
-    for row in record.ingress.inputs:
-        sentence = _row_mismatch(row, args, kwargs)
-        if sentence is not None:
-            return passed, sentence
-        passed += 1
-    return passed, "every enumerated row matched (a non-row guard refused?)"
+    outcome = _record_mismatch(record, args, kwargs)
+    if outcome is None:
+        return (
+            len(record.ingress.inputs),
+            "every enumerated row matched (a non-row guard refused?)",
+        )
+    return outcome
 
 
 class _ForwardDispatcher:

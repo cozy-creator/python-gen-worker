@@ -19,10 +19,14 @@ two things followed:
     activation into a bf16 denoiser: `Input type (float) and bias type
     (c10::BFloat16)` on payload 0.
 
-The rule is now about WHERE the answer comes from, in order of how directly
-the source knows: the component's own BYTES, then the LANE, then the
-component's config — with the config last precisely because it is the one
-source a conversion does not rewrite.
+**pgw#1567 (Paul, 2026-08-20) then settled the ORDER, which is what was still
+wrong.** The ladder led with the component's own BYTES, so a derive against a
+tree the store had not converted — a stock fp16 dreamshaper on a dev box —
+traced fp16 graphs under a bf16 lane and armed a fleet no runtime could enter.
+The lane declaration now answers FIRST for every component of the tree it
+governs; the checkpoint speaks only for a DERIVED lane, which has no contract
+to read a dtype from. The trace dtype is a property of the contract-template,
+never of the bytes that happen to be mounted.
 
 These tests use the REAL library contracts on purpose. pgw#1512's fixture
 invented `unet.conv_out.weight`, and that invention is what let every check
@@ -162,26 +166,100 @@ def test_the_WHOLE_sd15_pipeline_agrees_so_no_activation_crosses_a_boundary(
     assert set(seen.values()) == {torch.bfloat16}, seen
 
 
-def test_a_components_own_BYTES_outrank_the_lane(tmp_path: Path) -> None:
-    """A converted tree's headers are what the pod actually runs.
-
-    Built with real safetensors so the stub-aware reader is the thing under
-    test, not a stand-in.
-    """
+def _tree_at(root: Path, dtype: Any) -> Path:
+    """A tiny two-component tree whose safetensors headers carry ``dtype``."""
 
     safetensors = pytest.importorskip("safetensors.torch")
 
-    tree = tmp_path / "tree"
-    (tree / "vae").mkdir(parents=True)
-    (tree / "vae" / "config.json").write_text(json.dumps({"_class_name": "AutoencoderKL"}))
-    safetensors.save_file(
-        {"decoder.conv_out.weight": torch.zeros(2, 2, dtype=torch.float16)},
-        str(tree / "vae" / "diffusion_pytorch_model.safetensors"),
-    )
+    root.mkdir(parents=True, exist_ok=True)
+    for component, weight in (
+        ("unet", "conv_in.weight"),
+        ("vae", "decoder.conv_out.weight"),
+    ):
+        (root / component).mkdir(parents=True, exist_ok=True)
+        (root / component / "config.json").write_text(json.dumps({"_class_name": "X"}))
+        safetensors.save_file(
+            {weight: torch.zeros(2, 2, dtype=dtype)},
+            str(root / component / "diffusion_pytorch_model.safetensors"),
+        )
+    return root
 
+
+def test_the_LANE_outranks_the_mounted_checkpoints_own_bytes(tmp_path: Path) -> None:
+    """pgw#1567, Paul's ruling: the checkpoint is IRRELEVANT to the trace.
+
+    Built with real safetensors so the stub-aware reader is the thing under
+    test, not a stand-in. These bytes say float16 and the lane says bfloat16;
+    under the old order the bytes won, and a dev-box derive against a stock
+    fp16 tree keyed a whole fleet of fp16 graphs that a bf16 pod could never
+    enter (14 armed, 0 entered).
+    """
+
+    tree = _tree_at(tmp_path / "tree", torch.float16)
     ctx = _ctx(tree, _contract("sd15.diffusers-bf16.v1.json"))
-    # The lane says bfloat16; these bytes say float16, and the bytes win.
-    assert ctx.component_dtype(tree, "vae") is torch.float16
+    assert ctx.component_dtype(tree, "vae") is torch.bfloat16
+    assert ctx.component_dtype(tree, "unet") is torch.bfloat16
+
+
+def test_FLIPPING_the_checkpoints_dtype_does_not_move_the_traced_precision(
+    tmp_path: Path,
+) -> None:
+    """The deliverable, stated as a property: same lane, two checkpoints.
+
+    Two trees identical but for the dtype their containers carry. Precision is
+    graph identity (pgw#1458), so if the checkpoint could move it, the two
+    would derive DIFFERENT graph sets under one contract-template — which is
+    exactly the fleet of unenterable graphs pgw#1567 measured. A weight-free
+    artifact plus runtime constant folding means any conforming checkpoint
+    folds in at load; nothing about the trace may depend on which one is
+    mounted.
+    """
+
+    lane = _contract("sd15.diffusers-bf16.v1.json")
+    answers = []
+    for name, dtype in (("fp16", torch.float16), ("fp32", torch.float32)):
+        tree = _tree_at(tmp_path / name, dtype)
+        ctx = _ctx(tree, lane)
+        answers.append(
+            tuple(ctx.component_dtype(tree, part) for part in ("unet", "vae"))
+        )
+    assert answers[0] == answers[1] == (torch.bfloat16, torch.bfloat16)
+
+
+def test_a_checkpoint_that_disagrees_with_the_lane_is_NAMED(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Following the lane silently would hide an unconverted tree.
+
+    The trace still follows the lane — that is the fix — but a tree the store
+    never converted is a store defect worth one line, the same fact
+    `streaming.engine._warn_on_lane` reports from the serve side.
+    """
+
+    import logging
+
+    tree = _tree_at(tmp_path / "tree", torch.float16)
+    ctx = _ctx(tree, _contract("sd15.diffusers-bf16.v1.json"))
+    with caplog.at_level(logging.WARNING, logger="gen_worker.release.trace"):
+        assert ctx.component_dtype(tree, "unet") is torch.bfloat16
+        assert ctx.component_dtype(tree, "unet") is torch.bfloat16
+    said = [r for r in caplog.records if "TRACE FOLLOWS THE LANE" in r.getMessage()]
+    assert len(said) == 1, "named once per component, not once per ask"
+    assert "float16" in said[0].getMessage()
+
+
+def test_a_checkpoint_that_AGREES_with_the_lane_says_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The red arm's other half: no warning when there is nothing to warn about."""
+
+    import logging
+
+    tree = _tree_at(tmp_path / "tree", torch.bfloat16)
+    ctx = _ctx(tree, _contract("sd15.diffusers-bf16.v1.json"))
+    with caplog.at_level(logging.WARNING, logger="gen_worker.release.trace"):
+        assert ctx.component_dtype(tree, "unet") is torch.bfloat16
+    assert not [r for r in caplog.records if "TRACE FOLLOWS THE LANE" in r.getMessage()]
 
 
 def test_a_stale_component_CONFIG_does_not_outrank_the_lane(
