@@ -1044,6 +1044,15 @@ class BackgroundMint:
     window_s: float = DEFAULT_SILENCE_WINDOW_S
     vcpus: Optional[int] = None
     on_landed: Optional[Callable[[MintedHole], None]] = None
+    #: The work-list, READ ONCE by the caller that armed this mint (pgw#1564).
+    #: ``None`` falls back to reading ``host.holes`` at run time — but a
+    #: caller that already counted N holes and then lets `run` re-read a LIVE
+    #: property is how a pod declared `completed 0/14` in 13 ms: the property
+    #: answered empty on the second read and an empty run settles as complete.
+    #: What was armed is what gets minted; each hole still re-checks presence
+    #: under its lease, so a graph that landed in between costs a skip, never
+    #: a rebuild.
+    work_list: Optional[Tuple[Any, ...]] = None
     _progress: Optional[MintProgress] = None
 
     def __post_init__(self) -> None:
@@ -1071,7 +1080,10 @@ class BackgroundMint:
         mint. A condemned mint returns what it had already banked.
         """
         started = time.monotonic()
-        holes = hole_work_list(self.host)
+        holes = (
+            self.work_list if self.work_list is not None
+            else hole_work_list(self.host)
+        )
         if not holes:
             return MintOutcome(holes=0, width=0, elapsed_s=0.0)
 
@@ -1301,6 +1313,7 @@ def mint_holes(
     window_s: float = DEFAULT_SILENCE_WINDOW_S,
     vcpus: Optional[int] = None,
     on_landed: Optional[Callable[[MintedHole], None]] = None,
+    work_list: Optional[Tuple[Any, ...]] = None,
 ) -> MintOutcome:
     """Run one serving worker's background mint over its own holes."""
     return BackgroundMint(
@@ -1317,6 +1330,7 @@ def mint_holes(
         window_s=window_s,
         vcpus=vcpus,
         on_landed=on_landed,
+        work_list=work_list,
     ).run()
 
 

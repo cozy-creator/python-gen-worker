@@ -109,6 +109,11 @@ class Booted:
     checkpoint_dir: Path
     adopted: Tuple[str, ...] = ()
     holes: Tuple[str, ...] = ()
+    #: Per-hole WHY, parallel to nothing — keyed rows, because the graph name
+    #: alone answered "which" while the field failure needed "why" (pgw#1564:
+    #: fourteen `cannot decompress` reasons sat unread on the session while a
+    #: campaign diagnosed the resulting zero as a new defect).
+    hole_reasons: Tuple[Tuple[str, str], ...] = ()
     mint: Any = None
     warnings: List[str] = field(default_factory=list)
 
@@ -162,9 +167,13 @@ def boot(spec: BootSpec) -> Booted:
 
     adopted: Tuple[str, ...] = ()
     holes: Tuple[str, ...] = ()
+    hole_reasons: Tuple[Tuple[str, str], ...] = ()
     if host.adoption is not None:
         adopted = tuple(record.graph for record in host.adoption.adopted)
         holes = tuple(hole.record.graph for hole in host.holes)
+        hole_reasons = tuple(
+            (hole.record.graph, str(hole.reason)[:300]) for hole in host.holes
+        )
 
     booted = Booted(
         host=host,
@@ -173,6 +182,7 @@ def boot(spec: BootSpec) -> Booted:
         checkpoint_dir=tree,
         adopted=adopted,
         holes=holes,
+        hole_reasons=hole_reasons,
     )
     if holes and spec.compile_policy == "auto" and store is not None:
         booted.mint = _start_background_mint(spec, host, store)
@@ -375,6 +385,20 @@ class ResidentEndpoint:
             "output_dir": str(self.spec.output_dir.resolve()),
             "adopted_graphs": list(self.booted.adopted),
             "holes": list(self.booted.holes),
+            # WHY each hole is a hole (pgw#1564): the handle is the ONE thing
+            # an out-of-process caller can read after boot, and it carried
+            # only names — so the 2026-08-20 field zero, whose fourteen
+            # reasons all said `cannot decompress`, was reported as
+            # reasonless. The verdict block makes the query one field read.
+            "hole_reasons": [
+                {"graph": graph, "reason": reason}
+                for graph, reason in self.booted.hole_reasons
+            ],
+            "adoption": {
+                "engaged": self.booted.host.adoption is not None,
+                "armed": len(self.booted.adopted),
+                "claimed": len(self.booted.adopted) + len(self.booted.holes),
+            },
             "sm": self.spec.sm,
             "lane": self.spec.lane,
             "booted_at": self._booted_at,
