@@ -217,7 +217,7 @@ def _default_free_vram_bytes(group: Optional[DeviceGroup] = None) -> int:
 def _obj_manages_own_device(obj: Any) -> bool:
     """diffusers offload hooks own placement; manual .to() would break them."""
     return getattr(obj, "_cozy_low_vram_mode", None) in (
-        "model_offload", "group_offload", "sequential",
+        "partial_resident", "model_offload", "group_offload", "sequential",
     )
 
 

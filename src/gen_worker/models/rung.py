@@ -66,6 +66,25 @@ RUN_CPU = "cpu"
 
 NATIVE = Rung("native", "", "", RUN_NATIVE, 1.0, False)
 FP8_STORAGE = Rung("fp8_storage", "", "fp8", RUN_FP8_STORAGE, 1.05, False)
+# pgw#1577 — COMPONENT-granular residency: evict the minimum-BYTE subset of
+# components that clears the budget and keep everything else, denoiser first,
+# on the card between requests. It sits ABOVE `model_offload` because it is
+# strictly cheaper on the same placement decision: same fit test, a subset of
+# the traffic. Measured cause on the campaign card (SDXL, RTX 4070 Laptop):
+# `model_offload` moves 13 GiB per request — the whole pipeline out and back —
+# to reclaim 1.2 GiB, at ~2.7 GB/s effective, which is ~4.8 s of the ~7.0 s
+# fixed per-request cost. This rung moves 1.64 GiB, one way, from pinned host
+# RAM, because a weight the host still holds needs no copy back.
+#
+# ADMISSION-ONLY, for the same reason `partial_stream` is: the resident set is
+# chosen from free VRAM and component sizes at LOAD, and the reactive OOM
+# descent has neither in hand when it fires. `_walk` therefore sends any
+# resident token to `model_offload`, exactly as before, and `price(RUN_OFFLOAD)`
+# keeps answering with `model_offload`'s coarse number rather than this rung's.
+PARTIAL_RESIDENT = Rung(
+    "partial_resident", "partial_resident", "", RUN_OFFLOAD, 1.3, True,
+    admission_only=True,
+)
 MODEL_OFFLOAD = Rung("model_offload", "model_offload", "", RUN_OFFLOAD, 2.5, True)
 # pgw#1497 — per-LEAF-MODULE budgeted residency, the tail cast per forward from
 # pinned host RAM (`models.stream_residency`). The only rung with a BUDGET: the
@@ -132,8 +151,8 @@ CPU = Rung("cpu", "cpu", "", RUN_CPU, 40.0, True)
 
 #: The ONE ordering, best first. ``descend`` walks it; nothing else may.
 LADDER: tuple[Rung, ...] = (
-    NATIVE, FP8_STORAGE, MODEL_OFFLOAD, PARTIAL_STREAM, GROUP_OFFLOAD, SEQUENTIAL,
-    CPU,
+    NATIVE, FP8_STORAGE, PARTIAL_RESIDENT, MODEL_OFFLOAD, PARTIAL_STREAM,
+    GROUP_OFFLOAD, SEQUENTIAL, CPU,
 )
 
 #: The reactive placement tail, shallowest first (gw#463): a load-time CUDA

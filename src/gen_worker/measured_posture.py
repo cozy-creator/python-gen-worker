@@ -134,6 +134,7 @@ PLACEMENT_DISK = "disk"
 #: Technique names — the SDK's OWN rungs (`models/rung.py`) plus the levers that
 #: had no wire representation at all.
 TECHNIQUE_FP8_STORAGE = "fp8_storage"
+TECHNIQUE_PARTIAL_RESIDENT = "partial_resident"
 TECHNIQUE_MODEL_OFFLOAD = "model_offload"
 TECHNIQUE_GROUP_OFFLOAD = "group_offload"
 TECHNIQUE_SEQUENTIAL = "sequential"
@@ -378,6 +379,7 @@ _PLACEMENT_RESIDENCY: Dict[str, str] = {
     "": "",
     "off": RESIDENCY_ALL_RESIDENT,
     "vae_only": RESIDENCY_ALL_RESIDENT,
+    "partial_resident": TECHNIQUE_PARTIAL_RESIDENT,
     "model_offload": TECHNIQUE_MODEL_OFFLOAD,
     "group_offload": TECHNIQUE_GROUP_OFFLOAD,
     "sequential": TECHNIQUE_SEQUENTIAL,
@@ -388,6 +390,7 @@ _PLACEMENT_RESIDENCY: Dict[str, str] = {
 #: the worker's estimate OF the lever, not a property of the run, and two SDK
 #: versions estimating it differently must not fork one posture's identity.
 _TECHNIQUE_SLOWDOWN: Dict[str, float] = {
+    TECHNIQUE_PARTIAL_RESIDENT: 1.3,
     TECHNIQUE_MODEL_OFFLOAD: 2.5,
     TECHNIQUE_GROUP_OFFLOAD: 3.0,
     TECHNIQUE_SEQUENTIAL: 4.0,
