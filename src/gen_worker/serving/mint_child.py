@@ -130,6 +130,14 @@ def _ensure_cuda_home(target_arch: str) -> None:
     when nobody has said does this compose one, and `compose()` is itself
     idempotent -- a pre-existing root is left alone rather than rebuilt.
 
+    CUDA_HOME is set from WHERE THE COMPOSE ACTUALLY WROTE (pgw#1532), not from
+    the module constant. Reading the constant made this correct only on a pod:
+    on a box whose `/usr/local` is root-owned the compose could not create
+    `/usr/local/cuda`, and this pointed torch at it anyway. Fourteen
+    specializations died on `FileNotFoundError:
+    '/usr/local/cuda/include'` -- while the toolkit was in the venv's own
+    `nvidia-*` wheels the whole time, which is what `compose()` builds from.
+
     Only for `sm_*`: a CPU target needs no CUDA root, and composing one there
     would be work done to answer a question nobody asked.
     """
@@ -139,12 +147,24 @@ def _ensure_cuda_home(target_arch: str) -> None:
         return
     from .. import cuda_root
 
-    cuda_root.compose()
-    os.environ["CUDA_HOME"] = str(cuda_root.CUDA_ROOT)
+    composed = cuda_root.compose()
+    for line in composed.lines():
+        logger.info("mint: %s", line)
+    if cuda_root.missing_parts(Path(composed.path)):
+        # Stated, never fatal: an incomplete root is still worth pointing at
+        # (the gaps may be ones this compile does not need), and the refusal
+        # belongs to `aot_preconditions`, not here.
+        logger.warning(
+            "mint: the CUDA root at %s is incomplete (%s) — AOTI resolves it "
+            "at the LINK step, so a gap here surfaces after the compile is "
+            "already paid for",
+            composed.path, ", ".join(cuda_root.missing_parts(Path(composed.path))),
+        )
+    os.environ["CUDA_HOME"] = composed.path
     logger.info(
-        "mint: composed the CUDA root at %s and set CUDA_HOME (pgw#1464) — "
-        "AOTI resolves it at the link step, after the compile is already paid",
-        cuda_root.CUDA_ROOT,
+        "mint: CUDA_HOME=%s (pgw#1464/pgw#1532) — AOTI resolves it at the link "
+        "step, after the compile is already paid",
+        composed.path,
     )
 
 

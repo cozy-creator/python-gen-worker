@@ -652,6 +652,58 @@ def driver_floor() -> Optional[str]:
         return None
 
 
+def artifact_manifest(env: Any, package: Path) -> Any:
+    """The COMPATIBILITY SET of these bytes, read off the artifact itself.
+
+    Paul, 2026-08-18: version constraints derived FROM THE ARTIFACT — its own
+    ELF ``DT_NEEDED`` entries plus the AOTI shim it was built against — never a
+    snapshot of the environment's package list. Each row is a same-major ``>=``
+    floor at the version present at mint; the sm and the driver floor ride their
+    own fields. An artifact whose kernels are all embedded Triton/SASS names no
+    libraries at all, and that is a correct answer, not a recording bug.
+
+    The mint always runs in the CURRENT env — by definition the newest the fleet
+    runs — so there is deliberately no staleness logic here and no opportunistic
+    re-mint.
+    """
+    from .._vendor.torchcg import RequirementsManifest
+
+    rows = dict(artifact_constraints(package))
+    name, floor = torch_shim_floor()
+    rows[name] = floor
+    return RequirementsManifest(
+        include_set=tuple(sorted(rows.items())),
+        sm_compiled=env.sm,
+        cuda_floor=driver_floor(),
+    )
+
+
+def publish_compiled(store: Any, graph: str, env: Any, artifact: Path) -> str:
+    """Put one freshly-compiled artifact WHERE THE SERVING PATH READS IT.
+
+    THE ONE PUBLISHER (pgw#1532). ``Engine.compile`` banks its output in
+    torchcg's own engine store — that is the engine's compile cache, keyed by
+    ``cg-key-v1`` and consulted by ``Engine.resolve`` so a re-compile is a
+    reuse. It is NOT the band adoption reads. ``holes()``, ``has_artifact`` and
+    every boot-time adopt address artifacts as ``(cg-graph-v1, cg-env-v2)`` in
+    the ``GraphStore``, and NOTHING lands there unless somebody calls
+    ``publish_artifact``.
+
+    The runtime mint called it; ``gen-worker compile`` did not — so the CLI
+    burned 26 minutes of real inductor work on this box, reported
+    ``built=14 (of 14)`` with rc=0, and left the serving reader looking at 14
+    holes. One compile path with two publishers was always going to drift; this
+    is the single one, and both callers go through it.
+
+    ``publish_artifact`` takes the package FILE, not the unpacked directory the
+    compiler returns (pgw#1471): an artifact position addresses ONE set of bytes
+    by digest and a directory has no digest.
+    """
+    package = artifact_package(Path(artifact))
+    outcome = store.publish_artifact(graph, env, package, artifact_manifest(env, package))
+    return str(getattr(outcome, "value", outcome) or "")
+
+
 def satisfied(
     manifest: Any, present: Mapping[str, str]
 ) -> Tuple[bool, Tuple[str, ...]]:
@@ -1057,15 +1109,7 @@ class BackgroundMint:
 
         published = ""
         if self.store is not None:
-            # pgw#1471: PUBLISH takes the package FILE, not the unpacked
-            # directory the compiler returns. `publish_artifact` requires a
-            # file because an artifact position addresses ONE set of bytes by
-            # digest, and a directory has no digest. `_manifest` reads the same
-            # package and unwraps to the ELF object inside it.
-            package = artifact_package(artifact)
-            outcome = self.store.publish_artifact(
-                record.graph, env, package, self._manifest(env, package))
-            published = str(getattr(outcome, "value", outcome) or "")
+            published = publish_compiled(self.store, record.graph, env, artifact)
 
         armed = False
         try:
@@ -1093,32 +1137,6 @@ class BackgroundMint:
         return MintedHole(
             graph=record.graph, target=record.target, artifact=artifact,
             published=published, armed=armed,
-        )
-
-    def _manifest(self, env: Any, artifact: Path) -> Any:
-        """The COMPATIBILITY SET of these bytes, read off the artifact itself.
-
-        Paul, 2026-08-18: version constraints derived FROM THE ARTIFACT — its
-        own ELF ``DT_NEEDED`` entries plus the AOTI shim it was built against
-        — never a snapshot of the environment's package list. Each row is a
-        same-major ``>=`` floor at the version present at mint; the sm and the
-        driver floor ride their own fields. An artifact whose kernels are all
-        embedded Triton/SASS names no libraries at all, and that is a correct
-        answer, not a recording bug.
-
-        The mint always runs in the CURRENT env — by definition the newest the
-        fleet runs — so there is deliberately no staleness logic here and no
-        opportunistic re-mint.
-        """
-        from .._vendor.torchcg import RequirementsManifest
-
-        rows = dict(artifact_constraints(artifact))
-        name, floor = torch_shim_floor()
-        rows[name] = floor
-        return RequirementsManifest(
-            include_set=tuple(sorted(rows.items())),
-            sm_compiled=env.sm,
-            cuda_floor=driver_floor(),
         )
 
     # -- the serving reserve, at the scheduler -------------------------------
@@ -1192,6 +1210,9 @@ __all__ = [
     "MissingProgram",
     "PROGRAM_GRAPH_FIELD",
     "artifact_constraints",
+    "artifact_manifest",
+    "artifact_package",
+    "publish_compiled",
     "assert_satisfied",
     "present_libraries",
     "driver_floor",

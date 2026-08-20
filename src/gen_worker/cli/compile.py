@@ -18,6 +18,19 @@ than as process adoption.
 weightless trace and the mint runs against it, so ``compile`` legitimately runs
 before ``download``.
 
+**SERVABLE, OR IT FAILED (pgw#1532).** The success criterion is not "the builds
+returned". It is "the reader that arms graphs at boot can find what I wrote",
+and it is checked by asking THAT reader, through a store object this command did
+not publish through. Before this, ``compile`` reported ``built=14 (of 14)`` with
+rc=0 after 26 minutes of real inductor work and left the serving path with 14
+holes: ``Engine.compile`` banks bytes in torchcg's own engine cache, and
+NOTHING lands in the ``(cg-graph-v1, cg-env-v2)`` band adoption reads unless
+somebody calls ``publish_artifact`` — which the runtime mint did and this
+command did not. It also never called ``put_graphs``, so even a correctly placed
+artifact had no graph-set document to be found through. Both are now this
+command's job, and the read-back is what proves it: a count of builds that
+returned cannot go red on either failure, and did not.
+
 ## Address-free programs
 
 Paul ruled the exported-program blob ADDRESS-FREE: ``torch.export.save`` is
@@ -49,12 +62,18 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import endpoint_lock as el
 from . import work_ledger, workspace
 
 logger = logging.getLogger(__name__)
+
+#: Compile one specialization: (spec, program blob, destination) -> artifact.
+#: The production implementation is :func:`_build` (one child process per
+#: graph); an explicit one is the local seam — no GPU, no inductor — and
+#: nothing else.
+Builder = Callable[["Spec", Path, Path], Path]
 
 #: Outcome vocabulary. Closed: every specialization ends in exactly one of
 #: these and the summary counts them.
@@ -304,17 +323,24 @@ def _ensure_program(spec: Spec, store: Any, rederive: Any, scratch: Path) -> Pat
 
 def _build(
     spec: Spec, *, program: Path, cas_root: Path, sm: str, destination: Path,
-) -> None:
-    """Compile one specialization in its OWN process.
+) -> Path:
+    """Compile one specialization in its OWN process, and return its artifact.
 
     A child, not a thread: inductor keeps process-global mutable state, and a
     mint that dies must not take the driver with it. ``destination`` is
     deliberately NOT created here — torchcg refuses a destination that already
     exists unless every byte matches, so an empty directory made "for tidiness"
     reads as occupied by something that is not the artifact.
+
+    The child writes the artifact path it produced into ``result``, and this
+    function READS it (pgw#1532). The request already asked for that file and
+    nothing consumed it: the parent threw the child's only output away, so it
+    had nothing to publish and could only count exit statuses — which is
+    precisely how a green run left the serving path empty.
     """
     from ..compile_cache import toolchain_digest
 
+    result_path = destination.parent / f"{spec.short}.result.json"
     request = {
         "blob": str(program),
         "graph": spec.graph,
@@ -324,7 +350,7 @@ def _build(
         "toolchain": dict(toolchain_digest()),
         "cas": str(cas_root),
         "destination": str(destination),
-        "result": str(destination.parent / f"{spec.short}.result.json"),
+        "result": str(result_path),
     }
     request_path = destination.parent / f"{spec.short}.request.json"
     request_path.parent.mkdir(parents=True, exist_ok=True)
@@ -344,11 +370,141 @@ def _build(
         raise CompileError(
             f"mint child exited {completed.returncode} for graph {spec.short}"
         )
+    try:
+        artifact = Path(result_path.read_text(encoding="utf-8").strip())
+    except OSError as exc:
+        raise CompileError(
+            f"the mint child for graph {spec.short} exited 0 but wrote no "
+            f"artifact path to {result_path} ({exc}) — a zero exit is not an "
+            f"artifact, and there is nothing to publish"
+        ) from exc
+    if not artifact.exists():
+        raise CompileError(
+            f"the mint child for graph {spec.short} named {artifact} and it "
+            f"does not exist"
+        )
+    return artifact
+
+
+def _default_builder(cas_root: Path, sm: str) -> Builder:
+    """THE production builder: one child process per specialization."""
+
+    def build(spec: Spec, program: Path, destination: Path) -> Path:
+        return _build(
+            spec, program=program, cas_root=Path(cas_root), sm=sm,
+            destination=destination,
+        )
+
+    return build
+
+
+def endpoint_module(endpoint_dir: Path) -> str:
+    """The module name adoption looks this endpoint's document up BY.
+
+    Read through ``load_endpoint`` — the one reader of ``endpoint.toml``'s
+    ``main =`` — because ``_adoption_source`` reads it the same way. Two
+    spellings of "which document is this endpoint's" is exactly the drift that
+    would make ``compile`` publish under a name ``up`` never asks for.
+    """
+    from ..discovery.discover import prime_sys_path
+    from ..serving.loader import load_endpoint
+
+    prime_sys_path(endpoint_dir)
+    return str(load_endpoint(endpoint_dir).module_name)
+
+
+# --------------------------------------------------------------------------
+# The serving reader — the only witness that counts
+# --------------------------------------------------------------------------
+
+
+def serving_reader(cas_root: Path) -> Any:
+    """The store object BOOT-TIME ADOPTION builds, over this machine's CAS.
+
+    Constructed exactly the way ``cli/daemon._adoption_source`` constructs it,
+    and deliberately NOT the store this command publishes through. "My writer
+    returned without raising" and "the reader that arms graphs can find it" are
+    different claims, and pgw#1532 is what happens when only the first one is
+    ever checked: the write succeeded, into torchcg's engine cache, and the
+    reader saw nothing.
+    """
+    from .._vendor.tensorfs import LocalCAS
+    from .._vendor.torchcg.store import LocalGraphStore
+
+    return LocalGraphStore(LocalCAS(Path(cas_root)))
+
+
+def unservable(cas_root: Path, specs: Tuple[Spec, ...], env: Any, module: str) -> List[str]:
+    """What the serving reader still cannot find. Empty means servable.
+
+    Reports the DOCUMENT as its own row: an endpoint whose artifacts are all
+    present but whose graph-set document is missing adopts nothing, because
+    adoption enumerates lanes out of the document and never reaches the
+    artifacts. That was the second half of the same silent failure — nothing in
+    this CLI called ``put_graphs``, so ``get_graphs`` answered a clean miss and
+    ``up`` served eager over a full store.
+    """
+    reader = serving_reader(cas_root)
+    gaps: List[str] = []
+    try:
+        document = reader.get_graphs(module)
+    except Exception as exc:  # noqa: BLE001 — unreadable IS unservable
+        document = None
+        gaps.append(f"graph-set document {module!r}: unreadable ({exc})")
+    if document is None and not gaps:
+        gaps.append(f"graph-set document {module!r}: absent")
+    for spec in specs:
+        try:
+            present = reader.has_artifact(spec.graph, env)
+        except Exception as exc:  # noqa: BLE001
+            gaps.append(f"artifact {spec.short}: unreadable ({exc})")
+            continue
+        if not present:
+            gaps.append(f"artifact {spec.short}: absent at ({spec.short}, {env.value})")
+    return gaps
+
+
+def _publish_document(cas_root: Path, lock_path: Path, module: str) -> None:
+    """Publish the committed lock's graph-set document into this box's store.
+
+    The document is not derived here and must not be: the lock IS the authored
+    document, ``specializations()`` already reads its ``[derive].document``
+    block for the very specs being built, and adoption looks the same document
+    up by module name. Writing a second one would be a second answer to what
+    this endpoint compiles to.
+    """
+    from .._vendor.torchcg.document import GraphSetDocument
+
+    block = el.read_derive_block(lock_path)
+    if block is None:  # unreachable via compile_all, which refuses earlier
+        return
+    document = GraphSetDocument.decode(block.decoded()["graphs"])
+    serving_reader(cas_root).put_graphs(module, document)
+    logger.info(
+        "compile: published graph-set document %s (%d lane(s), %d graph(s)) — "
+        "adoption enumerates lanes out of this; artifacts alone adopt nothing",
+        module, len(document.lanes),
+        sum(len(lane.graphs) for lane in document.lanes),
+    )
 
 
 # --------------------------------------------------------------------------
 # The driver
 # --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Report:
+    """What one ``compile`` run did, and whether it left anything servable.
+
+    ``unservable`` is the verdict and ``outcomes`` is the narrative. They are
+    separate fields because they answer different questions and the whole of
+    pgw#1532 is that the narrative was mistaken for the verdict: fourteen
+    ``BUILT`` rows and rc=0 over a serving path that could arm nothing.
+    """
+
+    outcomes: List[Outcome]
+    unservable: List[str]
 
 
 def compile_all(
@@ -360,7 +516,10 @@ def compile_all(
     lockfile: Optional[Path],
     only: int = 0,
     vram_budget_gb: float = 0.0,
-) -> List[Outcome]:
+    module: str = "",
+    store: Any = None,
+    builder: Optional[Builder] = None,
+) -> Report:
     specs = specializations(lock_path)
     if only:
         specs = specs[:only]
@@ -369,7 +528,7 @@ def compile_all(
             "compile: this endpoint's lock claims no compiled specializations "
             "— nothing to build (it serves eager by declaration)"
         )
-        return []
+        return Report([], [])
 
     floor = declared_floor_gb(endpoint_dir)
     grant = grant_gb(vram_budget_gb)
@@ -381,10 +540,14 @@ def compile_all(
             "grant. NO-OP: %d specialization(s) left unbuilt on purpose.",
             grant, floor, len(specs),
         )
-        return [
-            Outcome(spec, BELOW_FLOOR, f"grant {grant:.1f} GiB < floor {floor:.1f} GiB")
-            for spec in specs
-        ]
+        return Report(
+            [
+                Outcome(spec, BELOW_FLOOR,
+                        f"grant {grant:.1f} GiB < floor {floor:.1f} GiB")
+                for spec in specs
+            ],
+            [],
+        )
     if floor is None:
         logger.info(
             "compile: compiled floor UNKNOWN for this endpoint (no declared "
@@ -392,8 +555,13 @@ def compile_all(
             "not a floor of zero"
         )
 
+    from ..serving.mint import publish_compiled
+
     env = _env_identity(endpoint_dir, sm, lockfile)
-    store = _store(cas_root)
+    if store is None:
+        store = _store(cas_root)
+    build = builder if builder is not None else _default_builder(cas_root, sm)
+    module = module or endpoint_module(endpoint_dir)
     artifacts_dir = Path(endpoint_dir) / ".compiled-graphs"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -435,12 +603,24 @@ def compile_all(
                     continue
                 logger.info("%s: building", label)
                 program = _ensure_program(spec, store, rederive, artifacts_dir)
-                _build(
-                    spec, program=program, cas_root=Path(cas_root), sm=sm,
-                    destination=destination,
-                )
+                artifact = build(spec, program, destination)
+                # PUBLISH, then ASK THE READER. Neither step existed before
+                # pgw#1532 and neither one alone is enough: the publish is what
+                # puts the bytes in the band adoption addresses, and the
+                # read-back is the only thing that can go red if it did not.
+                published = publish_compiled(store, spec.graph, env, artifact)
+                if not serving_reader(cas_root).has_artifact(spec.graph, env):
+                    raise CompileError(
+                        f"built {spec.short} and the publish reported "
+                        f"{published or 'nothing'}, and the store adoption "
+                        f"reads at boot still has no artifact at "
+                        f"({spec.short}, {env.value}). The build is not the "
+                        f"deliverable — an artifact the serving reader can "
+                        f"find is."
+                    )
+                logger.info("%s: built and servable (%s)", label, published or "published")
                 outcomes.append(
-                    Outcome(spec, BUILT, wall_s=time.monotonic() - started)
+                    Outcome(spec, BUILT, published, wall_s=time.monotonic() - started)
                 )
         except work_ledger.Busy:
             logger.info(
@@ -454,7 +634,15 @@ def compile_all(
                 Outcome(spec, FAILED, f"{type(exc).__name__}: {exc}",
                         wall_s=time.monotonic() - started)
             )
-    return outcomes
+
+    # The document is published for the WHOLE run, not per specialization: it
+    # names every lane the lock claims, so a partial run still leaves adoption
+    # able to enumerate and the mint able to fill the rest. Publishing it after
+    # the artifacts is the same durability order the runtime mint uses —
+    # nothing is announced before it exists.
+    _publish_document(cas_root, lock_path, module)
+    gaps = unservable(cas_root, specs, env, module)
+    return Report(outcomes, gaps)
 
 
 def _rederive_programs(
@@ -533,6 +721,51 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
     parser.set_defaults(_handler=run_compile)
 
 
+def summarize(report: Report) -> Tuple[str, int]:
+    """What the operator is told, and what the shell is told, from ONE fact.
+
+    Separated from :func:`run_compile` so the verdict is testable against real
+    reports rather than only through argparse and a live inductor. The whole of
+    pgw#1532 lives in the second element: for 26 minutes of real GPU work this
+    returned 0 beside ``built=14 (of 14)`` while the serving path held 14 holes,
+    because the exit code was computed from the outcome tally and the tally
+    counted builds that returned.
+    """
+    counts: Dict[str, int] = {}
+    for outcome in report.outcomes:
+        counts[outcome.state] = counts.get(outcome.state, 0) + 1
+    lines = [
+        "gen-worker compile: "
+        + ", ".join(f"{state}={counts[state]}" for state in sorted(counts))
+        + f" (of {len(report.outcomes)})\n"
+    ]
+    if report.unservable:
+        # NOT a warning. A run that leaves the serving path unable to arm what
+        # it was asked for has failed at the only thing it was for, and saying
+        # so quietly beside a green summary is the defect this fixed, not a
+        # style choice.
+        lines.append(
+            f"gen-worker compile: NOT SERVABLE — {len(report.unservable)} "
+            f"gap(s) in the store `gen-worker up` adopts from:\n"
+        )
+        lines.extend(f"  - {gap}\n" for gap in report.unservable)
+        lines.append(
+            "  A build that returned is not an artifact the serving path can "
+            "find; this command reports the second.\n"
+        )
+        return "".join(lines), 1
+    if counts.get(FAILED):
+        return "".join(lines), 1
+    if counts.get(BELOW_FLOOR) or not report.outcomes:
+        return "".join(lines), 0
+    lines.append(
+        f"gen-worker compile: SERVABLE — the graph-set document and all "
+        f"{len(report.outcomes)} artifact(s) are readable through the store "
+        f"boot-time adoption uses.\n"
+    )
+    return "".join(lines), 0
+
+
 def run_compile(args: argparse.Namespace) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(message)s", stream=sys.stderr, force=False,
@@ -549,7 +782,7 @@ def run_compile(args: argparse.Namespace) -> int:
     lock_path = Path(args.lock) if args.lock else endpoint_dir / el.LOCK_FILENAME
     cas_root = Path(args.graph_store) if args.graph_store else workspace.graph_cas_root()
     try:
-        outcomes = compile_all(
+        report = compile_all(
             endpoint_dir=endpoint_dir,
             lock_path=lock_path,
             cas_root=cas_root,
@@ -561,29 +794,29 @@ def run_compile(args: argparse.Namespace) -> int:
     except CompileError as exc:
         sys.stderr.write(f"gen-worker compile: {exc}\n")
         return 1
-    counts: Dict[str, int] = {}
-    for outcome in outcomes:
-        counts[outcome.state] = counts.get(outcome.state, 0) + 1
-    sys.stderr.write(
-        "gen-worker compile: "
-        + ", ".join(f"{state}={counts[state]}" for state in sorted(counts))
-        + f" (of {len(outcomes)})\n"
-    )
-    return 1 if counts.get(FAILED) else 0
+    summary, code = summarize(report)
+    sys.stderr.write(summary)
+    return code
 
 
 __all__ = [
     "BELOW_FLOOR",
     "BUILT",
     "CLAIMED",
+    "Builder",
     "CompileError",
     "FAILED",
     "FETCHED",
     "Outcome",
     "PRESENT",
+    "Report",
     "Spec",
     "add_subparser",
     "compile_all",
+    "endpoint_module",
     "run_compile",
+    "serving_reader",
     "specializations",
+    "summarize",
+    "unservable",
 ]
