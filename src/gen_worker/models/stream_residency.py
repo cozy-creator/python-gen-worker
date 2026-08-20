@@ -51,6 +51,34 @@ through its own hook exactly as an unpatched one does, and the adapter leaves
 are forced resident (they are megabytes, and their cost is dwarfed by the
 launch overhead of streaming them). A MERGED adapter is just a different
 weight and streams like any other.
+
+**Cells and the schedule** (pgw#1515). Two things above the split, both
+PLANNER-side and therefore shared by every mechanism the rung can sit on:
+
+* **Cells** (:class:`CellPolicy`, :class:`ResidencyCell`) — the unit of
+  back/unback/stream is a CELL, a packed group of leaves, not a leaf. A
+  mechanism that maps memory at a page granularity pays that granularity ONCE
+  PER REGION, so per-leaf regions charge the alignment remainder once per leaf:
+  pgw#1507 measured **248 MiB = 13.2 %** of sd1.5's weights lost that way
+  (1.830 GiB of weight in 2.072 GiB of span over 239 regions, 2 MiB VMM
+  granularity), and ~98 µs of page-table work per streamed leaf per forward on
+  top. Packing the small leaves first collapses both: the remainder is paid
+  once per CELL, and the plan REPORTS the residual so the elimination is a
+  measured claim and not an assertion (:attr:`ResidencyPlan.granularity_tax_bytes`
+  against :attr:`ResidencyPlan.leaf_granular_tax_bytes`).
+* **The schedule** (:class:`ResidencySchedule`) — when the assigned {VRAM, RAM}
+  pair admits holding the whole ACTIVE component for a call, the cells rotate at
+  CALL boundaries (:meth:`StreamedResidency.hold_component`) instead of
+  per-forward. That is ``model_offload``'s per-CALL amortization — measured
+  1.57× against this rung's per-STEP 1.91× at the same peak VRAM (pgw#1497) —
+  on this rung's mechanism and at this rung's finer granularity. The choice is
+  DETERMINISTIC ARITHMETIC over the budget and the cell layout, decided in the
+  plan, never a runtime heuristic reacting to pressure (Paul's boundary ruling).
+
+Admission-first is untouched: the budget is still handed down, the fill is still
+the greedy largest-first walk run to a fixed point, and under the default
+leaf-granular policy every number this module produces is bit-for-bit what it
+produced before cells existed.
 """
 
 from __future__ import annotations
@@ -58,6 +86,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from . import staging
@@ -78,6 +107,10 @@ DEFAULT_MIN_STREAM_BYTES = 1 << 20
 #: weight's dtype, so every sub-buffer starts on a 512-byte boundary.
 _ALIGN = 512
 
+#: varena's VMM chunk granularity — the page size the driver maps in. The
+#: number behind pgw#1507's measured 13.2 % tax, and the reason cells exist.
+VMM_GRANULARITY_BYTES = 2 << 20
+
 #: Set on a module whose leaves this rung has hooked.
 ENGAGED_ATTR = "_cozy_stream_residency"
 
@@ -86,8 +119,15 @@ ENGAGED_ATTR = "_cozy_stream_residency"
 _ADAPTER_MARKERS = ("lora_a", "lora_b", "lora_embedding", "lora_magnitude")
 
 
+def align_to(n: int, alignment: int) -> int:
+    """``n`` rounded up to a multiple of ``alignment``. One rounding rule for
+    both alignments a mechanism has: the cast-buffer carve and the page."""
+    a = max(1, int(alignment))
+    return (int(n) + a - 1) // a * a
+
+
 def aligned(n: int) -> int:
-    return (int(n) + _ALIGN - 1) // _ALIGN * _ALIGN
+    return align_to(n, _ALIGN)
 
 
 # ---------------------------------------------------------------------------
@@ -141,10 +181,214 @@ class LeafCost:
     name: str
     resident_bytes: int
     cast_bytes: int = 0
+    #: Which COMPONENT this leaf belongs to — the first path segment of its
+    #: qualified name (``unet.down_blocks.0.attn.to_q`` -> ``unet``), which is
+    #: exactly the granularity ``model_offload`` swaps at and therefore the unit
+    #: the call-boundary schedule holds hot. A dotless name has no component and
+    #: joins the unnamed one, so a flat tree is one component rather than N.
+    component: str = ""
 
     def __post_init__(self) -> None:
         if not self.cast_bytes:
             object.__setattr__(self, "cast_bytes", int(self.resident_bytes))
+        if not self.component and "." in self.name:
+            object.__setattr__(self, "component", self.name.split(".", 1)[0])
+
+
+@dataclass(frozen=True)
+class CellPolicy:
+    """A MECHANISM's paging geometry — the only thing the planner needs to know
+    about how a rung actually holds bytes (pgw#1515).
+
+    Three numbers, each a property of the mechanism and not of the model:
+
+    * ``cell_bytes`` — the target size of one back/unback/stream unit. ``0``
+      means LEAF-GRANULAR: every leaf is its own cell, which is what the rung
+      did before cells existed and what :data:`LEAF_CELLS` states.
+    * ``granularity_bytes`` — the page size a REGION is rounded up to. The
+      software cast ring has no region concept and states ``1``; varena maps in
+      2 MiB VMM chunks and states :data:`VMM_GRANULARITY_BYTES`, which is the
+      whole source of pgw#1507's 13.2 % tax.
+    * ``intra_align_bytes`` — the alignment BETWEEN members inside one cell. A
+      uint8 slice must be re-viewable as its weight's dtype, so a mechanism that
+      carves views out of a shared region states :data:`_ALIGN`; one that does
+      not states ``1``.
+
+    Stating a geometry is how a mechanism gets priced honestly: with
+    ``granularity_bytes=1`` the tax arithmetic collapses to zero and every
+    number the planner reports is the pre-cell number, exactly.
+    """
+
+    cell_bytes: int = 0
+    granularity_bytes: int = 1
+    intra_align_bytes: int = 1
+
+    @classmethod
+    def of(cls, value: "int | CellPolicy | None") -> "CellPolicy":
+        """Accept a bare target-cell-bytes int, a policy, or nothing."""
+        if value is None:
+            return LEAF_CELLS
+        if isinstance(value, CellPolicy):
+            return value
+        return cls(cell_bytes=max(0, int(value)))
+
+    @classmethod
+    def vmm(cls, cell_bytes: int) -> "CellPolicy":
+        """The varena geometry: 2 MiB pages, 512-byte views inside a cell."""
+        return cls(
+            cell_bytes=max(0, int(cell_bytes)),
+            granularity_bytes=VMM_GRANULARITY_BYTES,
+            intra_align_bytes=_ALIGN,
+        )
+
+    def span_of(self, payload_bytes: int) -> int:
+        """What a region holding ``payload_bytes`` actually MAPS."""
+        return align_to(payload_bytes, self.granularity_bytes)
+
+    def member_bytes(self, leaf_bytes: int) -> int:
+        """What one member costs inside a cell, aligned for its neighbours."""
+        return align_to(leaf_bytes, self.intra_align_bytes)
+
+
+#: The default: one cell per leaf, no page granularity, no intra-cell padding.
+#: Under this policy the planner's arithmetic is identical to pgw#1497's.
+LEAF_CELLS = CellPolicy()
+
+
+@dataclass(frozen=True)
+class ResidencyCell:
+    """One back/unback/stream unit: a packed group of leaves that share a fate.
+
+    Members of a cell are always in the same place. That is the point — a
+    mechanism that can map, stream or release half a cell is back to per-leaf
+    granularity and back to paying its page remainder per leaf.
+    """
+
+    index: int
+    component: str
+    members: Tuple[str, ...]
+    #: The weight bytes the members really hold (no alignment of any kind).
+    weight_bytes: int
+    #: What the mechanism MAPS for this cell: the members packed at the
+    #: intra-cell alignment, rounded up to one page granularity.
+    span_bytes: int
+    #: The in-flight cast cost when this cell streams — the whole cell, since
+    #: the cell is the stream unit.
+    cast_bytes: int
+    #: True when every member is always-resident (below the streaming floor, or
+    #: excluded by the caller). Forced and streamable leaves never share a cell:
+    #: a cell's fate has to be one thing.
+    forced: bool
+    #: The same members priced ONE REGION PER LEAF — the baseline this packing
+    #: exists to beat, carried so the elimination is reported and not asserted.
+    leaf_span_bytes: int
+
+    @property
+    def granularity_tax_bytes(self) -> int:
+        return max(0, self.span_bytes - self.weight_bytes)
+
+    @property
+    def leaf_granular_tax_bytes(self) -> int:
+        return max(0, self.leaf_span_bytes - self.weight_bytes)
+
+
+def pack_cells(
+    costs: Sequence[LeafCost],
+    *,
+    policy: "int | CellPolicy | None" = None,
+    min_stream_bytes: int = DEFAULT_MIN_STREAM_BYTES,
+    exclude: Iterable[str] = (),
+) -> Tuple[ResidencyCell, ...]:
+    """Group ``costs`` into cells. Deterministic, order-independent, pure.
+
+    **Small leaves are packed FIRST**, which is not a tie-break but the whole
+    mechanism: a leaf's page remainder is bounded by the granularity, so a 4 KiB
+    norm weight in its own 2 MiB region wastes 99.8 % of it while a 300 MiB
+    attention block wastes at most 0.7 %. Filling ascending puts the small ones
+    together until a cell reaches its target and leaves the large ones as
+    singletons, where they were already efficient. pgw#1507 measured the cost of
+    not doing this: 248 MiB over 239 regions on a 1.830 GiB model.
+
+    Two things a cell may never mix, because a cell has ONE fate and ONE home:
+
+    * forced and streamable leaves — a forced member would pin the whole cell;
+    * two components — the call-boundary schedule holds a COMPONENT hot, so a
+      cell straddling two of them could not be swapped at a call boundary.
+
+    Order-independence is a hard requirement inherited from
+    :func:`plan_residency`: groups are emitted in sorted key order and filled in
+    sorted member order, so the cells are a function of the SET of costs, never
+    of the sequence they arrived in.
+    """
+    geometry = CellPolicy.of(policy)
+    skip = {str(n) for n in exclude}
+    floor = int(min_stream_bytes)
+
+    groups: Dict[Tuple[str, bool], List[LeafCost]] = {}
+    for cost in costs:
+        forced = cost.name in skip or cost.cast_bytes < floor
+        groups.setdefault((cost.component, forced), []).append(cost)
+
+    cells: List[ResidencyCell] = []
+    for key in sorted(groups):
+        component, forced = key
+        members = sorted(
+            groups[key], key=lambda c: (c.cast_bytes, c.resident_bytes, c.name)
+        )
+        batch: List[LeafCost] = []
+        payload = 0
+        for cost in members:
+            share = geometry.member_bytes(cost.resident_bytes)
+            if batch and payload + share > max(0, geometry.cell_bytes):
+                cells.append(_cell(len(cells), component, forced, batch, payload, geometry))
+                batch, payload = [], 0
+            batch.append(cost)
+            payload += share
+        if batch:
+            cells.append(_cell(len(cells), component, forced, batch, payload, geometry))
+    return tuple(cells)
+
+
+def _cell(
+    index: int,
+    component: str,
+    forced: bool,
+    members: Sequence[LeafCost],
+    payload_bytes: int,
+    geometry: CellPolicy,
+) -> ResidencyCell:
+    return ResidencyCell(
+        index=index,
+        component=component,
+        members=tuple(c.name for c in members),
+        weight_bytes=sum(c.resident_bytes for c in members),
+        span_bytes=geometry.span_of(payload_bytes),
+        cast_bytes=sum(c.cast_bytes for c in members),
+        forced=forced,
+        leaf_span_bytes=sum(
+            geometry.span_of(geometry.member_bytes(c.resident_bytes)) for c in members
+        ),
+    )
+
+
+class ResidencySchedule(str, Enum):
+    """WHEN cells rotate — decided in the plan, never under fire.
+
+    ``CALL_BOUNDARY`` is the ``model_offload``-equivalent mode on this rung's
+    mechanism: the assigned {VRAM, RAM} pair admits holding the whole active
+    component's cells for the duration of a call, so the swap happens once per
+    call and its cost amortises over every step (pgw#1497 measured that split
+    directly — ``model_offload`` 1.57× per-CALL against this rung's 1.91×
+    per-STEP at the SAME 1.9 GB peak).
+
+    ``PER_STEP`` is the fallback the budget forces: no component fits whole, so
+    cells rotate inside the forward and the tax is paid every step. It is also
+    the mode that reaches below ``model_offload``'s floor, which is the band
+    this rung exists for.
+    """
+
+    CALL_BOUNDARY = "call_boundary"
+    PER_STEP = "per_step"
 
 
 @dataclass(frozen=True)
@@ -169,6 +413,44 @@ class ResidencyPlan:
     #: enforced — see :class:`MemoryBudget`.
     ram_budget_bytes: int = 0
 
+    # -- cells (pgw#1515) ---------------------------------------------------
+    #: The paging geometry this plan was drawn for.
+    policy: CellPolicy = LEAF_CELLS
+    #: Every cell, forced and streamable, in packing order.
+    cells: Tuple[ResidencyCell, ...] = ()
+    #: The cells the card holds — indices into :attr:`cells`, in fill order.
+    resident_cells: Tuple[int, ...] = ()
+    #: The cells that stream, in the same walk order.
+    streamed_cells: Tuple[int, ...] = ()
+    #: What the mechanism actually MAPS for the resident set: the cell spans,
+    #: page-remainder included. Equals :attr:`resident_bytes` exactly when the
+    #: geometry has no page granularity, which is why the default policy leaves
+    #: every pre-cell number unchanged.
+    resident_span_bytes: int = 0
+    #: The SAME resident leaves priced one region per leaf — pgw#1507's measured
+    #: baseline, carried so that :attr:`tax_eliminated_bytes` is a subtraction
+    #: of two numbers this plan computed rather than a claim about a past run.
+    leaf_granular_span_bytes: int = 0
+
+    # -- the schedule (pgw#1515) --------------------------------------------
+    schedule: ResidencySchedule = ResidencySchedule.PER_STEP
+    #: (component, mapped span) for every component, largest first. The
+    #: arithmetic the schedule was decided on, published so the decision can be
+    #: audited without re-deriving it.
+    component_spans: Tuple[Tuple[str, int], ...] = ()
+    #: The largest component's mapped span — what CALL_BOUNDARY must hold.
+    hot_component_bytes: int = 0
+    #: What rests off-card while one component is hot. This is the RAM half's
+    #: real bill under CALL_BOUNDARY, and the reason a stated RAM budget can
+    #: force PER_STEP on a card that would otherwise admit the swap.
+    cold_component_bytes: int = 0
+    #: The components that may be held whole for a call, largest first. Empty
+    #: under PER_STEP — an empty tuple IS the refusal.
+    hold_while_hot: Tuple[str, ...] = ()
+    #: Which component this plan is currently holding hot, "" while the plan is
+    #: the budget-greedy split rather than a call-boundary arrangement.
+    hot_component: str = ""
+
     @property
     def host_bytes(self) -> int:
         """What this plan costs in HOST RAM: the pinned streaming tail."""
@@ -183,8 +465,44 @@ class ResidencyPlan:
 
     @property
     def device_bytes(self) -> int:
-        """What the card actually holds under this plan, at peak."""
-        return self.resident_bytes + self.window_bytes
+        """What the card actually holds under this plan, at peak.
+
+        The SPAN, not the weight bytes: a region is charged at what it maps, so
+        ``fits`` stays exact under a mechanism that pages (pgw#1507 charged its
+        regions the same way, which is what made its ``resident_bytes`` equal
+        the driver's mapped bytes to the byte)."""
+        return self.resident_span_bytes + self.window_bytes
+
+    # -- the granularity tax, reported (pgw#1515) ---------------------------
+
+    @property
+    def granularity_tax_bytes(self) -> int:
+        """What this plan's page remainders cost. Zero is the goal, and the
+        residual is published rather than assumed away."""
+        return max(0, self.resident_span_bytes - self.resident_bytes)
+
+    @property
+    def leaf_granular_tax_bytes(self) -> int:
+        """What the same resident leaves would have cost one region each —
+        pgw#1507 measured this at 248 MiB / 13.2 % on sd1.5."""
+        return max(0, self.leaf_granular_span_bytes - self.resident_bytes)
+
+    @property
+    def tax_eliminated_bytes(self) -> int:
+        """Weight bytes the packing bought back at the same lease."""
+        return max(0, self.leaf_granular_span_bytes - self.resident_span_bytes)
+
+    @property
+    def granularity_tax_ratio(self) -> float:
+        return self.granularity_tax_bytes / self.resident_bytes if self.resident_bytes else 0.0
+
+    @property
+    def leaf_granular_tax_ratio(self) -> float:
+        return (
+            self.leaf_granular_tax_bytes / self.resident_bytes
+            if self.resident_bytes
+            else 0.0
+        )
 
     @property
     def fits(self) -> bool:
@@ -205,6 +523,7 @@ def plan_residency(
     streams: int = DEFAULT_STREAMS,
     min_stream_bytes: int = DEFAULT_MIN_STREAM_BYTES,
     exclude: Iterable[str] = (),
+    cells: "int | CellPolicy | None" = None,
 ) -> ResidencyPlan:
     """Split ``costs`` into a resident set and a streaming tail under a budget.
 
@@ -238,52 +557,126 @@ def plan_residency(
     always produce the same split. That is a hard requirement, not a
     nicety — a mint's traced graph specializations and a residency reservation
     both depend on the answer.
+
+    **The unit of the walk is a CELL** (pgw#1515), not a leaf: cells are packed
+    first (:func:`pack_cells`), the fill admits whole cells charged at their
+    MAPPED SPAN, and the in-flight window reserves ``streams`` × the largest
+    streamed CELL, because a cell is what moves. Under the default
+    leaf-granular geometry every cell is one leaf with no page remainder, so
+    this is the identical arithmetic to the pre-cell planner — verified as a
+    standing test, not as an argument.
+
+    The plan also decides its own SCHEDULE from the same two inputs, so that
+    "hold the hot component and swap at call boundaries" is a property of the
+    plan and never a runtime reaction to pressure.
     """
     streams = max(1, int(streams))
     pair = MemoryBudget.of(budget_bytes)
     budget = max(0, int(pair.vram_bytes))
-    skip = {str(n) for n in exclude}
+    geometry = CellPolicy.of(cells)
+    packed = pack_cells(
+        costs, policy=geometry, min_stream_bytes=min_stream_bytes, exclude=exclude
+    )
 
-    forced: List[LeafCost] = []
-    candidates: List[LeafCost] = []
-    for cost in costs:
-        if cost.name in skip or cost.cast_bytes < int(min_stream_bytes):
-            forced.append(cost)
-        else:
-            candidates.append(cost)
-
-    order = sorted(candidates, key=lambda c: (-c.cast_bytes, -c.resident_bytes, c.name))
-    floor = sum(c.resident_bytes for c in forced)
+    forced_cells = [c for c in packed if c.forced]
+    order = sorted(
+        (c for c in packed if not c.forced),
+        key=lambda c: (-c.cast_bytes, -c.weight_bytes, c.index),
+    )
+    floor = sum(c.span_bytes for c in forced_cells)
 
     window = 0
-    mem = floor
-    resident: List[LeafCost] = []
-    streamed: List[LeafCost] = []
+    span = floor
+    resident: List[ResidencyCell] = []
+    streamed: List[ResidencyCell] = []
     for _ in range(len(order) + 1):
-        mem = floor
+        span = floor
         resident = []
         streamed = []
-        for cost in order:
-            if mem + cost.resident_bytes + window <= budget:
-                resident.append(cost)
-                mem += cost.resident_bytes
+        for cell in order:
+            if span + cell.span_bytes + window <= budget:
+                resident.append(cell)
+                span += cell.span_bytes
             else:
-                streamed.append(cost)
+                streamed.append(cell)
         needed = streams * max((c.cast_bytes for c in streamed), default=0)
         if needed <= window:
             break
         window = needed
 
+    held = forced_cells + resident
+    component_span: Dict[str, int] = {}
+    for cell in packed:
+        component_span[cell.component] = component_span.get(cell.component, 0) + cell.span_bytes
+    ranked = tuple(sorted(component_span.items(), key=lambda kv: (-kv[1], kv[0])))
+    hot = ranked[0][1] if ranked else 0
+    cold = sum(v for _, v in ranked) - hot
+    # The swap moves a cell at a time and is pipelined exactly like a per-step
+    # cast, so the same ring reservation applies at a call boundary.
+    swap_window = streams * max((c.cast_bytes for c in packed), default=0)
+    ram = max(0, int(pair.ram_bytes))
+    call_boundary = bool(ranked) and hot + swap_window <= budget and (not ram or cold <= ram)
+
     return ResidencyPlan(
         budget_bytes=budget,
         streams=streams,
-        forced=tuple(c.name for c in forced),
-        resident=tuple(c.name for c in resident),
-        streamed=tuple(c.name for c in streamed),
-        resident_bytes=mem,
-        streamed_bytes=sum(c.resident_bytes for c in streamed),
+        forced=tuple(n for c in forced_cells for n in c.members),
+        resident=tuple(n for c in resident for n in c.members),
+        streamed=tuple(n for c in streamed for n in c.members),
+        resident_bytes=sum(c.weight_bytes for c in held),
+        streamed_bytes=sum(c.weight_bytes for c in streamed),
         window_bytes=window,
-        ram_budget_bytes=max(0, int(pair.ram_bytes)),
+        ram_budget_bytes=ram,
+        policy=geometry,
+        cells=packed,
+        resident_cells=tuple(c.index for c in held),
+        streamed_cells=tuple(c.index for c in streamed),
+        resident_span_bytes=span,
+        leaf_granular_span_bytes=sum(c.leaf_span_bytes for c in held),
+        schedule=(
+            ResidencySchedule.CALL_BOUNDARY if call_boundary else ResidencySchedule.PER_STEP
+        ),
+        component_spans=ranked,
+        hot_component_bytes=hot,
+        cold_component_bytes=cold,
+        hold_while_hot=tuple(name for name, _ in ranked) if call_boundary else (),
+    )
+
+
+def _hot_plan(plan: ResidencyPlan, component: str) -> ResidencyPlan:
+    """``plan`` rearranged so ``component`` is held whole and the rest parks.
+
+    Pure, and derived from the cells the plan already carries — the schedule
+    decides WHETHER this arrangement is affordable, and this decides what it
+    looks like. The forced core (adapters, sub-floor leaves, caller exclusions)
+    stays resident in every arrangement: an exclusion is a statement about
+    residency, and a call boundary does not repeal it.
+    """
+    held = [c for c in plan.cells if c.forced or c.component == component]
+    parked = [c for c in plan.cells if not c.forced and c.component != component]
+    window = plan.streams * max((c.cast_bytes for c in parked), default=0)
+    return ResidencyPlan(
+        budget_bytes=plan.budget_bytes,
+        streams=plan.streams,
+        forced=tuple(n for c in held if c.forced for n in c.members),
+        resident=tuple(n for c in held if not c.forced for n in c.members),
+        streamed=tuple(n for c in parked for n in c.members),
+        resident_bytes=sum(c.weight_bytes for c in held),
+        streamed_bytes=sum(c.weight_bytes for c in parked),
+        window_bytes=window,
+        ram_budget_bytes=plan.ram_budget_bytes,
+        policy=plan.policy,
+        cells=plan.cells,
+        resident_cells=tuple(c.index for c in held),
+        streamed_cells=tuple(c.index for c in parked),
+        resident_span_bytes=sum(c.span_bytes for c in held),
+        leaf_granular_span_bytes=sum(c.leaf_span_bytes for c in held),
+        schedule=plan.schedule,
+        component_spans=plan.component_spans,
+        hot_component_bytes=plan.hot_component_bytes,
+        cold_component_bytes=plan.cold_component_bytes,
+        hold_while_hot=plan.hold_while_hot,
+        hot_component=component,
     )
 
 
@@ -550,7 +943,15 @@ def discover_leaves(
             # reservation is the number the ring really allocates rather than
             # one that ignores the 512-byte sub-buffer boundaries.
             costs.append(
-                LeafCost(qualified, total, sum(aligned(tensor_bytes(t)) for _, _, t in own))
+                LeafCost(
+                    qualified,
+                    total,
+                    sum(aligned(tensor_bytes(t)) for _, _, t in own),
+                    # STATED, not derived from the name: a root that is itself a
+                    # leaf has a dotless qualified name and still belongs to its
+                    # own component for the call-boundary schedule (pgw#1515).
+                    component=root_name,
+                )
             )
     return leaves, costs, adapters
 
@@ -585,6 +986,7 @@ class StreamedResidency:
         streams: int = DEFAULT_STREAMS,
         min_stream_bytes: int = DEFAULT_MIN_STREAM_BYTES,
         exclude: Iterable[str] = (),
+        cells: "int | CellPolicy | None" = None,
     ) -> None:
         import torch
 
@@ -599,6 +1001,7 @@ class StreamedResidency:
         self.budget = MemoryBudget.of(budget_bytes)
         self.streams = max(1, int(streams))
         self.min_stream_bytes = int(min_stream_bytes)
+        self.cells = CellPolicy.of(cells)
         self._exclude = {str(n) for n in exclude}
         self._roots = list(roots)
         self._leaves: Dict[str, Any] = {}
@@ -653,6 +1056,7 @@ class StreamedResidency:
                 streams=self.streams,
                 min_stream_bytes=self.min_stream_bytes,
                 exclude=self._exclude,
+                cells=self.cells,
             ),
             allow_promote=True,
         )
@@ -680,6 +1084,7 @@ class StreamedResidency:
                 streams=self.streams,
                 min_stream_bytes=self.min_stream_bytes,
                 exclude=self._exclude,
+                cells=self.cells,
             ),
             allow_promote=allow_promote,
         )
@@ -702,6 +1107,49 @@ class StreamedResidency:
         self.rebudget(before + max(0, int(extra_bytes)))
         after = self.plan.resident_bytes if self.plan is not None else 0
         return max(0, after - before)
+
+    # -- the call-boundary schedule (pgw#1515) ------------------------------
+
+    def hold_component(self, component: str) -> ResidencyPlan:
+        """Hold ``component``'s cells whole and park every other component.
+
+        THE call-boundary swap, and the ``model_offload``-equivalent mode on
+        this rung's mechanism: the hot component runs fully resident for the
+        whole call, so its move cost is paid once per CALL and amortises over
+        every step, instead of the per-STEP cast this rung otherwise pays. The
+        difference is measured, not argued — pgw#1497 clocked ``model_offload``
+        at 1.57× against this rung's 1.91× at the SAME 1.9 GB peak, purely
+        because of where the tax lands.
+
+        REFUSES when the plan's schedule is not
+        :attr:`ResidencySchedule.CALL_BOUNDARY`. A budget that cannot hold the
+        biggest component whole would answer this call by silently overshooting
+        its lease, and the whole point of deciding the schedule in the plan is
+        that the answer is known before anything moves.
+        """
+        plan = self.plan if self.plan is not None else self.engage()
+        wanted = str(component)
+        if plan.schedule is not ResidencySchedule.CALL_BOUNDARY:
+            raise ValueError(
+                "hold_component(%r) refused: the assigned budget admits no whole "
+                "component (hot %d B + window %d B > VRAM %d B, cold %d B vs RAM %d B) "
+                "— this plan is scheduled %s"
+                % (
+                    wanted,
+                    plan.hot_component_bytes,
+                    plan.window_bytes,
+                    plan.budget_bytes,
+                    plan.cold_component_bytes,
+                    plan.ram_budget_bytes,
+                    plan.schedule.value,
+                )
+            )
+        if wanted not in plan.hold_while_hot:
+            raise ValueError(
+                "hold_component(%r) refused: no such component — this tree has %r"
+                % (wanted, plan.hold_while_hot)
+            )
+        return self._apply(_hot_plan(plan, wanted), allow_promote=True)
 
     def demote_to_host(self) -> int:
         """Every weight to pinned host RAM. The residency HOST tier."""
@@ -757,6 +1205,11 @@ class StreamedResidency:
         streamed = tuple(old.streamed) + tuple(
             n for n in old.all_resident if n in dropped
         )
+        # The cells that survived the trim, so the span and tax numbers keep
+        # describing what is really mapped rather than what the planner drew.
+        kept = set(forced) | set(resident)
+        held = [c for c in planned.cells if kept.issuperset(c.members)]
+        parked = [c for c in planned.cells if not kept.issuperset(c.members)]
         return ResidencyPlan(
             budget_bytes=planned.budget_bytes,
             streams=planned.streams,
@@ -771,6 +1224,17 @@ class StreamedResidency:
             ),
             window_bytes=planned.window_bytes,
             ram_budget_bytes=planned.ram_budget_bytes,
+            policy=planned.policy,
+            cells=planned.cells,
+            resident_cells=tuple(c.index for c in held),
+            streamed_cells=tuple(c.index for c in parked),
+            resident_span_bytes=sum(c.span_bytes for c in held),
+            leaf_granular_span_bytes=sum(c.leaf_span_bytes for c in held),
+            schedule=planned.schedule,
+            component_spans=planned.component_spans,
+            hot_component_bytes=planned.hot_component_bytes,
+            cold_component_bytes=planned.cold_component_bytes,
+            hold_while_hot=planned.hold_while_hot,
         )
 
     def _place_residue(self) -> None:
@@ -938,11 +1402,17 @@ __all__ = [
     "DEFAULT_MIN_STREAM_BYTES",
     "DEFAULT_STREAMS",
     "ENGAGED_ATTR",
+    "LEAF_CELLS",
+    "VMM_GRANULARITY_BYTES",
+    "CellPolicy",
     "LeafCost",
     "MemoryBudget",
     "PlanTransition",
+    "ResidencyCell",
     "ResidencyPlan",
+    "ResidencySchedule",
     "StreamedResidency",
+    "align_to",
     "aligned",
     "bind_tensor",
     "discover_leaves",
@@ -950,6 +1420,7 @@ __all__ = [
     "is_streamable_leaf",
     "module_roots",
     "own_tensors",
+    "pack_cells",
     "tensor_bytes",
     "plan_residency",
     "plan_transition",
