@@ -129,6 +129,27 @@ def resolve_projection(root: Path | str) -> Optional[ProjectedSnapshot]:
     return ProjectedSnapshot(tree, cas, manifest)
 
 
+def stub_at_any(root: Path | str) -> bool:
+    """Whether ANY file under ``root`` is a pointer stub.
+
+    pgw#1513: the cheap "is this tree projected" question, asked by callers
+    that must not hand a stubbed tree to a stock reader. It branches on
+    :func:`read_stub` — the stub's own self-identifying header — and NEVER on
+    a parse failure from something that tried to read one as weights, which is
+    pgw#1308's mistake: two callers inferred a fact about the WORLD from a
+    fact about a READER, and reached opposite wrong conclusions.
+
+    Stops at the first stub: this is a predicate, not a census.
+    """
+    tree = Path(root)
+    if not tree.is_dir():
+        return False
+    for path in tree.rglob("*"):
+        if (path.is_file() or path.is_symlink()) and read_stub(path) is not None:
+            return True
+    return False
+
+
 def snapshot_root_of(path: Path | str) -> Optional[Path]:
     """The snapshot tree a file lives in, or ``None``.
 
@@ -363,5 +384,6 @@ __all__ = [
     "resolve_projection",
     "snapshot_root_of",
     "stub_at",
+    "stub_at_any",
     "symlinks_supported",
 ]

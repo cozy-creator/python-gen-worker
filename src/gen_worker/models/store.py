@@ -1270,6 +1270,36 @@ class ModelStore:
             await asyncio.to_thread(self._quarantine_snapshot, ref, tree, bad)
             return False
 
+        # pgw#1513: AND IT MUST BE STREAMABLE, not merely intact.
+        #
+        # A projected tree's weights are pointer stubs; the pgw#1380 streaming
+        # engine is the reader for them, and it binds only if
+        # `resolve_projection` can recover the tree's manifest — which is
+        # keyed on the tree's own DIRECTORY NAME. A tree whose pin is missing
+        # is byte-perfect and passes the verification above, yet no engine
+        # will bind to it, so `ctx.load` falls to the eager `from_pretrained`
+        # bridge, which reads a 128 B stub with the stock safetensors reader
+        # and reports `header too large` — a corruption message about an
+        # uncorrupted checkpoint.
+        #
+        # Answering `already_resident` here would strand the pod in exactly
+        # that state. Answering False instead sends it through
+        # `ensure_local` -> `ensure_snapshot`, which re-pins the manifest and,
+        # because `_tree_matches` passes, returns the SAME tree without moving
+        # a byte. A missing pin is repaired, not re-downloaded.
+        from . import projection as _projection
+
+        if _projection.stub_at_any(tree) and _projection.resolve_projection(tree) is None:
+            logger.error(
+                "residency REFUSED for %s at %s: the tree is intact but its "
+                "manifest pin is missing, so the streaming engine cannot bind "
+                "and the eager bridge would read its pointer stubs as corrupt "
+                "weights. Re-materializing to re-pin (no bytes move) — "
+                "pgw#1513",
+                ref, tree,
+            )
+            return False
+
         identity = self._snapshot_identity(ref, snapshot)
         with self._identity_lock:
             self._disk_identities[ref] = identity
