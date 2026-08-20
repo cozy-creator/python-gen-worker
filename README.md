@@ -134,7 +134,11 @@ Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
   context — every `@job` body and every producer-kind `@endpoint` handler gets
   it, and what it may write comes from the declaration, not the kind
 - Errors: `ValidationError`, `RetryableError`, `CanceledError`, `FatalError`
-- Streaming: `BatchItemDelta`, `IncrementalTokenDelta`, `Done`, `Error`
+- Incremental output (pgw#1576): `@entrypoint(streams=TokenDelta)` +
+  `ctx.emit(...)`; chunk types `TokenDelta`, `ItemDelta`, `Delta`, and
+  `iter_transformers_text_deltas`. A streaming entrypoint still RETURNS its
+  terminal struct — deltas are the droppable live lane, the return is the
+  authoritative result
 - Value types: `Asset`, `ImageAsset`, `AudioAsset`, `VideoAsset`
 - I/O codecs: `gen_worker.io`
 

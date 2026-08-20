@@ -46,6 +46,7 @@ import msgspec
 from ..families.base import GenerationDefaults
 from ..request_context import RequestContext as _BaseRequestContext
 from ..request_context import _PublisherMixin
+from .deltas import frame_of
 
 if TYPE_CHECKING:
     from ..models.defaults_decode import CarriesDefaults
@@ -1055,11 +1056,68 @@ class RequestContext(_PublisherMixin, _BaseRequestContext[D]):
         request_id: str,
         *,
         binding: Optional[DeployBinding] = None,
+        streams: Optional[Tuple[type, ...] | type] = None,
+        chunk_sink: Optional[Callable[[bytes, str], None]] = None,
         **base_kwargs: Any,
     ) -> None:
         super().__init__(request_id, **base_kwargs)
         self._serve_binding = binding
         self._mktemp_root: Optional[Path] = None
+        #: pgw#1576: the ``@entrypoint(streams=…)`` chunk type(s), stamped from
+        #: the spec exactly like ``publishes`` — the SDK half of the declaration
+        #: the manifest reports as ``incremental_output``. A tuple because one
+        #: handler may declare several shapes.
+        self._delta_types: Tuple[type, ...] = (
+            () if streams is None
+            else (tuple(streams) if isinstance(streams, tuple) else (streams,))
+        )
+        #: Where a chunk goes: ``(data, content_type) -> None``, the dispatch's
+        #: ``JobProgress`` emitter. Absent on a local run, where a chunk is
+        #: logged and dropped rather than refused — the wire says deltas are
+        #: droppable, and `gen-worker run` has no wire at all.
+        self._chunk_sink = chunk_sink
+
+    def emit(self, chunk: Any) -> None:
+        """Put one incremental-output chunk on the wire (pgw#1576).
+
+        Ordered per request, live, never persisted, and DROPPABLE by contract —
+        the worker's send queue sheds progress under pressure and says so with
+        a ``serve_degrade`` row. What a caller is owed is the struct this
+        entrypoint RETURNS; a delta is how they see it arriving.
+
+        Refuses unless the function declared ``@entrypoint(streams=<type>)``,
+        and refuses a chunk that is not that type: an undeclared emitter would
+        publish ``incremental_output: false`` and stream anyway, which is a
+        manifest that lies to every client that reads it.
+
+        Sync and thread-safe on purpose — the body runs on a worker thread
+        (``asyncio.to_thread``) and a plain ``def`` entrypoint streams with the
+        identical call.
+        """
+        declared = self._delta_types
+        if not declared:
+            raise RuntimeError(
+                "ctx.emit: this entrypoint declared no chunk type, so the hub "
+                "publishes incremental_output=false for it and no client will "
+                "subscribe. Declare @entrypoint(streams=<msgspec.Struct>) "
+                "(pgw#1576)"
+            )
+        if not isinstance(chunk, declared):
+            names = " | ".join(arm.__name__ for arm in declared)
+            raise TypeError(
+                f"ctx.emit: this entrypoint declared streams={names} and "
+                f"delta_output_schema was published from it; got "
+                f"{type(chunk).__name__}"
+            )
+        sink = self._chunk_sink
+        if sink is None:
+            logger.debug(
+                "ctx.emit dropped for %s: no chunk sink (local run)",
+                self.request_id,
+            )
+            return
+        data, content_type = frame_of(chunk)
+        sink(data, content_type)
 
     def mktemp(self) -> Path:
         """A request-scoped scratch directory. Contents are NOT persisted.

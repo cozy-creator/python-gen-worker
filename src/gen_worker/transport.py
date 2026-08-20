@@ -192,6 +192,35 @@ def _backoff_ceiling(base: float, cap: float, attempt: int) -> float:
     return ceiling
 
 
+def _confess_dropped_chunk(msg: pb.WorkerMessage) -> None:
+    """One ``serve_degrade`` row for a JobProgress frame this queue destroyed.
+
+    pgw#1576. Shedding progress under pressure is the queue's CONTRACT — a
+    dropped chunk never fails a request, because ``JobResult`` carries the
+    authoritative output. But a dropped chunk IS missing live text in a
+    completion the caller is watching, and both drop sites were silent, so the
+    loss was unobservable at any altitude.
+
+    The detail is stable per (request_id, attempt) and carries no seq on
+    purpose: the hub's activity upsert folds identical rows on
+    ``(worker_id, kind, phase, state, payload_digest)`` with ``occurrences+1``,
+    so a shedding storm becomes ONE row with a count instead of one row per
+    lost token.
+    """
+    progress = msg.job_progress
+    try:
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            f"request_id={progress.request_id} attempt={progress.attempt}: "
+            f"streamed output chunk dropped — the send queue is over its bound "
+            f"and progress is shed by contract; the terminal JobResult still "
+            f"carries the whole output",
+            phase="stream_chunk_dropped",
+        )
+    except Exception:  # noqa: BLE001 — a confession never breaks the queue
+        logger.debug("serve_degrade row for a dropped chunk failed", exc_info=True)
+
+
 def _msg_kind(msg: pb.WorkerMessage) -> str:
     which = msg.WhichOneof("msg")
     if which == "job_result":
@@ -413,9 +442,10 @@ class SendQueue:
         return list(self._pending_results.keys())
 
     def _drop_oldest_progress(self) -> bool:
-        for i, (kind, _m) in enumerate(self._items):
+        for i, (kind, msg) in enumerate(self._items):
             if kind == _PROGRESS:
                 del self._items[i]
+                _confess_dropped_chunk(msg)
                 return True
         return False
 
@@ -686,6 +716,7 @@ class SendQueue:
                 if self._drop_oldest_progress():
                     continue
                 if kind == _PROGRESS:
+                    _confess_dropped_chunk(msg)
                     return                            # drop this progress chunk
                 await self._cond.wait()               # backpressure: block the producer
             if (

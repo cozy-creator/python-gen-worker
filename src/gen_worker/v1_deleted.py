@@ -80,6 +80,39 @@ REPLACEMENTS: Final[dict[str, str]] = {
     "class_set_delta": "the publish-time instrumented derive",
     "contract_delta": "the publish-time instrumented derive",
     "override_delta": "the publish-time instrumented derive",
+    # pgw#1576: these three were deleted BY OMISSION — no successor line, so an
+    # author hit a bare ImportError and the gap read as an oversight rather
+    # than a ruling. It was an oversight, and the successor exists now. The
+    # third name is NOT here: `iter_transformers_text_deltas` came back
+    # verbatim, same spelling, so it imports instead of refusing.
+    "IncrementalTokenDelta": (
+        "gen_worker.TokenDelta with @entrypoint(streams=TokenDelta) and "
+        "ctx.emit(...) — the entrypoint still RETURNS its terminal struct "
+        "(pgw#1576)"
+    ),
+    "BatchItemDelta": (
+        "gen_worker.ItemDelta with @entrypoint(streams=ItemDelta) and "
+        "ctx.emit(...); the binary `chunk` field is gone (msgpack framing "
+        "could not survive the hub's JSON SSE surface) — text rides `text`, "
+        "and the whole batch rides the returned struct (pgw#1576)"
+    ),
+    "TokenUsage": (
+        "typed fields on the entrypoint's own returned struct — the terminal "
+        "is the author's, so the platform folds nothing (pgw#1576)"
+    ),
+    "StreamResult": (
+        "the entrypoint's own returned struct: a streaming entrypoint returns "
+        "its terminal exactly like every other one (pgw#1576)"
+    ),
+    "StreamItem": "a field on the entrypoint's own returned struct (pgw#1576)",
+    "Done": (
+        "no successor — the stream ends when the body returns, and JobResult "
+        "is the terminal (pgw#1576)"
+    ),
+    "Error": (
+        "raise a typed gen_worker error; a failed ITEM in a batch is "
+        "ItemDelta(error=...) plus the terminal struct (pgw#1576)"
+    ),
     "GenerationDefaults": "gen_worker.models — the model type's Defaults struct",
     "StringEnum": "stdlib enum.StrEnum",
     "arm_compile": "ctx.compile inside Model.load",
