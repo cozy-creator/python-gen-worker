@@ -140,14 +140,28 @@ def _seed_programs(store: LocalGraphStore, tmp_path: Path) -> None:
         store.put_program(graph, blob)
 
 
+@pytest.fixture(autouse=True)
+def _box_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every run's mint scratch lands in THIS test's tmpdir, never the box cache.
+
+    The old builders `mkdir(exist_ok=True)`-ed into the REAL
+    `~/.cache/cozy/compiled-graphs` and leaked fixture directories there for
+    every suite run on a developer box; `tcg_artifacts.unpacked` materializes
+    atomically (refusing occupied destinations, like the engine) and turned
+    that leak into a cross-run flake. The suite was always supposed to be
+    hermetic; now it is.
+    """
+    monkeypatch.setattr(
+        workspace, "artifacts_root", lambda: tmp_path / "box-artifacts"
+    )
+
+
 def _builder(built: List[str]) -> compile_cli.Builder:
     """A compile that really produces an artifact, without inductor or a card."""
 
     def build(spec: compile_cli.Spec, program: Path, destination: Path) -> Path:
         assert program.is_file(), "the builder must be handed this box's program"
-        destination.mkdir(parents=True, exist_ok=True)
-        tcg_artifacts.aoti_package(
-            destination / "model.pt2", graph_specialization=spec.graph)
+        tcg_artifacts.unpacked(destination, graph_specialization=spec.graph)
         built.append(spec.graph)
         return destination
 
@@ -226,9 +240,7 @@ def test_a_build_lands_in_the_box_cache_and_never_in_the_endpoint_tree(
 
     def build(spec: compile_cli.Spec, program: Path, destination: Path) -> Path:
         destinations.append(destination)
-        destination.mkdir(parents=True, exist_ok=True)
-        tcg_artifacts.aoti_package(
-            destination / "model.pt2", graph_specialization=spec.graph)
+        tcg_artifacts.unpacked(destination, graph_specialization=spec.graph)
         return destination
 
     report = _run(endpoint, cas, store=store, builder=build)
@@ -321,7 +333,7 @@ def test_a_compile_that_publishes_nowhere_fails_loudly(
     assert store.publishes == len(GRAPHS)
     # And every one of them is a FAILURE, at the moment it happened.
     assert {outcome.state for outcome in report.outcomes} == {compile_cli.FAILED}
-    assert all("serving reader" in outcome.detail for outcome in report.outcomes)
+    assert all("NOT loadable" in outcome.detail for outcome in report.outcomes)
     assert len(report.unservable) == len(GRAPHS)
     summary, code = compile_cli.summarize(report)
     assert code == 1
@@ -613,6 +625,98 @@ def test_a_cached_mint_on_a_different_toolchain_is_not_reused(
     assert report.unservable == []
 
 
+# --------------------------------------------------------------------------
+# pgw#1561: the published bytes are the ENVELOPE, and the witness LOADS them
+# --------------------------------------------------------------------------
+
+
+def test_published_bytes_are_the_envelope_and_materialize(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """The publish banks what the boot loader reads: tar+gzip, metadata and
+    all — not the bare `.pt2` ZIP that left va#3 arm 2 with 0/14 armed over a
+    band `SERVABLE` had just certified."""
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    _seed_programs(store, tmp_path)
+
+    report = _run(endpoint, cas, store=store, builder=_builder([]))
+    assert report.unservable == []
+
+    reader = compile_cli.serving_reader(cas)
+    for graph in GRAPHS:
+        fetched = reader.fetch_artifact(graph, ENV, tmp_path / "out" / graph[-8:])
+        assert fetched is not None
+        with fetched.open("rb") as handle:
+            assert handle.read(2) == b"\x1f\x8b", (
+                f"{graph}: the published blob is not a gzip envelope"
+            )
+        assert compile_cli.witness_materializes(cas, graph, ENV) is None
+
+
+def test_a_legacy_bare_package_position_is_named_and_then_replaced(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """Tonight's field failure as a fixture (pgw#1561, va#3 arm 2).
+
+    A position seeded the way every pre-envelope publisher seeded it — the
+    bare `model.pt2` — must (1) read as a NAMED gap in the census, never as
+    `SERVABLE`, and (2) read as a MISS to the next run, whose publish
+    REPLACES the skewed incumbent through the store's tcg#75 migration arm.
+    """
+    from gen_worker._vendor.torchcg import RequirementsManifest
+
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    _seed_programs(store, tmp_path)
+    legacy = tcg_artifacts.aoti_package(
+        tmp_path / "legacy.pt2", graph_specialization=GRAPHS[0])
+    store.publish_artifact(
+        GRAPHS[0], ENV, legacy,
+        RequirementsManifest(include_set=(("torch", ">=2.13.0"),), sm_compiled=SM),
+    )
+
+    # (1) The census names the skew — this exact state used to print SERVABLE.
+    specs = compile_cli.specializations(endpoint / el.LOCK_FILENAME)
+    gaps = compile_cli.unservable(cas, specs[:1], ENV, "some.other")
+    assert any("bare AOTI .pt2 package" in str(gap) for gap in gaps), gaps
+
+    # (2) The next run treats it as a miss and the publish replaces it.
+    built: List[str] = []
+    report = _run(endpoint, cas, store=store, builder=_builder(built))
+    assert GRAPHS[0] in built, "a skewed position must route back through the publish"
+    assert report.unservable == []
+    for graph in GRAPHS:
+        assert compile_cli.witness_materializes(cas, graph, ENV) is None
+    assert compile_cli.summarize(report)[1] == 0
+
+
+def test_the_witness_goes_red_when_the_publisher_banks_the_package(
+    endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RED ARM, the coordinator's fixture: revert the publish fix and the
+    witness must refuse — a `has_artifact` read-back certified exactly this
+    state as SERVABLE on 2026-08-20 09:22, minutes after the defect was filed
+    against it."""
+    from gen_worker.serving import mint as mint_mod
+
+    monkeypatch.setattr(
+        mint_mod, "artifact_envelope",
+        lambda artifact, workspace: mint_mod.artifact_package(Path(artifact)),
+    )
+
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    _seed_programs(store, tmp_path)
+
+    report = _run(endpoint, cas, store=store, builder=_builder([]))
+
+    assert {outcome.state for outcome in report.outcomes} == {compile_cli.FAILED}
+    assert all("MATERIALIZE" in outcome.detail for outcome in report.outcomes)
+    summary, code = compile_cli.summarize(report)
+    assert code == 1 and "NOT SERVABLE" in summary
+
+
 def test_an_unreadable_module_name_is_a_typed_refusal_not_a_traceback(
     tmp_path: Path,
 ) -> None:
@@ -755,9 +859,7 @@ def test_the_graph_set_document_is_published_before_the_first_build(
 
     def build(spec: compile_cli.Spec, program: Path, destination: Path) -> Path:
         seen.append(compile_cli.serving_reader(cas).get_graphs(MODULE))
-        destination.mkdir(parents=True, exist_ok=True)
-        tcg_artifacts.aoti_package(
-            destination / "model.pt2", graph_specialization=spec.graph)
+        tcg_artifacts.unpacked(destination, graph_specialization=spec.graph)
         return destination
 
     _run(endpoint, cas, store=store, builder=build, fill=compile_cli.FILL_NONE)

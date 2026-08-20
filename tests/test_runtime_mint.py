@@ -24,20 +24,18 @@ from gen_worker import compile_posture
 from gen_worker.serving import mint
 
 
-def _elf(path: Path) -> Path:
-    """A minimal 64-bit ELF with no sections.
+def _artifact(destination: Path, graph: str) -> Path:
+    """A real UNPACKED artifact directory — what `Engine.compile` leaves.
 
-    `needed_libraries` reads DT_NEEDED off the artifact itself, and an
-    artifact naming no libraries is a legitimate answer (all-embedded
-    Triton/SASS) rather than a recording bug — so this is the honest smallest
-    fixture, not a stub of the reader.
+    This used to be a bare 64-byte ELF file, and the `_Store` double accepted
+    it — which is the exact modeling gap pgw#1561 measured in the field: the
+    REAL publisher now repacks the ENVELOPE from the unpacked directory
+    (validating metadata against the package on the way), so a compiler seam
+    handing back anything less no longer publishes anywhere.
     """
-    raw = bytearray(64)
-    raw[:4] = b"\x7fELF"
-    raw[4:7] = bytes((2, 1, 1))          # ELFCLASS64, little-endian, v1
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(bytes(raw))
-    return path
+    import tcg_artifacts
+
+    return tcg_artifacts.unpacked(destination, graph_specialization=graph)
 
 
 class _Adoption:
@@ -129,7 +127,7 @@ def test_a_healthy_mint_is_never_called_wedged(
     host = _host(3)
 
     def _compiler(blob: Path, record: Any, destination: Path) -> Path:
-        return _elf(destination)
+        return _artifact(destination, record.graph)
 
     outcome = _mint(host, _Store(), tmp_path, compiler=_compiler).run()
 
@@ -149,7 +147,7 @@ def test_a_published_graph_that_does_not_arm_is_a_wire_fact(
     store = _Store()
 
     def _compiler(blob: Path, record: Any, destination: Path) -> Path:
-        return _elf(destination)
+        return _artifact(destination, record.graph)
 
     outcome = _mint(host, store, tmp_path, compiler=_compiler).run()
 

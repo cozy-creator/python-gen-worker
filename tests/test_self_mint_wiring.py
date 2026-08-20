@@ -148,7 +148,12 @@ class FakeCompiler:
         self.calls.append(record.graph)
         if self.block is not None:
             self.block.wait(timeout=20.0)
-        return elf(destination)
+        # A CONFORMING unpacked artifact (pgw#1561): the publish repacks the
+        # ENVELOPE from this directory and validates the metadata against the
+        # package — a bare ELF file no longer publishes anywhere.
+        import tcg_artifacts
+
+        return tcg_artifacts.unpacked(destination, graph_specialization=record.graph)
 
 
 def programs(tmp_path: Path) -> Callable[[str, Path], Path]:
@@ -181,7 +186,11 @@ def counting_loader(
     """
 
     def load(path: Path, record: Any, module: Any) -> Callable[..., Any]:
-        assert path.is_file(), "an armed artifact must exist on disk"
+        # File OR directory: torchcg's `materialize` accepts both shapes — a
+        # store fetch hands the packed envelope, a runtime mint hands the
+        # unpacked directory `Engine.compile` resolved (the shape the seam
+        # compiler produces since pgw#1561).
+        assert path.is_file() or path.is_dir(), "an armed artifact must exist on disk"
         assert isinstance(module, torch.nn.Module), (
             "the loader is handed the module its constants bind from")
         armed.append(record.graph)

@@ -306,7 +306,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "2a38ff2be91e2823b311f31b9f665048b7d0db55"
+rev = "7f927a42f434bb27e548d7c81dc4776c89af003c"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's
@@ -511,18 +511,18 @@ rewrites = [
 "writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
 
 [packages.torchcg.files]
-"__init__.py" = "0948c32c9e5f3772bc0995855a0b1acdcba5f75f7c4733eae5a3ae841915459e"
+"__init__.py" = "14bbdb65947b78fff1a6a1e1230e8aac7173609d536bc0827750d054cc82eda9"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
 "_wrapper_split.py" = "1d5a3bc1ccabadeaa2b8b54f1492cba10723e53074a0022b8c7453565a86a4ce"
 "adopt.py" = "7cc8965a48e9f2ea5867e80ccc3dec506d33fe86896de37528a6652fe80c19e9"
-"artifact.py" = "fb8c1ad62b94abb075915fd8e58514c740f03ec5f8384a5ab97c17917b8061e5"
+"artifact.py" = "5b61f1b0d06d01b733d55ac123190da5e6a33ea2ec8663402a49e80bfb567a62"
 "cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
 "compiler.py" = "6ee54b26286b215eef8867dffb133d023a6808379574ac69f8007a64c477045a"
-"contracts/KEY_GRAMMAR_DIGEST" = "0503f3251f2eb48b794961736f021915cd56c14930798ac844c90112fa2af69d"
+"contracts/KEY_GRAMMAR_DIGEST" = "2ff20e741b25779e73158a884222922d60446b680a1584e771845f05614e7ab3"
 "contracts/__init__.py" = "9693f0ebc4672ef35d6b56b8973022e268de89d7456ed0fae8e218461360381d"
 "contracts/call_ingress_v1.json" = "3af3437ec20b15156892055ab89bf21621378cee9f0f72f63bc4626f69f242dc"
-"contracts/compiled_graph_key_vectors.json" = "a274c5702b8c167ca119758d9fb1f98c40ddfdb3dbf6c58b4aacd580803e8c2b"
+"contracts/compiled_graph_key_vectors.json" = "5dcadf72b8ce19086e1a95bb767252e5b6521e74721aefa518dbd810112db15f"
 "contracts/graph_specialization_identity_v4.json" = "295b1281b339e97a986719c7ad17e362e68f97930e98cfeffd60e693d10aab48"
 "contracts/ingress_selection_v1.json" = "28e2c5922f5be4d336d1d53299e190bfdf322dec6e2d9284954da14939e2de4a"
 "contracts/literal_identity_v1.json" = "50cb80e750a8124a45b982415258d8590c37f90ca804326588dfde1b368c6863"
@@ -548,5 +548,5 @@ rewrites = [
 "serve.py" = "a1f3b6fe5e46305bc9aea9848ac5935537b7bb37e2586ae3f0393f66cead2ade"
 "spans.py" = "4776fac2006967b1f17ffcbec03e50147d511120fd50cf085ac3b6b4702e5539"
 "storage.py" = "6e1e94523ee9c1449538aa57dbfaf8e20e24997d09297b3fd09cc88d17d02354"
-"store.py" = "29570d7013fadbdc593c86d2f553fcfc81f24b04d925381f0b68beef5836614c"
+"store.py" = "a294417b552371d8e5f50307021afb23cc1809dfda8761cc59a00dced8b42670"
 "transform.py" = "34a82af6cbf7def844730b0a21416e478e81684b92480b6055d177d5f3219071"

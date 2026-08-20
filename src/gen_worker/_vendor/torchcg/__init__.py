@@ -7,7 +7,12 @@ from .adopt import (
     Hole,
     UnclaimedMark,
 )
-from .artifact import ARTIFACT_METADATA_FIELDS, COMPILED_GRAPH_FORMAT, ArtifactError
+from .artifact import (
+    ARTIFACT_METADATA_FIELDS,
+    COMPILED_GRAPH_FORMAT,
+    ArtifactError,
+    ArtifactFormatSkew,
+)
 from .compiler import CompileError
 from .declaration import (
     GRAPH_INTERFACE_FORMAT,
@@ -195,6 +200,7 @@ __all__ = [
     "AdoptSession",
     "ArtifactCandidate",
     "ArtifactError",
+    "ArtifactFormatSkew",
     "ArtifactLoader",
     "CompileError",
     "COMPILED_GRAPH_FORMAT",

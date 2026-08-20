@@ -390,6 +390,34 @@ class LocalGraphStore:
     def has_artifact(self, graph: str, env: EnvIdentity) -> bool:
         return self.cas.read_ref(_artifact_ref(graph, env)) is not None
 
+    def artifact_skew(self, graph: str, env: EnvIdentity) -> str | None:
+        """A sentence when the stored blob is a recognizable NON-envelope, else
+        ``None`` — the census-grade shape probe (tcg#75/pgw#1561).
+
+        Two magic bytes, not a decode: a per-boot census over every position
+        must stay proportional to positions, not to artifact bytes. Absence is
+        ``None`` here — ``has_artifact`` owns that question — and full
+        verification stays where it always was, on the fetch path.
+        """
+
+        ref = self.cas.read_ref(_artifact_ref(graph, env))
+        if ref is None:
+            return None
+        try:
+            with self.cas.object_path(ref).open("rb") as handle:
+                magic = handle.read(4)
+        except (OSError, ValueError):
+            return None  # unreadable-at-rest is the fetch path's verdict
+        if magic[:2] == b"\x1f\x8b":
+            return None
+        if magic == b"PK\x03\x04":
+            return (
+                "stored blob is a bare AOTI .pt2 package (ZIP), not the "
+                "compiled-graph envelope — published by a pre-envelope "
+                "publisher; re-publish"
+            )
+        return "stored blob is not a compiled-graph envelope (unknown format)"
+
     def fetch_artifact(self, graph: str, env: EnvIdentity, destination: str | Path) -> Path | None:
         ref = self.cas.read_ref(_artifact_ref(graph, env))
         if ref is None:
@@ -443,6 +471,33 @@ class LocalGraphStore:
             if current == candidate:
                 self._ensure_manifest(graph, env, manifest_candidate)
                 return PublishOutcome.PRESENT
+            if self._envelope_supersedes(current, source):
+                # tcg#75 / pgw#1561: the occupied position holds bytes NO
+                # reader of this store can load — the bare `.pt2` package a
+                # pre-envelope publisher banked. That is not a diverged mint;
+                # it is a shape this store's own loaders refuse by type
+                # (`ArtifactFormatSkew`), so under tcg#69's doctrine the
+                # incumbent is ABSENT-equivalent derived bytes and an envelope
+                # replaces it. A real envelope-vs-envelope divergence still
+                # refuses below.
+                try:
+                    self.cas.compare_and_swap_ref(ref_name, candidate, expected=current)
+                except RefConflict:
+                    if self.cas.read_ref(ref_name) != candidate:
+                        raise StoreError(
+                            f"artifact position ({graph}, {env.value}) moved "
+                            f"during envelope repair"
+                        ) from None
+                reclaimed = self._discard_object(current)
+                logger.warning(
+                    "torchcg: REPLACED artifact (%s, %s) — the position held a "
+                    "non-envelope blob (a bare package from a pre-envelope "
+                    "publisher, unloadable by every reader of this store); the "
+                    "envelope now stands. Reclaimed %d byte(s).",
+                    graph, env.value, reclaimed,
+                )
+                self._ensure_manifest(graph, env, manifest_candidate)
+                return PublishOutcome.PUBLISHED
             raise StoreError(
                 f"artifact position ({graph}, {env.value}) already holds "
                 f"different bytes; a deterministic mint diverged"
@@ -459,6 +514,29 @@ class LocalGraphStore:
             ) from None
         self._ensure_manifest(graph, env, manifest_candidate)
         return PublishOutcome.PUBLISHED
+
+    def _envelope_supersedes(self, incumbent: CASRef, candidate_file: Path) -> bool:
+        """Whether ``candidate_file`` is a gzip envelope while the incumbent
+        object is NOT — the one migration this store performs (tcg#75).
+
+        Sniffed off magic bytes, never decoded here: the candidate is fully
+        verified on the way out by every reader, and the incumbent needs only
+        to be recognized as unloadable-by-shape. An incumbent whose object is
+        MISSING counts too — a live ref over absent bytes fails every fetch,
+        so replacing it with verified bytes is a repair, not an arbitration.
+        """
+
+        try:
+            with Path(candidate_file).open("rb") as handle:
+                if handle.read(2) != b"\x1f\x8b":
+                    return False
+        except OSError:
+            return False
+        try:
+            with self.cas.object_path(incumbent).open("rb") as handle:
+                return handle.read(2) != b"\x1f\x8b"
+        except (OSError, ValueError):
+            return True
 
     def _ensure_manifest(self, graph: str, env: EnvIdentity, candidate: CASRef) -> None:
         """First manifest wins; an interrupted earlier publish is repaired."""
