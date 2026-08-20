@@ -170,6 +170,18 @@ def tree_bytes(tree: Path) -> int:
     return sum(p.stat().st_size for p in tree.rglob("*") if p.is_file())
 
 
+def local_graph_store(root: Path) -> Any:
+    """torchcg's ``LocalGraphStore`` over the graph CAS at ``root``.
+
+    The store, not the bare CAS, because since the address-free ruling the
+    programs are addressed BY GRAPH IDENTITY and the graph->bytes ref is the
+    store's to own (``has_program`` / ``fetch_program`` / ``put_program``).
+    """
+    from .._vendor.torchcg.store import LocalGraphStore
+
+    return LocalGraphStore(local_cas(root))
+
+
 def local_cas(root: Path) -> Any:
     """A tensorfs ``LocalCAS`` at ``root``, created if absent.
 

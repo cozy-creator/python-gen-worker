@@ -297,12 +297,15 @@ def run_lock(args: argparse.Namespace) -> int:
             slot_trees,
         )
 
-    cas = ws.local_cas(graph_cas_root)
+    store = ws.local_graph_store(graph_cas_root)
     reuse = el.derive_is_reusable(
         existing,
         want_inputs_digest=want,
         want_trace_device=device,
-        cas_has=lambda digest: bool(cas.contains(digest)),
+        # BY GRAPH IDENTITY. The saved trace is reusable only if THIS box still
+        # holds a serialized program for every graph the document names — a
+        # question about local bytes, asked with the one key that is portable.
+        cas_has=lambda graph: bool(store.has_program(graph)),
     )
     if reuse.ok and not args.force:
         # The whole point of the verb. Rewrite the lock so freshly-discovered
@@ -355,7 +358,7 @@ def run_lock(args: argparse.Namespace) -> int:
     el.write_lock(out, manifest, block)
 
     graphs = sum(len(h) for h in result.lane_graphs.values())
-    programs = el.program_digests(json.loads(result.document))
+    programs = el.graph_identities(json.loads(result.document))
     _say_posture(result)
     # pgw#1449: an entrypoint the enumerator could not reach no longer kills
     # the lock — it is written with everything that COULD be enumerated and
@@ -365,7 +368,9 @@ def run_lock(args: argparse.Namespace) -> int:
         _say(f"lock: entrypoint {name} NOT enumerated -- {reason}")
     _say(
         f"lock: traced {graphs} specialization(s), {len(programs)} exported "
-        f"program(s) in the CAS at {graph_cas_root} ({elapsed:.1f}s)"
+        f"program(s) banked BY GRAPH IDENTITY in the CAS at {graph_cas_root} "
+        f"({elapsed:.1f}s) — the bytes stay on this box; the document carries "
+        f"identities, never their addresses"
     )
     _say(f"lock: wrote {out}")
     print(json.dumps({

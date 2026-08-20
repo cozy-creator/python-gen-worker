@@ -44,6 +44,17 @@ from .. import activity as activity_mod
 
 logger = logging.getLogger(__name__)
 
+
+def _store_faults() -> tuple[type[BaseException], ...]:
+    """The store's own "these bytes are bad" vocabulary, imported not guessed."""
+    from .._vendor.tensorfs.local import DigestMismatch
+    from .._vendor.torchcg.store import StoreError
+
+    return (StoreError, DigestMismatch, FileNotFoundError, ValueError)
+
+
+_STORE_FAULTS = _store_faults()
+
 #: The typed fact: this pod minted a graph and the FLEET does not have it.
 #: A mint that is only pod-local is not the mint this program promises, so it
 #: says so on the wire rather than reading as a clean publish.
@@ -114,83 +125,94 @@ class TieredGraphStore:
             return found
         return self.upstream.get_manifest(graph, env)
 
-    def fetch_program(self, digest: str, destination: Path) -> Path:
-        """One graph's serialized ``ExportedProgram`` — the mint's INPUT.
+    def fetch_program(self, graph: str, destination: Path) -> Path:
+        """This box's serialized ``ExportedProgram`` for one GRAPH IDENTITY.
 
-        THREE tiers, cheapest-and-most-trusted first: an upstream that can
-        serve one, then the pod's own CAS, then the IMAGE's baked CAS. All
-        three are keyed by CONTENT ADDRESS, so the order is a cost decision
-        and never a correctness one — a digest is a digest.
+        KEYED BY IDENTITY, NOT BY ADDRESS (Paul, 2026-08-19, address-free). The
+        document states which graph a hole is; it states nothing about where
+        bytes live, because a serialized program's digest is machine-scoped —
+        pgw#1462p2 measured 14/14 graph identities reproducing across boxes and
+        0/14 blob digests. A box can only use bytes it made, and the identity is
+        the one key every box agrees on, so it is the key here.
 
-        **THE BAKED TIER IS pgw#1462 PART 2, and it closes a gap that was
-        assumed closed.** th#2162 argued no hub route was needed because
-        *"pgw's miner already falls through to its local CAS by content
-        address"*. The fallthrough is real; the directory was wrong. The pod's
-        CAS is ``<TENSORHUB_CACHE_DIR>/cas`` (``/tmp/tensorhub-cache/cas``) and
-        the builder bakes to ``/app/.tensorhub/derive-cas``, so every baked blob
-        has been unreachable since the first image carried one — a permanent
-        silent miss, which is why nothing ever reported it.
+        Two tiers, cheapest first: this pod's own store, then the IMAGE's baked
+        one. Both answer the same question under the same key, so the order is a
+        cost decision and never a correctness one.
 
-        **THE BYTES ARE VERIFIED BEFORE THEY ARE TRUSTED, BY THE STORE'S OWN
-        SCRUB.** These bytes are fed straight to a compiler, so each tier is
-        probed with ``verify_object`` — presence AND integrity in one call —
-        rather than with ``contains`` plus a hash written here. Two reasons it
-        is that call and not the obvious one: a second implementation of
-        integrity checking is a second thing that can disagree, and the two
-        tensorfs snapshots in this tree DISAGREE about ``contains`` — the
-        vendored one rehashes and RAISES ``DigestMismatch``, tensorfs master's
-        is "presence, not integrity" and answers True for bytes corrupted in
-        place. ``verify_object`` means the same thing in both, so this code
-        does not silently change behaviour when the vendor is re-synced.
+        **THE BAKED TIER (pgw#1462 part 2) STAYS, with its scope narrowed.** The
+        pod's store is ``<TENSORHUB_CACHE_DIR>/cas`` and the builder bakes to
+        ``/app/.tensorhub/derive-cas`` — two directories, which is why baked
+        programs were unreachable for as long as they existed. It is still
+        exactly right for the REGENERATE arm, where the build container derived
+        the document and the bytes together so its programs answer for the
+        identities the document names. It cannot serve a release stamped from a
+        committed lock — those bytes were never on this machine — and that case
+        is rescued by the identity instead, which lets a LOCAL derive supply
+        them.
+
+        **THE BYTES ARE VERIFIED BEFORE THEY ARE TRUSTED**, by the store's own
+        scrub: ``LocalGraphStore.fetch_program`` verifies the object behind the
+        graph ref and raises rather than hand back bytes that no longer hash to
+        what was banked. These go straight to a compiler.
 
         **A CORRUPT TIER IS A MISS, NOT A DEATH** — the next tier may hold a
-        good copy, and preferring it is strictly better than refusing. But the
-        corruption is REMEMBERED: if nothing serves the blob, the refusal names
-        it, because "no tier had it" and "a tier had it and it was rotten" have
-        very different remedies.
+        good copy. The corruption is REMEMBERED: if nothing serves the program,
+        the refusal names it, because "no tier had it" and "a tier had it and it
+        was rotten" have very different remedies.
 
-        A blob no tier holds stays a TYPED PER-GRAPH refusal — it costs its own
-        graph and never the boot.
+        A program no tier holds stays a TYPED PER-GRAPH refusal — it costs its
+        own graph and never the boot.
         """
+        # A MALFORMED KEY IS NOT CORRUPT BYTES. The store validates the graph
+        # spelling and raises `StoreError` for a bad one — indistinguishable,
+        # inside the loop below, from "these bytes are rotten", which would
+        # send the reader to scrub a disk over a wrong argument. Checked once,
+        # here, against torchcg's own predicate.
+        from .._vendor.torchcg import is_graph_hash
+
+        if not is_graph_hash(graph):
+            raise ProgramBlobUnreachable(
+                f"{graph!r} is not a cg-graph-v1 identity, so no store can be "
+                f"asked for a program under it. A mint hole is keyed by the "
+                f"graph the document names — not by a blob digest, which since "
+                f"the address-free ruling is not in the document at all."
+            )
         fetch = getattr(self.upstream, "fetch_program", None)
         if fetch is not None:
-            return Path(fetch(digest, destination))
+            return Path(fetch(graph, destination))
         rotten: list[str] = []
-        for tier, cas in (("this pod's own", getattr(self.local, "cas", None)),
-                          ("the image's baked", self.baked)):
-            if cas is None:
+        for tier, store in (("this pod's own", self.local),
+                            ("the image's baked", self.baked)):
+            if store is None:
                 continue
             try:
-                source = Path(cas.verify_object(digest))
-            except FileNotFoundError:
-                continue  # an ordinary miss: this tier does not hold it
-            except Exception as exc:  # noqa: BLE001 - any scrub failure is an answer
-                rotten.append(f"{tier} CAS ({type(exc).__name__}: {exc})")
+                found = store.fetch_program(graph, destination)
+            except _STORE_FAULTS as exc:
+                # NARROW ON PURPOSE. A blanket `except Exception` here reported
+                # an `AttributeError` — a wiring mistake — as "corrupted at
+                # rest", which sends the reader to scrub a disk over a typo.
+                # Only the store's OWN failure vocabulary means "these bytes
+                # are bad"; anything else is this code being wrong and must
+                # surface as itself.
+                rotten.append(f"{tier} store ({type(exc).__name__}: {exc})")
                 continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(source.read_bytes())
-            return destination
+            if found is not None:
+                return Path(found)
         if rotten:
             raise ProgramBlobUnreachable(
-                f"graph blob {digest} is present but does not survive its own "
-                f"integrity scrub in " + "; ".join(rotten) + " — the object was "
-                "truncated or corrupted at rest, and no other tier holds a good "
-                "copy. Refusing to compile bytes that are not the graph the "
-                "release stamped."
+                f"the serialized program for {graph} is present but does not "
+                f"survive its own integrity scrub in " + "; ".join(rotten) +
+                " — truncated or corrupted at rest, and no other tier holds a "
+                "good copy."
             )
         raise ProgramBlobUnreachable(
-            f"graph blob {digest} is in neither this pod's CAS nor the image's "
-            f"baked program CAS, and the adopt answer offers no transport for "
-            f"it: th#2133's per-graph rows carry the `program` DIGEST but "
-            f"presign only the compiled artifact. An image whose build used a "
-            f"COMMITTED endpoint.lock bakes no programs (th#2162 renders no "
-            f"derive step for it), which is the ordinary way to reach this, and "
-            f"the blobs are NOT regenerable here: a re-trace reproduces the "
-            f"graph identity but not the serialized bytes, so it would address "
-            f"different digests than the release stamped. pgw#1370 owns "
-            f"emitting these blobs where the pod can reach them. "
-            f"This mint will NEVER re-trace to work around it (author code "
-            f"does not run at mint time)."
+            f"this box holds no serialized program for graph {graph}. That is "
+            f"ORDINARY on a pod that has not derived this endpoint yet, and the "
+            f"remedy is LOCAL: derive here (`gen-worker lock`, or `compile`) so "
+            f"the programs land in this machine's own store under the identity "
+            f"the release stamped. Nothing is fetched from anywhere — a "
+            f"serialized program's bytes are machine-scoped (pgw#1462p2), so "
+            f"the only ones this box can compile are the ones it made."
         )
 
     # -- the mint's publish -------------------------------------------------
@@ -255,10 +277,15 @@ def worker_store(
     from .._vendor.torchcg.store import LocalGraphStore
 
     root = baked_program_cas_dir() if baked_root is None else Path(baked_root)
-    # A read-only tier: LocalCAS is opened on an EXISTING directory only, so a
-    # missing bake never creates one. `LocalCAS.__init__` mkdirs, so absence is
-    # decided before it is constructed, not by it.
-    baked = LocalCAS(root) if root is not None and Path(root).is_dir() else None
+    # A read-only tier, and a GraphStore rather than a bare CAS because the
+    # programs are addressed by graph identity now. Opened on an EXISTING
+    # directory only: `LocalCAS.__init__` mkdirs, so absence is decided before
+    # it is constructed, not by it.
+    baked = (
+        LocalGraphStore(LocalCAS(root))
+        if root is not None and Path(root).is_dir()
+        else None
+    )
     return TieredGraphStore(LocalGraphStore(LocalCAS(Path(cas_dir))), upstream, baked)
 
 

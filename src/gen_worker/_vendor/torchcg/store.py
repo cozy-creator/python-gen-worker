@@ -119,6 +119,20 @@ def _manifest_ref(graph: str, env: EnvIdentity) -> str:
     return f"{_REF_PREFIX}/manifests/{_require_graph(graph)}/{env.value}"
 
 
+def _program_ref(graph: str) -> str:
+    """This machine's serialized ExportedProgram for one graph specialization.
+
+    KEYED BY THE GRAPH HASH, never by the blob's own digest, and that is the
+    whole of the address-free ruling (Paul, 2026-08-19). `torch.export.save`
+    emits different bytes on different machines for the same traced graph
+    (pgw#1462p2: 14/14 identities, 0/14 blob digests), so the blob digest is a
+    machine-scoped fact and cannot appear in a document every machine must
+    agree on. The graph hash IS reproducible, so it is the key here and the
+    identity in the document, and the bytes never leave the box that made them.
+    """
+    return f"{_REF_PREFIX}/programs/{_require_graph(graph)}"
+
+
 def _side_table_ref(pass_name: str, key: str) -> str:
     """A transform pass's minted side table, addressed by (pass, domain key).
 
@@ -299,6 +313,53 @@ class LocalGraphStore:
             ) from exc
 
     # -- transform side tables (tcg#52) -------------------------------------
+
+    def has_program(self, graph: str) -> bool:
+        return self.cas.read_ref(_program_ref(graph)) is not None
+
+    def fetch_program(self, graph: str, destination: str | Path) -> Path | None:
+        """This machine's serialized program for ``graph``, or None.
+
+        None is an ordinary answer: a box that has not traced this endpoint
+        yet simply has no programs, and the caller's remedy is to derive
+        rather than to fetch from anywhere.
+        """
+        ref = self.cas.read_ref(_program_ref(graph))
+        if ref is None:
+            return None
+        try:
+            blob = self.cas.verify_object(ref)
+        except (DigestMismatch, FileNotFoundError, ValueError) as exc:
+            raise StoreError(
+                f"program for {graph} failed CAS verification: {exc}"
+            ) from exc
+        return self._copy_out(blob, destination)
+
+    def put_program(self, graph: str, path: str | Path) -> str:
+        """Bank this machine's serialized program for ``graph``.
+
+        LAST WRITE WINS, and this is deliberately NOT the side table's
+        "divergence refuses" rule. Two traces of one graph on one machine
+        produce identical bytes, but a torch upgrade in place legitimately
+        produces different ones for the same graph identity, and refusing
+        would strand the box on its first re-derive after an upgrade. The
+        bytes are local and cheap to recreate; the identity is what is
+        protected, and it is protected by the key.
+        """
+        source = Path(path)
+        if not source.is_file():
+            raise StoreError(f"program {source} is not a file")
+        candidate = self._admit_file(source)
+        ref_name = _program_ref(graph)
+        while True:
+            current = self.cas.read_ref(ref_name)
+            if current == candidate:
+                return str(candidate)
+            try:
+                self.cas.compare_and_swap_ref(ref_name, candidate, expected=current)
+            except RefConflict:
+                continue
+            return str(candidate)
 
     def has_side_table(self, pass_name: str, key: str) -> bool:
         return self.cas.read_ref(_side_table_ref(pass_name, key)) is not None

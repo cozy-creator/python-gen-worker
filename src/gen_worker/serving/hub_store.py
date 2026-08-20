@@ -27,8 +27,7 @@ and the route answers something else::
      "sm": "sm_89", "empty": false, "hits": 30, "misses": 6,
      "graphs": [{"graph_hash": "cg-graph-v1:...", "graph_specialization": "...",
                  "status": "hit"|"miss"|"transport_unavailable",
-                 "found": true, "program": "sha256:...",
-                 "module_path": "...", "ingress": {...},
+                 "found": true, "module_path": "...", "ingress": {...},
                  "content_digest": "...", "artifact_path": "...",
                  "requirements_manifest": {...},
                  "transport": {"snapshot_digest": ..., "files": [...]}}, ...],
@@ -47,7 +46,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol
 
-from .._vendor.torchcg.document import DocumentError, GraphSetDocument
+from .._vendor.torchcg.document import (
+    DOCUMENT_FORMAT,
+    DocumentError,
+    GraphSetDocument,
+)
 from .._vendor.torchcg.graph_identity import EnvIdentity
 from .._vendor.torchcg.requirements import RequirementsError, RequirementsManifest
 from .._vendor.torchcg.store import PublishOutcome, StoreError
@@ -279,11 +282,15 @@ class HubGraphStore:
                         f"{row.get('graph_hash')!r} carries no ingress contract; "
                         f"the adopt answer cannot be dispatched against"
                     )
+                # NO `program`: the reconstructed document is address-free
+                # (Paul, 2026-08-19). The hub may still send the key on rows it
+                # stamped before the ruling; it is not read, because a
+                # serialized program's digest is machine-scoped and this pod
+                # can only use bytes it made — found by the graph identity.
                 records.append({
                     "graph": str(row.get("graph_hash") or ""),
                     "target": str(row.get("module_path") or ""),
                     "ingress": ingress,
-                    "program": str(row.get("program") or ""),
                 })
             observed = {record["target"] for record in records}
             declared = [
@@ -315,8 +322,14 @@ class HubGraphStore:
                 ],
             })
         try:
+            # DOCUMENT_FORMAT, never a literal: this reconstructs a document
+            # for torchcg's own decoder, so the version is torchcg's to state.
+            # A hardcoded 2 here silently stopped decoding the moment the
+            # address-free change bumped it to 3, and the only symptom was
+            # `sink_for` returning None — i.e. a pod serving eager for a reason
+            # nothing printed.
             self._document = GraphSetDocument.decode(
-                {"v": 2, "stack": stack, "lanes": lanes}
+                {"v": DOCUMENT_FORMAT, "stack": stack, "lanes": lanes}
             )
         except DocumentError as exc:
             raise StoreError(

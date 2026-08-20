@@ -735,30 +735,30 @@ def _version(raw: str) -> Tuple[int, ...]:
 
 #: The field on a ``GraphRecord`` carrying the CAS digest of that graph's
 #: SERIALIZED ``ExportedProgram`` (Paul, 2026-08-18). The derive lane emits
-#: it; this lane consumes it; the name is the contract between them and is
-#: stated in one place so neither side spells it twice.
-PROGRAM_DIGEST_FIELD = "program"
+#: THE HOLE'S KEY IS ITS GRAPH HASH, not a blob digest (Paul, 2026-08-19:
+#: "program blobs are ADDRESS-FREE — the identity is the contract, bytes are
+#: local"). The document states the identity; every box resolves its own
+#: serialized program under it.
+PROGRAM_GRAPH_FIELD = "graph"
 
 
-class MissingProgramDigest(RuntimeError):
-    """A hole names no serialized graph — there is nothing to compile.
+class MissingProgram(RuntimeError):
+    """This box holds no serialized graph for the identity this hole names.
 
-    Never a re-trace: running author code at mint time is exactly what the
-    blob-in design removes. A record without its digest is a DERIVE defect,
-    reported against that graph and costing only that graph.
+    NOT a derive defect and NOT a broken document: the ordinary cause is a box
+    that has not derived this endpoint yet, and the remedy is local — derive
+    (`gen-worker lock`, or `compile`) so the programs land in this machine's
+    own store. Costs its own graph and never the boot.
     """
 
 
-def program_digest(record: Any) -> str:
-    """The serialized-``ExportedProgram`` digest this hole must compile."""
-    value = str(getattr(record, PROGRAM_DIGEST_FIELD, "") or "")
+def program_graph(record: Any) -> str:
+    """The GRAPH IDENTITY this hole must compile, as the document states it."""
+    value = str(getattr(record, PROGRAM_GRAPH_FIELD, "") or "")
     if not value:
-        raise MissingProgramDigest(
-            f"graph {getattr(record, 'graph', '?')} carries no "
-            f"{PROGRAM_DIGEST_FIELD!r} digest, so the mint has no serialized "
-            f"graph to compile. The worker NEVER re-traces (author code does "
-            f"not run at mint time): re-emit the release document with the "
-            f"graph blob published to the CAS"
+        raise MissingProgram(
+            "a mint hole carries no graph identity at all, so nothing can be "
+            "resolved for it — the release document is malformed"
         )
     return value
 
@@ -853,8 +853,11 @@ class BackgroundMint:
     cas_dir: Optional[Path] = None
     target_arch: str = ""
     toolchain: Mapping[str, str] = field(default_factory=dict)
-    #: Fetch one serialized graph by digest: (digest, destination) -> path.
-    #: Defaults to the store's own ``fetch_program``.
+    #: Resolve one serialized graph BY GRAPH IDENTITY:
+    #: (graph_hash, destination) -> path. Defaults to the store's own
+    #: ``fetch_program``. Keyed by identity and not by a blob digest because a
+    #: blob digest is machine-scoped (pgw#1462p2) and this box's bytes are the
+    #: only ones it can use.
     program_source: Optional[Callable[[str, Path], Path]] = None
     posture: compile_posture.CompilePosture = compile_posture.FLEET
     reserve: int = SERVING_RESERVE_CPUS
@@ -1024,24 +1027,30 @@ class BackgroundMint:
         any point leaves the fleet strictly better off and never leaves a
         dispatcher pointed at bytes nobody else can fetch.
 
-        Step one is a DOWNLOAD, not a trace (Paul, 2026-08-18): the release
-        holds each graph's serialized ``ExportedProgram`` and the document
-        pins it by digest, so the worker runs inductor over bytes it fetched.
-        No author code runs at mint time, no weights are read, and a mint can
-        no longer diverge from the graph the release actually shipped.
+        Step one RESOLVES this box's serialized ``ExportedProgram`` for the
+        graph IDENTITY the document names (Paul, 2026-08-19, address-free).
+        The document pins the identity, not an address: `torch.export.save`
+        emits different bytes on different machines for the same traced graph
+        (pgw#1462p2 — 14/14 identities reproduce, 0/14 blob digests do), so an
+        address in a shared document is unresolvable by construction. Matching
+        on the identity is what makes a stamped release mintable on a box that
+        did not produce it.
+
+        No weights are read here, and a mint still cannot diverge from the
+        graph the release shipped: the identity IS the graph.
         """
         env = self.host.adoption.env
         destination = self.artifacts_dir / env.value / f"{record.graph}.so"
         destination.parent.mkdir(parents=True, exist_ok=True)
 
-        digest = program_digest(record)
+        graph = program_graph(record)
         if self.program_source is None:
-            raise MissingProgramDigest(
-                f"graph {record.graph} names program {digest} but this mint "
-                f"has no source to fetch it from (the store exposes no "
-                f"`fetch_program` and no `program_source` was stated)")
+            raise MissingProgram(
+                f"graph {graph} has no program source on this mint (the store "
+                f"exposes no `fetch_program` and no `program_source` was "
+                f"stated)")
         blob = Path(self.program_source(
-            digest, self.artifacts_dir / "programs" / f"{digest}.pt2"))
+            graph, self.artifacts_dir / "programs" / f"{graph}.pt2"))
 
         assert self.compiler is not None  # __post_init__ guarantees it
         artifact = Path(self.compiler(blob, record, destination))
@@ -1180,8 +1189,8 @@ __all__ = [
     "ArtifactUnreadable",
     "ChildCompileFailed",
     "ContractModuleMissing",
-    "MissingProgramDigest",
-    "PROGRAM_DIGEST_FIELD",
+    "MissingProgram",
+    "PROGRAM_GRAPH_FIELD",
     "artifact_constraints",
     "assert_satisfied",
     "present_libraries",
@@ -1192,5 +1201,5 @@ __all__ = [
     "entry_workers",
     "hole_work_list",
     "mint_holes",
-    "program_digest",
+    "program_graph",
 ]
