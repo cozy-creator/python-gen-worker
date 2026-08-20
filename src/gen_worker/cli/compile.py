@@ -1212,9 +1212,11 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
                              "state of every specialization, and every "
                              "remaining gap")
     parser.add_argument("--vram-budget", type=float, default=0.0, metavar="GB",
-                        help="the grant this compile targets; below the "
-                             "endpoint's compiled floor it no-ops by name. "
-                             "0 = probe this card once.")
+                        help="the VRAM grant this compile targets, passed to "
+                             "the mint child as its residency budget. 0 = "
+                             "probe this card once. It does NOT gate the "
+                             "build: nothing here refuses a mint on a "
+                             "declared number (pgw#1587).")
     parser.set_defaults(_handler=run_compile)
 
 
