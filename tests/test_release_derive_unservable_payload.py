@@ -29,6 +29,7 @@ pytest.importorskip("transformers")
 import gen_worker._vendor.torchcg  # noqa: E402,F401
 
 from gen_worker.release.derive import (  # noqa: E402
+    _third_party_root,
     deepest_endpoint_frame,
     endpoint_source_root,
 )
@@ -200,3 +201,108 @@ def test_the_endpoint_root_is_the_TOP_LEVEL_package_directory() -> None:
         sys.path.remove(str(FIXTURES))
 
     assert endpoint_source_root(ep) == FIXTURES
+
+
+# ---------------------------------------------------------------------------
+# pgw#1533: the source root is the sys.path ENTRY, not the main package.
+
+
+def test_a_SIBLING_top_level_module_is_endpoint_owned(tmp_path: Path) -> None:
+    """h3's actual shape, and the hole that killed its run.
+
+    `endpoint_source_root` used to return the main module's top-level PACKAGE
+    directory, so a helper module BESIDE that package — `src/cozy_rife.py`
+    next to `src/minimax_h3/` — was not provably the author's, and a product
+    bug raised there took the whole derive down.
+    """
+
+    sys.path.insert(0, str(FIXTURES))
+    try:
+        import sibling_helper
+        import tiny_endpoint
+    finally:
+        sys.path.remove(str(FIXTURES))
+
+    root = endpoint_source_root(tiny_endpoint)
+    exc = _raise_from(lambda: sibling_helper.refuse_unservable(60))
+    frame = deepest_endpoint_frame(exc, root)
+
+    assert frame is not None, "a sibling author module must be endpoint-owned"
+    assert Path(frame.filename).name == "sibling_helper.py"
+    assert frame.name == "refuse_unservable"
+
+
+def test_a_PACKAGE_endpoints_root_is_the_directory_ABOVE_the_package() -> None:
+    """That is what makes a sibling reachable at all."""
+
+    sys.path.insert(0, str(FIXTURES))
+    try:
+        import modular_tiny_endpoint  # a module inside no package
+    finally:
+        sys.path.remove(str(FIXTURES))
+
+    assert endpoint_source_root(modular_tiny_endpoint) == FIXTURES
+
+
+def test_the_SUBTRACTION_keeps_an_SDK_frame_fatal_even_under_a_WIDE_root() -> None:
+    """The original concern, tested at its worst case.
+
+    A wider root can only be safe if everything that is not the author's is
+    removed from it. This hands the matcher a root so wide it contains the
+    SDK — the filesystem ROOT — and the SDK frame is still refused.
+    """
+
+    import gen_worker
+    from gen_worker.release.derive import _auto_payloads
+
+    class NotAStruct:
+        pass
+
+    exc = _raise_from(lambda: _auto_payloads("@entrypoint x", NotAStruct))
+    sdk = Path(gen_worker.__file__).resolve().parent
+    assert deepest_endpoint_frame(exc, Path(sdk.anchor)) is None
+    assert deepest_endpoint_frame(exc, sdk) is None
+    assert deepest_endpoint_frame(exc, sdk.parent) is None
+
+
+def test_the_SUBTRACTION_keeps_a_THIRD_PARTY_frame_fatal_under_a_wide_root() -> None:
+    """torch/diffusers live in site-packages, and a wide root would swallow it.
+
+    Named by install LAYOUT rather than by a list of libraries, so it holds for
+    whatever an endpoint pulls in next. The raise site is real diffusers PYTHON
+    code — a C extension reports `<string>` and would make this pass without
+    testing anything.
+    """
+
+    import traceback
+
+    from diffusers import AutoencoderKL
+
+    exc = _raise_from(lambda: AutoencoderKL.load_config("/nonexistent-tree"))
+    deepest = Path(traceback.extract_tb(exc.__traceback__)[-1].filename).resolve()
+    # Pin the PREMISE: this really is a third-party python frame.
+    assert _third_party_root(deepest), deepest
+
+    # A root wide enough to contain it — the filesystem root — and it is still
+    # refused, because the install tree is subtracted.
+    assert deepest_endpoint_frame(exc, Path(deepest.anchor)) is None
+
+
+def test_an_endpoint_INSTALLED_into_site_packages_claims_nothing() -> None:
+    """The degenerate case resolves the SAFE way.
+
+    If the author's code were itself installed into site-packages, the whole
+    source root is subtracted and nothing is claimed — every failure stays
+    fatal, which is the property this design rests on.
+    """
+
+    import traceback
+
+    from diffusers import AutoencoderKL
+
+    exc = _raise_from(lambda: AutoencoderKL.load_config("/nonexistent-tree"))
+    installed = Path(traceback.extract_tb(exc.__traceback__)[-1].filename).resolve()
+    assert _third_party_root(installed)
+
+    # Treat that very tree as the "endpoint source root".
+    assert deepest_endpoint_frame(exc, installed.parent) is None
