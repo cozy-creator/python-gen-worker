@@ -15,12 +15,16 @@ What lives here, and what does NOT:
   a number (or ``None`` for "no reading"). It never decides. Admission,
   placement, pool sizing and refusals stay with their owners, which read from
   here.
-* **Three named VRAM formulas, not nine** — :func:`free_vram_bytes` (what the
+* **Four named VRAM formulas, not nine** — :func:`free_vram_bytes` (what the
   driver says is free right now), :func:`total_vram_bytes` (the card's
-  nameplate as measured) and :func:`headroom_bytes` (driver-free plus the
-  allocator cache THIS process can hand back). They are different quantities
-  with different right answers, so they are three names rather than one
-  ambiguous "free".
+  nameplate as measured), :func:`headroom_bytes` (driver-free plus the
+  allocator cache THIS process can hand back) and
+  :func:`process_ceiling_bytes` (driver-free plus what this process already
+  holds — the ceiling a whole working set fits under). They are different
+  quantities with different right answers, so they are four names rather than
+  one ambiguous "free". The fourth was added by pgw#1558, not invented there:
+  an endpoint was already computing it, off in its own repo, with its own
+  ``mem_get_info`` call.
 * **Never aggregate across cards here.** VRAM is not fungible between cards; a
   producer that sums or maxes hands its consumer a number no single job can
   have. Aggregation is a consumer's explicit, argued act.
@@ -211,6 +215,39 @@ def headroom_bytes(device: Optional[int] = None) -> Optional[int]:
     except Exception:  # noqa: BLE001
         reclaimable = 0
     return int(free) + reclaimable
+
+
+def process_ceiling_bytes(device: Optional[int] = None) -> Optional[int]:
+    """Bytes THIS process may occupy on ONE card at its peak. ``None`` = no
+    reading.
+
+    Driver-free PLUS what this process has ALREADY allocated — the ceiling a
+    whole working set (resident weights + the activations they will produce)
+    has to fit under. :func:`headroom_bytes` answers the different question
+    "may I allocate this NEXT block", and deliberately excludes the process's
+    own weights because they are not available for the next block; a fit
+    decision about the whole set must include them, or it charges its own
+    resident weights against itself twice.
+
+    pgw#1558: this is the fourth named formula, and it exists because it was
+    already being computed outside this module. ``minimax-h3`` carried
+    ``free + allocated`` as ``_driver_usable_gib`` with its own raw
+    ``mem_get_info`` call, which is exactly the drift pgw#896 abolished — the
+    endpoint could not tell "no card" from "card would not answer" and named
+    every zero UNREADABLE. Here the two stay different: ``None``.
+    """
+    reading = _mem_get_info(device)
+    if reading is None:
+        return None
+    free, _total = reading
+    try:
+        import torch
+
+        index = torch.cuda.current_device() if device is None else int(device)
+        allocated = int(torch.cuda.memory_allocated(index))
+    except Exception:  # noqa: BLE001
+        allocated = 0
+    return int(free) + allocated
 
 
 def device_count() -> int:
@@ -497,6 +534,7 @@ __all__ = [
     "headroom_bytes",
     "PROC_MEMINFO",
     "meminfo_kb",
+    "process_ceiling_bytes",
     "reset_cuda_state",
     "total_vram_bytes",
 ]

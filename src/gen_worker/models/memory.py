@@ -242,6 +242,29 @@ def available_vram(device_index: int = 0) -> VramReading:
     return VramReading(float(free) / float(1024**3))
 
 
+def process_ceiling_vram(device_index: int = 0) -> VramReading:
+    """What THIS process may occupy on the card at its peak, with its
+    zero-cause — driver-free plus what it already holds.
+
+    The reading a *whole working set* fit is decided against: resident weights
+    plus the activations they will produce must land under it.
+    :func:`available_vram` answers "what would a NEW process get", which is
+    the wrong denominator for a process budgeting against its own weights.
+
+    pgw#1558: an endpoint that computes this itself (``free + allocated`` off a
+    raw ``mem_get_info``) cannot distinguish a CPU host from a wedged card, and
+    ``minimax-h3`` demonstrably could not — it named every zero "UNREADABLE,
+    not merely unmeasured" including on a machine with no GPU at all. That is
+    pgw#940's misattribution, one repo over; ``reason`` is how it stays fixed.
+    """
+    if not hostfacts.cuda_ready():
+        return VramReading(0.0, VRAM_NO_CUDA)
+    ceiling = hostfacts.process_ceiling_bytes(device_index)
+    if ceiling is None:
+        return VramReading(0.0, VRAM_UNREADABLE)
+    return VramReading(float(ceiling) / float(1024**3))
+
+
 def get_available_vram_gb(device_index: int = 0) -> float:
     """Currently-free VRAM on the selected CUDA device. 0.0 if no CUDA.
 
@@ -708,7 +731,195 @@ def repair_device_placement(obj: Any, device: str) -> List[tuple[str, str, str]]
             comp.to(device)
         except Exception as exc:
             _LOG.warning("device repair: %s.to(%s) failed: %s", cname or "obj", device, exc)
+    remaining = device_mismatches(obj, device)
+    if not remaining:
+        return []
+    # ESCALATION (pgw#1558). A second `.to(device)` is not a different act from
+    # the first, so a component whose `.to()` is a NO-OP — a torchao/quantized
+    # wrapper, an accelerate-hooked module, anything that overrides `_apply` —
+    # survives the retry unchanged and the caller is told "unrepairable". It is
+    # not: rebinding `tensor.data` moves the storage regardless of what the
+    # module's `.to()` chose to do, and `minimax-h3` has been carrying exactly
+    # this escalation privately since a stuck 27 GiB text encoder OOM'd a
+    # denoise that had already "evicted" it.
+    # Only the tensors `device_mismatches` NAMED — it is the walk that already
+    # exempts virtual/structure-only/meta tensors, and force-moving one of
+    # those is the pgw#1124 defect with a bigger hammer.
+    wanted = {(c, t) for c, t, _ in remaining}
+    still = {c for c, _, _ in remaining}
+    forced = 0
+    for cname, comp in _named_components(obj):
+        if cname not in still:
+            continue
+        for owner, tname, t, slot in _owned_tensors(comp):
+            if (cname, tname) not in wanted:
+                continue
+            leaf = tname.rsplit(".", 1)[-1]
+            try:
+                moved = t.data.to(device)
+            except Exception as exc:  # noqa: BLE001 — report what is left, never raise
+                _LOG.warning(
+                    "device repair: %s.%s could not be read onto %s: %s",
+                    cname or "obj", tname, device, exc,
+                )
+                continue
+            try:
+                # In-place first: this preserves tensor IDENTITY, which is what
+                # `Module._apply` itself does and what anything holding a
+                # reference to the parameter (an installed hook, a cached
+                # module handle) depends on.
+                t.data = moved
+                forced += 1
+                continue
+            except Exception as identity_exc:  # noqa: BLE001
+                _LOG.debug(
+                    "device repair: %s.%s in-place rebind refused (%s); replacing the slot",
+                    cname or "obj", tname, identity_exc,
+                )
+            try:
+                # torch itself refuses some in-place rebinds across device
+                # kinds. Replacing the slot on the OWNING module is the same
+                # move by the other door, and is what `_apply` falls back to
+                # for buffers.
+                slot[leaf] = _like(t, moved)
+                forced += 1
+            except Exception as exc:  # noqa: BLE001
+                _LOG.warning(
+                    "device repair: %s.%s tensor-wise move to %s failed: %s",
+                    cname or "obj", tname, device, exc,
+                )
+    if forced:
+        _LOG.warning(
+            "device repair: %d tensor(s) on %s did not follow `.to(%s)` and were "
+            "moved storage-wise",
+            forced, ", ".join(sorted(still)) or "obj", device,
+        )
     return device_mismatches(obj, device)
+
+
+def _like(old: Any, moved: Any) -> Any:
+    """``moved``, wrapped back into a Parameter when ``old`` was one."""
+    try:
+        import torch
+
+        if isinstance(old, torch.nn.Parameter):
+            return torch.nn.Parameter(moved, requires_grad=old.requires_grad)
+    except Exception:  # noqa: BLE001
+        pass
+    return moved
+
+
+def _owned_tensors(comp: Any) -> List[tuple[Any, str, Any, Any]]:
+    """``(owner_module, dotted_name, tensor, slot_dict)`` for every parameter
+    and buffer under ``comp``, where ``slot_dict`` is the owner's own
+    ``_parameters``/``_buffers`` mapping. The owner is what a placement repair
+    needs and ``named_parameters()`` does not give it. [] for a non-module."""
+    out: List[tuple[Any, str, Any, Any]] = []
+    try:
+        import torch
+    except Exception:  # noqa: BLE001
+        return out
+    if comp is None or not hasattr(comp, "named_modules"):
+        return out
+    try:
+        modules = list(comp.named_modules())
+    except Exception:  # noqa: BLE001
+        return out
+    for prefix, module in modules:
+        for slot in (
+            getattr(module, "_parameters", None),
+            getattr(module, "_buffers", None),
+        ):
+            if not isinstance(slot, dict):
+                continue
+            for leaf, t in list(slot.items()):
+                if not isinstance(t, torch.Tensor):
+                    continue
+                out.append((module, f"{prefix}.{leaf}" if prefix else leaf, t, slot))
+    return out
+
+
+def _iter_tensors(comp: Any) -> Iterable[tuple[str, Any]]:
+    """``(name, tensor)`` over one module's parameters and buffers, [] for a
+    non-module. Never raises."""
+    try:
+        import torch
+    except Exception:  # noqa: BLE001
+        return []
+    if comp is None or not hasattr(comp, "named_parameters"):
+        return []
+    try:
+        named = list(comp.named_parameters())
+        if hasattr(comp, "named_buffers"):
+            named.extend(comp.named_buffers())
+    except Exception:  # noqa: BLE001
+        return []
+    return [(n, t) for n, t in named if isinstance(t, torch.Tensor)]
+
+
+def tensor_storage_bytes(t: Any) -> int:
+    """Bytes the tensor OCCUPIES, not what its logical dtype implies.
+
+    pgw#1558, lifted from ``minimax-h3`` where it was written because the
+    plain formula lied in production: a torchao tensor subclass reports the
+    LOGICAL dtype it emulates, so ``numel() * element_size()`` prices a
+    per-row fp8 weight at bf16 — "the census row two independent readers read
+    as *no fp8 here*". torch's own ``__tensor_flatten__`` names the real
+    inner tensors, so the walk descends into them and sums what they hold.
+
+    This is the byte question every residency estimate in this module asks, so
+    it is asked here once: an endpoint that quantizes and then reads
+    :func:`estimate_cuda_resident_gb` used to be told its fp8 DiT still cost
+    what its bf16 checkpoint did.
+    """
+    data = getattr(t, "data", t)
+    flatten = getattr(data, "__tensor_flatten__", None)
+    if flatten is not None:
+        try:
+            names, _meta = flatten()
+            return sum(tensor_storage_bytes(getattr(data, n)) for n in names)
+        except Exception:  # noqa: BLE001 — a census must never raise
+            pass
+    try:
+        return int(data.numel()) * int(data.element_size())
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def tensor_dtype_label(t: Any) -> str:
+    """``torch.bfloat16``, or ``Float8Tensor[torch.float8_e4m3fn]`` for a
+    quantized subclass — never an emulated dtype without naming the subclass
+    that emulates it. The reporting twin of :func:`tensor_storage_bytes`
+    (pgw#1558, same origin, same reason: a histogram reading
+    ``bfloat16=37.4GiB`` over a quantized DiT says this lane is bf16)."""
+    data = getattr(t, "data", t)
+    flatten = getattr(data, "__tensor_flatten__", None)
+    if flatten is None:
+        return str(getattr(data, "dtype", "?"))
+    try:
+        names, _meta = flatten()
+        inner = getattr(data, names[0])
+        return f"{type(data).__name__}[{inner.dtype}]"
+    except Exception:  # noqa: BLE001 — a census must never raise
+        return f"{type(data).__name__}[{getattr(data, 'dtype', '?')} logical]"
+
+
+def resident_census(obj: Any) -> List[tuple[str, int]]:
+    """``(component, cuda-resident bytes)`` for every component of ``obj`` that
+    holds anything on the card, largest first — what to print when an OOM has
+    to name its holder. Storage-priced (:func:`tensor_storage_bytes`), so a
+    quantized component is reported at what it actually occupies."""
+    rows: List[tuple[str, int]] = []
+    for cname, comp in _named_components(obj):
+        on_cuda = sum(
+            tensor_storage_bytes(t)
+            for _n, t in _iter_tensors(comp)
+            if t.device.type == "cuda"
+        )
+        if on_cuda:
+            rows.append((cname, on_cuda))
+    rows.sort(key=lambda row: row[1], reverse=True)
+    return rows
 
 
 def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
@@ -774,7 +985,15 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
                 if key in seen:
                     continue
                 seen.add(key)
-                total += t.numel() * t.element_size()
+                # pgw#1558: STORAGE bytes, not the logical dtype's. A virtual
+                # tensor has no storage to descend into and is priced by what
+                # it DECLARES, which is what a real load will go on to
+                # allocate; everything else is priced by what it holds, so a
+                # quantized subclass stops being booked at the dtype it
+                # emulates.
+                total += (
+                    t.numel() * t.element_size() if virtual else tensor_storage_bytes(t)
+                )
     return total
 
 
@@ -804,6 +1023,27 @@ def estimate_cuda_resident_gb(*objects: Any) -> float:
         return float(_sum_tensor_bytes(objects, cuda_only=True)) / float(1024**3)
     except Exception:
         return 0.0
+
+
+def release_cached_vram() -> None:
+    """Hand the allocator's cached-but-unused blocks back to the driver.
+    ``empty_cache`` and NOTHING else — always safe to call.
+
+    pgw#1558. This is the fragmentation discipline a residency schedule runs
+    between stages, and it is deliberately not :func:`flush_memory`: that one
+    also resets the peak counters, which is exactly what an endpoint measuring
+    its own activation across a stage boundary must not do (the same reason
+    ``aflush_memory`` defaults ``reset_peak=False``). Nor does it ``gc``,
+    which is seconds on a large pipeline and pointless between two stages of
+    one request.
+    """
+    try:
+        import torch
+
+        if cuda_ready():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        _LOG.debug("release_cached_vram: empty_cache failed", exc_info=True)
 
 
 def flush_memory() -> None:
@@ -2281,5 +2521,15 @@ __all__ = [
     "get_total_ram_gb",
     "aflush_memory",
     "flush_memory",
+    "release_cached_vram",
     "release_unused_pinned_host_cache",
+    # pgw#1558 — the endpoint-facing mechanism surface.
+    "available_vram",
+    "process_ceiling_vram",
+    "resident_census",
+    "tensor_dtype_label",
+    "tensor_storage_bytes",
+    "VramReading",
+    "VRAM_NO_CUDA",
+    "VRAM_UNREADABLE",
 ]
