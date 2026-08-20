@@ -51,7 +51,8 @@ def _emit(path: Path, base: str, files: tuple[str, ...]) -> Path:
     return path
 
 
-def _run(script: str, target: Path, diff_file: Path | None):
+def _run(script: str, target: Path,
+         diff_file: Path | None) -> "subprocess.CompletedProcess[str]":
     env = dict(os.environ)
     env.pop("PGW1521_DIFF_FILES", None)
     if diff_file is not None:
