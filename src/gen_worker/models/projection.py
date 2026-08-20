@@ -171,6 +171,13 @@ def collected_entries(root: Path | str) -> list[str]:
     for path in sorted(tree.rglob("*")):
         if path.is_symlink() and is_projection_artifact(path) and not path.exists():
             gone.append(path.relative_to(tree).as_posix())
+    # `model_index.json` FIRST, because it is the entry whose absence produces
+    # the false "carries no model_index.json" — so it is the one a reader most
+    # needs to see in a truncated list, and plain alphabetical order drops it
+    # out of the window on any tree with early-alphabet components
+    # (se#790 measured it landing 2nd of 3 by luck). Everything else keeps
+    # sorted order, so the list stays stable and diffable.
+    gone.sort(key=lambda rel: (rel != "model_index.json", rel))
     return gone
 
 
