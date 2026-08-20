@@ -350,15 +350,34 @@ class Bench:
         return time.monotonic() - started
 
     def specializations(self, room: Path) -> list[dict[str, Any]]:
+        """Every graph specialization this arm's lock declares.
+
+        `read_lock` answers a plain dict (NOT an object with attributes) and
+        the derive document sits under `["derive"]["document"]` as a JSON
+        STRING. Both facts are asserted here rather than assumed: an attribute
+        read that works on nothing would have raised on the pod, minutes into
+        a paid window, after the compile it was supposed to plan.
+        """
+
         from gen_worker.cli import endpoint_lock as el
 
         block = el.read_lock(room / el.LOCK_FILENAME)
-        document = json.loads(block.document) if isinstance(block.document, (str, bytes)) else block.document
-        return [
+        derive = block.get("derive") if isinstance(block, dict) else None
+        if not isinstance(derive, dict) or "document" not in derive:
+            raise SystemExit(
+                f"{room / el.LOCK_FILENAME}: no [derive] document — a lock "
+                f"written with --discovery-only has no graphs to benchmark"
+            )
+        raw = derive["document"]
+        document = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        records = [
             record
             for lane in document["graphs"]["lanes"]
             for record in lane["graphs"]
         ]
+        if not records:
+            raise SystemExit(f"{room}: the lock declares zero specializations")
+        return records
 
     def compile(self, room: Path, arm: str, selectors: list[str]) -> float:
         """Build ONLY what this run benchmarks. One selector per child."""
