@@ -56,13 +56,40 @@ class Skeleton:
 
 
 def _resolve(library: str, class_name: str) -> type:
+    """The class a ``model_index.json`` entry names.
+
+    A library entry is EITHER an importable module (``transformers``,
+    ``diffusers``) OR a diffusers PIPELINE SUBMODULE name — ``stable_diffusion``
+    for ``StableDiffusionSafetyChecker``, which is not importable as a
+    top-level module and never was. diffusers' own loader tests exactly this,
+    in this order (`hasattr(diffusers.pipelines, library_name)` →
+    ``getattr(pipeline_module, class_name)``), so this mirrors it rather than
+    inventing a second rule for the same file format.
+
+    Found by RUNNING it (pgw#1518, via pgw#1491's acceptance): every sd15 checkpoint on the
+    hub names ``stable_diffusion.StableDiffusionSafetyChecker``, and
+    `gen-worker up` died on it. It had gone unseen because the eager bridge
+    (``from_pretrained``) resolves it correctly and this skeleton is reached
+    ONLY when the tree has a chunk store behind it — i.e. exactly the
+    production-shaped path, and never the bare-tree local one the campaign
+    used.
+    """
+    module: Any
     try:
         module = importlib.import_module(library)
-    except ImportError as exc:
+    except ImportError:
+        module = None
+    if module is None or not hasattr(module, class_name):
+        pipelines = _diffusers_pipelines()
+        submodule = getattr(pipelines, library, None) if pipelines else None
+        if submodule is not None and hasattr(submodule, class_name):
+            module = submodule
+    if module is None:
         raise SkeletonError(
             f"{MODEL_INDEX} names component class {library}.{class_name}, "
-            f"but {library!r} is not importable in this image"
-        ) from exc
+            f"but {library!r} is neither importable in this image nor a "
+            f"diffusers pipeline submodule"
+        )
     found = getattr(module, class_name, None)
     if found is None or not isinstance(found, type):
         raise SkeletonError(
@@ -70,6 +97,20 @@ def _resolve(library: str, class_name: str) -> type:
             f"{library} version"
         )
     return found
+
+
+def _diffusers_pipelines() -> Any:
+    """``diffusers.pipelines``, or ``None`` when diffusers is absent.
+
+    Absent is legal: a non-diffusers endpoint's model_index names no pipeline
+    submodule, and importing diffusers to prove that would be a hard dependency
+    this module does not otherwise have.
+    """
+    try:
+        import diffusers.pipelines as pipelines
+    except ImportError:
+        return None
+    return pipelines
 
 
 def _is_module(cls: type) -> bool:
