@@ -258,16 +258,31 @@ class ProjectedTreeNotStreamable(RuntimeError):
             for path, on_disk, named in self.stubs[:3]
         )
         more = "" if len(self.stubs) <= 3 else f" (+{len(self.stubs) - 3} more)"
+        # pgw#1513 follow-up: THE DECLINE REASON GOES FIRST, and this ordering
+        # is load-bearing rather than editorial.
+        #
+        # The first field run of this refusal proved the fix works and then
+        # LOST the one clause it exists to deliver: `JobResult.safe_message` is
+        # bounded at 512 chars on the wire (`worker.py::_send_result`, a
+        # deliberate slice — this layer declining to put an unbounded string on
+        # a wire it owns), and the decline reason sat at the END of a longer
+        # message. It was truncated away, so the pod said WHAT was wrong and
+        # not WHY, which is the half nobody can reconstruct afterwards.
+        #
+        # Leading with it is structural: it survives ANY cap, at any layer,
+        # including caps nobody has told us about yet. The explanation that
+        # follows is the part a reader can afford to lose, because it is the
+        # same every time — the reason is not.
         super().__init__(
-            f"{self.tree} is a PROJECTED snapshot tree: {len(self.stubs)} of "
-            f"its tensor containers are tensorfs pointer stubs, not weights — "
-            f"{shown}{more}. The eager `from_pretrained` bridge reads with the "
-            f"stock safetensors reader and would report `header too large`, "
-            f"which describes a corrupt checkpoint and this checkpoint is not "
+            f"ENGINE DECLINED: {declined or 'unknown'} "
+            f"| PROJECTED TREE, {len(self.stubs)} pointer stub(s), NOT weights: "
+            f"{shown}{more} "
+            f"| tree={self.tree} "
+            f"| The eager `from_pretrained` bridge reads with the stock "
+            f"safetensors reader and would report `header too large`, which "
+            f"describes a corrupt checkpoint — and this checkpoint is NOT "
             f"corrupt: its bytes are in the CAS. The streaming engine "
-            f"(pgw#1380) is the reader for this tree and it declined to bind, "
-            f"which means `resolve_projection` could not recover the tree's "
-            f"manifest pin. THE ENGINE DECLINED BECAUSE: {declined or 'unknown'}. "
+            f"(pgw#1380) is the reader for this tree and declined to bind. "
             f"Refusing rather than serving a lie about the weights."
         )
 

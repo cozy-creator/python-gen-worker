@@ -39,6 +39,7 @@ import pytest
 from gen_worker._vendor.tensorfs.project import stub_bytes
 from gen_worker.serving.context import (
     DeployBinding,
+    _projection_declined_because,
     LoadContext,
     ProjectedTreeNotStreamable,
     _projection_artifacts,
@@ -284,3 +285,46 @@ def test_collected_entries_puts_model_index_json_FIRST(tmp_path: Path) -> None:
     assert got[1:] == sorted(got[1:]), f"the tail must stay sorted: {got}"
     assert "model_index.json" in projection.collected_refusal(tmp_path, got)[:400], (
         "and it must survive into the truncated (shown) window of the message")
+
+
+def test_the_decline_REASON_survives_the_wire_truncation(tmp_path: Path) -> None:
+    """The clause this refusal exists to deliver must survive the 512-char cap.
+
+    # pgw#1513 follow-up, from the FIRST FIELD FIRING of this refusal.
+
+    It worked — a pod reported `ProjectedTreeNotStreamable` naming four stubs
+    with bytes-on-disk against bytes-named — and then lost the one clause the
+    whole mechanism exists for. `JobResult.safe_message` is sliced to 512 chars
+    in `worker.py::_send_result` (deliberate: that layer declines to put an
+    unbounded string on a wire it owns), and `THE ENGINE DECLINED BECAUSE: …`
+    sat at the END of a longer message. It was truncated away, so the pod said
+    WHAT was wrong and never WHY — and WHY is the half nobody can reconstruct
+    from the logs afterwards.
+
+    Leading with the reason is structural: it survives any cap at any layer,
+    including caps nobody has told us about. This test asserts that property
+    against the real limit and the real field shape, so a later edit that
+    "tidies" the message ordering fails here instead of on a rental.
+    """
+    #: The exact slice `_send_result` applies.
+    WIRE_CAP = 512
+
+    tree = Path("/tensorhub-endpoint-cache/cas/snapshots/sha256:" + "b7" * 32)
+    stubs = [
+        (f"component_{i}/diffusion_pytorch_model.safetensors", 128, 3_400_000_000)
+        for i in range(4)
+    ]
+    declined = _projection_declined_because(tmp_path / "snapshots" / "absent")
+
+    message = str(ProjectedTreeNotStreamable(tree, stubs, declined))
+    truncated = message[:WIRE_CAP]
+
+    assert message.startswith("ENGINE DECLINED:"), (
+        "the reason must LEAD — anything after the first 512 characters is not "
+        f"guaranteed to reach a reader: {message[:80]!r}")
+    assert declined[:120] in truncated, (
+        "the decline reason must survive the wire cap intact; this is the "
+        f"clause the refusal exists to deliver. Truncated form: {truncated!r}")
+    assert "pointer stub(s), NOT weights" in truncated, (
+        "the stub count should also fit inside the cap — it is what identifies "
+        "the shape on sight")
