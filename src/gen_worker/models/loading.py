@@ -1042,6 +1042,17 @@ def composition_compute_dtype(base_path: str | Path, dtype: str = "") -> str:
     return ""
 
 
+class ProjectedTreeNotEagerlyLoadable(RuntimeError):
+    """pgw#1549: the eager whole-pipeline loader met a projected tensorfs tree.
+
+    Typed rather than a log line, because the alternative outcomes are both
+    silent: `from_pretrained` on a stub raises `SafetensorError: header too
+    large` (a lie about the checkpoint — pgw#1513's two lost days), and the
+    tier-3 materialization that avoids it doubles the tree on disk to do a job
+    `ctx.load` does with no file at all.
+    """
+
+
 class MixedComputeDtypeError(RuntimeError):
     """A composed pipeline presents more than one COMPUTE dtype to its GEMMs.
 
@@ -2293,6 +2304,37 @@ def load_from_pretrained(
     modular lane must not stage them onto the card and must not take the
     per-component host-RAM discount."""
     path = str(path)
+    # pgw#1549: THE EAGER WHOLE-PIPELINE LOADER REFUSES A PROJECTED TREE.
+    #
+    # Every arm below ends at `third_party_dir(path, ...)`, which is tier 3 of
+    # the #1303 access ladder: it MATERIALIZES a second real copy of the tree
+    # so a third-party loader can read files. For a serving pytorch pipeline
+    # that is not a fallback, it is the defect Paul's 2026-08-19 no-fill ruling
+    # names — the weights are already in the chunk store and `ctx.load` streams
+    # them store->VRAM with no file written. Reaching here with a projected
+    # tree costs 2x the disk to produce a load `ctx.load` does better, and on a
+    # pod it is the difference between serving and filling the volume.
+    #
+    # This function has no production caller at HEAD: its only one was
+    # `provision.load_slot`, orphaned when pgw#1373 hardcut the v1 SDK. That is
+    # exactly why the guard goes here rather than in a comment — an exported
+    # eager loader with no caller is not safe, it is UNWATCHED, and the outage
+    # this refusal belongs to was caused by a second construction path nobody
+    # was looking at.
+    from .projection import stub_at_any
+
+    if stub_at_any(Path(path)):
+        raise ProjectedTreeNotEagerlyLoadable(
+            f"load_from_pretrained({getattr(cls, '__name__', cls)}, {path}): "
+            f"this is a PROJECTED tensorfs tree — its tensor containers are "
+            f"~128 B TFSSTUB1 pointer stubs whose bytes live in the CAS. The "
+            f"eager loader would materialize a full second copy of the tree "
+            f"to read them (tier 3 of the pgw#1303 ladder), which the "
+            f"2026-08-19 no-fill ruling leaves to external binaries only. "
+            f"Load through `ctx.load(<PipelineClass>)`, which binds the "
+            f"pgw#1380 streaming engine and walks the chunk store straight to "
+            f"VRAM with no tensor file written or read."
+        )
     if is_modular_pipeline_class(cls):
         return _load_modular_pipeline(
             cls, path, dtype=dtype, storage_dtype=storage_dtype,
@@ -2519,6 +2561,7 @@ __all__ = [
     "apply_fp8_storage",
     "assert_uniform_compute_dtype",
     "MixedComputeDtypeError",
+    "ProjectedTreeNotEagerlyLoadable",
     "composition_compute_dtype",
     "QUANT_EXECUTION_LANE_COMPUTE_DEFAULT",
     "pipeline_weight_lane",

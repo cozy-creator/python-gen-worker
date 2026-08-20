@@ -472,6 +472,16 @@ class LoadContext(Generic[MT_co]):
         self._weight_budget_bytes = max(0, int(weight_budget_bytes))
 
     @property
+    def loader_engine(self) -> Optional[LoaderEngine]:
+        """The streaming engine THIS load actually bound, or ``None``.
+
+        pgw#1549. `EndpointHost` used to keep its own handle and report its
+        numbers; since `ctx.load` is the one binder, the only truthful source
+        for "did an engine run, and what did it do" is the context that ran.
+        """
+        return self._engine
+
+    @property
     def checkpoint_dir(self) -> Path:
         """The worker-resolved checkpoint tree, already converted to the
         active lane's tensor-layout contract."""

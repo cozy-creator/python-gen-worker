@@ -45,6 +45,7 @@ from .entrypoints import EntrypointSpec
 from .loader import LoadedEndpoint
 from .model import Model, model_type
 from .placement import serving_device, warn_if_degraded
+from .worker_context import worker_load_context
 
 logger = logging.getLogger(__name__)
 
@@ -128,23 +129,20 @@ class EndpointHost:
         #: it references no Model class, so it is never resident and has
         #: nothing to make resident.
         self._booted = False
-        if engine is None and not loaded.models:
-            # pgw#1392: a WEIGHTLESS endpoint references no Model class, so
-            # nothing will ever be built through the loader engine. Probing
-            # the binding's tree for a chunk store would be work done to
-            # answer a question nobody asks.
-            engine = None
-        elif engine is None:
-            # pgw#1380: the native store->VRAM engine, bound off the
-            # checkpoint tree the worker already resolved — a projected
-            # snapshot carries its own chunk store, so nothing extra is
-            # plumbed here. `None` back means this tree has no store behind
-            # it (a bare download, a fixture) and `ctx.load` keeps the eager
-            # bridge; PLACEMENT is decided here, by the worker, never by
-            # author code.
-            from .streaming import engine_for
-
-            engine = engine_for(binding.checkpoint_dir, device=device, io=io)
+        # pgw#1549: THIS HOST NO LONGER BUILDS AN ENGINE, and that deletion is
+        # the fix rather than a tidy-up.
+        #
+        # `engine_for` had two production call sites — here, and (since
+        # pgw#1544) `ctx.load`. Two constructions of one capability is exactly
+        # the state that kept the fleet down: the pod went through `ServeLoop`,
+        # which had NEITHER, so every local red/green passed against a caller
+        # the production path is not. Deleting this one leaves `ctx.load` — the
+        # one place that always has the tree, and the one place BOTH hosts
+        # reach — as the sole binder, so the local CLI and the pod now execute
+        # the same code and a local verdict finally means something about a pod.
+        #
+        # `engine=` survives as an EXPLICIT override (endpoint suites inject a
+        # fake). Production passes nothing.
         self._engine = engine
         self._io = str(io or "buffered")
         #: pgw#1452: the SAME decision reaches the eager bridge. Handing it
@@ -156,9 +154,15 @@ class EndpointHost:
         self._output_dir = output_dir
         self._context_kwargs = dict(context_kwargs or {})
 
-    def _stream_attributes(self) -> Dict[str, Any]:
-        """The streamed load's own numbers, or nothing when no engine ran."""
-        report = getattr(self._engine, "last_report", None)
+    def _stream_attributes(self, ctx: LoadContext[Any]) -> Dict[str, Any]:
+        """The streamed load's own numbers, or nothing when no engine ran.
+
+        pgw#1549: read off the CONTEXT that actually loaded, not off a
+        host-held engine. The host no longer builds one — `ctx.load` binds it —
+        so a host-held handle would report the numbers of a load that did not
+        happen, which is worse than reporting none.
+        """
+        report = getattr(ctx.loader_engine, "last_report", None)
         if report is None:
             return {}
         attributes: Dict[str, Any] = report.attributes()
@@ -185,7 +189,8 @@ class EndpointHost:
     def _load_context(
         self, model_cls: type, *, compile_sink: Any = None
     ) -> LoadContext[Any]:
-        return LoadContext(
+        # pgw#1549: THE ONE PRODUCTION LOAD CONTEXT, shared with `ServeLoop`.
+        return worker_load_context(
             binding=self.binding,
             model_type=model_type(model_cls),
             lane=self.lanes[model_cls],
@@ -314,7 +319,7 @@ class EndpointHost:
                 duration_ms=int((time.monotonic() - load_started) * 1000),
                 label=f"{self.loaded.module_name}:{model_cls.__name__}",
                 checkpoint=self.binding.checkpoint_ref,
-                **self._stream_attributes(),
+                **self._stream_attributes(load_context),
             )
         if session is not None:
             # The mint-written manifest is the artifact's COMPATIBILITY SET

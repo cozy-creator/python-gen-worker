@@ -55,6 +55,7 @@ from .reserved_repos import (
     reserved_context_kwargs,
 )
 from .residency import InstanceSizer, ResidencyError, ResidencyManager
+from .worker_context import worker_load_context
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +309,15 @@ class ServeLoop:
             )
             backend = _InstanceBackend(
                 model_cls,
-                LoadContext(
+                # pgw#1549: THE ONE PRODUCTION LOAD CONTEXT. This call used to
+                # be a hand-assembled `LoadContext(...)` that named no
+                # `device=` and no `io=`, so pgw#1452's placement decision —
+                # landed on `EndpointHost` and asserted there — never reached
+                # a pod at all: `_placed` saw `_device == ""` and returned
+                # every eagerly-bridged pipeline on the CPU. Same shape as
+                # pgw#1544's missing engine ask, on the same caller, silent
+                # instead of loud.
+                worker_load_context(
                     binding=binding,
                     model_type=model_type(model_cls),
                     lane=lane,
