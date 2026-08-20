@@ -620,3 +620,88 @@ def test_an_EMPTY_store_emits_the_row_that_ANSWERS_predate_vs_this_boot(
         "predate-vs-built-this-boot evidence the census can produce")
     assert rows[0].total_steps == 0 and rows[0].step == 0
     assert rows[0].phase == "all_servable"
+
+
+def test_the_repair_outcome_SURVIVES_THE_512_CHAR_CAP_on_a_realistic_refusal(
+    tmp_path: Path,
+) -> None:
+    """pgw#1542: position two, because the tail gets sliced off.
+
+    `worker.py::_send_result` slices `safe_message` at 512 chars. pgw#1513
+    already lost the decline reason to that cap once, by putting it last. The
+    repair outcome has the same property — per-incident, unreconstructable
+    afterwards — so appending it would have repeated the identical bug.
+
+    This asserts on a REALISTIC message: a full-length snapshot tree name and
+    three long stub paths, which is what a real refusal carries. The naive
+    append placement fails this test.
+    """
+    from gen_worker.models import projection as proj
+    from gen_worker.serving.context import ProjectedTreeNotStreamable
+
+    tree = tmp_path / "snapshots" / ("sha256:" + "5b" * 32)
+    tree.mkdir(parents=True)
+    proj.record_pin_outcome(tree.name, "ATTEMPTED and FAILED: PermissionError")
+
+    stubs = [
+        (f"unet/diffusion_pytorch_model-{i:05d}-of-00007.safetensors", 128,
+         3_438_167_536)
+        for i in range(4)
+    ]
+    exc = ProjectedTreeNotStreamable(tree, stubs, declined="no manifest pin")
+
+    capped = str(exc)[:512]
+    assert "repair attempted: ATTEMPTED and FAILED: PermissionError" in capped, (
+        "the repair outcome must survive the 512-char wire cap — that is the "
+        f"entire reason it sits in position two. Capped message: {capped!r}")
+    # And the decline reason still leads, unchanged by the insertion.
+    assert capped.startswith("ENGINE DECLINED: no manifest pin")
+
+
+def test_an_UNATTEMPTED_repair_never_renders_as_a_clean_bill_of_health() -> None:
+    """Absence must say `not attempted`, never blank.
+
+    A blank field reads as "no repair was needed", which is the false-negative
+    this whole change exists to prevent — the same missing-renders-as-fine
+    failure the boot census hit one layer up.
+    """
+    from gen_worker.models.projection import pin_outcome
+
+    assert pin_outcome("a-tree-nobody-touched") == "not attempted"
+    assert pin_outcome("") == "not attempted"
+
+
+def test_the_outcome_registry_is_PER_TREE_not_a_global_last_writer(
+    tmp_path: Path,
+) -> None:
+    """A pod serves many trees; a global slot would misattribute the repair.
+
+    Recording one tree's failed repair and then reading a DIFFERENT tree's
+    refusal must not blame the second tree for the first tree's outcome.
+    """
+    from gen_worker.models import projection as proj
+    from gen_worker.serving.context import ProjectedTreeNotStreamable
+
+    good = tmp_path / "snapshots" / "tree-that-was-repaired"
+    bad = tmp_path / "snapshots" / "tree-nobody-repaired"
+    for d in (good, bad):
+        d.mkdir(parents=True)
+    proj.record_pin_outcome(good.name, "REPAIRED, pin rewritten")
+
+    msg = str(ProjectedTreeNotStreamable(bad, [("w.safetensors", 128, 1)], "x"))
+    assert "repair attempted: not attempted" in msg
+    assert "REPAIRED" not in msg, (
+        "one tree's repair outcome must never be attributed to another tree's "
+        f"refusal: {msg}")
+
+
+def test_the_registry_is_BOUNDED_so_a_long_lived_pod_cannot_grow_it() -> None:
+    """A pod that sees thousands of trees must not accumulate an entry each."""
+    from gen_worker.models import projection as proj
+
+    for i in range(proj._PIN_OUTCOMES_CAP * 3):
+        proj.record_pin_outcome(f"bounded-probe-{i}", "not needed: already pinned")
+    assert len(proj._PIN_OUTCOMES) <= proj._PIN_OUTCOMES_CAP
+    # The most RECENT survive — a live refusal is about a recent repair.
+    assert proj.pin_outcome(f"bounded-probe-{proj._PIN_OUTCOMES_CAP * 3 - 1}") == (
+        "not needed: already pinned")

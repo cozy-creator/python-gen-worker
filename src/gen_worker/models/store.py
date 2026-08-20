@@ -1265,6 +1265,21 @@ class ModelStore:
         except Exception:  # noqa: BLE001 — telemetry never fails a boot
             logger.debug("snapshot census event dropped", exc_info=True)
 
+    @staticmethod
+    def _record_pin(path: Path, outcome: str) -> None:
+        """pgw#1542: every exit of `ensure_pinned` states itself DURABLY.
+
+        pgw#1536 made every exit log a reason. That is unreadable on a rented
+        pod, so the outcome also goes to the projection registry, from which
+        the refusal message picks it up — the one channel proven to leave a pod.
+        """
+        try:
+            from . import projection as _projection
+
+            _projection.record_pin_outcome(path.name, outcome)
+        except Exception:  # noqa: BLE001 — telemetry never fails a load
+            pass
+
     def ensure_pinned(
         self, ref: WireRef, tree: Path, snapshot: Optional[pb.Snapshot],
     ) -> bool:
@@ -1319,12 +1334,14 @@ class ModelStore:
                 "this tree is projected it is unreadable by the streaming "
                 "engine (pgw#1536)", ref, path,
             )
+            self._record_pin(path, "no banked snapshot, manifest unrebuildable")
             return False
         try:
             from . import projection as _projection
 
             if _projection.resolve_projection(path) is not None:
                 logger.debug("pin OK for %s at %s", ref, path)
+                self._record_pin(path, "not needed: already pinned")
                 return False  # already pinned, the overwhelmingly common case
             if not _projection.stub_at_any(path):
                 # A materialized tree holds its own bytes and needs no pin.
@@ -1332,12 +1349,14 @@ class ModelStore:
                     "pin not required for %s at %s: tree is materialized, not "
                     "projected", ref, path,
                 )
+                self._record_pin(path, "not needed: tree is materialized")
                 return False
         except Exception as exc:  # noqa: BLE001 — a probe must never fail a load
             logger.warning(
                 "pin check FAILED to probe %s at %s: %s: %s (pgw#1536)",
                 ref, path, type(exc).__name__, exc,
             )
+            self._record_pin(path, f"probe failed: {type(exc).__name__}")
             return False
         try:
             from .cozy_snapshot import _manifest, _pin_manifest
@@ -1354,6 +1373,7 @@ class ModelStore:
                 "will misreport it as a corrupt checkpoint (pgw#1526)",
                 ref, path, type(exc).__name__, exc,
             )
+            self._record_pin(path, f"ATTEMPTED and FAILED: {type(exc).__name__}")
             return False
         logger.warning(
             "REPAIRED the missing manifest pin `snapshot:%s` for %s at %s — the "
@@ -1361,6 +1381,7 @@ class ModelStore:
             "unreadable by the streaming engine. No bytes moved (pgw#1526)",
             path.name, ref, path,
         )
+        self._record_pin(path, "REPAIRED, pin rewritten")
         return True
 
     async def announce_resident(

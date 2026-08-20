@@ -49,6 +49,48 @@ from gen_worker._vendor.tensorfs import (
 _log = logging.getLogger("gen_worker.models.projection")
 
 SNAPSHOTS_DIR = "snapshots"
+
+
+# pgw#1542: WHERE THE REPAIR DIED, carried to the one channel that survives.
+#
+# `ModelStore.ensure_pinned` has six named exits and every one of them is a LOG
+# LINE. On a rented pod that is unreadable: five separate paths were checked and
+# none carries worker stdout off the box (no worker-log table, `cozy logs` is
+# local-only, privatedeploy has no logs verb, `bootstages` reads pgw#1355
+# telemetry, and RunPod's REST API exposes no logs route). So "the repair ran
+# and lost" and "the repair never ran" are the same observation to anyone
+# reading after the pod dies — which is the exact ambiguity pgw#1536 set out to
+# kill at boot, still live one layer down.
+#
+# The refusal message is the ONE channel proven to survive a pod, because it
+# rides `error_message_safe`. So the outcome is recorded here, keyed by tree
+# name, and read back at the raise site. A dict rather than a single slot: a
+# pod serves many trees, and a global last-writer would attribute one tree's
+# repair to another tree's refusal, which is worse than saying nothing.
+_PIN_OUTCOMES: "dict[str, str]" = {}
+_PIN_OUTCOMES_CAP = 64
+
+
+def record_pin_outcome(tree_name: str, outcome: str) -> None:
+    """Record which named exit `ensure_pinned` took for this tree."""
+    if not tree_name:
+        return
+    if len(_PIN_OUTCOMES) >= _PIN_OUTCOMES_CAP and tree_name not in _PIN_OUTCOMES:
+        # Bounded: a long-lived pod must not accumulate one entry per tree it
+        # ever saw. Dropping the OLDEST keeps the most recent repairs, which
+        # are the ones a live refusal is about.
+        _PIN_OUTCOMES.pop(next(iter(_PIN_OUTCOMES)), None)
+    _PIN_OUTCOMES[tree_name] = outcome
+
+
+def pin_outcome(tree_name: str) -> str:
+    """The recorded exit, or `not attempted` — NEVER an empty string.
+
+    The empty string would render as "no repair", which is precisely the false
+    reading this exists to prevent. `not attempted` is a claim about this
+    process and is true: nothing called `ensure_pinned` for this tree here.
+    """
+    return _PIN_OUTCOMES.get(tree_name, "not attempted")
 REF_PREFIX = "snapshot:"
 
 

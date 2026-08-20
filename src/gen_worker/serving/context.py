@@ -273,8 +273,19 @@ class ProjectedTreeNotStreamable(RuntimeError):
         # including caps nobody has told us about yet. The explanation that
         # follows is the part a reader can afford to lose, because it is the
         # same every time — the reason is not.
+        # pgw#1542: THE REPAIR OUTCOME RIDES IN POSITION TWO, NOT AT THE END.
+        #
+        # The ask was to append it. Appending would have reproduced the exact
+        # bug the comment below describes: at 512 chars the tail is sliced off,
+        # and a long `tree=` plus three stub paths already spends most of the
+        # budget before the boilerplate starts. The repair outcome is
+        # per-incident and unreconstructable — the same property that earned
+        # the decline reason its front position — so it goes directly behind
+        # it, ahead of everything a reader can afford to lose.
+        repair = _projection_pin_outcome(self.tree)
         super().__init__(
             f"ENGINE DECLINED: {declined or 'unknown'} "
+            f"| repair attempted: {repair} "
             f"| PROJECTED TREE, {len(self.stubs)} pointer stub(s), NOT weights: "
             f"{shown}{more} "
             f"| tree={self.tree} "
@@ -285,6 +296,22 @@ class ProjectedTreeNotStreamable(RuntimeError):
             f"(pgw#1380) is the reader for this tree and declined to bind. "
             f"Refusing rather than serving a lie about the weights."
         )
+
+
+def _projection_pin_outcome(tree: Path) -> str:
+    """WHICH named exit `ModelStore.ensure_pinned` took for this tree.
+
+    pgw#1542. Never raises and never returns empty: a blank here would read as
+    "no repair happened", and telling a post-mortem reader that the repair did
+    not run when in fact it ran and failed is worse than the silence it
+    replaces.
+    """
+    try:
+        from ..models.projection import pin_outcome
+
+        return pin_outcome(Path(tree).name) or "not attempted"
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 def _projection_declined_because(tree: Path) -> str:
