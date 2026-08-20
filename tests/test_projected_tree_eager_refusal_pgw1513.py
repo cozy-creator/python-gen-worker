@@ -256,3 +256,29 @@ def test_a_tree_whose_OBJECTS_WERE_COLLECTED_says_so_and_not_malformed(
     assert "carries no model_index.json" in message, (
         "the refusal must name the FALSE message it is pre-empting, so the "
         f"next reader searching that string lands here: {message}")
+
+
+def test_collected_entries_puts_model_index_json_FIRST(tmp_path: Path) -> None:
+    """se#790's refinement, and the reason it is not cosmetic.
+
+    `model_index.json` is the entry whose absence produces the false "carries
+    no model_index.json", so it is the one a reader most needs to see in the
+    truncated list the refusal shows. Plain alphabetical order drops it out of
+    that window on any tree with early-alphabet components — measured on a real
+    `@composed-v3` tree, where it landed 2nd of 3 by luck of `dit/` sorting
+    first. Everything after it keeps sorted order so the list stays diffable.
+    """
+    from gen_worker.models import projection
+
+    for rel in ("model_index.json", "aaa/config.json", "dit/config.json",
+                "text_encoder/config.json"):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.symlink_to(Path("..") / "objects" / "sha256" / "de" / "ad" / ("de" * 32))
+
+    got = projection.collected_entries(tmp_path)
+    assert got[0] == "model_index.json", (
+        f"the entry that causes the false refusal must lead the list: {got}")
+    assert got[1:] == sorted(got[1:]), f"the tail must stay sorted: {got}"
+    assert "model_index.json" in projection.collected_refusal(tmp_path, got)[:400], (
+        "and it must survive into the truncated (shown) window of the message")
