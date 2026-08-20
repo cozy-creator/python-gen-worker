@@ -380,8 +380,46 @@ def _wrap_vae_decode(vae: Any, log: logging.Logger) -> bool:
                 log=log,
             )
 
+    # Same rule as the denoiser's (pgw#1534). `decode` is not a `forward` and
+    # adoption does not read it today, but a wrapper that erases the signature
+    # of what it wraps is wrong for the same reason wherever it is installed,
+    # and the two wrappers must not diverge on it.
+    _carry_signature(decode, original)
     setattr(vae, "decode", decode)
     return True
+
+
+def _carry_signature(wrapper: Any, wrapped: Any) -> None:
+    """Make ``wrapper`` present the signature of what it wraps (pgw#1534).
+
+    A ``*args, **kwargs`` wrapper is invisible to anything that INTROSPECTS the
+    forward it replaced, and adoption is exactly that: torchcg claims a graph
+    record for a marked module when the module's forward accepts every
+    parameter the record's ingress names. An erased signature therefore does not
+    degrade adoption — it silently switches it off for that module, everywhere,
+    permanently, and no mint can turn it back on because nothing is missing.
+
+    ``functools.wraps`` is not used: it copies ``__dict__`` and ``__wrapped__``
+    too, and this wrapper's identity should stay its own. Only the one fact a
+    caller introspects is carried, and a wrapped object that has no readable
+    signature (a builtin, a C-implemented forward) leaves the wrapper as it is
+    rather than failing a load — an unarmed ladder must never fail a load, and
+    neither must an unsigned one.
+    """
+    try:
+        wrapper.__signature__ = inspect.signature(wrapped)
+    except Exception:  # noqa: BLE001 — an unsigned ladder must never fail a load
+        # Deliberately broad, and it is this module's own rule rather than a
+        # shrug: `inspect.signature` runs arbitrary code through `__signature__`
+        # descriptors and `__get__`, so the exception set is not enumerable.
+        # `install` catching it one frame up would abandon the WHOLE ladder over
+        # a cosmetic step, which is a worse trade than an unsigned wrapper.
+        return
+    for attribute in ("__name__", "__qualname__", "__doc__"):
+        try:
+            setattr(wrapper, attribute, getattr(wrapped, attribute))
+        except AttributeError:
+            pass
 
 
 def _denoiser(pipeline: Any) -> Optional[Any]:
@@ -404,6 +442,24 @@ def _wrap_denoiser_forward(pipeline: Any, module: Any, log: logging.Logger) -> b
     which is why this can be installed without touching the class — and it is
     the same seam ``aot_serve`` swaps, so an armed artifact simply captures
     this wrapper as its eager fallback.
+
+    🔴 **AND IT MUST CARRY THE WRAPPED SIGNATURE (pgw#1534).** That seam is not
+    only where a graph is armed; it is where adoption decides WHETHER to arm
+    one. ``torchcg`` claims a graph record for a marked module when the
+    module's forward accepts every parameter the record's ingress names, and it
+    reads those names off ``inspect.signature(module.forward)``. A bare
+    ``*args, **kwargs`` wrapper has no named parameters at all, so after this
+    installed, a 13-parameter unet forward presented an EMPTY set and **every
+    record in the lane went unclaimed** — measured on a real boot with all 14
+    artifacts present in the store: ``adopted: 0, holes: 0, armed: 0``.
+
+    pgw#1499 armed this ladder on EVERY rung, which is correct and is also what
+    made a per-OOM-path wrapper into a permanent, universal disabling of the
+    compiled path. ``models/lora_lifted.py`` already restores ``__signature__``
+    on its own forward wrapper; this one did not, and the two wrappers sit four
+    files apart. The rule is general and belongs to the seam, not to either
+    wrapper: **anything installed onto a module's ``forward`` must present the
+    signature it wrapped** — a fence test holds it.
     """
     slicer = getattr(pipeline, "enable_attention_slicing", None)
     original = getattr(module, "forward", None)
@@ -452,6 +508,7 @@ def _wrap_denoiser_forward(pipeline: Any, module: Any, log: logging.Logger) -> b
                 log=log,
             )
 
+    _carry_signature(forward, original)
     setattr(module, "forward", forward)
     return True
 

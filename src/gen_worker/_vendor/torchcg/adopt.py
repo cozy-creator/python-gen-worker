@@ -25,7 +25,7 @@ forward — the author's code stays the serve host.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -69,6 +69,75 @@ class Hole:
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics
         return f"Hole({self.record.graph}, {self.reason!r})"
+
+
+class UnclaimedMark:
+    """A module the author MARKED with ``ctx.compile`` that fit no record.
+
+    tcg#70. This used to be a bare ``return`` with a comment on it — a marked
+    module that claims nothing is eager FOREVER, and nothing anywhere said so.
+    Together with a lane whose records also go unclaimed it produces
+    ``adopted=0, holes=0``: two zeros indistinguishable from "there was nothing
+    to do", over a store holding every artifact the document asked for.
+
+    A hole would be the wrong shape for it — a hole is a graph the mint should
+    build, and these graphs are already built. What is broken is the MATCH, so
+    what gets recorded is both sides of it: the module's own forward signature,
+    and the parameters the nearest record needed that this signature does not
+    have. That difference IS the diagnosis, and it costs one set subtraction.
+    """
+
+    __slots__ = ("module", "parameters", "nearest", "missing")
+
+    def __init__(
+        self,
+        module: str,
+        parameters: tuple[str, ...],
+        nearest: str,
+        missing: tuple[str, ...],
+    ) -> None:
+        self.module = module
+        self.parameters = parameters
+        self.nearest = nearest
+        self.missing = missing
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics
+        return (
+            f"UnclaimedMark({self.module}, missing={list(self.missing)}, "
+            f"nearest={self.nearest[-12:] if self.nearest else None})"
+        )
+
+    def describe(self) -> str:
+        """One operator-facing line naming what did not match and why."""
+
+        if not self.parameters:
+            # THE MOST LIKELY CAUSE GETS THE MOST DIRECT SENTENCE. A denoiser
+            # with no NAMED forward parameters does not exist; a `*args,
+            # **kwargs` wrapper installed over one does, and every parameter
+            # name the match is made on disappears behind it. Measured exactly
+            # this way (pgw#1534): an OOM-retry wrapper installed at load time
+            # turned a 13-parameter forward into an empty set, and every record
+            # in the lane went unclaimed in silence.
+            return (
+                f"{self.module}: marked with ctx.compile, and its forward "
+                f"accepts NO named parameters — so no record can name anything "
+                f"it takes. That is the signature of a `*args, **kwargs` "
+                f"wrapper installed over the real forward: a wrapper must "
+                f"carry the wrapped signature (functools.wraps, or an explicit "
+                f"__signature__), or it silently disables adoption for this "
+                f"module"
+            )
+        if not self.nearest:
+            return (
+                f"{self.module}: marked with ctx.compile and this lane has no "
+                f"records left to match it against"
+            )
+        return (
+            f"{self.module}: marked with ctx.compile, matched NO graph in this "
+            f"lane. Nearest record {self.nearest[-12:]} needs "
+            f"{sorted(self.missing)!r}, which this module's forward does not "
+            f"accept; it accepts {sorted(self.parameters)!r}"
+        )
 
 
 class AmbiguousStructure(Exception):
@@ -177,6 +246,31 @@ def _forward_parameters(module: Any) -> frozenset[str]:
     )
 
 
+def _describe_unclaimed(
+    module: Any, signature: frozenset[str], records: Iterable[GraphRecord]
+) -> UnclaimedMark:
+    """Why this marked module fits nothing, in the terms the match is made in.
+
+    "Nearest" is the record needing the FEWEST parameters this signature lacks
+    — the one whose gap is most likely to be the real story. Ties break on the
+    graph hash so the message is deterministic across boots, because an operator
+    comparing two runs must not be reading a set-iteration order.
+    """
+
+    best: tuple[int, str, tuple[str, ...]] | None = None
+    for record in records:
+        missing = tuple(sorted(set(record.ingress.parameters) - signature))
+        candidate = (len(missing), record.graph, missing)
+        if best is None or candidate < best:
+            best = candidate
+    return UnclaimedMark(
+        module=type(module).__name__,
+        parameters=tuple(sorted(signature)),
+        nearest="" if best is None else best[1],
+        missing=() if best is None else best[2],
+    )
+
+
 class AdoptSession:
     """One boot's adoption for the active (lane, sm) — ``ctx.compile``'s engine.
 
@@ -233,6 +327,7 @@ class AdoptSession:
         self._adopted: set[str] = set()
         self._holes: dict[str, Hole] = {}
         self._ambiguous: set[str] = set()
+        self._unclaimed_marks: list[UnclaimedMark] = []
 
     @staticmethod
     def _reconcile_passes(
@@ -296,7 +391,12 @@ class AdoptSession:
             if set(record.ingress.parameters) <= signature
         ]
         if not claimed:
-            return  # marked module, no graphs for it in this document: eager
+            # RECORDED, not returned from silently (tcg#70). Eager is a safe
+            # answer and stays one; an unexplained eager is not.
+            self._unclaimed_marks.append(
+                _describe_unclaimed(module, signature, self._unclaimed.values())
+            )
+            return
         dispatcher = self._dispatcher_for(module)
         for record in claimed:
             del self._unclaimed[record.graph]
@@ -394,6 +494,26 @@ class AdoptSession:
         once observed."""
         return self._canonical(self._unclaimed)
 
+    @property
+    def unclaimed_marks(self) -> tuple[UnclaimedMark, ...]:
+        """The MODULE side of the same fact: every ``ctx.compile``-ed module
+        that matched no record, with the signature gap that explains it.
+
+        :attr:`unclaimed` says which graphs found no home; this says which
+        marks found no graph. Reading only one of them is how ``adopted=0,
+        holes=0`` became a silent verdict (tcg#70) — a boot needs both to tell
+        "the author stopped marking a module" from "the module the author
+        marks no longer has the forward the derive traced"."""
+        return tuple(self._unclaimed_marks)
+
+    def silently_eager(self) -> bool:
+        """Nothing armed, nothing to mint, and marks that matched nothing.
+
+        The exact state that used to print as two zeros. It is not an error —
+        eager costs speed, never correctness — but it is never a quiet success
+        either, and a caller that reports adoption MUST say so."""
+        return bool(self._unclaimed_marks) and not self._adopted and not self._holes
+
 
 __all__ = [
     "AdoptError",
@@ -401,4 +521,5 @@ __all__ = [
     "ArtifactLoader",
     "HOLE_MISS",
     "Hole",
+    "UnclaimedMark",
 ]

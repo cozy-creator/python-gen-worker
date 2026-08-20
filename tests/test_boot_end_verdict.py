@@ -43,15 +43,41 @@ PHASE = EagerPhase.BOOT_ENDED_UNCOMPILED.value
 
 
 class FakeSession:
-    """What `AdoptSession` is to this verdict: three counted lists."""
+    """What `AdoptSession` is to this verdict: five counted collections.
 
-    def __init__(self, adopted: int = 0, holes: int = 0, unclaimed: int = 0):
+    pgw#1534 added `ambiguous` and `unclaimed_marks` to what the verdict
+    reads, and this double went stale the moment it did — which is the
+    argument for keeping it a MODEL of the contract rather than the two
+    fields one caller happened to use. `silently_eager` is a method on the
+    real session, so it is one here too.
+    """
+
+    def __init__(
+        self,
+        adopted: int = 0,
+        holes: int = 0,
+        unclaimed: int = 0,
+        ambiguous: int = 0,
+        unclaimed_marks: int = 0,
+    ):
         self.adopted = ["graph"] * adopted
         self.holes = ["hole"] * holes
         self.unclaimed = ["unclaimed"] * unclaimed
+        self.ambiguous = ["ambiguous"] * ambiguous
+        self.unclaimed_marks = [_Mark()] * unclaimed_marks
+
+    def silently_eager(self) -> bool:
+        return bool(self.unclaimed_marks) and not self.adopted and not self.holes
 
     def adopt(self, *a: Any, **k: Any) -> Any:  # pragma: no cover - unused
         raise AssertionError("the verdict never runs a graph")
+
+
+class _Mark:
+    """One `UnclaimedMark`: the verdict only ever asks it to describe itself."""
+
+    def describe(self) -> str:
+        return "FakeModule: marked with ctx.compile, matched NO graph in this lane"
 
 
 class FakeMintStatus:

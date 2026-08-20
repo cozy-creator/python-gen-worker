@@ -173,7 +173,17 @@ KIND_BOOT_ADOPT = "boot_adopt"
 # Same trap as pgw#1067's, caught before it shipped rather than after.
 #
 # `phase` is `reused` (this boot adopted everything and mints nothing) /
-# `minting` (holes remain) / `empty_lane`. THE COUNTS ARE NUMERIC, not prose:
+# `minting` (holes remain) / `empty_lane` (nothing was marked: an eager endpoint
+# saying so) / `marks_unmatched` (pgw#1534 — a `ctx.compile`-ed module fits NO
+# record in its own lane, so the compiled path is off and NO mint can turn it
+# on) / `all_ambiguous` (pgw#1534 — every record was disarmed as a literal-twin:
+# the artifacts are present and VALID, and the dispatcher refuses to guess
+# between two graphs with one tensor structure, so it disarms both).
+# THE LAST THREE ALL CARRY `step=0, total_steps=0` and are three different facts.
+# That is exactly why they are three phases: while they all read `empty_lane`,
+# no query could find a pod whose compiled path had silently switched off, and
+# the two zeros were measured on a box with 14 valid artifacts in its store.
+# THE COUNTS ARE NUMERIC, not prose:
 # `step` = graphs adopted, `total_steps` = graphs claimed, so the reuse ratio
 # is a query rather than a regex over `detail`. `detail` keeps the sentence.
 KIND_BOOT_ADOPT_SUMMARY = "boot_adopt_summary"
