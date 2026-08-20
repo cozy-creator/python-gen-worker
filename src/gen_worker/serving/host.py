@@ -389,13 +389,47 @@ class EndpointHost:
                 )
                 for mark in marks:
                     logger.warning("adopt:   %s", mark.describe())
-            logger.info(
-                "adopt: lane=%s sm=%s — %d armed, %d hole(s) to mint, "
-                "%d ambiguous, %d record(s) unclaimed, %d marked module(s) "
-                "matched nothing",
-                lane_contract, sm, len(session.adopted), len(session.holes),
-                len(session.ambiguous), len(session.unclaimed), len(marks),
-            )
+            # THE ZERO MUST NAME ITSELF (pgw#1564). This summary sat at INFO,
+            # and `gen-worker up` surfaces WARNING+ only (`logging.lastResort`)
+            # — so on 2026-08-20 09:41 a boot claimed 14 graphs, holed all 14
+            # with `cannot decompress` sitting RIGHT THERE on each Hole, and
+            # the resident log carried not one adoption line. The failure was
+            # then investigated as a NEW silent-adoption defect for hours; it
+            # was pgw#1561's unloadable blobs wearing this path's silence. A
+            # declared-compiled boot that armed NOTHING is a WARNING with its
+            # hole reasons attached; a boot that armed is one INFO line.
+            if session.adopted:
+                logger.info(
+                    "adopt: lane=%s sm=%s — %d armed, %d hole(s) to mint, "
+                    "%d ambiguous, %d record(s) unclaimed, %d marked module(s) "
+                    "matched nothing",
+                    lane_contract, sm, len(session.adopted), len(session.holes),
+                    len(session.ambiguous), len(session.unclaimed), len(marks),
+                )
+            else:
+                logger.warning(
+                    "adopt: ZERO of %d claimed graph(s) armed for lane=%s "
+                    "sm=%s (%d hole(s), %d ambiguous, %d unclaimed, %d "
+                    "unmatched mark(s)) — this boot serves EAGER for a lane "
+                    "that declared compiled serving",
+                    len(session.adopted) + len(session.holes), lane_contract,
+                    sm, len(session.holes), len(session.ambiguous),
+                    len(session.unclaimed), len(marks),
+                )
+                seen: set[str] = set()
+                for hole in session.holes:
+                    # One line per distinct reason, not per graph: fourteen
+                    # copies of one sentence is how a reason gets skimmed past.
+                    reason_class = str(hole.reason).split(" ", 3)[0]
+                    if reason_class in seen:
+                        continue
+                    seen.add(reason_class)
+                    logger.warning(
+                        "adopt:   hole %s: %s", hole.record.graph[-16:],
+                        str(hole.reason)[:300],
+                    )
+                    if len(seen) >= 6:
+                        break
         self.adoption = session
         self._booted = True
 

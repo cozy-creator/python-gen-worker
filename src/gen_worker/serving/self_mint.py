@@ -53,7 +53,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from .. import activity as activity_mod
 from .. import compile_posture
@@ -191,6 +191,9 @@ class SelfMint:
         self._done = threading.Event()
         self._status = SelfMintStatus()
         self._started_at = 0.0
+        #: The armed work-list, read ONCE in :meth:`arm` (pgw#1564). Declared,
+        #: not a getattr hedge — pgw#1534 is what a hedge costs.
+        self._work_list: Tuple[Any, ...] = ()
 
     # -- the trigger --------------------------------------------------------
 
@@ -240,6 +243,11 @@ class SelfMint:
                 return self._status
             self._status = SelfMintStatus(state=MINTING, holes=len(holes))
             self._started_at = time.monotonic()
+            # READ ONCE (pgw#1564): this tuple — the one whose length the
+            # status just declared — IS the mint's work-list. `run` used to
+            # re-read the live `host.holes` property, and a second read that
+            # answered empty settled as `completed 0/N` in milliseconds.
+            self._work_list = holes
             self._thread = threading.Thread(
                 target=self._run, args=(host, len(holes)),
                 name="self-mint", daemon=True)
@@ -309,6 +317,7 @@ class SelfMint:
                 window_s=self.window_s,
                 vcpus=self.vcpus,
                 on_landed=landed,
+                work_list=self._work_list or None,
             )
         except Exception as exc:  # noqa: BLE001 — the worker outlives its mint
             error = f"{type(exc).__name__}: {exc}"
