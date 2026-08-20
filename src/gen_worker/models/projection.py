@@ -31,7 +31,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from gen_worker._vendor.tensorfs import (
     CASRef,
@@ -148,6 +148,53 @@ def stub_at_any(root: Path | str) -> bool:
         if (path.is_file() or path.is_symlink()) and read_stub(path) is not None:
             return True
     return False
+
+
+def collected_entries(root: Path | str) -> list[str]:
+    """Projected entries under ``root`` whose CAS object is GONE.
+
+    pgw#1513/pgw#1514, measured by the se#790 lane on a real 5.6 GB tree: a
+    tree's manifest pin is the ONLY GC root its objects have, so a tree that
+    outlives its pin and then meets a GC pass has every object deleted while
+    the tree stands. Tensor containers remain stubs; everything else becomes a
+    DANGLING SYMLINK — ``model_index.json`` among them.
+
+    `Path.is_file()` FOLLOWS the link, which is what collapses "collected" and
+    "absent" into one branch and makes a caller say "carries no
+    model_index.json" about a tree that has one. Ask this instead, and ask it
+    BEFORE any parse.
+    """
+    tree = Path(root)
+    gone: list[str] = []
+    if not tree.is_dir():
+        return gone
+    for path in sorted(tree.rglob("*")):
+        if path.is_symlink() and is_projection_artifact(path) and not path.exists():
+            gone.append(path.relative_to(tree).as_posix())
+    return gone
+
+
+def collected_refusal(root: Path | str, entries: Sequence[str]) -> str:
+    """THE wording for "this tree's bytes were collected", in one place.
+
+    Both refusal sites call this — the eager bridge (pgw#1513) and
+    ``skeleton.build`` (pgw#1514) — so a reader who greps either path lands in
+    the same mental model. Two hand-written strings is how this shape reached
+    four callers; the se#790 lane found a fifth instance in their OWN code
+    while documenting the lesson in the same file's docstring.
+    """
+    shown = ", ".join(list(entries)[:3])
+    more = "" if len(entries) <= 3 else f" (+{len(entries) - 3} more)"
+    return (
+        f"{Path(root)}: {len(entries)} of this tree's entries are projected "
+        f"links whose CAS OBJECTS HAVE BEEN COLLECTED ({shown}{more}). The "
+        f"tree's manifest pin is the only root those objects had, so losing it "
+        f"makes a GC pass delete the bytes while leaving the tree standing. "
+        f"These weights must be RE-FETCHED; this is not a re-pin. Do not read "
+        f"this as a malformed checkpoint — a dangling `model_index.json` is "
+        f"why a tree that HAS one gets reported as 'carries no "
+        f"model_index.json'."
+    )
 
 
 def snapshot_root_of(path: Path | str) -> Optional[Path]:
@@ -385,5 +432,7 @@ __all__ = [
     "snapshot_root_of",
     "stub_at",
     "stub_at_any",
+    "collected_entries",
+    "collected_refusal",
     "symlinks_supported",
 ]
