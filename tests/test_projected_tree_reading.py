@@ -522,11 +522,21 @@ def test_the_census_fingerprint_SURVIVES_TEARDOWN_as_an_activity_row(
     assert "unservable=2" in row.detail and "e5e5" in row.detail
 
 
-def test_a_HEALTHY_census_emits_no_row_at_all(tmp_path: Path) -> None:
-    """A fingerprint, not a heartbeat: nothing unservable means no row.
+def test_a_HEALTHY_census_STILL_emits_a_row_so_absence_means_one_thing(
+    tmp_path: Path,
+) -> None:
+    """The row is unconditional, and this test is the reason why.
 
-    The counterpart to the test above, and the one that keeps this from
-    becoming per-boot noise that nobody filters.
+    My first cut fired the row only when something was unservable, reasoning
+    that a healthy row is noise. That was wrong, and it broke the exact
+    question the census exists to answer. The residue is PREDATE-vs-BUILT-
+    THIS-BOOT, and it is read off the census being ABSENT at boot while the
+    failure shows up later. Fire-on-bad-only makes absence ambiguous — healthy
+    boot, crashed census, and no-trees-on-disk all render identically as "no
+    row", and an absent instrument that reads as a clean bill of health is
+    worse than no instrument at all.
+
+    So: absence now means exactly one thing — the census did not run.
     """
     import asyncio
 
@@ -555,8 +565,58 @@ def test_a_HEALTHY_census_emits_no_row_at_all(tmp_path: Path) -> None:
 
     asyncio.run(run())
 
-    assert not [
-        m for m in sent
+    rows = [
+        m.activity_update for m in sent
         if m.WhichOneof("msg") == "activity_update"
         and m.activity_update.kind == activity.KIND_SNAPSHOT_CENSUS
-    ], "a healthy boot must emit NO census row"
+    ]
+    assert len(rows) == 1, "a healthy boot must still be ON THE RECORD"
+    assert rows[0].phase == "all_servable"
+    assert rows[0].step == 0 and rows[0].total_steps == 1
+    assert ":P-" in rows[0].detail or ":--" in rows[0].detail, (
+        f"per-tree state must be packed into the row: {rows[0].detail}")
+
+
+def test_an_EMPTY_store_emits_the_row_that_ANSWERS_predate_vs_this_boot(
+    tmp_path: Path,
+) -> None:
+    """`of=0` at boot is the residue's answer, not a boring case to skip.
+
+    An empty snapshot store at boot means any stubbed tree found later was
+    BUILT THIS BOOT. That is the whole predate-vs-built-this-boot question,
+    settled by one row — so the empty case is the LAST one that should have
+    been an early return, and it used to be one.
+    """
+    import asyncio
+
+    from gen_worker import activity
+    from gen_worker.models.store import ModelStore
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    base = tmp_path / "cas"
+    for d in ("refs", "objects", "snapshots"):
+        (base / d).mkdir(parents=True)
+
+    sent: list[Any] = []
+
+    async def sink(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    async def run() -> None:
+        activity.bind_sink(sink, asyncio.get_running_loop())
+        ModelStore(sink, cache_dir=base)._census_snapshot_pins()
+        for _ in range(8):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    rows = [
+        m.activity_update for m in sent
+        if m.WhichOneof("msg") == "activity_update"
+        and m.activity_update.kind == activity.KIND_SNAPSHOT_CENSUS
+    ]
+    assert len(rows) == 1, (
+        "an EMPTY store must be on the record — it is the strongest "
+        "predate-vs-built-this-boot evidence the census can produce")
+    assert rows[0].total_steps == 0 and rows[0].step == 0
+    assert rows[0].phase == "all_servable"
