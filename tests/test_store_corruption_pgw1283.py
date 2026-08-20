@@ -66,7 +66,7 @@ def cas(tmp_path: Path) -> Path:
 def _artifact(tmp_path: Path, *, source: Path = ARTIFACT_A,
               name: str = "mint") -> Path:
     """A packed compiled graph carrying its own stamp, as a real mint produces."""
-    p = tmp_path / name / "cell.tar.gz"
+    p = tmp_path / name / "cell.tar.gz"  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
     p.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, p)
     return p

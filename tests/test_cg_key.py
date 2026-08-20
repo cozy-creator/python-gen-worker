@@ -132,11 +132,11 @@ def test_execution_lane_canonicalization():
 
 
 # pgw#1181 REMOVED the six local-compiled graph-verdict rows:
-# `test_local_cell_has_no_key_stamp`, `test_local_verdict_ignores_sku_and_pins_sm`,
+# `test_local_cell_has_no_key_stamp`, `test_local_verdict_ignores_sku_and_pins_sm`,  # cell-spelling: the record of test names pgw#1181 DELETED; respelling falsifies it
 # `test_declared_contract_fences_newer_contract`,
 # `test_self_requested_drift_is_selection_bug`,
 # `test_self_requested_no_target_is_selection_bug` and
-# `test_foreign_cell_drift_stays_eager`.
+# `test_foreign_cell_drift_stays_eager`.  # cell-spelling: the record of test names pgw#1181 DELETED; respelling falsifies it
 #
 # Their subject is the `torch-inductor-cache` store verdict —
 # `compile_cache.local_compiled_graph_mismatch` over `artifact_metadata`, and the

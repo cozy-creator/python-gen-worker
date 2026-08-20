@@ -356,10 +356,10 @@ def test_the_dropped_child_can_write_a_RELOCATED_local_compiled_graph_store(drop
     ``local_compiled_graph_store.store_root()`` defaults under ``~/.cache``, which the
     grant list already covers through the compute uid's home — so the gap was
     invisible for as long as nobody moved it. cozy-local DOES move it
-    (``internal/paths/paths.go`` exports ``GEN_WORKER_LOCAL_CELLS_DIR``), and a
+    (``internal/paths/paths.go`` exports ``GEN_WORKER_LOCAL_CELLS_DIR``), and a  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
     relocated root is created by this root parent at 0755 and never chowned, so
     the child's first memo write died on
-    ``PermissionError: .../aot-cells`` — mid-request, taking the stream down
+    ``PermissionError: .../aot-cells`` — mid-request, taking the stream down  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
     with it. It surfaced as a NON-DETERMINISTIC red of a neighbouring row in
     this very file, because whether the mint reached its memo write inside a
     given tape was a race. Asserted directly here so the boundary is measured
@@ -381,7 +381,7 @@ def test_the_dropped_child_can_write_a_RELOCATED_local_compiled_graph_store(drop
     )
     # `write-probe` mkdirs a nested subtree before it writes, which is the
     # operation that actually died: `_write_json_atomic` reaches every sidecar
-    # through `parent.mkdir(parents=True)`, and `aot-cells` is the component
+    # through `parent.mkdir(parents=True)`, and `aot-cells` is the component  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
     # that did not exist yet.
     assert _probe(dropped, "write-probe", root) == "ok", (
         f"the compute child cannot write its own compiled graph store at {root}. The "

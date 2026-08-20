@@ -102,7 +102,7 @@ def materialize_named_artifact(
     # an adopt. This is the one place compiled graph bytes move, so it is the one place
     # the span belongs.
     with boot_phases.span(
-        boot_phases.PHASE_CELL_FETCH,
+        boot_phases.PHASE_CELL_FETCH,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
         ref=cg_ref,
         artifact_kind=ARTIFACT_KIND,
         artifact_key=str(content_digest or ""),

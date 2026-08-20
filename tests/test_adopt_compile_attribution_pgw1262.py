@@ -112,7 +112,7 @@ def _install(
 def _arm(tmp_path: Path, **kw: Any) -> AdoptOutcome:
     return provision.arm_aot(
         object(), type("Cfg", (), {"family": "z-image"})(), None,
-        tmp_path / "cell.tar.gz", 0, dict(_META), **kw)
+        tmp_path / "cell.tar.gz", 0, dict(_META), **kw)  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
 
 
 # --------------------------------------------------------------------------
@@ -253,7 +253,7 @@ def test_the_marker_names_the_FAMILY_so_the_reboot_report_is_legible(
     _install(monkeypatch, on_enable=lambda: seen.append(_live_compile_markers()))
     provision.arm_aot(
         object(), type("Cfg", (), {"family": ""})(), None,
-        tmp_path / "cell.tar.gz", 0, {"entry": _META["entry"]})
+        tmp_path / "cell.tar.gz", 0, {"entry": _META["entry"]})  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
 
     assert seen[0][0]["function"] == "compile:adopt:unknown"
 

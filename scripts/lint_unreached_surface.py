@@ -222,7 +222,7 @@ EXEMPT_TARGETS: dict[str, str] = {
     # structurally cannot do. THE WIRING IS OWED BY THAT LANE; if phase 3 is
     # abandoned, these two rows are the deletion notice for the whole module.
     "gen_worker.models.arena_residency.ArenaResidency":
-        "ladder/serving wiring owed by roadmap phase 3 (compiled cells over "
+        "ladder/serving wiring owed by roadmap phase 3 (compiled graphs over "
         "stable arena addresses); measured slower than partial_stream until then",
     "gen_worker.models.arena_residency.safetensors_triples":
         "the (path, offset, len) seam; its production producer is pgw#1498's "

@@ -76,9 +76,9 @@ record and carry it:
 LAYOUT (one directory per compiled graph, so a compiled graph and the facts about it move as a
 unit)::
 
-    <root>/aot-cells/<ck1-…>/record.json   the POLICY sidecar {verdict, sink, …}
-    <root>/aot-cells/<ck1-…>/cell.tar.gz   TCG's export — a MATERIALIZATION, not custody
-    <root>/aot-cells/.memo/<arm1-…>.json   the MEMO: pre-trace identity -> ck1 key
+    <root>/aot-cells/<ck1-…>/record.json   the POLICY sidecar {verdict, sink, …}  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
+    <root>/aot-cells/<ck1-…>/cell.tar.gz   TCG's export — a MATERIALIZATION, not custody  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
+    <root>/aot-cells/.memo/<arm1-…>.json   the MEMO: pre-trace identity -> ck1 key  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
     <root>/trust-class.json                the learned trust class
 
 The layout is preserved on purpose: cozy-local's ``cozy compiled graphs`` CLI and
@@ -126,11 +126,11 @@ logger = logging.getLogger(__name__)
 #: ``workerEnv`` (``cozy-local/internal/paths/paths.go``) and the ``cozy
 #: compiled graphs`` CLI reads the same root, so the NAME and the DEFAULT are a
 #: cross-repo contract: changing either goes dark on that CLI.
-ENV_STORE_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"
+ENV_STORE_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
 
-COMPILED_GRAPHS_DIRNAME = "aot-cells"
+COMPILED_GRAPHS_DIRNAME = "aot-cells"  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
 MEMO_DIRNAME = ".memo"
-ARTIFACT_NAME = "cell.tar.gz"
+ARTIFACT_NAME = "cell.tar.gz"  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
 RECORD_NAME = "record.json"
 TRUST_CLASS_NAME = "trust-class.json"
 
@@ -173,7 +173,7 @@ def store_root() -> Path:
     env = os.environ.get(ENV_STORE_DIR, "").strip()
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".cache" / "cozy" / "compile-cells"
+    return Path.home() / ".cache" / "cozy" / "compile-cells"  # cell-spelling: default store root; cozy-local paths.go + th localcompiledgraphs.Dir resolve it
 
 
 def compiled_graphs_root(root: Optional[Path] = None) -> Path:

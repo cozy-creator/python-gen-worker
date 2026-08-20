@@ -213,10 +213,10 @@ _STAGE_BY_PHASE: Final[Mapping[str, Stage]] = {
     boot_phases.PHASE_DECLARATION_COMPOSE: Stage.KEYSET,
     boot_phases.PHASE_TRACE_FOR_KEY: Stage.KEYSET,
     boot_phases.PHASE_KEY_FOLD: Stage.KEYSET,
-    boot_phases.PHASE_CELL_FETCH: Stage.ADOPT,
-    boot_phases.PHASE_CELL_VERIFY: Stage.ADOPT,
-    boot_phases.PHASE_CELL_HUB_RTT: Stage.ADOPT,
-    boot_phases.PHASE_CELL_ARM: Stage.ARM,
+    boot_phases.PHASE_CELL_FETCH: Stage.ADOPT,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    boot_phases.PHASE_CELL_VERIFY: Stage.ADOPT,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    boot_phases.PHASE_CELL_HUB_RTT: Stage.ADOPT,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    boot_phases.PHASE_CELL_ARM: Stage.ARM,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
     boot_phases.PHASE_ENTRY_ADMIT: Stage.ARM,
     boot_phases.PHASE_WARMUP: Stage.WARMUP,
 }

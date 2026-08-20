@@ -88,7 +88,7 @@ def test_a_model_library_bump_does_not_rekey(library: str) -> None:
 
 
 @pytest.mark.parametrize("library", MODEL_LIBRARIES)
-def test_the_axis_ignores_the_library_even_when_a_cell_records_it(
+def test_the_axis_ignores_the_library_even_when_a_graph_records_it(
     library: str,
 ) -> None:
     """Membership is a property of the AXIS, not of whichever producer wrote

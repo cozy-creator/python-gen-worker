@@ -160,7 +160,7 @@ _REQUIRED: Tuple[Tuple[str, str], ...] = (
     ("graph_contract", "the admission expectation's graph axis"),
     ("publisher_org", "an artifact whose producer is unnamed is trusted by no "
                       "rule, and 'unknown publisher' is not a tier"),
-    # dataclass field; the wire spelling is `cell_ref` (proto-lane vocabulary)
+    # dataclass field; the wire spelling is `cell_ref` (proto-lane vocabulary)  # cell-spelling: proto field spelling, gated on PROTO_DIGEST
     ("cg_ref", "the address the bytes are fetched from"),
     ("content_digest", "what the fetched bytes are verified against"),
     # pgw#1224: the per-ANSWER signature. Under the batch wire this is the only
@@ -307,7 +307,7 @@ def _compiled_graph_from(body: Mapping[str, Any]) -> ResolvedCompiledGraph:
     return ResolvedCompiledGraph(
         family=str(body.get("family") or ""),
         compiled_graph_key=str(body.get("compiled_graph_key") or ""),
-        cg_ref=str(body.get("cell_ref") or ""),
+        cg_ref=str(body.get("cell_ref") or ""),  # cell-spelling: proto field spelling, gated on PROTO_DIGEST
         checkpoint_id=str(body.get("checkpoint_id") or ""),
         content_digest=str(body.get("content_digest") or ""),
         artifact_path=str(body.get("artifact_path") or ""),
@@ -452,7 +452,7 @@ def resolve_batch(
     fam, asked = _require_batch(family, keys)
 
     with boot_phases.span(
-        boot_phases.PHASE_CELL_HUB_RTT, function="compiled_graphs.resolve",
+        boot_phases.PHASE_CELL_HUB_RTT, function="compiled_graphs.resolve",  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
         artifact_key=asked[0], ref=fam,
     ) if boot_phases.in_boot() else _null() as span:
         resp = broker.request(
@@ -551,7 +551,7 @@ def materialize(
     """Fetch the resolved compiled graph's bytes through the EXISTING delivery path.
 
     Deliberately a two-line function: everything it could have added —
-    digest verification, chunk assembly, the cache, the ``cell_fetch`` span —
+    digest verification, chunk assembly, the cache, the ``cell_fetch`` span —  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
     ``materialize_named_artifact`` already does, and a second downloader is a
     second place for "verified" to mean something slightly different.
     """
