@@ -1488,8 +1488,13 @@ def _execution_device() -> Any:
     return "cuda:0"
 
 
+#: Where the last residency reserve came from, for the confession to state.
+_LAST_RESERVE: Dict[str, Any] = {}
+
+
 def _plan_partial_resident(
     pipeline: Any, log: logging.Logger, *, min_moved_bytes: int = 0,
+    peak_vram_gb: Optional[float] = None, model_size_gb: Optional[float] = None,
 ) -> Any:
     """The pgw#1577 component-residency plan, or None to keep ``model_offload``.
 
@@ -1507,9 +1512,44 @@ def _plan_partial_resident(
         free_gb = get_available_vram_gb()
         if free_gb <= 0.0:
             return None
+        # pgw#1595/#1586 item 5. THE RESERVE MUST COME FROM THE REQUEST, NOT A
+        # CONSTANT. `PARTIAL_RESIDENT_RESERVE_GB` was derived from ONE workload
+        # shape (pgw#1570's 20-step 1024^2 SDXL); a 28-step job overran it and
+        # thrashed the allocator at 6.6 MB free. The endpoint's DECLARED
+        # per-request peak is already in this function's caller and was being
+        # dropped on the floor — `select_auto_mode` gets it, this planner did
+        # not. `peak_vram_gb` is a TOTAL requirement, so the activation share is
+        # what it asks for beyond the weights; the constant stays as a FLOOR for
+        # endpoints that declare nothing or under-declare.
+        reserve_gb = PARTIAL_RESIDENT_RESERVE_GB
+        # NOT A COSMETIC FIELD. Measured 2026-08-20: ZERO of the 26 shipped
+        # endpoints declare `peak_vram_per_request_gb`, so on every real serve
+        # today this reserve is an ASSUMPTION carried over from one workload
+        # shape, not a measurement of this one. pgw#1595's 28-step job overran
+        # it. Until endpoints declare, the honest thing the log can do is say
+        # which of the two it used.
+        reserve_source = "default"
+        declared = 0.0
+        if peak_vram_gb is not None and peak_vram_gb > 0.0:
+            weights_gb = (
+                model_size_gb if model_size_gb is not None
+                else estimate_pipeline_size_gb(pipeline)
+            )
+            declared = max(0.0, float(peak_vram_gb) - float(weights_gb))
+            reserve_source = "declared" if declared > reserve_gb else "default"
+            if declared > reserve_gb:
+                log.info(
+                    "low_vram: partial_resident reserve %.2f -> %.2f GiB, from "
+                    "the endpoint's declared per-request peak (%.2f GiB total, "
+                    "%.2f GiB of weights)",
+                    reserve_gb, declared, float(peak_vram_gb), float(weights_gb),
+                )
+                reserve_gb = declared
+        _LAST_RESERVE.clear()
+        _LAST_RESERVE.update(reserve_gb=reserve_gb, reserve_source=reserve_source)
         plan = plan_for_pipeline(
             pipeline,
-            budget_bytes=int(max(0.0, free_gb - PARTIAL_RESIDENT_RESERVE_GB) * _GIB),
+            budget_bytes=int(max(0.0, free_gb - reserve_gb) * _GIB),
             free_bytes=int(free_gb * _GIB),
             sizer=lambda m: module_storage_bytes(m),
             forced_resident=unhookable_components(pipeline),
@@ -2219,6 +2259,7 @@ def component_placement_census(pipeline: Any) -> str:
 
 def _report_offload_engaged(
     pipeline: Any, rung: str, applied: Dict[str, Any], log: logging.Logger,
+    *, plan_free_gb: Optional[float] = None,
 ) -> None:
     """THE offload-activation confession — one home for every route into a
     CPU-touching rung (pgw#1312).
@@ -2237,7 +2278,15 @@ def _report_offload_engaged(
     placement has already succeeded when this runs.
     """
     needed_gb = estimate_pipeline_size_gb(pipeline)
-    free_gb = get_available_vram_gb()
+    # pgw#1595. THE LINE STATES THE DECISION, SO IT MUST STATE THE DECISION'S
+    # INPUT. This used to re-read free VRAM HERE — after placement — so a rung
+    # chosen against 7.3 GiB printed `free_gb=0.4` beside its own name, and a
+    # whole issue was filed against the wrong cause on the strength of it. The
+    # plan-time figure is authoritative when the rung recorded one; the
+    # post-placement figure is still reported, as `free_after_gb`, because "what
+    # the card looks like now" is a real and different fact.
+    free_after_gb = get_available_vram_gb()
+    free_gb = free_after_gb if plan_free_gb is None else plan_free_gb
     _confess_serve_degrade(
         phase=OFFLOAD_ENGAGED_PHASE,
         line=transition_line(
@@ -2246,7 +2295,8 @@ def _report_offload_engaged(
             detail=f"CPU offload ENGAGED ({_applied_summary(applied)}); every "
                    f"forward on this pipeline now moves weights over PCIe; "
                    f"{attention_kernel_census(pipeline)}; "
-                   f"{component_placement_census(pipeline)}",
+                   f"{component_placement_census(pipeline)}; "
+                   f"free_after_gb={free_after_gb:.1f}",
         ),
         detail=(
             f"pipeline={type(pipeline).__name__}: CPU offload ENGAGED at rung "
@@ -2488,7 +2538,9 @@ def apply_low_vram_config(
     # only honest place to decide.
     partial_resident_plan = None
     if effective_mode == "model_offload":
-        partial_resident_plan = _plan_partial_resident(pipeline, log)
+        partial_resident_plan = _plan_partial_resident(
+            pipeline, log, peak_vram_gb=peak_vram_gb, model_size_gb=model_size_gb,
+        )
         if partial_resident_plan is not None:
             effective_mode = "partial_resident"
 
@@ -2614,15 +2666,18 @@ def apply_low_vram_config(
         # every attempt is at load: no OOM can reach a request from here.
         plan = partial_resident_plan
         armed = False
+        probe_facts: Dict[str, Any] = {}
         for _ in range(_MAX_PROBE_ATTEMPTS):
             armed = apply_component_residency(
                 pipeline, plan, device=_execution_device(), log=log,
                 free_bytes_now=lambda: int(get_available_vram_gb() * _GIB),
+                facts=probe_facts,
             )
             if armed:
                 break
             nxt = _plan_partial_resident(
-                pipeline, log, min_moved_bytes=plan.offloaded_bytes
+                pipeline, log, min_moved_bytes=plan.offloaded_bytes,
+                peak_vram_gb=peak_vram_gb, model_size_gb=model_size_gb,
             )
             if nxt is None:
                 break
@@ -2631,8 +2686,30 @@ def apply_low_vram_config(
             applied["partial_resident"] = True
             applied["partial_resident_offloaded"] = list(plan.offloaded)
             applied["partial_resident_bytes"] = plan.offloaded_bytes
+            # The decision's own arithmetic, on the LOUD line. pgw#1595: these
+            # lived at INFO and vanished at the endpoint's WARNING level, so the
+            # only surviving diagnostic was the misleading one.
+            applied["plan_budget_gb"] = plan.budget_bytes / _GIB
+            applied["reserve_gb"] = float(_LAST_RESERVE.get("reserve_gb", 0.0))
+            applied["reserve_source"] = str(
+                _LAST_RESERVE.get("reserve_source", "default"))
+            applied["plan_peak_gb"] = plan.transient_peak_bytes / _GIB
+            for _k, _lbl in (("attr_alloc_bytes", "attr_alloc_gb"),
+                             ("attr_cache_bytes", "attr_cache_gb"),
+                             ("attr_ctx_bytes", "attr_ctx_gb")):
+                if _k in probe_facts:
+                    applied[_lbl] = float(probe_facts[_k]) / _GIB
+            probe_free = probe_facts.get("probe_free_bytes")
+            if probe_free is not None:
+                # Probe SUCCESS was `log.info` and therefore inaudible, which
+                # makes "probe passed" and "probe never ran" the same picture
+                # (pgw#1559 class). It is a number now, on the loud line.
+                applied["probe_free_gb"] = float(probe_free) / _GIB
             setattr(pipeline, _COZY_MODE_ATTR, "partial_resident")
-            _report_offload_engaged(pipeline, "partial_resident", applied, log)
+            _report_offload_engaged(
+                pipeline, "partial_resident", applied, log,
+                plan_free_gb=plan.free_bytes / _GIB,
+            )
             return applied
         # Same discipline as `partial_stream`: a rung the operator was told
         # about and did not get is a placement lie. Confess and descend.
@@ -2689,8 +2766,28 @@ def apply_low_vram_config(
 
 
 def _applied_summary(applied: Dict[str, Any]) -> str:
-    keys = [k for k, v in applied.items() if v and k not in ("mode", "already_applied")]
-    return ",".join(keys) or "none"
+    """The engaged savers, and the numbers beside them — TYPED APART.
+
+    pgw#1586 item 3: this used to print the KEY of anything truthy, so pgw#1577's
+    two DATA entries rendered as if they were savers that engaged
+    (``vae_slicing,partial_resident,partial_resident_offloaded,partial_resident_bytes``
+    — four names for two techniques). The distinction is by TYPE, not by an
+    allowlist, so the next data entry anyone adds cannot masquerade either.
+    """
+    names: List[str] = []
+    values: List[str] = []
+    for k, v in applied.items():
+        if k in ("mode", "already_applied") or not v:
+            continue
+        if isinstance(v, bool):
+            names.append(k)
+        elif isinstance(v, float):
+            values.append(f"{k}={v:.2f}")
+        elif isinstance(v, (list, tuple)):
+            values.append(f"{k}={'+'.join(str(x) for x in v)}")
+        else:
+            values.append(f"{k}={v}")
+    return ",".join(names + values) or "none"
 
 
 def _should_auto_disk_offload() -> bool:

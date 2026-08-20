@@ -104,15 +104,36 @@ PARTIAL_RESIDENT_UNARMED_PHASE = "partial_resident_unarmed"
 _TRANSIENT_RESERVE_BYTES = 512 * (1 << 20)
 
 #: The activation headroom this rung reserves, and it is NOT
-#: ``memory._DEFAULT_SAFETY_MARGIN_GB``. That 2.0 GiB is a PLACEMENT heuristic
-#: for the resident-vs-offload decision, deliberately pessimistic because it
-#: guards a rung with no offload at all. Here the measurement exists: pgw#1570
-#: recorded SDXL 1024^2 batch-2 CFG at a 5956 MiB peak with 5437 MiB of weights
-#: resident — **519 MiB of activations**. 1.25 GiB is 2.4x that, and holding
-#: back 2.0 would refuse the plan that keeps the denoiser resident, which is
-#: Paul's ruling inverted: *"if the space is available, and it helps us run
-#: faster, why wouldn't varena take it?"*
-PARTIAL_RESIDENT_RESERVE_GB = 1.25
+#: ``memory._DEFAULT_SAFETY_MARGIN_GB``'s twin by accident any more — see below.
+#:
+#: ⚠️ **RAISED 1.25 -> 2.00 GiB, 2026-08-20 (pgw#1595, coordinator ruling). THE 1.25 WAS
+#: DERIVED FROM THE WRONG RESIDENCY CONFIGURATION AND WAS UNDER-SIZED FROM THE DAY IT
+#: SHIPPED.** It came from pgw#1570's ``model_offload`` run — 5956 MiB peak over 5437 MiB of
+#: weights, so **519 MiB** of activations. That number does not transfer to THIS rung, and
+#: pgw#1586's own GREEN arm proves it: 7540 MiB peak over 5693 MiB of resident weights is
+#: **1847 MiB = 1.80 GiB**, 3.6x the figure the constant was built on.
+#:
+#: The two configurations differ in the allocator, not in the maths. Under ``model_offload``
+#: the denoiser is freed and re-allocated every request, so the pool churns and blocks are
+#: reused; under ``partial_resident`` the weights are PINNED in the pool for the process's
+#: life and activations must come out of what is left, so the high-water mark carries
+#: fragmentation the offloaded rung never pays.
+#:
+#: 2.00 = the measured 1.80 plus margin. It is also what the safer plan needs: at 2.00 the
+#: search takes BOTH encoders (peak 6.70 GiB, ~1.1 GiB of headroom) instead of the single
+#: encoder the 1.25 admitted (peak 6.95, **268 MB** of headroom — the configuration that
+#: survived pgw#1586's leg by 13.5 MB and thrashed pgw#1595's by 6.6 MB).
+#:
+#: **CONSEQUENCE, STATED RATHER THAN DISCOVERED LATER:** the rung needs
+#: ``free - reserve >= 5.31 GiB`` (the forced unet+vae set), so at 2.00 it is only available
+#: above **~7.31 GiB free**. On this 7.62 GiB card that means a nearly-empty card and the rung
+#: will often REFUSE to ``model_offload`` — which is the honest answer, not a regression. On
+#: fleet cards (12/16/24 GiB) SDXL never demotes this far and none of this applies.
+#:
+#: **TEMPORARY.** This is a constant standing in for a measurement, sized to the worst shape
+#: we have actually run. It is replaced by the per-endpoint measured peak (pgw#1586 item (c),
+#: ``reserve_source=measured``) as soon as that lands.
+PARTIAL_RESIDENT_RESERVE_GB = 2.00
 
 #: What the ON-CARD PROBE demands still be free with the largest evicted
 #: component onloaded. The arithmetic above is an ESTIMATE — measured on the
@@ -492,6 +513,41 @@ def _install_residency_hooks(
     log.debug("partial_resident: hooks installed for %s", ",".join(parked))
 
 
+def _placement_attribution(torch_mod: Any) -> Dict[str, int]:
+    """Split what the PROCESS holds on the card into its four real parts.
+
+    pgw#1586: the budget subtracts a reserve from DRIVER-level free
+    (``mem_get_info``), but the resident SET is sized in WEIGHT BYTES — so
+    everything the process holds that is not a weight is spent out of the
+    reserve before the first activation, invisibly. Measured on the campaign
+    card: arithmetic said ~2.1 GiB should remain for activations and the probe
+    read 0.45. Attribution, not inference, is the only way to say where the
+    difference went, so the four parts are read from the allocator itself:
+
+    * ``alloc`` — live tensors. The weights, and what the plan actually sized.
+    * ``cache`` — ``reserved - allocated``: blocks the allocator holds and WILL
+      reuse for activations, but which driver-free counts as gone. A parked
+      component's device blocks land here: ``park()`` drops the reference, the
+      caching allocator keeps the block, and ``mem_get_info`` never sees it come
+      back without ``empty_cache()``.
+    * ``ctx`` — ``(total - driver_free) - reserved``: the CUDA context, cuDNN and
+      cuBLAS workspaces, and anything else outside the caching allocator.
+    * ``driver_free`` — what a fresh allocation can take from the driver.
+    """
+    out: Dict[str, int] = {}
+    try:
+        alloc = int(torch_mod.cuda.memory_allocated())
+        reserved = int(torch_mod.cuda.memory_reserved())
+        driver_free, total = torch_mod.cuda.mem_get_info()
+    except Exception:  # noqa: BLE001 - attribution must never fail a placement
+        return out
+    out["attr_alloc_bytes"] = alloc
+    out["attr_cache_bytes"] = max(0, reserved - alloc)
+    out["attr_ctx_bytes"] = max(0, (int(total) - int(driver_free)) - reserved)
+    out["attr_driver_free_bytes"] = int(driver_free)
+    return out
+
+
 def probe_plan(
     parked: Dict[str, ParkedComponent], *, free_bytes_now: Any,
     floor_bytes: int = _PROBE_FLOOR_BYTES,
@@ -510,8 +566,33 @@ def probe_plan(
     worst = max(parked.values(), key=lambda c: c.bytes)
     worst.onload()
     free = int(free_bytes_now())
+    cache = 0
+    try:
+        import torch
+
+        cache = int(_placement_attribution(torch).get("attr_cache_bytes", 0))
+    except Exception:  # noqa: BLE001 - a probe that cannot attribute still probes
+        cache = 0
     worst.park()
-    return free >= floor_bytes, free
+    # pgw#1586. THE FLOOR IS CHECKED AGAINST WHAT ACTIVATIONS CAN ACTUALLY HAVE,
+    # WHICH IS NOT DRIVER-FREE. A parked component's blocks stay in the caching
+    # allocator's pool: `park()` drops the reference, the allocator keeps the
+    # block, and `mem_get_info` never sees it return. So the same bytes were
+    # counted as freed by the plan and as used by this probe. Measured on the
+    # card: driver_free 0.45 + reusable cache 1.56 = 2.01 GiB against a 2.00 GiB
+    # reserve — the reserve was honoured all along and the probe was reading a
+    # number 1.56 GiB too small.
+    #
+    # ⚠️ CACHE IS *SOFT* AVAILABILITY, NOT A HARD BUDGET TERM. 1.56 GiB of
+    # cached blocks is not 1.56 GiB of CONTIGUOUS space, and the 214 allocator
+    # retries this leg logged ARE that discount showing up at runtime — the
+    # allocator freeing and remapping segments that do not fit the requested
+    # activation. Counting it here is right because the bug being fixed is a
+    # SPURIOUS REFUSAL and the failure mode past the probe is retries-and-serve,
+    # not a fatal (degrade-never-OOM holds). Do NOT promote this term into a
+    # hard budget: the measured-placement work should treat it as soft, with the
+    # retry count as the natural signal for how soft.
+    return (free + cache) >= floor_bytes, free
 
 
 def parks_module(target: Any) -> bool:
@@ -550,6 +631,7 @@ def apply_component_residency(
     device: Any,
     log: logging.Logger,
     free_bytes_now: Any = None,
+    facts: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Arm ``plan`` on ``pipeline``, PROBING it on the card first. Returns
     whether it armed.
@@ -598,6 +680,13 @@ def apply_component_residency(
             return False
         if free_bytes_now is not None:
             ok, free = probe_plan(parked, free_bytes_now=free_bytes_now)
+            # The probe's MEASUREMENT, handed back so the caller can put it on
+            # the loud line. pgw#1595: success was `log.info` and inaudible at
+            # the endpoint's WARNING level, which makes "probe passed" and
+            # "probe never ran" the same picture (pgw#1559 class).
+            if facts is not None:
+                facts["probe_free_bytes"] = int(free)
+                facts.update(_placement_attribution(torch))
             if not ok:
                 log.warning(
                     "partial_resident: PROBE REFUSED %s — onloading the largest "

@@ -62,14 +62,13 @@ def _plan(sizes, *, free_gb, budget_gb=None, forced=(), denoiser="unet", order=N
 # --------------------------------------------------------------------------
 
 
-def test_sdxl_on_a_7_3_gib_card_keeps_the_denoiser_and_evicts_the_encoders():
-    # free 7.3, reserve 1.25 -> budget 6.05. Weights 6.95; must free 0.90, and
-    # `vae` is forced resident on this family (the `force_upcast` one), so the
-    # fewest bytes that clear the BUDGET is {text_encoder_2} at 1.39 — whose
-    # transient peak is 6.95 of 7.3, 96%. MEASURED: that plan OOMs in the
-    # onload. The transient ceiling rejects it and the search takes both
-    # encoders at 1.64 for a 6.70 peak.
-    plan = _plan(_SDXL, free_gb=7.3, forced=("vae",), order=_SDXL_ORDER)
+def test_sdxl_on_a_7_45_gib_card_keeps_the_denoiser_and_evicts_the_encoders():
+    # free 7.45, reserve 2.00 -> budget 5.45. `vae` is forced resident on this
+    # family (the `force_upcast` one) and unet+vae alone is 5.31, so the budget
+    # admits only the plan that evicts BOTH encoders: resident 5.31, peak 6.70.
+    # The single-encoder plan (resident 5.56) is excluded because 5.56 + the
+    # 2.00 reserve exceeds 7.45 — which is exactly what the reserve is for.
+    plan = _plan(_SDXL, free_gb=7.45, forced=("vae",), order=_SDXL_ORDER)
     assert plan.fits, plan.refusal
     assert plan.offloaded == ("text_encoder", "text_encoder_2")
     assert plan.resident == ("unet", "vae")
@@ -86,7 +85,10 @@ def test_a_busier_card_refuses_the_rung_rather_than_admitting_a_plan_that_ooms()
     # measured on this card and it is an OOM inside `ParkedComponent.onload`.
     plan = _plan(_SDXL, free_gb=7.1, forced=("vae",), order=_SDXL_ORDER)
     assert not plan.fits
-    assert "transient ceiling" in plan.refusal
+    # At the truthful 2.00 reserve the denoiser plus its activations no longer
+    # fit at all on this card, so the refusal comes from the BUDGET rather than
+    # the transient ceiling. Falling to `model_offload` is the honest answer.
+    assert "forced-resident set alone" in plan.refusal
 
 
 def test_fewest_bytes_wins_over_fewest_components():
@@ -119,7 +121,7 @@ def test_forced_resident_components_are_never_evicted():
     # own `_exclude_from_cpu_offload` does NOT achieve this — it is consulted
     # only for components absent from `model_cpu_offload_seq`, and `vae` is in
     # SDXL's — so this rung enforces it itself.
-    plan = _plan(_SDXL, free_gb=7.3, forced=("vae",), order=_SDXL_ORDER)
+    plan = _plan(_SDXL, free_gb=7.45, forced=("vae",), order=_SDXL_ORDER)
     assert plan.fits, plan.refusal
     assert "vae" not in plan.offloaded
 
@@ -137,7 +139,7 @@ def test_the_transient_ceiling_rejects_a_plan_the_budget_alone_admits():
 
 
 def test_a_plan_that_fits_reports_the_arithmetic_it_used():
-    plan = _plan(_SDXL, free_gb=7.3, forced=("vae",), order=_SDXL_ORDER)
+    plan = _plan(_SDXL, free_gb=7.45, forced=("vae",), order=_SDXL_ORDER)
     assert plan.resident_bytes + plan.offloaded_bytes == sum(_SDXL.values())
     assert plan.resident_bytes <= plan.budget_bytes
     assert plan.transient_peak_bytes == plan.resident_bytes + _SDXL["text_encoder_2"]
@@ -397,3 +399,210 @@ def test_the_placement_census_reads_live_devices_not_the_flag_that_set_them():
         "a flag, not the tensors"
     )
     assert "vae@cpu" in moved
+
+
+# --------------------------------------------------------------------------
+# pgw#1595 / pgw#1586 — the confession states the DECISION, and the reserve
+# comes from the REQUEST
+# --------------------------------------------------------------------------
+
+
+def test_the_applied_summary_separates_techniques_from_their_numbers():
+    """pgw#1586 item 3. It used to print the KEY of anything truthy, so two data
+    entries rendered as savers that engaged — four names for two techniques. The
+    split is by TYPE so the next data entry cannot masquerade either."""
+    from gen_worker.models.memory import _applied_summary
+
+    line = _applied_summary({
+        "mode": "partial_resident",
+        "vae_slicing": True,
+        "partial_resident": True,
+        "vae_tiling": False,
+        "partial_resident_offloaded": ["text_encoder_2"],
+        "partial_resident_bytes": 1492501790,
+        "plan_budget_gb": 6.05,
+    })
+    techniques = [p for p in line.split(",") if "=" not in p]
+    assert techniques == ["vae_slicing", "partial_resident"], (
+        "a data entry is being counted as an engaged technique"
+    )
+    assert "partial_resident_offloaded=text_encoder_2" in line
+    assert "plan_budget_gb=6.05" in line
+
+
+def test_the_confession_reports_the_free_vram_the_DECISION_saw():
+    """RED ARM for pgw#1595, which was filed against the wrong cause because of
+    exactly this. The rung is chosen against free VRAM BEFORE placement; the old
+    line re-read it AFTER, so a plan made at 7.3 GiB printed `free_gb=0.4`
+    beside its own name."""
+    import gen_worker.models.memory as m
+
+    seen = {}
+
+    def fake_line(**kw):
+        seen.update(kw)
+        return "line"
+
+    real_line, real_free, real_size = (
+        m.transition_line, m.get_available_vram_gb, m.estimate_pipeline_size_gb)
+    m.transition_line = fake_line
+    m.get_available_vram_gb = lambda *a, **k: 0.4       # post-placement truth
+    m.estimate_pipeline_size_gb = lambda *a, **k: 6.5
+    try:
+        m._report_offload_engaged(
+            _pipeline(), "partial_resident", {"partial_resident": True},
+            logging.getLogger("t"), plan_free_gb=7.3,
+        )
+    finally:
+        m.transition_line, m.get_available_vram_gb, m.estimate_pipeline_size_gb = (
+            real_line, real_free, real_size)
+
+    assert seen["free_gb"] == 7.3, (
+        "the confession printed the post-placement re-read as the decision's "
+        "input — this is the bug that cost pgw#1595 a root cause"
+    )
+    assert "free_after_gb=0.4" in seen["detail"], (
+        "the post-placement figure is a real fact and must still be reported"
+    )
+
+
+def test_a_declared_per_request_peak_raises_the_reserve_above_the_constant():
+    """pgw#1595. The reserve was a constant from ONE workload shape, and a
+    28-step job overran it. The endpoint's declared peak was already in the
+    caller and was being dropped."""
+    import gen_worker.models.memory as m
+    from gen_worker.models.partial_resident import PARTIAL_RESIDENT_RESERVE_GB
+
+    budgets = []
+    real_free, real_unhook = m.get_available_vram_gb, m.unhookable_components
+
+    import gen_worker.models.partial_resident as pr
+    real_pfp = pr.plan_for_pipeline
+
+    def spy(pipeline, *, budget_bytes, **kw):
+        budgets.append(budget_bytes / (1 << 30))
+        return real_pfp(pipeline, budget_bytes=budget_bytes, **kw)
+
+    pr.plan_for_pipeline = spy
+    m.get_available_vram_gb = lambda *a, **k: 8.0
+    m.unhookable_components = lambda *a, **k: []
+    try:
+        pipe = _pipeline()
+        m._plan_partial_resident(pipe, logging.getLogger("t"))
+        m._plan_partial_resident(
+            pipe, logging.getLogger("t"), peak_vram_gb=9.0, model_size_gb=6.5)
+    finally:
+        pr.plan_for_pipeline = real_pfp
+        m.get_available_vram_gb, m.unhookable_components = real_free, real_unhook
+
+    assert len(budgets) == 2
+    assert abs(budgets[0] - (8.0 - PARTIAL_RESIDENT_RESERVE_GB)) < 0.01, (
+        "the constant is no longer the floor when nothing is declared")
+    # declared 9.0 total - 6.5 weights = 2.5 GiB of activations, above the 1.25
+    # constant, so the budget must shrink by the declared figure instead.
+    assert abs(budgets[1] - (8.0 - 2.5)) < 0.01, (
+        "the declared per-request peak was ignored — the defect pgw#1595 found")
+
+
+def test_the_probe_reports_its_measurement_even_when_it_passes():
+    """pgw#1559 class, in this rung's own code: success was INFO and inaudible
+    at the endpoint's WARNING level, so a passing probe and a probe that never
+    ran looked identical."""
+    pipe = _pipeline()
+    plan, _ = _arm(pipe)
+    facts: dict = {}
+    apply_component_residency(
+        pipe, plan, device="cpu", log=logging.getLogger("t"),
+        free_bytes_now=lambda: 64 * _MIB, facts=facts,
+    )
+    assert facts.get("probe_free_bytes") == 64 * _MIB, (
+        "a passing probe left no measurement behind"
+    )
+
+
+def test_the_production_planner_leaves_room_for_the_reserve_it_planned_against():
+    """THE INVARIANT THE RESERVE EXISTS FOR — asserted through the PRODUCTION
+    path, `_plan_partial_resident`, because that is where the budget formula
+    lives.
+
+    An earlier version of this test called `plan_component_residency` directly
+    and computed the budget itself, which made it TAUTOLOGICAL: it passed with
+    the reserve reverted AND with the budget formula stripped of its reserve
+    subtraction. A test that cannot fail is not a test. This one goes through
+    the real planner, so breaking `budget = free - reserve` turns it red.
+
+    The denoise phase holds resident weights and activations at once, so
+    `resident + reserve <= free` must hold for every admitted plan — otherwise a
+    plan fits its own budget and still OOMs mid-denoise, which is what pgw#1595
+    found on the card.
+    """
+    import gen_worker.models.memory as m
+
+    pipe = _pipeline()
+    total = sum(
+        p.numel() * p.element_size()
+        for c in pipe.components.values()
+        if isinstance(c, torch.nn.Module) for p in c.parameters()
+    )
+    # Sit free VRAM just above the reserve so this toy tree is genuinely over
+    # budget and eviction is forced, exactly as SDXL is on the real card.
+    free_bytes = int(PARTIAL_RESIDENT_RESERVE_GB * _GIB) + 1200
+    real_free, real_unhook = m.get_available_vram_gb, m.unhookable_components
+    m.get_available_vram_gb = lambda *a, **k: free_bytes / _GIB
+    m.unhookable_components = lambda *a, **k: []
+    try:
+        plan = m._plan_partial_resident(pipe, logging.getLogger("t"))
+    finally:
+        m.get_available_vram_gb, m.unhookable_components = real_free, real_unhook
+
+    assert plan is not None, (
+        "the planner admitted nothing where eviction was required — the budget "
+        "is no longer being reduced by the reserve"
+    )
+    assert plan.offloaded, "a plan that evicts nothing cannot be over budget"
+    assert plan.resident_bytes + total - total == plan.resident_bytes
+    headroom = free_bytes - plan.resident_bytes
+    assert headroom >= PARTIAL_RESIDENT_RESERVE_GB * _GIB, (
+        f"the admitted plan leaves {headroom} bytes for activations, under the "
+        f"{PARTIAL_RESIDENT_RESERVE_GB} GiB reserve it was planned against"
+    )
+
+
+def test_the_probe_counts_the_reusable_allocator_pool_as_available():
+    """pgw#1586. A parked component's blocks stay in the caching allocator's
+    pool — `park()` drops the reference, the allocator keeps the block, and
+    `mem_get_info` never sees it return. The plan counted those bytes as freed
+    while this probe counted them as used, so the SAME bytes were both.
+
+    Measured on the card: driver_free 0.45 + reusable cache 1.56 = 2.01 GiB
+    against a 2.00 GiB reserve. Reading driver-free alone made a workable plan
+    look 1.56 GiB short, which is a SPURIOUS REFUSAL — the conservative
+    direction, which is why nothing had failed from it yet.
+    """
+    import gen_worker.models.partial_resident as pr
+
+    pipe = _pipeline()
+    plan, armed = _arm(pipe)
+    assert armed
+    parked = getattr(pipe, PARKED_COMPONENTS_ATTR)
+
+    floor = 256 * _MIB
+    driver_free = 100 * _MIB          # on its own, below the floor
+    cache = 400 * _MIB                # reusable pool the allocator still holds
+
+    real_attr = pr._placement_attribution
+    pr._placement_attribution = lambda torch_mod: {"attr_cache_bytes": cache}
+    try:
+        ok, reported = pr.probe_plan(
+            parked, free_bytes_now=lambda: driver_free, floor_bytes=floor)
+    finally:
+        pr._placement_attribution = real_attr
+
+    assert ok, (
+        "the probe refused a plan with 500 MiB genuinely available to "
+        "activations because only 100 MiB of it was visible to driver-free"
+    )
+    assert reported == driver_free, (
+        "the reported number must stay the DRIVER-free figure — the soft cache "
+        "term belongs in the decision, not in what the log claims is free"
+    )
