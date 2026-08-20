@@ -490,24 +490,12 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
     parser.set_defaults(_handler=run_compile)
 
 
-def _this_sm() -> str:
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return ""
-        major, minor = torch.cuda.get_device_capability()
-        return f"sm_{major}{minor}"
-    except Exception:  # noqa: BLE001
-        return ""
-
-
 def run_compile(args: argparse.Namespace) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(message)s", stream=sys.stderr, force=False,
     )
     endpoint_dir = Path(args.endpoint_dir).resolve()
-    sm = args.sm or _this_sm()
+    sm = args.sm or workspace.host_sm()
     if not sm:
         sys.stderr.write(
             "gen-worker compile: no --sm and no visible CUDA device. Compiled "
