@@ -457,6 +457,18 @@ class TraceRequestContext:
 
         return ImageAsset(ref=f"trace://image.{format}")
 
+    #: pgw#1522. This context's outputs are DISCARDED BY CONSTRUCTION — every
+    #: `save_*` below is a stub returning a `trace://` ref, so nothing is
+    #: uploaded and nothing banks. The output-integrity floor reads this to
+    #: know it is not judging a render (`output_integrity.judged`): under a
+    #: hollow session the parameters carry no bytes, so a blank frame is the
+    #: only possible output and the floor's verdict, while TRUE, is about the
+    #: substrate rather than the endpoint.
+    #:
+    #: Private because it is a platform fact, not an author input: there is
+    #: deliberately no `ctx.is_trace` for author code to branch on.
+    _outputs_discarded = True
+
     def save_video(self, video: Any, ref: Optional[str] = None, *, format: str = "mp4",
                    **_: Any) -> Any:
         del video

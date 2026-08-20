@@ -196,7 +196,21 @@ def test_a_model_with_no_lane_never_mentions_dtype_at_all():
 # cannot drift apart again.
 
 
-def test_the_derive_bridge_also_survives_a_loader_that_refuses_torch_dtype():
+def test_the_derive_bridge_NEVER_OFFERS_torch_dtype_so_it_cannot_be_refused():
+    """pgw#1512 SUPERSEDES the retry this used to assert, and strengthens it.
+
+    This test pinned the pgw#1447 rescue: the derive bridge offered
+    `torch_dtype=` first, a strict `ModularPipeline` refused it by TypeError,
+    and the bridge retried without and cast afterwards. Paul's per-component
+    passthrough ruling DELETED the offer — the lane's dtype governs only the
+    component its contract describes, resolved per component inside the hollow
+    session — so there is no longer a global cast to be refused.
+
+    The hazard is therefore DESIGNED OUT rather than handled, which is why the
+    assertion inverts instead of relaxing: exactly one attempt, carrying no
+    `torch_dtype` at all. A loader that refuses it is never given the chance.
+    """
+
     from gen_worker.release.trace_context import TraceLoadContext
 
     calls: Dict[str, Any] = {"attempts": []}
@@ -223,8 +237,11 @@ def test_the_derive_bridge_also_survives_a_loader_that_refuses_torch_dtype():
     got = ctx.load(RefusesLikeModularPipeline)
 
     assert isinstance(got, RefusesLikeModularPipeline)
-    assert calls["attempts"] == [["torch_dtype"], []]
-    assert repr(calls["to"]) == "torch.bfloat16", "the derive must honour the lane dtype too"
+    # ONE attempt, and it carried no dtype — so the refusal above never fires.
+    assert calls["attempts"] == [[]]
+    # And no blanket `.to(dtype)` afterwards either: casting the whole object
+    # is the same fabrication by another route (pgw#1512).
+    assert "to" not in calls
 
 
 # ==========================================================================
