@@ -35,8 +35,7 @@ sweep and by the hub, not only by a Python interpreter.
 EDGE. :func:`plan_layout_conversions` and :func:`classify_layout` are fixed
 logic — membership, then reachability — and must never gain a per-format
 branch, a similarity score or a "close enough" fallback. Neither function
-contains a literal handle string, and
-`scripts/lint_compiled_graph_key_layout_fence.py` fails if one appears.
+contains a literal handle string.
 
 **4. Preference is NOT here.** The accepted
 set is a compatibility FILTER whose order carries no preference, and preference
@@ -47,8 +46,8 @@ chooses. A planner that picked "the earliest accepted layout" would be a second
 ordering that can disagree with the first.
 
 The wheel ships this registry EMPTY, like the other five: converters
-are declared by the endpoint that owns the format, registered through
-`load_declaration_module`, and asserted bare by `scripts/check_registry_contract.py`.
+are declared by the endpoint that owns the format and registered through
+`load_declaration_module`.
 """
 
 from __future__ import annotations

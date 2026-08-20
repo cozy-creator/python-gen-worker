@@ -124,9 +124,9 @@ def register(impl: MintSupervision) -> None:
     THE DEPENDENCY POINTS THE OTHER WAY, and it has to. A ``supervision()``
     that imported its own eager implementation — even lazily, even inside the
     function — puts the whole mint lane back in this module's static closure,
-    which puts it back in the adopt-only role's. That is not a theory: it is
-    what ``scripts/lint_serve_role_closure.py`` reported the first two times
-    this seam was written, function-local import and all. So the serve side
+    which puts it back in the adopt-only role's. That is not a theory: the
+    closure walk reported exactly that the first two times this seam was
+    written, function-local import and all. So the serve side
     knows only the Protocol, and :mod:`gen_worker.mint_adapter` — imported by
     the eager-capable process host, never by this role — registers itself.
     """

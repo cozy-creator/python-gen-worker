@@ -19,8 +19,7 @@ that entry loaded, and `current()` raises if that never happened.
 
 Prefer a parameter. `Settings` is passed by parameter wherever the caller has
 one, and this is for the residue: leaf helpers in `models/` with wide fan-in
-from both the worker and the standalone CLI. Every remaining reader is listed,
-classified, in `scripts/config_reads_allowlist.txt`.
+from both the worker and the standalone CLI.
 """
 
 from __future__ import annotations

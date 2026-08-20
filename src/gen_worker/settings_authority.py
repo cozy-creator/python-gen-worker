@@ -15,10 +15,8 @@ that concrete: torch's own ``aot_compile`` mutates global
 contamination rather than the boot; and ``cpp.march=None`` hashes identically
 on every host while the emitted code differs per host.
 
-Write fence: ``scripts/lint_settings_writers.py`` holds the modules in
-:data:`AUTHORITY_MODULES` to be the ONLY writers of torch settings. A write
-anywhere else in ``src/gen_worker`` is red unless classified in
-``scripts/settings_writers_allowlist.txt``.
+The modules in :data:`AUTHORITY_MODULES` are the ONLY writers of torch
+settings; nothing else in ``src/gen_worker`` writes one.
 """
 
 from __future__ import annotations

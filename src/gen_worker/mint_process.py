@@ -878,9 +878,8 @@ __all__ = [
 # (`mint_supervisor`), so there is no `mint_delegate` retry loop giving every
 # attempt a fresh `child-N` directory and re-paying every finished graph specialization.
 # What survives is the request VOCABULARY, and it belongs to the module that
-# owns the child protocol: `scripts/
-# micro_mint_rig.py` (the pre-publish proof harness) and any operator running
-# `python -m gen_worker.mint_child` by hand build a `MintRequest` through it.
+# owns the child protocol: any operator running `python -m gen_worker.mint_child`
+# by hand builds a `MintRequest` through it.
 
 
 @dataclass(frozen=True)

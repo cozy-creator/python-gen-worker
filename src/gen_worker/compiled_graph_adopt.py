@@ -118,8 +118,7 @@ class EagerPhase(StrEnum):
     #: written against its ABSENCE passes unconditionally — which is what
     #: se#780 nearly spent an 80 GB rental discovering.
     #:
-    #: `scripts/phase_enum_census.txt` records the dead set and
-    #: `scripts/lint_phase_enum_emitters.py` stops it growing. WIRE-OR-DELETE
+    #: WIRE-OR-DELETE
     #: per member is a RULING and not a lint decision, because the hub groups
     #: historical `worker_activity_events` by these values.
     #:

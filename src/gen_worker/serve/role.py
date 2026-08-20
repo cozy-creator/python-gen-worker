@@ -21,9 +21,8 @@ THE MODULE SETS, AND WHY THEY LIVE HERE
 ---------------------------------------
 :data:`SERVE_ROLE_MODULES`, :data:`MINT_MACHINERY`, :data:`MODEL_FREE_MODULES`,
 :data:`MODEL_BEARING_SERVE_MODULES`, :data:`FORBIDDEN_LIBRARIES` and
-:data:`OPTIONAL_SERVE_IMPORTS` are read by THREE consumers: the runtime blocker
-(:mod:`gen_worker.serve.guard`), the CI fence
-(``scripts/lint_serve_role_closure.py``) and the tests. pgw#1176's measured
+:data:`OPTIONAL_SERVE_IMPORTS` are read by TWO consumers: the runtime blocker
+(:mod:`gen_worker.serve.guard`) and the tests. pgw#1176's measured
 lesson is that a fence naming symbols in its own string literals rots silently,
 and pgw#824's is that two lists of the same literals drift. So the role's own
 module declares them and everything else — including the fence, which parses
@@ -140,10 +139,8 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
 
 
 #: The serve-role modules that still reach a model library, and this is a
-#: LEDGER, not an allowlist: ``lint_serve_role_closure.py`` asserts every row
-#: really does reach one TODAY, so a row that gets fixed goes red until it is
-#: deleted. The list can only shrink. An owed cut written as prose rots
-#: (pgw#1176); written here it is checked on every PR.
+#: LEDGER, not an allowlist: every row really does reach one TODAY, and the
+#: list can only shrink.
 #:
 #: **Nine rows, TWO causes, and neither is a design question — both are moves
 #: too big to smuggle into the lane that measured them.**

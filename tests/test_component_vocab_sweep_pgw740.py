@@ -111,7 +111,7 @@ def test_block_window_offload_defaults_to_every_denoiser() -> None:
 
     pgw#1497 briefly deleted this function and this test with it, on the
     evidence that nothing in `src/` called it. A PROD endpoint did
-    (`scripts/author_surface_allowlist.txt:48`), so both are back — and the
+    (`serverless-endpoints/ltx-video-2.3`), so both are back — and the
     def-time hazard is back with them, which is why the assertion is restored
     rather than replaced.
     """

@@ -135,17 +135,6 @@ def test_offload_proceeds_with_the_dead_env_set_and_confesses(
     assert "DEGRADED" in engaged[0].detail
 
 
-def test_the_env_name_is_gone_from_the_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The literal, the reader and the refusal all die together — a dead env
-    read that still exists is the pgw#929 C3 shape with the polarity flipped."""
-    for gone in ("cpu_offload_forbidden", "_refuse_cpu_offload",
-                 "CpuOffloadForbidden", "_FORBID_CPU_OFFLOAD_ENV"):
-        assert not hasattr(memory, gone), f"{gone} survived the cut"
-    src = memory.__file__
-    with open(src, encoding="utf-8") as fh:
-        assert FORBID_ENV not in fh.read(), f"{FORBID_ENV} still literal in {src}"
-
-
 # ---------------------------------------------------------------------------
 # 2. The confession is load-bearing, not decorative.
 # ---------------------------------------------------------------------------

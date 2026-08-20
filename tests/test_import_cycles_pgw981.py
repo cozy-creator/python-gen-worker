@@ -23,10 +23,13 @@ from typing import List, NamedTuple, Optional, Tuple
 
 import pytest
 
-# pgw#1310: one home for "which subtrees a guard may not judge" —
-# scripts/_lint_scope.py, shared with the CI lint scanners.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from _lint_scope import is_unowned  # noqa: E402
+# Subtrees a guard may not judge: generated protobuf and byte-identical
+# vendored snapshots (fixed upstream and re-vendored, never edited here).
+UNOWNED_DIRS = ("pb", "_vendor")
+
+
+def is_unowned(path: Path, root: Path) -> bool:
+    return any(name in path.relative_to(root).parts for name in UNOWNED_DIRS)
 
 
 SRC = Path(__file__).resolve().parents[1] / "src"

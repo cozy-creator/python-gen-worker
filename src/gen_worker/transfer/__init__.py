@@ -26,9 +26,8 @@ duration is what got correctly-downloading pods condemned by the hub's
 wait on the first object's callback.
 
 **This module deliberately re-exports NOTHING.** A convenience facade here
-would not be free: `scripts/lint_unreached_surface.py` resolves a use to its
-DEFINING module, so surface reached only through a re-export reads to that
-guard as dead code. Measured, not assumed -- adding the facade made
+would not be free: a reachability sweep resolves a use to its DEFINING module,
+so surface reached only through a re-export reads as dead code. Measured, not assumed -- adding the facade made
 `TransferJournal` report as unreached while `hubio/client.py` was constructing
 one. Import from `.grants` or `.journal`.
 """

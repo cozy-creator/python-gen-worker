@@ -196,9 +196,9 @@ def test_one_file_is_a_file_and_not_a_directory_holding_it(
 def test_the_seam_is_the_only_way_the_hatch_is_reached(tmp_path: Path) -> None:
     """A state assertion about the census, not an intent.
 
-    `scripts/lint_materialization_hatch.py` is the enforcement; this pins the
-    fact the lint's `author-slot-directory` row now has exactly one first-party
-    occupant, so a second one is a decision someone makes on purpose.
+    This pins the fact that the `author-slot-directory` hatch row has exactly
+    one first-party occupant, so a second one is a decision someone makes on
+    purpose.
     """
 
     source = Path(materialized_view.__file__).read_text()

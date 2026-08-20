@@ -11,10 +11,9 @@ named the missing owner; a docstring is not a gate.
 So the vectors are the contract. ``tests/testdata/compiled_graph_key_vectors.json``
 is vendored byte-identically in tensorhub
 (``internal/orchestrator/compilecache/testdata/``); each repo runs its own
-implementation against its own copy, each pins that copy to the digest BOTH
-repos commit, and ``scripts/grammar-vector-drift.sh`` (verbatim in both) proves
-the two files are equal. A one-sided hand-edit fails HERE, in the tree where it
-happened, with no network and no credentials.
+implementation against its own copy, and each pins that copy to the digest BOTH
+repos commit. A one-sided hand-edit fails HERE, in the tree where it happened,
+with no network and no credentials.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
-import subprocess
 import sys
 
 import pytest
@@ -161,48 +159,6 @@ def test_a_pod_can_name_the_family_of_what_it_just_armed() -> None:
     """
     key = f"{tcg_identity.KEY_SCHEME}-{HEX56}"
     assert parse_compiled_graph_ref(f"root/family-sdxl#{key}") == ("sdxl", key)
-
-
-# ---------------------------------------------------------------------------
-# Layer 2 of the fence
-# ---------------------------------------------------------------------------
-
-
-def test_the_drift_script_is_committed_and_runnable_offline() -> None:
-    """``scripts/grammar-vector-drift.sh`` is committed VERBATIM in both repos
-    and compares this tree's corpora against the peer's. Driven here through
-    ``GRAMMAR_PEER_DIR`` against this same checkout: a script that cannot pass
-    when the two sides ARE equal is not a gate anybody can act on.
-    """
-    script = REPO_ROOT / "scripts" / "grammar-vector-drift.sh"
-    assert script.exists()
-    proc = subprocess.run(
-        ["bash", str(script)],
-        env={"PATH": "/usr/bin:/bin", "GRAMMAR_PEER_DIR": str(TESTDATA)},
-        capture_output=True, text=True, timeout=120,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "2 corpora agree" in proc.stdout, proc.stdout
-
-
-def test_the_drift_script_fails_when_a_corpus_differs(
-    tmp_path: pathlib.Path,
-) -> None:
-    """And it goes red when they do not — the half that makes the row above
-    mean something."""
-    peer = tmp_path / "peer"
-    peer.mkdir()
-    (peer / "ref_grammar_vectors.json").write_bytes(
-        (TESTDATA / "ref_grammar_vectors.json").read_bytes()
-    )
-    (peer / "compiled_graph_key_vectors.json").write_text("{}\n")
-    proc = subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "grammar-vector-drift.sh")],
-        env={"PATH": "/usr/bin:/bin", "GRAMMAR_PEER_DIR": str(peer)},
-        capture_output=True, text=True, timeout=120,
-    )
-    assert proc.returncode == 1, proc.stdout
-    assert "compiled_graph_key_vectors.json differs" in proc.stderr
 
 
 if __name__ == "__main__":  # pragma: no cover

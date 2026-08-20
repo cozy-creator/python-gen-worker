@@ -40,14 +40,11 @@ name: CI
 #
 # The old `paths-ignore: ["**.md"]` is gone, and no `paths:` filter replaces it.
 # A path filter is precisely what made proto-contract.yaml silently absent from
-# #466, and three of the gates below scan the WHOLE TREE:
-# `lint_unreached_surface.py` walks the public surface for unreached symbols,
-# `lint_config_reads.py` censuses every `os.environ` access against
-# `scripts/config_reads_allowlist.txt`, and the gw#666 guards inside the suite
-# scan all of `tests/` for fixed-deadline waits. Each is invalidated COLLATERALLY
-# — by a change touching none of the files it reads. pgw#949 is exactly that:
-# pgw#943 added ONE new test file and broke two guards in a file it never opened.
-# Any path filter narrow enough to be useful is the filter that misses these.
+# #466, and the gw#666 guards inside the suite scan all of `tests/` for
+# fixed-deadline waits — invalidated COLLATERALLY by a change touching none of
+# the files they read (pgw#949: ONE new test file broke two guards in a file it
+# never opened). Any path filter narrow enough to be useful is the filter that
+# misses these.
 #
 # A docs-only PR therefore runs the full suite. On an unmetered public repo that
 # is the cheaper mistake: "zero checks on this PR" is the state this issue exists
@@ -67,19 +64,10 @@ name: CI
 #   * CROSS-REPO CONTRACT DRIFT against tensorhub's canonical proto. That is
 #     proto-contract.yaml layer 1 here and layer 2 in tensorhub, by design.
 #
-# The list above used to be the only place a reader could learn what a green run
-# did not measure, and it could only ever name CLASSES. pgw#966 makes the actual
-# set visible per run: the two pytest steps carry `-rs` (reasons in the log) and
-# `--skip-census-out=` (the same set as JSON), and the guard after them refuses
-# an unclassified skip and refuses a `CI-MUST-RUN` row that skipped. Read
-# `scripts/skip_census.txt` for what is deliberately not measured here and where
-# each of those IS measured — starting with: nothing on a GPU is, anywhere.
-#
 # What it DOES catch is the class that has actually been costing lanes time:
-# a behavioural regression in the ~3,000-test suite, and the three tree-scanning
-# guards. pgw#950's own lane found a 57-failure regression only by running a
-# baseline differential BY HAND against a clean base; mypy, ruff and the three
-# script guards would every one of them have passed it. That is why the full
+# a behavioural regression in the ~3,000-test suite. pgw#950's own lane found a
+# 57-failure regression only by running a baseline differential BY HAND against
+# a clean base; mypy and ruff would both have passed it. That is why the full
 # suite is on the PR trigger and not just the cheap half.
 #
 # pgw#1264 (2026-08-14, Paul's ruling): `fast gates` is the master ruleset's
@@ -188,67 +176,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # pgw#1521 — SECOND, before any guard, and stdlib-only so it can be.
-      # `fast gates` is this repo's only required context and it bundles ~25
-      # unrelated guards, so at the merge button "somebody else's master-red"
-      # and "a guard is refusing MY OWN new file" are indistinguishable — and
-      # an `--admin` granted for the first silently buys the second. Measured
-      # four times in one night (pgw#1521); pgw has no post-merge CI, so a
-      # guard can stop being enforced and nothing detects it.
-      #
-      # Nothing new is computed: every one of those guards already names the
-      # file it refuses. This step resolves the base ONCE — a PR checkout is
-      # shallow at the merge commit, so resolving it costs a fetch — and every
-      # guard below reads the answer through `scripts/_lint_side.py` and prints
-      # the side on the failing line itself.
-      #
-      # A base it cannot resolve prints as UNKNOWN, never as "not yours".
-      - name: pgw#1521 - name the files THIS diff touches
-        run: |
-          python3 scripts/_lint_side.py --selftest
-          python3 scripts/_lint_side.py --emit "$RUNNER_TEMP/pgw1521-diff-files.txt"
-          echo "PGW1521_DIFF_FILES=$RUNNER_TEMP/pgw1521-diff-files.txt" >> "$GITHUB_ENV"
-
-      # pgw#1477 — FIRST OF THE GUARDS, ahead of uv itself, and stdlib-only so
-      # it can be. (Only pgw#1521's attribution step precedes it, because every
-      # guard from here down — this one included — reads its answer.)
-      # `uv sync --locked` (two steps down, and the first step of every other
-      # job in every other workflow) dies on a stale lock with a message that
-      # names neither file and no rev — so a torchcg re-vendor that moved
-      # pyproject.toml's pin and not uv.lock turned `fast gates`, `tests` and
-      # `drift` red simultaneously, at install, on PRs that had touched
-      # neither file. Twice on 2026-08-19, twenty minutes apart. Nothing in the
-      # required set could report it: a gate cannot fail on something it never
-      # got far enough to read.
-      #
-      # ~30 ms, no venv, no network. The `--selftest` arm runs here only, and
-      # is the reason this line is evidence: it builds a divergent tree in a
-      # tempdir and fails if the check stays green on it.
+      # pgw#1477 — FIRST, ahead of uv itself, and stdlib-only so it can be.
+      # `uv sync --locked` dies on a stale lock with a message that names
+      # neither file and no rev, so a re-vendor that moved pyproject.toml's pin
+      # and not uv.lock turns every job red at install. ~30 ms, no venv.
       - name: pgw#1477 guard - uv.lock agrees with pyproject.toml's git pins
-        run: |
-          python3 scripts/lint_lock_pin_agreement.py --selftest
-          python3 scripts/lint_lock_pin_agreement.py
+        run: python3 scripts/lint_lock_pin_agreement.py
 
       # pgw#1264: `@v6` HERE ONLY, and the version is the point. `@v4` bundles
       # `@actions/cache` v3, which speaks the cache API GitHub retired, so
       # `enable-cache: true` on `@v4` is dead config that reads as a working
-      # cache — it warns `Failed to restore: Cache service responded with 400`,
-      # saves nothing, and turns no step red. The other three workflows stay on
-      # `@v4`: none is the required context, so an unused bump is risk with no
-      # payoff.
+      # cache. The other workflows stay on `@v4`: none is the required context.
       #
       # Cache scope note: Actions caches are branch-scoped, and a merge-group ref
       # is nobody's child — so the entry that makes queue runs fast is the one
-      # written by a run on `master`, i.e. the nightly below. Until the first
-      # nightly lands, expect a miss and the full install.
+      # written by a run on `master`, i.e. the nightly below.
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
-          # Keyed on uv.lock's hash (setup-uv's default glob): a lock bump
-          # misses once and repopulates. Only this job asks for the cache —
-          # `tests` is off the merge path now, and two jobs writing one key just
-          # race to save the same entry.
           enable-cache: true
 
       - name: Set up Python
@@ -256,401 +202,49 @@ jobs:
 
       # --locked (pgw#524 item 6): resolve exactly what uv.lock pins — the
       # same resolution publish.yaml uses on tag push, so PR-CI green
-      # actually implies publish green (fails loudly instead if uv.lock
-      # drifts from pyproject.toml, the 0.18.0 silent-publish-failure root
-      # cause). Both jobs use this exact line; keep them identical.
+      # actually implies publish green. Both jobs use this exact line.
       - name: Install dependencies
         run: uv sync --locked --extra dev
 
-      # GATING (gw#497): the tree is mypy-clean (zeroed 2026-07-11 — the
-      # #356-era 88-error debt is gone; no baseline, no continue-on-error).
-      # A new mypy error is a new seam: fix it, don't ignore it.
-      #
-      # pgw#1202: `strict = true` is now the DEFAULT for every module, so a
-      # module added tomorrow is born strict. 101 modules carry a named
-      # single-flag exemption; the guard below is what stops that list growing.
-      #
-      # pgw#1202 PR 2: the TEST tree is checked too — that is where the doubles
-      # that lie about production contracts live.
+      # GATING (gw#497): the tree is mypy-clean; strict by default (pgw#1202),
+      # tests included. A new mypy error is a new seam: fix it, don't ignore it.
       - name: Type check (mypy, strict by default, src + tests)
         run: uv run mypy src/gen_worker tests
-
-      # pgw#1373: the pgw#1347 pod mint-rig (`scripts/mint_rig/`,
-      # `micro_mint_rig.py`, `pod_rig.py`, `boot_key_rig.py`) is DELETED with the
-      # v1 SDK. It drove `@endpoint` declarations through `gen_worker.model`,
-      # `api.export_contract`, `aot_declaration` and `fleet_compiled_graphs` —
-      # every one of them gone — so it had no tree left to type-check.
-
-      - name: pgw#1202 guard - the mypy strictness ratchet only turns one way
-        run: uv run python scripts/lint_mypy_ratchet.py
 
       - name: Lint
         continue-on-error: true  # Lint debt (mostly worker.py, being rewritten) — visible in logs, doesn't block CI.
         run: uv run ruff check src/gen_worker
 
-      # GATING (no continue-on-error): a bare HTTP call site is the gw#456
-      # forever-hang reintroduced. hf_hub network use goes through
-      # gen_worker.net.hf(); every httpx/requests call carries a timeout.
-      - name: HTTP timeout guard (gw#467)
-        run: uv run python scripts/lint_http_timeouts.py
-
-      - name: pgw#849 guard 2 - unreached public surface (aot/mint/serve)
-        run: uv run python scripts/lint_unreached_surface.py
-
-      # pgw#1350: and the --siblings half must be able to REFUSE. CI has no
-      # sibling checkouts, so it can never run that mode for real — which is
-      # exactly why the 2026-08-16 rename left it scanning 5 corpora while
-      # printing "across 6 siblings, 0 unlisted consumers" and nothing noticed.
-      # The selftest forces both arms in a temp workspace (<1s, no network).
-      - name: pgw#849 guard 2 - the sibling scan can go red
-        run: uv run python scripts/lint_unreached_surface.py --siblings-selftest
-
-      # GATING (pgw#931, ruling §1.18): exactly ONE component reads the
-      # environment. Every other os.environ access needs a CLASSIFIED line in
-      # scripts/config_reads_allowlist.txt. Also proves the loader's
-      # unknown-key refusal set still covers the tree (pgw#929).
-      - name: pgw#931 guard - config reads outside the pipeline
-        run: uv run python scripts/lint_config_reads.py
-
-      # GATING (pgw#1049): exactly ONE authority writes torch settings
-      # (`us -> pytorch settings`). Any write outside the authority modules
-      # needs a CLASSIFIED line in scripts/settings_writers_allowlist.txt;
-      # stale rows are red too.
-      - name: pgw#1049 guard - torch-settings writes outside the authority
-        run: uv run python scripts/lint_settings_writers.py
-
-      # GATING (HARDCUT E5): pickles are banned platform-wide, and the two
-      # scans enforcing it lived in `tests` — a job that gates nothing since
-      # pgw#1264 — and read `src/` only. This one runs here, over every Python
-      # tree, with no path allowlist: a site is permitted only where a proof of
+      # GATING (HARDCUT E5): pickles are banned platform-wide. Every Python
+      # tree, no path allowlist: a site is permitted only where a proof of
       # refusal sits beside it.
       - name: HARDCUT E5 guard - nothing deserializes a pickle
-        run: |
-          uv run python scripts/lint_pickle_readers.py --selftest
-          uv run python scripts/lint_pickle_readers.py
-
-      # GATING (pgw#1316): a test that forks this interpreter inherits gRPC's
-      # poller from whichever grpc.aio file shared its xdist worker, and the
-      # child SIGABRTs. It reads as a suite failure nobody caused, on master.
-      - name: pgw#1316 guard - no test forks this interpreter
-        run: |
-          uv run python scripts/lint_test_fork_start_method.py --selftest
-          uv run python scripts/lint_test_fork_start_method.py
-
-      # GATING (pgw#1362, DESIGN-RULINGS 4.34b): a cleanup epic cannot outrun
-      # its own intake. Measured 2026-08-17/18 — three consolidation waves
-      # removed 41 incident-named modules and ~1,900 lines, and master's test
-      # tree still went 441/134,979 -> 411/135,818, because other lanes added
-      # ~2,700 lines of new issue-named tests in the same window. All correct
-      # work; the corpus grew anyway. Without this gate pgw#1362 is a treadmill.
-      - name: pgw#1362 guard - a NEW test module is not named for an issue
-        run: |
-          uv run python scripts/lint_incident_test_names.py --selftest
-          uv run python scripts/lint_incident_test_names.py
-
-      # GATING (pgw#1308): under mixed-CAS a resident model occupies disk ONCE
-      # — non-tensor files are symlinks into the object store and tensor bytes
-      # are read, never copied. The hatch that undoes that works perfectly at
-      # every individual call site, so no test ever goes red while the
-      # architecture erodes; only a census notices. Whole-tree materialization
-      # is down to a NAMED residue (one caller, one test), and every
-      # `extract()` must say which `docs/mixed-cas-layout.md` §9 row it is.
-      - name: pgw#1308 guard - the materialization hatch does not grow
-        run: |
-          uv run python scripts/lint_materialization_hatch.py --selftest
-          uv run python scripts/lint_materialization_hatch.py
-
-      # GATING (pgw#1299): TCG owns the compiled-graph metadata vocabulary and
-      # exports it. A respelled `"graph_specialization"` / `"aot-inductor"` does not fail
-      # at import when TCG renames the key — it returns None from a `.get()`,
-      # the arm reads an un-armed compiled graph as a cache miss, and the fleet
-      # silently re-mints. AST-based, so prose is not a finding, and a genuinely
-      # different vocabulary is classified at the line.
-      - name: pgw#1299 guard - nobody respells TCG's metadata vocabulary
-        run: |
-          uv run python scripts/lint_tcg_vocabulary.py --selftest
-          uv run python scripts/lint_tcg_vocabulary.py
-
-      # GATING (pgw#1297): the CAS and compiled-graph libraries were renamed to
-      # `tensorfs` and `torchcg`, and BOTH old PyPI projects are permanently
-      # deleted — so an old spelling never points at anything that exists. A
-      # fence and not a sweep, because this rename half-landed twice. Text-based
-      # on purpose, unlike the AST fence above: here the prose IS the defect,
-      # because a docstring naming a module nobody can import sends the reader
-      # nowhere. `_vendor/` is exempt structurally — a vendored file is fixed
-      # upstream and re-vendored, never respelled here, and the digest fence
-      # refuses a hand-patch.
-      - name: pgw#1297 guard - no retired package name survives
-        run: |
-          uv run python scripts/lint_retired_package_names.py --selftest
-          uv run python scripts/lint_retired_package_names.py
-
-      # GATING (pgw#1346): the typed SDK's `Family*` spellings are DELETED, with
-      # no alias — `Model`, `ModelSpec`, `GraphModelSpec`, `gen_worker.model`.
-      # A separate fence from the one above because the retired word here is a
-      # word this tree still uses correctly everywhere else (`recipe_v1`'s
-      # `family`, `family_export_v1`, `gen_worker.families`), so the sweep has to
-      # be symbol-by-symbol rather than substring. The selftest proves it can go
-      # red, and proves the wire vocabulary stays clean.
-      - name: pgw#1346 guard - no retired SDK spelling survives
-        run: |
-          uv run python scripts/lint_retired_sdk_spellings.py --selftest
-          uv run python scripts/lint_retired_sdk_spellings.py
-
-      # tcg#56 (Paul): a target has ONE graph and MANY graph SPECIALIZATIONS.
-      # Same shape and same reason as the fence above, and it is not
-      # hypothetical: this rename ALREADY half-landed within hours of merging.
-      # A sibling lane's NEW file (`cli/endpoint_lock.py`) and this workflow's
-      # own comment both kept the dead spelling, and no other gate could see
-      # either — neither is code. The selftest proves it goes red on the real
-      # defect and proves it does NOT flag the many live, correct uses of the
-      # word `class` (pipeline_class, reason_class, tensor-layout classes).
-      - name: tcg#56 guard - no retired graph-class spelling survives
-        run: |
-          uv run python scripts/lint_retired_graph_class_spellings.py --selftest
-          uv run python scripts/lint_retired_graph_class_spellings.py
-
-      # GATING (pgw#1547, Paul 2026-08-20): a compiled graph is not a "cell".
-      # pgw#1363 already retired the word two days earlier and it did NOT
-      # stick — nothing watched it, so `_PROVEN_CELLS`, a `getattr`-defaulted
-      # conftest ledger clear that would have gone SILENT on the rename, and
-      # eight mint fixtures were all still speaking it. The hub-owned wire
-      # spellings and the on-disk `aot-cells`/`cell.tar.gz` triple are pinned
-      # cross-repo, so they are ENUMERATED as `cell-spelling:` proofs at the
-      # line rather than excluded: the deferred set can only shrink. The
-      # selftest proves the fence goes red AND proves it does not flag the 84
-      # live `cancelled`/`CancelledError` uses that contain the same letters.
-      - name: pgw#1547 guard - no retired `cell` spelling survives
-        run: |
-          uv run python scripts/lint_retired_cell_spellings.py --selftest
-          uv run python scripts/lint_retired_cell_spellings.py
-
-      # GATING (th#1987 / HARDCUT A9): the `:tag` ref production is DELETED.
-      # A surviving pin fails on a rented pod at the resolve, not at the line
-      # that wrote it. The selftest proves the fence can go red, because a
-      # sweep that only ever prints "clean" guards nothing.
-      - name: th#1987 guard - no retired `owner/repo:tag` pin survives
-        run: |
-          uv run python scripts/lint_repo_ref_pins.py --selftest
-          uv run python scripts/lint_repo_ref_pins.py
-
-      # GATING (A18 / §1.32(d), pgw#1319): the flavor axis is deleted and the
-      # residue is ZERO — the class is DECLARED and the former residue paths get
-      # no exemption. It runs HERE because the equivalent test lives in `tests`,
-      # which pgw#1264 took off the merge path, so without this step the
-      # required context would have no opinion about the axis at all. Selftest
-      # first: the fence must prove it goes red before its green means anything.
-      - name: A18 guard - the flavor is deleted and its residue is zero
-        run: |
-          uv run python scripts/lint_flavor_deletion.py --selftest
-          uv run python scripts/lint_flavor_deletion.py
-
-      # GATING (pgw#1143, §1.33): `Slot(layouts=...)` is the per-slot layout
-      # DEMAND the hub's gate reads. It must be readable by the AST sweep as
-      # well as by the import, so a computed declaration is refused where it
-      # is written — otherwise the published manifest becomes the only place
-      # the demand can be read, which is the dual-declaration hazard.
-      - name: pgw#1143 guard - Slot(layouts=) declarations are literals
-        run: uv run python scripts/lint_layout_declarations.py
-
-      # GATING (pgw#1143, §1.33 point 5): conversion is UPSTREAM of compute, so
-      # no compiled graph-key axis may read the layout demand or a conversion chain — no
-      # compiled graph re-keys on a conversion, ever. The fenced module set is DERIVED
-      # from who calls a compiled graph-key axis producer, so a new key computation joins
-      # the fence without anyone remembering to add it.
-      - name: pgw#1143 guard - no compiled graph-key axis reads the layout vocabulary
-        run: uv run python scripts/lint_compiled_graph_key_layout_fence.py
-
-      # GATING (pgw#1215 / th#1834 §PHASE 3): th#1299's real invariant, as a
-      # fence rather than as a whole extra process tier. `torch.export` and the
-      # AOTI compile entry points may only be NAMED by a module that runs
-      # inside a compile/trace child; every other module under src/gen_worker
-      # is serving-process code by default. `torch.compile` is deliberately
-      # NOT banned — th#1834 keeps the dynamo JIT-intake arm, whose half of
-      # th#1299 is the turn gate (`hot_swap.RouterNotGated`).
-      - name: pgw#1215 guard - no export/AOTI compile in the serving process
-        run: uv run python scripts/lint_serving_process_compiles.py
-
-      # pgw#1460: torchcg artifacts are WEIGHTLESS by sealed policy, so a bare
-      # `aoti_load_package(path)` arms an EMPTY constant buffer and takes flat
-      # feeds its caller does not have. BOTH v2 adopt loaders were exactly that
-      # — the `GraphRecord` accepted and discarded — and every test that
-      # covered them injected a stub. `torchcg.serve.aoti_loader` is the
-      # sanctioned path AND the default, so the right amount of code at a call
-      # site is none.
-      - name: pgw#1460 guard - no raw AOTI package load in src/gen_worker
-        run: uv run python scripts/lint_raw_aoti_load.py
-
-      # GATING. pgw#1550, bought by the ~21 h fleet serve outage of 2026-08-19.
-      # gen-worker had TWO construction paths for the tensorfs-aware streaming
-      # loader — the local CLI host asked for it, `ServeLoop` never did — so
-      # every pod fell to a naive file reader, met a 128 B TFSSTUB1 pointer
-      # stub, and refused every request while every local test passed. A raw
-      # `safe_open`/`load_file`/`torch.load` on a checkpoint path IS that
-      # outage; the seam is `gen_worker.models.tensor_source`. Selftest first:
-      # a fence whose red has never been observed proves nothing when green.
-      # NOTE: in this pgw-only clone the sibling `serverless-endpoints`
-      # checkout is absent, so the guard scans gen_worker and SAYS SO on
-      # stderr rather than scoring the half it could not read as clean.
-      - name: pgw#1550 guard - one tensorfs-aware tensor reader
-        run: |
-          uv run python scripts/lint_tensor_read_seam.py --selftest
-          uv run python scripts/lint_tensor_read_seam.py
-
-      # pgw#1489: an artifact's env identity is the COMPILE STACK read off the
-      # endpoint's uv.lock — torch/triton/nvidia and nothing else. The whole
-      # installed set was a second representation of that lock, unable to agree
-      # with it by construction, and it split the artifact pool on packages
-      # that cannot reach the compiler.
-      - name: pgw#1489 guard - the installed set is not an identity
-        run: uv run python scripts/lint_no_installed_set_keying.py
-
-      # pgw#1480: `phase` is a typed wire column, so a phase enum is an
-      # INSTRUMENT — an operator counts by it and a proof condition is written
-      # against it. `BOOT_ENDED_UNCOMPILED` was defined and referenced by
-      # nothing, so se#780's headline pass condition ("must be ABSENT") was
-      # absent unconditionally and could not fail. 18 of 23 members are in that
-      # state; the census records them and this gate stops the set growing.
-      - name: pgw#1480 guard - no unwired phase-vocabulary members
-        run: uv run python scripts/lint_phase_enum_emitters.py
-
-      # GATING (pgw#1328, superseding pgw#1327's narrow precursor): the
-      # ADOPT-ONLY serve role adopts by key and refuses or routes on a miss
-      # (§4.28/§4.29), so it must not be able to compile. This walks the
-      # transitive static import closure of the role's declared module set —
-      # function-local imports INCLUDED, which is how `fleet_compiled_graphs` reached
-      # the lane — and reds on any reach into the mint machinery. Both lists
-      # are read out of `src/gen_worker/serve/role.py` rather than retyped
-      # here, so the role and its fence cannot drift (pgw#1176). Selftest
-      # first: it proves the walk still goes red on a mint-reaching root, so
-      # the green below means something.
-      - name: pgw#1328 guard - the adopt-only serve role cannot reach the mint lane
-        run: |
-          uv run python scripts/lint_serve_role_closure.py --selftest
-          uv run python scripts/lint_serve_role_closure.py
-
-      # GATING (pgw#1176): THE GUARDS ARE GUARDED. A fence names symbols in
-      # string literals; when one is renamed or deleted the fence keeps
-      # running, keeps exiting 0, and guards NOTHING — it does not go red, so
-      # no amount of running things finds it. Measured: this repo shipped
-      # `lint_compiled_graph_key_layout_fence.py` naming a deleted symbol, green the
-      # whole time. This gate scans ITSELF along with the others, so it is the
-      # one guard that cannot rot silently.
-      - name: pgw#1176 guard - every symbol a fence names still exists
-        run: uv run python scripts/lint_fence_symbols.py
-
-      # pgw#1373: the pgw#740 registry-contract gate is DELETED. It asserted
-      # that the shipped wheel's SIX declaration registries are bare and that a
-      # consumer's `@endpoint` declarations populate them. There are no
-      # declaration registries any more — `api/export_contract`, `registry` and
-      # the catalog are gone — so the property it guarded no longer exists.
-
-      # pgw#1373: the pgw#1332 family-bindings gate is DELETED. It compared a
-      # catalog family's declaration-time export against the bindings codegen
-      # produced from it — `gen_worker.model.codegen`, `model/catalog/` and
-      # `model/catalog/_generated/` — and all three are gone. There are no two
-      # halves left to disagree.
-
-      # GATING (th#1914 / pgw#1237 / cl#56): this public corpus is the
-      # authority both sides bind to real path behavior. PGW pins it offline;
-      # cozy-local performs the meaningful peer comparison after PGW lands.
-      - name: pgw#1237 gate - Cozy runtime env corpus matches its digest
-        run: uv run python scripts/check_cozy_runtime_env_digest.py
-
-      # GATING (th#1914 / pgw#1237): public carrier for the exact worker
-      # values and bounded relations Tensorhub consumes. PGW pins layer 1;
-      # private Tensorhub performs the meaningful peer comparison after PGW
-      # lands. Running that peer script here would compare PGW to itself.
-      - name: pgw#1237 gate - worker value corpus matches its digest
-        run: uv run python scripts/check_worker_value_contracts_digest.py
-
-      # GATING (th#1914 / pgw#1239): public carrier for the launch ABI names
-      # the private Hub supplies and this worker consumes. PGW pins layer 1;
-      # Tensorhub performs the meaningful peer comparison after PGW lands.
-      # Running that peer script here without an explicit candidate would be
-      # a local self-comparison, so this required job stays offline.
-      - name: pgw#1239 gate - Hub-worker boundary corpus matches its digest
-        run: uv run python scripts/check_hub_worker_boundary_contracts_digest.py
-
-      # GATING (th#1897/pgw#1213): the shared grammar corpora are pinned to the
-      # digest BOTH repos commit, so a one-sided hand-edit of
-      # compiled_graph_key_vectors.json or ref_grammar_vectors.json is red
-      # HERE — offline, in the tree where it happened.
-      #
-      # This is LAYER 1 of the cross-repo fence and it is the half that belongs
-      # in this repo. Layer 2 is scripts/grammar-vector-drift.sh, committed
-      # verbatim beside it but RUN FROM TENSORHUB: it fetches the peer's copy
-      # over raw.githubusercontent, this repo is public and tensorhub is not,
-      # and the reverse fetch does not exist. That asymmetry is the same one
-      # the proto and worker-constant gates have, and it gives the same law —
-      # PGW LANDS FIRST. Running the script here would compare this repo to
-      # itself, which is not a gate. It is exercised offline (both green and
-      # red) by tests/test_key_grammar_vectors_th1897.py.
-      - name: th#1897 gate - the shared grammar corpora match their digest
-        run: uv run python scripts/check_grammar_corpus_digest.py
-
-      # GATING (th#1914 / pgw#1236): both languages execute their formula
-      # implementation against a vendored corpus. Pin the PGW copy offline;
-      # Tensorhub performs the one meaningful peer comparison because this
-      # repository is public and Tensorhub is private. No network here.
-      - name: pgw#1236 gate - the shared formula corpus matches its digest
-        run: uv run python scripts/check_formula_corpus_digest.py
-
-      # GATING (pgw#1122): the compute child holds no worker credential BY
-      # CONSTRUCTION, so a gate that reads one to answer "who am I?" or "is
-      # there a hub?" refuses on every real serving pod (pgw#1108, then
-      # pgw#1122 — a dead function, three pods reaped, two replacements
-      # bought). Every credential read needs a CLASSIFIED line in
-      # scripts/credential_identity_allowlist.txt, and there is no IDENTITY
-      # class: identity comes from gen_worker.worker_identity.viewer().
-      - name: pgw#1122 guard - worker-credential reads outside the resolver
-        run: uv run python scripts/lint_credential_identity.py
-
-      # GATING (pgw#1152): the ADOPT-PATH half of the same class. Four gates in
-      # a row were one defect — a rule written against the SELF-MINT path that
-      # the boot-adopt path does not take, so a compiled graph that resolved,
-      # materialized and armed was scored on the dynamo ledger and thrown away
-      # on a real pod. The rule is structural now (registration happens inside
-      # `load_and_wrap`), and this fence keeps it: a production feeder off the
-      # seam is red, a stale
-      # row is red, a SECOND map into a fenced object is red, and a TEST that
-      # hand-feeds one or stubs a lane accessor is red — it drives
-      # tests/harness/adopt_rig.py instead. There is no CONVENTION class.
-      - name: pgw#1152 guard - arm-state feeders and the adopt-path rig
-        run: uv run python scripts/lint_arm_state_feeders.py
-
-      # GATING (pgw#1049): the ambient-input census's structural claims —
-      # IMPOSED rows exist in DECLARED_ENV, NEUTRALIZED rows are actually
-      # scrub-covered, watched env literals in the tree are classified. The
-      # completeness half (against the INSTALLED torch) runs in `tests` as
-      # tests/test_ambient_census_pgw1049.py.
-      - name: pgw#1049 guard - ambient-input census structural claims
-        run: uv run python scripts/lint_ambient_census.py
-
-      # GATING (pgw#891/pgw#904): a connected worker may not reconstruct or
-      # substitute a Hub decision. The real repair is pgw#891's exact
-      # ExecutionSpec and its schema half is th#1457's, so the deletion cannot
-      # land yet — this freezes the SIZE of the job so pgw#904 stays a bounded
-      # list instead of an open-ended hunt. Fails on ADDITION only.
-      - name: pgw#891 guard - the post-connect resolution surface may not grow
-        run: uv run python scripts/lint_post_connect_resolution.py
+        run: uv run python scripts/lint_pickle_readers.py
 
       # GATING (pgw#1013 / th#1662): a length read off external bytes may not
-      # size a read until something bounds it. The §4.24 census enumerated the
-      # bounds that EXIST, so it could not see a site that needs one and has
-      # none — it walked past two real ones in files it had already swept.
-      # Either bound the length with a sanctioned validator, or state why it
-      # needs none with a `# bound-justified:` comment.
+      # size a read until something bounds it — a sanctioned validator or a
+      # `# bound-justified:` comment.
       - name: pgw#1013 guard - an external length sizes a read with no bound
         run: uv run python scripts/lint_unbounded_reads.py
 
-      # GATING (pgw#1010 rider): a changelog fragment whose name does not
-      # parse as <prefix><number>.md refuses the RELEASE CUT, which is weeks
-      # after the PR that added it and belongs to whoever is cutting rather
-      # than whoever wrote it. Three fragments have now landed misnamed
-      # (pgw868-a4, pgw984-pgw985, pgw1002-pgw1005) — the failure was always
-      # loud, just at the wrong time. Same check, same script, moved to the PR
-      # that introduces the name.
+      # GATING: the shared contract corpora under tests/testdata are pinned to
+      # the digest the peer repos (tensorhub, cozy-local, jobs) commit, so a
+      # one-sided hand-edit is red HERE, offline. PGW LANDS FIRST; the peer
+      # performs the meaningful cross-repo comparison.
+      - name: pgw#1237 gate - Cozy runtime env corpus matches its digest
+        run: uv run python scripts/check_cozy_runtime_env_digest.py
+      - name: pgw#1237 gate - worker value corpus matches its digest
+        run: uv run python scripts/check_worker_value_contracts_digest.py
+      - name: pgw#1239 gate - Hub-worker boundary corpus matches its digest
+        run: uv run python scripts/check_hub_worker_boundary_contracts_digest.py
+      - name: th#1897 gate - the shared grammar corpora match their digest
+        run: uv run python scripts/check_grammar_corpus_digest.py
+      - name: pgw#1236 gate - the shared formula corpus matches its digest
+        run: uv run python scripts/check_formula_corpus_digest.py
+
+      # GATING (pgw#968): a changelog fragment whose name does not parse as
+      # <prefix><number>.md would otherwise refuse the RELEASE CUT, weeks after
+      # the PR that added it. Same check, on the PR that introduces the name.
       - name: pgw#968 guard - changelog fragment names parse
         run: uv run python scripts/assemble_changelog.py --check
 
@@ -752,77 +346,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra dev
 
-      # Pinned CPU build so the gw#402 llama.cpp runtime tests exercise the
-      # real llama-server codepath (tests skip when the binary is absent).
-      # Measured 1s on the runner — a ~20 MB tarball fetch, NOT part of what
-      # makes this suite expensive, so there is no version of this job worth
-      # running without it. Dropping it skips five tests — which, since pgw#966,
-      # the census at the end of this job PRINTS and COUNTS rather than swallows.
-      #
-      # `continue-on-error` (pgw#966): this is the one third party the suite
-      # still reaches, and an unreachable third party must degrade to a loud
-      # counted skip, never to a red required check. The MODEL those five tests
-      # run is no longer fetched at all — it is vendored at
-      # tests/testdata/stories260K.gguf, because an `hf_hub_download` here is
-      # what put PR #483's tests job red on a `429` from huggingface.co.
-      - name: Install llama-server (pinned, CPU)
-        continue-on-error: true
-        run: |
-          curl -sSL --retry 3 -o /tmp/llama.tgz \
-            https://github.com/ggml-org/llama.cpp/releases/download/b9964/llama-b9964-bin-ubuntu-x64.tar.gz
-          tar xzf /tmp/llama.tgz -C "$HOME"
-          echo "$HOME/llama-b9964" >> "$GITHUB_PATH"
-          echo "LD_LIBRARY_PATH=$HOME/llama-b9964" >> "$GITHUB_ENV"
-
-      # th#960/pgw#609 greenfield suite (P1-P10 + harness), whole tests/ dir
-      # so late additions run automatically without a CI edit.
-      #
+      # th#960/pgw#609: whole tests/ dir, so late additions run automatically.
       # pgw#796: `-n 4` (= ubuntu-latest's vCPU count), `--dist loadfile` so a
       # file's tests — and the module/session fixtures they share — stay in one
-      # process. This is TEST-SYSTEM-DESIGN.md §7's wiring, finally landed.
-      # `-v` is dropped: xdist's per-worker interleaving makes it unreadable,
-      # and failures print in full either way.
-      #
-      # pgw#966: `-rs` and `--skip-census-out=` are not decoration. A skipped
-      # row and a passing row are otherwise the same character of nothing in
-      # this log, which is how a row reads as coverage while executing only on
-      # developer boxes. `-rs` puts the reasons in the log for a human; the JSON
-      # feeds the guard at the end of this job, which fails the NEXT build.
-      - name: Run tests (v1)
-        run: uv run pytest tests/ -n 4 --dist loadfile -rs --skip-census-out=.skip-census-v1.json
-
-      # pgw#808: the zero-based suite, as its OWN gate.
-      #
-      # Both directories run for the whole transition, and the reason is
-      # coverage, not caution. `tests_v2/` has 2 of its 14 planned suites
-      # (`test_boot`, `test_dispatch`); nine behavior domains — fatal/crash,
-      # residency, CAS, lanes, adapters, JIT graphs, compiled graphs, convert, SDK
-      # and telemetry — have ZERO v2 coverage today and `tests/` is their only
-      # net. Flipping now would trade a real suite for a partial one.
-      #
-      # Two steps, not one invocation, deliberately: during a replacement the
-      # two suites are two distinct questions ("does the net still hold" /
-      # "is the replacement ready"), and a collection error in either must not
-      # erase the other's answer. The flip (pgw#808: point CI at `tests_v2/`,
-      # `git rm -r tests/`) deletes the step above and this comment with it.
-      #
-      # pgw#952: `if: !cancelled()` is what makes the paragraph above TRUE. A
-      # failing step skips every later step by default, so without it a red
-      # `tests/` silently erases the `tests_v2/` answer — exactly the outcome
-      # the two-step split was written to prevent. `!cancelled()` rather than
-      # `always()` so a cancelled run (the concurrency group above cancels
-      # superseded pushes) does not spend four more minutes on a result nobody
-      # will read.
-      # GATING (pgw#966). Two rules: every skip this run took is CLASSIFIED in
-      # scripts/skip_census.txt, and no row classified CI-MUST-RUN was among
-      # them. The first stops the skip set growing invisibly; the second is the
-      # pgw#858 shape stated positively — that row is expected to EXECUTE here,
-      # so seeing it skip is a failure and not a note. `!cancelled()` for the
-      # same reason as the step above: a red suite must not erase this answer,
-      # since a red suite is exactly when the skip set tends to move.
-      - name: pgw#966 guard - the skip census
-        if: ${{ !cancelled() }}
-        # pgw#1373: `.skip-census-v2.json` came from the `tests_v2/` run, and
-        # that suite is deleted — asking for a census file nothing writes is
-        # a gate that fails on its own missing input.
-        run: uv run python scripts/lint_skip_census.py --ci .skip-census-v1.json
+      # process. `-rs` puts skip reasons in the log.
+      - name: Run tests
+        run: uv run pytest tests/ -n 4 --dist loadfile -rs

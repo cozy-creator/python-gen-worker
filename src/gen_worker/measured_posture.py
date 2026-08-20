@@ -26,9 +26,8 @@ implementation of it. A worker-side digest would be a second one — two
 canonicalizations of the same object, each green against its own tests, free to
 disagree exactly like the two topology decoders did (pgw#1188). The worker
 reports the structure; the hub decides what it is identical to. What keeps the
-two sides honest is the byte-identical vector fence
-(``tests/testdata/posture_wire_vectors.json`` + ``scripts/posture-vector-drift.sh``),
-not a duplicated hash.
+two sides honest is the byte-identical vector corpus
+(``tests/testdata/posture_wire_vectors.json``), not a duplicated hash.
 
 **It does not decide anything.** No refusal, no gate, no placement input.
 §1.35's second amendment stands: loudness is diagnostics.

@@ -96,7 +96,7 @@ logger = logging.getLogger(__name__)
 
 RESOLVE_PATH = "/v1/worker/compiled-graphs/resolve"
 
-#: Mandatory (``scripts/lint_http_timeouts.py``). Generous relative to the
+#: Mandatory. Generous relative to the
 #: hub's own 15 s transport resolve, because the answer is on the boot path and
 #: a retry costs a whole cold mint — but bounded, because a boot that hangs here
 #: is a boot that never serves.

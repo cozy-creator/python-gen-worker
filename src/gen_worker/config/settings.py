@@ -14,10 +14,8 @@ env read wearing better clothes — unreachable by a caller that wants to pass a
 different value, invisible to a test that does not clear the cache, and latched
 by whichever module happened to import first.
 
-The list of sanctioned raw-read sites is deliberately not prose here (prose
-drifts). It is `scripts/config_reads_allowlist.txt`, every line classified,
-enforced by `scripts/lint_config_reads.py` in CI. A new `os.environ` read
-outside this package fails the build.
+Raw `os.environ` reads outside this package are the residue, not the rule:
+prefer a parameter or `config.current()`.
 
 Built on msgspec.Struct (already a worker dep) instead of pydantic-settings to
 avoid pulling in pydantic. The source-loader layering (env → .env → secrets dir

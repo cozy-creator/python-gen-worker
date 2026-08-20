@@ -14,8 +14,7 @@ and boot observability.
 symlinks into ``objects/`` for everything that is not a tensor container,
 ~128 B TFSSTUB1 pointer stubs for everything that is, and no tensor byte at
 any path in it. Whole-tree materialization -- a second complete copy -- has no
-caller in this repo, and ``scripts/lint_materialization_hatch.py`` refuses its
-return.
+caller in this repo.
 """
 
 from __future__ import annotations

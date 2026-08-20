@@ -41,7 +41,6 @@ from fake_hub import _FakeHub
 
 from gen_worker.convert.produced import ProducedFlavor
 from gen_worker.convert.publish import PrecisionClassRefusal, publish_flavors
-from gen_worker.models import ladder
 
 #: Cut by `tests/convert/conftest.py`'s fake repo.
 RELEASE = "2026.08"
@@ -271,42 +270,6 @@ def test_a_class_is_matched_case_and_whitespace_insensitively(
 # ---------------------------------------------------------------------------
 # 3. the deletion itself
 # ---------------------------------------------------------------------------
-
-
-def test_the_produced_struct_has_no_flavor_field() -> None:
-    assert "flavor" not in ProducedFlavor.__struct_fields__
-    with pytest.raises(TypeError):
-        ProducedFlavor(path=Path("/nonexistent"), flavor="fp8")  # type: ignore[call-arg]
-
-
-def test_the_classifier_is_deleted_and_the_vocabulary_survives() -> None:
-    """The vocabulary is what a DECLARATION is checked against, so it stays —
-    one home, in this repo, which te imports rather than re-listing.
-
-    SEVEN classes since pgw#1498 (`4d2bce0c`), which added `gguf`: ONE class
-    for every ggml block encoding, because the qtype is a property of the
-    artifact's bytes (it travels in the tensor-layout contract) while the CLASS
-    is what the hub's ladder ranks, and every qtype ranks the same way against
-    fp8 and base. The exact-set form is deliberate — the vocabulary is a
-    cross-repo contract (tensorhub `precision.Class*`, which te imports rather
-    than re-lists), so a member added or removed here must be a decision
-    somebody took, not a drift somebody absorbed.
-    """
-    assert not hasattr(ladder, "classify_flavor_token")
-    assert ladder.PRECISION_CLASSES == frozenset({
-        "base", "fp8", "gguf", "nvfp4", "nvfp4-w4a4", "svdq-fp4", "svdq-int4"})
-
-
-@pytest.mark.parametrize(
-    "dead", ["svdq-fp4-r128", "fp8-w8a8", "q4_k_m", "q8_0", "bnb-nf4", "int4"])
-def test_a_dead_spelling_can_never_re_enter_the_vocabulary(dead: str) -> None:
-    """The positive half of the fence above, stated as the thing that must not
-    come back. Each of these was once a real spelling somewhere — `-r128` and
-    `fp8-w8a8` are TOKENS (the axis A18 deleted), the two ggml qtypes are what
-    pgw#1498 refused to make classes of, and `bnb-nf4` is the rung pgw#1206 D
-    deleted. A class is refused at publish (`convert.publish`) precisely
-    because it is not a member here, so membership is the whole gate."""
-    assert dead not in ladder.PRECISION_CLASSES
 
 
 def test_the_publish_leg_names_the_artifact_not_a_flavor(

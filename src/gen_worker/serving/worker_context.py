@@ -23,8 +23,7 @@ the tests were the caller. **A capability that two callers must both have does
 not get added to both callers — it gets constructed once, where neither can
 omit it.**
 
-So: nothing outside this module builds a production ``LoadContext``, and
-``scripts/lint_tensor_read_seam.py`` fails the build if something starts.
+So: nothing outside this module builds a production ``LoadContext``.
 A BARE ``LoadContext(...)`` remains inert on purpose — it names no device and
 binds no engine — because the derive/trace path (``release/derive.py``) must
 not acquire either, and pgw#1452's arm 2 asserts exactly that.

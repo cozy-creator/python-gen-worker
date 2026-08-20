@@ -92,8 +92,8 @@ EAGER_BY_DESIGN_REFUSALS = frozenset({
 # The bytes->callable path is torchcg's own (`torchcg.serve.aoti_loader`,
 # tcg#58) and it is the DEFAULT `AdoptSession` loader, so stating nothing is
 # both correct and the only reasonable thing to write. `loader=` below survives
-# as a TEST seam and nothing else; `scripts/lint_raw_aoti_load.py` is what
-# keeps a raw one from growing back here or anywhere else in `src/`.
+# as a TEST seam and nothing else; a raw `aoti_load_package` must not grow
+# back here or anywhere else in `src/`.
 
 
 class ServeAdoption:

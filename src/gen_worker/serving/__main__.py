@@ -386,8 +386,7 @@ def main(argv: list[str] | None = None) -> int:
     # No `loader=`: pgw#1460. The byte-identical raw `aoti_load_package` that
     # used to sit here discarded the record and armed a WEIGHTLESS package with
     # an empty constant buffer. `torchcg.serve.aoti_loader` (tcg#58) is the
-    # default and the only sanctioned path — stating one here is what the
-    # `lint_raw_aoti_load` fence exists to stop.
+    # default and the only sanctioned path — do not state one here.
     host.setup(
         store=store, document=document, sm=args.sm,
         artifacts_dir=_artifacts_dir(args),

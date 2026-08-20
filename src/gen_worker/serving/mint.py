@@ -957,8 +957,8 @@ def _child_compiler(
     Not a helper a caller opts into — it is what a mint runs by default. The
     child (:mod:`gen_worker.serving.mint_child`) does the ``torch.export.load``
     and the AOTI compile, because both hold the GIL for minutes and would
-    starve the heartbeat and eager serving on the parent's loop (th#1299 —
-    `scripts/lint_serving_process_compiles.py` is the fence). It also makes a
+    starve the heartbeat and eager serving on the parent's loop (th#1299).
+    It also makes a
     wedged compile KILLABLE, which is what turns the progress guard's verdict
     into an action.
 

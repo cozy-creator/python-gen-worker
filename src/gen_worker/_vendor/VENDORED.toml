@@ -71,16 +71,12 @@ subdir = "python/src/tensorfs"
 #
 #   * `materialize_repository` — DEAD. The chokepoint projects (pgw#1308 step
 #     6, `models/cozy_snapshot.py:_publish_snapshot`), so this repo has zero
-#     callers. The definition below is all that is left of it, and
-#     `scripts/lint_materialization_hatch.py` declares that and refuses a new
-#     caller anywhere, `_vendor` included.
+#     callers. The definition below is all that is left of it.
 #   * `materialize` (single file) — KEPT, and the name is now the SHARED one.
 #     The pinned rev has always called it `materialize`; upstream called the
 #     same operation `extract()` until tensorfs#107 renamed it to match
 #     (Paul's #1303 ruling). So the two-spelling hazard that once made the
-#     hatch census read zero is gone: one name here and upstream, and
-#     `.extract(` is refused outright by
-#     `scripts/lint_materialization_hatch.py`. It is tier 3 of the access
+#     hatch census read zero is gone: one name here and upstream. It is tier 3 of the access
 #     ladder — permanent, not separately priced — and upstream's own
 #     no-whole-tree-materialization fence exempts it by name. ONE live user
 #     since pgw#1342 — `aot_delivery.py`, declared to the lint against
@@ -426,9 +422,8 @@ subdir = "src/torchcg"
 #
 # The bump also RETIRES a `materialize` caller: the old vendored storage half
 # materialized a manifest entry to a temp file before untarring, and the new one
-# untars straight out of the store. `scripts/lint_materialization_hatch.py` and
-# tensorfs's own no-whole-tree-materialization exemption now cover exactly one
-# caller here, `aot_delivery.py`.
+# untars straight out of the store. tensorfs's own no-whole-tree-materialization
+# exemption now covers exactly one caller here, `aot_delivery.py`.
 #
 # AN UNDECLARED REWRITE WAS FOUND WHILE DOING THIS, AND IT IS GONE RATHER THAN
 # DECLARED. pgw#1340 had added `ARTIFACT_METADATA_FIELDS` to the vendored
@@ -464,8 +459,7 @@ subdir = "src/torchcg"
 # `metadata.get(...)`, so a producer/consumer spelling mismatch returns `None`,
 # reads as a cache MISS, and RE-MINTS THE FLEET rather than raising. The vendored
 # snapshot serves the mint and the serving path; the dev pin serves the derive.
-# Splitting them is money, not a warning -- which is what
-# `scripts/lint_tcg_vocabulary.py` has existed for since pgw#1299.
+# Splitting them is money, not a warning (pgw#1299).
 #
 # The contract file is renamed with it:
 # `contracts/graph_class_identity_v4.json` -> `graph_specialization_identity_v4.json`

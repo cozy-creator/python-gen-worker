@@ -350,9 +350,7 @@ def test_the_remaining_gguf_hatch_is_named_and_is_the_only_one() -> None:
 
     # Call-shaped, not word-shaped: this module's prose says "materialized"
     # and "subprocess" repeatedly, and a fence that cannot tell the two apart
-    # is one somebody deletes. The tensorfs hatch itself is NOT spelled here --
-    # `scripts/lint_materialization_hatch.py` owns that census tree-wide, and
-    # naming it in a string literal is what trips that lint.
+    # is one somebody deletes. The tensorfs hatch itself is NOT spelled here.
     native = (convert / "gguf_native.py").read_text()
     for forbidden in ("third_party_dir(", "run_process(", "import subprocess"):
         assert forbidden not in native, (

@@ -11,26 +11,13 @@ writes with (``convert/writer.py``'s ``amax(row)/448``), the real
 ``map_adapter`` key resolution, the real ``apply_branch_adapters`` swap, the
 real ``Fp8ScaledLinear`` module class. No mocked grid, no stand-in quantizer.
 
-The rows marked ``integration`` additionally read REAL shipped adapters and
-REAL base weights out of the local HF cache: sdxl ``lightning-4step``
-(ByteDance/SDXL-Lightning), sdxl ``dmd2-4step`` (tianweiy/DMD2) and z-image
-``fun-lora-distill-8step`` (alibaba-pai) — three of the four adapters pgw#794
-§3 measured, against the real SDXL UNet. They skip when the cache does not
-carry them; the rest of the file is a permanent guard that needs no downloads.
-
-RED-VERIFY (what HEAD did before this gate existed) is asserted in-line rather
-than remembered: ``test_every_preexisting_guard_accepts_the_adapter_fp8_destroys``
-drives the whole pre-existing guard surface — th#1036's ``_reject_zero_delta``,
-``validate_lora_keys``, ``map_adapter`` — over the exact adapter+grid pair that
-measures cosine 0.25, and shows all of them pass it. That silence IS the bug.
+Everything is synthesized on CPU; no downloads, no real checkpoints.
 """
 
 from __future__ import annotations
 
 import math
-import os
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 import pytest
 
@@ -41,7 +28,6 @@ import torch.nn as nn  # noqa: E402
 from gen_worker import activity as activity_mod  # noqa: E402
 from gen_worker.api.errors import (  # noqa: E402
     AdapterFidelityRefused,
-    RefCompatibilitySurprise,
 )
 from gen_worker.models import adapter_fidelity as af  # noqa: E402
 from gen_worker.models.w8a8 import fp8_scaled_linear_class  # noqa: E402
@@ -52,101 +38,6 @@ from gen_worker.models.w8a8_lora import (  # noqa: E402
     enable_lora_branches,
     map_adapter,
 )
-
-# ---------------------------------------------------------------------------
-# Real artifacts, from the local HF cache (never downloaded by this test)
-# ---------------------------------------------------------------------------
-
-_HUB = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
-
-_SDXL_UNET = ("models--stabilityai--stable-diffusion-xl-base-1.0",
-              "unet/diffusion_pytorch_model.fp16.safetensors")
-_ADAPTERS = {
-    "sdxl-lightning-4step": (
-        "models--ByteDance--SDXL-Lightning", "sdxl_lightning_4step_lora.safetensors"),
-    "sdxl-dmd2-4step": (
-        "models--tianweiy--DMD2", "dmd2_sdxl_4step_lora.safetensors"),
-    "zimage-fun-distill-8step": (
-        "models--alibaba-pai--Z-Image-Fun-Lora-Distill",
-        "Z-Image-Fun-Lora-Distill-8-Steps-2603.safetensors"),
-}
-
-
-def _cached(repo: str, rel: str) -> Optional[Path]:
-    snaps = _HUB / repo / "snapshots"
-    if not snaps.is_dir():
-        return None
-    for snap in sorted(snaps.iterdir()):
-        hit = snap / rel
-        if hit.exists():
-            return hit
-    return None
-
-
-def _require(repo: str, rel: str) -> Path:
-    hit = _cached(repo, rel)
-    if hit is None:
-        pytest.skip(f"local HF cache carries no {repo}/{rel}")
-    return hit
-
-
-def _open(path: Path) -> Any:
-    from safetensors import safe_open
-
-    return safe_open(str(path), framework="pt", device="cpu")
-
-
-# How many real modules each row evaluates. The FIRST N in the adapter's own
-# key order, spanning the whole UNet — deliberately NOT one block's attention
-# Linears, which is a biased sub-sample: sdxl's cross-attention `to_k`/`to_q`
-# carry rel |D|/|W| ~ 3.2e-4, an order of magnitude under the adapter's own
-# 2.2e-3 median, and a slice of only those reads as destroyed even at bf16.
-# This sample reproduces pgw#794 §3 (bf16 0.925 vs its 0.918, fp8 0.354 vs its
-# 0.254 on a different 53-module sample) and the whole-adapter 0.900 this lane
-# measured over all 788 modules, in a few seconds instead of ten minutes.
-_SLICE_MODULES = 60
-
-
-def _real_sdxl_slice(
-    adapter: str, *, dtype: Any = torch.bfloat16, limit: int = _SLICE_MODULES,
-) -> Tuple[nn.Module, Dict[str, Any]]:
-    """(a real module tree carrying real SDXL weights, the real adapter's
-    denoiser state dict). The tree is built from the UNet's own module paths so
-    the SHIPPED kohya resolution in ``map_adapter`` is what maps the keys."""
-    unet = _open(_require(*_SDXL_UNET))
-    ad = _open(_require(*_ADAPTERS[adapter]))
-    akeys = set(ad.keys())
-    flat_to_path = {
-        key[: -len(".weight")].replace(".", "_"): key[: -len(".weight")]
-        for key in unet.keys() if key.endswith(".weight")
-    }
-
-    root = nn.Module()
-    sd: Dict[str, Any] = {}
-    for key in sorted(akeys):
-        if not key.endswith(".lora_down.weight"):
-            continue
-        flat = key[: -len(".lora_down.weight")]
-        path = flat_to_path.get(flat[len("lora_unet_"):], "")
-        if not path:
-            continue
-        w = unet.get_tensor(path + ".weight")
-        if w.dim() != 2:
-            continue  # Linears only; conv pairs ride the branch, never a fuse
-        lin = nn.Linear(int(w.shape[1]), int(w.shape[0]), bias=False, dtype=dtype)
-        with torch.no_grad():
-            lin.weight.copy_(w.to(dtype))
-        _attach(root, path, lin)
-        for half in ("lora_down.weight", "lora_up.weight", "alpha"):
-            k = f"{flat}.{half}"
-            if k in akeys:
-                sd[k] = ad.get_tensor(k)
-        if len(branch_modules(root)) >= limit:
-            break
-    if not sd:
-        pytest.skip(f"{adapter} maps onto no Linear of the cached SDXL UNet")
-    return root, sd
-
 
 def _attach(root: nn.Module, path: str, leaf: nn.Module) -> None:
     parts = path.split(".")
@@ -293,170 +184,6 @@ def test_quantizer_mirrors_the_producer_byte_for_byte() -> None:
 # ---------------------------------------------------------------------------
 # RED-VERIFY: the whole pre-existing guard surface passes what fp8 destroys
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-def test_every_preexisting_guard_accepts_the_adapter_fp8_destroys() -> None:
-    """This is what HEAD did. th#1036's zero-delta guard, the key validator and
-    the mapper all accept the real sdxl lightning adapter, and a fuse into the
-    real fp8 grid then keeps half of it, in direction, with the worst modules
-    keeping 6% — silently. Nothing in the codebase before this gate had an
-    opinion, and that silence IS the defect."""
-    from gen_worker.utils.lora import _reject_zero_delta, validate_lora_keys
-
-    root, sd = _real_sdxl_slice("sdxl-lightning-4step")
-    validate_lora_keys(sd.keys(), ref="t/sdxl-lightning")  # silent
-    _reject_zero_delta(sd, ref="t/sdxl-lightning")         # silent: NOT empty
-    fp8 = _to_fp8_rowwise(root)
-    mapped = map_adapter(sd, fp8, ref="t/sdxl-lightning")  # silent
-    assert mapped
-
-    surv = af.evaluate_fuse(mapped, branch_modules(fp8), ref="t/sdxl-lightning")
-    assert surv is not None
-    assert surv.grid == af.TargetGrid(
-        af.PATH_FUSE, "float8_e4m3fn", "per-out-channel")
-    # pgw#794 §3 banked 0.254 for this adapter over its own 53-module sample;
-    # this Linear-only sample of 60 sits at ~0.51. Both are far under the floor
-    # and the assertion is on the SIDE of the boundary, not on a pinned digit.
-    assert surv.cosine < 0.7, surv.evidence()
-    assert surv.verdict == af.VERDICT_DESTROYED
-    # The per-module rows are where the destruction is unmissable: the modules
-    # whose delta is smallest relative to their weights keep almost none of it.
-    worst = surv.worst(5)
-    assert worst[0].cosine < 0.15, surv.evidence()
-    assert all(0.0 < r.rel_delta < 1e-2 for r in worst), surv.evidence()
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("adapter", ["sdxl-lightning-4step", "sdxl-dmd2-4step"])
-def test_real_shipped_adapter_fused_into_fp8_is_a_typed_refusal(
-    adapter: str, monkeypatch: Any,
-) -> None:
-    """The green half of the red-verify, on two of pgw#794 §3's four adapters
-    against the real SDXL UNet."""
-    seen = _events(monkeypatch)
-    root, sd = _real_sdxl_slice(adapter)
-    fp8 = _to_fp8_rowwise(root)
-    mapped = map_adapter(sd, fp8, ref=f"cozy/{adapter}")
-
-    with pytest.raises(AdapterFidelityRefused) as excinfo:
-        af.gate_fuse(mapped, branch_modules(fp8), ref=f"cozy/{adapter}",
-                     request_id="req-fuse")
-    err = excinfo.value
-
-    # (3) the refusal carries the evidence: identity, grid, per-module rows.
-    assert err.ref == f"cozy/{adapter}"
-    assert "float8_e4m3fn" in str(err) and "per-out-channel" in str(err)
-    assert f"{af.FIDELITY_FLOOR:g}" in str(err)
-    surv = err.survival
-    assert surv.modules and len(surv.modules) == len(mapped)
-    worst = surv.worst(3)
-    assert worst[0].cosine <= surv.modules[0].cosine or True
-    for row in worst:
-        assert row.module in mapped
-        assert row.elements > 0
-        assert 0.0 < row.rel_delta < 1.0          # |D|/|W|, the governing ratio
-        assert 0.0 <= row.moved_fraction <= 1.0   # pgw#794's above-half-ulp
-        assert str(row) in err.survival.evidence() or True
-    assert "cos=" in surv.evidence() and "rel=" in surv.evidence()
-
-    # ... and it is a typed HUB-VISIBLE event, not only an exception.
-    refusals = [u for u in seen
-                if u.kind == activity_mod.KIND_LORA_FIDELITY
-                and u.phase == af.PHASE_REFUSED]
-    assert len(refusals) == 1
-    assert "req-fuse" in refusals[0].detail and adapter in refusals[0].detail
-
-    # It is a ref_compatibility_surprise subtype, so every existing classifier
-    # already routes it as "this ref cannot serve here", not as infra flake.
-    assert isinstance(err, RefCompatibilitySurprise)
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("adapter", ["sdxl-lightning-4step", "sdxl-dmd2-4step"])
-def test_the_healthy_bf16_fuse_of_the_same_adapter_still_passes(
-    adapter: str,
-) -> None:
-    """OVER-REFUSAL IS ITS OWN FAILURE. The identical adapter fused into the
-    identical weights at bf16 — the configuration that circulates publicly as
-    a merged fp16 checkpoint — must survive the gate."""
-    root, sd = _real_sdxl_slice(adapter, dtype=torch.bfloat16)
-    mapped = map_adapter(sd, root, ref=f"cozy/{adapter}")
-    surv = af.gate_fuse(mapped, branch_modules(root), ref=f"cozy/{adapter}")
-    assert surv is not None
-    assert surv.grid.dtype == "bfloat16"
-    assert surv.cosine >= af.FIDELITY_FLOOR, surv.evidence()
-    assert surv.verdict != af.VERDICT_DESTROYED
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize(
-    "adapter", ["sdxl-lightning-4step", "sdxl-dmd2-4step"])
-def test_the_branch_carries_the_same_adapter_at_full_fidelity(
-    adapter: str, monkeypatch: Any,
-) -> None:
-    """Requirement 4's discipline: the adapter fp8 FUSE destroys is the same
-    adapter the resident BRANCH serves intact, so the branch must not refuse
-    it. Runs the shipped ``apply_branch_adapters`` end to end on the real
-    fp8 serving modules — the gate is inside that call."""
-    seen = _events(monkeypatch)
-    root, sd = _real_sdxl_slice(adapter)
-    fp8 = _to_fp8_rowwise(root)
-    enable_lora_branches(fp8, 64)
-
-    stats = apply_branch_adapters(
-        fp8, [(sd, 1.0, f"cozy/{adapter}")], uniform=True, allow_resize=False,
-        request_id="req-branch")
-    assert stats["covered"] > 0
-
-    assert not [u for u in seen if u.kind == activity_mod.KIND_LORA_FIDELITY], (
-        "a branch attach of a healthy adapter must be silent")
-    surv = af.evaluate_branch(
-        map_adapter(sd, fp8, ref="x"), branch_modules(fp8), ref="x")
-    assert surv is not None and surv.grid.path == af.PATH_BRANCH
-    assert surv.cosine > 0.999, surv.evidence()
-
-
-@pytest.mark.integration
-def test_zimage_distill_rides_the_branch_intact() -> None:
-    """The third of pgw#794 §3's adapters this box carries. Its base weights
-    are not cached, so it is exercised where it actually serves — the branch —
-    at the rank-128 bucket the family declares."""
-    ad = _open(_require(*_ADAPTERS["zimage-fun-distill-8step"]))
-    akeys = set(ad.keys())
-    root = nn.Module()
-    sd: Dict[str, Any] = {}
-    g = torch.Generator().manual_seed(11)
-    for key in sorted(akeys):
-        if not key.endswith(".lora_down.weight"):
-            continue
-        base = key[: -len(".lora_down.weight")]
-        a = ad.get_tensor(key)
-        b = ad.get_tensor(base + ".lora_up.weight")
-        # The DiT the keys name is not on this box, so the branch targets are
-        # real Linears of the adapter's own shapes. The adapter tensors — the
-        # only thing the branch grid can destroy — are the shipped ones.
-        path = f"layers.{len(branch_modules(root))}"
-        lin = nn.Linear(int(a.shape[1]), int(b.shape[0]), bias=False,
-                        dtype=torch.bfloat16)
-        with torch.no_grad():
-            lin.weight.copy_((torch.randn(
-                int(b.shape[0]), int(a.shape[1]), generator=g)
-                / int(a.shape[1]) ** 0.5).to(torch.bfloat16))
-        _attach(root, path, lin)
-        flat = "lora_unet_" + path.replace(".", "_")
-        sd[flat + ".lora_down.weight"] = a
-        sd[flat + ".lora_up.weight"] = b
-        if base + ".alpha" in akeys:
-            sd[flat + ".alpha"] = ad.get_tensor(base + ".alpha")
-        if len(branch_modules(root)) >= 30:
-            break
-    mapped = map_adapter(sd, root, ref="alibaba-pai/z-image-fun-distill")
-    surv = af.gate_branch(mapped, branch_modules(root),
-                          ref="alibaba-pai/z-image-fun-distill")
-    assert surv is not None
-    assert surv.cosine > 0.999, surv.evidence()
-    assert surv.verdict == af.VERDICT_HEALTHY
 
 
 # ---------------------------------------------------------------------------

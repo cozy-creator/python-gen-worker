@@ -53,8 +53,6 @@ os.environ.setdefault(
 if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 
-pytest_plugins = ("harness.receipt_hub",)
-
 import gen_worker  # noqa: E402
 
 # The suite runs under the DECLARED interpreter env — the exact
@@ -398,10 +396,9 @@ def _isolated_local_compiled_graph_store(tmp_path_factory):
     explicitly-requested ones, so requesting `monkeypatch` here makes pytest
     build it early for EVERY test in the tree; fixtures finalize in reverse
     setup order, so `monkeypatch` then unwinds LAST — after the yield-fixture
-    teardowns that run beside it. `test_seal_lib_memo_pgw832` and
-    `test_seal_record_derivation_pgw1095` both `monkeypatch.setattr(env_seal,
-    "_lib_digest", ...)` over an `lru_cache` and then call
-    `env_seal._lib_digest.cache_clear()` in their own `finally` — which, with
+    teardowns that run beside it. `test_seal_record_derivation_pgw1095`
+    `monkeypatch.setattr(env_seal, "_lib_digest", ...)` over an `lru_cache`
+    and then calls `env_seal._lib_digest.cache_clear()` in its own `finally` — which, with
     the order flipped, ran while the attribute was still a plain function
     (`AttributeError: 'function' object has no attribute 'cache_clear'`).
     Save and restore the variable by hand so this fixture adds no ordering

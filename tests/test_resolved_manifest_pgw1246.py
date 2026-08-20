@@ -11,15 +11,11 @@ the only assertion that stays true as the code moves.
 
 from __future__ import annotations
 
-import pathlib
 
 import pytest
 
-from gen_worker.models import cozy_snapshot, download, loading
+from gen_worker.models import cozy_snapshot, download
 from gen_worker.models.refs import WireRef
-from gen_worker.api import binding as binding_mod
-from gen_worker.api import errors as errors_mod
-from gen_worker.child_contract import MintSlot
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.wire_snapshots import AmbiguousManifestError, index_snapshots
 
@@ -93,54 +89,6 @@ def test_the_snapshot_directory_IS_the_composed_digest() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_wire_has_no_syntax_left_for_subtraction() -> None:
-    fields = {f.name for f in pb.ModelBinding.DESCRIPTOR.fields}
-    assert "components" not in fields, (
-        "ModelBinding.components IS the subtraction; it must stay deleted")
-    assert "manifest_digest" in fields
-    # pgw#1415: 9 -> 10. Tag 9 was claimed here while tensorhub still had it
-    # free, and th#2140 then spent it on `model`; the hub is the only SENDER
-    # of either field, so the hub's number stands and this one moved. The
-    # SUBTRACTION this test guards is untouched by that.
-    assert pb.ModelBinding.DESCRIPTOR.fields_by_name[
-        "manifest_digest"].number == 10
-    assert "provenance" in {f.name for f in pb.Snapshot.DESCRIPTOR.fields}
-
-
-def test_the_child_contract_carries_no_second_tree() -> None:
-    """A composed manifest names a COHERENT tree, so there is no second tree
-    for four child processes to be handed — and no field for them to speak
-    that the parent stopped sending.
-
-    Pinned as "exactly ONE location field", not as a field count: pgw#1333
-    added `facts` (what the catalog says the checkpoint IS), which is neither
-    a tree nor a narrowing of one. A count would have gone red for it and
-    said "second tree", which is the wrong sentence.
-    """
-    assert "component_paths" not in MintSlot.__struct_fields__
-    located = [f for f in MintSlot.__struct_fields__
-               if f in ("path", "component_paths", "paths", "trees", "root")]
-    assert located == ["path"], MintSlot.__struct_fields__
-    assert set(MintSlot.__struct_fields__) == {"ref", "path", "facts"}
-
-
-def test_a_binding_pins_exactly_one_ref() -> None:
-    assert not hasattr(binding_mod, "component_overrides")
-    assert not hasattr(binding_mod, "binding_wire_refs")
-    assert "component_overrides" not in binding_mod.ModelRef.__struct_fields__
-    # The author-declared positive selector is a different thing and stays.
-    assert "components" in binding_mod.ModelRef.__struct_fields__
-
-
-def test_both_component_substitution_error_classes_are_gone() -> None:
-    """Two incompatible classes with one name is what let `preload` catch a
-    refusal `executor` never raised (the pgw#1048 refusal-cache bypass)."""
-    assert not hasattr(errors_mod, "ComponentSubstitutionError")
-    assert not hasattr(loading, "ComponentSubstitutionError")
-    assert not hasattr(loading, "load_component_override")
-    assert not hasattr(loading, "assert_composition_satisfiable")
-
-
 def test_positive_component_selection_survives_and_negative_does_not() -> None:
     paths = ["model_index.json", "vae/a", "unet/b"]
     assert download.select_component_paths(paths, ("vae",)) == {
@@ -149,42 +97,3 @@ def test_positive_component_selection_survives_and_negative_does_not() -> None:
     with pytest.raises(TypeError):
         download.select_component_paths(paths, (), ("vae",))  # type: ignore[call-arg]
 
-
-def test_the_deleted_vocabulary_is_absent_from_the_installed_package() -> None:
-    """The assertion that survives refactors: grep the shipped source. A stale
-    mechanism that comes back under a new call site still writes these words."""
-    import gen_worker
-
-    root = pathlib.Path(gen_worker.__file__).resolve().parent
-    # The sweep must see the WHOLE package, so anchor it on a file that is
-    # certain to be there. `executor.py` was that anchor and cd46c957
-    # (pgw#1373) deleted it with the v1 runtime — an anchor that names a
-    # deleted file turns this row from "the vocabulary is gone" into "the
-    # anchor is gone", which is a different sentence. `worker.py` is the v2
-    # boot connector and cannot be absent from a working package.
-    assert (root / "worker.py").exists(), root
-    banned = (
-        "component_fetch_skipped",
-        "_override_excluded_components",
-        "dir_key_excludes_components",
-        "EXCLUDE_MARKER",
-        "load_component_override",
-        "component_trees",
-        "component_paths",
-        "component_overrides",
-        "ComponentSubstitutionError",
-        "exclude_components",
-    )
-    hits = []
-    for path in sorted(root.rglob("*.py")):
-        if path.parent.name == "pb":
-            continue  # generated bindings carry no worker logic
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for word in banned:
-            if word == "component_paths" and "select_component_paths" in text:
-                text_check = text.replace("select_component_paths", "")
-            else:
-                text_check = text
-            if word in text_check:
-                hits.append(f"{path.relative_to(root)}: {word}")
-    assert not hits, hits

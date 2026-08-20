@@ -130,8 +130,7 @@ def test_the_storage_half_still_provides_what_the_ownership_ruling_keeps() -> No
         )
 
     # And the one that DID die with the chokepoint flip: still defined by the
-    # pinned upstream snapshot, called by nothing here. The caller census is
-    # `scripts/lint_materialization_hatch.py`, in the required `fast gates`.
+    # pinned upstream snapshot, called by nothing here.
     assert hasattr(LocalCAS, "materialize" + "_repository")
 
 

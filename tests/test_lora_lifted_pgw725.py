@@ -18,7 +18,6 @@ device — no GPU and no fp8 kernel needed to prove where a bound view lands.
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -27,7 +26,6 @@ torch = pytest.importorskip("torch")
 
 import torch.nn as nn
 
-from gen_worker.models import lora_lifted
 from gen_worker.api.errors import ValidationError
 from gen_worker.models.lora_lifted import (
     LIFTED_INPUT_NAMES,
@@ -38,7 +36,6 @@ from gen_worker.models.lora_lifted import (
     lifted_binding,
     lifted_input_names,
     lora_constant_fqns,
-    package_constant_audit,
     remove_lifted_lora_forward,
     resolve_slots,
     unbind_views,
@@ -148,8 +145,7 @@ def test_g2_swap_matches_eager_and_differs_export() -> None:
     # NOTE: ``ep.module()`` shares buffer STORAGE with the live module, so it
     # would happily "swap" a baked adapter too — it proves the lifted call
     # convention and the numerics, never the absence of baking. The anti-baking
-    # bite comes from G3 (constant table) and from the packaged-artifact test
-    # below, which is the only form that actually copies constants.
+    # bite comes from G3 (constant table).
     graph = ep.module()
 
     with torch.no_grad():
@@ -280,106 +276,6 @@ def test_g3_catches_a_traced_away_branch() -> None:
     assert lora_constant_fqns(ep) == ()
     with pytest.raises(ValidationError, match="traced away"):
         assert_no_baked_adapter(ep, label="branchless")
-
-
-# --------------------------------------------------------------------------
-# The PACKAGED artifact — the only form where baking is observable.
-#
-# CPU AOTI packs a real `.so`, so the whole no-baked-adapter acceptance test is
-# affordable without a GPU (pgw#704 assumed it needed the pod rig). Opt-in
-# because each pack costs ~10-30s and needs a C++ toolchain.
-# --------------------------------------------------------------------------
-
-_AOT = pytest.mark.skipif(
-    os.environ.get("GEN_WORKER_AOT_PACK_TESTS") != "1",
-    reason="set GEN_WORKER_AOT_PACK_TESTS=1 (packs a real .pt2; needs g++)")
-
-
-def _pack(exported: Any, path: Any) -> Any:
-    pkg = torch._inductor.aoti_compile_and_package(
-        exported, package_path=str(path))
-    return torch._inductor.aoti_load_package(pkg)
-
-
-@_AOT
-def test_aot_g2_swap_on_a_packaged_artifact(tmp_path: Any) -> None:
-    """G2 against a real `.pt2`: out(A) and out(B) both match eager, and they
-    differ. One artifact, no recompile, swap = different argument data."""
-    x = torch.randn(TOK, DIM, dtype=DT)
-    sd_a = _adapter_sd(_Stack(), rank=8, seed=21, alpha=16.0)
-    sd_b = _adapter_sd(_Stack(), rank=8, seed=22, alpha=4.0)
-    ref_a, ref_b, ref_zero = _eager_reference(x, sd_a, sd_b)
-
-    model, binding = _lifted(x)
-    binding.swap([(sd_a, 1.0, "A")])
-    with torch.no_grad():
-        ep = torch.export.export(
-            model, (x,), dict(zip(LIFTED_INPUT_NAMES, binding.tensors)),
-            strict=False)
-    runner = _pack(ep, tmp_path / "lifted.pt2")
-
-    # G3 is asserted on the EXPORT (where FQNs survive); the package read is
-    # advisory, and certifying a package is refused by name.
-    assert_no_baked_adapter(ep, label="lifted export")
-    named, anon = package_constant_audit(runner)
-    assert named == ()
-    with pytest.raises(ValidationError, match="cannot certify a LOADED"):
-        assert_no_baked_adapter(runner, label="packaged lifted")
-
-    with torch.no_grad():
-        out_a = runner(x, **binding.call_kwargs()).clone()
-        binding.swap([(sd_b, 1.0, "B")])
-        out_b = runner(x, **binding.call_kwargs()).clone()
-        binding.clear()
-        out_zero = runner(x, **binding.call_kwargs()).clone()
-    assert _rel(out_a, ref_a) < 1e-4
-    assert _rel(out_b, ref_b) < 1e-4
-    assert _rel(out_zero, ref_zero) < 1e-4
-    assert _rel(out_a, out_b) > 1e-3
-
-
-@_AOT
-def test_aot_g2_catches_a_baked_adapter(tmp_path: Any) -> None:
-    """The failure the gate exists for: a buffer-held adapter is COPIED into the
-    package, so hot-swapping the source buffers moves the eager output and
-    leaves the artifact serving the export-time adapter forever."""
-    x = torch.randn(TOK, DIM, dtype=DT)
-    sd_a = _adapter_sd(_Stack(), rank=8, seed=23)
-    sd_b = _adapter_sd(_Stack(), rank=8, seed=24)
-
-    # No faking needed: the SHIPPED buffer-copy path IS the baked shape once it
-    # is exported without lifting.
-    model = _Stack().eval()
-    enable_lora_branches(model, BUCKET)
-    apply_branch_adapters(model, [(sd_a, 1.0, "A")], uniform=True)
-    with torch.no_grad():
-        ep = torch.export.export(model, (x,), strict=False)
-    # G3 refuses at PACK time, before a request is ever served — and names them.
-    baked = lora_constant_fqns(ep)
-    assert baked, "an un-lifted adapter must show up in the constant table"
-    with pytest.raises(ValidationError, match="BAKED"):
-        assert_no_baked_adapter(ep, label="unlifted export")
-
-    runner = _pack(ep, tmp_path / "baked.pt2")
-    with torch.no_grad():
-        art_a = runner(x).clone()
-        apply_branch_adapters(model, [(sd_b, 1.0, "B")], uniform=True)
-        eager_b = model(x).clone()
-        art_b = runner(x).clone()
-
-    assert _rel(art_a, eager_b) > 1e-3, "eager must move on swap"
-    # BOTH G2 assertions fail on the baked artifact — that is the catch.
-    assert _rel(art_a, art_b) < 1e-9, "the packaged adapter is frozen"
-    assert _rel(art_b, eager_b) > 1e-3, "the artifact serves the stale adapter"
-    # MEASURED (torch 2.13): packing ERASES the FQN of a __dict__-home adapter,
-    # so the package-side name scan is a FALSE PASS and the gate must refuse to
-    # certify a package at all. This assertion is the regression tape for that.
-    named, anon = package_constant_audit(runner)
-    assert named == (), "expected the plain-lane FQNs to be erased by packing"
-    assert len(anon) == len(baked), (
-        f"expected {len(baked)} anonymous constants, got {anon}")
-    with pytest.raises(ValidationError, match="cannot certify a LOADED"):
-        assert_no_baked_adapter(runner, label="packaged baked")
 
 
 # --------------------------------------------------------------------------

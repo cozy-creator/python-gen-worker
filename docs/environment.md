@@ -13,11 +13,8 @@ deep to be handed a parameter it reads what the entry published
 (`config.current()`), which raises rather than silently loading if nothing was
 installed.
 
-**Raw-env reads ARE centrally registered now.** They are
-`scripts/config_reads_allowlist.txt`, one classified line per accepted site,
-enforced by `scripts/lint_config_reads.py` in CI. That file — not this page —
-is the authoritative census; this page is orientation. The previous prose
-version of that list named 5 files while the reads lived in 41.
+This page is orientation, not a census of raw-env read sites; grep
+`os.environ` for the current set.
 
 An unrecognised key inside a gen-worker-owned namespace (`GEN_WORKER_`,
 `TENSORHUB_`, `WORKER_`, `COZY_`) in `.env`, `/run/secrets` or yaml now
@@ -161,9 +158,8 @@ compile evidence.
   `GEN_WORKER_COMPUTE_UID` (privilege-drop target uid),
   `GEN_WORKER_EAGER_FIRST_BOOT`,
   `GEN_WORKER_NATIVE_KERNELS`, `GEN_WORKER_AOT_*`,
-  `GEN_WORKER_MINT_*`, `RUNPOD_PROVIDER` — further raw reads. **This list is no
-  longer the source of truth**: `scripts/config_reads_allowlist.txt` is, and it
-  is complete by construction because CI fails on any site missing from it.
+  `GEN_WORKER_MINT_*`, `RUNPOD_PROVIDER` — further raw reads. **This list is
+  not the source of truth**; grep `os.environ` for the current set.
 - `NCCL_NVLS_ENABLE` — NOT a knob. `parallel/group.py` overwrites it to `0`
   unconditionally immediately before communicator creation (pgw#929): NVLS
   multicast cannot be bound in our containers and every Ulysses all-to-all dies

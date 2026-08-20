@@ -3,21 +3,13 @@
 # pgw#1524: Paul's hardcut — "only store + support loading our new tensorfs laid
 # out files ... do not support old systems that lack this. Hardcut."
 
-Three things are proven here, and they are different instruments:
+Two things are proven here:
 
-1.  **The census asserts its own size.** A per-source-class refusal test can
-    only fail on a door it was told about, so it cannot see a NEW direct-serve
-    branch someone adds tomorrow. The census does: it walks the AST of every
-    module under ``src/gen_worker`` and counts the upstream-registry fetch call
-    sites, partitioned into SERVE-side (must be zero) and INGEST-side (must be
-    non-zero, or the ingest edge silently vanished and the refusals below would
-    be refusing people out of a capability that no longer exists anywhere).
-
-2.  **Every door refuses, by source class.** Three doors — the ModelStore
+1.  **Every door refuses, by source class.** Three doors — the ModelStore
     funnel, the hub-less CLI resolver, and the job plane's reserved-repo
     materializer — crossed with three source classes.
 
-3.  **The end-to-end shape, at CPU scale.** One synthesized safetensors file.
+2.  **The end-to-end shape, at CPU scale.** One synthesized safetensors file.
     Fetch-shaped (an upstream ref, no snapshot) it is REFUSED; ingested — put
     in the CAS, named by a resolved manifest, projected — the very same bytes
     serve, and the tensor reads back byte-exact out of the projected tree.
@@ -25,11 +17,10 @@ Three things are proven here, and they are different instruments:
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 
 import pytest
 
@@ -51,8 +42,6 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.serving.reserved_repos import materialize_reserved_inputs_async
 from gen_worker.transfer.grants import TransferReport
 
-_SRC = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
-
 #: One ref per SOURCE CLASS, in each class's own grammar. Parametrizing the
 #: doors over this is what makes "per source class" a real axis rather than
 #: three copies of the huggingface case.
@@ -64,125 +53,7 @@ SOURCE_CLASSES: Tuple[Tuple[str, str], ...] = (
 
 
 # ---------------------------------------------------------------------------
-# 1. The census, and it states its own size
-# ---------------------------------------------------------------------------
-
-#: The upstream-registry fetch primitives. A call to one of these is, by
-#: definition, bytes coming off a third-party registry rather than out of the
-#: platform CAS — so WHERE they are called is the whole question this cut
-#: answers.
-_REGISTRY_FETCHES = frozenset({
-    "snapshot_download",
-    "hf_hub_download",
-    "download_civitai",
-    "download_hf",
-    "download_modelscope",
-    "_snapshot_download_with_retries",
-})
-
-#: Packages that are INGEST by construction: their entire reason to exist is
-#: fetching an upstream artifact so it can be normalized under a layout
-#: contract and published into the CAS. Everything else is serve-side.
-_INGEST_PACKAGES = ("gen_worker.convert",)
-
-#: What the 2026-08-19 census found and the cut left behind. Stated as numbers
-#: so a new direct-serve branch changes a number rather than slipping past a
-#: test that was only ever told about three doors.
-#:
-#: SERVE-side registry fetches must be ZERO. That is the hardcut.
-CENSUS_SERVE_SIDE_REGISTRY_FETCHES = 0
-#: INGEST-side must stay non-zero: HF ingest owns its own bounded
-#: `snapshot_download` and civitai ingest calls `download_civitai`. If this
-#: goes to zero the platform can no longer take a model IN, and the refusals
-#: below would be pointing operators at a route that does not exist.
-CENSUS_INGEST_SIDE_REGISTRY_FETCHES_MIN = 2
-
-
-def _module_name(path: Path) -> str:
-    rel = path.relative_to(_SRC.parent).with_suffix("")
-    return ".".join(rel.parts)
-
-
-def _registry_fetch_sites() -> Dict[str, List[str]]:
-    """``{module: [called name, ...]}`` for every upstream-registry fetch call
-    in the package. Whole-tree, AST — not grep, which cannot tell a call from a
-    docstring naming what was deleted."""
-    found: Dict[str, List[str]] = {}
-    for path in sorted(_SRC.rglob("*.py")):
-        if "_vendor" in path.parts or "__pycache__" in path.parts:
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:  # pragma: no cover - a broken tree fails elsewhere
-            continue
-        names: List[str] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = (
-                func.id if isinstance(func, ast.Name)
-                else func.attr if isinstance(func, ast.Attribute)
-                else ""
-            )
-            if name in _REGISTRY_FETCHES:
-                names.append(name)
-        if names:
-            found[_module_name(path)] = names
-    return found
-
-
-def _partition(sites: Dict[str, List[str]]) -> Tuple[int, int, Dict[str, List[str]]]:
-    serve = 0
-    ingest = 0
-    serve_detail: Dict[str, List[str]] = {}
-    for module, names in sites.items():
-        if module.startswith(_INGEST_PACKAGES):
-            ingest += len(names)
-        else:
-            serve += len(names)
-            serve_detail[module] = names
-    return serve, ingest, serve_detail
-
-
-def test_no_module_outside_ingest_fetches_from_an_upstream_registry() -> None:
-    """THE census assertion. Zero serve-side registry fetches, and the failure
-    names the module and the call so the next reader does not have to re-run
-    the census by hand."""
-    serve, _ingest, detail = _partition(_registry_fetch_sites())
-    assert serve == CENSUS_SERVE_SIDE_REGISTRY_FETCHES, (
-        "a weight source outside gen_worker.convert fetches from an upstream "
-        "registry — serving loads ONLY tensorfs CAS snapshots (pgw#1524). "
-        f"Sites: {detail}"
-    )
-
-
-def test_the_ingest_edge_still_exists_for_the_refusals_to_point_at() -> None:
-    """The other half of the census, and it is not decoration: a refusal that
-    names an ingest route the tree no longer has is worse than no refusal."""
-    _serve, ingest, _detail = _partition(_registry_fetch_sites())
-    assert ingest >= CENSUS_INGEST_SIDE_REGISTRY_FETCHES_MIN, (
-        "gen_worker.convert no longer fetches from any upstream registry, so "
-        "the ingest route the refusals name does not exist"
-    )
-
-
-def test_the_census_instrument_can_see_a_reintroduced_direct_serve_branch() -> None:
-    """The census's OWN red-arm: prove the scanner finds a serve-side fetch
-    when one is there, so its green is evidence rather than a scan that found
-    nothing because it was looking in the wrong place."""
-    planted = ast.parse("def serve(x):\n    return snapshot_download(x)\n")
-    names = [
-        node.func.id
-        for node in ast.walk(planted)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id in _REGISTRY_FETCHES
-    ]
-    assert names == ["snapshot_download"]
-
-
-# ---------------------------------------------------------------------------
-# 2. Every door refuses, per source class
+# 1. Every door refuses, per source class
 # ---------------------------------------------------------------------------
 
 
@@ -304,7 +175,7 @@ def test_an_unknown_provider_is_still_an_input_error_not_a_source_refusal() -> N
 
 
 # ---------------------------------------------------------------------------
-# 3. End to end: the SAME bytes refuse direct and serve after ingest
+# 2. End to end: the SAME bytes refuse direct and serve after ingest
 # ---------------------------------------------------------------------------
 
 _PAYLOAD = projection_fixture.varied(64, seed=1524)

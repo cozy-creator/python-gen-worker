@@ -26,6 +26,5 @@ from __future__ import annotations
 #:
 #: 96 is 56 hex + one separator + a 39-byte scheme budget. It is a bound, not a
 #: target. The number is shared with tensorhub through the vendored corpora
-#: (boundary vectors at 96 and 97 in both) and fenced by
-#: ``scripts/grammar-vector-drift.sh``.
+#: (boundary vectors at 96 and 97 in both), pinned by ``KEY_GRAMMAR_DIGEST``.
 MAX_FRAGMENT_LEN = 96

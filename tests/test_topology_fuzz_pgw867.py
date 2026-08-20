@@ -22,8 +22,7 @@ properties here are:
       coherence rules. This is what makes "silently served the wrong packing"
       unreachable rather than merely unobserved.
   P4  the Python side answers every vector in ``testdata/topology_wire_vectors
-      .json`` as recorded (the merge-path half; the random cross-language search
-      lives in ``scripts/topology_differential_pgw867.py``, not here).
+      .json`` as recorded (the merge-path half).
 
 hypothesis over atheris: these decoders are shallow, so libFuzzer's coverage
 feedback buys little, and ``@example`` puts each historical defect in the source
