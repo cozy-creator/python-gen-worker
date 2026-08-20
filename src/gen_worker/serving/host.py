@@ -417,6 +417,7 @@ class EndpointHost:
                     len(session.unclaimed), len(marks),
                 )
                 seen: set[str] = set()
+                reasons: list[str] = []
                 for hole in session.holes:
                     # One line per distinct reason, not per graph: fourteen
                     # copies of one sentence is how a reason gets skimmed past.
@@ -424,12 +425,36 @@ class EndpointHost:
                     if reason_class in seen:
                         continue
                     seen.add(reason_class)
-                    logger.warning(
-                        "adopt:   hole %s: %s", hole.record.graph[-16:],
-                        str(hole.reason)[:300],
+                    reasons.append(
+                        f"{hole.record.graph[-16:]}: {str(hole.reason)[:300]}"
                     )
+                    logger.warning("adopt:   hole %s", reasons[-1])
                     if len(seen) >= 6:
                         break
+                # DURABLE, not log-only (pgw#1564, second lesson): the 09:41
+                # zero was diagnosable from this exact list, and the list
+                # lived in a resident log; the NEXT instance is on a pod
+                # whose SSH is dead two rentals running. The row is what a
+                # $0.07 rental reads from the hub instead of buying blind.
+                try:
+                    from .. import activity as activity_mod
+                    from .self_mint import KIND_SKIPPED
+
+                    activity_mod.emit_event(
+                        KIND_SKIPPED,
+                        f"lane={lane_contract} sm={sm}: boot armed ZERO of "
+                        f"{len(session.adopted) + len(session.holes)} claimed "
+                        f"graph(s) ({len(session.holes)} hole(s), "
+                        f"{len(session.ambiguous)} ambiguous, "
+                        f"{len(marks)} unmatched mark(s)); hole reasons: "
+                        + ("; ".join(reasons) or "none recorded"),
+                        phase="armed_zero",
+                        step=0,
+                        total_steps=len(session.adopted) + len(session.holes),
+                    )
+                except Exception:  # noqa: BLE001 — the row never costs the boot
+                    logger.debug("adopt: armed-zero row failed to emit",
+                                 exc_info=True)
         self.adoption = session
         self._booted = True
 
