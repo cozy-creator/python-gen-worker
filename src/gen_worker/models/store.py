@@ -127,6 +127,35 @@ class _MaterializedLocal:
     path: Path
     identity: _ResidencyIdentity
 
+# pgw#1543: THE SERVING PATH NEEDS THE STORE, and had no way to reach it.
+#
+# `ensure_pinned` had exactly two callers — `announce_resident` (boot) and
+# `_materialize_local` (materialization) — and `ctx.load`, the per-request path
+# that ACTUALLY REFUSES, called neither. A pod whose tree was already
+# materialized and whose announce already ran serves every later request
+# through `ctx.load`, which finds the pin missing and refuses forever, while
+# the repair sits two modules away with no reference to reach it by. Three
+# commits of observability were watching a door the failure does not use.
+#
+# The resolver already takes the store by `bind_store`; this is the same idea
+# for the serving path, which holds a `DeployBinding` (ref + dir) and nothing
+# else. Module-level because a `ServingContext` is built per host from a
+# binding that deliberately carries no store, and threading one through every
+# construction site to fix an outage is the wrong trade today.
+_ACTIVE_STORE: "Optional[ModelStore]" = None
+
+
+def bind_active_store(store: "ModelStore") -> None:
+    """Publish the process's store for paths that hold no reference to it."""
+    global _ACTIVE_STORE
+    _ACTIVE_STORE = store
+
+
+def active_store() -> "Optional[ModelStore]":
+    """The bound store, or None in a process that never made one (a fixture)."""
+    return _ACTIVE_STORE
+
+
 class ModelStore:
     """The worker's model seam: ensure-local with retries, the residency map,
     and disk retention (#370). All tier transitions flow through
@@ -689,6 +718,31 @@ class ModelStore:
         """
         with self._identity_lock:
             return self._snapshots.get(ref)
+
+    def banked_snapshot_for_tree(self, tree_name: str) -> Optional[pb.Snapshot]:
+        """The banked snapshot whose DIGEST names ``tree_name``, if any.
+
+        pgw#1543. `banked_snapshot` is keyed by ref, and the serving path holds
+        `DeployBinding.checkpoint_ref` — which is the resolver's `pick.ref`,
+        not necessarily the exact string the store banked under. A repair that
+        depended on those two spellings matching would SILENTLY NO-OP on any
+        mismatch: `banked_snapshot` misses, `ensure_pinned` returns False, the
+        pod refuses exactly as before, and every stubbed test still passes.
+        That failure mode is invisible, so the lookup does not rely on the ref
+        at all — the tree's directory name IS its digest, and that is a fact
+        about disk rather than about vocabulary.
+        """
+        want = str(tree_name)
+        with self._identity_lock:
+            banked = list(self._snapshots.values())
+        for snapshot in banked:
+            digest = str(getattr(snapshot, "digest", "") or "").strip()
+            if not digest or not snapshot.files:
+                continue
+            bare = digest.split(":", 1)[-1]
+            if want in (snapshot_dir_key(digest), snapshot_dir_key(bare)):
+                return snapshot
+        return None
 
     def bank_snapshot(self, ref: WireRef, snapshot: pb.Snapshot) -> None:
         """Make hub metadata available without starting a download."""

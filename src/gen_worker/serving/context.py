@@ -50,6 +50,7 @@ from ..request_context import _PublisherMixin
 if TYPE_CHECKING:
     from ..models.defaults_decode import CarriesDefaults
     from ..models.model_types import ModelType
+    from ..models.refs import WireRef
 
 P = TypeVar("P")
 D = TypeVar("D", bound=GenerationDefaults)
@@ -386,6 +387,7 @@ class LoadContext(Generic[MT_co]):
         engine: Optional[LoaderEngine] = None,
         compile_sink: Optional[Callable[[Any], Any]] = None,
         device: str = "",
+        io: str = "buffered",
         weight_budget_bytes: int = 0,
     ) -> None:
         self._binding = binding
@@ -398,6 +400,10 @@ class LoadContext(Generic[MT_co]):
         #: means none was handed down — a bare `LoadContext(...)` places
         #: nothing, exactly as before.
         self._device = str(device or "")
+        #: pgw#1543: the host's IO mode, kept so a repair-at-decline re-asks
+        #: `engine_for` with the SAME arguments the host used. Retrying with a
+        #: guessed mode would make the retry a different question.
+        self._io = str(io or "buffered")
         #: The offload rung `_placed` engaged for this load, or "" for "the
         #: ladder was never consulted" (pgw#1486). Read by `compile()`, which
         #: may not arm a compiled graph over hook-managed weights.
@@ -432,6 +438,54 @@ class LoadContext(Generic[MT_co]):
                 "(eager-permanent); there is no active lane to read"
             )
         return self._lane
+
+    def _repair_pin_and_rebind(self) -> bool:
+        """Re-pin this tree's manifest and re-ask for an engine. True if bound.
+
+        pgw#1543. Idempotent and moves NO BYTES — `ensure_pinned` rewrites the
+        manifest pin from the banked snapshot, and the objects are already on
+        disk (guaranteed by the `collected` check above). A pod that has been
+        refusing every request becomes a serving pod on its next one.
+
+        Never raises: a repair that fails must leave the ORIGINAL refusal
+        intact rather than replace a precise diagnosis with a repair traceback.
+        The outcome is recorded either way (pgw#1542) and rides the refusal.
+        """
+        try:
+            from ..models.store import active_store
+            from .streaming import engine_for
+
+            store = active_store()
+            if store is None:
+                return False
+            ref = cast("WireRef", self.checkpoint_ref)
+            # The snapshot is looked up BY TREE first, not by ref. The serving
+            # path holds the resolver's `pick.ref`, which need not be the exact
+            # string the store banked under, and a ref-only lookup would make
+            # this repair a SILENT NO-OP on any spelling mismatch — refusing
+            # exactly as before while every stubbed test passes. The tree's
+            # directory name is its digest, which is a fact about disk.
+            snapshot = store.banked_snapshot_for_tree(self.checkpoint_dir.name)
+            if not store.ensure_pinned(ref, self.checkpoint_dir, snapshot):
+                return False
+            engine = engine_for(
+                self.checkpoint_dir,
+                device=self._device or "cuda",
+                io=self._io or "buffered",
+            )
+            if engine is None:
+                # Re-pinned and STILL no engine: a different fault, and the
+                # refusal below is the honest answer. Not logging this as a
+                # success is the whole point of re-asking rather than assuming.
+                return False
+            self._engine = engine
+            return True
+        except Exception:  # noqa: BLE001 — a repair must never mask the refusal
+            logger.warning(
+                "pgw#1543: repair-at-decline raised for %s; falling through to "
+                "the refusal", self.checkpoint_dir, exc_info=True,
+            )
+            return False
 
     def load(self, pipeline_cls: Type[P]) -> P:
         """Build ``pipeline_cls`` with this checkpoint's weights resident —
@@ -508,6 +562,33 @@ class LoadContext(Generic[MT_co]):
             )
         stubbed = _projection_artifacts(self.checkpoint_dir)
         if stubbed:
+            # pgw#1543: REPAIR AT THE DECLINE, because this is the only place
+            # the failure actually happens.
+            #
+            # `ensure_pinned` existed since pgw#1526 and had two callers —
+            # `announce_resident` (boot) and `_materialize_local`
+            # (materialization). NEITHER is on this path. A pod whose tree was
+            # already materialized, or whose announce ran before the repair
+            # existed, reaches here on EVERY request and refuses, forever,
+            # while a working repair sits two modules away. That is a ~19 h
+            # fleet-wide serve outage explained without a single log line: the
+            # fix was never on the failing path.
+            #
+            # Ordering is load-bearing: `collected` is checked ABOVE and never
+            # reaches here, because a tree whose objects were GC'd has nothing
+            # to re-pin (se#790 measured 5.6 GB / 134 GB gone) and writing a
+            # pin over absent bytes would convert an honest refusal into a
+            # corrupt serve. Only the stubbed-but-INTACT case is repairable —
+            # exactly "the objects are present and only the pin is gone".
+            if self._repair_pin_and_rebind():
+                engine = self._engine
+                assert engine is not None  # set by the repair above
+                rebound: P = engine.build(
+                    pipeline_cls,
+                    checkpoint_dir=self.checkpoint_dir,
+                    lane=self._lane,
+                )
+                return self._placed(rebound)
             raise ProjectedTreeNotStreamable(
                 self.checkpoint_dir,
                 stubbed,
