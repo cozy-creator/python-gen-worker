@@ -1256,12 +1256,25 @@ def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
 
 
 def endpoint_source_root(module: ModuleType) -> Optional[Path]:
-    """The directory the AUTHOR's code lives in, or None if it cannot be told.
+    """The SOURCE ROOT the author's modules live under, or None if unknowable.
 
-    The top-level package of the endpoint's main module: `minimax_h3.main` ->
-    `<repo>/src/minimax_h3`, a bare fixture module -> the directory holding it.
-    None when the module has no file (namespace/frozen), and None is treated as
-    "cannot prove endpoint-owned", which keeps the conservative default.
+    The sys.path entry that holds the endpoint's code — `minimax_h3.main` ->
+    `<repo>/src`, a bare fixture module -> the directory holding it. None when
+    the module has no file (namespace/frozen), and None is treated as "cannot
+    prove endpoint-owned", which keeps the conservative default.
+
+    **pgw#1533: this used to return the top-level PACKAGE directory**
+    (`<repo>/src/minimax_h3`), which silently uncovered every author module
+    that is not inside that one package. h3's fps refusal raises in
+    `src/cozy_rife.py` — a SIBLING top-level module at the same source root —
+    so `deepest_endpoint_frame` could not prove it was the author's and the
+    whole derive died on a product bug that pgw#1527 exists to skip. A shared
+    helper module beside the main package is the common case, not an exotic
+    one, so the roster was wrong for most endpoints rather than a few.
+
+    Widening the root is safe only because :func:`deepest_endpoint_frame`
+    SUBTRACTS: the SDK and any third-party install root are excluded from it
+    explicitly, so a wider root can add author files and never adds a library.
     """
 
     import sys
@@ -1272,9 +1285,28 @@ def endpoint_source_root(module: ModuleType) -> Optional[Path]:
     if not path:
         return None
     try:
-        return Path(path).resolve().parent
+        here = Path(path).resolve()
     except OSError:
         return None
+    # A PACKAGE's `__init__.py` sits one level below the source root; a bare
+    # module sits directly in it.
+    if here.name == "__init__.py":
+        return here.parent.parent
+    return here.parent
+
+
+def _third_party_root(where: Path) -> bool:
+    """Is this path inside an installed-dependency tree?
+
+    Named by the install layout rather than by a list of libraries, so torch,
+    diffusers and anything else an endpoint pulls in are covered without being
+    enumerated.
+    """
+
+    return any(
+        part in ("site-packages", "dist-packages", "__pypackages__")
+        for part in where.parts
+    )
 
 
 def _sdk_root() -> Path:
@@ -1317,8 +1349,24 @@ def deepest_endpoint_frame(
         where = Path(deepest.filename).resolve()
     except OSError:
         return None
-    sdk = _sdk_root()
-    if where.is_relative_to(sdk):
+    # THE SUBTRACTION, and it is what makes a wide source root safe (pgw#1533).
+    # The root is now the sys.path entry holding the author's modules, so a
+    # sibling helper beside the main package is covered — but a root can only
+    # ADD author files if everything that is not the author's is removed from
+    # it first, and removed by construction rather than by a list:
+    #
+    #   * the SDK, even if it somehow sits under the same root;
+    #   * any installed-dependency tree (site-packages / dist-packages), which
+    #     is where torch, diffusers and everything else an endpoint pulls in
+    #     actually live.
+    #
+    # The degenerate case is the safe one: an endpoint pip-INSTALLED into
+    # site-packages has a source root that is entirely subtracted, so nothing
+    # is claimed and every failure stays fatal. "Unsure" still resolves to
+    # fatal, which is the property pgw#1527 was built on.
+    if where.is_relative_to(_sdk_root()):
+        return None
+    if _third_party_root(where):
         return None
     if not where.is_relative_to(endpoint_root):
         return None
