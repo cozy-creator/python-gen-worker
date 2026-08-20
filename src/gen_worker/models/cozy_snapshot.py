@@ -29,6 +29,7 @@ import re
 import shutil
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
@@ -42,7 +43,7 @@ from gen_worker._vendor.tensorfs import (
     RepositoryManifest,
     project_snapshot,
 )
-from gen_worker.transfer.grants import TransferGrant, download
+from gen_worker.transfer.grants import DEFAULT_PARALLEL, TransferGrant, download
 
 from .. import activity as _activity
 from .. import boot_phases
@@ -202,6 +203,34 @@ def _filter_resolved_components(
         files=[file for file in resolved.files if file.path in keep],
     )
 
+
+
+def _scan_fanout(
+    account: Callable[[TransferGrant], None],
+    grants: Sequence[TransferGrant],
+) -> None:
+    """Run the residency/fill verdict over every grant, `DEFAULT_PARALLEL`-wide.
+
+    pgw#1556. Called from ONE `asyncio.to_thread` rather than one per object,
+    so the event loop is released for the whole scan (unchanged, and the
+    reason the off-thread hop exists) while the objects themselves overlap.
+
+    A failure is never swallowed here: `account` already converts every
+    per-object verdict, including the failures, into `missing` — the fetch
+    that follows is the recovery. What must not happen is a thread dying with
+    an exception nobody reads, so the pool is drained by RESULT and the first
+    exception is re-raised at the caller, on the caller's thread.
+    """
+    width = max(1, min(DEFAULT_PARALLEL, len(grants)))
+    if width == 1:
+        for grant in grants:
+            account(grant)
+        return
+    with ThreadPoolExecutor(
+        max_workers=width, thread_name_prefix="fill-scan"
+    ) as pool:
+        for future in [pool.submit(account, grant) for grant in grants]:
+            future.result()
 
 def _manifest(files: Sequence[WorkerResolvedRepoFile]) -> RepositoryManifest:
     return RepositoryManifest(tuple(_manifest_entry(file) for file in files))
@@ -504,13 +533,36 @@ class CozySnapshotDownloader:
                 return False
 
         def filled(grant: TransferGrant) -> bool:
+            """Volume -> pod CAS, hashing every byte ONCE (pgw#1556).
+
+            This used to call `fill.verify_object` first, which reads and
+            SHA-256s the whole source purely to check it, and then handed the
+            same path to `put_file`, which reads it again and hashes it again
+            while copying. Two full hash passes over every byte on the exact
+            path the flagship 134 GB warm-volume boot runs down.
+
+            **Digest verification is NOT relaxed — it is deduplicated.**
+            `put_file(expected=..., size=...)` already hashes streaming
+            alongside the copy and raises `DigestMismatch` on any mismatch, and
+            it additionally fstats the source before and after to refuse a file
+            that changed mid-read. The deleted pass proved nothing the surviving
+            pass does not prove, one read earlier. Measured on this box over 48
+            synthetic 64 MiB objects (paired alternation, min of 3):
+            203.6 -> 348.9 MiB/s sequential, 1.71x, and it compounds with the
+            fan-out below.
+
+            `object_path` is presence-free by design, so a source that is not on
+            the volume raises `FileNotFoundError` out of `put_file`'s own open —
+            the same verdict `verify_object` used to return, from the layer that
+            was going to open the file anyway.
+            """
             if fill is None:
                 return False
             try:
-                source = fill.verify_object(grant.digest, size=grant.size_bytes)
+                source = fill.object_path(CASRef.parse(grant.digest))
                 cas.put_file(source, expected=grant.digest, size=grant.size_bytes)
                 return True
-            except (DigestMismatch, FileNotFoundError, OSError):
+            except (DigestMismatch, FileNotFoundError, OSError, ValueError):
                 return False
 
         # Every check re-hashes the object — ~1.0s of solid CPU per GiB WARM,
@@ -531,20 +583,72 @@ class CozySnapshotDownloader:
         filled_objects = 0
         filled_bytes = 0
         report_residency()
-        for grant in grants:
-            if await asyncio.to_thread(resident, grant):
-                done += grant.size_bytes
-                resident_objects += 1
-                resident_bytes += grant.size_bytes
-                settle(grant.digest, boot_phases.SOURCE_LOCAL)
-            elif await asyncio.to_thread(filled, grant):
-                done += grant.size_bytes
-                filled_objects += 1
-                filled_bytes += grant.size_bytes
-                settle(grant.digest, boot_phases.SOURCE_VOLUME)
+
+        # pgw#1556: ONE OBJECT AT A TIME was the whole cost model.
+        #
+        # `await asyncio.to_thread(...)` inside a `for` buys zero parallelism —
+        # it is awaited in the loop body, so exactly one object is ever in
+        # flight. Its purpose (above) is real and is preserved: keep the hash
+        # off the event loop so the heartbeat is not stranded. But the fetch
+        # path RIGHT BESIDE THIS ONE has run `DEFAULT_PARALLEL`-wide since
+        # pgw#1308, so the same pod that pulls 8 objects at once from R2 filled
+        # them from an attached volume strictly serially — and volume fill is
+        # the path the ops-side pre-warm exists to make fast.
+        #
+        # The work is `hashlib` + read + write, all of which release the GIL, so
+        # threads are real concurrency here rather than interleaving. Same width
+        # and the same constant as the transfer path: two fan-outs over one
+        # uplink and one disk should not be able to disagree about how wide the
+        # machine is.
+        #
+        # Measured on this box, 48 synthetic 64 MiB objects, paired alternation,
+        # min of 3 reps, against the REAL `LocalCAS`:
+        #
+        #     sequential + double hash (before)   203.6 MiB/s   1.00x
+        #     sequential + single hash            348.9 MiB/s   1.71x
+        #     8-wide     + single hash            880.3 MiB/s   4.32x
+        #
+        # ORDER IS NOT PRESERVED and does not need to be: `settle` is already
+        # lock-guarded and per-object, `missing` is drained by a fan-out
+        # downloader that reorders anyway, and the byte position is an
+        # AGGREGATE (`done`), not a cursor. What order DOES still buy is the
+        # ordering of `config.refs` one layer up (boot_materialize), which is
+        # untouched — a pod still finishes the 134 GB checkpoint before the
+        # 22 MB interpolator.
+        tally_lock = threading.Lock()
+
+        def account(grant: TransferGrant) -> None:
+            nonlocal done, resident_objects, resident_bytes
+            nonlocal filled_objects, filled_bytes
+            # The verdict is taken OUTSIDE the lock — it is the expensive part,
+            # and holding a mutex across a 64 MiB hash would rebuild the serial
+            # loop this replaces with extra steps.
+            if resident(grant):
+                source = boot_phases.SOURCE_LOCAL
+            elif filled(grant):
+                source = boot_phases.SOURCE_VOLUME
             else:
-                missing.append(grant)
-            report_residency()
+                source = ""
+            with tally_lock:
+                if source == boot_phases.SOURCE_LOCAL:
+                    done += grant.size_bytes
+                    resident_objects += 1
+                    resident_bytes += grant.size_bytes
+                elif source == boot_phases.SOURCE_VOLUME:
+                    done += grant.size_bytes
+                    filled_objects += 1
+                    filled_bytes += grant.size_bytes
+                else:
+                    missing.append(grant)
+                # Inside the lock so a slower thread can never publish a
+                # position an earlier one already passed: the hub advances on
+                # STRICT INCREASE and a regressing position reads as a wedge.
+                report_residency()
+            if source:
+                settle(grant.digest, source)
+
+        if grants:
+            await asyncio.to_thread(_scan_fanout, account, grants)
 
         # SIZE WHAT IS ACTUALLY WRITTEN, and nothing else. This arithmetic has
         # been wrong in both directions (pgw#1296(b)): it first sized only the
