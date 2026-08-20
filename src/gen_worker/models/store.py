@@ -1189,7 +1189,17 @@ class ModelStore:
 
         Returns True when the answer was given; False means "not resident,
         fetch it" and the caller falls through to the funnel.
+
+        **The answer is VERIFIED, not assumed** (pgw#1511). A tree is residency
+        only if it matches its manifest; a present-but-incomplete tree is
+        quarantined and answered False. See the comment at the check itself for
+        what this cost the fleet when it was `is_dir()` alone.
         """
+        # The quarantine below emits EVICTED through Residency, and this can
+        # run before anything else has bound the store's loop (boot calls it
+        # first). Without this the eviction of a tree we just refused is
+        # dropped, and the hub keeps the residency this pod has disowned.
+        self.bind_loop()
         if snapshot is None:
             snapshot = self._snapshots.get(ref)
         if snapshot is None or not snapshot.digest:
@@ -1217,6 +1227,91 @@ class ModelStore:
                 # and calling that satisfied would strand the goal forever.
                 return False
             tree = existing
+
+        # pgw#1511: VERIFY BEFORE ASSERTING. Everything above this line is a
+        # statement about a DIRECTORY ENTRY — `candidate.is_dir()` — and that
+        # was the whole test. A tree left incomplete by an interrupted or
+        # superseded materialization is a directory that exists, so this
+        # answered `already_resident`, published ON_DISK, and (below) added the
+        # ref to `self._verified`, which permanently suppresses
+        # `_materialize_local`'s first-use `_verify_snapshot_tree` for the rest
+        # of the process. The bytes were then never checked by anyone, and the
+        # first thing to notice was the tenant's loader — `SafetensorError:
+        # header too large`, blamed on the checkpoint.
+        #
+        # It is not enough to verify here and carry on: a residency answer that
+        # cannot be substantiated must never become an answer at all. So a bad
+        # tree is QUARANTINED (the partial and its bad blobs are deleted, so
+        # re-materialization re-downloads instead of re-linking the same bytes)
+        # and this returns False, which sends the caller down the ordinary
+        # fetch path.
+        #
+        # `_verify_snapshot_tree` is the INHERITED checker and it is used here
+        # precisely because it is PROJECTION-AWARE. A projected tree's tensor
+        # containers are ~128 B TFSSTUB1 pointer stubs and its other files are
+        # CAS symlinks; by construction they do not hold the bytes their
+        # manifest entries name. A validator that opened one naively would get
+        # a loud parse failure that is CORRECT behaviour, score it as
+        # corruption, and delete the model on every boot — pgw#1308 finding 3,
+        # where two callers read that same correct failure and reached opposite
+        # wrong conclusions. So stubs and symlinks go to `verify_projection`
+        # (structural) and only files holding real bytes are hashed. That is
+        # also why this is not a re-download tax on every warm pod.
+        ok, bad = await asyncio.to_thread(self._verify_snapshot_tree, tree, snapshot)
+        if not ok:
+            logger.error(
+                "residency REFUSED for %s at %s: the tree is present but does "
+                "not match its manifest (%d bad file(s)) — quarantining and "
+                "falling through to a fetch. This pod will NOT advertise these "
+                "weights as resident; a tree that cannot be substantiated is "
+                "not residency (pgw#1511)",
+                ref, tree, len(bad),
+            )
+            await asyncio.to_thread(self._quarantine_snapshot, ref, tree, bad)
+            return False
+
+        # pgw#1513: AND IT MUST BE STREAMABLE, not merely intact.
+        #
+        # A projected tree's weights are pointer stubs; the pgw#1380 streaming
+        # engine is the reader for them, and it binds only if
+        # `resolve_projection` can recover the tree's manifest — which is
+        # keyed on the tree's own DIRECTORY NAME. A tree whose pin is missing
+        # is byte-perfect and passes the verification above, yet no engine
+        # will bind to it, so `ctx.load` falls to the eager `from_pretrained`
+        # bridge, which reads a 128 B stub with the stock safetensors reader
+        # and reports `header too large` — a corruption message about an
+        # uncorrupted checkpoint.
+        #
+        # Answering `already_resident` here would strand the pod in exactly
+        # that state. Answering False instead sends it through
+        # `ensure_local` -> `ensure_snapshot`, which re-pins the manifest and,
+        # because `_tree_matches` passes, returns the SAME tree without moving
+        # a byte. A missing pin is repaired, not re-downloaded.
+        #
+        # THE "NO BYTES MOVE" CLAIM HOLDS ONLY ON THIS BRANCH, and the reason
+        # is the ORDER of the two checks above. The se#790 lane measured the
+        # worse state on a real tree: the manifest pin is a tree's ONLY GC
+        # root, so a tree that outlives its pin AND then meets a GC pass has
+        # all of its objects deleted (5.6 GB there; 134 GB on H3) while the
+        # tree stands, leaving stubs plus dangling symlinks. That state does
+        # not reach this line — it fails `_verify_snapshot_tree` above, where
+        # `projection_fault` reports "linked object … is absent", and takes
+        # the quarantine-and-refetch path, which is the honest cost. Reaching
+        # HERE means verification passed, i.e. the objects are present and
+        # only the pin is gone. Cheap repair for the cheap case, full re-fetch
+        # for the expensive one, and the two are never confused.
+        from . import projection as _projection
+
+        if _projection.stub_at_any(tree) and _projection.resolve_projection(tree) is None:
+            logger.error(
+                "residency REFUSED for %s at %s: the tree is intact but its "
+                "manifest pin is missing, so the streaming engine cannot bind "
+                "and the eager bridge would read its pointer stubs as corrupt "
+                "weights. Re-materializing to re-pin (no bytes move) — "
+                "pgw#1513",
+                ref, tree,
+            )
+            return False
 
         identity = self._snapshot_identity(ref, snapshot)
         with self._identity_lock:
