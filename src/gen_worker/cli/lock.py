@@ -366,6 +366,8 @@ def run_lock(args: argparse.Namespace) -> int:
     # operator running this verb is the one who can reshape the signature.
     for name, reason in result.unenumerable_entrypoints:
         _say(f"lock: entrypoint {name} NOT enumerated -- {reason}")
+    for skipped in result.unservable_payloads:
+        _say(f"lock: payload SKIPPED (unservable) -- {skipped}")
     _say(
         f"lock: traced {graphs} specialization(s), {len(programs)} exported "
         f"program(s) banked BY GRAPH IDENTITY in the CAS at {graph_cas_root} "
@@ -385,6 +387,7 @@ def run_lock(args: argparse.Namespace) -> int:
         "unenumerable_entrypoints": [
             name for name, _reason in result.unenumerable_entrypoints
         ],
+        "unservable_payloads": list(result.unservable_payloads),
         "seconds": round(elapsed, 1),
     }))
     return 0
