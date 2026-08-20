@@ -315,12 +315,58 @@ def _projection_pin_outcome(tree: Path) -> str:
         return "unknown"
 
 
-def _projection_declined_because(tree: Path) -> str:
+def _serving_device() -> str:
+    """The device to stream onto when nobody handed one down (pgw#1544).
+
+    ``ServeLoop`` builds its load contexts with no ``device=``, and the literal
+    ``"cuda"`` is an enumeration of what a pod usually is rather than a
+    measurement of this machine — pgw#1452's whole point. So the same probe the
+    host uses answers here.
+    """
+    try:
+        from .placement import serving_device
+
+        return serving_device()
+    except Exception:  # noqa: BLE001 — an unprobeable host is not a refusal
+        return "cuda"
+
+
+def _projection_pinned(tree: Path) -> bool:
+    """Does this tree's manifest pin RESOLVE. The one measurement (pgw#1544).
+
+    Both the repair's precondition and the refusal's decline reason are derived
+    from this single call, passed down. Two independent lookups of one fact is
+    how a refusal came to contradict itself in the same sentence.
+    """
+    from ..models import projection
+
+    try:
+        return projection.resolve_projection(tree) is not None
+    except Exception:  # noqa: BLE001 — a probe never fails a load
+        return False
+
+
+def _projection_declined_because(
+    tree: Path, *, pinned: Optional[bool] = None
+) -> str:
     """WHICH of `resolve_projection`'s three silent Nones fired, in words.
 
     pgw#1513. Without this the reader gets a beautiful message about stubs and
     still does not know why the streaming engine passed on a tree it should
     have taken — the same two-day hunt, one layer up.
+
+    **pgw#1544: the last branch used to ASSERT the pin was missing without ever
+    looking.** It was the else of two structural checks, so any tree in the
+    right place with a CAS behind it got the sentence "the manifest pin ... is
+    MISSING" whether or not it was. On the fleet's pods the pin was PRESENT, so
+    the refusal read `pin ... is MISSING | repair attempted: not needed:
+    already pinned` — one string contradicting itself, on every request, for
+    21 hours, sending three lanes to look at the store while the defect was in
+    the wiring. A refusal that names an unmeasured cause is worse than one that
+    names none.
+
+    ``pinned`` is the caller's own measurement, handed in so that the sentence
+    and the decision it explains can never key on two different lookups.
     """
     from ..models.projection import SNAPSHOTS_DIR
 
@@ -339,6 +385,16 @@ def _projection_declined_because(tree: Path) -> str:
         return (
             f"the store root {base} has no {'/'.join(missing)} directory, so "
             f"there is no CAS behind this tree"
+        )
+    if pinned is None:
+        pinned = _projection_pinned(root)
+    if pinned:
+        return (
+            f"the manifest pin `snapshot:{root.name}` RESOLVES at {base} and "
+            f"this tree is STREAMABLE — the store is not the problem. No "
+            f"streaming engine was bound for this load, so the eager bridge "
+            f"was handed a projected tree. That is a WIRING defect on the path "
+            f"that built this load context, not a missing pin (pgw#1544)"
         )
     return (
         f"the manifest pin `snapshot:{root.name}` is MISSING from the store at "
@@ -439,53 +495,79 @@ class LoadContext(Generic[MT_co]):
             )
         return self._lane
 
-    def _repair_pin_and_rebind(self) -> bool:
-        """Re-pin this tree's manifest and re-ask for an engine. True if bound.
+    def _bind_streaming_engine(self, *, pinned: bool) -> Tuple[bool, bool]:
+        """ASK for this projected tree's engine, repairing the pin if it is
+        gone. Returns ``(bound, pinned_after)``.
 
-        pgw#1543. Idempotent and moves NO BYTES — `ensure_pinned` rewrites the
-        manifest pin from the banked snapshot, and the objects are already on
-        disk (guaranteed by the `collected` check above). A pod that has been
-        refusing every request becomes a serving pod on its next one.
+        pgw#1543 put the REPAIR here. pgw#1544 puts the ASK here, which is the
+        half that was missing and the reason the fleet stayed down.
 
-        Never raises: a repair that fails must leave the ORIGINAL refusal
-        intact rather than replace a precise diagnosis with a repair traceback.
-        The outcome is recorded either way (pgw#1542) and rides the refusal.
+        **A projected tree reaching this method means no engine was bound for
+        this load, and until now that was read as "the engine declined".** It
+        is not. ``engine_for`` has two production call sites: ``EndpointHost``
+        (the local CLI and the daemon) and this one. The serverless worker
+        builds its ``LoadContext`` in ``ServeLoop._backend_factory`` with
+        ``engine=self._engine``, and ``worker.py`` constructs ``ServeLoop``
+        with no ``engine=`` at all — so on a POD nothing ever asked. Every
+        projected tree fell to the eager bridge and refused, on every request,
+        with a message blaming the store.
+
+        So the engine is asked HERE, at the one place that always has the tree,
+        rather than at each of the N paths that build a context — the same
+        defect class pgw#1543 fixed one layer up, and the reason this fix does
+        not simply add an ``engine=`` to ``ServeLoop``: the next path to build
+        a context would omit it again.
+
+        ``pinned`` is the caller's measurement, not a second lookup. When it is
+        True the pin is already good and the repair is not merely unnecessary,
+        it is **not a precondition** — pgw#1543 returned False here because
+        `ensure_pinned` answers "did I repair", and "already pinned" is False.
+        A correctly-pinned tree therefore never re-asked for an engine and
+        refused anyway. That single conflation is the outage's second half.
+
+        Never raises: a failure must leave the ORIGINAL refusal intact rather
+        than replace a precise diagnosis with a repair traceback. The outcome
+        is recorded either way (pgw#1542) and rides the refusal.
         """
         try:
             from ..models.store import active_store
-            from .streaming import engine_for
+            from . import streaming
 
-            store = active_store()
-            if store is None:
-                return False
-            ref = cast("WireRef", self.checkpoint_ref)
-            # The snapshot is looked up BY TREE first, not by ref. The serving
-            # path holds the resolver's `pick.ref`, which need not be the exact
-            # string the store banked under, and a ref-only lookup would make
-            # this repair a SILENT NO-OP on any spelling mismatch — refusing
-            # exactly as before while every stubbed test passes. The tree's
-            # directory name is its digest, which is a fact about disk.
-            snapshot = store.banked_snapshot_for_tree(self.checkpoint_dir.name)
-            if not store.ensure_pinned(ref, self.checkpoint_dir, snapshot):
-                return False
-            engine = engine_for(
+            if not pinned:
+                store = active_store()
+                if store is None:
+                    return False, pinned
+                ref = cast("WireRef", self.checkpoint_ref)
+                # The snapshot is looked up BY TREE first, not by ref. The
+                # serving path holds the resolver's `pick.ref`, which need not
+                # be the exact string the store banked under, and a ref-only
+                # lookup would make this repair a SILENT NO-OP on any spelling
+                # mismatch — refusing exactly as before while every stubbed
+                # test passes. The tree's directory name is its digest, which
+                # is a fact about disk.
+                snapshot = store.banked_snapshot_for_tree(
+                    self.checkpoint_dir.name)
+                if not store.ensure_pinned(ref, self.checkpoint_dir, snapshot):
+                    return False, pinned
+                pinned = True
+            engine = streaming.engine_for(
                 self.checkpoint_dir,
-                device=self._device or "cuda",
+                device=self._device or _serving_device(),
                 io=self._io or "buffered",
             )
             if engine is None:
-                # Re-pinned and STILL no engine: a different fault, and the
+                # Pinned and STILL no engine: a different fault, and the
                 # refusal below is the honest answer. Not logging this as a
-                # success is the whole point of re-asking rather than assuming.
-                return False
+                # success is the whole point of asking rather than assuming.
+                return False, pinned
             self._engine = engine
-            return True
-        except Exception:  # noqa: BLE001 — a repair must never mask the refusal
+            return True, pinned
+        except Exception:  # noqa: BLE001 — this must never mask the refusal
             logger.warning(
-                "pgw#1543: repair-at-decline raised for %s; falling through to "
-                "the refusal", self.checkpoint_dir, exc_info=True,
+                "pgw#1544: binding the streaming engine raised for %s; falling "
+                "through to the refusal", self.checkpoint_dir, exc_info=True,
             )
-            return False
+            return False, pinned
 
     def load(self, pipeline_cls: Type[P]) -> P:
         """Build ``pipeline_cls`` with this checkpoint's weights resident —
@@ -563,7 +645,8 @@ class LoadContext(Generic[MT_co]):
         stubbed = _projection_artifacts(self.checkpoint_dir)
         if stubbed:
             # pgw#1543: REPAIR AT THE DECLINE, because this is the only place
-            # the failure actually happens.
+            # the failure actually happens. pgw#1544: and ASK FOR THE ENGINE
+            # here too, because on a pod nobody else ever does.
             #
             # `ensure_pinned` existed since pgw#1526 and had two callers —
             # `announce_resident` (boot) and `_materialize_local`
@@ -580,19 +663,33 @@ class LoadContext(Generic[MT_co]):
             # pin over absent bytes would convert an honest refusal into a
             # corrupt serve. Only the stubbed-but-INTACT case is repairable —
             # exactly "the objects are present and only the pin is gone".
-            if self._repair_pin_and_rebind():
+            #
+            # pgw#1544: ONE LOOKUP OF "IS THIS TREE PINNED", derived from here
+            # and handed to both the decision and the sentence that explains
+            # it. The pod's refusal read `pin ... is MISSING | repair
+            # attempted: not needed: already pinned` because the repair MEASURED
+            # the pin and the message ASSUMED it — and the message was wrong.
+            pinned = _projection_pinned(self.checkpoint_dir)
+            bound, pinned = self._bind_streaming_engine(pinned=pinned)
+            if bound:
                 engine = self._engine
-                assert engine is not None  # set by the repair above
+                assert engine is not None  # set by the bind above
+                # Returned RAW, exactly as the primary streaming arm above
+                # returns it. `_placed` is the EAGER bridge's placement — the
+                # streaming engine already streamed these weights onto the
+                # device it was handed, and running the fit ladder over a
+                # pipeline that is already resident is how pgw#1486's OOM
+                # happens. One placement story for one engine.
                 rebound: P = engine.build(
                     pipeline_cls,
                     checkpoint_dir=self.checkpoint_dir,
                     lane=self._lane,
                 )
-                return self._placed(rebound)
+                return rebound
             raise ProjectedTreeNotStreamable(
                 self.checkpoint_dir,
                 stubbed,
-                _projection_declined_because(self.checkpoint_dir),
+                _projection_declined_because(self.checkpoint_dir, pinned=pinned),
             )
         # pgw#1473: a VARIANT-ONLY tree (`*.fp16.safetensors`, which is what
         # every fp16 mirror ships) is invisible to `from_pretrained` unless it

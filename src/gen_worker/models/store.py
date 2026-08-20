@@ -235,6 +235,9 @@ class ModelStore:
         # : a cached snapshot is re-verified on first use per process
         # so pod-churn corruption can never be trusted forever.
         self._verified: set[str] = set()
+        #: pgw#1544: the snapshot census is one statement about the whole
+        #: store, so the per-ref residency answer emits it at most once.
+        self._censused = False
         # Last digest-carrying snapshot seen per ref: companion-slot
         # setups may arrive snapshot-less; without memory of the hub's desired
         # state / RunJob snapshot they cannot materialize tensorhub refs. Stale
@@ -1229,6 +1232,20 @@ class ModelStore:
             )
         return snapshot
 
+    def _census_snapshot_pins_once(self) -> None:
+        """The census, at most once per process, and never failing its caller.
+
+        pgw#1544. `announce_resident` runs per ref per reconcile; the census is
+        a statement about the whole store, so N refs must not mean N rows.
+        """
+        if self._censused:
+            return
+        self._censused = True
+        try:
+            self._census_snapshot_pins()
+        except Exception:  # noqa: BLE001 — a census never fails a residency answer
+            logger.debug("snapshot census raised", exc_info=True)
+
     def _census_snapshot_pins(self) -> None:
         """One line per snapshot tree on disk: is it pinned, and is it stubbed.
 
@@ -1472,6 +1489,23 @@ class ModelStore:
         # first). Without this the eviction of a tree we just refused is
         # dropped, and the hub keeps the residency this pod has disowned.
         self.bind_loop()
+        # pgw#1544: THE CENSUS'S SECOND CALL SITE, and it is here because this
+        # is a window whose rows demonstrably REACH THE HUB.
+        #
+        # `rescan_disk` (the only caller pgw#1536 gave it) runs inside `arun`
+        # BEFORE the transport task exists, and on the fleet's pods NOTHING
+        # emitted in that window landed: the four verification pods of
+        # 2026-08-19/20 produced `weight_fetch` and `snapshot_pull` rows and
+        # NOT ONE row of any boot-window kind — no `snapshot_census`, no
+        # `process_role`, no `boot_stages` — while pods from a day earlier have
+        # all three. So the census's absence was never a missing call site, and
+        # a second boot-window caller would have produced a second row nobody
+        # can read. This runs on the reconcile, after HelloAck, in the same
+        # window that delivered `snapshot_pull` — and BEFORE this pod
+        # materializes anything, so it still answers pgw#1536's
+        # predate-vs-built-this-boot question. Once per process; the hub folds
+        # a duplicate payload onto one row by `payload_digest` anyway.
+        self._census_snapshot_pins_once()
         if snapshot is None:
             snapshot = self._snapshots.get(ref)
         if snapshot is None or not snapshot.digest:
