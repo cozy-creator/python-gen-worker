@@ -493,6 +493,30 @@ def test_an_empty_adapter_set_is_a_no_op_that_still_yields() -> None:
         assert torch.equal(_run(unet, args), baseline)
 
 
+def test_rearm_constants_still_matches_the_real_runner_surface() -> None:
+    """The stand-in above defines `_package`/`_bound_values`, so it would keep
+    passing if the VENDORED runner renamed them and production started
+    refusing every fold. Assert the two names against the real class.
+
+    `rearm_constants` reaches into those privates on purpose: the right home is
+    a `CompiledGraphRunner.rebind()` upstream, but the vendored snapshot is
+    sha256-fenced (`_vendor/VENDORED.toml`) so it cannot be edited here. This
+    is the tripwire that makes the re-vendor land loudly instead of quietly.
+    """
+    import inspect
+
+    from gen_worker._vendor.torchcg.runner import CompiledGraphRunner
+
+    source = inspect.getsource(CompiledGraphRunner)
+    for attribute in ("self._package", "self._bound_values"):
+        assert attribute in source, (
+            f"{attribute} is gone from CompiledGraphRunner — "
+            "aot_serve.rearm_constants reads it to re-install the constant "
+            "table after a fold, and would now refuse every compiled fold. "
+            "Give torchcg a public rebind() and call that instead"
+        )
+
+
 def test_the_set_digest_keys_on_refs_and_weights() -> None:
     unet = _tiny_unet()
     a, b = _adapter(unet, 1, 0.8), _adapter(unet, 2, 0.5)
