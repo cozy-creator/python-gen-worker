@@ -606,3 +606,35 @@ def test_the_probe_counts_the_reusable_allocator_pool_as_available():
         "the reported number must stay the DRIVER-free figure — the soft cache "
         "term belongs in the decision, not in what the log claims is free"
     )
+
+
+def test_EVERY_rung_confesses_the_decision_time_free_vram_not_a_re_read():
+    """pgw#1586 closing the class pgw#1595 opened.
+
+    pgw#1595's fix threaded the plan-time figure into the `partial_resident`
+    confession ONLY. Six siblings — `model_offload`, `sequential`,
+    `partial_stream`, both `cpu` arms and the fall-through — kept re-reading
+    free VRAM AT REPORT TIME, after placement. Within hours the pgw#1548 lane
+    read `free_gb=0.4` off a `model_offload` line on a card with 7.9 GiB free at
+    boot and reached for a boot-ordering cause — the SAME wrong conclusion
+    pgw#1595 was filed on, from the same artefact, on a rung the fix had not
+    covered.
+
+    So this asserts the CLASS, by reading the source: no `_report_offload_engaged`
+    call may omit `plan_free_gb`. A per-rung test would have passed for
+    `partial_resident` and missed the other six, which is exactly how the first
+    fix shipped incomplete.
+    """
+    import inspect
+    import re
+
+    import gen_worker.models.memory as m
+
+    src = inspect.getsource(m.apply_low_vram_config)
+    calls = re.findall(r"_report_offload_engaged\((.*?)\)", src, re.S)
+    assert calls, "no confession call sites found — this test has gone blind"
+    missing = [c for c in calls if "plan_free_gb" not in c]
+    assert missing == [], (
+        f"{len(missing)} rung(s) still confess a post-placement re-read as the "
+        f"decision's input: {missing}"
+    )
