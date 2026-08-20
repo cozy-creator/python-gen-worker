@@ -227,19 +227,17 @@ def _adoption_source(
             # the whole eager bridge. Say it, then take it.
             print(f"adopt: {exc}", file=sys.stderr)
             return None, None
-        if args.mint:
-            # ONE store for the boot AND the mint. The hub store is read-only
-            # by construction, so a mint publishing through it would fail every
-            # graph; tiering it here — and BEFORE the AdoptSession is built —
-            # keeps a single answer to "do I have this graph".
-            from .mint_store import worker_store
+        # ONE store, ALWAYS tiered (pgw#1573). The hub store is read-only by
+        # construction, so it can never be the only tier: a mint would fail
+        # every publish and a fleet hit would be re-downloaded on every boot.
+        # This used to tier only under `--mint`, which made the adopt-only run
+        # and the minting run disagree about what "present" means.
+        from .mint_store import graph_store
 
-            store = worker_store(_mint_cas(args), store)
-        return store, document
-    from .._vendor.tensorfs import LocalCAS
-    from .._vendor.torchcg.store import LocalGraphStore
+        return graph_store(_mint_cas(args), store), document
+    from .mint_store import graph_store
 
-    store = LocalGraphStore(LocalCAS(Path(args.graph_store)))
+    store = graph_store(Path(args.graph_store))
     return store, store.get_graphs(module_name)
 
 

@@ -11,17 +11,21 @@ in `logger.error` has, from the hub's side, simply stopped emitting.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, List
+from typing import Any, Callable, List
 
 import pytest
 
 from gen_worker import activity as activity_mod
 from gen_worker import compile_posture
+from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
+from gen_worker._vendor.torchcg.serve import materialize
 from gen_worker.serving import mint
+from gen_worker.serving.mint_store import graph_store
 
 
 def _artifact(destination: Path, graph: str) -> Path:
@@ -38,42 +42,77 @@ def _artifact(destination: Path, graph: str) -> Path:
     return tcg_artifacts.unpacked(destination, graph_specialization=graph)
 
 
+#: The real env identity, not a namespace: the store's `_artifact_ref` and its
+#: manifest/sm cross-check both read it.
+ENV = EnvIdentity(stack=(("torch", "2.13.0"),), sm="sm_89")
+
+
+def graph_of(index: int) -> str:
+    """A REAL `cg-graph-v1` identity, deterministic per index.
+
+    pgw#1573: these used to be `unet/class=0`. That string is not an identity
+    any store addresses rows by — `LocalGraphStore._require_graph` refuses it —
+    and the `_Store` double this module carried accepted it, along with a
+    directory the real store refuses and a `publish_artifact` that returned a
+    literal. Three preconditions unmodelled, which is why this file was green
+    through pgw#1471 AND pgw#1561.
+    """
+    return "cg-graph-v1-" + hashlib.sha256(
+        f"pgw1573/{index}".encode()).hexdigest()[:56]
+
+
 class _Adoption:
+    """The adopt session's arm seam — the ONE thing here that is not real.
+
+    torchcg's `AdoptSession.arm` needs a live `nn.Module` with resident
+    constants on a device to build a callable, which is a GPU fact. Everything
+    up to it is the production object: the real store, the real envelope, the
+    real fetch. What is recorded is the PATH the mint armed, which is the whole
+    subject of pgw#1573 — it must be the store's copy, never the compiler's.
+    """
+
     def __init__(self, arm_raises: BaseException | None = None) -> None:
-        self.env = SimpleNamespace(value="lane-a", sm="sm_89")
+        self.env = ENV
         self.armed: List[str] = []
+        self.armed_paths: List[Path] = []
         self.arm_raises = arm_raises
 
     def arm(self, record: Any, artifact: Path) -> None:
         if self.arm_raises is not None:
             raise self.arm_raises
+        # The arm READS the bytes it was handed, through the exact function
+        # boot adoption's loader calls. An arm that only records a path cannot
+        # tell a loadable envelope from a directory, which is the distinction
+        # this module now exists to hold.
+        materialize(Path(artifact), Path(artifact).parent / "unpacked")
         self.armed.append(record.graph)
+        self.armed_paths.append(Path(artifact))
 
 
 def _host(graphs: int, *, arm_raises: BaseException | None = None) -> Any:
     holes = tuple(
         SimpleNamespace(record=SimpleNamespace(
-            graph=f"unet/class={i}", target="unet"))
+            graph=graph_of(i), target="unet"))
         for i in range(graphs))
     return SimpleNamespace(holes=holes, adoption=_Adoption(arm_raises))
 
 
-class _Store:
-    """The fleet sink, minus the hub."""
+def _store(tmp_path: Path) -> Any:
+    """THE store — `graph_store`, the one constructor every entry point uses.
 
-    def __init__(self) -> None:
-        self.published: List[str] = []
+    `baked_root` is stated so the fixture never reaches the box's real settings
+    for a directory it does not need.
+    """
+    return graph_store(tmp_path / "cas", None, tmp_path / "no-baked")
 
-    def fetch_program(self, digest: str, destination: Path) -> Path:
+
+def _programs(tmp_path: Path) -> "Callable[[str, Path], Path]":
+    def fetch(graph: str, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"program")
+        destination.write_bytes(b"exported-program")
         return destination
 
-    def publish_artifact(
-        self, graph: str, env: Any, artifact: Path, manifest: Any,
-    ) -> str:
-        self.published.append(graph)
-        return "checkpoint-1"
+    return fetch
 
 
 @pytest.fixture()
@@ -86,6 +125,7 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
 
 
 def _mint(host: Any, store: Any, tmp_path: Path, **kw: Any) -> mint.BackgroundMint:
+    kw.setdefault("program_source", _programs(tmp_path))
     return mint.BackgroundMint(
         host=host, store=store, artifacts_dir=tmp_path / "artifacts",
         posture=compile_posture.FLEET, vcpus=4, **kw)
@@ -103,7 +143,8 @@ def test_a_condemned_mint_reports_itself_on_the_wire(
         wedged.wait(timeout=10.0)      # a compile that will never come back
         return destination
 
-    box = _mint(_host(2), _Store(), tmp_path, compiler=_compiler, window_s=0.3)
+    box = _mint(_host(2), _store(tmp_path), tmp_path, compiler=_compiler,
+                window_s=0.3)
     try:
         outcome = box.run()
     finally:
@@ -125,17 +166,56 @@ def test_a_healthy_mint_is_never_called_wedged(
     """The polarity guard. A mint that lands its graphs emits no defect —
     otherwise the event is noise the hub learns to ignore."""
     host = _host(3)
+    store = _store(tmp_path)
 
     def _compiler(blob: Path, record: Any, destination: Path) -> Path:
         return _artifact(destination, record.graph)
 
-    outcome = _mint(host, _Store(), tmp_path, compiler=_compiler).run()
+    outcome = _mint(host, store, tmp_path, compiler=_compiler).run()
 
     assert outcome.landed == 3 and not outcome.condemned
-    assert host.adoption.armed == [f"unet/class={i}" for i in range(3)] or \
-        sorted(host.adoption.armed) == sorted(
-            f"unet/class={i}" for i in range(3))
+    assert sorted(host.adoption.armed) == sorted(graph_of(i) for i in range(3))
     assert not [e for e in wire if e[0] == mint.KIND_MINT_WEDGED], wire
+
+
+def test_the_mint_arms_the_STORE_copy_and_never_the_compilers(
+    tmp_path: Path, wire: List[tuple],
+) -> None:
+    """pgw#1573 — the invariant that collapses the two load paths into one.
+
+    `_mint_one` used to arm ``artifact``: the unpacked DIRECTORY the compile
+    child had just written, while publishing an ENVELOPE the arm never opened.
+    Two producers, two formats, and no run of the mint ever read its own
+    published bytes — which is precisely how pgw#1471's bare-``.pt2`` publish
+    survived from the first publisher that ever existed until va#3 arm 2
+    fetched one on a pod and holed 14/14 on ``cannot decompress``.
+
+    So the assertion is about WHICH BYTES: the armed path must be the store's
+    fetch position, it must be a FILE, and it must carry the gzip envelope
+    magic the boot loader reads. Arming the compiler's output again fails all
+    three.
+    """
+    host = _host(1)
+    store = _store(tmp_path)
+
+    def _compiler(blob: Path, record: Any, destination: Path) -> Path:
+        return _artifact(destination, record.graph)
+
+    outcome = _mint(host, store, tmp_path, compiler=_compiler).run()
+
+    assert outcome.landed == 1, outcome.failed
+    armed = host.adoption.armed_paths[0]
+    assert armed.is_file(), (
+        f"{armed} is not a file — the mint armed the compiler's unpacked "
+        f"directory again, so a publish/load format skew would be invisible "
+        f"from here exactly as it was in pgw#1561")
+    with armed.open("rb") as handle:
+        assert handle.read(2) == b"\x1f\x8b", (
+            f"{armed} is not the tar+gzip envelope boot adoption reads")
+    # And it is THE position boot adoption fetches to, not a scratch copy:
+    # torchcg's `AdoptSession._adopt_module` addresses exactly this path.
+    assert armed == tmp_path / "artifacts" / ENV.value / f"{graph_of(0)}.so"
+    assert outcome.entries[0].artifact == armed
 
 
 def test_a_published_graph_that_does_not_arm_is_a_wire_fact(
@@ -144,14 +224,16 @@ def test_a_published_graph_that_does_not_arm_is_a_wire_fact(
     """`published but did not arm live` is why the pod keeps serving eager for
     a graph it just paid to compile. It was a `logger.warning`."""
     host = _host(1, arm_raises=RuntimeError("no module to arm onto"))
-    store = _Store()
+    store = _store(tmp_path)
 
     def _compiler(blob: Path, record: Any, destination: Path) -> Path:
         return _artifact(destination, record.graph)
 
     outcome = _mint(host, store, tmp_path, compiler=_compiler).run()
 
-    assert outcome.landed == 1 and store.published == ["unet/class=0"]
+    assert outcome.landed == 1
+    assert store.has_artifact(graph_of(0), ENV), (
+        "the graph did not reach the band boot adoption reads")
     assert not outcome.entries[0].armed
     missed = [e for e in wire if e[0] == mint.KIND_ARM_MISSED]
     assert len(missed) == 1, (

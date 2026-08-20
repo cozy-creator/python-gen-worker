@@ -190,14 +190,20 @@ def test_the_mint_mints_what_it_was_armed_on_not_a_second_read(
     work-list is read ONCE at arm; what was armed is what gets minted."""
     from gen_worker.serving.self_mint import SelfMint
 
+    from gen_worker.serving.mint_store import graph_store
+
+    graphs = [
+        "cg-graph-v1-" + f"{index:056x}".replace("x", "0")
+        for index in range(3)
+    ]
+
     class Vanishing:
         """A host whose hole list is live — and empties after the first read."""
 
         def __init__(self) -> None:
             self._reads = 0
             self.adoption = SimpleNamespace(
-                env=SimpleNamespace(value="lane-a", sm=SM),
-                arm=lambda record, artifact: None,
+                env=ENV, arm=lambda record, artifact: None,
             )
 
         @property
@@ -206,17 +212,19 @@ def test_the_mint_mints_what_it_was_armed_on_not_a_second_read(
             if self._reads > 1:
                 return ()
             return tuple(
-                SimpleNamespace(record=SimpleNamespace(graph=f"g{i}", target="unet"))
-                for i in range(3)
+                SimpleNamespace(record=SimpleNamespace(graph=graph, target="unet"))
+                for graph in graphs
             )
 
     compiled: list[str] = []
 
     def compiler(blob: Path, record: SimpleNamespace, destination: Path) -> Path:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"artifact")
+        # A REAL unpacked artifact (pgw#1573): the mint publishes it and then
+        # arms what the store hands back, so a `b"artifact"` placeholder no
+        # longer survives the round trip it now makes.
         compiled.append(record.graph)
-        return destination
+        return tcg_artifacts.unpacked(
+            destination, graph_specialization=record.graph, sm=SM)
 
     def program_source(graph: str, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -224,13 +232,14 @@ def test_the_mint_mints_what_it_was_armed_on_not_a_second_read(
         return destination
 
     box = SelfMint(
-        store=None, artifacts_dir=tmp_path / "artifacts",
+        store=graph_store(tmp_path / "cas", None, tmp_path / "no-baked"),
+        artifacts_dir=tmp_path / "artifacts",
         compiler=compiler, program_source=program_source, vcpus=2,
     )
     armed = box.arm(Vanishing())
     assert armed.holes == 3
-    final = box.join(30.0)
-    assert sorted(compiled) == ["g0", "g1", "g2"], (
+    final = box.join(60.0)
+    assert sorted(compiled) == sorted(graphs), (
         "the mint must mint the ARMED list, not a second read of a live "
         "property that already emptied"
     )
@@ -288,15 +297,16 @@ def test_the_armed_zero_verdict_is_a_durable_row_not_a_log_line(
 def test_the_mint_terminal_verdict_rides_the_wire_with_its_identity(
     tmp_path: Path, wire: "list[tuple]",
 ) -> None:
+    from gen_worker.serving.mint_store import graph_store
     from gen_worker.serving.self_mint import SelfMint
 
     compiled: "list[str]" = []
+    graphs = ["cg-graph-v1-" + f"{2 + index:056d}" for index in range(2)]
 
     def compiler(blob: Path, record: SimpleNamespace, destination: Path) -> Path:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"artifact")
         compiled.append(record.graph)
-        return destination
+        return tcg_artifacts.unpacked(
+            destination, graph_specialization=record.graph, sm=SM)
 
     def program_source(graph: str, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -305,14 +315,15 @@ def test_the_mint_terminal_verdict_rides_the_wire_with_its_identity(
 
     host = SimpleNamespace(
         holes=tuple(
-            SimpleNamespace(record=SimpleNamespace(graph=f"g{i}", target="unet"))
-            for i in range(2)),
+            SimpleNamespace(record=SimpleNamespace(graph=graph, target="unet"))
+            for graph in graphs),
         adoption=SimpleNamespace(
-            env=SimpleNamespace(value="lane-a", sm=SM),
-            arm=lambda record, artifact: None),
+            env=ENV, arm=lambda record, artifact: None),
     )
-    box = SelfMint(store=None, artifacts_dir=tmp_path / "artifacts",
-                   compiler=compiler, program_source=program_source, vcpus=2)
+    box = SelfMint(
+        store=graph_store(tmp_path / "cas", None, tmp_path / "no-baked"),
+        artifacts_dir=tmp_path / "artifacts",
+        compiler=compiler, program_source=program_source, vcpus=2)
     box.arm(host)
     final = box.join(30.0)
     assert final.landed == 2

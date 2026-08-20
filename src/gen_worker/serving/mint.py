@@ -12,11 +12,15 @@ graphs it is missing. Four properties, each load-bearing:
    The whole-declaration sweep that took e2e#1892 run 7's pod down with it is
    not reachable from this entry at all.
 
-2. **PER-GRAPH PUBLISH.** Each hole is compiled, published (hub store + local
-   CAS) and ARMED on its own, the moment its artifact lands — never a batch,
-   never a seal at the end. A pod killed mid-mint keeps every completed graph
-   and its successor mints only the remainder (pgw#1367 clause 4: partial-hit
-   by construction). This deletes the loss mode runs 7/8 died to.
+2. **PER-GRAPH PUBLISH, AND THE ARM READS THE STORE BACK.** Each hole is
+   compiled, published (local CAS + hub) and ARMED on its own, the moment its
+   artifact lands — never a batch, never a seal at the end. A pod killed
+   mid-mint keeps every completed graph and its successor mints only the
+   remainder (pgw#1367 clause 4: partial-hit by construction). Since pgw#1573
+   the bytes it arms are the bytes ``fetch_artifact`` hands back, not the
+   directory the compile child wrote: one load path for a self-minted artifact
+   and a hub-fetched one, which is what makes a publish/load format skew break
+   immediately instead of on somebody else's pod a week later.
 
 3. **CPU BUDGETED AGAINST THE SERVING PROCESS.** ``entry_workers <= vcpus -
    SERVING_RESERVE_CPUS``, the reserve non-zero and explicit, and the mint
@@ -1008,6 +1012,16 @@ class ChildCompileFailed(RuntimeError):
     """A compile child died. Costs its own graph and nothing else."""
 
 
+class MintNotServable(RuntimeError):
+    """A graph compiled, published, and the store cannot hand it back.
+
+    pgw#1573's red arm, and the only refusal that can catch a publish/read
+    address split at the instant it is introduced. It costs its own graph:
+    everything else this mint builds still lands, and the pod keeps serving
+    eager for this one.
+    """
+
+
 # ── the mint ─────────────────────────────────────────────────────────────────
 
 
@@ -1057,6 +1071,20 @@ class BackgroundMint:
 
     def __post_init__(self) -> None:
         self.artifacts_dir = Path(self.artifacts_dir)
+        if self.store is None:
+            # NOT optional any more (pgw#1573). The store is where a minted
+            # artifact BECOMES servable — it is published there and armed from
+            # there — so a mint with no store used to fall back to arming the
+            # compiler's own output, which is the second load path this issue
+            # exists to delete. A mint that cannot publish has nothing to
+            # deliver and says so at construction, not eleven minutes of
+            # inductor later.
+            raise ValueError(
+                "a mint needs the store it publishes into and arms from: pass "
+                "`store=` (gen_worker.serving.mint_store.graph_store). Since "
+                "pgw#1573 the mint arms the bytes the STORE hands back, never "
+                "the directory the compiler wrote, so there is no storeless "
+                "mint to fall back to")
         if self.compiler is None:
             if self.cas_dir is None or not self.target_arch:
                 raise ValueError(
@@ -1212,7 +1240,7 @@ class BackgroundMint:
     # -- one hole -----------------------------------------------------------
 
     def _mint_one(self, record: Any, arm_lock: threading.Lock) -> MintedHole:
-        """Fetch, compile, publish, arm — in that order, for ONE graph.
+        """Fetch, compile, publish, FETCH BACK, arm — for ONE graph.
 
         The order is the durability contract. The artifact is on disk before
         it is published; it is in the store before it is armed; so a kill at
@@ -1230,10 +1258,36 @@ class BackgroundMint:
 
         No weights are read here, and a mint still cannot diverge from the
         graph the release shipped: the identity IS the graph.
+
+        ## THE FETCH BACK IS THE POINT (pgw#1573)
+
+        This used to arm ``artifact`` — the unpacked directory the compile
+        child had just written — while publishing the ENVELOPE somewhere the
+        arm never looked. Two producers, two formats, one dispatcher, and no
+        run of this function ever read its own published bytes. That is
+        exactly how pgw#1471's bare-``.pt2`` publish survived from the first
+        publisher that ever existed until va#3 arm 2 fetched one on a pod and
+        holed 14/14 on ``cannot decompress``: every local green was green over
+        the directory, and the store's copy was never opened by anybody.
+
+        So the mint now arms what the STORE hands back, through the same
+        ``fetch_artifact`` boot adoption calls, into the same position boot
+        adoption fetches to. A self-minted artifact and a hub-fetched artifact
+        traverse one load path. A publisher that banks bytes the loader cannot
+        read now breaks the mint's own arm, on the machine that made them,
+        within seconds — instead of hiding for weeks behind a directory.
         """
         env = self.host.adoption.env
-        destination = self.artifacts_dir / env.value / f"{record.graph}.so"
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        # SCRATCH, and deliberately not the adopt position. `Engine.compile`
+        # leaves an unpacked DIRECTORY at its destination while the store
+        # copies out a FILE, and both used to be pointed at
+        # `<artifacts_dir>/<env>/<graph>.so` — so a boot after a mint asked
+        # `os.replace` to put a file where a directory stood.
+        scratch = self.artifacts_dir / env.value / "build" / record.graph
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        #: Where boot adoption fetches to (torchcg `AdoptSession._adopt_module`)
+        #: and therefore where this mint fetches to. One position, one shape.
+        position = self.artifacts_dir / env.value / f"{record.graph}.so"
 
         graph = program_graph(record)
         if self.program_source is None:
@@ -1245,16 +1299,23 @@ class BackgroundMint:
             graph, self.artifacts_dir / "programs" / f"{graph}.pt2"))
 
         assert self.compiler is not None  # __post_init__ guarantees it
-        artifact = Path(self.compiler(blob, record, destination))
+        artifact = Path(self.compiler(blob, record, scratch))
 
-        published = ""
-        if self.store is not None:
-            published = publish_compiled(self.store, record.graph, env, artifact)
+        published = publish_compiled(self.store, record.graph, env, artifact)
+        fetched = self.store.fetch_artifact(record.graph, env, position)
+        if fetched is None:
+            raise MintNotServable(
+                f"graph {record.graph} compiled and published "
+                f"({published or 'no ref reported'}) and the store answers a "
+                f"MISS at ({record.graph[:16]}, {env.value}). The publish and "
+                f"the read address different positions; nothing this mint "
+                f"builds can ever be adopted."
+            )
 
         armed = False
         try:
             with arm_lock:
-                self.host.adoption.arm(record, artifact)
+                self.host.adoption.arm(record, Path(fetched))
             armed = True
         except Exception as exc:  # noqa: BLE001 — published beats armed
             # The graph IS minted and the fleet HAS it; only THIS pod's live
@@ -1275,7 +1336,7 @@ class BackgroundMint:
             )
 
         return MintedHole(
-            graph=record.graph, target=record.target, artifact=artifact,
+            graph=record.graph, target=record.target, artifact=Path(fetched),
             published=published, armed=armed,
         )
 
@@ -1342,6 +1403,7 @@ __all__ = [
     "DEFAULT_SILENCE_WINDOW_S",
     "MintCondemned",
     "MintFailure",
+    "MintNotServable",
     "MintOutcome",
     "MintProgress",
     "MintedHole",

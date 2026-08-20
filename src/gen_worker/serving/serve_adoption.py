@@ -59,6 +59,7 @@ PERMANENT_REFUSALS = frozenset({
     "environment_mismatch",  # the pod is not the release's env; a retry cannot help
     "no_document",           # the release is stamped with no lane for this (lane x sm)
     "EnvironmentMismatch",   # the same, arriving as an exception type name
+    "no_local_cas",          # pgw#1573: no local tier — nothing can be banked or minted
 })
 
 #: The refusal phases that mean the RELEASE NEVER DECLARED compiled serving
@@ -120,9 +121,11 @@ class ServeAdoption:
         self.release_id = str(release_id)
         self.sm = str(sm)
         self.artifacts_dir = Path(artifacts_dir)
-        #: The pod's own tensorfs CAS — the local tier of the store below.
-        #: ``None`` keeps the hub as the only tier, which is read-only, so a
-        #: mint on that shape banks nothing and says so.
+        #: The pod's own tensorfs CAS — the local tier of the store below, and
+        #: REQUIRED since pgw#1573: it is where a fleet hit is cached and where
+        #: a mint publishes and arms from. ``None`` is a typed refusal at
+        #: build time (`no_local_cas`), not a read-only degraded mode nobody
+        #: could tell from a working one.
         self.cas_dir = Path(cas_dir) if cas_dir is not None else None
         self._transport = transport
         self._stack = dict(stack) if stack is not None else None
@@ -295,7 +298,7 @@ class ServeAdoption:
     def _build(self, lane: Any) -> None:
         from .._vendor.torchcg.adopt import AdoptSession
         from ..env_identity import installed_stack_drift
-        from .mint_store import worker_store
+        from .mint_store import graph_store
         from .hub_store import (
             BrokerReleaseGraphTransport,
             HubGraphStore,
@@ -335,13 +338,21 @@ class ServeAdoption:
         stack = self._stack if self._stack is not None else dict(document.stack)
         for row in installed_stack_drift(dict(document.stack)):
             logger.warning("adopt: compile-stack drift vs this venv: %s", row)
-        # ONE store for both directions: the adopt reads through it (local CAS
-        # before the hub, so a restarted pod adopts what it already minted) and
-        # the mint publishes through it. Two objects here would mean two
-        # answers to "do I have this graph".
-        self.store = (
-            worker_store(self.cas_dir, store) if self.cas_dir is not None else store
-        )
+        # ONE store for both directions and for every entry point (pgw#1573):
+        # the adopt reads through it (local CAS before the hub, so a restarted
+        # pod adopts what it already minted, and a fleet hit is BANKED locally
+        # on the way through), and the mint publishes into it and arms out of
+        # it. Two objects here would mean two answers to "do I have this
+        # graph"; a hub tier with no local one would mean a pod that
+        # re-downloads its own artifacts on every boot.
+        if self.cas_dir is None:
+            self._refuse(
+                "no_local_cas",
+                "this worker states no local CAS, so a fetched artifact could "
+                "not be banked and a minted one could not be published — the "
+                "adopt would be read-only against the fleet pool forever")
+            return
+        self.store = graph_store(self.cas_dir, store)
         self.contract = contract
         self.adoption = AdoptSession(
             self.store, document, contract, self.sm,

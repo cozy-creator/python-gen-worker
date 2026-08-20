@@ -246,10 +246,16 @@ def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
             "--sm is required to adopt compiled graphs (artifacts are per-sm). "
             "Omit --graph-store to serve eager."
         )
-    from .._vendor.tensorfs import LocalCAS
-    from .._vendor.torchcg.store import LocalGraphStore, StoreError
+    from .._vendor.torchcg.store import StoreError
+    from ..serving.mint_store import graph_store
 
-    store = LocalGraphStore(LocalCAS(Path(spec.graph_store)))
+    # THE ONE STORE (pgw#1573). This built a bare `LocalGraphStore` — no hub
+    # tier, no baked tier, and a different object from the one this boot's
+    # background mint would publish through — so `up` and a pod disagreed about
+    # what "present" means. `graph_store` is what every entry point builds now;
+    # `upstream=None` is the honest statement that a box boot has no release to
+    # adopt for, not a second class of store.
+    store = graph_store(Path(spec.graph_store))
     try:
         document = store.get_graphs(module_name)
     except StoreError as exc:
