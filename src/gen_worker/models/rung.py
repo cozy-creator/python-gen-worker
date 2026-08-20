@@ -55,6 +55,14 @@ class Rung:
     #: :func:`price` does not describe one — a caller standing on such a rung
     #: passes its NAME.
     admission_only: bool = False
+    #: pgw#1587. True when the rung moves only the components it NAMED at
+    #: admission and leaves every other one device-resident for the life of
+    #: the load. This is the fact `ctx.compile` needs and `touches_host_ram`
+    #: cannot answer: a compiled graph binds its constants to device pointers,
+    #: so it may be armed on a target whose weights do not move — but not on
+    #: one accelerate onloads and frees per forward. `touches_host_ram` is
+    #: about ACCOUNTING (host RAM is charged); this is about STABILITY.
+    parks_named_components_only: bool = False
 
 
 # Wire run modes (Go-mirrored: tensorhub profiling.RunMode). Values are the
@@ -81,9 +89,17 @@ FP8_STORAGE = Rung("fp8_storage", "", "fp8", RUN_FP8_STORAGE, 1.05, False)
 # descent has neither in hand when it fires. `_walk` therefore sends any
 # resident token to `model_offload`, exactly as before, and `price(RUN_OFFLOAD)`
 # keeps answering with `model_offload`'s coarse number rather than this rung's.
+#
+# `parks_named_components_only`: the plan NAMES its offload set and forces the
+# denoiser resident, so every component outside that set keeps a stable device
+# pointer for the life of the load. That is what makes this the one offload
+# rung a COMPILED graph can be armed under (pgw#1587, Paul: *"For SDXL in
+# particular, we need to offload the text encoders to free up room for the
+# Unet, and then it works, during inference. This doesn't conflict with
+# compilation however because [we] are only running the compiled UNet."*).
 PARTIAL_RESIDENT = Rung(
     "partial_resident", "partial_resident", "", RUN_OFFLOAD, 1.3, True,
-    admission_only=True,
+    admission_only=True, parks_named_components_only=True,
 )
 MODEL_OFFLOAD = Rung("model_offload", "model_offload", "", RUN_OFFLOAD, 2.5, True)
 # pgw#1497 — per-LEAF-MODULE budgeted residency, the tail cast per forward from
@@ -277,6 +293,21 @@ def touches_host_ram(mode: Optional[str]) -> bool:
     and streams to the card per forward, so host-RAM accounting must charge
     the full tree."""
     return str(mode or "") in PLACEMENT_LADDER
+
+
+def moves_every_component(mode: Optional[str]) -> bool:
+    """True when this placement token moves EVERY component's weights between
+    host and device per forward (pgw#1587).
+
+    The question `ctx.compile` has to ask, and the one ``touches_host_ram``
+    was standing in for. Under such a rung no compiled graph can be armed on
+    anything, because the device pointers it binds are freed after each
+    forward. Under a rung that parks only the components it named, the answer
+    is per-TARGET and the plan holds it — see
+    :func:`gen_worker.models.partial_resident.parks_module`.
+    """
+    r = _BY_NAME.get(str(mode or ""))
+    return bool(r and r.touches_host_ram and not r.parks_named_components_only)
 
 
 def floor_of(a: Optional[str], b: Optional[str]) -> str:

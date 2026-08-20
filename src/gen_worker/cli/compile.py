@@ -61,15 +61,15 @@ graph CAS does not hold the program for a specialization, ``compile``
 RE-DERIVES it locally from the committed source + lock (~2 min CPU) instead of
 fetching one. There is no program-blob route to call and there must never be.
 
-## The compiled floor
+## No floor (pgw#1587)
 
-A graph executes atomically with by-reference weights — nothing pages
-mid-graph — so below a certain grant no compiled specialization can ever be
-armed. Under such a grant this command NO-OPS by name rather than minting
-artifacts that could not be used. The floor is read from the endpoint's own
-declared lane floor today; a measured peak-VRAM stamp (pgw#1494) supersedes it
-when one exists. An UNKNOWN floor never reads as zero and never reads as
-infinite: it simply does not fire the refusal.
+This command MINTS; it does not decide what a particular card can arm. It used
+to no-op the whole run when the endpoint's declared lane number exceeded this
+run's VRAM grant — a refusal to BUILD, taken from a declaration, sized to the
+whole pipeline rather than to the compiled graph. Deleted. Servability is
+settled on the serving card at load, by probe, and a card that cannot hold the
+graph's working set serves EAGER with a typed reason. See the block above
+:func:`_env_identity` for the whole argument.
 """
 
 from __future__ import annotations
@@ -101,8 +101,10 @@ PRESENT = "present"        # already readable through the store (local or fleet)
 BUILT = "built"            # compiled here
 REUSED = "reused"          # resolved out of the engine's own compile cache
 CLAIMED = "claimed"        # another process holds the lease; it is doing it
-BELOW_FLOOR = "below_floor"  # no grant this run targets could arm it
 FAILED = "failed"
+# pgw#1587: `BELOW_FLOOR` is DELETED. A declared lane requirement is a claim
+# about what a COMPILED GRAPH needs of a card, verified by a probe at serve —
+# never permission to build. Nothing here refuses a mint on a declaration.
 
 #: What this run does with the specializations that are NOT the first one.
 #: Closed, and stated rather than inferred from a flag combination.
@@ -256,58 +258,36 @@ def order(specs: Tuple[Spec, ...], selector: str) -> Tuple[Spec, ...]:
 
 
 # --------------------------------------------------------------------------
-# The compiled floor
+# pgw#1587: THERE IS NO COMPILED FLOOR HERE ANY MORE
 # --------------------------------------------------------------------------
-
-
-def declared_floor_gb(endpoint_dir: Path) -> Optional[float]:
-    """The endpoint's declared per-lane VRAM floor, or ``None`` if it declares
-    none. ``None`` means UNKNOWN and is never treated as 0 or as infinite."""
-    try:
-        from ..discovery.discover import prime_sys_path
-        from ..serving.loader import load_endpoint
-        from ..serving.model import model_requires
-    except Exception:  # noqa: BLE001 - an import failure is not a floor
-        return None
-    try:
-        prime_sys_path(endpoint_dir)
-        loaded = load_endpoint(endpoint_dir)
-    except Exception:  # noqa: BLE001
-        return None
-    floors: List[float] = []
-    for cls in loaded.models:
-        for requirements in (model_requires(cls) or {}).values():
-            # `model_requires` answers LayoutRequirements, whose floor lives on
-            # `.minimum` (a RequirementTerms). Reading `min_vram_gb` off the
-            # outer object returns None — which this function would have
-            # rendered as "no floor declared" and the caller as "proceed". A
-            # missing floor and a floor read one level too shallow are
-            # indistinguishable downstream, so the access is explicit here.
-            terms = getattr(requirements, "minimum", None) or requirements
-            value = float(getattr(terms, "min_vram_gb", 0.0) or 0.0)
-            if value > 0.0:
-                floors.append(value)
-    return min(floors) if floors else None
-
-
-def grant_gb(stated: float) -> Optional[float]:
-    """This run's VRAM grant: the stated one, else what the card has free.
-
-    Probed ONCE and frozen (pgw#1495's shape), because a grant re-probed later
-    is a grant that can disagree with the decision it justified.
-    """
-    if stated > 0.0:
-        return stated
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return None
-        free, _total = torch.cuda.mem_get_info()
-        return float(free) / float(1024 ** 3)
-    except Exception:  # noqa: BLE001 - absent never renders as zero
-        return None
-
+#
+# `declared_floor_gb` + `grant_gb` used to read the endpoint's declared
+# per-lane VRAM number, compare it against this run's grant, and NO-OP the
+# whole mint when the grant was smaller ("nothing this endpoint compiles to
+# could be armed under this grant"). Two things were wrong with it and Paul
+# named both (2026-08-20):
+#
+#   "Remove this '12gb floor'. I don't even know what this is. I didn't ask
+#    for this. this is the completely wrong model."
+#   "having some memory requirement per tensor-layout-contract makes sense.
+#    But yeah, this limit is too high. And we should be able to serve
+#    no-compiled below this limit."
+#
+#  1. THE NUMBER DESCRIBED THE WRONG THING. A declared lane number sized the
+#     whole PIPELINE, while what a compiled graph needs of a card is its OWN
+#     working set — its weights BY REFERENCE plus its activation peak — with
+#     every component outside the graph free to be offloaded to make room.
+#     SDXL is the case: park the two text encoders and the compiled UNet
+#     serves on a 7.3 GiB card the 12 GiB number refused outright.
+#  2. BUILDING IS NOT SERVING. This command mints artifacts; whether a
+#     PARTICULAR card can arm one is decided on that card, at load, by probe
+#     (`adopt_fit`, `partial_resident.probe_plan`) and never by a declaration
+#     read here. A card that cannot hold the graph serves EAGER, loudly, with
+#     a typed reason — it never refuses the job.
+#
+# The declaration itself is NOT deleted: `lanes={contract: "vram7g"}` stays as
+# the per-tensor-layout-contract memory requirement — the hub's buying signal
+# and the claim the probe verifies. What is deleted is its power to refuse.
 
 # --------------------------------------------------------------------------
 # Store + env
@@ -963,44 +943,6 @@ def compile_all(
 
     reuse = _EngineReuse(Path(cas_root), sm)
 
-    # PRESENCE BEFORE POLICY (pgw#1546). The floor/grant question only decides
-    # whether to BUILD, and the grant probe + declared-floor read import torch
-    # and the author's whole module (~4.5 s measured) to answer it. A run whose
-    # artifacts are all already in the serving band builds nothing, and a miss
-    # the engine cache claims a mint for costs a verified resolve rather than
-    # a mint — neither asks the floor anything. Only a specialization that
-    # would genuinely COMPILE does, so only that shape pays the imports; the
-    # warm re-run is bookkeeping-free by construction, not by a fast
-    # implementation of the bookkeeping.
-    if any(
-        not _known_present(spec) and not reuse.offers(spec.graph)
-        for spec in specs
-    ):
-        floor = declared_floor_gb(endpoint_dir)
-        grant = grant_gb(vram_budget_gb)
-        if floor is not None and grant is not None and grant < floor:
-            logger.info(
-                "compile: grant_below_compiled_floor(grant=%.1f GiB, floor=%.1f GiB) "
-                "— a compiled graph executes atomically with by-reference weights, "
-                "so nothing this endpoint compiles to could be armed under this "
-                "grant. NO-OP: %d specialization(s) left unbuilt on purpose.",
-                grant, floor, len(specs),
-            )
-            return Report(
-                [
-                    Outcome(spec, BELOW_FLOOR,
-                            f"grant {grant:.1f} GiB < floor {floor:.1f} GiB")
-                    for spec in specs
-                ],
-                [],
-            )
-        if floor is None:
-            logger.info(
-                "compile: compiled floor UNKNOWN for this endpoint (no declared "
-                "lane floor, no measured stamp) — proceeding; an unknown floor is "
-                "not a floor of zero"
-            )
-
     from ..serving.mint import publish_compiled
 
     build = builder if builder is not None else _default_builder(cas_root, sm)
@@ -1319,7 +1261,7 @@ def summarize(report: Report) -> Tuple[str, int]:
         return "".join(lines), 1
     if counts.get(FAILED):
         return "".join(lines), 1
-    if counts.get(BELOW_FLOOR) or not report.outcomes:
+    if not report.outcomes:
         return "".join(lines), 0
     if pending:
         # THE PARTIAL VERDICT, and it is a different sentence on purpose. The
@@ -1431,7 +1373,6 @@ def _write_verdict(
 
 
 __all__ = [
-    "BELOW_FLOOR",
     "BUILT",
     "CLAIMED",
     "Builder",

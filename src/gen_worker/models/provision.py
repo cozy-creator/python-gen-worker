@@ -380,7 +380,27 @@ def arm_aot(
     """
     # Deferred: hoisting drags aot_serve onto the `import gen_worker` path
     # (+39 modules).
-    from .. import aot_serve
+    from .. import aot_serve, serve_posture
+
+    # pgw#1587 / §4.32 item 4, FIRST because it is the cheapest and the most
+    # authoritative: an operator has ordered this worker eager. The ARMING half
+    # of that order used to be read only through `compile_cache.arming_block`,
+    # which is the v1 tier's precondition authority — so on the v2 serving path
+    # `serve_posture{eager_only:true}` suppressed nothing at arm time and the
+    # order was observed only at CALL time (`aot_serve.wrap_module`). That left
+    # a live operator control half-wired: the pod still paid for every adopt it
+    # had been told not to make.
+    #
+    # Refusing HERE is the reversibility-safe half: nothing is unwrapped and no
+    # state is de-armed, so releasing the order lets the next arming pass adopt
+    # normally. It is the third entry into this path's loud-eager branch,
+    # beside `adopt_fit`'s probed capacity refusal and a card that cannot hold
+    # the graph's working set — one behaviour, three named causes.
+    ordered_eager = serve_posture.block()
+    if ordered_eager:
+        logger.warning(
+            "aot arm: serving EAGER by operator order — %s", ordered_eager)
+        return AdoptOutcome.miss(serve_posture.REASON, ordered_eager)
 
     if meta is None:
         meta = _compiled_graph_metadata(artifact)
