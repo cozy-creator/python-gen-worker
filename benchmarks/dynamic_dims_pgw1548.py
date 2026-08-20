@@ -399,14 +399,27 @@ class Bench:
 
     def serve(self, room: Path, arm: str) -> None:
         require_window()
-        up = self._gen_worker(
-            room,
-            ["up", str(room), "-d", "--checkpoint", str(self.args.checkpoint),
-             "--idle-timeout", str(self.args.idle_timeout)],
-            timeout=self.args.boot_timeout,
-        )
+        # --sm is NOT optional: `gen-worker up --help` says it is "required to
+        # adopt compiled graphs". Without it the boot serves EAGER, both arms
+        # measure eager, and the table reports a beautiful 0% delta — the same
+        # vacuous green the preflight exists to stop, arriving from the boot
+        # side. The whole run would be worthless and would look fine.
+        argv = ["up", str(room), "-d", "--checkpoint", str(self.args.checkpoint),
+                "--idle-timeout", str(self.args.idle_timeout)]
+        if self.args.sm:
+            argv += ["--sm", self.args.sm]
+        up = self._gen_worker(room, argv, timeout=self.args.boot_timeout)
         if up.returncode != 0:
             raise SystemExit(f"[{arm}] up failed:\n{up.stdout}\n{up.stderr}")
+        (self.out / f"up-{arm}.log").write_text(
+            (up.stdout or "") + "\n--- stderr ---\n" + (up.stderr or "")
+        )
+        # Adoption is the PREMISE of every number below it. A boot that adopted
+        # nothing is not a slow arm, it is a different experiment.
+        banner = (up.stdout or "") + (up.stderr or "")
+        if "adopt" not in banner.lower():
+            print(f"[{arm}] WARNING: the boot said nothing about adoption — "
+                  f"check {self.out / f'up-{arm}.log'} before trusting this arm")
 
     def down(self, room: Path) -> None:
         self._gen_worker(room, ["down"], timeout=120)
@@ -630,6 +643,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--guidance", type=float, default=7.5)
     parser.add_argument("--seed", type=int, default=1548)
     parser.add_argument("--prompt", default="a fisherman at dawn")
+    parser.add_argument("--sm", default="",
+                        help="this GPU's sm (e.g. sm_89). REQUIRED to adopt "
+                             "compiled graphs — without it every arm serves "
+                             "eager and the table reads 0%% for the wrong reason")
     parser.add_argument("--substrate", choices=sorted(SUBSTRATES), default="raw-pod",
                         help="what produced these numbers; stamped into the "
                              "verdict and the table so the bound on what they "
