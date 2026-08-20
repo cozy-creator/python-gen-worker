@@ -144,6 +144,10 @@ def _run_derive(args: argparse.Namespace) -> int:
     # be able to see without parsing prose.
     for name, reason in result.unenumerable_entrypoints:
         print(f"entrypoint {name}: NOT enumerated -- {reason}", file=sys.stderr)
+    # pgw#1527: named separately from the warnings for the same reason — a
+    # payload with no graphs is a property of the document, not prose.
+    for skipped in result.unservable_payloads:
+        print(f"payload SKIPPED (unservable): {skipped}", file=sys.stderr)
     if result.eager_permanent:
         # pgw#1392: two different reasons reach "no lanes" and the log must
         # not conflate them — a model held eagerly (`lanes=()`), or NO MODEL

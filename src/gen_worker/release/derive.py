@@ -62,6 +62,7 @@ import inspect
 import itertools
 import json
 import types
+import traceback
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -187,6 +188,10 @@ class ReleaseDeriveResult:
     #: for, name -> the typed reason. They are STATED, not silently dropped,
     #: and they no longer take the module's other entrypoints down with them.
     unenumerable_entrypoints: tuple[tuple[str, str], ...] = ()
+    #: pgw#1527: enumerated payloads the ENDPOINT's own code refused to serve.
+    #: One line each, naming the author frame — a skipped payload has to be
+    #: louder than a missing one.
+    unservable_payloads: tuple[str, ...] = ()
 
     @property
     def eager_permanent(self) -> bool:
@@ -1250,6 +1255,76 @@ def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
     return torchcg.LaneRef(handle, dtype=_torch_dtype(dtype))
 
 
+def endpoint_source_root(module: ModuleType) -> Optional[Path]:
+    """The directory the AUTHOR's code lives in, or None if it cannot be told.
+
+    The top-level package of the endpoint's main module: `minimax_h3.main` ->
+    `<repo>/src/minimax_h3`, a bare fixture module -> the directory holding it.
+    None when the module has no file (namespace/frozen), and None is treated as
+    "cannot prove endpoint-owned", which keeps the conservative default.
+    """
+
+    import sys
+
+    name = (getattr(module, "__package__", "") or module.__name__).split(".")[0]
+    top = sys.modules.get(name) or module
+    path = getattr(top, "__file__", None) or getattr(module, "__file__", None)
+    if not path:
+        return None
+    try:
+        return Path(path).resolve().parent
+    except OSError:
+        return None
+
+
+def _sdk_root() -> Path:
+    import gen_worker
+
+    return Path(gen_worker.__file__).resolve().parent
+
+
+def deepest_endpoint_frame(
+    exc: BaseException, endpoint_root: Optional[Path]
+) -> Optional[traceback.FrameSummary]:
+    """The DEEPEST frame of ``exc``, but only if the author's code raised it.
+
+    pgw#1527, and the narrowness IS the ruling. A payload the endpoint cannot
+    serve is a product fact and should cost ONE payload; an SDK defect is the
+    derive's whole point and must still kill it loudly. Walls 1-8 were every
+    one of them an SDK-frame exception (torchcg's hollow session, the trace
+    context, the provenance walk, the output floor) — a blanket catch would
+    have swallowed all eight and turned each into a quiet coverage gap, which
+    is exactly the counter-argument the filer raised against themselves.
+
+    So the test is positive and it is on the DEEPEST frame only: the innermost
+    thing that actually raised must be a file under the endpoint's own source
+    root. Author code that calls into torch and trips a shape error there
+    reports a TORCH frame, and stays fatal — deliberately, because this cannot
+    tell that apart from an SDK-induced one without guessing.
+
+    Never endpoint-owned: anything under the SDK, even if the two roots
+    somehow overlap. Returns None whenever it cannot PROVE the frame is the
+    author's, so "unsure" always means "fatal".
+    """
+
+    if endpoint_root is None:
+        return None
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        return None
+    deepest = frames[-1]
+    try:
+        where = Path(deepest.filename).resolve()
+    except OSError:
+        return None
+    sdk = _sdk_root()
+    if where.is_relative_to(sdk):
+        return None
+    if not where.is_relative_to(endpoint_root):
+        return None
+    return deepest
+
+
 def _derive_lane(
     torchcg: ModuleType,
     cls: type,
@@ -1259,6 +1334,8 @@ def _derive_lane(
     warnings: list[str],
     program_sink: Optional[Any] = None,
     slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
+    endpoint_root: Optional[Path] = None,
+    unservable: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[Any]:
     """One lane's instrumented runs, merged across defaults variants.
 
@@ -1426,14 +1503,40 @@ def _derive_lane(
                                 # derive failure.
                                 refused += 1
                             except Exception as exc:
-                                raise DeriveError(
-                                    f"lane {handle!r}: entrypoint "
-                                    f"{plan.name!r} failed on auto-enumerated "
-                                    f"payload {index} ({payload!r}) with "
-                                    f"binding {dict(binding)!r} under the "
-                                    f"trace session: "
-                                    f"{type(exc).__name__}: {exc}"
-                                ) from exc
+                                # pgw#1527: ONE unservable payload costs one
+                                # payload, not the document — but only when the
+                                # AUTHOR's code is what raised. Anything deeper
+                                # in the SDK, torch or diffusers is still fatal:
+                                # the derive exists to find those, and walls 1-8
+                                # were every one of them.
+                                frame = deepest_endpoint_frame(exc, endpoint_root)
+                                if frame is None or unservable is None:
+                                    raise DeriveError(
+                                        f"lane {handle!r}: entrypoint "
+                                        f"{plan.name!r} failed on auto-enumerated "
+                                        f"payload {index} ({payload!r}) with "
+                                        f"binding {dict(binding)!r} under the "
+                                        f"trace session: "
+                                        f"{type(exc).__name__}: {exc}"
+                                    ) from exc
+                                row = {
+                                    "entrypoint": plan.name,
+                                    "payload": index,
+                                    "binding": {
+                                        str(k): str(v)
+                                        for k, v in dict(binding).items()
+                                    },
+                                    # WHERE the author's code raised, so a
+                                    # skipped payload points at the line that
+                                    # has to change.
+                                    "frame": (
+                                        f"{Path(frame.filename).name}:"
+                                        f"{frame.lineno} in {frame.name}"
+                                    ),
+                                    "error": f"{type(exc).__name__}: {exc}",
+                                }
+                                if row not in unservable:
+                                    unservable.append(row)
 
             try:
                 lane_graphs = torchcg.discover_modules(
@@ -1525,6 +1628,8 @@ def derive_release(
     warnings: list[str] = []
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
     unenumerable: list[tuple[str, str]] = []
+    #: pgw#1527: payloads the ENDPOINT could not serve, one row each.
+    unservable_payloads: list[dict[str, Any]] = []
     for plan in _entrypoints(module, cls):
         owner = f"@entrypoint {plan.name}"
         refusal: Optional[PayloadEnumerationRefused] = None
@@ -1595,6 +1700,8 @@ def derive_release(
                 torchcg, cls, lane, plans, checkpoint_dir, warnings,
                 program_sink=program_sink,
                 slot_checkpoints=slot_checkpoints,
+                endpoint_root=endpoint_source_root(module),
+                unservable=unservable_payloads,
             )
             if lane_graphs is None:
                 # Traced, nothing marked (pgw#1488). No lane row: an empty one
@@ -1633,6 +1740,23 @@ def derive_release(
             if floor is not None:
                 entry["requires"] = floor.render()
             lane_contracts[lane_graphs.contract] = entry
+
+    # pgw#1527: a skipped payload is STATED, per entrypoint, and is absent
+    # entirely when nothing was skipped — so a document with no unservable
+    # payload is byte-identical to one derived before this existed.
+    for row in unservable_payloads:
+        row_entry = entrypoints.get(str(row["entrypoint"]))
+        if row_entry is None:
+            continue
+        skipped: list[Any] = row_entry.setdefault("unservable", [])
+        skipped.append({k: v for k, v in row.items() if k != "entrypoint"})
+    for row in unservable_payloads:
+        warnings.append(
+            f"@entrypoint {row['entrypoint']}: payload {row['payload']} is "
+            f"UNSERVABLE and was skipped — {row['error']} (at {row['frame']}). "
+            f"Its graphs are not in this document; every other payload is "
+            f"unaffected."
+        )
 
     graphs_document = torchcg.GraphSetDocument(stack=stack, lanes=tuple(lanes))
     payload_dict: dict[str, Any] = {
@@ -1675,6 +1799,10 @@ def derive_release(
         derived_lanes=tuple(derived_lanes),
         unmarked_lanes=tuple(unmarked_lanes),
         unenumerable_entrypoints=tuple(unenumerable),
+        unservable_payloads=tuple(
+            f"{r['entrypoint']}[{r['payload']}]: {r['error']} (at {r['frame']})"
+            for r in unservable_payloads
+        ),
     )
 
 
