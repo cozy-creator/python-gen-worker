@@ -12,3 +12,7 @@
   as a miss so a warm run repairs it, its census probes every position's shape
   (two magic bytes), and the pgw#1533 read-back now MATERIALIZES fetched bytes
   through the real loader — presence-only certification is what let this ship.
+  The RUNTIME-mint seam now round-trips too: `_mint_one` publishes, and the test
+  fetches those bytes back through the real store and opens them with
+  `torchcg.serve.materialize`. That seam arms the unpacked directory it just
+  wrote, so nothing it publishes was ever read back — the gap the field found.
