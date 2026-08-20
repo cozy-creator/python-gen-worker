@@ -161,6 +161,36 @@ def mint_the_holes(host: Any, store: Any, tmp_path: Path,
     ).run()
 
 
+def dispatch_counts(host: Any) -> Any:
+    """THE DAEMON'S OWN WITNESS, which this file used not to build (pgw#1591).
+
+    `cli/daemon.py` installs a `DispatchCounter` right after `host.setup` and
+    prints its verdict after every request; this file asserted on a loader
+    stub's call list instead. So the daemon could report the dispatcher
+    DISPLACED on 12/12 requests of a real sd15 benchmark while these legs
+    stayed green — the two booths were not measuring the same thing, and the
+    difference was the instrument, not the arm.
+
+    Every leg now takes the daemon's reading. Install AFTER setup, exactly as
+    `daemon.py` does, because the order is part of what broke.
+    """
+    from gen_worker.serving.dispatch_counter import DispatchCounter
+
+    return DispatchCounter().install(host)
+
+
+def assert_served_compiled(counter: Any, *, at_least: int = 1) -> Any:
+    """The reading a compiled claim rests on, in the daemon's own terms."""
+    counts = counter.take()
+    assert counts.displaced_modules == (), (
+        f"the compiled dispatcher is not reachable as the module's forward: "
+        f"{counts.facts()} — this is what the live sd15 benchmark read on "
+        f"12/12 requests of both arms (pgw#1591)")
+    assert counts.compiled_graph_calls >= at_least, (
+        f"served eager while claiming compiled: {counts.facts()}")
+    return counts
+
+
 def bank_both(store: Any, document: Any, tmp_path: Path) -> None:
     """Put a real envelope at both positions of ``store``."""
     from gen_worker.serving.mint import publish_compiled
@@ -215,6 +245,7 @@ def test_cold_boot_serves_EAGER_then_mints_then_serves_COMPILED(
         "a minted graph that did not arm leaves this host eager forever")
 
     # THE HOT SWAP: same host, same instance, no reboot — now compiled.
+    counter = dispatch_counts(host)
     host.dispatch("generate", {"prompt": "x", "aspect_ratio": first},
                   request_id="cold-2")
     host.dispatch("generate", {"prompt": "x", "aspect_ratio": second},
@@ -222,6 +253,10 @@ def test_cold_boot_serves_EAGER_then_mints_then_serves_COMPILED(
     armed = {record.graph for record in document.lanes[0].graphs}
     assert set(calls) == armed, (
         f"the eager forward is still serving after a landed mint: {calls}")
+    # ...and the DAEMON's own witness agrees. This is the half that was
+    # missing: without it these legs stayed green while `gen-worker up`
+    # reported the dispatcher DISPLACED on 12/12 requests (pgw#1591).
+    assert_served_compiled(counter, at_least=2)
 
     # And the bytes are in the LOCAL CAS, at the band adoption reads.
     for record in document.lanes[0].graphs:
@@ -250,9 +285,11 @@ def test_warm_local_reboot_arms_from_the_store_and_compiles_NOTHING(
 
     assert len(host.adoption.adopted) == 2 and host.holes == ()
     first, _second = ratios(document)
+    counter = dispatch_counts(host)
     host.dispatch("generate", {"prompt": "x", "aspect_ratio": first},
                   request_id="warm-1")
     assert calls, "a warm boot served eager over a full store"
+    assert_served_compiled(counter)
 
     # Nothing to mint, and the mint says so as a NAMED state rather than a
     # zero count (pgw#1371's `nothing_to_mint`).
@@ -396,9 +433,11 @@ def test_warm_remote_fetches_verifies_arms_serves_and_BANKS_locally(
             f"the fleet pool answered and nothing armed; holes: "
             f"{[(h.record.graph[-12:], h.reason) for h in host.holes]}")
         first, _second = ratios(document)
+        counter = dispatch_counts(host)
         host.dispatch("generate", {"prompt": "x", "aspect_ratio": first},
                       request_id="remote-1")
         assert calls, "adopted from the hub and still served eager"
+        assert_served_compiled(counter)
 
         # (4) BANKED. Without this the pod re-downloads every boot.
         for record in document.lanes[0].graphs:

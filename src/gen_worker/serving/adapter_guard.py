@@ -54,8 +54,20 @@ PEFT_MARKER_ATTR = "peft_config"
 _GUARD_ATTR = "_cozy_adapter_guard"
 
 
-def _dispatcher(module: Any) -> Any:
-    """The torchcg dispatcher fronting ``module``, through any guard, or None.
+def dispatcher_of(module: Any) -> Any:
+    """The torchcg dispatcher fronting ``module``, THROUGH any wrapper, or None.
+
+    PUBLIC, and it is the answer to "is this module still routing through its
+    compiled dispatcher" (pgw#1591). This guard installs itself AS
+    ``module.forward``, so the obvious test — ``module.forward is dispatcher``
+    — reads False on every guarded module and calls a perfectly healthy arm
+    DISPLACED. Measured on the live sd15 benchmark: 12/12 requests of both
+    arms reported the dispatcher displaced while the compiled graphs were in
+    fact executing, and a whole GPU leg was thrown away comparing eager to
+    eager that was not eager.
+
+    Anything asking that question must ask it HERE, so that adding a wrapper
+    is not a change every reader has to learn about.
 
     Duck-typed on the two attributes the dispatcher contract actually has
     (``eager_forward`` + ``armed_graphs``) rather than on an isinstance against
@@ -75,7 +87,7 @@ def _dispatcher(module: Any) -> Any:
 
 def armed_graphs(module: Any) -> Tuple[str, ...]:
     """The graph identities currently armed on ``module``. Empty = eager."""
-    dispatcher = _dispatcher(module)
+    dispatcher = dispatcher_of(module)
     if dispatcher is None:
         return ()
     try:
@@ -111,7 +123,7 @@ def install(module: Any) -> bool:
     ``AdoptSession.arm``'s late-mint handoff, which reaches the dispatcher
     through its own ``_home`` map, keeps working unchanged.
     """
-    dispatcher = _dispatcher(module)
+    dispatcher = dispatcher_of(module)
     if dispatcher is None:
         return False
     if getattr(getattr(module, "forward", None), _GUARD_ATTR, None) is not None:
@@ -171,8 +183,8 @@ def _adopted_modules(target: Any) -> List[Any]:
     components = getattr(target, "components", None)
     if isinstance(components, dict):
         return [value for value in components.values()
-                if _dispatcher(value) is not None]
-    return [target] if _dispatcher(target) is not None else []
+                if dispatcher_of(value) is not None]
+    return [target] if dispatcher_of(target) is not None else []
 
 
 def _eager_only_reason() -> str:
@@ -283,7 +295,7 @@ def rearm_constants(module: Any) -> int:
     what puts ``fold_state`` back to INITIALIZED, so the next call re-folds
     against the new weights.
     """
-    dispatcher = _dispatcher(module)
+    dispatcher = dispatcher_of(module)
     if dispatcher is None:
         return 0
     rearmed = 0
@@ -306,6 +318,7 @@ __all__ = [
     "PEFT_MARKER_ATTR",
     "armed_graphs",
     "compiled_armed",
+    "dispatcher_of",
     "has_live_adapter",
     "install",
     "rearm_constants",

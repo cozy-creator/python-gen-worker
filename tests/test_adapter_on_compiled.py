@@ -19,6 +19,7 @@ DISTINGUISHABLE from the eager forward, which is the whole measurement.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, List
 
 import pytest
@@ -375,3 +376,69 @@ def test_an_operator_eager_only_order_suppresses_compiled_dispatch(
             "latched, so the order is one-way")
     finally:
         serve_posture.reset()
+
+
+# --------------------------------------------------------------------------
+# pgw#1591: a WRAPPED dispatcher is not a displaced one, and a displaced one
+# still reports what it measured
+# --------------------------------------------------------------------------
+
+
+def test_the_guard_does_not_read_as_a_DISPLACED_dispatcher(
+    tmp_path: Path,
+) -> None:
+    """THE P1. `DispatchCounter` asked `module.forward is dispatcher`, and this
+    guard installs itself AS `module.forward` — so every guarded module read
+    DISPLACED the moment pgw#1573 landed.
+
+    Measured in the field before it was understood: sd15, 12/12 requests of
+    both benchmark arms, `dispatch: DISPLACED on UNet2DConditionModel`, and a
+    whole GPU leg discarded because the lane could not tell eager from
+    compiled. The arm was fine; the question was wrong.
+    """
+    from gen_worker.serving.dispatch_counter import DispatchCounter
+
+    calls: List[str] = []
+    module = _armed(tmp_path, calls)
+    session = SimpleNamespace(_dispatchers=[
+        (module, adapter_guard.dispatcher_of(module))])
+    counter = DispatchCounter().install(SimpleNamespace(adoption=session))
+
+    module(torch.ones(2, 4))
+    counts = counter.take()
+
+    assert counts.displaced_modules == (), (
+        f"a GUARDED dispatcher is not a displaced one: {counts.facts()}")
+    assert counts.compiled_graph_calls == 1 and counts.eager_calls == 0
+    assert "DISPLACED" not in counts.summary()
+
+
+def test_a_DISPLACED_module_still_reports_what_it_MEASURED(
+    tmp_path: Path,
+) -> None:
+    """The second half, and the one that cost the #1548 lane its window.
+
+    The displaced branch used to end "so all N call(s) ran eager" — a sentence
+    it never measured. The same logs carried 120 AOTI wrapper invocations per
+    arm, so the lane had two irreconcilable readings and correctly refused to
+    pick one. Neither was right: compiled DID execute and the message
+    overcounted eager.
+
+    Displacement and dispatch are separate facts. Both get stated.
+    """
+    from gen_worker.serving.dispatch_counter import DispatchCounts
+
+    displaced_but_served = DispatchCounts(
+        module_calls=21, compiled_graph_calls=10, armed_modules=1,
+        armed_graphs=14, displaced_modules=("UNet2DConditionModel",))
+    line = displaced_but_served.summary()
+    assert "DISPLACED" in line
+    assert "10 of 21 call(s) still served COMPILED" in line, line
+    assert "ran eager" not in line, (
+        f"the summary asserted eager over a measurement that says otherwise: "
+        f"{line}")
+
+    truly_eager = DispatchCounts(
+        module_calls=21, compiled_graph_calls=0, armed_modules=1,
+        armed_graphs=14, displaced_modules=("UNet2DConditionModel",))
+    assert "all 21 call(s) ran eager" in truly_eager.summary()
