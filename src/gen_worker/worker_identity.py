@@ -51,8 +51,8 @@ logger = logging.getLogger(__name__)
 #: them from the hub's OWN record of the release — never from anything the
 #: worker says — which is why they are the identity both ends of the compiled graph
 #: exchange scope by.
-CLAIM_ENDPOINT_ID = "cell_read_endpoint_id"  # cell-spelling: hub-stamped credential claim name; this side only reads it
-CLAIM_ORG_ID = "cell_read_org_id"  # cell-spelling: hub-stamped credential claim name; this side only reads it
+CLAIM_ENDPOINT_ID = "graph_read_endpoint_id"
+CLAIM_ORG_ID = "graph_read_org_id"
 
 
 class IdentityUnavailable(RuntimeError):

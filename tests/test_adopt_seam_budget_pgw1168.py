@@ -75,7 +75,7 @@ def _install(
 def _arm(tmp_path: Path, **kw: Any):
     return provision.arm_aot(
         object(), type("Cfg", (), {"family": "sdxl"})(), None,
-        tmp_path / "cell.tar.gz", 0, dict(_META), **kw)  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
+        tmp_path / "graph.tar.gz", 0, dict(_META), **kw)
 
 
 def _row(events: List[Tuple[str, str, str]]) -> str:

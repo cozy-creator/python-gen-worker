@@ -540,8 +540,8 @@ def test_graph_artifact_legitimate_transfer_is_unaffected(
     # the latter at its typed handoff so arbitrary control bytes do not need to
     # masquerade as a compiled graph.
     monkeypatch.setattr(aot_delivery, "_import_verified_artifact", lambda *a, **k: None)
-    url = _serve(rig, "/cell.tar.gz", ARTIFACT)  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
-    entry = {"path": "cell.tar.gz", "url": url,  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
+    url = _serve(rig, "/graph.tar.gz", ARTIFACT)
+    entry = {"path": "graph.tar.gz", "url": url,
              "digest": ARTIFACT_DIGEST, "size_bytes": len(ARTIFACT)}
     out = _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST)
     assert out is not None and out.read_bytes() == ARTIFACT
@@ -571,8 +571,8 @@ def test_graph_artifact_oversized_stream_is_abandoned_mid_transfer(
     assert _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
     _aborted_early(rig, "/compiled graph-big.tar.gz")
     hexname = ARTIFACT_DIGEST.split(":", 1)[-1]
-    assert not (tmp_path / "aot-cells" / f"{hexname}.tar.gz").exists()  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
-    assert not (tmp_path / "aot-cells" / f"{hexname}.part").exists()  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
+    assert not (tmp_path / "graphs" / f"{hexname}.tar.gz").exists()
+    assert not (tmp_path / "graphs" / f"{hexname}.part").exists()
 
 
 # ---------------------------------------------------------------------------

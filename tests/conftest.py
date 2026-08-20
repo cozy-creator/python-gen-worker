@@ -422,18 +422,14 @@ def _isolated_local_compiled_graph_store(tmp_path_factory):
     """
     from gen_worker import config as _config
 
-    prior = os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR")  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
     prior_cache = os.environ.get("TENSORHUB_CACHE_DIR")
-    os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = str(  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
-        tmp_path_factory.mktemp("local-compiled-graph-store"))
     os.environ["TENSORHUB_CACHE_DIR"] = str(
         tmp_path_factory.mktemp("worker-cache"))
     _config.reload_for_test()
     try:
         yield
     finally:
-        for name, value in (("GEN_WORKER_LOCAL_CELLS_DIR", prior),  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
-                            ("TENSORHUB_CACHE_DIR", prior_cache)):
+        for name, value in (("TENSORHUB_CACHE_DIR", prior_cache),):
             if value is None:
                 os.environ.pop(name, None)
             else:

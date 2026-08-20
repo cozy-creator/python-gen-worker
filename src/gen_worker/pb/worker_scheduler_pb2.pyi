@@ -838,7 +838,7 @@ class ModelResolution(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ..., lane: _Optional[str] = ..., lane_pinned: _Optional[bool] = ...) -> None: ...
 
 class StateDelta(_message.Message):
-    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "cell_lookups", "disk_usage", "observed_config_generation")
+    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "compiled_graph_lookups", "disk_usage", "observed_config_generation")
     PHASE_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     LOADING_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
@@ -846,7 +846,7 @@ class StateDelta(_message.Message):
     FINALIZING_JOBS_FIELD_NUMBER: _ClassVar[int]
     OBSERVED_RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
     COMPILE_TARGETS_FIELD_NUMBER: _ClassVar[int]
-    CELL_LOOKUPS_FIELD_NUMBER: _ClassVar[int]
+    COMPILED_GRAPH_LOOKUPS_FIELD_NUMBER: _ClassVar[int]
     DISK_USAGE_FIELD_NUMBER: _ClassVar[int]
     OBSERVED_CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
     phase: WorkerPhase
@@ -856,10 +856,10 @@ class StateDelta(_message.Message):
     finalizing_jobs: int
     observed_residency_generation: int
     compile_targets: _containers.RepeatedCompositeFieldContainer[CompileTarget]
-    cell_lookups: _containers.RepeatedCompositeFieldContainer[CellLookup]
+    compiled_graph_lookups: _containers.RepeatedCompositeFieldContainer[CompiledGraphLookup]
     disk_usage: DiskUsageReport
     observed_config_generation: int
-    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ..., cell_lookups: _Optional[_Iterable[_Union[CellLookup, _Mapping]]] = ..., disk_usage: _Optional[_Union[DiskUsageReport, _Mapping]] = ..., observed_config_generation: _Optional[int] = ...) -> None: ...
+    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ..., compiled_graph_lookups: _Optional[_Iterable[_Union[CompiledGraphLookup, _Mapping]]] = ..., disk_usage: _Optional[_Union[DiskUsageReport, _Mapping]] = ..., observed_config_generation: _Optional[int] = ...) -> None: ...
 
 class StorageTierUsage(_message.Message):
     __slots__ = ("tier", "mount_path", "total_bytes", "free_bytes", "used_bytes", "reclaimable_bytes")
@@ -885,16 +885,16 @@ class DiskUsageReport(_message.Message):
     capacity_generation: int
     def __init__(self, tiers: _Optional[_Iterable[_Union[StorageTierUsage, _Mapping]]] = ..., capacity_generation: _Optional[int] = ...) -> None: ...
 
-class CellLookup(_message.Message):
-    __slots__ = ("family", "cell_key")
+class CompiledGraphLookup(_message.Message):
+    __slots__ = ("family", "compiled_graph_key")
     FAMILY_FIELD_NUMBER: _ClassVar[int]
-    CELL_KEY_FIELD_NUMBER: _ClassVar[int]
+    COMPILED_GRAPH_KEY_FIELD_NUMBER: _ClassVar[int]
     family: str
-    cell_key: str
-    def __init__(self, family: _Optional[str] = ..., cell_key: _Optional[str] = ...) -> None: ...
+    compiled_graph_key: str
+    def __init__(self, family: _Optional[str] = ..., compiled_graph_key: _Optional[str] = ...) -> None: ...
 
 class CompileTarget(_message.Message):
-    __slots__ = ("incarnation_id", "family", "pipeline_weight_lane", "lora_bucket", "contract_digest", "active_compile_ref", "active_compile_snapshot_digest", "function_names", "model_bindings", "requested_cell_key")
+    __slots__ = ("incarnation_id", "family", "pipeline_weight_lane", "lora_bucket", "contract_digest", "active_compile_ref", "active_compile_snapshot_digest", "function_names", "model_bindings", "requested_compiled_graph_key")
     INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
     FAMILY_FIELD_NUMBER: _ClassVar[int]
     PIPELINE_WEIGHT_LANE_FIELD_NUMBER: _ClassVar[int]
@@ -904,7 +904,7 @@ class CompileTarget(_message.Message):
     ACTIVE_COMPILE_SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_NAMES_FIELD_NUMBER: _ClassVar[int]
     MODEL_BINDINGS_FIELD_NUMBER: _ClassVar[int]
-    REQUESTED_CELL_KEY_FIELD_NUMBER: _ClassVar[int]
+    REQUESTED_COMPILED_GRAPH_KEY_FIELD_NUMBER: _ClassVar[int]
     incarnation_id: str
     family: str
     pipeline_weight_lane: str
@@ -914,8 +914,8 @@ class CompileTarget(_message.Message):
     active_compile_snapshot_digest: str
     function_names: _containers.RepeatedScalarFieldContainer[str]
     model_bindings: _containers.RepeatedCompositeFieldContainer[CompileTargetBinding]
-    requested_cell_key: str
-    def __init__(self, incarnation_id: _Optional[str] = ..., family: _Optional[str] = ..., pipeline_weight_lane: _Optional[str] = ..., lora_bucket: _Optional[int] = ..., contract_digest: _Optional[str] = ..., active_compile_ref: _Optional[str] = ..., active_compile_snapshot_digest: _Optional[str] = ..., function_names: _Optional[_Iterable[str]] = ..., model_bindings: _Optional[_Iterable[_Union[CompileTargetBinding, _Mapping]]] = ..., requested_cell_key: _Optional[str] = ...) -> None: ...
+    requested_compiled_graph_key: str
+    def __init__(self, incarnation_id: _Optional[str] = ..., family: _Optional[str] = ..., pipeline_weight_lane: _Optional[str] = ..., lora_bucket: _Optional[int] = ..., contract_digest: _Optional[str] = ..., active_compile_ref: _Optional[str] = ..., active_compile_snapshot_digest: _Optional[str] = ..., function_names: _Optional[_Iterable[str]] = ..., model_bindings: _Optional[_Iterable[_Union[CompileTargetBinding, _Mapping]]] = ..., requested_compiled_graph_key: _Optional[str] = ...) -> None: ...
 
 class CompileTargetBinding(_message.Message):
     __slots__ = ("slot", "ref", "snapshot_digest")
@@ -999,16 +999,16 @@ class InputAsset(_message.Message):
     def __init__(self, asset_id: _Optional[str] = ..., source_ref: _Optional[str] = ..., blake3: _Optional[str] = ..., size_bytes: _Optional[int] = ..., kind: _Optional[str] = ..., mime_type: _Optional[str] = ...) -> None: ...
 
 class RequiredCompileExecution(_message.Message):
-    __slots__ = ("target_incarnation_id", "cell_ref", "cell_snapshot_digest", "contract_digest")
+    __slots__ = ("target_incarnation_id", "compiled_graph_ref", "compiled_graph_snapshot_digest", "contract_digest")
     TARGET_INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
-    CELL_REF_FIELD_NUMBER: _ClassVar[int]
-    CELL_SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    COMPILED_GRAPH_REF_FIELD_NUMBER: _ClassVar[int]
+    COMPILED_GRAPH_SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
     CONTRACT_DIGEST_FIELD_NUMBER: _ClassVar[int]
     target_incarnation_id: str
-    cell_ref: str
-    cell_snapshot_digest: str
+    compiled_graph_ref: str
+    compiled_graph_snapshot_digest: str
     contract_digest: str
-    def __init__(self, target_incarnation_id: _Optional[str] = ..., cell_ref: _Optional[str] = ..., cell_snapshot_digest: _Optional[str] = ..., contract_digest: _Optional[str] = ...) -> None: ...
+    def __init__(self, target_incarnation_id: _Optional[str] = ..., compiled_graph_ref: _Optional[str] = ..., compiled_graph_snapshot_digest: _Optional[str] = ..., contract_digest: _Optional[str] = ...) -> None: ...
 
 class ResolvedCompute(_message.Message):
     __slots__ = ("accelerator", "gpu_index")
@@ -1162,7 +1162,7 @@ class Adjustment(_message.Message):
     def __init__(self, field: _Optional[str] = ..., requested: _Optional[str] = ..., applied: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class JobMetrics(_message.Message):
-    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane", "runtime_terms", "stage_ms", "serving_mode", "served_cell_ref", "served_eager_fallback", "fallback_reason", "sm", "steps", "width", "height", "posture")
+    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count", "slot_held_ms", "finalize_wall_ms", "lane", "runtime_terms", "stage_ms", "serving_mode", "served_compiled_graph_ref", "served_eager_fallback", "fallback_reason", "sm", "steps", "width", "height", "posture")
     class RuntimeTermsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -1193,7 +1193,7 @@ class JobMetrics(_message.Message):
     RUNTIME_TERMS_FIELD_NUMBER: _ClassVar[int]
     STAGE_MS_FIELD_NUMBER: _ClassVar[int]
     SERVING_MODE_FIELD_NUMBER: _ClassVar[int]
-    SERVED_CELL_REF_FIELD_NUMBER: _ClassVar[int]
+    SERVED_COMPILED_GRAPH_REF_FIELD_NUMBER: _ClassVar[int]
     SERVED_EAGER_FALLBACK_FIELD_NUMBER: _ClassVar[int]
     FALLBACK_REASON_FIELD_NUMBER: _ClassVar[int]
     SM_FIELD_NUMBER: _ClassVar[int]
@@ -1217,7 +1217,7 @@ class JobMetrics(_message.Message):
     runtime_terms: _containers.ScalarMap[str, float]
     stage_ms: _containers.ScalarMap[str, int]
     serving_mode: str
-    served_cell_ref: str
+    served_compiled_graph_ref: str
     served_eager_fallback: bool
     fallback_reason: str
     sm: str
@@ -1225,7 +1225,7 @@ class JobMetrics(_message.Message):
     width: int
     height: int
     posture: MeasuredPosture
-    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ..., stage_ms: _Optional[_Mapping[str, int]] = ..., serving_mode: _Optional[str] = ..., served_cell_ref: _Optional[str] = ..., served_eager_fallback: _Optional[bool] = ..., fallback_reason: _Optional[str] = ..., sm: _Optional[str] = ..., steps: _Optional[int] = ..., width: _Optional[int] = ..., height: _Optional[int] = ..., posture: _Optional[_Union[MeasuredPosture, _Mapping]] = ...) -> None: ...
+    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ..., stage_ms: _Optional[_Mapping[str, int]] = ..., serving_mode: _Optional[str] = ..., served_compiled_graph_ref: _Optional[str] = ..., served_eager_fallback: _Optional[bool] = ..., fallback_reason: _Optional[str] = ..., sm: _Optional[str] = ..., steps: _Optional[int] = ..., width: _Optional[int] = ..., height: _Optional[int] = ..., posture: _Optional[_Union[MeasuredPosture, _Mapping]] = ...) -> None: ...
 
 class MeasuredPosture(_message.Message):
     __slots__ = ("execution_lane", "attention_backend", "attention_backend_wanted", "compile_state", "compile_state_wanted", "residency_mode", "applied", "components", "shortfall")
@@ -1370,7 +1370,7 @@ class ModelEvent(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ..., network_bytes: _Optional[int] = ...) -> None: ...
 
 class ActivityUpdate(_message.Message):
-    __slots__ = ("kind", "phase", "step", "total_steps", "seq", "state", "error", "detail", "updated_at_unix_ms", "counter", "counter_unit", "counter_done", "counter_total", "rate_per_s", "self_stalled", "stalled_for_ms", "duration_ms", "family", "cell_key", "graph_specialization")
+    __slots__ = ("kind", "phase", "step", "total_steps", "seq", "state", "error", "detail", "updated_at_unix_ms", "counter", "counter_unit", "counter_done", "counter_total", "rate_per_s", "self_stalled", "stalled_for_ms", "duration_ms", "family", "compiled_graph_key", "graph_specialization")
     KIND_FIELD_NUMBER: _ClassVar[int]
     PHASE_FIELD_NUMBER: _ClassVar[int]
     STEP_FIELD_NUMBER: _ClassVar[int]
@@ -1389,7 +1389,7 @@ class ActivityUpdate(_message.Message):
     STALLED_FOR_MS_FIELD_NUMBER: _ClassVar[int]
     DURATION_MS_FIELD_NUMBER: _ClassVar[int]
     FAMILY_FIELD_NUMBER: _ClassVar[int]
-    CELL_KEY_FIELD_NUMBER: _ClassVar[int]
+    COMPILED_GRAPH_KEY_FIELD_NUMBER: _ClassVar[int]
     GRAPH_SPECIALIZATION_FIELD_NUMBER: _ClassVar[int]
     kind: str
     phase: str
@@ -1409,9 +1409,9 @@ class ActivityUpdate(_message.Message):
     stalled_for_ms: int
     duration_ms: int
     family: str
-    cell_key: str
+    compiled_graph_key: str
     graph_specialization: str
-    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: _Optional[bool] = ..., stalled_for_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., family: _Optional[str] = ..., cell_key: _Optional[str] = ..., graph_specialization: _Optional[str] = ...) -> None: ...
+    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: _Optional[bool] = ..., stalled_for_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., family: _Optional[str] = ..., compiled_graph_key: _Optional[str] = ..., graph_specialization: _Optional[str] = ...) -> None: ...
 
 class BootPhase(_message.Message):
     __slots__ = ("boot_id", "ordinal", "parent_ordinal", "phase", "terminal", "started_at_unix_ms", "duration_ms", "process_uptime_ms", "bytes", "source", "ref", "artifact_kind", "artifact_key", "function", "outcome", "reason", "detail", "cumulative")

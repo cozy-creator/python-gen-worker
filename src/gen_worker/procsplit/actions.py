@@ -255,8 +255,8 @@ ACTIONS: Dict[str, HubAction] = {
 ACTION_REPORT_DETAIL = "report.detail"
 
 # Non-HTTP action: the child asks the parent WHO THIS POD IS (pgw#1122). The
-# parent decodes the two hub-stamped viewer claims (`cell_read_endpoint_id`,  # cell-spelling: hub-stamped credential claim name; this side only reads it
-# `cell_read_org_id`) out of the credential it holds and returns THEM — never  # cell-spelling: hub-stamped credential claim name; this side only reads it
+# parent decodes the two hub-stamped viewer claims (`graph_read_endpoint_id`,
+# `graph_read_org_id`) out of the credential it holds and returns THEM — never
 # the token. A claim is not a credential, so this widens nothing: the child
 # already learns its worker id and release id as plain env values at spawn, and
 # these two are the same shape of fact.

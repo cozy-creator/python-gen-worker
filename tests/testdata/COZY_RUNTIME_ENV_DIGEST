@@ -1,4 +1,10 @@
 # sha256 of cozy_runtime_env_vectors.json — the shared cozy-local/worker
 # runtime path contract (th#1914 / pgw#1237 / cl#56).
 # PGW lands first; private consumers vendor both files verbatim.
-90ab5b929248df26dc257463d98f8e4cc622b0698ba0d36c5bd606d734b0b283
+#
+# pgw#1547 (Paul, 2026-08-20): GEN_WORKER_LOCAL_CELLS_DIR is DELETED, not
+# renamed. It configured a second root for a store the CAS knob already
+# roots, and the store now derives unconditionally as
+# <TENSORHUB_CACHE_DIR>/compiled-graph-store. One variable leaves this corpus;
+# nothing replaces it, because a derived path is not a configuration.
+9eb3eab60f1e96a5a1a3d433398c2c4543e5829e646604d126f4993c3584f351

@@ -190,6 +190,11 @@ _COMPUTE_HOME = "/var/lib/gen-worker/compute"
 # than imported: importing either package pulls the model layer, and the parent
 # never imports torch.
 _DEFAULT_TENSORHUB_CACHE_DIR = "/tmp/tensorhub-cache"
+
+#: Must equal `local_compiled_graph_store.STORE_DIRNAME`. Restated rather than
+#: imported because this process is deliberately torch-free;
+#: `test_pod_isolation` pins the two together.
+_COMPILED_GRAPH_STORE_DIRNAME = "compiled-graph-store"
 _DEFAULT_CONFIG_SNAPSHOT_PATH = "/app/.tensorhub/runtime_config.msgpack"
 
 
@@ -1397,20 +1402,26 @@ class ParentControl:
                 self._child_env.get("GEN_WORKER_BOOT_RECORD", "")
                 or self._settings.boot_record_path
             ),
-            # The local compiled graph store: the CHILD mints, and the mint
-            # writes the memo and the per-compiled graph sidecar under this root. Its
-            # DEFAULT (``~/.cache/cozy/compiled graphs``) already resolves inside
-            # the compute uid's own home, so nothing needed granting while the
-            # default stood — which is exactly why the gap survived: cozy-local
-            # RELOCATES it by env (`internal/paths/paths.go`), and a relocated
-            # root lands outside every other entry in this list. pgw#1349: the
-            # dropped child then dies mid-request on
-            # ``PermissionError: .../aot-cells``, root-owned 0755 because the  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
-            # parent created it. Read from the child's env — the same rule the
-            # cache root above follows — never by importing the store, which
-            # would pull the model layer into this torch-free process.
-            self._child_env.get("GEN_WORKER_LOCAL_CELLS_DIR", "")  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
-            or os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR", ""),  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
+            # The local compiled-graph store: the CHILD mints, and the mint
+            # writes the memo and the per-graph sidecar under this root.
+            #
+            # pgw#1547 DELETED its dedicated env, so this is now DERIVED from
+            # the cache root rather than read from a second knob — but it is
+            # still granted EXPLICITLY, and that is load-bearing rather than
+            # belt-and-braces. Granting the cache root alone is NOT equivalent:
+            # `grant_paths` mkdirs AND chowns each entry it is handed, and this
+            # subdirectory does not exist yet on a cold pod, so only naming it
+            # gets it created owned by the compute uid. Dropping it reproduced
+            # pgw#1349 exactly — `PermissionError` on the child's first nested
+            # sidecar write — and `test_pod_isolation` caught it under a real
+            # root parent. Derived here rather than imported, for the same
+            # reason the cache root above is: this process never imports torch.
+            os.path.join(
+                self._child_env.get("TENSORHUB_CACHE_DIR", "")
+                or self._settings.tensorhub_cache_dir
+                or _DEFAULT_TENSORHUB_CACHE_DIR,
+                _COMPILED_GRAPH_STORE_DIRNAME,
+            ),
             # The mutable-config snapshot: the CHILD atomically rewrites
             # it on every config-generation push (tmp file in the SAME dir plus
             # os.replace, so the directory itself must be writable), and unlike
