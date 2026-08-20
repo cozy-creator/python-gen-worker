@@ -167,14 +167,29 @@ class ServeAdoption:
         """
         with self._lock:
             if self._settled:
-                return self.adoption.adopt if self.adoption is not None else None
+                return self._sink()
             self._settled = True
             try:
                 self._build(lane)
             except Exception as exc:  # noqa: BLE001 — adoption never kills a boot
                 self._refuse(type(exc).__name__, str(exc))
                 return None
-        return self.adoption.adopt if self.adoption is not None else None
+        return self._sink()
+
+    def _sink(self) -> Optional[Callable[..., Any]]:
+        """``adopt``, GUARDED (pgw#1573/pgw#1571).
+
+        A peft adapter attached after arming does not execute inside a compiled
+        graph — the parent's forward is the traced computation and never enters
+        the wrapped submodules — so the base model is served bit-identically
+        with no refusal and no log. The guard rides every module this sink
+        arms; `adapter_guard` owns the argument.
+        """
+        from .adapter_guard import sink as guarded_sink
+
+        if self.adoption is None:
+            return None
+        return guarded_sink(self.adoption.adopt)
 
     def loaded(self, model_cls: type = type(None), lane: Any = None) -> None:
         """THE MINT'S TRIGGER: the author's ``load(ctx)`` has returned.

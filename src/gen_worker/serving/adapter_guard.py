@@ -1,0 +1,246 @@
+"""A LIVE adapter on a compiled-armed module serves EAGER, loudly (pgw#1573).
+
+pgw#1571 measured the defect and stated it exactly: peft wraps a denoiser's
+SUBMODULES, and an armed compiled graph replaces the PARENT's forward with a
+traced computation that never enters them. So an adapter attached after arming
+does not execute — the base model is served, bit-identically, with no refusal
+and no log. Measured there: eager red arm ``max|delta| = 2.2e-02``, armed
+``0.0``, with 32 peft wrappers attached.
+
+**Its fix landed in ``aot_serve``, which nothing on the serving path calls.**
+Verified against ``origin/master``: ``aot_serve.wrap_module`` has zero non-test
+callers — every reference in ``src/`` is a docstring — and the live arm is
+``torchcg.adopt.AdoptSession`` handing ``torchcg.serve.CompiledGraphCall`` to a
+``_ForwardDispatcher``. Neither ``PEFT_MARKER_ATTR``, ``_say_adapter_ops_once``
+nor ``rearm_constants`` is reachable from a pod. The defect was masked only by
+adoption being broken; pgw#1573 fixed adoption, so it arms itself. This module
+is the same guard, on the path that runs.
+
+TWO HALVES, both O(1) on the hot path:
+
+* :func:`install` wraps the dispatcher torchcg installed. A module carrying a
+  live ``peft_config`` routes to the module's own eager forward and says so
+  ONCE. One ``getattr`` per call — a module walk here would cost more than the
+  defect it prevents.
+* :func:`rearm_constants` re-installs a compiled runner's bound constant table
+  after an in-place weight write, which is what makes folding an adapter INTO
+  the weights (:mod:`gen_worker.models.lora_fold`) work on a v2 pod:
+  ``load_constants(..., user_managed=True)`` keeps raw pointers, so a fold is
+  visible — except through AOTI's runtime constant folding, which folds once on
+  the first ``run()`` and never re-folds on a bare tensor write.
+
+**Eager is a correct answer and stays one.** Nothing here refuses a request:
+the cost is speed, never numerics, and the alternative — a silently wrong
+image — is the only outcome that is not acceptable.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Callable, Dict, List, Tuple
+
+from .. import activity as activity_mod
+
+logger = logging.getLogger(__name__)
+
+#: peft writes this on the module it injects adapters into (diffusers'
+#: ``load_lora_adapter`` -> ``inject_adapter_in_model``) and deletes it on
+#: unload. Same attribute pgw#1571 keyed on, deliberately: one marker, and the
+#: v1 spelling is the one the ecosystem writes.
+PEFT_MARKER_ATTR = "peft_config"
+
+#: Set on a guard so a second ``ctx.compile`` of the same module cannot stack
+#: two of them, and so :func:`armed_graphs` can recognise one.
+_GUARD_ATTR = "_cozy_adapter_guard"
+
+
+def _dispatcher(module: Any) -> Any:
+    """The torchcg dispatcher fronting ``module``, through any guard, or None.
+
+    Duck-typed on the two attributes the dispatcher contract actually has
+    (``eager_forward`` + ``armed_graphs``) rather than on an isinstance against
+    a vendored private class: the vendored snapshot is sha256-fenced, so a
+    check that pins its identity here is a check that breaks on a re-vendor
+    instead of on a real change.
+    """
+    forward = getattr(module, "forward", None)
+    if forward is None:
+        return None
+    inner = getattr(forward, _GUARD_ATTR, None)
+    candidate = inner if inner is not None else forward
+    if hasattr(candidate, "eager_forward") and hasattr(candidate, "armed_graphs"):
+        return candidate
+    return None
+
+
+def armed_graphs(module: Any) -> Tuple[str, ...]:
+    """The graph identities currently armed on ``module``. Empty = eager."""
+    dispatcher = _dispatcher(module)
+    if dispatcher is None:
+        return ()
+    try:
+        return tuple(dispatcher.armed_graphs())
+    except Exception:  # noqa: BLE001 — a probe never costs a request
+        return ()
+
+
+def compiled_armed(module: Any) -> bool:
+    """Whether a compiled artifact is currently serving ``module``'s forward.
+
+    THE v2 ANSWER. ``lora_fold._compiled_armed`` asks ``aot_serve``, whose
+    marker (``_cozy_compile``) no pod has carried since pgw#1373 — so on a real
+    worker that predicate answers False for every armed module and every
+    compiled-aware branch behind it is dead code.
+    """
+    return bool(armed_graphs(module))
+
+
+def has_live_adapter(module: Any) -> bool:
+    """Whether peft currently has adapters injected into ``module``."""
+    return bool(getattr(module, PEFT_MARKER_ATTR, None))
+
+
+def install(module: Any) -> bool:
+    """Guard one adopted module. Returns whether a guard was installed.
+
+    Called after ``AdoptSession.adopt`` has installed its dispatcher, on the
+    same object. Idempotent: a module already guarded is left alone, so the two
+    ``ctx.compile`` hosts and a re-adopt cannot stack guards.
+
+    The dispatcher object is NOT replaced — only ``module.forward`` is — so
+    ``AdoptSession.arm``'s late-mint handoff, which reaches the dispatcher
+    through its own ``_home`` map, keeps working unchanged.
+    """
+    dispatcher = _dispatcher(module)
+    if dispatcher is None:
+        return False
+    if getattr(getattr(module, "forward", None), _GUARD_ATTR, None) is not None:
+        return True  # already guarded
+    state: Dict[str, Any] = {"said": False}
+
+    def guarded(*args: Any, **kwargs: Any) -> Any:
+        if getattr(module, PEFT_MARKER_ATTR, None):
+            if not state["said"]:
+                state["said"] = True
+                _say(module)
+            return dispatcher.eager_forward(*args, **kwargs)
+        return dispatcher(*args, **kwargs)
+
+    setattr(guarded, _GUARD_ATTR, dispatcher)
+    module.forward = guarded
+    return True
+
+
+def sink(adopt: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """``ctx.compile``'s sink, with the guard on everything it arms.
+
+    Wraps ``AdoptSession.adopt`` rather than living inside it, because the
+    session is vendored and sha256-fenced. The walk is the same one ``adopt``
+    does — the target itself, or every ``nn.Module`` in a pipeline-shaped
+    container's ``components`` mapping — so a marked pipeline is guarded
+    component by component exactly as it is armed.
+    """
+
+    def compile_sink(target: Any) -> Any:
+        armed_target = adopt(target)
+        for module in _adopted_modules(armed_target):
+            try:
+                install(module)
+            except Exception:  # noqa: BLE001 — a guard never fails a load
+                logger.exception(
+                    "adapter guard: could not guard %s; a LoRA on this "
+                    "module would serve the base weights silently",
+                    type(module).__name__)
+        return armed_target
+
+    return compile_sink
+
+
+def _adopted_modules(target: Any) -> List[Any]:
+    components = getattr(target, "components", None)
+    if isinstance(components, dict):
+        return [value for value in components.values()
+                if _dispatcher(value) is not None]
+    return [target] if _dispatcher(target) is not None else []
+
+
+def _say(module: Any) -> None:
+    """Say the degradation ONCE per module, on the wire and in the log.
+
+    Per FORWARD, not per boot: an adapter arrives at request time, so the first
+    guarded call is the first instant this is true. A serve pod's stdout goes
+    nowhere (pgw#760), so the log line alone would be the same silence this
+    guard exists to end.
+    """
+    names = sorted(getattr(module, PEFT_MARKER_ATTR, {}) or {})
+    detail = (
+        f"{type(module).__name__}: live peft adapter(s) {names} on a "
+        f"compiled-armed module ({len(armed_graphs(module))} graph(s) armed) — "
+        f"serving EAGER for the duration, because the compiled graph was "
+        f"traced without them and would silently return the BASE MODEL "
+        f"(pgw#1571). Fold the adapter into the weights "
+        f"(models.lora_fold.folded, rebind=adapter_guard.rearm_constants) to "
+        f"keep compiled speed."
+    )
+    logger.warning("adapter guard: %s", detail)
+    try:
+        activity_mod.emit_event(
+            activity_mod.KIND_LORA_HYGIENE, detail,
+            phase="adapter_ops_on_compiled",
+        )
+    except Exception:  # noqa: BLE001 — the request outlives its telemetry
+        logger.debug("adapter guard: hygiene row failed to emit", exc_info=True)
+
+
+class ConstantRearmUnsupported(RuntimeError):
+    """A compiled runner exposes no bound constant table to re-install.
+
+    Refused BY NAME rather than skipped: the condition this is preventing is a
+    folded constant that keeps serving pre-fold weights, which produces a
+    plausible wrong image and no error at all.
+    """
+
+
+def rearm_constants(module: Any) -> int:
+    """Re-install every armed runner's constant table after a WEIGHT WRITE.
+
+    Returns how many entries were re-armed; 0 when nothing is armed, which is
+    the ordinary eager case and not an error.
+
+    ``load_constants(..., user_managed=True)`` keeps RAW POINTERS to the
+    module's own parameters, so an in-place fold is visible to the artifact
+    with no bookkeeping — except through AOTI's runtime constant folding, which
+    ``torchcg.compiler`` turns on. The container folds once on the first
+    ``run()`` (``fold_state`` INITIALIZED -> FOLDED) and never again, and an
+    in-place tensor write calls nothing. Re-installing the same pointers is
+    what puts ``fold_state`` back to INITIALIZED, so the next call re-folds
+    against the new weights.
+    """
+    dispatcher = _dispatcher(module)
+    if dispatcher is None:
+        return 0
+    rearmed = 0
+    for _record, call in tuple(getattr(dispatcher, "_entries", ()) or ()):
+        runner = getattr(call, "runner", None)
+        package = getattr(runner, "_package", None)
+        values = getattr(runner, "_bound_values", None)
+        if package is None or not values:
+            raise ConstantRearmUnsupported(
+                f"the compiled runner armed on {type(module).__name__} exposes "
+                f"no bound constant table to re-install after a weight "
+                f"mutation; a folded constant would serve stale weights")
+        package.load_constants(values, check_full_update=True, user_managed=True)
+        rearmed += 1
+    return rearmed
+
+
+__all__ = [
+    "ConstantRearmUnsupported",
+    "PEFT_MARKER_ATTR",
+    "armed_graphs",
+    "compiled_armed",
+    "has_live_adapter",
+    "install",
+    "rearm_constants",
+    "sink",
+]
