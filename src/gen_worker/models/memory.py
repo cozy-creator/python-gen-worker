@@ -2455,6 +2455,20 @@ def apply_low_vram_config(
     if prior is not None:
         return {"mode": prior, "already_applied": True}
 
+    # pgw#1586, CLOSING THE CLASS pgw#1595 OPENED. Free VRAM read ONCE here,
+    # before anything is placed, and carried to every confession below.
+    #
+    # pgw#1595's fix threaded the plan-time figure into the `partial_resident`
+    # confession ONLY, and left six sibling call sites — `model_offload`,
+    # `sequential`, `partial_stream`, both `cpu` arms and the fall-through —
+    # still re-reading free VRAM AT REPORT TIME, after placement. Within hours
+    # the pgw#1548 lane read `free_gb=0.4` off a `model_offload` line on a card
+    # with 7.9 GiB free at boot and reached for a boot-ordering cause, which is
+    # the SAME wrong conclusion pgw#1595 was filed on. Fixing the one line that
+    # had bitten me and leaving its five siblings was the defect; this is the
+    # class.
+    decision_free_gb = get_available_vram_gb()
+
     # pgw#1498's tier dial, BEFORE the rung is chosen: spending the lease's
     # surplus on decode-once weights changes the footprint every decision below
     # is made against. A no-op on any pipeline holding no ggml block bytes.
@@ -2576,7 +2590,8 @@ def apply_low_vram_config(
         # pgw#1312's one confession home. This rung is the LOUDEST degradation
         # the ladder has — ~40x — so it may not be the one route that reaches a
         # CPU-touching placement without saying so off the pod.
-        _report_offload_engaged(pipeline, "cpu", applied, log)
+        _report_offload_engaged(pipeline, "cpu", applied, log,
+                                plan_free_gb=decision_free_gb)
         return applied
 
     # Every rung reached from here has a live `oom_ladder` (armed above, on
@@ -2612,7 +2627,8 @@ def apply_low_vram_config(
         applied["mode"] = "cpu"
         _to_host(pipeline)
         setattr(pipeline, _COZY_MODE_ATTR, "cpu")
-        _report_offload_engaged(pipeline, "cpu", applied, log)
+        _report_offload_engaged(pipeline, "cpu", applied, log,
+                                plan_free_gb=decision_free_gb)
         return applied
 
     if offload_to_disk_path is None and _should_auto_disk_offload():
@@ -2637,7 +2653,8 @@ def apply_low_vram_config(
         ):
             setattr(pipeline, _COZY_MODE_ATTR, "partial_stream")
             if applied.get("stream_streamed_leaves"):
-                _report_offload_engaged(pipeline, "partial_stream", applied, log)
+                _report_offload_engaged(pipeline, "partial_stream", applied, log,
+                                        plan_free_gb=decision_free_gb)
             return applied
         # It could not arm (no torch, no hookable tree, a meta/aliased leaf).
         # The next rung down is the honest answer, not a resident placement.
@@ -2731,7 +2748,8 @@ def apply_low_vram_config(
                 log.warning("low_vram: enable_model_cpu_offload failed: %s", exc)
         applied["model_offload"] = ok
         setattr(pipeline, _COZY_MODE_ATTR, "model_offload")
-        _report_offload_engaged(pipeline, "model_offload", applied, log)
+        _report_offload_engaged(pipeline, "model_offload", applied, log,
+                                plan_free_gb=decision_free_gb)
         return applied
 
     if effective_mode == "group_offload":
@@ -2754,12 +2772,14 @@ def apply_low_vram_config(
         applied["sequential_offload"] = ok
         applied["mode"] = "sequential"
         setattr(pipeline, _COZY_MODE_ATTR, "sequential")
-        _report_offload_engaged(pipeline, "sequential", applied, log)
+        _report_offload_engaged(pipeline, "sequential", applied, log,
+                                plan_free_gb=decision_free_gb)
         return applied
 
     setattr(pipeline, _COZY_MODE_ATTR, effective_mode)
     if touches_host_ram(effective_mode):
-        _report_offload_engaged(pipeline, effective_mode, applied, log)
+        _report_offload_engaged(pipeline, effective_mode, applied, log,
+                                plan_free_gb=decision_free_gb)
     else:
         log.info("low_vram: %s applied (%s)", effective_mode, _applied_summary(applied))
     return applied
