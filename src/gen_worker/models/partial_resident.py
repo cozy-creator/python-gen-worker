@@ -67,19 +67,33 @@ PARTIAL_RESIDENT_DEVICE_ATTR = "_cozy_partial_resident_device"
 #: to a coarser one is a placement the operator asked for and did not get.
 PARTIAL_RESIDENT_UNARMED_PHASE = "partial_resident_unarmed"
 
-#: Allocator slack for the ONLOAD COPY itself — and nothing else. It is NOT an
-#: activation estimate: the only phase in which an evicted component is on the
-#: card is the one that runs it (text encoding, 77 tokens), whose activations are
-#: noise next to the weights being moved. The activation estimate is the BUDGET's
-#: `PARTIAL_RESIDENT_RESERVE_GB`, and it guards the denoise phase, where
-#: activations actually exist.
+#: Headroom held back for the transient onload of an evicted component.
 #:
-#: MEASURED CLIFF, found on the card and recorded because the number looks
-#: arbitrary otherwise: at 512 MiB this check REFUSED the whole rung once free
-#: VRAM dropped from 7.3 to 7.1 GiB — a 200 MiB shift by a co-tenant silently
-#: reverting SDXL to the 13 GiB-per-request rung. Charging a denoise-sized
-#: reserve against an encode-sized phase is what produced that cliff.
-_TRANSIENT_RESERVE_BYTES = 256 * (1 << 20)
+#: MEASURED TWICE ON THE CARD, and both numbers are in the record because the
+#: first one was mine and it was wrong:
+#:
+#: * At **512 MiB** the check refused the whole rung once free VRAM fell from
+#:   7.3 to 7.1 GiB — a co-tenant taking 200 MiB reverting SDXL to
+#:   `model_offload`. A performance cliff.
+#: * At **256 MiB** the rung admitted the single-encoder plan (6.95 GiB peak of
+#:   7.3 free, 96%) and the onload **OOMed in `ParkedComponent.onload`**:
+#:   *"Tried to allocate 20.00 MiB … 14.94 MiB is free … this process has
+#:   6.96 GiB in use."* A failed request.
+#:
+#: The 256 MiB reasoning — "the encode phase has no activations to reserve for"
+#: — is wrong about the mechanism. The caching allocator does not return the
+#: DENOISE phase's blocks between requests, so the next request's encode does
+#: not start on a clean card: it starts on a pool that still holds them, next to
+#: whatever co-tenants took. The reserve must cover both, and it is therefore an
+#: activation-sized number after all.
+#:
+#: The two failures are not symmetric. 512 MiB's cliff falls back to today's
+#: rung — slow, correct, loud. 256 MiB's failure is an OOM on a paid request.
+#: That asymmetry picks the number, not the arithmetic.
+#:
+#: OWED: the cliff is real and should be closed by a ceiling that scales with
+#: the card rather than a constant subtracted from it. Filed with the rung.
+_TRANSIENT_RESERVE_BYTES = 512 * (1 << 20)
 
 #: The activation headroom this rung reserves, and it is NOT
 #: ``memory._DEFAULT_SAFETY_MARGIN_GB``. That 2.0 GiB is a PLACEMENT heuristic

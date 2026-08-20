@@ -62,30 +62,31 @@ def _plan(sizes, *, free_gb, budget_gb=None, forced=(), denoiser="unet", order=N
 # --------------------------------------------------------------------------
 
 
-def test_sdxl_on_a_7_3_gib_card_keeps_the_denoiser_and_evicts_an_encoder():
+def test_sdxl_on_a_7_3_gib_card_keeps_the_denoiser_and_evicts_the_encoders():
     # free 7.3, reserve 1.25 -> budget 6.05. Weights 6.95; must free 0.90, and
     # `vae` is forced resident on this family (the `force_upcast` one), so the
-    # fewest bytes that clear it is {text_encoder_2} at 1.39.
+    # fewest bytes that clear the BUDGET is {text_encoder_2} at 1.39 — whose
+    # transient peak is 6.95 of 7.3, 96%. MEASURED: that plan OOMs in the
+    # onload. The transient ceiling rejects it and the search takes both
+    # encoders at 1.64 for a 6.70 peak.
     plan = _plan(_SDXL, free_gb=7.3, forced=("vae",), order=_SDXL_ORDER)
     assert plan.fits, plan.refusal
-    assert plan.offloaded == ("text_encoder_2",)
-    assert plan.resident == ("text_encoder", "unet", "vae")
+    assert plan.offloaded == ("text_encoder", "text_encoder_2")
+    assert plan.resident == ("unet", "vae")
     # The whole point: per-request traffic collapses from the pipeline's full
     # weight set, twice over, to one encoder once.
     assert plan.offloaded_bytes < sum(_SDXL.values()) / 4
 
 
-def test_a_busier_card_evicts_more_rather_than_refusing_the_rung():
-    # 7.1 GiB free — a co-tenant took 200 MiB. The single-encoder plan's 6.95
-    # transient peak no longer clears the ceiling, so the search takes BOTH
-    # encoders at a 6.70 peak for 0.25 GiB more traffic. It must NOT refuse:
-    # refusing here reverts SDXL to model_offload's 13 GiB per request over a
-    # 200 MiB shift, which is the cliff a 512 MiB reserve actually produced on
-    # the card.
+def test_a_busier_card_refuses_the_rung_rather_than_admitting_a_plan_that_ooms():
+    # 7.1 GiB free — a co-tenant took 200 MiB. Nothing clears the transient
+    # ceiling any more, and the honest answer is to REFUSE and let the load fall
+    # to `model_offload`: slow, correct, loud. This IS a performance cliff and it
+    # is owed work (see `_TRANSIENT_RESERVE_BYTES`) — but the alternative was
+    # measured on this card and it is an OOM inside `ParkedComponent.onload`.
     plan = _plan(_SDXL, free_gb=7.1, forced=("vae",), order=_SDXL_ORDER)
-    assert plan.fits, plan.refusal
-    assert plan.offloaded == ("text_encoder", "text_encoder_2")
-    assert plan.resident == ("unet", "vae")
+    assert not plan.fits
+    assert "transient ceiling" in plan.refusal
 
 
 def test_fewest_bytes_wins_over_fewest_components():
@@ -130,7 +131,7 @@ def test_the_transient_ceiling_rejects_a_plan_the_budget_alone_admits():
     sizes = {"unet": 5 * _GIB, "encoder": 3 * _GIB}
     roomy = _plan(sizes, budget_gb=5.0, free_gb=9.0)
     assert roomy.fits and roomy.offloaded == ("encoder",)
-    tight = _plan(sizes, budget_gb=5.0, free_gb=8.2)
+    tight = _plan(sizes, budget_gb=5.0, free_gb=8.4)
     assert not tight.fits
     assert "transient ceiling" in tight.refusal
 
