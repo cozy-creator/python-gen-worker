@@ -53,6 +53,14 @@ COMPONENT_RESIDENCY_ATTR = "_cozy_component_residency"
 #: reader can state where each evicted component actually is.
 PARKED_COMPONENTS_ATTR = "_cozy_parked_components"
 
+#: Set on each MODULE this rung parks (pgw#1587). The mark rides the module
+#: rather than the pipeline because the reader that needs it — ``ctx.compile``
+#: — is handed a compile TARGET and nothing else, and a mark it has to find a
+#: pipeline to interpret is a mark it will one day fail to find. A module
+#: without it keeps a stable device pointer for the life of the load, which is
+#: exactly the precondition a compiled graph's by-reference constants need.
+PARKED_MODULE_ATTR = "_cozy_parked_module"
+
 #: The device this rung's resident set actually executes on. ``DiffusionPipeline.device``
 #: answers with the FIRST component's device, and an evicted encoder parked on
 #: the host makes that ``cpu`` for a pipeline whose denoiser is on the card —
@@ -435,6 +443,17 @@ def _install_residency_hooks(
             _c.onload()
 
         comp.module.register_forward_pre_hook(_pre)
+        # pgw#1587: the mark goes on HERE and not at `mirror()`, because THIS
+        # is the moment the component starts moving per forward. A mirror the
+        # probe then refuses is rolled up by the caller's fall to the next
+        # rung, and marking it would have told `ctx.compile` that a component
+        # nothing is hooking relocates — a refusal on a load where no rung
+        # armed at all. (Found by the pgw#1587 red arm, which is the shape a
+        # gate keyed on the wrong moment always has.)
+        try:
+            setattr(comp.module, PARKED_MODULE_ATTR, True)
+        except Exception:  # noqa: BLE001 — a module that refuses an attribute
+            log.debug("partial_resident: %s could not carry the park mark", name)
 
     seen_parked = False
     for name in order:
@@ -493,6 +512,35 @@ def probe_plan(
     free = int(free_bytes_now())
     worst.park()
     return free >= floor_bytes, free
+
+
+def parks_module(target: Any) -> bool:
+    """Does this rung MOVE ``target``'s weights between host and device per
+    forward? (pgw#1587)
+
+    The question ``ctx.compile`` asks before arming a compiled graph on a
+    target. A compiled graph binds its constants to device pointers and cannot
+    page mid-graph, so a target this rung parks must serve eager — while every
+    other component, denoiser included, keeps a stable pointer for the life of
+    the load and compiles exactly as it would with no rung engaged. That is
+    Paul's SDXL case: the text encoders come off the card, the compiled UNet
+    stays on it, and the two do not conflict.
+
+    Accepts a module OR a pipeline: for a pipeline the answer is "does it park
+    ANY of my components", which is the honest answer for ``ctx.compile(pipe)``
+    — that form marks the whole component tree.
+    """
+    if target is None:
+        return False
+    if bool(getattr(target, PARKED_MODULE_ATTR, False)):
+        return True
+    components = getattr(target, "components", None)
+    if isinstance(components, Mapping):
+        return any(
+            bool(getattr(component, PARKED_MODULE_ATTR, False))
+            for component in components.values()
+        )
+    return False
 
 
 def apply_component_residency(
@@ -585,12 +633,14 @@ def apply_component_residency(
 __all__ = [
     "COMPONENT_RESIDENCY_ATTR",
     "PARKED_COMPONENTS_ATTR",
+    "PARKED_MODULE_ATTR",
     "PARTIAL_RESIDENT_DEVICE_ATTR",
     "PARTIAL_RESIDENT_RESERVE_GB",
     "PARTIAL_RESIDENT_UNARMED_PHASE",
     "ParkedComponent",
     "ResidencyPlan",
     "apply_component_residency",
+    "parks_module",
     "plan_component_residency",
     "plan_for_pipeline",
     "probe_plan",

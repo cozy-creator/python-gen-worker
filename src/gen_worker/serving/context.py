@@ -966,9 +966,11 @@ class LoadContext(Generic[MT_co]):
         marking is always safe."""
         if self._compile_sink is None:
             return target
-        from ..models.rung import touches_host_ram
+        from ..models.partial_resident import parks_module
+        from ..models.rung import moves_every_component, touches_host_ram
 
-        if touches_host_ram(self._engaged_rung):
+        rung = self._engaged_rung
+        if moves_every_component(rung):
             # pgw#1486, the ADMISSION half. An offload rung hands each
             # component's weights to accelerate, which onloads them for a
             # forward and frees the device copy after — so the device pointers
@@ -982,9 +984,40 @@ class LoadContext(Generic[MT_co]):
                 "engaged, and a compiled graph cannot bind constants to "
                 "weights accelerate moves between host and device per forward "
                 "(pgw#1486). Fit the model on the card to get compiled speed.",
-                type(target).__name__, self._engaged_rung,
+                type(target).__name__, rung,
             )
             return target
+        if touches_host_ram(rung):
+            # pgw#1587. A rung that parks only the components it NAMED is not
+            # the case above, and treating it as one is what made a small card
+            # mean "no compiled graph, ever". Paul, 2026-08-20: *"For SDXL in
+            # particular, we need to offload the text encoders to free up room
+            # for the Unet, and then it works, during inference. This doesn't
+            # conflict with compilation however because [we] are only running
+            # the compiled UNet."*
+            #
+            # So the question is per-TARGET and the armed plan answers it: a
+            # parked target serves eager (its pointers really do move), and
+            # everything the plan left resident compiles exactly as it would
+            # with no rung engaged. The rung's whole reason for parking those
+            # encoders was to make room for THIS.
+            if parks_module(target):
+                logger.warning(
+                    "ctx.compile: serving EAGER for %s — the %r rung parks "
+                    "this component, so its weights move between pinned host "
+                    "RAM and the card per forward and a compiled graph cannot "
+                    "bind constants to them (pgw#1587). The components the "
+                    "plan left resident still compile.",
+                    type(target).__name__, rung,
+                )
+                return target
+            logger.info(
+                "ctx.compile: compiling %s UNDER the %r rung — this target is "
+                "in the plan's resident set, so its device pointers are stable "
+                "for the life of the load; the components the rung parked are "
+                "what made room for it (pgw#1587).",
+                type(target).__name__, rung,
+            )
         return self._compile_sink(target)
 
     def defaults(self: "LoadContext[ModelType[DT]]") -> DT:

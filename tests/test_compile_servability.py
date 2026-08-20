@@ -415,20 +415,38 @@ def test_the_shell_learns_unservable_even_when_every_build_returned() -> None:
     assert "built=1" in summary and "NOT SERVABLE" in summary
 
 
-def test_a_below_floor_no_op_is_not_an_unservable_run(
+def test_a_tiny_grant_no_longer_refuses_the_mint(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """Refusing to build under a grant that could never arm is a SUCCESS.
+    """pgw#1587 — THE REFUSAL IS GONE, and this is the red arm for its return.
 
-    It must not be swept into the new refusal: the store is legitimately empty
-    and nothing was promised.
+    This ran `BELOW_FLOOR` before: a declared lane number bigger than the run's
+    VRAM grant no-opped every specialization, which is how a 12 GiB declaration
+    made a 7.3 GiB card unable to mint SDXL at all (va#3 leg C). Paul,
+    2026-08-20: *"we should be able to serve no-compiled below this limit."*
+    Building is not serving; whether a PARTICULAR card can arm the artifact is
+    decided on that card, by probe, at load.
+
+    Named `--vram-budget 1.0` because that is the operand the old gate read.
     """
-    spec = compile_cli.Spec(contract=LANE, graph=GRAPHS[0], target=TARGET, ingress={})
-    report = compile_cli.Report(
-        [compile_cli.Outcome(spec, compile_cli.BELOW_FLOOR, "grant 1.0 < floor 4.0")],
-        [],
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    _seed_programs(store, tmp_path)
+    built: List[str] = []
+
+    report = _run(
+        endpoint, cas, store=store, builder=_builder(built), vram_budget_gb=1.0
     )
+
+    assert built == list(GRAPHS), "a 1 GiB grant must not veto the mint"
+    assert {outcome.state for outcome in report.outcomes} == {compile_cli.BUILT}
+    assert report.unservable == []
     assert compile_cli.summarize(report)[1] == 0
+    assert not hasattr(compile_cli, "declared_floor_gb"), (
+        "the declared-floor read is deleted, not merely unused — a function "
+        "left standing is a gate somebody re-wires"
+    )
+    assert not hasattr(compile_cli, "BELOW_FLOOR")
 
 
 # --------------------------------------------------------------------------
@@ -516,9 +534,12 @@ def test_an_all_present_run_asks_no_policy_questions_and_republishes_nothing(
     endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The fully-warm run (pgw#1546): every artifact already in the serving
-    band means NO floor read, NO grant probe, NO builder, NO publish — the
-    ~4.5 s of author-module/torch import the old path paid was bookkeeping for
-    a build that was never going to happen. The census still decides.
+    band means NO builder and NO publish. The census still decides.
+
+    pgw#1587 dropped the two policy reads this test also fenced (the declared
+    floor and the grant probe) — with no gate there is no ~4.5 s import to
+    avoid — but the builder/publish half of the claim is unchanged and is the
+    half that guards real work.
     """
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
@@ -527,9 +548,6 @@ def test_an_all_present_run_asks_no_policy_questions_and_republishes_nothing(
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("an all-present run consulted build policy")
-
-    monkeypatch.setattr(compile_cli, "declared_floor_gb", refuse)
-    monkeypatch.setattr(compile_cli, "grant_gb", refuse)
 
     report = _run(endpoint, cas, store=_PublishRefused(store), builder=refuse)
 
@@ -723,10 +741,9 @@ def test_an_unreadable_module_name_is_a_typed_refusal_not_a_traceback(
     """pgw#1537: `compile` reads the endpoint's module name and can now fail on
     the author's own import.
 
-    `declared_floor_gb` calls `load_endpoint` too and swallows everything,
-    because an unreadable floor genuinely IS "no floor stated". An unreadable
-    module NAME is not "no name" — nothing can be published under a name that
-    could not be read — so it refuses, in one sentence, with the cause.
+    An unreadable module NAME is not "no name" — nothing can be published
+    under a name that could not be read — so it refuses, in one sentence, with
+    the cause.
     """
     empty = tmp_path / "not-an-endpoint"
     empty.mkdir()
