@@ -55,6 +55,11 @@ EXPECTED: dict[str, dict[str, Any] | None] = {
     "svdq-fp4": {"precision_class": "svdq-fp4"},
     "nvfp4": {"precision_class": "nvfp4"},
     "nvfp4-w4a4": {"precision_class": "nvfp4-w4a4"},
+    # pgw#1498 (`4d2bce0c`) added the SEVENTH class. It stamps like any other:
+    # the hub reads `placement.precision_class` verbatim, so a gguf row reaches
+    # the catalog carrying its class even though `precision.StoredPrecisionOf`
+    # does not RANK it yet (the hub half is OWED and named in `ladder.py`).
+    "gguf": {"precision_class": "gguf"},
 }
 
 #: The keys th#2055 stopped reading. Any of them at the wire is the regression.
@@ -114,7 +119,7 @@ def test_the_declared_block_is_precision_class_and_nothing_else(
         "unread JSON at best and a resurrected purchase veto at worst")
 
 
-@pytest.mark.parametrize("cls", ["svdq-fp4", "svdq-int4", "nvfp4-w4a4", "fp8"])
+@pytest.mark.parametrize("cls", ["svdq-fp4", "svdq-int4", "nvfp4-w4a4", "fp8", "gguf"])
 def test_no_admission_key_survives_at_the_wire(
     fake_hub: Any, tmp_path: Path, cls: str
 ) -> None:
@@ -146,17 +151,39 @@ def test_the_ladder_module_no_longer_exports_a_placement() -> None:
     `default_placement` and `placement_to_metadata` are gone, and with them the
     reason `models/svdq.py` kept nunchaku's kernel windows alive — pgw#1298's
     two deliberate survivors, whose only consumers were this stamp and a
-    tensorhub peer pin th#2055 deleted."""
+    tensorhub peer pin th#2055 deleted.
+
+    The export list is asserted WHOLE rather than by absence, so a class added
+    to the vocabulary without being exported (or the reverse) is caught here —
+    that is the half that went stale when pgw#1498 landed `CLASS_GGUF`.
+    """
     from gen_worker.models import svdq
 
     assert set(ladder.__all__) == {
-        "CLASS_BASE", "CLASS_FP8", "CLASS_NVFP4", "CLASS_NVFP4_W4A4",
-        "CLASS_SVDQ_FP4", "CLASS_SVDQ_INT4", "PRECISION_CLASSES",
+        "CLASS_BASE", "CLASS_FP8", "CLASS_GGUF", "CLASS_NVFP4",
+        "CLASS_NVFP4_W4A4", "CLASS_SVDQ_FP4", "CLASS_SVDQ_INT4",
+        "PRECISION_CLASSES",
     }
     leftovers = [n for n in vars(ladder) if "PLACEMENT" in n.upper()]
     assert leftovers == [], f"placement survived the cut: {leftovers}"
     assert not hasattr(svdq, "SVDQ_FP4_SMS")
     assert not hasattr(svdq, "SVDQ_INT4_SMS")
+
+
+def test_every_exported_class_constant_is_in_the_vocabulary_and_back() -> None:
+    """The self-consistency half, which no transcribed literal can state: the
+    `CLASS_*` names `__all__` exports and the members of `PRECISION_CLASSES`
+    are the SAME set. pgw#1498 added `CLASS_GGUF` to both and to the exports;
+    a future class added to only one of the three would publish a value the
+    publish gate refuses, or export a name nothing checks against."""
+    exported_classes = {
+        getattr(ladder, name) for name in ladder.__all__
+        if name.startswith("CLASS_")
+    }
+    assert exported_classes == set(ladder.PRECISION_CLASSES)
+    assert {n for n in vars(ladder) if n.startswith("CLASS_")} == {
+        n for n in ladder.__all__ if n.startswith("CLASS_")
+    }
 
 
 def test_the_worker_no_longer_reports_a_nunchaku_admission_token(
