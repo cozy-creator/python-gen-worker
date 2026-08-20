@@ -52,8 +52,10 @@ Adapter = Tuple[Dict[str, Any], float, str]
 
 #: Called with the mutated denoiser after the weights change and again after
 #: they are restored. The serve path passes ``aot_serve.rearm_constants``; a
-#: pipeline with no compiled artifact passes nothing.
-Rebind = Callable[[Any], None]
+#: pipeline with no compiled artifact passes nothing. Any return is ignored —
+#: ``rearm_constants`` reports how many entries it re-armed and the fold does
+#: not act on the count.
+Rebind = Callable[[Any], Any]
 
 
 def _plain_leaf(module: Any) -> bool:

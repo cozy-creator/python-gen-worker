@@ -1,4 +1,4 @@
-"""pgw#1571: fold the request's LoRA into the weights, restore exactly.
+"""Folding a request's LoRA into the denoiser weights, and undoing it exactly.
 
 The defect these tests exist for, measured on the production seams: a live
 adapter on a COMPILED-ARMED denoiser changes the served tensor by exactly
@@ -43,13 +43,15 @@ def _tiny_unet() -> Any:
     from diffusers import UNet2DConditionModel
 
     torch.manual_seed(0)
-    return UNet2DConditionModel(
+    unet: Any = UNet2DConditionModel(
         sample_size=8, in_channels=4, out_channels=4,
         block_out_channels=(16, 32), layers_per_block=1,
         down_block_types=("DownBlock2D", "CrossAttnDownBlock2D"),
         up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
         cross_attention_dim=16, attention_head_dim=4, norm_num_groups=8,
-    ).eval()
+    )
+    unet.eval()
+    return unet
 
 
 class _Pipe:
