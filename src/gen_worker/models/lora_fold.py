@@ -22,6 +22,21 @@ a saved clone, never a ``sub_`` of the delta — subtracting is not the inverse 
 adding in bf16, and a serial request stream would accumulate drift. Bit-exact
 restore is by construction here, not by tolerance.
 
+**The call site an endpoint writes** (se#808 is the rewire of sd15/sdxl onto it;
+the adapter bytes come from :func:`gen_worker.utils.lora.load_adapter_state_dict`
+because that is where the zero-delta and key-grammar refusals live, not from a
+bare ``safetensors.load_file``)::
+
+    @contextmanager
+    def adapters(self, applied: Sequence[Adapter]) -> Iterator[None]:
+        with lora_fold.folded(
+            self.pipe,
+            [(load_adapter_state_dict(Path(a.path), ref=a.ref), a.scale, a.ref)
+             for a in applied],
+            rebind=aot_serve.rearm_constants,
+        ):
+            yield
+
 **What this does NOT do.** It does not fold onto a QUANTIZED leaf (fp8/gguf):
 an fp8 grid cannot represent a small delta and the fold would be a silent
 fidelity loss — those lanes keep the additive branch (:mod:`.w8a8_lora`), and
