@@ -258,7 +258,7 @@ def _mint_cas(args: argparse.Namespace) -> Path:
 def _toolchain() -> Mapping[str, str]:
     """This worker's own recorded compiler identity — the mint records what
     it actually compiled with, never a guess."""
-    from ..compile_cache import toolchain_digest
+    from ..toolchain import toolchain_digest
 
     return dict(toolchain_digest())
 

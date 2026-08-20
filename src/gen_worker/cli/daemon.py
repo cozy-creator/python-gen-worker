@@ -336,7 +336,7 @@ def _start_background_mint(spec: BootSpec, host: Any, store: Any) -> Any:
     (skip-if-present measured at ~10 s/hit) and whichever survives finishes the
     remainder.
     """
-    from ..compile_cache import toolchain_digest
+    from ..toolchain import toolchain_digest
     from ..serving.self_mint import SelfMint
 
     box = SelfMint(

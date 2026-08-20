@@ -75,7 +75,7 @@ def build_fatal_detail(
 def _build_report(settings: Settings, detail: str) -> HardwareReport:
     gen_worker_version = ""
     try:
-        from .compile_cache import gen_worker_version as _gwv
+        from .toolchain import gen_worker_version as _gwv
 
         gen_worker_version = _gwv()
     except Exception:

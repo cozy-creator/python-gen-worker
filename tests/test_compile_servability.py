@@ -571,7 +571,7 @@ def test_a_mint_in_the_engine_cache_is_reused_without_a_child_or_a_program(
     """
     from gen_worker._vendor.tensorfs import LocalCAS as VendoredCAS
     from gen_worker._vendor.torchcg.engine import Engine
-    from gen_worker import compile_cache
+    from gen_worker import toolchain as compile_cache
 
     monkeypatch.setattr(workspace, "artifacts_root", lambda: tmp_path / "box")
     cas = tmp_path / "graph-cas"
@@ -617,7 +617,7 @@ def test_a_cached_mint_on_a_different_toolchain_is_not_reused(
     build path, never be republished as this env's artifact."""
     from gen_worker._vendor.tensorfs import LocalCAS as VendoredCAS
     from gen_worker._vendor.torchcg.engine import Engine
-    from gen_worker import compile_cache
+    from gen_worker import toolchain as compile_cache
 
     monkeypatch.setattr(workspace, "artifacts_root", lambda: tmp_path / "box")
     cas = tmp_path / "graph-cas"

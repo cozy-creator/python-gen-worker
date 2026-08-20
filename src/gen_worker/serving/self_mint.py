@@ -382,7 +382,7 @@ class SelfMint:
         is worse than the silence it replaces.
         """
         try:
-            from ..compile_cache import gen_worker_version
+            from ..toolchain import gen_worker_version
             from .mint_child import contract_digest
 
             run_holes = outcome.holes if outcome is not None else 0
@@ -449,7 +449,7 @@ def production_mint(
     the artifact's key axis is built from — so a mint can never record a
     toolchain it did not compile with.
     """
-    from ..compile_cache import toolchain_digest
+    from ..toolchain import toolchain_digest
 
     return SelfMint(
         store=store,

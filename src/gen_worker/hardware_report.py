@@ -102,7 +102,7 @@ def build_hardware_report(probe: CudaProbeResult, settings: Settings) -> Hardwar
         pass
     gen_worker_version = ""
     try:
-        from .compile_cache import gen_worker_version as _gwv
+        from .toolchain import gen_worker_version as _gwv
 
         gen_worker_version = _gwv()
     except Exception:

@@ -106,7 +106,6 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         raise_for_hub_error,
     )
     from .models.provision import (
-        arm_compile,
         report_applied_attention,
         report_applied_lane,
         report_attention_backend,
@@ -244,7 +243,6 @@ _EXPORTS: Final[dict[str, str]] = {
     "ValidationError": "api.errors",
     "VideoAsset": "api.types",
     "WorkerError": "api.errors",
-    "arm_compile": "models.provision",
     "diffusers_step_callback": "api.progress",
     "entrypoint": "serving.entrypoints",
     "fetch_bytes": "url_fetch",
@@ -313,7 +311,6 @@ __all__ = [
     "LayoutDeclarationError",
     # pgw#739 export-declaration vocabulary.
     # pgw#1115: a mint refusal is DATA on the declaration.
-    "arm_compile",
     # pgw#1104: the serve-time recipe reports the lane it APPLIED.
     "report_applied_attention",
     "report_applied_lane",

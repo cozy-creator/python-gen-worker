@@ -550,26 +550,26 @@ def target_module(pipe: Any, target: str) -> Any:
     a multi-slot family produces (a refiner slot has no denoiser of the
     primary's name).
 
-    Resolution is delegated to ``compile_cache.resolve_targets`` — the ONE
-    target authority (§1.29) — rather than re-walked here, because a target is
-    an ATTRIBUTE PATH and not a component name: ``transformer.denoise`` and
-    ``vae.decode`` are both declared on the fleet, and a second walk that only
-    understood ``getattr(pipe, name)`` would read every dotted target as "not
-    carried" and skip the fence for exactly the families whose targets are
-    nested. A guard with its own weaker resolver is a guard that cannot fire.
+    A target is an ATTRIBUTE PATH, not a component name: ``transformer.denoise``
+    and ``vae.decode`` are both declared on the fleet, so the walk is dotted.
+    A resolver that only understood ``getattr(pipe, name)`` would read every
+    dotted target as "not carried" and skip this fence for exactly the families
+    whose targets are nested — a guard that cannot fire.
+
+    pgw#1573: this delegated to ``compile_cache.resolve_targets``, which went
+    with the v1 arming tier. The walk is the same one that function did for a
+    single named target, minus the declaration plumbing that only the v1 arm
+    used.
     """
-    import types
-
-    from .. import compile_cache as cc
-
     name = str(target or "").strip()
     if not name:
         return None
-    for _declared, owner, _attr, _fn in cc.resolve_targets(
-            pipe, types.SimpleNamespace(targets=(name,))):
-        if owner is not None and hasattr(owner, "named_parameters"):
-            return owner
-    return None
+    owner: Any = pipe
+    for part in name.split("."):
+        owner = getattr(owner, part, None)
+        if owner is None:
+            return None
+    return owner if hasattr(owner, "named_parameters") else None
 
 
 @dataclass(frozen=True)

@@ -65,7 +65,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from ..compile_cache import _closure_file_digest
+from ..toolchain import closure_file_digest as _closure_file_digest
 from ..models.tensor_layout_contract import (
     AXIS_QUANT,
     AXIS_TOPOLOGY,

@@ -173,7 +173,7 @@ def measure() -> Dict[str, Any]:
     except Exception as exc:
         out["canary_error"] = f"{type(exc).__name__}: {exc}"
     try:
-        from ..compile_cache import gen_worker_version
+        from ..toolchain import gen_worker_version
 
         out["gen_worker_version"] = gen_worker_version()
     except Exception:
