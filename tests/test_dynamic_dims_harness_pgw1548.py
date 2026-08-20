@@ -19,6 +19,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,7 +33,7 @@ sys.modules["dynamic_dims_pgw1548"] = harness
 _spec.loader.exec_module(harness)
 
 
-def _bench(tmp_path: Path) -> object:
+def _bench(tmp_path: Path) -> Any:
     args = argparse.Namespace(
         endpoint=str(tmp_path), out=str(tmp_path / "out"), substrate="local"
     )
