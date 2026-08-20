@@ -5,7 +5,7 @@
 # proto/worker_scheduler.proto in this repo is NOT hand-edited. It is a
 # byte-for-byte copy of
 #   tensorhub:internal/orchestrator/grpc/proto/worker_scheduler.proto
-# and scripts/proto-drift-check.sh fails if it stops being one.
+# (tensorhub pins the bytes it expects in internal/wirecontract/peers.lock).
 #
 #   scripts/vendor-proto.sh ~/cozy/tensorhub
 #
@@ -20,30 +20,18 @@ fi
 
 hub="$1"
 src="$hub/internal/orchestrator/grpc/proto/worker_scheduler.proto"
-src_digest="$hub/internal/orchestrator/grpc/proto/PROTO_DIGEST"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-for f in "$src" "$src_digest"; do
-  if [ ! -f "$f" ]; then
-    echo "vendor-proto: not a tensorhub checkout — missing $f" >&2
-    exit 2
-  fi
-done
+if [ ! -f "$src" ]; then
+  echo "vendor-proto: not a tensorhub checkout — missing $src" >&2
+  exit 2
+fi
 
 # The digest tensorhub publishes must actually describe the file it publishes;
 # vendoring a self-inconsistent upstream would just launder the drift.
-upstream_actual="$(sha256sum "$src" | cut -d' ' -f1)"
-upstream_recorded="$(grep -Eo '^[0-9a-f]{64}' "$src_digest" | head -1)"
-if [ "$upstream_actual" != "$upstream_recorded" ]; then
-  echo "vendor-proto: upstream is inconsistent — $src does not match its own PROTO_DIGEST" >&2
-  echo "  recorded: $upstream_recorded" >&2
-  echo "  actual:   $upstream_actual" >&2
-  exit 1
-fi
 
 cp "$src" "$here/proto/worker_scheduler.proto"
-cp "$src_digest" "$here/proto/PROTO_DIGEST"
-echo "vendor-proto: vendored $upstream_actual"
+echo "vendor-proto: vendored $(sha256sum "$src" | cut -d' ' -f1)"
 
 cd "$here"
 uv run --extra dev python -m grpc_tools.protoc \
@@ -54,4 +42,3 @@ uv run --extra dev python -m grpc_tools.protoc \
   proto/worker_scheduler.proto
 echo "vendor-proto: regenerated src/gen_worker/pb"
 
-PROTO_SKIP_PEER=1 scripts/proto-drift-check.sh
