@@ -8,7 +8,7 @@ of ``up``'s daemon, and refuses by name when nothing is up).
 
 Layout, one endpoint per directory::
 
-    ~/.cache/cozy/endpoints/<slug>-<digest8>/
+    ~/.cache/cozy/resident/<slug>-<digest8>/
         endpoint.json   the handle: pid, listen address, functions, state
         endpoint.sock   the NDJSON socket the daemon accepts on
         up.log          the detached daemon's stdout+stderr
@@ -37,10 +37,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-#: Per-user root for resident-endpoint state. Config key ``COZY_ENDPOINT_STATE``
-#: (Settings field ``endpoint_state_root``), never guessed from the environment
-#: at the call site (§1.18).
-DEFAULT_ENDPOINT_STATE = Path.home() / ".cache" / "cozy" / "endpoints"
+#: Per-user root for RESIDENT-endpoint state. Config key
+#: ``COZY_ENDPOINT_STATE`` (Settings field ``endpoint_state_root``), never
+#: guessed from the environment at the call site (§1.18).
+#:
+#: NOT ``~/.cache/cozy/endpoints`` — that directory is already taken, by
+#: cozy-local, for installed endpoint SOURCE and venvs
+#: (``paths.EndpointsDir()``). Two different things under one name is how a
+#: `down` ends up deleting a checkout. "endpoints" is where they are
+#: INSTALLED; "resident" is which of them are UP right now.
+DEFAULT_ENDPOINT_STATE = Path.home() / ".cache" / "cozy" / "resident"
 
 #: The daemon writes this the moment it is accepting requests. Its presence is
 #: not enough — see :func:`read_handle`.

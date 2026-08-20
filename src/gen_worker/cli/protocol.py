@@ -23,7 +23,7 @@ PROTOCOL_VERSION = 1
 # deleted verbs (`describe`, `list_functions`, `prefetch`, `cancel`,
 # `streaming`, `serve_sidecar`, `tcp_listen`) — a capability list that lies is
 # worse than no list, because an integrator branches on it:
-#   - "endpoint_handle" : the ~/.cache/cozy/endpoints/<key>/endpoint.json handle
+#   - "endpoint_handle" : the ~/.cache/cozy/resident/<key>/endpoint.json handle
 #                         `up` publishes and `run`/`down` read
 #   - "dispatch_counts" : every response carries compiled-vs-eager call counts
 #   - "hub_resolve"     : standalone Hub-ref resolve via TENSORHUB_URL

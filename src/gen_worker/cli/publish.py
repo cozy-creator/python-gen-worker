@@ -19,16 +19,31 @@ exact shape, and a source or editable install NEVER invokes the build backend's
 building a wheel can. Skippable with ``--no-preflight``, which is there so the
 flag shows up in the log of anyone who chose to skip it.
 
-## What the hub does with the lock — TODAY, honestly
+## What the hub does with the lock — and it is load-bearing in two places
 
-The lock is included in the upload. The hub does not yet READ it: its tarball
-inspector captures ``endpoint.toml``, ``pyproject.toml``, ``uv.lock``,
-``requirements.txt``, ``author-ci.toml`` and Dockerfiles, and ``endpoint.lock``
-is not on that list; the bake-time derive is disarmed by a compile-time
-constant (``DeriveAtBakeArmed = false``) because a BuildKit builder has no GPU.
-So publishing a committed lock is currently a NO-OP hub-side, and this command
-says so rather than implying a guarantee it cannot make. The hub half is filed;
-the client half is correct now and needs no change when it lands.
+The lock is INGESTED, at both ends of the build (verified with the th#2162
+owner against the deployed hub pin, not read off master):
+
+* **at publish**, the uploaded tarball's ``endpoint.lock`` is captured and its
+  ``[derive]`` table parsed and digest-verified, which decides ONE thing —
+  whether a derive step is rendered into the build at all. With a committed
+  lock the build pays no trace;
+* **from the built image**, the stamped graph document is read back out of
+  ``/app/endpoint.lock`` and written onto the release rows.
+
+Without a committed lock the build regenerates one itself — "regenerate when
+missing" is LEGAL and this command warns rather than refuses, because refusing
+would turn a ruled-supported publish into an error whose only remedy is a trace
+the author may not want to pay at that moment. Including the lock when there is
+one is what makes the build cheap.
+
+A correction worth recording, because the method failed and not just the
+answer: this module first said the hub ignored the lock, on the strength of
+``grep 'case "endpoint.lock"'`` returning nothing and a
+``DeriveAtBakeArmed = false`` constant. The inspector matches a CONSTANT
+(``CommittedLockFileName``), not the literal, and the disarm constant had been
+DELETED — a grep for a string value cannot see either. Absence of a literal is
+not absence of a mechanism.
 """
 
 from __future__ import annotations
@@ -242,12 +257,18 @@ def run_publish(args: argparse.Namespace) -> int:
 
     lock = root / el.LOCK_FILENAME
     if not lock.is_file():
+        # WARN, never refuse. Paul's builder addendum is explicit: "the builder
+        # USES the committed lock when present, and REGENERATES it when missing
+        # — missing is allowed, not a refusal." A client that refused would
+        # turn a legal publish into an error whose only remedy is a trace the
+        # author may not want to pay right now.
         sys.stderr.write(
-            f"gen-worker publish: no {el.LOCK_FILENAME} beside the endpoint. "
-            f"It is AUTHOR-time output and belongs in git — run "
-            f"`gen-worker lock` and commit it.\n"
+            f"gen-worker publish: WARNING — no {el.LOCK_FILENAME} beside the "
+            f"endpoint, so this build will TRACE inside the image (~2 min for "
+            f"an sd15-sized endpoint).\n"
+            f"  `gen-worker lock` once, commit the result, and every later "
+            f"build skips that step.\n"
         )
-        return 1
 
     try:
         if not args.no_preflight:
@@ -269,10 +290,9 @@ def run_publish(args: argparse.Namespace) -> int:
         return 1
 
     sys.stderr.write(
-        f"gen-worker publish: {len(files)} file(s), {len(blob) / 1024:.0f} KiB\n"
-        f"gen-worker publish: NOTE — {el.LOCK_FILENAME} is uploaded, but the "
-        f"hub does not ingest it yet (its tarball inspector does not capture "
-        f"it and bake-time derive is disarmed). The build regenerates its own.\n"
+        f"gen-worker publish: {len(files)} file(s), {len(blob) / 1024:.0f} KiB "
+        + (f"(including {el.LOCK_FILENAME}, so the build skips the trace)\n"
+           if lock.is_file() else "(no committed lock; the build traces)\n")
     )
     if args.dry_run:
         return 0
