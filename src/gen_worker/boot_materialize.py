@@ -69,6 +69,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
+from . import boot_phases
+from . import weight_position
 from .models.refs import WireRef
 from .models.store import ModelStore
 from .pb import worker_scheduler_pb2 as pb
@@ -261,7 +263,18 @@ class CheckpointMaterialization:
         for ref in config.refs:
             snapshot = config.snapshots.get(ref)
             try:
-                if await self._store.announce_resident(ref, snapshot):
+                # pgw#1555: TIMED, because a `resident` verdict deletes the
+                # only other row this ref would have produced. The check is a
+                # verified manifest match (pgw#1511), so on a warm 134 GB
+                # volume it IS the boot — and until this span existed that
+                # boot rendered as an empty ladder.
+                with boot_phases.span(
+                    boot_phases.PHASE_RESIDENCY_CHECK, ref=str(ref),
+                ) as check:
+                    check.note(f"tree_bytes={weight_position.snapshot_bytes(snapshot)}")
+                    resident = await self._store.announce_resident(ref, snapshot)
+                    check.classify("resident" if resident else "absent")
+                if resident:
                     # The volume-staged case, and the ordinary warm reboot.
                     # Asking the funnel to "fetch" bytes the pod holds opens a
                     # transfer record for zero bytes — the 0-of-N phantom

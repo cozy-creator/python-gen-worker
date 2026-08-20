@@ -104,6 +104,9 @@ class FetchPosition:
         self._emitted_at = 0.0
         self._opened = False
         self._closed = False
+        #: When `open()` stated position 0. Used by the TERMINAL row only —
+        #: see `_terminal_detail`.
+        self._opened_at = 0.0
 
     # -- the position itself ------------------------------------------------
 
@@ -123,6 +126,7 @@ class FetchPosition:
         if self._opened:
             return
         self._opened = True
+        self._opened_at = time.monotonic()
         self._emit(PHASE_STARTED)
 
     def progress(self, done: int, total: Optional[int] = None) -> None:
@@ -170,6 +174,31 @@ class FetchPosition:
 
     # -- emission -----------------------------------------------------------
 
+    def _terminal_detail(self) -> str:
+        """`elapsed_ms=` and `mib_s=` for a transfer that is OVER.
+
+        pgw#1555. This does NOT reintroduce a clock into the liveness
+        judgment the module docstring rules out: the "no clocks" doctrine is
+        about *is the position advancing*, which is still answered by
+        differencing positions, and these fields exist only on `fetched` /
+        `abandoned` — rows that describe a span that has already ended. Without
+        them "how fast does this fleet pull weights" is a self-join over
+        `started` and `fetched` timestamps that nobody writes; with them it is
+        a column. A speed nobody can select is a speed nobody optimizes.
+
+        Absent, never zero, when there is no open instant to measure from:
+        `already_resident` opens and closes in one row, and rendering that as
+        `mib_s=0` would put an infinitely fast warm boot in the same bucket as
+        a wedge.
+        """
+        if not self._opened_at:
+            return ""
+        elapsed = max(0.0, time.monotonic() - self._opened_at)
+        out = f" elapsed_ms={int(elapsed * 1000)}"
+        if elapsed > 0 and self._pos_bytes > 0:
+            out += f" mib_s={(self._pos_bytes / MIB) / elapsed:.1f}"
+        return out
+
     def _emit(self, phase: str) -> None:
         pos = self.position_mib
         self._emitted_mib = pos
@@ -178,6 +207,8 @@ class FetchPosition:
             f"ref={_token(self.ref)} pos_mib={pos} total_mib={self.total_mib} "
             f"pos_bytes={self._pos_bytes} total_bytes={self._total_bytes}"
         )
+        if phase in (PHASE_FETCHED, PHASE_ABANDONED):
+            detail += self._terminal_detail()
         try:
             # Lazy: `activity` pulls in protobuf and psutil, and this module is
             # imported from the download path the discovery build keeps thin.
