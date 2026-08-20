@@ -312,6 +312,7 @@ class EndpointHost:
                     manifest = store.get_manifest(record.graph, session.env)
                     if manifest is not None:
                         assert_satisfied(manifest, sm=sm)
+            marks = tuple(getattr(session, "unclaimed_marks", ()) or ())
             span(
                 graphs_from="release",
                 lane=lane_contract,
@@ -319,6 +320,58 @@ class EndpointHost:
                 artifact_from_eager=len(session.holes),
                 ambiguous=len(session.ambiguous),
                 unclaimed=len(session.unclaimed),
+                unmatched_marks=len(marks),
+            )
+            # THE VERDICT REACHES A TERMINAL, not only a span (pgw#1534).
+            #
+            # This is the path `up` and every in-process host take;
+            # `ServeAdoption` — which does emit a boot_adopt_summary — is the
+            # pod-side adopt-only object and does not run here. So on this
+            # path every one of these counts was going into a span no operator
+            # reads, and the boot printed nothing at all. Measured: 14 graphs
+            # in the document, 14 artifacts present in the store,
+            # `adopted: 0, holes: 0, armed: 0`, and not one line saying why.
+            #
+            # THREE DIFFERENT FACTS COLLAPSE ONTO THOSE TWO ZEROS, and each is
+            # loud below, because "which one" is the entire diagnosis:
+            #   * nothing was marked          -> an eager endpoint, correct
+            #   * marks matched no record     -> the compiled path is off and
+            #                                    no mint can turn it on
+            #   * every record was AMBIGUOUS  -> the artifacts are present and
+            #                                    fine, and the dispatcher
+            #                                    refuses to guess between
+            #                                    literal-twins, so it disarms
+            #                                    BOTH — adopted drops back to
+            #                                    zero and holes never rises
+            if session.ambiguous:
+                logger.warning(
+                    "adopt: %d graph(s) in lane %s share a tensor structure "
+                    "with another graph and were ALL disarmed — the dispatcher "
+                    "cannot tell literal-twins apart at call time and refuses "
+                    "to guess. The artifacts are present and valid; they are "
+                    "unusable as specialized. Serving EAGER for them.",
+                    len(session.ambiguous), lane_contract,
+                )
+                for record in session.ambiguous[:8]:
+                    logger.warning(
+                        "adopt:   ambiguous %s (target %s)",
+                        record.graph[-16:], record.target,
+                    )
+            if marks:
+                logger.warning(
+                    "adopt: %d module(s) marked with ctx.compile matched NO "
+                    "graph in lane %s. They serve EAGER, permanently — and no "
+                    "mint can change that, because the graphs are not missing, "
+                    "the MATCH is.", len(marks), lane_contract,
+                )
+                for mark in marks:
+                    logger.warning("adopt:   %s", mark.describe())
+            logger.info(
+                "adopt: lane=%s sm=%s — %d armed, %d hole(s) to mint, "
+                "%d ambiguous, %d record(s) unclaimed, %d marked module(s) "
+                "matched nothing",
+                lane_contract, sm, len(session.adopted), len(session.holes),
+                len(session.ambiguous), len(session.unclaimed), len(marks),
             )
         self.adoption = session
         self._booted = True

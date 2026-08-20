@@ -349,10 +349,18 @@ class ServeAdoption:
             artifacts_dir=self.artifacts_dir,
             stack=stack,
         )
+        # WHAT IS KNOWN AT CONSTRUCTION, and only that (pgw#1534). This line
+        # used to report "%d adopted, %d hole(s)" from here — and it ran BEFORE
+        # any `ctx.compile` had, so both counts were structurally always 0. A
+        # log line that cannot say anything else is not a reading; the real
+        # verdict is `_say_outcome`, emitted from `loaded` for exactly this
+        # reason, and its own docstring already said so.
         logger.info(
-            "adopt: release=%s lane=%s sm=%s — %d adopted, %d hole(s)",
+            "adopt: release=%s lane=%s sm=%s — %d graph(s) claimed by the "
+            "document; what this boot arms is decided by the author's "
+            "ctx.compile calls and reported after load",
             self.release_id, contract, self.sm,
-            len(self.adoption.adopted), len(self.adoption.holes),
+            len(self.adoption.lane.graphs),
         )
 
     def _say_outcome(self, contract: str) -> None:
@@ -389,16 +397,47 @@ class ServeAdoption:
         if session is None:
             return
         adopted, holes = len(session.adopted), len(session.holes)
+        marks = tuple(getattr(session, "unclaimed_marks", ()) or ())
+        # `adopted=0, holes=0` HAD TWO CAUSES AND ONE PHASE (pgw#1534).
+        #
+        # An endpoint that marks nothing is an eager endpoint and `empty_lane`
+        # is the truth about it. An endpoint whose `ctx.compile`-ed module fits
+        # NO record in the lane is a compiled path silently switched off — over
+        # a store that may hold every artifact the document names. Both landed
+        # on `empty_lane` with the same two zeros, so no query could separate
+        # "nothing to do" from "the compiled path is off and nobody noticed".
+        # Measured exactly that way on this box: 14 graphs in the document, 14
+        # artifacts present, `adopted: 0, holes: 0, armed: 0`.
+        silent = bool(getattr(session, "silently_eager", bool)())
+        ambiguous = len(session.ambiguous)
         activity_mod.emit_event(
             activity_mod.KIND_BOOT_ADOPT_SUMMARY,
             f"release={self.release_id} lane={contract} sm={self.sm}: "
             f"{adopted} graph(s) adopted from the store, {holes} hole(s) for "
-            f"the background mint, {len(session.unclaimed)} unclaimed",
-            phase="reused" if holes == 0 and adopted else (
-                "minting" if holes else "empty_lane"),
+            f"the background mint, {ambiguous} disarmed as ambiguous, "
+            f"{len(session.unclaimed)} unclaimed, "
+            f"{len(marks)} marked module(s) that matched nothing",
+            phase=(
+                "marks_unmatched" if silent else
+                "reused" if holes == 0 and adopted else
+                "minting" if holes else
+                "all_ambiguous" if ambiguous and not adopted else "empty_lane"
+            ),
             step=adopted,
             total_steps=adopted + holes,
         )
+        if marks:
+            # LOUD, and at WARNING: this is the author's own mark producing
+            # nothing, which is never what the author meant. Eager still serves
+            # — correctness is untouched — so it is stated, not raised.
+            logger.warning(
+                "adopt: %d module(s) marked with ctx.compile matched NO graph "
+                "in lane %s. They serve EAGER, permanently, and no mint will "
+                "change that: the graphs exist, the MATCH does not.",
+                len(marks), contract,
+            )
+            for mark in marks:
+                logger.warning("adopt:   %s", mark.describe())
 
     def _refuse(self, phase: str, detail: str) -> None:
         self.refusal = f"{phase}: {detail}"
@@ -436,11 +475,28 @@ class ServeAdoption:
         when no session was ever built, and `refusal` says why."""
         if self.adoption is None:
             return {"adopting": False, "refusal": self.refusal or "not_attempted"}
+        marks = tuple(getattr(self.adoption, "unclaimed_marks", ()) or ())
         return {
             "adopting": True,
             "adopted": len(self.adoption.adopted),
             "holes": len(self.adoption.holes),
             "unclaimed": len(self.adoption.unclaimed),
+            # pgw#1534: the MODULE side. Without it `adopted: 0, holes: 0` is
+            # the same reading for "this endpoint marks nothing" and "this
+            # endpoint's marked module fits no graph in its own lane", and a
+            # caller deciding whether the compiled path is live cannot tell
+            # them apart. `unmatched_marks` is the count; `unmatched` is the
+            # per-module reason, which is what makes it actionable rather than
+            # merely non-zero.
+            "unmatched_marks": len(marks),
+            "unmatched": [mark.describe() for mark in marks],
+            # pgw#1534: the THIRD way to reach `adopted: 0, holes: 0` — every
+            # record disarmed as a literal-twin. The artifacts are present and
+            # valid; the dispatcher refuses to guess between two graphs whose
+            # tensor structures are identical, so it disarms BOTH. Counted here
+            # because a caller asking "is the compiled path live" gets three
+            # different answers behind one pair of zeros.
+            "ambiguous": len(self.adoption.ambiguous),
         }
 
 

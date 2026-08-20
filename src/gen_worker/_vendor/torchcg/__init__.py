@@ -5,6 +5,7 @@ from .adopt import (
     AdoptSession,
     ArtifactLoader,
     Hole,
+    UnclaimedMark,
 )
 from .artifact import ARTIFACT_METADATA_FIELDS, COMPILED_GRAPH_FORMAT, ArtifactError
 from .compiler import CompileError
@@ -210,6 +211,7 @@ __all__ = [
     "GraphSetDocument",
     "GraphStore",
     "Hole",
+    "UnclaimedMark",
     "LaneError",
     "LaneGraphs",
     "LocalGraphStore",
