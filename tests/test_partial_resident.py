@@ -566,3 +566,43 @@ def test_the_production_planner_leaves_room_for_the_reserve_it_planned_against()
         f"the admitted plan leaves {headroom} bytes for activations, under the "
         f"{PARTIAL_RESIDENT_RESERVE_GB} GiB reserve it was planned against"
     )
+
+
+def test_the_probe_counts_the_reusable_allocator_pool_as_available():
+    """pgw#1586. A parked component's blocks stay in the caching allocator's
+    pool — `park()` drops the reference, the allocator keeps the block, and
+    `mem_get_info` never sees it return. The plan counted those bytes as freed
+    while this probe counted them as used, so the SAME bytes were both.
+
+    Measured on the card: driver_free 0.45 + reusable cache 1.56 = 2.01 GiB
+    against a 2.00 GiB reserve. Reading driver-free alone made a workable plan
+    look 1.56 GiB short, which is a SPURIOUS REFUSAL — the conservative
+    direction, which is why nothing had failed from it yet.
+    """
+    import gen_worker.models.partial_resident as pr
+
+    pipe = _pipeline()
+    plan, armed = _arm(pipe)
+    assert armed
+    parked = getattr(pipe, PARKED_COMPONENTS_ATTR)
+
+    floor = 256 * _MIB
+    driver_free = 100 * _MIB          # on its own, below the floor
+    cache = 400 * _MIB                # reusable pool the allocator still holds
+
+    real_attr = pr._placement_attribution
+    pr._placement_attribution = lambda _t: {"attr_cache_bytes": cache}
+    try:
+        ok, reported = pr.probe_plan(
+            parked, free_bytes_now=lambda: driver_free, floor_bytes=floor)
+    finally:
+        pr._placement_attribution = real_attr
+
+    assert ok, (
+        "the probe refused a plan with 500 MiB genuinely available to "
+        "activations because only 100 MiB of it was visible to driver-free"
+    )
+    assert reported == driver_free, (
+        "the reported number must stay the DRIVER-free figure — the soft cache "
+        "term belongs in the decision, not in what the log claims is free"
+    )

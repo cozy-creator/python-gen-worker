@@ -2694,6 +2694,11 @@ def apply_low_vram_config(
             applied["reserve_source"] = str(
                 _LAST_RESERVE.get("reserve_source", "default"))
             applied["plan_peak_gb"] = plan.transient_peak_bytes / _GIB
+            for _k, _lbl in (("attr_alloc_bytes", "attr_alloc_gb"),
+                             ("attr_cache_bytes", "attr_cache_gb"),
+                             ("attr_ctx_bytes", "attr_ctx_gb")):
+                if _k in probe_facts:
+                    applied[_lbl] = float(probe_facts[_k]) / _GIB
             probe_free = probe_facts.get("probe_free_bytes")
             if probe_free is not None:
                 # Probe SUCCESS was `log.info` and therefore inaudible, which
