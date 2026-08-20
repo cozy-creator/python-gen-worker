@@ -116,14 +116,34 @@ def host_sm() -> str:
 
     ``""`` means "no CUDA device visible", which is a legal state (a CPU-only
     box, a laptop with the driver absent) and is never rendered as a guess.
+
+    ``nvidia-smi`` is asked FIRST (pgw#1546): it answers in ~50 ms where the
+    torch import costs seconds, and a warm `compile` whose artifacts are all
+    present must not pay a torch import to learn a name it only compares.
+    The torch reading survives as the fallback for a box whose driver ships
+    no CLI. First device wins in both spellings; a heterogeneous multi-GPU
+    box should state --sm explicitly.
     """
+    import subprocess
+
+    try:
+        answer = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip().splitlines()
+        if answer:
+            major, _, minor = answer[0].strip().partition(".")
+            if major.isdigit() and minor.isdigit():
+                return f"sm_{int(major)}{int(minor)}"
+    except Exception:  # noqa: BLE001 - fall through to the torch reading
+        pass
     try:
         import torch
 
         if not torch.cuda.is_available():
             return ""
-        major, minor = torch.cuda.get_device_capability()
-        return f"sm_{major}{minor}"
+        capability = torch.cuda.get_device_capability()
+        return f"sm_{capability[0]}{capability[1]}"
     except Exception:  # noqa: BLE001 - absence is an answer, not an error
         return ""
 

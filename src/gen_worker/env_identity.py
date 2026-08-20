@@ -258,6 +258,43 @@ def _bucket_entries(
     return found
 
 
+def _torch_cuda_line() -> str:
+    """``torch.version.cuda`` WITHOUT executing the torch package (pgw#1546).
+
+    ``torch/version.py`` is a generated constants module with no imports of
+    its own, and the value is static per install — paying the full torch
+    import (~1.5 s) to read one string made every warm ``compile`` carry it.
+    A torch already in ``sys.modules`` is used as-is; the full import survives
+    as the fallback for any install whose layout differs.
+    """
+    import importlib.util
+    import sys
+
+    if "torch" not in sys.modules:
+        try:
+            spec = importlib.util.find_spec("torch")
+            for location in list(getattr(spec, "submodule_search_locations", None) or []):
+                path = Path(location) / "version.py"
+                if not path.is_file():
+                    continue
+                probe = importlib.util.spec_from_file_location(
+                    "_gen_worker_torch_version_probe", path
+                )
+                if probe is None or probe.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(probe)
+                probe.loader.exec_module(module)
+                return str(getattr(module, "cuda", "") or "")
+        except Exception:  # noqa: BLE001 - fall through to the real import
+            pass
+    try:
+        import torch
+
+        return str(getattr(torch.version, "cuda", "") or "")
+    except Exception:  # noqa: BLE001 - absence is an answer
+        return ""
+
+
 def cuda_bucket() -> str:
     """This host's CUDA bucket, from the torch it actually materialized.
 
@@ -268,12 +305,7 @@ def cuda_bucket() -> str:
     does not care about.
     """
 
-    try:
-        import torch
-
-        line = str(getattr(torch.version, "cuda", "") or "")
-    except Exception:  # noqa: BLE001 - absence is an answer
-        return ""
+    line = _torch_cuda_line()
     parts = line.split(".")
     if len(parts) < 2 or not parts[0].isdigit():
         return ""

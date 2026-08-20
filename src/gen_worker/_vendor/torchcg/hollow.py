@@ -117,8 +117,13 @@ class HollowSession:
 
     fake_mode: Any
     device: str = DEFAULT_TRACE_DEVICE
-    #: tcg#68 -- resolve ONE component's load dtype, given the tree it is being
-    #: loaded from and its subfolder. Installed by the caller that knows the
+    #: tcg#68/tcg#71 -- resolve ONE component's load dtype, given the tree it
+    #: is being loaded from, its subfolder, and the MODULE just built from
+    #: config (meta parameters, nothing allocated). The module is there so a
+    #: policy can decide by matching the component's own PARAMETER NAMES,
+    #: which is the only way to tell which component a layout contract
+    #: describes: contracts state the denoiser's own parameter names and never
+    #: prefix them with a component (pgw#1530). Installed by the caller that knows the
     #: precision policy (the derive); ``None`` leaves each component at
     #: whatever its own config builds, which is this package's standalone
     #: behaviour and never a policy.
@@ -555,6 +560,7 @@ def _component_dtype(
     path: Any,
     subfolder: Any,
     kwargs: Mapping[str, Any],
+    module: Any = None,
 ) -> Any:
     """The dtype ONE component loads at (tcg#68).
 
@@ -575,15 +581,12 @@ def _component_dtype(
     resolve = session.dtype_for
     if resolve is None:
         return None
-    return resolve(path, subfolder or None)
+    return resolve(path, subfolder or None, module)
 
 
 def _hollow_diffusers(session: HollowSession) -> Any:
     def from_pretrained(cls: Any, /, pretrained_model_name_or_path: Any, **kwargs: Any) -> Any:
         subfolder = kwargs.get("subfolder")
-        torch_dtype = _component_dtype(
-            session, pretrained_model_name_or_path, subfolder, kwargs
-        )
         try:
             config, _unused = cls.load_config(
                 pretrained_model_name_or_path,
@@ -599,6 +602,12 @@ def _hollow_diffusers(session: HollowSession) -> Any:
                 + (f" (subfolder {subfolder!r})" if subfolder else "")
                 + f" failed: {type(exc).__name__}: {exc}"
             ) from exc
+        # tcg#71: resolved AFTER the build, because the policy decides by
+        # MATCHING the module's own parameter names against the contract. The
+        # build is on meta and allocates nothing, so handing it over is free.
+        torch_dtype = _component_dtype(
+            session, pretrained_model_name_or_path, subfolder, kwargs, model
+        )
         virtualize_parameters(model, session, dtype=torch_dtype)
         model.eval()
         return model
@@ -704,9 +713,6 @@ def _hollow_lazy_pipeline(original: Any) -> Any:
 def _hollow_transformers(session: HollowSession) -> Any:
     def from_pretrained(cls: Any, /, pretrained_model_name_or_path: Any, **kwargs: Any) -> Any:
         subfolder = kwargs.get("subfolder") or ""
-        torch_dtype = _component_dtype(
-            session, pretrained_model_name_or_path, subfolder, kwargs
-        )
         try:
             config = cls.config_class.from_pretrained(
                 pretrained_model_name_or_path, subfolder=subfolder
@@ -720,6 +726,12 @@ def _hollow_transformers(session: HollowSession) -> Any:
                 + (f" (subfolder {subfolder!r})" if subfolder else "")
                 + f" failed: {type(exc).__name__}: {exc}"
             ) from exc
+        # tcg#71: resolved AFTER the build, because the policy decides by
+        # MATCHING the module's own parameter names against the contract. The
+        # build is on meta and allocates nothing, so handing it over is free.
+        torch_dtype = _component_dtype(
+            session, pretrained_model_name_or_path, subfolder, kwargs, model
+        )
         virtualize_parameters(model, session, dtype=torch_dtype)
         model.eval()
         return model
@@ -1005,8 +1017,8 @@ def hollow_session(
     too -- the shims never touch non-fake tensors and ``torch.export``
     re-enters the session's own mode for hollow modules.
 
-    ``dtype_for`` is the PER-COMPONENT precision policy (tcg#68): given a tree
-    and a subfolder it answers that component's load dtype, because precision
+    ``dtype_for`` is the PER-COMPONENT precision policy (tcg#68): given a tree,
+    a subfolder and the just-built module it answers that component's load dtype, because precision
     is a property of a component and not of a load. Omitted, nothing is cast --
     this package states no precision policy of its own, since only the caller
     knows which component a layout contract describes.

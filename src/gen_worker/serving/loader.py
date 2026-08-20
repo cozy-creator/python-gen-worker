@@ -116,6 +116,31 @@ def load_endpoint_module(module_name: str) -> LoadedEndpoint:
     )
 
 
+def endpoint_module_name(endpoint_dir: str | Path) -> str:
+    """The module name ``endpoint.toml`` declares (``main =``), WITHOUT importing it.
+
+    Still the ONE reader of ``main =`` (pgw#1537's drift concern):
+    :func:`load_endpoint` resolves the name through this very function, so a
+    caller that needs only the NAME — ``gen-worker compile`` publishes and
+    looks up the graph-set document by it — shares the reader without paying
+    the author-module import (torch, diffusers: measured ~4.5 s on a warm
+    all-present compile, pgw#1546) that ``load_endpoint``'s callers actually
+    need.
+    """
+
+    manifest = Path(endpoint_dir) / "endpoint.toml"
+    if not manifest.is_file():
+        raise EndpointLoadError(f"{Path(endpoint_dir)} has no endpoint.toml")
+    try:
+        parsed = tomllib.loads(manifest.read_text())
+    except tomllib.TOMLDecodeError as exc:
+        raise EndpointLoadError(f"{manifest} is not valid TOML: {exc}") from exc
+    main = parsed.get("main")
+    if not isinstance(main, str) or not main.strip():
+        raise EndpointLoadError(f"{manifest} declares no `main = \"pkg.module\"`")
+    return main.strip()
+
+
 def load_endpoint(endpoint_dir: str | Path) -> LoadedEndpoint:
     """Load an endpoint from its directory: ``endpoint.toml``'s ``main =``.
 
@@ -125,25 +150,17 @@ def load_endpoint(endpoint_dir: str | Path) -> LoadedEndpoint:
     """
 
     root = Path(endpoint_dir)
-    manifest = root / "endpoint.toml"
-    if not manifest.is_file():
-        raise EndpointLoadError(f"{root} has no endpoint.toml")
-    try:
-        parsed = tomllib.loads(manifest.read_text())
-    except tomllib.TOMLDecodeError as exc:
-        raise EndpointLoadError(f"{manifest} is not valid TOML: {exc}") from exc
-    main = parsed.get("main")
-    if not isinstance(main, str) or not main.strip():
-        raise EndpointLoadError(f"{manifest} declares no `main = \"pkg.module\"`")
+    main = endpoint_module_name(root)
     src = root / "src"
     if src.is_dir() and str(src) not in sys.path:
         sys.path.insert(0, str(src))
-    return load_endpoint_module(main.strip())
+    return load_endpoint_module(main)
 
 
 __all__ = [
     "EndpointLoadError",
     "LoadedEndpoint",
+    "endpoint_module_name",
     "load_endpoint",
     "load_endpoint_module",
 ]

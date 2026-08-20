@@ -27,7 +27,7 @@ from pathlib import Path
 
 from ..tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
 
-from .artifact import ArtifactError, _fsync_dir, unpack_artifact
+from .artifact import ArtifactError, _fsync_dir, read_metadata, unpack_artifact
 from .identity import CompiledGraphKey, is_compiled_graph_key
 
 _COMPILED_GRAPH_PATH = "compiled_graph.tar.gz"
@@ -229,6 +229,52 @@ class _CompiledGraphStore:
                     raise StorageError(f"exact-key ref {value} disappeared during repair") from None
         self.quarantine(value, candidate)
         return StoreResult(StoreOutcome.DIVERGENT, value, candidate)
+
+    def keys(self) -> tuple[str, ...]:
+        """Every exact key currently published in this store, sorted.
+
+        Read out of the ref RECORDS -- small JSON rows, one per position --
+        never by walking ``objects``, whose layout belongs to tensorfs. The
+        same enumeration pattern ``store.LocalGraphStore._ref_records`` uses.
+        """
+
+        prefix = f"{_REF_PREFIX}/graphs/"
+        found: list[str] = []
+        for path in self.cas.refs.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                record = json.loads(path.read_bytes())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            name = str(record.get("name", ""))
+            if not name.startswith(prefix):
+                continue
+            key = name[len(prefix):]
+            if is_compiled_graph_key(key):
+                found.append(key)
+        return tuple(sorted(found))
+
+    def peek_metadata(self, key: str | CompiledGraphKey) -> dict[str, object] | None:
+        """The stored artifact's own metadata block, WITHOUT verifying its bytes.
+
+        A PROBE, for reuse indexing: nothing read here is trusted further than
+        choosing which exact key to hand ``resolve``, which remains the
+        verification gate. A missing, quarantined, or unreadable row answers
+        ``None`` -- a probe that raised would turn one rotten row into a failed
+        scan.
+        """
+
+        value = _key_value(key)
+        ref = self.cas.read_ref(_graph_ref(value))
+        if ref is None or self._is_quarantined(value, ref):
+            return None
+        try:
+            return read_metadata(self.cas.object_path(ref))
+        except (ArtifactError, OSError, ValueError):
+            return None
 
     @staticmethod
     def _verify_archive(artifact: Path, key: str) -> None:

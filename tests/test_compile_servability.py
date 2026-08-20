@@ -481,6 +481,138 @@ def test_a_relocated_root_says_so_rather_than_relocating_silently(
                for note in composed.notes)
 
 
+
+# --------------------------------------------------------------------------
+# pgw#1546: the warm paths are structurally cheap, not merely fast
+# --------------------------------------------------------------------------
+
+
+class _PublishRefused:
+    """A store proxy that fails the test the moment anything re-publishes."""
+
+    def __init__(self, real: LocalGraphStore) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def publish_artifact(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("an all-present run re-published an artifact")
+
+
+def test_an_all_present_run_asks_no_policy_questions_and_republishes_nothing(
+    endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fully-warm run (pgw#1546): every artifact already in the serving
+    band means NO floor read, NO grant probe, NO builder, NO publish — the
+    ~4.5 s of author-module/torch import the old path paid was bookkeeping for
+    a build that was never going to happen. The census still decides.
+    """
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    _seed_programs(store, tmp_path)
+    _run(endpoint, cas, store=store, builder=_builder([]))
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("an all-present run consulted build policy")
+
+    monkeypatch.setattr(compile_cli, "declared_floor_gb", refuse)
+    monkeypatch.setattr(compile_cli, "grant_gb", refuse)
+
+    report = _run(endpoint, cas, store=_PublishRefused(store), builder=refuse)
+
+    assert {outcome.state for outcome in report.outcomes} == {compile_cli.PRESENT}
+    assert report.unservable == []
+    assert compile_cli.summarize(report)[1] == 0
+
+
+def test_a_mint_in_the_engine_cache_is_reused_without_a_child_or_a_program(
+    endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pgw#1546's other warm state: present in the ENGINE cache (cg-key band),
+    absent from the serving band — the exact state of the 140.5 s run. The old
+    path spawned a mint child per specialization (torch import + export.load,
+    5.47 s measured) purely to re-derive keys the cache already stores; the
+    reuse path resolves them torch-free and still runs the [[pgw#1533]]
+    publish + read-back, so the witness survives the optimization.
+
+    The programs are deliberately NOT seeded: a reuse needs no program blob,
+    and a builder that raises proves no child path was reached.
+    """
+    from gen_worker._vendor.tensorfs import LocalCAS as VendoredCAS
+    from gen_worker._vendor.torchcg.engine import Engine
+    from gen_worker import compile_cache
+
+    monkeypatch.setattr(workspace, "artifacts_root", lambda: tmp_path / "box")
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    engine = Engine(VendoredCAS(cas))
+    for graph in GRAPHS:
+        artifact = tcg_artifacts.build(
+            tmp_path / f"{graph[-8:]}.tar.gz",
+            graph_specialization=graph, sm=SM,
+            # Distinct witnesses: the cg-key hashes the graph CONTENT, not its
+            # name, so two fixture graphs sharing one witness share one key and
+            # the second import lands DIVERGENT instead of stored.
+            witness=graph[-16:],
+        )
+        engine.import_artifact(tcg_artifacts.key_of(artifact), artifact)
+
+    monkeypatch.setattr(
+        compile_cache, "toolchain_digest",
+        lambda: tuple(sorted(tcg_artifacts.TOOLCHAIN.items())),
+    )
+
+    def no_child(spec: Any, program: Any, destination: Any) -> Any:
+        raise AssertionError(f"{spec.short}: a cached mint spawned a build child")
+
+    report = _run(endpoint, cas, store=store, builder=no_child)
+
+    assert [outcome.state for outcome in report.outcomes] == [
+        compile_cli.REUSED for _ in GRAPHS]
+    assert report.unservable == []
+    reader = compile_cli.serving_reader(cas)
+    for graph in GRAPHS:
+        assert reader.has_artifact(graph, ENV), f"{graph} was reused but not published"
+    summary, code = compile_cli.summarize(report)
+    assert code == 0 and "SERVABLE" in summary
+    assert f"reused={len(GRAPHS)}" in summary
+
+
+def test_a_cached_mint_on_a_different_toolchain_is_not_reused(
+    endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RED ARM: the reuse index answers only the exact (sm x toolchain) axis.
+    A cache row minted under another compiler stack must fall through to the
+    build path, never be republished as this env's artifact."""
+    from gen_worker._vendor.tensorfs import LocalCAS as VendoredCAS
+    from gen_worker._vendor.torchcg.engine import Engine
+    from gen_worker import compile_cache
+
+    monkeypatch.setattr(workspace, "artifacts_root", lambda: tmp_path / "box")
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    _seed_programs(store, tmp_path)
+    engine = Engine(VendoredCAS(cas))
+    stale = tcg_artifacts.build(
+        tmp_path / "stale.tar.gz",
+        graph_specialization=GRAPHS[0], sm=SM,
+        toolchain={"torch": "an-older-stack", "triton": "entirely"},
+    )
+    engine.import_artifact(tcg_artifacts.key_of(stale), stale)
+
+    monkeypatch.setattr(
+        compile_cache, "toolchain_digest",
+        lambda: tuple(sorted(tcg_artifacts.TOOLCHAIN.items())),
+    )
+    built: List[str] = []
+    report = _run(endpoint, cas, store=store, builder=_builder(built))
+
+    assert built == list(GRAPHS), "a foreign-toolchain cache row must not satisfy this env"
+    assert {outcome.state for outcome in report.outcomes} == {compile_cli.BUILT}
+    assert report.unservable == []
+
+
 def test_an_unreadable_module_name_is_a_typed_refusal_not_a_traceback(
     tmp_path: Path,
 ) -> None:
