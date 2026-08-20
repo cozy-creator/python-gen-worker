@@ -170,7 +170,9 @@ def test_the_handle_carries_hole_reasons_and_the_verdict(tmp_path: Path) -> None
         _booted_at="", _served=0,
         _primary_fields=lambda: {},
     )
-    document = daemon_mod.ResidentEndpoint._document(resident, "ready")
+    from typing import Any, cast
+
+    document = daemon_mod.ResidentEndpoint._document(cast(Any, resident), "ready")
     assert document["hole_reasons"] == [
         {"graph": "cg-graph-v1-" + "a" * 56,
          "reason": "ArtifactFormatSkew: bare package"}
@@ -210,7 +212,7 @@ def test_the_mint_mints_what_it_was_armed_on_not_a_second_read(
 
     compiled: list[str] = []
 
-    def compiler(blob: Path, record, destination: Path) -> Path:
+    def compiler(blob: Path, record: SimpleNamespace, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"artifact")
         compiled.append(record.graph)
