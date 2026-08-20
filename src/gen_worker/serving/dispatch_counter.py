@@ -95,10 +95,23 @@ class DispatchCounts:
         if self.armed_modules == 0:
             return "dispatch: no compiled graph armed — served eager (nothing adopted)"
         if self.displaced_modules:
+            # THE COUNTS, NEVER AN INFERENCE FROM THE FLAG (pgw#1591). This
+            # branch used to end "so all N call(s) ran eager" — a claim it did
+            # not measure and, in the field, a false one: the sd15 benchmark
+            # read it on 12/12 requests of both arms while 120 AOTI wrapper
+            # invocations per arm were in the same log, and the lane could not
+            # reconcile the two because one of them was not a measurement.
+            # Displacement and dispatch are separate facts; both are stated.
+            served = (
+                f"{self.compiled_graph_calls} of {self.module_calls} call(s) "
+                f"still served COMPILED"
+                if self.compiled_graph_calls
+                else f"all {self.module_calls} call(s) ran eager"
+            )
             return (
-                f"dispatch: DISPLACED on {', '.join(self.displaced_modules)} — the "
-                f"compiled dispatcher is no longer this module's forward, so all "
-                f"{self.module_calls} call(s) ran eager"
+                f"dispatch: DISPLACED on {', '.join(self.displaced_modules)} — "
+                f"the compiled dispatcher is no longer reachable as this "
+                f"module's forward; {served}"
             )
         if self.compiled_graph_calls == 0:
             return (
@@ -204,7 +217,16 @@ class DispatchCounter:
             if graphs:
                 armed_modules += 1
                 armed_graphs += len(graphs)
-            if getattr(module, "forward", None) is not dispatcher:
+            # THROUGH any wrapper (pgw#1591). `module.forward is dispatcher`
+            # calls every WRAPPED dispatcher displaced — and pgw#1573's
+            # adapter guard is a legitimate wrapper installed on every adopted
+            # module, so this read went false fleet-wide the moment it landed.
+            # `adapter_guard.dispatcher_of` is the one resolver; a module it
+            # cannot resolve is genuinely displaced (accelerate restoring
+            # `_old_forward` after an offload rung is the real shape of that).
+            from .adapter_guard import dispatcher_of
+
+            if dispatcher_of(module) is not dispatcher:
                 displaced.append(label)
         counts = DispatchCounts(
             module_calls=self._module_calls,
