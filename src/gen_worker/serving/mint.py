@@ -681,7 +681,7 @@ def artifact_manifest(env: Any, package: Path) -> Any:
 def publish_compiled(store: Any, graph: str, env: Any, artifact: Path) -> str:
     """Put one freshly-compiled artifact WHERE THE SERVING PATH READS IT.
 
-    THE ONE PUBLISHER (pgw#1532). ``Engine.compile`` banks its output in
+    THE ONE PUBLISHER (pgw#1533). ``Engine.compile`` banks its output in
     torchcg's own engine store — that is the engine's compile cache, keyed by
     ``cg-key-v1`` and consulted by ``Engine.resolve`` so a re-compile is a
     reuse. It is NOT the band adoption reads. ``holes()``, ``has_artifact`` and

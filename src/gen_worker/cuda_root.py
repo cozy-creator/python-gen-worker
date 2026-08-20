@@ -72,7 +72,7 @@ NV_TARGET = Path("include/nv/target")
 
 
 def default_root() -> Path:
-    """Where THIS process can actually compose a CUDA root (pgw#1532).
+    """Where THIS process can actually compose a CUDA root (pgw#1533).
 
     ``/usr/local/cuda`` is the answer on a pod, and it stayed the only answer
     for too long. On a developer box ``/usr/local`` is root-owned: the compose

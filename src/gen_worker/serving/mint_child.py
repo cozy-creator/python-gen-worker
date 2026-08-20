@@ -130,7 +130,7 @@ def _ensure_cuda_home(target_arch: str) -> None:
     when nobody has said does this compose one, and `compose()` is itself
     idempotent -- a pre-existing root is left alone rather than rebuilt.
 
-    CUDA_HOME is set from WHERE THE COMPOSE ACTUALLY WROTE (pgw#1532), not from
+    CUDA_HOME is set from WHERE THE COMPOSE ACTUALLY WROTE (pgw#1533), not from
     the module constant. Reading the constant made this correct only on a pod:
     on a box whose `/usr/local` is root-owned the compose could not create
     `/usr/local/cuda`, and this pointed torch at it anyway. Fourteen
@@ -162,7 +162,7 @@ def _ensure_cuda_home(target_arch: str) -> None:
         )
     os.environ["CUDA_HOME"] = composed.path
     logger.info(
-        "mint: CUDA_HOME=%s (pgw#1464/pgw#1532) — AOTI resolves it at the link "
+        "mint: CUDA_HOME=%s (pgw#1464/pgw#1533) — AOTI resolves it at the link "
         "step, after the compile is already paid",
         composed.path,
     )

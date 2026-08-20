@@ -18,7 +18,7 @@ than as process adoption.
 weightless trace and the mint runs against it, so ``compile`` legitimately runs
 before ``download``.
 
-**SERVABLE, OR IT FAILED (pgw#1532).** The success criterion is not "the builds
+**SERVABLE, OR IT FAILED (pgw#1533).** The success criterion is not "the builds
 returned". It is "the reader that arms graphs at boot can find what I wrote",
 and it is checked by asking THAT reader, through a store object this command did
 not publish through. Before this, ``compile`` reported ``built=14 (of 14)`` with
@@ -333,7 +333,7 @@ def _build(
     reads as occupied by something that is not the artifact.
 
     The child writes the artifact path it produced into ``result``, and this
-    function READS it (pgw#1532). The request already asked for that file and
+    function READS it (pgw#1533). The request already asked for that file and
     nothing consumed it: the parent threw the child's only output away, so it
     had nothing to publish and could only count exit statuses — which is
     precisely how a green run left the serving path empty.
@@ -424,7 +424,7 @@ def serving_reader(cas_root: Path) -> Any:
     Constructed exactly the way ``cli/daemon._adoption_source`` constructs it,
     and deliberately NOT the store this command publishes through. "My writer
     returned without raising" and "the reader that arms graphs can find it" are
-    different claims, and pgw#1532 is what happens when only the first one is
+    different claims, and pgw#1533 is what happens when only the first one is
     ever checked: the write succeeded, into torchcg's engine cache, and the
     reader saw nothing.
     """
@@ -499,7 +499,7 @@ class Report:
 
     ``unservable`` is the verdict and ``outcomes`` is the narrative. They are
     separate fields because they answer different questions and the whole of
-    pgw#1532 is that the narrative was mistaken for the verdict: fourteen
+    pgw#1533 is that the narrative was mistaken for the verdict: fourteen
     ``BUILT`` rows and rc=0 over a serving path that could arm nothing.
     """
 
@@ -605,7 +605,7 @@ def compile_all(
                 program = _ensure_program(spec, store, rederive, artifacts_dir)
                 artifact = build(spec, program, destination)
                 # PUBLISH, then ASK THE READER. Neither step existed before
-                # pgw#1532 and neither one alone is enough: the publish is what
+                # pgw#1533 and neither one alone is enough: the publish is what
                 # puts the bytes in the band adoption addresses, and the
                 # read-back is the only thing that can go red if it did not.
                 published = publish_compiled(store, spec.graph, env, artifact)
@@ -726,7 +726,7 @@ def summarize(report: Report) -> Tuple[str, int]:
 
     Separated from :func:`run_compile` so the verdict is testable against real
     reports rather than only through argparse and a live inductor. The whole of
-    pgw#1532 lives in the second element: for 26 minutes of real GPU work this
+    pgw#1533 lives in the second element: for 26 minutes of real GPU work this
     returned 0 beside ``built=14 (of 14)`` while the serving path held 14 holes,
     because the exit code was computed from the outcome tally and the tally
     counted builds that returned.
