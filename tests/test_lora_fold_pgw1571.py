@@ -180,9 +180,11 @@ def _arm(unet: Any, artifact: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_live_adapter_on_a_compiled_armed_denoiser_serves_the_base_model() -> None:
-    """RED ARM for everything below: without the guard, the served tensor is
-    bit-identical to the base model while the adapter sits attached."""
+def test_an_artifact_bound_by_value_is_blind_to_module_side_weight_surgery() -> None:
+    """The defect in one assertion. An artifact whose constants are a COPY —
+    which is what a bound-and-then-copied table is, and what peft's submodule
+    wrapping is always up against — returns the base model bit-identically
+    while an adapter is live on the module. RED ARM for the guard below."""
     unet = _tiny_unet()
     args = _inputs()
     baseline = _run(unet, args)
