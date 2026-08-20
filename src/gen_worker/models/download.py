@@ -458,22 +458,6 @@ def _civitai_attempts() -> int:
     return 3
 
 
-def parse_civitai_version_id(raw: str) -> int:
-    """Extract a model-VERSION id from a ref string / URL fragment."""
-    s = str(raw or "").strip()
-    if not s:
-        raise ValueError("empty civitai model ref")
-    for key in ("modelVersionId=", "model_version_id=", "version_id="):
-        if key in s:
-            s = s.split(key, 1)[1].split("&", 1)[0].strip()
-            break
-    if s.startswith("versions/"):
-        s = s.split("/", 1)[1].strip()
-    if not s.isdigit():
-        raise ValueError(f"civitai model ref must be a model version id, got {raw!r}")
-    return int(s)
-
-
 def _civitai_get_json(url: str, api_key: str = "") -> dict[str, Any]:
     import requests  # lazy (all sites): download is on the `import gen_worker` path; stays requests-free
 
@@ -490,11 +474,6 @@ def _civitai_get_json(url: str, api_key: str = "") -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("civitai_fetch_failed")
     return data
-
-
-def fetch_civitai_model(model_id: int, *, api_key: str = "") -> dict[str, Any]:
-    """GET /models/{id} — used to map a model id to its latest version id."""
-    return _civitai_get_json(f"{_CIVITAI_API}/models/{int(model_id)}", api_key)
 
 
 def fetch_civitai_model_version(version_id: int, *, api_key: str = "") -> dict[str, Any]:
@@ -822,9 +801,7 @@ __all__ = [
     # INGEST-only fetchers (gen_worker.convert drives them). They are NOT on
     # the serving path any more — pgw#1524 deleted every direct-serve branch.
     "download_civitai",
-    "fetch_civitai_model",
     "fetch_civitai_model_version",
-    "parse_civitai_version_id",
     "select_component_paths",
     "components_present",
     "DownloadStalledError",
