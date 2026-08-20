@@ -144,7 +144,7 @@ def _fresh_delivered_seed_flag():
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cell_ledgers():
+def _fresh_compiled_graph_ledgers():
     """pgw#672 process ledgers (quarantined identities, in-process finalized
     mints) are process-lifetime in production; clear them between tests so a
     proof failure in one test cannot poison another's arm/selection."""
@@ -153,8 +153,11 @@ def _fresh_cell_ledgers():
     # pgw#1373: `fleet_compiled_graphs` died with the v1 mint stack; only the
     # compile-cache ledger is left to clear.
     def _clear() -> None:
-        with _cc._PROVEN_CELLS_LOCK:
-            getattr(_cc, "_QUARANTINED_CELLS", set()).clear()
+        # Direct attribute access, never getattr-with-default: a defaulted
+        # read silently STOPS CLEARING when the name moves, which is how a
+        # rename turns an autouse fixture into a no-op nothing can see.
+        with _cc._PROVEN_GRAPHS_LOCK:
+            _cc._QUARANTINED_GRAPHS.clear()
 
     _clear()
     yield
@@ -419,9 +422,9 @@ def _isolated_local_compiled_graph_store(tmp_path_factory):
     """
     from gen_worker import config as _config
 
-    prior = os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR")
+    prior = os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR")  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
     prior_cache = os.environ.get("TENSORHUB_CACHE_DIR")
-    os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = str(
+    os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = str(  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
         tmp_path_factory.mktemp("local-compiled-graph-store"))
     os.environ["TENSORHUB_CACHE_DIR"] = str(
         tmp_path_factory.mktemp("worker-cache"))
@@ -429,7 +432,7 @@ def _isolated_local_compiled_graph_store(tmp_path_factory):
     try:
         yield
     finally:
-        for name, value in (("GEN_WORKER_LOCAL_CELLS_DIR", prior),
+        for name, value in (("GEN_WORKER_LOCAL_CELLS_DIR", prior),  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
                             ("TENSORHUB_CACHE_DIR", prior_cache)):
             if value is None:
                 os.environ.pop(name, None)

@@ -120,7 +120,7 @@ def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
     """
     pipe = _Pipe()
     cc.apply_lora_execution_lane(pipe, BUCKET)
-    artifact = tmp_path / "cell.tar.gz"
+    artifact = tmp_path / "cell.tar.gz"  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
     artifact.write_bytes(b"compiled graph")
 
     outcome = provision.arm_aot(pipe, _Cfg(), None, artifact, BUCKET)

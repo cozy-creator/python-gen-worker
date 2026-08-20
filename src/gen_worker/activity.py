@@ -556,9 +556,9 @@ class Activity:
 
 #: pgw#1176 / th#1839: compiled-graph identity travels as TYPED WIRE FIELDS.
 #:
-#: ``ActivityUpdate.family`` / ``.cell_key`` / ``.graph_specialization`` (proto fields
+#: ``ActivityUpdate.family`` / ``.cell_key`` / ``.graph_specialization`` (proto fields  # cell-spelling: proto field spelling, gated on PROTO_DIGEST
 #: 18-20) land in the hub's existing ``worker_activity_events`` columns. The
-#: prose form they replace was measured: ``detail LIKE 'ref=%#'||cell_key||'
+#: prose form they replace was measured: ``detail LIKE 'ref=%#'||cell_key||'  # cell-spelling: proto field spelling, gated on PROTO_DIGEST
 #: %'`` matched one of three rows correctly, because four emitters spelled
 #: identity four ways. A fact that has to be regex-scraped out of a sentence
 #: cannot be indexed, cannot be grouped, and returns NULL the first time the
@@ -608,8 +608,8 @@ def emit_event(
         state=pb.ActivityState.ACTIVITY_STATE_COMPLETED,
         detail=detail[:2000],
         family=str(family or "")[:200],
-        # proto field 19 is still spelled `cell_key` — see the note above.
-        cell_key=str(compiled_graph_key or "")[:200],
+        # proto field 19 is still spelled `cell_key` — see the note above.  # cell-spelling: proto field spelling, gated on PROTO_DIGEST
+        cell_key=str(compiled_graph_key or "")[:200],  # cell-spelling: proto field spelling, gated on PROTO_DIGEST
         graph_specialization=str(graph_specialization or "")[:300],
         duration_ms=max(0, int(duration_ms)),
         updated_at_unix_ms=int(time.time() * 1000),

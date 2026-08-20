@@ -165,8 +165,8 @@ def uninstall() -> None:
     patched = _package._load_state_dict
     if not getattr(patched, "_pgw1468", False):
         return
-    for cell in getattr(patched, "__closure__", None) or ():
-        candidate = cell.cell_contents
+    for slot in getattr(patched, "__closure__", None) or ():
+        candidate = slot.cell_contents
         if callable(candidate) and not getattr(candidate, "_pgw1468", False):
             _package._load_state_dict = candidate
             return

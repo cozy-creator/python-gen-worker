@@ -1388,7 +1388,7 @@ class QwenImageDefaults(msgspec.Struct, frozen=True):
     VOCABULARY FACT, and pgw#1112 says so in its own words: a compile target is
     an attribute PATH on ONE pipeline object, both slots owned ``.transformer``,
     so declaration order silently handed every mint to t2i. That is a reason for
-    two ``Model`` classes and two cells. It is not a reason for two roots — the
+    two ``Model`` classes and two compiled graphs. It is not a reason for two roots — the
     same shape :class:`Wan22` already serves with three model classes on one.
     The shipped code agrees outright: ONE
     ``register_family("qwen-image", QwenImageDefaults)`` (``:142``), both

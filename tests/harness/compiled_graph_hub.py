@@ -231,7 +231,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             # would make the client's "one token each" check unfalsifiable.
             entries = body.get("entries") or []
             self._json(200, {
-                "object": "cell_publish_intent_batch",
+                "object": "cell_publish_intent_batch",  # cell-spelling: hub-owned response object name
                 "repo": f"root/family-{family}",
                 "family": family,
                 "granted": len(entries),

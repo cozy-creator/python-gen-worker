@@ -99,7 +99,7 @@ READY_POD_STATES = frozenset({"ready", "connected", "running", "serving"})
 BLOCKER_INVOKE_ROUTE = "th#1927 follow-up (POST /v1/private-deployments/:id/:function)"
 BLOCKER_RECONCILER = "th#1927 (provisioning reconciler)"
 BLOCKER_SETTLEMENT = "th#1928 (per-second settlement)"
-BLOCKER_CELL_INVENTORY = "th#1355 (GET /v1/admin/compiled-graphs) is absent from this hub"
+BLOCKER_COMPILED_GRAPH_INVENTORY = "th#1355 (GET /v1/admin/compiled-graphs) is absent from this hub"
 BLOCKER_ACTIVITY_EVENTS = "th#1839 (GET /v1/admin/worker-activity-events) is absent from this hub"
 
 OK = "ok"
@@ -209,7 +209,7 @@ class DeploymentAPI(Protocol):
     def config_history(self, org: str, deployment_id: str) -> List[Dict[str, Any]]: ...
     def invoke(self, deployment_id: str, function: str, payload: Mapping[str, Any]) -> str: ...
     def request(self, request_id: str) -> Dict[str, Any]: ...
-    def admin_cells(self, release: str) -> List[Dict[str, Any]]: ...
+    def admin_compiled_graphs(self, release: str) -> List[Dict[str, Any]]: ...
     def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]: ...
 
 
@@ -282,7 +282,7 @@ class HttpDeploymentAPI:
     def request(self, request_id: str) -> Dict[str, Any]:
         return dict(self._call("GET", "/v1/requests/" + urllib.parse.quote(request_id)))
 
-    def admin_cells(self, release: str) -> List[Dict[str, Any]]:
+    def admin_compiled_graphs(self, release: str) -> List[Dict[str, Any]]:
         """th#1355's compiled-graph inventory, filtered server-side.
 
         Read from the graph's OWN row rather than through a demand join, so a
@@ -668,11 +668,11 @@ class _Run:
                 observed = str(pod["gpu_class"])
                 break
         try:
-            graphs = self.api.admin_cells(self.leg.release_id)
+            graphs = self.api.admin_compiled_graphs(self.leg.release_id)
         except ApiError as exc:
             if exc.route_missing:
                 self.find("seal.route", BLOCKED,
-                          f"cannot read the compiled-graph store: {exc}", BLOCKER_CELL_INVENTORY)
+                          f"cannot read the compiled-graph store: {exc}", BLOCKER_COMPILED_GRAPH_INVENTORY)
             else:
                 self.find("seal.rows", FAILED, f"compiled-graph inventory read failed: {exc}")
             return
@@ -1062,7 +1062,7 @@ class ContractModel:
                                 "error": "artifact pack refused: short write",
                                 "pod_id": pod.get("pod_id", "")})
 
-    def admin_cells(self, release: str) -> List[Dict[str, Any]]:
+    def admin_compiled_graphs(self, release: str) -> List[Dict[str, Any]]:
         if not self.seal_evidence:
             raise ApiError("GET", "/v1/admin/compiled-graphs", 404, "", "404 page not found")
         return [c for c in self.graphs if not release or c["minted_for_release_id"] == release]

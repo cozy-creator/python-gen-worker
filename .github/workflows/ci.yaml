@@ -410,6 +410,21 @@ jobs:
           uv run python scripts/lint_retired_graph_class_spellings.py --selftest
           uv run python scripts/lint_retired_graph_class_spellings.py
 
+      # GATING (pgw#1547, Paul 2026-08-20): a compiled graph is not a "cell".
+      # pgw#1363 already retired the word two days earlier and it did NOT
+      # stick — nothing watched it, so `_PROVEN_CELLS`, a `getattr`-defaulted
+      # conftest ledger clear that would have gone SILENT on the rename, and
+      # eight mint fixtures were all still speaking it. The hub-owned wire
+      # spellings and the on-disk `aot-cells`/`cell.tar.gz` triple are pinned
+      # cross-repo, so they are ENUMERATED as `cell-spelling:` proofs at the
+      # line rather than excluded: the deferred set can only shrink. The
+      # selftest proves the fence goes red AND proves it does not flag the 84
+      # live `cancelled`/`CancelledError` uses that contain the same letters.
+      - name: pgw#1547 guard - no retired `cell` spelling survives
+        run: |
+          uv run python scripts/lint_retired_cell_spellings.py --selftest
+          uv run python scripts/lint_retired_cell_spellings.py
+
       # GATING (th#1987 / HARDCUT A9): the `:tag` ref production is DELETED.
       # A surviving pin fails on a rented pod at the resolve, not at the line
       # that wrote it. The selftest proves the fence can go red, because a

@@ -15,7 +15,7 @@ dynamo regional branch), four defects remain in what it then EXECUTES:
 3. ``_guarded_regional`` caught the raise, cleared the block compilations and
    served eager forever — but, unlike its ``_guarded`` twin, NEVER set
    ``failure_signal["degraded"]``. ``is_compile_armed`` reads exactly that, so
-   the wire kept reporting ``serving_mode=jit_cell``,
+   the wire kept reporting ``serving_mode=jit_cell``,  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
    ``served_eager_fallback=false``, empty ``fallback_reason``.
 4. ``emit_jit_compile_event``'s ``n_graphs`` had no caller, so nothing could
    see any of it.
@@ -164,7 +164,7 @@ def test_the_marks_reach_the_integer_index_and_the_rotary_tuple():
 def test_a_degraded_regional_target_stops_claiming_it_is_compiled():
     """THE LIE. RED before: ``_guarded_regional``'s permanent-degrade branch
     never set ``degraded``, which ``is_compile_armed`` reads — so a target
-    that fell to eager on its first call reported ``serving_mode=jit_cell``
+    that fell to eager on its first call reported ``serving_mode=jit_cell``  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
     with an empty ``fallback_reason`` for the life of the pod."""
 
     class _Owner(torch.nn.Module):

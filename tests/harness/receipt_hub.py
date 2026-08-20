@@ -81,7 +81,7 @@ def make_claims(
     gone from this SDK, so a compiled graph it names is re-minted, never armed.
     """
     algo, _, hex_part = artifact_digest.partition(":")
-    artifact: Dict[str, Any] = {"path": "cell.tar.gz", "size_bytes": size_bytes}
+    artifact: Dict[str, Any] = {"path": "cell.tar.gz", "size_bytes": size_bytes}  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
     if legacy_blake3_only:
         assert algo == "blake3", "legacy receipts only ever carried blake3"
         artifact["blake3"] = hex_part
@@ -119,7 +119,7 @@ def pub_map(rsa_key: rsa.RSAPrivateKey) -> Dict[str, rsa.RSAPublicKey]:
 
 def make_artifact(tmp_path: Path, *, compiled_graph_key: str = COMPILED_GRAPH_KEY, family: str = FAMILY) -> Path:
     meta = {"compiled_graph_key": compiled_graph_key, "family": family, "format": "cozy-compile-cache/v1"}
-    target = tmp_path / "cell.tar.gz"
+    target = tmp_path / "cell.tar.gz"  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
     with tarfile.open(target, "w:gz") as tar:
         raw = json.dumps(meta).encode()
         ti = tarfile.TarInfo("metadata.json")
@@ -231,17 +231,17 @@ def hub(rsa_key: rsa.RSAPrivateKey) -> Iterator[HubStub]:
 def worker_jwt_for(endpoint_id: str, org_id: str = "") -> str:
     """A hub-shaped worker credential naming the endpoint this pod serves.
 
-    th#1657: the pod's own identity comes from the `cell_read_endpoint_id` the
+    th#1657: the pod's own identity comes from the `cell_read_endpoint_id` the  # cell-spelling: hub-stamped credential claim name; this side only reads it
     hub stamps on the compiled graph-read grant (th#1335), so the test builds the same
     thing. The signature is never checked — this is our OWN bearer token, not an
     input — so an unsigned third segment is faithful to what the gate reads.
     """
     header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
-    claims = {"sub": "worker-1", "cell_read_endpoint_id": endpoint_id}
+    claims = {"sub": "worker-1", "cell_read_endpoint_id": endpoint_id}  # cell-spelling: hub-stamped credential claim name; this side only reads it
     # th#1680: the org rides the same grant. Omitted when empty, exactly as a
     # pre-th#1680 hub (or one that could not resolve the org) leaves it out.
     if org_id:
-        claims["cell_read_org_id"] = org_id
+        claims["cell_read_org_id"] = org_id  # cell-spelling: hub-stamped credential claim name; this side only reads it
     payload = _b64url(json.dumps(claims).encode())
     return header + "." + payload + ".not-checked-here"
 

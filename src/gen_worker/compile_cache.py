@@ -139,12 +139,12 @@ _LOCK_TYPE = type(threading.Lock())
 # compiled code for this object's targets is live
 # (:func:`has_inmemory_compiled_code`) — the registry alone would let one
 # object's hit certify another's silence, which gw#603/gw#611 forbid.
-_PROVEN_CELLS_LOCK = threading.Lock()
-_PROVEN_CELLS: set[str] = set()
+_PROVEN_GRAPHS_LOCK = threading.Lock()
+_PROVEN_GRAPHS: set[str] = set()
 # pgw#672: compiled graphs whose serve/finalize proof FAILED in this process. Consulted
 # at selection and self-mint arm time so one boot never loops adopt-fail /
 # mint-fail on the identical identity (the L4 churn loop's worker half).
-_QUARANTINED_CELLS: set[str] = set()
+_QUARANTINED_GRAPHS: set[str] = set()
 # Live armed pipelines (weakly held): the disproof path must never
 # ``torch._dynamo.reset()`` globally while a HEALTHY sibling's compiled
 # code is live — the global reset killed the first checkpoint's proven
@@ -176,14 +176,14 @@ def record_compiled_graph_proven(ref: str) -> None:
     identity = _compiled_graph_ref_identity(ref)
     if not identity:
         return
-    with _PROVEN_CELLS_LOCK:
-        _PROVEN_CELLS.add(identity)
+    with _PROVEN_GRAPHS_LOCK:
+        _PROVEN_GRAPHS.add(identity)
 
 
 def compiled_graph_proven_in_process(ref: str) -> bool:
     identity = _compiled_graph_ref_identity(ref)
-    with _PROVEN_CELLS_LOCK:
-        return bool(identity) and identity in _PROVEN_CELLS
+    with _PROVEN_GRAPHS_LOCK:
+        return bool(identity) and identity in _PROVEN_GRAPHS
 
 
 def record_compiled_graph_quarantined(ref: str) -> None:
@@ -191,15 +191,15 @@ def record_compiled_graph_quarantined(ref: str) -> None:
     identity = _compiled_graph_ref_identity(ref)
     if not identity:
         return
-    with _PROVEN_CELLS_LOCK:
-        _QUARANTINED_CELLS.add(identity)
-        _PROVEN_CELLS.discard(identity)
+    with _PROVEN_GRAPHS_LOCK:
+        _QUARANTINED_GRAPHS.add(identity)
+        _PROVEN_GRAPHS.discard(identity)
 
 
 def compiled_graph_quarantined_in_process(ref: str) -> bool:
     identity = _compiled_graph_ref_identity(ref)
-    with _PROVEN_CELLS_LOCK:
-        return bool(identity) and identity in _QUARANTINED_CELLS
+    with _PROVEN_GRAPHS_LOCK:
+        return bool(identity) and identity in _QUARANTINED_GRAPHS
 
 
 def _armed_pipelines() -> "weakref.WeakSet[Any]":
@@ -2145,7 +2145,7 @@ def _guarded(
             # in this closure. An INTAKE arm names no artifact, so "is this
             # pipeline serving compiled" cannot be answered by an active compiled graph
             # ref — `is_compile_armed` reads this, and without it a permanently
-            # degraded intake pod would keep reporting `serving_mode=jit_cell`
+            # degraded intake pod would keep reporting `serving_mode=jit_cell`  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
             # while every request ran eager (the gw#586 class, one lane over).
             if isinstance(failure_signal, dict):
                 failure_signal["degraded"] = True
@@ -2278,7 +2278,7 @@ def _guarded_regional(
                 # flag on a permanent degrade; the REGIONAL twin never did,
                 # and `is_compile_armed` reads exactly it. So a regional
                 # target that degraded to eager on its very first call kept
-                # reporting `serving_mode=jit_cell`, `served_eager_fallback
+                # reporting `serving_mode=jit_cell`, `served_eager_fallback  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
                 # =false`, EMPTY `fallback_reason` — for the life of the pod,
                 # at eager speed. Every telemetry axis said compiled while
                 # 100% of the work ran eager (minimax-h3 0.4.3: 6.27 s/step

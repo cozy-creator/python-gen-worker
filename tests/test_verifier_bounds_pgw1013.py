@@ -35,7 +35,7 @@ from gen_worker import artifact_meta, receipts
 # ---------------------------------------------------------------------------
 
 
-def _cell(tmp_path: Path, meta_bytes: bytes, name: str = "cell.tar.gz") -> Path:
+def _artifact(tmp_path: Path, meta_bytes: bytes, name: str = "cell.tar.gz") -> Path:  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
     """A real gzip-compressed artifact carrying `meta_bytes` as its
     metadata.json, plus a payload member so it is shaped like a compiled graph."""
     path = tmp_path / name
@@ -55,7 +55,7 @@ def test_a_legitimate_envelope_still_reads(tmp_path: Path):
                                        for i in range(64)}}
     raw = json.dumps(meta).encode()
     assert len(raw) < artifact_meta.MAX_METADATA_BYTES
-    assert artifact_meta.read_metadata(_cell(tmp_path, raw)) == meta
+    assert artifact_meta.read_metadata(_artifact(tmp_path, raw)) == meta
 
 
 def test_a_decompression_bomb_in_the_envelope_is_refused_before_it_is_read(
@@ -63,7 +63,7 @@ def test_a_decompression_bomb_in_the_envelope_is_refused_before_it_is_read(
 ):
     # 128 MiB of zeroes: ~128 KiB on disk after gzip, 8x the bound.
     bomb = b"\0" * (128 << 20)
-    artifact = _cell(tmp_path, bomb)
+    artifact = _artifact(tmp_path, bomb)
     on_disk = artifact.stat().st_size
     assert on_disk < 2 << 20, (
         f"the bomb must be cheap on the wire for the test to mean anything "
@@ -84,7 +84,7 @@ def test_the_verifier_itself_refuses_the_bomb_with_a_typed_reason(
     # a REAL 36-entry sdxl envelope and cost a 92-minute mint). The bomb has
     # to stay above the bound for this test to mean anything; its size was
     # always incidental, the typed refusal is the point.
-    artifact = _cell(tmp_path, b"\0" * (128 << 20))
+    artifact = _artifact(tmp_path, b"\0" * (128 << 20))
     with pytest.raises(receipts.ReceiptError) as exc:
         receipts._embedded_meta(artifact)
     assert exc.value.reason == "artifact_unreadable"
@@ -98,12 +98,12 @@ def test_the_bound_is_exact_at_both_sides(tmp_path: Path):
     pad_key = '{"pad":"'
     at = (pad_key + "x" * (limit - len(pad_key) - 2) + '"}').encode()
     assert len(at) == limit
-    assert artifact_meta.read_metadata(_cell(tmp_path, at, "at.tar.gz"))["pad"]
+    assert artifact_meta.read_metadata(_artifact(tmp_path, at, "at.tar.gz"))["pad"]
 
     over = (pad_key + "x" * (limit - len(pad_key) - 1) + '"}').encode()
     assert len(over) == limit + 1
     with pytest.raises(artifact_meta.ArtifactMetadataError):
-        artifact_meta.read_metadata(_cell(tmp_path, over, "over.tar.gz"))
+        artifact_meta.read_metadata(_artifact(tmp_path, over, "over.tar.gz"))
 
 
 # ---------------------------------------------------------------------------

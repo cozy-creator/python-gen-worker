@@ -1405,12 +1405,12 @@ class ParentControl:
             # RELOCATES it by env (`internal/paths/paths.go`), and a relocated
             # root lands outside every other entry in this list. pgw#1349: the
             # dropped child then dies mid-request on
-            # ``PermissionError: .../aot-cells``, root-owned 0755 because the
+            # ``PermissionError: .../aot-cells``, root-owned 0755 because the  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
             # parent created it. Read from the child's env — the same rule the
             # cache root above follows — never by importing the store, which
             # would pull the model layer into this torch-free process.
-            self._child_env.get("GEN_WORKER_LOCAL_CELLS_DIR", "")
-            or os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR", ""),
+            self._child_env.get("GEN_WORKER_LOCAL_CELLS_DIR", "")  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
+            or os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR", ""),  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
             # The mutable-config snapshot: the CHILD atomically rewrites
             # it on every config-generation push (tmp file in the SAME dir plus
             # os.replace, so the directory itself must be writable), and unlike

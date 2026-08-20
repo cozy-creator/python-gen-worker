@@ -75,7 +75,7 @@ def _install(
 def _arm(tmp_path: Path, **kw: Any):
     return provision.arm_aot(
         object(), type("Cfg", (), {"family": "sdxl"})(), None,
-        tmp_path / "cell.tar.gz", 0, dict(_META), **kw)
+        tmp_path / "cell.tar.gz", 0, dict(_META), **kw)  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
 
 
 def _row(events: List[Tuple[str, str, str]]) -> str:
@@ -183,7 +183,7 @@ def test_each_armed_CLASS_gets_ITS_OWN_row_never_a_pooled_one(
 # --------------------------------------------------------------------------
 
 
-def test_the_row_is_keyed_by_the_cell_s_OWN_recorded_lane(
+def test_the_row_is_keyed_by_the_graph_s_OWN_recorded_lane(
     monkeypatch, tmp_path,
 ) -> None:
     """The lane comes off the compiled graph's recorded `weight_lane`, so a reader can

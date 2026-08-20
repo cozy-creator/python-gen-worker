@@ -20,19 +20,19 @@ from gen_worker import compile_cache as cc
 
 @pytest.fixture(autouse=True)
 def _clean_process_registries() -> Iterator[None]:
-    with cc._PROVEN_CELLS_LOCK:
-        cc._PROVEN_CELLS.clear()
+    with cc._PROVEN_GRAPHS_LOCK:
+        cc._PROVEN_GRAPHS.clear()
     armed = cc._armed_pipelines()
     for pipe in list(armed):
         armed.discard(pipe)
     yield
-    with cc._PROVEN_CELLS_LOCK:
-        cc._PROVEN_CELLS.clear()
+    with cc._PROVEN_GRAPHS_LOCK:
+        cc._PROVEN_GRAPHS.clear()
     for pipe in list(armed):
         armed.discard(pipe)
 
 
-def test_proven_cell_registry_roundtrip() -> None:
+def test_proven_graph_registry_roundtrip() -> None:
     ref = "cozy-fleet/compiled graphs/sdxl-rtx-4090-w8a8:abc123"
     assert cc.compiled_graph_proven_in_process(ref) is False
     cc.record_compiled_graph_proven(ref)
