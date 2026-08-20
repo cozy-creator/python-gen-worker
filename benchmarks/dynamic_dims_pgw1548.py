@@ -354,14 +354,77 @@ class Bench:
                 shutil.copytree(source, room / name)
             else:
                 shutil.copy2(source, room / name)
-        venv = self.endpoint / ".venv"
+        venv = self._venv()
         if venv.exists():
             (room / ".venv").symlink_to(venv)
         return room
 
+    def _venv(self) -> Path:
+        """The environment the endpoint's own code runs in.
+
+        NOT always `<endpoint>/.venv`. On this box that one carries
+        `torch 2.13.0+cpu` — an endpoint booted in it would refuse the card,
+        or worse, serve on CPU and produce a table of walls that compare two
+        CPU runs. `--venv` names the fleet-line environment instead, and the
+        boot below verifies it can actually see a GPU before anything is
+        compiled.
+        """
+
+        if getattr(self.args, "venv", ""):
+            return Path(self.args.venv).expanduser().resolve()
+        return self.endpoint / ".venv"
+
     def _python(self) -> str:
-        venv = self.endpoint / ".venv" / "bin" / "python"
+        venv = self._venv() / "bin" / "python"
         return str(venv) if venv.exists() else sys.executable
+
+    def assert_card(self) -> dict[str, Any]:
+        """Refuse before the first compile if this environment has no card.
+
+        A CPU-only torch is not a slow run, it is a different measurement
+        wearing the same output shape: every arm would still produce walls,
+        the table would still render, and every number in it would be wrong
+        about the thing being asked. Cheaper to refuse here than to discover
+        it in the verdict.
+        """
+
+        probe = _run(
+            [self._python(), "-c",
+             "import json,torch;print(json.dumps({'torch': torch.__version__,"
+             "'cuda': torch.version.cuda, 'available': torch.cuda.is_available(),"
+             "'name': torch.cuda.get_device_name(0) if torch.cuda.is_available()"
+             " else '', 'capability': list(torch.cuda.get_device_capability(0))"
+             " if torch.cuda.is_available() else []}))"],
+            timeout=180,
+        )
+        line = (probe.stdout or "").strip().splitlines()[-1] if probe.stdout else ""
+        try:
+            facts = json.loads(line)
+        except json.JSONDecodeError:
+            raise SystemExit(
+                f"could not read a card probe out of {self._python()}:\n"
+                f"{probe.stdout}\n{probe.stderr}"
+            ) from None
+        if not facts.get("available"):
+            raise SystemExit(
+                f"{self._python()} reports torch {facts.get('torch')} "
+                f"(cuda={facts.get('cuda')}) with NO card available. Every arm "
+                f"would produce walls and the table would render — and it would "
+                f"be a CPU-vs-CPU comparison labelled as a graph A/B. Refusing. "
+                f"Pass --venv <fleet-line env>."
+            )
+        major, minor = (facts.get("capability") or [0, 0])[:2]
+        facts["sm"] = f"sm_{major}{minor}"
+        if self.args.sm and self.args.sm != facts["sm"]:
+            raise SystemExit(
+                f"--sm {self.args.sm!r} but the card is {facts['sm']} "
+                f"({facts['name']}). An sm mismatch does not fail loudly at "
+                f"adopt time — it silently matches no artifact and every arm "
+                f"serves eager."
+            )
+        print(f"[card] {facts['name']} {facts['sm']} torch {facts['torch']} "
+              f"cu{facts['cuda']}")
+        return facts
 
     def _gen_worker(self, room: Path, argv: list[str], timeout: float) -> subprocess.CompletedProcess:
         """The CLI, running THIS branch's source (PYTHONPATH wins over the pin)."""
@@ -369,12 +432,38 @@ class Bench:
         return _run(
             [self._python(), "-m", "gen_worker.cli", *argv],
             cwd=room,
-            env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+            env={
+                "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+                # Fragmentation is a real term on a card this small: an SDXL
+                # boot leaves the allocator holding segments the request's
+                # activations cannot reuse. Held CONSTANT across every arm, so
+                # it changes the headroom without changing the comparison.
+                "PYTORCH_CUDA_ALLOC_CONF": os.environ.get(
+                    "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
+            },
             timeout=timeout,
         )
 
     # -- one arm ------------------------------------------------------------
     def lock(self, room: Path, arm: str) -> float:
+        """Derive this arm's graph set. **Cacheable, and it should be cached.**
+
+        The derive touches no card — it is `torch.export` tracing on CPU — but
+        it is not cheap: SDXL measured 865.6 s static / 201.4 s aspect. Paying
+        that inside a granted GPU window spends the one scarce resource on the
+        one step that does not need it, so `--lock-cache` takes a lock derived
+        earlier on the box. The cached wall is carried forward from the sidecar
+        rather than reported as zero: a cached arm must not read as a free
+        derive in the mint-cost arithmetic, which is half of the ROI question.
+        """
+
+        cached = self._cached_lock(arm)
+        if cached is not None:
+            document, wall = cached
+            shutil.copy2(document, room / "endpoint.lock")
+            print(f"[{arm}] lock: reused {document} (derived off-window in "
+                  f"{wall:.1f}s)")
+            return wall
         started = time.monotonic()
         result = self._gen_worker(
             room,
@@ -385,6 +474,32 @@ class Bench:
         if result.returncode != 0:
             raise SystemExit(f"[{arm}] lock failed:\n{result.stdout}\n{result.stderr}")
         return time.monotonic() - started
+
+    def _cached_lock(self, arm: str) -> tuple[Path, float] | None:
+        """A pre-derived `endpoint.lock.<arm>` plus the wall it actually cost.
+
+        A cache HIT with no recorded wall is refused rather than scored as 0 s:
+        the derive wall is an input to the specialization-ROI arithmetic, and a
+        silent zero there would make every dynamic arm look free to author.
+        """
+
+        if not getattr(self.args, "lock_cache", ""):
+            return None
+        directory = Path(self.args.lock_cache).expanduser()
+        document = directory / f"endpoint.lock.{arm}"
+        if not document.exists():
+            return None
+        meta = directory / f"endpoint.lock.{arm}.meta.json"
+        if not meta.exists():
+            raise SystemExit(
+                f"[{arm}] {document} has no {meta.name} beside it, so the derive "
+                f"wall it cost is unknown. That wall is half of the ROI this "
+                f"lane reports; scoring it as zero would make a dynamic arm read "
+                f"as free to derive. Re-derive with the sidecar, or drop "
+                f"--lock-cache."
+            )
+        wall = float(json.loads(meta.read_text())["lock_s"])
+        return document, wall
 
     def specializations(self, room: Path) -> list[dict[str, Any]]:
         """Every graph specialization this arm's lock declares.
@@ -416,6 +531,95 @@ class Bench:
             raise SystemExit(f"{room}: the lock declares zero specializations")
         return records
 
+    def covering_selectors(self, arm: str, records: list[dict[str, Any]]) -> list[str]:
+        """Exactly the specializations this run's SHAPES enter — no more, no fewer.
+
+        A single global `--selectors` list cannot serve a multi-arm run: the
+        static arm needs one specialization per shape, the aspect arm needs one
+        for all of them, and handing either the other's list is a refusal
+        ("names no specialization this endpoint has") — arriving after the lock,
+        inside the paid window. And building EVERY record instead would spend
+        the card on 15 buckets nobody measures.
+
+        So the selection is DERIVED from the same (aspect, cfg) cells the table
+        will report, against each record's own declared `sample` ingress:
+        concrete dims must match exactly; a symbolic dim (`8*s3`) matches when
+        the value is inside the symbol's observed range AND on its stride —
+        which is the dispatcher's own rule, not a looser one invented here.
+
+        A cell no record covers is a REFUSAL, not a skipped row. Serving it
+        would fall through to eager, and an eager wall averaged into a compiled
+        column is the exact vacuous green this file exists to prevent.
+        """
+
+        wanted: list[tuple[str, str, int, int, int]] = []
+        for aspect in self.args.aspects:
+            latent = self.args.latents.get(aspect)
+            if latent is None:
+                raise SystemExit(
+                    f"--latents has no entry for aspect {aspect!r}. The harness "
+                    f"will not guess a bucket: a wrong latent silently selects "
+                    f"the wrong specialization and the arm then serves eager."
+                )
+            for cfg in self.args.cfg:
+                wanted.append((aspect, cfg, 2 if cfg == "on" else 1, *latent))
+
+        chosen: list[str] = []
+        for aspect, cfg, batch, height, width in wanted:
+            match = None
+            for record in records:
+                if self._covers(record, batch, height, width):
+                    match = record
+                    break
+            if match is None:
+                raise SystemExit(
+                    f"[{arm}] no specialization in this arm's lock covers "
+                    f"{aspect}/{cfg} (batch {batch}, latent {height}x{width}). "
+                    f"That cell would serve EAGER and its wall would be averaged "
+                    f"into a compiled column. Refusing to run the arm."
+                )
+            short = match["graph"][:16]
+            if short not in chosen:
+                chosen.append(short)
+        print(f"[{arm}] building {len(chosen)} of {len(records)} "
+              f"specialization(s) for {len(wanted)} cell(s): {chosen}")
+        return chosen
+
+    @staticmethod
+    def _covers(record: dict[str, Any], batch: int, height: int, width: int) -> bool:
+        inputs = ((record.get("ingress") or {}).get("inputs") or [])
+        sample = next((i for i in inputs if i.get("name") == "sample"), None)
+        if sample is None:
+            return False
+        shape = sample.get("shape") or []
+        if len(shape) != 4:
+            return False
+        symbols = (record.get("ingress") or {}).get("symbols") or {}
+        for declared, value in zip(shape, (batch, None, height, width)):
+            if value is None:  # the channel dim, never an axis
+                continue
+            if isinstance(declared, int):
+                if declared != value:
+                    return False
+                continue
+            bounds = symbols.get(declared)
+            if not bounds:
+                return False
+            low, high = int(bounds[0]), int(bounds[-1])
+            if not (low <= value <= high):
+                return False
+            # `8*s3` is a DERIVED dim: the stride rides in the symbol name and
+            # a value off it satisfies no guard (tcg#77). Checking the range
+            # alone would select a record the dispatcher then refuses.
+            stride = 1
+            if "*" in str(declared):
+                head = str(declared).split("*", 1)[0]
+                if head.isdigit():
+                    stride = int(head)
+            if stride > 1 and value % stride:
+                return False
+        return True
+
     def compile(self, room: Path, arm: str, selectors: list[str]) -> float:
         """Build ONLY what this run benchmarks. One selector per child."""
 
@@ -441,8 +645,31 @@ class Bench:
         # measure eager, and the table reports a beautiful 0% delta — the same
         # vacuous green the preflight exists to stop, arriving from the boot
         # side. The whole run would be worthless and would look fine.
+        # `--compile off` is NOT an optimization, it is a correctness
+        # requirement for a benchmark, and it cost this lane a leg to learn.
+        # The default policy is `auto`, whose help says it fills this boot's
+        # holes in the background, "never blocking a request". It does not
+        # block a request — it COMPETES with one. Measured on the campaign card
+        # (2026-08-20): booting the static arm with 17 unbuilt specializations
+        # started `gen_worker.serving.mint_child`, which took 5300 MiB of an
+        # 8188 MiB card, and the very first measured request died with 6.6 MB
+        # free. On a card that does NOT OOM the outcome is worse, because the
+        # arm still produces walls — walls taken while a compiler had the SMs.
+        # Every artifact this harness measures was built by the explicit
+        # `gen-worker compile` above; a hole is a shape this run is not
+        # measuring, and filling it during the measurement is pure contamination.
         argv = ["up", str(room), "-d", "--checkpoint", str(self.args.checkpoint),
+                "--compile", "off",
                 "--idle-timeout", str(self.args.idle_timeout)]
+        # The CFG/batch axis is a CHECKPOINT-DEFAULTS flag, not a request field
+        # (sd15 main.py:367-373, and sdxl reads `config.cfg` the same way): the
+        # request's `guidance_scale` is warned-and-ignored on a cfg-off serving.
+        # So batch-1 vs batch-2 cannot vary WITHIN one boot — it is a property
+        # of the boot, and `--defaults` is where it is stated. Passing
+        # guidance_scale and hoping for batch 1 would have measured batch 2
+        # twice and reported the CFG axis as free.
+        if self.args.defaults:
+            argv += ["--defaults", self.args.defaults]
         if self.args.sm:
             argv += ["--sm", self.args.sm]
         up = self._gen_worker(room, argv, timeout=self.args.boot_timeout)
@@ -540,11 +767,13 @@ class Bench:
         # included. A SUFFIX matches neither, so every compile would have been
         # refused with "names no specialization this endpoint has" — on the
         # pod, after the lock, inside the paid window.
-        selectors = self.args.selectors or [r["graph"][:16] for r in records]
+        selectors = self.args.selectors or self.covering_selectors(name, records)
         compile_s = self.compile(room, name, selectors)
         self.mint[name] = {
             "lock_s": lock_s,
+            "lock_cached": self._cached_lock(name) is not None,
             "compile_s": compile_s,
+            "compile_s_per_spec": compile_s / len(selectors) if selectors else None,
             "specializations": len(records),
             "built": len(selectors),
             "load1_at_compile": os.getloadavg()[0],
@@ -619,6 +848,65 @@ class Bench:
             print(f"[{arm}] note: displaced={list(sample.displaced)} while "
                   f"{sample.compiled_calls} call(s) still served compiled")
 
+    def roi(self) -> dict[str, Any]:
+        """Paul's question, as arithmetic: *is the extra specialization worth it?*
+
+        One axis, two sides, both measured here and neither guessed:
+
+        * **BOUGHT** — the worst decidable cell's regression against static.
+          The WORST, not the mean: a request that lands in the bad bucket pays
+          it every time, so averaging a win against a loss answers a question
+          nobody asked.
+        * **PAID** — (N_static − N_dynamic) extra specializations, each costing
+          one measured `compile_s_per_spec` on the card plus one export inside
+          every `gen-worker lock` anyone ever runs, plus its bytes in the lock.
+
+        The floor is not 1. SDXL's schedulers fork the timestep dtype (5 int64 /
+        3 float32, measured $0 by the coordinator 2026-08-20), and a dtype fork
+        is STRUCTURAL, not a shape — so the minimum honest spec count for a
+        fully dynamic SDXL is 2, and the static ceiling is 2x the shape
+        enumeration. `dtype_lanes` states that assumption in the output instead
+        of leaving a reader to infer a floor of 1 from a table that only ever
+        exercised one lane.
+        """
+
+        static = self.mint.get("static") or {}
+        per_spec = static.get("compile_s_per_spec")
+        out: dict[str, Any] = {
+            "dtype_lanes": self.args.dtype_lanes,
+            "measured_compile_s_per_spec": per_spec,
+            "axes": {},
+        }
+        for arm in self.table.arms():
+            if arm == "static":
+                continue
+            mint = self.mint.get(arm) or {}
+            worst: tuple[str, float] | None = None
+            for aspect, cfg in self.table.shapes():
+                if self.table.undecidable(aspect, cfg):
+                    continue
+                delta = self.table.regression(arm, aspect, cfg)
+                if delta is None:
+                    continue
+                if worst is None or delta > worst[1]:
+                    worst = (f"{aspect}/{cfg}", delta)
+            saved = (static.get("specializations") or 0) - (
+                mint.get("specializations") or 0)
+            out["axes"][arm] = {
+                "worst_cell": worst[0] if worst else None,
+                "bought_pct_per_step": -worst[1] if worst else None,
+                "specializations_static": static.get("specializations"),
+                "specializations_dynamic": mint.get("specializations"),
+                "specializations_saved": saved,
+                "compile_s_saved": (saved * per_spec) if per_spec else None,
+                "derive_s_static": static.get("lock_s"),
+                "derive_s_dynamic": mint.get("lock_s"),
+                "derive_s_saved": (
+                    (static.get("lock_s") or 0.0) - (mint.get("lock_s") or 0.0)
+                ),
+            }
+        return out
+
     def report(self) -> dict[str, Any]:
         adoption = {}
         for arm in self.table.arms():
@@ -633,10 +921,16 @@ class Bench:
             # rendered table, so a consumer reading the JSON cannot get the
             # numbers without the sentence that bounds them.
             "substrate_note": SUBSTRATES[self.args.substrate],
+            # Which SCHEDULER lane these graphs cover. Same discipline as the
+            # substrate stamp: the SDXL locks in play were derived under the
+            # checkpoint's own EulerDiscrete (float32 timesteps), so a reader
+            # must not take the table as an all-scheduler result.
+            "lane_note": self.args.lane_note,
             "tolerance_pct": self.args.tolerance,
             "mint": self.mint,
             "table_markdown": self.table.render(self.args.substrate),
             "adoption": adoption,
+            "roi": self.roi(),
             **self.table.as_dict(),
         }
 
@@ -752,6 +1046,64 @@ def self_test() -> int:
     check("every arm names an axis policy", set(ARMS) == set(AXES))
     check("static is the OFF control", AXES["static"] == "off")
 
+    print("[self-test] a cached lock cannot smuggle in a free derive")
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = Path(tmp)
+        (cache / "endpoint.lock.aspect").write_text("{}")
+        bench = Bench.__new__(Bench)
+        bench.args = argparse.Namespace(lock_cache=str(cache))
+        try:
+            bench._cached_lock("aspect")
+            check("a cache hit with no derive wall is refused", False)
+        except SystemExit as exc:
+            check("a cache hit with no derive wall is refused",
+                  "meta.json" in str(exc))
+        (cache / "endpoint.lock.aspect.meta.json").write_text('{"lock_s": 201.4}')
+        hit = bench._cached_lock("aspect")
+        check("with the sidecar, the REAL derive wall is carried forward",
+              hit is not None and abs(hit[1] - 201.4) < 1e-9)
+        check("a miss is a miss, not a refusal", bench._cached_lock("batch") is None)
+        bench.args = argparse.Namespace(lock_cache="")
+        check("no cache configured means no cache", bench._cached_lock("aspect") is None)
+
+    print("[self-test] the ROI reports the WORST cell, never the mean")
+    roi_table = Table()
+    for round_index in (0, 1):
+        for _ in range(2):
+            # 1:1 barely moves; 3:2 costs 12%. A mean would read as +6% and
+            # invite adoption; the worst cell is what a request actually pays.
+            roi_table.add(Sample(arm="static", aspect="1:1", cfg="on",
+                                 seconds=10.0, round=round_index))
+            roi_table.add(Sample(arm="aspect", aspect="1:1", cfg="on",
+                                 seconds=10.0, round=round_index))
+            roi_table.add(Sample(arm="static", aspect="3:2", cfg="on",
+                                 seconds=10.0, round=round_index))
+            roi_table.add(Sample(arm="aspect", aspect="3:2", cfg="on",
+                                 seconds=11.2, round=round_index))
+    roi_bench = Bench.__new__(Bench)
+    roi_bench.table = roi_table
+    roi_bench.args = argparse.Namespace(dtype_lanes=2)
+    roi_bench.mint = {
+        "static": {"specializations": 18, "compile_s_per_spec": 218.0,
+                   "lock_s": 865.6},
+        "aspect": {"specializations": 2, "lock_s": 201.4},
+    }
+    roi = roi_bench.roi()["axes"]["aspect"]
+    check("the worst cell is the one reported", roi["worst_cell"] == "3:2/on")
+    check("and it is stated as what the extra specializations BUY",
+          roi["bought_pct_per_step"] is not None
+          and abs(roi["bought_pct_per_step"] - -12.0) < 0.01)
+    check("the paid side counts the specializations removed",
+          roi["specializations_saved"] == 16)
+    check("priced at the MEASURED compile wall, not a remembered one",
+          abs(roi["compile_s_saved"] - 16 * 218.0) < 1e-6)
+    check("the derive saving is reported too (it is author time, every run)",
+          abs(roi["derive_s_saved"] - (865.6 - 201.4)) < 1e-6)
+    check("the dtype-lane floor travels with the arithmetic",
+          roi_bench.roi()["dtype_lanes"] == 2)
+
     print()
     if failures:
         print(f"SELF-TEST RED: {len(failures)} check(s) failed: {failures}")
@@ -795,6 +1147,31 @@ def main(argv: list[str] | None = None) -> int:
                         help="comma-separated `gen-worker compile --first` "
                              "selectors; default: every specialization in the "
                              "arm's lock")
+    parser.add_argument("--defaults", default="",
+                        help='checkpoint-defaults JSON for `up --defaults`, '
+                             'e.g. \'{"cfg": false}\' for the batch-1 half of '
+                             'the CFG axis. CFG is a per-checkpoint flag, so it '
+                             'is a property of the BOOT, not of a request')
+    parser.add_argument("--venv", default="",
+                        help="the environment the endpoint runs in. Default "
+                             "<endpoint>/.venv — which on this box is CPU-only "
+                             "torch, so a real leg must name the fleet-line env")
+    parser.add_argument("--lock-cache", default="",
+                        help="directory holding pre-derived "
+                             "`endpoint.lock.<arm>` files, each with a "
+                             "`.meta.json` carrying the derive wall it cost. "
+                             "The derive needs no card; paying it inside a "
+                             "granted GPU window spends the scarce resource on "
+                             "the step that does not need it.")
+    parser.add_argument("--lane-note", default="euler/float32 timestep lane only",
+                        help="which scheduler/dtype lane these graphs cover; "
+                             "stamped into the verdict so the table is not read "
+                             "as an all-scheduler result")
+    parser.add_argument("--dtype-lanes", type=int, default=2,
+                        help="structural timestep-dtype lanes this model forks "
+                             "into (SDXL: 2 — 5 int64 / 3 float32 schedulers). "
+                             "This is the FLOOR on specialization count even "
+                             "with every shape axis dynamic.")
     parser.add_argument("--lock-timeout", type=float, default=1800)
     parser.add_argument("--compile-timeout", type=float, default=3600)
     parser.add_argument("--boot-timeout", type=float, default=900)
@@ -821,6 +1198,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("the static arm is the control; every run needs it")
 
     bench = Bench(args)
+    bench.card = bench.assert_card()
     rooms = {}
     for arm in arms:
         print(f"[prepare] {arm} (--dynamic-axes {AXES[arm]})")
@@ -839,7 +1217,25 @@ def main(argv: list[str] | None = None) -> int:
         state = "ADOPT" if verdict["adopt"] else "KEEP STATIC"
         print(f"{arm}: {state} {verdict['outside_tolerance'] or ''}")
     print()
-    print(report["substrate_note"])
+    print("SPECIALIZATION ROI — what the extra graphs buy, and what they cost")
+    roi = report["roi"]
+    for arm, row in roi["axes"].items():
+        bought = row["bought_pct_per_step"]
+        print(
+            f"  {arm}: static buys "
+            + ("(not decidable)" if bought is None
+               else f"{bought:+.1f}% round-trip in its WORST cell "
+                    f"({row['worst_cell']})")
+            + f" and costs {row['specializations_saved']} extra "
+              f"specialization(s) = "
+            + (f"{row['compile_s_saved']:.0f}s of mint"
+               if row["compile_s_saved"] else "an unmeasured mint")
+            + f" + {row['derive_s_saved']:.0f}s of derive on EVERY lock run"
+        )
+    print(f"  floor: {roi['dtype_lanes']} specialization(s) even fully dynamic "
+          f"(structural timestep-dtype lanes)")
+    print()
+    print(report["substrate_note"], "|", report["lane_note"])
     return 0
 
 
