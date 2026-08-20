@@ -319,3 +319,59 @@ def test_the_PRODUCTION_host_installs_the_guard(
         "the production host handed out an UNGUARDED ctx.compile sink, so a "
         "LoRA request served the base model silently (pgw#1571)")
     assert [row for row in wire if row[1] == "adapter_ops_on_compiled"], wire
+
+
+# --------------------------------------------------------------------------
+# The OPERATOR'S ORDER (pgw#1589, carrying pgw#1587's intent to the live path)
+# --------------------------------------------------------------------------
+
+
+def test_an_operator_eager_only_order_suppresses_compiled_dispatch(
+    tmp_path: Path, wire: List[tuple]
+) -> None:
+    """pgw#1589. The hub sends the order, `worker.on_message` applies it, and
+    until now exactly ONE thing read it: `aot_serve`'s arm, which has no
+    production caller. pgw#1587 added a second read in `arm_aot` — same
+    orphaned tier. So an operator could issue `serve_posture{eager_only:true}`,
+    get an ack, and watch the pod keep serving from its compiled graphs.
+
+    Read here, on the path that dispatches, so the order is observed by the
+    thing it is about.
+    """
+    from gen_worker import serve_posture
+
+    calls: List[str] = []
+    module = _armed(tmp_path, calls)
+    serve_posture.reset()
+    try:
+        module(torch.ones(2, 4))
+        assert calls, "compiled serving was off before any order was issued"
+        calls.clear()
+
+        serve_posture.apply_command(True, actor="operator@cozy", reason="drain")
+        module(torch.ones(2, 4))
+        assert calls == [], (
+            "an operator ordered this worker EAGER and it dispatched to a "
+            "compiled graph anyway (pgw#1589)")
+
+        # The DISPATCH row, on its own phase — `serve_posture` emits its own
+        # TRANSITION row on `PHASE_SUPPRESSED`, and one phase carrying two
+        # vocabularies is a metric that means neither (pgw#1441's split).
+        rows = [row for row in wire
+                if row[0] == activity_mod.KIND_LORA_HYGIENE
+                and row[1] == serve_posture.REASON]
+        assert len(rows) == 1, f"the order must be a wire fact: {wire}"
+        assert serve_posture.REASON == "operator_eager_only", (
+            "this row finally wires EagerPhase.OPERATOR_EAGER_ONLY, which had "
+            "no emitter since pgw#1142 defined it")
+        assert "operator@cozy" in rows[0][2] and "drain" in rows[0][2]
+
+        # REVERSIBLE, and with no re-arm: `apply_command` promises it and the
+        # read is per call, never latched at arm time.
+        serve_posture.apply_command(False, actor="operator@cozy")
+        module(torch.ones(2, 4))
+        assert calls, (
+            "releasing the order did not resume compiled serving — the read "
+            "latched, so the order is one-way")
+    finally:
+        serve_posture.reset()

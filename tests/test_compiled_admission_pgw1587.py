@@ -252,38 +252,50 @@ def test_the_probe_refuses_a_plan_the_arithmetic_admitted() -> None:
     )
 
 
-def test_an_operator_eager_only_order_refuses_the_v2_arm_by_name() -> None:
-    """The third entry into loud eager, and it was HALF-WIRED.
+def test_an_operator_eager_only_order_is_observed_by_the_dispatch_seam() -> None:
+    """The third entry into loud eager, RE-AIMED at the seam that runs.
 
-    `serve_posture{eager_only:true}` reaches `apply_command` from
-    `worker.py`, but its arming reader was `compile_cache.arming_block` — the
-    v1 tier's precondition authority. On the v2 serving path the order was
-    observed only at CALL time, so a pod told not to adopt still paid for
-    every adopt. Refusing at the arm seam is the reversibility-safe half:
-    nothing is unwrapped, so releasing the order lets the next pass adopt.
+    pgw#1587 filed this correctly and pointed it one layer off. Its reader was
+    `compile_cache.arming_block` (the v1 precondition authority), so this row
+    moved it to `provision.arm_aot` and called that "the v2 arm" — but
+    `arm_aot` imports `aot_serve`, i.e. it is the SAME v1 tier, which pgw#1573
+    measured as having no production caller. Both readers were in dead code, so
+    an operator could issue the order, get an ack, and watch the pod keep
+    serving from its compiled graphs (filed as pgw#1589).
+
+    The v2 arm is `AdoptSession` installing a dispatcher; the order arrives
+    over a live control channel long AFTER that and is RELEASABLE, so the
+    honest altitude is the dispatch itself. `serving.adapter_guard` reads it
+    per call — which makes both directions work with no re-arm and no de-arm,
+    exactly the reversibility `apply_command` promises.
+
+    The behavioural proof lives beside the seam, in
+    `tests/test_adapter_on_compiled.py`
+    (`test_an_operator_eager_only_order_suppresses_compiled_dispatch`, red-armed).
+    What this row keeps is pgw#1587's own claim: the order is a REFUSAL WITH A
+    NAME, and that name is the token the enum reserved for it.
     """
+    from gen_worker.serving import adapter_guard
+
     serve_posture.reset()
     try:
+        assert adapter_guard._eager_only_reason() == "", (
+            "a worker under no order must not report one")
+
         assert serve_posture.apply_command(
             True, actor="operator@test", reason="a card under investigation")
-        outcome = provision.arm_aot(
-            object(), object(), None, Path("/nonexistent.pt2"), 0, meta={},
-        )
-        assert not outcome, "an ordered-eager worker must not arm"
-        assert outcome.reason == serve_posture.REASON
-        assert "operator@test" in outcome.detail
-        assert "a card under investigation" in outcome.detail
+        why = adapter_guard._eager_only_reason()
+        assert why, "the dispatch seam cannot see a standing order"
+        assert "operator@test" in why and "a card under investigation" in why
+        assert serve_posture.REASON == "operator_eager_only", (
+            "the order's token must stay the one EagerPhase reserved for it — "
+            "never counted with the failure classes, never with "
+            "`hub_ordered_eager` (one PLAN's backend, not a standing order)")
 
-        # RELEASED: the same call must no longer answer with the order. It may
-        # still miss for its own reasons (the artifact is a fiction here) — the
-        # claim is that POLICY stopped being the cause.
+        # RELEASED: policy stops being the cause, with nothing re-armed.
         assert serve_posture.apply_command(False, actor="operator@test")
-        after = provision.arm_aot(
-            object(), object(), None, Path("/nonexistent.pt2"), 0, meta={},
-        )
-        assert after.reason != serve_posture.REASON, (
-            "releasing the order must let arming decisions run normally again"
-        )
+        assert adapter_guard._eager_only_reason() == "", (
+            "releasing the order must let dispatch run normally again")
     finally:
         serve_posture.reset()
 
