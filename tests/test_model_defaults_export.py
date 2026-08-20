@@ -61,6 +61,10 @@ LAUNCH_SET_NAMES: list[str] = [
     # either, because every core model in its repo is a pickle and no
     # safetensors-shaped document can ever describe one.
     "trellis2", "hunyuan3d",
+    # pgw#1574 (se#798): joycaption, the last endpoint of 26 without a type.
+    # A LLaVA captioner — no lane document, no scheduler, and an AR sampling
+    # vocabulary (max_new_tokens/temperature/top_p) rather than a diffusion one.
+    "joycaption",
     "sdxl.lora", "sd15.lora",
 ]
 

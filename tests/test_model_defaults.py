@@ -560,6 +560,10 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
         "internvl-u",
         # pgw#1424 (se#769 3D lane): the two 3D roots.
         "trellis2", "hunyuan3d",
+        # pgw#1574 (se#798): the LLaVA captioner — the LAST of the 26
+        # serverless endpoints to acquire a type. Non-diffusion, and the
+        # QwenTextGen sampling triple under its own wire names.
+        "joycaption",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL

@@ -1789,6 +1789,86 @@ class Ltx2UpsamplerDefaults(msgspec.Struct, frozen=True):
     like any other. Fields stay additive if a knob is ever ruled."""
 
 
+class JoyCaptionDefaults(msgspec.Struct, frozen=True):
+    """JoyCaption — a LLaVA image captioner
+    (``LlavaForConditionalGeneration`` + ``LlavaProcessor`` out of ONE mirror
+    snapshot). The SECOND non-diffusion sampling vocabulary in this module and
+    the same shape as the first: this is :class:`QwenTextGenDefaults`'s triple,
+    not a diffusion one.
+
+    Nothing from the diffusion vocabulary applies. There are no steps, no
+    guidance, no ``cfg``, no timesteps and no scheduler — a caption is one
+    autoregressive pass per token through a decoder, so the knobs are the
+    sampler's. ``cfg`` is absent for a stronger reason than "not exposed":
+    :class:`MusicGenDefaults` carries ``cfg = True`` because MusicGen really
+    does run classifier-free guidance over its T5 conditioning, and a LLaVA
+    ``generate`` runs no second uncond forward at all.
+
+    Values are SOURCED from the family's own endpoint code — the only code
+    that exists for it — ``joycaption/src/joycaption_batch/main.py``'s
+    ``BatchCaptionInput``: ``max_new_tokens`` 512 (``ge=1, le=2048``),
+    ``temperature`` 0.6, ``top_p`` 0.9. There is no ``register_family`` row to
+    transcribe the way :class:`Hunyuan3dDefaults` had one; joycaption is the
+    one endpoint of 26 that never had a vocabulary at all, which is what
+    pgw#1574 closes.
+
+    WIRE NAME ON PURPOSE — ``max_new_tokens``, not :class:`QwenTextGenDefaults`'s
+    ``max_tokens``, and this type therefore does NOT subclass it. The
+    :class:`Hunyuan3dDefaults` reason: ``ctx.defaults`` is merged and read by
+    SAME-NAMED lookup against the payload, so a normalized spelling would
+    resolve from the payload alone and silently stop carrying the platform
+    value. Two roots whose wires disagree are two field names, not one.
+
+    ``max_new_tokens`` CARRIES A ``hi`` where :class:`QwenTextGenDefaults`
+    deliberately refuses one, and the difference is the number of endpoints.
+    Qwen's 32768/16384 clamps are CARD BUDGETS from two different endpoints, so
+    promoting either would make the other's checkpoint row unreachable
+    (``defaults_decode`` only ever NARROWS). 1..2048 is a caption-length policy
+    from the SINGLE joycaption endpoint, over a single lane and a single
+    checkpoint — the :class:`InternVLUDefaults` case exactly, where the wire
+    envelope is simultaneously the only and therefore the widest envelope any
+    lane of this family declares, so it narrows nothing. If a second joycaption
+    checkpoint or endpoint ever ships, this bound must be re-derived as the
+    UNION, not left as it stands.
+
+    ``temperature``/``top_p`` carry a default and NO bounds: the endpoint
+    declares neither with an ``msgspec.Meta`` range (plain ``float`` fields),
+    and inventing a sampling envelope is the pgw#1427 defect. They stay
+    ``Knob`` rather than plain values because the wire DOES expose both, so a
+    per-checkpoint row can narrow them later without a schema change.
+
+    DELIBERATELY ABSENT — THE TWO PROMPTS, and the absence is a decision rather
+    than an oversight. ``_SYSTEM_PROMPT`` ("You are a helpful image captioner.")
+    and ``_DEFAULT_PROMPT`` ("Write a long descriptive caption…") are module
+    CONSTANTS of that one endpoint; the system prompt never reaches the wire at
+    all, and the ``default_prompt`` that does is a value the handler REWRITES
+    caller-visibly when it arrives blank (a ``ctx.adjusted`` row). The one
+    string field this module does carry — :class:`StableAudioDefaults.negative`
+    — earns its place by being per-CHECKPOINT: two checkpoints under that root
+    ship two different values, which is what makes a vocabulary field. Here
+    both strings are single-valued endpoint policy, and no checkpoint-side or
+    model-card evidence for a joycaption fine-tune's trained prompt exists in
+    this repo to source a second value from. Declaring one would pin the whole
+    family to one endpoint's phrasing on no evidence.
+
+    Also absent: ``_RESIZE_MAX_SIDE`` (1024) and ``_EXEC_BATCH_SIZE`` (10).
+    Those are the ie#345 shape discipline — a server-side pin and a payload-side
+    preset, which the endpoint states in situ — and a ModelType is name +
+    ``Defaults`` + fingerprint, nothing else. Same line
+    :class:`Trellis2Defaults` draws at ``resolution``/``texture_size`` and
+    :class:`Hunyuan3dDefaults` at ``octree_resolution``.
+    """
+
+    #: main.py's ``BatchCaptionInput.max_new_tokens``; bounds are that
+    #: endpoint's wire envelope, safe to promote only because it is the
+    #: family's only one (see the docstring).
+    max_new_tokens: Knob[int] = Knob(512, lo=1, hi=2048, name="max_new_tokens")
+    #: AR sampling temperature. No bounds — the endpoint declares none.
+    temperature: Knob[float] = Knob(0.6, name="temperature")
+    #: Nucleus-sampling mass. No bounds, same reason.
+    top_p: Knob[float] = Knob(0.9, name="top_p")
+
+
 # ── the model types (launch set, pgw#1376 point 1) ───────────────────────────
 
 
@@ -2313,6 +2393,47 @@ class Ltx2Upsampler(ModelType[Ltx2UpsamplerDefaults]):
     Defaults = Ltx2UpsamplerDefaults
 
 
+class JoyCaption(ModelType[JoyCaptionDefaults]):
+    """JoyCaption — the LLaVA image captioner ``joycaption`` serves.
+
+    NAME + FINGERPRINT + ``Defaults`` ONLY. **No ``canonical_contract``, and
+    deliberately not a :class:`MissingContract` sentinel either** — the
+    :class:`MusicGen` / :class:`Hunyuan3d` shape, ratified under the se#769
+    umbrella: when a family genuinely has no lane, declare NO contract rather
+    than a sentinel, whose own refusal text instructs the reader to author the
+    missing document and is therefore "a standing lie with a to-do attached".
+    Absent is honest.
+
+    The absence is real rather than unfinished, and it is CHECKED rather than
+    assumed. tensorfs publishes no ``joycaption.*`` document — the vendored
+    library carries 21 stamps and not one of them is in this family. It also
+    could not publish a *diffusers* one: this is a ``transformers`` LLaVA tree
+    (``LlavaForConditionalGeneration`` + ``LlavaProcessor`` from a single
+    mirror snapshot), the class th#1937/th#2109 rule as correctly carrying NO
+    ``file_layout``, not as a gap to fill. The endpoint matches that shape on
+    the serve path too: its root slot binds an endpoint-local
+    ``JoyCaptionPipeline.from_pretrained`` wrapper, never
+    ``ctx.load(<diffusers PipelineClass>)``, so no loader would consume a lane
+    document if one existed.
+
+    This is the LAST of the 26 ``serverless-endpoints`` endpoints to acquire a
+    model type; before pgw#1574 it was the one endpoint that could not be
+    written as ``Model[MT]`` at all, because ``Model`` reads its type from
+    ``__orig_bases__`` and an endpoint-local ``ModelType`` subclass would be a
+    name the fleet's defaults decoding cannot resolve.
+
+    ``canonical_scheduler_config`` is ``{}`` by DEFINITION, the
+    :class:`Qwen36Mtp` reason: the field exists so ingest can synthesize a
+    missing ``scheduler/scheduler_config.json`` for a diffusers pipeline
+    constructor's scheduler invariant, and an autoregressive decoder has no
+    noise schedule and no such invariant.
+    """
+
+    name = "joycaption"
+    contracts = ("joycaption.*",)
+    Defaults = JoyCaptionDefaults
+
+
 MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     SDXL,
     SD15,
@@ -2337,6 +2458,7 @@ MODEL_TYPES: Final[tuple[type[ModelType[msgspec.Struct]], ...]] = (
     InternVLU,
     Trellis2,
     Hunyuan3d,
+    JoyCaption,
 )
 
 LORA_OVERLAYS: Final[tuple[type[LoraOverlay], ...]] = (SDXL.Lora, SD15.Lora)
@@ -2388,6 +2510,7 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
         InternVLU.name: InternVLU.Defaults,
         Trellis2.name: Trellis2.Defaults,
         Hunyuan3d.name: Hunyuan3d.Defaults,
+        JoyCaption.name: JoyCaption.Defaults,
         SDXL.Lora.name: SDXL.Lora.Defaults,
         SD15.Lora.name: SD15.Lora.Defaults,
     }
@@ -2433,6 +2556,8 @@ __all__ = [
     "Hunyuan3dDefaults",
     "HiDreamO1",
     "HiDreamO1Defaults",
+    "JoyCaption",
+    "JoyCaptionDefaults",
     "Knob",
     "LORA_OVERLAYS",
     "LoraOverlay",
