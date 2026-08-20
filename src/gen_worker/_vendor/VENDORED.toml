@@ -306,7 +306,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "8b037b01d30ed8c460371f77efea0b41644a0a87"
+rev = "2a38ff2be91e2823b311f31b9f665048b7d0db55"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's
@@ -516,7 +516,7 @@ rewrites = [
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
 "_wrapper_split.py" = "1d5a3bc1ccabadeaa2b8b54f1492cba10723e53074a0022b8c7453565a86a4ce"
 "adopt.py" = "7cc8965a48e9f2ea5867e80ccc3dec506d33fe86896de37528a6652fe80c19e9"
-"artifact.py" = "a3c96d845be49c752bd608dbb4b36fb192cb449937716d8d835aeba2e28d12ba"
+"artifact.py" = "fb8c1ad62b94abb075915fd8e58514c740f03ec5f8384a5ab97c17917b8061e5"
 "cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
 "compiler.py" = "6ee54b26286b215eef8867dffb133d023a6808379574ac69f8007a64c477045a"
 "contracts/KEY_GRAMMAR_DIGEST" = "0503f3251f2eb48b794961736f021915cd56c14930798ac844c90112fa2af69d"
