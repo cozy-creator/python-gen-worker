@@ -189,8 +189,20 @@ class Table:
         return (high - low) / low * 100.0 if low else None
 
     def undecidable(self, aspect: str, cfg: str, limit: float = 15.0) -> bool:
+        """Is this cell's verdict unreadable — for EITHER reason?
+
+        Two ways, and the second one used to read as decidable, which is the
+        silent-vacuity shape this file exists to avoid: a cell measured in
+        only ONE round has no reproducibility evidence at all, so `spread`
+        answers None, and "no evidence" must never score as "no problem". A
+        run cut short to fit a window is exactly when that happens, so the
+        absence is treated as undecidable rather than as a pass.
+        """
+
         spread = self.spread("static", aspect, cfg)
-        return spread is not None and spread > limit
+        if spread is None:
+            return True
+        return spread > limit
 
     def regression(self, arm: str, aspect: str, cfg: str) -> float | None:
         """Percent SLOWER than the static control in this cell. Negative = faster."""
@@ -242,10 +254,13 @@ class Table:
         for aspect, cfg in self.shapes():
             if self.undecidable(aspect, cfg):
                 spread = self.spread("static", aspect, cfg)
-                offenders.append(
-                    f"{aspect}/{cfg}: UNDECIDABLE (control spread "
-                    f"{spread:.1f}% > 15%; re-run on a quiet slot)"
+                why = (
+                    f"control spread {spread:.1f}% > 15%; re-run on a quiet slot"
+                    if spread is not None
+                    else "measured in ONE round, so nothing establishes that "
+                         "the control reproduces; re-run with >= 2 rounds"
                 )
+                offenders.append(f"{aspect}/{cfg}: UNDECIDABLE ({why})")
                 continue
             delta = self.regression(arm, aspect, cfg)
             if delta is None:
@@ -552,11 +567,15 @@ def self_test() -> int:
 
     print("[self-test] the per-shape table CAN show a regression")
     table = Table()
-    for _ in range(3):
-        table.add(Sample("static", "1:1", "on", 1.000))
-        table.add(Sample("aspect", "1:1", "on", 1.010))
-        table.add(Sample("static", "3:4", "on", 2.000))
-        table.add(Sample("aspect", "3:4", "on", 2.600))
+    # TWO rounds: a single-round cell is undecidable by construction now, so a
+    # fixture that wants to exercise the regression arithmetic has to supply
+    # the reproducibility evidence a real run would.
+    for round_index in range(2):
+        for _ in range(3):
+            table.add(Sample("static", "1:1", "on", 1.000, round=round_index))
+            table.add(Sample("aspect", "1:1", "on", 1.010, round=round_index))
+            table.add(Sample("static", "3:4", "on", 2.000, round=round_index))
+            table.add(Sample("aspect", "3:4", "on", 2.600, round=round_index))
     check("a 1% cell reads +1.0%", round(table.regression("aspect", "1:1", "on"), 1) == 1.0)
     check("a 30% cell reads +30.0%", round(table.regression("aspect", "3:4", "on"), 1) == 30.0)
     ok, offenders = table.verdict("aspect", tolerance=5.0)
@@ -584,11 +603,23 @@ def self_test() -> int:
 
     print("[self-test] an unmeasured cell is NOT silently adopted")
     thin = Table()
-    thin.add(Sample("static", "1:1", "on", 1.0))
-    thin.add(Sample("aspect", "1:1", "on", 1.0))
-    thin.add(Sample("static", "16:9", "on", 1.0))
+    for round_index in range(2):
+        thin.add(Sample("static", "1:1", "on", 1.0, round=round_index))
+        thin.add(Sample("aspect", "1:1", "on", 1.0, round=round_index))
+        thin.add(Sample("static", "16:9", "on", 1.0, round=round_index))
     ok, offenders = thin.verdict("aspect", tolerance=5.0)
     check("a missing cell refuses", not ok and any("NOT MEASURED" in o for o in offenders))
+
+    print("[self-test] ONE round is UNDECIDABLE, never a quiet pass")
+    single = Table()
+    single.add(Sample("static", "1:1", "on", 1.0, round=0))
+    single.add(Sample("aspect", "1:1", "on", 1.0, round=0))
+    check("a single-round cell has no spread", single.spread("static", "1:1", "on") is None)
+    check("and is UNDECIDABLE", single.undecidable("1:1", "on"))
+    ok, offenders = single.verdict("aspect", tolerance=3.0)
+    check("so it cannot adopt", not ok)
+    check("and the reason names the ROUND count, not a spread",
+          any("ONE round" in o for o in offenders))
 
     print("[self-test] the table never averages across shapes")
     rendered = table.render()
