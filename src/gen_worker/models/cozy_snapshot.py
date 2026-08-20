@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from gen_worker._vendor.tensorfs import (
+    MAX_CHUNK_SIZE,
     CASRef,
     Chunk,
     DigestMismatch,
@@ -121,12 +122,30 @@ def _manifest_entry(file: WorkerResolvedRepoFile) -> FileEntry:
         Chunk(CASRef.parse(f"sha256:{chunk.sha256}"), int(chunk.length))
         for chunk in file.chunks
     )
-    return FileEntry(
-        _norm_rel_path(file.path),
-        int(file.size_bytes),
-        digest,
-        chunks,
-    )
+    path = _norm_rel_path(file.path)
+    size = int(file.size_bytes)
+    # pgw#1575: THE 64 MiB CHUNKLESS CEILING IS THIS REPO'S, SO IT IS ENFORCED
+    # HERE. tensorfs's own `manifest.py` dropped it (a chunkless entry is one
+    # blob of ANY size upstream), and the vendored snapshot carries upstream's
+    # bytes. But in THIS fleet an object above 64 MiB cannot exist: tensorhub's
+    # publish-v2 lane promotes with a single PUT and refuses anything larger,
+    # which is why `cas/planner.py::plan_chunks` still cuts an oversized blob on
+    # the fixed grid (pgw#1366). So a hub snapshot describing a large file as
+    # ONE object names an object nothing can ever hold, and accepting it is not
+    # harmless: `store.ensure_pinned` would write a pin for it, and
+    # `announce_resident` would then advertise a tree whose bytes are
+    # unreachable — an eager-bridge `header too large` about an intact
+    # checkpoint. The old, stricter vendored parser refused this by accident;
+    # this refuses it on purpose, at the one place every hub-derived entry is
+    # built. It closes with pgw#1366, together with the planner deviation.
+    if not chunks and size > MAX_CHUNK_SIZE:
+        raise ValueError(
+            f"resolved model file {path}: {size} bytes with no chunks. An "
+            f"object above {MAX_CHUNK_SIZE} bytes cannot be promoted by "
+            f"tensorhub's single-PUT publish lane, so this manifest names an "
+            f"object that can never be resident (pgw#1366)"
+        )
+    return FileEntry(path, size, digest, chunks)
 
 
 def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> WorkerResolvedRepo:

@@ -180,13 +180,13 @@ def test_the_document_property_is_the_canonical_json_string() -> None:
 
 
 def _upstream_blob(path: str) -> bytes | None:
-    """One upstream file AT `contract_plane_rev`, or None if unavailable.
+    """One upstream file AT the pinned `rev`, or None if unavailable.
 
     THE REV, NOT THE SIBLING'S WORKING TREE, and the difference is the whole
     point of pinning one. Both drift checks below used to read
     `UPSTREAM / <path>` — whatever the neighbouring checkout happened to have
     checked out — which asserts that this repo is always at tensorfs TIP. That
-    contradicts `contract_plane_rev` existing at all, and it goes red for
+    contradicts the pin existing at all, and it goes red for
     reasons that have nothing to do with the change under test: while tensorfs
     is under active multi-lane development its master gains a lane document
     every few hours, so every vendor PR inherits an unrelated failure and the
@@ -202,7 +202,7 @@ def _upstream_blob(path: str) -> bytes | None:
     manifest = tomllib.loads(
         (ROOT / "src" / "gen_worker" / "_vendor" / "VENDORED.toml").read_text()
     )
-    rev = manifest["packages"]["tensorfs"]["contract_plane_rev"]
+    rev = manifest["packages"]["tensorfs"]["rev"]
     done = subprocess.run(
         ["git", "-C", str(UPSTREAM), "show", f"{rev}:{path}"],
         capture_output=True,
@@ -218,7 +218,7 @@ def test_the_corpus_matches_the_pinned_upstream_rev() -> None:
 
     theirs = _upstream_blob("spec/v1/contract-vectors/contract-vectors.json")
     if theirs is None:
-        pytest.skip("no sibling tensorfs checkout carrying contract_plane_rev")
+        pytest.skip("no sibling tensorfs checkout carrying the pinned rev")
     ours = (VECTORS / "contract-vectors.json").read_bytes()
     assert hashlib.sha256(theirs).hexdigest() == hashlib.sha256(ours).hexdigest()
 
@@ -228,21 +228,30 @@ def test_the_vendored_documents_match_the_pinned_upstream_rev() -> None:
     for path in DOCUMENTS.glob("*.json"):
         theirs = _upstream_blob(f"spec/v1/contracts/{path.name}")
         if theirs is None:
-            pytest.skip("no sibling tensorfs checkout carrying contract_plane_rev")
+            pytest.skip("no sibling tensorfs checkout carrying the pinned rev")
         assert path.read_bytes() == theirs, f"{path.name} drifted from upstream"
         checked += 1
     # A loop that checked nothing is not a passing drift check.
     assert checked == len(list(DOCUMENTS.glob("*.json"))) >= 14
 
 
-def test_the_contract_plane_rev_is_recorded_in_vendored_toml() -> None:
+def test_the_contract_plane_is_digest_fenced_at_the_one_rev() -> None:
+    """pgw#1575: the contract plane has no rev of its own any more.
+
+    It used to, because the snapshot's `rev` was a lineage that predated
+    contracts entirely. One master-ancestor rev now supplies every plane, so
+    the only thing left to assert is that these files are in the SINGLE digest
+    inventory rather than sitting on disk unfenced — which is the failure that
+    third-document drift actually took.
+    """
+
     manifest = tomllib.loads(
         (ROOT / "src" / "gen_worker" / "_vendor" / "VENDORED.toml").read_text()
     )
     spec = manifest["packages"]["tensorfs"]
-    assert len(spec["contract_plane_rev"]) == 40
-    recorded = set(spec["contract_plane_files"])
-    assert "contracts.py" in recorded
+    assert len(spec["rev"]) == 40
+    recorded = set(spec["files"])
+    assert {"contract.py", "contracts.py"} <= recorded
     assert {f"_contracts/{path.name}" for path in DOCUMENTS.glob("*.json")} <= recorded
 
 

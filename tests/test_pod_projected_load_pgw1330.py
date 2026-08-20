@@ -46,6 +46,7 @@ from gen_worker._vendor.tensorfs import (  # noqa: E402
     read_entry,
     tree_bytes,
 )
+from cas_fixture import ingest_repository  # noqa: E402
 from gen_worker.models import projection  # noqa: E402
 from gen_worker.models import svdq_native as native  # noqa: E402
 from gen_worker.models.loading import (  # noqa: E402
@@ -141,7 +142,7 @@ def pod(tmp_path_factory: pytest.TempPathFactory) -> Dict[str, Any]:
 
     base = root / "store"
     cas = LocalCAS(base)
-    manifest = cas.ingest_repository(source)
+    manifest = ingest_repository(cas, source)
     cas.compare_and_swap_ref(
         REF_PREFIX + KEY, cas.store_manifest(manifest), expected=None
     )

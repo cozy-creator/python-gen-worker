@@ -78,60 +78,79 @@ def test_the_vendored_tensorfs_carries_no_transfer_plane() -> None:
         )
 
 
-def test_the_read_plane_is_recorded_at_its_own_rev() -> None:
-    """pgw#1330: the snapshot is SPLIT at two revs, and the split is declared.
+def test_the_tensorfs_snapshot_is_one_rev() -> None:
+    """pgw#1575: ONE rev, and nothing may re-grow a second.
 
-    The consumption plane comes from a rev the storage half is deliberately NOT
-    at: the newer lineage deleted three `LocalCAS` methods this repo still
-    calls (ingest, GC, and the whole-tree copy the chokepoint uses —
-    VENDORED.toml names them). A split that is only in a comment is a split
-    nobody can audit, so the rev is a field and the file list is a field, and
-    the digest fence above covers them like any other vendored file.
+    The snapshot used to carry THREE — a `rev` on a lineage with no common
+    ancestor with upstream master at all, plus a `read_plane_rev` and a
+    `contract_plane_rev` bolted on beside it because the dead rev could not
+    supply either plane. Each was added by a lane that needed one more file,
+    and each was locally reasonable, which is exactly how a snapshot ends up
+    certifying fidelity to a rev nobody would ever fix.
 
-    pgw#1344 widened the plane rather than the split: `writer.py` joins it (the
-    GGUF/safetensors composer a conversion writes through) and `__init__.py`
-    comes from the same rev, verbatim, now that upstream no longer re-exports a
-    Python transfer plane. The membership is spelled out so a file JOINING the
-    plane is a decision somebody makes on purpose.
+    Paul's 2026-08-20 release-policy ruling ended it: "get rid of the vendored
+    copies … Remove the v1's from the codebase fully." This is the torchcg
+    shape (see below), applied here.
+
+    The rev itself is NOT restated here. VENDORED.toml is "the single home of
+    the fact", and a copy of a rev in a test is a second home that drifts.
     """
 
     spec = MANIFEST["packages"]["tensorfs"]
-    assert spec["read_plane_rev"] != spec["rev"]
-    assert set(spec["read_plane_files"]) == {
-        "__init__.py", "gguf.py", "project.py", "tensors.py", "writer.py",
-    }
-    for name in spec["read_plane_files"]:
-        assert name in spec["files"], f"{name} is not digest-fenced"
+    extra = sorted(k for k in spec if k.endswith("_rev") and k != "rev")
+    assert not extra, (
+        f"the tensorfs snapshot grew a second rev ({extra}). One rev, per "
+        f"pgw#1575. If a plane needs a file the pinned rev lacks, bump the "
+        f"rev; if it needs a file NO upstream rev has, it is first-party and "
+        f"belongs in gen_worker/, not under _vendor/."
+    )
+    assert not any(k.endswith("_files") for k in spec), (
+        "a per-plane file list is back. The one inventory is "
+        "[packages.tensorfs.files], enforced as a set above."
+    )
 
 
-def test_the_storage_half_still_provides_what_the_ownership_ruling_keeps() -> None:
-    """pgw#1308 step ⑥: the split is the STEADY STATE, and this says why.
+def test_the_write_plane_is_first_party_and_never_returns() -> None:
+    """pgw#1575: the five `8bafdfbb`-only APIs, and where each of them went.
 
-    The ruling (VENDORED.toml, and the issue's own section) is that admission
-    and GC are TENSORFS'S — upstream ported them to Rust rather than
-    abandoning them, and a source-vendored wheel cannot load Rust (pgw#1310).
-    So they are consumed from the pinned rev indefinitely, and a bump that
-    "finishes the migration" deletes them with no reachable successor.
-
-    A comment saying that goes stale silently. This goes red instead, and it
-    is deliberately NOT a digest check: the digest fence above would refuse
-    the bump too, but only with "a file changed", which is exactly the message
-    that gets a fence regenerated rather than read.
+    `8bafdfbb` was held for exactly these. Upstream's current `LocalCAS` has
+    none of them: ingest and GC went to Rust or to nobody, `materialize` moved
+    to `TensorReader`, and the whole-tree copy died with the chokepoint flip
+    (pgw#1308 step 6). Re-vendoring a `local.py` that has them means the dead
+    lineage is back, so this refuses the SYMBOLS rather than the rev — a
+    digest fence would only say "a file changed", which is the message that
+    gets a fence regenerated instead of read.
     """
 
     from gen_worker._vendor.tensorfs import LocalCAS
 
-    for kept in ("ingest_file", "ingest_repository", "collect_garbage", "materialize"):
-        assert callable(getattr(LocalCAS, kept, None)), (
-            f"LocalCAS.{kept} is gone from the vendored storage snapshot. If "
-            f"this is a `rev` bump: upstream's successor is the compiled Rust "
-            f"extension, which pgw cannot load (pgw#1310). Read the ownership "
-            f"ruling in VENDORED.toml before bumping."
+    for retired in (
+        "ingest_file",
+        "ingest_repository",
+        "collect_garbage",
+        "materialize",
+        "materialize" + "_repository",
+    ):
+        assert not hasattr(LocalCAS, retired), (
+            f"LocalCAS.{retired} is back on the vendored snapshot. It exists "
+            f"at NO tensorfs master ancestor; a `local.py` carrying it came "
+            f"from the pre-genesis `8bafdfbb` lineage. Admission and retention "
+            f"are first-party at gen_worker/cas/; the single-file hatch is "
+            f"`TensorReader.materialize`."
         )
 
-    # And the one that DID die with the chokepoint flip: still defined by the
-    # pinned upstream snapshot, called by nothing here.
-    assert hasattr(LocalCAS, "materialize" + "_repository")
+    # The planner is not upstream's at any rev and must not masquerade as one.
+    assert "planner.py" not in MANIFEST["packages"]["tensorfs"]["files"]
+    assert not (VENDOR / "tensorfs" / "planner.py").exists()
+
+    # And the successors actually exist, so this is a redirection rather than
+    # a deletion: importing them is the proof.
+    from gen_worker._vendor.tensorfs import TensorReader
+    from gen_worker.cas import collect_garbage, ingest_file, plan_chunks
+
+    for successor in (collect_garbage, ingest_file, plan_chunks):
+        assert callable(successor)
+    assert callable(TensorReader.materialize)
 
 
 def test_the_torchcg_snapshot_is_one_rev() -> None:
@@ -269,7 +288,7 @@ def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() 
 
 
 def test_the_read_plane_runs_without_the_compiled_extension() -> None:
-    """The reason the split is expressible at all: this half is PURE PYTHON.
+    """The reason the snapshot is usable at all: it is PURE PYTHON.
 
     `Layout::project` is Rust and cannot travel into a source-vendored wheel,
     so a stub that only the extension could render or parse would leave every

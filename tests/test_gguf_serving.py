@@ -399,6 +399,7 @@ def test_the_store_source_is_one_constructor_from_the_edge_source(
     nothing else.
     """
     from gen_worker._vendor.tensorfs import LocalCAS
+    from cas_fixture import ingest_repository
     from gen_worker._vendor.tensorfs.tensors import open_tensors
 
     # A cross-attention-free UNet, and the reason is a REAL constraint worth
@@ -429,7 +430,7 @@ def test_the_store_source_is_one_constructor_from_the_edge_source(
     assert max(len(k) for k in reference.state_dict()) <= 63
 
     cas = LocalCAS(tmp_path / "cas")
-    manifest = cas.ingest_repository(staged)
+    manifest = ingest_repository(cas, staged)
     with open_tensors(cas, manifest) as reader:
         views = {name: reader[name] for name in reader}
         assert any(v.format == "gguf-v1" and v.block.quantized

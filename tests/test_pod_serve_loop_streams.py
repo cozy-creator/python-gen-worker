@@ -40,6 +40,7 @@ pytest.importorskip("diffusers")
 pytest.importorskip("transformers")
 
 from gen_worker._vendor.tensorfs import LocalCAS, project_snapshot  # noqa: E402
+from cas_fixture import ingest_repository  # noqa: E402
 from gen_worker.models import projection, store as store_mod  # noqa: E402
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR  # noqa: E402
 from gen_worker.models.refs import WireRef  # noqa: E402
@@ -87,7 +88,7 @@ def projected(tmp_path_factory: pytest.TempPathFactory) -> Dict[str, Any]:
     build_source(source)
 
     cas = LocalCAS(base)
-    manifest = cas.ingest_repository(source)
+    manifest = ingest_repository(cas, source)
     # Exactly what `cozy_snapshot._pin_manifest` does, so `resolve_projection`
     # runs against the production pinning and not a test convention.
     cas.compare_and_swap_ref(

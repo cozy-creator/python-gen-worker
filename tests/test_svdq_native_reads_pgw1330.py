@@ -26,6 +26,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 
 from gen_worker._vendor.tensorfs import LocalCAS, project_snapshot  # noqa: E402
+from gen_worker.cas import ingest_file  # noqa: E402
 from gen_worker.models import projection  # noqa: E402
 from gen_worker.models import svdq_native as native  # noqa: E402
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR  # noqa: E402
@@ -52,7 +53,7 @@ def _project(checkpoint: Path, base: Path, key: str = "c" * 64) -> Path:
     """Ingest ONE checkpoint into a real CAS and project it as a snapshot."""
 
     cas = LocalCAS(base)
-    entry = cas.ingest_file(checkpoint, manifest_path=checkpoint.name)
+    entry = ingest_file(cas, checkpoint, manifest_path=checkpoint.name)
     from gen_worker._vendor.tensorfs import RepositoryManifest
 
     manifest = RepositoryManifest((entry,))

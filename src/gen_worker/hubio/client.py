@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, cast
 
 import requests
 from gen_worker._vendor.tensorfs import CASRef, RepositoryManifest
+from gen_worker.cas.admission import ingest_file
 from gen_worker.transfer.grants import TransferGrant, upload
 from gen_worker.transfer.journal import TransferJournal, TransferSession
 
@@ -634,7 +635,7 @@ class HubClient:
                     f"publish_v2: {f.path!r} is a by-reference add; v2 declares "
                     "digests computed from local bytes"
                 )
-            entries.append(cas.ingest_file(Path(f.local_path), manifest_path=f.path))
+            entries.append(ingest_file(cas, Path(f.local_path), manifest_path=f.path))
         manifest = RepositoryManifest(tuple(entries))
         manifest_ref = manifest.digest()
 
