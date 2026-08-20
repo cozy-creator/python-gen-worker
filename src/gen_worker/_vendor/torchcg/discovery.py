@@ -26,14 +26,18 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .document import GraphRecord, LaneGraphs
+from .dynamic import DimPolicy, alias_ingress, plan_exports, resolve_policy
 from .graph_identity import GraphIdentityError, graph_hash
 from .ingress import IngressError, build_call_ingress
 from .lane import LaneError, LaneRef, require_targets, resolve_target
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # torch-free import closure: transform.py is torch-shaped
     from .hollow import HollowSession
@@ -175,6 +179,7 @@ def discover_lane(
     program_sink: Callable[[str, Any], object] | None = None,
     transforms: TransformSet | None = None,
     session: HollowSession | None = None,
+    dynamic_dims: DimPolicy | bool | None = None,
 ) -> LaneGraphs:
     """Run the author's code once, derive every observed graph, state the rest.
 
@@ -210,6 +215,7 @@ def discover_lane(
         program_sink=program_sink,
         transforms=transforms,
         session=session,
+        dynamic_dims=dynamic_dims,
     )
 
 
@@ -269,6 +275,7 @@ def discover_modules(
     program_sink: Callable[[str, Any], object] | None = None,
     transforms: TransformSet | None = None,
     session: HollowSession | None = None,
+    dynamic_dims: DimPolicy | bool | None = None,
 ) -> LaneGraphs:
     """Discovery over MARKED modules (the imperative ``ctx.compile`` surface).
 
@@ -296,6 +303,14 @@ def discover_modules(
     it. A program whose lifted constants are FAKE is still refused by name --
     a silently zeroed literal digest is exactly the class of defect this pass
     exists to delete -- but under tcg#64 no session can produce one.
+
+    ``dynamic_dims`` (tcg#77) decides how many EXPORTS the observed set costs.
+    ``None`` (the default) is one export per observed call — the shape fan.
+    ``True``, or a ``(target, input name, axis) -> bool`` predicate, marks the
+    axes that VARY across the observed calls as ``torch.export.Dim``s, so the
+    calls they distinguish collapse into one graph whose ingress states the
+    axis as a RANGE. A refused dynamic export falls back to that group's own
+    static exports, loudly. See :mod:`torchcg.dynamic`.
 
     ``transforms`` (tcg#52) is the SEALED :class:`~torchcg.transform.
     TransformSet` of the lane's PASS phase. Passing it is what makes PASS ->
@@ -367,19 +382,48 @@ def discover_modules(
 
     records: list[GraphRecord] = []
     seen_graphs: set[str] = set()
+    dims = resolve_policy(dynamic_dims)
     for path, calls in observed.items():
         module = modules[path]
         fake_mode = _fake_mode_of(module)
         device = _trace_device_of(module)
         synthesis = fake_mode if fake_mode is not None else contextlib.nullcontext()
+        synthesized: list[tuple[tuple[Any, ...], dict[str, Any], list[str]]] = []
         for call in calls.values():
             with synthesis:
                 args = tuple(_synthesize(value, device) for value in call.args)
                 kwargs = {name: _synthesize(value, device) for name, value in call.kwargs}
+            synthesized.append((args, kwargs, _param_names(module, args, kwargs)))
+        with synthesis:
+            pending = plan_exports(path, synthesized, dims)
+        while pending:
+            plan = pending.pop(0)
+            args, kwargs = plan.args, plan.kwargs
             try:
                 with synthesis:
-                    program = torch.export.export(module, args, kwargs, strict=strict)
+                    program = torch.export.export(
+                        module,
+                        args,
+                        kwargs,
+                        dynamic_shapes=plan.dynamic_shapes,
+                        strict=strict,
+                    )
             except Exception as exc:
+                if plan.dynamic:
+                    # tcg#77: a refused dynamic export is a MEASUREMENT, not a
+                    # failure — this model cannot carry that axis symbolically,
+                    # and the static fan it replaces is still exactly right.
+                    # Loud, because a silent fallback is how a lane believes it
+                    # collapsed a fan it did not.
+                    logger.warning(
+                        "lane %s target %s: dynamic export over %s was REFUSED "
+                        "(%s: %s); falling back to one static export per "
+                        "observed shape for this group",
+                        contract, path, sorted(plan.symbols),
+                        type(exc).__name__, exc,
+                    )
+                    pending = plan.static_fallback() + pending
+                    continue
                 raise DiscoveryError(
                     f"lane {contract!r} target {path!r}: torch.export"
                     f"(strict={strict}) failed for the observed call: "
@@ -393,9 +437,11 @@ def discover_modules(
                 session.restate(program)
             _assert_literal_values_are_real(contract, path, program)
             _demote_example_inputs(program)
-            names = _param_names(module, args, kwargs)
+            names = list(plan.param_names)
             try:
-                ingress = build_call_ingress(program, names, args, kwargs)
+                ingress = alias_ingress(
+                    build_call_ingress(program, names, args, kwargs), plan
+                )
                 graph = graph_hash(program, ingress, passes=passes)
             except (IngressError, GraphIdentityError) as exc:
                 raise DiscoveryError(

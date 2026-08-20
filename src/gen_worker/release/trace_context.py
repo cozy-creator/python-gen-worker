@@ -63,6 +63,10 @@ class TraceLoadContext:
         #: Modules the author marked via ctx.compile() -- discovery hooks
         #: exactly these during the payload drives.
         self.marked_modules: list[Any] = []
+        #: Component directories already reported as disagreeing with the
+        #: lane, so the pgw#1567 warning is one line per component and not
+        #: one per parameter.
+        self._dtype_said: set[str] = set()
 
     def load(self, loader: Any) -> Any:
         """Hollow-materialize the CONFIG-ONLY tree through the author's loader.
@@ -95,12 +99,12 @@ class TraceLoadContext:
         # bf16 landed on the VAE beside it — a bf16 bias meeting an fp32
         # activation in a decode block that is fine on a pod.
         #
-        # Precision is now decided PER COMPONENT, by `component_dtype` below,
-        # through the session policy torchcg asks (tcg#68). The lane still
-        # governs the component its contract describes, so the marked
-        # denoiser's precision — which IS graph identity (pgw#1458) — still
-        # comes from the contract, and pgw#1448's "real dtype, never the
-        # spelling" rule still applies to it.
+        # Precision is asked PER COMPONENT, by `component_dtype` below,
+        # through the session policy torchcg installs (tcg#68) — and every
+        # component of a tree a DECLARED lane governs answers with that lane's
+        # dtype (pgw#1567, Paul). Precision IS graph identity (pgw#1458), the
+        # lane is where that identity is declared, and pgw#1448's "real dtype,
+        # never the spelling" rule applies to it.
         loaded = from_pretrained(self.checkpoint_dir)
         # Adapter application mutates WEIGHTS (or injects adapter layers);
         # at trace every parameter is fake and no adapter bytes exist, so the
@@ -114,34 +118,55 @@ class TraceLoadContext:
         return loaded
 
     def component_dtype(self, tree: Any, subfolder: Any, module: Any = None) -> Any:
-        """The precision ONE component loads at (pgw#1512, Paul's ruling).
+        """The precision ONE component loads at — **from the LANE DECLARATION**.
+
+        ⚖️ **Paul, 2026-08-20 (pgw#1567), ratifying and generalizing:** *"do one
+        trace per tensor-layout-contract-template… the tensor-layout contract
+        says, essentially 'this is a lane you can use'."* The trace dtype and
+        the trace identity come from the lane the endpoint DECLARES, never from
+        whatever checkpoint happens to be mounted at derive time. Within a lane
+        the checkpoint is irrelevant by construction: the artifact is
+        weight-free and runtime constant folding binds any conforming
+        fine-tune's weights at load.
+
+        **THE BUG THIS DELETES, and it was in the ORDER, not the sources.**
+        This ladder used to read the mounted tree's safetensors headers FIRST.
+        A dev-box derive against a stock fp16 dreamshaper tree therefore traced
+        every graph fp16 while the lane was ``sd15.diffusers-bf16@1`` and the
+        pod served bf16 — 14 graphs armed, 0 entered, silently, for a night.
+        tcg#76's instrument named it in one line::
+
+            input 'sample': dtype bfloat16 != expected float16
+
+        **Why the lane is the right source and the checkpoint is not.** The
+        serve path does not convert anything: ``streaming.engine`` is dtype
+        PASSTHROUGH and the STORE converts the tree through the lane's layout
+        contract before a pod ever mounts it (``engine._warn_on_lane`` is that
+        rule stated from the other side). So on the tree that actually serves,
+        every container IS the lane's dtype — the lane declaration is a
+        complete and correct statement of it, and the header read only ever
+        agreed by luck. At derive time the mounted tree is usually NOT the
+        converted one, which is exactly when the two answers differ and exactly
+        when following the checkpoint is wrong.
+
+        The ladder, in order:
+
+        1. **The lane's declared dtype**, for every component of the tree the
+           lane governs. Precision is graph identity (pgw#1458) and the lane is
+           the one place that identity is declared.
+        2. **A lane that declares none** is a DERIVED lane (pgw#1488) — no
+           contract, so no contract dtype. Only then does the checkpoint speak,
+           through the same stub-aware reader the serve path uses: the
+           component's own bytes, then its config.
+        3. **Nothing may default.** A quiet fp32 is the defect pgw#1448
+           deleted, and at trace it would silently re-key a graph.
 
         ``module`` is tcg#71's third argument — the component just built on
-        meta, handed over so a policy CAN match by the module's own parameter
-        names. This policy still decides by contract-segment + container
-        (below); adopting name-matching is pgw#1530's owner's call, and until
-        then the argument is accepted so the vendored torchcg tip can call the
-        policy at all.
-
-        Installed as torchcg's session policy, so it is asked once per
-        component instead of once per tree.
-
-        1. **The lane governs the component its CONTRACT DESCRIBES.** A layout
-           contract names the tensors it covers, and a pattern's first segment
-           is the component that owns them (``unet.conv_out.weight`` ->
-           ``unet``). For h3 that set is the DiT and nothing else, which is the
-           whole ruling: a denoiser contract says nothing about the VAE beside
-           it. This branch is where precision-is-identity lives (pgw#1458), so
-           it keeps pgw#1448's real-dtype-never-the-spelling read.
-        2. **Otherwise the component's own container answers**, through the
-           SAME stub-aware reader the serve path uses
-           (``serving.checkpoint_dtype``): its config's declared dtype first,
-           then the safetensors headers. On a projected tree those headers are
-           128-byte stubs, and that reader is the one that knows it -- a naive
-           open here would read a stub as truth.
-        3. **Nothing may default.** If neither the contract nor the container
-           can say, this REFUSES by name. A quiet fp32 is the defect pgw#1448
-           deleted, and at trace it would silently re-key a graph.
+        meta. This policy does not need it: the lane governs the tree, not a
+        matched subset (pgw#1538 measured that match-scoping leaves sd15's text
+        encoder at fp32 beside a bf16 denoiser, which is the same defect
+        arriving from the other side). It is accepted so the vendored torchcg
+        tip can call the policy at all.
         """
 
         from ..serving.checkpoint_dtype import (
@@ -169,35 +194,29 @@ class TraceLoadContext:
             if relative is not None and str(relative) not in (".", ""):
                 name = str(relative).strip("/")
 
-        # 1. THE COMPONENT'S OWN BYTES, when it has any. A serving tree has
-        #    been CONVERTED through the lane contract by the store, so its
-        #    safetensors headers are the precision the pod actually runs —
-        #    read through the stub-aware reader, which knows a 128-byte
-        #    projection stub from a real file.
+        # 1. THE LANE, for every component of the tree it governs. A contract's
+        #    `tensors` list enumerates the DENOISER's own parameter names —
+        #    `conv_in.weight` for sd15, `transformer_blocks.…` for h3 — but its
+        #    `dtype` states the precision of the TREE the store converts to
+        #    that contract, which is the tree that serves.
+        # No `checkpoint_dir=`: this read asks the CONTRACT and nothing else.
+        # Passing the tree is what would reintroduce the checkpoint as a
+        # silent second answer.
+        declared = _lane_torch_dtype(self.lane)
+        if declared is not None:
+            self._say_checkpoint_disagrees(directory, name, declared)
+            return declared
+
+        # 2. A DERIVED LANE (pgw#1488) declares no dtype, so there is no
+        #    contract to read one from and the checkpoint is the only source
+        #    left. Its own BYTES first, through the stub-aware reader that
+        #    knows a 128-byte projection stub from a real file; its config
+        #    last, because on a converted tree a component config is the
+        #    PUBLISHER's (sd15's `text_encoder/config.json` still says
+        #    `float32` in a tree whose bytes are bf16).
         own = _header_dtype(directory)
         if own is not None:
             return own
-
-        # 2. OTHERWISE THE LANE. pgw#1530: this is the half pgw#1512 got
-        #    wrong. A contract's `tensors` list enumerates the DENOISER's own
-        #    parameter names — every shipped contract does, `conv_in.weight`
-        #    for sd15, `transformer_blocks.…` for h3, never a `unet.`/
-        #    `transformer.` prefix — but its `dtype` states the precision of
-        #    the TREE the store converts to that contract. Treating the
-        #    tensor list as a component roster made the governed set match
-        #    nothing on every endpoint in the fleet, so the lane's dtype was
-        #    never applied anywhere and a config-only derive silently traced
-        #    fp32 graphs under a bf16 lane.
-        declared = _lane_torch_dtype(self.lane, checkpoint_dir=self.checkpoint_dir)
-        if declared is not None:
-            return declared
-
-        # 3. THE COMPONENT'S CONFIG, LAST and only when nothing above spoke.
-        #    On a converted tree a component config is the PUBLISHER's, not
-        #    the store's: sd15's `text_encoder/config.json` still says
-        #    `float32` in a tree whose bytes are bf16. Preferring it is what
-        #    put an fp32 encoder beside a bf16 denoiser and produced
-        #    `Input type (float) and bias type (c10::BFloat16)` on payload 0.
         config = _config_dtype(directory)
         if config is not None:
             return config
@@ -206,6 +225,45 @@ class TraceLoadContext:
         # which is what the streaming loader does with bytes it was given no
         # contract for.
         return None
+
+    def _say_checkpoint_disagrees(
+        self, directory: Path, name: str, declared: Any
+    ) -> None:
+        """Name a mounted tree whose bytes are not the lane's, once per component.
+
+        The trace follows the LANE regardless — that is the fix. But a
+        derive run against an unconverted tree is worth saying out loud,
+        because it is the state in which the old order silently produced a
+        whole fleet of graphs no runtime could enter (pgw#1567). Same fact the
+        serve-side loader reports from the other side
+        (``streaming.engine._warn_on_lane``): conversion is the store's job,
+        and a tree that skipped it is a store defect, never a trace decision.
+        """
+
+        from ..serving.checkpoint_dtype import _tensor_dtype
+
+        key = str(directory)
+        if key in self._dtype_said:
+            return
+        try:
+            own = _tensor_dtype(directory)
+        except Exception:  # noqa: BLE001 — a diagnostic never fails a derive
+            return
+        if own is None or own == declared:
+            return
+        self._dtype_said.add(key)
+        self._log.warning(
+            "derive: lane %s declares dtype %s and the mounted checkpoint's "
+            "%s containers carry %s. The TRACE FOLLOWS THE LANE (pgw#1567): "
+            "the store converts a tree through the layout contract before a "
+            "pod mounts it, so the lane is what serves. This tree was not "
+            "converted — the graphs are still right, but nothing here has "
+            "verified the checkpoint against the contract it is keyed under.",
+            getattr(self.lane, "contract", self.lane),
+            declared,
+            name or "root",
+            own,
+        )
 
     def compile(self, target: Any) -> Any:
         """torch.compile-style marking, trace half (pgw#1370/#1372 contract).

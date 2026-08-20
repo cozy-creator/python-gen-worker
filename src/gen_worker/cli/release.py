@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..release.derive import DYNAMIC_AXES
+
 
 def add_subparser(sub: Any) -> None:
     parser = sub.add_parser(
@@ -73,6 +75,17 @@ def add_subparser(sub: Any) -> None:
         default=None,
         help="write the document bytes here (default: stdout)",
     )
+    # pgw#1548: see `release.derive.DYNAMIC_AXES`. OFF by default — a dynamic
+    # axis re-keys every graph in the lane, and whether it is free is measured
+    # per model, not assumed.
+    derive.add_argument(
+        "--dynamic-axes",
+        choices=list(DYNAMIC_AXES),
+        default="off",
+        help="export these axes as torch.export Dims instead of one graph per "
+        "observed shape: `batch` collapses the CFG axis, `aspect` collapses "
+        "the aspect-ratio buckets, `all` both (default: off)",
+    )
     derive.set_defaults(_handler=_run_derive)
 
 
@@ -127,6 +140,7 @@ def _run_derive(args: argparse.Namespace) -> int:
             lockfile=lockfile,
             graph_cas=Path(args.graph_cas).resolve() if args.graph_cas else None,
             slot_checkpoints=trees,
+            dynamic_axes=args.dynamic_axes,
         )
     except DeriveError as exc:
         print(f"derive error: {exc}", file=sys.stderr)

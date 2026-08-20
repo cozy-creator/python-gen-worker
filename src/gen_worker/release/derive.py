@@ -105,9 +105,53 @@ ENUM_CAP = 64
 #: modules like a marked VAE decoder). None = the author's own step count.
 TRACE_STEP_BUDGET: Optional[int] = 1
 
+#: The axes a derive may export DYNAMIC, by name (pgw#1548).
+#:
+#: torchcg takes a ``(target, input name, axis) -> bool`` predicate and holds
+#: no opinion about what an axis MEANS; naming them is the endpoint layer's
+#: job, and these two names are the ones Paul's ruling is written in:
+#:
+#: * ``batch`` — axis 0 of any feed. Classifier-free guidance is the whole
+#:   axis: batch 2 is cond+uncond concatenated, batch 1 is the guidance-free
+#:   path, and every shipped lock carries both.
+#: * ``aspect`` — axes 2.. of a rank-4+ feed, i.e. a latent's spatial sides.
+#:   sd15 carries 7 of these and sdxl 9, one graph each.
+#:
+#: ``all`` is both; ``off`` (the default) is the static fan every lock in the
+#: fleet was derived under. The default is deliberately OFF: which axis is
+#: worth collapsing is a MEASURED question per model (pgw#1548's acceptance),
+#: and a flag that silently re-keys every graph in the fleet is not a default.
+DYNAMIC_AXES = ("off", "batch", "aspect", "all")
+
 
 class DeriveError(RuntimeError):
     """The release derive cannot state this endpoint's graph set."""
+
+
+def dynamic_dim_policy(axes: str) -> Any:
+    """Turn an axis NAME into the predicate torchcg dispatches on."""
+
+    if axes not in DYNAMIC_AXES:
+        raise DeriveError(
+            f"dynamic dims are declared by axis name, one of "
+            f"{list(DYNAMIC_AXES)!r}; got {axes!r}"
+        )
+    if axes == "off":
+        return None
+    batch = axes in ("batch", "all")
+    aspect = axes in ("aspect", "all")
+
+    def policy(_target: str, _name: str, axis: int) -> bool:
+        if axis == 0:
+            return batch
+        # Rank is not handed to the predicate, so "axis 2 or beyond" is the
+        # spelling of spatial here. Axis 1 is a channel or a sequence length
+        # and is never offered: neither varies across an aspect fan, so
+        # admitting it would widen a graph over an axis no observation
+        # supports.
+        return aspect and axis >= 2
+
+    return policy
 
 
 class PayloadEnumerationRefused(DeriveError):
@@ -1384,6 +1428,7 @@ def _derive_lane(
     slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
     endpoint_root: Optional[Path] = None,
     unservable: Optional[list[dict[str, Any]]] = None,
+    dynamic_dims: Any = None,
 ) -> Optional[Any]:
     """One lane's instrumented runs, merged across defaults variants.
 
@@ -1589,7 +1634,7 @@ def _derive_lane(
             try:
                 lane_graphs = torchcg.discover_modules(
                     handle, modules, drive, program_sink=program_sink,
-                    session=session,
+                    session=session, dynamic_dims=dynamic_dims,
                 )
                 if set(lane_graphs.targets) - {
                     record.target for record in lane_graphs.graphs
@@ -1600,7 +1645,7 @@ def _derive_lane(
                     request_ctx.step_budget = None
                     lane_graphs = torchcg.discover_modules(
                         handle, modules, drive, program_sink=program_sink,
-                        session=session,
+                        session=session, dynamic_dims=dynamic_dims,
                     )
             except DeriveError:
                 raise
@@ -1642,6 +1687,7 @@ def derive_release(
     lockfile: Optional[Path] = None,
     graph_cas: Optional[Path] = None,
     slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
+    dynamic_axes: str = "off",
 ) -> ReleaseDeriveResult:
     """Derive the release metadata document for one endpoint module.
 
@@ -1750,6 +1796,7 @@ def derive_release(
                 slot_checkpoints=slot_checkpoints,
                 endpoint_root=endpoint_source_root(module),
                 unservable=unservable_payloads,
+                dynamic_dims=dynamic_dim_policy(dynamic_axes),
             )
             if lane_graphs is None:
                 # Traced, nothing marked (pgw#1488). No lane row: an empty one
