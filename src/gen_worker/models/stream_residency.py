@@ -58,7 +58,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from . import staging
 
@@ -86,7 +86,7 @@ ENGAGED_ATTR = "_cozy_stream_residency"
 _ADAPTER_MARKERS = ("lora_a", "lora_b", "lora_embedding", "lora_magnitude")
 
 
-def _aligned(n: int) -> int:
+def aligned(n: int) -> int:
     return (int(n) + _ALIGN - 1) // _ALIGN * _ALIGN
 
 
@@ -463,14 +463,14 @@ class _StreamedLeaf:
                     .view(host.shape)
                 )
                 view.copy_(host, non_blocking=stream is not None)
-                _assign(module, slot.attr, view, slot.is_param)
+                bind_tensor(module, slot.attr, view, slot.is_param)
         if stream is not None:
             torch.cuda.current_stream(self.ring.device).wait_stream(stream)
         self._stream = stream
 
     def _post(self, module: Any, args: Any, output: Any = None) -> None:
         for slot in self.slots:
-            _assign(module, slot.attr, slot.host, slot.is_param)
+            bind_tensor(module, slot.attr, slot.host, slot.is_param)
         stream, self._stream = self._stream, None
         if stream is not None:
             # The other half of the fence (ComfyUI's ``uncast_bias_weight``):
@@ -487,7 +487,7 @@ class _nullcontext:
         return None
 
 
-def _assign(module: Any, attr: str, value: Any, is_param: bool) -> None:
+def bind_tensor(module: Any, attr: str, value: Any, is_param: bool) -> None:
     if is_param:
         module._parameters[attr].data = value
     else:
@@ -499,7 +499,7 @@ def _assign(module: Any, attr: str, value: Any, is_param: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _own_tensors(module: Any) -> List[Tuple[str, bool, Any]]:
+def own_tensors(module: Any) -> List[Tuple[str, bool, Any]]:
     """(attr, is_param, tensor) for the module's OWN parameters and buffers."""
     out: List[Tuple[str, bool, Any]] = []
     for name, param in getattr(module, "_parameters", {}).items():
@@ -511,16 +511,51 @@ def _own_tensors(module: Any) -> List[Tuple[str, bool, Any]]:
     return out
 
 
-def _tensor_bytes(t: Any) -> int:
+def tensor_bytes(t: Any) -> int:
     return int(t.numel()) * int(t.element_size())
 
 
-def _is_adapter(name: str) -> bool:
+def is_adapter_name(name: str) -> bool:
     lowered = name.lower()
     return any(marker in lowered for marker in _ADAPTER_MARKERS)
 
 
-def _streamable(module: Any) -> bool:
+def discover_leaves(
+    roots: Sequence[Tuple[str, Any]],
+) -> Tuple[Dict[str, Any], List[LeafCost], Set[str]]:
+    """``({name: module}, [LeafCost], adapter_names)`` for one module forest.
+
+    ONE walk, shared by every mechanism that holds this rung's contract — the
+    software tail here and the arena facade in
+    :mod:`gen_worker.models.arena_residency`. The two must agree leaf-for-leaf
+    or their plans are not comparable, and a second copy of this walk is the
+    way they would silently stop agreeing.
+    """
+    leaves: Dict[str, Any] = {}
+    costs: List[LeafCost] = []
+    adapters: Set[str] = set()
+    for root_name, root in roots:
+        for name, module in root.named_modules():
+            if not is_streamable_leaf(module):
+                continue
+            qualified = f"{root_name}.{name}" if name else root_name
+            if is_adapter_name(qualified):
+                adapters.add(qualified)
+            own = own_tensors(module)
+            total = sum(tensor_bytes(t) for _, _, t in own)
+            if total <= 0:
+                continue
+            leaves[qualified] = module
+            # `cast_bytes` is the ALIGNED carve, so the plan's window
+            # reservation is the number the ring really allocates rather than
+            # one that ignores the 512-byte sub-buffer boundaries.
+            costs.append(
+                LeafCost(qualified, total, sum(aligned(tensor_bytes(t)) for _, _, t in own))
+            )
+    return leaves, costs, adapters
+
+
+def is_streamable_leaf(module: Any) -> bool:
     """True leaves only: no children, and tensors of its own.
 
     A module that owns parameters AND children cannot be hooked safely — its
@@ -529,7 +564,7 @@ def _streamable(module: Any) -> bool:
     """
     for _ in module.children():
         return False
-    return bool(_own_tensors(module))
+    return bool(own_tensors(module))
 
 
 class StreamedResidency:
@@ -590,28 +625,8 @@ class StreamedResidency:
         return cls(module_roots(obj), device=device, budget_bytes=budget_bytes, **kwargs)
 
     def _discover(self) -> None:
-        for root_name, root in self._roots:
-            for name, module in root.named_modules():
-                if not _streamable(module):
-                    continue
-                qualified = f"{root_name}.{name}" if name else root_name
-                if _is_adapter(qualified):
-                    self._exclude.add(qualified)
-                own = _own_tensors(module)
-                total = sum(_tensor_bytes(t) for _, _, t in own)
-                if total <= 0:
-                    continue
-                self._leaves[qualified] = module
-                # `cast_bytes` is the ALIGNED carve, so the plan's window
-                # reservation is the number the ring really allocates rather
-                # than one that ignores the 512-byte sub-buffer boundaries.
-                self._costs.append(
-                    LeafCost(
-                        qualified,
-                        total,
-                        sum(_aligned(_tensor_bytes(t)) for _, _, t in own),
-                    )
-                )
+        self._leaves, self._costs, adapters = discover_leaves(self._roots)
+        self._exclude |= adapters
 
     # -- read side ----------------------------------------------------------
 
@@ -774,10 +789,10 @@ class StreamedResidency:
                 qualified = f"{root_name}.{name}" if name else root_name
                 if qualified in self._streamed:
                     continue  # its tensors rest on the host BY DESIGN
-                for attr, is_param, tensor in _own_tensors(module):
+                for attr, is_param, tensor in own_tensors(module):
                     if tensor.is_meta or tensor.device == self.device:
                         continue
-                    _assign(module, attr, tensor.to(self.device), is_param)
+                    bind_tensor(module, attr, tensor.to(self.device), is_param)
 
     def _ring_for(self) -> _CastRing:
         if self._ring is None:
@@ -792,7 +807,7 @@ class StreamedResidency:
         torch = self._torch
         slots: List[_TensorSlot] = []
         offset = 0
-        for attr, is_param, tensor in _own_tensors(module):
+        for attr, is_param, tensor in own_tensors(module):
             if tensor.is_meta or tensor.storage_offset() != 0:
                 # Meta or an alias into a larger storage: this mover cannot
                 # represent it, so the leaf stays where it is rather than
@@ -807,14 +822,14 @@ class StreamedResidency:
             if host is None:
                 host = torch.empty_like(tensor, device="cpu")
             host.copy_(tensor)
-            nbytes = _tensor_bytes(host)
+            nbytes = tensor_bytes(host)
             slots.append(
                 _TensorSlot(
                     attr=attr, is_param=is_param, host=host, nbytes=nbytes, offset=offset
                 )
             )
-            offset += _aligned(nbytes)
-            _assign(module, attr, host, is_param)
+            offset += aligned(nbytes)
+            bind_tensor(module, attr, host, is_param)
         leaf = _StreamedLeaf(name, module, slots, offset, self._ring_for(), torch)
         leaf.install()
         self._streamed[name] = leaf
@@ -832,17 +847,17 @@ class StreamedResidency:
                     pinned = bool(slot.host.is_pinned())
                 except Exception:  # noqa: BLE001
                     pinned = False
-                _assign(
+                bind_tensor(
                     module,
                     slot.attr,
                     slot.host.to(self.device, non_blocking=pinned),
                     slot.is_param,
                 )
             return
-        for attr, is_param, tensor in _own_tensors(module):
+        for attr, is_param, tensor in own_tensors(module):
             if tensor.is_meta or tensor.device == self.device:
                 continue
-            _assign(module, attr, tensor.to(self.device), is_param)
+            bind_tensor(module, attr, tensor.to(self.device), is_param)
 
     def release(self) -> None:
         """Un-hook everything and leave every weight on the device."""
@@ -906,7 +921,7 @@ def tree_device(roots: Sequence[Tuple[str, Any]]) -> Optional[Any]:
     """
     for _, root in roots:
         for module in root.modules():
-            for _attr, _is_param, tensor in _own_tensors(module):
+            for _attr, _is_param, tensor in own_tensors(module):
                 if not tensor.is_meta:
                     return tensor.device
     return None
@@ -928,7 +943,14 @@ __all__ = [
     "PlanTransition",
     "ResidencyPlan",
     "StreamedResidency",
+    "aligned",
+    "bind_tensor",
+    "discover_leaves",
+    "is_adapter_name",
+    "is_streamable_leaf",
     "module_roots",
+    "own_tensors",
+    "tensor_bytes",
     "plan_residency",
     "plan_transition",
     "stream_residency_active",
