@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple
 
+from ...models import projection
 from ...models.meta_init import init_empty_weights
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -153,6 +154,22 @@ def build(
     extra_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> Skeleton:
     """Build ``pipeline_cls`` from configs only. Reads no tensor bytes."""
+    # pgw#1514: ASK WHY BEFORE SAYING WHAT, and ask it ONCE for the whole tree.
+    # `Path.is_file()` FOLLOWS the link, so "this tree never had an index" and
+    # "this tree's objects were collected" arrive at the check below as the
+    # same False — and the second is a fact about the STORE that this refusal
+    # reported as a fact about the CHECKPOINT. Measured on a real 5.6 GB tree
+    # (se#790): pin dropped, one GC, and a tree whose `model_index.json` is
+    # right there gets refused for not having one.
+    #
+    # The index merely DIES FIRST — 14 entries dangle in that state — so this
+    # walks the whole tree rather than guarding one file, which would only
+    # move the wrong message down to the next component's config. Same helper
+    # and same sentence as the eager bridge uses (pgw#1513), because two
+    # hand-written strings is how this shape reached four callers.
+    collected = projection.collected_entries(checkpoint_dir)
+    if collected:
+        raise SkeletonError(projection.collected_refusal(checkpoint_dir, collected))
     index_path = Path(checkpoint_dir) / MODEL_INDEX
     if not index_path.is_file():
         raise SkeletonError(
