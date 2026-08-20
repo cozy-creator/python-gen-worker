@@ -10,7 +10,9 @@ A lane is the FULL execution-strategy descriptor:
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
+
+import re
 
 import msgspec
 
@@ -315,7 +317,46 @@ class ExecutionLaneUnavailableError(ValueError):
         super().__init__(f"lane_unavailable: {execution_lane} — {detail}")
 
 
+def execution_lane_bucket(execution_lane: str) -> Tuple[str, int]:
+    """(base lane, rank bucket) for a weight lane in stamp OR label-token form.
+
+    ``"w8a8-lora128"`` -> ``("w8a8", 128)``, ``"lora32"`` -> ``("", 32)``,
+    ``"w8a8"`` -> ``("w8a8", 0)``. Sparse stamps (eager-only, never compiled)
+    do not parse as bucketed — they pass through as their whole string.
+
+    pgw#1573 moved this out of ``compile_cache`` (the v1 arming brain, deleted)
+    and beside the lane vocabulary it belongs to. ``models/loading.py``'s BASE
+    lane set already cited it by this name.
+    """
+
+
+    match = re.search(r"(?:^|-)lora(\d+)$", str(execution_lane or ""))
+    if match is None:
+        return str(execution_lane or ""), 0
+    return execution_lane[: match.start()], int(match.group(1))
+
+
+def execution_lane_token(weight_lane: str) -> str:
+    """Label token for a traced weight lane (gw#534).
+
+    Compiled graphs of different lanes are DIFFERENT graphs and must not
+    collide on one flavor label. ``""`` (plain resident, incl. bf16-resident)
+    stays unsuffixed. LoRA-branch lanes (gw#547/gw#561) keep their base lane's
+    token plus the bucket suffix: ``w8a8-lora128`` -> ``w8a8-lora128``,
+    ``fp8-hooks-lora32`` -> ``w8a16-lora32``, ``lora32`` -> ``lora32`` — one
+    graph family per (base lane, rank bucket).
+    """
+    base, bucket = execution_lane_bucket(str(weight_lane or ""))
+    token = {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8",
+             "w4a4": "w4a4"}.get(base, base)
+    if bucket:
+        return f"{token}-lora{bucket}" if token else f"lora{bucket}"
+    return token
+
+
 __all__ = [
+    "execution_lane_bucket",
+    "execution_lane_token",
     "ACT_W16A16",
     "AppliedLane",
     "ACT_W4A4",
