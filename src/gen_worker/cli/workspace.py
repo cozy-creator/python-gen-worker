@@ -69,6 +69,28 @@ def graph_cas_root() -> Path:
     return Path(_settings().graph_cas_root or DEFAULT_GRAPH_CAS)
 
 
+def host_sm() -> str:
+    """This host's CUDA compute capability as ``sm_XY``, or ``""``.
+
+    ONE implementation, here, because `compile` and `up` both need it and they
+    must not disagree: `compile` builds artifacts FOR an sm and `up` adopts
+    artifacts BY it, so two spellings would silently split the pool — build for
+    one key, look up another, and every hit reads as a miss.
+
+    ``""`` means "no CUDA device visible", which is a legal state (a CPU-only
+    box, a laptop with the driver absent) and is never rendered as a guess.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return ""
+        major, minor = torch.cuda.get_device_capability()
+        return f"sm_{major}{minor}"
+    except Exception:  # noqa: BLE001 - absence is an answer, not an error
+        return ""
+
+
 def trace_device() -> str:
     """The device CLASS a trace states. ``derive._trace_device`` IS the law.
 
@@ -205,6 +227,7 @@ __all__ = [
     "CheckpointRef",
     "WorkspaceError",
     "graph_cas_root",
+    "host_sm",
     "local_cas",
     "parse_checkpoint_ref",
     "resolve_checkpoint",

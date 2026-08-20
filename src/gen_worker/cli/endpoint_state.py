@@ -35,7 +35,7 @@ import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 #: Per-user root for RESIDENT-endpoint state. Config key
 #: ``COZY_ENDPOINT_STATE`` (Settings field ``endpoint_state_root``), never
@@ -183,7 +183,7 @@ def clear_handle(handle: EndpointHandle) -> None:
 def wait_for_handle(
     handle: EndpointHandle,
     *,
-    child_pid: int,
+    still_running: Callable[[], bool],
     poll_s: float = 0.1,
 ) -> Dict[str, Any]:
     """Block until the daemon publishes a READY handle, or it dies.
@@ -193,12 +193,22 @@ def wait_for_handle(
     distinguishes that from a hang. The loop's terminating condition is the
     CHILD — if it exits without publishing, that is a boot failure and the log
     says why. Progress is observed, not clocked.
+
+    ``still_running`` is a CALLABLE, not a pid, and that is the whole fix for
+    pgw#1523. Signalling a pid cannot answer this question for one's OWN child:
+    an exited-but-unreaped child is a ZOMBIE, and `os.kill(pid, 0)` on a zombie
+    SUCCEEDS. So a pid-based check reports a child that died in its first
+    second as alive forever, and this loop — correctly having no timeout —
+    spins until the caller gives up. Measured: `gen-worker up -d` against an
+    endpoint whose boot refused immediately hung for the full 10-minute test
+    timeout with the refusal already sitting in its log. The caller passes
+    `Popen.poll`, which REAPS and therefore reports the truth.
     """
     while True:
         document = read_handle(handle)
         if document is not None and document.get("state") == "ready":
             return document
-        if not pid_alive(child_pid):
+        if not still_running():
             tail = ""
             try:
                 tail = "\n".join(

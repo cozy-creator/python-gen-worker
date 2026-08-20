@@ -110,16 +110,32 @@ def _spec(args: argparse.Namespace) -> BootSpec:
     refs = tuple(args.checkpoint_ref) or (
         () if args.checkpoint else runtime_config_refs(endpoint_dir)
     )
+    sm = args.sm or workspace.host_sm()
     graph_store: Optional[Path] = None
     if args.graph_store:
+        # STATED explicitly. If the sm cannot be resolved, adoption is
+        # impossible and refusing is right — the user asked for a store.
         graph_store = Path(args.graph_store)
     else:
         default = workspace.graph_cas_root()
-        # Absent = the eager bridge, stated rather than defaulted into: a
-        # store that does not exist yet would make every graph a hole and turn
-        # a plain `up` into a compile.
-        if default.is_dir():
+        # DEFAULTED. Two defaults have to agree, and they did not: the store
+        # defaulted ON whenever the box CAS existed while the sm defaulted to
+        # empty, so `_adoption_source` refused and a bare `gen-worker up`
+        # could not bring ANY endpoint up on a machine that had ever compiled
+        # anything (pgw#1523, measured on the echo example: "--sm is required
+        # to adopt"). A default that makes the common invocation refuse is not
+        # a default. With no sm there is nothing to adopt FOR, so the eager
+        # bridge is the honest answer and the log says so.
+        if default.is_dir() and sm:
             graph_store = default
+        elif default.is_dir():
+            print(
+                "gen-worker up: a compiled-graph store exists at "
+                f"{default} but this host's sm could not be determined, so "
+                "nothing can be adopted for it — serving EAGER. Pass --sm to "
+                "adopt.",
+                file=sys.stderr,
+            )
     return BootSpec(
         endpoint_dir=endpoint_dir,
         checkpoint_refs=refs,
@@ -128,7 +144,7 @@ def _spec(args: argparse.Namespace) -> BootSpec:
         model=args.model,
         defaults=args.defaults,
         lane=args.lane,
-        sm=args.sm,
+        sm=sm,
         graph_store=graph_store,
         artifacts_dir=Path(args.artifacts_dir),
         output_dir=Path(args.output_dir),
@@ -205,7 +221,11 @@ def _detach(args: argparse.Namespace, handle: Any) -> int:
     )
     sys.stderr.flush()
     try:
-        document = endpoint_state.wait_for_handle(handle, child_pid=child.pid)
+        # `child.poll` REAPS; a bare pid check would see the zombie of a child
+        # that already refused and wait forever (pgw#1523).
+        document = endpoint_state.wait_for_handle(
+            handle, still_running=lambda: child.poll() is None
+        )
     except EndpointStateError as exc:
         sys.stderr.write(f"gen-worker up: {exc}\n")
         return 1
