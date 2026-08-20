@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
@@ -113,28 +114,31 @@ class TraceLoadContext:
                 setattr(loaded, lora_call, _noop)
         return loaded
 
-    def component_dtype(self, tree: Any, subfolder: Any) -> Any:
-        """The precision ONE component loads at (pgw#1512, Paul's ruling).
+    def component_dtype(self, tree: Any, subfolder: Any, module: Any = None) -> Any:
+        """The precision ONE component loads at — MATCH-SCOPED (pgw#1531).
 
-        Installed as torchcg's session policy, so it is asked once per
-        component instead of once per tree.
+        Paul's ruling, after pgw#1530 measured that the two previous readings
+        were both wrong. The lane's dtype governs exactly the components whose
+        parameters the contract's patterns MATCH, and the match is against
+        parameter NAMES because that is the only thing a contract states:
+        every shipped contract spells the denoiser's own parameters
+        (``conv_in.weight``, ``transformer_blocks.…``) and none prefixes them
+        with a component.
 
-        1. **The lane governs the component its CONTRACT DESCRIBES.** A layout
-           contract names the tensors it covers, and a pattern's first segment
-           is the component that owns them (``unet.conv_out.weight`` ->
-           ``unet``). For h3 that set is the DiT and nothing else, which is the
-           whole ruling: a denoiser contract says nothing about the VAE beside
-           it. This branch is where precision-is-identity lives (pgw#1458), so
-           it keeps pgw#1448's real-dtype-never-the-spelling read.
-        2. **Otherwise the component's own container answers**, through the
-           SAME stub-aware reader the serve path uses
-           (``serving.checkpoint_dtype``): its config's declared dtype first,
-           then the safetensors headers. On a projected tree those headers are
-           128-byte stubs, and that reader is the one that knows it -- a naive
-           open here would read a stub as truth.
-        3. **Nothing may default.** If neither the contract nor the container
-           can say, this REFUSES by name. A quiet fp32 is the defect pgw#1448
-           deleted, and at trace it would silently re-key a graph.
+        Resolution order, by how directly each source knows:
+
+        1. the component's own BYTES — a store-converted tree's safetensors
+           headers are what the pod runs, read through the stub-aware reader
+           that knows a 128-byte projection stub from a real file;
+        2. the LANE, **if this contract matches this component**. sdxl's
+           contract matches its UNet and its VAE, so it is tree-wide there;
+           h3's matches only the DiT, so the decode and conditioning blocks
+           are left alone and wall 7 cannot come back through them;
+        3. the component's CONFIG — last, because it is the one source a
+           conversion does not rewrite (sd15's ``text_encoder/config.json``
+           still says float32 in a tree whose bytes are bf16);
+        4. nothing anywhere: NO CAST. The absence of a conversion is not a
+           default precision (pgw#1448).
         """
 
         from ..serving.checkpoint_dtype import (
@@ -147,12 +151,9 @@ class TraceLoadContext:
         if name:
             directory = directory / name
         else:
-            # diffusers loads a component by handing its DIRECTORY over with no
-            # subfolder (`AutoencoderKL.from_pretrained(<tree>/vae)`), so an
-            # absent subfolder does not mean "the root". The component is
-            # whatever this directory is called relative to the tree the author
-            # was given; only the tree ITSELF is the root, and that is the
-            # single-module checkpoint the lane speaks for.
+            # diffusers loads a component by handing its DIRECTORY over with
+            # no subfolder (`AutoencoderKL.from_pretrained(<tree>/vae)`), so an
+            # absent subfolder does not mean "the root".
             try:
                 relative = directory.resolve().relative_to(
                     self.checkpoint_dir.resolve()
@@ -162,43 +163,66 @@ class TraceLoadContext:
             if relative is not None and str(relative) not in (".", ""):
                 name = str(relative).strip("/")
 
-        # 1. THE COMPONENT'S OWN BYTES, when it has any. A serving tree has
-        #    been CONVERTED through the lane contract by the store, so its
-        #    safetensors headers are the precision the pod actually runs —
-        #    read through the stub-aware reader, which knows a 128-byte
-        #    projection stub from a real file.
         own = _header_dtype(directory)
         if own is not None:
             return own
 
-        # 2. OTHERWISE THE LANE. pgw#1530: this is the half pgw#1512 got
-        #    wrong. A contract's `tensors` list enumerates the DENOISER's own
-        #    parameter names — every shipped contract does, `conv_in.weight`
-        #    for sd15, `transformer_blocks.…` for h3, never a `unet.`/
-        #    `transformer.` prefix — but its `dtype` states the precision of
-        #    the TREE the store converts to that contract. Treating the
-        #    tensor list as a component roster made the governed set match
-        #    nothing on every endpoint in the fleet, so the lane's dtype was
-        #    never applied anywhere and a config-only derive silently traced
-        #    fp32 graphs under a bf16 lane.
-        declared = _lane_torch_dtype(self.lane, checkpoint_dir=self.checkpoint_dir)
-        if declared is not None:
-            return declared
+        if self._lane_matches(module):
+            declared = _lane_torch_dtype(
+                self.lane, checkpoint_dir=self.checkpoint_dir
+            )
+            if declared is not None:
+                return declared
 
-        # 3. THE COMPONENT'S CONFIG, LAST and only when nothing above spoke.
-        #    On a converted tree a component config is the PUBLISHER's, not
-        #    the store's: sd15's `text_encoder/config.json` still says
-        #    `float32` in a tree whose bytes are bf16. Preferring it is what
-        #    put an fp32 encoder beside a bf16 denoiser and produced
-        #    `Input type (float) and bias type (c10::BFloat16)` on payload 0.
         config = _config_dtype(directory)
         if config is not None:
             return config
-
-        # Nothing anywhere can say. No cast — the absence of a conversion,
-        # which is what the streaming loader does with bytes it was given no
-        # contract for.
         return None
+
+    def _lane_matches(self, module: Any) -> bool:
+        """Does this lane's contract describe THIS module's parameters?
+
+        The mechanical half of match-scoping. A contract pattern is a
+        parameter name with ``{...}`` standing for one path segment, so it
+        becomes an anchored regex and the question is whether any of this
+        module's parameter names is one the contract claims.
+
+        Short-circuits on the first hit, which is immediate for a governed
+        component. A module with no parameters (a tokenizer, a scheduler) is
+        never claimed — there is nothing to match and nothing to cast.
+        """
+
+        if module is None or self.lane is None:
+            return False
+        try:
+            names = list(module.state_dict())
+        except Exception:  # noqa: BLE001 - a probe never breaks a load
+            return False
+        if not names:
+            return False
+        for pattern in self._lane_patterns():
+            for candidate in names:
+                if pattern.match(candidate):
+                    return True
+        return False
+
+    def _lane_patterns(self) -> tuple[Any, ...]:
+        """The contract's tensor patterns, compiled once per context."""
+
+        cached = getattr(self, "_lane_pattern_cache", None)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        compiled = []
+        for entry in getattr(self.lane, "tensors", ()) or ():
+            spelling = str(getattr(entry, "pattern", "") or "")
+            if not spelling:
+                continue
+            # `{i}` is one path segment, never a dot-crossing wildcard.
+            body = re.sub(r"\\\{[^}]*\\\}", "[^.]+", re.escape(spelling))
+            compiled.append(re.compile(f"^{body}$"))
+        resolved = tuple(compiled)
+        self._lane_pattern_cache = resolved
+        return resolved
 
     def compile(self, target: Any) -> Any:
         """torch.compile-style marking, trace half (pgw#1370/#1372 contract).

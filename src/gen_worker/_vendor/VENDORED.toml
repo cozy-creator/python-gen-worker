@@ -306,7 +306,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "f45fc64a9ba1323e0a44975565d822517aab8058"
+rev = "e24de3bf22857a89887b700f973445bd286db7f2"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's
@@ -511,11 +511,11 @@ rewrites = [
 "writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
 
 [packages.torchcg.files]
-"__init__.py" = "ed20294bb586c6209538dbe6f0d120ec5ff41ef24002ec2daf751e3e6abde891"
+"__init__.py" = "0948c32c9e5f3772bc0995855a0b1acdcba5f75f7c4733eae5a3ae841915459e"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
 "_wrapper_split.py" = "1d5a3bc1ccabadeaa2b8b54f1492cba10723e53074a0022b8c7453565a86a4ce"
-"adopt.py" = "78f6557c7f68fa4e96b27bce25b49f056f2e1bd02e1118d48b3ed71ccf3317c1"
+"adopt.py" = "7cc8965a48e9f2ea5867e80ccc3dec506d33fe86896de37528a6652fe80c19e9"
 "artifact.py" = "a3c96d845be49c752bd608dbb4b36fb192cb449937716d8d835aeba2e28d12ba"
 "cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
 "compiler.py" = "6ee54b26286b215eef8867dffb133d023a6808379574ac69f8007a64c477045a"
@@ -533,7 +533,7 @@ rewrites = [
 "document.py" = "a70f4e53d75dd4cdc5fb6f52be4c8c105e49efee168ab6c295094a09f779d0ad"
 "engine.py" = "d8275ad146c73ae5516ea7d60acc1fd63cdddb3036f4833f7741913fe340a1a9"
 "graph_identity.py" = "88c731a681eb1e0b878f30bc33fcaa4efdbfc16bdc612fd6d406a088e299e567"
-"hollow.py" = "5d1eb57bb8be95c830e36db4c309279e6dd17bec002170c5adec5a57e6070cb7"
+"hollow.py" = "d9a0b57b01036588b9182d737ea925c34885b14a4bf88e76c8bb38d6d4ae97f9"
 "host_isa.py" = "679aa81547be2d60ae6593b6e8f75dd29dcd56ab85d8e858e219b5af5d0eadc4"
 "identity.py" = "a460a24836cbd46cc9e65bd684b9f6258f6718e5c56102f26a7071f01574a99e"
 "ingress.py" = "fa9b814dbfcd43e2a7cfdd2ed48299a7fa5a570aa73d3e2269448c974074d558"
