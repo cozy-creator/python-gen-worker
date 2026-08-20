@@ -115,3 +115,19 @@ release.trace_context.TraceRequestContext.materialize_blob	jobs/vlm_judge/src/vl
 release.trace_context.TraceRequestContext.mktemp	jobs/vlm_judge/src/vlm_judge/clips/judge.py:243	PROD
 release.trace_context.TraceRequestContext.resolve_dataset	jobs/h3_finetuner/src/h3_finetuner/train.py:137	PROD
 release.trace_context.TraceRequestContext.workflow_checkpoint	private-inference-endpoints/dj-pipeline/src/dj_pipeline/main.py:249	PROD
+
+# pgw#1558 / se#797: the endpoint-facing MEMORY MECHANISM. These four exist
+# because `minimax-h3` was hand-rolling them in raw torch (se#796's finding:
+# the endpoint imported ZERO memory APIs from this SDK), so their consumer is
+# an endpoint by construction — the pod's own paths already had answers they
+# were not sharing. The other three added in the same commit
+# (`tensor_storage_bytes`, `module_storage_bytes`, `residency.move_verified`)
+# ARE reached from `src/`, and are deliberately not listed here.
+#
+# Verified with `lint_unreached_surface.py --siblings`: `6 corpora scanned
+# across 6/6 siblings` — the COUNT, because that scan skips a missing sibling
+# and still prints green.
+models.memory.process_ceiling_vram	serverless-endpoints/minimax-h3/src/minimax_h3/engine.py:1389	PROD
+models.memory.release_cached_vram	serverless-endpoints/minimax-h3/src/minimax_h3/engine.py:388	PROD
+models.memory.tensor_dtype_label	serverless-endpoints/minimax-h3/src/minimax_h3/engine.py:1708	PROD
+models.memory.resident_census	serverless-endpoints/minimax-h3/src/minimax_h3/engine.py:1882	PROD
