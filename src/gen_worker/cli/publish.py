@@ -75,11 +75,14 @@ _EXCLUDE_DIRS = frozenset({
     # Build/tool detritus.
     ".venv", "venv", "__pycache__", ".git", ".mypy_cache", ".pytest_cache",
     ".tox", ".ruff_cache", "node_modules",
-    # A LOCAL RUN'S OUTPUT. Both are cwd-relative defaults (pgw#1526): the
-    # daemon writes artifacts to `.compiled-graphs` and media to `outputs`,
-    # so anyone who runs `up`/`compile` inside an endpoint leaves them in the
-    # source tree. Measured via cozy-local's twin of this set (cl#88): 172 MB
-    # of artifacts took one tarball 75 KB -> 59 MB.
+    # A LOCAL RUN'S OUTPUT. `outputs` is still a cwd-relative default (media
+    # from `run`). `.compiled-graphs` is NO LONGER ONE — pgw#1526 moved the
+    # artifacts default to the box cache (`cli/workspace.artifacts_root`), so
+    # the only way it appears in a source tree now is an explicit
+    # `--artifacts-dir .compiled-graphs`. It stays in this set anyway: this is
+    # a FLOOR, and a floor that only holds for the default is not a floor.
+    # Measured via cozy-local's twin of this set (cl#88): 172 MB of artifacts
+    # took one tarball 75 KB -> 59 MB.
     ".compiled-graphs", "outputs",
     # CREDENTIAL DIRECTORIES. Not bloat — a secret-leak vector. `publish`
     # uploads a whole tree when the endpoint is not a git work tree, and an

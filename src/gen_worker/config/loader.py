@@ -43,6 +43,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     # TENSORHUB_CACHE_DIR does.
     "COZY_WEIGHTS_CAS": "weights_cas_root",
     "COZY_GRAPH_CAS": "graph_cas_root",
+    "COZY_ARTIFACTS": "artifacts_root",
     "COZY_ENDPOINT_STATE": "endpoint_state_root",
     "COZY_HOME": "cozy_home",
     "BAKED_PROGRAM_CAS_ROOT": "baked_program_cas_root",

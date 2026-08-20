@@ -23,6 +23,11 @@ Weights and graphs are split because their lifetimes differ by orders of
 magnitude: a weight tree is worth 6 GB and survives every code change, a graph
 blob is invalidated by a torch bump. One CAS would make a GC policy that is
 right for one of them wrong for the other.
+
+Plus one working address on the same footing (pgw#1526): the **artifacts root**,
+where `compile` builds and `up` adopts. It is here for the reason everything
+else is here — it is MACHINE-scoped, so letting it fall out of whatever cwd the
+daemon started in put an AOTInductor store inside a source tree.
 """
 
 from __future__ import annotations
@@ -40,6 +45,27 @@ DEFAULT_WEIGHTS_CAS = Path.home() / ".cache" / "tensorhub" / "cas"
 #: Exported programs (from `lock`) and compiled artifacts (from `compile`).
 #: Config key `COZY_GRAPH_CAS` (Settings field `graph_cas_root`).
 DEFAULT_GRAPH_CAS = Path.home() / ".cache" / "cozy" / "graph-cas"
+
+#: Where `compile` builds artifacts and `up` adopts them from — the scratch and
+#: staging half of the graph store, beside the CAS it publishes into.
+#: Config key `COZY_ARTIFACTS` (Settings field `artifacts_root`).
+#:
+#: pgw#1526: this used to default to `Path(".compiled-graphs")` — RELATIVE TO
+#: CWD — so running `up` or `compile` from inside an endpoint deposited a
+#: MACHINE-SCOPED AOTInductor store into a source tree, untracked, unignored
+#: and indistinguishable from endpoint content. Measured cost while it stood
+#: (cl#88): sd15 0.3.2's source tarball went 75,164 -> 59,408,521 bytes (790x)
+#: on 172 MB of local compile output, and the first build died in 35 s on an S3
+#: PutObject fault over a residential uplink. Nothing anywhere read the shipped
+#: copy: artifacts are keyed (env x sm) per pgw#1471, so a laptop's would be a
+#: keyed miss on a pod regardless.
+#:
+#: It is pgw#1513 in a different path — one store whose address was decided by
+#: an accident of cwd rather than stated once by the layer that owns it. A
+#: default that depends on where you happened to `cd` is not a default, so
+#: there is no fallback and no alias: explicit `--artifacts-dir` still wins,
+#: and nothing else resolves it.
+DEFAULT_ARTIFACTS = Path.home() / ".cache" / "cozy" / "compiled-graphs"
 
 
 class WorkspaceError(RuntimeError):
@@ -67,6 +93,17 @@ def weights_cas_root() -> Path:
 
 def graph_cas_root() -> Path:
     return Path(_settings().graph_cas_root or DEFAULT_GRAPH_CAS)
+
+
+def artifacts_root() -> Path:
+    """Where compiled artifacts are built and adopted from (pgw#1526).
+
+    ONE answer, here, for the same reason `graph_cas_root` is here: `compile`
+    WRITES artifacts and `up` ADOPTS them, so two spellings would silently
+    split the pool — build under one address, look up another, and every hit
+    reads as a miss.
+    """
+    return Path(_settings().artifacts_root or DEFAULT_ARTIFACTS)
 
 
 def host_sm() -> str:
@@ -222,10 +259,12 @@ def local_cas(root: Path) -> Any:
 
 
 __all__ = [
+    "DEFAULT_ARTIFACTS",
     "DEFAULT_GRAPH_CAS",
     "DEFAULT_WEIGHTS_CAS",
     "CheckpointRef",
     "WorkspaceError",
+    "artifacts_root",
     "graph_cas_root",
     "host_sm",
     "local_cas",

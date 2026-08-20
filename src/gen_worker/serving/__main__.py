@@ -148,7 +148,10 @@ def _parser() -> argparse.ArgumentParser:
              "triton, nvidia-*). Default: the endpoint's own uv.lock, which "
              "is the SAME file `gen-worker lock` read for the document being "
              "adopted. Absent, the document's own stamp is used.")
-    parser.add_argument("--artifacts-dir", default=".compiled-graphs")
+    # pgw#1526: resolved from `cli/workspace.py`, never from cwd.
+    parser.add_argument("--artifacts-dir", default="", metavar="DIR",
+                        help="where compiled artifacts are built and "
+                             "adopted from (default: the box cache).")
     parser.add_argument("--mint", action="store_true",
                         help="after boot, fill this (lane x sm)'s holes "
                              "(pgw#1371) and WAIT for the mint before "
@@ -240,10 +243,18 @@ def _adoption_source(
     return store, store.get_graphs(module_name)
 
 
+def _artifacts_dir(args: argparse.Namespace) -> Path:
+    """STATED wins; otherwise the box cache (pgw#1526), one spelling."""
+    from ..cli.workspace import artifacts_root
+
+    stated = str(getattr(args, "artifacts_dir", "") or "").strip()
+    return Path(stated).resolve() if stated else artifacts_root()
+
+
 def _mint_cas(args: argparse.Namespace) -> Path:
     """Where the mint's compile child admits artifacts, one spelling."""
     return Path(
-        args.mint_cas or args.graph_store or (Path(args.artifacts_dir) / "cas"))
+        args.mint_cas or args.graph_store or (_artifacts_dir(args) / "cas"))
 
 
 def _toolchain() -> Mapping[str, str]:
@@ -379,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     # `lint_raw_aoti_load` fence exists to stop.
     host.setup(
         store=store, document=document, sm=args.sm,
-        artifacts_dir=Path(args.artifacts_dir),
+        artifacts_dir=_artifacts_dir(args),
         stack=stack,
     )
     if host.adoption is not None:
@@ -404,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
 
         box = SelfMint(
             store=store,
-            artifacts_dir=Path(args.artifacts_dir),
+            artifacts_dir=_artifacts_dir(args),
             cas_dir=_mint_cas(args),
             target_arch=args.sm,
             toolchain=dict(_toolchain()),

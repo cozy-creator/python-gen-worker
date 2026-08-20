@@ -180,6 +180,49 @@ def test_a_built_graph_lands_where_boot_time_adoption_reads_it(
     assert "SERVABLE" in compile_cli.summarize(report)[0]
 
 
+def test_a_build_lands_in_the_box_cache_and_never_in_the_endpoint_tree(
+    endpoint: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """# pgw#1526: `compile` wrote its scratch to `<endpoint>/.compiled-graphs`.
+
+    Machine-scoped bytes inside a source tree, untracked and unignored and
+    indistinguishable from endpoint content — which is how 172 MB of local
+    compile output took an sd15 source tarball from 75,164 to 59,408,521 bytes
+    (cl#88) and killed the first build on an S3 fault over a residential link.
+
+    Asserted at the PATH level rather than through adoption: the peer #1532
+    lane reports adoption enumerating zero records over a full store for a
+    cause of its own, so an adoption-based assertion here would go green or red
+    for their reason instead of this one.
+    """
+    box = tmp_path / "box-artifacts"
+    monkeypatch.setattr(compile_cli.workspace, "artifacts_root", lambda: box)
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    _seed_programs(store, tmp_path)
+
+    destinations: List[Path] = []
+
+    def build(spec: compile_cli.Spec, program: Path, destination: Path) -> Path:
+        destinations.append(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        tcg_artifacts.aoti_package(
+            destination / "model.pt2", graph_specialization=spec.graph)
+        return destination
+
+    report = _run(endpoint, cas, store=store, builder=build)
+
+    assert [outcome.state for outcome in report.outcomes] == [
+        compile_cli.BUILT, compile_cli.BUILT]
+    assert destinations, "the builder was never reached"
+    for destination in destinations:
+        assert box in destination.parents, destination
+        assert endpoint not in destination.parents, destination
+    # The endpoint tree is UNTOUCHED — the property a `.gitignore` or an
+    # upload-exclusion can only paper over.
+    assert not (endpoint / ".compiled-graphs").exists()
+
+
 def test_a_second_run_over_a_full_store_reports_present_and_stays_servable(
     endpoint: Path, tmp_path: Path
 ) -> None:
