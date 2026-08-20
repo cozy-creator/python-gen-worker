@@ -58,6 +58,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+#: What substrate produced these numbers, stamped into the verdict and the
+#: table so a row CANNOT be published without it (coordinator, 2026-08-20).
+#:
+#: A raw pod runs `gen-worker lock/compile/up/run` — the endpoint's own serving
+#: code, which is what the measurement law asks for — but it does NOT go
+#: through release packaging and deploy. That is the right subject for a
+#: graph-shape A/B (packaging does not touch a per-step wall) and it is a real
+#: limit on what the number describes, so the limit travels WITH the number
+#: rather than in a paragraph someone has to remember to quote.
+SUBSTRATES = {
+    "raw-pod": (
+        "raw-pod substrate; numbers describe the graphs, not the deploy path"
+    ),
+    "local": (
+        "local-card substrate; numbers describe the graphs, not the deploy path"
+    ),
+    "release": "release-built substrate; the full deploy path",
+}
+
 ARMS = ("static", "aspect", "batch", "all")
 AXES = {"static": "off", "aspect": "aspect", "batch": "batch", "all": "all"}
 
@@ -182,9 +201,10 @@ class Table:
             return None
         return (measured - control) / control * 100.0
 
-    def render(self) -> str:
+    def render(self, substrate: str = "") -> str:
         arms = self.arms()
-        lines = [
+        lines = [f"_{SUBSTRATES[substrate]}_", ""] if substrate else []
+        lines += [
             "| shape | cfg | " + " | ".join(
                 f"{arm} (s)" + ("" if arm == "static" else " / vs static")
                 for arm in arms
@@ -449,9 +469,14 @@ class Bench:
             adoption[arm] = {"adopt": ok, "outside_tolerance": offenders}
         return {
             "endpoint": str(self.endpoint),
+            "substrate": self.args.substrate,
+            # The attribution rides in the verdict itself, not only in the
+            # rendered table, so a consumer reading the JSON cannot get the
+            # numbers without the sentence that bounds them.
+            "substrate_note": SUBSTRATES[self.args.substrate],
             "tolerance_pct": self.args.tolerance,
             "mint": self.mint,
-            "table_markdown": self.table.render(),
+            "table_markdown": self.table.render(self.args.substrate),
             "adoption": adoption,
             **self.table.as_dict(),
         }
@@ -538,6 +563,16 @@ def self_test() -> int:
     )
     check("the control column carries no percentage", "static (s) / vs static" not in rendered)
 
+    print("[self-test] the substrate attribution cannot be dropped")
+    stamped = table.render("raw-pod")
+    check("the table leads with the substrate note",
+          stamped.splitlines()[0].strip("_") == SUBSTRATES["raw-pod"])
+    check("and it names the deploy-path limit",
+          "not the deploy path" in stamped)
+    check("every substrate carries a note", all(SUBSTRATES.values()))
+    check("an unstamped render is only reachable deliberately",
+          "substrate" not in table.render())
+
     print("[self-test] the arm plan is exhaustive over the axes")
     check("every arm names an axis policy", set(ARMS) == set(AXES))
     check("static is the OFF control", AXES["static"] == "off")
@@ -571,6 +606,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--guidance", type=float, default=7.5)
     parser.add_argument("--seed", type=int, default=1548)
     parser.add_argument("--prompt", default="a fisherman at dawn")
+    parser.add_argument("--substrate", choices=sorted(SUBSTRATES), default="raw-pod",
+                        help="what produced these numbers; stamped into the "
+                             "verdict and the table so the bound on what they "
+                             "describe travels with them")
     parser.add_argument("--tolerance", type=float, default=3.0,
                         help="percent slower than static that still adopts")
     parser.add_argument("--selectors", default="",
@@ -620,6 +659,8 @@ def main(argv: list[str] | None = None) -> int:
     for arm, verdict in report["adoption"].items():
         state = "ADOPT" if verdict["adopt"] else "KEEP STATIC"
         print(f"{arm}: {state} {verdict['outside_tolerance'] or ''}")
+    print()
+    print(report["substrate_note"])
     return 0
 
 
