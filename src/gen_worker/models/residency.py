@@ -250,6 +250,87 @@ def _move_obj(obj: Any, device: str) -> None:
         to(device)
 
 
+def move_verified(
+    obj: Any,
+    device: str,
+    *,
+    label: str = "",
+    move_fn: Callable[[Any, str], None] = _move_obj,
+) -> bool:
+    """Move ``obj`` to ``device`` and PROVE it landed. ``True`` = it did.
+
+    The paranoid completeness walk: after the move, every parameter/buffer
+    must actually be on ``device`` — a move that raised (mid-move CUDA OOM)
+    or silently skipped tensors gets one targeted repair pass (which now
+    escalates to a storage-wise move for anything whose ``.to()`` is a no-op),
+    and an unrepairable object is rolled back to the other side. Nothing here
+    ever books a mixed-device object: mixed devices fatal mid-denoise
+    ("Expected all tensors to be on the same device").
+
+    pgw#1558 made this a FREE FUNCTION. It was a private method on
+    :class:`Residency`, which is a worker-level registry keyed by model ref —
+    so an endpoint scheduling residency across the stages of ONE pipeline had
+    no way to reach it, and ``minimax-h3`` re-derived a weaker version of it
+    (a bare timed ``.to()`` plus its own stuck-tensor sweep) in its own repo.
+    The registry keeps its bookkeeping; the mechanism lives here, where an
+    endpoint, a rung and the registry can all call the same one.
+
+    ``move_fn`` is the mover — :func:`_move_obj` (pinned-swap-aware) by
+    default, or whatever a registry was constructed with.
+    """
+    name = label or type(obj).__name__
+    restore = "cpu" if device != "cpu" else "cuda"
+    try:
+        move_fn(obj, device)
+        missed = device_mismatches(obj, device)
+        if missed:
+            logger.warning(
+                "residency: .to(%s) on %s left %d tensors behind (e.g. %s); repairing",
+                device, name, len(missed), missed[:3],
+            )
+            missed = repair_device_placement(obj, device)
+        if not missed:
+            return True
+        logger.error(
+            "residency: move of %s to %s incomplete after repair (%s); rolling back",
+            name, device, missed[:5],
+        )
+    except Exception as exc:
+        logger.error(
+            "residency: .to(%s) failed for %s: %s; rolling back", device, name, exc,
+        )
+    try:
+        move_fn(obj, restore)
+        left = repair_device_placement(obj, restore)
+        if left:
+            logger.critical(
+                "residency: rollback of %s to %s ALSO incomplete (%s) — "
+                "object is mixed-device and unusable",
+                name, restore, left[:5],
+            )
+            # The next forward on this object fatals mid-denoise
+            # ("Expected all tensors to be on the same device"), so the
+            # hub must see the cause, not only the downstream job error.
+            activity_mod.emit_event(
+                activity_mod.KIND_RESIDENCY_FAULT,
+                f"ref={name} wanted={device} "
+                f"restore={restore}: move AND rollback both incomplete "
+                f"(e.g. {left[:3]}); object is mixed-device and unusable",
+                phase="mixed_device_unusable",
+            )
+    except Exception as exc:
+        logger.exception("residency: rollback .to(%s) failed for %s", restore, name)
+        activity_mod.emit_event(
+            activity_mod.KIND_RESIDENCY_FAULT,
+            f"ref={name} wanted={device} "
+            f"restore={restore}: rollback move raised; object is likely "
+            f"mixed-device and unusable: {type(exc).__name__}: {exc}",
+            phase="mixed_device_unusable",
+        )
+    flush_memory()
+    return False
+
+
 class Lease:
     """Admission lease: the set of refs one job needs, taken BEFORE the job
     starts and held for its whole lifetime.
@@ -577,63 +658,9 @@ class Residency:
         return True
 
     def _move_verified(self, obj: Any, device: str, *, ref: str = "") -> bool:
-        """Move + paranoid completeness walk: after ``.to(device)``,
-        every module parameter/buffer must actually be on ``device`` — a move
-        that raised (mid-move CUDA OOM) or skipped tensors gets one targeted
-        repair pass, and an unrepairable object is rolled back to the other
-        side. Residency NEVER books a mixed-device pipeline: mixed devices
-        fatal mid-denoise ("Expected all tensors to be on the same device")."""
-        restore = "cpu" if device != "cpu" else "cuda"
-        try:
-            self._move(obj, device)
-            missed = device_mismatches(obj, device)
-            if missed:
-                logger.warning(
-                    "residency: .to(%s) on %s left %d tensors behind (e.g. %s); repairing",
-                    device, ref or type(obj).__name__, len(missed), missed[:3],
-                )
-                missed = repair_device_placement(obj, device)
-            if not missed:
-                return True
-            logger.error(
-                "residency: move of %s to %s incomplete after repair (%s); rolling back",
-                ref or type(obj).__name__, device, missed[:5],
-            )
-        except Exception as exc:
-            logger.error(
-                "residency: .to(%s) failed for %s: %s; rolling back",
-                device, ref or type(obj).__name__, exc,
-            )
-        try:
-            self._move(obj, restore)
-            left = repair_device_placement(obj, restore)
-            if left:
-                logger.critical(
-                    "residency: rollback of %s to %s ALSO incomplete (%s) — "
-                    "object is mixed-device and unusable",
-                    ref or type(obj).__name__, restore, left[:5],
-                )
-                # The next forward on this object fatals mid-denoise
-                # ("Expected all tensors to be on the same device"), so the
-                # hub must see the cause, not only the downstream job error.
-                activity_mod.emit_event(
-                    activity_mod.KIND_RESIDENCY_FAULT,
-                    f"ref={ref or type(obj).__name__} wanted={device} "
-                    f"restore={restore}: move AND rollback both incomplete "
-                    f"(e.g. {left[:3]}); object is mixed-device and unusable",
-                    phase="mixed_device_unusable",
-                )
-        except Exception as exc:
-            logger.exception("residency: rollback .to(%s) failed for %s", restore, ref)
-            activity_mod.emit_event(
-                activity_mod.KIND_RESIDENCY_FAULT,
-                f"ref={ref or type(obj).__name__} wanted={device} "
-                f"restore={restore}: rollback move raised; object is likely "
-                f"mixed-device and unusable: {type(exc).__name__}: {exc}",
-                phase="mixed_device_unusable",
-            )
-        flush_memory()
-        return False
+        """This registry's binding of :func:`move_verified` — same mechanism,
+        this instance's injected mover."""
+        return move_verified(obj, device, label=ref, move_fn=self._move)
 
     @property
     def vram_device(self) -> str:
@@ -1234,5 +1261,6 @@ __all__ = [
     "HostRamHeadroom",
     "LoadedComponentKey",
     "content_set_digest",
+    "move_verified",
     "ON_DISK", "IN_RAM", "IN_VRAM", "EVICTED",
 ]
