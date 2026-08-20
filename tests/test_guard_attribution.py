@@ -132,15 +132,56 @@ def test_the_attribution_helper_selftest_passes():
     assert done.returncode == 0, done.stdout + done.stderr
 
 
+#: The `scripts/lint_*.py` that are NOT `fast gates` diff-local guards, and so
+#: are not expected to carry the attribution seam. Transcribed, not derived —
+#: deriving it from the same `_lint_side` probe the rows below use would make
+#: the exemption self-granting, which is the whole defect this literal closes.
+#:
+#: `lint_skip_census.py` is the pgw#966 census guard. It runs in the `tests`
+#: job, not `fast gates`, and its finding is never a file in a diff — it is a
+#: skip key, which has no side to fall on.
+NOT_DIFF_LOCAL = frozenset({"lint_skip_census.py"})
+
+
+def test_the_set_of_guards_exempt_from_attribution_is_exactly_the_named_one():
+    """pgw#1528. This row replaces a `pytest.skip` and the replacement is the
+    point: the parametrized rows below used to SKIP when a script had no
+    `_lint_side` — so a guard that silently LOST the seam produced a skip, not
+    a failure. That is the exact shape pgw#966's census exists to catch (a row
+    that stops measuring and reports nothing), reached from inside the guard
+    that was supposed to prevent it. A skip is also not free: it minted an
+    unclassified census key that failed the `tests` job for every PR in the
+    repo until somebody disposed of it.
+
+    Stated as a set instead, an unconverted NEW guard is red HERE, naming
+    itself, and a conversion that regresses is red rather than quiet.
+    """
+    unconverted = {p.name for p in SCRIPTS.glob("lint_*.py")
+                   if "_lint_side" not in p.read_text()}
+    assert unconverted == NOT_DIFF_LOCAL, (
+        "a `fast gates` guard lost (or never got) the attribution seam: "
+        f"{sorted(unconverted - NOT_DIFF_LOCAL)}; or an exempt one was "
+        f"converted and this literal is stale: {sorted(NOT_DIFF_LOCAL - unconverted)}"
+    )
+
+
 @pytest.mark.parametrize("script", sorted(
-    p.name for p in SCRIPTS.glob("lint_*.py")
+    p.name for p in SCRIPTS.glob("lint_*.py") if p.name not in NOT_DIFF_LOCAL
 ))
 def test_every_fast_gates_guard_can_attribute(script):
     """A guard that stopped importing the attribution seam is a guard that
-    silently went back to being unattributable. Structural, not a promise."""
+    silently went back to being unattributable. Structural, not a promise.
+
+    The parametrization EXCLUDES the exempt set rather than skipping over it,
+    so every row here executes and the exemption is a decision recorded in one
+    place (`NOT_DIFF_LOCAL`, fenced as a set above) instead of a condition
+    evaluated per row.
+    """
     source = (SCRIPTS / script).read_text()
-    if "_lint_side" not in source:
-        pytest.skip(f"{script} is not a `fast gates` diff-local guard")
+    assert "_lint_side" in source, (
+        f"{script} carries no attribution seam at all — add it, or name it in "
+        "NOT_DIFF_LOCAL with the reason it has no side to report"
+    )
     assert "_lint_side.report" in source or "_lint_side.verdict" in source, (
         f"{script} imports the attribution seam but never calls it — the import "
         f"is the only thing left of the conversion"
