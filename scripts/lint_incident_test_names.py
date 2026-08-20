@@ -67,8 +67,12 @@ ROOTS: Tuple[str, ...] = ("tests", "tests_v2")
 #: Length of the grandfather list. **Lower it with the names you deleted; never
 #: raise it.** 375 at adoption (pgw#1362, after waves 1-3a folded 41 modules out
 #: of the 416 that were issue-named when the epic's census was taken).
-BASELINE_HIGH_WATER = 126  # 370 -> 128: pgw#1373 deleted the v1 SDK's test corpus;
-                           # 128 -> 126: pgw#1438 deleted two more whose subjects went with it
+BASELINE_HIGH_WATER = 124  # 370 -> 128: pgw#1373 deleted the v1 SDK's test corpus;
+                           # 128 -> 126: pgw#1438 deleted two more whose subjects went with it;
+                           # 126 -> 124: pgw#1524 deleted the HF and ModelScope
+                           # direct-serve lanes, so their pickle-refusal modules
+                           # had no subject left (E5 coverage moved to the ingest
+                           # edge: tests/test_ingest_edge_refuses_pickle_weights.py)
 
 #: The issue-id spellings this workspace uses, as they appear inside a filename
 #: (`_pgw1234`, `_th1130`, `_gw640`, `_cl72`, `_ie655`, `_te148`). Matched

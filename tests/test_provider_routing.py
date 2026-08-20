@@ -4,9 +4,10 @@ Exercises the REAL routing path of ``gen_worker.models.download``:
 
   * build_provider_index_from_manifest over a real endpoint.lock-shaped dict,
   * lookup_provider_for_ref against the process-global index,
-  * ensure_local dispatching to the right provider branch (hf/civitai leaves
-    stubbed only at the network edge — every routing decision is real),
-  * retry-after-failure: a failed ensure_local attempt does not poison the ref.
+  * ensure_local dispatching on that provider — which since pgw#1524 means
+    dispatching to the right VERDICT: the CAS branch, the orchestrator-owes-a-
+    resolve refusal, or the unservable-source refusal,
+  * retry-after-refusal: the verdict is stable across calls.
 
 Named regressions kept as explicit cases:
   * tag-stripping (live 2026-05-16 failure: ``:latest`` stamped HF ref),
@@ -17,26 +18,15 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import List
 
 import pytest
 
-import gen_worker.models.download as dl_mod
 from gen_worker.models.download import (
     build_provider_index_from_manifest,
     ensure_local,
     lookup_provider_for_ref,
     set_provider_index,
 )
-
-
-def _make_weight_files(root: Path, files: List[str]) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    for f in files:
-        p = root / f
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"x" * 16)
-    return root
 
 
 @pytest.fixture(autouse=True)
@@ -159,35 +149,36 @@ def test_lookup_release_strip(wire_ref: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_hf_indexed_ref_routes_to_hf_branch(tmp_path: Path, monkeypatch) -> None:
-    snap = _make_weight_files(tmp_path / "snap", ["model.safetensors"])
-    calls: list = []
+def test_an_hf_indexed_ref_is_REFUSED_not_routed(tmp_path: Path) -> None:
+    """pgw#1524: the index still ROUTES — it decides which verdict the ref
+    gets — but "hf" no longer names a branch that fetches. It names the
+    refusal, and the refusal carries the ingest route."""
+    from gen_worker.models.errors import NonCasWeightSourceRefused
 
-    def _fake_hf(ref, **kw):
-        calls.append(ref)
-        return snap
-
-    monkeypatch.setattr(dl_mod, "download_hf", _fake_hf)
     set_provider_index({"bfl/FLUX.2-klein-4B": "hf"})
-    out = asyncio.run(ensure_local("bfl/FLUX.2-klein-4B", cache_dir=tmp_path))
-    assert len(calls) == 1
-    assert calls[0].repo_id == "bfl/FLUX.2-klein-4B"
-    assert out == snap
+    with pytest.raises(NonCasWeightSourceRefused) as caught:
+        asyncio.run(ensure_local("bfl/FLUX.2-klein-4B", cache_dir=tmp_path))
+    assert caught.value.provider == "hf"
+    assert not list(tmp_path.iterdir()), (
+        "a refused ref must leave no cache directory behind")
 
 
-def test_civitai_ref_routes_to_civitai_branch(tmp_path: Path, monkeypatch) -> None:
-    got: dict = {}
+def test_a_civitai_ref_is_REFUSED_not_routed(tmp_path: Path) -> None:
+    from gen_worker.models.errors import NonCasWeightSourceRefused
 
-    def _fake_civitai(version_id, out_dir, **kw):
-        got["version_id"] = version_id
-        got["out_dir"] = Path(out_dir)
-        return Path(out_dir) / "model.safetensors"
+    with pytest.raises(NonCasWeightSourceRefused) as caught:
+        asyncio.run(ensure_local("987654", provider="civitai", cache_dir=tmp_path))
+    assert caught.value.provider == "civitai"
+    assert not (tmp_path / "civitai").exists(), (
+        "the deleted branch used to mkdir a civitai staging dir; nothing may")
 
-    monkeypatch.setattr(dl_mod, "download_civitai", _fake_civitai)
-    out = asyncio.run(ensure_local("987654", provider="civitai", cache_dir=tmp_path))
-    assert got["version_id"] == 987654
-    assert got["out_dir"] == tmp_path / "civitai" / "987654"
-    assert out.name == "model.safetensors"
+
+def test_a_modelscope_ref_is_REFUSED_not_routed(tmp_path: Path) -> None:
+    from gen_worker.models.errors import NonCasWeightSourceRefused
+
+    with pytest.raises(NonCasWeightSourceRefused) as caught:
+        asyncio.run(ensure_local("org/model", provider="modelscope", cache_dir=tmp_path))
+    assert caught.value.provider == "modelscope"
 
 
 @pytest.mark.parametrize(
@@ -198,36 +189,36 @@ def test_civitai_ref_routes_to_civitai_branch(tmp_path: Path, monkeypatch) -> No
         ("acme/no-index", {}),                                        # no index at all
     ],
 )
-def test_tensorhub_refs_require_a_snapshot(tmp_path: Path, monkeypatch, ref, index) -> None:
+def test_tensorhub_refs_require_a_snapshot(tmp_path: Path, ref, index) -> None:
     """Workers never resolve tensorhub refs themselves — the orchestrator
-    pre-resolves and ships a Snapshot. Without one, the tensorhub branch
-    raises the typed terminal MissingSnapshotError and the
-    HF branch is NOT touched."""
-    from gen_worker.models.errors import MissingSnapshotError
+    pre-resolves and ships a Snapshot. Without one, the tensorhub branch raises
+    the typed terminal MissingSnapshotError, which pgw#1524 keeps DISTINCT from
+    the unservable-source refusal: this one the orchestrator can fix by
+    re-minting, that one it never can."""
+    from gen_worker.models.errors import (
+        MissingSnapshotError,
+        NonCasWeightSourceRefused,
+    )
 
-    calls: list = []
-    monkeypatch.setattr(dl_mod, "download_hf", lambda *a, **k: calls.append(a) or tmp_path)
     set_provider_index(index)
-    with pytest.raises(MissingSnapshotError, match="orchestrator-resolved snapshot"):
+    with pytest.raises(MissingSnapshotError, match="orchestrator-resolved snapshot") as caught:
         asyncio.run(ensure_local(ref, cache_dir=tmp_path))
-    assert calls == []
+    assert not isinstance(caught.value, NonCasWeightSourceRefused)
 
 
-def test_ensure_local_failure_then_retry_succeeds(tmp_path: Path, monkeypatch) -> None:
-    """Retry-after-failure: a failed attempt must not poison the ref — the
-    next ensure_local call re-dispatches and can succeed."""
-    snap = _make_weight_files(tmp_path / "snap", ["model.safetensors"])
-    attempts = {"n": 0}
+def test_a_refused_ref_is_not_poisoned_and_refuses_again_identically(
+    tmp_path: Path,
+) -> None:
+    """Retry-after-refusal. The old rig proved a transient fetch failure did
+    not poison the ref; there is no fetch to be transient any more, so the
+    property that matters is that the verdict is STABLE — a refusal that
+    became something else on the second call would send a retrying caller
+    somewhere new."""
+    from gen_worker.models.errors import NonCasWeightSourceRefused
 
-    def _flaky(ref, **kw):
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            raise RuntimeError("transient network failure")
-        return snap
-
-    monkeypatch.setattr(dl_mod, "download_hf", _flaky)
-    with pytest.raises(RuntimeError, match="transient"):
-        asyncio.run(ensure_local("owner/repo", provider="hf", cache_dir=tmp_path))
-    out = asyncio.run(ensure_local("owner/repo", provider="hf", cache_dir=tmp_path))
-    assert out == snap
-    assert attempts["n"] == 2
+    first: list = []
+    for _ in range(2):
+        with pytest.raises(NonCasWeightSourceRefused) as caught:
+            asyncio.run(ensure_local("owner/repo", provider="hf", cache_dir=tmp_path))
+        first.append(str(caught.value))
+    assert first[0] == first[1]

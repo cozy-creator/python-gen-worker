@@ -53,7 +53,7 @@ from .. import weight_position
 from ..api.errors import ValidationError
 from ..models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from ..models.download import ensure_local
-from ..models.errors import NonCasWeightSourceRefused
+
 from ..models.refs import normalize_model_ref
 
 logger = logging.getLogger(__name__)
@@ -153,23 +153,28 @@ async def _materialize_one(
     # is a RESOLUTION defect on the hub side, not an invitation to pull
     # un-normalized bytes off an upstream registry into a producer's hands.
     #
-    # Named rather than swallowed: `payload.<field>` is client-supplied, so the
-    # refusal says which field and which ref, and `NonCasWeightSourceRefused`
-    # carries the ingest route for the operator who has to fix it.
+    # THE VERDICT IS NOT RE-DERIVED HERE. `ensure_local` owns it and keeps the
+    # two no-snapshot conditions distinguishable BY TYPE, which matters because
+    # they need opposite operator actions: `MissingSnapshotError` says the hub
+    # owes this ref a resolve (retryable there), `NonCasWeightSourceRefused`
+    # says the binding names a source class that can never be served and points
+    # at the ingest route. Which one fires is decided by the ref's PROVIDER,
+    # from the endpoint.lock binding index — so both are reachable at this door.
     #
-    # pgw#1485 / pgw#1455 kept: `track` is the job plane's own weight_fetch
-    # instrumentation and it closes the position on every exit path, so a fetch
-    # that dies mid-way still says where it stopped. With the uninstrumented
-    # branch gone, EVERY reserved-repo byte is now on the funnel — the claim
-    # pgw#1455 made and could not previously hold here.
+    # pgw#1485 / pgw#1455 kept, and now honestly: `track` is the job plane's own
+    # weight_fetch instrumentation and it closes the position on every exit
+    # path. The no-snapshot call below is deliberately UNinstrumented, and that
+    # is no longer a hole — every path through it raises, so there are no bytes
+    # for a position to describe. EVERY reserved-repo byte is on the funnel,
+    # which is the claim pgw#1455 made and could not previously hold here.
     if snapshot is None:
-        raise NonCasWeightSourceRefused(
-            f"payload.{field_name}.ref {ref!r}: the hub resolved no tensorfs "
-            "CAS snapshot for this repo, and serving loads ONLY "
-            "tensor-layout-contract-cut CAS snapshots (pgw#1524). Publish the "
-            "repo through the platform's ingest route (conversion endpoint / "
-            "mirror-first) and bind the tensorhub ref it produces."
+        path = await ensure_local(
+            str(ref),
+            cache_dir=tensorhub_cas_dir(),
+            fill_source_dir=tensorhub_fill_source_dir(),
         )
+        setter(str(path))
+        return
     with weight_position.track(
         str(ref), weight_position.snapshot_bytes(snapshot),
     ) as position:
