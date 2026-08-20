@@ -284,3 +284,96 @@ def test_collected_entries_puts_model_index_json_FIRST(tmp_path: Path) -> None:
     assert got[1:] == sorted(got[1:]), f"the tail must stay sorted: {got}"
     assert "model_index.json" in projection.collected_refusal(tmp_path, got)[:400], (
         "and it must survive into the truncated (shown) window of the message")
+
+
+# ---------------------------------------------------------------------------
+# pgw#1514: the STREAMING reader. Everything above is the eager bridge; this is
+# the other caller, and it reads the index BEFORE anything that guard can see.
+# ---------------------------------------------------------------------------
+
+
+class _KeepsComponents:
+    """A pipeline class that would build happily — so a refusal below is the
+    guard's, never an accident of the fixture."""
+
+    def __init__(self, **components: Any) -> None:  # pragma: no cover
+        for name, value in components.items():
+            setattr(self, name, value)
+
+
+def _collected_tree(root: Path, *, entries: tuple[str, ...]) -> Path:
+    """A projected tree whose objects have been collected: every entry is a
+    dangling link into `objects/`, exactly as one GC pass after a lost pin
+    leaves it."""
+    base = root / "cas"
+    (base / "refs").mkdir(parents=True)
+    (base / "objects").mkdir(parents=True)
+    tree = base / "snapshots" / ("sha256:" + "c0" * 32)
+    tree.mkdir(parents=True)
+    for rel in entries:
+        path = tree / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        depth = len(Path(rel).parts)
+        up = Path(*([".."] * (depth + 1)))
+        path.symlink_to(up / "objects" / "sha256" / "de" / "ad" / ("de" * 32))
+        assert path.is_symlink() and not path.exists(), rel
+    return tree
+
+
+def test_skeleton_build_does_not_call_a_collected_tree_index_less(
+    tmp_path: Path,
+) -> None:
+    """THE pgw#1514 REGRESSION. `Path.is_file()` follows the link, so before
+    this fix a dangling `model_index.json` and an absent one were the same
+    False — and `skeleton.build` reported the store's condition as the
+    checkpoint's shape."""
+    from gen_worker.serving.streaming import skeleton as sk
+
+    tree = _collected_tree(
+        tmp_path, entries=("model_index.json", "dit/config.json", "vae/config.json")
+    )
+    with pytest.raises(sk.SkeletonError) as caught:
+        sk.build(_KeepsComponents, tree)
+
+    message = str(caught.value)
+    assert "COLLECTED" in message, message
+    assert "RE-FETCHED" in message, message
+    assert not message.startswith(f"{tree} carries no model_index.json"), (
+        "the false refusal is exactly what this issue removed")
+
+
+def test_skeleton_build_walks_the_WHOLE_tree_not_just_the_index(
+    tmp_path: Path,
+) -> None:
+    """The index merely DIES FIRST. 14 entries dangle in the measured state, so
+    guarding one file would relocate the wrong message to the next component's
+    config rather than remove it. Here the index is FINE and a component config
+    is collected — the pre-fix code reached `_build_on_meta` and failed there
+    with a message about a missing config."""
+    from gen_worker.serving.streaming import skeleton as sk
+
+    tree = _collected_tree(tmp_path, entries=("dit/config.json",))
+    (tree / "model_index.json").write_text(
+        '{"_class_name": "X", "dit": ["anima.components", "AnimaDiTComponent"]}'
+    )
+
+    with pytest.raises(sk.SkeletonError) as caught:
+        sk.build(_KeepsComponents, tree)
+    assert "COLLECTED" in str(caught.value), str(caught.value)
+    assert "dit/config.json" in str(caught.value)
+
+
+def test_a_tree_that_GENUINELY_has_no_index_still_says_so(tmp_path: Path) -> None:
+    """The original wording SURVIVES and is now true whenever it is reached. A
+    fix that swallowed the genuine case would trade one wrong message for
+    another, which is the mistake this issue is about."""
+    from gen_worker.serving.streaming import skeleton as sk
+
+    bare = tmp_path / "bare"
+    (bare / "unet").mkdir(parents=True)
+    (bare / "unet" / "config.json").write_text("{}")
+
+    with pytest.raises(sk.SkeletonError) as caught:
+        sk.build(_KeepsComponents, bare)
+    assert "carries no model_index.json" in str(caught.value)
+    assert "COLLECTED" not in str(caught.value)
