@@ -829,7 +829,14 @@ def _copy_member(
                 output.write(chunk)
                 remaining -= len(chunk)
             output.flush()
-            os.fsync(output.fileno())
+            # NO per-member fsync (tcg#73). Every unpack target is either a
+            # verify tempdir deleted moments later or a DERIVED cache whose
+            # durable copy is the CAS blob the store already fsynced — and a
+            # journal commit per member was the single largest cost of a warm
+            # reuse (pgw#1546: 27.6 s of 34 s across 14 artifacts). The
+            # staging rename below still orders visibility; bytes lost to a
+            # crash are re-unpacked from the blob, and an occupied destination
+            # is byte-compared before it is ever trusted.
 
 
 def unpack_artifact(artifact: str | Path, destination: str | Path) -> dict[str, Any]:

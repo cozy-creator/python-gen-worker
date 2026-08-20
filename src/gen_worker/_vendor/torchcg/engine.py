@@ -228,6 +228,37 @@ class Engine:
         self._admit_host_metadata(graph.metadata)
         return graph
 
+    def reuse_index(self, sm: str, toolchain: Mapping[str, str]) -> dict[str, str]:
+        """graph-specialization name -> exact key, for every artifact this
+        engine's store holds on exactly this (sm, toolchain) axis. Torch-free.
+
+        The whole reason this exists: deriving a key the ordinary way needs the
+        exported program loaded, which needs torch, which costs a caller ~5 s
+        of import/deserialize bookkeeping per graph just to discover the mint
+        already happened (pgw#1546 measured 96% of a warm reuse spent there).
+        This answers the same question from the store's own ref records plus
+        each artifact's metadata member, and ``resolve`` still fully verifies
+        whatever key the caller picks -- nothing read here is admitted, it is
+        only an address.
+        """
+
+        wanted = toolchain_axis_digest(toolchain)
+        index: dict[str, str] = {}
+        for key in self._store.keys():
+            metadata = self._store.peek_metadata(key)
+            if metadata is None or metadata.get("sm") != sm:
+                continue
+            stored = metadata.get("toolchain")
+            if not isinstance(stored, Mapping) or toolchain_axis_digest(
+                stored
+            ) != wanted:
+                continue
+            block = metadata.get(GRAPH_SPECIALIZATION_BLOCK)
+            name = block.get("name") if isinstance(block, Mapping) else None
+            if isinstance(name, str) and name:
+                index.setdefault(name, key)
+        return index
+
     @staticmethod
     def _admit_request(
         compiled_graph: StoredCompiledGraph,
