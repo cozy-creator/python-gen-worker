@@ -1216,6 +1216,84 @@ def assert_lifted_contract(module: Any, contract: CallIngress) -> None:
             "binding to supply them (bucket=0 is a different graph specialization)")
 
 
+#: peft writes this on the module it injects adapters into (diffusers'
+#: ``load_lora_adapter`` -> ``inject_adapter_in_model``) and deletes it on
+#: unload. An O(1) attribute read, which is what lets the guard sit on the
+#: per-call path: a module walk there would cost more than the defect.
+PEFT_MARKER_ATTR = "peft_config"
+
+
+def serves_compiled(module: Any) -> bool:
+    """Whether a compiled artifact currently serves this module's forward."""
+    return bool(getattr(module, _MARKER_ATTR, None))
+
+
+def _say_adapter_ops_once(
+    state: Dict[str, Any], label: str, module: Any,
+) -> None:
+    """Say the degradation the first time, then stop — this is per FORWARD."""
+    if state.get("adapter_ops_said"):
+        return
+    state["adapter_ops_said"] = True
+    names = sorted(getattr(module, PEFT_MARKER_ATTR, {}) or {})
+    detail = (
+        f"target={label}: live peft adapter(s) {names} on a compiled-armed "
+        "module — serving EAGER for the duration, because the artifact would "
+        "silently return the base model (pgw#1571). Fold the adapter into the "
+        "weights (models.lora_fold) to keep compiled speed"
+    )
+    logger.warning("aot-serve: %s", detail)
+    activity_mod.emit_event(
+        activity_mod.KIND_LORA_HYGIENE, detail, phase="adapter_ops_on_compiled",
+    )
+
+
+def rearm_constants(module: Any) -> int:
+    """Re-install a compiled module's constant table after its WEIGHTS CHANGED.
+
+    Returns how many armed entries were re-armed (0 when nothing is compiled,
+    which is the ordinary eager case and not an error).
+
+    **Why this exists at all.** ``load_constants(..., user_managed=True)`` keeps
+    RAW POINTERS to the module's own parameters, so an in-place fold is visible
+    to the artifact with no bookkeeping — except through AOTI's runtime constant
+    folding, which ``torchcg.compiler`` turns on. The container folds once on the
+    first ``run()`` (``fold_state`` INITIALIZED -> FOLDED) and never again, and an
+    in-place tensor write calls nothing. Re-installing the same pointers is what
+    puts ``fold_state`` back to INITIALIZED, so the next call re-folds against
+    the new weights. Both ``update_constant_buffer`` overloads do it; there is
+    no cheaper hook.
+
+    **This reaches into the vendored torchcg runner's privates, deliberately and
+    narrowly.** The right home is a ``CompiledGraphRunner.rebind()`` upstream —
+    but the vendored snapshot is sha256-fenced (``VENDORED.toml``), so a local
+    edit is refused by CI and an upstream change plus a re-vendor is a separate
+    act with a separate owner. Until that lands this refuses by name rather than
+    guessing when the surface is not what it expects, because the failure it is
+    preventing is a silently stale weight.
+    """
+    marker = getattr(module, _MARKER_ATTR, None) or {}
+    dispatch = (marker.get("state") or {}).get("runner")
+    if dispatch is None:
+        return 0
+    armed = 0
+    for _name, entry in tuple(getattr(dispatch, "runners", ()) or ()):
+        runner = getattr(entry, "runner", None)
+        package = getattr(runner, "_package", None)
+        values = getattr(runner, "_bound_values", None)
+        if package is None or not values:
+            raise AdoptError(
+                "constant_rearm_unsupported",
+                "the compiled runner exposes no bound constant table to "
+                "re-install after a weight mutation; a folded constant would "
+                "serve stale weights",
+            )
+        package.load_constants(
+            values, check_full_update=True, user_managed=True)
+        armed += 1
+    return armed
+
+
 def wrap_module(
     module: Any,
     runner: "EntryDispatch",
@@ -1306,6 +1384,17 @@ def wrap_module(
         artifact_lora, eager_lora = adapter_call_kwargs(module, runner)
         eager_kwargs = {**kwargs, **eager_lora}
         kwargs = {**kwargs, **artifact_lora}
+        if getattr(module, PEFT_MARKER_ATTR, None):
+            # pgw#1571. A peft adapter is LIVE on this module's submodules and
+            # the artifact cannot execute them — it replaced `forward`, and its
+            # constants were bound from the base weights at arm time. Serving
+            # compiled here returns the BASE MODEL, bit-identically, for a
+            # request that paid for an adapter (measured: max|delta| = 0.0
+            # against the pre-LoRA baseline, with 32 peft wrappers attached).
+            # Eager is a real cost and it is the only correct answer; the fold
+            # path (`models.lora_fold`) is how a compiled lane keeps its speed.
+            _say_adapter_ops_once(state, label, module)
+            return original(*args, **eager_kwargs)
         if serve_posture.eager_only():
             # pgw#1142 / §4.32 item 4: an operator ordered eager. This is THE
             # reversibility seam — the artifact is not unwrapped and `state`
