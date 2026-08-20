@@ -175,11 +175,18 @@ def test_carrying_a_signature_survives_a_forward_that_has_none(tmp_path: Any) ->
     marker["ok"] = True
     assert marker["ok"]
 
-    # And a genuinely unreadable callable takes the same path.
-    class Opaque:
-        __signature__ = property(lambda self: 1 / 0)  # noqa: ARG005
+    # And a callable whose `__signature__` RAISES takes the same path.
+    # `inspect.signature` runs arbitrary code through that descriptor, so the
+    # exception set is not enumerable and the catch is deliberately broad.
+    class Exploding:
+        @property
+        def __signature__(self) -> Any:
+            raise ZeroDivisionError("a descriptor can raise anything")
 
-    oom_ladder._carry_signature(wrapper, Opaque())
+        def __call__(self) -> None:
+            return None
+
+    oom_ladder._carry_signature(wrapper, Exploding())
     assert callable(wrapper)
 
 

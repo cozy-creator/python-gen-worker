@@ -408,7 +408,12 @@ def _carry_signature(wrapper: Any, wrapped: Any) -> None:
     """
     try:
         wrapper.__signature__ = inspect.signature(wrapped)
-    except (TypeError, ValueError):  # no introspectable signature: leave it
+    except Exception:  # noqa: BLE001 — an unsigned ladder must never fail a load
+        # Deliberately broad, and it is this module's own rule rather than a
+        # shrug: `inspect.signature` runs arbitrary code through `__signature__`
+        # descriptors and `__get__`, so the exception set is not enumerable.
+        # `install` catching it one frame up would abandon the WHOLE ladder over
+        # a cosmetic step, which is a worse trade than an unsigned wrapper.
         return
     for attribute in ("__name__", "__qualname__", "__doc__"):
         try:
