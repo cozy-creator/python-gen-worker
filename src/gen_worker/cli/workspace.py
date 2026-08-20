@@ -142,8 +142,8 @@ def host_sm() -> str:
 
         if not torch.cuda.is_available():
             return ""
-        major, minor = torch.cuda.get_device_capability()
-        return f"sm_{major}{minor}"
+        capability = torch.cuda.get_device_capability()
+        return f"sm_{capability[0]}{capability[1]}"
     except Exception:  # noqa: BLE001 - absence is an answer, not an error
         return ""
 
