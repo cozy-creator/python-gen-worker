@@ -528,6 +528,10 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
     row_kind = getattr(spec, "kind", "") or ENTRYPOINT_KIND
     input_schema, input_sha = type_schema_and_hash(spec.payload_type)
     output_schema, output_sha = type_schema_and_hash(spec.return_type)
+    delta_type = getattr(spec, "delta_type", None)
+    delta_schema, delta_sha = (
+        type_schema_and_hash(delta_type) if delta_type is not None else (None, "")
+    )
     moderation = payload_moderation(spec.payload_type)
     slots: List[Dict[str, Any]] = []
     for slot in spec.slots:
@@ -550,9 +554,23 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         "payload_schema_sha256": input_sha,
         "output_schema": output_schema,
         "output_schema_sha256": output_sha,
-        # A v2 entrypoint returns one struct; streaming is not part of the
-        # ratified surface, so the cardinality fact is stated, never omitted.
-        "incremental_output": False,
+        # pgw#1576: a v2 entrypoint ALWAYS returns one struct — that is
+        # `output_schema` above, and it is what a non-streaming caller and the
+        # request record read. `streams=` adds the second, droppable channel,
+        # and the hub already decodes both keys on a function row
+        # (`manifestFunction.IncrementalOutput` / `.DeltaOutputSchema`, and
+        # `entrypoints[]` IS `[]manifestFunction`), so this reaches
+        # `endpoint_function_schemas` with no hub change. Read off the SPEC:
+        # publish never executes author code.
+        "incremental_output": bool(delta_schema is not None),
+        **(
+            {
+                "delta_output_schema": delta_schema,
+                "delta_output_schema_sha256": delta_sha,
+            }
+            if delta_schema is not None
+            else {}
+        ),
         # pgw#1418: WHICH payload paths are media, and which are prompts. The
         # hub decodes exactly this key to recognize typed media inputs — it
         # deliberately will not sniff URL-shaped strings — so without it no

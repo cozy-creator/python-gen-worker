@@ -24,6 +24,7 @@ import asyncio
 import contextvars
 import functools
 import importlib
+import itertools
 import json
 import logging
 import os
@@ -32,7 +33,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import msgspec
 
@@ -96,6 +97,12 @@ _SIGNAL_DRAIN_DEADLINE_MS = 30_000
 #: The same estimate ``python -m gen_worker.serving`` reserves locally; the
 #: exact per-(model type, resolution class) number rides the pgw#1380 sizer.
 _HEADROOM_DIVISOR = 4
+
+#: pgw#1576: the content type that marks a ``JobProgress`` chunk as a typed
+#: ctx-event envelope rather than streamed output. Verbatim from the hub's own
+#: ``runtimestore.RequestEventContentType``; a chunk carrying anything else is
+#: fanned out to SSE subscribers as ``output.delta``.
+EVENT_CONTENT_TYPE = "application/x-request-event+json"
 
 #: v1 decorator stamps. A module still carrying one is a build failure with a
 #: name attached, never an empty manifest.
@@ -1067,13 +1074,97 @@ class Worker:
         if run.media_bytes == pb.MEDIA_BYTES_INLINE:
             # The client asked for bytes back in the result rather than a link.
             hints["output_format"] = "inline"
+        emitter, chunk_sink = self._progress_channel(run)
         return {
             "owner": str(run.org or "") or None,
             "invoker_id": str(run.invoker_id or "") or None,
             "file_api_base_url": self.file_base_url or None,
             "worker_capability_token": str(run.capability_token or "") or None,
             "execution_hints": hints or None,
+            # pgw#1576: THIS REQUEST'S JobProgress LANE, both halves. Per
+            # request because `seq` is per (request_id, attempt) — it can never
+            # ride `ServeLoop`'s construction-time context_kwargs, which is
+            # exactly the reason the v2 rewrite ended up wiring neither.
+            "emitter": emitter,
+            "chunk_sink": chunk_sink,
         }
+
+    def _progress_channel(
+        self, run: pb.RunJob
+    ) -> Tuple[
+        Callable[[Dict[str, Any]], None], Callable[[bytes, str], None]
+    ]:
+        """This request's ``JobProgress`` lane: ``(ctx event emitter, chunk sink)``.
+
+        ONE seam and ONE ``seq`` counter for both, because they are one wire
+        message. ``JobProgress.seq`` is "strictly increasing per (request_id,
+        attempt)" and it is stamped ON THE LOOP, so send order and seq order
+        cannot disagree no matter which thread produced the frame.
+
+        * the CTX EVENT lane — ``ctx.progress``/``log``/``warning``/
+          ``checkpoint`` as a JSON envelope under
+          ``application/x-request-event+json``, which the hub parses into
+          request-progress positions and `request_events` rows.
+          **pgw#1576: the v2 rewrite wired NO emitter at all**, so
+          ``_emit_event`` hit its `no emitter configured` branch on every pod
+          and the hub's liveness sweep read positions nobody was sending.
+        * the OUTPUT DELTA lane — ``ctx.emit(chunk)`` frames, content-typed by
+          the chunk itself, fanned out live to SSE subscribers.
+
+        Both are best-effort by contract: the send queue sheds progress under
+        pressure (and confesses a ``serve_degrade`` row where it does), and a
+        producer never fails a request over a chunk that did not fit.
+        """
+        loop = asyncio.get_running_loop()
+        seq = itertools.count(1)
+        request_id, attempt = str(run.request_id), int(run.attempt)
+
+        async def _send_progress(data: bytes, content_type: str) -> None:
+            await self._send(
+                pb.WorkerMessage(
+                    job_progress=pb.JobProgress(
+                        request_id=request_id,
+                        attempt=attempt,
+                        seq=next(seq),
+                        data=data,
+                        content_type=content_type,
+                    )
+                )
+            )
+
+        def _put(data: bytes, content_type: str) -> None:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    _send_progress(data, content_type), loop
+                )
+            except RuntimeError:
+                return  # loop closed: the worker is shutting down
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                # Called ON the loop (a sync entrypoint invoked in-process, a
+                # test). Waiting here would deadlock the very loop that has to
+                # do the send, so the frame is scheduled and not awaited.
+                return
+            # WAIT, deliberately: it orders this thread's frames and applies
+            # whatever backpressure the send path has. It cannot hang on queue
+            # capacity — the send queue's policy for a full queue is to DROP
+            # progress, never to block its producer (transport.py).
+            future.result()
+
+        def _emit_event(event: Dict[str, Any]) -> None:
+            try:
+                data = msgspec.json.encode(event)
+            except Exception:
+                logger.debug(
+                    "unencodable ctx event dropped for %s", request_id
+                )
+                return
+            _put(data, EVENT_CONTENT_TYPE)
+
+        return _emit_event, _put
 
     def _check_lane(self, run: pb.RunJob) -> None:
         lane = str(run.lane or "").strip()

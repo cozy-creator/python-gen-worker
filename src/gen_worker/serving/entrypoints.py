@@ -26,6 +26,11 @@ ruling, 2026-08-17 — one parameter-order rule across the SDK, matching
     def generate(ctx: RequestContext, payload: GenerateInput,
                  video: H3Model) -> GenerateOutput: ...
 
+    @entrypoint(streams=TokenDelta)   # INCREMENTAL OUTPUT (pgw#1576): the
+    async def complete(ctx: RequestContext,   # chunk type is declared, the
+                       payload: CompletionInput,   # terminal struct is still
+                       model: QwenModel) -> Completion: ...  # RETURNED
+
     @entrypoint(kind="conversion",    # a PRODUCER (pgw#1406)
                 publishes=True, env=("HF_TOKEN", "CIVITAI_API_KEY"))
     def cast_dtype(ctx: RequestContext, payload: CastDtypeInput
@@ -67,6 +72,7 @@ principle.
 
 from __future__ import annotations
 
+import collections.abc
 import inspect
 import types
 import typing
@@ -153,6 +159,15 @@ class EntrypointSpec:
     #: THIS class, so a producer that annotates ``JobContext`` receives the
     #: publisher surface and an inference entrypoint is unchanged.
     ctx_type: type | None = None
+    #: pgw#1576: the declared ``streams=`` chunk ANNOTATION, or ``None``. One
+    #: struct type, or a discriminated union when a handler streams several
+    #: shapes. Present means this function emits incremental output: publish
+    #: reports ``incremental_output`` + ``delta_output_schema`` off THIS field
+    #: without executing author code.
+    delta_type: Any = None
+    #: The same declaration as an isinstance-able tuple — what ``ctx.emit``
+    #: refuses a foreign chunk against.
+    delta_arms: Tuple[Type[msgspec.Struct], ...] = ()
 
     @property
     def model_params(self) -> Tuple[Tuple[str, type], ...]:
@@ -278,6 +293,62 @@ def _validate_env_decl(fn: Callable[..., Any], env: Any) -> Tuple[str, ...]:
     return tuple(out)
 
 
+def _delta_declaration(
+    fn: Callable[..., Any], streams: Any
+) -> Tuple[Any, Tuple[Type[msgspec.Struct], ...]]:
+    """``streams=`` normalized: ``(annotation, arms)``.
+
+    Accepts one ``msgspec.Struct`` type, a tuple/list of them, or ``A | B`` —
+    one handler legitimately streams more than one shape. The ANNOTATION is
+    what publish turns into ``delta_output_schema`` (a union becomes a
+    discriminated ``anyOf``); the ARMS are what ``ctx.emit`` type-checks
+    against.
+    """
+    if streams is None:
+        return None, ()
+    if isinstance(streams, (tuple, list)):
+        candidates = tuple(streams)
+    elif typing.get_origin(streams) in (typing.Union, types.UnionType):
+        candidates = typing.get_args(streams)
+    else:
+        candidates = (streams,)
+    arms: list[Type[msgspec.Struct]] = []
+    for candidate in candidates:
+        concrete = _annotation_class(candidate)
+        if concrete is None or not issubclass(concrete, msgspec.Struct):
+            raise _refuse(
+                fn,
+                f"streams= takes the msgspec.Struct chunk type(s) this "
+                f"function emits (gen_worker.TokenDelta, gen_worker.ItemDelta, "
+                f"your own Delta subclass, or a tuple/union of them), got "
+                f"{candidate!r} — the type is what publish reports as "
+                f"delta_output_schema",
+            )
+        arms.append(concrete)
+    if not arms:
+        raise _refuse(fn, "streams= declares no chunk type")
+    if len(arms) == 1:
+        return arms[0], (arms[0],)
+    # `Union[tuple(...)]` at runtime — the arms are only known here, so mypy
+    # cannot read it as a type alias and is told so.
+    annotation: Any = typing.Union[tuple(arms)]
+    untagged = [
+        arm.__name__
+        for arm in arms
+        if getattr(arm, "__struct_config__", None) is None
+        or getattr(arm.__struct_config__, "tag", None) is None
+    ]
+    if untagged:
+        raise _refuse(
+            fn,
+            f"streams= declares several chunk types and {untagged} carry no "
+            "msgspec tag, so the published delta_output_schema could not tell "
+            "them apart. Subclass gen_worker.Delta (tagged on `type`), or "
+            "declare tag=True on your struct",
+        )
+    return annotation, tuple(arms)
+
+
 @overload
 def entrypoint(fn: F) -> F: ...
 @overload
@@ -288,6 +359,7 @@ def entrypoint(
     publishes: bool = ...,
     env: Any = ...,
     emits_media: bool | None = ...,
+    streams: Any = ...,
 ) -> Callable[[F], F]: ...
 
 
@@ -299,6 +371,7 @@ def entrypoint(
     publishes: bool = False,
     env: Any = None,
     emits_media: bool | None = None,
+    streams: Any = None,
 ) -> F | Callable[[F], F]:
     """Mark a module-level function as an entrypoint (contract above).
 
@@ -400,6 +473,45 @@ def entrypoint(
       it would silently downgrade every producer that declared media. An
       INFERENCE row still emits nothing, because nothing there can store or
       read it; that half of th#2087's fence stays.
+
+    ``streams=`` is the INCREMENTAL-OUTPUT declaration (pgw#1576): the
+    ``msgspec.Struct`` type this function emits through :meth:`ctx.emit
+    <gen_worker.serving.context.RequestContext.emit>` while it works. It does
+    NOT change the return contract — a streaming entrypoint still returns one
+    struct, because the wire carries two things and they promise different
+    amounts::
+
+        @entrypoint(streams=TokenDelta)
+        async def complete(ctx: RequestContext, payload: CompletionInput,
+                           model: QwenModel) -> Completion:
+            parts = []
+            async for token in engine.stream(payload.prompt):
+                ctx.raise_if_cancelled()
+                parts.append(token)
+                ctx.emit(TokenDelta(text=token))
+            return Completion(text="".join(parts))
+
+    One handler may stream several shapes — ``streams=(TokenDelta, ItemDelta)``
+    or ``streams=TokenDelta | ItemDelta`` — and the manifest publishes a
+    DISCRIMINATED ``anyOf`` over them, which is why every arm must carry a
+    msgspec tag (``gen_worker.Delta`` subclasses do).
+
+    ``JobProgress`` deltas are ordered, live, never persisted and DROPPABLE by
+    contract; ``JobResult`` is the single authoritative output every
+    non-streaming caller and the request record read. The declaration is read
+    statically at publish — ``incremental_output`` and ``delta_output_schema``
+    come off ``EntrypointSpec.delta_type``, no author code executed — and
+    ``ctx.emit`` refuses both an undeclared function and a chunk of another
+    type, the same one-fact-two-enforcers shape as ``publishes=``.
+
+    **An async-generator entrypoint is refused, and the refusal is the design.**
+    Python forbids ``return <value>`` inside an async generator, so
+    ``-> AsyncIterator[Delta]`` can express the droppable half of the wire and
+    nothing else: the authoritative result would have to be folded out of the
+    deltas by the platform (v1's accumulator, magic field-peeling over three
+    blessed types) or smuggled in as a special last frame. Both are weaker than
+    a plain ``return``, so the generator shape is refused at import naming
+    ``streams=`` + ``ctx.emit`` as the successor.
     """
 
     if fn is None:
@@ -411,6 +523,7 @@ def entrypoint(
                 publishes=publishes,
                 env=env,
                 emits_media=emits_media,
+                streams=streams,
             )
         return bind
 
@@ -445,6 +558,7 @@ def entrypoint(
             "normalize would silently become 'inference'",
         )
     declared_env = _validate_env_decl(fn, env)
+    delta_type, delta_arms = _delta_declaration(fn, streams)
     if resources is not None:
         from ..api.resources import Resources
 
@@ -525,6 +639,28 @@ def entrypoint(
     # JUNK slots are not — `_slot_of` above still refuses every parameter
     # that is neither a Model subclass nor an adapter form.
 
+    # pgw#1576: name the STREAMING migration before the generic refusal does.
+    # An async-generator body (or an `AsyncIterator[...]`/`Iterator[...]`
+    # return) is the v1 streaming shape, and "must be a msgspec.Struct" sends
+    # its author looking for a schema defect that is not there.
+    returns_iterator = _annotation_class(hints.get("return")) in (
+        collections.abc.AsyncIterator, collections.abc.AsyncGenerator,
+        collections.abc.Iterator, collections.abc.Generator,
+    )
+    if inspect.isasyncgenfunction(fn) or inspect.isgeneratorfunction(fn) or (
+        returns_iterator
+    ):
+        raise _refuse(
+            fn,
+            "a generator entrypoint cannot produce the request's authoritative "
+            "result — Python forbids `return <value>` inside a generator, and "
+            "JobResult is a separate wire channel from the droppable "
+            "JobProgress deltas. Declare the chunk type instead and return the "
+            "terminal struct: `@entrypoint(streams=TokenDelta)` + "
+            "`ctx.emit(TokenDelta(text=...))` in the loop + "
+            "`return <YourOutput>(...)` at the end (pgw#1576)",
+        )
+
     return_type = _annotation_class(hints.get("return"))
     if return_type is None or not issubclass(return_type, msgspec.Struct):
         raise _refuse(
@@ -544,6 +680,8 @@ def entrypoint(
         env=declared_env,
         emits_media=emits_media,
         ctx_type=ctx_type,
+        delta_type=delta_type,
+        delta_arms=delta_arms,
     )
     setattr(fn, ENTRYPOINT_ATTR, spec)
     return fn

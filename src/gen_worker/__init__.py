@@ -134,6 +134,12 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         LlamaServer,
         VllmServer,
     )
+    from .serving.deltas import (
+        Delta,
+        ItemDelta,
+        TokenDelta,
+        iter_transformers_text_deltas,
+    )
     from .serving.entrypoints import entrypoint
     from .api.resources import Resources
     from .serving.model import Model
@@ -189,6 +195,14 @@ _EXPORTS: Final[dict[str, str]] = {
     "VllmServer": "serving.engine_runtime",
     "Resources": "api.resources",
     "DistillationAdapter": "serving.context",
+    # pgw#1576: INCREMENTAL OUTPUT. `@entrypoint(streams=<type>)` declares the
+    # chunk type, `ctx.emit(chunk)` puts one on the droppable JobProgress lane,
+    # and the entrypoint still RETURNS its terminal struct on the authoritative
+    # one — two wire channels, and the declaration names both.
+    "Delta": "serving.deltas",
+    "ItemDelta": "serving.deltas",
+    "TokenDelta": "serving.deltas",
+    "iter_transformers_text_deltas": "serving.deltas",
     "ExpectedOutput": "api.types",
     "FamilyGeometry": "geometry",
     "FatalError": "api.errors",
@@ -278,6 +292,12 @@ __all__ = [
     "Model",
     "Resources",
     "entrypoint",
+    # pgw#1576: incremental output — the declared chunk types + the
+    # transformers text-delta helper.
+    "Delta",
+    "ItemDelta",
+    "TokenDelta",
+    "iter_transformers_text_deltas",
     # pgw#1421: the engine-hosted tier (external binaries only).
     "EngineBootError",
     "EngineHandle",

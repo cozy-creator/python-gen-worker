@@ -600,6 +600,10 @@ class ServeLoop:
             # media is the product of a request, and behaviour is unchanged for
             # every endpoint that never says the word.
             kwargs["publishes"] = bool(getattr(spec, "publishes", False))
+            # pgw#1576: the SAME stamp for the streaming declaration. `emit`
+            # refuses without it, so an undeclared function cannot stream past
+            # a manifest that says `incremental_output: false`.
+            kwargs["streams"] = getattr(spec, "delta_arms", ()) or None
             declared_media = getattr(spec, "emits_media", None)
             if declared_media is not None:
                 kwargs["emits_media"] = bool(declared_media)
