@@ -57,10 +57,42 @@ from typing import List, Optional
 
 CUDA_ROOT = Path("/usr/local/cuda")
 
+#: Where a CUDA root gets composed when ``/usr/local`` is not this process's to
+#: write. Spelled the same way ``cli/workspace.DEFAULT_GRAPH_CAS`` spells the
+#: box's graph CAS — one shape for "the box's cozy cache", and no environment
+#: read: §1.18 is right that "wherever XDG happens to point" is not a config
+#: value anyone can name, and the operator's own knob for this is CUDA_HOME,
+#: which wins outright and is never second-guessed.
+USER_CUDA_ROOT = Path.home() / ".cache" / "cozy" / "cuda-root"
+
 #: The header that proves the flattened-include problem is solved.
 CRT_HOST_DEFINES = Path("include/crt/host_defines.h")
 #: The CCCL header several cu13 headers include and no tree in the image ships.
 NV_TARGET = Path("include/nv/target")
+
+
+def default_root() -> Path:
+    """Where THIS process can actually compose a CUDA root (pgw#1533).
+
+    ``/usr/local/cuda`` is the answer on a pod, and it stayed the only answer
+    for too long. On a developer box ``/usr/local`` is root-owned: the compose
+    ran as the user, ``mkdir`` raised ``PermissionError`` minutes into a mint,
+    and every specialization failed for a reason that reads like a missing
+    toolkit while the toolkit was sitting in the venv's own ``nvidia-*``
+    wheels. Measured on this box: fourteen specializations, all
+    ``FileNotFoundError: '/usr/local/cuda/include'``.
+
+    An EXISTING ``/usr/local/cuda`` always wins — an image that composed one in
+    its Dockerfile, or ships a devel base, is not to be second-guessed. Then a
+    writable ``/usr/local``, which is the image case before the compose has
+    run. Only when neither holds does this fall to a per-user cache, and it says
+    so in the composition notes rather than silently relocating the toolkit.
+    """
+    if CUDA_ROOT.exists():
+        return CUDA_ROOT
+    if os.access(CUDA_ROOT.parent, os.W_OK):
+        return CUDA_ROOT
+    return USER_CUDA_ROOT
 
 
 @dataclass
@@ -70,10 +102,17 @@ class Composition:
     root: str = ""
     crt: str = ""
     nv: str = ""
+    #: WHERE the root was composed — the value a caller must export as
+    #: ``CUDA_HOME``. Distinct from ``root``, which names the donor wheel: a
+    #: caller that reads the module constant instead of this field points torch
+    #: at a directory nobody wrote.
+    path: str = ""
     notes: List[str] = field(default_factory=list)
 
     def lines(self) -> List[str]:
         out = [f"cuda_root: {self.root or 'none'}"]
+        if self.path:
+            out.append(f"cuda_home: {self.path}")
         if self.crt:
             out.append(f"cuda_crt: {self.crt}")
         if self.nv:
@@ -146,18 +185,26 @@ def _install_cuda_cccl(target: Path) -> str:
     return ""
 
 
-def compose(root_dir: Path = CUDA_ROOT) -> Composition:
+def compose(root_dir: Optional[Path] = None) -> Composition:
     """Assemble ``root_dir`` out of parts the image already ships.
 
-    Idempotent by the same test the synthesized step uses: a pre-existing
-    ``/usr/local/cuda`` is left alone. An image that already has a real CUDA
-    install (a devel base, a distro package) is not one this recipe should
-    second-guess.
+    Idempotent by the same test the synthesized step uses: a pre-existing root
+    is left alone. An image that already has a real CUDA install (a devel base,
+    a distro package) is not one this recipe should second-guess.
+
+    ``root_dir`` defaults to :func:`default_root`, which is what makes this
+    work off a pod at all.
     """
-    out = Composition()
+    root_dir = Path(root_dir) if root_dir is not None else default_root()
+    out = Composition(path=str(root_dir))
     if root_dir.exists():
         out.root = "preexisting"
         return out
+    if root_dir != CUDA_ROOT:
+        out.notes.append(
+            f"cuda_root: {CUDA_ROOT} is neither present nor this process's to "
+            f"create, so the root is composed at {root_dir} instead — export "
+            f"CUDA_HOME from `Composition.path`, never from the constant")
 
     wheel = wheel_cuda_root()
     if not wheel:
@@ -195,15 +242,17 @@ def compose(root_dir: Path = CUDA_ROOT) -> Composition:
     return out
 
 
-def missing_parts(root_dir: Path = CUDA_ROOT) -> List[str]:
+def missing_parts(root_dir: Optional[Path] = None) -> List[str]:
     """Which of the three measured facts this image still fails, if any.
 
     The one predicate ``aot_preconditions`` reads, so "is the CUDA root usable"
     has a single implementation and the gate cannot prove something the
-    composer never did.
+    composer never did — which is also why its default must be the composer's
+    default and not a second spelling of it.
     """
+    root_dir = Path(root_dir) if root_dir is not None else default_root()
     if not root_dir.is_dir():
-        return ["the root itself (/usr/local/cuda does not exist)"]
+        return [f"the root itself ({root_dir} does not exist)"]
     gaps = []
     if not (root_dir / "include" / "cuda_runtime.h").exists():
         gaps.append("include/cuda_runtime.h")
@@ -241,12 +290,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         description=("Compose /usr/local/cuda for AOTInductor's host compile. "
                      "Run it in your Dockerfile when an endpoint in the image "
                      "declares an AOT export."))
-    parser.add_argument("--root", default=str(CUDA_ROOT),
-                        help="where to compose the root (default /usr/local/cuda)")
+    parser.add_argument("--root", default="",
+                        help="where to compose the root (default: "
+                             "/usr/local/cuda when it exists or /usr/local is "
+                             "writable, else a per-user cache root)")
     parser.add_argument("--check", action="store_true",
                         help="report what is missing and exit nonzero; compose nothing")
     args = parser.parse_args(argv)
-    root = Path(args.root)
+    root = Path(args.root) if args.root else default_root()
 
     if args.check:
         gaps = missing_parts(root)
