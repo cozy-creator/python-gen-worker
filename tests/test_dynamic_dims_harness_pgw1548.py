@@ -110,6 +110,30 @@ def test_a_lock_declaring_zero_graphs_REFUSES(tmp_path: Path) -> None:
         _bench(tmp_path).specializations(room)
 
 
+def test_the_default_selectors_are_PREFIXES_the_compiler_can_match(
+    tmp_path: Path,
+) -> None:
+    """`--first` matches a facet by equality or the graph id by PREFIX.
+
+    `compile.Spec.short` is `graph[:16]` — scheme included — and `_selects`
+    does `spec.graph.startswith(term)`. A suffix matches neither, so a harness
+    passing one gets "names no specialization this endpoint has" for every
+    arm, on the pod, inside the paid window. This test fails if the harness
+    ever goes back to a suffix.
+    """
+
+    graph = "cg-graph-v1-" + "a" * 52
+    room = _lock(tmp_path / "arm", [_record(graph, [2, 4, 64, 64])])
+    records = _bench(tmp_path).specializations(room)
+    selector = records[0]["graph"][:16]
+    assert selector == "cg-graph-v1-aaaa"
+    assert graph.startswith(selector), "the compiler matches by prefix"
+    assert len(selector) >= 8, "eight characters minimum, so a word cannot collide"
+    assert not graph.startswith(records[0]["graph"][-16:]), (
+        "a suffix does NOT match — this is the bug the prefix fixes"
+    )
+
+
 def test_the_substrate_note_is_carried_into_every_rendered_table() -> None:
     table = harness.Table()
     for round_index in range(2):

@@ -444,7 +444,12 @@ class Bench:
         room = self._workspace(name)
         lock_s = self.lock(room, name)
         records = self.specializations(room)
-        selectors = self.args.selectors or [r["graph"][-16:] for r in records]
+        # `--first` matches a facet by EQUALITY or the graph identity by
+        # PREFIX (>= 8 chars) — `compile.Spec.short` is `graph[:16]`, scheme
+        # included. A SUFFIX matches neither, so every compile would have been
+        # refused with "names no specialization this endpoint has" — on the
+        # pod, after the lock, inside the paid window.
+        selectors = self.args.selectors or [r["graph"][:16] for r in records]
         compile_s = self.compile(room, name, selectors)
         self.mint[name] = {
             "lock_s": lock_s,
