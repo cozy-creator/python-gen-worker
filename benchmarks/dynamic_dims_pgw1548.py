@@ -58,6 +58,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+#: What substrate produced these numbers, stamped into the verdict and the
+#: table so a row CANNOT be published without it (coordinator, 2026-08-20).
+#:
+#: A raw pod runs `gen-worker lock/compile/up/run` — the endpoint's own serving
+#: code, which is what the measurement law asks for — but it does NOT go
+#: through release packaging and deploy. That is the right subject for a
+#: graph-shape A/B (packaging does not touch a per-step wall) and it is a real
+#: limit on what the number describes, so the limit travels WITH the number
+#: rather than in a paragraph someone has to remember to quote.
+SUBSTRATES = {
+    "raw-pod": (
+        "raw-pod substrate; numbers describe the graphs, not the deploy path"
+    ),
+    "local": (
+        "local-card substrate; numbers describe the graphs, not the deploy path"
+    ),
+    "release": "release-built substrate; the full deploy path",
+}
+
 ARMS = ("static", "aspect", "batch", "all")
 AXES = {"static": "off", "aspect": "aspect", "batch": "batch", "all": "all"}
 
@@ -170,8 +189,20 @@ class Table:
         return (high - low) / low * 100.0 if low else None
 
     def undecidable(self, aspect: str, cfg: str, limit: float = 15.0) -> bool:
+        """Is this cell's verdict unreadable — for EITHER reason?
+
+        Two ways, and the second one used to read as decidable, which is the
+        silent-vacuity shape this file exists to avoid: a cell measured in
+        only ONE round has no reproducibility evidence at all, so `spread`
+        answers None, and "no evidence" must never score as "no problem". A
+        run cut short to fit a window is exactly when that happens, so the
+        absence is treated as undecidable rather than as a pass.
+        """
+
         spread = self.spread("static", aspect, cfg)
-        return spread is not None and spread > limit
+        if spread is None:
+            return True
+        return spread > limit
 
     def regression(self, arm: str, aspect: str, cfg: str) -> float | None:
         """Percent SLOWER than the static control in this cell. Negative = faster."""
@@ -182,9 +213,10 @@ class Table:
             return None
         return (measured - control) / control * 100.0
 
-    def render(self) -> str:
+    def render(self, substrate: str = "") -> str:
         arms = self.arms()
-        lines = [
+        lines = [f"_{SUBSTRATES[substrate]}_", ""] if substrate else []
+        lines += [
             "| shape | cfg | " + " | ".join(
                 f"{arm} (s)" + ("" if arm == "static" else " / vs static")
                 for arm in arms
@@ -222,10 +254,13 @@ class Table:
         for aspect, cfg in self.shapes():
             if self.undecidable(aspect, cfg):
                 spread = self.spread("static", aspect, cfg)
-                offenders.append(
-                    f"{aspect}/{cfg}: UNDECIDABLE (control spread "
-                    f"{spread:.1f}% > 15%; re-run on a quiet slot)"
+                why = (
+                    f"control spread {spread:.1f}% > 15%; re-run on a quiet slot"
+                    if spread is not None
+                    else "measured in ONE round, so nothing establishes that "
+                         "the control reproduces; re-run with >= 2 rounds"
                 )
+                offenders.append(f"{aspect}/{cfg}: UNDECIDABLE ({why})")
                 continue
             delta = self.regression(arm, aspect, cfg)
             if delta is None:
@@ -273,6 +308,8 @@ class Bench:
         self.out.mkdir(parents=True, exist_ok=True)
         self.table = Table()
         self.mint: dict[str, dict[str, Any]] = {}
+        #: arm -> the SERVING daemon's log (not the launcher's output).
+        self._daemon_log: dict[str, Path | None] = {}
 
     # -- the endpoint copy: never mutate a shared checkout ------------------
     def _workspace(self, arm: str) -> Path:
@@ -330,15 +367,34 @@ class Bench:
         return time.monotonic() - started
 
     def specializations(self, room: Path) -> list[dict[str, Any]]:
+        """Every graph specialization this arm's lock declares.
+
+        `read_lock` answers a plain dict (NOT an object with attributes) and
+        the derive document sits under `["derive"]["document"]` as a JSON
+        STRING. Both facts are asserted here rather than assumed: an attribute
+        read that works on nothing would have raised on the pod, minutes into
+        a paid window, after the compile it was supposed to plan.
+        """
+
         from gen_worker.cli import endpoint_lock as el
 
         block = el.read_lock(room / el.LOCK_FILENAME)
-        document = json.loads(block.document) if isinstance(block.document, (str, bytes)) else block.document
-        return [
+        derive = block.get("derive") if isinstance(block, dict) else None
+        if not isinstance(derive, dict) or "document" not in derive:
+            raise SystemExit(
+                f"{room / el.LOCK_FILENAME}: no [derive] document — a lock "
+                f"written with --discovery-only has no graphs to benchmark"
+            )
+        raw = derive["document"]
+        document = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        records = [
             record
             for lane in document["graphs"]["lanes"]
             for record in lane["graphs"]
         ]
+        if not records:
+            raise SystemExit(f"{room}: the lock declares zero specializations")
+        return records
 
     def compile(self, room: Path, arm: str, selectors: list[str]) -> float:
         """Build ONLY what this run benchmarks. One selector per child."""
@@ -360,14 +416,36 @@ class Bench:
 
     def serve(self, room: Path, arm: str) -> None:
         require_window()
-        up = self._gen_worker(
-            room,
-            ["up", str(room), "-d", "--checkpoint", str(self.args.checkpoint),
-             "--idle-timeout", str(self.args.idle_timeout)],
-            timeout=self.args.boot_timeout,
-        )
+        # --sm is NOT optional: `gen-worker up --help` says it is "required to
+        # adopt compiled graphs". Without it the boot serves EAGER, both arms
+        # measure eager, and the table reports a beautiful 0% delta — the same
+        # vacuous green the preflight exists to stop, arriving from the boot
+        # side. The whole run would be worthless and would look fine.
+        argv = ["up", str(room), "-d", "--checkpoint", str(self.args.checkpoint),
+                "--idle-timeout", str(self.args.idle_timeout)]
+        if self.args.sm:
+            argv += ["--sm", self.args.sm]
+        up = self._gen_worker(room, argv, timeout=self.args.boot_timeout)
         if up.returncode != 0:
             raise SystemExit(f"[{arm}] up failed:\n{up.stdout}\n{up.stderr}")
+        banner = (up.stdout or "") + (up.stderr or "")
+        (self.out / f"up-{arm}.log").write_text(banner)
+        # `up -d` DETACHES: its own output is a three-line launcher banner and
+        # says nothing about adoption. The serving daemon's log is a different
+        # file, and the launcher prints where — so read THAT. Checking the
+        # launcher's output for the word "adopt" is how this harness spent a
+        # window measuring eager against eager (pgw#1591).
+        self._daemon_log[arm] = None
+        for line in banner.splitlines():
+            if "logs:" in line:
+                candidate = Path(line.split("logs:", 1)[1].strip())
+                if candidate.name:
+                    self._daemon_log[arm] = candidate
+        if self._daemon_log[arm] is None:
+            raise SystemExit(
+                f"[{arm}] the boot did not name its daemon log, so nothing can "
+                f"verify that this arm serves COMPILED. Refusing to measure."
+            )
 
     def down(self, room: Path) -> None:
         self._gen_worker(room, ["down"], timeout=120)
@@ -405,7 +483,12 @@ class Bench:
         room = self._workspace(name)
         lock_s = self.lock(room, name)
         records = self.specializations(room)
-        selectors = self.args.selectors or [r["graph"][-16:] for r in records]
+        # `--first` matches a facet by EQUALITY or the graph identity by
+        # PREFIX (>= 8 chars) — `compile.Spec.short` is `graph[:16]`, scheme
+        # included. A SUFFIX matches neither, so every compile would have been
+        # refused with "names no specialization this endpoint has" — on the
+        # pod, after the lock, inside the paid window.
+        selectors = self.args.selectors or [r["graph"][:16] for r in records]
         compile_s = self.compile(room, name, selectors)
         self.mint[name] = {
             "lock_s": lock_s,
@@ -430,15 +513,59 @@ class Bench:
 
         self.serve(room, name)
         try:
+            first = True
             for aspect in self.args.aspects:
                 for cfg in self.args.cfg:
                     self.request(room, name, aspect, cfg, round_index)
+                    if first:
+                        # The warm-up call has now exercised the serve path
+                        # once. Check the PREMISE here, at the cheapest
+                        # possible point, before paying for the rest of the
+                        # arm — let alone the other arm.
+                        self.assert_compiled(name)
+                        first = False
                     for _ in range(self.args.reps):
                         self.table.add(
                             self.request(room, name, aspect, cfg, round_index)
                         )
         finally:
             self.down(room)
+
+    def assert_compiled(self, arm: str) -> None:
+        """Did this arm actually SERVE compiled? Typed abort if not (pgw#1591).
+
+        A warning was not enough. An arm whose dispatcher was displaced serves
+        eager on every call and still produces perfectly plausible timings —
+        and two such arms compare to ~0%, which reads as "the dynamic axis is
+        free" rather than as "nothing was measured". So an arm that cannot
+        show compiled serving does not get to contribute a row.
+        """
+
+        log = self._daemon_log.get(arm)
+        if log is None or not log.exists():
+            raise SystemExit(
+                f"[{arm}] daemon log {log} is absent — nothing can verify this "
+                f"arm serves compiled. Refusing to measure."
+            )
+        text = log.read_text(errors="replace")
+        if "DISPLACED" in text:
+            raise SystemExit(
+                f"[{arm}] DISPLACED: the compiled dispatcher is no longer the "
+                f"module's forward, so calls ran EAGER (pgw#1591). Both arms "
+                f"would compare eager-to-eager and report ~0%. Refusing to "
+                f"measure. See {log}"
+            )
+        if "NO armed graph matched" in text:
+            raise SystemExit(
+                f"[{arm}] the dispatcher matched NOTHING (tcg#76's trace is in "
+                f"{log}); this arm serves eager. Refusing to measure."
+            )
+        if "wrapper.tcg" not in text:
+            raise SystemExit(
+                f"[{arm}] no compiled wrapper ran during the warm-up call, so "
+                f"this arm has not been shown to serve compiled at all. "
+                f"Refusing to measure. See {log}"
+            )
 
     def report(self) -> dict[str, Any]:
         adoption = {}
@@ -449,9 +576,14 @@ class Bench:
             adoption[arm] = {"adopt": ok, "outside_tolerance": offenders}
         return {
             "endpoint": str(self.endpoint),
+            "substrate": self.args.substrate,
+            # The attribution rides in the verdict itself, not only in the
+            # rendered table, so a consumer reading the JSON cannot get the
+            # numbers without the sentence that bounds them.
+            "substrate_note": SUBSTRATES[self.args.substrate],
             "tolerance_pct": self.args.tolerance,
             "mint": self.mint,
-            "table_markdown": self.table.render(),
+            "table_markdown": self.table.render(self.args.substrate),
             "adoption": adoption,
             **self.table.as_dict(),
         }
@@ -490,11 +622,15 @@ def self_test() -> int:
 
     print("[self-test] the per-shape table CAN show a regression")
     table = Table()
-    for _ in range(3):
-        table.add(Sample("static", "1:1", "on", 1.000))
-        table.add(Sample("aspect", "1:1", "on", 1.010))
-        table.add(Sample("static", "3:4", "on", 2.000))
-        table.add(Sample("aspect", "3:4", "on", 2.600))
+    # TWO rounds: a single-round cell is undecidable by construction now, so a
+    # fixture that wants to exercise the regression arithmetic has to supply
+    # the reproducibility evidence a real run would.
+    for round_index in range(2):
+        for _ in range(3):
+            table.add(Sample("static", "1:1", "on", 1.000, round=round_index))
+            table.add(Sample("aspect", "1:1", "on", 1.010, round=round_index))
+            table.add(Sample("static", "3:4", "on", 2.000, round=round_index))
+            table.add(Sample("aspect", "3:4", "on", 2.600, round=round_index))
     check("a 1% cell reads +1.0%", round(table.regression("aspect", "1:1", "on"), 1) == 1.0)
     check("a 30% cell reads +30.0%", round(table.regression("aspect", "3:4", "on"), 1) == 30.0)
     ok, offenders = table.verdict("aspect", tolerance=5.0)
@@ -522,11 +658,23 @@ def self_test() -> int:
 
     print("[self-test] an unmeasured cell is NOT silently adopted")
     thin = Table()
-    thin.add(Sample("static", "1:1", "on", 1.0))
-    thin.add(Sample("aspect", "1:1", "on", 1.0))
-    thin.add(Sample("static", "16:9", "on", 1.0))
+    for round_index in range(2):
+        thin.add(Sample("static", "1:1", "on", 1.0, round=round_index))
+        thin.add(Sample("aspect", "1:1", "on", 1.0, round=round_index))
+        thin.add(Sample("static", "16:9", "on", 1.0, round=round_index))
     ok, offenders = thin.verdict("aspect", tolerance=5.0)
     check("a missing cell refuses", not ok and any("NOT MEASURED" in o for o in offenders))
+
+    print("[self-test] ONE round is UNDECIDABLE, never a quiet pass")
+    single = Table()
+    single.add(Sample("static", "1:1", "on", 1.0, round=0))
+    single.add(Sample("aspect", "1:1", "on", 1.0, round=0))
+    check("a single-round cell has no spread", single.spread("static", "1:1", "on") is None)
+    check("and is UNDECIDABLE", single.undecidable("1:1", "on"))
+    ok, offenders = single.verdict("aspect", tolerance=3.0)
+    check("so it cannot adopt", not ok)
+    check("and the reason names the ROUND count, not a spread",
+          any("ONE round" in o for o in offenders))
 
     print("[self-test] the table never averages across shapes")
     rendered = table.render()
@@ -537,6 +685,16 @@ def self_test() -> int:
         len(rendered.splitlines()) == 2 + len(table.shapes()),
     )
     check("the control column carries no percentage", "static (s) / vs static" not in rendered)
+
+    print("[self-test] the substrate attribution cannot be dropped")
+    stamped = table.render("raw-pod")
+    check("the table leads with the substrate note",
+          stamped.splitlines()[0].strip("_") == SUBSTRATES["raw-pod"])
+    check("and it names the deploy-path limit",
+          "not the deploy path" in stamped)
+    check("every substrate carries a note", all(SUBSTRATES.values()))
+    check("an unstamped render is only reachable deliberately",
+          "substrate" not in table.render())
 
     print("[self-test] the arm plan is exhaustive over the axes")
     check("every arm names an axis policy", set(ARMS) == set(AXES))
@@ -571,6 +729,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--guidance", type=float, default=7.5)
     parser.add_argument("--seed", type=int, default=1548)
     parser.add_argument("--prompt", default="a fisherman at dawn")
+    parser.add_argument("--sm", default="",
+                        help="this GPU's sm (e.g. sm_89). REQUIRED to adopt "
+                             "compiled graphs — without it every arm serves "
+                             "eager and the table reads 0%% for the wrong reason")
+    parser.add_argument("--substrate", choices=sorted(SUBSTRATES), default="raw-pod",
+                        help="what produced these numbers; stamped into the "
+                             "verdict and the table so the bound on what they "
+                             "describe travels with them")
     parser.add_argument("--tolerance", type=float, default=3.0,
                         help="percent slower than static that still adopts")
     parser.add_argument("--selectors", default="",
@@ -620,6 +786,8 @@ def main(argv: list[str] | None = None) -> int:
     for arm, verdict in report["adoption"].items():
         state = "ADOPT" if verdict["adopt"] else "KEEP STATIC"
         print(f"{arm}: {state} {verdict['outside_tolerance'] or ''}")
+    print()
+    print(report["substrate_note"])
     return 0
 
 
