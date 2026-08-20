@@ -200,7 +200,26 @@ def _checkpoint_tree(spec: BootSpec, loaded: Any) -> Tuple[Path, str]:
 
 
 def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
-    """(store, document) for this boot, or (None, None) — the eager bridge."""
+    """(store, document) for this boot, or (None, None) — the eager bridge.
+
+    An UNREADABLE graph-set document is a MISS, never a boot failure (pgw#1525).
+    Compiled graphs are derived and disposable: a document this build's torchcg
+    cannot decode — a v1 document under a v3 decoder, the ordinary shape after a
+    re-vendor — means this box holds nothing usable for this endpoint, which is
+    exactly what an empty store means. Both answers are "serve eager and let the
+    mint refill", so they must not have different outcomes.
+
+    `LocalGraphStore.get_graphs` RAISES `StoreError` on a decode failure rather
+    than answering a clean miss, and this call site used to let it through — so
+    a stale store did not degrade, it killed `up` before any author code ran.
+    That is the cold-start regression pgw#1525 names, and it is worst precisely
+    when recovery matters most: right after the format bump that produced it.
+
+    The refusal is caught HERE and not repaired in the store because the two
+    halves belong to different repos. The store-side fix (answer a clean miss
+    and GC the unreadable leftover) is torchcg's; this is the serving side
+    refusing to die on it either way.
+    """
     if spec.graph_store is None:
         return None, None
     if not spec.sm:
@@ -209,10 +228,31 @@ def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
             "Omit --graph-store to serve eager."
         )
     from .._vendor.tensorfs import LocalCAS
-    from .._vendor.torchcg.store import LocalGraphStore
+    from .._vendor.torchcg.store import LocalGraphStore, StoreError
 
     store = LocalGraphStore(LocalCAS(Path(spec.graph_store)))
-    return store, store.get_graphs(module_name)
+    try:
+        return store, store.get_graphs(module_name)
+    except StoreError as exc:
+        # LOUD and typed: silence here would read as "this endpoint compiles to
+        # nothing", which is a different fact with the same shape.
+        print(
+            f"adopt: graph_store_unreadable — the compiled-graph document for "
+            f"{module_name} in {spec.graph_store} cannot be decoded by this "
+            f"build's torchcg ({exc}).\n"
+            f"adopt: SERVING EAGER. Compiled graphs are derived and disposable, "
+            f"so this costs speed, never correctness.\n"
+            f"adopt: remedy — `gen-worker compile` re-mints this endpoint's "
+            f"graphs in the current format; the stale entries are reclaimable.",
+            file=sys.stderr,
+        )
+        # `(store, None)` and NOT `(None, None)`: an undecodable document must
+        # land on the SAME value an empty store produces, or the two "I hold
+        # nothing usable" states diverge again one layer down. The store stays
+        # bound because it is still WRITABLE — `put_graphs` compare-and-swaps a
+        # ref and does not care that the old bytes are undecodable, so a re-mint
+        # can refill this very store rather than needing it deleted first.
+        return store, None
 
 
 def _stated_stack(spec: BootSpec, document: Any) -> Optional[Any]:
