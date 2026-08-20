@@ -498,13 +498,13 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
 #
 # The first pass DELETED it outright on the evidence that nothing in `src/`
 # called it. That evidence was real and the conclusion was WRONG: `src/` is not
-# the tree. `scripts/author_surface_allowlist.txt:48` recorded the caller —
-# `serverless-endpoints/ltx-video-2.3/.../main.py:128`, marked PROD — and
+# the tree. The caller is `serverless-endpoints/ltx-video-2.3/.../main.py:128`,
+# in PROD — and
 # pgw#849 guard 2 says so in as many words: *"'No call site in this repo' is NOT
 # 'no consumer'"*. Deleting it would have made the ltx-video-2.3 endpoint fail
 # at IMPORT on its next gen-worker bump, nowhere near the offload path. The
-# lesson is the guard's own: run `lint_unreached_surface.py --siblings` before
-# deleting public surface, because CI structurally cannot.
+# lesson: grep the sibling endpoint repos before deleting public surface,
+# because CI structurally cannot.
 #
 # What DID die is the second implementation. `_BlockOffloadWindow` (per-BLOCK
 # windows, all-or-nothing, ambient stream, no reused cast buffer, no in-flight

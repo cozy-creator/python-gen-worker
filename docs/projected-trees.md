@@ -35,8 +35,8 @@ which binds the pgw#1380 streaming engine and walks the chunk store straight to
 VRAM. There is no `torch_dtype=` (the lane contract *is* the dtype) and no
 `.to("cuda")` (placement is the worker's decision, handed down).
 
-`scripts/lint_tensor_read_seam.py` fails the build on a raw
-`safe_open` / `load_file` / `torch.load` outside the seam.
+A raw `safe_open` / `load_file` / `torch.load` outside the seam is the
+pgw#1550 outage and must not come back.
 
 ## Every other reader's obligation
 

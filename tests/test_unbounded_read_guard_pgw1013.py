@@ -399,8 +399,7 @@ def test_rule_2_fires_on_all_four_filed_sites_as_they_were():
     quotes would assert about a shape that never existed.
 
     Needs the pre-fix commit, so it cannot run on CI's shallow checkout; the
-    parametrized test above is where this property is measured there. That
-    disposition is recorded in `scripts/skip_census.txt`.
+    parametrized test above is where this property is measured there.
     """
     # Pinned rather than derived: `merge-base HEAD origin/master` moves to the
     # fix itself the moment this lands, and the test would then assert the

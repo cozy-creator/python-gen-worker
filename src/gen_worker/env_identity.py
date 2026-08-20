@@ -327,8 +327,8 @@ def lockfile_beside(endpoint_dir: Path | str) -> Path | None:
 def installed_stack_drift(stated: Mapping[str, str] | tuple[tuple[str, str], ...]) -> tuple[str, ...]:
     """DIAGNOSTIC ONLY: how the venv's compile stack differs from the lock's.
 
-    Nothing gates on this and nothing keys on it — that is the pgw#1489 line,
-    and `scripts/lint_no_installed_set_keying.py` holds it. It exists because
+    Nothing gates on this and nothing keys on it — that is the pgw#1489 line.
+    It exists because
     one divergence here is genuinely fatal at RUN time (an artifact compiled
     against the lock's torch, loaded into a venv with a different one), and a
     warning naming the package beats a segfault. It compares the compile

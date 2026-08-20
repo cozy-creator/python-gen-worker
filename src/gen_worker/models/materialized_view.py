@@ -35,8 +35,7 @@ hands a directory to a third party. So:
 *   nothing is copied until a tier-3 site actually asks;
 *   only the SUBTREE it asks for is copied — a `from_pretrained` on one
     component costs that component, not the model;
-*   every copy goes through the single-file hatch with its §9 row on the line,
-    so `scripts/lint_materialization_hatch.py` counts it;
+*   every copy goes through the single-file hatch with its §9 row on the line;
 *   the bytes are logged at INFO with the caller's own `why`, so every
     remaining copy has a name and a call site. That log IS the migration
     burn-down: a site that disappears from it has moved up the ladder.

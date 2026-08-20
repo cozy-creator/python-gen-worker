@@ -53,8 +53,8 @@ _RANK_ALIGN = 16
 
 _SELF_CHECK_PROBES = ((128, 512, 256), (77, 3072, 384))
 
-# Quantizer launch config per SM. Module level so scripts/svdq_bench/
-# tune_quant.py can sweep it per card instead of anyone editing source.
+# Quantizer launch config per SM. Module level so a bench can sweep it per
+# card instead of anyone editing source.
 # sm_120: 8 warps on the strided kernel. sm_100: 1 warp on the contiguous
 # kernel — a whole-sweep optimum on B200, where more warps only add
 # contention on an already memory-bound kernel.

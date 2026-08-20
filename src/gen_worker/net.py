@@ -172,14 +172,13 @@ def _install_requests_backend() -> None:
 def hf() -> Any:
     """THE sanctioned huggingface_hub accessor: installs the timeout
     floor, then returns the module. Every network entry point (HfApi,
-    snapshot_download, hf_hub_download, ...) must be reached through here —
-    the CI guard (scripts/lint_http_timeouts.py) rejects direct imports
-    anywhere else in src/, so the floor is structurally unskippable.
+    snapshot_download, hf_hub_download, ...) must be reached through here,
+    so the floor is structurally unskippable.
     Non-network imports (huggingface_hub.errors / .constants) stay direct."""
     install_hf_http_timeouts()
     # Kept below the install call, not at module top: binding the module only
     # after the floor is proven is what makes "reached through hf()" mean
-    # "reached with timeouts installed" (scripts/lint_http_timeouts.py).
+    # "reached with timeouts installed".
     import huggingface_hub
 
     return huggingface_hub

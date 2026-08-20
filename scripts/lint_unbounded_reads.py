@@ -59,9 +59,12 @@ from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _lint_scope import is_unowned  # noqa: E402
-import _lint_side  # noqa: E402
+#: Subtrees not ours to judge: generated protobuf, byte-identical vendored snapshots.
+UNOWNED_DIRS = ("pb", "_vendor")
+
+
+def is_unowned(path: Path, root: Path) -> bool:
+    return any(name in path.relative_to(root).parts for name in UNOWNED_DIRS)
 
 # Calls whose result is a length taken from bytes the process did not compute.
 LENGTH_SOURCES = {"unpack", "unpack_from", "from_bytes"}
@@ -454,8 +457,8 @@ def main() -> int:
 
     if findings:
         print("unbounded-read guard: an external length sizes a read with no bound\n")
-        _lint_side.report(findings, "pgw#1013 unbounded reads",
-                          stream=sys.stdout)
+        for finding in findings:
+            print(f"  {finding}")
         print(
             "\npgw#1013 / th#1662: the bounds census could not see these — it enumerated "
             "bounds that exist, not sites that need one."

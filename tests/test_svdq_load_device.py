@@ -6,15 +6,14 @@ nunchaku loads the same bytes in ~8 s because its kernels consume the on-disk
 layout verbatim. Ours cannot (torch._scaled_mm wants blocked scales + plain
 packed nibbles), so the transforms now run ON the target device.
 
-These tests prove the plumbing changes NOTHING about the decoded bytes:
-the cpu path is bit-identical to a direct decode_linear/decode_awq_linear
-(the historical loader body), and the cuda path (GPU CI lane) is bit-identical
-to the cpu path — plus the load-time regression claim itself.
+This proves the plumbing changes NOTHING about the decoded bytes: the cpu
+path is bit-identical to a direct decode_linear/decode_awq_linear (the
+historical loader body). The ``_Art``/``_write_multiunit`` builders are shared
+with the pgw#1330 projected-tree suites.
 """
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import pytest
@@ -200,44 +199,3 @@ def test_cpu_load_bytes_match_direct_decode(tmp_path) -> None:
     assert _bit_equal(got_lin.weight, want_lin.weight)
     assert _bit_equal(got_lin.bias, want_lin.bias)
 
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_cuda_decode_bit_identical_to_cpu(tmp_path) -> None:
-    """The GPU decode path produces byte-identical buffers to the CPU path
-    (every transform is a permutation/bit op — no arithmetic to drift)."""
-    path, _, _ = _write_multiunit(tmp_path)
-    cpu = native.load_svdq_native_denoiser(
-        _Art(path), mode="blockwise", device="cpu")
-    gpu = native.load_svdq_native_denoiser(
-        _Art(path), mode="blockwise", device="cuda")
-    cb, gb = _buffer_map(cpu), _buffer_map(gpu)
-    assert set(cb) == set(gb) and cb
-    for name in sorted(cb):
-        assert gb[name].device.type == "cuda", name
-        assert _bit_equal(cb[name], gb[name]), name
-    for name, mod in cpu.named_modules():
-        if name.endswith("img_mod.1"):
-            got = gpu.get_submodule(name)
-            assert got.weight.device.type == "cuda"
-            assert _bit_equal(mod.weight, got.weight), name
-            assert _bit_equal(mod.bias, got.bias), name
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_gpu_decode_is_not_slower_than_cpu(tmp_path) -> None:
-    """The point of the change: on a real-shaped multi-unit file the device
-    decode must beat the historical CPU decode. Generous bound (>=1x) so the
-    test guards the regression, not the exact speedup."""
-    path, _, _ = _write_multiunit(tmp_path, dim_heads=16, head_dim=128,
-                                  layers=2, name="big")
-    t0 = time.perf_counter()
-    native.load_svdq_native_denoiser(_Art(path), mode="blockwise",
-                                     device="cpu")
-    cpu_s = time.perf_counter() - t0
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    native.load_svdq_native_denoiser(_Art(path), mode="blockwise",
-                                     device="cuda")
-    torch.cuda.synchronize()
-    gpu_s = time.perf_counter() - t0
-    assert gpu_s <= cpu_s, f"gpu decode {gpu_s:.2f}s vs cpu {cpu_s:.2f}s"

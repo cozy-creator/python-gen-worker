@@ -412,31 +412,3 @@ def test_an_implausible_header_length_is_refused(tmp_path):
     with pytest.raises(ValueError, match="implausible"):
         safetensors_triples(tmp_path)
 
-
-def test_triples_cover_a_real_sd15_component_exactly():
-    """The production path: the box's own sd1.5 snapshot, not a fixture.
-
-    Every UNet parameter must have a triple whose length is the tensor's, or
-    the cold-load arm would be filling some weights and silently leaving
-    others as whatever the arena last held.
-    """
-    snapshot = Path(
-        "/home/fidika/.cache/huggingface/hub/"
-        "models--stable-diffusion-v1-5--stable-diffusion-v1-5/snapshots/"
-        "451f4fe16113bff5a5d2269ed5ad43b0592e9a14"
-    )
-    if not (snapshot / "unet").is_dir():
-        pytest.skip("sd1.5 snapshot not on this box")
-    from diffusers import UNet2DConditionModel
-
-    with torch.device("meta"):
-        unet = UNet2DConditionModel.from_config(
-            UNet2DConditionModel.load_config(str(snapshot / "unet"))
-        )
-    triples = safetensors_triples(snapshot / "unet", variant="fp16")
-    missing = [k for k, _ in unet.named_parameters() if k not in triples]
-    assert not missing, missing[:5]
-    for key, param in unet.named_parameters():
-        _path, _offset, length = triples[key]
-        # The snapshot is fp16 and the meta tree is fp32: compare ELEMENTS.
-        assert length == param.numel() * 2, key

@@ -103,8 +103,7 @@ gen-worker model generate src/gen_worker/model/catalog/_generated/sdxl.export.js
 `export` runs `torch.export` with **fake** tensors — no GPU, no weights, no
 network, no compile — and writes `family_export_v1`. `generate` turns that
 document into the typed module, and is a pure function of it: no torch, no
-diffusers. Both halves are committed, and
-`scripts/check_model_bindings.py` (a required CI gate) proves they still agree.
+diffusers. Both halves are committed.
 
 Bindings generate from the **declaration**, never from a mint-emitted recipe
 (torchcg G16) — otherwise a new family could not type-check until somebody
@@ -177,9 +176,8 @@ direction is one-way: the declaration reads from the serving half, never the
 reverse, so the family's shape arithmetic has one definition and an artifact
 cannot be minted at a shape the loop will not ask for.
 
-`scripts/lint_serve_role_closure.py` enforces it. `role.MODEL_FREE_MODULES` is
-the surface, `role.FORBIDDEN_LIBRARIES` is what it may not reach, and the walk
-follows function-local imports. `serve.guard` blocks the same names at run time.
+`role.MODEL_FREE_MODULES` is the surface, `role.FORBIDDEN_LIBRARIES` is what
+it may not reach, and `serve.guard` blocks those names at run time.
 
 ## Scheduler as bare math
 

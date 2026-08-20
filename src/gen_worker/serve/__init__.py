@@ -5,8 +5,7 @@ code path: this role admits, adopts BY KEY, arms from the store (pgw#1329),
 selects an ingress through tcg#37's published contract, serves — and on a miss
 produces a typed refusal the hub can route on. It never serves eager on a miss
 and it never mints, because it cannot: the mint lane is unimportable here
-(:mod:`gen_worker.serve.guard` at runtime, ``scripts/lint_serve_role_closure.py``
-in CI).
+(:mod:`gen_worker.serve.guard` at runtime).
 
 Read the modules in this order:
 

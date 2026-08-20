@@ -33,9 +33,6 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _lint_side  # noqa: E402
-
 #: uv writes a git source as `<repo>?rev=<rev>#<resolved>` (lock `source.git`),
 #: and as `<repo>?rev=<rev>` in the `[package.metadata]` tables. One pattern
 #: reads both.
@@ -209,7 +206,8 @@ def main(argv: list[str]) -> int:
         "  BEFORE any gate runs — three red checks, none of them the cause.\n",
         file=sys.stderr,
     )
-    _lint_side.report(failures, "pgw#1477 uv.lock/pyproject pin agreement")
+    for failure in failures:
+        print(f"  {failure}", file=sys.stderr)
     print("", file=sys.stderr)
     return 1
 

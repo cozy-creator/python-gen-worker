@@ -192,7 +192,7 @@ def main() -> int:
 # ---------------------------------------------------------------------------
 # pgw#1373: `probe_hardware` LIVES HERE NOW. It came from the deleted
 # `lifecycle.py`, and its obvious home looked like `hostfacts` — it returns a
-# `HostFacts`. That was wrong, and `lint_serve_role_closure` said so
+# `HostFacts`. That was wrong, and the serve-role closure walk said so
 # immediately: the probe needs `topology` and `models.hub_policy` — NAMED FROM
 # THE PACKAGE ROOT, i.e. `gen_worker.topology` and `gen_worker.models.hub_policy`,
 # which from inside this package are `..topology` and `..models.hub_policy`.

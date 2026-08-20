@@ -8,9 +8,9 @@ math needs no model library, so importing
 the promise with the measurable payoff, because ``import diffusers`` alone is
 seconds of process start and hundreds of megabytes of resident host memory.
 
-The CI fence (``scripts/lint_serve_role_closure.py``) proves no serve-role
-module *can* reach the mint lane. This is the other half, and the two are not
-redundant: the fence reads the tree, so it is blind to a name assembled at
+A static closure walk can prove no serve-role module *can* reach the mint
+lane. This is the other half, and the two are not redundant: a static walk
+reads the tree, so it is blind to a name assembled at
 runtime (``importlib.import_module(f"gen_worker.{part}")``) and to code that is
 not in this repo at all — an endpoint's own module, which the worker imports
 from the tenant's image. A pod that promises it cannot compile must keep that

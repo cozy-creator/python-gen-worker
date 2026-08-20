@@ -104,10 +104,8 @@ merges. A third context, `drift`, also gates.
 
 1. `uv sync --locked --extra dev` — a version bump without `uv lock` fails here. It has.
 2. `mypy src/gen_worker` — GATING (gw#497; the tree is mypy-clean, no baseline)
-3. `scripts/lint_http_timeouts.py` (gw#467)
-4. `scripts/lint_unreached_surface.py` (pgw#849 guard 2)
-5. `scripts/lint_config_reads.py` (pgw#931 guard)
-6. `uv build` — a cut can still fail here, after every test is green.
+3. `scripts/lint_pickle_readers.py`, `scripts/lint_unbounded_reads.py`, the `check_*_digest.py` corpus pins
+4. `uv build` — a cut can still fail here, after every test is green.
 
 **`tests`** (~15m15s):
 

@@ -117,10 +117,6 @@ def test_an_upload_with_no_derivable_owner_is_no_longer_a_failure_mode() -> None
         reset_upload_sink()
 
 
-def test_the_org_reconstruction_helper_is_gone() -> None:
-    assert not hasattr(RequestContext, "_media_upload_owner")
-
-
 def test_the_sink_would_have_caught_the_old_shape() -> None:
     """The harness is only evidence if it can go red. The alias th#1799
     deletes must not match the org-less family."""

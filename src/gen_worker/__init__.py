@@ -31,9 +31,8 @@ byte-identical — ``from gen_worker import endpoint`` still works, and so does
 table the eager block used to spell out. ``if TYPE_CHECKING`` keeps the eager
 spelling for type checkers, which never execute it.
 
-``scripts/lint_serve_role_closure.py`` is what holds this: with the eager block
-back, the whole serve role reaches ``diffusers``/``transformers`` and the fence
-names the modules. ``gen_worker.model``'s own ``__init__`` is the same shape
+With the eager block back, the whole serve role would reach
+``diffusers``/``transformers``. ``gen_worker.model``'s own ``__init__`` is the same shape
 for the same reason, one layer down.
 """
 

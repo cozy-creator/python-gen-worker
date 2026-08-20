@@ -1,8 +1,8 @@
 """The orphaned serve-path wires, exercised through the seam that lost them.
 
 pgw#1418 measured one of these on a rented pod; pgw#1425 found nine siblings
-sitting in `scripts/unreached_surface_baseline.txt`, put there wholesale by a
-`--write-baseline` run. Every case here drives the WIRE, never the function:
+sitting in the (since-deleted) unreached-surface baseline, put there wholesale.
+Every case here drives the WIRE, never the function:
 the bug in all ten was that nothing CALLED a function that worked fine.
 """
 

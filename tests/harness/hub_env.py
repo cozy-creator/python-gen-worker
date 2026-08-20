@@ -1,8 +1,8 @@
 """pgw#995 — the hub's env-delivery chain, modelled so local tests can see it.
 
-THE BLIND SPOT THIS CLOSES. `scripts/micro_mint_rig.py` (pgw#978) runs the whole
-mint machinery on this box and is why a change can be proven before PyPI. But it
-**constructs its own environment**: the mint child gets `mint_process.child_env`
+THE BLIND SPOT THIS CLOSES. The local mint rig (pgw#978, since deleted) ran the
+whole mint machinery on this box and was why a change could be proven before
+PyPI. But it **constructed its own environment**: the mint child gets `mint_process.child_env`
 plus a few rig keys, and the adopting process gets `dict(os.environ)`. Neither
 resembles how a production pod is given its env, so the chain below was
 invisible to every test in this repo:

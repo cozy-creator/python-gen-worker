@@ -9,8 +9,7 @@ It is a separate PROCESS for three reasons, all of them load-bearing:
 
 * **th#1299**: ``torch.export.load`` and inductor hold the GIL for minutes at
   a time. On the serving process that starves the heartbeat and eager
-  serving. The fence (`scripts/lint_serving_process_compiles.py`) is what
-  keeps this honest, and this module is the CHILD_ONLY side of it.
+  serving. This module is the CHILD_ONLY side of that split.
 * **Crash isolation**: an inductor OOM or segfault costs one graph, not the
   worker. The parent reads the exit status and the artifact on disk.
 * **Condemnation has teeth**: a wedged compile in a thread cannot be stopped

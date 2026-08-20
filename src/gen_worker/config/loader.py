@@ -148,7 +148,7 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     # the compute child must not be able to reach through the config surface.
     "GEN_WORKER_PROBE",
     "GEN_WORKER_PROBE_PUBLISH_ARMED",
-    # Library/standalone-tool knobs; see scripts/config_reads_allowlist.txt.
+    # Library/standalone-tool knobs.
     "GEN_WORKER_LOG_LEVEL",
     "GEN_WORKER_CG_KEYSET",
     "GEN_WORKER_LOCAL_OUTPUT_DIR",

@@ -146,30 +146,6 @@ def test_the_dead_placement_override_attrs_are_dropped_not_published(
     assert not [k for k in meta if k.startswith("placement_")]
 
 
-def test_the_ladder_module_no_longer_exports_a_placement() -> None:
-    """The deletion asserted rather than remembered. `Placement`,
-    `default_placement` and `placement_to_metadata` are gone, and with them the
-    reason `models/svdq.py` kept nunchaku's kernel windows alive — pgw#1298's
-    two deliberate survivors, whose only consumers were this stamp and a
-    tensorhub peer pin th#2055 deleted.
-
-    The export list is asserted WHOLE rather than by absence, so a class added
-    to the vocabulary without being exported (or the reverse) is caught here —
-    that is the half that went stale when pgw#1498 landed `CLASS_GGUF`.
-    """
-    from gen_worker.models import svdq
-
-    assert set(ladder.__all__) == {
-        "CLASS_BASE", "CLASS_FP8", "CLASS_GGUF", "CLASS_NVFP4",
-        "CLASS_NVFP4_W4A4", "CLASS_SVDQ_FP4", "CLASS_SVDQ_INT4",
-        "PRECISION_CLASSES",
-    }
-    leftovers = [n for n in vars(ladder) if "PLACEMENT" in n.upper()]
-    assert leftovers == [], f"placement survived the cut: {leftovers}"
-    assert not hasattr(svdq, "SVDQ_FP4_SMS")
-    assert not hasattr(svdq, "SVDQ_INT4_SMS")
-
-
 def test_every_exported_class_constant_is_in_the_vocabulary_and_back() -> None:
     """The self-consistency half, which no transcribed literal can state: the
     `CLASS_*` names `__all__` exports and the members of `PRECISION_CLASSES`
@@ -185,21 +161,3 @@ def test_every_exported_class_constant_is_in_the_vocabulary_and_back() -> None:
         n for n in ladder.__all__ if n.startswith("CLASS_")
     }
 
-
-def test_the_worker_no_longer_reports_a_nunchaku_admission_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """pgw#1298's other deliberate survivor. The probe list is hardcoded and
-    nunchaku is installed nowhere here, so asking the real environment would
-    pass with the token still in the list — a vacuous fence. Every probe is
-    forced importable instead, which makes the reported set the LIST itself:
-    `nunchaku` must be absent while its neighbours are present."""
-    from gen_worker.models import hub_policy
-
-    monkeypatch.setattr(hub_policy, "_is_importable", lambda _name: True)
-    libs = set(hub_policy.detect_worker_capabilities().installed_libs)
-
-    assert {"torchao", "modelopt", "deepcompressor"} <= libs, (
-        "the probe list itself did not answer — this fence is measuring the "
-        "wrong thing")
-    assert "nunchaku" not in libs

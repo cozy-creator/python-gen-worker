@@ -33,12 +33,14 @@ from gen_worker.models.safetensors_header import MAX_HEADER_BYTES, header_len_ok
 from gen_worker.models.svdq import _read_safetensors_metadata
 from gen_worker.models.w4a4 import _read_header as w4a4_read_header
 from gen_worker.models.w8a8 import _read_header as w8a8_read_header
-import sys
 
-# pgw#1310: one home for "which subtrees a guard may not judge" —
-# scripts/_lint_scope.py, shared with the CI lint scanners.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from _lint_scope import is_unowned  # noqa: E402
+# Subtrees a guard may not judge: generated protobuf and byte-identical
+# vendored snapshots (fixed upstream and re-vendored, never edited here).
+UNOWNED_DIRS = ("pb", "_vendor")
+
+
+def is_unowned(path: Path, root: Path) -> bool:
+    return any(name in path.relative_to(root).parts for name in UNOWNED_DIRS)
 
 
 # One tensor of one F32 element, so the header describes something real.

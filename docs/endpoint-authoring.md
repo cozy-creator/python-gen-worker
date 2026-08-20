@@ -453,9 +453,8 @@ class Generate:
 
   Handles must be registered
   (`KNOWN_CONTRACTS`, transcribed from tensorhub's `internal/tensorlayout`)
-  and written as LITERALS or as constants imported from that module —
-  `scripts/lint_layout_declarations.py` refuses anything the AST sweep cannot
-  read. Declaring a handle no decoder in the image backs is NOT an error: it
+  and written as LITERALS or as constants imported from that module, so an
+  AST sweep can read them. Declaring a handle no decoder in the image backs is NOT an error: it
   lands in the build log as `layouts_census_unbacked`, because plenty of
   layouts are decoded natively by `transformers`/`diffusers` with no cozy
   marker.

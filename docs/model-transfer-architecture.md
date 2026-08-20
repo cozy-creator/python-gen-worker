@@ -37,6 +37,5 @@ digests, and finalization; R2 is only the byte store.
   legacy bare-hex `blake3` field only when `digest` is absent. Blobs land under
   `blobs/{algo}/{xx}/{yy}/{hex}`, so the two namespaces never collide.
 
-Transfer defaults are chosen from benchmarks
-(`scripts/benchmark_model_transfer.py` — reliability first, then wall-clock,
-RSS, retries), not exposed as knobs.
+Transfer defaults are chosen from benchmarks (reliability first, then
+wall-clock, RSS, retries), not exposed as knobs.
