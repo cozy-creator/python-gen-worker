@@ -174,9 +174,9 @@ class TieredGraphStore:
             raise ProgramBlobUnreachable(
                 f"graph blob {digest} is present but does not survive its own "
                 f"integrity scrub in " + "; ".join(rotten) + " — the object was "
-                f"truncated or corrupted at rest, and no other tier holds a good "
-                f"copy. Refusing to compile bytes that are not the graph the "
-                f"release stamped."
+                "truncated or corrupted at rest, and no other tier holds a good "
+                "copy. Refusing to compile bytes that are not the graph the "
+                "release stamped."
             )
         raise ProgramBlobUnreachable(
             f"graph blob {digest} is in neither this pod's CAS nor the image's "
