@@ -409,3 +409,26 @@ def test_a_relocated_root_says_so_rather_than_relocating_silently(
     assert composed.path == str(tmp_path / "cache" / "cuda-root")
     assert any("is neither present nor this process's to create" in note
                for note in composed.notes)
+
+
+def test_an_unreadable_module_name_is_a_typed_refusal_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """pgw#1537: `compile` reads the endpoint's module name and can now fail on
+    the author's own import.
+
+    `declared_floor_gb` calls `load_endpoint` too and swallows everything,
+    because an unreadable floor genuinely IS "no floor stated". An unreadable
+    module NAME is not "no name" — nothing can be published under a name that
+    could not be read — so it refuses, in one sentence, with the cause.
+    """
+    empty = tmp_path / "not-an-endpoint"
+    empty.mkdir()
+
+    with pytest.raises(compile_cli.CompileError) as refusal:
+        compile_cli.endpoint_module(empty)
+
+    message = str(refusal.value)
+    assert "cannot read" in message
+    assert "graph-set document" in message, "it says WHY the name is needed"
+    assert str(empty) in message, "and which endpoint it was asked about"

@@ -405,12 +405,32 @@ def endpoint_module(endpoint_dir: Path) -> str:
     ``main =`` — because ``_adoption_source`` reads it the same way. Two
     spellings of "which document is this endpoint's" is exactly the drift that
     would make ``compile`` publish under a name ``up`` never asks for.
+
+    An import failure here is a TYPED refusal, not a traceback (pgw#1537).
+    pgw#1533 made this the first thing `compile` needs that can fail on the
+    author's own code — `declared_floor_gb` calls `load_endpoint` too, but
+    swallows everything, because an unreadable floor is genuinely "no floor
+    stated". An unreadable MODULE NAME is not "no name": nothing can be
+    published under a name that could not be read, so the run cannot deliver a
+    servable endpoint and must say why in one sentence.
     """
     from ..discovery.discover import prime_sys_path
     from ..serving.loader import load_endpoint
 
-    prime_sys_path(endpoint_dir)
-    return str(load_endpoint(endpoint_dir).module_name)
+    try:
+        prime_sys_path(endpoint_dir)
+        return str(load_endpoint(endpoint_dir).module_name)
+    except Exception as exc:  # noqa: BLE001 — author code; any failure is theirs
+        raise CompileError(
+            f"cannot read {endpoint_dir}'s module name "
+            f"({type(exc).__name__}: {exc}).\n"
+            f"  `compile` publishes this endpoint's graph-set document under "
+            f"that name and boot-time adoption looks it up by the same one, so "
+            f"a document published under a guess would be invisible to `up`.\n"
+            f"  Fix the import (this is the endpoint's own `main =` module), or "
+            f"pass the name explicitly if you are compiling for a tree you "
+            f"cannot import here."
+        ) from exc
 
 
 # --------------------------------------------------------------------------
