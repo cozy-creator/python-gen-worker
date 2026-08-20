@@ -52,9 +52,109 @@ def test_an_unreadable_graph_document_serves_eager_instead_of_killing_boot(
         "THIS store rather than requiring it be deleted first"
     )
     said = capsys.readouterr().err
-    assert "graph_store_unreadable" in said      # typed, not a bare traceback
     assert "SERVING EAGER" in said               # states the outcome
     assert "gen-worker compile" in said          # names the remedy
+
+
+def test_the_discard_itself_is_announced_and_names_what_went_away(
+    tmp_path, caplog
+):
+    """WHICH of the two "nothing usable" states it was is still stated.
+
+    The adopt lines deliberately say the same thing for a stale store and an
+    empty one -- that is this issue's conclusion, not an omission. The
+    difference is not lost: torchcg's discard WARNING names the graph-set, the
+    bytes it dropped and the decode failure. This asserts the operator gets
+    BOTH, because the adopt line alone would leave a silent deletion.
+    """
+    import logging
+
+    store = tmp_path / "graph-cas"
+    _store_with_unreadable_document(store, "toy.main")
+    spec = BootSpec(endpoint_dir=tmp_path, graph_store=store, sm="sm_89")
+
+    with caplog.at_level(
+        logging.WARNING, logger="gen_worker._vendor.torchcg.store"
+    ):
+        _adoption_source(spec, "toy.main")
+
+    said = "\n".join(
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "gen_worker._vendor.torchcg.store"
+    )
+    assert "DISCARDED" in said
+    assert "toy.main" in said                    # which graph-set
+    assert "sha256:" in said                     # which bytes
+    assert "unreadable by this build" in said    # why
+
+
+def test_the_shape_actually_found_on_disk_is_the_version_mismatch(
+    tmp_path, caplog
+):
+    """The document that blocked va#3's arm 2 was v=2 with a VALID field set.
+
+    Worth its own case because the fixture above fails on the field set and
+    would pass a reader that only rejected unknown fields. This one can only
+    fail on the version, which is the shape a re-vendor actually produces.
+    """
+    import logging
+
+    from gen_worker._vendor.tensorfs import LocalCAS
+    from gen_worker._vendor.torchcg.store import _document_ref
+
+    store = tmp_path / "graph-cas"
+    store.mkdir(parents=True)
+    cas = LocalCAS(store)
+    ref = cas.put_bytes(b'{"lanes":[],"stack":[],"v":2}')
+    cas.compare_and_swap_ref(_document_ref("toy.main"), ref, expected=None)
+
+    spec = BootSpec(endpoint_dir=tmp_path, graph_store=store, sm="sm_89")
+    with caplog.at_level(
+        logging.WARNING, logger="gen_worker._vendor.torchcg.store"
+    ):
+        _, document = _adoption_source(spec, "toy.main")
+
+    assert document is None
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "document v must be 3" in said
+    assert cas.read_ref(_document_ref("toy.main")) is None
+
+
+def test_a_store_that_still_raises_keeps_the_typed_refusal(
+    tmp_path, capsys, monkeypatch
+):
+    """The `StoreError` branch is NOT dead -- it guards the other backends.
+
+    tcg#69 taught the LOCAL store to answer a clean miss, so that branch no
+    longer fires for `LocalGraphStore`. The hub-backed store is a different
+    implementation of the same protocol and still raises, and a `up` must
+    degrade on it too rather than die. Driven through a store double so this
+    is a test of the CALL SITE, which is what owns the outcome.
+    """
+    import gen_worker._vendor.torchcg.store as store_module
+    from gen_worker._vendor.torchcg.store import StoreError
+
+    class RaisingStore:
+        def get_graphs(self, name: str) -> None:
+            raise StoreError(f"graph-set document {name!r} is unreadable: nope")
+
+    store = tmp_path / "graph-cas"
+    store.mkdir(parents=True)
+    spec = BootSpec(endpoint_dir=tmp_path, graph_store=store, sm="sm_89")
+
+    # `_adoption_source` imports the class inside the function, so the module
+    # attribute is what it resolves at call time.
+    monkeypatch.setattr(store_module, "LocalGraphStore", lambda _cas: RaisingStore())
+
+    adopted_store, document = _adoption_source(spec, "toy.main")
+
+    assert document is None
+    assert adopted_store is not None
+    said = capsys.readouterr().err
+    assert "graph_store_unreadable" in said
+    assert "SERVING EAGER" in said
+    assert "gen-worker compile" in said
 
 
 def test_an_unreadable_document_lands_where_an_empty_store_lands(tmp_path):

@@ -232,7 +232,7 @@ def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
 
     store = LocalGraphStore(LocalCAS(Path(spec.graph_store)))
     try:
-        return store, store.get_graphs(module_name)
+        document = store.get_graphs(module_name)
     except StoreError as exc:
         # LOUD and typed: silence here would read as "this endpoint compiles to
         # nothing", which is a different fact with the same shape.
@@ -253,6 +253,33 @@ def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
         # ref and does not care that the old bytes are undecodable, so a re-mint
         # can refill this very store rather than needing it deleted first.
         return store, None
+    if document is None:
+        # THE REMEDY IS PRINTED FOR THE MISS ITSELF, not only for a raise.
+        #
+        # tcg#69 made `LocalGraphStore` answer a clean miss and discard the
+        # stale bytes, so the branch above no longer fires for the local store
+        # — it survives for backends that still raise (the hub-backed one).
+        # Printing the remedy only there would have silently retired the
+        # operator-facing line on the exact path pgw#1525 exists to fix.
+        #
+        # Naming ONE outcome for both states is not a loss of information, it
+        # is this issue's own conclusion: an undecodable document and an empty
+        # store are the same fact — this box holds nothing usable — and the
+        # remedy is the same verb. WHICH of the two it was is still said, by
+        # torchcg's discard WARNING, which names the graph-set, the bytes and
+        # the decode failure. That warning reaches the terminal even with no
+        # logging configured (`logging.lastResort` handles WARNING+), which
+        # was verified rather than assumed.
+        print(
+            f"adopt: no compiled-graph document for {module_name} in "
+            f"{spec.graph_store}.\n"
+            f"adopt: SERVING EAGER. Compiled graphs are derived and "
+            f"disposable, so this costs speed, never correctness.\n"
+            f"adopt: remedy — `gen-worker compile` mints this endpoint's "
+            f"graphs for this card in the current format.",
+            file=sys.stderr,
+        )
+    return store, document
 
 
 def _stated_stack(spec: BootSpec, document: Any) -> Optional[Any]:

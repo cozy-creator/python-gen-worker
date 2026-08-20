@@ -11,12 +11,37 @@ lifecycle test double -- same lifecycle code, any store.
 Addresses live under ``torchcg/v2`` -- a NEW address space for the two-level
 identity scheme. ``torchcg/v1`` (exact cg-key rows, ``storage.py``) is the
 prior grammar; nothing reads both.
+
+## A graph-set document this build cannot read is ABSENT, and it is discarded
+
+tcg#69. Every byte in this store is DERIVED: a graph-set document is a
+statement about programs that can be re-traced and artifacts that can be
+re-minted from sources the store does not own. So a document written by an
+older ``DOCUMENT_FORMAT`` is not a fault to report, it is a document this
+build does not have -- ``get_graphs`` returns ``None``, the caller registers
+holes and serves eager while a background mint refills, and the unreadable
+bytes are dropped. That is the SAME path a store with no document at all
+takes, which is what makes it safe: the miss branch is the one every caller
+already exercises on a fresh box.
+
+There is NO migration machinery here and there never will be (Paul,
+2026-08-19: *"weights migrate/normalize once at ingest; graphs regenerate"*).
+A format bump costs one re-mint, and code that translates old graph documents
+would be a permanent tax paid to avoid a one-time cost that the store is
+designed to absorb.
+
+What this replaces: raising ``StoreError`` at ADOPT time. It was typed and
+loud, so it was never silent -- but it landed on every local user's first
+cold start after an upgrade, at serving time, on a machine that could simply
+have rebuilt. The condition was diagnosed correctly and handled at the wrong
+altitude.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -31,6 +56,8 @@ from .document import DocumentError, GraphSetDocument, LaneGraphs
 from .graph_identity import EnvIdentity, is_graph_hash
 from .lane import LaneError, require_pass_ref
 from .requirements import RequirementsError, RequirementsManifest
+
+logger = logging.getLogger(__name__)
 
 _REF_PREFIX = "torchcg/v2"
 _READ_BUFFER = 1 << 20
@@ -61,9 +88,7 @@ class GraphStore(Protocol):
         """Whether an artifact exists at (graph, env) -- the hole probe."""
         ...
 
-    def fetch_artifact(
-        self, graph: str, env: EnvIdentity, destination: str | Path
-    ) -> Path | None:
+    def fetch_artifact(self, graph: str, env: EnvIdentity, destination: str | Path) -> Path | None:
         """Verify and copy the (graph, env) artifact out, or a clean miss."""
         ...
 
@@ -90,9 +115,7 @@ def holes(store: GraphStore, lane: LaneGraphs, env: EnvIdentity) -> tuple[str, .
     """
 
     return tuple(
-        record.graph
-        for record in lane.graphs
-        if not store.has_artifact(record.graph, env)
+        record.graph for record in lane.graphs if not store.has_artifact(record.graph, env)
     )
 
 
@@ -104,9 +127,7 @@ def _require_graph(graph: str) -> str:
 
 def _document_ref(name: str) -> str:
     clean = str(name).strip()
-    if not clean or "\\" in clean or any(
-        part in ("", ".", "..") for part in clean.split("/")
-    ):
+    if not clean or "\\" in clean or any(part in ("", ".", "..") for part in clean.split("/")):
         raise StoreError(f"unsafe graph-set name {name!r}")
     return f"{_REF_PREFIX}/graphsets/{clean}"
 
@@ -147,9 +168,7 @@ def _side_table_ref(pass_name: str, key: str) -> str:
     except LaneError as exc:
         raise StoreError(str(exc)) from exc
     if not re.fullmatch(r"[0-9a-f]{8,64}", str(key)):
-        raise StoreError(
-            f"a side-table key is the canonical hex domain-key address, got {key!r}"
-        )
+        raise StoreError(f"a side-table key is the canonical hex domain-key address, got {key!r}")
     return f"{_REF_PREFIX}/sidetables/{pass_name}/{key}"
 
 
@@ -185,14 +204,107 @@ class LocalGraphStore:
     # -- graph-set documents ------------------------------------------------
 
     def get_graphs(self, name: str) -> GraphSetDocument | None:
-        ref = self.cas.read_ref(_document_ref(name))
+        """The named document, or a clean miss -- including when it is stale.
+
+        A document this build cannot decode is a MISS, not an error: see the
+        module docstring. It is discarded on the way out so the next call is
+        an ordinary miss against an empty position rather than a second
+        discard, and so the box does not carry the dead bytes forever.
+        """
+
+        ref_name = _document_ref(name)
+        ref = self.cas.read_ref(ref_name)
         if ref is None:
             return None
         try:
             blob = self.cas.verify_object(ref)
             return GraphSetDocument.decode(Path(blob).read_bytes())
         except (DigestMismatch, FileNotFoundError, ValueError, DocumentError) as exc:
-            raise StoreError(f"graph-set document {name!r} is unreadable: {exc}") from exc
+            self._discard_graphs(ref_name, name, ref, exc)
+            return None
+
+    def _discard_graphs(self, ref_name: str, name: str, ref: CASRef, cause: Exception) -> None:
+        """Drop an unreadable graph-set document and delete its bytes.
+
+        ONE warning, and it names all three things a reader needs: which
+        graph-set went away, which bytes were dropped, and why they could not
+        be read. Silence here would turn a rebuild into an unexplained one.
+
+        The ref goes first: it is the compare-and-swap, so a peer that
+        replaced or discarded the same document a moment earlier simply wins,
+        and this call does nothing but return the miss it already decided on.
+
+        The bytes go second and ONLY if nothing else names them. This is a
+        content-addressed store, so an object is shared the instant two
+        positions hold identical bytes; deleting one position's object without
+        that check would punch a hole under a live position. The scan is over
+        ``refs`` -- small JSON records, one per position -- never over
+        ``objects``, whose layout belongs to tensorfs and not to this module.
+        """
+
+        try:
+            self.cas.compare_and_swap_ref(ref_name, None, expected=ref)
+        except RefConflict:
+            # A concurrent writer already replaced or dropped it. Whatever
+            # stands now is theirs; this call's only job was to stop reading
+            # the stale bytes, and returning a miss has done that.
+            logger.warning(
+                "torchcg: graph-set %r was unreadable by this build (%s) and a "
+                "concurrent writer replaced it; serving as ABSENT this call",
+                name,
+                cause,
+            )
+            return
+        reclaimed = self._discard_object(ref)
+        logger.warning(
+            "torchcg: DISCARDED graph-set %r (%s) -- unreadable by this build: "
+            "%s. Compiled graphs are derived and disposable, so it is treated "
+            "as ABSENT and will be re-minted; no migration is attempted. "
+            "Reclaimed %d byte(s).",
+            name,
+            ref,
+            cause,
+            reclaimed,
+        )
+
+    def _discard_object(self, ref: CASRef) -> int:
+        """Delete ``ref``'s bytes if no logical ref still names them.
+
+        Returns the bytes reclaimed, 0 when the object is still shared or is
+        already gone. Never raises: this runs on the way out of a read that
+        has already decided its answer, and failing to reclaim a few kilobytes
+        must not turn a clean miss back into an exception.
+        """
+
+        try:
+            if any(self._targets(record) == ref for record in self._ref_records()):
+                return 0
+            path = self.cas.object_path(ref)
+            size = path.stat().st_size
+            path.unlink()
+        except OSError:
+            return 0
+        return size
+
+    def _ref_records(self) -> list[dict[str, object]]:
+        records: list[dict[str, object]] = []
+        for path in self.cas.refs.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                raw = json.loads(path.read_bytes())
+            except (OSError, ValueError):
+                continue
+            if isinstance(raw, dict):
+                records.append(raw)
+        return records
+
+    @staticmethod
+    def _targets(record: dict[str, object]) -> CASRef | None:
+        try:
+            return CASRef.parse(str(record.get("target", "")))
+        except ValueError:
+            return None
 
     def put_graphs(self, name: str, document: GraphSetDocument) -> None:
         ref_name = _document_ref(name)
@@ -212,9 +324,7 @@ class LocalGraphStore:
     def has_artifact(self, graph: str, env: EnvIdentity) -> bool:
         return self.cas.read_ref(_artifact_ref(graph, env)) is not None
 
-    def fetch_artifact(
-        self, graph: str, env: EnvIdentity, destination: str | Path
-    ) -> Path | None:
+    def fetch_artifact(self, graph: str, env: EnvIdentity, destination: str | Path) -> Path | None:
         ref = self.cas.read_ref(_artifact_ref(graph, env))
         if ref is None:
             return None
@@ -229,9 +339,7 @@ class LocalGraphStore:
     def _copy_out(self, blob: str | Path, destination: str | Path) -> Path:
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{target.name}.", dir=target.parent
-        )
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
         os.close(descriptor)
         temporary = Path(temporary_name)
         try:
@@ -285,9 +393,7 @@ class LocalGraphStore:
         """First manifest wins; an interrupted earlier publish is repaired."""
 
         try:
-            self.cas.compare_and_swap_ref(
-                _manifest_ref(graph, env), candidate, expected=None
-            )
+            self.cas.compare_and_swap_ref(_manifest_ref(graph, env), candidate, expected=None)
         except RefConflict:
             # An existing manifest beside the same artifact bytes stands; the
             # mint that wrote it stated what it linked, and restating differs
@@ -308,9 +414,7 @@ class LocalGraphStore:
             ValueError,
             RequirementsError,
         ) as exc:
-            raise StoreError(
-                f"manifest ({graph}, {env.value}) is unreadable: {exc}"
-            ) from exc
+            raise StoreError(f"manifest ({graph}, {env.value}) is unreadable: {exc}") from exc
 
     # -- transform side tables (tcg#52) -------------------------------------
 
@@ -330,9 +434,7 @@ class LocalGraphStore:
         try:
             blob = self.cas.verify_object(ref)
         except (DigestMismatch, FileNotFoundError, ValueError) as exc:
-            raise StoreError(
-                f"program for {graph} failed CAS verification: {exc}"
-            ) from exc
+            raise StoreError(f"program for {graph} failed CAS verification: {exc}") from exc
         return self._copy_out(blob, destination)
 
     def put_program(self, graph: str, path: str | Path) -> str:
@@ -364,9 +466,7 @@ class LocalGraphStore:
     def has_side_table(self, pass_name: str, key: str) -> bool:
         return self.cas.read_ref(_side_table_ref(pass_name, key)) is not None
 
-    def fetch_side_table(
-        self, pass_name: str, key: str, destination: str | Path
-    ) -> Path | None:
+    def fetch_side_table(self, pass_name: str, key: str, destination: str | Path) -> Path | None:
         ref = self.cas.read_ref(_side_table_ref(pass_name, key))
         if ref is None:
             return None
