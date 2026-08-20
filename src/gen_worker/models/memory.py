@@ -1353,17 +1353,43 @@ def _move_pipeline_to_cpu(pipeline: Any) -> None:
 
 
 def _apply_vae_and_attention(
-    pipeline: Any, applied: Dict[str, bool], *, memory_bound: bool = True
+    pipeline: Any, applied: Dict[str, bool], *, no_reactive_ladder: bool = False
 ) -> None:
     """VAE/attention memory savers.
 
-    th#1107: tiling and attention slicing are VRAM tools that cost real
-    latency (tiled decode re-runs the VAE per tile and blends 25% overlaps;
-    attention slicing replaces the fused SDPA/flash path with a chunked
-    loop). ``vae_only`` is selected when the pipeline FITS and only headroom
-    is tight, so applying them there taxes every request on a card that never
-    needed them. ``memory_bound=False`` (the vae_only rung) keeps only VAE
-    slicing, which is a no-op at batch 1.
+    **A PLACEMENT RUNG ANSWERS "WHERE DO THE WEIGHTS LIVE" AND NOTHING ELSE**
+    (pgw#1570). Tiled decode and attention slicing are ACTIVATION tools on a
+    different axis, and they cost real latency: tiled decode re-runs the VAE
+    per tile and blends 25% overlaps, and ``enable_attention_slicing()``
+    becomes a diffusers ``SlicedAttnProcessor`` — ``baddbmm`` + ``softmax`` in
+    a python loop over ``batch*heads`` chunks, materializing the full NxN score
+    matrix — **in place of** ``AttnProcessor2_0`` (torch SDPA -> flash /
+    mem-efficient). That is a per-STEP tax on every request for the life of
+    the process, and it was being levied as a side effect of moving weights.
+
+    Measured A/B/A, RTX 4070 Laptop, SDXL 1024^2, 20 steps, CFG, bf16, eager,
+    on the ``model_offload`` rung, per-step off the sampler's own loop rate:
+    **sliced 1.10 s/step (two arms, bracketing) against SDPA's 0.827 — 1.33x**,
+    warm round trip 26.1/33.5 s against 23.6 s. **Peak VRAM moved 5932 ->
+    5956 MiB: the whole tax bought 24 MiB.** SDPA's workspace is nothing at a
+    4096-token sequence, and the rung had already freed 1.6 GiB by evicting the
+    text encoders. This term was 84% of the round-trip gap [[va#3]] measured
+    against ComfyUI on this card, which runs SDPA on the same weights.
+
+    th#1107 cut these off the ``vae_only`` rung on exactly this argument and
+    stopped there. The rest of the cut is here: **nothing is applied
+    proactively on any rung that has a reactive ladder.** pgw#1499's
+    ``oom_ladder`` is installed on EVERY rung by :func:`apply_low_vram_config`
+    and applies both — tiles on a decode OOM, slices on a denoise-step OOM —
+    when an op actually does not fit, confessing each time. A card that never
+    needs them never pays.
+
+    ``no_reactive_ladder=True`` is the ONE exception and it names its reason:
+    the ``cpu`` rung, where the constraint is host RAM and there is no CUDA OOM
+    for ``oom_ladder`` to catch, so the savers must be armed up front.
+
+    VAE *slicing* stays unconditional — it is a no-op at batch 1 and does not
+    touch the denoise loop.
     """
     if not _call_if_present(pipeline, "enable_vae_slicing"):
         vae = getattr(pipeline, "vae", None)
@@ -1372,7 +1398,7 @@ def _apply_vae_and_attention(
     else:
         applied["vae_slicing"] = True
 
-    if not memory_bound:
+    if not no_reactive_ladder:
         return
 
     if not _call_if_present(pipeline, "enable_vae_tiling"):
@@ -2084,6 +2110,31 @@ def report_under_minimum(
 # onto every request the instance serves.
 
 
+def attention_kernel_census(pipeline: Any) -> str:
+    """The attention processor classes actually LIVE on the denoiser, counted.
+
+    pgw#1570: `attention_slicing` was applied by a placement rung and nothing
+    ever said which kernel that left running. The flag name is not the answer —
+    diffusers turns `enable_attention_slicing()` into a `SlicedAttnProcessor`
+    (`baddbmm`+`softmax`, chunked python loop, full NxN scores materialized) in
+    place of `AttnProcessor2_0` (torch SDPA -> flash/mem-efficient), and the two
+    differ by more than a memory saving. A rung that changes the kernel must
+    NAME the kernel: "which one runs" is a fact to be read off the object, never
+    inferred from the flag that set it.
+    """
+    denoiser = getattr(pipeline, "unet", None) or getattr(pipeline, "transformer", None)
+    getter = getattr(denoiser, "attn_processors", None) if denoiser is not None else None
+    if not getter:
+        return "attention=unknown(no attn_processors)"
+    counts: Dict[str, int] = {}
+    for proc in getter.values():
+        name = type(proc).__name__
+        counts[name] = counts.get(name, 0) + 1
+    return "attention=" + ",".join(
+        f"{n}x{c}" for n, c in sorted(counts.items(), key=lambda kv: -kv[1])
+    )
+
+
 def _report_offload_engaged(
     pipeline: Any, rung: str, applied: Dict[str, Any], log: logging.Logger,
 ) -> None:
@@ -2111,7 +2162,8 @@ def _report_offload_engaged(
             event="engaged", phase="load", from_rung="resident", to_rung=rung,
             needed_gb=needed_gb, free_gb=free_gb,
             detail=f"CPU offload ENGAGED ({_applied_summary(applied)}); every "
-                   f"forward on this pipeline now moves weights over PCIe",
+                   f"forward on this pipeline now moves weights over PCIe; "
+                   f"{attention_kernel_census(pipeline)}",
         ),
         detail=(
             f"pipeline={type(pipeline).__name__}: CPU offload ENGAGED at rung "
@@ -2352,7 +2404,7 @@ def apply_low_vram_config(
         # that there is no usable one — either the pod is cardless or every
         # rung above OOM'd. The savers still apply, because host RAM is now the
         # constraint and tiled decode is what keeps a large VAE inside it.
-        _apply_vae_and_attention(pipeline, applied, memory_bound=True)
+        _apply_vae_and_attention(pipeline, applied, no_reactive_ladder=True)
         _to_host(pipeline)
         flush_memory()
         setattr(pipeline, _COZY_MODE_ATTR, "cpu")
@@ -2362,9 +2414,11 @@ def apply_low_vram_config(
         _report_offload_engaged(pipeline, "cpu", applied, log)
         return applied
 
-    _apply_vae_and_attention(
-        pipeline, applied, memory_bound=effective_mode != "vae_only"
-    )
+    # Every rung reached from here has a live `oom_ladder` (armed above, on
+    # every rung including the resident ones), so none of them arms the
+    # activation savers proactively — see `_apply_vae_and_attention`. Only the
+    # `cpu` rung, which returned earlier, has no CUDA OOM to react to.
+    _apply_vae_and_attention(pipeline, applied)
 
     if effective_mode == "vae_only":
         setattr(pipeline, _COZY_MODE_ATTR, "vae_only")
