@@ -527,3 +527,25 @@ gen_worker.serving.engine_runtime.process_vram_bytes()
 #             caller and the ratchet will say so by going red on STALE.
 #     EXPIRY: none. A guard's undo living beside its do is the correct shape.
 gen_worker.serving.weightless_program.uninstall()
+
+#   Built ahead of its caller, on purpose, with the caller NAMED
+#     StreamedResidency.hold_component — pgw#1515's call-boundary swap. The
+#     PLAN already decides the schedule (ResidencySchedule.CALL_BOUNDARY vs
+#     PER_STEP) from the assigned {VRAM, RAM} pair and the cell layout, and this
+#     is the method that executes it: hold one component whole for a call, park
+#     the others. It is unreached because the serve path has no call-BOUNDARY
+#     hook yet — the rung engages once per placement, not once per generation —
+#     and adding one is the half that must be MEASURED, not reasoned about
+#     (pgw#1497 measured the per-CALL vs per-STEP split at 1.57x vs 1.91x on the
+#     card; whether our finer-grained version of it beats model_offload at its
+#     own 1.9 GB floor is the open question this whole issue exists to answer).
+#     Wiring it before that measurement would put a rung on the ladder at a
+#     price nobody has paid, which is precisely what pgw#1507 refused to do.
+#
+#     OWNER:  pgw#1515. WIRE IT — this is not a permanent exemption. The GPU
+#             pricing sweep ({leaf, 64 MiB, 256 MiB, component} x four budgets)
+#             either produces the caller or produces the deletion.
+#     EXPIRY: the pgw#1515 GPU sweep. If that sweep says the schedule does not
+#             beat model_offload at its floor, this method and its tests go,
+#             they are not ported (DESIGN-RULINGS 4.34).
+gen_worker.models.stream_residency.StreamedResidency.hold_component()

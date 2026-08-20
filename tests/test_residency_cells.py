@@ -197,17 +197,28 @@ def test_bigger_cells_monotonically_shrink_the_residual_tax() -> None:
     assert taxes[0] > 100 * MIB and taxes[-1] < 4 * MIB
 
 
-def test_small_leaves_are_packed_first() -> None:
-    """Packing small-first is the mechanism, not a tie-break: a 4 KiB norm in
-    its own 2 MiB region wastes 99.8 % of it, a 300 MiB block wastes 0.7 %."""
-    small = [LeafCost(f"unet.s{i}", 64 * 1024) for i in range(40)]
-    large = [LeafCost(f"unet.big{i}", 100 * MIB) for i in range(2)]
-    cells = pack_cells(small + large, policy=_vmm(8 * MIB), min_stream_bytes=1)
-    shared = [c for c in cells if len(c.members) > 1]
-    singles = [c for c in cells if len(c.members) == 1]
-    assert shared, "the small leaves must have been combined"
-    assert all(m.startswith("unet.s") for c in shared for m in c.members)
-    assert {c.members[0] for c in singles} == {"unet.big0", "unet.big1"}
+def test_small_leaves_are_packed_with_each_other_never_welded_to_a_big_one() -> None:
+    """Small-FIRST is the mechanism, not a tie-break, and this is the outcome it
+    buys that a descending fill does not.
+
+    Filling ascending, a leaf at or above the cell target always lands alone:
+    the batch before it flushes, and the next leaf is at least as large so it
+    overflows immediately. Filling DESCENDING, the big leaf goes down first with
+    room left over and the small leaves get appended to it — which welds a 4 KiB
+    norm's residency to a 90 MiB block, so the norm can no longer be moved
+    without moving 90 MiB. On this fixture that is the difference between the
+    twenty small leaves being one 20 MiB unit and ten of them being hostages."""
+    small = [LeafCost(f"unet.s{i:02d}", MIB) for i in range(20)]
+    large = [LeafCost("unet.big", 90 * MIB)]
+    cells = pack_cells(small + large, policy=_vmm(100 * MIB), min_stream_bytes=1)
+
+    big_cells = [c for c in cells if "unet.big" in c.members]
+    assert [c.members for c in big_cells] == [("unet.big",)], (
+        "a leaf near the cell target must land alone, not collect small leaves"
+    )
+    packed = [c for c in cells if "unet.big" not in c.members]
+    assert sum(len(c.members) for c in packed) == 20
+    assert max(len(c.members) for c in packed) == 20, "and they pack together"
 
 
 def test_a_cell_never_mixes_forced_and_streamable_leaves() -> None:
@@ -387,7 +398,7 @@ def test_a_budget_that_holds_the_hot_component_schedules_at_call_boundaries() ->
     assert plan.schedule is ResidencySchedule.CALL_BOUNDARY
     assert plan.hold_while_hot == ("unet", "text_encoder")
     assert plan.hot_component_bytes + plan.streams * max(
-        c.cast_bytes for c in plan.cells
+        c.cast_bytes for c in plan.cells if not c.forced
     ) <= plan.budget_bytes
 
 
@@ -409,7 +420,7 @@ def test_the_schedule_flips_exactly_where_the_arithmetic_says() -> None:
         costs, budget_bytes=1 << 40, streams=2, min_stream_bytes=1, cells=_vmm(64 * MIB)
     )
     threshold = probe.hot_component_bytes + probe.streams * max(
-        c.cast_bytes for c in probe.cells
+        c.cast_bytes for c in probe.cells if not c.forced
     )
     at = plan_residency(
         costs, budget_bytes=threshold, streams=2, min_stream_bytes=1, cells=_vmm(64 * MIB)
@@ -562,8 +573,10 @@ def test_the_forced_core_stays_resident_through_a_call_boundary_swap() -> None:
     hot = residency.hold_component("unet")
     assert "text_encoder.blocks.0.fc1" in hot.forced
     assert "text_encoder.blocks.0.fc1" not in hot.streamed
-    param = model.text_encoder.blocks[0].fc1.weight  # type: ignore[index,union-attr]
-    assert not param.is_pinned()
+    # And it is really still where it was: a parked leaf would be sitting in
+    # pinned host memory instead.
+    params = dict(model.text_encoder.named_parameters())
+    assert not params["blocks.0.fc1.weight"].is_pinned()
 
 
 def test_a_real_tree_reports_its_own_tax_elimination() -> None:
@@ -594,3 +607,32 @@ def test_a_real_tree_reports_its_own_tax_elimination() -> None:
     assert b.tax_eliminated_bytes > 0
     packed.release()
     leafwise.release()
+
+
+def test_the_forced_core_does_not_inflate_the_call_boundary_reservation() -> None:
+    """Packing makes this matter. A tree with hundreds of sub-floor leaves has
+    ONE large forced cell, and that cell is resident in every arrangement — it
+    never travels. Reserving the swap ring for it would deny the call-boundary
+    schedule to budgets that plainly admit it."""
+    costs = [LeafCost(f"unet.tiny{i:03d}", 128 * 1024) for i in range(512)] + [
+        LeafCost(f"unet.l{i}", 2 * MIB) for i in range(3)
+    ]
+    # The floor forces every 128 KiB leaf resident; they pack into ONE 64 MiB
+    # cell, eight times larger than the only cell that can actually move.
+    plan = plan_residency(
+        costs,
+        budget_bytes=100 * MIB,
+        streams=2,
+        min_stream_bytes=1 * MIB,
+        cells=_vmm(64 * MIB),
+    )
+    forced_cells = [c for c in plan.cells if c.forced]
+    movable = [c for c in plan.cells if not c.forced]
+    assert max(c.cast_bytes for c in forced_cells) > 8 * max(
+        c.cast_bytes for c in movable
+    ), "the packed forced core must dwarf every cell that can move"
+    # RED ARM: reserving the ring for the forced core would put this over budget.
+    assert plan.hot_component_bytes + plan.streams * max(
+        c.cast_bytes for c in plan.cells
+    ) > plan.budget_bytes
+    assert plan.schedule is ResidencySchedule.CALL_BOUNDARY

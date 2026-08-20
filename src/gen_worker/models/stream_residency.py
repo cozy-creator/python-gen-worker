@@ -612,8 +612,13 @@ def plan_residency(
     hot = ranked[0][1] if ranked else 0
     cold = sum(v for _, v in ranked) - hot
     # The swap moves a cell at a time and is pipelined exactly like a per-step
-    # cast, so the same ring reservation applies at a call boundary.
-    swap_window = streams * max((c.cast_bytes for c in packed), default=0)
+    # cast, so the same ring reservation applies at a call boundary — but over
+    # the cells that can actually MOVE. Forced cells are resident in every
+    # arrangement, and packing makes that distinction matter: a tree with 500
+    # sub-floor leaves has ONE large forced cell, and reserving the ring for a
+    # cell that never travels would deny the call-boundary schedule to budgets
+    # that plainly admit it.
+    swap_window = streams * max((c.cast_bytes for c in packed if not c.forced), default=0)
     ram = max(0, int(pair.ram_bytes))
     call_boundary = bool(ranked) and hot + swap_window <= budget and (not ram or cold <= ram)
 
