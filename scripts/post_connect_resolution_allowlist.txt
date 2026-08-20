@@ -31,6 +31,21 @@
 
 src/gen_worker/models/provision.py::resolve_repo  STANDALONE  _local_flavor_fold's own resolve, same containment.
 
+# pgw#1491's CLI verbs. `cli/download.py` resolves a checkpoint ref against the
+# hub's public resolve route so `gen-worker download` (and `up`'s boot, which
+# materializes through the SAME function) can put bytes on disk before anything
+# is asked to serve. It is a FIRST resolver for a machine that has no hub
+# connection at all — an operator naming a ref on a laptop — not a second one
+# reconstructing a decision the hub already made for a connected worker.
+#
+# Containment VERIFIED 2026-08-20 by import, not by assertion: nothing outside
+# `src/gen_worker/cli/` imports `cli.download` or `cli.daemon`, and the
+# connected worker (`worker.py`, `entrypoint.py`, `procsplit/`, `serve/`)
+# does not import `gen_worker.cli` at ALL. A connected pod materializes
+# through `boot_materialize` -> `ModelStore.ensure_local` with the snapshot the
+# hub sent it, and never reaches this call.
+src/gen_worker/cli/download.py::resolve_repo  STANDALONE  the `download`/`up` verbs' own resolve; no connected path imports gen_worker.cli.
+
 # --- PUBLISH ------------------------------------------------------------------
 
 src/gen_worker/convert/publish.py::resolve_repo  PUBLISH  reads the SOURCE repo's classification to stamp the published artifact; best-effort, and the hub's classification gate stays the enforcement. Publish-time metadata, not execution resolution.
