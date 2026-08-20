@@ -106,6 +106,18 @@ _TRANSIENT_RESERVE_BYTES = 512 * (1 << 20)
 #: faster, why wouldn't varena take it?"*
 PARTIAL_RESIDENT_RESERVE_GB = 1.25
 
+#: What the ON-CARD PROBE demands still be free with the largest evicted
+#: component onloaded. The arithmetic above is an ESTIMATE — measured on the
+#: campaign card it admitted a plan that then OOMed by 5 MiB — and no constant
+#: fitted to one card fixes that, because the allocator's fragmentation and the
+#: co-tenants' share are not in any of the numbers the planner can read. So the
+#: plan is checked by DOING it once, at load, before a request can hit it.
+_PROBE_FLOOR_BYTES = 256 * (1 << 20)
+
+#: How many progressively more expensive plans the probe may reject before the
+#: rung gives up and lets the load fall to `model_offload`.
+_MAX_PROBE_ATTEMPTS = 4
+
 
 @dataclass(frozen=True)
 class ResidencyPlan:
@@ -147,8 +159,15 @@ def plan_component_residency(
     budget_bytes: int,
     free_bytes: int,
     transient_reserve_bytes: int = _TRANSIENT_RESERVE_BYTES,
+    min_moved_bytes: int = 0,
 ) -> ResidencyPlan:
     """The minimum-BYTES subset of components to evict, or a refusal.
+
+    ``min_moved_bytes`` asks for the next plan STRICTLY more expensive than a
+    given one. It exists because the arithmetic here is an estimate and the
+    allocator is not: :func:`apply_component_residency` probes the plan it was
+    given on the real card, and when the probe says no the caller comes back for
+    the next-cheapest one rather than giving up on the rung.
 
     Minimum bytes, not minimum count: every evicted byte is paid twice per
     request (out and back), so the cheapest plan that fits is the one that moves
@@ -203,6 +222,8 @@ def plan_component_residency(
             )
             ceiling = max(0, free_bytes - transient_reserve_bytes)
             if subset and peak > ceiling:
+                continue
+            if moved <= min_moved_bytes:
                 continue
             key = (moved, len(subset), subset)
             if best is None or key < best:
@@ -278,6 +299,7 @@ def plan_for_pipeline(
     sizer: Any,
     forced_resident: Collection[str] = (),
     transient_reserve_bytes: int = _TRANSIENT_RESERVE_BYTES,
+    min_moved_bytes: int = 0,
 ) -> ResidencyPlan:
     """:func:`plan_component_residency` against a live pipeline's own tree."""
     names = _pipeline_component_names(pipeline)
@@ -291,6 +313,7 @@ def plan_for_pipeline(
         budget_bytes=budget_bytes,
         free_bytes=free_bytes,
         transient_reserve_bytes=transient_reserve_bytes,
+        min_moved_bytes=min_moved_bytes,
     )
 
 
@@ -450,17 +473,42 @@ def _install_residency_hooks(
     log.debug("partial_resident: hooks installed for %s", ",".join(parked))
 
 
+def probe_plan(
+    parked: Dict[str, ParkedComponent], *, free_bytes_now: Any,
+    floor_bytes: int = _PROBE_FLOOR_BYTES,
+) -> tuple[bool, int]:
+    """DO the worst onload once and read what is left. Returns (ok, free_bytes).
+
+    The planner's transient ceiling is arithmetic over numbers it can read, and
+    on the campaign card that arithmetic admitted a plan whose onload then died
+    5 MiB short — because allocator fragmentation and a co-tenant's share are in
+    neither the component sizes nor the free-VRAM probe. This is the same
+    question asked of the card instead of of a constant, and it costs one copy
+    at load.
+    """
+    if not parked:
+        return True, int(free_bytes_now())
+    worst = max(parked.values(), key=lambda c: c.bytes)
+    worst.onload()
+    free = int(free_bytes_now())
+    worst.park()
+    return free >= floor_bytes, free
+
+
 def apply_component_residency(
     pipeline: Any,
     plan: ResidencyPlan,
     *,
     device: Any,
     log: logging.Logger,
+    free_bytes_now: Any = None,
 ) -> bool:
-    """Arm ``plan`` on ``pipeline``. Returns whether it armed.
+    """Arm ``plan`` on ``pipeline``, PROBING it on the card first. Returns
+    whether it armed.
 
-    A False return means nothing was armed and the caller must fall to the next
-    rung — never that a partial arrangement was left behind.
+    A False return means nothing was armed and the caller either asks for a
+    more expensive plan or falls to the next rung — never that a partial
+    arrangement was left behind.
     """
     if not plan.fits:
         return False
@@ -500,6 +548,23 @@ def apply_component_residency(
                 "and none could be parked", len(plan.offloaded),
             )
             return False
+        if free_bytes_now is not None:
+            ok, free = probe_plan(parked, free_bytes_now=free_bytes_now)
+            if not ok:
+                log.warning(
+                    "partial_resident: PROBE REFUSED %s — onloading the largest "
+                    "evicted component left %.2f GiB free, under the %.2f GiB "
+                    "floor. The plan's arithmetic said %.2f GiB peak of %.2f "
+                    "free; the card disagrees, and the card is right.",
+                    ",".join(plan.offloaded), free / _GIB,
+                    _PROBE_FLOOR_BYTES / _GIB,
+                    plan.transient_peak_bytes / _GIB, plan.free_bytes / _GIB,
+                )
+                return False
+            log.info(
+                "partial_resident: probe OK — %.2f GiB still free with %s "
+                "onloaded", free / _GIB, ",".join(plan.offloaded),
+            )
         _install_residency_hooks(
             pipeline, parked, _pipeline_component_names(pipeline), log
         )
@@ -528,4 +593,5 @@ __all__ = [
     "apply_component_residency",
     "plan_component_residency",
     "plan_for_pipeline",
+    "probe_plan",
 ]

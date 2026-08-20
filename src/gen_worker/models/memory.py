@@ -1488,7 +1488,9 @@ def _execution_device() -> Any:
     return "cuda:0"
 
 
-def _plan_partial_resident(pipeline: Any, log: logging.Logger) -> Any:
+def _plan_partial_resident(
+    pipeline: Any, log: logging.Logger, *, min_moved_bytes: int = 0,
+) -> Any:
     """The pgw#1577 component-residency plan, or None to keep ``model_offload``.
 
     None is the answer whenever the subset search cannot beat the coarse rung —
@@ -1511,6 +1513,7 @@ def _plan_partial_resident(pipeline: Any, log: logging.Logger) -> Any:
             free_bytes=int(free_gb * _GIB),
             sizer=lambda m: module_storage_bytes(m),
             forced_resident=unhookable_components(pipeline),
+            min_moved_bytes=min_moved_bytes,
         )
     except Exception as exc:
         log.warning(
@@ -2595,18 +2598,39 @@ def apply_low_vram_config(
 
     if effective_mode == "partial_resident" and partial_resident_plan is not None:
         from .partial_resident import (
+            _MAX_PROBE_ATTEMPTS,
             PARTIAL_RESIDENT_UNARMED_PHASE,
             apply_component_residency,
         )
 
-        if apply_component_residency(
-            pipeline, partial_resident_plan, device=_execution_device(), log=log,
-        ):
-            applied["partial_resident"] = True
-            applied["partial_resident_offloaded"] = list(
-                partial_resident_plan.offloaded
+        # THE PROBE LOOP, and it is why this rung is admission-first WITHOUT
+        # being estimate-first (pgw#1577). The planner's transient ceiling is
+        # arithmetic over the two numbers it can read — component sizes and free
+        # VRAM — and on the campaign card that arithmetic admitted a plan whose
+        # onload then died 5 MiB short, because allocator fragmentation and a
+        # co-tenant's share are in neither. So each plan is DONE once before it
+        # is trusted, and a plan the card refuses is followed by the
+        # next-cheapest one rather than by giving up on the rung. Bounded, and
+        # every attempt is at load: no OOM can reach a request from here.
+        plan = partial_resident_plan
+        armed = False
+        for _ in range(_MAX_PROBE_ATTEMPTS):
+            armed = apply_component_residency(
+                pipeline, plan, device=_execution_device(), log=log,
+                free_bytes_now=lambda: int(get_available_vram_gb() * _GIB),
             )
-            applied["partial_resident_bytes"] = partial_resident_plan.offloaded_bytes
+            if armed:
+                break
+            nxt = _plan_partial_resident(
+                pipeline, log, min_moved_bytes=plan.offloaded_bytes
+            )
+            if nxt is None:
+                break
+            plan = nxt
+        if armed:
+            applied["partial_resident"] = True
+            applied["partial_resident_offloaded"] = list(plan.offloaded)
+            applied["partial_resident_bytes"] = plan.offloaded_bytes
             setattr(pipeline, _COZY_MODE_ATTR, "partial_resident")
             _report_offload_engaged(pipeline, "partial_resident", applied, log)
             return applied
