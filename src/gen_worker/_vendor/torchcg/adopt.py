@@ -25,6 +25,7 @@ forward — the author's code stays the serve host.
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,8 @@ from .store import GraphStore, StoreError
 
 if TYPE_CHECKING:  # torch-free import closure: transform.py is torch-shaped
     from .transform import TransformSet
+
+logger = logging.getLogger(__name__)
 
 #: Turns one fetched artifact into the callable that replaces the target
 #: module's forward for its graph specialization.
@@ -168,21 +171,72 @@ def _structure_key(record: GraphRecord) -> tuple[Any, ...]:
     )
 
 
-def _matches(record: GraphRecord, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+def _row_mismatch(row: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
+    """Why this ONE ingress row refuses this call, or ``None`` when it passes.
+
+    THE single source for both the match decision and the diagnosis (tcg#76):
+    ``_matches`` is ``every row answers None``, and the first-mismatch trace
+    prints exactly what this function refused on — one predicate, so the guard
+    and its explanation cannot drift into telling two stories.
+    """
     import torch
 
+    resolved, value = row.resolve(args, kwargs)
+    if not resolved:
+        return (
+            f"input {row.param!r} (position {row.position}, path {row.path!r}) "
+            f"never resolved from the call — absent from args/kwargs"
+        )
+    if not isinstance(value, torch.Tensor):
+        received = repr(value)
+        if len(received) > 60:
+            received = received[:60] + "…"
+        return (
+            f"input {row.param!r}: received py-type {type(value).__name__} "
+            f"({received}), expected a torch.Tensor {row.dtype} {tuple(row.shape)}"
+        )
+    dtype = str(value.dtype).removeprefix("torch.")
+    if dtype != row.dtype:
+        return (
+            f"input {row.param!r}: dtype {dtype} != expected {row.dtype} "
+            f"(received shape {tuple(value.shape)})"
+        )
+    if len(value.shape) != len(row.shape):
+        return (
+            f"input {row.param!r}: rank {len(value.shape)} (shape "
+            f"{tuple(value.shape)}) != expected rank {len(row.shape)} (shape "
+            f"{tuple(row.shape)})"
+        )
+    for got, want in zip(value.shape, row.shape, strict=True):
+        if isinstance(want, int) and int(got) != want:
+            return (
+                f"input {row.param!r}: shape {tuple(value.shape)} != expected "
+                f"{tuple(row.shape)}"
+            )
+    return None
+
+
+def _matches(record: GraphRecord, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+    return all(
+        _row_mismatch(row, args, kwargs) is None for row in record.ingress.inputs
+    )
+
+
+def _first_mismatch(
+    record: GraphRecord, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[int, str]:
+    """(rows passed before the first failure, that failure's sentence).
+
+    A record with no failing row never reaches here — ``_matches`` would have
+    dispatched it.
+    """
+    passed = 0
     for row in record.ingress.inputs:
-        resolved, value = row.resolve(args, kwargs)
-        if not resolved or not isinstance(value, torch.Tensor):
-            return False
-        if str(value.dtype).removeprefix("torch.") != row.dtype:
-            return False
-        if len(value.shape) != len(row.shape):
-            return False
-        for got, want in zip(value.shape, row.shape, strict=True):
-            if isinstance(want, int) and int(got) != want:
-                return False
-    return True
+        sentence = _row_mismatch(row, args, kwargs)
+        if sentence is not None:
+            return passed, sentence
+        passed += 1
+    return passed, "every enumerated row matched (a non-row guard refused?)"
 
 
 class _ForwardDispatcher:
@@ -194,7 +248,7 @@ class _ForwardDispatcher:
     restores the eager class forward untouched.
     """
 
-    __slots__ = ("eager_forward", "module", "_entries")
+    __slots__ = ("eager_forward", "module", "_entries", "_mismatch_reported")
 
     def __init__(self, module: Any) -> None:
         #: The module this dispatcher fronts, kept because arming needs it:
@@ -204,6 +258,13 @@ class _ForwardDispatcher:
         self.module = module
         self.eager_forward = module.forward
         self._entries: list[tuple[GraphRecord, Callable[..., Any]]] = []
+        #: tcg#76: the first all-miss call is DIAGNOSED, once. Not per call —
+        #: the fall-through is per-request hot path — and not never, which is
+        #: what "armed 14, entered 0" cost a full night of counter-reading:
+        #: three confident root causes died against a store whose dispatcher
+        #: knew the exact divergent input on every single call and said
+        #: nothing.
+        self._mismatch_reported = False
 
     def arm(self, record: GraphRecord, compiled: Callable[..., Any]) -> None:
         key = _structure_key(record)
@@ -230,7 +291,47 @@ class _ForwardDispatcher:
         for record, compiled in self._entries:
             if _matches(record, args, kwargs):
                 return compiled(*args, **kwargs)
+        if self._entries and not self._mismatch_reported:
+            self._mismatch_reported = True
+            self._say_first_mismatch(args, kwargs)
         return self.eager_forward(*args, **kwargs)
+
+    def _say_first_mismatch(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        """Name the FIRST divergence of the BEST-matching armed record (tcg#76).
+
+        Fires on the first call no armed graph matches, once per module per
+        boot, at WARNING — the level a bare ``gen-worker up`` actually
+        surfaces. "Armed and never entered" is a per-call silence by design
+        (eager is correct), but an UNEXPLAINED one is a diagnosis this object
+        already holds and used to discard: every guard refusal knows exactly
+        which input diverged and what it received.
+
+        Best-matching = the record that passes the MOST rows before its first
+        failure (ties broken by graph hash, so two boots print the same
+        record). Never raises: a diagnostic that can take down a serving
+        forward is worse than the silence it replaces.
+        """
+        try:
+            best: tuple[int, str, GraphRecord, str] | None = None
+            for record, _compiled in self._entries:
+                passed, sentence = _first_mismatch(record, args, kwargs)
+                candidate = (-passed, record.graph, record, sentence)
+                if best is None or candidate < (best[0], best[1], best[2], best[3]):
+                    best = candidate
+            if best is None:  # pragma: no cover — guarded by `self._entries`
+                return
+            _negative_passed, _graph, record, sentence = best
+            rows = len(record.ingress.inputs)
+            logger.warning(
+                "torchcg dispatch: NO armed graph matched a call on %s — %d "
+                "graph(s) armed, serving eager. Closest record %s (%d/%d "
+                "input row(s) matched); first divergence: %s. Reported once "
+                "per module; further unmatched calls fall through silently.",
+                type(self.module).__name__, len(self._entries),
+                record.graph[-16:], -_negative_passed, rows, sentence,
+            )
+        except Exception:  # noqa: BLE001 — the diagnostic must never cost a call
+            logger.debug("torchcg dispatch: first-mismatch trace failed", exc_info=True)
 
 
 def _forward_parameters(module: Any) -> frozenset[str]:
