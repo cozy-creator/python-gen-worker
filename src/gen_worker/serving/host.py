@@ -228,6 +228,7 @@ class EndpointHost:
         """
         from .._vendor.torchcg import EnvironmentMismatch
         from .._vendor.torchcg.adopt import AdoptSession
+        from . import adapter_guard
         from ..env_identity import installed_stack_drift
 
         started = time.monotonic()
@@ -303,9 +304,15 @@ class EndpointHost:
                 model_cls, self.lanes[model_cls]
             )
             model: Model[Any] = model_cls()  # cheap __init__ — no GPU, by contract
+            # GUARDED (pgw#1573/pgw#1571): a peft adapter attached after
+            # arming never executes inside a compiled graph, so an unguarded
+            # sink serves the base model bit-identically and says nothing.
             load_context = self._load_context(
                 model_cls,
-                compile_sink=session.adopt if session is not None else None,
+                compile_sink=(
+                    adapter_guard.sink(session.adopt)
+                    if session is not None else None
+                ),
             )
             model.load(load_context)
             self.instances[model_cls] = ModelInstance(model, load_context)

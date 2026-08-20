@@ -304,13 +304,23 @@ def apply_fold(model: Any, deltas: Mapping[str, Any]) -> FoldScope:
 def _compiled_armed(model: Any) -> bool:
     """Whether a compiled artifact is currently serving this module's forward.
 
-    Read off ``aot_serve``'s own marker rather than a second flag — the
-    question "is something other than this module's forward serving" has one
-    answer and it lives there.
+    TWO ARMING TIERS, and the v2 one is the only one a pod has (pgw#1573).
+    ``aot_serve``'s ``_cozy_compile`` marker is the v1 arm, whose last in-repo
+    caller went with ``executor.py`` in pgw#1373 — so asking only that question
+    answered False for every armed module on every real worker, and every
+    compiled-aware branch behind this predicate was dead there. The live arm is
+    torchcg's ``_ForwardDispatcher``, installed by ``AdoptSession``, and
+    ``serving.adapter_guard`` is what reads it.
     """
-    from .. import aot_serve
+    from ..serving import adapter_guard
 
-    return aot_serve.serves_compiled(model)
+    if adapter_guard.compiled_armed(model):
+        return True
+    try:
+        from .. import aot_serve
+    except ImportError:  # the v1 tier is deleted on this build
+        return False
+    return bool(aot_serve.serves_compiled(model))
 
 
 @contextmanager
