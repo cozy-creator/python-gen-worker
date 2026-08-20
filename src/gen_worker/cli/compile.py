@@ -3,9 +3,17 @@
 pgw#1491. Paul: *"compile all graph-specializations for this card, if they
 cannot be fetched already."* Three properties, all load-bearing:
 
-**FETCH-FIRST.** Per specialization the hub is asked before anything is built —
-it is the fleet artifact pool, so one machine's compile is every same-env
-machine's fetch. Only a genuine miss pays for a build.
+**PRESENCE-FIRST, THROUGH THE ONE STORE.** Per specialization the store is
+asked before anything is built — local CAS first, then the fleet pool when this
+process has a release to adopt for (a pod does; a box `compile` on a committed
+lock does not, and that is a stated `upstream=None`, not a different store).
+Only a genuine miss pays for a build.
+
+pgw#1573 corrected this paragraph, which claimed a hub consult this verb has
+never had: `_store` passed `upstream=None` and the `FETCHED` outcome constant
+was defined and never assigned anywhere in `src/`. A vocabulary member nothing
+can emit is a proof condition that passes unconditionally, so it is deleted
+rather than left reading like coverage.
 
 **NEVER BLOCKS SERVING.** This is a separate process. An endpoint that is up
 keeps serving throughout, and its own background mint and this command key work
@@ -89,8 +97,7 @@ Builder = Callable[["Spec", Path, Path], Path]
 
 #: Outcome vocabulary. Closed: every specialization ends in exactly one of
 #: these and the summary counts them.
-PRESENT = "present"        # already in this machine's CAS
-FETCHED = "fetched"        # pulled from the hub's fleet pool
+PRESENT = "present"        # already readable through the store (local or fleet)
 BUILT = "built"            # compiled here
 REUSED = "reused"          # resolved out of the engine's own compile cache
 CLAIMED = "claimed"        # another process holds the lease; it is doing it
@@ -331,16 +338,21 @@ def _env_identity(endpoint_dir: Path, sm: str, lockfile: Optional[Path]) -> Any:
 
 
 def _store(cas_root: Path) -> Any:
-    """This machine's graph store, tiered under the hub when one is configured.
+    """THE store — the same constructor a pod and `gen-worker up` build.
 
-    The hub tier is READ-ONLY here: publishing a locally-built artifact back to
-    the fleet pool is the pod-side mint's job (pgw#1471), which stamps driver
-    range and measured peak. A CLI publishing unstamped artifacts would fill
-    the pool with rows nothing can safely admit.
+    ``upstream=None``: a box compiling from a committed lock has no release to
+    adopt for, and the fleet artifact route is release-scoped. That is a stated
+    absence, not a second kind of store — and it is the ONLY thing that differs
+    between this call and the pod's.
+
+    Publishing a locally-built artifact back to the fleet pool is the pod-side
+    mint's job (pgw#1471), which stamps driver range and measured peak. A CLI
+    publishing unstamped artifacts would fill the pool with rows nothing can
+    safely admit.
     """
-    from ..serving.mint_store import worker_store
+    from ..serving.mint_store import graph_store
 
-    return worker_store(Path(cas_root), None)
+    return graph_store(Path(cas_root))
 
 
 # --------------------------------------------------------------------------
@@ -543,17 +555,20 @@ def endpoint_module(endpoint_dir: Path) -> str:
 def serving_reader(cas_root: Path) -> Any:
     """The store object BOOT-TIME ADOPTION builds, over this machine's CAS.
 
-    Constructed exactly the way ``cli/daemon._adoption_source`` constructs it,
-    and deliberately NOT the store this command publishes through. "My writer
-    returned without raising" and "the reader that arms graphs can find it" are
-    different claims, and pgw#1533 is what happens when only the first one is
-    ever checked: the write succeeded, into torchcg's engine cache, and the
-    reader saw nothing.
-    """
-    from .._vendor.tensorfs import LocalCAS
-    from .._vendor.torchcg.store import LocalGraphStore
+    pgw#1573: this used to be a DELIBERATELY DIFFERENT object from the one this
+    command publishes through — an independence that was never the property
+    that mattered. pgw#1533's defect was two BANDS (the engine's compile cache
+    versus the ``(cg-graph-v1, cg-env-v2)`` serving band), not two Python
+    objects over one band, and pgw#1561's defect was two FORMATS. Neither is
+    detected by holding a second handle, and both are detected by the read-back
+    below actually opening the bytes. So there is one store, built by
+    :func:`_store`, and the witness is what proves it.
 
-    return LocalGraphStore(LocalCAS(Path(cas_root)))
+    Kept as a function because callers pass a CAS root, not a store — and
+    because a second construction over the same root is now provably the same
+    answer rather than a hedge against the writer.
+    """
+    return _store(Path(cas_root))
 
 
 @dataclass(frozen=True, slots=True)
@@ -919,6 +934,11 @@ def compile_all(
         one thing that could repair it — the re-publish. A skewed position is
         a MISS here, which is exactly what routes it back through the publish
         (whose store-side migration arm replaces the skewed incumbent).
+
+        Both questions go to the SAME store object (pgw#1573). The skew probe
+        used to build a second one per specialization, which was both a second
+        answer to "do I have this graph" and per-spec construction on the warm
+        path pgw#1546 measured down to 0.95 s.
         """
         try:
             if not store.has_artifact(spec.graph, env):
@@ -930,7 +950,7 @@ def compile_all(
             )
             return False
         try:
-            skew = serving_reader(cas_root).artifact_skew(spec.graph, env)
+            skew = store.artifact_skew(spec.graph, env)
         except Exception:  # noqa: BLE001 — probe absence never blocks a run
             return True
         if skew:
@@ -1417,7 +1437,6 @@ __all__ = [
     "Builder",
     "CompileError",
     "FAILED",
-    "FETCHED",
     "FILLS",
     "FILL_ALL",
     "FILL_BACKGROUND",

@@ -1,4 +1,13 @@
-"""The store a serving worker adopts from and mints into (pgw#1371).
+"""THE compiled-graph store (pgw#1371, made canonical by pgw#1573).
+
+:func:`graph_store` is the ONE constructor. Paul's ruling, 2026-08-20:
+*"check local and remote hub … it's literally that simple. You likely created
+a bunch of unnecessary extra code paths."* Before pgw#1573 six call sites built
+a store six ways — three of them a bare ``LocalGraphStore`` with no hub tier at
+all, one of them (`gen-worker compile`) documenting a fetch-first hub consult it
+did not have — so "do I have this graph" had three different answers depending
+on which entry point asked. There is one now, and every reader and every
+publisher goes through it.
 
 One ``GraphStore``, three tiers, and the reason they are one object is that a
 worker must not have two answers to "do I have this graph".
@@ -112,12 +121,77 @@ class TieredGraphStore:
             return True
         return self.upstream is not None and self.upstream.has_artifact(graph, env)
 
+    def artifact_skew(self, graph: str, env: Any) -> Optional[str]:
+        """The LOCAL position's shape verdict, passed through (pgw#1573).
+
+        pgw#1561 left this as its one non-blocking observation: the skew gate
+        lived only in the compile CLI's own bare ``LocalGraphStore``, so a
+        serving pod holding a skewed local position still answered
+        ``has_artifact`` TRUE and repaired itself the expensive way — an
+        adoption hole, then a full re-compile. With the gate on the store every
+        reader of the store asks the same question.
+
+        Only the local tier: the upstream answer is verified by digest on the
+        way in and has no position to be skewed at.
+        """
+        probe = getattr(self.local, "artifact_skew", None)
+        return None if probe is None else probe(graph, env)
+
     def fetch_artifact(self, graph: str, env: Any, destination: Any) -> Any:
+        """Branches ① and ② of the canonical flow, and nothing else.
+
+        ① LOCAL HIT — bytes this pod already holds. No network, unrevocable
+        mid-boot, and the common case on every boot after the first.
+
+        ② REMOTE HIT — the fleet pool has it and this box does not. The bytes
+        are fetched, digest-verified by the upstream tier, and **BANKED INTO
+        THE LOCAL CAS on the way through**, so the next boot takes branch ①.
+        Without that bank a pod re-downloaded every artifact on every restart
+        and a hub outage turned a warm box cold — "check local then remote" is
+        only half a cache if the remote answer is never kept.
+
+        Banking is BEST-EFFORT and never costs the arm: the bytes are already
+        in hand and already verified, so a full disk or a raced sibling publish
+        means one more download next boot, not a hole.
+        """
         if self.local.has_artifact(graph, env):
             return self.local.fetch_artifact(graph, env, destination)
         if self.upstream is None:
-            return self.local.fetch_artifact(graph, env, destination)  # its refusal
-        return self.upstream.fetch_artifact(graph, env, destination)
+            return None
+        fetched = self.upstream.fetch_artifact(graph, env, destination)
+        if fetched is not None:
+            self._bank(graph, env, Path(fetched))
+        return fetched
+
+    def _bank(self, graph: str, env: Any, artifact: Path) -> None:
+        """Keep a verified upstream artifact in this box's own CAS."""
+        manifest = None
+        try:
+            manifest = self.upstream.get_manifest(graph, env)
+        except Exception:  # noqa: BLE001 — a manifest-less hit is still a hit
+            logger.debug("adopt: upstream manifest unreadable for %s", graph,
+                         exc_info=True)
+        if manifest is None:
+            # NOT banked without one. `LocalGraphStore.publish_artifact` stores
+            # the manifest beside the bytes and `EndpointHost.setup` reads it
+            # back to check this host satisfies the artifact's floors; banking
+            # bytes with no manifest would make a cached artifact adoptable on
+            # a machine the fleet answer would have refused.
+            logger.info(
+                "adopt: %s fetched from the fleet pool and NOT cached locally "
+                "— the answer carried no requirements manifest, and an "
+                "artifact with no stated floors must not become a local hit",
+                graph,
+            )
+            return
+        try:
+            self.local.publish_artifact(graph, env, artifact, manifest)
+        except Exception as exc:  # noqa: BLE001 — the arm has its bytes already
+            logger.warning(
+                "adopt: %s fetched from the fleet pool but not cached locally "
+                "(%s: %s); the next boot re-downloads it",
+                graph, type(exc).__name__, exc,
+            )
 
     def get_manifest(self, graph: str, env: Any) -> Any:
         found = self.local.get_manifest(graph, env)
@@ -259,16 +333,23 @@ class TieredGraphStore:
         }
 
 
-def worker_store(
+def graph_store(
     cas_dir: Path,
     upstream: Optional[Any] = None,
     baked_root: Optional[Path] = None,
 ) -> TieredGraphStore:
-    """The store a real serving pod uses, over its own tensorfs CAS.
+    """THE compiled-graph store — every entry point builds it here (pgw#1573).
+
+    A pod, ``gen-worker up``, ``gen-worker compile`` and the CI runner all take
+    this constructor, so a graph is present-or-absent for all of them at once.
+    ``upstream`` is the fleet pool (:class:`~gen_worker.serving.hub_store.
+    HubGraphStore`) when this process has a release to adopt for and nothing
+    when it does not — the ONE thing that differs between a pod and a box, and
+    it is a stated argument rather than a different class.
 
     ``baked_root`` is the IMAGE's read-only exported-program CAS; omitted, it
-    is resolved from settings (`baked_program_cas_dir`), which is what both
-    production call sites want. Passing it explicitly is for tests and for a
+    is resolved from settings (`baked_program_cas_dir`), which is what every
+    production call site wants. Passing it explicitly is for tests and for a
     cozy-local run whose blobs are somewhere else.
     """
     from .._vendor.tensorfs import LocalCAS
@@ -293,5 +374,5 @@ __all__ = [
     "KIND_PUBLISH_LOCAL_ONLY",
     "ProgramBlobUnreachable",
     "TieredGraphStore",
-    "worker_store",
+    "graph_store",
 ]

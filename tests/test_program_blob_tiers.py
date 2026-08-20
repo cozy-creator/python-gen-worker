@@ -23,7 +23,7 @@ from gen_worker.models.cache_paths import BAKED_PROGRAM_CAS_DIR, baked_program_c
 from gen_worker.serving.mint_store import (
     ProgramBlobUnreachable,
     TieredGraphStore,
-    worker_store,
+    graph_store,
 )
 
 PROGRAM = b"\x80\x05serialized-exported-program-bytes" * 64
@@ -161,8 +161,8 @@ def test_a_missing_bake_is_absence_and_never_a_created_directory(
     assert baked_program_cas_dir() is None
     assert not absent.exists()
 
-    # worker_store resolves it and simply carries no baked tier.
-    store = worker_store(tmp_path / "cas")
+    # graph_store resolves it and simply carries no baked tier.
+    store = graph_store(tmp_path / "cas")
     assert store.baked is None
 
 
