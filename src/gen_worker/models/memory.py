@@ -41,6 +41,7 @@ from .. import measured_posture as posture_mod
 from . import machine_fit
 from ..api.errors import HostRamMoveRefusedError
 from ..component_vocab import component_vocabulary
+from .partial_resident import PARTIAL_RESIDENT_DEVICE_ATTR
 from .structure_only import STAMP as _STRUCTURE_ONLY
 import asyncio
 from ..hostfacts import cuda_ready
@@ -53,8 +54,8 @@ _GIB = 1024 ** 3
 Mode = str  # "auto" | "off" | "vae_only" | "model_offload" | "group_offload" | "sequential" | "cpu"
 
 _VALID_MODES: tuple[str, ...] = (
-    "auto", "off", "vae_only", "partial_stream", "model_offload",
-    "group_offload", "sequential", "cpu",
+    "auto", "off", "vae_only", "partial_resident", "partial_stream",
+    "model_offload", "group_offload", "sequential", "cpu",
 )
 
 _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB = 8.0
@@ -1481,6 +1482,58 @@ def _pin_unhookable_components(
         )
 
 
+def _execution_device() -> Any:
+    """The device an offload rung onloads TO. Index 0, like every other rung
+    here (``enable_model_cpu_offload(gpu_id=0)``)."""
+    return "cuda:0"
+
+
+def _plan_partial_resident(
+    pipeline: Any, log: logging.Logger, *, min_moved_bytes: int = 0,
+) -> Any:
+    """The pgw#1577 component-residency plan, or None to keep ``model_offload``.
+
+    None is the answer whenever the subset search cannot beat the coarse rung —
+    the denoiser alone over budget, an unmeasurable tree, no CUDA. It is never
+    an exception: this sits on the load path of every offloaded pipeline, and a
+    planner that raises would take out placements that work today.
+    """
+    try:
+        from .partial_resident import (
+            PARTIAL_RESIDENT_RESERVE_GB,
+            plan_for_pipeline,
+        )
+
+        free_gb = get_available_vram_gb()
+        if free_gb <= 0.0:
+            return None
+        plan = plan_for_pipeline(
+            pipeline,
+            budget_bytes=int(max(0.0, free_gb - PARTIAL_RESIDENT_RESERVE_GB) * _GIB),
+            free_bytes=int(free_gb * _GIB),
+            sizer=lambda m: module_storage_bytes(m),
+            forced_resident=unhookable_components(pipeline),
+            min_moved_bytes=min_moved_bytes,
+        )
+    except Exception as exc:
+        log.warning(
+            "low_vram: could not plan component residency (%s: %s); keeping "
+            "model_offload", type(exc).__name__, exc,
+        )
+        return None
+    if not plan.fits:
+        log.info("low_vram: partial_resident declined — %s", plan.refusal)
+        return None
+    if not plan.offloaded:
+        # Nothing to evict means the pipeline fits resident, which is a fit
+        # decision `select_auto_mode` already made against a different margin.
+        # Do not overrule it from here.
+        return None
+    log.info("low_vram: upgrading model_offload -> partial_resident: %s",
+             plan.summary())
+    return plan
+
+
 #: The typed phase a `partial_stream` arming FAILURE confesses under. A rung
 #: that could not arm and fell through to a coarser one is a placement the
 #: operator asked for and did not get — pgw#1497 measured that exact silence on
@@ -2135,6 +2188,35 @@ def attention_kernel_census(pipeline: Any) -> str:
     )
 
 
+def component_placement_census(pipeline: Any) -> str:
+    """Where each weight-bearing component's tensors actually LIVE, read off
+    the objects.
+
+    pgw#1577, and the same lesson pgw#1570 learned about attention: the rung a
+    log names is the decision, not the outcome. ``_pin_unhookable_components``
+    has been setting ``_exclude_from_cpu_offload`` and reporting
+    ``vae_resident`` since gw#441 — and diffusers consults that list ONLY for
+    components absent from ``model_cpu_offload_seq``, where SDXL's ``vae`` is
+    not, so the claim was decorative and nothing could see that. A census can.
+    """
+    parts: List[str] = []
+    for name, comp in _named_components(pipeline):
+        if not hasattr(comp, "parameters"):
+            continue
+        devices: Dict[str, int] = {}
+        try:
+            for t in comp.parameters(recurse=True):
+                key = str(t.device)
+                devices[key] = devices.get(key, 0) + 1
+        except Exception:  # noqa: BLE001 - a census must not fail a placement
+            continue
+        if not devices:
+            continue
+        where = "/".join(sorted(devices, key=lambda d: -devices[d]))
+        parts.append(f"{name}@{where}")
+    return "placement=" + (",".join(parts) if parts else "unreadable")
+
+
 def _report_offload_engaged(
     pipeline: Any, rung: str, applied: Dict[str, Any], log: logging.Logger,
 ) -> None:
@@ -2163,7 +2245,8 @@ def _report_offload_engaged(
             needed_gb=needed_gb, free_gb=free_gb,
             detail=f"CPU offload ENGAGED ({_applied_summary(applied)}); every "
                    f"forward on this pipeline now moves weights over PCIe; "
-                   f"{attention_kernel_census(pipeline)}",
+                   f"{attention_kernel_census(pipeline)}; "
+                   f"{component_placement_census(pipeline)}",
         ),
         detail=(
             f"pipeline={type(pipeline).__name__}: CPU offload ENGAGED at rung "
@@ -2235,6 +2318,14 @@ def install_execution_device_fallback() -> bool:
         armed_device = getattr(armed, "device", None) if armed is not None else None
         if armed_device is not None and getattr(armed, "plan", None) is not None:
             return armed_device
+        # pgw#1577. The SAME repair for `partial_resident`, which breaks the
+        # same public answer for the same reason: an evicted text encoder is
+        # parked on the host and the original getter answers with whichever
+        # component it reaches first. The rung records the device its resident
+        # set actually executes on, and that is the honest answer.
+        resident_device = getattr(self, PARTIAL_RESIDENT_DEVICE_ATTR, None)
+        if resident_device is not None:
+            return resident_device
         if getattr(got, "type", None) != "meta":
             return got
         if getattr(reentry, "active", False):
@@ -2380,12 +2471,34 @@ def apply_low_vram_config(
                 effective_mode, int(stream_budget_bytes) / _GIB,
             )
 
+    # pgw#1577. `model_offload` evicts EVERY component after EVERY request and
+    # re-onloads the lot before the next one. Measured on the campaign card,
+    # SDXL: 13 GiB of PCIe per request — 6.5 GiB out, 6.5 GiB back — to reclaim
+    # the 1.2 GiB the pipeline was over budget by. Nothing about the placement
+    # decision required that; the rung is simply all-or-nothing. So before
+    # taking it, ask whether a SUBSET of components clears the budget, and keep
+    # the denoiser on the card if one does. Paul, 2026-08-20: *"if the space is
+    # available, and it helps us run faster, why wouldn't varena take it?"*
+    #
+    # ADMISSION-FIRST, and that is the whole safety argument (pgw#1560): the
+    # plan is computed ONCE, here, from free VRAM and measured component sizes,
+    # and the resident set never changes again. There is no eviction loop for a
+    # non-raising allocator to thrash inside, and no except-OOM retry — an OOM
+    # in a compiled graph is process death, so before the weights land is the
+    # only honest place to decide.
+    partial_resident_plan = None
+    if effective_mode == "model_offload":
+        partial_resident_plan = _plan_partial_resident(pipeline, log)
+        if partial_resident_plan is not None:
+            effective_mode = "partial_resident"
+
     applied: Dict[str, Any] = {
         "mode": effective_mode,
         "vae_slicing": False,
         "vae_tiling": False,
         "attention_slicing": False,
         "partial_stream": False,
+        "partial_resident": False,
         "model_offload": False,
         "group_offload": False,
         "sequential_offload": False,
@@ -2480,6 +2593,53 @@ def apply_low_vram_config(
             "low_vram: partial_stream did not arm; descending to model_offload"
         )
         applied["partial_stream"] = False
+        effective_mode = "model_offload"
+        applied["mode"] = effective_mode
+
+    if effective_mode == "partial_resident" and partial_resident_plan is not None:
+        from .partial_resident import (
+            _MAX_PROBE_ATTEMPTS,
+            PARTIAL_RESIDENT_UNARMED_PHASE,
+            apply_component_residency,
+        )
+
+        # THE PROBE LOOP, and it is why this rung is admission-first WITHOUT
+        # being estimate-first (pgw#1577). The planner's transient ceiling is
+        # arithmetic over the two numbers it can read — component sizes and free
+        # VRAM — and on the campaign card that arithmetic admitted a plan whose
+        # onload then died 5 MiB short, because allocator fragmentation and a
+        # co-tenant's share are in neither. So each plan is DONE once before it
+        # is trusted, and a plan the card refuses is followed by the
+        # next-cheapest one rather than by giving up on the rung. Bounded, and
+        # every attempt is at load: no OOM can reach a request from here.
+        plan = partial_resident_plan
+        armed = False
+        for _ in range(_MAX_PROBE_ATTEMPTS):
+            armed = apply_component_residency(
+                pipeline, plan, device=_execution_device(), log=log,
+                free_bytes_now=lambda: int(get_available_vram_gb() * _GIB),
+            )
+            if armed:
+                break
+            nxt = _plan_partial_resident(
+                pipeline, log, min_moved_bytes=plan.offloaded_bytes
+            )
+            if nxt is None:
+                break
+            plan = nxt
+        if armed:
+            applied["partial_resident"] = True
+            applied["partial_resident_offloaded"] = list(plan.offloaded)
+            applied["partial_resident_bytes"] = plan.offloaded_bytes
+            setattr(pipeline, _COZY_MODE_ATTR, "partial_resident")
+            _report_offload_engaged(pipeline, "partial_resident", applied, log)
+            return applied
+        # Same discipline as `partial_stream`: a rung the operator was told
+        # about and did not get is a placement lie. Confess and descend.
+        log.warning(
+            "low_vram: partial_resident did not arm; descending to "
+            "model_offload (%s)", PARTIAL_RESIDENT_UNARMED_PHASE,
+        )
         effective_mode = "model_offload"
         applied["mode"] = effective_mode
 
