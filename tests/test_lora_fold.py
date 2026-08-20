@@ -458,6 +458,32 @@ def test_a_key_that_lands_on_no_component_refuses_rather_than_being_dropped() ->
             pass
 
 
+def test_the_kohya_text_encoder_alias_routes_to_the_same_component() -> None:
+    """`lora_te_`/`lora_te1_` are sd-scripts' own grammar and route through the
+    same table as the dotted form — one alias table, checked from both sides."""
+    import torch.nn as nn
+
+    class _TinyTE(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.q_proj = nn.Linear(8, 8, bias=False)
+
+    unet = _tiny_unet()
+    pipe = _Pipe(unet)
+    pipe.text_encoder = _TinyTE()
+    before = pipe.text_encoder.q_proj.weight.detach().clone()
+
+    torch.manual_seed(13)
+    sd, weight, ref = _adapter(unet, 7)
+    sd["lora_te_q_proj.lora_down.weight"] = torch.randn(_RANK, 8) * 0.05
+    sd["lora_te_q_proj.lora_up.weight"] = torch.randn(8, _RANK) * 0.05
+
+    with lora_fold.folded(pipe, [(sd, weight, ref)]) as stats:
+        assert stats["components"] == 2, stats
+        assert not torch.equal(pipe.text_encoder.q_proj.weight, before)
+    assert torch.equal(pipe.text_encoder.q_proj.weight, before)
+
+
 def test_an_empty_adapter_set_is_a_no_op_that_still_yields() -> None:
     unet = _tiny_unet()
     args = _inputs()

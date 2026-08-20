@@ -161,7 +161,10 @@ def _route(
                 # STRIPPED, unlike the denoiser half: `map_adapter` strips
                 # `unet.`/`transformer.` itself and knows no text-encoder
                 # prefix, so the routing that identified the component is also
-                # what removes it.
+                # what removes it. A remainder that names no module of that
+                # component then fails typed IN `map_adapter`, by key — the
+                # kohya-flat case (`text_model_encoder_layers_0_…`) lands
+                # there, and loudly, which is the correct place for it.
                 routed.setdefault(comp, {})[key[len(prefix):].lstrip(".")] = tensor
                 break
         else:
