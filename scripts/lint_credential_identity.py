@@ -48,6 +48,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC_ROOT = REPO / "src" / "gen_worker"
 ALLOWLIST = REPO / "scripts" / "credential_identity_allowlist.txt"
 
@@ -225,7 +227,7 @@ def main() -> int:
     allowed, errors = load_allowlist()
     problems = errors + check(sites, allowed)
     if problems:
-        print("\n".join(problems), file=sys.stderr)
+        _lint_side.report(problems, "pgw#1122 worker-credential reads")
         return 1
     print(f"credential-identity fence: {len(sites)} classified read(s); "
           f"the resolver is {sorted(RESOLVER_FILES)}")

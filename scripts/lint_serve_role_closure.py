@@ -54,6 +54,8 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC = REPO / "src" / "gen_worker"
 ROLE_FILE = SRC / "serve" / "role.py"
 
@@ -568,9 +570,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     problems = check(roots, banned)
     problems.extend(check_model_free(model_free, libraries, optional, within=roots))
     problems.extend(check_bearing_ledger(bearing, model_free, libraries))
-    for line in problems:
-        print(line, file=sys.stderr)
     if problems:
+        _lint_side.report(problems, "pgw#1328 adopt-only serve role")
         print(
             f"\n{len(problems)} adopt-only serve-role violation(s).",
             file=sys.stderr)

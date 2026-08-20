@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC_ROOT = REPO / "src" / "gen_worker"
 CONFIG_PKG = SRC_ROOT / "config"
 ALLOWLIST = REPO / "scripts" / "config_reads_allowlist.txt"
@@ -599,8 +601,7 @@ def main() -> int:
 
     if errors:
         print("config-read guard (§1.18) failed:\n", file=sys.stderr)
-        for err in errors:
-            print(f"  {err}", file=sys.stderr)
+        _lint_side.report(errors, "pgw#931 config reads")
         print(
             f"\n{len(errors)} problem(s). See scripts/lint_config_reads.py.",
             file=sys.stderr)

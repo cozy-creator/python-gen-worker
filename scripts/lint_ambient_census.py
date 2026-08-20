@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC_ROOT = REPO / "src" / "gen_worker"
 CENSUS = REPO / "scripts" / "ambient_inputs_census.txt"
 
@@ -220,7 +222,7 @@ def check(census_path: Path = CENSUS) -> List[str]:
 def main() -> int:
     problems = check()
     if problems:
-        print("\n".join(problems), file=sys.stderr)
+        _lint_side.report(problems, "pgw#1049 ambient-input census")
         return 1
     rows, _ = load_census()
     print(f"ambient-input census: {len(rows)} row(s), structural claims hold")

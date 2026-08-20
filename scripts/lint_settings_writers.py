@@ -53,6 +53,7 @@ SRC_ROOT = REPO / "src" / "gen_worker"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lint_scope import is_unowned  # noqa: E402
+import _lint_side  # noqa: E402
 ALLOWLIST = REPO / "scripts" / "settings_writers_allowlist.txt"
 
 CLASSIFICATIONS = {"SCOPED", "PLUMBING", "SCRUB"}
@@ -282,7 +283,7 @@ def main() -> int:
     allowed, errors = load_allowlist()
     problems = errors + check(sites, allowed)
     if problems:
-        print("\n".join(problems), file=sys.stderr)
+        _lint_side.report(problems, "pgw#1049 torch-settings writers")
         return 1
     print(f"settings-writer fence: {len(sites)} classified site(s), "
           f"authority = {sorted(AUTHORITY_FILES)}")

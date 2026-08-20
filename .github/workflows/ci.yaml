@@ -188,7 +188,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # pgw#1477 — FIRST, ahead of uv itself, and stdlib-only so it can be.
+      # pgw#1521 — SECOND, before any guard, and stdlib-only so it can be.
+      # `fast gates` is this repo's only required context and it bundles ~25
+      # unrelated guards, so at the merge button "somebody else's master-red"
+      # and "a guard is refusing MY OWN new file" are indistinguishable — and
+      # an `--admin` granted for the first silently buys the second. Measured
+      # four times in one night (pgw#1521); pgw has no post-merge CI, so a
+      # guard can stop being enforced and nothing detects it.
+      #
+      # Nothing new is computed: every one of those guards already names the
+      # file it refuses. This step resolves the base ONCE — a PR checkout is
+      # shallow at the merge commit, so resolving it costs a fetch — and every
+      # guard below reads the answer through `scripts/_lint_side.py` and prints
+      # the side on the failing line itself.
+      #
+      # A base it cannot resolve prints as UNKNOWN, never as "not yours".
+      - name: pgw#1521 - name the files THIS diff touches
+        run: |
+          python3 scripts/_lint_side.py --selftest
+          python3 scripts/_lint_side.py --emit "$RUNNER_TEMP/pgw1521-diff-files.txt"
+          echo "PGW1521_DIFF_FILES=$RUNNER_TEMP/pgw1521-diff-files.txt" >> "$GITHUB_ENV"
+
+      # pgw#1477 — FIRST OF THE GUARDS, ahead of uv itself, and stdlib-only so
+      # it can be. (Only pgw#1521's attribution step precedes it, because every
+      # guard from here down — this one included — reads its answer.)
       # `uv sync --locked` (two steps down, and the first step of every other
       # job in every other workflow) dies on a stale lock with a message that
       # names neither file and no rev — so a torchcg re-vendor that moved

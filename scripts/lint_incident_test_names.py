@@ -61,6 +61,10 @@ from pathlib import Path
 from typing import List, Sequence, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
+
 BASELINE_PATH = REPO / "scripts" / "incident_named_tests.txt"
 ROOTS: Tuple[str, ...] = ("tests", "tests_v2")
 
@@ -131,11 +135,13 @@ def check(repo: Path = REPO, baseline_path: Path = BASELINE_PATH,
         problems.append(
             f"{rel}: a NEW test module named for an ISSUE. The file name says "
             f"WHEN this was written, not WHAT it exercises (DESIGN-RULINGS "
-            f"4.34b). Put these tests in the domain module for their subject "
-            f"— e.g. {_EXAMPLES} — or add a new domain module named for its "
-            f"subject, and keep the lineage as a one-line comment on the test: "
-            f"`# pgw#1234: <one clause>`. The full story belongs in the tracker "
-            f"issue, which is where anyone looking for it will actually go."
+            f"4.34b). FOLD the cases into the existing domain module that owns "
+            f"their subject — e.g. {_EXAMPLES} — and keep the lineage as a "
+            f"one-line comment on the test: `# pgw#1234: <one clause>`. Only if "
+            f"the subject is genuinely new, add a domain module named for it: "
+            f"renaming satisfies the letter of 4.34b while still growing the "
+            f"corpus the rule exists to shrink. The full story belongs in the "
+            f"tracker issue, which is where anyone looking for it will go."
         )
 
     for rel in stale:
@@ -233,8 +239,7 @@ def main(argv: List[str]) -> int:
             f"({len(load_baseline())} grandfathered, and that list only shrinks)"
         )
         return 0
-    for problem in problems:
-        print(problem, file=sys.stderr)
+    _lint_side.report(problems, "pgw#1362 incident-named tests")
     print(f"{len(problems)} incident-naming problem(s)", file=sys.stderr)
     return 1
 

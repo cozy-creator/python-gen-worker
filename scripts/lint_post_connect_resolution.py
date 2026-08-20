@@ -53,6 +53,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC_ROOT = REPO / "src" / "gen_worker"
 ALLOWLIST = REPO / "scripts" / "post_connect_resolution_allowlist.txt"
 
@@ -152,8 +154,8 @@ def main() -> int:
             "second resolver and needs a ruling, not an allowlist line.\n",
             file=sys.stderr,
         )
-        for key in new:
-            print(f"  + {key}", file=sys.stderr)
+        _lint_side.report([f"+ {key}" for key in new],
+                          "pgw#891 post-connect resolution surface")
         return 1
 
     if stale:
@@ -162,8 +164,8 @@ def main() -> int:
         # ever comes back. Same defect class the gate exists to police.
         print("allowlist has entries with no matching call site — delete them:",
               file=sys.stderr)
-        for key in stale:
-            print(f"  - {key}", file=sys.stderr)
+        _lint_side.report([f"- {key}" for key in stale],
+                          "pgw#891 post-connect resolution surface")
         return 1
 
     connected = sum(1 for c in accepted.values() if c == "CONNECTED")

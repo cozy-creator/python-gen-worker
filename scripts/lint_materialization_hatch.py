@@ -71,6 +71,7 @@ SELF = Path(__file__).resolve()
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lint_scope import is_unowned  # noqa: E402
+import _lint_side  # noqa: E402
 
 DEFAULT_ROOTS = (
     REPO / "src", REPO / "tests", REPO / "tests_v2", REPO / "scripts",
@@ -394,8 +395,7 @@ def main(argv: List[str]) -> int:
             "is the retired name (tensorfs#107).\n",
             file=sys.stderr,
         )
-        for f in findings:
-            print(f, file=sys.stderr)
+        _lint_side.report(findings, "pgw#1308 materialization hatch")
         print(f"\n{len(findings)} undeclared materialization(s)", file=sys.stderr)
         return 1
     print(

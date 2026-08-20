@@ -71,6 +71,8 @@ from pathlib import Path
 from typing import Iterator
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 
 #: spelling -> what replaced it. The message names the successor, because a
 #: refusal that does not say what to write instead just costs a grep.
@@ -215,6 +217,7 @@ def main(argv: list[str]) -> int:
         REPO / "scripts",
         REPO / "docs",
     ]
+    problems: list[str] = []
     findings = 0
     for path in _walk(roots):
         try:
@@ -227,9 +230,12 @@ def main(argv: list[str]) -> int:
                 rel = rel.relative_to(REPO)
             except ValueError:
                 pass
-            print(f"{rel}:{lineno}: retired spelling {spelling!r} -> write {successor}")
+            problems.append(
+                f"{rel}:{lineno}: retired spelling {spelling!r} -> write {successor}")
             findings += 1
     if findings:
+        _lint_side.report(problems, "tcg#56 retired graph-class spellings",
+                          stream=sys.stdout)
         print(
             f"\nlint_retired_graph_class_spellings: {findings} finding(s). tcg#56 renamed the "
             "compiled-graph vocabulary: a target has ONE graph and MANY graph SPECIALIZATIONS.\n"

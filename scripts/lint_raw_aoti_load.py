@@ -52,6 +52,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC = REPO / "src" / "gen_worker"
 VENDOR = SRC / "_vendor"
 
@@ -113,8 +115,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    for line in violations:
-        print(line, file=sys.stderr)
+    if violations:
+        _lint_side.report(violations, "pgw#1460 raw AOTI package loads")
     if violations:
         print(
             f"\n{len(violations)} raw AOTI package load(s).", file=sys.stderr

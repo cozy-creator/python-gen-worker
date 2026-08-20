@@ -41,6 +41,9 @@ from typing import Dict, Set, Tuple
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
+
+sys.path.insert(0, str(HERE))
+import _lint_side  # noqa: E402
 SRC = ROOT / "src" / "gen_worker"
 
 #: The guards. This script is IN this list on purpose — see the module
@@ -141,9 +144,10 @@ def main() -> int:
     if dead:
         print("lint_fence_symbols: A FENCE NAMES A SYMBOL THAT NO LONGER "
               "EXISTS.\n", file=sys.stderr)
-        for rel in sorted(dead):
-            for name in sorted(dead[rel]):
-                print(f"  {rel}: {name!r}", file=sys.stderr)
+        _lint_side.report(
+            [f"{rel}: {name!r} is named by this fence and no longer exists"
+             for rel in sorted(dead) for name in sorted(dead[rel])],
+            "pgw#1176 fence symbols")
         print(
             "\nThat fence still runs and still exits 0 — and guards NOTHING "
             "for this symbol.\nA green fence is not evidence after a rename. "
