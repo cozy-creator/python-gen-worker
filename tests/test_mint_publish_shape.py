@@ -173,12 +173,12 @@ def test_a_directory_carrying_no_package_refuses_BY_NAME(tmp_path: Path) -> None
 
 # --------------------------------------------------- the end-to-end mint path
 
-def test_mint_one_compiles_publishes_and_manifests_through_the_REAL_store(
-    tmp_path: Path,
-) -> None:
-    """The path that was broken, end to end, with nothing stubbed but the
-    compiler — which stands in for inductor and returns exactly what
-    `Engine.compile` returns: the unpacked directory."""
+def _run_one_mint(tmp_path: Path, compiler: Any = None) -> Any:
+    """One `_mint_one` against the REAL `LocalGraphStore`.
+
+    Nothing is stubbed but the compiler, which stands in for inductor and
+    returns exactly what `Engine.compile` returns: the unpacked directory.
+    """
     from gen_worker import compile_posture
     from gen_worker._vendor.tensorfs import LocalCAS
     from gen_worker._vendor.torchcg.store import LocalGraphStore
@@ -214,16 +214,83 @@ def test_mint_one_compiles_publishes_and_manifests_through_the_REAL_store(
     box = mint.BackgroundMint(
         host=host, store=store, artifacts_dir=tmp_path / "artifacts",
         posture=compile_posture.FLEET, vcpus=4,
-        compiler=_compiler, program_source=_program_source,
+        compiler=compiler or _compiler, program_source=_program_source,
     )
 
     minted = box._mint_one(record, __import__("threading").Lock())
+    return SimpleNamespace(store=store, minted=minted, armed=armed)
 
-    assert minted.published, "the mint compiled and then published nothing"
-    assert minted.armed and armed == [GRAPH]
+
+def test_mint_one_compiles_publishes_and_manifests_through_the_REAL_store(
+    tmp_path: Path,
+) -> None:
+    """The path that was broken, end to end."""
+    run = _run_one_mint(tmp_path)
+
+    assert run.minted.published, "the mint compiled and then published nothing"
+    assert run.minted.armed and run.armed == [GRAPH]
 
     # The manifest was derived from the ELF INSIDE the package, so it carries
     # the real link table rather than an empty set.
-    manifest = store.get_manifest(GRAPH, ENV)
+    manifest = run.store.get_manifest(GRAPH, ENV)
     assert manifest is not None
     assert manifest.sm_compiled == "sm_89"
+
+
+def test_what_the_mint_PUBLISHED_is_opened_by_the_REAL_boot_loader(
+    tmp_path: Path,
+) -> None:
+    """pgw#1561's missing round-trip: mint → store → fetch → MATERIALIZE.
+
+    `_mint_one` arms the unpacked directory the compiler just wrote, so
+    mint→arm never touches the published bytes at all. Boot adoption is their
+    only reader, and no test had ever been one — which is precisely how the
+    band held bare `model.pt2` ZIPs from pgw#1471 until va#3 arm 2 fetched
+    them and holed 14/14 on `cannot decompress`. Every assertion this seam
+    had (published ref non-empty, manifest present, armed) was TRUE over
+    those unloadable bytes.
+
+    So this drives the published object back OUT through the store adoption
+    reads and opens it with `torchcg.serve.materialize` — the exact function
+    boot-time arming calls — and states the two facts the loader needs:
+    the blob is the gzip envelope, and it carries its own identity.
+    """
+    from gen_worker._vendor.torchcg.serve import materialize
+
+    run = _run_one_mint(tmp_path)
+    assert run.store.artifact_skew(GRAPH, ENV) is None, (
+        "the published position is shaped like something no loader opens")
+
+    fetched = run.store.fetch_artifact(GRAPH, ENV, tmp_path / "fetched")
+    assert fetched is not None, "boot adoption fetches a MISS at a position it minted"
+    with fetched.open("rb") as handle:
+        assert handle.read(2) == b"\x1f\x8b", (
+            f"{fetched} is not the tar+gzip envelope the boot loader reads")
+
+    graph = materialize(fetched, tmp_path / "unpacked")
+    assert graph.key, "the materialized artifact states no compiled_graph_key"
+    assert graph.package.is_file(), "no model.pt2 inside the envelope"
+    # metadata.json — the self-stated identity the bare-ZIP publish DISCARDED.
+    assert graph.metadata.get("compiled_graph_key") == graph.key
+
+
+def test_a_compiler_that_hands_back_the_bare_package_publishes_NOTHING(
+    tmp_path: Path,
+) -> None:
+    """RED ARM. The pre-pgw#1561 world, reconstructed at the seam that made it.
+
+    Every publisher since pgw#1471 banked `artifact_package` — the bare
+    `.pt2` ZIP — and the store took it, so the defect was invisible from here.
+    Handing the publish a package FILE must now be a typed refusal at the
+    mint, not fourteen adoption holes an hour later on a pod.
+    """
+    def _package_only(blob: Path, rec: Any, destination: Path) -> Path:
+        import tcg_artifacts
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        return tcg_artifacts.aoti_package(
+            destination, graph_specialization=GRAPH)
+
+    with pytest.raises(mint.ArtifactUnreadable) as refusal:
+        _run_one_mint(tmp_path, compiler=_package_only)
+    assert "bare package cannot be published" in str(refusal.value)
