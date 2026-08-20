@@ -55,7 +55,7 @@ class _Adoption:
 def _host(graphs: int, *, arm_raises: BaseException | None = None) -> Any:
     holes = tuple(
         SimpleNamespace(record=SimpleNamespace(
-            graph=f"unet/class={i}", target="unet", program=f"sha256:{i:064x}"))
+            graph=f"unet/class={i}", target="unet"))
         for i in range(graphs))
     return SimpleNamespace(holes=holes, adoption=_Adoption(arm_raises))
 

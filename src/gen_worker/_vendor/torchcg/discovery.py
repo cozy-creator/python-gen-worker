@@ -172,7 +172,7 @@ def discover_lane(
     drive: Callable[[], object],
     *,
     strict: bool = False,
-    program_sink: Callable[[str, Any], str] | None = None,
+    program_sink: Callable[[str, Any], object] | None = None,
     transforms: TransformSet | None = None,
     session: HollowSession | None = None,
 ) -> LaneGraphs:
@@ -266,7 +266,7 @@ def discover_modules(
     drive: Callable[[], object],
     *,
     strict: bool = False,
-    program_sink: Callable[[str, Any], str] | None = None,
+    program_sink: Callable[[str, Any], object] | None = None,
     transforms: TransformSet | None = None,
     session: HollowSession | None = None,
 ) -> LaneGraphs:
@@ -278,12 +278,13 @@ def discover_modules(
     caller (the derive) names each marked module for the document's
     provenance and hands them here keyed by that name.
 
-    ``program_sink`` (Paul, 2026-08-20) receives ``(graph_hash,
-    ExportedProgram)`` for each NEW graph specialization and returns the CAS digest it
-    stored the serialized program under. The whole traced graph is kept, not
-    just its hash: trace() runs once, ever, and the runtime miner downloads
-    the graph and runs inductor rather than re-tracing author code. torchcg
-    holds no opinion on WHERE the bytes go -- bytes-at-rest is tensorfs's
+    ``program_sink`` receives ``(graph_hash, ExportedProgram)`` for each NEW
+    graph specialization so the caller can bank this machine's serialized
+    program under that identity. **Its return value is discarded** (Paul,
+    2026-08-19, address-free): the bytes are local and their digest is
+    machine-scoped, so nothing about them enters the document -- the graph
+    hash is the identity, and a mint on any box resolves its own bytes by it.
+    torchcg holds no opinion on WHERE they go: bytes-at-rest is tensorfs's
     charter, so the caller owns the sink.
 
     ``session`` (pgw#1458, tcg#64) is the :class:`~torchcg.hollow.
@@ -406,20 +407,23 @@ def discover_modules(
                 # class -- dedup is the point of content identity.
                 continue
             seen_graphs.add(graph)
-            program_digest = ""
+            # THE SINK'S RETURN IS DISCARDED, and that is the address-free
+            # ruling in one line (Paul, 2026-08-19). The sink still banks this
+            # machine's serialized program -- keyed by `graph`, which it is
+            # handed precisely so it can -- but nothing about those bytes
+            # enters the document. A blob digest is machine-scoped
+            # (pgw#1462p2: 14/14 identities reproduce across boxes, 0/14 blob
+            # digests do), so putting one in a document every machine must
+            # agree on is what made the document unportable.
             if program_sink is not None:
                 try:
-                    program_digest = program_sink(graph, program)
+                    program_sink(graph, program)
                 except Exception as exc:
                     raise DiscoveryError(
                         f"lane {contract!r} target {path!r}: graph {graph} "
                         f"could not be stored: {type(exc).__name__}: {exc}"
                     ) from exc
-            records.append(
-                GraphRecord(
-                    graph=graph, target=path, ingress=ingress, program=program_digest
-                )
-            )
+            records.append(GraphRecord(graph=graph, target=path, ingress=ingress))
 
     unobserved = tuple(sorted(path for path, calls in observed.items() if not calls))
     return LaneGraphs(

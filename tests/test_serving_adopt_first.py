@@ -412,7 +412,6 @@ def _adopt_answer(
         base: dict[str, Any] = {
             "graph_hash": record.graph,
             "graph_specialization": "",
-            "program": record.program,
             "module_path": record.target,
             "ingress_digest": record.ingress.digest(),
             # THE CONTRACT ITSELF. Without it the lane document cannot be

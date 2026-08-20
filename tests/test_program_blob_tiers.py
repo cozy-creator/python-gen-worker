@@ -1,12 +1,13 @@
-"""The mint's INPUT: where a serialized ExportedProgram is found, and refused.
+"""The mint's INPUT: which serialized ExportedProgram a hole gets, and why.
 
-# pgw#1462 part 2: the image bakes the release's graph blobs and the pod's own
-# CAS is a different directory, so the miner's content-address fallthrough has
-# never reached them.
+# pgw#1462 part 2: the image bakes the release's programs and the pod's own
+# store is a different directory, so the miner's fallthrough never reached them.
+# pgw#1462 address-free: the key is the GRAPH IDENTITY, never a blob digest.
 
-The defect these fence is a SILENT one, which is why it survived: a cache miss
-reports nothing, so a tier looking in the wrong directory and a release with no
-blobs at all produce the same observable — an eager pod.
+Two defects meet here and both were SILENT, which is why they survived: a miss
+reports nothing, so a tier looking in the wrong directory, a release whose
+programs were made on another machine, and an endpoint with no graphs at all all
+produced one observable — an eager pod.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker._vendor.tensorfs import LocalCAS
+from gen_worker._vendor.torchcg.store import LocalGraphStore
 from gen_worker.models.cache_paths import BAKED_PROGRAM_CAS_DIR, baked_program_cas_dir
 from gen_worker.serving.mint_store import (
     ProgramBlobUnreachable,
@@ -26,23 +28,28 @@ from gen_worker.serving.mint_store import (
 
 PROGRAM = b"\x80\x05serialized-exported-program-bytes" * 64
 
+#: A real cg-graph-v1 identity, the shape torchcg emits and the ONLY key a
+#: document carries since the address-free ruling.
+GRAPH = "cg-graph-v1-" + "9715a0114f7aef25b359294fea1c1b0ca33c3d3e7e17cccabaaa942d"
 
-def _seed(root: Path, blob: bytes = PROGRAM) -> str:
-    """Put ``blob`` in a real LocalCAS and return its ``sha256:`` address."""
-    cas = LocalCAS(root)
-    ref = cas.put_bytes(blob)
-    digest = f"sha256:{hashlib.sha256(blob).hexdigest()}"
-    assert str(ref) in (digest, digest.split(":", 1)[1]), f"unexpected ref {ref}"
-    return digest
+#: torchcg's own ref spelling for a graph's serialized program. Restated here
+#: ONLY to corrupt an object on purpose; production code never spells it.
+_PROGRAM_REF = "torchcg/v2/programs/%s"
+
+
+def _seed(root: Path, blob: bytes = PROGRAM, graph: str = GRAPH) -> str:
+    """Bank ``blob`` as the serialized program for ``graph``, by IDENTITY."""
+    store = LocalGraphStore(LocalCAS(root))
+    staged = root.parent / f"staged-{abs(hash(graph)) % 10000}.pt2"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(blob)
+    store.put_program(graph, staged)
+    return graph
 
 
 def _local_tier(root: Path) -> object:
-    """A stand-in for LocalGraphStore: the mint reads only its `.cas`."""
-
-    class _Store:
-        cas = LocalCAS(root)
-
-    return _Store()
+    """The pod's own store — a real LocalGraphStore over a real CAS."""
+    return LocalGraphStore(LocalCAS(root))
 
 
 def test_a_baked_blob_is_unreachable_without_the_image_tier(tmp_path: Path) -> None:
@@ -60,11 +67,11 @@ def test_a_baked_blob_is_unreachable_without_the_image_tier(tmp_path: Path) -> N
         without.fetch_program(digest, tmp_path / "out" / "p.pt2")
     # The message has to name the ordinary cause, because the ordinary cause is
     # a build that used a committed lock and therefore baked nothing.
-    assert "COMMITTED endpoint.lock" in str(refusal.value)
+    assert "no serialized program" in str(refusal.value)
 
     # …and the GREEN arm is the same store with the tier wired.
     with_tier = TieredGraphStore(
-        _local_tier(pod_cas), upstream=None, baked=LocalCAS(image_cas)
+        _local_tier(pod_cas), upstream=None, baked=LocalGraphStore(LocalCAS(image_cas))
     )
     got = with_tier.fetch_program(digest, tmp_path / "out" / "p.pt2")
     assert Path(got).read_bytes() == PROGRAM
@@ -73,9 +80,9 @@ def test_a_baked_blob_is_unreachable_without_the_image_tier(tmp_path: Path) -> N
 def test_the_pods_own_cas_still_wins_and_needs_no_image(tmp_path: Path) -> None:
     """The new tier is additive: a pod that already holds the blob never looks."""
     pod_cas = tmp_path / "cas"
-    digest = _seed(pod_cas)
+    graph = _seed(pod_cas)
     store = TieredGraphStore(_local_tier(pod_cas), upstream=None, baked=None)
-    assert Path(store.fetch_program(digest, tmp_path / "p.pt2")).read_bytes() == PROGRAM
+    assert Path(store.fetch_program(graph, tmp_path / "p.pt2")).read_bytes() == PROGRAM
 
 
 def test_corrupted_baked_bytes_are_refused_not_compiled(tmp_path: Path) -> None:
@@ -87,27 +94,33 @@ def test_corrupted_baked_bytes_are_refused_not_compiled(tmp_path: Path) -> None:
     reach inductor.
     """
     image_cas = tmp_path / "derive-cas"
-    digest = _seed(image_cas)
+    graph = _seed(image_cas)
     cas = LocalCAS(image_cas)
-    target = Path(cas.object_path(digest))
+    banked = LocalGraphStore(cas).fetch_program(graph, tmp_path / "peek.pt2")
+    assert banked is not None
+    ref = cas.read_ref(_PROGRAM_REF % graph)
+    assert ref is not None
+    target = Path(cas.object_path(ref))
     target.chmod(0o644)
     target.write_bytes(b"not the graph the release stamped" * 64)
 
     store = TieredGraphStore(
-        _local_tier(tmp_path / "pod"), upstream=None, baked=LocalCAS(image_cas)
+        _local_tier(tmp_path / "pod"), upstream=None,
+        baked=LocalGraphStore(LocalCAS(image_cas)),
     )
     with pytest.raises(ProgramBlobUnreachable) as refusal:
-        store.fetch_program(digest, tmp_path / "p.pt2")
+        store.fetch_program(graph, tmp_path / "p.pt2")
     assert "integrity scrub" in str(refusal.value)
 
     # NEGATIVE CONTROL: without the corruption the same call succeeds, so the
     # assertion above is about the scrub and not about a broken fixture.
     clean = tmp_path / "clean-cas"
-    clean_digest = _seed(clean)
+    clean_graph = _seed(clean)
     ok = TieredGraphStore(
-        _local_tier(tmp_path / "pod2"), upstream=None, baked=LocalCAS(clean)
+        _local_tier(tmp_path / "pod2"), upstream=None,
+        baked=LocalGraphStore(LocalCAS(clean)),
     )
-    assert Path(ok.fetch_program(clean_digest, tmp_path / "ok.pt2")).exists()
+    assert Path(ok.fetch_program(clean_graph, tmp_path / "ok.pt2")).exists()
 
 
 def test_an_upstream_that_can_serve_one_still_wins(tmp_path: Path) -> None:
@@ -119,19 +132,20 @@ def test_an_upstream_that_can_serve_one_still_wins(tmp_path: Path) -> None:
     calls: list[str] = []
 
     class _Upstream:
-        def fetch_program(self, digest: str, destination: Path) -> Path:
-            calls.append(digest)
+        def fetch_program(self, graph: str, destination: Path) -> Path:
+            calls.append(graph)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(PROGRAM)
             return destination
 
     image_cas = tmp_path / "derive-cas"
-    digest = _seed(image_cas)
+    graph = _seed(image_cas)
     store = TieredGraphStore(
-        _local_tier(tmp_path / "pod"), upstream=_Upstream(), baked=LocalCAS(image_cas)
+        _local_tier(tmp_path / "pod"), upstream=_Upstream(),
+        baked=LocalGraphStore(LocalCAS(image_cas)),
     )
-    store.fetch_program(digest, tmp_path / "p.pt2")
-    assert calls == [digest]
+    store.fetch_program(graph, tmp_path / "p.pt2")
+    assert calls == [graph]
 
 
 def test_a_missing_bake_is_absence_and_never_a_created_directory(

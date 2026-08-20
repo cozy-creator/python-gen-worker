@@ -27,12 +27,12 @@ from .graph_identity import (
 from .ingress import CallIngress, IngressError
 from .lane import LaneError, require_contract_ref, require_passes, require_targets
 
-DOCUMENT_FORMAT = 2
+DOCUMENT_FORMAT = 3
 _DOCUMENT_FIELDS = frozenset(("v", "stack", "lanes"))
 _LANE_FIELDS = frozenset(
     ("contract", "targets", "graphs", "unobserved_targets", "passes")
 )
-_GRAPH_FIELDS = frozenset(("graph", "target", "ingress", "program"))
+_GRAPH_FIELDS = frozenset(("graph", "target", "ingress"))
 
 
 class DocumentError(ValueError):
@@ -46,17 +46,28 @@ class GraphRecord:
     graph: str
     target: str
     ingress: CallIngress
-    #: CAS digest of the SERIALIZED ExportedProgram for this graph specialization
-    #: (Paul, 2026-08-20: the derive stores the whole traced graph, not just
-    #: its hash -- "we only ever need to run trace() once" now holds
-    #: literally, and the runtime miner downloads this blob and runs inductor
-    #: instead of re-tracing author code). **The NAME is the contract with
-    #: the mint lane**, which reads it as `PROGRAM_DIGEST_FIELD = "program"`
-    #: (pgw#962) and raises `MissingProgramDigest` on an empty one. Empty
-    #: only when the producer stored no blob. Portability is fenced by the
-    #: document's own compile stack: an ExportedProgram is torch-coupled, and
-    #: the stack pins torch.
-    program: str = ""
+
+    # NO `program` FIELD, AND ITS ABSENCE IS THE CONTRACT (Paul, 2026-08-19:
+    # "program blobs are ADDRESS-FREE -- the identity is the contract, bytes
+    # are local"). It used to carry the CAS digest of this specialization's
+    # serialized ExportedProgram, on the premise that the blob would travel
+    # and the miner would download rather than re-trace.
+    #
+    # THE PREMISE WAS FALSE, and it was measured rather than argued
+    # (pgw#1462 part 2): sd15 re-traced at its own pinned gen-worker, with a
+    # byte-identical 17-row compile stack, reproduced 14/14 GRAPH HASHES and
+    # 0/14 program digests. `torch.export.save` is deterministic within a
+    # machine and different across machines whose declared inputs are
+    # identical. So the digest was a machine-scoped address inside a document
+    # every machine is supposed to agree on -- it made the document itself
+    # unportable, which is why `lock --check` reported drift on unchanged
+    # trees.
+    #
+    # What replaces it: nothing in the document. The GRAPH HASH is the
+    # identity a mint matches on, and each machine keeps its own serialized
+    # programs in its own store, keyed by that hash (`LocalGraphStore
+    # .put_program`). Bytes stay local, exactly as the author-time-lock
+    # ruling always said they should.
 
     def __post_init__(self) -> None:
         if not is_graph_hash(self.graph):
@@ -65,15 +76,12 @@ class GraphRecord:
             raise DocumentError("graph record must name its target module path")
         if not isinstance(self.ingress, CallIngress):
             raise DocumentError("graph record must carry its CallIngress contract")
-        if not isinstance(self.program, str):
-            raise DocumentError("graph program digest must be a string")
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "graph": self.graph,
             "target": self.target,
             "ingress": self.ingress.as_dict(),
-            "program": self.program,
         }
 
 
@@ -261,7 +269,6 @@ class GraphSetDocument:
                         graph=raw_record["graph"],
                         target=raw_record["target"],
                         ingress=ingress,
-                        program=raw_record["program"],
                     )
                 )
             lanes.append(

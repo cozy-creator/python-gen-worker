@@ -60,7 +60,7 @@ from .mint import (
     MintOutcome,
     MintProgress,
     MintedHole,
-    MissingProgramDigest,
+    MissingProgram,
     mint_holes,
 )
 from .loader import (
@@ -142,7 +142,7 @@ __all__ = [
     "MintOutcome",
     "MintProgress",
     "MintedHole",
-    "MissingProgramDigest",
+    "MissingProgram",
     "Model",
     "ModelDeclarationError",
     "ModelInstance",

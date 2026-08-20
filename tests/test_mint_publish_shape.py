@@ -192,8 +192,7 @@ def test_mint_one_compiles_publishes_and_manifests_through_the_REAL_store(
         def arm(self, record: Any, artifact: Path) -> None:
             armed.append(record.graph)
 
-    record = SimpleNamespace(
-        graph=GRAPH, target="unet", program="sha256:" + "0" * 64)
+    record = SimpleNamespace(graph=GRAPH, target="unet")
     host = SimpleNamespace(holes=(SimpleNamespace(record=record),),
                            adoption=_Adoption())
 

@@ -101,11 +101,11 @@ def document(binding: DeployBinding, tmp_path: Path) -> GraphSetDocument:
 
     lane = discover_lane(LANE, ("unet",), {"unet": model.pipe.unet}, drive)
     host.teardown()
+    # NO program address: the document is address-free, and the mint resolves
+    # this box's own serialized program by the GRAPH IDENTITY below.
     stamped = tuple(
         GraphRecord(
             graph=record.graph, target=record.target, ingress=record.ingress,
-            program="sha256:" + hashlib.sha256(
-                record.graph.encode()).hexdigest(),
         )
         for record in lane.graphs
     )
@@ -445,7 +445,6 @@ def all_miss_answer(document: GraphSetDocument) -> dict:
             {
                 "graph_hash": record.graph,
                 "graph_specialization": "",
-                "program": record.program,
                 "module_path": record.target,
                 "ingress_digest": record.ingress.digest(),
                 "ingress": record.ingress.as_dict(),
@@ -615,27 +614,37 @@ def test_a_minted_artifact_the_fleet_cannot_take_is_still_banked_and_stated(
     assert len(said) == 1 and "pgw#1368" in said[0][2]
 
 
-def test_a_graph_blob_with_no_route_costs_its_graph_and_names_its_owner(
+def test_a_program_this_box_never_made_is_a_typed_per_graph_refusal(
     tmp_path: Path,
 ) -> None:
-    """The mint's INPUT leg is the third unwired one, and it must fail TYPED.
+    """The mint's INPUT leg must fail TYPED, and its remedy is LOCAL.
 
-    th#2133's adopt answer carries each graph's ``program`` digest and presigns
-    only the compiled ARTIFACT, so a pod whose CAS has never seen the
-    serialized graph has no route to it. That is a per-graph refusal naming its
-    owner — never an ``AttributeError``, and never a re-trace.
+    This test used to assert the refusal named pgw#1370 as the owner of
+    PUBLISHING the blob somewhere fetchable. There is no such owner and no such
+    route: a serialized program's bytes are machine-scoped (pgw#1462p2 measured
+    14/14 graph identities reproducing across boxes and 0/14 blob digests), so
+    nothing can ship them and the remedy is to derive here. The refusal says
+    that instead — per graph, never an ``AttributeError``, never a boot failure.
     """
     from gen_worker.serving.mint_store import ProgramBlobUnreachable
 
     cas = LocalCAS(tmp_path / "cas")
     store = TieredGraphStore(LocalGraphStore(cas), None)
-    with pytest.raises(ProgramBlobUnreachable, match="pgw#1370"):
+    graph = "cg-graph-v1-" + "0" * 56
+    with pytest.raises(ProgramBlobUnreachable, match="gen-worker lock"):
+        store.fetch_program(graph, tmp_path / "blob.pt2")
+
+    # A BLOB DIGEST IS NOT A KEY ANY MORE, and asking with one is a caller
+    # error rather than a missing blob — it must not read as corruption.
+    with pytest.raises(ProgramBlobUnreachable, match="not a cg-graph-v1 identity"):
         store.fetch_program("sha256:" + "0" * 64, tmp_path / "blob.pt2")
 
-    # A blob this pod ALREADY holds needs no route: a digest is a digest.
-    ref = cas.put_bytes(b"a serialized ExportedProgram")
-    got = store.fetch_program(str(ref), tmp_path / "have.pt2")
-    assert got.read_bytes() == b"a serialized ExportedProgram"
+    # A program this box MADE needs nothing: it is found by the identity.
+    staged = tmp_path / "staged.pt2"
+    staged.write_bytes(b"a serialized ExportedProgram")
+    LocalGraphStore(cas).put_program(graph, staged)
+    got = store.fetch_program(graph, tmp_path / "have.pt2")
+    assert Path(got).read_bytes() == b"a serialized ExportedProgram"
 
 
 def test_the_reuse_hit_is_a_wire_fact_a_rental_can_capture(

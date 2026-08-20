@@ -221,38 +221,47 @@ def _hollow() -> ModuleType:
 
 
 def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
-    """Store each discovered graph's SERIALIZED ExportedProgram in the CAS.
+    """Bank each discovered graph's SERIALIZED ExportedProgram, KEYED BY GRAPH.
 
-    Paul's ruling (2026-08-20): the derive keeps THE WHOLE TRACED GRAPH, not
-    just its hash -- "we only ever need to run trace() once" now holds
-    literally. The runtime miner downloads this blob and runs inductor on
-    it; it never re-traces and never executes author code at mint time.
+    Paul, 2026-08-19 (address-free): the bytes are local and their digest is
+    machine-scoped, so nothing about them travels. What the document carries
+    is the cg-graph-v1 identity; what this stores is one machine's bytes for
+    that identity, under it. A mint on any box asks its own store for
+    "the program for graph X" and never for a digest somebody else computed.
 
-    Bytes-at-rest is tensorfs's charter (LIBRARY-BOUNDARIES), so the blob
-    goes into a tensorfs ``LocalCAS`` and only its digest travels in the
-    release document, beside the cg-graph-v1 hash and the ingress spec.
-    Portability needs no new fence: an ExportedProgram is torch-coupled and
-    the document's own compile stack pins torch -- the same validity rule
-    compiled artifacts already live under.
+    Measured reason (pgw#1462p2): sd15 re-traced at its own pinned gen-worker,
+    with a byte-identical 17-row compile stack, reproduced 14/14 GRAPH HASHES
+    and 0/14 blob digests. `torch.export.save` is deterministic within a
+    machine and different across machines, so a blob digest in a shared
+    document is an address nobody else can resolve — and it made the document
+    itself unportable.
+
+    Bytes-at-rest is tensorfs's charter (LIBRARY-BOUNDARIES), so the blob goes
+    into a tensorfs ``LocalCAS`` through torchcg's ``LocalGraphStore``, which
+    owns the graph->bytes ref.
     """
 
     if cas_root is None:
         return None
 
-    import io
+    import tempfile
 
     import torch
 
     from .._vendor.tensorfs import LocalCAS
+    from .._vendor.torchcg.store import LocalGraphStore
 
-    cas = LocalCAS(Path(cas_root))
+    store = LocalGraphStore(LocalCAS(Path(cas_root)))
 
-    def sink(graph: str, program: Any) -> str:
+    def sink(graph: str, program: Any) -> None:
         _assert_weights_free(torch, program)
-        buffer = io.BytesIO()
-        torch.export.save(program, buffer)
-        del graph
-        return str(cas.put_bytes(buffer.getvalue()))
+        # torch.export.save to a FILE, because the store admits files: it
+        # hashes and links them in, so a large program never has to exist
+        # twice in memory the way a BytesIO round-trip forces.
+        with tempfile.TemporaryDirectory() as scratch:
+            staged = Path(scratch) / "program.pt2"
+            torch.export.save(program, str(staged))
+            store.put_program(graph, staged)
 
     return sink
 

@@ -21,7 +21,7 @@ Two rules this module exists to enforce, both from the 2026-08-19
    digests up to the top level for convenience. Every such copy is a second
    place a producer can lie, and a reader that trusts the copy over the document
    is the bug. Callers that want a specialization read it back OUT of the
-   document (:func:`program_digests`), which is why that function parses rather
+   document (:func:`graph_identities`), which is why that function parses rather
    than looks up.
 2. **Hashes are opaque addresses.** ``specialization_hash`` folds
    ``specialization_dims`` into itself and is the graph axis of every cg-key. We
@@ -197,23 +197,26 @@ def tracer_digest() -> str:
     return h.hexdigest()
 
 
-def program_digests(document: Mapping[str, Any]) -> tuple[str, ...]:
-    """Every exported-program CAS digest the document names, deduped + sorted.
+def graph_identities(document: Mapping[str, Any]) -> tuple[str, ...]:
+    """Every graph IDENTITY the document names, deduped + sorted.
 
     Parsed out of the document on demand and deliberately NOT stored beside it:
     a stored copy is a fact that can disagree with its source. The walk is
-    structural (any ``program`` key under ``graphs``) rather than a fixed path,
+    structural (any ``graph`` key under ``graphs``) rather than a fixed path,
     because the graph document's nesting is torchcg's to change and this reader
     must not encode a second copy of its schema.
+
+    This used to collect ``program`` blob ADDRESSES. It cannot: a blob digest is
+    machine-scoped (pgw#1462p2 measured 14/14 identities reproducing across
+    boxes and 0/14 blob digests), so it is not in the document any more. The
+    identity is, and it is what a local store is keyed by.
     """
     found: set[str] = set()
 
     def walk(node: Any) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
-                # torchcg spells the exported-program address `program` (the
-                # digest `_program_sink` returned). Anything else recurses.
-                if key == "program" and isinstance(value, str) and value:
+                if key == "graph" and isinstance(value, str) and value:
                     found.add(value)
                 else:
                     walk(value)
@@ -335,12 +338,12 @@ def derive_is_reusable(
 ) -> Reuse:
     """The skip check: can we serve this lock's trace instead of re-deriving?
 
-    ``cas_has`` is a predicate over an exported-program digest (typically
-    ``LocalCAS.contains``). It is checked because the document and the blobs are
-    stored SEPARATELY by design — a garbage-collected CAS leaves a lock whose
-    document is intact and whose programs are gone, and re-deriving is the only
-    correct response. Pass ``None`` to skip the blob check when the caller does
-    not need the programs (e.g. `run`, which never compiles).
+    ``cas_has`` is a predicate over a GRAPH IDENTITY (typically
+    ``LocalGraphStore.has_program``). It is checked because the document and the
+    bytes are stored SEPARATELY by design — a garbage-collected CAS leaves a
+    lock whose document is intact and whose programs are gone, and re-deriving
+    is the only correct response. Pass ``None`` to skip the check when the
+    caller does not need the programs (e.g. `run`, which never compiles).
     """
     if block is None:
         return Reuse(False, "no [derive] block — the trace was never saved")
@@ -373,13 +376,14 @@ def derive_is_reusable(
     except LockError as exc:
         return Reuse(False, str(exc))
     if cas_has is not None:
-        missing = [d for d in program_digests(document) if not cas_has(d)]
+        missing = [g for g in graph_identities(document) if not cas_has(g)]
         if missing:
             return Reuse(
                 False,
-                f"{len(missing)} exported-program blob(s) named by the document "
-                f"are not in the CAS (first: {missing[0]}) — the document "
-                f"survived a GC its programs did not",
+                f"this box holds no serialized program for {len(missing)} of "
+                f"the graphs the document names (first: {missing[0]}) — the "
+                f"document survived a GC its programs did not, or it was "
+                f"derived on another box",
             )
     return Reuse(True, "inputs unchanged and every program blob present",
                  block=block, document=document)
@@ -451,7 +455,7 @@ __all__ = [
     "Reuse",
     "derive_is_reusable",
     "inputs_digest",
-    "program_digests",
+    "graph_identities",
     "read_derive_block",
     "read_lock",
     "source_files",
