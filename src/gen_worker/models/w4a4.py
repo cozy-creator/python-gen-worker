@@ -838,7 +838,7 @@ def quantize_tree_w4a4(
     in %% 32 == 0, out %% 16 == 0, name not matching ``exclude``."""
 
     import torch
-    from safetensors.torch import load_file, save_file
+    from safetensors.torch import save_file
 
     src_tree, out_tree = Path(src_tree), Path(out_tree)
     comp = next((c for c in denoiser_components() if (src_tree / c).is_dir()), None)
@@ -856,7 +856,13 @@ def quantize_tree_w4a4(
         if rel.parts[0] != comp:
             shutil.copy2(f, dst)
             continue
-        tensors = load_file(str(f))
+    # pgw#1549: `safetensors.torch.load_file` is the ONE shape a projected
+    # tree cannot serve — it reads the ~128 B TFSSTUB1 pointer stub's first
+    # eight bytes as a header length. `tensor_source.load_state_dict` is its
+    # drop-in replacement and reads the CAS when the path holds a stub, so
+    # this producer is correct on a projected source tree instead of failing
+    # with a lie about the checkpoint.
+        tensors = load_state_dict(f, why="the w4a4 data-free producer reads a source shard")
         out: Dict[str, Any] = {}
         quantized = 0
         for name, t in tensors.items():

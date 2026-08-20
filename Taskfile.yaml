@@ -157,6 +157,10 @@ tasks:
       # reads the .skip-census-*.json that only a full pytest run produces —
       # it belongs to `task test`, not to a static lint pass.
       - cmd: uv run python scripts/lint_mypy_ratchet.py
+      # pgw#1550. Locally this one is STRICTLY STRONGER than CI's: the sibling
+      # `serverless-endpoints` checkout is present here, so the endpoint half
+      # of the fence actually runs. CI cannot see that repo and says so.
+      - cmd: uv run python scripts/lint_tensor_read_seam.py
       - cmd: uv run python scripts/lint_config_reads.py
       - cmd: uv run python scripts/lint_settings_writers.py
       - cmd: uv run python scripts/lint_layout_declarations.py

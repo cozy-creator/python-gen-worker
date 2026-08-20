@@ -227,6 +227,32 @@ def build(
             components[name] = _build_on_meta(cls, directory, name)
             modules[name] = components[name]
         else:
+            # PASSTHROUGH: a non-`nn.Module` component (tokenizer, scheduler,
+            # feature extractor). Its files are small REAL files, so the stock
+            # `from_pretrained` is correct — but ONLY while that stays true.
+            #
+            # pgw#1549: prove it instead of assuming it. A projected tree
+            # chunks TENSOR CONTAINERS into the CAS and leaves a ~128 B
+            # TFSSTUB1 stub at the path; if one ever lands under a passthrough
+            # component, `from_pretrained` reads the stub's first eight bytes
+            # as a header length and raises `SafetensorError: header too
+            # large` — a LIE ABOUT THE CHECKPOINT that cost two days once
+            # already (pgw#1513). One `stub_at_any` call converts that into a
+            # named refusal that says which component and what to do.
+            from ...models import projection
+
+            if projection.stub_at_any(directory):
+                raise SkeletonError(
+                    f"component {name!r} is a PASSTHROUGH component "
+                    f"({library}.{class_name} is not an nn.Module, so it is "
+                    f"built by the stock from_pretrained) but {directory} "
+                    f"holds a TFSSTUB1 pointer stub: its bytes are in the CAS "
+                    f"and no file reader can reach them. The stock loader "
+                    f"would read the stub as a truncated header and blame the "
+                    f"checkpoint. This component needs a tensorfs-aware "
+                    f"loader (gen_worker.models.tensor_source), or the "
+                    f"publisher must not chunk its containers."
+                )
             components[name] = cls.from_pretrained(str(directory))  # type: ignore[attr-defined]
             passthrough.append(name)
 

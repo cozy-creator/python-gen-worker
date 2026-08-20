@@ -481,6 +481,22 @@ jobs:
       - name: pgw#1460 guard - no raw AOTI package load in src/gen_worker
         run: uv run python scripts/lint_raw_aoti_load.py
 
+      # GATING. pgw#1550, bought by the ~21 h fleet serve outage of 2026-08-19.
+      # gen-worker had TWO construction paths for the tensorfs-aware streaming
+      # loader — the local CLI host asked for it, `ServeLoop` never did — so
+      # every pod fell to a naive file reader, met a 128 B TFSSTUB1 pointer
+      # stub, and refused every request while every local test passed. A raw
+      # `safe_open`/`load_file`/`torch.load` on a checkpoint path IS that
+      # outage; the seam is `gen_worker.models.tensor_source`. Selftest first:
+      # a fence whose red has never been observed proves nothing when green.
+      # NOTE: in this pgw-only clone the sibling `serverless-endpoints`
+      # checkout is absent, so the guard scans gen_worker and SAYS SO on
+      # stderr rather than scoring the half it could not read as clean.
+      - name: pgw#1550 guard - one tensorfs-aware tensor reader
+        run: |
+          uv run python scripts/lint_tensor_read_seam.py --selftest
+          uv run python scripts/lint_tensor_read_seam.py
+
       # pgw#1489: an artifact's env identity is the COMPILE STACK read off the
       # endpoint's uv.lock — torch/triton/nvidia and nothing else. The whole
       # installed set was a second representation of that lock, unable to agree
