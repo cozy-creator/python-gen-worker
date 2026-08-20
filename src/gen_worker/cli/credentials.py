@@ -38,7 +38,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 #: Marker every machine token carries. Lets a client tell a static credential
 #: from a session token without asking the server.
@@ -54,9 +54,25 @@ class CredentialError(RuntimeError):
     """The credential store could not be read or written."""
 
 
+def _settings() -> Any:
+    """Installed Settings, or a zero-config default.
+
+    §1.18: config is loaded ONCE by the pipeline and PASSED; a module reading
+    `os.environ` itself is a second loader that can disagree with the first.
+    `current_or` takes the fallback AS A VALUE so the zero-config case is
+    visible here rather than hidden in an env read — this module is imported
+    both by the CLI (which installs Settings at process entry) and by scripts
+    that never bring a worker up.
+    """
+    from .. import config
+
+    return config.current_or(config.Settings())
+
+
 def cozy_home() -> Path:
-    """``~/.cozy``, or ``COZY_HOME``. The same root cozy-local resolves."""
-    return Path(os.environ.get("COZY_HOME") or (Path.home() / ".cozy"))
+    """``~/.cozy``, or whatever ``COZY_HOME`` configured. The same root
+    cozy-local resolves, so one login serves both tools."""
+    return Path(_settings().cozy_home or (Path.home() / ".cozy"))
 
 
 def credentials_dir() -> Path:
@@ -122,15 +138,20 @@ def load(
 ) -> Optional[Credential]:
     """The stored credential, or the environment's, or ``None``.
 
-    ``TENSORHUB_TOKEN`` wins: a pod is configured by its environment and must
-    not depend on a home directory it does not have. Empty ``name``/``profile``
-    take the shared pointer (:func:`current_selection`), not a local default.
+    A CONFIGURED token wins over the file store: a pod is configured by its
+    environment and must not depend on a home directory it does not have. It
+    arrives through `Settings.tensorhub_token` rather than an `os.environ` read
+    here — same precedence, but the value now also comes from `.env`, yaml and
+    `/run/secrets` like every other setting, instead of only from the one
+    source this module happened to look at. Empty ``name``/``profile`` take the
+    shared pointer (:func:`current_selection`), not a local default.
     """
-    env_token = (os.environ.get("TENSORHUB_TOKEN") or "").strip()
-    if env_token:
+    settings = _settings()
+    configured_token = (settings.tensorhub_token or "").strip()
+    if configured_token:
         return Credential(
-            token=env_token,
-            hub_url=(os.environ.get("TENSORHUB_URL") or "").strip() or current_hub_url(),
+            token=configured_token,
+            hub_url=(settings.tensorhub_url or "").strip() or current_hub_url(),
         )
     selected_name, selected_profile = current_selection()
     name = name or selected_name

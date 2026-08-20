@@ -44,6 +44,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "COZY_WEIGHTS_CAS": "weights_cas_root",
     "COZY_GRAPH_CAS": "graph_cas_root",
     "COZY_ENDPOINT_STATE": "endpoint_state_root",
+    "COZY_HOME": "cozy_home",
     "BAKED_PROGRAM_CAS_ROOT": "baked_program_cas_root",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "GEN_WORKER_CONFIG_SNAPSHOT_PATH": "config_snapshot_path",

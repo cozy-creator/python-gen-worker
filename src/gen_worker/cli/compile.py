@@ -44,7 +44,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import subprocess
 import sys
 import time
@@ -291,7 +290,13 @@ def _build(
         "nice", "-n", "19",
         sys.executable, "-m", "gen_worker.serving.mint_child", str(request_path),
     ]
-    completed = subprocess.run(argv, check=False, env=dict(os.environ))
+    # NO `env=`: a child inherits this process's environment by default, so
+    # `env=dict(os.environ)` was a no-op that re-exported the whole environment
+    # explicitly — an unresolvable bare `os.environ` binding that §1.18's guard
+    # cannot classify, because "whatever happens to be set" is not a config
+    # value anyone can name. The mint child reads its own inputs from the
+    # request file written above; nothing here needs to hand it an env.
+    completed = subprocess.run(argv, check=False)
     if completed.returncode != 0:
         raise CompileError(
             f"mint child exited {completed.returncode} for graph {spec.short}"

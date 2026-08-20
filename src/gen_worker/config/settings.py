@@ -64,6 +64,12 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # CLI installs Settings at process entry like every other entry point.
     weights_cas_root: str = ""
     graph_cas_root: str = ""
+    # pgw#1491/cl#85: `~/.cozy` — the USER-GLOBAL root cozy-local also
+    # resolves, holding the shared credential store both tools read. A Settings
+    # field rather than a direct env read (§1.18) because it IS configuration:
+    # one login serves every endpoint venv on the machine, and the location of
+    # that store is exactly the kind of value the pipeline should carry.
+    cozy_home: str = ""            # COZY_HOME
     # pgw#1491: where `up` publishes its handle and `run`/`down` find it.
     # Empty = the box default in `cli/endpoint_state.py`, beside the code that
     # explains why liveness is a signal-0 and not the file's existence.
