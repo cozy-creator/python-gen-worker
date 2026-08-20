@@ -209,6 +209,11 @@ _STAGE_BY_PHASE: Final[Mapping[str, Stage]] = {
     boot_phases.PHASE_LIB_MEMO: Stage.IMPORTS,
     boot_phases.PHASE_WEIGHTS_FETCH: Stage.SNAPSHOT_PULL,
     boot_phases.PHASE_COMPONENT_FETCH: Stage.SNAPSHOT_PULL,
+    # pgw#1555. SNAPSHOT_PULL and not a stage of its own: it answers the same
+    # question the pull does — how long until this pod holds the tree — and on
+    # a warm volume it REPLACES the pull entirely, so its seconds belong in the
+    # bucket a reader compares warm boots against cold ones in.
+    boot_phases.PHASE_RESIDENCY_CHECK: Stage.SNAPSHOT_PULL,
     boot_phases.PHASE_PIPELINE_LOAD: Stage.MODEL_LOAD,
     boot_phases.PHASE_DECLARATION_COMPOSE: Stage.KEYSET,
     boot_phases.PHASE_TRACE_FOR_KEY: Stage.KEYSET,

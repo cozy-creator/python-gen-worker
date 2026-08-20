@@ -1304,6 +1304,13 @@ class Worker:
 
         activity_mod.bind_sink(self._send, loop)
         boot_mod.bind_sink(self._send, loop)
+        # pgw#1555: the boot recorder asks THIS object whether the worker can
+        # serve, because this is the object the hub's routing already reads
+        # (`_state_delta`). Without it `in_boot()` latched shut ~1 ms after
+        # `hello` on every pod whose first ack named no refs, and the
+        # `weights_fetch` span — the one phase the boot table exists for — was
+        # never opened on any of them.
+        boot_mod.bind_servable_probe(lambda: self.materialization.ready)
 
         # BOOT-TIME TRUTH, and it must run HERE. On a warm pod with the
         # endpoint volume attached this is what turns already-staged bytes into

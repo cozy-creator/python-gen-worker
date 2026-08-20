@@ -31,6 +31,7 @@ from typing import Any, List
 import pytest
 
 from gen_worker import activity
+from gen_worker import boot_phases
 from gen_worker.boot_materialize import (
     STATE_FAILED,
     STATE_MATERIALIZING,
@@ -519,5 +520,179 @@ def test_a_TRUNCATED_warm_tree_is_refused_quarantined_and_refetched(
         checker = _store(_Wire(), cas)
         ok, bad = checker._verify_snapshot_tree(final[0], snapshot)
         assert ok, f"the recovered tree still fails verification: {bad}"
+    finally:
+        origin.close()
+
+
+# ---------------------------------------------------------------------------
+# pgw#1555 — THE BOOT LADDER CAN SEE THE FETCH
+#
+# The instrument that exists to answer "where did the boot's seconds go" was
+# blind to weights on every pod. `in_boot()` latched shut at the FIRST servable
+# mark, `on_hello_ack` marks servable the instant `materialization.ready` is
+# true, and a config naming NO refs makes that true immediately — so a fleet
+# whose first ack was empty closed its boot window ~1 ms after `hello` and then
+# downloaded gigabytes with nothing recording. Read off the standing stack:
+# 15/15 recent boots hold only `hello` + `first_request_servable` (+ sometimes
+# `eager_ready`) with `bytes = 0` in every row, while `worker_activity_events`
+# shows the same pods moving 2,742,235,508 bytes of sd15 fourteen seconds later.
+# ---------------------------------------------------------------------------
+
+
+def _fetch_rows(phase: str) -> List[Any]:
+    return [r for r in boot_phases.recorded_rows()
+            if r.phase == phase and r.terminal]
+
+
+def test_a_pull_that_follows_an_EMPTY_config_still_lands_in_the_boot_ladder(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """The field sequence, exactly: empty config, servable, THEN the real one.
+
+    The hub's first ack named no refs, so the pod was legitimately ready with
+    nothing to hold and `first_request_servable` was stamped. The config that
+    named the checkpoint arrived on a later ack. Everything after that point
+    is the boot this table exists to measure, and before this fix none of it
+    was recorded — not one `weights_fetch` row, not one byte.
+    """
+    origin = _Origin()
+    try:
+        snapshot = _blobs(origin)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            mat = CheckpointMaterialization(store)
+            # The recorder asks the same object the hub routes on, which is
+            # what `Worker.arun` binds in production.
+            boot_phases.bind_servable_probe(lambda: mat.ready)
+
+            # Ack #1: no refs. Ready with nothing to materialize, and the
+            # worker marks the servable milestone — both correct.
+            mat.configure(CheckpointConfig.from_wire(pb.DesiredResidency(generation=1)))
+            assert mat.ready
+            boot_phases.mark_once(boot_phases.PHASE_HELLO)
+            boot_phases.mark_once(boot_phases.PHASE_FIRST_REQUEST_SERVABLE)
+            assert boot_phases.servable_ms() is not None
+
+            # Ack #2: the checkpoint. The pod stops being routable, so it is
+            # not in steady state and the fetch is a boot fact.
+            mat.configure(_config(2, _REF, snapshot))
+            assert not mat.ready
+            assert boot_phases.in_boot(), (
+                "a worker that is advertising `loading_functions` and holds "
+                "none of its configured weights is NOT past its boot — that "
+                "reading is what blinded the ladder on every field pod")
+            await _settle(mat)
+            assert mat.ready
+
+        asyncio.run(run())
+
+        rows = _fetch_rows(boot_phases.PHASE_WEIGHTS_FETCH)
+        assert rows, (
+            "the pull produced NO `weights_fetch` row. This is the fleet "
+            "defect verbatim: 2.74 GB moved and the boot ladder recorded "
+            f"nothing. rows={[r.phase for r in boot_phases.recorded_rows()]}")
+        assert sum(r.bytes for r in rows) > 0, (
+            "a `weights_fetch` row with bytes=0 over a real transfer is the "
+            "other half of the field reading — every stored row had bytes=0")
+        # And the window closing again is what keeps the table bounded: a
+        # steady-state materialization hours later must NOT land in the ladder.
+        assert not boot_phases.in_boot()
+    finally:
+        origin.close()
+
+
+def test_a_WARM_volume_boot_is_a_TIMED_ROW_and_not_a_hole_in_the_ladder(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """The flagship case, and the one with no instrument at all.
+
+    `_materialize` `continue`s past `ensure_local` when the tree is already
+    resident, so the row `ensure_local` would have opened never exists — a
+    warm 134 GB pod rendered as an EMPTY boot ladder. The check it does
+    instead is not free (a verified manifest match, pgw#1511), and on a warm
+    volume it IS the boot, so it gets the row.
+    """
+    origin = _Origin()
+    try:
+        snapshot = _blobs(origin)
+        cas = tmp_path / "endpoint-volume-cas"
+
+        async def stage() -> None:
+            wire = _Wire()
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            mat = CheckpointMaterialization(_store(wire, cas))
+            mat.configure(_config(1, _REF, snapshot))
+            await _settle(mat)
+
+        asyncio.run(stage())
+        boot_phases.reset_for_tests()
+
+        warm = _Wire()
+
+        async def boot() -> None:
+            store = _store(warm, cas)
+            activity.bind_sink(warm.send, asyncio.get_running_loop())
+            store.rescan_disk()
+            mat = CheckpointMaterialization(store)
+            boot_phases.bind_servable_probe(lambda: mat.ready)
+            mat.configure(_config(1, _REF, snapshot))
+            await _settle(mat)
+            assert mat.state == STATE_READY
+
+        asyncio.run(boot())
+
+        rows = _fetch_rows(boot_phases.PHASE_RESIDENCY_CHECK)
+        assert len(rows) == 1, (
+            "one row per configured ref, whichever way the answer goes; got "
+            f"{[(r.phase, r.reason) for r in boot_phases.recorded_rows()]}")
+        assert rows[0].reason == "resident", (
+            f"a warm volume answers `resident`; row said {rows[0].reason!r}")
+        assert rows[0].bytes == 0, (
+            "the bytes column means BYTES MOVED and a resident tree moves "
+            "none — putting the tree size here would make a warm boot read as "
+            "the fastest transfer the fleet ever did")
+        assert f"tree_bytes={OBJECTS * OBJECT_BYTES}" in rows[0].detail, (
+            "the size it did NOT have to move belongs on the row, in a field "
+            f"that is not `bytes`; detail={rows[0].detail!r}")
+        assert boot_phases.phase_class(rows[0].phase) == boot_phases.CLASS_FETCH
+    finally:
+        origin.close()
+
+
+def test_an_ABSENT_ref_records_the_check_it_lost_before_the_fetch_it_starts(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """Both arms, or the row is a survivorship filter.
+
+    If only the `resident` arm emitted, the ladder would show a population in
+    which residency checks are always free and always win — and the cold boot's
+    check time would silently join `residual_ms`. The reconciliation this
+    module promises is a union of MEASURED spans; an unmeasured one is a lie
+    of omission, not a gap.
+    """
+    origin = _Origin()
+    try:
+        snapshot = _blobs(origin)
+        wire = _Wire()
+        store = _store(wire, tmp_path / "cas")
+
+        async def run() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            mat = CheckpointMaterialization(store)
+            boot_phases.bind_servable_probe(lambda: mat.ready)
+            mat.configure(_config(3, _REF, snapshot))
+            await _settle(mat)
+
+        asyncio.run(run())
+
+        rows = _fetch_rows(boot_phases.PHASE_RESIDENCY_CHECK)
+        assert len(rows) == 1 and rows[0].reason == "absent", (
+            "a cold pod's residency check must leave a row saying it lost; "
+            f"got {[(r.phase, r.reason) for r in rows]}")
+        assert _fetch_rows(boot_phases.PHASE_WEIGHTS_FETCH), (
+            "and the fetch it fell through to must be its own row")
     finally:
         origin.close()
