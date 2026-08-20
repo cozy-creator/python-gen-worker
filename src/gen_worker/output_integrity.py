@@ -454,8 +454,31 @@ def judged(ctx: Any) -> bool:
     from a degenerate input is the expected result there, not a defect, and
     refusing it turned a valid warm into a FATAL on the paying request that
     happened to wake the pod (minimax-h3 `reference-to-video`, measured).
+
+    **A TRACE is the same shape, and pgw#1522 is the same lesson twice.** The
+    publish derive runs the author's handler under a HOLLOW session: every
+    parameter is a fake tensor carrying no bytes, so every frame it renders is
+    exactly blank — `adjacent_frame_corr` and `frame_std_min` are
+    mathematically ZERO, the signature of virtualized weights rather than a
+    marginal render. Its output is discarded by construction too: `ctx.save_*`
+    is a stub that returns `trace://…` and uploads nothing, banks nothing.
+    Degenerate output from a degenerate input, again.
+
+    So the floor is NOT weakened here and its threshold is untouched — this
+    says WHOSE outputs it judges, which is the question this predicate exists
+    to answer. It is the one place that answers it, so the module-level
+    `gw_io.write_*` writers and the `ctx.save_*` path cannot disagree about it
+    the way they did (the writers enforced it under a trace that `ctx.save_*`
+    had already stubbed, which is why every `ctx.save_*` endpoint derived and
+    the first `gw_io` one could not).
     """
-    return not bool(getattr(ctx, "boot_warmup", False))
+    if bool(getattr(ctx, "boot_warmup", False)):
+        return False
+    # Duck-typed and PRIVATE on purpose. The trace context sets it; nothing on
+    # the author surface exposes "am I a trace" (Paul deleted that spelling —
+    # author code branching on it corrupts compilation coverage), and this is
+    # a platform fact about where the output GOES, not an author input.
+    return not bool(getattr(ctx, "_outputs_discarded", False))
 
 
 def guard_frames(frames: Any, *, ref: str) -> OutputIntegrity:
