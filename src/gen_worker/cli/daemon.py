@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import msgspec
 
 from . import endpoint_state, sockaddr
+from .workspace import artifacts_root
 from .endpoint_state import EndpointHandle
 from .protocol import PROTOCOL_VERSION, gen_worker_version
 
@@ -79,7 +80,15 @@ class BootSpec:
     lane: str = ""
     sm: str = ""
     graph_store: Optional[Path] = None
-    artifacts_dir: Path = Path(".compiled-graphs")
+    #: pgw#1526: the BOX cache, stated once in `cli/workspace.py` beside
+    #: `graph_cas_root()`. It was `Path(".compiled-graphs")` — relative to
+    #: whatever cwd the daemon happened to start in, which put a
+    #: machine-scoped artifact store inside an endpoint source tree.
+    #: A `default_factory` and not a module-level constant: the address is
+    #: config (`COZY_ARTIFACTS`), so it must be read when a BootSpec is
+    #: built, not frozen at import — a process that installs Settings after
+    #: import would otherwise silently keep the pre-config answer.
+    artifacts_dir: Path = field(default_factory=artifacts_root)
     output_dir: Path = Path("outputs")
     #: Background pre-warm posture: "auto" mints the adopt session's holes in
     #: the background, "off" never compiles. `gen-worker compile` is the

@@ -582,7 +582,18 @@ def compile_all(
         store = _store(cas_root)
     build = builder if builder is not None else _default_builder(cas_root, sm)
     module = module or endpoint_module(endpoint_dir)
-    artifacts_dir = Path(endpoint_dir) / ".compiled-graphs"
+    # pgw#1526: the BOX cache, not `<endpoint>/.compiled-graphs`. This is mint
+    # SCRATCH plus the pre-publish destination — machine-scoped by nature, and
+    # nothing downstream reads it from the source tree: the artifact's only
+    # durable address is the CAS entry `publish_compiled` writes below, keyed
+    # (graph x env). Writing it into the endpoint made it look like endpoint
+    # content and shipped 172 MB of it in a source tarball (cl#88).
+    #
+    # Box-wide is safe to SHARE because the leaf is `spec.short` — the graph
+    # identity, content-addressed over the exported program — so two endpoints
+    # collide only when they trace to the same graph, in which case the CAS
+    # deduplicates them anyway.
+    artifacts_dir = workspace.artifacts_root()
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     rederive_ran = [False]

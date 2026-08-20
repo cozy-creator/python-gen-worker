@@ -49,6 +49,21 @@ from .placement import serving_device, warn_if_degraded
 logger = logging.getLogger(__name__)
 
 
+def _artifacts_root() -> Path:
+    """The box artifacts cache — pgw#1526's ONE address.
+
+    Imported inside the function, not at module scope: this module is inside
+    the adopt-only serve closure (pgw#1328) and must not acquire the CLI
+    package merely to learn a path. The answer still comes from
+    `cli/workspace.py` and is not restated here — a second spelling of a store
+    address is how a build and a lookup end up at different directories.
+    """
+    from ..cli.workspace import artifacts_root
+
+    return artifacts_root()
+
+
+
 class ServeDispatchError(RuntimeError):
     """A request names a function this endpoint does not serve."""
 
@@ -257,8 +272,9 @@ class EndpointHost:
                     lane_contract,
                     sm,
                     loader=loader,
-                    artifacts_dir=artifacts_dir
-                    or Path(".compiled-graphs"),
+                    # pgw#1526: the box cache, never cwd. `compile` writes
+                    # there and this is the reader that arms what it wrote.
+                    artifacts_dir=artifacts_dir or _artifacts_root(),
                     stack=stack_rows,
                 )
             except EnvironmentMismatch as exc:

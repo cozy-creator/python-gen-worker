@@ -66,7 +66,13 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
     up.add_argument("--graph-store", default="", metavar="DIR",
                     help="compiled-graph CAS to adopt from. Default: the box "
                          "graph CAS when it exists; absent = serve eager.")
-    up.add_argument("--artifacts-dir", default=".compiled-graphs")
+    # pgw#1526: NO default here. Unset means "ask `cli/workspace.py`", which
+    # is the one place that answers it; a default spelled here would be a
+    # second answer that can drift from the daemon's.
+    up.add_argument("--artifacts-dir", default="", metavar="DIR",
+                    help="where compiled artifacts are built and adopted "
+                         "from. Default: the box cache "
+                         "(~/.cache/cozy/compiled-graphs).")
     up.add_argument("--output-dir", default="outputs",
                     help="where saved images/media land")
     up.add_argument("--compile", dest="compile_policy", default="auto",
@@ -100,6 +106,21 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
 # --------------------------------------------------------------------------
 # up
 # --------------------------------------------------------------------------
+
+
+def _artifacts_dir(args: argparse.Namespace) -> Path:
+    """STATED wins; otherwise the box cache (pgw#1526).
+
+    Resolved HERE and passed to the detached child as an absolute path, not
+    re-defaulted there: `up -d` re-execs with a different cwd, so a relative
+    or re-derived answer would put the child's artifacts somewhere the parent
+    never looks — a build under one address and a lookup under another, which
+    reads as an endless cache miss rather than as an error.
+    """
+    from . import workspace
+
+    stated = str(getattr(args, "artifacts_dir", "") or "").strip()
+    return Path(stated).resolve() if stated else workspace.artifacts_root()
 
 
 def _spec(args: argparse.Namespace) -> BootSpec:
@@ -146,7 +167,7 @@ def _spec(args: argparse.Namespace) -> BootSpec:
         lane=args.lane,
         sm=sm,
         graph_store=graph_store,
-        artifacts_dir=Path(args.artifacts_dir),
+        artifacts_dir=_artifacts_dir(args),
         output_dir=Path(args.output_dir),
         compile_policy=args.compile_policy,
         idle_timeout_s=float(args.idle_timeout or 0.0),
@@ -256,7 +277,7 @@ def _child_argv(args: argparse.Namespace) -> List[str]:
             argv += [flag, str(value)]
     argv += [
         "--defaults", args.defaults,
-        "--artifacts-dir", str(args.artifacts_dir),
+        "--artifacts-dir", str(_artifacts_dir(args)),
         "--output-dir", str(Path(args.output_dir).resolve()),
         "--compile", args.compile_policy,
         "--idle-timeout", str(args.idle_timeout),
