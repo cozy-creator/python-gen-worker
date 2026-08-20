@@ -569,13 +569,14 @@ def test_a_mint_in_the_engine_cache_is_reused_without_a_child_or_a_program(
     report = _run(endpoint, cas, store=store, builder=no_child)
 
     assert [outcome.state for outcome in report.outcomes] == [
-        compile_cli.REUSED, compile_cli.REUSED]
+        compile_cli.REUSED for _ in GRAPHS]
     assert report.unservable == []
     reader = compile_cli.serving_reader(cas)
     for graph in GRAPHS:
         assert reader.has_artifact(graph, ENV), f"{graph} was reused but not published"
     summary, code = compile_cli.summarize(report)
-    assert code == 0 and "SERVABLE" in summary and "reused=2" in summary
+    assert code == 0 and "SERVABLE" in summary
+    assert f"reused={len(GRAPHS)}" in summary
 
 
 def test_a_cached_mint_on_a_different_toolchain_is_not_reused(
