@@ -71,8 +71,24 @@ HTTP_TIMEOUT_S = 600.0
 
 #: Never uploaded, whatever git says: weights belong in repos, venvs and caches
 #: are machine-local, and a .env is a secret someone forgot to gitignore.
-_EXCLUDE_DIRS = frozenset({".venv", "venv", "__pycache__", ".git", ".mypy_cache",
-                           ".pytest_cache", ".compiled-graphs", "outputs"})
+_EXCLUDE_DIRS = frozenset({
+    # Build/tool detritus.
+    ".venv", "venv", "__pycache__", ".git", ".mypy_cache", ".pytest_cache",
+    ".tox", ".ruff_cache", "node_modules",
+    # A LOCAL RUN'S OUTPUT. Both are cwd-relative defaults (pgw#1526): the
+    # daemon writes artifacts to `.compiled-graphs` and media to `outputs`,
+    # so anyone who runs `up`/`compile` inside an endpoint leaves them in the
+    # source tree. Measured via cozy-local's twin of this set (cl#88): 172 MB
+    # of artifacts took one tarball 75 KB -> 59 MB.
+    ".compiled-graphs", "outputs",
+    # CREDENTIAL DIRECTORIES. Not bloat — a secret-leak vector. `publish`
+    # uploads a whole tree when the endpoint is not a git work tree, and an
+    # `.ssh/id_ed25519` sitting beside an endpoint would go to the hub with
+    # it. cozy-local's archiver has excluded these since it was written and
+    # asserts it in a test; this client did not, and the two clients publish
+    # the same trees.
+    ".aws", ".azure", ".gnupg", ".kube", ".secrets", ".ssh",
+})
 _EXCLUDE_SUFFIXES = (".safetensors", ".ckpt", ".bin", ".pt", ".pth", ".gguf",
                      ".onnx", ".so", ".pyc")
 _EXCLUDE_NAMES = frozenset({".env"})
