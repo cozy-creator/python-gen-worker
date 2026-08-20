@@ -1192,6 +1192,7 @@ class ModelStore:
             return
         from . import projection as _projection
 
+        unservable: List[str] = []
         for tree in trees:
             try:
                 pinned = _projection.resolve_projection(tree) is not None
@@ -1201,12 +1202,42 @@ class ModelStore:
                 continue
             # UNPINNED + STUBBED is the pod incident's exact state, and it is
             # the one combination that cannot serve.
+            if stubbed and not pinned:
+                unservable.append(tree.name)
             (logger.error if (stubbed and not pinned) else logger.info)(
                 "snapshot census at boot: %s pinned=%s projected=%s%s",
                 tree.name, pinned, stubbed,
                 "  <-- UNREADABLE by the streaming engine (pgw#1536)"
                 if (stubbed and not pinned) else "",
             )
+
+        # pgw#1541: THE FINGERPRINT MUST OUTLIVE THE POD.
+        #
+        # Everything above is a log line, and a rental that ends in a teardown
+        # script loses all of it — the census was "free on any run" only for a
+        # runner who knew to pull `cozy logs` while the pod was still alive.
+        # So the one state that cannot serve also lands as a
+        # `worker_activity_events` row, which survives teardown and is
+        # queryable by every DB-reading harness. Emitted ONLY when something is
+        # actually unservable: a row per healthy boot would be noise, and this
+        # is a fingerprint, not a heartbeat.
+        if not unservable:
+            return
+        try:
+            from .. import activity as activity_mod
+
+            shown = ",".join(unservable[:3])
+            activity_mod.emit_event(
+                activity_mod.KIND_SNAPSHOT_CENSUS,
+                f"unservable={len(unservable)} of={len(trees)} trees={shown}"
+                + ("" if len(unservable) <= 3 else f" (+{len(unservable) - 3} more)")
+                + f" store={root}",
+                phase="unpinned_projected",
+                step=len(unservable),
+                total_steps=len(trees),
+            )
+        except Exception:  # noqa: BLE001 — telemetry never fails a boot
+            logger.debug("snapshot census event dropped", exc_info=True)
 
     def ensure_pinned(
         self, ref: WireRef, tree: Path, snapshot: Optional[pb.Snapshot],

@@ -262,6 +262,22 @@ KIND_PROCESS_ROLE = "process_role"
 # ActivityUpdate field holds them and the th#1839 route serves `detail`
 # verbatim, so this needs no hub change.
 KIND_SNAPSHOT_PULL = "snapshot_pull"
+# pgw#1541: the boot SNAPSHOT CENSUS — which trees this pod holds and whether
+# each is PINNED. Its own kind because it answers a question no other row can:
+# a projected tree without its manifest pin is unreadable by the streaming
+# engine (the only reader of pointer stubs), and the pod then serves the eager
+# bridge a stubbed tree and reports `header too large` about an intact
+# checkpoint. pgw#1536 added that census as LOG LINES ONLY, which made it
+# invisible to every DB-reading harness and — worse — DELETED AT TEARDOWN: a
+# rental that ends by tearing down silently loses the exact fact the census
+# exists to preserve, and its "free on any run" value held only for a runner
+# who knew to pull `cozy logs` while the pod was alive.
+#
+# One row, emitted ONLY when at least one tree is unservable, because that is
+# the incident fingerprint and it must outlive the pod. `step`/`total_steps`
+# carry unservable/total so the state is a NUMERIC query and not a string
+# search; per-tree detail stays in the logs, where volume is free.
+KIND_SNAPSHOT_CENSUS = "snapshot_census"
 # pgw#1355: the COLD BOOT's own decomposition — per-stage spans carrying
 # start/end offsets from OS process start, plus one terminal roll-up. Its own
 # KIND because it is the only row that answers "where did this pod's cold start

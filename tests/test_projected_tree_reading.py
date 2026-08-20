@@ -457,3 +457,106 @@ def test_the_boot_census_NAMES_an_unpinned_stubbed_tree(
         "unpinned + stubbed is the ONE combination that cannot serve — it must "
         f"be loud, not an INFO line nobody greps: level={row.levelname}")
     assert "UNREADABLE by the streaming engine" in row.getMessage()
+
+
+def test_the_census_fingerprint_SURVIVES_TEARDOWN_as_an_activity_row(
+    tmp_path: Path,
+) -> None:
+    """pgw#1541: a log line dies with the pod; the fingerprint must not.
+
+    pgw#1536's census emitted logger lines ONLY, which made it invisible to
+    every DB-reading harness and deleted at teardown — a rental ending in a
+    teardown script silently loses the exact fact the census exists to
+    preserve. Its "free on any run" value held only for a runner who knew to
+    pull `cozy logs` while the pod was still alive.
+
+    So the one state that cannot serve also lands as a
+    `worker_activity_events` row. Asserted here on the REAL emit path, not a
+    mock: `activity.bind_sink` is bound to a recorder exactly as `arun` binds
+    it to the worker's wire.
+    """
+    import asyncio
+
+    from gen_worker import activity
+    from gen_worker._vendor.tensorfs.project import stub_bytes
+    from gen_worker.models.store import ModelStore
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    base = tmp_path / "cas"
+    (base / "refs").mkdir(parents=True)
+    (base / "objects").mkdir(parents=True)
+    for name in ("sha256:" + "e5" * 32, "sha256:" + "f6" * 32):
+        tree = base / "snapshots" / name
+        (tree / "unet").mkdir(parents=True)
+        (tree / "unet" / "x.safetensors").write_bytes(
+            stub_bytes("a" * 64, 3_400_000_000)
+        )
+
+    sent: list[Any] = []
+
+    async def sink(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    async def run() -> None:
+        activity.bind_sink(sink, asyncio.get_running_loop())
+        store = ModelStore(sink, cache_dir=base)
+        store._census_snapshot_pins()
+        for _ in range(8):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    rows = [
+        m.activity_update for m in sent
+        if m.WhichOneof("msg") == "activity_update"
+        and m.activity_update.kind == activity.KIND_SNAPSHOT_CENSUS
+    ]
+    assert len(rows) == 1, (
+        "exactly ONE fingerprint row per boot — a row per healthy tree would be "
+        f"a heartbeat, not a fingerprint; got {len(rows)}")
+    row = rows[0]
+    assert row.phase == "unpinned_projected"
+    assert row.step == 2 and row.total_steps == 2, (
+        "the counts must be NUMERIC so the state is a query and not a string "
+        f"search; got step={row.step} total={row.total_steps}")
+    assert "unservable=2" in row.detail and "e5e5" in row.detail
+
+
+def test_a_HEALTHY_census_emits_no_row_at_all(tmp_path: Path) -> None:
+    """A fingerprint, not a heartbeat: nothing unservable means no row.
+
+    The counterpart to the test above, and the one that keeps this from
+    becoming per-boot noise that nobody filters.
+    """
+    import asyncio
+
+    from gen_worker import activity
+    from gen_worker.models.store import ModelStore
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    base = tmp_path / "cas"
+    (base / "refs").mkdir(parents=True)
+    (base / "objects").mkdir(parents=True)
+    # A materialized tree: real bytes, no stubs, needs no pin.
+    tree = base / "snapshots" / "plain"
+    tree.mkdir(parents=True)
+    (tree / "weights.bin").write_bytes(b"real bytes")
+
+    sent: list[Any] = []
+
+    async def sink(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    async def run() -> None:
+        activity.bind_sink(sink, asyncio.get_running_loop())
+        ModelStore(sink, cache_dir=base)._census_snapshot_pins()
+        for _ in range(8):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert not [
+        m for m in sent
+        if m.WhichOneof("msg") == "activity_update"
+        and m.activity_update.kind == activity.KIND_SNAPSHOT_CENSUS
+    ], "a healthy boot must emit NO census row"
