@@ -31,6 +31,18 @@ artifact had no graph-set document to be found through. Both are now this
 command's job, and the read-back is what proves it: a count of builds that
 returned cannot go red on either failure, and did not.
 
+**FIRST THE ONE THAT IS NEEDED (pgw#1545).** Paul, 2026-08-20: *"prioritize
+generating the graph specialization for what we want to run first; the other
+specializations can be compiled in the background while we do inference using
+the .so that was compiled for the workflow we're actually using."* So the unit
+of delivery is not the run, it is the FIRST SPECIALIZATION: ``--first`` names
+the one the caller's workflow needs (defaulting to the document's own first
+record, which the derive states is the all-defaults specialization — tcg
+``document.py``, pgw#1384), the graph-set document is published BEFORE any
+build, and under ``--fill background`` the verb returns the instant that one
+artifact is servable while a detached child fills the rest. Measured before
+this: 14 specializations at ~111 s each, nothing servable for ~26 minutes.
+
 ## Address-free programs
 
 Paul ruled the exported-program blob ADDRESS-FREE: ``torch.export.save`` is
@@ -83,6 +95,13 @@ BUILT = "built"            # compiled here
 CLAIMED = "claimed"        # another process holds the lease; it is doing it
 BELOW_FLOOR = "below_floor"  # no grant this run targets could arm it
 FAILED = "failed"
+
+#: What this run does with the specializations that are NOT the first one.
+#: Closed, and stated rather than inferred from a flag combination.
+FILL_ALL = "all"                # build them here, in this process, in order
+FILL_BACKGROUND = "background"  # hand them to a detached child and return
+FILL_NONE = "none"              # build only the first one; say what was left
+FILLS = (FILL_ALL, FILL_BACKGROUND, FILL_NONE)
 
 
 class CompileError(RuntimeError):
@@ -144,6 +163,88 @@ def specializations(lock_path: Path) -> Tuple[Spec, ...]:
                 )
             )
     return tuple(out)
+
+
+# --------------------------------------------------------------------------
+# Which specialization goes first
+# --------------------------------------------------------------------------
+
+
+def facets(spec: Spec) -> Tuple[str, ...]:
+    """Every name ``--first`` may address ONE specialization by.
+
+    A specialization has no single human name — it is a graph identity, and an
+    operator asking for "the 512x512 unet" is naming properties of its ingress.
+    So the selector matches FACETS: the graph identity (and its short form),
+    the lane contract, the target module path, and, from the ingress contract,
+    each input's parameter name, dtype and ``AxBxC`` shape. One relation, so a
+    refusal can print exactly what was addressable.
+    """
+    out: List[str] = [spec.graph, spec.short, spec.contract, spec.target]
+    ingress = spec.ingress if isinstance(spec.ingress, dict) else {}
+    for row in ingress.get("inputs") or ():
+        if not isinstance(row, dict):
+            continue
+        out.append(str(row.get("param") or ""))
+        out.append(str(row.get("dtype") or ""))
+        shape = row.get("shape")
+        if isinstance(shape, (list, tuple)) and shape:
+            out.append("x".join(str(dimension) for dimension in shape))
+    return tuple(dict.fromkeys(name for name in out if name))
+
+
+def _selects(spec: Spec, term: str) -> bool:
+    """One selector term against one specialization.
+
+    Equality against a facet, or a prefix of the graph identity — a graph hash
+    is 68 characters and nobody types one, but a distinguishing prefix is how
+    every other content-addressed tool is driven. Eight characters minimum, so
+    a short word can never accidentally prefix-match a hash.
+    """
+    if term in facets(spec):
+        return True
+    return len(term) >= 8 and spec.graph.startswith(term)
+
+
+def select(specs: Tuple[Spec, ...], selector: str) -> Spec:
+    """The specialization ``selector`` names — the one built FIRST.
+
+    An empty selector is the DOCUMENT'S OWN default: the first record in
+    document order. That is not "whatever happens to be first" — graph order is
+    semantic and the derive states it, putting the all-defaults specialization
+    first (torchcg ``document.py``, pgw#1384), which is exactly the one an
+    unstated workflow runs.
+
+    A selector matching nothing REFUSES. Falling back to the default would
+    build a specialization the caller did not ask for and report success, and
+    the whole point of the argument is that the first artifact is the one that
+    serves.
+    """
+    if not selector.strip():
+        return specs[0]
+    terms = [term.strip() for term in selector.split(",") if term.strip()]
+    for spec in specs:
+        if all(_selects(spec, term) for term in terms):
+            return spec
+    addressable = sorted({name for spec in specs for name in facets(spec)
+                          if not name.startswith("cg-graph-v1-")})
+    raise CompileError(
+        f"--first {selector!r} names no specialization this endpoint has.\n"
+        f"  {len(specs)} specialization(s) are addressable by lane contract, "
+        f"target, input parameter, dtype, AxBxC shape, or a graph-identity "
+        f"prefix (>= 8 chars).\n"
+        f"  Addressable names here: {', '.join(addressable) or '(none)'}"
+    )
+
+
+def order(specs: Tuple[Spec, ...], selector: str) -> Tuple[Spec, ...]:
+    """``specs`` with the selected one first, everything else in document order.
+
+    Document order is preserved for the remainder rather than re-sorted: it is
+    the producer's stated priority for everything after the caller's own ask.
+    """
+    first = select(specs, selector)
+    return (first,) + tuple(spec for spec in specs if spec is not first)
 
 
 # --------------------------------------------------------------------------
@@ -454,7 +555,25 @@ def serving_reader(cas_root: Path) -> Any:
     return LocalGraphStore(LocalCAS(Path(cas_root)))
 
 
-def unservable(cas_root: Path, specs: Tuple[Spec, ...], env: Any, module: str) -> List[str]:
+@dataclass(frozen=True, slots=True)
+class Gap:
+    """One thing the serving reader cannot find, ATTRIBUTED to its graph.
+
+    ``graph`` is ``""`` for the graph-set document row. The attribution is what
+    lets the verdict tell a gap this run promised to close from one it
+    deliberately deferred to the background fill (pgw#1545) — a bare sentence
+    could only be told apart by matching prose, which is how a vocabulary
+    becomes folklore.
+    """
+
+    graph: str
+    detail: str
+
+    def __str__(self) -> str:
+        return self.detail
+
+
+def unservable(cas_root: Path, specs: Tuple[Spec, ...], env: Any, module: str) -> List[Gap]:
     """What the serving reader still cannot find. Empty means servable.
 
     Reports the DOCUMENT as its own row: an endpoint whose artifacts are all
@@ -465,22 +584,24 @@ def unservable(cas_root: Path, specs: Tuple[Spec, ...], env: Any, module: str) -
     ``up`` served eager over a full store.
     """
     reader = serving_reader(cas_root)
-    gaps: List[str] = []
+    gaps: List[Gap] = []
     try:
         document = reader.get_graphs(module)
     except Exception as exc:  # noqa: BLE001 — unreadable IS unservable
         document = None
-        gaps.append(f"graph-set document {module!r}: unreadable ({exc})")
+        gaps.append(Gap("", f"graph-set document {module!r}: unreadable ({exc})"))
     if document is None and not gaps:
-        gaps.append(f"graph-set document {module!r}: absent")
+        gaps.append(Gap("", f"graph-set document {module!r}: absent"))
     for spec in specs:
         try:
             present = reader.has_artifact(spec.graph, env)
         except Exception as exc:  # noqa: BLE001
-            gaps.append(f"artifact {spec.short}: unreadable ({exc})")
+            gaps.append(Gap(spec.graph, f"artifact {spec.short}: unreadable ({exc})"))
             continue
         if not present:
-            gaps.append(f"artifact {spec.short}: absent at ({spec.short}, {env.value})")
+            gaps.append(Gap(
+                spec.graph,
+                f"artifact {spec.short}: absent at ({spec.short}, {env.value})"))
     return gaps
 
 
@@ -521,10 +642,107 @@ class Report:
     separate fields because they answer different questions and the whole of
     pgw#1533 is that the narrative was mistaken for the verdict: fourteen
     ``BUILT`` rows and rc=0 over a serving path that could arm nothing.
+
+    ``deferred`` is the third question (pgw#1545) and it is deliberately not
+    folded into either: a specialization this run CHOSE not to build yet is
+    absent from the store for a reason, and a verdict that cannot tell it from
+    one that was promised and missing is back to guessing.
     """
 
     outcomes: List[Outcome]
-    unservable: List[str]
+    unservable: List[Gap]
+    #: The specialization built FIRST, because it is the one that serves.
+    priority: Optional[Spec] = None
+    #: Handed to the background fill (or left unbuilt under ``--fill none``).
+    deferred: Tuple[Spec, ...] = ()
+    #: Where the background fill's own verdict lands. Empty = none started.
+    fill: str = ""
+
+
+# --------------------------------------------------------------------------
+# The background fill
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Fill:
+    """The specializations this run deferred, and the two ways to run them.
+
+    ``run`` builds them HERE, through the same per-specialization path the
+    foreground used — it exists so the deferral is testable without a detached
+    process, and production never calls it. ``argv`` is the real one: a whole
+    ``gen-worker compile`` for the same endpoint with ``--fill all``, which
+    resolves everything already built as PRESENT and continues from there. The
+    fill is not a special mode with its own resume state; it is this verb.
+    """
+
+    specs: Tuple[Spec, ...]
+    argv: Tuple[str, ...]
+    log: Path
+    verdict: Path
+    run: Callable[[], List[Outcome]]
+
+
+#: Start the fill and answer where its verdict will land. The production
+#: implementation is :func:`detach`; an explicit one is the local seam.
+FillRunner = Callable[[Fill], str]
+
+
+def detach(fill: Fill) -> str:
+    """Run the deferred specializations in a DETACHED, niced child.
+
+    Detached, because the foreground's whole promise is that it returns as soon
+    as the first artifact is servable — a caller that goes on to ``gen-worker
+    up`` must not be waiting on the remainder. ``start_new_session`` puts the
+    child in its own session so the parent's exit, its terminal and its process
+    group signals do not take the fill with them.
+
+    Niced, and only niced: CPU priority is what this process can actually give
+    away. It does NOT arbitrate the card — what keeps the fill from starving
+    live inference there is that it compiles one specialization at a time in a
+    process of its own, which a serving process on the same card preempts the
+    same way any other tenant does.
+    """
+    fill.log.parent.mkdir(parents=True, exist_ok=True)
+    with open(fill.log, "ab", buffering=0) as handle:
+        process = subprocess.Popen(
+            list(fill.argv),
+            stdin=subprocess.DEVNULL, stdout=handle, stderr=handle,
+            start_new_session=True,
+        )
+    return f"pid {process.pid}, log {fill.log}, verdict {fill.verdict}"
+
+
+def _fill_argv(
+    *, endpoint_dir: Path, lock_path: Path, cas_root: Path, sm: str,
+    lockfile: Optional[Path], only: int, vram_budget_gb: float, module: str,
+    first: str, verdict: Path,
+) -> Tuple[str, ...]:
+    """The child that finishes this run: THIS verb, stated in full.
+
+    Every input the parent resolved is restated explicitly — the sm it chose,
+    the CAS it published into, the module name it published the document under.
+    A child that re-derived any of them could publish under a different name or
+    build for a different card and still exit 0, and nothing would disagree.
+    """
+    argv = [
+        "nice", "-n", "19",
+        sys.executable, "-m", "gen_worker.cli", "compile", str(endpoint_dir),
+        "--sm", sm,
+        "--graph-store", str(cas_root),
+        "--lock", str(lock_path),
+        "--module", module,
+        "--first", first,
+        "--fill", FILL_ALL,
+        "--verdict", str(verdict),
+    ]
+    if lockfile is not None:
+        argv += ["--env-lockfile", str(lockfile)]
+    if only:
+        argv += ["--only", str(only)]
+    if vram_budget_gb > 0.0:
+        argv += ["--vram-budget", str(vram_budget_gb)]
+    return tuple(argv)
 
 
 def compile_all(
@@ -539,16 +757,28 @@ def compile_all(
     module: str = "",
     store: Any = None,
     builder: Optional[Builder] = None,
+    first: str = "",
+    fill: str = FILL_ALL,
+    fill_runner: Optional[FillRunner] = None,
 ) -> Report:
+    if fill not in FILLS:
+        raise CompileError(f"--fill must be one of {FILLS}, got {fill!r}")
     specs = specializations(lock_path)
-    if only:
-        specs = specs[:only]
     if not specs:
         logger.info(
             "compile: this endpoint's lock claims no compiled specializations "
             "— nothing to build (it serves eager by declaration)"
         )
         return Report([], [])
+    # THE PRIORITY ORDER, taken FIRST (pgw#1545): `--first` names the
+    # specialization the caller's workflow actually runs and everything else
+    # keeps document order behind it. Resolved here, before the floor probe
+    # imports torch, so a selector that names nothing refuses in milliseconds
+    # rather than after a load. `--only` then truncates the PRIORITY order,
+    # which is the only reading of a bring-up aid that can honour both flags.
+    specs = order(specs, first)
+    if only:
+        specs = specs[:only]
 
     floor = declared_floor_gb(endpoint_dir)
     grant = grant_gb(vram_budget_gb)
@@ -609,15 +839,18 @@ def compile_all(
             rederive_ran[0] = True
             _rederive_programs(endpoint_dir, cas_root, lockfile)
 
-    outcomes: List[Outcome] = []
-    for index, spec in enumerate(specs, start=1):
+    def satisfy(spec: Spec, label: str) -> Outcome:
+        """One specialization: present, or leased-built-published-witnessed.
+
+        Returns an outcome for every path including failure — one graph's
+        failure has never been the run's, and now that the run may be split
+        across two processes it is the ONLY thing that could be.
+        """
         started = time.monotonic()
-        label = f"[{index}/{len(specs)}] {spec.contract} {spec.short}"
         try:
             if store.has_artifact(spec.graph, env):
                 logger.info("%s: present", label)
-                outcomes.append(Outcome(spec, PRESENT, wall_s=time.monotonic() - started))
-                continue
+                return Outcome(spec, PRESENT, wall_s=time.monotonic() - started)
         except Exception as exc:  # noqa: BLE001 — a store miss is not fatal
             logger.warning("%s: store lookup failed (%s); treating as a miss", label, exc)
 
@@ -628,10 +861,7 @@ def compile_all(
                 # have landed exactly this artifact while we waited.
                 if store.has_artifact(spec.graph, env):
                     logger.info("%s: present (landed while claimed)", label)
-                    outcomes.append(
-                        Outcome(spec, PRESENT, wall_s=time.monotonic() - started)
-                    )
-                    continue
+                    return Outcome(spec, PRESENT, wall_s=time.monotonic() - started)
                 logger.info("%s: building", label)
                 program = _ensure_program(spec, store, rederive, artifacts_dir)
                 artifact = build(spec, program, destination)
@@ -650,30 +880,89 @@ def compile_all(
                         f"find is."
                     )
                 logger.info("%s: built and servable (%s)", label, published or "published")
-                outcomes.append(
-                    Outcome(spec, BUILT, published, wall_s=time.monotonic() - started)
-                )
+                return Outcome(spec, BUILT, published, wall_s=time.monotonic() - started)
         except work_ledger.Busy:
             logger.info(
                 "%s: claimed by another process — skipping (the work ledger is "
                 "how compile and a serving mint share this)", label,
             )
-            outcomes.append(Outcome(spec, CLAIMED, wall_s=time.monotonic() - started))
+            return Outcome(spec, CLAIMED, wall_s=time.monotonic() - started)
         except Exception as exc:  # noqa: BLE001 — one failure is not the run
             logger.error("%s: FAILED: %s: %s", label, type(exc).__name__, exc)
-            outcomes.append(
-                Outcome(spec, FAILED, f"{type(exc).__name__}: {exc}",
-                        wall_s=time.monotonic() - started)
-            )
+            return Outcome(spec, FAILED, f"{type(exc).__name__}: {exc}",
+                           wall_s=time.monotonic() - started)
 
-    # The document is published for the WHOLE run, not per specialization: it
-    # names every lane the lock claims, so a partial run still leaves adoption
-    # able to enumerate and the mint able to fill the rest. Publishing it after
-    # the artifacts is the same durability order the runtime mint uses —
-    # nothing is announced before it exists.
+    def satisfy_all(batch: Tuple[Spec, ...], *, offset: int) -> List[Outcome]:
+        return [
+            satisfy(spec, f"[{offset + index}/{len(specs)}] "
+                          f"{spec.contract} {spec.short}")
+            for index, spec in enumerate(batch, start=1)
+        ]
+
+    # The split. `specs` is already in priority order.
+    priority = specs[0]
+    foreground = specs if fill == FILL_ALL else specs[:1]
+    deferred = () if fill == FILL_ALL else specs[1:]
+    if deferred:
+        logger.info(
+            "compile: building %s FIRST (%s); %d specialization(s) deferred to "
+            "the %s fill — the first artifact is what serves",
+            priority.short, first or "the document's own default (all-defaults "
+            "specialization, stated first by the derive)",
+            len(deferred), fill,
+        )
+
+    # THE DOCUMENT FIRST, and this is a REVERSAL (pgw#1545). It used to be
+    # published after every build, on the runtime mint's durability rule that
+    # nothing is announced before it exists. That rule is about ARTIFACTS and
+    # still governs them — but the document is not a claim that artifacts
+    # exist. It is the authored lane list, read out of the committed lock, and
+    # `AdoptSession` turns every record it cannot fetch into a HOLE: eager for
+    # that graph, queued for the mint, never a refusal. Publishing it last is
+    # therefore what made an incremental run unservable — thirteen artifacts on
+    # disk and adoption unable to enumerate a single one, because the one row
+    # it enumerates FROM had not landed yet.
     _publish_document(cas_root, lock_path, module)
+
+    outcomes = satisfy_all(foreground, offset=0)
+
+    fill_detail = ""
+    if deferred and fill == FILL_BACKGROUND:
+        verdict = _fill_dir(module) / "fill.json"
+        runner = fill_runner if fill_runner is not None else detach
+        try:
+            fill_detail = runner(Fill(
+                specs=deferred,
+                argv=_fill_argv(
+                    endpoint_dir=endpoint_dir, lock_path=lock_path,
+                    cas_root=cas_root, sm=sm, lockfile=lockfile, only=only,
+                    vram_budget_gb=vram_budget_gb, module=module, first=first,
+                    verdict=verdict,
+                ),
+                log=_fill_dir(module) / "fill.log",
+                verdict=verdict,
+                run=lambda: satisfy_all(deferred, offset=1),
+            ))
+        except Exception as exc:  # noqa: BLE001 — a fill that will not start is
+            # not a foreground failure: the priority artifact is servable and
+            # this endpoint runs. It is stated, and the deferred rows stay
+            # deferred, so the next `compile` finishes them.
+            logger.error("compile: the background fill did not start: %s: %s",
+                         type(exc).__name__, exc)
+            fill_detail = f"NOT STARTED ({type(exc).__name__}: {exc})"
+
     gaps = unservable(cas_root, specs, env, module)
-    return Report(outcomes, gaps)
+    return Report(outcomes, gaps, priority=priority, deferred=deferred,
+                  fill=fill_detail)
+
+
+def _fill_dir(module: str) -> Path:
+    """Where a background fill's log and verdict live — one place per module,
+    reused across runs so an operator has ONE path to read rather than a
+    timestamped pile nobody prunes."""
+    safe = "".join(char if char.isalnum() or char in "._-" else "-"
+                   for char in module) or "endpoint"
+    return workspace.artifacts_root() / "fill" / safe
 
 
 def _rederive_programs(
@@ -725,11 +1014,14 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
         "compile",
         help="Pre-warm this card's compiled graphs: fetch else build.",
         description=(
-            "Satisfy every graph specialization the committed endpoint.lock "
-            "claims, for this card's sm and this venv's compile stack. Fetches "
-            "from the hub's fleet pool when it can, builds when it must, and "
-            "shares the work with any serving process's background mint "
-            "through the CAS work ledger. Weightless — no checkpoint needed."
+            "Satisfy the graph specializations the committed endpoint.lock "
+            "claims, for this card's sm and this venv's compile stack, "
+            "starting with the one --first names. Fetches from the hub's fleet "
+            "pool when it can, builds when it must, and shares the work with "
+            "any serving process's background mint through the CAS work "
+            "ledger. Weightless — no checkpoint needed. A specialization that "
+            "is not built yet costs eager execution at request time and never "
+            "a refusal, which is what makes --fill background safe."
         ),
     )
     parser.add_argument("endpoint_dir", nargs="?", default=".",
@@ -745,6 +1037,28 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
                              "endpoint's own)")
     parser.add_argument("--only", type=int, default=0, metavar="N",
                         help="stop after N specializations (bring-up aid)")
+    parser.add_argument("--first", default="", metavar="SELECTOR",
+                        help="build THIS specialization first — the one the "
+                             "workflow you are about to run needs. A "
+                             "comma-separated conjunction over lane contract, "
+                             "target, input parameter, dtype, AxBxC shape, or "
+                             "a graph-identity prefix. Default: the "
+                             "document's own first record (the all-defaults "
+                             "specialization).")
+    parser.add_argument("--fill", default=FILL_ALL, choices=list(FILLS),
+                        help="what to do with the specializations that are not "
+                             "--first. `all` (default) builds them here; "
+                             "`background` returns as soon as the first one is "
+                             "servable and finishes the rest in a detached "
+                             "niced child; `none` builds only the first.")
+    parser.add_argument("--module", default="", metavar="NAME",
+                        help="publish the graph-set document under this module "
+                             "name instead of importing the endpoint to read "
+                             "it (for a tree this box cannot import)")
+    parser.add_argument("--verdict", default="", metavar="PATH",
+                        help="also write the verdict here as JSON: rc, the "
+                             "state of every specialization, and every "
+                             "remaining gap")
     parser.add_argument("--vram-budget", type=float, default=0.0, metavar="GB",
                         help="the grant this compile targets; below the "
                              "endpoint's compiled floor it no-ops by name. "
@@ -770,16 +1084,24 @@ def summarize(report: Report) -> Tuple[str, int]:
         + ", ".join(f"{state}={counts[state]}" for state in sorted(counts))
         + f" (of {len(report.outcomes)})\n"
     ]
-    if report.unservable:
+    # A gap this run DEFERRED is not a gap it failed to close (pgw#1545), and
+    # the two are told apart by the gap's own attribution rather than by its
+    # prose. Everything not attributable to a deferred specialization — the
+    # graph-set document row included, because the document is published in the
+    # foreground precisely so the deferred ones can land into it — is fatal.
+    deferred_graphs = {spec.graph for spec in report.deferred}
+    pending = [gap for gap in report.unservable if gap.graph in deferred_graphs]
+    fatal = [gap for gap in report.unservable if gap.graph not in deferred_graphs]
+    if fatal:
         # NOT a warning. A run that leaves the serving path unable to arm what
         # it was asked for has failed at the only thing it was for, and saying
         # so quietly beside a green summary is the defect this fixed, not a
         # style choice.
         lines.append(
-            f"gen-worker compile: NOT SERVABLE — {len(report.unservable)} "
+            f"gen-worker compile: NOT SERVABLE — {len(fatal)} "
             f"gap(s) in the store `gen-worker up` adopts from:\n"
         )
-        lines.extend(f"  - {gap}\n" for gap in report.unservable)
+        lines.extend(f"  - {gap.detail}\n" for gap in fatal)
         lines.append(
             "  A build that returned is not an artifact the serving path can "
             "find; this command reports the second.\n"
@@ -789,10 +1111,31 @@ def summarize(report: Report) -> Tuple[str, int]:
         return "".join(lines), 1
     if counts.get(BELOW_FLOOR) or not report.outcomes:
         return "".join(lines), 0
+    if pending:
+        # THE PARTIAL VERDICT, and it is a different sentence on purpose. The
+        # all-complete line below is a claim about EVERY specialization, so no
+        # arrangement of half-done work may reach it: this branch is chosen by
+        # asking the serving reader which deferred artifacts it still cannot
+        # find, not by asking what this run intended.
+        first = report.priority.short if report.priority is not None else "?"
+        lines.append(
+            f"gen-worker compile: SERVABLE FOR {first} — the graph-set "
+            f"document and the {len(report.outcomes)} artifact(s) built here "
+            f"are readable through the store boot-time adoption uses. "
+            f"{len(pending)} specialization(s) are NOT built yet; serving arms "
+            f"each one as it lands and falls back to eager for the rest.\n"
+        )
+        lines.extend(f"  - pending: {gap.detail}\n" for gap in pending)
+        lines.append(
+            f"  background fill: {report.fill}\n" if report.fill else
+            "  no fill was started — re-run `gen-worker compile` to finish "
+            "them (everything built already resolves as present).\n"
+        )
+        return "".join(lines), 0
     lines.append(
         f"gen-worker compile: SERVABLE — the graph-set document and all "
-        f"{len(report.outcomes)} artifact(s) are readable through the store "
-        f"boot-time adoption uses.\n"
+        f"{len(report.outcomes) + len(report.deferred)} artifact(s) are "
+        f"readable through the store boot-time adoption uses.\n"
     )
     return "".join(lines), 0
 
@@ -812,6 +1155,7 @@ def run_compile(args: argparse.Namespace) -> int:
         return 2
     lock_path = Path(args.lock) if args.lock else endpoint_dir / el.LOCK_FILENAME
     cas_root = Path(args.graph_store) if args.graph_store else workspace.graph_cas_root()
+    verdict_path = Path(args.verdict) if getattr(args, "verdict", "") else None
     try:
         report = compile_all(
             endpoint_dir=endpoint_dir,
@@ -821,13 +1165,59 @@ def run_compile(args: argparse.Namespace) -> int:
             lockfile=Path(args.env_lockfile) if args.env_lockfile else None,
             only=int(args.only or 0),
             vram_budget_gb=float(args.vram_budget or 0.0),
+            module=str(getattr(args, "module", "") or ""),
+            first=str(getattr(args, "first", "") or ""),
+            fill=str(getattr(args, "fill", FILL_ALL) or FILL_ALL),
         )
     except CompileError as exc:
         sys.stderr.write(f"gen-worker compile: {exc}\n")
+        if verdict_path is not None:
+            _write_verdict(verdict_path, None, str(exc), 1)
         return 1
     summary, code = summarize(report)
     sys.stderr.write(summary)
+    if verdict_path is not None:
+        _write_verdict(verdict_path, report, summary, code)
     return code
+
+
+def _write_verdict(
+    path: Path, report: Optional[Report], summary: str, code: int
+) -> None:
+    """The run's verdict, durably, per specialization.
+
+    THE BACKGROUND FILL'S ONLY WAY TO BE READ (pgw#1545). A detached child's
+    exit status reaches nobody: its parent is gone by the time it finishes, and
+    a serve pod's stdout goes nowhere. So the fill states its result where a
+    later reader — an operator, the next `compile`, a test — can find it, and
+    it states it PER SPECIALIZATION, because "the fill failed" over fourteen
+    graphs is not a fact anyone can act on.
+
+    Never raises: a verdict that could not be written must not turn a finished
+    compile into a failed one.
+    """
+    payload: Dict[str, Any] = {"rc": int(code), "summary": summary}
+    if report is not None:
+        payload["priority"] = (
+            report.priority.graph if report.priority is not None else "")
+        payload["fill"] = report.fill
+        payload["deferred"] = [spec.graph for spec in report.deferred]
+        payload["specializations"] = [
+            {"graph": outcome.spec.graph, "contract": outcome.spec.contract,
+             "target": outcome.spec.target, "state": outcome.state,
+             "detail": outcome.detail, "wall_s": round(outcome.wall_s, 3)}
+            for outcome in report.outcomes
+        ]
+        payload["unservable"] = [
+            {"graph": gap.graph, "detail": gap.detail}
+            for gap in report.unservable
+        ]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True),
+                        encoding="utf-8")
+    except OSError as exc:
+        logger.warning("compile: could not write the verdict to %s (%s)", path, exc)
 
 
 __all__ = [
@@ -838,14 +1228,25 @@ __all__ = [
     "CompileError",
     "FAILED",
     "FETCHED",
+    "FILLS",
+    "FILL_ALL",
+    "FILL_BACKGROUND",
+    "FILL_NONE",
+    "Fill",
+    "FillRunner",
+    "Gap",
     "Outcome",
     "PRESENT",
     "Report",
     "Spec",
     "add_subparser",
     "compile_all",
+    "detach",
     "endpoint_module",
+    "facets",
+    "order",
     "run_compile",
+    "select",
     "serving_reader",
     "specializations",
     "summarize",

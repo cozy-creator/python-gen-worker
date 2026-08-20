@@ -8,16 +8,28 @@ verdict and the exit code are computed from a reader rather than from a tally,
 and that the mint child can find a CUDA root on the box it is actually running
 on (no root, no artifact, so it belongs to the same claim).
 
+pgw#1545 extends the same contract to a run that is deliberately INCOMPLETE:
+the specialization the caller names is built first, the rest are deferred, and
+the verdict has to stay honest about which is which — a deferred artifact is
+not a missing one, and no arrangement of half-done work may print the
+all-complete line. Its last two tests close the loop on the serving side,
+because deferring is only safe if a specialization that is not built yet costs
+eager execution and never a refusal.
+
 Every test drives the REAL ``compile_all`` — its work ledger, its store, its
 publish, its census — with only the inductor child replaced by a seam emitting a
-real torchcg artifact (``tests/tcg_artifacts``: no torch, no GPU). The red arms
-are the point, because each of them was once GREEN.
+real torchcg artifact (``tests/tcg_artifacts``: no inductor, no GPU), and the
+serving pair drives the real ``AdoptSession`` with only the bytes->callable
+loader seamed. The red arms are the point, because each of them was once GREEN.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -40,33 +52,38 @@ MODULE = "sd15.main"
 LANE = "sd15.diffusers-bf16@1"
 TARGET = "unet"
 
-#: Two graphs, because "all of them" and "some of them" are different verdicts
-#: and a one-graph fixture cannot tell them apart.
+#: Three graphs, because "all of them", "some of them" and "the ONE the caller
+#: asked for first" are three different verdicts, and a one-graph fixture can
+#: tell none of them apart. They differ in the two facets `--first` selects on
+#: — target module path and input shape — because a fixture whose
+#: specializations are indistinguishable cannot prove an ORDER was honoured.
 GRAPHS = (
     "cg-graph-v1-" + "a" * 56,
     "cg-graph-v1-" + "b" * 56,
+    "cg-graph-v1-" + "c" * 56,
 )
+TARGETS = ("unet", "unet", "vae")
+SHAPES = ((2, 64, 64), (2, 128, 128), (1, 64, 64))
 
 
-def _ingress() -> CallIngress:
+def _ingress(shape: Tuple[int, ...] = (2,)) -> CallIngress:
     return CallIngress(
         parameters=("value",),
         flat_arity=1,
-        inputs=(CallInput("value", 0, "value", 0, (), "value", "float32", (2,)),),
+        inputs=(CallInput("value", 0, "value", 0, (), "value", "float32", shape),),
     )
 
 
 def document() -> GraphSetDocument:
-    ingress = _ingress()
     return GraphSetDocument(
         stack=STACK,
         lanes=(
             LaneGraphs(
                 contract=LANE,
-                targets=(TARGET,),
+                targets=tuple(dict.fromkeys(TARGETS)),
                 graphs=tuple(
-                    GraphRecord(graph=graph, target=TARGET, ingress=ingress)
-                    for graph in GRAPHS
+                    GraphRecord(graph=graph, target=target, ingress=_ingress(shape))
+                    for graph, target, shape in zip(GRAPHS, TARGETS, SHAPES)
                 ),
             ),
         ),
@@ -165,9 +182,9 @@ def test_a_built_graph_lands_where_boot_time_adoption_reads_it(
 
     report = _run(endpoint, cas, store=store, builder=_builder(built))
 
-    assert built == list(GRAPHS), "both specializations must have been built"
-    assert [outcome.state for outcome in report.outcomes] == [
-        compile_cli.BUILT, compile_cli.BUILT]
+    assert built == list(GRAPHS), "every specialization must have been built"
+    assert [outcome.state for outcome in report.outcomes] == (
+        [compile_cli.BUILT] * len(GRAPHS))
     assert report.unservable == []
 
     # The witness that matters: a store object this run did not publish
@@ -216,8 +233,8 @@ def test_a_build_lands_in_the_box_cache_and_never_in_the_endpoint_tree(
 
     report = _run(endpoint, cas, store=store, builder=build)
 
-    assert [outcome.state for outcome in report.outcomes] == [
-        compile_cli.BUILT, compile_cli.BUILT]
+    assert [outcome.state for outcome in report.outcomes] == (
+        [compile_cli.BUILT] * len(GRAPHS))
     assert destinations, "the builder was never reached"
     for destination in destinations:
         assert box in destination.parents, destination
@@ -332,7 +349,9 @@ def test_an_unpublished_graph_set_document_is_a_gap_even_when_every_artifact_is_
     # Ask under a name nothing published: the artifacts are still all present,
     # and that is not enough.
     gaps = compile_cli.unservable(cas, specs, ENV, "some.other")
-    assert gaps == ["graph-set document 'some.other': absent"]
+    assert [gap.detail for gap in gaps] == [
+        "graph-set document 'some.other': absent"]
+    assert [gap.graph for gap in gaps] == [""], "the document row names no graph"
 
 
 def test_an_artifact_under_the_wrong_env_is_absent_to_the_reader(
@@ -353,7 +372,9 @@ def test_an_artifact_under_the_wrong_env_is_absent_to_the_reader(
     other = EnvIdentity(stack=STACK, sm="sm_90")
     gaps = compile_cli.unservable(cas, specs, other, MODULE)
     assert len(gaps) == len(GRAPHS)
-    assert all("absent at" in gap for gap in gaps)
+    assert all("absent at" in gap.detail for gap in gaps)
+    assert {gap.graph for gap in gaps} == set(GRAPHS), (
+        "every gap is attributed, so a deferred one can be told from a missing one")
 
 
 # --------------------------------------------------------------------------
@@ -373,7 +394,9 @@ def test_the_shell_learns_unservable_even_when_every_build_returned() -> None:
 
     lying = compile_cli.Report(
         [compile_cli.Outcome(spec, compile_cli.BUILT)],
-        ["artifact cg-graph-v1-aaa: absent at (cg-graph-v1-aaa, cg-env-v2-x)"],
+        [compile_cli.Gap(
+            GRAPHS[0],
+            "artifact cg-graph-v1-aaa: absent at (cg-graph-v1-aaa, cg-env-v2-x)")],
     )
     summary, code = compile_cli.summarize(lying)
     assert code == 1, "a build that returned is not an artifact anyone can serve"
@@ -479,3 +502,467 @@ def test_an_unreadable_module_name_is_a_typed_refusal_not_a_traceback(
     assert "cannot read" in message
     assert "graph-set document" in message, "it says WHY the name is needed"
     assert str(empty) in message, "and which endpoint it was asked about"
+
+
+# --------------------------------------------------------------------------
+# pgw#1545: FIRST the specialization the workflow needs; the rest in the
+# background. Time-to-first-served is the number, not total mint wall.
+# --------------------------------------------------------------------------
+
+
+def _cas_with_programs(tmp_path: Path) -> Tuple[Path, LocalGraphStore]:
+    cas = tmp_path / "graph-cas"
+    store = LocalGraphStore(LocalCAS(cas))
+    _seed_programs(store, tmp_path)
+    return cas, store
+
+
+def test_the_selector_addresses_a_specialization_by_the_facets_it_has(
+    endpoint: Path,
+) -> None:
+    """A specialization has no human name, so `--first` matches its FACETS.
+
+    Asserted through the real `specializations()` output rather than a hand-built
+    Spec, because the facets are read off the ingress the lock actually carries.
+    """
+    specs = compile_cli.specializations(endpoint / el.LOCK_FILENAME)
+
+    assert compile_cli.select(specs, "").graph == GRAPHS[0], (
+        "an unstated selector is the document's own first record")
+    assert compile_cli.select(specs, "vae").graph == GRAPHS[2]
+    assert compile_cli.select(specs, "2x128x128").graph == GRAPHS[1]
+    assert compile_cli.select(specs, "unet,2x128x128").graph == GRAPHS[1], (
+        "terms are a conjunction: both must hold of the same specialization")
+    assert compile_cli.select(specs, GRAPHS[2][:20]).graph == GRAPHS[2], (
+        "a graph-identity prefix addresses one exactly")
+    assert compile_cli.select(specs, LANE).graph == GRAPHS[0], (
+        "a lane matches every graph in it, and the first one wins")
+
+    ordered = compile_cli.order(specs, "vae")
+    assert [spec.graph for spec in ordered] == [GRAPHS[2], GRAPHS[0], GRAPHS[1]], (
+        "the selected one moves to the front; the rest keep document order")
+
+
+def test_a_selector_that_names_nothing_refuses_rather_than_building_the_default(
+    endpoint: Path,
+) -> None:
+    """The whole point of the argument is that the FIRST artifact is the one
+    that serves. Silently building the default instead would report success
+    over a specialization the caller never asked for."""
+    specs = compile_cli.specializations(endpoint / el.LOCK_FILENAME)
+
+    with pytest.raises(compile_cli.CompileError) as refusal:
+        compile_cli.select(specs, "controlnet")
+
+    message = str(refusal.value)
+    assert "names no specialization" in message
+    assert "vae" in message and "unet" in message, "it prints what IS addressable"
+
+
+def test_only_truncates_the_PRIORITY_order_not_the_document_order(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """The two bring-up flags have to compose.
+
+    `--only` truncating before `--first` was resolved would make
+    `--only 1 --first vae` refuse — the selector would be asked about a list the
+    truncation had already removed its answer from.
+    """
+    cas, store = _cas_with_programs(tmp_path)
+    built: List[str] = []
+
+    report = _run(endpoint, cas, store=store, builder=_builder(built),
+                  first="vae", only=1)
+
+    assert built == [GRAPHS[2]]
+    assert [outcome.spec.graph for outcome in report.outcomes] == [GRAPHS[2]]
+    assert report.unservable == [], (
+        "the census covers what this run took on, which is the truncated set")
+
+
+def test_the_named_specialization_is_the_only_one_built_and_it_is_servable(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """THE ACCEPTANCE, in miniature: one build, and the endpoint serves it.
+
+    ``--fill none`` is the sharpest form of the claim — no background process
+    to confuse the reading, so the store's contents are exactly what the
+    priority build put there.
+    """
+    cas, store = _cas_with_programs(tmp_path)
+    built: List[str] = []
+
+    report = _run(endpoint, cas, store=store, builder=_builder(built),
+                  first="vae", fill=compile_cli.FILL_NONE)
+
+    assert built == [GRAPHS[2]], "only the specialization the caller named was built"
+    assert report.priority is not None and report.priority.graph == GRAPHS[2]
+    assert [spec.graph for spec in report.deferred] == [GRAPHS[0], GRAPHS[1]]
+
+    reader = compile_cli.serving_reader(cas)
+    assert reader.get_graphs(MODULE) == document(), (
+        "the document is published, so adoption can enumerate and arm this one")
+    assert reader.has_artifact(GRAPHS[2], ENV)
+    assert not reader.has_artifact(GRAPHS[0], ENV)
+    assert not reader.has_artifact(GRAPHS[1], ENV)
+
+
+def test_the_graph_set_document_is_published_before_the_first_build(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """A REVERSAL, and the property that makes incremental serving possible.
+
+    The document used to be published after every build, so a run that had
+    landed some artifacts and not others left adoption unable to enumerate a
+    single one: the row it enumerates FROM had not landed. Observed from inside
+    the builder — the only place that can see the store as it was BEFORE any
+    artifact existed.
+    """
+    cas, store = _cas_with_programs(tmp_path)
+    seen: List[Any] = []
+
+    def build(spec: compile_cli.Spec, program: Path, destination: Path) -> Path:
+        seen.append(compile_cli.serving_reader(cas).get_graphs(MODULE))
+        destination.mkdir(parents=True, exist_ok=True)
+        tcg_artifacts.aoti_package(
+            destination / "model.pt2", graph_specialization=spec.graph)
+        return destination
+
+    _run(endpoint, cas, store=store, builder=build, fill=compile_cli.FILL_NONE)
+
+    assert seen == [document()], (
+        "the first build already ran against a store adoption can enumerate")
+
+
+def test_a_deferred_run_never_reports_the_all_complete_line(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """rc semantics: servable FOR the priority artifact, rc 0, and the
+    all-complete sentence is unreachable while the reader still has holes."""
+    cas, store = _cas_with_programs(tmp_path)
+
+    report = _run(endpoint, cas, store=store, builder=_builder([]),
+                  fill=compile_cli.FILL_NONE)
+    summary, code = compile_cli.summarize(report)
+
+    assert code == 0, "a deferred specialization is not a failure"
+    assert f"SERVABLE FOR {report.outcomes[0].spec.short}" in summary
+    assert "and all 3 artifact(s) are readable" not in summary
+    assert summary.count("pending:") == 2
+    assert "re-run `gen-worker compile`" in summary, (
+        "no fill was started, so it says how they get finished")
+
+
+def test_a_gap_in_what_this_run_PROMISED_is_still_fatal(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """Deferral must not become a way to launder a failure.
+
+    The priority build publishes nowhere — the pgw#1533 defect — while two
+    specializations are legitimately deferred. The deferred ones stay silent;
+    the promised one is NOT SERVABLE and rc is 1.
+    """
+    cas, real = _cas_with_programs(tmp_path)
+    store = PublishesNowhere(real)
+
+    report = _run(endpoint, cas, store=store, builder=_builder([]),
+                  fill=compile_cli.FILL_NONE)
+    summary, code = compile_cli.summarize(report)
+
+    assert code == 1
+    assert "NOT SERVABLE — 1 gap(s)" in summary, (
+        "one gap is fatal; the other two were never promised by this run")
+    assert {outcome.state for outcome in report.outcomes} == {compile_cli.FAILED}
+
+
+def test_the_background_fill_finishes_what_the_foreground_deferred(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """The fill runs the SAME per-specialization path, and the verdict is
+    computed from the reader afterwards — which is the only way the
+    all-complete line is ever reached."""
+    cas, store = _cas_with_programs(tmp_path)
+    built: List[str] = []
+    handed: List[Tuple[str, ...]] = []
+
+    def inline(fill: compile_cli.Fill) -> str:
+        handed.append(tuple(spec.graph for spec in fill.specs))
+        fill.run()
+        return "ran inline"
+
+    report = _run(endpoint, cas, store=store, builder=_builder(built),
+                  first="vae", fill=compile_cli.FILL_BACKGROUND,
+                  fill_runner=inline)
+    summary, code = compile_cli.summarize(report)
+
+    assert built == [GRAPHS[2], GRAPHS[0], GRAPHS[1]], (
+        "priority first, then the rest in document order")
+    assert handed == [(GRAPHS[0], GRAPHS[1])]
+    assert report.unservable == []
+    assert code == 0
+    assert "and all 3 artifact(s) are readable" in summary
+
+
+def test_the_detached_fill_is_THIS_verb_with_every_input_restated(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """The fill is not a second code path with its own resume state.
+
+    It is ``gen-worker compile --fill all`` for the same endpoint, so
+    everything already built resolves as PRESENT and it continues from there.
+    Every resolved input is restated on the argv: a child that re-derived its
+    sm or its module name could publish somewhere else and still exit 0.
+    """
+    cas, store = _cas_with_programs(tmp_path)
+    seen: List[compile_cli.Fill] = []
+
+    def capture(fill: compile_cli.Fill) -> str:
+        seen.append(fill)
+        return f"pid 4242, log {fill.log}"
+
+    _run(endpoint, cas, store=store, builder=_builder([]), first="vae",
+         fill=compile_cli.FILL_BACKGROUND, fill_runner=capture)
+
+    argv = seen[0].argv
+    assert argv[:3] == ("nice", "-n", "19"), "the fill yields the CPU"
+    assert "compile" in argv and str(endpoint) in argv
+    for flag, value in (
+        ("--sm", SM), ("--graph-store", str(cas)), ("--module", MODULE),
+        ("--first", "vae"), ("--fill", compile_cli.FILL_ALL),
+        ("--lock", str(endpoint / el.LOCK_FILENAME)),
+        ("--verdict", str(seen[0].verdict)),
+    ):
+        assert argv[argv.index(flag) + 1] == value, flag
+    # And the argv is a real one: the parser this verb installs accepts it.
+    parser = argparse.ArgumentParser()
+    compile_cli.add_subparser(parser.add_subparsers(dest="verb"))
+    parsed = parser.parse_args(list(argv[argv.index("compile"):]))
+    assert parsed.fill == compile_cli.FILL_ALL and parsed.module == MODULE
+
+
+def test_detach_really_spawns_a_surviving_child_and_captures_its_output(
+    tmp_path: Path
+) -> None:
+    """The PRODUCTION runner, exercised — not just the seam it hides behind.
+
+    Every other test here states its own `fill_runner`, so `detach` would
+    otherwise be correct code no test path calls, which is the exact defect
+    class this repo keeps finding (pgw#1543 C1). Driven over a harmless argv:
+    what is under test is that a child is started, survives being detached, and
+    lands its output where the returned sentence says it will.
+    """
+    log = tmp_path / "fill" / "fill.log"
+    fill = compile_cli.Fill(
+        specs=(),
+        argv=("nice", "-n", "19", sys.executable, "-c",
+              "import os; print('filling', os.getsid(0) != %d)" % os.getsid(0)),
+        log=log, verdict=tmp_path / "fill" / "fill.json",
+        run=lambda: [],
+    )
+
+    detail = compile_cli.detach(fill)
+
+    assert detail.startswith("pid ") and str(log) in detail
+    pid = int(detail.split()[1].rstrip(","))
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert log.read_text(encoding="utf-8").strip() == "filling True", (
+        "the child ran, in a session of its own, with its output captured")
+
+
+def test_a_fill_that_cannot_start_is_stated_and_is_not_a_failure(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """The priority artifact is servable and the endpoint runs. A fill that
+    will not spawn leaves work undone, not a broken deliverable."""
+    cas, store = _cas_with_programs(tmp_path)
+
+    def refuses(fill: compile_cli.Fill) -> str:
+        raise OSError("no fork for you")
+
+    report = _run(endpoint, cas, store=store, builder=_builder([]),
+                  fill=compile_cli.FILL_BACKGROUND, fill_runner=refuses)
+    summary, code = compile_cli.summarize(report)
+
+    assert code == 0
+    assert "NOT STARTED (OSError: no fork for you)" in report.fill
+    assert "NOT STARTED" in summary
+
+
+def test_a_killed_fill_resumes_as_reuse_and_finishes_the_remainder(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """Interruption safety, over the real store rather than a resume file.
+
+    The fill dies after one of its two specializations. The re-run rebuilds
+    NOTHING that landed — the finished ones resolve as PRESENT through the same
+    store lookup a warm run uses — and builds only what is missing.
+    """
+    cas, store = _cas_with_programs(tmp_path)
+    first_pass: List[str] = []
+
+    def dies_after_one(fill: compile_cli.Fill) -> str:
+        """A fill that lands ONE of its two and is then killed.
+
+        Modelled the way production actually looks: the runner returns a pid
+        and the parent goes on. A detached child's death is invisible to the
+        foreground by construction, so the resume can only be proved by what is
+        in the store afterwards — which is the point.
+        """
+        compile_cli.compile_all(
+            endpoint_dir=endpoint, lock_path=endpoint / el.LOCK_FILENAME,
+            cas_root=cas, sm=SM, lockfile=None, module=MODULE, store=store,
+            builder=_builder(first_pass), first=fill.specs[0].graph,
+            fill=compile_cli.FILL_NONE,
+        )
+        return "pid 4242 (killed after one)"
+
+    _run(endpoint, cas, store=store, builder=_builder(first_pass), first="vae",
+         fill=compile_cli.FILL_BACKGROUND, fill_runner=dies_after_one)
+    assert first_pass == [GRAPHS[2], GRAPHS[0]], "two of three landed"
+
+    second_pass: List[str] = []
+    report = _run(endpoint, cas, store=store, builder=_builder(second_pass),
+                  first="vae")
+
+    assert second_pass == [GRAPHS[1]], "only the unfinished one was rebuilt"
+    assert {outcome.state for outcome in report.outcomes} == {
+        compile_cli.PRESENT, compile_cli.BUILT}
+    assert report.unservable == []
+    assert compile_cli.summarize(report)[1] == 0
+
+
+def test_the_verb_writes_a_durable_per_specialization_verdict(
+    endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A detached fill's exit status reaches nobody, so it states its result
+    where a later reader can find it — per specialization, because "the fill
+    failed" over fourteen graphs is not a fact anyone can act on.
+
+    Driven through argparse and :func:`run_compile`, so the flags, the handler
+    and the writer are all the real ones.
+    """
+    cas, store = _cas_with_programs(tmp_path)
+    monkeypatch.setattr(workspace, "artifacts_root", lambda: tmp_path / "box")
+    _run(endpoint, cas, store=store, builder=_builder([]))  # everything present
+
+    verdict = tmp_path / "fill" / "fill.json"
+    parser = argparse.ArgumentParser()
+    compile_cli.add_subparser(parser.add_subparsers(dest="verb"))
+    args = parser.parse_args([
+        "compile", str(endpoint), "--sm", SM, "--graph-store", str(cas),
+        "--lock", str(endpoint / el.LOCK_FILENAME), "--module", MODULE,
+        "--verdict", str(verdict),
+    ])
+
+    assert args._handler(args) == 0
+
+    banked = json.loads(verdict.read_text(encoding="utf-8"))
+    assert banked["rc"] == 0
+    assert "SERVABLE" in banked["summary"]
+    assert [row["graph"] for row in banked["specializations"]] == list(GRAPHS)
+    assert {row["state"] for row in banked["specializations"]} == {compile_cli.PRESENT}
+    assert banked["unservable"] == []
+
+
+# --------------------------------------------------------------------------
+# ...and what SERVING does with a store that is only partly filled. This is
+# the other half of pgw#1545: deferring is only safe because a specialization
+# that is not built yet costs eager execution and NEVER a refusal.
+# --------------------------------------------------------------------------
+
+
+def _adopt_session(cas: Path, artifacts: Path, armed: List[str]) -> Any:
+    """A REAL ``AdoptSession`` over the store `compile` published into.
+
+    Only the bytes->callable loader is seamed (there is no card here); the
+    fetch, the claim, the per-graph arm and the dispatcher are torchcg's own.
+    """
+    from gen_worker._vendor.torchcg.adopt import AdoptSession
+
+    def loader(artifact: Path, record: Any, module: Any) -> Any:
+        armed.append(record.graph)
+        return lambda value: ("compiled", record.graph)
+
+    return AdoptSession(
+        LocalGraphStore(LocalCAS(cas)), document(), LANE, SM,
+        loader=loader, artifacts_dir=artifacts, stack=STACK,
+    )
+
+
+def _marked_module() -> Any:
+    import torch
+
+    class Denoiser(torch.nn.Module):
+        def forward(self, value: Any) -> Any:
+            return ("eager", tuple(value.shape))
+
+    return Denoiser()
+
+
+def test_a_specialization_that_is_not_built_yet_serves_EAGER_and_never_refuses(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """The property the whole deferral rests on.
+
+    One artifact in the store, three in the document. The call that matches it
+    dispatches compiled; the calls that do not run the author's own forward.
+    Neither refuses, and neither waits for a build.
+    """
+    import torch
+
+    cas, store = _cas_with_programs(tmp_path)
+    _run(endpoint, cas, store=store, builder=_builder([]), first="vae",
+         fill=compile_cli.FILL_NONE)
+
+    armed: List[str] = []
+    session = _adopt_session(cas, tmp_path / "adopted", armed)
+    module = session.adopt(_marked_module())
+
+    assert armed == [GRAPHS[2]], "only the built specialization was armed"
+    assert [record.graph for record in session.adopted] == [GRAPHS[2]]
+    assert [hole.record.graph for hole in session.holes] == [GRAPHS[0], GRAPHS[1]], (
+        "the unbuilt ones are the mint work-list, in document order")
+
+    assert module(torch.zeros(SHAPES[2])) == ("compiled", GRAPHS[2])
+    assert module(torch.zeros(SHAPES[0])) == ("eager", SHAPES[0]), (
+        "a request needing a specialization nobody built runs eager")
+    assert module(torch.zeros((7, 7))) == ("eager", (7, 7)), (
+        "and so does a shape no specialization in the document covers")
+
+
+def test_the_fill_ARMS_into_a_live_session_without_a_reboot(
+    endpoint: Path, tmp_path: Path
+) -> None:
+    """Per-artifact adoption: each specialization arms the instant it lands.
+
+    The session is built while two specializations are still missing, a request
+    is served eager for one of them, then the fill lands it and the SAME live
+    module dispatches compiled — no restart, no re-adopt.
+    """
+    import torch
+
+    cas, store = _cas_with_programs(tmp_path)
+    _run(endpoint, cas, store=store, builder=_builder([]), first="vae",
+         fill=compile_cli.FILL_NONE)
+
+    armed: List[str] = []
+    session = _adopt_session(cas, tmp_path / "adopted", armed)
+    module = session.adopt(_marked_module())
+    assert module(torch.zeros(SHAPES[0])) == ("eager", SHAPES[0])
+
+    # The fill lands the deferred specializations, exactly as `--fill
+    # background` would, through the same verb.
+    _run(endpoint, cas, store=store, builder=_builder([]))
+
+    hole = session.holes[0]
+    fetched = LocalGraphStore(LocalCAS(cas)).fetch_artifact(
+        hole.record.graph, session.env, tmp_path / "late" / "model")
+    session.arm(hole.record, fetched)
+
+    assert armed == [GRAPHS[2], GRAPHS[0]]
+    assert module(torch.zeros(SHAPES[0])) == ("compiled", GRAPHS[0]), (
+        "the live module took the late artifact")
+    assert module(torch.zeros(SHAPES[1])) == ("eager", SHAPES[1]), (
+        "and the one still unarmed is still eager, not refused")
+    assert [hole.record.graph for hole in session.holes] == [GRAPHS[1]]
