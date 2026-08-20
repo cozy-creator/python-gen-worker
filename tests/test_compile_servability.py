@@ -29,6 +29,7 @@ from gen_worker._vendor.torchcg import CallIngress, CallInput
 from gen_worker._vendor.torchcg.document import GraphRecord, GraphSetDocument, LaneGraphs
 from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
 from gen_worker._vendor.torchcg.store import LocalGraphStore, PublishOutcome
+from gen_worker.cli import workspace
 from gen_worker.cli import compile as compile_cli
 from gen_worker.cli import endpoint_lock as el
 
@@ -181,7 +182,7 @@ def test_a_built_graph_lands_where_boot_time_adoption_reads_it(
 
 
 def test_a_build_lands_in_the_box_cache_and_never_in_the_endpoint_tree(
-    endpoint: Path, tmp_path: Path, monkeypatch
+    endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """# pgw#1526: `compile` wrote its scratch to `<endpoint>/.compiled-graphs`.
 
@@ -196,7 +197,10 @@ def test_a_build_lands_in_the_box_cache_and_never_in_the_endpoint_tree(
     for their reason instead of this one.
     """
     box = tmp_path / "box-artifacts"
-    monkeypatch.setattr(compile_cli.workspace, "artifacts_root", lambda: box)
+    # Patched on `cli.workspace` itself, which is where the answer lives —
+    # `compile` looks the attribute up at call time, so this is the real seam
+    # rather than a re-export the module never promised.
+    monkeypatch.setattr(workspace, "artifacts_root", lambda: box)
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
