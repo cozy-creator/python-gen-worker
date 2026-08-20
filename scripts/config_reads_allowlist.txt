@@ -92,7 +92,6 @@ src/gen_worker/supervisor.py::GEN_WORKER_POSTMORTEM_FILE IPC GEN_WORKER_POSTMORT
 src/gen_worker/host_canary.py::$k IPC restores the child's saved env after the canary subprocess.
 
 src/gen_worker/procsplit/parent.py::$ENV_WATCHDOG_PING_S IPC watchdog ping cadence handed down to the child.
-src/gen_worker/procsplit/parent.py::GEN_WORKER_LOCAL_CELLS_DIR IPC GEN_WORKER_LOCAL_CELLS_DIR, read to prepare the exec boundary rather than to steer this process. `_spawn_child` builds the child's environment from `dict(os.environ)`, so the value the CHILD will resolve its compiled graph store to is whatever this process carries - and the parent must chown that root to the compute uid while it is still root. Reading it anywhere but here would be reading it after the only moment it can be acted on (pgw#1349). Same shape and same justification as the TENSORHUB_CACHE_DIR / GEN_WORKER_BOOT_RECORD reads in the same function; it is listed separately because the unit here is one file reading one variable.
 # ---------------------------------------------------------------------------
 # LIBRARY — torch / inductor / triton / NCCL read env at import. Accepted as a
 # MECHANISM. The VALUES are authored constants scattered across nine files,
@@ -121,7 +120,6 @@ src/gen_worker/convert/clone.py::COZY_CONVERT_WORKDIR STANDALONE COZY_CONVERT_WO
 src/gen_worker/convert/ingest.py::COZY_CLONE_DOWNLOAD_ATTEMPTS STANDALONE COZY_CLONE_DOWNLOAD_ATTEMPTS, convert-tool retry count.
 src/gen_worker/models/download.py::COZY_CIVITAI_DOWNLOAD_ATTEMPTS STANDALONE COZY_CIVITAI_DOWNLOAD_ATTEMPTS, provider retry count.
 src/gen_worker/net.py::$name STANDALONE COZY_HTTP_*_TIMEOUT_S. Documented as "read from env on every call (test-tunable)" - i.e. env used as a TEST SEAM, which is what loader `init_kwargs` exists for. Worth fixing; it is the last piece of prose from the old 5-file exception list that is still true.
-src/gen_worker/local_compiled_graph_store.py::GEN_WORKER_LOCAL_CELLS_DIR STANDALONE GEN_WORKER_LOCAL_CELLS_DIR, the local compiled graph store's ROOT (pgw#1096 moved the accessor here from local_compiled_graphs): a path relocation like TENSORHUB_CACHE_DIR, never a behavior knob, and a cross-repo contract with cozy-local's paths.go.
 src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODE_CONCURRENCY STANDALONE GEN_WORKER_VIDEO_ENCODE_CONCURRENCY, encode fan-out.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS VIOLATION GEN_WORKER_NATIVE_KERNELS. th#1887: NOT standalone — a serving-path rollout gate, not a CLI. Now also registered in BEHAVIOUR_GATES; deletion target pending a release-declaration check.
 

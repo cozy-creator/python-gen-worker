@@ -577,7 +577,7 @@ def _package_missing(backend: str) -> bool:
 def compile_axis(serving_mode: str) -> str:
     """``compiled`` | ``eager`` from ``ServedIdentity.serving_mode``.
 
-    ``jit_cell`` and ``aot_cell`` are BOTH compiled — the artifact kind is a  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
+    ``jit_graph`` and ``aot_graph`` are BOTH compiled — the artifact kind is a
     different axis (``metrics.serving_mode`` carries it), and folding it in here
     would split every compiled graph in two on a fact §1.30 ruled is a cache question.
     """

@@ -1,3 +1,9 @@
 # SHA-256 of worker_value_contracts.json.
 # PGW is the public-corpus vendor; peer repositories pin this byte identity.
-38c0b3664d4fa5194e539a82031cddf3ad7e400f07860131ca9b35e424459d4f
+#
+# pgw#1547 (Paul, 2026-08-20 hardcut): the `cell` vocabulary is retired from
+# the WIRE VALUES this corpus enumerates — serving modes jit_cell/aot_cell ->
+# jit_graph/aot_graph, and boot phases cell_arm/cell_fetch/cell_hub_rtt/
+# cell_verify -> graph_*. Values, not just names: tensorhub reads these strings,
+# so its copy moves in the same window.
+89f6bc53701754d8c95656293eb1902b6c24dbd2880e892eec97ff7e83e763c9

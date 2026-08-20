@@ -3,7 +3,7 @@
   "grammar": "<scheme>-<56 lowercase hex>, whole token <= 96 bytes of [a-z0-9][a-z0-9._-]*",
   "authorities": [
     "tensorhub internal/orchestrator/compilecache.IsCompiledGraphKey",
-    "python-gen-worker gen_worker.cell_key.is_key"
+    "python-gen-worker gen_worker._vendor.torchcg.identity.is_compiled_graph_key"
   ],
   "note": "This file is the CONTRACT between the two, vendored byte-identically in python-gen-worker (tests/testdata/) and fenced by scripts/grammar-vector-drift.sh. th#1897 exists because there was no such file: both implementations were internally consistent, they disagreed about `cg-key-v1`, and nothing in either CI could see it \u2014 the first mint on the new scheme would have compiled for 45+ minutes and been refused at publish. A change to either implementation that is not a change to this file is the same defect again.",
   "vectors": [
@@ -130,7 +130,7 @@
     {
       "key": "root/family-sdxl#cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
       "valid": false,
-      "note": "A cell REF is not a key; KeyRef composes them, KeyFromRef splits them."
+      "note": "A compiled-graph REF is not a key; KeyRef composes them, KeyFromRef splits them."
     },
     {
       "key": "manifest-7692c3ad3540bb803c020b3aee66cd8887123234",

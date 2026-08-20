@@ -76,14 +76,16 @@ record and carry it:
 LAYOUT (one directory per compiled graph, so a compiled graph and the facts about it move as a
 unit)::
 
-    <root>/aot-cells/<ck1-…>/record.json   the POLICY sidecar {verdict, sink, …}  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
-    <root>/aot-cells/<ck1-…>/cell.tar.gz   TCG's export — a MATERIALIZATION, not custody  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
-    <root>/aot-cells/.memo/<arm1-…>.json   the MEMO: pre-trace identity -> ck1 key  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
-    <root>/trust-class.json                the learned trust class
+    <root>/graphs/<ck1-…>/record.json   the POLICY sidecar {verdict, sink, …}
+    <root>/graphs/<ck1-…>/graph.tar.gz  TCG's export — a MATERIALIZATION, not custody
+    <root>/graphs/.memo/<arm1-…>.json   the MEMO: pre-trace identity -> ck1 key
+    <root>/trust-class.json             the learned trust class
 
-The layout is preserved on purpose: cozy-local's ``cozy compiled graphs`` CLI and
-tensorhub's runtime-env contract both name it, and the cutover changes byte
-CUSTODY, not the cross-repo path contract.
+where ``<root>`` is ``<TENSORHUB_CACHE_DIR>/compiled-graph-store``. pgw#1547
+renamed this layout in lockstep with cozy-local's ``cozy compiled graphs`` CLI
+and tensorhub's runtime-env contract — a HARDCUT with no dual-read and no
+boot-time move (Paul, 2026-08-20). A pod volume still holding the old
+``compile-cells/graphs`` tree is simply not found, and re-pays one mint.  # cell-spelling: names the pre-pgw#1547 on-disk path a stale pod volume may still hold
 
 THE MEMO, and why a content-addressed store needs one. The ck1 key's ``graph``
 axis is the traced-graph digest, which does not exist until an export
@@ -113,6 +115,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from gen_worker.models.cache_paths import tensorhub_cache_dir
 from gen_worker._vendor.torchcg.identity import ARTIFACT_KIND, is_compiled_graph_key
 from gen_worker._vendor.torchcg.identity import KEY_SCHEME
 
@@ -121,16 +124,23 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-#: A path relocation, never a behavior knob (§1.18, and the same rule
-#: ``TENSORHUB_CACHE_DIR`` follows). cozy-local exports it from its own
-#: ``workerEnv`` (``cozy-local/internal/paths/paths.go``) and the ``cozy
-#: compiled graphs`` CLI reads the same root, so the NAME and the DEFAULT are a
-#: cross-repo contract: changing either goes dark on that CLI.
-ENV_STORE_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
+#: pgw#1547 (Paul, 2026-08-20): there is NO dedicated env for this root any
+#: more. ``GEN_WORKER_LOCAL_CELLS_DIR`` was deleted outright — it named a  # cell-spelling: names the env pgw#1547 DELETED; the deletion is the point of the note
+#: second way to configure a root the CAS knob already configures, and a
+#: second name for one thing is a way for two callers to disagree. Paul:
+#: *"that's a configuration on where to store them, and I believe we store
+#: them in local-CAS, so you can delete this env entirely and just use whatever
+#: env we use to point to the local-CAS directory."* That knob is
+#: ``TENSORHUB_CACHE_DIR``, read through :func:`tensorhub_cache_dir` — the ONE
+#: root, for the CAS and for the sidecars that describe its compiled graphs.
+#: This store's subtree of the CAS root. Distinct from ``compiled-graphs``,
+#: which ``worker.py`` and the CLI already use for the v2 artifact pool — two
+#: stores under one root must not share a directory name.
+STORE_DIRNAME = "compiled-graph-store"
 
-COMPILED_GRAPHS_DIRNAME = "aot-cells"  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
+COMPILED_GRAPHS_DIRNAME = "graphs"
 MEMO_DIRNAME = ".memo"
-ARTIFACT_NAME = "cell.tar.gz"  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
+ARTIFACT_NAME = "graph.tar.gz"
 RECORD_NAME = "record.json"
 TRUST_CLASS_NAME = "trust-class.json"
 
@@ -169,11 +179,13 @@ SINK_REFUSED = "refused"
 
 
 def store_root() -> Path:
-    """The policy sidecar root: the stated env path, else the cozy cache dir."""
-    env = os.environ.get(ENV_STORE_DIR, "").strip()
-    if env:
-        return Path(env).expanduser()
-    return Path.home() / ".cache" / "cozy" / "compile-cells"  # cell-spelling: default store root; cozy-local paths.go + th localcompiledgraphs.Dir resolve it
+    """The policy-sidecar root, derived from the ONE CAS knob (pgw#1547).
+
+    Unconditional by design: there is no dedicated env and no branch, so this
+    root cannot disagree with the CAS it describes. Relocate both together with
+    ``TENSORHUB_CACHE_DIR``.
+    """
+    return tensorhub_cache_dir() / STORE_DIRNAME
 
 
 def compiled_graphs_root(root: Optional[Path] = None) -> Path:
@@ -982,7 +994,7 @@ __all__ = [
     "ARTIFACT_NAME",
     "COMPILED_GRAPHS_DIRNAME",
     "CompiledGraphRecord",
-    "ENV_STORE_DIR",
+    "STORE_DIRNAME",
     "LocalCompiledGraph",
     "MEMO_DIRNAME",
     "MintProvenance",

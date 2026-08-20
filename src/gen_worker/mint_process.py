@@ -937,7 +937,7 @@ def build_request(
         modules=tuple(task.modules),
         family=str(pending.family),
         arm_token=str(pending.arm_token),
-        target=str(Path(workdir) / "cell.tar.gz"),  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
+        target=str(Path(workdir) / "graph.tar.gz"),
         work_root=str(workdir),
         report=str(Path(workdir) / REPORT_NAME),
         # pgw#848: where the child writes its LIVE table. `report` is written

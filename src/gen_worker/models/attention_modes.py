@@ -1,7 +1,7 @@
 """Attention-execution vocabulary — the THIRD axis (pgw#1043 §PRODUCTIZATION).
 
 ``JobMetrics.lane`` says ``fp8-w8a8-dynamic+compiled`` and ``serving_mode`` says
-``aot_cell``. Neither can say **which key blocks the attention actually read**,  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
+``aot_graph``. Neither can say **which key blocks the attention actually read**,
 and on a sparse-attention endpoint that is the single largest determinant of both
 latency and the take the render is. The three axes are independent by
 construction:
@@ -10,7 +10,7 @@ construction:
 axis             vocabulary                          who owns it
 ===============  ==================================  ==========================
 execution lane   ``<weights>-<act>[-<scale>]+<exec>``  the CHECKPOINT's numerics
-serving mode     ``eager | jit_cell | aot_cell``      the ARMED artifact  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
+serving mode     ``eager | jit_graph | aot_graph``      the ARMED artifact
 attention mode   ``dense | sparse-kNN``               the SELECTOR + its index
 ===============  ==================================  ==========================
 

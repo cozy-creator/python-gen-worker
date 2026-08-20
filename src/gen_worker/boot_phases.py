@@ -73,11 +73,11 @@ PHASE_PIPELINE_LOAD = "pipeline_load"
 #: Emitted ONLY when warm work actually runs: a skipped warmup emits no row,
 #: because "nobody warmed" and "warming was free" are different answers.
 PHASE_WARMUP = "warmup"
-PHASE_CELL_FETCH = "cell_fetch"  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+PHASE_GRAPH_FETCH = "graph_fetch"
 #: The arm of ONE delivered or discovered compiled graph. Its duration is the same
 #: quantity the hub stores as the adoption's `duration_ms`, measured once, in
 #: the one place that does the arming.
-PHASE_CELL_ARM = "cell_arm"  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+PHASE_GRAPH_ARM = "graph_arm"
 PHASE_FIRST_REQUEST_SERVABLE = "first_request_servable"
 
 # --- the per-COMPONENT decomposition ---------------------------------------
@@ -129,10 +129,10 @@ PHASE_KEY_FOLD = "key_fold"
 #: publish-complete). `function` names the leg. NOTE: there is no worker-side
 #: key LOOKUP to time (the hub resolves the arm), so this is the whole of the
 #: hub RTT the compiled graph path actually pays on a boot.
-PHASE_CELL_HUB_RTT = "cell_hub_rtt"  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+PHASE_GRAPH_HUB_RTT = "graph_hub_rtt"
 #: Staging + contract verification of a downloaded compiled graph, before the first
 #: dlopen. The first half of admission.
-PHASE_CELL_VERIFY = "cell_verify"  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+PHASE_GRAPH_VERIFY = "graph_verify"
 #: ONE entry's admission: contract parse, constant bind, ingress-assertion
 #: arming and the admission-drift parity check against the artifact's own
 #: generated guards. The second half of admission, and the per-entry parity
@@ -172,8 +172,8 @@ CLASS_SETUP = "setup"      # probes, seals, manifests, handshake
 _CLASS_BY_PHASE: Dict[str, str] = {
     PHASE_HELLO: CLASS_SETUP,
     PHASE_WEIGHTS_FETCH: CLASS_FETCH,
-    PHASE_CELL_FETCH: CLASS_FETCH,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
-    PHASE_CELL_ARM: CLASS_LOAD,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    PHASE_GRAPH_FETCH: CLASS_FETCH,
+    PHASE_GRAPH_ARM: CLASS_LOAD,
     PHASE_PIPELINE_LOAD: CLASS_LOAD,
     # An UNARMED warm pays the compile; an ARMED one pays only the call. The
     # default is the expensive reading; `span(..., klass=)` overrides per row,
@@ -190,8 +190,8 @@ _CLASS_BY_PHASE: Dict[str, str] = {
     PHASE_DECLARATION_COMPOSE: CLASS_SETUP,
     PHASE_TRACE_FOR_KEY: CLASS_COMPILE,
     PHASE_KEY_FOLD: CLASS_SETUP,
-    PHASE_CELL_HUB_RTT: CLASS_SETUP,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
-    PHASE_CELL_VERIFY: CLASS_LOAD,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    PHASE_GRAPH_HUB_RTT: CLASS_SETUP,
+    PHASE_GRAPH_VERIFY: CLASS_LOAD,
     PHASE_ENTRY_ADMIT: CLASS_LOAD,
     PHASE_EAGER_READY: CLASS_SETUP,
     PHASE_COMPILED_SWAP: CLASS_SETUP,
@@ -1171,15 +1171,15 @@ SHAPE_ENTRYPOINT: frozenset = SHAPE_EAGER | frozenset({
 #: A boot that ADOPTED a compiled graph the hub named: no trace, no fold — it pays a
 #: download and an admission instead.
 SHAPE_ADOPT: frozenset = SHAPE_ENTRYPOINT | frozenset({
-    PHASE_CELL_FETCH, PHASE_CELL_VERIFY, PHASE_ENTRY_ADMIT, PHASE_CELL_ARM,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    PHASE_GRAPH_FETCH, PHASE_GRAPH_VERIFY, PHASE_ENTRY_ADMIT, PHASE_GRAPH_ARM,
     PHASE_COMPILED_SWAP,
 })
 #: A boot that MINTED its own compiled graph: declaration, per-class trace, fold, the
 #: publish round trips, then the same admission as an adopt.
 SHAPE_SELF_MINT: frozenset = SHAPE_ADOPT | frozenset({
     PHASE_DECLARATION_COMPOSE, PHASE_TRACE_FOR_KEY, PHASE_KEY_FOLD,
-    PHASE_CELL_HUB_RTT,  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
-}) - frozenset({PHASE_CELL_FETCH})  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    PHASE_GRAPH_HUB_RTT,
+}) - frozenset({PHASE_GRAPH_FETCH})
 
 #: A boot whose phases explain less of the wall than this is not decomposed.
 #: The acceptance bar: the phases sum to within ~5% of wall.
@@ -1323,8 +1323,8 @@ __all__ = [
     "PHASE_WEIGHTS_FETCH",
     "PHASE_PIPELINE_LOAD",
     "PHASE_WARMUP",
-    "PHASE_CELL_FETCH",  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
-    "PHASE_CELL_ARM",  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    "PHASE_GRAPH_FETCH",
+    "PHASE_GRAPH_ARM",
     "PHASE_FIRST_REQUEST_SERVABLE",
     "PHASE_SDK_READY",
     "PHASE_COMPONENT_FETCH",
@@ -1333,8 +1333,8 @@ __all__ = [
     "PHASE_DECLARATION_COMPOSE",
     "PHASE_TRACE_FOR_KEY",
     "PHASE_KEY_FOLD",
-    "PHASE_CELL_HUB_RTT",  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
-    "PHASE_CELL_VERIFY",  # cell-spelling: hub-owned boot-phase wire string (proto lane, pgw#1363)
+    "PHASE_GRAPH_HUB_RTT",
+    "PHASE_GRAPH_VERIFY",
     "PHASE_ENTRY_ADMIT",
     "PHASE_EAGER_READY",
     "PHASE_COMPILED_SWAP",

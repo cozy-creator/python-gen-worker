@@ -35,7 +35,7 @@ from gen_worker import artifact_meta, receipts
 # ---------------------------------------------------------------------------
 
 
-def _artifact(tmp_path: Path, meta_bytes: bytes, name: str = "cell.tar.gz") -> Path:  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
+def _artifact(tmp_path: Path, meta_bytes: bytes, name: str = "graph.tar.gz") -> Path:
     """A real gzip-compressed artifact carrying `meta_bytes` as its
     metadata.json, plus a payload member so it is shaped like a compiled graph."""
     path = tmp_path / name

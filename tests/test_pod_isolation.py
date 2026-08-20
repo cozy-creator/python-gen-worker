@@ -351,29 +351,50 @@ def test_the_dropped_child_can_write_every_path_it_was_granted(dropped, tmp_path
 
 @root_only
 def test_the_dropped_child_can_write_a_RELOCATED_local_compiled_graph_store(dropped):
-    """pgw#1349: the mint's own store, when an operator has moved it.
+    """pgw#1349, re-aimed by pgw#1547 at the knob that still exists.
 
-    ``local_compiled_graph_store.store_root()`` defaults under ``~/.cache``, which the
-    grant list already covers through the compute uid's home — so the gap was
-    invisible for as long as nobody moved it. cozy-local DOES move it
-    (``internal/paths/paths.go`` exports ``GEN_WORKER_LOCAL_CELLS_DIR``), and a  # cell-spelling: env name pinned cross-repo by the pgw#1237 runtime-env parity contract
-    relocated root is created by this root parent at 0755 and never chowned, so
-    the child's first memo write died on
-    ``PermissionError: .../aot-cells`` — mid-request, taking the stream down  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
-    with it. It surfaced as a NON-DETERMINISTIC red of a neighbouring row in
-    this very file, because whether the mint reached its memo write inside a
-    given tape was a race. Asserted directly here so the boundary is measured
-    instead of stumbled over.
+    THE ORIGINAL BUG: ``local_compiled_graph_store`` had its OWN env
+    (``GEN_WORKER_LOCAL_CELLS_DIR``), cozy-local relocated it to a root outside  # cell-spelling: names the env pgw#1547 DELETED; the row exists to say the shape is now impossible
+    every entry in the grant list, this root parent created it at 0755 and
+    never chowned it, and the dropped child's first memo write died on
+    ``PermissionError`` — mid-request, taking the stream down with it. It
+    surfaced as a NON-DETERMINISTIC red of a neighbouring row in this file,
+    because whether the mint reached its memo write inside a given tape was a
+    race.
 
-    The suite's own autouse ``_isolated_local_compiled_graph_store`` fixture is what
-    relocates it here, which makes this an honest reproduction of the operator
-    case rather than a construction: nothing in the test sets the env for the
-    test's benefit."""
-    root = os.environ.get(local_compiled_graph_store.ENV_STORE_DIR, "")
-    assert root, (
-        f"{local_compiled_graph_store.ENV_STORE_DIR} is unset, so this row would pass "
-        "for the wrong reason — the suite's autouse fixture sets it"
+    THAT ENV IS DELETED (pgw#1547). The store is now
+    ``<TENSORHUB_CACHE_DIR>/compiled-graph-store``, a subtree of a root the
+    grant list already covers recursively — so the ORIGINAL shape is now
+    structurally impossible rather than merely fixed. This row therefore
+    measures the property that still has to hold: relocate the ONE knob, and
+    the dropped child can still write its own store under it. If a future
+    change re-introduces a second root for this store, this row goes red the
+    same way it did in 2026.
+
+    The suite's autouse ``_isolated_local_compiled_graph_store`` fixture is
+    what relocates the cache root here, so this stays an honest reproduction of
+    the operator case rather than a construction: nothing in the test sets the
+    env for the test's benefit."""
+    # The parent restates the store's directory name rather than importing it
+    # (it must stay torch-free), so pin the two together HERE: a drift between
+    # them grants one path and writes another, which is pgw#1349 with extra
+    # steps and no error message.
+    from gen_worker.procsplit import parent as _parent
+    assert _parent._COMPILED_GRAPH_STORE_DIRNAME == local_compiled_graph_store.STORE_DIRNAME, (
+        f"procsplit.parent grants {_parent._COMPILED_GRAPH_STORE_DIRNAME!r} but the store "
+        f"writes {local_compiled_graph_store.STORE_DIRNAME!r}"
     )
+
+    # Ask the CHILD's environment, never this process's: the harness overrides
+    # TENSORHUB_CACHE_DIR for the child, so computing the expected root from
+    # `os.environ` here would probe a path nothing in the split ever writes —
+    # which is exactly the false red this row produced while being written.
+    cache_root = dropped.child_env.get("TENSORHUB_CACHE_DIR", "")
+    assert cache_root, (
+        "the child has no TENSORHUB_CACHE_DIR, so this row would pass for the "
+        "wrong reason — the split harness sets it"
+    )
+    root = os.path.join(cache_root, local_compiled_graph_store.STORE_DIRNAME)
     assert not os.path.exists(os.path.join(root, local_compiled_graph_store.COMPILED_GRAPHS_DIRNAME)), (
         "this row must measure the CHILD creating the compiled graphs root — a "
         f"{local_compiled_graph_store.COMPILED_GRAPHS_DIRNAME} this root parent made would be "
@@ -381,14 +402,15 @@ def test_the_dropped_child_can_write_a_RELOCATED_local_compiled_graph_store(drop
     )
     # `write-probe` mkdirs a nested subtree before it writes, which is the
     # operation that actually died: `_write_json_atomic` reaches every sidecar
-    # through `parent.mkdir(parents=True)`, and `aot-cells` is the component  # cell-spelling: on-disk dir pinned by the pgw#1237 parity contract + cozy-local's CLI
+    # through `parent.mkdir(parents=True)`, and `graphs` is the component
     # that did not exist yet.
     assert _probe(dropped, "write-probe", root) == "ok", (
         f"the compute child cannot write its own compiled graph store at {root}. The "
         "mint writes the memo and every per-compiled graph sidecar there, so this is a "
-        "dead compute child on any pod whose store has been relocated "
-        "(pgw#1349). The answer is another entry in the grant list, never root."
+        "dead compute child on any pod whose cache root has been relocated "
+        "(pgw#1349). The answer is a grant that covers the cache root, never root."
     )
+
 
 
 @root_only
