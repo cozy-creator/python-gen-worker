@@ -688,13 +688,15 @@ def artifact_constraints(artifact: Path) -> Tuple[Tuple[str, str], ...]:
 def torch_shim_floor() -> Tuple[str, str]:
     """The AOTI shim this artifact was built against, as a same-major floor.
 
-    Read from the installed distribution's metadata, never by importing torch
-    (pgw#1546): the version string is identical and the import costs ~1.5 s on
-    the warm publish path, which loads no model.
+    Reads ``torch.__version__`` — a recording of the mint env, not a key axis
+    — and deliberately not the dist-metadata reader the pgw#1489 guard fences
+    to one diagnostic caller. The import is free in practice: every path that
+    publishes has already imported torch through ``toolchain_digest``
+    (pgw#1546).
     """
-    from importlib.metadata import version as dist_version
+    import torch
 
-    version = str(dist_version("torch")).split("+", 1)[0]
+    version = str(torch.__version__).split("+", 1)[0]
     return ("torch", _same_major_floor(version) or f">={version}")
 
 
