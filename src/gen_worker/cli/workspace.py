@@ -1,10 +1,15 @@
-"""The box-shared stores the four verbs share, and how a ref becomes a tree.
+"""The box-shared stores the verbs share, and how a ref becomes a tree.
 
-pgw#1466. ``lock``, ``sync``, ``serve`` and ``run`` are four front doors onto
-one set of stores; this module is where "where do weights live" and "where do
-graphs live" are each answered ONCE. A verb that computed its own answer would
-be a verb that can disagree with its siblings — `sync` pre-warming into a
-directory `serve` never reads is the failure mode, and it is silent.
+pgw#1466, re-spelled by pgw#1491. ``lock``, ``download``, ``compile``, ``up``
+and ``run`` are front doors onto one set of stores; this module is where "where
+do weights live" and "where do graphs live" are each answered ONCE. A verb that
+computed its own answer would be a verb that can disagree with its siblings —
+``download`` pre-warming into a directory ``up`` never reads is the failure
+mode, and it is silent.
+
+(``sync`` was one of the original four and is DELETED, not renamed: deps are
+``uv sync``, artifacts are ``compile``, weights are ``download``. One verb that
+meant all three could not be given a correct default for any of them.)
 
 Two stores, deliberately separate:
 
@@ -32,7 +37,7 @@ from typing import Any, Optional
 #: `weights_cas_root`), never guessed.
 DEFAULT_WEIGHTS_CAS = Path.home() / ".cache" / "tensorhub" / "cas"
 
-#: Exported programs (from `lock`) and compiled artifacts (from `sync`).
+#: Exported programs (from `lock`) and compiled artifacts (from `compile`).
 #: Config key `COZY_GRAPH_CAS` (Settings field `graph_cas_root`).
 DEFAULT_GRAPH_CAS = Path.home() / ".cache" / "cozy" / "graph-cas"
 
@@ -146,7 +151,7 @@ def resolve_checkpoint(ref: CheckpointRef, *, cas_root: Optional[Path] = None) -
         raise WorkspaceError(
             f"{ref} is not in the weight CAS at {root}.\n"
             f"  refs present: {', '.join(available) if available else '(none)'}\n"
-            f"  run `gen-worker sync` to materialize it."
+            f"  run `gen-worker download {ref}` to materialize it."
         )
     snapshot_id = ref_file.read_text(encoding="utf-8").strip()
     if not snapshot_id:

@@ -64,6 +64,10 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # CLI installs Settings at process entry like every other entry point.
     weights_cas_root: str = ""
     graph_cas_root: str = ""
+    # pgw#1491: where `up` publishes its handle and `run`/`down` find it.
+    # Empty = the box default in `cli/endpoint_state.py`, beside the code that
+    # explains why liveness is a signal-0 and not the file's existence.
+    endpoint_state_root: str = ""
     # pgw#1462 part 2: the IMAGE's read-only exported-program CAS — where the
     # builder bakes this release's serialized ExportedPrograms. Distinct from
     # `graph_cas_root` (the CLI's own store) and from the pod's

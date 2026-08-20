@@ -164,15 +164,26 @@ def build_payload(
     struct_type: Any,
     *,
     base: Optional[Dict[str, Any]] = None,
+    primary: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assemble a payload dict from ergonomic tokens, coerced via ``struct_type``.
 
     ``base`` (e.g. a ``--payload`` JSON object) is the starting point; tokens
     merge over it. Raises :class:`ArgError` on a malformed token.
+
+    ``struct_type`` may be ``None``: that is the SOCKET CLIENT case (pgw#1491's
+    ``gen-worker run``), which holds no struct because importing the endpoint
+    to send a string would mean importing torch. It then guesses scalar shapes
+    httpie-style and accepts any field name, and ``primary`` supplies the one
+    fact it cannot guess — which field a bare positional fills — published by
+    the daemon from the live struct. The authoritative decode still happens
+    there, so a bad field is a typed refusal from the real decode path rather
+    than from a client-side copy of the schema.
     """
     out: Dict[str, Any] = dict(base or {})
-    field_types = _struct_field_types(struct_type)
-    primary = primary_field(struct_type)
+    field_types = _struct_field_types(struct_type) if struct_type is not None else {}
+    if primary is None and struct_type is not None:
+        primary = primary_field(struct_type)
     primary_set = False
 
     for tok in tokens:

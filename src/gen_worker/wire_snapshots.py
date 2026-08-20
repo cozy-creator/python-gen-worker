@@ -68,6 +68,45 @@ def resolved_repo_from_snapshot(snap: Any) -> Any:
     )
 
 
+def snapshot_from_resolved_repo(resolved: Any) -> Any:
+    """``WorkerResolvedRepo`` -> ``pb.Snapshot``: the INVERSE, and it lives
+    here for the reason this module exists — one place the two spellings meet.
+
+    pgw#1491. The CLI resolves a checkpoint over HTTP
+    (``hub_client.resolve_repo``, which answers ``WorkerResolvedRepo``) and
+    then hands it to the SAME ``ModelStore.ensure_local`` a pod's boot uses,
+    whose parameter is the gRPC spelling. Without this the CLI would need its
+    own materializer, which is the two-paths-rot rule's exact shape: two
+    downloaders that both produce trees and disagree about integrity.
+
+    ``provenance`` is deliberately not synthesized: the proto calls it
+    audit/display ONLY and nothing downstream reads it, so inventing one here
+    would be manufacturing provenance the hub never stated.
+    """
+    from .pb import worker_scheduler_pb2 as pb
+
+    return pb.Snapshot(
+        digest=resolved.snapshot_digest,
+        files=[
+            pb.SnapshotFile(
+                path=f.path,
+                size_bytes=int(f.size_bytes),
+                url=f.url or "",
+                digest=f.digest or "",
+                chunks=[
+                    pb.ChunkRef(
+                        sha256=c.sha256,
+                        url=c.url,
+                        len=int(c.length),
+                    )
+                    for c in (f.chunks or ())
+                ],
+            )
+            for f in resolved.files
+        ],
+    )
+
+
 def resolved_repos(
     wire: Mapping[str, Any],
     bindings: Iterable[Any] = (),

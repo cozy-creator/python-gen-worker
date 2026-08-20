@@ -18,24 +18,18 @@ from typing import List
 # shapes, the describe document, or the serve sidecar change incompatibly.
 PROTOCOL_VERSION = 1
 
-# Optional features a host can rely on without scraping ``--help``. Add a token
-# only when the feature is actually implemented:
-#   - "describe"       : `gen-worker describe --json`
-#   - "list_functions" : `gen-worker serve --list-functions [--json]`
-#   - "prefetch"       : `gen-worker prefetch`
-#   - "cancel"         : per-request `{"cancel":{"request_id"}}` control
-#   - "streaming"      : multi-frame streamed responses, `{"stream":true}`
-#   - "tcp_listen"     : `serve --listen tcp://host:port`
-#   - "serve_sidecar"  : machine-readable `.gen-worker.serve.json` handle
-#   - "hub_resolve"    : standalone Hub-ref resolve via TENSORHUB_URL
+# Optional features a host can rely on without scraping ``--help``. A token
+# goes in ONLY when the feature actually ships. pgw#1491 removed six that named
+# deleted verbs (`describe`, `list_functions`, `prefetch`, `cancel`,
+# `streaming`, `serve_sidecar`, `tcp_listen`) — a capability list that lies is
+# worse than no list, because an integrator branches on it:
+#   - "endpoint_handle" : the ~/.cache/cozy/resident/<key>/endpoint.json handle
+#                         `up` publishes and `run`/`down` read
+#   - "dispatch_counts" : every response carries compiled-vs-eager call counts
+#   - "hub_resolve"     : standalone Hub-ref resolve via TENSORHUB_URL
 CAPABILITIES: List[str] = [
-    "describe",
-    "list_functions",
-    "prefetch",
-    "cancel",
-    "streaming",
-    "tcp_listen",
-    "serve_sidecar",
+    "endpoint_handle",
+    "dispatch_counts",
     "hub_resolve",
 ]
 
