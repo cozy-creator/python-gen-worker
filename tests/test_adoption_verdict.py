@@ -235,3 +235,117 @@ def test_the_mint_mints_what_it_was_armed_on_not_a_second_read(
         "property that already emptied"
     )
     assert final.landed == 3 and not final.running
+
+
+@pytest.fixture()
+def wire(monkeypatch: pytest.MonkeyPatch) -> "list[tuple]":
+    from gen_worker import activity as activity_mod
+
+    seen: "list[tuple]" = []
+    monkeypatch.setattr(
+        activity_mod, "emit_event",
+        lambda kind, detail, phase="", **kw: seen.append((kind, phase, detail, kw)))
+    return seen
+
+
+def test_the_armed_zero_verdict_is_a_durable_row_not_a_log_line(
+    tmp_path: Path, wire: "list[tuple]", caplog: pytest.LogCaptureFixture
+) -> None:
+    """pgw#1564, second lesson: the 09:41 zero was diagnosable from the hole
+    reasons — which lived in a resident log; the next instance was on a pod
+    whose SSH was dead. The reasons now ride the wire."""
+    import tcg_artifacts
+    from gen_worker._vendor.torchcg.requirements import RequirementsManifest
+    from test_serving_adopt_first import fresh_host, publish_document
+
+    binding = make_binding(tmp_path)
+    host = fresh_host(binding, tmp_path)
+    host.setup()
+    document = publish_document(host)
+    store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
+    for record in document.lanes[0].graphs:
+        bare = tcg_artifacts.aoti_package(
+            tmp_path / f"{record.graph[-8:]}.pt2",
+            graph_specialization=record.graph)
+        store.publish_artifact(
+            record.graph, ENV, bare,
+            RequirementsManifest(
+                include_set=(("torch", torch.__version__),), sm_compiled=SM))
+
+    booted = fresh_host(binding, tmp_path)
+    with caplog.at_level(logging.WARNING):
+        booted.setup(store=store, document=document, sm=SM,
+                     artifacts_dir=tmp_path / "adopted", stack=STACK)
+
+    rows = [row for row in wire if row[1] == "armed_zero"]
+    assert len(rows) == 1, wire
+    _kind, _phase, detail, counts = rows[0]
+    assert "armed ZERO" in detail and "ArtifactFormatSkew" in detail
+    assert counts["step"] == 0 and counts["total_steps"] == len(
+        document.lanes[0].graphs)
+
+
+def test_the_mint_terminal_verdict_rides_the_wire_with_its_identity(
+    tmp_path: Path, wire: "list[tuple]",
+) -> None:
+    from gen_worker.serving.self_mint import SelfMint
+
+    compiled: "list[str]" = []
+
+    def compiler(blob: Path, record: SimpleNamespace, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"artifact")
+        compiled.append(record.graph)
+        return destination
+
+    def program_source(graph: str, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"program")
+        return destination
+
+    host = SimpleNamespace(
+        holes=tuple(
+            SimpleNamespace(record=SimpleNamespace(graph=f"g{i}", target="unet"))
+            for i in range(2)),
+        adoption=SimpleNamespace(
+            env=SimpleNamespace(value="lane-a", sm=SM),
+            arm=lambda record, artifact: None),
+    )
+    box = SelfMint(store=None, artifacts_dir=tmp_path / "artifacts",
+                   compiler=compiler, program_source=program_source, vcpus=2)
+    box.arm(host)
+    final = box.join(30.0)
+    assert final.landed == 2
+
+    terminal = [row for row in wire if row[1].startswith("terminal_")]
+    assert len(terminal) == 1, wire
+    _kind, phase, detail, counts = terminal[0]
+    assert phase == "terminal_complete"
+    assert "gen-worker " in detail and "contract " in detail, (
+        "the executed code identity must ride the verdict — 'pin inferred "
+        "from the build chain' is what this row exists to end")
+    assert "DIVERGENT" not in detail
+    assert counts["step"] == 2 and counts["total_steps"] == 2
+
+
+def test_a_divergent_work_list_is_named_on_the_verdict(
+    tmp_path: Path, wire: "list[tuple]",
+) -> None:
+    """The 13/23 ms no-op class, as ONE named fact: the run processed fewer
+    holes than were armed. Constructed directly — a pod running older bytes
+    cannot emit new instruments, so the row's job is to make the NEXT
+    executed-bytes question answerable, not to time-travel."""
+    from gen_worker.serving.mint import MintOutcome
+    from gen_worker.serving.self_mint import SelfMint
+
+    box = SelfMint(
+        store=None, artifacts_dir=tmp_path,
+        compiler=lambda blob, record, destination: Path(destination),
+        program_source=lambda graph, destination: Path(destination),
+    )
+    box._settle(MintOutcome(holes=0, width=0, elapsed_s=0.001), "", 14)
+
+    terminal = [row for row in wire if row[1].startswith("terminal_")]
+    assert len(terminal) == 1
+    detail = terminal[0][2]
+    assert "DIVERGENT WORK-LIST: armed 14 hole(s), the run processed 0" in detail

@@ -359,6 +359,59 @@ class SelfMint:
         with self._lock:
             self._status = status
         logger.info("self-mint: %s", status.facts())
+        self._say_verdict(status, outcome, holes)
+
+    def _say_verdict(
+        self, status: SelfMintStatus, outcome: Optional[MintOutcome], armed_holes: int,
+    ) -> None:
+        """The mint's TERMINAL verdict as a DURABLE activity row (pgw#1564).
+
+        Twice in one day a pod's mint declared itself done in milliseconds and
+        the one line naming WHY lived in a log no SSH could reach (the
+        pgw#1541/#1542 lesson, relearned). So the verdict rides the wire:
+
+        * the COUNTS, armed-at-arm vs processed-at-run — a divergence between
+          them IS the 13/23 ms no-op class, named here instead of being
+          inferred across two other rows that disagree;
+        * the REASON (failures / condemnation / error), deduped upstream;
+        * the EXECUTED CODE IDENTITY — the falsifying rental could only say
+          "pin inferred from the build chain"; a verdict that states its own
+          `gen_worker_version` + parent contract digest ends that inference.
+
+        Never raises: a verdict emitter that can kill the worker it reports on
+        is worse than the silence it replaces.
+        """
+        try:
+            from ..compile_cache import gen_worker_version
+            from .mint_child import contract_digest
+
+            run_holes = outcome.holes if outcome is not None else 0
+            divergence = ""
+            if run_holes != armed_holes:
+                divergence = (
+                    f" DIVERGENT WORK-LIST: armed {armed_holes} hole(s), the "
+                    f"run processed {run_holes} — the pgw#1564 no-op class; "
+                    f"a second live read (or older bytes) emptied the list."
+                )
+            try:
+                identity = (
+                    f"gen-worker {gen_worker_version()}, "
+                    f"contract {contract_digest() or 'no-source'}"
+                )
+            except Exception:  # noqa: BLE001 — identity must not cost the row
+                identity = "identity unreadable"
+            activity_mod.emit_event(
+                KIND,
+                f"self-mint TERMINAL: {status.state} — landed "
+                f"{status.landed}, failed {status.failed}, armed "
+                f"{armed_holes} hole(s), {status.elapsed_s:.3f}s."
+                f"{divergence} reason: {status.reason or 'none'}; {identity}",
+                phase=f"terminal_{status.state}",
+                step=status.landed,
+                total_steps=armed_holes,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("self-mint: verdict row failed to emit", exc_info=True)
 
     def _beat(self, act: activity_mod.Activity, stop: threading.Event) -> None:
         """Carry the counter to the hub on this mint's OWN thread.
