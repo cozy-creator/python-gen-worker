@@ -591,7 +591,7 @@ def test_the_probe_counts_the_reusable_allocator_pool_as_available():
     cache = 400 * _MIB                # reusable pool the allocator still holds
 
     real_attr = pr._placement_attribution
-    pr._placement_attribution = lambda _t: {"attr_cache_bytes": cache}
+    pr._placement_attribution = lambda torch_mod: {"attr_cache_bytes": cache}
     try:
         ok, reported = pr.probe_plan(
             parked, free_bytes_now=lambda: driver_free, floor_bytes=floor)
