@@ -67,14 +67,19 @@ PARTIAL_RESIDENT_DEVICE_ATTR = "_cozy_partial_resident_device"
 #: to a coarser one is a placement the operator asked for and did not get.
 PARTIAL_RESIDENT_UNARMED_PHASE = "partial_resident_unarmed"
 
-#: Headroom held back for the transient onload of an offloaded component. Text
-#: encoding runs at 77 tokens and its activations are noise next to the weights
-#: being moved; this covers the allocator's own slack and fragmentation during
-#: the copy. On the campaign card it is also what decides between two admissible
-#: SDXL plans — evicting `text_encoder_2` alone peaks at 6.95 GiB of 7.3 free
-#: (96%), evicting both encoders peaks at 6.70 (92%) for 0.25 GiB more traffic.
-#: The second is the trade this number buys, and it buys it by ARITHMETIC.
-_TRANSIENT_RESERVE_BYTES = 512 * (1 << 20)
+#: Allocator slack for the ONLOAD COPY itself — and nothing else. It is NOT an
+#: activation estimate: the only phase in which an evicted component is on the
+#: card is the one that runs it (text encoding, 77 tokens), whose activations are
+#: noise next to the weights being moved. The activation estimate is the BUDGET's
+#: `PARTIAL_RESIDENT_RESERVE_GB`, and it guards the denoise phase, where
+#: activations actually exist.
+#:
+#: MEASURED CLIFF, found on the card and recorded because the number looks
+#: arbitrary otherwise: at 512 MiB this check REFUSED the whole rung once free
+#: VRAM dropped from 7.3 to 7.1 GiB — a 200 MiB shift by a co-tenant silently
+#: reverting SDXL to the 13 GiB-per-request rung. Charging a denoise-sized
+#: reserve against an encode-sized phase is what produced that cliff.
+_TRANSIENT_RESERVE_BYTES = 256 * (1 << 20)
 
 #: The activation headroom this rung reserves, and it is NOT
 #: ``memory._DEFAULT_SAFETY_MARGIN_GB``. That 2.0 GiB is a PLACEMENT heuristic
