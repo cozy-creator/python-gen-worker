@@ -21,7 +21,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..serving.context import _lane_torch_dtype, _rejected_torch_dtype
+from ..serving.context import _lane_torch_dtype
 
 
 class TraceLoadContext:
@@ -80,29 +80,28 @@ class TraceLoadContext:
                 f"ctx.load() needs a loader with from_pretrained "
                 f"(a diffusers/transformers class); got {loader!r}"
             )
-        # pgw#1447, SECOND SITE. This is a separate implementation of the same
-        # eager bridge `serving/context.py` carries, and it had the identical
-        # defect: a `ModularPipeline` does not consume `torch_dtype` in
-        # `from_pretrained`, so `**kwargs` funnels it into the constructor and
-        # a strict pipeline refuses it. Fixing only the serve-path copy left
-        # the DERIVE — the one path that ALWAYS takes an eager bridge, because
-        # a trace has no streaming engine — still broken. Two bridges, one
-        # contract; the predicate is shared so they cannot drift.
-        # pgw#1448: the real `torch.dtype`, never the contract's SPELLING.
-        # `Contract.dtype` is `'bfloat16'` (str) and `Contract.torch_dtype` is
-        # `torch.bfloat16`; diffusers refuses the string with a warning and
-        # silently loads fp32, so this read decides the precision the whole
-        # trace runs at.
-        dtype = _lane_torch_dtype(self.lane, checkpoint_dir=self.checkpoint_dir)
-        try:
-            loaded = from_pretrained(self.checkpoint_dir, torch_dtype=dtype)
-        except TypeError as exc:
-            if not _rejected_torch_dtype(exc):
-                raise
-            loaded = from_pretrained(self.checkpoint_dir)
-            to = getattr(loaded, "to", None)
-            if dtype is not None and callable(to):
-                to(dtype)
+        # pgw#1512, Paul's per-component-passthrough ruling. There is NO
+        # `torch_dtype=` here any more, and its absence is the fix.
+        #
+        # This used to read one dtype off the lane and hand it to
+        # `from_pretrained`, casting EVERY component of the tree to it. The
+        # serving loader does the opposite and says so: "No `torch_dtype=`
+        # (the lane contract IS the dtype)" (`serving/context.py`), and
+        # "bytes land verbatim in the container's own dtype ... any conversion
+        # is the STORE's contract-negotiation job, NEVER load time. A
+        # container that disagrees with the active lane is reported, not
+        # silently repaired" (`serving/streaming/engine.py`). So the trace
+        # performed exactly the conversion serve refuses, and a DiT lane's
+        # bf16 landed on the VAE beside it — a bf16 bias meeting an fp32
+        # activation in a decode block that is fine on a pod.
+        #
+        # Precision is now decided PER COMPONENT, by `component_dtype` below,
+        # through the session policy torchcg asks (tcg#68). The lane still
+        # governs the component its contract describes, so the marked
+        # denoiser's precision — which IS graph identity (pgw#1458) — still
+        # comes from the contract, and pgw#1448's "real dtype, never the
+        # spelling" rule still applies to it.
+        loaded = from_pretrained(self.checkpoint_dir)
         # Adapter application mutates WEIGHTS (or injects adapter layers);
         # at trace every parameter is fake and no adapter bytes exist, so the
         # enumeration's fake-adapter arms must not hit real LoRA I/O. The
@@ -113,6 +112,104 @@ class TraceLoadContext:
             if hasattr(loaded, lora_call):
                 setattr(loaded, lora_call, _noop)
         return loaded
+
+    def component_dtype(self, tree: Any, subfolder: Any) -> Any:
+        """The precision ONE component loads at (pgw#1512, Paul's ruling).
+
+        Installed as torchcg's session policy, so it is asked once per
+        component instead of once per tree.
+
+        1. **The lane governs the component its CONTRACT DESCRIBES.** A layout
+           contract names the tensors it covers, and a pattern's first segment
+           is the component that owns them (``unet.conv_out.weight`` ->
+           ``unet``). For h3 that set is the DiT and nothing else, which is the
+           whole ruling: a denoiser contract says nothing about the VAE beside
+           it. This branch is where precision-is-identity lives (pgw#1458), so
+           it keeps pgw#1448's real-dtype-never-the-spelling read.
+        2. **Otherwise the component's own container answers**, through the
+           SAME stub-aware reader the serve path uses
+           (``serving.checkpoint_dtype``): its config's declared dtype first,
+           then the safetensors headers. On a projected tree those headers are
+           128-byte stubs, and that reader is the one that knows it -- a naive
+           open here would read a stub as truth.
+        3. **Nothing may default.** If neither the contract nor the container
+           can say, this REFUSES by name. A quiet fp32 is the defect pgw#1448
+           deleted, and at trace it would silently re-key a graph.
+        """
+
+        from ..serving.checkpoint_dtype import checkpoint_dtype
+
+        directory = Path(str(tree))
+        name = str(subfolder).strip("/") if subfolder else ""
+        if name:
+            directory = directory / name
+        else:
+            # diffusers loads a component by handing its DIRECTORY over with no
+            # subfolder (`AutoencoderKL.from_pretrained(<tree>/vae)`), so an
+            # absent subfolder does not mean "the root". The component is
+            # whatever this directory is called relative to the tree the author
+            # was given; only the tree ITSELF is the root, and that is the
+            # single-module checkpoint the lane speaks for.
+            try:
+                relative = directory.resolve().relative_to(
+                    self.checkpoint_dir.resolve()
+                )
+            except (ValueError, OSError):
+                relative = None
+            if relative is not None and str(relative) not in (".", ""):
+                name = str(relative).strip("/")
+
+        governed = (not name) or name in self._lane_components()
+        if governed:
+            declared = _lane_torch_dtype(self.lane, checkpoint_dir=self.checkpoint_dir)
+            if declared is not None:
+                return declared
+        own = checkpoint_dtype(directory)
+        if own is not None:
+            return own
+
+        if governed:
+            raise TraceSurfaceUnavailable(
+                f"nothing declares a load dtype for component "
+                f"{name or '<root>'!r} of {tree}, and the lane contract "
+                f"COVERS it: this is the component whose precision becomes "
+                f"graph identity (pgw#1458), so the derive cannot pick one. "
+                f"State a dtype on the lane contract, or a torch_dtype in "
+                f"the component's config."
+            )
+        # NOT a default, and the distinction is the whole ruling: this is the
+        # ABSENCE of a conversion. The serving loader casts nothing and reports
+        # a container that disagrees with the lane rather than repairing it, so
+        # a component nobody has said anything about keeps whatever its own
+        # config builds — exactly what a pod would serve. Refusing here instead
+        # would make every endpoint underivable: measured on the real trees,
+        # sd15's and sdxl's `[derive] checkpoint_configs` declare no dtype in
+        # any component config, none in `model_index.json`, and carry no
+        # safetensors to read a header from.
+        return None
+
+    def _lane_components(self) -> frozenset[str]:
+        """Component names the lane contract's tensor patterns cover.
+
+        Derived from the contract rather than declared a second time: a
+        pattern's first path segment IS the component that owns the tensor.
+        A lane with no readable patterns governs nothing, which sends every
+        component to its own container — the honest answer for a derived lane
+        that has no contract to speak with.
+        """
+
+        cached = getattr(self, "_lane_component_cache", None)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+        names: set[str] = set()
+        for entry in getattr(self.lane, "tensors", ()) or ():
+            pattern = str(getattr(entry, "pattern", "") or "")
+            head = pattern.split(".", 1)[0].strip()
+            if head and "{" not in head:
+                names.add(head)
+        resolved = frozenset(names)
+        self._lane_component_cache = resolved
+        return resolved
 
     def compile(self, target: Any) -> Any:
         """torch.compile-style marking, trace half (pgw#1370/#1372 contract).

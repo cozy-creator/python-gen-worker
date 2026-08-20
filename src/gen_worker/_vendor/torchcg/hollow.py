@@ -117,6 +117,18 @@ class HollowSession:
 
     fake_mode: Any
     device: str = DEFAULT_TRACE_DEVICE
+    #: tcg#68 -- resolve ONE component's load dtype, given the tree it is being
+    #: loaded from and its subfolder. Installed by the caller that knows the
+    #: precision policy (the derive); ``None`` leaves each component at
+    #: whatever its own config builds, which is this package's standalone
+    #: behaviour and never a policy.
+    #:
+    #: It exists because the precision of a component is a PER-COMPONENT fact,
+    #: not a property of the load: a checkpoint may carry a bf16 denoiser
+    #: beside an fp32 VAE, and casting the whole tree to one dtype is the
+    #: load-time conversion the serving loader explicitly refuses to perform
+    #: (pgw#1512).
+    dtype_for: Any | None = None
 
     @property
     def device_type(self) -> str:
@@ -538,10 +550,40 @@ def _restate(program: Any, device: Any, torch: Any, FakeTensor: Any) -> tuple[st
     return tuple(sorted(set(stranded)))
 
 
+def _component_dtype(
+    session: HollowSession,
+    path: Any,
+    subfolder: Any,
+    kwargs: Mapping[str, Any],
+) -> Any:
+    """The dtype ONE component loads at (tcg#68).
+
+    An explicit ``torch_dtype=`` in the call is the AUTHOR speaking about this
+    component and always wins. Otherwise the session's :attr:`dtype_for`
+    policy decides, because only the caller knows which component a layout
+    contract actually describes -- a lane contract for a denoiser says nothing
+    about the VAE beside it, and applying it there is a conversion the serving
+    loader refuses to make.
+
+    No policy installed means no cast, which is what this package did before a
+    caller had one to state.
+    """
+
+    explicit = kwargs.get("torch_dtype", kwargs.get("dtype"))
+    if explicit is not None:
+        return explicit
+    resolve = session.dtype_for
+    if resolve is None:
+        return None
+    return resolve(path, subfolder or None)
+
+
 def _hollow_diffusers(session: HollowSession) -> Any:
     def from_pretrained(cls: Any, /, pretrained_model_name_or_path: Any, **kwargs: Any) -> Any:
         subfolder = kwargs.get("subfolder")
-        torch_dtype = kwargs.get("torch_dtype", kwargs.get("dtype"))
+        torch_dtype = _component_dtype(
+            session, pretrained_model_name_or_path, subfolder, kwargs
+        )
         try:
             config, _unused = cls.load_config(
                 pretrained_model_name_or_path,
@@ -662,7 +704,9 @@ def _hollow_lazy_pipeline(original: Any) -> Any:
 def _hollow_transformers(session: HollowSession) -> Any:
     def from_pretrained(cls: Any, /, pretrained_model_name_or_path: Any, **kwargs: Any) -> Any:
         subfolder = kwargs.get("subfolder") or ""
-        torch_dtype = kwargs.get("torch_dtype", kwargs.get("dtype"))
+        torch_dtype = _component_dtype(
+            session, pretrained_model_name_or_path, subfolder, kwargs
+        )
         try:
             config = cls.config_class.from_pretrained(
                 pretrained_model_name_or_path, subfolder=subfolder
@@ -951,13 +995,21 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def hollow_session(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[HollowSession]:
+def hollow_session(
+    device: str = DEFAULT_TRACE_DEVICE, dtype_for: Any | None = None
+) -> Iterator[HollowSession]:
     """Everything a weights-free derive runs inside: one mode, one DEVICE.
 
     Instantiation (the author's ``setup``) and observation (the author's
     handlers driven with sample payloads) both run in here; derivation may
     too -- the shims never touch non-fake tensors and ``torch.export``
     re-enters the session's own mode for hollow modules.
+
+    ``dtype_for`` is the PER-COMPONENT precision policy (tcg#68): given a tree
+    and a subfolder it answers that component's load dtype, because precision
+    is a property of a component and not of a load. Omitted, nothing is cast --
+    this package states no precision policy of its own, since only the caller
+    knows which component a layout contract describes.
 
     ``device`` is the STATED trace device class, and it is a real decision,
     not a formality: it is stamped into every node's meta and therefore into
@@ -970,7 +1022,9 @@ def hollow_session(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[HollowSession
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     session = HollowSession(
-        fake_mode=FakeTensorMode(allow_non_fake_inputs=True), device=str(device)
+        fake_mode=FakeTensorMode(allow_non_fake_inputs=True),
+        device=str(device),
+        dtype_for=dtype_for,
     )
     with (
         _loader_interception(session),
