@@ -125,7 +125,13 @@ class Sample:
     seconds: float
     round: int = 0
     load1: float = 0.0
-    served: str = ""
+    #: THE MEASURED dispatch facts for THIS request, read off the response
+    #: envelope (`gen-worker run --json` carries `dispatch`). Not inferred from
+    #: a log string, and not a proxy: pgw#1591 was an instrument that INFERRED
+    #: "all N ran eager" from a flag instead of reading the counter beside it.
+    compiled_calls: int = 0
+    eager_calls: int = 0
+    displaced: tuple[str, ...] = ()
 
 
 @dataclass
@@ -272,6 +278,20 @@ class Table:
     def as_dict(self) -> dict[str, Any]:
         return {
             "samples": [vars(s) for s in self.samples],
+            # The premise, carried BESIDE the timings so a reader cannot take
+            # the numbers without the evidence that they measured compiled
+            # serving at all.
+            "dispatch": {
+                f"{arm}": {
+                    "compiled_calls": sum(
+                        s.compiled_calls for s in self.samples if s.arm == arm
+                    ),
+                    "eager_calls": sum(
+                        s.eager_calls for s in self.samples if s.arm == arm
+                    ),
+                }
+                for arm in self.arms()
+            },
             "rounds": self.rounds(),
             "control_spread_pct": {
                 f"{aspect}/{cfg}": self.spread("static", aspect, cfg)
@@ -472,10 +492,42 @@ class Bench:
                 f"[{arm}] request {aspect}/{cfg} failed:\n"
                 f"{result.stdout}\n{result.stderr}"
             )
+        facts = self._dispatch_facts(arm, result.stdout)
         return Sample(
             arm=arm, aspect=aspect, cfg=cfg, seconds=elapsed,
             round=round_index, load1=os.getloadavg()[0],
+            compiled_calls=int(facts.get("compiled_graph_calls", 0) or 0),
+            eager_calls=int(facts.get("eager_calls", 0) or 0),
+            displaced=tuple(facts.get("displaced_modules") or ()),
         )
+
+    def _dispatch_facts(self, arm: str, stdout: str) -> dict[str, Any]:
+        """The `dispatch` block of the response envelope, or a typed refusal.
+
+        `gen-worker run --json` prints the raw envelope and the serving path
+        puts `DispatchCounts.facts()` in it, so every request carries its own
+        compiled/eager counts. An envelope without them is not a request this
+        harness can score: it would leave the premise unmeasured, which is
+        exactly how pgw#1591 nearly shipped a table of eager timings.
+        """
+
+        envelope: dict[str, Any] = {}
+        for line in reversed((stdout or "").splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    envelope = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                break
+        facts = envelope.get("dispatch")
+        if not isinstance(facts, dict):
+            raise SystemExit(
+                f"[{arm}] the response envelope carries no `dispatch` facts, so "
+                f"nothing measures whether this request served COMPILED. "
+                f"Refusing to score it."
+            )
+        return facts
 
     def prepare(self, name: str) -> Path:
         """Lock + compile ONE arm. The card cost, paid once per arm."""
@@ -516,13 +568,13 @@ class Bench:
             first = True
             for aspect in self.args.aspects:
                 for cfg in self.args.cfg:
-                    self.request(room, name, aspect, cfg, round_index)
+                    warmup = self.request(room, name, aspect, cfg, round_index)
                     if first:
                         # The warm-up call has now exercised the serve path
-                        # once. Check the PREMISE here, at the cheapest
-                        # possible point, before paying for the rest of the
-                        # arm — let alone the other arm.
-                        self.assert_compiled(name)
+                        # once and CARRIES ITS OWN COUNTS. Check the premise
+                        # here, at the cheapest possible point, before paying
+                        # for the rest of the arm — let alone the other arm.
+                        self.assert_compiled(name, warmup)
                         first = False
                     for _ in range(self.args.reps):
                         self.table.add(
@@ -531,41 +583,41 @@ class Bench:
         finally:
             self.down(room)
 
-    def assert_compiled(self, arm: str) -> None:
-        """Did this arm actually SERVE compiled? Typed abort if not (pgw#1591).
+    def assert_compiled(self, arm: str, sample: Sample) -> None:
+        """Did THIS request actually serve compiled? Typed abort if not.
 
-        A warning was not enough. An arm whose dispatcher was displaced serves
-        eager on every call and still produces perfectly plausible timings —
-        and two such arms compare to ~0%, which reads as "the dynamic axis is
-        free" rather than as "nothing was measured". So an arm that cannot
-        show compiled serving does not get to contribute a row.
+        Reads the MEASURED counts off the request's own envelope. It used to
+        prove compiled serving by grepping the daemon log for `wrapper.tcg` —
+        a string that exists only because of the alignment defect pgw#1593 is
+        fixing. That check would have started aborting every HEALTHY arm the
+        moment someone fixed that defect: an instrument whose green depends on
+        another bug staying unfixed. The counter is the real evidence and it
+        survives both fixes.
+
+        Displacement is no longer read as "everything ran eager" either
+        (pgw#1591): it is a separate fact, and a displaced module can still
+        have served compiled calls. So the bar is what it always should have
+        been — compiled calls happened, and none fell through.
         """
 
-        log = self._daemon_log.get(arm)
-        if log is None or not log.exists():
+        if sample.compiled_calls <= 0:
             raise SystemExit(
-                f"[{arm}] daemon log {log} is absent — nothing can verify this "
-                f"arm serves compiled. Refusing to measure."
+                f"[{arm}] ZERO compiled calls on the warm-up request "
+                f"(eager_calls={sample.eager_calls}, "
+                f"displaced={list(sample.displaced)}). This arm serves EAGER; "
+                f"two such arms compare to ~0% and read as 'the axis is free'. "
+                f"Refusing to measure. See {self._daemon_log.get(arm)}"
             )
-        text = log.read_text(errors="replace")
-        if "DISPLACED" in text:
+        if sample.eager_calls:
             raise SystemExit(
-                f"[{arm}] DISPLACED: the compiled dispatcher is no longer the "
-                f"module's forward, so calls ran EAGER (pgw#1591). Both arms "
-                f"would compare eager-to-eager and report ~0%. Refusing to "
-                f"measure. See {log}"
+                f"[{arm}] MIXED execution on the warm-up request: "
+                f"{sample.compiled_calls} compiled and {sample.eager_calls} "
+                f"eager call(s). A wall that is part compiled and part eager "
+                f"is not this axis's cost. Refusing to measure."
             )
-        if "NO armed graph matched" in text:
-            raise SystemExit(
-                f"[{arm}] the dispatcher matched NOTHING (tcg#76's trace is in "
-                f"{log}); this arm serves eager. Refusing to measure."
-            )
-        if "wrapper.tcg" not in text:
-            raise SystemExit(
-                f"[{arm}] no compiled wrapper ran during the warm-up call, so "
-                f"this arm has not been shown to serve compiled at all. "
-                f"Refusing to measure. See {log}"
-            )
+        if sample.displaced:
+            print(f"[{arm}] note: displaced={list(sample.displaced)} while "
+                  f"{sample.compiled_calls} call(s) still served compiled")
 
     def report(self) -> dict[str, Any]:
         adoption = {}

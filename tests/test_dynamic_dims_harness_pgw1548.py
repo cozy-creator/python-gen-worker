@@ -145,61 +145,70 @@ def test_the_substrate_note_is_carried_into_every_rendered_table() -> None:
     assert "| 1:1 | on |" in rendered
 
 
-def _armed(tmp_path: Path, arm: str, text: str) -> Any:
-    """A bench whose named arm has a daemon log carrying `text`."""
+def _sample(compiled: int, eager: int, displaced: tuple = ()) -> Any:
+    return harness.Sample(
+        arm="static", aspect="1:1", cfg="on", seconds=1.0,
+        compiled_calls=compiled, eager_calls=eager, displaced=displaced,
+    )
 
-    log = tmp_path / f"{arm}-daemon.log"
-    log.write_text(text)
+
+def test_an_arm_serving_ZERO_compiled_calls_REFUSES(tmp_path: Path) -> None:
+    """pgw#1591's lesson, keyed on the COUNT rather than on a log string."""
+
     bench = _bench(tmp_path)
-    bench._daemon_log = {arm: log}
-    return bench
+    bench._daemon_log = {}
+    with pytest.raises(SystemExit, match="ZERO compiled calls"):
+        bench.assert_compiled("static", _sample(compiled=0, eager=21))
 
 
-def test_a_DISPLACED_arm_REFUSES_to_contribute_a_row(tmp_path: Path) -> None:
-    """pgw#1591: two displaced arms compare to ~0% and read as 'free'.
+def test_MIXED_execution_REFUSES(tmp_path: Path) -> None:
+    """Part compiled, part eager is not this axis's cost."""
 
-    This is the whole reason it is an abort and not a warning — the numbers a
-    displaced arm produces are perfectly plausible and entirely meaningless.
+    bench = _bench(tmp_path)
+    bench._daemon_log = {}
+    with pytest.raises(SystemExit, match="MIXED execution"):
+        bench.assert_compiled("static", _sample(compiled=10, eager=11))
+
+
+def test_a_DISPLACED_module_that_STILL_SERVED_COMPILED_is_allowed(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """pgw#1591's fix: displacement and dispatch are SEPARATE facts.
+
+    The old check aborted on the word DISPLACED alone. After #1591 a displaced
+    module can still have served every call compiled, and refusing that would
+    throw away a valid arm for a flag that no longer implies what it used to.
     """
 
-    bench = _armed(tmp_path, "static", (
-        "wrapper.tcg run_impl\n"
-        "dispatch: DISPLACED on UNet2DConditionModel — the compiled dispatcher "
-        "is no longer this module's forward, so all 21 call(s) ran eager\n"
-    ))
-    with pytest.raises(SystemExit, match="DISPLACED"):
-        bench.assert_compiled("static")
-
-
-def test_an_arm_that_MATCHED_NOTHING_refuses(tmp_path: Path) -> None:
-    """tcg#76's trace means the guards refused every armed record."""
-
-    bench = _armed(tmp_path, "aspect",
-                   "torchcg dispatch: NO armed graph matched a call on UNet\n")
-    with pytest.raises(SystemExit, match="matched NOTHING"):
-        bench.assert_compiled("aspect")
-
-
-def test_an_arm_with_NO_compiled_wrapper_at_all_refuses(tmp_path: Path) -> None:
-    """Silence is not success: no wrapper ran, so nothing was shown."""
-
-    bench = _armed(tmp_path, "static", "ready — functions: generate\n")
-    with pytest.raises(SystemExit, match="not been shown to serve compiled"):
-        bench.assert_compiled("static")
-
-
-def test_an_absent_daemon_log_refuses_rather_than_assuming(tmp_path: Path) -> None:
     bench = _bench(tmp_path)
-    bench._daemon_log = {"static": tmp_path / "nope.log"}
-    with pytest.raises(SystemExit, match="absent"):
-        bench.assert_compiled("static")
+    bench._daemon_log = {}
+    bench.assert_compiled("static", _sample(compiled=21, eager=0, displaced=("UNet",)))
+    assert "still served compiled" in capsys.readouterr().out
 
 
-def test_a_genuinely_compiled_arm_PASSES(tmp_path: Path) -> None:
-    """The green arm: a wrapper ran, nothing displaced, nothing unmatched."""
+def test_a_clean_compiled_arm_PASSES(tmp_path: Path) -> None:
+    bench = _bench(tmp_path)
+    bench._daemon_log = {}
+    bench.assert_compiled("static", _sample(compiled=21, eager=0))
 
-    bench = _armed(tmp_path, "static", (
-        "gen-worker up: ready\n"
-        "[W] cw54nq...wrapper.tcg.cpp:26541 Warning: run_impl\n"
-    ))
-    bench.assert_compiled("static")
+
+def test_an_envelope_without_dispatch_facts_REFUSES(tmp_path: Path) -> None:
+    """No counter means the premise is unmeasured — the pgw#1591 near-miss."""
+
+    bench = _bench(tmp_path)
+    with pytest.raises(SystemExit, match="no `dispatch` facts"):
+        bench._dispatch_facts("static", '{"ok": true, "result": {}}')
+
+
+def test_the_facts_are_read_off_the_real_envelope_shape(tmp_path: Path) -> None:
+    """The shape `gen-worker run --json` actually prints."""
+
+    envelope = {
+        "ok": True,
+        "dispatch": {
+            "module_calls": 21, "compiled_graph_calls": 21, "eager_calls": 0,
+            "armed_modules": 1, "armed_graphs": 14, "displaced_modules": [],
+        },
+    }
+    facts = _bench(tmp_path)._dispatch_facts("static", json.dumps(envelope))
+    assert facts["compiled_graph_calls"] == 21
