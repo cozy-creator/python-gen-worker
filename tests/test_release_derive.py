@@ -524,17 +524,44 @@ def test_derive_runs_in_a_release_env_with_no_top_level_torchcg_or_tensorfs(
     )
     assert completed.returncode == 0, completed.stderr[-4000:]
 
-    # th#2192's consequence, asserted on the OUTPUT: an empty `program` is the
-    # miner's `MissingProgramDigest`, so a derive that stores no blob is not a
-    # mintable derive. `--graph-cas` is the only thing that fills it.
+    # WHAT THIS USED TO ASSERT, AND WHY IT CHANGED. It read `record["program"]`
+    # and required a non-empty blob address on every graph — th#2192's
+    # consequence, on the premise that the address was the miner's fetch key.
+    # tcg#67 deleted the field: `torch.export.save` emits different bytes on
+    # different machines for the same traced graph (pgw#1462p2 measured 14/14
+    # graph identities reproducing across boxes and 0/14 blob digests), so the
+    # address was machine-scoped and made the DOCUMENT unportable. The property
+    # worth asserting survived the field: `--graph-cas` is still the only thing
+    # that banks the programs, and a derive that banks none is still unusable
+    # locally. It is just keyed by IDENTITY now.
     document = json.loads(out.read_bytes())
-    programs = [
-        record["program"]
+    graphs = [
+        record["graph"]
         for lane in document["graphs"]["lanes"]
         for record in lane["graphs"]
     ]
-    assert programs and all(p.strip() for p in programs), document["graphs"]
+    assert graphs, document["graphs"]
+    assert all(g.startswith("cg-graph-v1-") for g in graphs), graphs
+
+    # THE ADDRESS-FREE CONTRACT, FENCED POSITIVELY rather than by deletion: a
+    # stale assertion that merely stops running proves nothing, so this asserts
+    # the field is ABSENT. Reintroducing it anywhere upstream fails here.
+    assert not any(
+        "program" in record
+        for lane in document["graphs"]["lanes"]
+        for record in lane["graphs"]
+    ), document["graphs"]
+
+    # And the bytes ARE banked, under the identity — the address-free
+    # replacement for "the document names a blob". This is the assertion that
+    # still catches a derive run without `--graph-cas`.
+    from gen_worker._vendor.tensorfs import LocalCAS
+    from gen_worker._vendor.torchcg.store import LocalGraphStore
+
     assert cas.is_dir() and any(cas.rglob("*")), "the graph CAS holds no blob"
+    store = LocalGraphStore(LocalCAS(cas))
+    missing = [g for g in graphs if not store.has_program(g)]
+    assert not missing, f"the CAS holds no program for {missing}"
 
 
 def test_the_blocker_itself_can_go_red(config_only_tree: Path, tmp_path: Path) -> None:
