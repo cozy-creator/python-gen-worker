@@ -180,6 +180,72 @@ def _digest_file(path: Path) -> CASRef:
     return CASRef(digest.hexdigest())
 
 
+#: Sidecar written beside a verified copy-out, recording which CAS ref the
+#: destination holds and the exact file identity the copy left behind.
+_STAMP_SUFFIX = ".torchcg-src"
+
+
+def _stamp_path(target: Path) -> Path:
+    return target.with_name(target.name + _STAMP_SUFFIX)
+
+
+def _write_stamp(target: Path, ref: CASRef) -> None:
+    """Record that ``target`` IS ``ref``'s verified bytes, best-effort.
+
+    A stamp that cannot be written costs the next boot one re-verify and
+    nothing else, so failure here is swallowed on purpose.
+    """
+
+    try:
+        stat = target.stat()
+        _stamp_path(target).write_text(
+            json.dumps(
+                {
+                    "format": 1,
+                    "target": str(ref),
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "ino": stat.st_ino,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="ascii",
+        )
+    except OSError:
+        pass
+
+
+def _stamped(target: Path, ref: CASRef) -> Path | None:
+    """``target`` if a prior VERIFIED copy-out of exactly ``ref`` still sits
+    there untouched, else ``None``.
+
+    The warm-boot fast path (pgw#1546): re-hashing and re-copying bytes a
+    previous boot already verified is per-boot work proportional to artifact
+    size over a store nothing changed. The stamp is only honoured when the
+    ref still names the same object AND the destination's size/mtime/inode
+    identity matches what the verified copy recorded -- any rewrite, however
+    small, changes that identity and falls back to the full verify+copy.
+    """
+
+    try:
+        raw = json.loads(_stamp_path(target).read_bytes())
+        stat = target.stat()
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("target") != str(ref):
+        return None
+    if (
+        raw.get("size") == stat.st_size
+        and raw.get("mtime_ns") == stat.st_mtime_ns
+        and raw.get("ino") == stat.st_ino
+        and target.is_file()
+        and not target.is_symlink()
+    ):
+        return target
+    return None
+
+
 class LocalGraphStore:
     """The reference ``GraphStore`` over one tensorfs ``LocalCAS``.
 
@@ -328,13 +394,18 @@ class LocalGraphStore:
         ref = self.cas.read_ref(_artifact_ref(graph, env))
         if ref is None:
             return None
+        warm = _stamped(Path(destination), ref)
+        if warm is not None:
+            return warm
         try:
             blob = self.cas.verify_object(ref)
         except (DigestMismatch, FileNotFoundError, ValueError) as exc:
             raise StoreError(
                 f"artifact ({graph}, {env.value}) failed CAS verification: {exc}"
             ) from exc
-        return self._copy_out(blob, destination)
+        fetched = self._copy_out(blob, destination)
+        _write_stamp(fetched, ref)
+        return fetched
 
     def _copy_out(self, blob: str | Path, destination: str | Path) -> Path:
         target = Path(destination)
@@ -431,11 +502,16 @@ class LocalGraphStore:
         ref = self.cas.read_ref(_program_ref(graph))
         if ref is None:
             return None
+        warm = _stamped(Path(destination), ref)
+        if warm is not None:
+            return warm
         try:
             blob = self.cas.verify_object(ref)
         except (DigestMismatch, FileNotFoundError, ValueError) as exc:
             raise StoreError(f"program for {graph} failed CAS verification: {exc}") from exc
-        return self._copy_out(blob, destination)
+        fetched = self._copy_out(blob, destination)
+        _write_stamp(fetched, ref)
+        return fetched
 
     def put_program(self, graph: str, path: str | Path) -> str:
         """Bank this machine's serialized program for ``graph``.

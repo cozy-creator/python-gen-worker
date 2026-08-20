@@ -92,6 +92,7 @@ Builder = Callable[["Spec", Path, Path], Path]
 PRESENT = "present"        # already in this machine's CAS
 FETCHED = "fetched"        # pulled from the hub's fleet pool
 BUILT = "built"            # compiled here
+REUSED = "reused"          # resolved out of the engine's own compile cache
 CLAIMED = "claimed"        # another process holds the lease; it is doing it
 BELOW_FLOOR = "below_floor"  # no grant this run targets could arm it
 FAILED = "failed"
@@ -502,35 +503,35 @@ def _default_builder(cas_root: Path, sm: str) -> Builder:
 def endpoint_module(endpoint_dir: Path) -> str:
     """The module name adoption looks this endpoint's document up BY.
 
-    Read through ``load_endpoint`` — the one reader of ``endpoint.toml``'s
-    ``main =`` — because ``_adoption_source`` reads it the same way. Two
-    spellings of "which document is this endpoint's" is exactly the drift that
-    would make ``compile`` publish under a name ``up`` never asks for.
+    Read through ``loader.endpoint_module_name`` — the one reader of
+    ``endpoint.toml``'s ``main =``, and the same one ``load_endpoint`` (which
+    ``_adoption_source``'s callers use) resolves through. Two spellings of
+    "which document is this endpoint's" is exactly the drift that would make
+    ``compile`` publish under a name ``up`` never asks for.
 
-    An import failure here is a TYPED refusal, not a traceback (pgw#1537).
-    pgw#1533 made this the first thing `compile` needs that can fail on the
-    author's own code — `declared_floor_gb` calls `load_endpoint` too, but
-    swallows everything, because an unreadable floor is genuinely "no floor
-    stated". An unreadable MODULE NAME is not "no name": nothing can be
-    published under a name that could not be read, so the run cannot deliver a
-    servable endpoint and must say why in one sentence.
+    Deliberately NOT ``load_endpoint`` itself (pgw#1546): importing the
+    author's module drags in torch and the model libraries — ~4.5 s measured
+    on a warm all-present run — to answer a question the manifest states in
+    one line. The name is what adoption keys by; the import proves nothing
+    the publish needs.
+
+    An unreadable name is a TYPED refusal, not a traceback (pgw#1537): nothing
+    can be published under a name that could not be read, so the run cannot
+    deliver a servable endpoint and must say why in one sentence.
     """
-    from ..discovery.discover import prime_sys_path
-    from ..serving.loader import load_endpoint
+    from ..serving.loader import endpoint_module_name
 
     try:
-        prime_sys_path(endpoint_dir)
-        return str(load_endpoint(endpoint_dir).module_name)
-    except Exception as exc:  # noqa: BLE001 — author code; any failure is theirs
+        return endpoint_module_name(endpoint_dir)
+    except Exception as exc:  # noqa: BLE001 — the manifest is the author's too
         raise CompileError(
             f"cannot read {endpoint_dir}'s module name "
             f"({type(exc).__name__}: {exc}).\n"
             f"  `compile` publishes this endpoint's graph-set document under "
             f"that name and boot-time adoption looks it up by the same one, so "
             f"a document published under a guess would be invisible to `up`.\n"
-            f"  Fix the import (this is the endpoint's own `main =` module), or "
-            f"pass the name explicitly if you are compiling for a tree you "
-            f"cannot import here."
+            f"  Fix endpoint.toml's `main = \"pkg.module\"`, or pass the name "
+            f"explicitly if you are compiling for a tree you cannot read here."
         ) from exc
 
 
@@ -627,6 +628,72 @@ def _publish_document(cas_root: Path, lock_path: Path, module: str) -> None:
         module, len(document.lanes),
         sum(len(lane.graphs) for lane in document.lanes),
     )
+
+
+class _EngineReuse:
+    """Already-minted artifacts in the engine's own compile cache, resolvable
+    WITHOUT torch, a program blob, or a child process (pgw#1546).
+
+    ``Engine.compile`` banks every mint under its exact cg-key, and the only
+    thing this command lacked to reuse one was the KEY — whose only derivation
+    path loaded the exported program inside a mint child: measured 5.47 s per
+    specialization of torch import + ``export.load`` bookkeeping against
+    0.21 s of actual store work, 14 times over, to rediscover work already
+    done. ``Engine.reuse_index`` answers the key from the store's own metadata,
+    torch-free, and ``Engine.resolve`` fully verifies whatever it answers — an
+    ADDRESS optimization, never an admission shortcut.
+
+    The index is built lazily, once, on the first specialization the serving
+    band is missing; a run whose artifacts are all published never pays it.
+    Every failure here answers ``None`` — the build path is always the fallback.
+    """
+
+    def __init__(self, cas_root: Path, sm: str) -> None:
+        self._cas_root = Path(cas_root)
+        self._sm = sm
+        self._engine: Any = None
+        self._index: Optional[Dict[str, str]] = None
+
+    def _load(self) -> None:
+        from ..compile_cache import toolchain_digest
+        from .._vendor.tensorfs import LocalCAS
+        from .._vendor.torchcg.engine import Engine
+
+        self._engine = Engine(LocalCAS(self._cas_root))
+        try:
+            self._index = dict(
+                self._engine.reuse_index(self._sm, dict(toolchain_digest()))
+            )
+        except Exception as exc:  # noqa: BLE001 — an unreadable cache is a miss
+            logger.warning(
+                "compile: engine reuse index unavailable (%s: %s); every miss "
+                "will build", type(exc).__name__, exc,
+            )
+            self._index = {}
+        if self._index:
+            logger.info(
+                "compile: engine cache holds %d already-minted artifact(s) for "
+                "this (sm x toolchain); reusing instead of rebuilding",
+                len(self._index),
+            )
+
+    def resolve(self, spec: Spec, destination: Path) -> Optional[Path]:
+        """The verified artifact directory for ``spec``, or ``None`` to build."""
+        if self._index is None:
+            self._load()
+        assert self._index is not None
+        key = self._index.get(spec.graph)
+        if key is None:
+            return None
+        try:
+            found = self._engine.resolve(key, destination)
+        except Exception as exc:  # noqa: BLE001 — a rotten row costs a rebuild
+            logger.warning(
+                "%s: engine-cache reuse of %s failed (%s: %s); building",
+                spec.short, key, type(exc).__name__, exc,
+            )
+            return None
+        return Path(destination) if found is not None else None
 
 
 # --------------------------------------------------------------------------
@@ -780,38 +847,57 @@ def compile_all(
     if only:
         specs = specs[:only]
 
-    floor = declared_floor_gb(endpoint_dir)
-    grant = grant_gb(vram_budget_gb)
-    if floor is not None and grant is not None and grant < floor:
-        logger.info(
-            "compile: grant_below_compiled_floor(grant=%.1f GiB, floor=%.1f GiB) "
-            "— a compiled graph executes atomically with by-reference weights, "
-            "so nothing this endpoint compiles to could be armed under this "
-            "grant. NO-OP: %d specialization(s) left unbuilt on purpose.",
-            grant, floor, len(specs),
-        )
-        return Report(
-            [
-                Outcome(spec, BELOW_FLOOR,
-                        f"grant {grant:.1f} GiB < floor {floor:.1f} GiB")
-                for spec in specs
-            ],
-            [],
-        )
-    if floor is None:
-        logger.info(
-            "compile: compiled floor UNKNOWN for this endpoint (no declared "
-            "lane floor, no measured stamp) — proceeding; an unknown floor is "
-            "not a floor of zero"
-        )
-
-    from ..serving.mint import publish_compiled
-
     env = _env_identity(endpoint_dir, sm, lockfile)
     if store is None:
         store = _store(cas_root)
-    build = builder if builder is not None else _default_builder(cas_root, sm)
     module = module or endpoint_module(endpoint_dir)
+
+    def _known_present(spec: Spec) -> bool:
+        try:
+            return bool(store.has_artifact(spec.graph, env))
+        except Exception as exc:  # noqa: BLE001 — a store miss is not fatal
+            logger.warning(
+                "%s: store lookup failed (%s); treating as a miss",
+                spec.short, exc,
+            )
+            return False
+
+    # PRESENCE BEFORE POLICY (pgw#1546). The floor/grant question only decides
+    # whether to BUILD, and the grant probe + declared-floor read import torch
+    # and the author's whole module (~4.5 s measured) to answer it. A run whose
+    # artifacts are all already in the serving band builds nothing, so it asks
+    # nothing — the warm re-run is bookkeeping-free by construction, not by a
+    # fast implementation of the bookkeeping.
+    if any(not _known_present(spec) for spec in specs):
+        floor = declared_floor_gb(endpoint_dir)
+        grant = grant_gb(vram_budget_gb)
+        if floor is not None and grant is not None and grant < floor:
+            logger.info(
+                "compile: grant_below_compiled_floor(grant=%.1f GiB, floor=%.1f GiB) "
+                "— a compiled graph executes atomically with by-reference weights, "
+                "so nothing this endpoint compiles to could be armed under this "
+                "grant. NO-OP: %d specialization(s) left unbuilt on purpose.",
+                grant, floor, len(specs),
+            )
+            return Report(
+                [
+                    Outcome(spec, BELOW_FLOOR,
+                            f"grant {grant:.1f} GiB < floor {floor:.1f} GiB")
+                    for spec in specs
+                ],
+                [],
+            )
+        if floor is None:
+            logger.info(
+                "compile: compiled floor UNKNOWN for this endpoint (no declared "
+                "lane floor, no measured stamp) — proceeding; an unknown floor is "
+                "not a floor of zero"
+            )
+
+    from ..serving.mint import publish_compiled
+
+    build = builder if builder is not None else _default_builder(cas_root, sm)
+    reuse = _EngineReuse(Path(cas_root), sm)
     # pgw#1526: the BOX cache, not `<endpoint>/.compiled-graphs`. This is mint
     # SCRATCH plus the pre-publish destination — machine-scoped by nature, and
     # nothing downstream reads it from the source tree: the artifact's only
@@ -862,25 +948,39 @@ def compile_all(
                 if store.has_artifact(spec.graph, env):
                     logger.info("%s: present (landed while claimed)", label)
                     return Outcome(spec, PRESENT, wall_s=time.monotonic() - started)
-                logger.info("%s: building", label)
-                program = _ensure_program(spec, store, rederive, artifacts_dir)
-                artifact = build(spec, program, destination)
+                # REUSE BEFORE BUILD (pgw#1546): the engine cache may already
+                # hold this exact mint, and resolving it needs no torch, no
+                # program blob, and no child — 0.21 s against the child's
+                # 5.47 s of bookkeeping to reach the same bytes.
+                reused = reuse.resolve(spec, destination)
+                if reused is not None:
+                    artifact, state = reused, REUSED
+                else:
+                    logger.info("%s: building", label)
+                    program = _ensure_program(spec, store, rederive, artifacts_dir)
+                    artifact = build(spec, program, destination)
+                    state = BUILT
                 # PUBLISH, then ASK THE READER. Neither step existed before
                 # pgw#1533 and neither one alone is enough: the publish is what
                 # puts the bytes in the band adoption addresses, and the
                 # read-back is the only thing that can go red if it did not.
+                # The reuse arm runs the SAME two steps — a resolve that never
+                # reached the serving band is the original defect exactly.
                 published = publish_compiled(store, spec.graph, env, artifact)
                 if not serving_reader(cas_root).has_artifact(spec.graph, env):
                     raise CompileError(
-                        f"built {spec.short} and the publish reported "
+                        f"{state} {spec.short} and the publish reported "
                         f"{published or 'nothing'}, and the store adoption "
                         f"reads at boot still has no artifact at "
                         f"({spec.short}, {env.value}). The build is not the "
                         f"deliverable — an artifact the serving reader can "
                         f"find is."
                     )
-                logger.info("%s: built and servable (%s)", label, published or "published")
-                return Outcome(spec, BUILT, published, wall_s=time.monotonic() - started)
+                logger.info(
+                    "%s: %s and servable (%s)", label, state,
+                    published or "published",
+                )
+                return Outcome(spec, state, published, wall_s=time.monotonic() - started)
         except work_ledger.Busy:
             logger.info(
                 "%s: claimed by another process — skipping (the work ledger is "
@@ -1237,6 +1337,7 @@ __all__ = [
     "Gap",
     "Outcome",
     "PRESENT",
+    "REUSED",
     "Report",
     "Spec",
     "add_subparser",
