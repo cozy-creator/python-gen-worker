@@ -1473,7 +1473,7 @@ def report_ingress_refusal(state: Dict[str, Any], reason: str, detail: str) -> N
     The refusal already rides ``aot_ingress_refused`` as a countable typed
     event, but that event names no REQUEST — so the request row that was
     served eager by an armed compiled lane still reported
-    ``serving_mode=aot_cell, fallback_reason=""``, i.e. an eager latency  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
+    ``serving_mode=aot_graph, fallback_reason=""``, i.e. an eager latency
     sample counted as compiled. That is the exact contamination
     :mod:`serving_mode` exists to prevent, and arming a partially
     dispatchable compiled graph (which pgw#844 now does) is what makes it common.

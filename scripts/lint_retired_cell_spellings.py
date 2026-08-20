@@ -44,17 +44,24 @@ scope. Measured before this fence was written:
 * BENCH-MATRIX cells — `scripts/svdq_bench/`'s `--cells mat,corr,bb,bf`, the
   rows of a benchmark table. Same eval sense as the H3 program's "15s cell".
 
-THE DEFERRED WIRE LANE, and why it is proven at the line instead of excluded.
-pgw#1363 deliberately left the spellings the HUB owns alone, because they are
-cross-repo contracts that cannot move unilaterally: the proto fields
-(`cell_key`, `cell_ref`, `cell_lookups`), the `jit_cell`/`aot_cell` serving
-modes, the `cell_*` boot phases, the `cell_read_*` claims, and the on-disk
-`GEN_WORKER_LOCAL_CELLS_DIR` + `aot-cells/` + `cell.tar.gz` triple that
-cozy-local's `paths.go` and tensorhub's `localcompiledgraphs` both name under a
-digest-gated parity contract. Those are REAL and CURRENT, so every one of them
-carries a `cell-spelling:` proof naming the contract that pins it. That makes
-the deferred set ENUMERATED and countable: it can only shrink, and a NEW `cell`
-cannot enter without someone writing a false reason.
+THE DEFERRED SET IS NOW THREE HISTORICAL NOTES, and that is the whole story of
+this fence. When it first landed it carried 83 line-proofs for spellings the hub
+owned and the fleet had persisted. Paul then ruled the hardcut (2026-08-20:
+*"I want it fully renamed. You can go ahead and break everything. No legacy
+support, hardcut. We are pre-launch it's fine."*), so pgw#1547's migration
+retired all 83: the proto fields moved by NAME with their numbers unchanged
+(PROTO_DIGEST records why that keeps the binary wire byte-identical), the
+`jit_cell`/`aot_cell` serving modes, the `cell_*` boot phases and the
+`cell_read_*` claims moved with the code that emits them, the on-disk layout
+became `<TENSORHUB_CACHE_DIR>/compiled-graph-store/graphs/<ck1>/graph.tar.gz`,
+and `GEN_WORKER_LOCAL_CELLS_DIR` was DELETED rather than renamed — it configured
+a second root for a store the CAS knob already roots.
+
+What is left carries a proof only because it is a RECORD: three lines that name
+the deleted env or the exact names of tests pgw#1181 deleted. Respelling any of
+them would falsify the record. So the marker's meaning has changed from
+"deferred, pending a coordinated lane" to "historical, deliberately", and the
+count should stay at three unless something is genuinely being recorded.
 
 EXCLUSIONS, all structural rather than an allowlist of findings:
 

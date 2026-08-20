@@ -57,8 +57,8 @@
     ],
     "serving_modes": [
       "eager",
-      "jit_cell",
-      "aot_cell"
+      "jit_graph",
+      "aot_graph"
     ],
     "per_request_fallback_reasons": [
       "guard_miss",
@@ -77,10 +77,10 @@
       "operator_eager_only"
     ],
     "boot_phase_producer_values": [
-      "cell_arm",
-      "cell_fetch",
-      "cell_hub_rtt",
-      "cell_verify",
+      "graph_arm",
+      "graph_fetch",
+      "graph_hub_rtt",
+      "graph_verify",
       "compiled_swap",
       "component_fetch",
       "declaration_compose",

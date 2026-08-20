@@ -2145,7 +2145,7 @@ def _guarded(
             # in this closure. An INTAKE arm names no artifact, so "is this
             # pipeline serving compiled" cannot be answered by an active compiled graph
             # ref — `is_compile_armed` reads this, and without it a permanently
-            # degraded intake pod would keep reporting `serving_mode=jit_cell`  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
+            # degraded intake pod would keep reporting `serving_mode=jit_graph`
             # while every request ran eager (the gw#586 class, one lane over).
             if isinstance(failure_signal, dict):
                 failure_signal["degraded"] = True
@@ -2278,7 +2278,7 @@ def _guarded_regional(
                 # flag on a permanent degrade; the REGIONAL twin never did,
                 # and `is_compile_armed` reads exactly it. So a regional
                 # target that degraded to eager on its very first call kept
-                # reporting `serving_mode=jit_cell`, `served_eager_fallback  # cell-spelling: hub-owned serving_mode wire value (proto lane, pgw#1363)
+                # reporting `serving_mode=jit_graph`, `served_eager_fallback
                 # =false`, EMPTY `fallback_reason` — for the life of the pod,
                 # at eager speed. Every telemetry axis said compiled while
                 # 100% of the work ran eager (minimax-h3 0.4.3: 6.27 s/step

@@ -169,19 +169,19 @@ message WorkerResources {
   // measurable (CPU-only build, probe failure). Additive: old orchestrators
   // ignore it; old workers send it unset.
   HostCanary host_canary  = 9;
-  // Exact runtime evidence used to select torch.compile cells. Full version
+  // Exact runtime evidence used to select torch.compile graphs. Full version
   // (for example 2.13.0+cu130); consumers compare the major.minor key while
   // artifact metadata remains responsible for stricter compatibility checks.
   string torch_version = 10;
   // gw#587/th#910: this worker's gen-worker library version (for example
-  // "0.39.0"). Additive: old workers send it unset; the hub's self-mint cell
+  // "0.39.0"). Additive: old workers send it unset; the hub's self-mint graph
   // publish attestation FAILS CLOSED on the gen_worker axis when absent —
   // which is harmless for old workers, because they never call the publish
   // route at all.
   string gen_worker_version = 11;
   // §4.28 / th#1751 W4 + pgw#1092: `worker_mode` is RETIRED with the forge.
   // There is one pod class — a serving pod that mints in the background on a
-  // cell miss — so there is no mode to declare. §1.27(f): a within-major
+  // graph miss — so there is no mode to declare. §1.27(f): a within-major
   // retirement reserves the number AND the name. Wheels <= 0.112.0 still SEND
   // field 12; proto3 drops unknown fields at decode, so those workers connect
   // and serve exactly as before.
@@ -564,7 +564,7 @@ message FunctionCapability {
   // unknown field is ignored and the old hub dispatches on state=READY exactly
   // as today. The hub validates vocabulary loosely — an unrecognized tier
   // reads as unknown, never as a shadow-state rejection. Flips
-  // eager->compiled on hot-swap (own mint arming or peer-cell adoption) with
+  // eager->compiled on hot-swap (own mint arming or peer-graph adoption) with
   // NO state flap; "serving eager while minting" is the hub-derived pair
   // (state=READY, serving_tier=eager, self_mint_compile activity running).
   string serving_tier = 9;
@@ -681,17 +681,17 @@ message StateDelta {
   // Latest desired-residency generation accepted by this worker. This is
   // observation, not convergence; ModelEvent reports best-effort outcomes.
   uint64 observed_residency_generation = 6;
-  // Exact READY live pipeline objects eligible for compile-cell adoption/
+  // Exact READY live pipeline objects eligible for compiled-graph adoption/
   // dispatch. Full-replace with every StateDelta; object-level readiness is
   // independent of aggregate phase. A vacated/replaced object disappears
   // before its successor can be addressed.
   repeated CompileTarget compile_targets = 7;
-  // th#883 pull-by-key (gw#581): every cell key this worker's runtime could
+  // th#883 pull-by-key (gw#581): every compiled-graph key this worker's runtime could
   // consume right now — candidate keys computed pre-load from endpoint
   // declarations, narrowed to the exact per-target keys once objects are
   // live. Full-replace. Store-lookup hints ONLY (boot attach rides these).
   // §4.28: nothing derives DEMAND from these — there is no mint to order.
-  repeated CellLookup cell_lookups = 8;
+  repeated CompiledGraphLookup compiled_graph_lookups = 8;
   // th#962/pgw#610: MEASURED per-tier disk telemetry. Present in every
   // StateDelta (and thus in Hello.state). The hub budgets residency plans
   // against these measured numbers only; release-declared disk sizes are
@@ -738,12 +738,12 @@ message DiskUsageReport {
   uint64 capacity_generation = 2;
 }
 
-// One worker-computed cell identity the hub may look up in its store. The
+// One worker-computed compiled-graph identity the hub may look up in its store. The
 // hub never derives compatibility from it — the worker owns the key (§4.27)
 // and the hub answers by key or misses.
-message CellLookup {
+message CompiledGraphLookup {
   string family = 1;
-  string cell_key = 2; // "ck1-<sha256hex>", computed by gen_worker.cell_key
+  string compiled_graph_key = 2; // "ck1-<sha256hex>", computed by gen_worker._vendor.torchcg.identity
 }
 
 // One exact live pipeline object. incarnation_id is opaque, worker-minted,
@@ -753,7 +753,7 @@ message CompileTarget {
   string incarnation_id = 1;
   string family = 2;
   // Raw worker runtime vocabulary: "" | "fp8-hooks" | "w8a8", optionally
-  // with the declared LoRA bucket suffix. Only compile-cell flavor identity
+  // with the declared LoRA bucket suffix. Only compiled-graph flavor identity
   // canonicalizes fp8-hooks to the token w8a16.
   string pipeline_weight_lane = 3;
   int32 lora_bucket = 4;
@@ -769,12 +769,12 @@ message CompileTarget {
   // Canonical sorted exact immutable load-time bindings owned by this target.
   // This may be a strict subset of the function's/RunJob's setup bindings.
   repeated CompileTargetBinding model_bindings = 9;
-  // th#883 pull-by-key (gw#581): the exact cell key this live object's
-  // runtime computed for itself (gen_worker.cell_key — the ONE compatibility
-  // brain). The hub serves a stored cell by this key or misses; it never
+  // th#883 pull-by-key (gw#581): the exact compiled-graph key this live object's
+  // runtime computed for itself (gen_worker._vendor.torchcg.identity — the ONE compatibility
+  // brain). The hub serves a stored graph by this key or misses; it never
   // derives compatibility hub-side. Empty when the runtime cannot state a
   // required axis.
-  string requested_cell_key = 10;
+  string requested_compiled_graph_key = 10;
   // §4.28 / th#1751 W4 + pgw#1092: `requested_cell_axes` is RETIRED. Its ONLY
   // stated purpose was "forge mint parameters (SKU pin, torch, image digest)",
   // and there is no forge to parameterize; the hub has never read it
@@ -821,7 +821,7 @@ message RunJob {
   repeated ModelBinding models = 11; // slot -> ref bindings resolved by the orchestrator
   // th#1941: presigned snapshots keyed by COMPOSED MANIFEST DIGEST, not by
   // canonical ref. Ordinary warm-local bindings may be omitted;
-  // required_compile retains every exact model digest plus the selected cell
+  // required_compile retains every exact model digest plus the selected graph
   // so the worker can revalidate immutable execution identity.
   map<string, Snapshot> snapshots = 12;
   // Unique exact current-state fence selected by Tensorhub. Multiple
@@ -896,8 +896,8 @@ message InputAsset {
 
 message RequiredCompileExecution {
   string target_incarnation_id = 1;
-  string cell_ref = 2;
-  string cell_snapshot_digest = 3;
+  string compiled_graph_ref = 2;
+  string compiled_graph_snapshot_digest = 3;
   string contract_digest = 4;
 }
 
@@ -1248,17 +1248,17 @@ message JobMetrics {
   // across serving paths. `lane` (13) already says "fp8-w8a8-dynamic+compiled",
   // but "+compiled" is a BINARY axis platform-wide (precision.ExecCompiled /
   // lanes.EXEC_COMPILED / serving_tier): it cannot tell an AOT .pt2 replay
-  // from a JIT dynamo cell, and it names no artifact. So "AOT vs JIT latency
+  // from a JIT dynamo graph, and it names no artifact. So "AOT vs JIT latency
   // on 4090s for sdxl w8a8" is unanswerable over our own production traffic
   // even though the worker knows the answer for every single request.
   //
-  //   serving_mode: "eager" | "jit_cell" | "aot_cell"
+  //   serving_mode: "eager" | "jit_graph" | "aot_graph"
   // Derived from the ARMED artifact, not from the lane string.
   string serving_mode = 16;
-  // The cell ref/key that actually served, echoed back from the worker.
-  // resolved_models.runtime.compile_cell_ref is the hub's dispatch INTENT and
+  // The compiled-graph ref/key that actually served, echoed back from the worker.
+  // resolved_models.runtime.compiled_graph_ref is the hub's dispatch INTENT and
   // is only set when RunJob.required_compile was; this is the confirmation.
-  string served_cell_ref = 17;
+  string served_compiled_graph_ref = 17;
   // TRUE when a compiled lane served THIS request eager anyway — a pgw#680
   // guard miss, a router heal/volatile verdict, or an aot_serve ingress
   // refusal. Today such a request reports lane=...+compiled, so the fallback
@@ -1268,7 +1268,7 @@ message JobMetrics {
   bool   served_eager_fallback = 18;
   string fallback_reason = 19;
   // Device compute capability ("89"), matching WorkerResources.gpu_sm. The
-  // SKU string is a marketing name; sm is the fact cells are keyed by, and it
+  // SKU string is a marketing name; sm is the fact graphs are keyed by, and it
   // is never persisted anywhere today.
   string sm = 20;
   // The executed shape coordinate + step count, defaults APPLIED — the axes
@@ -1443,10 +1443,10 @@ message ModelEvent {
   int64 bytes_total = 6; // set while state = DOWNLOADING (0 = unknown)
   int64 duration_ms = 7; // op wall time; set when state = ADOPTED
   // Adoption observability (gw#391), set when state = ADOPTED for inductor
-  // cells: FX-graph cache hits/misses observed during the adoption warmup and
+  // graphs: FX-graph cache hits/misses observed during the adoption warmup and
   // the warmup wall seconds. A warmup observing ZERO hits never reports
   // ADOPTED - it rolls back to eager and reports adopt_failed:cache_miss; an
-  // endpoint without warmup() cannot prove the cell and reports
+  // endpoint without warmup() cannot prove the graph and reports
   // adopt_failed:no_warmup. hits>0 with misses>0 = partial shape coverage.
   int64 cache_hits = 8;
   int64 cache_misses = 9;
@@ -1473,11 +1473,11 @@ message ModelEvent {
   string snapshot_digest = 16;
   uint64 residency_generation = 17;
   // Echoes ModelOp.operation_id on ADOPTED/adopt-FAILED and at most one later
-  // causal compiled-runtime FAILED. Empty on boot-attached cells and ordinary
+  // causal compiled-runtime FAILED. Empty on boot-attached graphs and ordinary
   // snapshot/download/residency events.
   string operation_id = 18;
   // Echoes ModelOp.target_incarnation_id on ADOPTED/adopt-FAILED and at most
-  // one later causal compiled-runtime FAILED; empty on boot-attached cells and
+  // one later causal compiled-runtime FAILED; empty on boot-attached graphs and
   // ordinary model events.
   string target_incarnation_id = 19;
   // th#850: cumulative bytes actually fetched over the network (the public
@@ -1568,10 +1568,10 @@ message ActivityUpdate {
   // breakdown is groupable too.
   int64 duration_ms = 17;
 
-  // pgw#1176 / th#1839: cell identity as TYPED FIELDS, so the hub's existing
-  // `worker_activity_events.family` / `.cell_key` columns are populated from
+  // pgw#1176 / th#1839: compiled-graph identity as TYPED FIELDS, so the hub's existing
+  // `worker_activity_events.family` / `.compiled_graph_key` columns are populated from
   // the wire instead of regex-scraped out of `detail`. The measured cost of
-  // the prose form: `detail LIKE 'ref=%#'||cell_key||' %'` matched one of
+  // the prose form: `detail LIKE 'ref=%#'||compiled_graph_key||' %'` matched one of
   // three rows correctly, because four emitters spelled identity four ways.
   //
   // `graph_specialization` is the pgw#1176 atom's unit — one artifact is ONE
@@ -1584,11 +1584,11 @@ message ActivityUpdate {
   //
   // Additive: old readers ignore all three, and an emitter that states none
   // sends empty strings, which is the honest "this event is not about a
-  // cell". Never derived by the hub from `detail` — a field that can be
+  // graph". Never derived by the hub from `detail` — a field that can be
   // reconstructed by parsing prose is a field that silently returns NULL the
   // first time the formatting changes.
   string family      = 18;
-  string cell_key    = 19; // the `ek1` ENTRY key (pgw#1176), not a cell key
+  string compiled_graph_key    = 19; // the `ek1` ENTRY key (pgw#1176), not a compiled-graph key
   string graph_specialization = 20; // the specialization name inside the declaration
 }
 
@@ -1606,7 +1606,7 @@ enum ActivityState {
 // investigation has had to hand-derive from log archaeology (th#1187's ladder
 // at tracker tensorhub/progress.md:13043). The pod-level facts the hub can
 // see for itself — create -> connect -> first-assign — bound the boot from
-// OUTSIDE; they say nothing about which of weights fetch, cell fetch, cell
+// OUTSIDE; they say nothing about which of weights fetch, graph fetch, graph
 // load or warmup owns the seconds INSIDE. Only the worker knows that, and
 // today it dies with the pod.
 //
@@ -1630,11 +1630,11 @@ message BootPhase {
   int64  parent_ordinal = 3;
   // Vocabulary is wire-shared with gen_worker/boot_phases.py (PHASE_*), and
   // is exactly the eight spans the shipping path PRODUCES (pgw#924):
-  //   hello | weights_fetch | pipeline_load | cell_discover | cell_fetch
-  //   | cell_arm | warmup | first_request_servable
+  //   hello | weights_fetch | pipeline_load | graph_discover | graph_fetch
+  //   | graph_arm | warmup | first_request_servable
   // pgw#924 deleted the nine that had no producer or never fired
   // (process_start, env_seal, manifest_load, cache_preflight, cuda_probe,
-  // cell_load, first_request, warm_complete, warmup_iteration) — a reader of
+  // graph_load, first_request, warm_complete, warmup_iteration) — a reader of
   // the old list learned a vocabulary the system cannot emit, which is the
   // C3 defect th#1562 fixed for FnUnavailable.
   // Unknown phases are stored verbatim, never rejected: an old hub must not
@@ -1649,7 +1649,7 @@ message BootPhase {
   // pre-first-phase cost (interpreter start, torch import) visible instead of
   // hiding it in an unexplained residual.
   int64  process_uptime_ms = 8;
-  // Bytes moved by this phase (weights/cell fetch). 0 = not a byte phase.
+  // Bytes moved by this phase (weights/graph fetch). 0 = not a byte phase.
   int64  bytes = 9;
   // Where the bytes came from: cas | volume | r2 | hf_cache | inflight_share
   // | local. The single most load-bearing boot fact after duration — the same
@@ -1658,12 +1658,12 @@ message BootPhase {
   string source = 10;
   // Model/checkpoint ref for weights phases.
   string ref = 11;
-  // Cell artifact identity for cell phases: aot-inductor | trt | dynamo.
+  // Compiled-graph artifact identity for graph phases: aot-inductor | trt | dynamo.
   string artifact_kind = 12;
   string artifact_key = 13;
   string function = 14;
   // ok | refused | failed | skipped. `refused` is a TYPED refusal that left
-  // the worker serving something else (an unarmed cell), not an error.
+  // the worker serving something else (an unarmed graph), not an error.
   string outcome = 15;
   // The classified reason token when outcome != ok — AdoptError.reason,
   // ConstantsUnboundError.reason, a lane-gate refusal. Short and stable so it
@@ -1742,7 +1742,7 @@ message FnUnavailable {
   //
   // State that can change — O re-probes these with backoff:
   //   insufficient_disk, insufficient_host_ram, host_ram_capacity,
-  //   setup_failed, retry_exhausted, compile_cell_failed, model_unavailable,
+  //   setup_failed, retry_exhausted, compile_graph_failed, model_unavailable,
   //   multi_group_async_handler, cancel_unwind_stuck.
   //
   // `native_crash_streak` is not only an availability fact: W's own PROCESS
@@ -1818,7 +1818,7 @@ message TokenRefresh {
 //     serving, and reported `hub_ordered_eager`. Nothing on the live wire
 //     carries a per-dispatch eager choice today — RunJob has no such field —
 //     so this command is now the ONLY hub-ordered eager posture.)
-//   * §4.31's sticky de-arm is AUTOMATIC and per-cell — a cell-attributable
+//   * §4.31's sticky de-arm is AUTOMATIC and per-graph — a graph-attributable
 //     failure, evidence, irreversible for the boot.
 // This one is operator-explicit, whole-worker and reversible, and it reports
 // its own token (`operator_eager_only`) so a suppressed pod's telemetry is
@@ -1828,9 +1828,9 @@ message TokenRefresh {
 // Additive proto3 oneof field: a worker that predates it ignores it.
 message ServePosture {
   // true  = serve eager only: arm nothing, mint nothing, and answer every
-  //         request from the eager forward even where a cell is already armed
+  //         request from the eager forward even where a graph is already armed
   //         (the arm is NOT unwrapped, which is what makes false reversible).
-  // false = release the suppression; already-armed cells serve compiled again
+  // false = release the suppression; already-armed graphs serve compiled again
   //         on the next request, and later arming decisions run normally.
   bool   eager_only = 1;
   string reason     = 2; // operator's words, carried into the worker's event

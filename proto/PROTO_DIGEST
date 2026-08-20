@@ -3,7 +3,7 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-5f7cec2795c92fe9b5cee41114a75ca6e6f46deac0c171d91454272ba59ab51c
+a6fe81fa7001d5fb4329a9b434ef20f12d95a45c7c463bf75cf636d1f525a733
 
 # th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
 # `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
@@ -86,3 +86,30 @@
 # It exists because `safe_message` was `f"{type(exc).__name__}: {exc}"` and
 # nothing else: a $0.50, 455-GPU-second flagship job failure delivered the five
 # characters `'keys'` to its submitter, on a pod retired 19 seconds later.
+
+# pgw#1547 / th#2233 (Paul, 2026-08-20: "I want it fully renamed... no legacy
+# support, hardcut"): the word `cell` is RETIRED for compiled graphs. Field and
+# message NAMES only, applied byte-identically to tensorhub's canonical copy:
+#   CellLookup                -> CompiledGraphLookup
+#   cell_lookups        (8)   -> compiled_graph_lookups
+#   cell_key            (2)   -> compiled_graph_key      (in CompiledGraphLookup)
+#   requested_cell_key  (10)  -> requested_compiled_graph_key
+#   cell_ref            (2)   -> compiled_graph_ref
+#   cell_snapshot_digest (3)  -> compiled_graph_snapshot_digest
+#   served_cell_ref     (17)  -> served_compiled_graph_ref
+#   cell_key            (19)  -> compiled_graph_key      (ActivityUpdate)
+# plus the wire VALUES carried in comments and renamed in lockstep with the code
+# that emits them: `jit_cell`/`aot_cell` -> `jit_graph`/`aot_graph`, boot phases
+# `cell_discover|cell_fetch|cell_arm` -> `graph_*`, and the refusal code
+# `compile_cell_failed` -> `compile_graph_failed`.
+#
+# EVERY FIELD NUMBER IS UNCHANGED, so the binary wire is byte-identical and a
+# hub or worker on an older build is unaffected; only the JSON names move. That
+# is what makes the two-repo landing window safe in either order — the same
+# property tcg#56 relied on above, and the reason Paul's hardcut costs nothing
+# on the wire.
+#
+# `reserved "requested_cell_axes"` is DELIBERATELY NOT renamed: a reserved name
+# exists to keep that exact string un-reusable, so respelling it would defeat
+# the reservation. The two remaining `cell` words in this file are the
+# STATISTICS sense (one aggregation cell with two samples), a different word.

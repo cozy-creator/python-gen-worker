@@ -53,9 +53,11 @@ ARM_A = "arm2-" + "1" * 40
 
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "cozy-compiled graphs"
-    monkeypatch.setenv(local_compiled_graph_store.ENV_STORE_DIR, str(root))
-    return root
+    # pgw#1547: the store has no env of its own any more — it derives from the
+    # ONE CAS knob, so a test relocates it the same way production does.
+    cache = tmp_path / "worker-cache"
+    monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(cache))
+    return cache / local_compiled_graph_store.STORE_DIRNAME
 
 
 @pytest.fixture()
@@ -66,7 +68,7 @@ def cas(tmp_path: Path) -> Path:
 def _artifact(tmp_path: Path, *, source: Path = ARTIFACT_A,
               name: str = "mint") -> Path:
     """A packed compiled graph carrying its own stamp, as a real mint produces."""
-    p = tmp_path / name / "cell.tar.gz"  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
+    p = tmp_path / name / "graph.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, p)
     return p

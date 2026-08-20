@@ -44,7 +44,7 @@ def _request(tmp_path: Path, **over: Any) -> mp.MintRequest:
         modules=("harness.toy_endpoints",),
         family="sdxl",
         arm_token="arm1-deadbeef",
-        target=str(tmp_path / "cell.tar.gz"),  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
+        target=str(tmp_path / "graph.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
         cfg=child_contract.CompileSpec(family="sdxl", shapes=((1024, 1024),),
@@ -128,7 +128,7 @@ def test_a_minted_graph_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> Non
     # artifacts it produced. This vehicle mints one class, and the unpack
     # asserts that arity rather than indexing past a set nobody checked.
     (only,) = out.artifacts
-    assert only == tmp_path / "cell.tar.gz"  # cell-spelling: on-disk artifact name read by cozy-local's compiled-graphs CLI
+    assert only == tmp_path / "graph.tar.gz"
     assert only.read_bytes() == b"stub-compiled graph-bytes"
     # The digest rides the ENTRY row, beside the key and the path —
     # a per-artifact fact belongs with its artifact, not on the report.

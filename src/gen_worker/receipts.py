@@ -269,7 +269,7 @@ def _normalize_publisher_tier(raw: object) -> str:
 def _self_viewer() -> "worker_identity.ViewerIdentity":
     """WHO THIS POD IS, from the one resolver that can answer.
 
-    Never decode ``cell_read_endpoint_id``/``cell_read_org_id`` out of  # cell-spelling: hub-stamped credential claim name; this side only reads it
+    Never decode ``graph_read_endpoint_id``/``graph_read_org_id`` out of
     ``cfg.worker_jwt()`` — *this process's* credential. The gate is armed at
     HelloAck inside the COMPUTE CHILD, which holds no credential by
     construction, so both claims are ``""`` on every real serving pod and
@@ -341,7 +341,7 @@ def refuse_untrusted_publisher(
     if not mine and not my_org:
         raise ReceiptError(
             "publisher_untrusted",
-            "this pod cannot name its own endpoint or org (no cell_read_* claim "  # cell-spelling: hub-stamped credential claim name; this side only reads it
+            "this pod cannot name its own endpoint or org (no graph_read_* claim "
             "on the worker credential), so it may adopt platform-tier compiled graphs only")
     raise ReceiptError(
         "publisher_untrusted",

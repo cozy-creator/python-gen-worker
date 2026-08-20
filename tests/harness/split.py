@@ -98,6 +98,11 @@ class SplitHarness:
             "GEN_WORKER_BOOT_RECORD": str(postmortem_dir(tmp) / _BOOT_RECORD_NAME),
         }
         child_env.update(extra_child_env or {})
+        #: What the CHILD will resolve its paths from. Exposed because a row
+        #: that computes an expected path from the PYTEST process's own
+        #: environment is measuring the wrong process — this harness
+        #: deliberately overrides TENSORHUB_CACHE_DIR for the child.
+        self.child_env = dict(child_env)
         self.pc = ParentControl(
             settings,
             child_cmd=child_cmd or [sys.executable, str(CHILD_MAIN)],
