@@ -457,3 +457,166 @@ def test_the_boot_census_NAMES_an_unpinned_stubbed_tree(
         "unpinned + stubbed is the ONE combination that cannot serve — it must "
         f"be loud, not an INFO line nobody greps: level={row.levelname}")
     assert "UNREADABLE by the streaming engine" in row.getMessage()
+
+
+def test_the_census_fingerprint_SURVIVES_TEARDOWN_as_an_activity_row(
+    tmp_path: Path,
+) -> None:
+    """pgw#1541: a log line dies with the pod; the fingerprint must not.
+
+    pgw#1536's census emitted logger lines ONLY, which made it invisible to
+    every DB-reading harness and deleted at teardown — a rental ending in a
+    teardown script silently loses the exact fact the census exists to
+    preserve. Its "free on any run" value held only for a runner who knew to
+    pull `cozy logs` while the pod was still alive.
+
+    So the one state that cannot serve also lands as a
+    `worker_activity_events` row. Asserted here on the REAL emit path, not a
+    mock: `activity.bind_sink` is bound to a recorder exactly as `arun` binds
+    it to the worker's wire.
+    """
+    import asyncio
+
+    from gen_worker import activity
+    from gen_worker._vendor.tensorfs.project import stub_bytes
+    from gen_worker.models.store import ModelStore
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    base = tmp_path / "cas"
+    (base / "refs").mkdir(parents=True)
+    (base / "objects").mkdir(parents=True)
+    for name in ("sha256:" + "e5" * 32, "sha256:" + "f6" * 32):
+        tree = base / "snapshots" / name
+        (tree / "unet").mkdir(parents=True)
+        (tree / "unet" / "x.safetensors").write_bytes(
+            stub_bytes("a" * 64, 3_400_000_000)
+        )
+
+    sent: list[Any] = []
+
+    async def sink(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    async def run() -> None:
+        activity.bind_sink(sink, asyncio.get_running_loop())
+        store = ModelStore(sink, cache_dir=base)
+        store._census_snapshot_pins()
+        for _ in range(8):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    rows = [
+        m.activity_update for m in sent
+        if m.WhichOneof("msg") == "activity_update"
+        and m.activity_update.kind == activity.KIND_SNAPSHOT_CENSUS
+    ]
+    assert len(rows) == 1, (
+        "exactly ONE fingerprint row per boot — a row per healthy tree would be "
+        f"a heartbeat, not a fingerprint; got {len(rows)}")
+    row = rows[0]
+    assert row.phase == "unpinned_projected"
+    assert row.step == 2 and row.total_steps == 2, (
+        "the counts must be NUMERIC so the state is a query and not a string "
+        f"search; got step={row.step} total={row.total_steps}")
+    assert "unservable=2" in row.detail and "e5e5" in row.detail
+
+
+def test_a_HEALTHY_census_STILL_emits_a_row_so_absence_means_one_thing(
+    tmp_path: Path,
+) -> None:
+    """The row is unconditional, and this test is the reason why.
+
+    My first cut fired the row only when something was unservable, reasoning
+    that a healthy row is noise. That was wrong, and it broke the exact
+    question the census exists to answer. The residue is PREDATE-vs-BUILT-
+    THIS-BOOT, and it is read off the census being ABSENT at boot while the
+    failure shows up later. Fire-on-bad-only makes absence ambiguous — healthy
+    boot, crashed census, and no-trees-on-disk all render identically as "no
+    row", and an absent instrument that reads as a clean bill of health is
+    worse than no instrument at all.
+
+    So: absence now means exactly one thing — the census did not run.
+    """
+    import asyncio
+
+    from gen_worker import activity
+    from gen_worker.models.store import ModelStore
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    base = tmp_path / "cas"
+    (base / "refs").mkdir(parents=True)
+    (base / "objects").mkdir(parents=True)
+    # A materialized tree: real bytes, no stubs, needs no pin.
+    tree = base / "snapshots" / "plain"
+    tree.mkdir(parents=True)
+    (tree / "weights.bin").write_bytes(b"real bytes")
+
+    sent: list[Any] = []
+
+    async def sink(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    async def run() -> None:
+        activity.bind_sink(sink, asyncio.get_running_loop())
+        ModelStore(sink, cache_dir=base)._census_snapshot_pins()
+        for _ in range(8):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    rows = [
+        m.activity_update for m in sent
+        if m.WhichOneof("msg") == "activity_update"
+        and m.activity_update.kind == activity.KIND_SNAPSHOT_CENSUS
+    ]
+    assert len(rows) == 1, "a healthy boot must still be ON THE RECORD"
+    assert rows[0].phase == "all_servable"
+    assert rows[0].step == 0 and rows[0].total_steps == 1
+    assert ":P-" in rows[0].detail or ":--" in rows[0].detail, (
+        f"per-tree state must be packed into the row: {rows[0].detail}")
+
+
+def test_an_EMPTY_store_emits_the_row_that_ANSWERS_predate_vs_this_boot(
+    tmp_path: Path,
+) -> None:
+    """`of=0` at boot is the residue's answer, not a boring case to skip.
+
+    An empty snapshot store at boot means any stubbed tree found later was
+    BUILT THIS BOOT. That is the whole predate-vs-built-this-boot question,
+    settled by one row — so the empty case is the LAST one that should have
+    been an early return, and it used to be one.
+    """
+    import asyncio
+
+    from gen_worker import activity
+    from gen_worker.models.store import ModelStore
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    base = tmp_path / "cas"
+    for d in ("refs", "objects", "snapshots"):
+        (base / d).mkdir(parents=True)
+
+    sent: list[Any] = []
+
+    async def sink(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    async def run() -> None:
+        activity.bind_sink(sink, asyncio.get_running_loop())
+        ModelStore(sink, cache_dir=base)._census_snapshot_pins()
+        for _ in range(8):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    rows = [
+        m.activity_update for m in sent
+        if m.WhichOneof("msg") == "activity_update"
+        and m.activity_update.kind == activity.KIND_SNAPSHOT_CENSUS
+    ]
+    assert len(rows) == 1, (
+        "an EMPTY store must be on the record — it is the strongest "
+        "predate-vs-built-this-boot evidence the census can produce")
+    assert rows[0].total_steps == 0 and rows[0].step == 0
+    assert rows[0].phase == "all_servable"

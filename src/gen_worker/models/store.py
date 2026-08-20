@@ -1183,15 +1183,23 @@ class ModelStore:
         anywhere else.
         """
         root = Path(self._cache_dir) / SNAPSHOTS_DIR
+        unreadable_store = False
         try:
             trees = sorted(p for p in root.iterdir() if p.is_dir())
         except OSError:
-            return
-        if not trees:
+            # NOT a return: an unreadable store is itself a census result, and
+            # a silent return here would put the ambiguity straight back.
+            trees, unreadable_store = [], True
+        if not trees and not unreadable_store:
+            # AN EMPTY STORE IS THE STRONGEST RESIDUE EVIDENCE THERE IS, not a
+            # boring case to skip. `of=0` at boot means anything found stubbed
+            # later was BUILT THIS BOOT — which is the predate-vs-built-this-
+            # boot question, answered outright. It falls through to the emit.
             logger.info("snapshot census at boot: no trees on disk at %s", root)
-            return
         from . import projection as _projection
 
+        unservable: List[str] = []
+        packed: List[str] = []
         for tree in trees:
             try:
                 pinned = _projection.resolve_projection(tree) is not None
@@ -1201,12 +1209,61 @@ class ModelStore:
                 continue
             # UNPINNED + STUBBED is the pod incident's exact state, and it is
             # the one combination that cannot serve.
+            if stubbed and not pinned:
+                unservable.append(tree.name)
+            # Short name: the digest prefix identifies the tree, and the full
+            # 71-char ref would blow the 2000-char detail cap at ~28 trees.
+            short = tree.name.split(":")[-1][:12] or tree.name[:12]
+            packed.append(f"{short}:{'P' if pinned else '-'}{'S' if stubbed else '-'}")
             (logger.error if (stubbed and not pinned) else logger.info)(
                 "snapshot census at boot: %s pinned=%s projected=%s%s",
                 tree.name, pinned, stubbed,
                 "  <-- UNREADABLE by the streaming engine (pgw#1536)"
                 if (stubbed and not pinned) else "",
             )
+
+        # pgw#1541: THE CENSUS MUST OUTLIVE THE POD.
+        #
+        # Everything above is a log line, and a RENTED pod's stdout is ingested
+        # NOWHERE: no worker-log table, `cozy logs` is local-only, privatedeploy
+        # has no logs verb, and `bootstages` reads pgw#1355 telemetry rather
+        # than stdout. So pgw#1536's census — built to answer condition-3's
+        # residue "for free instead of costing a rental" — could not be read on
+        # exactly the pods it was built for. It paid out only where someone can
+        # already tail the process, which was never the hard case.
+        #
+        # ALWAYS ONE ROW, INCLUDING THE HEALTHY BOOT. My first cut here emitted
+        # only when something was unservable, reasoning that a healthy row is
+        # noise. That was wrong, and it broke the very question this exists to
+        # answer: the residue is PREDATE-vs-BUILT-THIS-BOOT, which is read off
+        # the boot census being ABSENT while the failure appears later. With a
+        # fire-on-bad-only row, absence is ambiguous — healthy boot, census
+        # crashed, and no-trees-on-disk all render identically as no row, and
+        # an absent instrument that reads as a clean bill of health is worse
+        # than none. Emitting unconditionally makes absence mean exactly one
+        # thing: the census did not run.
+        try:
+            from .. import activity as activity_mod
+
+            # Per-tree state packed into the ONE row: `<digest12>:<pin><stub>`,
+            # so a DB harness gets the whole picture without the logs it cannot
+            # reach. Bounded well under the 2000-char detail cap.
+            shown = ",".join(packed[:40])
+            more = "" if len(packed) <= 40 else f" (+{len(packed) - 40} more)"
+            activity_mod.emit_event(
+                activity_mod.KIND_SNAPSHOT_CENSUS,
+                f"unservable={len(unservable)} of={len(trees)} "
+                f"trees={shown}{more} store={root}",
+                phase=(
+                    "store_unreadable" if unreadable_store
+                    else "unpinned_projected" if unservable
+                    else "all_servable"
+                ),
+                step=len(unservable),
+                total_steps=len(trees),
+            )
+        except Exception:  # noqa: BLE001 — telemetry never fails a boot
+            logger.debug("snapshot census event dropped", exc_info=True)
 
     def ensure_pinned(
         self, ref: WireRef, tree: Path, snapshot: Optional[pb.Snapshot],
