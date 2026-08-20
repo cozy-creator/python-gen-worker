@@ -328,3 +328,90 @@ def test_the_decline_REASON_survives_the_wire_truncation(tmp_path: Path) -> None
     assert "pointer stub(s), NOT weights" in truncated, (
         "the stub count should also fit inside the cap — it is what identifies "
         "the shape on sight")
+
+
+def test_a_missing_manifest_pin_is_REPAIRED_not_refused_forever(tmp_path: Path) -> None:
+    """The pod's condition 3, verbatim, and the loop it was stuck in.
+
+    # pgw#1526: measured on an L4, same volume, pin the only variable:
+    #   ENGINE DECLINED: the manifest pin `snapshot:sha256:5bd90786…` is
+    #   MISSING from the store at /tmp/tensorhub-cache/cas
+
+    `_pin_manifest` has exactly ONE caller, `ensure_snapshot`. But
+    `_materialize_local`'s cached short-circuits return a tree already on disk
+    without going through it, so a tree that reaches residency by any other
+    route is unpinned — and `ensure_local` can never repair it, because it
+    short-circuits on that same tree forever. pgw#1513 refused and bounced to
+    `ensure_local` expecting a re-pin; on a pod the bounce lands right back on
+    the unpinned tree. Refusing was right; refusing forever was the bug.
+
+    So: stage a real tree, DELETE its pin the way the pod's is missing, and
+    assert the store repairs it — without moving bytes — so the streaming
+    engine can bind and the checkpoint actually serves.
+    """
+    import asyncio
+
+    from gen_worker import activity
+    from gen_worker.models import projection
+    from test_weight_position import (  # type: ignore[import-not-found]
+        OBJECT_BYTES,
+        OBJECTS,
+        _Origin,
+        _Wire,
+        _pb_snapshot,
+        _store,
+    )
+    from gen_worker.models.refs import WireRef
+
+    ref = WireRef("acme/model-a")
+    origin = _Origin()
+    try:
+        files = [
+            (f"unet/shard-{i}.safetensors", bytes([i + 1]) * OBJECT_BYTES)
+            for i in range(OBJECTS)
+        ]
+        snapshot = _pb_snapshot([(p, b, origin.put(b)) for p, b in files])
+        cas = tmp_path / "cas"
+
+        async def stage() -> Path:
+            wire = _Wire()
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            store = _store(wire, cas)
+            return await store.ensure_local(ref, snapshot)
+
+        tree = asyncio.run(stage())
+        assert projection.resolve_projection(tree) is not None, "fixture never pinned"
+
+        # THE POD'S STATE: bytes fine, pin gone.
+        # Refs are stored under a hashed id, so the pin is found by the NAME it
+        # records rather than by its filename.
+        import json as _json
+
+        wanted = "snapshot:" + tree.name
+        pins = [
+            q for q in (cas / "refs").rglob("*")
+            if q.is_file() and _json.loads(q.read_bytes()).get("name") == wanted
+        ]
+        assert len(pins) == 1, f"expected exactly one pin for {wanted}, got {pins}"
+        pins[0].unlink()
+        assert projection.resolve_projection(tree) is None, "fixture is not in state 3"
+        before = sorted((p, p.stat().st_size) for p in tree.rglob("*") if p.is_file())
+
+        async def reboot() -> bool:
+            wire = _Wire()
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            store = _store(wire, cas)
+            store.rescan_disk()
+            return await store.announce_resident(ref, snapshot)
+
+        answered = asyncio.run(reboot())
+
+        assert projection.resolve_projection(tree) is not None, (
+            "the pin must be REPAIRED — bouncing to `ensure_local` lands on the "
+            "same unpinned tree forever, which is the loop the pod was in")
+        assert answered is True, (
+            "with the pin repaired the pod is genuinely resident and must say so")
+        after = sorted((p, p.stat().st_size) for p in tree.rglob("*") if p.is_file())
+        assert before == after, f"NO BYTES MAY MOVE; tree changed: {before} -> {after}"
+    finally:
+        origin.close()
