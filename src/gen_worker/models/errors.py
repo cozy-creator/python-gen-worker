@@ -21,6 +21,44 @@ class MissingSnapshotError(RuntimeError):
     re-sends DOWNLOAD on ``ModelEvent{FAILED, error:"missing_snapshot"}``."""
 
 
+class NonCasWeightSourceRefused(RuntimeError):
+    """Serving was asked to load weights from something that is not a
+    tensor-layout-contract-cut tensorfs CAS snapshot.
+
+    Paul's 2026-08-19 hardcut ruling: *"only store + support loading our new
+    tensorfs laid out files. Our tensor-layout-contract and tensorfs chunking
+    system are mandatory; do not support old systems that lack this."* The
+    serving path therefore has exactly ONE weight source — a projected CAS
+    snapshot tree (``models/cozy_snapshot.py``) built from an
+    orchestrator-resolved manifest.
+
+    Hugging Face, Civitai and ModelScope survive as INGEST edges only:
+    fetch -> normalize under a layout contract -> publish to the CAS -> serve
+    from the CAS. There is no direct-serve fallback to fall back TO, so this is
+    terminal and never retried — retrying cannot make an upstream registry into
+    a CAS snapshot. The message names the ingest route, because an operator who
+    hits this needs the next action, not the diagnosis.
+    """
+
+    def __init__(self, message: str, *, provider: str = "") -> None:
+        super().__init__(message)
+        self.provider = str(provider or "")
+
+
+def non_cas_refusal(*, ref: str, provider: str) -> "NonCasWeightSourceRefused":
+    """THE refusal, worded once. Every serve-path source class raises this one
+    function's result so the operator reads the same route from every door."""
+    return NonCasWeightSourceRefused(
+        f"refusing to serve {ref!r} from {provider!r}: serving loads ONLY "
+        "tensor-layout-contract-cut tensorfs CAS snapshots. "
+        f"{provider!r} is an INGEST source — clone it into the platform "
+        "(conversion endpoint / `cozy clone`), which normalizes it under a "
+        "layout contract and publishes it to the tensorhub CAS, then bind the "
+        "resulting tensorhub ref. There is no direct-serve path.",
+        provider=provider,
+    )
+
+
 class PickleWeightRefused(RuntimeError):
     """A resolved snapshot contains a pickle-format weight (.bin/.ckpt/.pt/
     .pth/.pkl/.pickle). Unpickling is arbitrary code execution in THIS process,
@@ -58,6 +96,8 @@ def first_pickle_weight_path(paths: Iterable[str]) -> str:
 __all__ = [
     "UrlExpiredError",
     "MissingSnapshotError",
+    "NonCasWeightSourceRefused",
+    "non_cas_refusal",
     "PickleWeightRefused",
     "PICKLE_WEIGHT_EXTENSIONS",
     "first_pickle_weight_path",

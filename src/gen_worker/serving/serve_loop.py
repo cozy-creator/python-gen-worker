@@ -457,12 +457,9 @@ class ServeLoop:
         # anything placed inside the ExitStack below would never run for the
         # 27 conversion producers this exists for.
         source_fetch_t0 = time.monotonic()
-        materialize_reserved_inputs(
-            ctx,
-            decoded.payload,
-            snapshots or {},
-            hf_token=str(per_request.get("hf_token") or self._hf_token or ""),
-        )
+        # pgw#1524: no HF token travels here any more — every reserved repo
+        # comes out of the platform CAS, never off an upstream registry.
+        materialize_reserved_inputs(ctx, decoded.payload, snapshots or {})
         ctx._stages.record_pre(
             "source_fetch", time.monotonic() - source_fetch_t0
         )

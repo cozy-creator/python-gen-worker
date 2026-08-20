@@ -53,6 +53,7 @@ from .. import weight_position
 from ..api.errors import ValidationError
 from ..models.cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
 from ..models.download import ensure_local
+from ..models.errors import NonCasWeightSourceRefused
 from ..models.refs import normalize_model_ref
 
 logger = logging.getLogger(__name__)
@@ -119,8 +120,6 @@ async def _materialize_one(
     payload: Any,
     field_name: str,
     snapshots: Mapping[str, Any],
-    *,
-    hf_token: str = "",
 ) -> None:
     info = reserved_repo_info(payload, field_name)
     if not info:
@@ -145,45 +144,42 @@ async def _materialize_one(
             f"no {_SETTER_FOR[field_name]}"
         )
     snapshot = snapshots.get(ref)
-    # pgw#1485 / pgw#1455: THE JOB PLANE'S FETCH IS INSTRUMENTED TOO. This is a
-    # SECOND download funnel — the `models.download.ensure_local` FREE FUNCTION,
-    # not `ModelStore`'s — and it was called with no `progress=` at all, so a
-    # pod that pulled 20.5 GB of reserved-repo weights left ZERO `weight_fetch`
-    # rows. pgw#1455's "the funnel sees every materialization path (… RunJob
-    # delivery)" was true of the serving plane and false here; repaired by
-    # wiring, not by narrowing the claim. `track` closes the position on every
-    # exit path, so a fetch that dies mid-way still says where it stopped.
+    # pgw#1524 — THE JOB PLANE HAS ONE WEIGHT SOURCE TOO, and it is the CAS.
     #
-    # SCOPED TO THE SNAPSHOT BRANCH DELIBERATELY. On the provider-direct
-    # branches `progress=` is not a passive observer: `download_hf` redirects
-    # into a `local_dir` staging tree and arms a progress-rate floor that can
-    # RAISE. Instrumenting those is a behaviour change and belongs to whoever
-    # measures it; emitting a position of 0 for them instead would manufacture
-    # exactly the frozen-transfer misreading pgw#1455 exists to prevent.
+    # This branch used to fall through to `ensure_local`'s provider-direct
+    # download when the hub shipped no snapshot for a reserved repo. That was
+    # the second direct-serve door in the tree (the first being ModelStore's),
+    # and Paul's hardcut closes both: a reserved repo with no resolved snapshot
+    # is a RESOLUTION defect on the hub side, not an invitation to pull
+    # un-normalized bytes off an upstream registry into a producer's hands.
+    #
+    # Named rather than swallowed: `payload.<field>` is client-supplied, so the
+    # refusal says which field and which ref, and `NonCasWeightSourceRefused`
+    # carries the ingest route for the operator who has to fix it.
+    #
+    # pgw#1485 / pgw#1455 kept: `track` is the job plane's own weight_fetch
+    # instrumentation and it closes the position on every exit path, so a fetch
+    # that dies mid-way still says where it stopped. With the uninstrumented
+    # branch gone, EVERY reserved-repo byte is now on the funnel — the claim
+    # pgw#1455 made and could not previously hold here.
     if snapshot is None:
-        logger.info(
-            "reserved repo fetch UNINSTRUMENTED field=%s ref=%s: no resolved "
-            "snapshot, provider-direct branch emits no weight_fetch positions",
-            field_name, ref,
+        raise NonCasWeightSourceRefused(
+            f"payload.{field_name}.ref {ref!r}: the hub resolved no tensorfs "
+            "CAS snapshot for this repo, and serving loads ONLY "
+            "tensor-layout-contract-cut CAS snapshots (pgw#1524). Publish the "
+            "repo through the platform's ingest route (conversion endpoint / "
+            "mirror-first) and bind the tensorhub ref it produces."
         )
+    with weight_position.track(
+        str(ref), weight_position.snapshot_bytes(snapshot),
+    ) as position:
         path = await ensure_local(
             str(ref),
+            snapshot=snapshot,
             cache_dir=tensorhub_cas_dir(),
-            hf_token=hf_token or None,
             fill_source_dir=tensorhub_fill_source_dir(),
+            progress=position.progress,
         )
-    else:
-        with weight_position.track(
-            str(ref), weight_position.snapshot_bytes(snapshot),
-        ) as position:
-            path = await ensure_local(
-                str(ref),
-                snapshot=snapshot,
-                cache_dir=tensorhub_cas_dir(),
-                hf_token=hf_token or None,
-                fill_source_dir=tensorhub_fill_source_dir(),
-                progress=position.progress,
-            )
     setter(str(path))
     logger.info(
         "reserved repo materialized field=%s ref=%s path=%s",
@@ -214,14 +210,10 @@ async def materialize_reserved_inputs_async(
     ctx: Any,
     payload: Any,
     snapshots: Mapping[str, Any],
-    *,
-    hf_token: str = "",
 ) -> None:
     """Fill every reserved path this payload declares, then its datasets."""
     for field_name in RESERVED_REPO_FIELDS:
-        await _materialize_one(
-            ctx, payload, field_name, snapshots, hf_token=hf_token
-        )
+        await _materialize_one(ctx, payload, field_name, snapshots)
         ctx.raise_if_cancelled("canceled")
     await _materialize_datasets(ctx, payload)
     ctx.raise_if_cancelled("canceled")
@@ -231,8 +223,6 @@ def materialize_reserved_inputs(
     ctx: Any,
     payload: Any,
     snapshots: Mapping[str, Any],
-    *,
-    hf_token: str = "",
 ) -> None:
     """The SYNCHRONOUS entry the serve loop calls.
 
@@ -242,11 +232,7 @@ def materialize_reserved_inputs(
     entrypoint that way. Downloading on the dispatch's event loop instead
     would block every other job's heartbeat behind a multi-GB fetch.
     """
-    asyncio.run(
-        materialize_reserved_inputs_async(
-            ctx, payload, snapshots, hf_token=hf_token
-        )
-    )
+    asyncio.run(materialize_reserved_inputs_async(ctx, payload, snapshots))
 
 
 def declared_reserved_fields(payload: Any) -> Tuple[str, ...]:

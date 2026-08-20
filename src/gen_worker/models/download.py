@@ -1,14 +1,28 @@
-"""ONE ensure-local path for every model provider.
+"""ONE ensure-local path for the serving fleet, and it has ONE weight source.
 
 ``ensure_local(ref)`` materializes a model ref on disk and returns its local
-path, dispatching on provider:
+path. Since pgw#1524 (Paul's 2026-08-19 hardcut ruling — *"only store + support
+loading our new tensorfs laid out files"*) the only thing it can materialize is
+a **tensor-layout-contract-cut tensorfs CAS snapshot**: an orchestrator-resolved
+manifest projected by ``models/cozy_snapshot.py``. Every other weight source is
+an INGEST edge and is refused here by name
+(:class:`~gen_worker.models.errors.NonCasWeightSourceRefused`).
 
-  - tensorhub : CAS blob download + snapshot materialization (orchestrator
-                pre-resolves and ships presigned URLs; see cozy_snapshot.py)
-  - hf        : ``huggingface_hub.snapshot_download`` in a thread, with
-                ``allow_patterns`` from a small variant selector
-  - civitai   : bounded provider fetch of a model-version's safetensors files
-  - modelscope: ``modelscope.snapshot_download`` in a thread
+What that means per provider tag, which still rides bindings because it records
+where a model CAME FROM:
+
+  - tensorhub : the snapshot the orchestrator resolved -> CAS -> projected tree.
+                A tensorhub ref with no snapshot is ``MissingSnapshotError``
+                (the orchestrator re-mints), not a fallback.
+  - hf / civitai / modelscope : servable ONLY through a hub-resolved snapshot
+                (mirror-first mirrors the upstream ref into the platform CAS).
+                With no snapshot there is nothing to serve and the refusal names
+                the ingest route.
+
+The fetchers themselves did not all die with the direct-serve branches: the
+INGEST edges live in ``gen_worker.convert`` (``ingest_huggingface`` has its own
+bounded ``snapshot_download``; ``ingest_civitai`` calls :func:`download_civitai`
+below), and they feed normalization -> contract -> CAS -> serve.
 
 One progress-reporter shape everywhere: ``progress(bytes_done, bytes_total)``
 (total may be None). Blocking library calls always run off the event loop.
@@ -16,7 +30,6 @@ One progress-reporter shape everywhere: ``progress(bytes_done, bytes_total)``
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -29,16 +42,15 @@ from urllib.parse import parse_qs, urlparse
 
 from ..api.errors import ValidationError
 from ..bounded_stream import copy_bounded, free_space_bound
-from ..config import Settings, current_or
+from ..config import Settings
 from ..manifest_blocks import declaration_rows
 
 _STANDALONE = Settings()
 from ..stall import ProgressFloor, SilenceWindow
 from .cache_paths import tensorhub_cas_dir
-from .errors import PickleWeightRefused, first_pickle_weight_path
+from .errors import PickleWeightRefused, first_pickle_weight_path, non_cas_refusal
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
 import hashlib
-from fnmatch import fnmatch
 
 if TYPE_CHECKING:
     from .hub_client import WorkerResolvedRepo
@@ -187,11 +199,6 @@ async def ensure_local(
     provider: Optional[str] = None,
     snapshot: Optional["WorkerResolvedRepo"] = None,
     cache_dir: Optional[Path] = None,
-    hf_home: Optional[str] = None,
-    hf_token: Optional[str] = None,
-    civitai_api_key: str = "",
-    allow_patterns: Sequence[str] = (),
-    components: Sequence[str] = (),
     progress: Optional[ProgressFn] = None,
     fill_source_dir: Optional[Path] = None,
 ) -> Path:
@@ -202,23 +209,30 @@ async def ensure_local(
     orchestrator is the only resolver: when it ships a snapshot for a ref —
     including an hf/civitai binding ref resolved through a platform mirror
     under mirror-first — the snapshot is authoritative and the bytes come from
-    tensorhub-CAS, never the upstream registry. Refs without a snapshot fall
-    back to their provider's direct download (hf/civitai/modelscope) or fail
-    retryably (tensorhub).
+    tensorhub-CAS, never the upstream registry.
 
-    ``components`` is honored on the HF direct-download branch.
-    It is deliberately NOT applied to the ``snapshot is not None`` branch:
-    that snapshot is orchestrator-resolved and the executor's residency
-    layer digest-verifies the materialized tree against the FULL
+    **pgw#1524: a ref with no snapshot has nothing to serve.** A tensorhub ref
+    raises ``MissingSnapshotError`` (retryable at the orchestrator, which
+    re-mints); every other provider raises
+    :class:`~gen_worker.models.errors.NonCasWeightSourceRefused`, which is
+    terminal and names the ingest route. The direct-download branches
+    (``download_hf``, ``download_modelscope``, and the civitai stream) are
+    DELETED, not flagged off: a fallback that serves un-normalized upstream
+    bytes is exactly what the hardcut removes.
+
+    **The registry-shaped parameters are GONE with the branches that read
+    them** (``hf_home``, ``hf_token``, ``civitai_api_key``, ``allow_patterns``,
+    ``components``). Only the deleted direct-download branches ever consumed
+    them: file selection on the CAS branch is the ORCHESTRATOR's, because the
+    residency layer digest-verifies the materialized tree against the FULL
     ``snapshot.files`` list it was handed (``ModelStore._verify_snapshot_tree``)
-    — filtering what gets written here without the orchestrator also
-    filtering what it verifies would turn every boot into a spurious
-    corruption/quarantine loop. Selective fetch for tensorhub-sourced
-    snapshots is therefore the hub's desired-snapshot scoping (the manifest
-    now carries ``components`` for it to read) — worker-side selective fetch
-    for tensorhub refs lands on the hub-less CLI path instead
-    (``models/provision.py::_fetch_tensorhub_snapshot``), which owns its own
-    resolve+download+materialize loop end to end.
+    — filtering here without the orchestrator also filtering what it verifies
+    turns every boot into a spurious corruption/quarantine loop. Selective
+    fetch for tensorhub refs is the hub's desired-snapshot scoping, and on the
+    hub-less CLI path ``models/provision.py::_fetch_tensorhub_snapshot``, which
+    owns its own resolve+download+materialize loop end to end. Keeping the
+    parameters as accepted-and-ignored would be the "silently wrong answer"
+    failure this repo keeps paying for.
 
     ``fill_source_dir``: an endpoint-scoped datacenter-warm CAS mount (RunPod
     volume) consulted before R2 on the tensorhub-snapshot branch only.
@@ -251,119 +265,17 @@ async def ensure_local(
             "and none was provided"
         )
 
-    if parsed.provider == "hf" and parsed.hf is not None:
-        return await asyncio.to_thread(
-            download_hf,
-            parsed.hf,
-            hf_home=hf_home,
-            hf_token=hf_token,
-            allow_patterns=tuple(allow_patterns),
-            components=tuple(components),
-            progress=progress,
-        )
-
-    if parsed.provider == "civitai" and parsed.civitai is not None:
-        version_id = parse_civitai_version_id(parsed.civitai.model_id)
-        return await asyncio.to_thread(
-            download_civitai,
-            version_id,
-            base / "civitai" / str(version_id),
-            api_key=civitai_api_key or current_or(_STANDALONE).civitai_api_key,
-            progress=progress,
-        )
-
-    if parsed.provider == "modelscope" and parsed.modelscope is not None:
-        ms = parsed.modelscope
-        return await asyncio.to_thread(
-            download_modelscope,
-            ms.repo_id,
-            cache_dir=base / "modelscope",
-            revision=ms.revision or "",
-            allow_patterns=tuple(allow_patterns),
-        )
+    # THE HARDCUT (pgw#1524). Every remaining provider is an INGEST source, so
+    # the only honest answer to "serve this without a CAS snapshot" is a typed
+    # refusal that names the ingest route. Deliberately NOT a per-provider
+    # branch: a source class this function has never heard of is refused by the
+    # same rule, because the rule is about the CAS, not about the registry.
+    if parsed.provider in ("hf", "civitai", "modelscope"):
+        raise non_cas_refusal(ref=str(ref), provider=parsed.provider)
 
     # Typed so the executor classifies it INVALID (bad input, never retry) —
     # a bare ValueError maps FATAL.
     raise ValidationError(f"unsupported model ref {ref!r} (provider={prov!r})")
-
-
-# ---------------------------------------------------------------------------
-# Hugging Face: snapshot_download + small variant selector
-# ---------------------------------------------------------------------------
-
-from ..component_vocab import denoiser_components, pipeline_component_dirs
-_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".onnx", ".msgpack", ".h5")
-_VARIANT_TAGS = ("bf16", "fp16", "fp8", "int8", "int4")
-_component_dirs = pipeline_component_dirs
-
-
-def _variant_of(filename: str) -> str:
-    low = filename.lower()
-    for tag in _VARIANT_TAGS:
-        if f".{tag}." in low or f"-{tag}." in low or f"_{tag}." in low:
-            return tag
-    return ""
-
-
-def select_hf_files(repo_files: Sequence[str]) -> Optional[set[str]]:
-    """Small variant selector: which repo files to download.
-
-    - Diffusers-style repos (component dirs): every non-weight file (configs,
-      tokenizers) plus ONE weight set per component directory — bf16 > fp16 >
-      untagged, safetensors preferred. Root monolithic checkpoints are
-      excluded (redundant). There is no ``flavor=`` override: HF has no flavor
-      axis, and an explicit file set is what ``files=`` is for.
-    - Root-weights repos: the root weight files (same variant rule) + sidecars.
-    - Anything else: None (download the whole repo).
-    """
-    files = [f for f in repo_files if f and not f.endswith("/")]
-    if not files:
-        return None
-    dirs = {f.split("/", 1)[0] for f in files if "/" in f}
-    diffusers_like = "model_index.json" in files or any(d in dirs for d in denoiser_components())
-
-    weights_by_dir: Dict[str, list[str]] = {}
-    non_weights: set[str] = set()
-    for f in files:
-        name = f.rsplit("/", 1)[-1]
-        low = name.lower()
-        if low.endswith(_WEIGHT_SUFFIXES):
-            d = f.split("/", 1)[0] if "/" in f else ""
-            weights_by_dir.setdefault(d, []).append(f)
-        else:
-            non_weights.add(f)
-
-    if not weights_by_dir:
-        return None
-
-    if not diffusers_like and set(weights_by_dir) != {""}:
-        return None  # unrecognized layout: full repo
-
-    if diffusers_like and "" in weights_by_dir and len(weights_by_dir) > 1:
-        # Root single-file distributions (sd1.5's v1-5-pruned*.safetensors)
-        # duplicate the component-dir weights — diffusers loads from the
-        # component dirs, so never pull the monolithic root checkpoints.
-        del weights_by_dir[""]
-
-    def _pick(group: list[str]) -> list[str]:
-        st = [f for f in group if f.lower().endswith(".safetensors")]
-        pool = st or group
-        by_variant: Dict[str, list[str]] = {}
-        for f in pool:
-            by_variant.setdefault(_variant_of(f.rsplit("/", 1)[-1]), []).append(f)
-        order: list[str] = ["bf16", "fp16", ""]
-        for v in order:
-            if by_variant.get(v):
-                return by_variant[v]
-        # Only exotic variants exist (fp8/int8/...) — take the smallest-named
-        # deterministic group rather than all of them.
-        first = sorted(by_variant)[0]
-        return by_variant[first]
-
-    selected: set[str] = set(non_weights)
-    for group in weights_by_dir.values():
-        selected.update(_pick(group))
-    return selected
 
 
 def select_component_paths(
@@ -413,31 +325,8 @@ def components_present(paths: Sequence[str], components: Sequence[str]) -> bool:
     return bool(dirs & comps)
 
 
-def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) -> set[str]:
-    """Repo files matched by ``patterns`` — huggingface_hub semantics
-    (fnmatch; a trailing ``/`` means the whole directory)."""
-
-    pats = [p + "*" if p.endswith("/") else p for p in patterns]
-    return {f for f in repo_files if any(fnmatch(f, p) for p in pats)}
-
-
-# HF snapshot-download guards: the progress window and the
-# accidental-huge-repo cap (0 = off). No deployment has ever overridden these,
-# so they're fixed constants rather than Settings fields.
-#
-# The bound is a PROGRESS-RATE FLOOR, never a wall clock. A wall-clock cap
-# cannot distinguish a healthy 200GB pull from a wedge, so it is either
-# useless or it kills real downloads; the honest question is "is this transfer
-# still moving fast enough to ever finish?". A transfer that cannot put
-# _HF_DOWNLOAD_MIN_WINDOW_BYTES on disk within _HF_DOWNLOAD_STALL_TIMEOUT_S is
-# stalled — including a trickle, which resets an any-progress watchdog forever
-# with a byte a minute. 8 MiB / 180s ~= 46 KiB/s: three orders of magnitude
-# under any real pod link, and still 60+ hours for a 10GB checkpoint, so
-# nothing healthy is near it.
 _HF_DOWNLOAD_STALL_TIMEOUT_S = 180.0
 _HF_DOWNLOAD_MIN_WINDOW_BYTES = 8 * 1024 * 1024
-_HF_MAX_REPO_BYTES = 60_000_000_000
-
 
 class DownloadStalledError(RuntimeError):
     """Raised when a blocking snapshot download fails the progress-rate floor
@@ -539,237 +428,6 @@ def _run_with_stall_watchdog(
     if "exc" in holder:
         raise holder["exc"]
     return str(holder["local"])
-
-
-def _refuse_pickles_on_disk(root: Path, label: str) -> None:
-    """Refuse if any pickle-format weight is materialized under ``root``.
-
-    Used where there is no listing to refuse against ahead of time. Symlinks
-    are not followed: the HF cache materializes snapshots as symlinks into
-    ``blobs/``, and the name that matters is the one a loader will open.
-    """
-    try:
-        names = [p.name for p in root.rglob("*") if p.is_file() or p.is_symlink()]
-        if root.is_file() or root.is_symlink():
-            names.append(root.name)  # a lane may return the artifact, not a tree
-    except OSError:
-        return
-    if bad := first_pickle_weight_path(names):
-        raise PickleWeightRefused(
-            f"refusing {label}: {bad!r} is a pickle-format weight. "
-            "Unpickling is arbitrary code execution in this process."
-        )
-
-
-def download_modelscope(
-    repo_id: str,
-    *,
-    cache_dir: Optional[Path] = None,
-    revision: str = "",
-    allow_patterns: Sequence[str] = (),
-    local_files_only: bool = False,
-) -> Path:
-    """ModelScope snapshot fetch — the THIRD entry lane, and the one pgw#1273
-    left open (HARDCUT E5).
-
-    HF refuses a pickle off the file listing before a byte moves and civitai
-    selects `.safetensors`/`.gguf` by allow-list, but modelscope mirrors
-    HF-shaped repos verbatim — `.bin` components and all — and both call sites
-    handed `snapshot_download`'s return straight to a loader. The refusal is on
-    what LANDED rather than on a listing (modelscope's listing API is a network
-    call this lane does not otherwise make), so bytes move and then nothing
-    reads them: the door is still shut in front of every deserializer.
-    """
-    from modelscope import snapshot_download as ms_snap
-
-    kwargs: Dict[str, Any] = {}
-    if cache_dir is not None:
-        kwargs["cache_dir"] = str(cache_dir)
-    if revision:
-        kwargs["revision"] = revision
-    if allow_patterns:
-        kwargs["allow_patterns"] = list(allow_patterns)
-    if local_files_only:
-        kwargs["local_files_only"] = True
-    local = Path(str(ms_snap(model_id=repo_id, **kwargs)))
-    _refuse_pickles_on_disk(local, f"modelscope:{repo_id}")
-    return local
-
-
-def _hf_progress_dir(hf_home: Optional[str], ref: HuggingFaceRef) -> Path:
-    base = Path(hf_home) if hf_home else Path.home() / ".cache" / "huggingface"
-    safe = ref.repo_id.replace("/", "--").replace(":", "_")
-    rev = (ref.revision or "main").replace("/", "--").replace(":", "_")
-    return base / "gen-worker-progress-snapshots" / safe / rev
-
-
-def download_hf(
-    ref: HuggingFaceRef,
-    *,
-    hf_home: Optional[str] = None,
-    hf_token: Optional[str] = None,
-    allow_patterns: Sequence[str] = (),
-    components: Sequence[str] = (),
-    progress: Optional[ProgressFn] = None,
-    local_files_only: bool = False,
-) -> Path:
-    """Blocking HF snapshot download (call via ``ensure_local`` /
-    ``asyncio.to_thread``). Transfer, cache, resume and locking are
-    huggingface_hub's; this only plans the file selection.
-
-    ``components`` narrows the repo listing to the named pipeline
-    component subfolders (+ root config files, via
-    :func:`select_component_paths`) BEFORE the existing ``files=``/auto
-    variant-selection logic runs — so a component-scoped fetch still gets
-    per-component flavor picking (bf16 > fp16 > untagged), just over a
-    smaller candidate set.
-    """
-    from ..net import hf  # lazy: net imports requests; keeps `import gen_worker` light
-
-    try:
-        hub = hf()  # no HF socket may wait forever
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError(
-            "huggingface_hub is required for hf model refs; install gen-worker with the HF extra."
-        ) from e
-    HfApi, snapshot_download = hub.HfApi, hub.snapshot_download
-
-    repo_id = (ref.repo_id or "").strip()
-    if not repo_id:
-        raise ValueError("empty hf repo_id")
-    hf_home = (hf_home or "").strip() or None
-    hf_token = (hf_token or "").strip() or None
-    comps = tuple(c.strip() for c in components if c and str(c).strip())
-    kwargs: dict[str, Any] = {}
-    if hf_home:
-        kwargs["cache_dir"] = hf_home
-    if hf_token:
-        kwargs["token"] = hf_token
-
-    if local_files_only:
-        patterns = list(allow_patterns)
-        if comps and not patterns:
-            # No repo listing available offline to narrow precisely — fall
-            # back to component-subfolder + root-json glob patterns.
-            patterns = [f"{c}/" for c in comps] + ["*.json"]
-        offline = Path(snapshot_download(
-            repo_id=repo_id, revision=ref.revision, local_files_only=True,
-            allow_patterns=patterns or None, **kwargs,
-        ))
-        # pgw#1273: this path returns before the selection-time refusal below,
-        # and offline there is no listing to refuse against — so refuse on what
-        # is actually on disk. A cache populated by an earlier build (or by
-        # hand) is exactly the "reaches a worker by another path" case.
-        _refuse_pickles_on_disk(offline, f"{repo_id}@{ref.revision or 'main'} (cached)")
-        return offline
-
-    api = HfApi(token=hf_token)
-    repo_files = list(api.list_repo_files(repo_id=repo_id, repo_type="model", revision=ref.revision))
-
-    if comps:
-        if not components_present(repo_files, comps):
-            raise ValueError(
-                f"components= {list(comps)!r} matched nothing in {repo_id}"
-            )
-        repo_files = sorted(select_component_paths(repo_files, comps))
-
-    selected: Optional[set[str]]
-    if allow_patterns:
-        # Size-guard the MATCHED subset, not the whole repo — a small files=
-        # subset of a huge repo must not trip the repo-size cap. Same fnmatch
-        # semantics as huggingface_hub.filter_repo_objects.
-        selected = _match_allow_patterns(repo_files, allow_patterns)
-        if not selected:
-            raise ValueError(
-                f"files= patterns matched nothing in {repo_id}: {list(allow_patterns)!r}"
-            )
-        kwargs["allow_patterns"] = list(allow_patterns)
-    else:
-        selected = select_hf_files(repo_files)
-        if selected is not None:
-            kwargs["allow_patterns"] = sorted(selected)
-        elif comps:
-            # components= narrowed the listing but the repo has no
-            # recognized diffusers/root-weights layout for select_hf_files
-            # to specialize further — fetch exactly the components= subset
-            # rather than silently reverting to the whole repo.
-            selected = set(repo_files)
-            kwargs["allow_patterns"] = repo_files
-
-    # pgw#1273 — REFUSE PICKLES BEFORE A BYTE MOVES.
-    #
-    # `selection` is the final resolved set across all three selection paths
-    # (files= patterns, select_hf_files, or the narrowed listing), so this is
-    # the one chokepoint that sees every HF fetch.
-    #
-    # The gap was structural, not an oversight: `_pick` prefers safetensors but
-    # falls back to the whole group when a component has none
-    # (`pool = st or group`), `select_hf_files` returns None -> full repo on an
-    # unrecognized layout, and `select_component_paths` — which calls itself
-    # "the ONE filter both sources apply" — filters by COMPONENT and never by
-    # extension. Nothing downstream re-checked: `use_safetensors=True` appears
-    # nowhere in this tree, so a selected `pytorch_model.bin` reaches
-    # `from_pretrained` and is unpickled in the process holding hub credentials.
-    #
-    # The tensorhub lane already refuses on the resolved manifest
-    # (cozy_snapshot._validate_resolved); the civitai lane is an allow-list.
-    # This is the same refusal on the same list, for the third provider —
-    # exactly the case PickleWeightRefused's docstring already named:
-    # "defence in depth for blobs that ... reach a worker by another path."
-    selection = selected if selected is not None else set(repo_files)
-    if bad := first_pickle_weight_path(sorted(selection)):
-        raise PickleWeightRefused(
-            f"refusing {repo_id}@{ref.revision or 'main'}: {bad!r} is a pickle-format "
-            "weight. Unpickling is arbitrary code execution in this process. "
-            "Use a safetensors revision, or ingest through the conversion endpoint."
-        )
-
-    # Best-effort size guard against accidental huge downloads.
-    total_hint: Optional[int] = None
-    try:
-        sizes = {
-            e.path: int(getattr(e, "size", 0))
-            for e in api.list_repo_tree(repo_id=repo_id, repo_type="model",
-                                        revision=ref.revision, recursive=True)
-            if isinstance(getattr(e, "size", None), int)
-        }
-        wanted = selected if selected is not None else set(repo_files)
-        total_hint = sum(sizes.get(p, 0) for p in wanted)
-        if _HF_MAX_REPO_BYTES > 0 and total_hint > _HF_MAX_REPO_BYTES:
-            raise RuntimeError(
-                f"refusing an excessively large Hugging Face selection for {repo_id}: "
-                f"{total_hint} bytes (limit {_HF_MAX_REPO_BYTES})"
-            )
-    except RuntimeError:
-        raise
-    except Exception:
-        total_hint = None
-
-    progress_root: Optional[Path] = None
-    if progress is not None:
-        progress_root = _hf_progress_dir(hf_home, ref)
-        progress_root.mkdir(parents=True, exist_ok=True)
-        kwargs["local_dir"] = str(progress_root)
-        try:
-            progress(0, total_hint)
-        except Exception:
-            pass
-
-    local = _run_with_stall_watchdog(
-        lambda: snapshot_download(repo_id=repo_id, revision=ref.revision, **kwargs),
-        label=f"{repo_id}@{ref.revision or 'main'}",
-        progress_root=progress_root,
-        progress_callback=progress,
-        total_hint=total_hint,
-        stall_timeout=_HF_DOWNLOAD_STALL_TIMEOUT_S,
-    )
-    if progress is not None:
-        try:
-            final = _scan_bytes(Path(local))
-            progress(final, total_hint or final or None)
-        except Exception:
-            pass
-    return Path(local)
 
 
 # ---------------------------------------------------------------------------
@@ -1161,15 +819,14 @@ def download_civitai(
 
 __all__ = [
     "ensure_local",
-    "download_hf",
+    # INGEST-only fetchers (gen_worker.convert drives them). They are NOT on
+    # the serving path any more — pgw#1524 deleted every direct-serve branch.
     "download_civitai",
-    "download_modelscope",
-    "select_hf_files",
-    "select_component_paths",
-    "components_present",
     "fetch_civitai_model",
     "fetch_civitai_model_version",
     "parse_civitai_version_id",
+    "select_component_paths",
+    "components_present",
     "DownloadStalledError",
     "set_provider_index",
     "lookup_provider_for_ref",

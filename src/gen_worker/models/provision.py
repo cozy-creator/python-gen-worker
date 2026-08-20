@@ -35,14 +35,11 @@ from gen_worker._vendor.torchcg import ARTIFACT_KIND, GRAPH_SPECIALIZATION_BLOCK
 from ..compiled_graph_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
-from ..config import Settings, current_or
-
-_STANDALONE = Settings()
 from ..measured_posture import normalize_backend
 from . import attention_modes
 from . import disk_gc, load_progress
 from .cache_paths import tensorhub_cas_dir
-from .errors import UrlExpiredError
+from .errors import UrlExpiredError, non_cas_refusal
 from .loading import (
     assert_uniform_compute_dtype,
     composition_compute_dtype,
@@ -1277,12 +1274,13 @@ def resolve_bindings(
                 f"unknown binding type for param {param_name!r}: "
                 f"{type(binding).__name__}"
             )
+        # pgw#1524: `files=` globs and `version=` pins addressed UPSTREAM
+        # registries, and those rungs are gone. `components=` survives because
+        # it scopes the tensorhub snapshot fetch itself.
         out[param_name] = resolve_local_path(
             ref=wire_ref(binding), provider=binding.source,
             offline=offline, emit=emit,
-            allow_patterns=tuple(getattr(binding, "files", ()) or ()),
             components=tuple(getattr(binding, "components", ()) or ()),
-            civitai_version_id=str(getattr(binding, "version", "") or ""),
         )
     return out
 
@@ -1393,23 +1391,24 @@ def _fetch_tensorhub_snapshot(
 
 def resolve_local_path(
     *, ref: str, provider: str, offline: bool, emit: EmitFn,
-    allow_patterns: Tuple[str, ...] = (),
     components: Tuple[str, ...] = (),
-    civitai_version_id: str = "",
 ) -> str:
-    """Resolve one model ref to a local snapshot dir / loader-ready string.
+    """Resolve one model ref to a local tensorfs CAS snapshot dir.
 
-    Order matches the live worker:
+    Order matches the live worker, and since pgw#1524 both have exactly one
+    weight source:
       1. local CAS lookup (digest-pinned snapshot dirs).
-      2. HF refs → ``download_hf`` (auto-fetches from HF).
-      3. ModelScope refs → ``modelscope.snapshot_download``.
-      4. Cozy refs missing from CAS: standalone resolve against tensorhub's
-         public resolve route (th#560); ``--offline`` stays CAS-only (exit 3).
-      5. Civitai refs → model → latest-version lookup (or the pinned
-         version), then ``download_civitai``.
+      2. Cozy refs missing from CAS: standalone resolve against tensorhub's
+         public resolve route (th#560), then the shared ``cozy_snapshot``
+         downloader; ``--offline`` stays CAS-only (exit 3).
+      3. anything else — hf, civitai, modelscope — is an INGEST source and is
+         REFUSED by name (``NonCasWeightSourceRefused``). The direct-download
+         rungs are DELETED: a hub-less CLI that quietly served un-normalized
+         upstream bytes would be a second answer to "what is a servable model",
+         and the whole point of the hardcut is that there is only one.
 
-    ``components`` (pgw#505) narrows an HF/tensorhub fetch to the named
-    pipeline component subfolders (+ root config files) — see
+    ``components`` (pgw#505) narrows the tensorhub fetch to the named pipeline
+    component subfolders (+ root config files) — see
     ``download.select_component_paths`` / ``cozy_snapshot.snapshot_dir_key``.
     """
 
@@ -1430,79 +1429,6 @@ def resolve_local_path(
         snap_dir = cache_dir / "snapshots" / digest
         if snap_dir.exists():
             return str(snap_dir)
-
-    # HF refs: fall through to the shared HF downloader.
-    if parsed.provider == "hf" and parsed.hf is not None:
-        if offline:
-            # Best-effort: check the HF cache (huggingface_hub manages this
-            # itself; a cache hit returns a path, miss raises).
-            patterns = list(allow_patterns)
-            if components and not patterns:
-                patterns = [f"{c}/" for c in components] + ["*.json"]
-            try:
-                from ..net import hf
-                p = hf().snapshot_download(
-                    repo_id=parsed.hf.repo_id,
-                    revision=parsed.hf.revision,
-                    local_files_only=True,
-                    cache_dir=current_or(_STANDALONE).hf_home or None,
-                    token=current_or(_STANDALONE).hf_token or None,
-                    allow_patterns=patterns or None,
-                )
-                return str(p)
-            except Exception as e:
-                raise ModelResolutionError(
-                    f"--offline: huggingface ref {parsed.hf.canonical()} not "
-                    f"in local cache ({e}); warm the cache by running without "
-                    "--offline first."
-                ) from e
-
-        emit({"kind": "model_fetch.started", "ref": parsed.hf.canonical()})
-        try:
-            from .download import download_hf
-
-            local_dir = download_hf(
-                parsed.hf,
-                hf_home=current_or(_STANDALONE).hf_home or None,
-                hf_token=current_or(_STANDALONE).hf_token or None,
-                allow_patterns=tuple(allow_patterns),
-                components=components,
-            )
-        except Exception as e:
-            raise ModelResolutionError(
-                f"failed to fetch huggingface ref {parsed.hf.canonical()}: {e}"
-            ) from e
-        emit({
-            "kind": "model_fetch.completed",
-            "ref": parsed.hf.canonical(),
-            "local_dir": str(local_dir),
-        })
-        return str(local_dir)
-
-    # ModelScope refs: fetch directly via modelscope.snapshot_download. This is
-    # file-oriented (allow_patterns) and has NO diffusers-layout requirement, so
-    # it handles ComfyUI/DiffSynth split checkpoints the HF resolver rejects.
-    if parsed.provider == "modelscope" and parsed.modelscope is not None:
-        from .download import download_modelscope
-        from .errors import PickleWeightRefused
-
-        emit({"kind": "model_fetch.started", "ref": parsed.modelscope.canonical(), "provider": "modelscope"})
-        try:
-            local = download_modelscope(
-                parsed.modelscope.repo_id,
-                revision=parsed.modelscope.revision or "",
-                allow_patterns=tuple(allow_patterns),
-                local_files_only=offline,
-            )
-        except PickleWeightRefused:
-            # Typed and terminal: a pickle repo is not a fetch failure to retry.
-            raise
-        except Exception as e:
-            raise ModelResolutionError(
-                f"failed to fetch modelscope ref {parsed.modelscope.canonical()}: {e}"
-            ) from e
-        emit({"kind": "model_fetch.completed", "ref": parsed.modelscope.canonical(), "local_dir": str(local)})
-        return str(local)
 
     # Cozy refs that miss the CAS (#379): resolve standalone against
     # tensorhub's public resolve route (th#560) and feed the shared
@@ -1526,65 +1452,11 @@ def resolve_local_path(
             parsed.tensorhub, cache_dir=cache_dir, emit=emit, components=components,
         )
 
-    # Civitai refs: download the model-version files directly. Auth (for gated
-    # creators) comes from CIVITAI_API_KEY; public models need none.
-    if parsed.provider == "civitai" and parsed.civitai is not None:
-        if offline:
-            raise ModelResolutionError(
-                f"--offline: civitai ref {ref!r} not available offline (no local "
-                "civitai cache); run once online to fetch it."
-            )
-        from .download import (
-            download_civitai,
-            fetch_civitai_model,
-            parse_civitai_version_id,
-        )
-        api_key = current_or(_STANDALONE).civitai_api_key
-
-        if civitai_version_id:
-            # Explicit version pin via Civitai(version="<id>"). The pinned id
-            # IS a model-VERSION id, so use it directly — no model lookup.
-            try:
-                version_id = parse_civitai_version_id(civitai_version_id)
-            except Exception as e:
-                raise ModelResolutionError(
-                    f"bad civitai version pin {civitai_version_id!r} on ref {ref!r}: {e}"
-                ) from e
-        else:
-            # Civitai's ref is a MODEL id by convention; map it to its latest
-            # version id. No silent fallback: if the lookup fails or the model
-            # has no versions, the ref is wrong (e.g. a bare version id was
-            # passed where a model id was expected) — surface it rather than
-            # guessing and downloading an unrelated model.
-            try:
-                model_id = parse_civitai_version_id(parsed.civitai.model_id)
-            except Exception as e:
-                raise ModelResolutionError(f"bad civitai ref {ref!r}: {e}") from e
-            try:
-                model = fetch_civitai_model(model_id, api_key=api_key)
-            except Exception as e:
-                raise ModelResolutionError(
-                    f"failed to resolve civitai model {model_id} for ref {ref!r}: {e}; "
-                    "Civitai's ref must be a MODEL id (pin a specific version "
-                    'with .version("<version_id>")).'
-                ) from e
-            versions = model.get("modelVersions") or []
-            version_id = int(versions[0].get("id") or 0) if versions else 0
-            if version_id <= 0:
-                raise ModelResolutionError(
-                    f"civitai model {model_id} (ref {ref!r}) has no published "
-                    'version to download (pin one with .version("<version_id>")).'
-                )
-        out_dir = cache_dir / "civitai" / str(version_id)
-        emit({"kind": "model_fetch.started", "ref": ref, "provider": "civitai"})
-        try:
-            local = download_civitai(version_id, out_dir, api_key=api_key)
-        except Exception as e:
-            raise ModelResolutionError(
-                f"failed to fetch civitai ref {ref!r} (resolved version {version_id}): {e}"
-            ) from e
-        emit({"kind": "model_fetch.completed", "ref": ref, "local_dir": str(local)})
-        return str(local)
+    # THE HARDCUT (pgw#1524). hf / civitai / modelscope are INGEST sources;
+    # this resolver serves, so it refuses them by name and points at the route.
+    if parsed.provider in ("hf", "civitai", "modelscope"):
+        raise ModelResolutionError(str(non_cas_refusal(
+            ref=str(ref), provider=parsed.provider)))
 
     raise ModelResolutionError(
         f"unsupported model ref: {ref!r} (provider={provider!r})"

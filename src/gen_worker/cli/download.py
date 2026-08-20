@@ -175,11 +175,9 @@ def _resolve_snapshot(ref_text: str) -> Tuple[Any, Any]:
 
 
 async def _materialize(refs: Sequence[str]) -> Dict[str, Path]:
-    from .. import config
     from ..models.store import ModelStore
     from . import workspace
 
-    settings = config.current_or(config.Settings())
     # STATE the box weight CAS; do not inherit ModelStore's default.
     # `models.cache_paths.tensorhub_cas_dir()` answers `/tmp/tensorhub-cache/cas`
     # — correct for a pod, where /tmp is the container's own disk and the pod
@@ -191,8 +189,6 @@ async def _materialize(refs: Sequence[str]) -> Dict[str, Path]:
     # the wrong place.
     store = ModelStore(
         _logging_emit(),
-        hf_home=settings.hf_home,
-        hf_token=settings.hf_token,
         cache_dir=workspace.weights_cas_root(),
     )
     store.bind_loop()
