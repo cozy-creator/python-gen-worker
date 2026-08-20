@@ -1287,6 +1287,19 @@ class ModelStore:
         # `ensure_local` -> `ensure_snapshot`, which re-pins the manifest and,
         # because `_tree_matches` passes, returns the SAME tree without moving
         # a byte. A missing pin is repaired, not re-downloaded.
+        #
+        # THE "NO BYTES MOVE" CLAIM HOLDS ONLY ON THIS BRANCH, and the reason
+        # is the ORDER of the two checks above. The se#790 lane measured the
+        # worse state on a real tree: the manifest pin is a tree's ONLY GC
+        # root, so a tree that outlives its pin AND then meets a GC pass has
+        # all of its objects deleted (5.6 GB there; 134 GB on H3) while the
+        # tree stands, leaving stubs plus dangling symlinks. That state does
+        # not reach this line — it fails `_verify_snapshot_tree` above, where
+        # `projection_fault` reports "linked object … is absent", and takes
+        # the quarantine-and-refetch path, which is the honest cost. Reaching
+        # HERE means verification passed, i.e. the objects are present and
+        # only the pin is gone. Cheap repair for the cheap case, full re-fetch
+        # for the expensive one, and the two are never confused.
         from . import projection as _projection
 
         if _projection.stub_at_any(tree) and _projection.resolve_projection(tree) is None:
