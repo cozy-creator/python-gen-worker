@@ -306,6 +306,38 @@ def _projection_declined_because(tree: Path) -> str:
     )
 
 
+def _collected_objects(tree: Path) -> List[str]:
+    """Projected entries whose CAS object is GONE — the tree outlived its bytes.
+
+    pgw#1513, found by the se#790 lane on a real `@composed-v3` tree: drop a
+    tree's manifest pin and the pin is the ONLY root, so a GC pass deletes
+    every object while the tree stands. The containers are still stubs, but
+    the NON-tensor files are dangling symlinks — `model_index.json` among
+    them — and `skeleton.build` then reports "carries no model_index.json"
+    about a tree that has one. That is a reader-level fact (the bytes were
+    collected) rendered as a claim about the checkpoint, which is pgw#1308's
+    mistake for the third time.
+
+    Named separately from the stub case because the REMEDY differs: a stub
+    means "the streaming engine should have read this"; a collected object
+    means "these bytes are gone and must be re-fetched".
+    """
+    from ..models import projection
+
+    gone: List[str] = []
+    root = Path(tree)
+    if not root.is_dir():
+        return gone
+    for path in sorted(root.rglob("*")):
+        if not path.is_symlink():
+            continue
+        if not projection.is_projection_artifact(path):
+            continue
+        if not path.exists():  # follows the link: the object is absent
+            gone.append(path.relative_to(root).as_posix())
+    return gone
+
+
 def _projection_artifacts(tree: Path) -> List[Tuple[str, int, int]]:
     """Every tensor container in ``tree`` that is a pointer, not weights.
 
@@ -451,6 +483,22 @@ class LoadContext(Generic[MT_co]):
         # DIRECTORY NAME, so a tree selected under a different spelling than
         # the one it was pinned under resolves to nothing. This refusal turns
         # that into one named failure instead of an opaque loader crash.
+        collected = _collected_objects(self.checkpoint_dir)
+        if collected:
+            shown = ", ".join(collected[:3])
+            more = "" if len(collected) <= 3 else f" (+{len(collected) - 3} more)"
+            raise ProjectedTreeNotStreamable(
+                self.checkpoint_dir,
+                _projection_artifacts(self.checkpoint_dir),
+                f"{len(collected)} of this tree's entries are projected links "
+                f"whose CAS OBJECTS HAVE BEEN COLLECTED ({shown}{more}). The "
+                f"tree's manifest pin is the only root those objects had, so "
+                f"losing it makes a GC pass delete the bytes while leaving the "
+                f"tree standing. These weights must be RE-FETCHED; this is not "
+                f"a re-pin. Do not read this as a malformed checkpoint — a "
+                f"dangling `model_index.json` is why a tree that HAS one gets "
+                f"reported as 'carries no model_index.json'",
+            )
         stubbed = _projection_artifacts(self.checkpoint_dir)
         if stubbed:
             raise ProjectedTreeNotStreamable(

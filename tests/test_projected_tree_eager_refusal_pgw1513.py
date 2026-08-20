@@ -207,3 +207,52 @@ def test_a_tree_with_a_MISSING_PIN_is_not_answered_as_resident(tmp_path: Path) -
         "a tree no engine can bind to must not be answered as resident — "
         "that is the state that reaches the eager bridge and reports "
         "`header too large` about an intact checkpoint")
+
+
+def test_a_tree_whose_OBJECTS_WERE_COLLECTED_says_so_and_not_malformed(
+    tmp_path: Path,
+) -> None:
+    """se#790's state D, measured on a real 5.6 GB `@composed-v3` tree.
+
+    A tree's manifest pin is the ONLY GC root its objects have. Drop the pin,
+    run a GC, and every object is deleted while the tree stands: the tensor
+    containers are still stubs and the NON-tensor files — `model_index.json`
+    among them — become dangling symlinks. `skeleton.build` then reports
+    "carries no model_index.json" about a tree that has one, which is a
+    reader-level fact rendered as a claim about the checkpoint.
+
+    The refusal must name the real condition, and must not be confused with
+    the cheap missing-pin case: these bytes are GONE and must be re-fetched.
+    """
+    base = tmp_path / "cas"
+    (base / "refs").mkdir(parents=True)
+    objects = base / "objects"
+    objects.mkdir(parents=True)
+    tree = base / "snapshots" / ("sha256:" + "d4" * 32)
+    tree.mkdir(parents=True)
+
+    # A projected non-tensor entry whose object has been collected.
+    (tree / "model_index.json").symlink_to(
+        Path("..") / ".." / "objects" / "sha256" / "de" / "ad" / ("de" * 32)
+    )
+    assert (tree / "model_index.json").is_symlink()
+    assert not (tree / "model_index.json").exists(), "fixture must be dangling"
+
+    _Pipeline.called.clear()
+    ctx: LoadContext[Any] = LoadContext(
+        binding=DeployBinding(checkpoint_ref="acme/m@1", checkpoint_dir=tree),
+        engine=None,
+    )
+    with pytest.raises(ProjectedTreeNotStreamable) as caught:
+        ctx.load(_Pipeline)
+
+    assert _Pipeline.called == []
+    message = str(caught.value)
+    assert "COLLECTED" in message, f"the real condition must be named: {message}"
+    assert "model_index.json" in message
+    assert "RE-FETCHED" in message, (
+        "this must not be confused with the cheap re-pin case — the bytes are "
+        f"gone: {message}")
+    assert "carries no model_index.json" in message, (
+        "the refusal must name the FALSE message it is pre-empting, so the "
+        f"next reader searching that string lands here: {message}")
