@@ -37,8 +37,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING, Any, Callable, Generic, Mapping, Optional, Protocol, Type,
-    TypeVar, cast,
+    TYPE_CHECKING, Any, Callable, Generic, List, Mapping, Optional, Protocol,
+    Sequence, Tuple, Type, TypeVar, cast,
 )
 
 import msgspec
@@ -229,6 +229,109 @@ class DefaultsError(msgspec.ValidationError):
     """A hub defaults row does not fit the model type's schema."""
 
 
+class ProjectedTreeNotStreamable(RuntimeError):
+    """The eager bridge was handed a tree whose weights are POINTERS.
+
+    pgw#1513. Raised instead of letting ``from_pretrained`` open a ~128 B
+    TFSSTUB1 stub with the stock safetensors reader, which reports
+    ``SafetensorError: header too large`` — a message about a corrupt
+    checkpoint, for a checkpoint that is perfectly intact and whose bytes are
+    sitting in the CAS. Two days of this incident were spent looking at
+    volumes and download paths because of that sentence.
+
+    The numbers in the message are what identify a stub on sight: a stub's
+    size is fixed (~128 B) no matter how large the model it names, which is
+    why a 3.4 GB and a 68 GB checkpoint failed identically.
+    """
+
+    def __init__(
+        self,
+        tree: Path,
+        stubs: Sequence[Tuple[str, int, int]],
+        declined: str = "",
+    ) -> None:
+        self.tree = Path(tree)
+        self.stubs = list(stubs)
+        self.declined = declined
+        shown = ", ".join(
+            f"{path} ({on_disk} B on disk, names {named:,} B)"
+            for path, on_disk, named in self.stubs[:3]
+        )
+        more = "" if len(self.stubs) <= 3 else f" (+{len(self.stubs) - 3} more)"
+        super().__init__(
+            f"{self.tree} is a PROJECTED snapshot tree: {len(self.stubs)} of "
+            f"its tensor containers are tensorfs pointer stubs, not weights — "
+            f"{shown}{more}. The eager `from_pretrained` bridge reads with the "
+            f"stock safetensors reader and would report `header too large`, "
+            f"which describes a corrupt checkpoint and this checkpoint is not "
+            f"corrupt: its bytes are in the CAS. The streaming engine "
+            f"(pgw#1380) is the reader for this tree and it declined to bind, "
+            f"which means `resolve_projection` could not recover the tree's "
+            f"manifest pin. THE ENGINE DECLINED BECAUSE: {declined or 'unknown'}. "
+            f"Refusing rather than serving a lie about the weights."
+        )
+
+
+def _projection_declined_because(tree: Path) -> str:
+    """WHICH of `resolve_projection`'s three silent Nones fired, in words.
+
+    pgw#1513. Without this the reader gets a beautiful message about stubs and
+    still does not know why the streaming engine passed on a tree it should
+    have taken — the same two-day hunt, one layer up.
+    """
+    from ..models.projection import SNAPSHOTS_DIR
+
+    root = Path(tree)
+    if root.parent.name != SNAPSHOTS_DIR:
+        return (
+            f"the tree is at {root}, whose parent directory is "
+            f"{root.parent.name!r} and not {SNAPSHOTS_DIR!r} — "
+            f"`resolve_projection` locates the store by walking UP from the "
+            f"tree, so a correctly-built tree in the wrong place is invisible "
+            f"to it"
+        )
+    base = root.parent.parent
+    missing = [d for d in ("refs", "objects") if not (base / d).is_dir()]
+    if missing:
+        return (
+            f"the store root {base} has no {'/'.join(missing)} directory, so "
+            f"there is no CAS behind this tree"
+        )
+    return (
+        f"the manifest pin `snapshot:{root.name}` is MISSING from the store at "
+        f"{base}. The tree and its bytes are fine; what is absent is the ref "
+        f"that lets a reader recover the manifest, and it is keyed on the "
+        f"tree's own DIRECTORY NAME. Re-materializing this ref re-pins it "
+        f"without moving any bytes"
+    )
+
+
+def _projection_artifacts(tree: Path) -> List[Tuple[str, int, int]]:
+    """Every tensor container in ``tree`` that is a pointer, not weights.
+
+    Returns ``(relative path, bytes on disk, bytes it names)`` so the refusal
+    can show the fixed-size-stub signature rather than assert it.
+    """
+    from ..models import projection
+
+    found: List[Tuple[str, int, int]] = []
+    root = Path(tree)
+    if not root.is_dir():
+        return found
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() and not path.is_symlink():
+            continue
+        stub = projection.stub_at(path)
+        if stub is None:
+            continue
+        try:
+            on_disk = path.lstat().st_size
+        except OSError:
+            on_disk = 0
+        found.append((path.relative_to(root).as_posix(), on_disk, int(stub.size)))
+    return found
+
+
 class LoadContext(Generic[MT_co]):
     """What ``Model.load``/``Model.unload`` receive — the load moment."""
 
@@ -324,6 +427,37 @@ class LoadContext(Generic[MT_co]):
             "ctx.load: eager from_pretrained bridge for %s (pgw#1380's "
             "native loader engine is not bound)", pipeline_cls.__name__,
         )
+        # pgw#1513: THE EAGER BRIDGE MUST NOT BE HANDED A PROJECTED TREE.
+        #
+        # Its own contract, three lines up, is "a tree with no chunk store
+        # behind it — a bare download, a local run, a fixture". A PROJECTED
+        # tree is the opposite: every tensor container in it is a ~128 B
+        # TFSSTUB1 pointer stub whose bytes live in the CAS, and
+        # `from_pretrained` reads with the stock safetensors reader, which
+        # knows nothing about stubs. It reads the stub's first 8 bytes as a
+        # header length and raises `SafetensorError: header too large`.
+        #
+        # That error is a LIE ABOUT THE CHECKPOINT, and it cost two days
+        # pointed at poisoned volumes and truncated downloads. It is identical
+        # for a 3.4 GB model and a 68 GB one — the stub is a fixed size — which
+        # is precisely the signature that ruled out every short-write theory
+        # and should have named this on day one. So the bridge refuses, by
+        # name, with the numbers that identify a stub on sight.
+        #
+        # Reaching here means the streaming engine declined this tree
+        # (`engine_for` -> `store_for` -> `resolve_projection` returned None),
+        # which for a tree that IS projected means its manifest pin could not
+        # be resolved — `resolve_projection` keys the pin on the tree's own
+        # DIRECTORY NAME, so a tree selected under a different spelling than
+        # the one it was pinned under resolves to nothing. This refusal turns
+        # that into one named failure instead of an opaque loader crash.
+        stubbed = _projection_artifacts(self.checkpoint_dir)
+        if stubbed:
+            raise ProjectedTreeNotStreamable(
+                self.checkpoint_dir,
+                stubbed,
+                _projection_declined_because(self.checkpoint_dir),
+            )
         # pgw#1473: a VARIANT-ONLY tree (`*.fp16.safetensors`, which is what
         # every fp16 mirror ships) is invisible to `from_pretrained` unless it
         # is told. Detected off the tree the worker already resolved, never
