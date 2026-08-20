@@ -397,7 +397,7 @@ class ServeAdoption:
         if session is None:
             return
         adopted, holes = len(session.adopted), len(session.holes)
-        marks = tuple(getattr(session, "unclaimed_marks", ()) or ())
+        marks = tuple(session.unclaimed_marks)
         # `adopted=0, holes=0` HAD TWO CAUSES AND ONE PHASE (pgw#1534).
         #
         # An endpoint that marks nothing is an eager endpoint and `empty_lane`
@@ -408,7 +408,7 @@ class ServeAdoption:
         # "nothing to do" from "the compiled path is off and nobody noticed".
         # Measured exactly that way on this box: 14 graphs in the document, 14
         # artifacts present, `adopted: 0, holes: 0, armed: 0`.
-        silent = bool(getattr(session, "silently_eager", bool)())
+        silent = bool(session.silently_eager())
         ambiguous = len(session.ambiguous)
         activity_mod.emit_event(
             activity_mod.KIND_BOOT_ADOPT_SUMMARY,
@@ -475,7 +475,7 @@ class ServeAdoption:
         when no session was ever built, and `refusal` says why."""
         if self.adoption is None:
             return {"adopting": False, "refusal": self.refusal or "not_attempted"}
-        marks = tuple(getattr(self.adoption, "unclaimed_marks", ()) or ())
+        marks = tuple(self.adoption.unclaimed_marks)
         return {
             "adopting": True,
             "adopted": len(self.adoption.adopted),

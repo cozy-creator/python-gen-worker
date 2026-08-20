@@ -312,7 +312,7 @@ class EndpointHost:
                     manifest = store.get_manifest(record.graph, session.env)
                     if manifest is not None:
                         assert_satisfied(manifest, sm=sm)
-            marks = tuple(getattr(session, "unclaimed_marks", ()) or ())
+            marks = tuple(session.unclaimed_marks)
             span(
                 graphs_from="release",
                 lane=lane_contract,
