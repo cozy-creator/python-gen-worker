@@ -947,7 +947,17 @@ class ModelStore:
 
         Also sweeps abandoned writer-unique CAS temp artifacts: on
         pod-local disk those died with the pod, but a CAS root pointed at a
-        persistent volume keeps them until swept."""
+        persistent volume keeps them until swept.
+
+        pgw#1536: it also CENSUSES the snapshot trees on disk and whether each
+        is pinned. The pod incident turned on a tree existing without its
+        manifest pin, and nobody could say whether that tree predated the boot
+        or was built during it — because nothing ever looked. This is one
+        `read_ref` per tree, at boot, on a directory that is empty on a cold
+        pod, and it is the difference between "we would need a rental to know"
+        and reading it off the boot log of any run that happens anyway.
+        """
+        self._census_snapshot_pins()
         for ref, ent in self._index.entries().items():
             p = Path(str(ent.get("path") or ""))
             if p.exists():
@@ -1165,6 +1175,39 @@ class ModelStore:
             )
         return snapshot
 
+    def _census_snapshot_pins(self) -> None:
+        """One line per snapshot tree on disk: is it pinned, and is it stubbed.
+
+        pgw#1536. Deliberately at boot and deliberately cheap — the answer to
+        "did this tree predate the boot" is free here and costs a rental
+        anywhere else.
+        """
+        root = Path(self._cache_dir) / SNAPSHOTS_DIR
+        try:
+            trees = sorted(p for p in root.iterdir() if p.is_dir())
+        except OSError:
+            return
+        if not trees:
+            logger.info("snapshot census at boot: no trees on disk at %s", root)
+            return
+        from . import projection as _projection
+
+        for tree in trees:
+            try:
+                pinned = _projection.resolve_projection(tree) is not None
+                stubbed = _projection.stub_at_any(tree)
+            except Exception as exc:  # noqa: BLE001 — a census never fails a boot
+                logger.warning("snapshot census: %s unreadable: %s", tree.name, exc)
+                continue
+            # UNPINNED + STUBBED is the pod incident's exact state, and it is
+            # the one combination that cannot serve.
+            (logger.error if (stubbed and not pinned) else logger.info)(
+                "snapshot census at boot: %s pinned=%s projected=%s%s",
+                tree.name, pinned, stubbed,
+                "  <-- UNREADABLE by the streaming engine (pgw#1536)"
+                if (stubbed and not pinned) else "",
+            )
+
     def ensure_pinned(
         self, ref: WireRef, tree: Path, snapshot: Optional[pb.Snapshot],
     ) -> bool:
@@ -1197,18 +1240,47 @@ class ModelStore:
         is already there. No bytes move — the manifest is rebuilt from the
         snapshot the caller already holds.
         """
-        if snapshot is None or not snapshot.files:
-            return False
+        # pgw#1536: EVERY EXIT SAYS WHY.
+        #
+        # The first field run of this repair produced NO LOG LINE AT ALL, and
+        # that was uninformative in the worst way: "no repair attempt
+        # surfaced" could equally mean this was never called, or was called
+        # and declined at any of three silent returns. An instrument whose
+        # silence has several meanings is not an instrument. Cheap — one line
+        # per materialization, and only at DEBUG for the common already-pinned
+        # case.
         path = Path(tree)
+        if snapshot is None or not snapshot.files:
+            # The caller may hold a bare ref; the store may still know the
+            # snapshot. Not falling back here is how a repair that COULD have
+            # run silently did not.
+            snapshot = self.banked_snapshot(ref)
+        if snapshot is None or not snapshot.files:
+            logger.warning(
+                "pin check SKIPPED for %s at %s: no digest-carrying snapshot "
+                "is banked for this ref, so the manifest cannot be rebuilt. If "
+                "this tree is projected it is unreadable by the streaming "
+                "engine (pgw#1536)", ref, path,
+            )
+            return False
         try:
             from . import projection as _projection
 
             if _projection.resolve_projection(path) is not None:
+                logger.debug("pin OK for %s at %s", ref, path)
                 return False  # already pinned, the overwhelmingly common case
             if not _projection.stub_at_any(path):
                 # A materialized tree holds its own bytes and needs no pin.
+                logger.debug(
+                    "pin not required for %s at %s: tree is materialized, not "
+                    "projected", ref, path,
+                )
                 return False
-        except Exception:  # noqa: BLE001 — a probe must never fail a load
+        except Exception as exc:  # noqa: BLE001 — a probe must never fail a load
+            logger.warning(
+                "pin check FAILED to probe %s at %s: %s: %s (pgw#1536)",
+                ref, path, type(exc).__name__, exc,
+            )
             return False
         try:
             from .cozy_snapshot import _manifest, _pin_manifest
