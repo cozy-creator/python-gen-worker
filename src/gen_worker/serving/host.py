@@ -146,6 +146,7 @@ class EndpointHost:
 
             engine = engine_for(binding.checkpoint_dir, device=device, io=io)
         self._engine = engine
+        self._io = str(io or "buffered")
         #: pgw#1452: the SAME decision reaches the eager bridge. Handing it
         #: only to `engine_for` meant a tree with no chunk store behind it
         #: was built by `from_pretrained` and left wherever that put it —
@@ -191,6 +192,7 @@ class EndpointHost:
             engine=self._engine,
             compile_sink=compile_sink,
             device=self._device,
+            io=self._io,
         )
 
     # -- boot ---------------------------------------------------------------

@@ -31,8 +31,9 @@ So the bridge refuses instead, naming the stub and its two sizes.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -705,3 +706,246 @@ def test_the_registry_is_BOUNDED_so_a_long_lived_pod_cannot_grow_it() -> None:
     # The most RECENT survive — a live refusal is about a recent repair.
     assert proj.pin_outcome(f"bounded-probe-{proj._PIN_OUTCOMES_CAP * 3 - 1}") == (
         "not needed: already pinned")
+
+
+class _PipelineCls:
+    """Stands in for a real pipeline class: it HAS `from_pretrained`.
+
+    `ctx.load` refuses a class without one BEFORE it reaches the projection
+    checks, so a bare `object` never gets far enough to exercise the repair.
+    Every real pipeline (`StableDiffusionPipeline`, `FluxPipeline`, …) has it.
+    """
+
+    @classmethod
+    def from_pretrained(cls, *a: Any, **k: Any) -> Any:  # pragma: no cover
+        raise AssertionError(
+            "the eager bridge must never run for an unpinned projected tree")
+
+
+def _unpinned_projected_tree(tmp_path: Path) -> Path:
+    """A tree that is STUBBED and UNPINNED — the fleet's exact failing state."""
+    from gen_worker._vendor.tensorfs.project import stub_bytes
+
+    base = tmp_path / "cas"
+    (base / "refs").mkdir(parents=True)
+    (base / "objects").mkdir(parents=True)
+    tree = base / "snapshots" / ("sha256:" + "7c" * 32)
+    (tree / "unet").mkdir(parents=True)
+    (tree / "unet" / "diffusion_pytorch_model.safetensors").write_bytes(
+        stub_bytes("d" * 64, 3_438_167_536)
+    )
+    return tree
+
+
+def test_the_repair_RUNS_ON_THE_REAL_PATH_with_a_MISMATCHED_ref_spelling(
+    tmp_path: Path,
+) -> None:
+    """pgw#1543, on a REAL `ModelStore` — no stubbed store, no stubbed pin.
+
+    Two things are proven here, and the second is the one a mock would miss.
+
+    1. The repair reaches the path that actually refuses. `ensure_pinned`
+       shipped in pgw#1526 with two callers — `announce_resident` (boot) and
+       `_materialize_local` (materialization) — and NEITHER is on `ctx.load`.
+       A pod whose tree was materialized already, or whose announce ran before
+       the repair existed, hits the engine decline on every request and refuses
+       forever while a working repair sits two modules away. That is a ~19h
+       fleet-wide serve outage that needs no log line to explain.
+
+    2. The repair does not depend on REF SPELLING. The store banks snapshots by
+       ref; the serving path holds `DeployBinding.checkpoint_ref`, which is the
+       resolver's `pick.ref` and need not be the same string. A ref-keyed
+       lookup would SILENTLY NO-OP on a mismatch — miss, return False, refuse
+       exactly as before — and every stubbed test would still pass. So this
+       banks under one spelling and serves under a deliberately DIFFERENT one,
+       and still requires the pin to be written.
+    """
+    from gen_worker.models import projection
+    from gen_worker.models import store as store_mod
+    from gen_worker.models.refs import WireRef
+    from gen_worker.models.store import ModelStore
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    digest = "sha256:" + "7c" * 32
+    base = tmp_path / "cas"
+    (base / "refs").mkdir(parents=True)
+    (base / "objects").mkdir(parents=True)
+    tree = base / "snapshots" / digest
+    (tree / "unet").mkdir(parents=True)
+    # Under 64 MiB on purpose: a real manifest for a larger file carries chunk
+    # entries, and `_manifest` rightly refuses to build one without them. The
+    # pin mechanism under test is identical either way, and the field's
+    # multi-GB shapes are asserted by the stub-signature tests above.
+    (tree / "unet" / "x.safetensors").write_bytes(stub_bytes("a" * 64, 4096))
+
+    assert projection.stub_at_any(tree) is True
+    assert projection.resolve_projection(tree) is None, "fixture must be UNPINNED"
+
+    async def noop(_msg: Any) -> None:
+        return None
+
+    store = ModelStore(noop, cache_dir=base)
+    snap = pb.Snapshot(digest=digest)
+    snap.files.add(path="unet/x.safetensors", size_bytes=4096,
+                   digest="sha256:" + "a" * 64)
+    # Banked under the STORE's spelling ...
+    store.bank_snapshot(WireRef("acme/sd15@1"), snap)
+    store_mod.bind_active_store(store)
+    try:
+        ctx: Any = LoadContext(
+            # ... and served under a DIFFERENT one. A ref-keyed repair no-ops here.
+            binding=DeployBinding(
+                checkpoint_ref="acme/sd15", checkpoint_dir=tree),
+            engine=None,          # the engine DECLINED — the failing state
+            device="cuda",
+        )
+        # The load cannot COMPLETE here — this fixture has no `model_index.json`
+        # and no real weights, so once the repair lets the engine bind, the
+        # skeleton builder rightly objects. That is fine and is not what is
+        # under test: the claim is that the PIN GETS WRITTEN on this path.
+        with contextlib.suppress(Exception):
+            ctx.load(_Pipeline)
+    finally:
+        store_mod.bind_active_store(cast(Any, None))
+
+    assert projection.resolve_projection(tree) is not None, (
+        "THE PIN MUST ACTUALLY BE WRITTEN on the real path — this is the whole "
+        "fix, and a repair that resolves to nothing here is the silent no-op "
+        "that a ref-keyed lookup would have produced")
+    assert projection.pin_outcome(tree.name) == "REPAIRED, pin rewritten", (
+        "and pgw#1542's instrument must record it, so a post-mortem reader can "
+        f"tell a repaired pod from an unattempted one: {projection.pin_outcome(tree.name)!r}")
+
+
+def test_a_REFUSING_pod_REPAIRS_AT_THE_DECLINE_and_serves(tmp_path: Path) -> None:
+    """The conversion the fleet needs: would-have-refused now returns a pipeline.
+
+    The companion to the test above. That one proves the pin is really written
+    on the real path; this one proves that once the engine can bind, the
+    request SERVES instead of refusing — a currently-refusing pod becoming a
+    serving pod on its next request, with no bytes moved.
+    """
+    from gen_worker.models import store as store_mod
+    import gen_worker.serving.streaming as streaming_mod
+
+    tree = _unpinned_projected_tree(tmp_path)
+    built = object()
+    repaired: list[Path] = []
+
+    class _Engine:
+        def build(self, cls: Any, *, checkpoint_dir: Path, lane: Any) -> Any:
+            return built
+
+    class _Store:
+        def banked_snapshot_for_tree(self, tree_name: str) -> Any:
+            return object()
+
+        def ensure_pinned(self, ref: str, path: Path, snap: Any) -> bool:
+            repaired.append(Path(path))
+            return True
+
+    store_mod.bind_active_store(cast(Any, _Store()))
+    orig = streaming_mod.engine_for
+    streaming_mod.engine_for = lambda *a, **k: _Engine()  # type: ignore[assignment]
+    try:
+        ctx: Any = LoadContext(
+            binding=DeployBinding(checkpoint_ref="ep/sd15@1", checkpoint_dir=tree),
+            engine=None,
+            device="cuda",
+        )
+        out = ctx.load(_Pipeline)
+    finally:
+        streaming_mod.engine_for = orig  # type: ignore[assignment]
+        store_mod.bind_active_store(cast(Any, None))
+
+    assert out is built, "a repaired pod must SERVE, not refuse"
+    assert repaired == [tree], "the repair must target the refusing tree"
+
+
+def test_a_repair_that_FAILS_leaves_the_original_refusal_intact(
+    tmp_path: Path,
+) -> None:
+    """A failed repair must not replace a precise diagnosis with a traceback.
+
+    The refusal is the most valuable artifact this path produces — it is the
+    one channel that survives the pod. A repair attempt that raises, or that
+    re-pins and still gets no engine, must fall through to it unchanged.
+    """
+    from gen_worker.models import store as store_mod
+    from gen_worker.serving.context import (
+        DeployBinding, LoadContext, ProjectedTreeNotStreamable,
+    )
+
+    tree = _unpinned_projected_tree(tmp_path)
+
+    class _ExplodingStore:
+        def banked_snapshot_for_tree(self, tree_name: str) -> Any:
+            return object()
+
+        def ensure_pinned(self, ref: str, path: Path, snap: Any) -> bool:
+            raise RuntimeError("pin write blew up")
+
+    store_mod.bind_active_store(cast(Any, _ExplodingStore()))
+    try:
+        ctx: Any = LoadContext(
+            binding=DeployBinding(checkpoint_ref="ep/sd15@1", checkpoint_dir=tree),
+            engine=None,
+            device="cuda",
+        )
+        with pytest.raises(ProjectedTreeNotStreamable) as caught:
+            ctx.load(_PipelineCls)
+    finally:
+        store_mod.bind_active_store(cast(Any, None))
+
+    assert "ENGINE DECLINED" in str(caught.value), (
+        "the original refusal must survive a failed repair")
+
+
+def test_repair_is_NOT_attempted_when_the_objects_were_COLLECTED(
+    tmp_path: Path,
+) -> None:
+    """The GC'd case must NEVER be re-pinned — that would serve a lie.
+
+    se#790 measured the worse state on a real tree: the manifest pin is a
+    tree's only GC root, so a tree outliving its pin and then meeting a GC pass
+    has its objects DELETED (5.6 GB there, 134 GB on H3), leaving stubs plus
+    dangling symlinks. Writing a pin over absent bytes would convert an honest
+    refusal into a corrupt serve, so `collected` is checked FIRST and the
+    repair must not run.
+    """
+    from gen_worker.models import store as store_mod
+    from gen_worker.models import projection as proj_mod
+    from gen_worker.serving.context import (
+        DeployBinding, LoadContext, ProjectedTreeNotStreamable,
+    )
+
+    tree = _unpinned_projected_tree(tmp_path)
+    attempted: list[Path] = []
+
+    class _Store:
+        def banked_snapshot_for_tree(self, tree_name: str) -> Any:
+            return object()
+
+        def ensure_pinned(self, ref: str, path: Path, snap: Any) -> bool:
+            attempted.append(Path(path))
+            return True
+
+    store_mod.bind_active_store(cast(Any, _Store()))
+    orig = proj_mod.collected_entries
+    proj_mod.collected_entries = (  # type: ignore[assignment]
+        lambda root: ["unet/diffusion_pytorch_model.safetensors"])
+    try:
+        ctx: Any = LoadContext(
+            binding=DeployBinding(checkpoint_ref="ep/sd15@1", checkpoint_dir=tree),
+            engine=None,
+            device="cuda",
+        )
+        with pytest.raises(ProjectedTreeNotStreamable):
+            ctx.load(_PipelineCls)
+    finally:
+        proj_mod.collected_entries = orig  # type: ignore[assignment]
+        store_mod.bind_active_store(cast(Any, None))
+
+    assert attempted == [], (
+        "a tree whose objects were COLLECTED must never be re-pinned — the "
+        "bytes are gone and a pin over them is a corrupt serve")

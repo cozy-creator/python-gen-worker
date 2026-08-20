@@ -55,7 +55,7 @@ from .models.cache_paths import tensorhub_cache_dir, tensorhub_cas_dir
 from .models.cozy_snapshot import snapshot_dir_key
 from .models.disk_gc import tree_bytes
 from .models.projection import SNAPSHOTS_DIR
-from .models.store import ModelStore
+from .models.store import ModelStore, bind_active_store
 from .boot_materialize import (
     REASON_MODEL_UNAVAILABLE,
     CheckpointConfig,
@@ -661,6 +661,8 @@ class Worker:
         # it; the resolver hands it to `ctx.load`. Two answers to that question
         # is how a pod ends up holding a checkpoint it cannot find.
         self.resolver.bind_store(self.store)
+        # pgw#1543: and the SERVING path too, which holds only a binding.
+        bind_active_store(self.store)
         # NOTE: the disk rescan is NOT here. `Worker` is constructed with no
         # running event loop (`entrypoint.py`), and `ModelStore`'s event path
         # closes its coroutine when it can find neither a running loop nor a
