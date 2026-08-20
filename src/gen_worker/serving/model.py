@@ -266,6 +266,36 @@ def _calls_ctx_compile(fn: Any) -> bool:
     definition = tree.body[0] if tree.body else None
     if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return False
+    return load_marks_compile(definition)
+
+
+def load_marks_compile(definition: Any) -> bool:
+    """Whether this ``load`` DEFINITION marks a compile target — the AST half
+    of :func:`_calls_ctx_compile`, taking the parsed node instead of a live
+    function.
+
+    PUBLIC, and split out for exactly one reason (se#809): a reader that can
+    only be reached through :func:`inspect.getsource` can only be used by code
+    that has already IMPORTED the endpoint, and an endpoint module imports
+    torch. Every repo-side gate over the fleet is therefore torch-free and
+    AST-based, so before this split the only way for one to ask "does this
+    model compile?" was to write a SECOND walker — which is how
+    `serverless-endpoints`' AUTHOR-CI gate ended up still counting the v1
+    `@endpoint(compile=...)` spelling and reporting 2 compiling endpoints
+    where the fleet had 13.
+
+    One reader, two entry points: this takes a parsed
+    ``FunctionDef``/``AsyncFunctionDef``, and ``_calls_ctx_compile`` is the
+    thin wrapper that gets there from a live function object.
+
+    Parsed rather than grepped — the string ``ctx.compile`` appears in comments
+    and docstrings that say a model deliberately does NOT compile, and a
+    substring check would refuse exactly the classes that documented
+    themselves best.
+    """
+
+    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
     # The ctx parameter: `load(self, ctx)`, the ruled signature (pgw#1382).
     names = {argument.arg for argument in definition.args.args[1:2]}
     for node in ast.walk(definition):
@@ -704,6 +734,7 @@ __all__ = [
     "model_requires",
     "ModelDeclarationError",
     "lane_handle",
+    "load_marks_compile",
     "model_lanes",
     "model_type",
 ]
