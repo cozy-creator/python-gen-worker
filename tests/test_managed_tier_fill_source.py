@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 
 from gen_worker._vendor.tensorfs import CASRef
-from gen_worker.transfer.grants import TransferReport
+from gen_worker.transfer.grants import DEFAULT_PARALLEL, TransferReport
 
 import projection_fixture
 import gen_worker.models.cozy_snapshot as snap_mod
@@ -157,6 +157,143 @@ def test_corrupt_volume_blob_falls_through_to_r2(tmp_path: Path, monkeypatch) ->
     assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD  # real bytes
     assert calls == [1]  # fell through to R2, not the corrupt volume copy
     assert scope.network_bytes == len(_PAYLOAD)
+
+
+# ---------------------------------------------------------------------------
+# pgw#1556 — HOW FAST the volume fill is, as behaviour rather than as a comment
+#
+# `test_corrupt_volume_blob_falls_through_to_r2` above is the revert-turns-red
+# guard for the RULING (digest verification of volume-read blobs is mandatory)
+# and it stays green through both changes below. That is the load-bearing fact:
+# the hash pass that was deleted proved nothing the surviving one does not.
+# ---------------------------------------------------------------------------
+
+
+def test_a_volume_fill_hashes_the_source_ONCE(tmp_path: Path, monkeypatch) -> None:
+    """Two full SHA-256 passes over every byte, on the flagship 134 GB path.
+
+    `filled()` called `fill.verify_object` — a whole-file read and hash whose
+    only product is a verdict — and then handed the same path to `put_file`,
+    which reads it again and hashes it again while copying. Measured on this
+    box over 48 synthetic 64 MiB objects through the REAL `LocalCAS` (paired
+    alternation, min of 3): 203.6 MiB/s with both passes, 348.9 MiB/s with one,
+    1.71x, before any fan-out.
+
+    The verification is not relaxed: `put_file(expected=..., size=...)` hashes
+    streaming alongside the copy and raises `DigestMismatch`, which is what
+    keeps the corrupt-blob test above green.
+    """
+    calls: list = []
+    _stub_r2(monkeypatch, calls)
+    volume = tmp_path / "volume"
+    local = tmp_path / "local"
+    blob = _blob(volume)
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(_PAYLOAD)
+
+    read_bytes = [0]
+    real_open = Path.open
+
+    def counting_open(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        handle = real_open(self, *args, **kwargs)
+        if self == blob and "r" in (args[0] if args else kwargs.get("mode", "r")):
+            class _Counted:
+                def __init__(self, inner): self._inner = inner
+                def read(self, *a):  # noqa: ANN
+                    data = self._inner.read(*a)
+                    read_bytes[0] += len(data)
+                    return data
+                def __getattr__(self, name): return getattr(self._inner, name)
+                def __enter__(self): self._inner.__enter__(); return self
+                def __exit__(self, *e): return self._inner.__exit__(*e)
+            return _Counted(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", counting_open)
+
+    ref = TensorhubRef(owner="org", repo="model")
+    snap = asyncio.run(ensure_snapshot_async(
+        base_dir=local, ref=ref, resolved=_resolved(), fill_source_dir=volume,
+    ))
+    assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD
+    assert calls == []
+    assert read_bytes[0] == len(_PAYLOAD), (
+        "the volume source was read "
+        f"{read_bytes[0] / len(_PAYLOAD):.1f}x — a fill that hashes every byte "
+        "twice is half the throughput of one that hashes it once, on the one "
+        "path a staged endpoint volume exists to make fast")
+
+
+def test_the_residency_and_fill_scan_runs_MORE_THAN_ONE_OBJECT_AT_A_TIME(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """`await asyncio.to_thread(...)` inside a `for` buys zero parallelism.
+
+    It is awaited in the loop body, so exactly one object is ever in flight —
+    while the R2 fetch on the very same pod has run `DEFAULT_PARALLEL`-wide
+    since pgw#1308. The barrier below is the proof, and it is the honest one:
+    if the scan is serial, no two objects are ever inside it at once and the
+    barrier times out rather than the test passing on a timing coincidence.
+    """
+    import threading as _threading
+
+    calls: list = []
+    _stub_r2(monkeypatch, calls)
+    volume = tmp_path / "volume"
+    local = tmp_path / "local"
+    payloads = [_PAYLOAD + bytes([i]) for i in range(DEFAULT_PARALLEL)]
+    files = []
+    for body in payloads:
+        digest = hashlib.sha256(body).hexdigest()
+        blob = _blob_at(volume, digest)
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_bytes(body)
+        files.append(WorkerResolvedRepoFile(
+            path=f"shard-{digest[:8]}.safetensors",
+            size_bytes=len(body),
+            digest="sha256:" + digest,
+            url="https://tensorhub.invalid/authorized-blob",
+        ))
+    resolved = WorkerResolvedRepo(snapshot_digest="d9" * 32, files=files)
+
+    barrier = _threading.Barrier(len(payloads), timeout=15.0)
+    peak = [0]
+    live = [0]
+    guard = _threading.Lock()
+    real_put_file = snap_mod.LocalCAS.put_file
+
+    def gated_put_file(self, source, **kwargs):  # type: ignore[no-untyped-def]
+        with guard:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        try:
+            # Every object must be inside the scan simultaneously, or this
+            # raises BrokenBarrierError and the test names the reason.
+            barrier.wait()
+        except _threading.BrokenBarrierError as exc:  # pragma: no cover
+            raise AssertionError(
+                "the residency/fill scan is SERIAL: fewer than "
+                f"{len(payloads)} objects were ever in flight at once "
+                f"(peak {peak[0]}). One object at a time is the whole of the "
+                "134 GB warm-volume boot's cost model."
+            ) from exc
+        finally:
+            with guard:
+                live[0] -= 1
+        return real_put_file(self, source, **kwargs)
+
+    monkeypatch.setattr(snap_mod.LocalCAS, "put_file", gated_put_file)
+
+    ref = TensorhubRef(owner="org", repo="model")
+    snap = asyncio.run(ensure_snapshot_async(
+        base_dir=local, ref=ref, resolved=resolved, fill_source_dir=volume,
+    ))
+    assert calls == [], "every object came off the volume; nothing hit R2"
+    assert peak[0] == len(payloads), (
+        f"peak concurrency was {peak[0]}, expected {len(payloads)}")
+    for body in payloads:
+        digest = hashlib.sha256(body).hexdigest()
+        assert projection_fixture.bytes_at(snap, f"shard-{digest[:8]}.safetensors") == body
 
 
 # ---------------------------------------------------------------------------

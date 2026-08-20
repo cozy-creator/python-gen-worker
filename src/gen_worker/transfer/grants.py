@@ -19,7 +19,12 @@ from typing import Protocol
 from gen_worker._vendor.tensorfs.local import DigestMismatch, LocalCAS
 from gen_worker._vendor.tensorfs.refs import CASRef
 
-_DEFAULT_PARALLEL = 8
+#: How many objects one machine moves at once. ONE number for every fan-out
+#: this worker runs over its uplink and its disk: the R2 downloader below and
+#: (pgw#1556) the volume-fill scan in `models/cozy_snapshot`, which was serial
+#: while this path was 8-wide on the same pod. Public because a second copy of
+#: it in the other module is a second answer to "how wide is this machine".
+DEFAULT_PARALLEL = 8
 _PROCESS_TRANSFER_BUDGET = threading.BoundedSemaphore(16)
 _EXPIRY_MARGIN_SECONDS = 120.0
 _RFC3339_UTC = re.compile(
@@ -342,7 +347,7 @@ def _upload(
     source: LocalCAS,
     *,
     transport: _GrantTransport,
-    parallel: int = _DEFAULT_PARALLEL,
+    parallel: int = DEFAULT_PARALLEL,
     max_attempts: int = 5,
     sleep: Callable[[float], None] = time.sleep,
     progress: Callable[[CASRef, int], None] | None = None,
@@ -366,7 +371,7 @@ def upload(
     grants: Sequence[TransferGrant],
     source: LocalCAS,
     *,
-    parallel: int = _DEFAULT_PARALLEL,
+    parallel: int = DEFAULT_PARALLEL,
     max_attempts: int = 5,
     progress: Callable[[CASRef, int], None] | None = None,
 ) -> TransferReport:
@@ -387,7 +392,7 @@ def _download(
     destination: LocalCAS,
     *,
     transport: _GrantTransport,
-    parallel: int = _DEFAULT_PARALLEL,
+    parallel: int = DEFAULT_PARALLEL,
     max_attempts: int = 5,
     sleep: Callable[[float], None] = time.sleep,
     progress: Callable[[CASRef, int], None] | None = None,
@@ -424,7 +429,7 @@ def download(
     grants: Sequence[TransferGrant],
     destination: LocalCAS,
     *,
-    parallel: int = _DEFAULT_PARALLEL,
+    parallel: int = DEFAULT_PARALLEL,
     max_attempts: int = 5,
     progress: Callable[[CASRef, int], None] | None = None,
 ) -> TransferReport:

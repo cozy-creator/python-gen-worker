@@ -81,13 +81,10 @@ def test_a_resident_grant_advances_progress_before_the_scan_finishes(
     )
 
     total = len(first) + len(second)
-    caller = threading.current_thread()
     beats: list[tuple[int, int | None]] = []
-    threads: list[threading.Thread] = []
 
     def progress(done: int, reported: int | None) -> None:
         beats.append((done, reported))
-        threads.append(threading.current_thread())
         # The gate opens on a RECORDED mid-scan beat, so it cannot be satisfied
         # by the leading 0/total or by the final one.
         if 0 < done < total:
@@ -106,7 +103,17 @@ def test_a_resident_grant_advances_progress_before_the_scan_finishes(
     assert beats[-1] == (total, total)
     # And it moved while the scan was still running.
     assert any(0 < done < total for done, _total in beats)
-    assert set(threads) == {caller}
+    # pgw#1556: the scan is now `DEFAULT_PARALLEL`-wide, so this used to assert
+    # `set(threads) == {caller}` and cannot any more. What that line was really
+    # protecting is the POSITION, and the position is protected properly now:
+    # the hub advances on STRICT INCREASE, so a beat that arrives out of order
+    # renders a healthy transfer as a wedge. `_ensure_objects` emits under the
+    # tally lock, which makes `done` monotone across every scan thread — a
+    # stronger guarantee than single-threadedness, and one the R2 half of this
+    # same fetch never had (`_progress`'s own docstring: "Called from the fetch
+    # thread", `DEFAULT_PARALLEL`-wide, since pgw#1308).
+    assert [done for done, _t in beats] == sorted(done for done, _t in beats), (
+        f"the reported position went BACKWARDS across scan threads: {beats}")
 
 
 def test_the_scan_yields_the_event_loop_between_grants(
@@ -120,6 +127,16 @@ def test_the_scan_yields_the_event_loop_between_grants(
     ends — measured at 1.0 s of blocked loop per GiB scanned, on a warm page
     cache. This pins the yield: a ticker task must observe wall time passing
     while the scan is still in flight.
+
+    **pgw#1556 widened the mechanism and this test's PROBE had to follow.** The
+    scan runs `DEFAULT_PARALLEL`-wide inside ONE `to_thread`, so the loop is
+    free for the whole scan rather than for a turn between grants — strictly
+    more of the property this test exists for. The old probe asked whether a
+    tick landed between the FIRST and LAST `contains` ENTRY, and under a
+    fan-out every entry happens at once, so that window closes to ~0 µs and the
+    probe reports failure over an improvement. The window is now entry-of-first
+    to RETURN-of-last, which is the interval "while the scan is in flight"
+    actually names.
     """
 
     bodies = [b"grant-%d" % index for index in range(4)]
@@ -127,13 +144,17 @@ def test_the_scan_yields_the_event_loop_between_grants(
     digests = [store.put_bytes(body) for body in bodies]
     ticks: list[float] = []
     scanned: list[float] = []
+    finished: list[float] = []
 
     real_contains = LocalCAS.contains
 
     def slow_contains(self: Any, ref: Any, *, size: int | None = None) -> bool:
         scanned.append(time.monotonic())
         time.sleep(0.05)
-        return real_contains(self, ref, size=size)
+        try:
+            return real_contains(self, ref, size=size)
+        finally:
+            finished.append(time.monotonic())
 
     monkeypatch.setattr(LocalCAS, "contains", slow_contains)
 
@@ -170,8 +191,10 @@ def test_the_scan_yields_the_event_loop_between_grants(
     asyncio.run(scenario())
 
     assert len(scanned) == len(bodies)
-    assert any(scanned[0] < tick < scanned[-1] for tick in ticks), (
-        "the event loop never ran between residency checks — every heartbeat "
-        "and every queued progress event is stranded for the whole scan "
-        f"(scan {scanned[0]:.3f}..{scanned[-1]:.3f}, ticks {ticks})"
+    assert len(finished) == len(bodies)
+    first_entry, last_return = min(scanned), max(finished)
+    assert any(first_entry < tick < last_return for tick in ticks), (
+        "the event loop never ran WHILE the residency scan was in flight — "
+        "every heartbeat and every queued progress event is stranded for the "
+        f"whole scan (scan {first_entry:.3f}..{last_return:.3f}, ticks {ticks})"
     )
