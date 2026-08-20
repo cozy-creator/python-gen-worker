@@ -48,6 +48,7 @@ cadence beside them.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import queue
@@ -538,6 +539,33 @@ def _library_name(soname: str) -> str:
     return soname.split(".so", 1)[0].lower()
 
 
+def _torch_package_dir() -> Optional[Path]:
+    """Where the torch package lives, WITHOUT importing it (pgw#1546).
+
+    A torch already in ``sys.modules`` answers directly; otherwise
+    ``find_spec`` locates the package without executing it — the reuse path
+    publishes manifests for artifacts it never loads, and paying the full
+    torch import to learn a directory made every warm publish carry it.
+    """
+    import sys
+
+    module = sys.modules.get("torch")
+    if module is not None:
+        try:
+            return Path(module.__file__).parent  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("torch")
+        for location in list(getattr(spec, "submodule_search_locations", None) or []):
+            return Path(location)
+    except Exception:  # noqa: BLE001 — a torchless env answers None
+        pass
+    return None
+
+
 def _search_roots(artifact: Path) -> Tuple[Path, ...]:
     """Where a linked library may really live, nearest first.
 
@@ -553,17 +581,54 @@ def _search_roots(artifact: Path) -> Tuple[Path, ...]:
                 roots.append(Path(path).parent)
     except OSError:  # pragma: no cover — Linux only
         pass
-    try:  # the interpreter's own library tree, where wheels ship CUDA libs
-        import torch
-
-        roots.append(Path(torch.__file__).parent / "lib")
-        roots.append(Path(torch.__file__).parent.parent / "nvidia")
-    except Exception:  # noqa: BLE001 — a torchless mint is not a thing, but
-        pass          # this must never be the reason a publish fails
+    torch_dir = _torch_package_dir()  # wheels ship the CUDA libs beside torch
+    if torch_dir is not None:
+        roots.append(torch_dir / "lib")
+        roots.append(torch_dir.parent / "nvidia")
     seen: Dict[str, Path] = {}
     for root in roots:
         seen.setdefault(str(root), root)
     return tuple(seen.values())
+
+
+def _root_resolved_version(stem: str, root: Path) -> str:
+    """The longest full-version tail resolvable for ``stem`` under one root."""
+    best = ""
+    try:
+        candidates = (
+            list(root.glob(f"{stem}.so*"))
+            + list(root.glob(f"*/{stem}.so*"))
+            # wheel-shipped CUDA libraries: nvidia/<lib>/lib/libX.so.N.N.N
+            + list(root.glob(f"*/lib/{stem}.so*"))
+        )
+    except OSError:
+        return best
+    for path in candidates:
+        try:
+            real = os.path.realpath(path).rsplit("/", 1)[-1]
+        except OSError:
+            continue
+        tail = real.split(".so.", 1)[-1] if ".so." in real else ""
+        if len(tail) > len(best):
+            best = tail
+    return best
+
+
+@functools.lru_cache(maxsize=None)
+def _env_resolved_version(stem: str) -> str:
+    """``_root_resolved_version`` over the ENV roots, cached per process.
+
+    The env half of the search (loader maps, the torch/nvidia wheel trees) is
+    the same answer for every artifact in a run, and the wheel-tree globs are
+    what made it expensive: pgw#1546 measured 6.6 s of a 34 s warm publish in
+    exactly these globs, repeated per artifact for the same four sonames.
+    """
+    best = ""
+    for root in _search_roots(Path(os.devnull)):
+        found = _root_resolved_version(stem, root)
+        if len(found) > len(best):
+            best = found
+    return best
 
 
 def _resolved_version(soname: str, artifact: Path) -> str:
@@ -574,27 +639,16 @@ def _resolved_version(soname: str, artifact: Path) -> str:
     through symlinks, so the floor is the version that actually produced these
     bytes. When only the soname can be found, its major IS the honest answer
     and is recorded as such rather than invented more precisely.
+
+    The artifact's own directory is probed fresh per call (a mint stages
+    libraries beside its artifact); the env-level roots are one cached scan
+    per soname per process.
     """
     stem = soname.split(".so", 1)[0]
-    best = ""
-    for root in _search_roots(artifact):
-        try:
-            candidates = (
-                list(root.glob(f"{stem}.so*"))
-                + list(root.glob(f"*/{stem}.so*"))
-                # wheel-shipped CUDA libraries: nvidia/<lib>/lib/libX.so.N.N.N
-                + list(root.glob(f"*/lib/{stem}.so*"))
-            )
-        except OSError:
-            continue
-        for path in candidates:
-            try:
-                real = os.path.realpath(path).rsplit("/", 1)[-1]
-            except OSError:
-                continue
-            tail = real.split(".so.", 1)[-1] if ".so." in real else ""
-            if len(tail) > len(best):
-                best = tail
+    best = _root_resolved_version(stem, Path(artifact).parent)
+    cached = _env_resolved_version(stem)
+    if len(cached) > len(best):
+        best = cached
     if best:
         return best
     return soname.split(".so.", 1)[-1] if ".so." in soname else ""
@@ -632,22 +686,32 @@ def artifact_constraints(artifact: Path) -> Tuple[Tuple[str, str], ...]:
 
 
 def torch_shim_floor() -> Tuple[str, str]:
-    """The AOTI shim this artifact was built against, as a same-major floor."""
-    import torch
+    """The AOTI shim this artifact was built against, as a same-major floor.
 
-    version = str(torch.__version__).split("+", 1)[0]
+    Read from the installed distribution's metadata, never by importing torch
+    (pgw#1546): the version string is identical and the import costs ~1.5 s on
+    the warm publish path, which loads no model.
+    """
+    from importlib.metadata import version as dist_version
+
+    version = str(dist_version("torch")).split("+", 1)[0]
     return ("torch", _same_major_floor(version) or f">={version}")
 
 
 def driver_floor() -> Optional[str]:
-    """The CUDA DRIVER present at mint, as a plain floor. ``None`` off-GPU."""
-    try:
-        import torch
+    """The CUDA line the mint's torch was built for, as a plain floor.
 
-        raw = getattr(torch.version, "cuda", None)
-        if not raw:
-            return None
-        return f">={raw}"
+    ``None`` for a CPU-only torch. Read through
+    :func:`gen_worker.env_identity._torch_cuda_line`, which answers
+    ``torch.version.cuda`` from the generated constants module without
+    executing the torch package (pgw#1546) — same value, no ~1.5 s import on
+    the warm publish path.
+    """
+    try:
+        from ..env_identity import _torch_cuda_line
+
+        raw = _torch_cuda_line()
+        return f">={raw}" if raw else None
     except Exception:  # noqa: BLE001 — a missing driver is not a mint failure
         return None
 

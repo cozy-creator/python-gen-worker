@@ -677,6 +677,14 @@ class _EngineReuse:
                 len(self._index),
             )
 
+    def offers(self, graph: str) -> bool:
+        """Whether the cache CLAIMS a mint for ``graph`` — an address answer;
+        the claim is only trusted after :meth:`resolve` fully verifies it."""
+        if self._index is None:
+            self._load()
+        assert self._index is not None
+        return graph in self._index
+
     def resolve(self, spec: Spec, destination: Path) -> Optional[Path]:
         """The verified artifact directory for ``spec``, or ``None`` to build."""
         if self._index is None:
@@ -862,13 +870,21 @@ def compile_all(
             )
             return False
 
+    reuse = _EngineReuse(Path(cas_root), sm)
+
     # PRESENCE BEFORE POLICY (pgw#1546). The floor/grant question only decides
     # whether to BUILD, and the grant probe + declared-floor read import torch
     # and the author's whole module (~4.5 s measured) to answer it. A run whose
-    # artifacts are all already in the serving band builds nothing, so it asks
-    # nothing — the warm re-run is bookkeeping-free by construction, not by a
-    # fast implementation of the bookkeeping.
-    if any(not _known_present(spec) for spec in specs):
+    # artifacts are all already in the serving band builds nothing, and a miss
+    # the engine cache claims a mint for costs a verified resolve rather than
+    # a mint — neither asks the floor anything. Only a specialization that
+    # would genuinely COMPILE does, so only that shape pays the imports; the
+    # warm re-run is bookkeeping-free by construction, not by a fast
+    # implementation of the bookkeeping.
+    if any(
+        not _known_present(spec) and not reuse.offers(spec.graph)
+        for spec in specs
+    ):
         floor = declared_floor_gb(endpoint_dir)
         grant = grant_gb(vram_budget_gb)
         if floor is not None and grant is not None and grant < floor:
@@ -897,7 +913,6 @@ def compile_all(
     from ..serving.mint import publish_compiled
 
     build = builder if builder is not None else _default_builder(cas_root, sm)
-    reuse = _EngineReuse(Path(cas_root), sm)
     # pgw#1526: the BOX cache, not `<endpoint>/.compiled-graphs`. This is mint
     # SCRATCH plus the pre-publish destination — machine-scoped by nature, and
     # nothing downstream reads it from the source tree: the artifact's only
