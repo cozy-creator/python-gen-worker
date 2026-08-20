@@ -744,6 +744,57 @@ def artifact_manifest(env: Any, package: Path) -> Any:
     )
 
 
+def artifact_envelope(artifact: Path, workspace: Path) -> Path:
+    """The tar+gzip ENVELOPE these bytes publish as (pgw#1561).
+
+    An unpacked artifact DIRECTORY (``metadata.json`` + ``model.pt2``
+    [+ ``constants.safetensors``]) is repacked with torchcg's own
+    DETERMINISTIC ``pack_artifact`` — which also validates the metadata
+    against the package on the way, so a publish is now a conformance proof
+    rather than a byte copy, and a re-publish of the same members is
+    byte-identical (idempotent ``present``, and the same object the engine
+    cache already holds, so the CAS dedups the two bands for free).
+
+    A FILE that already carries the gzip magic passes through as the envelope
+    it is. ANY other file — above all the bare ``model.pt2`` ZIP — is a typed
+    refusal: pgw#1561 is fourteen adoptions holing on ``cannot decompress``
+    because the pre-envelope publisher banked exactly that ZIP, `SERVABLE` on
+    its lips, and a publisher that can be handed a package and quietly bank it
+    is the same defect waiting to be re-introduced.
+    """
+    from .._vendor.torchcg.artifact import pack_artifact
+
+    source = Path(artifact)
+    if source.is_file():
+        with source.open("rb") as handle:
+            if handle.read(2) == b"\x1f\x8b":
+                return source
+        raise ArtifactUnreadable(
+            f"{source} is a file but not a compiled-graph envelope — a bare "
+            f"package cannot be published (pgw#1561: the serving loader reads "
+            f"the ENVELOPE, and a package file carries no metadata to build "
+            f"one from). Hand the unpacked artifact DIRECTORY instead."
+        )
+    if not source.is_dir():
+        raise ArtifactUnreadable(f"{source} is neither a file nor a directory")
+    metadata_path = source / "metadata.json"
+    if not metadata_path.is_file():
+        raise ArtifactUnreadable(
+            f"{source} carries no metadata.json — not an unpacked "
+            f"compiled-graph artifact; nothing publishable can be built from it"
+        )
+    import json
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    literals = source / "constants.safetensors"
+    return pack_artifact(
+        artifact_package(source),
+        workspace / "compiled_graph.tar.gz",
+        metadata,
+        literals=literals if literals.is_file() else None,
+    )
+
+
 def publish_compiled(store: Any, graph: str, env: Any, artifact: Path) -> str:
     """Put one freshly-compiled artifact WHERE THE SERVING PATH READS IT.
 
@@ -761,12 +812,23 @@ def publish_compiled(store: Any, graph: str, env: Any, artifact: Path) -> str:
     holes. One compile path with two publishers was always going to drift; this
     is the single one, and both callers go through it.
 
-    ``publish_artifact`` takes the package FILE, not the unpacked directory the
-    compiler returns (pgw#1471): an artifact position addresses ONE set of bytes
-    by digest and a directory has no digest.
+    WHAT IS PUBLISHED IS THE ENVELOPE (pgw#1561). pgw#1471 published
+    ``artifact_package`` — the bare ``model.pt2`` ZIP — and the adopt loader
+    reads the tar+gzip envelope, so no artifact this function ever banked
+    could be loaded by the path it was banked for: va#3 arm 2 measured
+    ``0/14 armed``, every hole ``cannot decompress``. The envelope also
+    carries what the bare package silently discarded — ``metadata.json`` (the
+    artifact's own key, sm, toolchain, constants table) and any literal
+    payload.
     """
-    package = artifact_package(Path(artifact))
-    outcome = store.publish_artifact(graph, env, package, artifact_manifest(env, package))
+    import tempfile
+
+    source = Path(artifact)
+    package = artifact_package(source)  # the ELF the manifest is read off
+    manifest = artifact_manifest(env, package)
+    with tempfile.TemporaryDirectory(prefix="pgw-envelope-") as raw:
+        envelope = artifact_envelope(source, Path(raw))
+        outcome = store.publish_artifact(graph, env, envelope, manifest)
     return str(getattr(outcome, "value", outcome) or "")
 
 

@@ -132,6 +132,18 @@ class ArtifactError(ValueError):
     """A compiled-graph envelope is malformed or internally inconsistent."""
 
 
+class ArtifactFormatSkew(ArtifactError):
+    """The bytes are a recognizable NON-envelope format, not corruption.
+
+    tcg#75 / pgw#1561: a publisher banked the bare AOTI ``.pt2`` package (a
+    ZIP) where the reader serves the tar+gzip envelope, and for as long as the
+    two shared one exception the field failure read as "corrupted at rest" —
+    sending operators to scrub disks over a wiring defect. A skew's remedy is
+    RE-PUBLISH through a correct publisher; corruption's is re-mint. Different
+    remedies, so a different type.
+    """
+
+
 def _fsync_dir(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -652,6 +664,23 @@ def verify_package(package: str | Path, metadata: Mapping[str, Any]) -> None:
 
 
 def _validate_single_gzip_member(artifact: Path) -> None:
+    try:
+        with artifact.open("rb") as sniff:
+            magic = sniff.read(4)
+    except OSError as exc:
+        raise ArtifactError(f"cannot read artifact {artifact}: {exc}") from exc
+    if magic[:4] == b"PK\x03\x04":
+        # A ZIP is the bare AOTI package, not the envelope — a publisher-side
+        # format skew (tcg#75/pgw#1561), never bytes rotting at rest. Named
+        # BEFORE the gzip decode so the refusal states the remedy instead of
+        # "cannot decompress".
+        raise ArtifactFormatSkew(
+            f"artifact {artifact} is a bare AOTI .pt2 package (ZIP), not the "
+            f"compiled-graph envelope (tar+gzip with metadata.json) — a "
+            f"publisher banked the package file instead of the envelope. "
+            f"Re-publish through a current publisher; the bytes are not "
+            f"corrupt, they are the wrong artifact shape."
+        )
     decoder = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
     uncompressed = 0
     try:

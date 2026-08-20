@@ -198,8 +198,13 @@ def test_mint_one_compiles_publishes_and_manifests_through_the_REAL_store(
 
     def _compiler(blob: Path, rec: Any, destination: Path) -> Path:
         # What Engine.compile does: resolve the key INTO destination, leaving
-        # an unpacked directory.
-        return _unpacked_artifact(destination)
+        # an unpacked directory. A CONFORMING one (pgw#1561): the publish now
+        # repacks the envelope and torchcg validates metadata against the
+        # package on the way, so the loose `_unpacked_artifact` shape that the
+        # direct-reader tests keep using no longer publishes anywhere.
+        import tcg_artifacts
+
+        return tcg_artifacts.unpacked(destination, graph_specialization=GRAPH)
 
     def _program_source(digest: str, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)

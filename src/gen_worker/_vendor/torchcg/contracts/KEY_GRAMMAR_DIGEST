@@ -3,4 +3,4 @@
 # its own byte-identical copy; scripts/grammar-vector-drift.sh proves the two
 # files are equal. Changing the corpus is a coupled cross-repo cut: pgw lands
 # first, then both digests move in one window.
-a274c5702b8c167ca119758d9fb1f98c40ddfdb3dbf6c58b4aacd580803e8c2b
+5dcadf72b8ce19086e1a95bb767252e5b6521e74721aefa518dbd810112db15f

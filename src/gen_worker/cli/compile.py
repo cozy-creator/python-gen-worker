@@ -603,7 +603,58 @@ def unservable(cas_root: Path, specs: Tuple[Spec, ...], env: Any, module: str) -
             gaps.append(Gap(
                 spec.graph,
                 f"artifact {spec.short}: absent at ({spec.short}, {env.value})"))
+            continue
+        # PRESENCE IS NOT LOADABILITY (pgw#1561). For as long as this census
+        # stopped at `has_artifact`, a store full of bare `.pt2` ZIPs — bytes
+        # the adopt loader refuses by TYPE — printed `SERVABLE`, and va#3
+        # arm 2 paid the difference: 0/14 armed over 14 present positions. The
+        # probe is two magic bytes per position (`artifact_skew`), so the
+        # fully-warm census stays proportional to positions, not bytes; the
+        # full open-through-the-real-loader proof runs where bytes change, in
+        # :func:`witness_materializes` on every publish.
+        try:
+            skew = reader.artifact_skew(spec.graph, env)
+        except Exception as exc:  # noqa: BLE001 — an unreadable probe is a gap
+            skew = f"format probe failed ({exc})"
+        if skew:
+            gaps.append(Gap(spec.graph, f"artifact {spec.short}: {skew}"))
     return gaps
+
+
+def witness_materializes(cas_root: Path, graph: str, env: Any) -> Optional[str]:
+    """Fetch through the store adoption uses and OPEN through the real loader.
+
+    ``None`` means the artifact will load at boot; a sentence names why it
+    will not. This is the [[pgw#1533]] read-back with its blind spot removed
+    (pgw#1561): `has_artifact` proved presence, and presence was never the
+    gap — the freshly-built probe artifact of 2026-08-20 09:22 was PRESENT,
+    `SERVABLE` was printed, and its bytes were a ZIP no loader opens. So the
+    witness now materializes the fetched bytes with ``torchcg.serve
+    .materialize`` — the exact function boot-time arming calls — and only
+    that is allowed to say servable.
+
+    Runs once per PUBLISHED artifact (14 × ~0.3 s on a full sd15 backfill),
+    never on the warm present path — the census's two-byte skew probe covers
+    that at position cost.
+    """
+    import tempfile
+
+    from .._vendor.torchcg.serve import materialize
+
+    reader = serving_reader(cas_root)
+    with tempfile.TemporaryDirectory(prefix="pgw1561-witness-") as raw:
+        destination = Path(raw) / "artifact"
+        try:
+            fetched = reader.fetch_artifact(graph, env, destination)
+        except Exception as exc:  # noqa: BLE001 — a failed fetch is the verdict
+            return f"fetch through the adoption store failed: {exc}"
+        if fetched is None:
+            return f"absent at ({graph[:16]}, {env.value})"
+        try:
+            materialize(fetched, Path(raw) / "unpacked")
+        except Exception as exc:  # noqa: BLE001 — an unloadable blob is the verdict
+            return f"fetched but does not MATERIALIZE ({type(exc).__name__}: {exc})"
+    return None
 
 
 def _publish_document(cas_root: Path, lock_path: Path, module: str) -> None:
@@ -861,14 +912,34 @@ def compile_all(
     module = module or endpoint_module(endpoint_dir)
 
     def _known_present(spec: Spec) -> bool:
+        """Present AND shaped like something a boot can load (pgw#1561).
+
+        A position holding a bare-package blob from a pre-envelope publisher
+        answered ``has_artifact`` TRUE, so every run short-circuited past the
+        one thing that could repair it — the re-publish. A skewed position is
+        a MISS here, which is exactly what routes it back through the publish
+        (whose store-side migration arm replaces the skewed incumbent).
+        """
         try:
-            return bool(store.has_artifact(spec.graph, env))
+            if not store.has_artifact(spec.graph, env):
+                return False
         except Exception as exc:  # noqa: BLE001 — a store miss is not fatal
             logger.warning(
                 "%s: store lookup failed (%s); treating as a miss",
                 spec.short, exc,
             )
             return False
+        try:
+            skew = serving_reader(cas_root).artifact_skew(spec.graph, env)
+        except Exception:  # noqa: BLE001 — probe absence never blocks a run
+            return True
+        if skew:
+            logger.warning(
+                "%s: present but NOT loadable (%s) — treating as a miss so the "
+                "publish path replaces it", spec.short, skew,
+            )
+            return False
+        return True
 
     reuse = _EngineReuse(Path(cas_root), sm)
 
@@ -948,19 +1019,19 @@ def compile_all(
         across two processes it is the ONLY thing that could be.
         """
         started = time.monotonic()
-        try:
-            if store.has_artifact(spec.graph, env):
-                logger.info("%s: present", label)
-                return Outcome(spec, PRESENT, wall_s=time.monotonic() - started)
-        except Exception as exc:  # noqa: BLE001 — a store miss is not fatal
-            logger.warning("%s: store lookup failed (%s); treating as a miss", label, exc)
+        if _known_present(spec):
+            logger.info("%s: present", label)
+            return Outcome(spec, PRESENT, wall_s=time.monotonic() - started)
 
         destination = artifacts_dir / spec.short
         try:
             with work_ledger.lease(Path(cas_root), f"{spec.graph}/{env.value}"):
                 # Re-check under the lease: the holder we queued behind may
-                # have landed exactly this artifact while we waited.
-                if store.has_artifact(spec.graph, env):
+                # have landed exactly this artifact while we waited. The same
+                # loadability gate as everywhere (pgw#1561): a present-but-
+                # skewed position must fall THROUGH to the publish that
+                # replaces it, never short-circuit as done.
+                if _known_present(spec):
                     logger.info("%s: present (landed while claimed)", label)
                     return Outcome(spec, PRESENT, wall_s=time.monotonic() - started)
                 # REUSE BEFORE BUILD (pgw#1546): the engine cache may already
@@ -982,14 +1053,18 @@ def compile_all(
                 # The reuse arm runs the SAME two steps — a resolve that never
                 # reached the serving band is the original defect exactly.
                 published = publish_compiled(store, spec.graph, env, artifact)
-                if not serving_reader(cas_root).has_artifact(spec.graph, env):
+                # The read-back MATERIALIZES (pgw#1561): `has_artifact` here
+                # certified fourteen ZIPs no loader opens, on the strength of
+                # their refs existing. Only bytes the real loader opens count.
+                problem = witness_materializes(cas_root, spec.graph, env)
+                if problem is not None:
                     raise CompileError(
                         f"{state} {spec.short} and the publish reported "
-                        f"{published or 'nothing'}, and the store adoption "
-                        f"reads at boot still has no artifact at "
-                        f"({spec.short}, {env.value}). The build is not the "
-                        f"deliverable — an artifact the serving reader can "
-                        f"find is."
+                        f"{published or 'nothing'}, and through the store "
+                        f"boot-time adoption reads the artifact is NOT "
+                        f"loadable: {problem}. The build is not the "
+                        f"deliverable — an artifact the serving loader can "
+                        f"OPEN is."
                     )
                 logger.info(
                     "%s: %s and servable (%s)", label, state,
@@ -1365,6 +1440,7 @@ __all__ = [
     "select",
     "serving_reader",
     "specializations",
+    "witness_materializes",
     "summarize",
     "unservable",
 ]

@@ -161,3 +161,39 @@ def key_of(artifact: Path) -> str:
     from gen_worker._vendor.torchcg.artifact import read_metadata
 
     return str(read_metadata(artifact).get("compiled_graph_key") or "")
+
+
+def unpacked(
+    destination: Path,
+    *,
+    graph_specialization: str = GRAPH_CLASS,
+    witness: str = "fedcba9876543210",
+    sm: str = "sm_89",
+    toolchain: Optional[Mapping[str, str]] = None,
+) -> Path:
+    """A real UNPACKED artifact directory at ``destination``.
+
+    What ``Engine.compile`` leaves behind (``metadata.json`` + ``model.pt2``),
+    and since pgw#1561 the only builder output ``publish_compiled`` accepts —
+    the publish repacks it into the ENVELOPE the adopt loader reads, so a
+    bare ``model.pt2`` in a directory with no metadata is now unrepresentable
+    on the publish path rather than silently banked.
+
+    ``destination`` must not exist yet: ``unpack_artifact`` materializes
+    atomically and refuses an occupied target, exactly like the engine.
+    """
+    from gen_worker._vendor.torchcg.artifact import unpack_artifact
+
+    envelope = destination.parent / f".{destination.name}.envelope.tar.gz"
+    build(
+        envelope,
+        graph_specialization=graph_specialization,
+        witness=witness,
+        sm=sm,
+        toolchain=toolchain,
+    )
+    try:
+        unpack_artifact(envelope, destination)
+    finally:
+        envelope.unlink(missing_ok=True)
+    return destination
