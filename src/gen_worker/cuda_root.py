@@ -58,10 +58,12 @@ from typing import List, Optional
 CUDA_ROOT = Path("/usr/local/cuda")
 
 #: Where a CUDA root gets composed when ``/usr/local`` is not this process's to
-#: write. Beside the box's other cozy caches, and per-user by construction.
-USER_CUDA_ROOT = Path(
-    os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
-) / "cozy" / "cuda-root"
+#: write. Spelled the same way ``cli/workspace.DEFAULT_GRAPH_CAS`` spells the
+#: box's graph CAS — one shape for "the box's cozy cache", and no environment
+#: read: §1.18 is right that "wherever XDG happens to point" is not a config
+#: value anyone can name, and the operator's own knob for this is CUDA_HOME,
+#: which wins outright and is never second-guessed.
+USER_CUDA_ROOT = Path.home() / ".cache" / "cozy" / "cuda-root"
 
 #: The header that proves the flattened-include problem is solved.
 CRT_HOST_DEFINES = Path("include/crt/host_defines.h")
