@@ -1,25 +1,41 @@
-"""gen-worker CLI — top-level argparse dispatcher.
+"""gen-worker CLI — top-level argparse dispatcher. THE endpoint interface.
 
-Subcommands:
+pgw#1491, Paul's ruling 2026-08-19: gen-worker IS the endpoint CLI. Every
+endpoint-scoped verb lives here because every one of them must run INSIDE the
+endpoint's venv against its pinned torch — ``lock`` needs its tracer,
+``compile`` its inductor, ``up`` its runtime. An external tool could only ever
+shell in and invoke this.
 
-- ``models export`` — emit this package's model vocabulary.
-- ``release derive`` — run the instrumented derive inside the release env and
-  emit the release metadata document.
+The surface, in the order a user meets it::
 
-pgw#1373 deleted the v1 subcommands (``run``, ``serve``, ``invoke``,
-``prefetch``, ``families``, ``model``, ``job``) with the declaration surface
-they drove. Local serving is ``python -m gen_worker.serving``.
+    login       authenticate to the hub (credentials USER-GLOBAL, shared by
+                every endpoint venv on this machine)
+    lock        AUTHOR-time: trace the endpoint, write endpoint.lock (committed)
+    download    fetch a checkpoint onto this machine
+    compile     pre-warm compiled graphs for this card: fetch else build
+    up [-d]     bring the endpoint up resident (foreground; -d detaches)
+    run         send one request to the endpoint that is up
+    down        stop it
+    publish     push this endpoint's source to the hub; the hub builds
 
-See ``docs/local-dev.md``.
+plus ``models export`` and ``release derive``, which are machinery rather than
+user surface.
+
+HARDCUT (pgw#1491): ``sync``, ``serve`` (as a verb) and ``gen`` are DELETED
+spellings, not aliases. ``sync`` was incoherent once checkpoints became runtime
+config — deps are ``uv sync``, artifacts are ``compile``, weights are
+``download``. ``serve`` split into ``up``/``down`` so that starting an endpoint
+and sending it work are different acts. Pre-launch, a compatibility alias would
+only preserve the confusion it renames.
 
 Exit codes (mirrored by every subcommand):
 
 - ``0``    success
-- ``1``    user-code exception (traceback to stderr)
+- ``1``    the command failed (message to stderr)
 - ``2``    CLI usage / validation error (help / message to stderr)
-- ``3``    model resolution failure (tensorhub unreachable AND cache miss,
-           or ``--offline`` with cache miss)
+- ``3``    model resolution failure (tensorhub unreachable AND cache miss)
 - ``130``  SIGINT (Ctrl-C; standard shell convention)
+
 """
 
 from __future__ import annotations
@@ -35,31 +51,43 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gen-worker",
         description=(
-            "Develop and dogfood gen-worker endpoints locally. "
-            "Sub-command 'run' executes one endpoint method against a JSON payload "
-            "in the local Python interpreter, mirroring production behavior for "
-            "model resolution, payload validation, and context wiring."
+            "The endpoint CLI. Download a checkpoint, compile for this card, "
+            "bring the endpoint up, run requests against it, publish it."
         ),
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     sub.required = False  # so `gen-worker --help` works without a sub
 
-    # Lazy-import the subcommand wiring so the cli stays cheap to import
-    # for `gen-worker --help` in CI. pgw#1373 deleted the v1 subcommands
-    # (`run`, `serve`, `invoke`, `prefetch`, `families`, `model`, `job`) with
-    # the declaration surface they drove; local serving is
-    # `python -m gen_worker.serving`.
+    # Lazy-imported so the cli stays cheap for `gen-worker --help`: `up` pulls
+    # in torch, and a user asking for help must not pay for it.
     from . import models_export as _models_mod
     _models_mod.add_subparser(sub)
 
     from . import release as _release_mod
     _release_mod.add_subparser(sub)
 
-    # pgw#1466 — the endpoint-level surface: lock pins, sync materializes,
-    # serve stays resident, run executes one. Four front doors onto ONE
-    # serving core; see each module's docstring.
+    # The endpoint surface (pgw#1491). Every one of these is a front door onto
+    # ONE serving core — `run` in particular executes nothing itself.
     from . import lock as _lock_mod
     _lock_mod.add_subparser(sub)
+
+    from . import download as _download_mod
+    _download_mod.add_subparser(sub)
+
+    from . import compile as _compile_mod
+    _compile_mod.add_subparser(sub)
+
+    from . import up as _up_mod
+    _up_mod.add_subparser(sub)
+
+    from . import run as _run_mod
+    _run_mod.add_subparser(sub)
+
+    from . import login as _login_mod
+    _login_mod.add_subparser(sub)
+
+    from . import publish as _publish_mod
+    _publish_mod.add_subparser(sub)
 
     return parser
 

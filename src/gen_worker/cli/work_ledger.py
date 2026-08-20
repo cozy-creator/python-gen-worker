@@ -1,0 +1,147 @@
+"""Per-key single-flight for compile work, on LOCAL DISK ONLY.
+
+pgw#1491. ``gen-worker compile`` and a serving process's background mint both
+fill the same holes from the same CAS. Paul's ruling makes the WORK LEDGER the
+coordination mechanism rather than process adoption: both key work by the same
+CAS entries, each skips what the other already landed (skip-if-present measured
+at ~10 s/hit), and whichever survives finishes the remainder. The lease below
+is the "somebody is on this one right now" half — without it, two compiles of
+one specialization race into the same destination and torchcg refuses the
+second at ``_require_exact_directory``, wasting a full build.
+
+## Local disk only, and that is a hard boundary
+
+``flock`` semantics on a network filesystem are unproven here (e2e#1910), and a
+lease that silently does nothing is worse than no lease — it would convert a
+loud double-build into a silent corrupt one. So :func:`lease` refuses a root
+that is not on a local filesystem rather than degrading. Paul's separate
+ruling stands alongside it: workers NEVER coordinate downloads with each other;
+this is one machine's two processes, which is a different thing entirely.
+
+## Crash-safe by construction
+
+The lease is an ``flock`` on an open fd. A process that dies — SIGKILL, OOM,
+power — has its fd closed by the kernel and its lease released with it. There
+is no stale-lease reaper, because there are no stale leases.
+"""
+
+from __future__ import annotations
+
+import errno
+import fcntl
+import hashlib
+import os
+import re
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator, Optional
+
+#: Subdirectory of the CAS root holding lease files. Beside the artifacts it
+#: leases, so a store that is copied or deleted takes its leases with it.
+LEDGER_DIR = ".work-ledger"
+
+#: Filesystems whose ``flock`` this ledger will not stand on. FUSE is here
+#: because the guarantee is per-driver, not per-protocol — sshfs, s3fs and
+#: ceph-fuse all present as `fuse` and none of them promises what is needed.
+_REMOTE_FSTYPES = frozenset({
+    "nfs", "nfs4", "cifs", "smb3", "fuse", "fuse.sshfs", "fuseblk",
+    "lustre", "gpfs", "ceph", "9p", "afs", "glusterfs",
+})
+
+_SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+class LedgerError(RuntimeError):
+    """The ledger could not be used on this filesystem or path."""
+
+
+class Busy(RuntimeError):
+    """Another process holds this key's lease right now."""
+
+
+def assert_local(root: Path) -> None:
+    """Refuse a ledger root whose filesystem does not honor ``flock``.
+
+    Fails CLOSED: a filesystem this cannot identify as local is refused, not
+    assumed. An unproven lock that reports success is the failure mode this
+    guard exists for.
+    """
+    fstype = _fstype(root)
+    if fstype is None:
+        raise LedgerError(
+            f"cannot identify the filesystem under {root}; the compile work "
+            f"ledger is local-disk-only (network flock is unproven, e2e#1910) "
+            f"and will not run where it cannot prove that."
+        )
+    if fstype in _REMOTE_FSTYPES:
+        raise LedgerError(
+            f"{root} is on {fstype}; the compile work ledger is "
+            f"local-disk-only. Point --graph-store at local disk."
+        )
+
+
+def _fstype(path: Path) -> Optional[str]:
+    """The mounted filesystem type for ``path``, or ``None`` if unreadable."""
+    try:
+        entries = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    target = str(Path(path).resolve())
+    best: tuple[int, Optional[str]] = (-1, None)
+    for line in entries.splitlines():
+        _, _, rest = line.partition(" - ")
+        fields = line.split()
+        if len(fields) < 5 or not rest:
+            continue
+        mountpoint = fields[4]
+        fstype = rest.split()[0]
+        if target == mountpoint or target.startswith(
+            mountpoint.rstrip("/") + "/"
+        ):
+            if len(mountpoint) > best[0]:
+                best = (len(mountpoint), fstype)
+    return best[1]
+
+
+def lease_path(root: Path, key: str) -> Path:
+    """Where one key's lease file lives. The key is hashed, never pasted:
+    a graph identity is long and a specialization name can carry anything."""
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=16).hexdigest()
+    hint = _SAFE.sub("-", key)[:48].strip("-")
+    return Path(root) / LEDGER_DIR / f"{hint}-{digest}.lease"
+
+
+@contextmanager
+def lease(root: Path, key: str, *, blocking: bool = False) -> Iterator[None]:
+    """Hold the single-flight lease for ``key`` for the body's duration.
+
+    ``blocking=False`` (the default) raises :class:`Busy` immediately when
+    somebody else holds it — which is what a compile driver wants: skip that
+    specialization now and come back to it, rather than idling a core waiting
+    for work another process is already doing.
+    """
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    assert_local(root)
+    path = lease_path(root, key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fd, flags)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise Busy(key) from exc
+            raise
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n{key}\n".encode("utf-8"))
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+__all__ = ["Busy", "LEDGER_DIR", "LedgerError", "assert_local", "lease", "lease_path"]
