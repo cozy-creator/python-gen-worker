@@ -77,7 +77,6 @@ class Spec:
 
     contract: str
     graph: str
-    program: str
     target: Any
     ingress: Any
 
@@ -122,7 +121,6 @@ def specializations(lock_path: Path) -> Tuple[Spec, ...]:
                 Spec(
                     contract=str(lane.get("contract") or ""),
                     graph=str(record.get("graph") or ""),
-                    program=str(record.get("program") or ""),
                     target=record.get("target"),
                     ingress=record.get("ingress"),
                 )
@@ -230,73 +228,36 @@ def _store(cas_root: Path) -> Any:
 # --------------------------------------------------------------------------
 
 
-def _ensure_program(spec: Spec, store: Any, cas: Any, rederive: Any) -> Path:
+def _ensure_program(spec: Spec, store: Any, rederive: Any, scratch: Path) -> Path:
     """The exported program for ``spec``, re-deriving it when this box lacks it.
 
     ADDRESS-FREE (Paul, 2026-08-19): ``torch.export.save`` is deterministic per
     machine but produces DIFFERENT bytes across machines for the same traced
-    graph — 14/14 graph identities reproduce, 0/14 blob digests do. So a
-    serialized program is a LOCAL derived artifact, its identity is the graph,
-    and ``graphs[].program`` is leaving the document contract entirely
-    (torchcg 09c09b7a).
+    graph — 14/14 graph identities reproduce, 0/14 blob digests do. A serialized
+    program is therefore a LOCAL derived artifact whose only portable name is
+    the GRAPH, and ``graphs[].program`` has left the document contract
+    entirely (torchcg 09c09b7a; `document.py` now contains zero occurrences).
 
-    Two store generations, and the newer one is asked FIRST so this needs no
-    edit when the re-vendor lands: a store that exposes ``fetch_program(graph,
-    destination)`` is asked BY GRAPH IDENTITY, which is the only portable key
-    there is. Older stores are addressed by digest, and then the lock's
-    ``program`` is the address. Either way a miss is answered by re-deriving
-    locally — never by fetching, because there is nothing portable to fetch.
+    So there is exactly one lookup and it is by identity. A miss is answered by
+    re-deriving locally — never by fetching, because there is nothing portable
+    to fetch. A malformed key is a typed refusal from the store rather than a
+    miss, so a wiring bug can never spend a pointless two-minute derive.
     """
-    fetch_by_identity = getattr(store, "fetch_program", None)
-    if callable(fetch_by_identity) and _keys_programs_by_graph(store):
-        destination = Path(cas.root if hasattr(cas, "root") else ".") / "programs"
-        destination.mkdir(parents=True, exist_ok=True)
-        found = fetch_by_identity(spec.graph, destination / spec.short)
-        if found is not None:
-            return Path(found)
-        rederive()
-        found = fetch_by_identity(spec.graph, destination / spec.short)
-        if found is None:
-            raise CompileError(
-                f"no exported program for graph {spec.short} after re-deriving: "
-                f"this source tree does not produce that graph. The committed "
-                f"lock and this checkout disagree; `gen-worker lock --check` "
-                f"names the drift."
-            )
+    destination = scratch / f"{spec.short}.pt2"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    found = store.fetch_program(spec.graph, destination)
+    if found is not None:
         return Path(found)
-
-    address = spec.program
-    if address:
-        path = Path(cas.object_path(address))
-        if path.exists():
-            return path
-    address = rederive().get(spec.graph, "") or address
-    if not address:
+    rederive()
+    found = store.fetch_program(spec.graph, destination)
+    if found is None:
         raise CompileError(
-            f"graph {spec.short} has no exported program and this store keys "
-            f"programs by DIGEST, so there is no identity to ask it for. This "
-            f"is the address-free transition: re-vendor torchcg (>= 09c09b7a) "
-            f"so the store answers `fetch_program(graph, destination)`."
+            f"no exported program for graph {spec.short} even after re-deriving "
+            f"from this source tree: the committed lock and this checkout "
+            f"disagree about what this endpoint traces to. "
+            f"`gen-worker lock --check` names the drift."
         )
-    path = Path(cas.object_path(address))
-    if not path.exists():
-        raise CompileError(
-            f"re-derive named exported program {address[:16]} for graph "
-            f"{spec.short} but it is not in the graph CAS."
-        )
-    return path
-
-
-def _keys_programs_by_graph(store: Any) -> bool:
-    """Does this store address programs by GRAPH IDENTITY (not by digest)?
-
-    The distinction is invisible in the method NAME — both generations spell it
-    ``fetch_program`` — so it is answered by the presence of ``has_program``,
-    which only the identity-keyed generation carries. Guessing from the name
-    would hand a graph hash to a digest-keyed store, which reports a wiring bug
-    as "corrupted at rest".
-    """
-    return callable(getattr(store, "has_program", None))
+    return Path(found)
 
 
 def _build(
@@ -352,8 +313,6 @@ def compile_all(
     only: int = 0,
     vram_budget_gb: float = 0.0,
 ) -> List[Outcome]:
-    from .._vendor.tensorfs import LocalCAS
-
     specs = specializations(lock_path)
     if only:
         specs = specs[:only]
@@ -387,19 +346,21 @@ def compile_all(
 
     env = _env_identity(endpoint_dir, sm, lockfile)
     store = _store(cas_root)
-    cas = LocalCAS(Path(cas_root))
     artifacts_dir = Path(endpoint_dir) / ".compiled-graphs"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    rederived: Dict[str, str] = {}
     rederive_ran = [False]
 
-    def rederive() -> Dict[str, str]:
-        """This machine's own graph -> program-address map, derived ONCE."""
+    def rederive() -> None:
+        """Regenerate this box's exported programs into the graph store, ONCE.
+
+        Once per compile run, not once per specialization: one derive emits
+        every graph the endpoint traces to, so a second call would re-pay a
+        two-minute trace to produce bytes already on disk.
+        """
         if not rederive_ran[0]:
             rederive_ran[0] = True
-            rederived.update(_rederive_programs(endpoint_dir, cas_root, lockfile))
-        return rederived
+            _rederive_programs(endpoint_dir, cas_root, lockfile)
 
     outcomes: List[Outcome] = []
     for index, spec in enumerate(specs, start=1):
@@ -425,7 +386,7 @@ def compile_all(
                     )
                     continue
                 logger.info("%s: building", label)
-                program = _ensure_program(spec, store, cas, rederive)
+                program = _ensure_program(spec, store, rederive, artifacts_dir)
                 _build(
                     spec, program=program, cas_root=Path(cas_root), sm=sm,
                     destination=destination,
@@ -450,12 +411,13 @@ def compile_all(
 
 def _rederive_programs(
     endpoint_dir: Path, cas_root: Path, lockfile: Optional[Path]
-) -> Dict[str, str]:
-    """Regenerate this machine's exported-program blobs into the graph CAS.
+) -> None:
+    """Regenerate this machine's exported programs into the graph store.
 
-    Returns ``{graph hash: program address}`` read off the document THIS derive
-    just produced — the local, honest source of an address that is not portable
-    by construction.
+    Returns nothing: since the address-free ruling the derive PUTS each program
+    under its graph identity, and the caller asks the store by that identity.
+    Handing back a map of addresses would be re-introducing exactly the
+    per-machine address the ruling deleted.
     """
     import importlib
 
@@ -475,7 +437,7 @@ def _rederive_programs(
     # second load, and it keeps this file from parsing endpoint.toml itself.
     module = importlib.import_module(load_endpoint(endpoint_dir).module_name)
     try:
-        result = derive_release(
+        derive_release(
             module,
             checkpoint_dir=endpoint_dir,
             lockfile=lockfile or lockfile_beside(str(endpoint_dir)),
@@ -484,15 +446,6 @@ def _rederive_programs(
         )
     except DeriveError as exc:
         raise CompileError(f"re-derive failed: {exc}") from exc
-    addresses: Dict[str, str] = {}
-    document = json.loads(bytes(result.document).decode("utf-8"))
-    for lane in ((document.get("graphs") or {}).get("lanes")) or []:
-        for record in lane.get("graphs") or ():
-            graph = str(record.get("graph") or "")
-            program = str(record.get("program") or "")
-            if graph and program:
-                addresses[graph] = program
-    return addresses
 
 
 # --------------------------------------------------------------------------
