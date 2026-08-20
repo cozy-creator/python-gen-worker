@@ -415,3 +415,45 @@ def test_a_missing_manifest_pin_is_REPAIRED_not_refused_forever(tmp_path: Path) 
         assert before == after, f"NO BYTES MAY MOVE; tree changed: {before} -> {after}"
     finally:
         origin.close()
+
+
+def test_the_boot_census_NAMES_an_unpinned_stubbed_tree(
+    tmp_path: Path, caplog: Any
+) -> None:
+    """pgw#1536: the one combination that cannot serve must be loud at boot.
+
+    The pod incident turned on a tree existing WITHOUT its manifest pin, and
+    nobody could say whether that tree predated the boot or was built during
+    it — because nothing ever looked. A census at boot answers that for free
+    on any run that happens anyway, instead of costing a rental.
+
+    UNPINNED + STUBBED is the state that cannot be served, so it is the one
+    that logs at ERROR rather than INFO.
+    """
+    import logging
+
+    from gen_worker._vendor.tensorfs.project import stub_bytes
+    from gen_worker.models.store import ModelStore
+
+    base = tmp_path / "cas"
+    (base / "refs").mkdir(parents=True)
+    (base / "objects").mkdir(parents=True)
+    tree = base / "snapshots" / ("sha256:" + "e5" * 32)
+    (tree / "unet").mkdir(parents=True)
+    (tree / "unet" / "x.safetensors").write_bytes(stub_bytes("a" * 64, 3_400_000_000))
+
+    async def noop(_msg: Any) -> None:
+        return None
+
+    store = ModelStore(noop, cache_dir=base)
+    with caplog.at_level(logging.INFO, logger="gen_worker.models.store"):
+        store._census_snapshot_pins()
+
+    census = [r for r in caplog.records if "snapshot census at boot" in r.message]
+    assert census, "the boot census must emit a line per tree"
+    row = census[0]
+    assert "pinned=False" in row.getMessage() and "projected=True" in row.getMessage()
+    assert row.levelno == logging.ERROR, (
+        "unpinned + stubbed is the ONE combination that cannot serve — it must "
+        f"be loud, not an INFO line nobody greps: level={row.levelname}")
+    assert "UNREADABLE by the streaming engine" in row.getMessage()
