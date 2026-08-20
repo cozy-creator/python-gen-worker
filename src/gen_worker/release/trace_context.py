@@ -113,8 +113,15 @@ class TraceLoadContext:
                 setattr(loaded, lora_call, _noop)
         return loaded
 
-    def component_dtype(self, tree: Any, subfolder: Any) -> Any:
+    def component_dtype(self, tree: Any, subfolder: Any, module: Any = None) -> Any:
         """The precision ONE component loads at (pgw#1512, Paul's ruling).
+
+        ``module`` is tcg#71's third argument — the component just built on
+        meta, handed over so a policy CAN match by the module's own parameter
+        names. This policy still decides by contract-segment + container
+        (below); adopting name-matching is pgw#1530's owner's call, and until
+        then the argument is accepted so the vendored torchcg tip can call the
+        policy at all.
 
         Installed as torchcg's session policy, so it is asked once per
         component instead of once per tree.
