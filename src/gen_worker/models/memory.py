@@ -789,11 +789,22 @@ def repair_device_placement(obj: Any, device: str) -> List[tuple[str, str, str]]
                     cname or "obj", tname, device, exc,
                 )
     if forced:
-        _LOG.warning(
-            "device repair: %d tensor(s) on %s did not follow `.to(%s)` and were "
-            "moved storage-wise",
-            forced, ", ".join(sorted(still)) or "obj", device,
+        detail = (
+            f"components={sorted(still) or ['obj']} did not follow `.to({device})`; "
+            f"{forced} tensor(s) moved storage-wise"
         )
+        _LOG.warning("device repair: %s", detail)
+        # Hub-visible. A component that ignores `.to()` is the shape that
+        # OOM'd a denoise which had already "evicted" a 27 GiB text encoder —
+        # recovering it silently means the next one is diagnosed from scratch.
+        try:
+            from .. import activity as _activity
+
+            _activity.emit_event(
+                _activity.KIND_RESIDENCY_FAULT, detail=detail, phase="evict_incomplete",
+            )
+        except Exception:  # noqa: BLE001 — an instrument must never fail a move
+            _LOG.debug("device repair: fault event not emitted", exc_info=True)
     return device_mismatches(obj, device)
 
 
@@ -949,10 +960,6 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
     the proof runs on the resident parent, so nothing downstream of a
     structure-only build allocates a checkpoint.)
     """
-    import torch
-
-    from ..meta_instantiation import is_virtual
-
     total = 0
     #: ``("ptr", data_ptr)`` for a tensor with storage — shared storages are
     #: counted ONCE — and ``("obj", id)`` for one without, which has no storage
@@ -960,41 +967,66 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
     seen: set[tuple[str, int]] = set()
     for obj in objs:
         for c in _iter_components(obj):
-            if c is None or not hasattr(c, "parameters"):
-                continue
-            tensors = list(c.parameters())
-            if hasattr(c, "buffers"):
-                tensors.extend(c.buffers())
-            for t in tensors:
-                if not isinstance(t, torch.Tensor):
-                    continue
-                # pgw#1198: asked of the STORAGE. A `setup()`-time quantizer
-                # leaves a wrapper subclass over fake data, which is a
-                # FakeTensor to nobody and occupies the card to nothing.
-                virtual = t.device.type != "meta" and is_virtual(t)
-                if cuda_only and (virtual or t.device.type != "cuda"):
-                    continue
-                key: tuple[str, int]
-                if virtual:
-                    key = ("obj", id(t))
-                else:
-                    try:
-                        key = ("ptr", t.data_ptr())
-                    except Exception:
-                        key = ("obj", id(t))
-                if key in seen:
-                    continue
-                seen.add(key)
-                # pgw#1558: STORAGE bytes, not the logical dtype's. A virtual
-                # tensor has no storage to descend into and is priced by what
-                # it DECLARES, which is what a real load will go on to
-                # allocate; everything else is priced by what it holds, so a
-                # quantized subclass stops being booked at the dtype it
-                # emulates.
-                total += (
-                    t.numel() * t.element_size() if virtual else tensor_storage_bytes(t)
-                )
+            total += _module_bytes(c, cuda_only=cuda_only, seen=seen)
     return total
+
+
+def _module_bytes(c: Any, *, cuda_only: bool, seen: set[tuple[str, int]]) -> int:
+    """One module's own parameters and buffers, storage-priced and deduped
+    against ``seen``. The shared inner walk of :func:`_sum_tensor_bytes` and
+    :func:`module_storage_bytes`."""
+    import torch
+
+    from ..meta_instantiation import is_virtual
+
+    if c is None or not hasattr(c, "parameters"):
+        return 0
+    tensors = list(c.parameters())
+    if hasattr(c, "buffers"):
+        tensors.extend(c.buffers())
+    total = 0
+    for t in tensors:
+        if not isinstance(t, torch.Tensor):
+            continue
+        # pgw#1198: asked of the STORAGE. A `setup()`-time quantizer
+        # leaves a wrapper subclass over fake data, which is a
+        # FakeTensor to nobody and occupies the card to nothing.
+        virtual = t.device.type != "meta" and is_virtual(t)
+        if cuda_only and (virtual or t.device.type != "cuda"):
+            continue
+        key: tuple[str, int]
+        if virtual:
+            key = ("obj", id(t))
+        else:
+            try:
+                key = ("ptr", t.data_ptr())
+            except Exception:
+                key = ("obj", id(t))
+        if key in seen:
+            continue
+        seen.add(key)
+        # pgw#1558: STORAGE bytes, not the logical dtype's. A virtual
+        # tensor has no storage to descend into and is priced by what
+        # it DECLARES, which is what a real load will go on to
+        # allocate; everything else is priced by what it holds, so a
+        # quantized subclass stops being booked at the dtype it
+        # emulates.
+        total += t.numel() * t.element_size() if virtual else tensor_storage_bytes(t)
+    return total
+
+
+def module_storage_bytes(module: Any, *, cuda_only: bool = False) -> int:
+    """Bytes ONE module's own parameters and buffers occupy, shared storages
+    counted once. 0 for a non-module.
+
+    pgw#1558. :func:`estimate_pipeline_size_gb` is the wrong tool for a single
+    component: it enumerates COMPONENTS OF the object it is handed, and handed
+    a bare denoiser it finds that denoiser's submodule attributes and misses
+    every parameter held on the root. This asks the module itself, which is
+    what "how big is this one component" means — the question a residency
+    schedule asks about each of its stage residents.
+    """
+    return _module_bytes(module, cuda_only=cuda_only, seen=set())
 
 
 def estimate_pipeline_size_gb(pipeline: Any) -> float:
@@ -2526,6 +2558,7 @@ __all__ = [
     # pgw#1558 — the endpoint-facing mechanism surface.
     "available_vram",
     "process_ceiling_vram",
+    "module_storage_bytes",
     "resident_census",
     "tensor_dtype_label",
     "tensor_storage_bytes",

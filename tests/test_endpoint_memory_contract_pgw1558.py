@@ -231,3 +231,47 @@ def test_release_cached_vram_does_not_reset_the_peak() -> None:
     assert "reset_peak_memory_stats" not in source
     assert "gc.collect" not in source
     memory.release_cached_vram()  # always safe, CUDA or not
+
+
+# --------------------------------------------------------------------------
+# One component's own bytes — the question a stage schedule asks.
+# --------------------------------------------------------------------------
+
+
+def test_module_storage_bytes_asks_the_module_itself() -> None:
+    """`estimate_pipeline_size_gb` enumerates the COMPONENTS OF what it is
+    handed, so a bare denoiser loses every parameter held on its root. A
+    residency schedule sizing one stage resident needs the module's own
+    bytes."""
+
+    class Denoiser(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            # On the ROOT — invisible to a components-of walk.
+            self.pos_embed = torch.nn.Parameter(
+                torch.zeros(1000, dtype=torch.float32), requires_grad=False
+            )
+            self.blocks = torch.nn.ModuleList([torch.nn.Linear(10, 10, bias=False)])
+
+    module = Denoiser()
+    expected = 1000 * 4 + 10 * 10 * 4
+    assert memory.module_storage_bytes(module) == expected
+    # The old tool, on the same object, and the gap it leaves.
+    assert memory.estimate_pipeline_size_gb(module) * float(1024**3) < expected
+
+
+def test_module_storage_bytes_counts_a_shared_storage_once() -> None:
+    shared = torch.zeros(256, dtype=torch.float32)
+
+    class Twin(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.a = torch.nn.Parameter(shared, requires_grad=False)
+            self.b = torch.nn.Parameter(shared, requires_grad=False)
+
+    assert memory.module_storage_bytes(Twin()) == 256 * 4
+
+
+def test_module_storage_bytes_is_zero_for_a_non_module() -> None:
+    assert memory.module_storage_bytes(None) == 0
+    assert memory.module_storage_bytes(object()) == 0
