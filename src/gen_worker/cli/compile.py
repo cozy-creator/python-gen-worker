@@ -432,7 +432,7 @@ def _build(
     had nothing to publish and could only count exit statuses — which is
     precisely how a green run left the serving path empty.
     """
-    from ..compile_cache import toolchain_digest
+    from ..toolchain import toolchain_digest
 
     result_path = destination.parent / f"{spec.short}.result.json"
     request = {
@@ -701,7 +701,7 @@ class _EngineReuse:
         self._index: Optional[Dict[str, str]] = None
 
     def _load(self) -> None:
-        from ..compile_cache import toolchain_digest
+        from ..toolchain import toolchain_digest
         from .._vendor.tensorfs import LocalCAS
         from .._vendor.torchcg.engine import Engine
 

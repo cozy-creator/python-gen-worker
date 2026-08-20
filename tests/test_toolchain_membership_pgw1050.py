@@ -26,7 +26,8 @@ import pytest
 
 from gen_worker._vendor.torchcg import identity as tcg_identity
 
-from gen_worker import compile_cache as cc, dist_records
+from gen_worker import dist_records
+from gen_worker import toolchain as cc
 
 from harness.compiled_graph_meta import exported_compiled_graph_meta
 

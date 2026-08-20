@@ -496,88 +496,15 @@ ARTIFACT = b"compiled graph-tarball-bytes" * 64
 ARTIFACT_DIGEST = "sha256:" + hashlib.sha256(ARTIFACT).hexdigest()
 
 
-def _resolve_route(rig: _Rig, repo: str, entry: Dict[str, Any]) -> None:
-    body = json.dumps({"files": [entry]}).encode()
-    rig.routes[f"/api/v1/repos/{repo}/resolve"] = _Route(body)
-
-
-def _fetch_compiled_graph(rig: _Rig, cache: Path, entry: Dict[str, Any],
-                digest: str) -> Optional[Path]:
-    """pgw#904: compiled graph bytes arrive as the EXACT named artifact from the
-    grant's transport (`aot_delivery`), never a discovery fetch — the same
-    bounded-read invariants, at the delivery seam that replaced it."""
-    from types import SimpleNamespace
-
-    from gen_worker import aot_delivery
-
-    presigned = SimpleNamespace(files=[SimpleNamespace(
-        path=str(entry.get("path") or ""),
-        size_bytes=int(entry.get("size_bytes") or 0),
-        digest=str(entry.get("digest") or ""),
-        url=str(entry.get("url") or ""),
-        chunks=(),
-    )])
-    try:
-        return aot_delivery.materialize_named_artifact(
-            "root/family-fam#ck", digest, presigned,
-            cache_dir=cache, what="stream-bounds rig")
-    except aot_delivery.NamedArtifactUnavailable:
-        return None
-
-
-def _repo_for(family: str = "fam") -> str:
-    from gen_worker import compile_cache as cc
-
-    return cc.system_repo(family)
-
-
-def test_graph_artifact_legitimate_transfer_is_unaffected(
-    rig: _Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from gen_worker import aot_delivery
-
-    # This suite owns the bounded transport, not TCG package admission.  Keep
-    # the latter at its typed handoff so arbitrary control bytes do not need to
-    # masquerade as a compiled graph.
-    monkeypatch.setattr(aot_delivery, "_import_verified_artifact", lambda *a, **k: None)
-    url = _serve(rig, "/graph.tar.gz", ARTIFACT)
-    entry = {"path": "graph.tar.gz", "url": url,
-             "digest": ARTIFACT_DIGEST, "size_bytes": len(ARTIFACT)}
-    out = _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST)
-    assert out is not None and out.read_bytes() == ARTIFACT
-    assert (tmp_path / "objects").is_dir()
-    assert not (tmp_path / "tensorfs").exists()
-
-
-def test_graph_artifact_without_size_bytes_is_a_typed_miss(rig: _Rig, tmp_path: Path) -> None:
-    """The chunked sibling branch passes this exact field to
-    `download_chunked_file` as `total_size`; the whole-file branch had it and
-    ignored it. An entry that cannot say how big it is now costs the pilot lane
-    a miss rather than an unbounded fetch — a compiled graph miss self-mints, so failing
-    closed here is free."""
-    url = _serve(rig, "/compiled graph-nosize.tar.gz", ARTIFACT)
-    entry = {"path": "compiled graph-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST}
-    assert _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
-    assert _served(rig, "/compiled graph-nosize.tar.gz") == 0, "no bytes fetched at all"
-
-
-def test_graph_artifact_oversized_stream_is_abandoned_mid_transfer(
-    rig: _Rig, tmp_path: Path
-) -> None:
-    url = _serve(rig, "/compiled graph-big.tar.gz", b"\0" * BODY_BYTES)
-    entry = {"path": "compiled graph-big.tar.gz", "url": url,
-             "digest": ARTIFACT_DIGEST, "size_bytes": DECLARED_BYTES}
-
-    assert _fetch_compiled_graph(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
-    _aborted_early(rig, "/compiled graph-big.tar.gz")
-    hexname = ARTIFACT_DIGEST.split(":", 1)[-1]
-    assert not (tmp_path / "graphs" / f"{hexname}.tar.gz").exists()
-    assert not (tmp_path / "graphs" / f"{hexname}.part").exists()
-
-
-# ---------------------------------------------------------------------------
-# The SEVERANCE check — `_aborted_early` must still be able to fail
-# ---------------------------------------------------------------------------
+# pgw#1573: the three GRAPH-ARTIFACT rows that stood here drove
+# `aot_delivery.materialize_named_artifact` — the v1 delivery seam, deleted
+# with its tier (no production caller since pgw#1373 removed `executor.py`).
+# What they measured is the BOUNDED-TRANSPORT invariant, which the blob, shard
+# and civitai rows above still measure over the same `copy_bounded` primitive;
+# what went away is one caller of it, not the property. The v2 artifact fetch
+# is `torchcg.store.LocalGraphStore.fetch_artifact` + `HubGraphStore`, whose
+# digest gate has its own coverage in `tests/test_adopt_flow.py`
+# (`test_a_TRUNCATED_remote_artifact_is_refused_before_it_is_ever_stored`).
 
 
 def test_the_ordering_predicate_FIRES_on_a_post_loop_check(

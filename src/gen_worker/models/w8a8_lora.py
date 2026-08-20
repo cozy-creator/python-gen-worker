@@ -1200,7 +1200,49 @@ def normalize_adapter_state_dict(
     return out
 
 
+def apply_lora_execution_lane(pipe: Any, bucket: int) -> bool:
+    """Put the pipeline on the branch-bearing graph family for ``bucket``
+    (gw#561): canonical zeroed rank-``bucket`` branches on every
+    branch-capable denoiser Linear (the gw#547 compiled-lane contract) + the
+    ``<base>-lora<bucket>`` lane stamp. Raises when the pipeline has no
+    branch-capable denoiser — a declared bucket that cannot trace must fail
+    loud, not publish/adopt the wrong graph.
+
+    gw#679: the container is allocated on EVERY denoiser the pipeline carries,
+    so a dual-expert MoE traces both experts branch-bearing and a per-expert
+    adapter set can land at request time without a recompile.
+
+    pgw#1573 moved this beside the machinery it wraps. It lived in
+    ``compile_cache`` — the v1 arming brain, orphaned since pgw#1373 deleted
+    its only caller and deleted outright here — while every line of its body is
+    this module's.
+    """
+    if not bucket:
+        return False
+    targets = enable_branch_execution_lanes(pipe, int(bucket))
+    if not targets:
+        raise RuntimeError(
+            "a lora bucket was declared but the pipeline has no branch-capable "
+            "denoiser (transformer/transformer_2/unet)"
+        )
+    stamp_execution_lane(pipe, targets)
+    return True
+
+
+def drop_lora_execution_lane(pipe: Any) -> None:
+    """Undo :func:`apply_lora_execution_lane`: drop the branch buffers on every
+    denoiser and restore the branchless lane stamp (the eager rollback —
+    canonical zeroed branches cost +21-32% eager, gw#547)."""
+    targets = branch_targets(pipe)
+    if not targets:
+        return
+    disable_branch_execution_lanes(pipe)
+    stamp_execution_lane(pipe, targets)
+
+
 __all__ = [
+    "apply_lora_execution_lane",
+    "drop_lora_execution_lane",
     "RANK_BUCKETS",
     "apply_branch_adapter_set",
     "apply_branch_adapters",

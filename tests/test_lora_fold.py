@@ -2,14 +2,14 @@
 
 The defect these tests exist for, measured on the production seams: a live
 adapter on a COMPILED-ARMED denoiser changes the served tensor by exactly
-``0.0``. ``aot_serve.wrap_module`` replaced ``forward`` with the artifact's
+``0.0``. The armed dispatcher replaced ``forward`` with the artifact's
 dispatch and bound its constants from the base weights at arm time; peft (and
 our own additive branch) put their work in SUBMODULES the artifact never runs.
 So the request pays for an adapter and receives the base model, with no
 refusal, no eager fallback and no log.
 
 Everything below runs the real code on CPU: a real tiny diffusers
-``UNet2DConditionModel``, the real ``aot_serve.wrap_module``, the real
+``UNet2DConditionModel``, the real ``adapter_guard`` seam, the real
 ``w8a8_lora`` key resolution under ``lora_fold``. The artifact stand-in is a
 FROZEN DEEP COPY of the pre-fold denoiser called through its own forward —
 semantically exactly what a weightless AOTI package bound once at arm time is:
@@ -25,6 +25,7 @@ CAUGHT, and the guard test asserts the unguarded shape serves the base model.
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -32,7 +33,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 
-from gen_worker import aot_serve  # noqa: E402
+from gen_worker.serving import adapter_guard  # noqa: E402
 from gen_worker.api.errors import RefCompatibilitySurprise  # noqa: E402
 from gen_worker.models import lora_fold  # noqa: E402
 
@@ -171,11 +172,42 @@ class _PointerArtifact(_FrozenArtifact):
             return type(self._frozen).forward(self._frozen, *args, **kwargs)
 
 
+class _Dispatcher:
+    """torchcg's ``_ForwardDispatcher``, in the respects the guard reads.
+
+    pgw#1573: this file armed through ``aot_serve.wrap_module``, which has no
+    production caller — the live arm is ``AdoptSession`` installing one of
+    these as the module's ``forward``. Same doubles, same assertions, the seam
+    a pod actually runs. ``_entries`` is torchcg's ``(record, call)`` shape and
+    ``call.runner`` is the artifact's bound runner, which is what
+    ``adapter_guard.rearm_constants`` re-installs.
+    """
+
+    def __init__(self, module: Any, artifact: Any) -> None:
+        self.module = module
+        self.eager_forward = module.forward
+        self.artifact = artifact
+        entry = getattr(artifact, "entry", None)
+        self._entries = ((SimpleNamespace(graph="probe-graph"), entry),)
+
+    def armed_graphs(self) -> Tuple[str, ...]:
+        return ("probe-graph",)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self.artifact(*args, **kwargs)
+
+
 def _arm(unet: Any, artifact: Any) -> None:
-    aot_serve.wrap_module(
-        unet, artifact, {"family": "probe", "compiled_graph_key": "probe"},
-        attr="forward", target="unet",
-    )
+    """Arm through the LIVE seam: torchcg's dispatcher, plus pgw#1573's guard.
+
+    ``adapter_guard.install`` is what ``ctx.compile`` runs on every adopted
+    module on both serving hosts, so what this file measures is what a pod
+    does.
+    """
+    unet.forward = _Dispatcher(unet, artifact)
+    assert adapter_guard.install(unet), (
+        "the guard did not recognise the dispatcher, so every peft row below "
+        "would pass for the wrong reason")
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +250,7 @@ def test_the_peft_guard_routes_a_compiled_armed_module_to_eager() -> None:
     _arm(unet, artifact)
     assert _run(unet, args) is not None and artifact.calls == 1
 
-    setattr(unet, aot_serve.PEFT_MARKER_ATTR, {"probe": object()})
+    setattr(unet, adapter_guard.PEFT_MARKER_ATTR, {"probe": object()})
     before = artifact.calls
     _run(unet, args)
     assert artifact.calls == before, (
@@ -226,7 +258,7 @@ def test_the_peft_guard_routes_a_compiled_armed_module_to_eager() -> None:
         "cannot execute peft's submodule wrappers and would serve base"
     )
 
-    delattr(unet, aot_serve.PEFT_MARKER_ATTR)
+    delattr(unet, adapter_guard.PEFT_MARKER_ATTR)
     _run(unet, args)
     assert artifact.calls == before + 1, "unloading the adapter must resume compiled"
 
@@ -247,7 +279,7 @@ def test_the_fold_reaches_a_pointer_bound_artifact() -> None:
     baseline = _run(unet, args)
 
     with lora_fold.folded(_Pipe(unet), [_adapter(unet, 1)],
-                          rebind=aot_serve.rearm_constants) as stats:
+                          rebind=adapter_guard.rearm_constants) as stats:
         served = _run(unet, args)
 
     assert stats["modules"] == 2, stats
@@ -511,7 +543,8 @@ def test_rearm_constants_still_matches_the_real_runner_surface() -> None:
     for attribute in ("self._package", "self._bound_values"):
         assert attribute in source, (
             f"{attribute} is gone from CompiledGraphRunner — "
-            "aot_serve.rearm_constants reads it to re-install the constant "
+            "adapter_guard.rearm_constants reads it to re-install the "
+            "constant "
             "table after a fold, and would now refuse every compiled fold. "
             "Give torchcg a public rebind() and call that instead"
         )

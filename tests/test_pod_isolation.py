@@ -29,7 +29,6 @@ from harness.split import (  # noqa: E402,F401 — fixtures come with it
 
 from gen_worker import (
     host_move_guard,
-    local_compiled_graph_store,  # noqa: E402
     postmortem,
 )
 from gen_worker.api.errors import HostRamMoveRefusedError
@@ -170,7 +169,6 @@ from harness.split import (  # noqa: E402,F401 — fixtures come with it
     isolated_postmortem,
 )
 
-from gen_worker import local_compiled_graph_store  # noqa: E402
 from gen_worker.procsplit import privdrop  # noqa: E402
 
 
@@ -347,54 +345,6 @@ def test_the_dropped_child_can_write_every_path_it_was_granted(dropped, tmp_path
             f"the compute child cannot write {path} — it is in the grant list "
             "(pgw#858). The answer is another entry there, never root."
         )
-
-
-@root_only
-def test_the_dropped_child_can_write_a_RELOCATED_local_compiled_graph_store(dropped):
-    """pgw#1349, re-aimed by pgw#1547 at the knob that still exists.
-
-    THE ORIGINAL BUG: the store had its OWN env, cozy-local relocated it to a
-    root outside every entry in the grant list, this root parent created it at
-    0755 and never chowned it, and the dropped child's first memo write died on
-    ``PermissionError`` — mid-request, taking the stream down with it.
-
-    THAT ENV IS DELETED (pgw#1547). The store is now
-    ``<TENSORHUB_CACHE_DIR>/compiled-graph-store``. It is STILL granted
-    explicitly, because `grant_paths` mkdirs and chowns what it is handed and
-    this subdirectory does not exist on a cold pod — dropping that entry during
-    the migration reproduced pgw#1349 exactly, and this row is what caught it.
-
-    Ask the CHILD's environment, never this process's: the harness overrides
-    TENSORHUB_CACHE_DIR for the child, so computing the expected root from
-    `os.environ` here would probe a path nothing in the split ever writes —
-    which is a second, quieter way for this row to go green for the wrong
-    reason."""
-    from gen_worker.procsplit import parent as _parent
-    assert _parent._COMPILED_GRAPH_STORE_DIRNAME == local_compiled_graph_store.STORE_DIRNAME, (
-        f"procsplit.parent grants {_parent._COMPILED_GRAPH_STORE_DIRNAME!r} but the store "
-        f"writes {local_compiled_graph_store.STORE_DIRNAME!r}"
-    )
-    cache_root = dropped.child_env.get("TENSORHUB_CACHE_DIR", "")
-    assert cache_root, (
-        "the child has no TENSORHUB_CACHE_DIR, so this row would pass for the "
-        "wrong reason — the split harness sets it"
-    )
-    root = os.path.join(cache_root, local_compiled_graph_store.STORE_DIRNAME)
-    assert not os.path.exists(os.path.join(root, local_compiled_graph_store.COMPILED_GRAPHS_DIRNAME)), (
-        "this row must measure the CHILD creating the compiled graphs root — a "
-        f"{local_compiled_graph_store.COMPILED_GRAPHS_DIRNAME} this root parent made would be "
-        "root-owned and the probe would report the wrong thing"
-    )
-    # `write-probe` mkdirs a nested subtree before it writes, which is the
-    # operation that actually died: `_write_json_atomic` reaches every sidecar
-    # through `parent.mkdir(parents=True)`, and `graphs` is the component
-    # that did not exist yet.
-    assert _probe(dropped, "write-probe", root) == "ok", (
-        f"the compute child cannot write its own compiled graph store at {root}. The "
-        "mint writes the memo and every per-compiled graph sidecar there, so this is a "
-        "dead compute child on any pod whose cache root has been relocated "
-        "(pgw#1349). The answer is a grant that covers the store root, never root."
-    )
 
 
 @root_only

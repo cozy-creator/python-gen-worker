@@ -22,9 +22,10 @@ The metadata therefore comes from ``tcg_artifacts.metadata()``, i.e. from
 ``torchcg.artifact.build_metadata`` — the same builder production uses — and
 there is deliberately no keyword here for a field TCG does not accept.
 
-Everything the publish needs and the artifact cannot say now lives in
-:func:`exported_compiled_graph_provenance`, which is the object production writes beside
-the bytes (``local_compiled_graph_store.MintProvenance``).
+pgw#1573 deleted the v1 local compiled-graph store, and with it the
+``MintProvenance`` sidecar this harness used to build: a v2 artifact's
+envelope carries its own metadata, so there is nothing left to state beside
+the bytes.
 """
 
 from __future__ import annotations
@@ -32,7 +33,6 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional
 
 from gen_worker import graph_facts
-from gen_worker.local_compiled_graph_store import MintProvenance
 
 import tcg_artifacts
 
@@ -58,25 +58,3 @@ def exported_compiled_graph_meta(
     """
     return tcg_artifacts.metadata(
         graph_specialization=graph_specialization, witness=witness, sm=sm, toolchain=toolchain)
-
-
-def exported_compiled_graph_provenance(
-    *,
-    lane: str = "bf16-w16a16",
-    sku: str = "l4",
-    gen_worker: str = "0.87.0",
-    env_seal: str = "seal-" + "1" * 16,
-    graph_contract: str = "",
-) -> MintProvenance:
-    """The mint facts that ride BESIDE the artifact (pgw#1341).
-
-    Production writes this into the local store's sidecar at the moment the
-    bytes become durable, and both the immediate publish and a later boot's
-    ``resume_owed_publishes`` read it back. A test that publishes must supply
-    one for the same reason a pod must: the artifact cannot.
-    """
-    return MintProvenance(
-        env_seal=env_seal, lane=lane,
-        graph_contract=(graph_contract
-                        or graph_facts.manifest_digest([SPECIALIZATION_HASH])),
-        sku=sku, gen_worker=gen_worker)

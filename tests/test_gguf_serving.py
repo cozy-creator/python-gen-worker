@@ -290,7 +290,8 @@ def test_the_bucketed_lane_is_a_gguf_graph_family(snapshot: Any) -> None:
     w8a8_lora.stamp_execution_lane(pipe)
     assert loading.pipeline_weight_lane(pipe) == "gguf-lora16"
 
-    from gen_worker.compile_cache import execution_lane_bucket, execution_lane_token
+    from gen_worker.models.execution_lanes import (
+            execution_lane_bucket, execution_lane_token)
 
     assert execution_lane_bucket("gguf-lora16") == ("gguf", 16)
     assert execution_lane_token("gguf-lora16") == "gguf-lora16"

@@ -13,7 +13,7 @@ distilled ladder: a wrong picture with a clean log.
 These run the REAL path — a real diffusers ``WanPipeline`` carrying two real
 (tiny) ``WanTransformer3DModel`` experts, real adapter key grammars, driven
 through ``AdapterResidency.activate/deactivate/detach`` and the real
-``compile_cache.apply_lora_lane`` arming — and check WHERE the weights
+``w8a8_lora.apply_lora_execution_lane`` arming — and check WHERE the weights
 landed by the branch lane's own scaling equivalent (``B @ A``, and the
 forward addend it produces), never by an adapter-name list.
 """
@@ -27,7 +27,6 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 
-from gen_worker import compile_cache  # noqa: E402
 from gen_worker.api.errors import RefCompatibilitySurprise  # noqa: E402
 from gen_worker.models import w8a8_lora  # noqa: E402
 from gen_worker.utils.lora import AdapterResidency, PreparedAdapter  # noqa: E402
@@ -257,7 +256,7 @@ def test_a_broken_second_half_attaches_nothing_at_all() -> None:
 
 def test_lora_bucket_container_is_armed_on_both_experts() -> None:
     pipe = _wan_pipe()
-    assert compile_cache.apply_lora_execution_lane(pipe, 32)
+    assert w8a8_lora.apply_lora_execution_lane(pipe, 32)
     assert w8a8_lora.branch_bucket(pipe.transformer) == 32
     assert w8a8_lora.branch_bucket(pipe.transformer_2) == 32
     assert w8a8_lora.pipeline_branch_bucket(pipe) == 32
@@ -323,7 +322,7 @@ def test_compiled_pipeline_refuses_a_set_that_needs_a_wider_bucket() -> None:
     """The no-recompile-at-swap-time rule is enforced over the SET (the sum
     of concatenated ranks on either expert)."""
     pipe = _wan_pipe()
-    compile_cache.apply_lora_execution_lane(pipe, 16)
+    w8a8_lora.apply_lora_execution_lane(pipe, 16)
     pipe._cozy_compile = object()
     wide: Dict[str, Any] = {}
     for path, mod in w8a8_lora.branch_modules(pipe.transformer_2).items():

@@ -249,25 +249,16 @@ def test_restructured_execution_lane_exports_and_the_hook_execution_lane_is_refu
         torch.export.export(execution_lanes["hooked"], args, strict=False)
 
 
-def test_execution_lane_value_kept_and_graph_contract_changed(execution_lanes: Dict[str, Any]) -> None:
-    """The wire lane value is unchanged ("fp8-hooks" — tensorhub maps it to
-    w8a16); the traced graph is NOT, and the execution contract says so."""
-    from gen_worker.compile_cache import execution_contract
-
-    pipe = execution_lanes["pipe"]
-    assert pipe.unet._cozy_fp8_storage_applied is True
-    assert pipeline_weight_lane(pipe) == "fp8-hooks"
-
-    hooked_pipe = _Pipe(execution_lanes["hooked"])
-    hooked_pipe.unet._cozy_fp8_storage_applied = True
-
-    class _Cfg:
-        targets = ("unet",)
-
-    hook_sig, hook_contract = execution_contract(hooked_pipe, _Cfg())
-    new_sig, new_contract = execution_contract(pipe, _Cfg())
-    assert hook_contract["lane"] == new_contract["lane"] == "fp8-hooks"
-    assert hook_sig != new_sig, "restructured graphs must not adopt hook compiled graphs"
+# pgw#1573: `test_execution_lane_value_kept_and_graph_contract_changed` stood
+# here and drove `compile_cache.execution_contract` — the v1 STRUCTURAL
+# signature (a walk over resolved targets' module types, shapes and hook
+# presence), deleted with its tier. Its claim was that restructuring the
+# weights must not adopt the pre-restructure compiled graph, and that claim is
+# now STRUCTURALLY true rather than checked: a v2 artifact is addressed by
+# `cg-graph-v1`, a content hash of the EXPORTED PROGRAM, so a restructured
+# module traces to a different graph identity and cannot collide. The row
+# above it (`torch.export` refuses the hooked module outright) is the part of
+# that property this file can still measure directly.
 
 
 def test_idempotent_and_refuses_to_compose_with_hooks() -> None:

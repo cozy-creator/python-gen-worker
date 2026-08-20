@@ -116,9 +116,20 @@ def install(module: Any) -> bool:
         return False
     if getattr(getattr(module, "forward", None), _GUARD_ATTR, None) is not None:
         return True  # already guarded
-    state: Dict[str, Any] = {"said": False}
+    state: Dict[str, Any] = {"said": False, "ordered": False}
 
     def guarded(*args: Any, **kwargs: Any) -> Any:
+        # THE OPERATOR'S ORDER FIRST — it is the cheapest read and the most
+        # authoritative (pgw#1587 / pgw#1589, §4.32 item 4). A standing
+        # `serve_posture{eager_only:true}` is neither a defect nor a
+        # degradation: it is the answer, and it is reversible, so it is
+        # re-read per call and never latched.
+        ordered = _eager_only_reason()
+        if ordered:
+            if not state["ordered"]:
+                state["ordered"] = True
+                _say_ordered(module, ordered)
+            return dispatcher.eager_forward(*args, **kwargs)
         if getattr(module, PEFT_MARKER_ATTR, None):
             if not state["said"]:
                 state["said"] = True
@@ -162,6 +173,62 @@ def _adopted_modules(target: Any) -> List[Any]:
         return [value for value in components.values()
                 if _dispatcher(value) is not None]
     return [target] if _dispatcher(target) is not None else []
+
+
+def _eager_only_reason() -> str:
+    """Why an operator has ordered this worker eager, or ``""``.
+
+    pgw#1589: the order was applied by `worker.on_message` and read by exactly
+    ONE thing — `aot_serve`'s arm, which has no production caller — so an
+    operator could issue it, get an ack, and watch the pod keep serving from
+    its compiled graphs. pgw#1587 added a second read in `arm_aot`, in the same
+    orphaned tier. This is the read on the path that dispatches.
+
+    ARM-time is the wrong altitude for it on its own: the order arrives over a
+    live control channel long after arming, and it is RELEASABLE. Reading it
+    here makes both directions work with no re-arm and no de-arm — which is
+    exactly the reversibility `apply_command` promises.
+    """
+    from .. import serve_posture
+
+    try:
+        return serve_posture.block()
+    except Exception:  # noqa: BLE001 — a posture probe never costs a request
+        logger.debug("adapter guard: posture read failed", exc_info=True)
+        return ""
+
+
+def _say_ordered(module: Any, why: str) -> None:
+    """The operator's order, stated ONCE per module, on the wire.
+
+    ITS OWN PHASE, and that is not a detail. `serve_posture` already emits a
+    TRANSITION row on `PHASE_SUPPRESSED` ("the order was applied"); this is a
+    DISPATCH row ("this module stopped being called"). Sharing one phase across
+    two kinds gives that phase two vocabularies and makes
+    `count(*) where phase=...` mean neither — the same split pgw#1441 made for
+    `boot_adopt` vs `boot_adopt_summary`, for the same reason.
+
+    So the phase is `EagerPhase.OPERATOR_EAGER_ONLY` itself — the token
+    `compiled_graph_adopt.EagerPhase` has defined for exactly this state since
+    pgw#1142 and which, until now, NOTHING emitted. It must never be counted
+    with the failure classes or with `hub_ordered_eager` (one PLAN's backend,
+    not a standing order about this pod).
+    """
+    from .. import serve_posture
+
+    detail = (
+        f"{type(module).__name__}: {len(armed_graphs(module))} armed graph(s) "
+        f"NOT dispatched to — {why}. Reversible: releasing the order resumes "
+        f"compiled serving with no re-arm."
+    )
+    logger.warning("adapter guard: %s", detail)
+    try:
+        activity_mod.emit_event(
+            activity_mod.KIND_LORA_HYGIENE, detail,
+            phase=serve_posture.REASON,
+        )
+    except Exception:  # noqa: BLE001 — the request outlives its telemetry
+        logger.debug("adapter guard: posture row failed to emit", exc_info=True)
 
 
 def _say(module: Any) -> None:

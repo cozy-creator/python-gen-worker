@@ -221,7 +221,7 @@ def test_gen_workers_own_source_is_not_a_toolchain_axis_input() -> None:
     check: it fails if anyone adds a gen_worker-sourced input, which is what
     would silently turn the next patch release into a fleet-wide re-mint.
     """
-    from gen_worker import compile_cache as cc
+    from gen_worker import toolchain as cc
 
     keys = set(dict(cc.toolchain_digest()))
     assert {"settings_declaration", "loaded_libs"} <= keys
