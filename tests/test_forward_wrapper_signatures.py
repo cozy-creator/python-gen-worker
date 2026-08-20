@@ -147,7 +147,9 @@ def test_a_signature_erasing_wrapper_is_what_switches_adoption_off(
     def erased(*args: Any, **kwargs: Any) -> Any:  # no named parameters
         return inner(*args, **kwargs)
 
-    pipe.unet.forward = erased
+    # The exact assignment `oom_ladder` makes, and mypy is right that it is a
+    # method assignment — that IS the seam under test.
+    pipe.unet.forward = erased  # type: ignore[method-assign]
     assert _forward_parameters(pipe.unet) == frozenset()
 
     live = session(tmp_path)
@@ -184,7 +186,9 @@ def test_carrying_a_signature_survives_a_forward_that_has_none(tmp_path: Any) ->
 def test_the_predicate_this_fence_uses_is_torchcgs_own() -> None:
     """If torchcg changes which parameter kinds count, this fence must move
     with it — so the rule is imported, never restated here."""
-    assert inspect.getmodule(_forward_parameters).__name__.endswith("torchcg.adopt")
+    module = inspect.getmodule(_forward_parameters)
+    assert module is not None
+    assert module.__name__.endswith("torchcg.adopt")
 
 
 def test_the_erased_signature_reaches_a_READER_and_names_the_remedy(
@@ -204,7 +208,7 @@ def test_the_erased_signature_reaches_a_READER_and_names_the_remedy(
     def erased(*args: Any, **kwargs: Any) -> Any:
         return inner(*args, **kwargs)
 
-    pipe.unet.forward = erased
+    pipe.unet.forward = erased  # type: ignore[method-assign]
     live = session(tmp_path)
     live.adopt(pipe.unet)
 
