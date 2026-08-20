@@ -137,8 +137,6 @@ class ModelStore:
         self,
         emit: Callable[[pb.WorkerMessage], Awaitable[None]],
         *,
-        hf_home: str = "",
-        hf_token: str = "",
         cache_dir: Optional[Path] = None,
         vram_budget_bytes: Optional[int] = None,
         disk_free_bytes_fn: Optional[Callable[[], int]] = None,
@@ -146,8 +144,9 @@ class ModelStore:
     ) -> None:
         self._emit = emit
         self._intent_registry: Optional[IntentRegistry] = None
-        self._hf_home = hf_home or None
-        self._hf_token = hf_token or None
+        # pgw#1524: no `hf_home` / `hf_token`. The store's ONE weight source is
+        # the tensorfs CAS, and a registry credential on the serving path is
+        # exactly the direct-serve capability the hardcut removed.
         self._cache_dir = cache_dir or tensorhub_cas_dir()
         # endpoint-scoped datacenter-warm
         # fill source (RunPod volume mount), consulted before R2 on a blob
@@ -1688,15 +1687,15 @@ class ModelStore:
                             if fetch_span is not None
                             else contextlib.nullcontext()
                         ):
+                            # pgw#1524: the registry credentials and the
+                            # file-selection globs travelled with the deleted
+                            # direct-download branches. What is served is the
+                            # orchestrator's snapshot, whole, or nothing.
                             path = await ensure_local(
                                 ref,
                                 provider=getattr(binding, "source", None),
                                 snapshot=resolved,
                                 cache_dir=self._cache_dir,
-                                hf_home=self._hf_home,
-                                hf_token=self._hf_token,
-                                allow_patterns=tuple(getattr(binding, "files", ()) or ()),
-                                components=tuple(getattr(binding, "components", ()) or ()),
                                 progress=_progress,
                                 fill_source_dir=self._fill_source_dir,
                             )

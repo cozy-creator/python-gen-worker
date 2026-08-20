@@ -36,7 +36,6 @@ tests/test_deshard_mirror_th1362.py
 tests/test_dockerfile_doc_contract_pgw1016.py
 tests/test_driver_cohort_seal_pgw745.py
 tests/test_dtype_pins_vocabulary_pgw1291.py
-tests/test_entry_lane_pickle_refusal_pgw1281.py
 tests/test_error_visibility_pgw760.py
 tests/test_fabric_predicate_pgw818.py
 tests/test_fail_closed_verification_pgw939_pgw940.py
@@ -51,7 +50,6 @@ tests/test_group_spawn_pgw783.py
 tests/test_h3_vae_dtype_pins_pgw1266.py
 tests/test_hf_fp8_blockwise_dispatch_pgw1253.py
 tests/test_hf_fp8_blockwise_th1803.py
-tests/test_hf_pickle_refusal_pgw1273.py
 tests/test_host_ram_probe_pgw752.py
 tests/test_import_cycles_pgw981.py
 tests/test_intent_registry_th1283.py
