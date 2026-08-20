@@ -308,6 +308,8 @@ class Bench:
         self.out.mkdir(parents=True, exist_ok=True)
         self.table = Table()
         self.mint: dict[str, dict[str, Any]] = {}
+        #: arm -> the SERVING daemon's log (not the launcher's output).
+        self._daemon_log: dict[str, Path | None] = {}
 
     # -- the endpoint copy: never mutate a shared checkout ------------------
     def _workspace(self, arm: str) -> Path:
@@ -426,15 +428,24 @@ class Bench:
         up = self._gen_worker(room, argv, timeout=self.args.boot_timeout)
         if up.returncode != 0:
             raise SystemExit(f"[{arm}] up failed:\n{up.stdout}\n{up.stderr}")
-        (self.out / f"up-{arm}.log").write_text(
-            (up.stdout or "") + "\n--- stderr ---\n" + (up.stderr or "")
-        )
-        # Adoption is the PREMISE of every number below it. A boot that adopted
-        # nothing is not a slow arm, it is a different experiment.
         banner = (up.stdout or "") + (up.stderr or "")
-        if "adopt" not in banner.lower():
-            print(f"[{arm}] WARNING: the boot said nothing about adoption — "
-                  f"check {self.out / f'up-{arm}.log'} before trusting this arm")
+        (self.out / f"up-{arm}.log").write_text(banner)
+        # `up -d` DETACHES: its own output is a three-line launcher banner and
+        # says nothing about adoption. The serving daemon's log is a different
+        # file, and the launcher prints where — so read THAT. Checking the
+        # launcher's output for the word "adopt" is how this harness spent a
+        # window measuring eager against eager (pgw#1591).
+        self._daemon_log[arm] = None
+        for line in banner.splitlines():
+            if "logs:" in line:
+                candidate = Path(line.split("logs:", 1)[1].strip())
+                if candidate.name:
+                    self._daemon_log[arm] = candidate
+        if self._daemon_log[arm] is None:
+            raise SystemExit(
+                f"[{arm}] the boot did not name its daemon log, so nothing can "
+                f"verify that this arm serves COMPILED. Refusing to measure."
+            )
 
     def down(self, room: Path) -> None:
         self._gen_worker(room, ["down"], timeout=120)
@@ -502,15 +513,59 @@ class Bench:
 
         self.serve(room, name)
         try:
+            first = True
             for aspect in self.args.aspects:
                 for cfg in self.args.cfg:
                     self.request(room, name, aspect, cfg, round_index)
+                    if first:
+                        # The warm-up call has now exercised the serve path
+                        # once. Check the PREMISE here, at the cheapest
+                        # possible point, before paying for the rest of the
+                        # arm — let alone the other arm.
+                        self.assert_compiled(name)
+                        first = False
                     for _ in range(self.args.reps):
                         self.table.add(
                             self.request(room, name, aspect, cfg, round_index)
                         )
         finally:
             self.down(room)
+
+    def assert_compiled(self, arm: str) -> None:
+        """Did this arm actually SERVE compiled? Typed abort if not (pgw#1591).
+
+        A warning was not enough. An arm whose dispatcher was displaced serves
+        eager on every call and still produces perfectly plausible timings —
+        and two such arms compare to ~0%, which reads as "the dynamic axis is
+        free" rather than as "nothing was measured". So an arm that cannot
+        show compiled serving does not get to contribute a row.
+        """
+
+        log = self._daemon_log.get(arm)
+        if log is None or not log.exists():
+            raise SystemExit(
+                f"[{arm}] daemon log {log} is absent — nothing can verify this "
+                f"arm serves compiled. Refusing to measure."
+            )
+        text = log.read_text(errors="replace")
+        if "DISPLACED" in text:
+            raise SystemExit(
+                f"[{arm}] DISPLACED: the compiled dispatcher is no longer the "
+                f"module's forward, so calls ran EAGER (pgw#1591). Both arms "
+                f"would compare eager-to-eager and report ~0%. Refusing to "
+                f"measure. See {log}"
+            )
+        if "NO armed graph matched" in text:
+            raise SystemExit(
+                f"[{arm}] the dispatcher matched NOTHING (tcg#76's trace is in "
+                f"{log}); this arm serves eager. Refusing to measure."
+            )
+        if "wrapper.tcg" not in text:
+            raise SystemExit(
+                f"[{arm}] no compiled wrapper ran during the warm-up call, so "
+                f"this arm has not been shown to serve compiled at all. "
+                f"Refusing to measure. See {log}"
+            )
 
     def report(self) -> dict[str, Any]:
         adoption = {}

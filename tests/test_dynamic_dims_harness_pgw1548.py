@@ -143,3 +143,63 @@ def test_the_substrate_note_is_carried_into_every_rendered_table() -> None:
     rendered = table.render("raw-pod")
     assert "not the deploy path" in rendered.splitlines()[0]
     assert "| 1:1 | on |" in rendered
+
+
+def _armed(tmp_path: Path, arm: str, text: str) -> Any:
+    """A bench whose named arm has a daemon log carrying `text`."""
+
+    log = tmp_path / f"{arm}-daemon.log"
+    log.write_text(text)
+    bench = _bench(tmp_path)
+    bench._daemon_log = {arm: log}
+    return bench
+
+
+def test_a_DISPLACED_arm_REFUSES_to_contribute_a_row(tmp_path: Path) -> None:
+    """pgw#1591: two displaced arms compare to ~0% and read as 'free'.
+
+    This is the whole reason it is an abort and not a warning — the numbers a
+    displaced arm produces are perfectly plausible and entirely meaningless.
+    """
+
+    bench = _armed(tmp_path, "static", (
+        "wrapper.tcg run_impl\n"
+        "dispatch: DISPLACED on UNet2DConditionModel — the compiled dispatcher "
+        "is no longer this module's forward, so all 21 call(s) ran eager\n"
+    ))
+    with pytest.raises(SystemExit, match="DISPLACED"):
+        bench.assert_compiled("static")
+
+
+def test_an_arm_that_MATCHED_NOTHING_refuses(tmp_path: Path) -> None:
+    """tcg#76's trace means the guards refused every armed record."""
+
+    bench = _armed(tmp_path, "aspect",
+                   "torchcg dispatch: NO armed graph matched a call on UNet\n")
+    with pytest.raises(SystemExit, match="matched NOTHING"):
+        bench.assert_compiled("aspect")
+
+
+def test_an_arm_with_NO_compiled_wrapper_at_all_refuses(tmp_path: Path) -> None:
+    """Silence is not success: no wrapper ran, so nothing was shown."""
+
+    bench = _armed(tmp_path, "static", "ready — functions: generate\n")
+    with pytest.raises(SystemExit, match="not been shown to serve compiled"):
+        bench.assert_compiled("static")
+
+
+def test_an_absent_daemon_log_refuses_rather_than_assuming(tmp_path: Path) -> None:
+    bench = _bench(tmp_path)
+    bench._daemon_log = {"static": tmp_path / "nope.log"}
+    with pytest.raises(SystemExit, match="absent"):
+        bench.assert_compiled("static")
+
+
+def test_a_genuinely_compiled_arm_PASSES(tmp_path: Path) -> None:
+    """The green arm: a wrapper ran, nothing displaced, nothing unmatched."""
+
+    bench = _armed(tmp_path, "static", (
+        "gen-worker up: ready\n"
+        "[W] cw54nq...wrapper.tcg.cpp:26541 Warning: run_impl\n"
+    ))
+    bench.assert_compiled("static")
