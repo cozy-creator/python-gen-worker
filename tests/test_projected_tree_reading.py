@@ -1,4 +1,6 @@
-"""pgw#1513: the eager bridge must refuse a PROJECTED tree, by name.
+"""Reading a PROJECTED tree: who may, who must refuse, and what they say.
+
+# pgw#1513: the eager bridge must refuse a projected tree, by name.
 
 # The incident, and why it looked like a short write for two days
 
