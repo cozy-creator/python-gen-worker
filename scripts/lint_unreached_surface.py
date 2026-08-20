@@ -70,6 +70,7 @@ SELF = Path(__file__).resolve()
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lint_scope import is_unowned  # noqa: E402
+import _lint_side  # noqa: E402
 
 # The RATCHET. Every entry is a live hit, recorded rather than silently
 # tolerated: the guard fails on anything NEW, and equally on an entry that has
@@ -1383,8 +1384,16 @@ def main() -> int:
         rewrite_baseline(current)
         return 0
 
+    # pgw#1521: one headline per finding, each naming the file it is about, so
+    # the verdict at the bottom can say whether this red is THIS DIFF's or the
+    # base's. The prose below is unchanged — it is the reading, this is the
+    # attribution, and the merge button needs the second one first.
+    attributable: List[str] = []
+
     writerless = writerless_private_setters()
     for name, path, line in writerless:
+        attributable.append(
+            f"{path.relative_to(REPO)}:{line}: writer-less private setter {name}")
         print(f"WRITER-LESS SETTER: {path.relative_to(REPO)}:{line}: {name}\n"
               f"  Nothing in src/ calls it, so the PUBLIC reader it fills "
               f"answers `None` forever — a contract that fails as ABSENCE, "
@@ -1403,6 +1412,8 @@ def main() -> int:
     known, notes, reasons = baseline_rows()
     unexplained = gate_rows_without_reasons(known, reasons)
     for label in unexplained:
+        attributable.append(
+            f"{BASELINE.relative_to(REPO)}: gate row with no reason: {label}")
         print(f"GATE ROW WITH NO REASON: {label}\n"
               f"  This is a GATE — its leaf name is one of "
               f"{'/'.join(GATE_PREFIXES)}* — and it is on the ratchet, which "
@@ -1421,7 +1432,10 @@ def main() -> int:
               file=sys.stderr)
     new = sorted(current - known)
     stale = sorted(known - current)
+    homes = {f.label: f"{f.path.relative_to(REPO)}:{f.line}" for f in findings}
     for label in new:
+        attributable.append(
+            f"{homes.get(label, '')}: NEW unreached public surface: {label}")
         print(f"NEW unreached public surface: {label}\n"
               f"  Nothing in src/ reaches this. That is the program's dominant "
               f"defect class (pgw#849) and one of three things:\n"
@@ -1455,6 +1469,9 @@ def main() -> int:
                   f"your branch predates it. Rebase and the red goes with it. "
                   f"Nothing here needs investigating.", file=sys.stderr)
             continue
+        # No path to attribute a stale row to — the symbol is gone or newly
+        # wired — so it prints unattributed rather than as somebody else's.
+        attributable.append(f"stale ratchet row: {label}")
         note = notes.get(label, "")
         owed = f"\n  THE ROW SAID: {note}" if note else ""
         if label in DEFINED_LABELS:
@@ -1470,7 +1487,11 @@ def main() -> int:
                   f"nothing can. Delete its line from {BASELINE.name} in the "
                   f"same commit as the deletion. (Do not go looking for its new "
                   f"caller — there isn't one.)", file=sys.stderr)
-    return 1 if (new or stale or unexplained or writerless) else 0
+    if new or stale or unexplained or writerless:
+        print(_lint_side.verdict(attributable, "pgw#849 unreached surface"),
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

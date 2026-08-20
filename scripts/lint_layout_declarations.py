@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Iterator, List, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 
 #: `src/` only, deliberately. The subject is a declaration that gets
 #: PUBLISHED — an endpoint's `Slot(layouts=...)` reaching a release manifest.
@@ -260,8 +262,7 @@ def main(argv: List[str]) -> int:
     if problems:
         print("pgw#1143 / A19: Slot layout declarations that are missing or "
               "that the AST sweep cannot read:\n", file=sys.stderr)
-        for problem in problems:
-            print(f"  {problem}", file=sys.stderr)
+        _lint_side.report(problems, "pgw#1143 Slot layout declarations")
         print(
             "\nWrite the declaration literally — a dict literal of string "
             "literals mapping to tuple literals of handles. The demand is "

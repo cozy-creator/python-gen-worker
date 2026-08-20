@@ -40,6 +40,8 @@ from pathlib import Path
 from typing import Iterator, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 DEFAULT_ROOTS = (REPO / "src" / "gen_worker",)
 
 #: Names §1.32(d) / pgw#1148 / th#1803 deleted. Binding or reading one in `src/`
@@ -230,8 +232,7 @@ def main(argv: List[str]) -> int:
               "precision class is DECLARED by the producer (`precision_class`, "
               "checked against models.ladder.PRECISION_CLASSES); it is never "
               "inferred from a label.\n", file=sys.stderr)
-        for f in findings:
-            print(f, file=sys.stderr)
+        _lint_side.report(findings, "A18 flavor-token residue")
         print(f"\n{len(findings)} finding(s)", file=sys.stderr)
         return 1
     print("lint_flavor_deletion: the flavor axis is deleted; the A18 residue is "

@@ -53,6 +53,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _lint_scope import is_unowned  # noqa: E402
+import _lint_side  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "gen_worker"
@@ -303,8 +304,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if failures:
         print(f"\n§1.33 point 5 fence BROKEN ({len(failures)} violation(s)):")
-        for line in failures:
-            print(f"  - {line}")
+        _lint_side.report(failures, "pgw#1143 compiled graph-key layout fence",
+                          stream=sys.stdout)
         print(
             "\nConversion is UPSTREAM of compute. If a compiled graph-key axis needs to "
             "know the layout, the conversion is happening too late — move it "

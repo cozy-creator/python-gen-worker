@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 
 ARM_MODULE = "aot_serve.py"
 ARM_SEAM = "arm_compiled_graph"
@@ -586,7 +588,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         + check_allowlist(sites, allowed)
     )
     if problems:
-        print("\n".join(problems), file=sys.stderr)
+        _lint_side.report(problems, "pgw#1152 arm-state feeders")
         return 1
     print(
         f"arm-state fence: {red_proofs} red proofs passed; "

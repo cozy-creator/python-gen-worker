@@ -25,6 +25,9 @@ import sys
 from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SANCTIONED = SRC_ROOT / "net.py"
 
 # huggingface_hub submodules with no network entry points.
@@ -81,16 +84,18 @@ def check_file(path: Path) -> list[tuple[int, str]]:
 
 
 def main() -> int:
-    bad = 0
+    problems: list[str] = []
     for path in sorted(SRC_ROOT.rglob("*.py")):
         if path == SANCTIONED:
             continue
         for lineno, msg in check_file(path):
-            print(f"{path.relative_to(SRC_ROOT.parents[1])}:{lineno}: {msg}")
-            bad += 1
-    if bad:
-        print(f"\nlint_http_timeouts: {bad} violation(s). Every HTTP call needs an explicit "
-              "timeout; huggingface_hub goes through gen_worker.net.hf().", file=sys.stderr)
+            problems.append(
+                f"{path.relative_to(SRC_ROOT.parents[1])}:{lineno}: {msg}")
+    if problems:
+        _lint_side.report(problems, "gw#467 HTTP timeouts")
+        print(f"\nlint_http_timeouts: {len(problems)} violation(s). Every HTTP call "
+              "needs an explicit timeout; huggingface_hub goes through "
+              "gen_worker.net.hf().", file=sys.stderr)
         return 1
     return 0
 

@@ -65,6 +65,7 @@ from typing import Iterator, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lint_scope import is_unowned  # noqa: E402
+import _lint_side  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = REPO / "src" / "gen_worker"
@@ -182,8 +183,8 @@ def main(argv: List[str]) -> int:
             )
     if findings:
         print("pgw#1299: compiled-graph vocabulary respelled as a literal\n")
-        for row in findings:
-            print(f"  {row}")
+        _lint_side.report(findings, "pgw#1299 TCG metadata vocabulary",
+                          stream=sys.stdout)
         print(
             f"\n{len(findings)} finding(s). A TCG rename does not raise on these — "
             "it returns None and the arm reads as a cache miss.\n"

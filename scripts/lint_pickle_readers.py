@@ -40,6 +40,8 @@ from pathlib import Path
 from typing import Iterator, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 
 DEFAULT_ROOTS = (
     REPO / "src", REPO / "tests", REPO / "tests_v2", REPO / "scripts",
@@ -162,8 +164,7 @@ def main(argv: List[str]) -> int:
               "as msgspec (`gen_worker/parallel/wire.py`) or mirror the source "
               "without the pickle. `weights_only=True` is not an exemption.\n",
               file=sys.stderr)
-        for f in findings:
-            print(f, file=sys.stderr)
+        _lint_side.report(findings, "HARDCUT E5 pickle deserializers")
         print(f"\n{len(findings)} pickle deserializer(s)", file=sys.stderr)
         return 1
     print("lint_pickle_readers: no pickle deserializer in the tree")

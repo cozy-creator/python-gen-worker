@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 DEFAULT_ROOTS = (REPO / "tests", REPO / "tests_v2")
 
 #: Attributes of `multiprocessing` (or a context) that start a process.
@@ -127,8 +129,7 @@ def main(argv: List[str]) -> int:
             "everything crossing the boundary picklable.\n",
             file=sys.stderr,
         )
-        for finding in findings:
-            print(finding, file=sys.stderr)
+        _lint_side.report(findings, "pgw#1316 test forks")
         return 1
     print("lint_test_fork_start_method: no test forks this interpreter")
     return 0

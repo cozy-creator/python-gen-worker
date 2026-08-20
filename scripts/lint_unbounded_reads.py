@@ -61,6 +61,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lint_scope import is_unowned  # noqa: E402
+import _lint_side  # noqa: E402
 
 # Calls whose result is a length taken from bytes the process did not compute.
 LENGTH_SOURCES = {"unpack", "unpack_from", "from_bytes"}
@@ -453,8 +454,8 @@ def main() -> int:
 
     if findings:
         print("unbounded-read guard: an external length sizes a read with no bound\n")
-        for f in findings:
-            print(f)
+        _lint_side.report(findings, "pgw#1013 unbounded reads",
+                          stream=sys.stdout)
         print(
             "\npgw#1013 / th#1662: the bounds census could not see these — it enumerated "
             "bounds that exist, not sites that need one."

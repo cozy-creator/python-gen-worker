@@ -53,6 +53,7 @@ from typing import Iterator, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lint_scope import is_unowned  # noqa: E402
+import _lint_side  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 SELF = Path(__file__).resolve()
@@ -221,15 +222,16 @@ def main(argv: List[str]) -> int:
     if not findings:
         print(f"no retired SDK spelling survives ({len(RETIRED)} spellings swept)")
         return 0
+    problems = []
     for path, lineno, spelling, replacement in findings:
         rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
-        print(
+        problems.append(
             f"{rel}:{lineno}: `{spelling}` is retired (pgw#1346) — it is "
             f"`{replacement}` now, and there is no alias. Respell it, or "
             f"classify the line with `{MARKER} <reason>` if it must name the "
-            f"dead spelling (a fence's own denylist, a historical rationale).",
-            file=sys.stderr,
+            f"dead spelling (a fence's own denylist, a historical rationale)."
         )
+    _lint_side.report(problems, "pgw#1346 retired SDK spellings")
     print(f"{len(findings)} retired SDK spelling(s) survive", file=sys.stderr)
     return 1
 

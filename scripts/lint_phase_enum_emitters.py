@@ -51,6 +51,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC = REPO / "src" / "gen_worker"
 VENDOR = SRC / "_vendor"
 CENSUS = REPO / "scripts" / "phase_enum_census.txt"
@@ -187,8 +189,8 @@ def main(argv: list[str]) -> int:
         violations.append(
             f"{key} is in {CENSUS.name} but no longer exists. Remove the line.")
 
-    for line in violations:
-        print(line, file=sys.stderr)
+    if violations:
+        _lint_side.report(violations, "pgw#1480 phase vocabulary")
     if violations:
         print(f"\n{len(violations)} phase-vocabulary violation(s).", file=sys.stderr)
         return 1

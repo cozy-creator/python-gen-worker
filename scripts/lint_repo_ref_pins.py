@@ -52,6 +52,8 @@ from pathlib import Path
 from typing import Iterator, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 
 DEFAULT_ROOTS = (
     REPO / "src", REPO / "tests", REPO / "tests_v2", REPO / "examples",
@@ -173,8 +175,7 @@ def main(argv: List[str]) -> int:
               "attach artifacts to it); a `:tag` ref is refused by "
               "gen_worker.models.refs.parse_model_ref on the pod, not here.\n",
               file=sys.stderr)
-        for f in findings:
-            print(f, file=sys.stderr)
+        _lint_side.report(findings, "th#1987 retired `:tag` pins")
         print(f"\n{len(findings)} retired tag pin(s)", file=sys.stderr)
         return 1
     print("lint_repo_ref_pins: no retired `:tag` repo-ref literal survives")

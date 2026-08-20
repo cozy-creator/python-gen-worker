@@ -56,6 +56,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC = REPO / "src" / "gen_worker"
 
 #: Dotted attribute paths whose CALL is a graph export or an AOTI compile.
@@ -264,8 +266,8 @@ def main() -> int:
             f"exempt from the serving-process rule and asserted to obey it. "
             f"Decide which the module is.")
 
-    for line in violations:
-        print(line, file=sys.stderr)
+    if violations:
+        _lint_side.report(violations, "pgw#1215 serving-process compiles")
     if violations:
         print(
             f"\n{len(violations)} serving-process compile fence violation(s).",

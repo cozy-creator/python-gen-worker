@@ -35,6 +35,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 SRC = REPO / "src" / "gen_worker"
 VENDOR = SRC / "_vendor"
 
@@ -137,8 +139,7 @@ def main() -> int:
     if violations:
         print(f"lint_no_installed_set_keying: {len(violations)} violation(s)",
               file=sys.stderr)
-        for row in violations:
-            print(f"  - {row}", file=sys.stderr)
+        _lint_side.report(violations, "pgw#1489 installed-set keying")
         return 1
     print(f"lint_no_installed_set_keying: clean ({scanned} files)")
     return 0

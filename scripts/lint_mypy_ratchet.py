@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _lint_side  # noqa: E402
 
 #: flag name -> (high-water EXACT-module count, errors it was hiding at adoption).
 #: Measured 2026-08-12 on 28018a0a: 413 --strict errors in 101 of 266 src modules,
@@ -245,8 +247,7 @@ def main(argv: List[str]) -> int:
     if problems:
         print("pgw#1202: the mypy strictness ratchet turned the wrong way:\n",
               file=sys.stderr)
-        for problem in problems:
-            print(f"  - {problem}\n", file=sys.stderr)
+        _lint_side.report(problems, "pgw#1202 mypy strictness ratchet")
         return 1
     total = sum(limit for limit, _ in HIGH_WATER.values())
     print(f"pgw#1202: strict = true; {total} module-exemptions remaining "
