@@ -1165,6 +1165,75 @@ class ModelStore:
             )
         return snapshot
 
+    def ensure_pinned(
+        self, ref: WireRef, tree: Path, snapshot: Optional[pb.Snapshot],
+    ) -> bool:
+        """Guarantee the tree's manifest pin exists. Returns True if repaired.
+
+        pgw#1526, and it is the LAST thing between the fleet and a weight-
+        bearing v2 serve. Measured on a pod, verbatim:
+
+            ENGINE DECLINED: the manifest pin `snapshot:sha256:5bd90786…` is
+            MISSING from the store at /tmp/tensorhub-cache/cas
+
+        A projected tree's manifest pin is the ONLY way a reader recovers its
+        manifest (`resolve_projection` reads `snapshot:<tree directory name>`),
+        and the streaming engine is the only legal reader of a tree made of
+        pointer stubs. No pin, no engine; no engine, the eager bridge gets a
+        stubbed tree and reports `header too large` about an intact checkpoint.
+
+        **Why the pin can be missing at all, which is the actual defect.**
+        `_pin_manifest` is called from exactly one place — `ensure_snapshot` —
+        but `_materialize_local` has CACHED SHORT-CIRCUITS that return a tree
+        already on disk WITHOUT going through it. So a tree that reaches
+        residency by any other route is unpinned, and `ensure_local` can never
+        repair it: it short-circuits on the same tree forever. That is a
+        materialization reporting success while leaving the tree unreadable by
+        the only component that can read it.
+
+        So the pin is established HERE, on the completion path every route
+        shares, rather than only on the download route. Cheap and idempotent:
+        the common case is one `read_ref`, and nothing is written when the pin
+        is already there. No bytes move — the manifest is rebuilt from the
+        snapshot the caller already holds.
+        """
+        if snapshot is None or not snapshot.files:
+            return False
+        path = Path(tree)
+        try:
+            from . import projection as _projection
+
+            if _projection.resolve_projection(path) is not None:
+                return False  # already pinned, the overwhelmingly common case
+            if not _projection.stub_at_any(path):
+                # A materialized tree holds its own bytes and needs no pin.
+                return False
+        except Exception:  # noqa: BLE001 — a probe must never fail a load
+            return False
+        try:
+            from .cozy_snapshot import _manifest, _pin_manifest
+            from .cache_paths import open_worker_cas
+
+            resolved = resolved_repo_from_snapshot(snapshot)
+            _pin_manifest(
+                open_worker_cas(self._cache_dir), path.name, _manifest(resolved.files),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "could not repair the manifest pin for %s at %s: %s: %s — the "
+                "streaming engine will decline this tree and the eager bridge "
+                "will misreport it as a corrupt checkpoint (pgw#1526)",
+                ref, path, type(exc).__name__, exc,
+            )
+            return False
+        logger.warning(
+            "REPAIRED the missing manifest pin `snapshot:%s` for %s at %s — the "
+            "tree was materialized by a path that does not pin, which leaves it "
+            "unreadable by the streaming engine. No bytes moved (pgw#1526)",
+            path.name, ref, path,
+        )
+        return True
+
     async def announce_resident(
         self, ref: WireRef, snapshot: Optional[pb.Snapshot] = None,
     ) -> bool:
@@ -1302,15 +1371,26 @@ class ModelStore:
         from . import projection as _projection
 
         if _projection.stub_at_any(tree) and _projection.resolve_projection(tree) is None:
-            logger.error(
-                "residency REFUSED for %s at %s: the tree is intact but its "
-                "manifest pin is missing, so the streaming engine cannot bind "
-                "and the eager bridge would read its pointer stubs as corrupt "
-                "weights. Re-materializing to re-pin (no bytes move) — "
-                "pgw#1513",
-                ref, tree,
-            )
-            return False
+            # pgw#1526: REPAIR IT HERE rather than bouncing to `ensure_local`.
+            #
+            # pgw#1513 refused and fell through, on the reasoning that
+            # `ensure_local` would re-materialize and re-pin. Measured on a
+            # pod: it does not. `_materialize_local`'s cached short-circuits
+            # return the tree already on disk WITHOUT calling
+            # `ensure_snapshot`, which is the only caller of `_pin_manifest` —
+            # so the bounce lands on the same unpinned tree, readiness is
+            # granted, and the dispatch declines. Refusing was right; refusing
+            # FOREVER was the bug.
+            if not self.ensure_pinned(ref, tree, snapshot):
+                logger.error(
+                    "residency REFUSED for %s at %s: the tree is intact but "
+                    "its manifest pin is missing AND could not be repaired, so "
+                    "the streaming engine cannot bind and the eager bridge "
+                    "would read its pointer stubs as corrupt weights "
+                    "(pgw#1526)",
+                    ref, tree,
+                )
+                return False
 
         identity = self._snapshot_identity(ref, snapshot)
         with self._identity_lock:
@@ -1387,6 +1467,13 @@ class ModelStore:
         acquired = False
 
         def complete(path: Path) -> _MaterializedLocal:
+            # pgw#1526: THE PIN IS PART OF BEING MATERIALIZED. Every route into
+            # this function returns a tree a caller will try to LOAD, and a
+            # projected tree without its manifest pin cannot be loaded by the
+            # only reader that can read it. `ensure_snapshot` pins; the cached
+            # short-circuits above do not, and they can never repair what they
+            # short-circuit on. So it is guaranteed here, where all routes meet.
+            self.ensure_pinned(ref, path, snapshot)
             # The bytes are pod-wide but each group keeps its own
             # ledger, so the group that asked must ALSO book the shared disk
             # entry — otherwise a group riding a sibling's materialization
