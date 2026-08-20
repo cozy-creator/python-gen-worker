@@ -645,6 +645,21 @@ class TraceRequestContext:
         return True
 
     @property
+    def child_calls(self) -> bool:
+        """FALSE: a trace calls no child endpoint — there is no request tree to
+        parent one to, and a stub ref is not a child's output (pgw#1579)."""
+        return False
+
+    @property
+    def handles(self) -> tuple[str, ...]:
+        """The lane a trace IS, when it has one. ``handles=`` names the lane
+        BODIES a body branches on, and the derive drives exactly one — so
+        answering the trace's own lane keeps a declared branch on the observed
+        side rather than sending it down the undeclared arm (pgw#1580)."""
+        body = str(getattr(self.lane, "contract", "") or "")
+        return (body,) if body else ()
+
+    @property
     def request_id(self) -> str:
         return "trace"
 

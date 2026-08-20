@@ -356,7 +356,8 @@ class ChildCallRefusedError(ChildCallError):
     ``call_cycle_detected``, ``tree_budget_exceeded``,
     ``tier_escalation_denied``, ``parent_not_running``, ``budget_not_root``,
     or ``child_calls_not_declared`` (this invocation's function did not
-    declare ``child_calls=True``, so it holds no child-call credential).
+    declare ``@entrypoint(child_calls=True)``, so it holds no child-call
+    credential — pgw#1579).
     """
 
     def __init__(self, code: str, message: str = "") -> None:
@@ -521,6 +522,38 @@ class MediaNotDeclaredError(ValidationError):
             "justifies the hub minting the upload_media grant, so without it "
             "there is nothing to upload against. It is independent of "
             "publishes=: a job may emit media and write no repo."
+        )
+
+
+class LaneNotDeclaredError(ValidationError):
+    """This function read ``ctx.execution_lane`` without declaring
+    ``handles=[...]`` (pgw#1580).
+
+    The third sibling of :class:`PublishNotDeclaredError` /
+    :class:`MediaNotDeclaredError`, on the ruling that BEHAVIORAL DIVERGENCE is
+    declared in the manifest and never inferred from code shape. Reading the
+    executing lane is what "this body branches on the lane" MEANS, and the hub
+    validates the declared tokens against its concrete lane-body table and
+    hydrates them onto ``FunctionMetadata.Handles`` for selection — so an
+    undeclared branch diverges invisibly to everything that plans around it.
+
+    The refusal is what makes the declaration load-bearing rather than
+    decorative: without it, ``ctx.execution_lane`` handed back a plausible
+    default (``bf16-w16a16+eager``) and an undeclared body branched on a value
+    nobody had checked.
+
+    FATAL, not retryable: no retry adds a declaration to a published release.
+    """
+
+    def __init__(self, surface: str = "ctx.execution_lane") -> None:
+        self.surface = str(surface or "ctx.execution_lane")
+        super().__init__(
+            f"{self.surface} refused: this function did not declare "
+            "handles=[...]. Add the concrete lane BODIES this code branches on "
+            "to the decorator (@entrypoint(handles=(\"fp8-w8a8-dynamic\",))) "
+            "and republish — the declaration is what tells the platform the "
+            "body diverges per lane, and reading the lane without it is a "
+            "divergence nothing downstream can see."
         )
 
 

@@ -270,6 +270,8 @@ class RequestContext(Generic[D]):
         boot_warmup: bool = False,
         publishes: bool = False,
         emits_media: Optional[bool] = None,
+        child_calls: bool = False,
+        handles: Optional[Sequence[str]] = None,
     ) -> None:
         self._request_id = str(request_id or "").strip()
         self._job_id = str(job_id or "").strip() or None
@@ -293,6 +295,13 @@ class RequestContext(Generic[D]):
         # for which the hub minted no `upload_media` grant. Stamped from the
         # spec at dispatch, like `publishes`.
         self._emits_media = emits_media if emits_media is None else bool(emits_media)
+        # pgw#1579/pgw#1580: the two declarations the v1 hardcut dropped while
+        # the hub kept reading them. Same shape as `publishes` above — the
+        # manifest asks the hub for the capability, the spec stamps the same
+        # fact here, and the SDK surface refuses undeclared code at the call
+        # site instead of letting the hub decline a credential mid-request.
+        self._child_calls = bool(child_calls)
+        self._handles: Tuple[str, ...] = tuple(handles or ())
         # Monotonic progress POSITION per phase (pgw#1294). Liveness for a job
         # is position ADVANCE within a phase budget — never pulse, never
         # duration — so a position that goes backwards is a lying instrument
@@ -359,12 +368,54 @@ class RequestContext(Generic[D]):
         return self._boot_warmup
 
     @property
+    def handles(self) -> Tuple[str, ...]:
+        """The lane BODIES this function declared it branches on
+        (``@entrypoint(handles=…)``), stamped from the spec at dispatch."""
+        return self._handles
+
+    @property
+    def child_calls(self) -> bool:
+        """Did this function declare ``@entrypoint(child_calls=True)``? The
+        SDK mirror of the hub's ``invoke_child`` grant decision."""
+        return self._child_calls
+
+    @property
     def execution_lane(self) -> str:
         """The EXECUTING precision lane of this call, a full descriptor id like
         ``"fp8-w8a8-dynamic+compiled"`` — post-degrade truth, the same value
-        JobMetrics.lane reports. Read-only; always available. Handlers that
-        declared ``handles=[...]`` branch on it; everyone else may ignore it."""
+        JobMetrics.lane reports.
+
+        DECLARED READERS ONLY (pgw#1580). Reading the executing lane IS the
+        behavioral divergence ``handles=`` declares, so a function that did not
+        declare one is refused typed rather than handed
+        ``"bf16-w16a16+eager"`` — a plausible default that an undeclared body
+        would branch on and nothing downstream could see. Same
+        one-fact-two-enforcers shape as ``publishes=``: the manifest tells the
+        hub, this refuses the author.
+        """
+        self._require_lane_declaration("ctx.execution_lane")
         return self._execution_lane or "bf16-w16a16+eager"
+
+    def _require_lane_declaration(self, surface: str) -> None:
+        if not self._handles:
+            from ..api.errors import LaneNotDeclaredError
+
+            raise LaneNotDeclaredError(surface)
+
+    def _declare_from_spec(self, spec: Any) -> None:
+        """Worker-internal: stamp an ``EntrypointSpec``'s declarations onto a
+        context built before the function was known.
+
+        The serve loop passes them at construction; the LOCAL host
+        (``EndpointHost.dispatch``, the CLI and the daemon) builds one context
+        per request and only then routes it to a function, so it stamps here.
+        Both ends read the SAME spec fields, which is the point — a declaration
+        that only works under the serverless dispatcher is a declaration an
+        author cannot test."""
+        if spec is None:
+            return
+        self._child_calls = bool(getattr(spec, "child_calls", False))
+        self._handles = tuple(getattr(spec, "handles", ()) or ())
 
     def _set_execution_lane(self, execution_lane: str) -> None:
         self._execution_lane = str(execution_lane or "").strip()
@@ -700,6 +751,21 @@ class RequestContext(Generic[D]):
     # -- call-out primitive --------------------------------------------------
 
     def _callout_client(self) -> "CalloutClient":
+        # pgw#1579, and it must come FIRST: the hub mints `invoke_child` only
+        # for a function whose manifest row declared it, so an undeclared body
+        # would otherwise reach the wire and come back 403 —
+        # `child_calls_not_declared` after the request was already running.
+        # Same refusal CODE as the hub's, so both ends say one word.
+        if not self._child_calls:
+            from ..api.errors import ChildCallRefusedError
+
+            raise ChildCallRefusedError(
+                "child_calls_not_declared",
+                "this function did not declare @entrypoint(child_calls=True), "
+                "so the platform minted no invoke_child grant for it. Add the "
+                "declaration and republish — it is a capability the manifest "
+                "asks for, never one inferred from the body.",
+            )
 
         if not self._file_api_base_url:
             from ..api.errors import ChildCallError
@@ -735,8 +801,10 @@ class RequestContext(Generic[D]):
         an unassigned semver-major is a typed refusal naming the assigned
         ones, and there is no ``latest``.
 
-        The function must be declared ``@endpoint(child_calls=True)`` — the
-        platform then scopes this invocation's credential for child calls.
+        The function must be declared ``@entrypoint(child_calls=True)`` — the
+        platform then scopes this invocation's credential for child calls, and
+        an undeclared function is refused HERE (``child_calls_not_declared``)
+        rather than by the hub mid-request.
         Children bill the parent request's payer, inherit its availability
         tier (``tier=`` may name a CHEAPER class, never escalate), count
         against the tree's depth/budget ceilings, and die with the parent

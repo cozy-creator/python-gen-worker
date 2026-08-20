@@ -36,6 +36,10 @@ ruling, 2026-08-17 — one parameter-order rule across the SDK, matching
     def cast_dtype(ctx: RequestContext, payload: CastDtypeInput
                    ) -> PublishResult: ...
 
+    @entrypoint(child_calls=True)     # a WORKFLOW (pgw#1579): this body
+    def make_video(ctx: RequestContext,   # composes OTHER endpoints through
+                   payload: DjInput) -> DjOutput: ...  # ctx.call_endpoint
+
 * first: ``ctx`` annotated :class:`~gen_worker.serving.context.RequestContext`
   — ONE class for inference and producers alike (pgw#1294/pgw#1306: *no kind
   selects a different class, because no kind decides what a body may write —
@@ -63,11 +67,18 @@ beyond import.
 **THE KWARG RULE (pgw#1406).** Decorator kwargs are declarations about
 PLACEMENT AND AUTHORITY; the signature carries MODEL SLOTS. ``resources=``
 (pgw#1396) and ``kind=`` are placement; ``publishes=`` / ``env=`` /
-``emits_media=`` are authority, and together they are the producer plane's
-whole declaration set — pgw#983 deleted ``@job`` and this is where its 27
-conversion producers land (th#2173). The "``resources=`` is the ONE kwarg"
-sentence described the surface on the day it had one; it was never the
-principle.
+``emits_media=`` / ``child_calls=`` / ``handles=`` are authority, and together
+they are the producer plane's whole declaration set — pgw#983 deleted ``@job``
+and this is where its 27 conversion producers land (th#2173). The
+"``resources=`` is the ONE kwarg" sentence described the surface on the day it
+had one; it was never the principle.
+
+**CAPABILITIES AND BEHAVIORAL DIVERGENCE ARE DECLARED, NEVER INFERRED**
+(coordinator ruling, 2026-08-20, on pgw#1579/pgw#1580). ``child_calls=`` and
+``handles=`` are back here rather than sniffed out of the body, because the
+manifest is where a capability is asked for: inferring ``child_calls`` from the
+presence of ``ctx.call_endpoint`` would mint an ``invoke_child`` credential for
+anything that merely imports the surface.
 """
 
 from __future__ import annotations
@@ -155,6 +166,20 @@ class EntrypointSpec:
     #: hub still derives three PLACEMENT facts from it, which is why a producer
     #: cannot leave it at the default. See the decorator docstring.
     kind: str = ""
+    #: pgw#1579: this function makes endpoint-to-endpoint CHILD CALLS. It is
+    #: the hub's ONE justification for minting the ``invoke_child`` capability
+    #: grant (``scheduler_dispatch.go`` mints it only ``if
+    #: subj.ChildCallsDeclared``), so an undeclared function's token cannot
+    #: submit a child request and ``ctx.call_endpoint`` fails at the FIRST
+    #: invoke — not at publish.
+    child_calls: bool = False
+    #: pgw#1580: the concrete execution-lane BODIES this function's code
+    #: branches on (``ctx.execution_lane``) — a BEHAVIORAL-DIVERGENCE marker,
+    #: never inventory and never a request for a lane. Tokens come from
+    #: ``models.execution_lanes.known_execution_lane_bodies()``, the twin of
+    #: the table the hub validates against; the execution axis (eager/compiled)
+    #: is the platform's and is refused here.
+    handles: Tuple[str, ...] = ()
     #: The class the author annotated on ``ctx``. The serve loop constructs
     #: THIS class, so a producer that annotates ``JobContext`` receives the
     #: publisher surface and an inference entrypoint is unchanged.
@@ -349,6 +374,59 @@ def _delta_declaration(
     return annotation, tuple(arms)
 
 
+def _validate_handles_decl(fn: Callable[..., Any], handles: Any) -> Tuple[str, ...]:
+    """The declared lane BODIES, validated at decoration (pgw#1580).
+
+    Every refusal here is one the hub's ``normalizeManifestHandles``
+    (``internal/builder/manifest_contract.go``) would raise instead — after the
+    image bake and the registry push. The vocabulary is not invented: it is
+    ``models.execution_lanes.known_execution_lane_bodies()``, already
+    documented in that module as *"the valid ``handles=`` declaration
+    tokens"*, and the twin of ``precision.KnownExecutionLaneBodies`` the hub
+    checks. The execution axis is refused with its own sentence rather than
+    lumped in with "unknown token", because ``"fp8-w8a8-dynamic+compiled"`` is
+    a legal LANE and an illegal DECLARATION, and the difference is the point.
+    """
+    from ..models.execution_lanes import (
+        known_execution_lane_bodies,
+        valid_execution_lane_body,
+    )
+
+    if handles is None:
+        return ()
+    if isinstance(handles, str) or not isinstance(handles, (list, tuple)):
+        raise _refuse(
+            fn,
+            f"handles= must be a list/tuple of lane BODY tokens, got "
+            f"{type(handles).__name__} — a bare string would iterate into "
+            "characters, so it is refused rather than accepted",
+        )
+    known = ", ".join(known_execution_lane_bodies())
+    out: list[str] = []
+    for raw in handles:
+        token = str(raw or "").strip().lower()
+        if not token:
+            raise _refuse(fn, "handles= carries an empty token")
+        if "+" in token:
+            raise _refuse(
+                fn,
+                f"handles= token {raw!r} carries an execution axis; declare "
+                "the lane BODY — eager/compiled is platform-managed and is "
+                "not something a body can branch on",
+            )
+        if not valid_execution_lane_body(token):
+            raise _refuse(
+                fn,
+                f"handles= token {raw!r} is not a known lane body "
+                f"(known: {known}) — the hub validates this against the same "
+                "table AFTER the image bake, so it is refused here instead",
+            )
+        if token in out:
+            raise _refuse(fn, f"handles= repeats {raw!r}")
+        out.append(token)
+    return tuple(out)
+
+
 @overload
 def entrypoint(fn: F) -> F: ...
 @overload
@@ -360,6 +438,8 @@ def entrypoint(
     env: Any = ...,
     emits_media: bool | None = ...,
     streams: Any = ...,
+    child_calls: bool = ...,
+    handles: Any = ...,
 ) -> Callable[[F], F]: ...
 
 
@@ -372,6 +452,8 @@ def entrypoint(
     env: Any = None,
     emits_media: bool | None = None,
     streams: Any = None,
+    child_calls: bool = False,
+    handles: Any = None,
 ) -> F | Callable[[F], F]:
     """Mark a module-level function as an entrypoint (contract above).
 
@@ -512,6 +594,35 @@ def entrypoint(
     blessed types) or smuggled in as a special last frame. Both are weaker than
     a plain ``return``, so the generator shape is refused at import naming
     ``streams=`` + ``ctx.emit`` as the successor.
+
+    ``child_calls=`` / ``handles=`` are the other two AUTHORITY kwargs, restored
+    by pgw#1579/pgw#1580 after the v1 hardcut deleted them while all three
+    other layers kept speaking them. Both are DECLARATIONS, on the ruling that
+    capabilities and behavioral divergence are never inferred from code shape:
+
+    * ``child_calls=True`` — this function calls OTHER endpoints
+      (``ctx.call_endpoint``). ``scheduler_dispatch.go`` mints the
+      ``invoke_child`` capability grant only ``if subj.ChildCallsDeclared``,
+      and ``manifestFunction.ChildCalls`` is where that flag comes from, so an
+      undeclared workflow endpoint publishes fine, deploys fine, and then fails
+      at its FIRST child call with ``child_calls_not_declared``. It is what
+      ``private-inference-endpoints/dj-pipeline`` IS: ``make_video`` is
+      ordinary CPU code that composes the DJ pipeline out of child requests.
+      Inference from the body is refused BY DESIGN — it would mint the
+      credential for anything that merely imports the surface.
+    * ``handles=("fp8-w8a8-dynamic",)`` — the concrete lane BODIES this
+      function's code BRANCHES ON, read back at runtime as
+      ``ctx.execution_lane``. A behavioral-divergence marker and nothing else:
+      it is not a request for a lane, not inventory, and it never narrows what
+      the platform may serve. The hub validates the tokens against its
+      concrete lane-body table; this decorator validates them against the SDK
+      twin first, so the refusal names your line instead of arriving after the
+      image bake. Undeclared is the norm — and ``ctx.execution_lane`` then
+      REFUSES typed rather than handing back a default nobody checked, the same
+      one-fact-two-enforcers shape as ``publishes=``. ``ctx.lane`` inside
+      ``Model.load`` is deliberately NOT gated by this: that lane is the
+      deploy's pick and ``ctx.lane.dtype`` is how every model loads at all,
+      which is the ordinary path rather than a divergence.
     """
 
     if fn is None:
@@ -524,6 +635,8 @@ def entrypoint(
                 env=env,
                 emits_media=emits_media,
                 streams=streams,
+                child_calls=child_calls,
+                handles=handles,
             )
         return bind
 
@@ -532,8 +645,9 @@ def entrypoint(
     if not inspect.isfunction(fn):
         raise EntrypointDeclarationError(
             f"@entrypoint marks module-level functions, got "
-            f"{type(fn).__name__} — the kwargs are resources= (pgw#1396) and "
-            "publishes=/env=/emits_media= (pgw#1406); the Model class header "
+            f"{type(fn).__name__} — the kwargs are resources= (pgw#1396), "
+            "publishes=/env=/emits_media= (pgw#1406) and "
+            "child_calls=/handles= (pgw#1579/pgw#1580); the Model class header "
             "carries lanes="
         )
     if not isinstance(publishes, bool):
@@ -542,6 +656,14 @@ def entrypoint(
             f"publishes= is a bool DECLARATION, got "
             f"{type(publishes).__name__} — it says this function MAY write to "
             "the hub; the request still says where",
+        )
+    if not isinstance(child_calls, bool):
+        raise _refuse(
+            fn,
+            f"child_calls= is a bool DECLARATION, got "
+            f"{type(child_calls).__name__} — it says this function calls OTHER "
+            "endpoints, and it is what the hub mints the invoke_child grant "
+            "against",
         )
     if emits_media is not None and not isinstance(emits_media, bool):
         raise _refuse(
@@ -559,6 +681,7 @@ def entrypoint(
         )
     declared_env = _validate_env_decl(fn, env)
     delta_type, delta_arms = _delta_declaration(fn, streams)
+    declared_handles = _validate_handles_decl(fn, handles)
     if resources is not None:
         from ..api.resources import Resources
 
@@ -679,6 +802,8 @@ def entrypoint(
         publishes=bool(publishes),
         env=declared_env,
         emits_media=emits_media,
+        child_calls=bool(child_calls),
+        handles=declared_handles,
         ctx_type=ctx_type,
         delta_type=delta_type,
         delta_arms=delta_arms,

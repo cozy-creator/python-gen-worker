@@ -158,6 +158,12 @@ def test_ctx_call_endpoint_addresses_a_non_zero_major_over_the_real_client() -> 
         ctx._request_id = "req-parent"  # type: ignore[attr-defined]
         ctx._worker_capability_token = "tok"  # type: ignore[attr-defined]
         ctx._file_api_base_url = rec.base_url  # type: ignore[attr-defined]
+        # pgw#1579: child calls are a DECLARED capability again, and a
+        # hand-built context must state it — `_callout_client` refuses an
+        # undeclared body with the hub's own `child_calls_not_declared` before
+        # a socket opens. Left absent it is an AttributeError, which is the
+        # right answer for a fixture that skipped a load-bearing field.
+        ctx._child_calls = True  # type: ignore[attr-defined]
 
         handle = ctx.call_endpoint(
             "acme/child", "generate", {}, semver_major=7, wait=False
