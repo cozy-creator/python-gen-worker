@@ -18,7 +18,9 @@ import typing
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, cast
+from typing import (
+    Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple, cast,
+)
 
 from .. import activity as activity_mod
 from .. import boot_phases as boot_mod
@@ -1139,6 +1141,36 @@ class ModelStore:
                     return other
         return ""
 
+    def _already_resident_bytes(self, files: Sequence[Any]) -> int:
+        """Bytes of ``files`` whose CAS objects this pod ALREADY holds.
+
+        pgw#1596. The headroom gate asks for FREE space, so it must ask for
+        what is still MISSING — the bytes already banked are, by definition,
+        not going to be written again. `contains` is the same content-addressed
+        predicate the fill path uses to decide a grant is satisfied, so this
+        cannot disagree with what the downloader will actually skip.
+
+        A file with no digest is counted as absent: the honest direction, since
+        it will be fetched.
+        """
+        from .cache_paths import open_worker_cas
+
+        try:
+            cas = open_worker_cas(self._cache_dir)
+        except Exception:  # noqa: BLE001 — a probe must not be the failure
+            return 0
+        total = 0
+        for f in files:
+            digest = str(getattr(f, "digest", "") or "").strip()
+            if not digest:
+                continue
+            try:
+                if cas.contains(digest, size=int(f.size_bytes)):
+                    total += int(f.size_bytes)
+            except Exception:  # noqa: BLE001 — an unreadable object is absent
+                continue
+        return total
+
     async def _ensure_disk_headroom(
         self,
         ref: WireRef,
@@ -1146,8 +1178,33 @@ class ModelStore:
         identity: _ResidencyIdentity = ("", 0),
         *,
         intent_id: str = "",
+        files: Optional[Sequence[Any]] = None,
     ) -> None:
-        target = int(needed_bytes) + _DISK_GC_MARGIN_BYTES
+        """Gate on the bytes still to be WRITTEN, never on the whole tree.
+
+        pgw#1596: this used to compare free space against the ref's entire
+        manifest, with nothing subtracting the part of that same manifest
+        already on disk. On a first pass over an empty disk that is right. On a
+        RE-ENTRY it is self-defeating — the bytes already fetched are counted
+        as consumed AND demanded again as free — so a materialization restarted
+        by an ordinary residency-generation supersede can never satisfy its own
+        check. It needs 2x the tree, and it fails at the END of its own pull.
+
+        MEASURED (pod `6uneiwhdl7fz8u`, 159 GB disk, 2026-08-20):
+        `need 104956706657 bytes; 65659441152 free after disk GC` — it demanded
+        the whole 105 GB tree free while ~86.2 GB of that same tree was already
+        resident, and died 157 MB short of a complete pull.
+
+        The boot ladder's supersede-and-restart design already ASSUMES
+        materialization is restart-safe. This is what makes that true.
+        """
+        total = int(needed_bytes)
+        resident = self._already_resident_bytes(files) if files else 0
+        # Never below zero, and never above the total: a stale or oversized
+        # residency reading must not talk this gate out of existence.
+        resident = max(0, min(resident, total))
+        remaining = total - resident
+        target = remaining + _DISK_GC_MARGIN_BYTES
         if self._disk_free() >= target:
             return
         await self._materialize_await(
@@ -1164,9 +1221,14 @@ class ModelStore:
                 ref, pb.MODEL_STATE_FAILED,
                 identity=identity, error="insufficient_disk",
             )
+            # Say what is still MISSING and what is already banked. The old
+            # message named only the whole tree, which is exactly why an
+            # 86 GB-resident refusal read as a 105 GB shortfall (pgw#1596).
             raise InsufficientDiskError(
-                f"need {needed_bytes} bytes for {ref}; {free} free after disk GC",
-                available_bytes=free, required_bytes=needed_bytes,
+                f"need {remaining} more bytes for {ref} "
+                f"({total} manifest - {resident} already resident); "
+                f"{free} free after disk GC",
+                available_bytes=free, required_bytes=remaining,
                 path=str(self._cache_dir),
             )
 
@@ -1838,6 +1900,9 @@ class ModelStore:
                     sum(int(f.size_bytes) for f in fetch_files),
                     operation_identity,
                     intent_id=intent_id,
+                    # pgw#1596: the same list, so the gate can subtract what is
+                    # already banked instead of demanding the tree twice.
+                    files=fetch_files,
                 )
             last_progress = 0.0
             # opened before _progress so
