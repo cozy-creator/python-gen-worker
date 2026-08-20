@@ -373,11 +373,24 @@ gen_worker.boot_phases.render_phase_table()
 gen_worker.boot_stages.emit()
 gen_worker.capability.HardwareUnmetError.axes()
 gen_worker.capability.InsufficientDiskError.axes()
-gen_worker.cli.args.build_payload()
-gen_worker.cli.protocol.gen_worker_version()
-gen_worker.cli.sockaddr.cleanup_listener()
-gen_worker.cli.sockaddr.create_client()
-gen_worker.cli.sockaddr.create_listener()
+# ✅ DELISTED 2026-08-20 — the CLI surface acquired production callers, which is
+# this ratchet's NICEST failure mode and the outcome it exists to produce.
+#
+#     cli.args.build_payload · cli.protocol.gen_worker_version
+#     cli.sockaddr.cleanup_listener · create_client · create_listener
+#
+# pgw#1491's `up`/`down`/`run` verbs wired all five: `up -d` needs a listener,
+# `run` needs a client and the payload builder, and the protocol handshake
+# names the version. The guard went red on STALE ("the symbol still exists and
+# now HAS a production caller"), which is the ratchet turning the RIGHT way.
+#
+# Delisted by the th#2204 lane rather than by pgw#1491's, because the wiring
+# landed WITHOUT its baseline update and left pgw master red on `fast gates`
+# for every lane — the fourth such event of the night, and the exact shape
+# pgw#1521 was filed about. The rule the header states is the remedy: a lane
+# that gives a baselined symbol a caller MUST delete its line in the same
+# commit as the wiring. That did not happen, so it happens here.
+
 gen_worker.cli.sockaddr.display()
 gen_worker.compile_posture.install()
 gen_worker.cuda_root.torch_cuda_home()
