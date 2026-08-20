@@ -42,7 +42,11 @@ from gen_worker.serving.streaming import (  # noqa: E402
     StreamingLoader,
     engine_for,
 )
-from gen_worker.serving.streaming.skeleton import meta_survivors  # noqa: E402
+from gen_worker.serving.streaming.skeleton import (  # noqa: E402
+    SkeletonError,
+    _resolve,
+    meta_survivors,
+)
 from streaming_fixture import (  # noqa: E402
     Lane,
     TracedStore,
@@ -401,3 +405,44 @@ def test_a_well_behaved_pipeline_still_builds_pgw1410(
     for name, module in built.modules.items():
         if name:
             assert getattr(built.pipeline, name) is module
+
+
+# ---------------------------------------------------------------------------
+# The skeleton's LIBRARY RESOLUTION — same subsystem, same file
+# (`serving/streaming/skeleton.py`), so it lives with the streaming tests
+# rather than in a module of its own.
+# ---------------------------------------------------------------------------
+
+# pgw#1518: a `model_index.json` library entry may be a diffusers PIPELINE
+# SUBMODULE, not an importable module. Every sd15 checkpoint on the hub names
+# one, and the streaming skeleton refused all of them — so the first boot ever
+# to drive a CAS-backed sd15 tree through this loader died here.
+
+
+def test_pipeline_submodule_library_resolves() -> None:
+    """`stable_diffusion` is not importable as a top-level module; it is a
+    diffusers pipeline submodule. This is the exact entry every sd15
+    model_index.json carries, and the boot that found it died here."""
+    cls = _resolve("stable_diffusion", "StableDiffusionSafetyChecker")
+    assert cls.__name__ == "StableDiffusionSafetyChecker"
+    with pytest.raises(ImportError):
+        __import__("stable_diffusion")
+
+
+def test_ordinary_module_libraries_still_resolve() -> None:
+    assert _resolve("transformers", "CLIPTextModel").__name__ == "CLIPTextModel"
+    assert _resolve("diffusers", "UNet2DConditionModel").__name__ == "UNet2DConditionModel"
+
+
+def test_unknown_library_still_refuses_by_name() -> None:
+    """A genuinely absent library must still be a typed refusal — the fallback
+    widens what resolves, it must not turn a miss into a silent None."""
+    with pytest.raises(SkeletonError) as caught:
+        _resolve("no_such_library_anywhere", "Thing")
+    assert "no_such_library_anywhere" in str(caught.value)
+
+
+def test_known_library_unknown_class_refuses_by_name() -> None:
+    with pytest.raises(SkeletonError) as caught:
+        _resolve("diffusers", "NoSuchClassInThisVersion")
+    assert "NoSuchClassInThisVersion" in str(caught.value)
