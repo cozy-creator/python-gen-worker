@@ -296,3 +296,39 @@ CI-SKIPPED tests/test_bridge_placement.py|hf-internal-testing/tiny-stable-diffus
 # the fix engages `model_offload` pre-placement, 0.51 GiB resident, and serves),
 # plus the red arm in a detached master worktree where 4 of the 6 cases fail.
 CI-SKIPPED tests/test_vram_fit.py|hf-internal-testing/tiny-stable-diffusion-pipe is not in the local hf cache (<path>)
+
+# pgw#1528 — the two keys the guard reported UNCLASSIFIED on master (run
+# 32325673668, `5443fbcb`), which is what kept the whole `tests` job red for
+# every PR in the repo overnight. Neither is new behaviour: pgw#1525 RENAMED
+# both modules (`test_partial_stream_rung_pgw1497.py` -> `test_partial_stream_rung.py`,
+# and `test_arena_residency.py` arrived with pgw#1507), and the census key is
+# `<file>|<reason>` — so a rename retires the old key and mints a new one that
+# nobody has classified. Read that as the general rule: RENAMING A TEST MODULE
+# THAT TAKES A CLASSIFIED SKIP IS A CENSUS EDIT, in the same landing.
+#
+# 3 rows, the pgw#1497 GPU window's own findings (`@CUDA`, three sites in
+# section 5). `ubuntu-latest` has no CUDA device and there is no GPU lane
+# anywhere (pgw#953), so this is UNVERIFIED in CI and always will be. WHERE IT
+# IS MEASURED: by hand on the rig box's RTX 4070 during the pgw#1497 window —
+# these three rows exist BECAUSE the card found two defects the cardless rows
+# could not. Sections 1-4 of the same file (the rung's ladder position, who may
+# select it, what it refuses, and whether its price was measured) need no card
+# and run on every runner, so the rung's CONTRACT is covered in CI; only the
+# cross-device placement behaviour is not.
+CI-SKIPPED tests/test_partial_stream_rung.py|cross-device placement needs a card
+
+# 1 row, and it is LOCAL-ONLY rather than CI-SKIPPED because the artifact it
+# needs is not something a runner could ever be given: the row reads the
+# AUTHORING BOX's own sd1.5 HF snapshot by absolute path
+# (`~/.cache/huggingface/hub/models--stable-diffusion-v1-5--...`) and walks
+# every UNet parameter's (path, offset, len) triple against it. Multi-GB
+# weights never transit CI, nor this box's uplink (workspace weights-locality
+# rule), so a fixture is the only thing CI could hold — and a fixture is
+# exactly what this row refuses to be: the whole point is that the triples
+# cover a REAL component exactly, since the cold-load arm would otherwise fill
+# some weights and leave others as whatever the arena last held.
+# WHAT IS UNVERIFIED WHILE IT SKIPS: only the real-snapshot coverage claim. The
+# layout arithmetic and triple resolution — every byte the arena maps — are
+# decidable without weights and run on every runner from real safetensors this
+# file builds itself.
+LOCAL-ONLY tests/test_arena_residency.py|sd# snapshot not on this box
