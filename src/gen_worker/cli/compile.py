@@ -241,22 +241,65 @@ def _ensure_program(spec: Spec, store: Any, rederive: Any, scratch: Path) -> Pat
     re-deriving locally — never by fetching, because there is nothing portable
     to fetch. A malformed key is a typed refusal from the store rather than a
     miss, so a wiring bug can never spend a pointless two-minute derive.
+
+    A MISS ARRIVES TWO WAYS, AND THIS ASKED FOR ONLY ONE (pgw#1525).
+    ``LocalGraphStore.fetch_program`` returns ``None`` for a miss;
+    ``WorkerGraphStore.fetch_program`` — which is what ``_store`` actually
+    builds — RAISES ``ProgramBlobUnreachable``, and its own message calls the
+    condition "ORDINARY". This function only tested for ``None``, so on the one
+    state it exists for — a box that has never derived this endpoint — the
+    raise escaped past ``rederive()`` and the re-derive branch was unreachable.
+    Measured: `compile` on a wiped store answered ``failed=14 (of 14)`` in
+    6.04 s having never logged "re-deriving", and told the user to run
+    `compile`.
+
+    Both spellings are now the same miss, and the answer to a miss is to derive.
+    That includes the ``rotten`` arm of the same refusal: a serialized program
+    is a DERIVED, DISPOSABLE, machine-scoped artifact, so bytes that fail their
+    own scrub deserve exactly what absent bytes deserve — regeneration, not a
+    report. The refusal survives where it is load-bearing: a malformed graph key
+    is not a miss, so it is re-raised rather than paying for a derive that
+    cannot possibly satisfy it, and a program still missing AFTER the derive is
+    the typed ``CompileError`` below.
     """
+    from .._vendor.torchcg import is_graph_hash
+    from ..serving.mint_store import ProgramBlobUnreachable
+
+    # Checked HERE, by the predicate, rather than recognised from the refusal's
+    # wording. A malformed key is a wiring bug and no derive can satisfy it, so
+    # it must not be swallowed as a miss; matching on message text to tell the
+    # two apart would put this function one prose edit from silently paying for
+    # a two-minute derive on every specialization.
+    if not is_graph_hash(spec.graph):
+        raise CompileError(
+            f"{spec.graph!r} is not a cg-graph-v1 identity — the lock names a "
+            f"graph no store can be asked for. `gen-worker lock` rewrites it."
+        )
+
     destination = scratch / f"{spec.short}.pt2"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    found = store.fetch_program(spec.graph, destination)
-    if found is not None:
-        return Path(found)
+
+    def _look() -> Optional[Path]:
+        try:
+            found = store.fetch_program(spec.graph, destination)
+        except ProgramBlobUnreachable as exc:
+            logger.debug("%s: no usable local program (%s)", spec.short, exc)
+            return None
+        return Path(found) if found is not None else None
+
+    program = _look()
+    if program is not None:
+        return program
     rederive()
-    found = store.fetch_program(spec.graph, destination)
-    if found is None:
+    program = _look()
+    if program is None:
         raise CompileError(
             f"no exported program for graph {spec.short} even after re-deriving "
             f"from this source tree: the committed lock and this checkout "
             f"disagree about what this endpoint traces to. "
             f"`gen-worker lock --check` names the drift."
         )
-    return Path(found)
+    return program
 
 
 def _build(
