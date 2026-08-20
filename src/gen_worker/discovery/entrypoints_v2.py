@@ -53,6 +53,7 @@ import pkgutil
 import textwrap
 from typing import Any, Dict, List, Set
 
+from .expected_outputs import expected_outputs
 from .moderation import payload_moderation
 from .schema import type_schema_and_hash
 
@@ -533,6 +534,7 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         type_schema_and_hash(delta_type) if delta_type is not None else (None, "")
     )
     moderation = payload_moderation(spec.payload_type)
+    outputs = expected_outputs(spec.payload_type, spec.return_type)
     slots: List[Dict[str, Any]] = []
     for slot in spec.slots:
         slots.append(_model_slot(slot) if slot.kind == "model" else _adapter_slot(slot))
@@ -579,6 +581,16 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # when the payload declares one, so a text-only row stays byte
         # identical.
         **({"moderation": moderation} if moderation else {}),
+        # pgw#1580: WHAT THIS FUNCTION IS ABOUT TO PRODUCE, read off the return
+        # struct's `ExpectedOutput` annotations. `expectedOutputsForRelease`
+        # resolves each plan against the actual request payload and stamps
+        # `ExpectedOutputsJSON` onto the request row, so a consumer rendering
+        # output placeholders has a count/type/aspect BEFORE generation
+        # finishes; `len(fn.ExpectedOutputs) == 0` returns nil and that whole
+        # path goes quiet. The marker survived the v1 hardcut and this emission
+        # did not, which is why every v2 release served `expected_outputs:
+        # null` — measured live on anima, before and after its pointer moved.
+        **({"expected_outputs": outputs} if outputs else {}),
         "slots": slots,
         # `None` is ABSENT (no model slot, no `resources=`); a dict is
         # PRESENT, and a present-but-empty block is the hub's explicit CPU
@@ -617,6 +629,20 @@ def _entrypoint_row(spec: Any) -> Dict[str, Any]:
         # copies verbatim, so there is no second vocabulary to drift.
         **({"publishes": True} if spec.publishes else {}),
         **({"env": list(spec.env)} if spec.env else {}),
+        # pgw#1579: the CHILD-CALL capability declaration.
+        # `scheduler_dispatch.go` mints the `invoke_child` grant only `if
+        # subj.ChildCallsDeclared`, and this key is where that flag comes from
+        # (`manifestFunction.ChildCalls`). Absent means undeclared and the hub
+        # declines the credential, so a workflow endpoint that publishes
+        # without it fails at its FIRST child call rather than at publish.
+        **({"child_calls": True} if spec.child_calls else {}),
+        # pgw#1580: the LANE-BODY divergence declaration.
+        # `normalizeManifestHandles` validates every token against the hub's
+        # concrete lane-body table and folds the result into
+        # `requirement_payload["handles"]`, which the release resolver hydrates
+        # into `FunctionMetadata.Handles` for selection. Tokens are already
+        # validated at decoration against the SDK twin of that table.
+        **({"handles": list(spec.handles)} if spec.handles else {}),
         **(
             {"emits_media": bool(spec.emits_media)}
             if spec.emits_media is not None and _is_job_kind(row_kind)

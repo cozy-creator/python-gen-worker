@@ -15,6 +15,31 @@ rule). A bare ``ImportError: cannot import name 'endpoint'`` across 27
 unmigrated endpoint packages says nothing about what happened or where to go,
 so every deleted name raises :class:`V1SdkDeleted` NAMING the migration —
 here, at import, at the exact spelling the author wrote.
+
+THE RULE THIS TABLE ENFORCES, and it is a rule about MANIFEST FIELDS too
+(pgw#1580's enumeration audit). Every field the hub DECODES may only be dropped
+from the author surface together with a row here naming its successor. The
+audit checked ``manifestFunction`` field by field against what
+``discovery/entrypoints_v2.py`` emits and the partition was exact:
+
+* every field with a row here — ``compile``/``compile_axes``, ``variant_of``,
+  ``objectives``, ``runtime_formula``, ``config_params``,
+  ``accepts_references`` — was a DECISION, and the successor holds;
+* every field WITHOUT one was an ACCIDENT. There were three, all P0, all found
+  by an endpoint breaking on them rather than by anything failing at publish:
+  ``child_calls`` (pgw#1579 — the hub mints ``invoke_child`` only when it is
+  set, so a workflow endpoint failed at its FIRST child call),
+  ``incremental_output``/``delta_output_schema`` (pgw#1576 — emitted, but
+  hardcoded ``False``), and ``expected_outputs`` (pgw#1580 — LIVE in
+  production: every endpoint promoted to v2 silently stopped telling the
+  platform what it was about to produce). ``handles`` was the fourth, ruled
+  RESTORED rather than retired on the principle that capabilities and
+  behavioral divergence are DECLARED, never inferred from code shape.
+
+So: a hardcut that removes an author-side spelling owes either a row in
+:data:`REPLACEMENTS` or a hub change that stops reading the field. Silence is
+the one option that is not available, and
+``tests/test_manifest_declarations_pgw1579_1580.py`` is the fence that says so.
 """
 
 from __future__ import annotations

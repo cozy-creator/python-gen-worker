@@ -545,6 +545,13 @@ class EndpointHost:
         decoded = self._decode(spec, payload)
         if ctx is None:
             ctx = self.make_context(request_id)
+        # pgw#1579/pgw#1580: the local host builds a context BEFORE it knows
+        # the function, so the spec's declarations are stamped here instead of
+        # at construction. Without this the CLI and the daemon refuse
+        # `ctx.execution_lane` and `ctx.call_endpoint` on an endpoint that
+        # declared both — a declaration only the serverless dispatcher honours
+        # is one an author cannot test.
+        ctx._declare_from_spec(spec)
         arguments = [
             self.instances[slot.annotation].model if slot.kind == "model"
             else list(loras) if slot.kind == "adapters"

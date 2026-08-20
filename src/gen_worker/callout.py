@@ -1,7 +1,7 @@
 """Endpoint-to-endpoint call-out client — the workflow primitive.
 
 The SDK half of the platform's call-out primitive: a function declared with
-``@endpoint(child_calls=True)`` receives an ``invoke_child`` grant on its
+``@entrypoint(child_calls=True)`` receives an ``invoke_child`` grant on its
 per-job capability token; this module submits/polls/cancels child requests
 and reads/writes the invocation's workflow checkpoints through the ordinary
 platform HTTP API using that token as the bearer.
@@ -43,7 +43,9 @@ _REFUSAL_CODES = frozenset(
 )
 
 # Route-scope denials for a capability token WITHOUT the invoke_child grant —
-# the function didn't declare child_calls=True.
+# the function didn't declare child_calls=True (pgw#1579: the declaration is
+# `@entrypoint(child_calls=True)`; `ctx._callout_client` refuses an undeclared
+# body before a socket opens, so reaching here means the grant was declined).
 _NOT_DECLARED_CODES = frozenset({"forbidden", "insufficient_scope", "unauthorized"})
 
 DEFAULT_POLL_INTERVAL_S = 2.0
@@ -110,7 +112,7 @@ class CalloutClient:
             raise ChildCallRefusedError(
                 "child_calls_not_declared",
                 "no capability token in this invocation context; declare "
-                "@endpoint(child_calls=True) and run under the platform",
+                "@entrypoint(child_calls=True) and run under the platform",
             )
         return {"Authorization": f"Bearer {token}"}
 
@@ -123,7 +125,7 @@ class CalloutClient:
                 "child_calls_not_declared",
                 message
                 or "the platform refused this credential for child calls; "
-                "declare @endpoint(child_calls=True)",
+                "declare @entrypoint(child_calls=True)",
             )
         raise ChildCallError(
             f"child call failed ({status_code}{', ' + code if code else ''}): "

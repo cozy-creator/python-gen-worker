@@ -607,6 +607,11 @@ class ServeLoop:
             declared_media = getattr(spec, "emits_media", None)
             if declared_media is not None:
                 kwargs["emits_media"] = bool(declared_media)
+            # pgw#1579/pgw#1580, the same wire for the two declarations the
+            # hardcut dropped. Unstamped they read as undeclared, which is the
+            # fail-closed answer the hub's own grant minter uses.
+            kwargs["child_calls"] = bool(getattr(spec, "child_calls", False))
+            kwargs["handles"] = tuple(getattr(spec, "handles", ()) or ())
         return RequestContext(
             request_id,
             binding=binding
