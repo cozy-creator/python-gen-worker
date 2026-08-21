@@ -510,6 +510,11 @@ def main() -> int:
                         help="raise the warm tier's host floor to force real "
                              "evictions/hysteresis on big-RAM pods (0 = the "
                              "adaptive default)")
+    parser.add_argument("--target-warm-images", type=int, default=0,
+                        help="compute the host floor pod-side so roughly this "
+                             "many ~5.6 GiB images fit, whatever the pod's "
+                             "RAM — the portable way to force eviction "
+                             "pressure (overrides --host-floor-gib)")
     args = parser.parse_args()
 
     from gen_worker.rigcheck import assert_fleet_line
@@ -537,6 +542,13 @@ def main() -> int:
         "mem_available_gib": round(_meminfo("MemAvailable") / (1 << 30), 1),
         "torch": torch.__version__,
     })
+
+    if args.target_warm_images > 0:
+        avail_gib = _meminfo("MemAvailable") / (1 << 30)
+        args.host_floor_gib = max(2.0, avail_gib - args.target_warm_images * 5.6)
+        loud(f"target_warm_images={args.target_warm_images}: host floor "
+             f"computed at {args.host_floor_gib:.1f} GiB of {avail_gib:.1f} "
+             f"GiB available")
 
     cache = Path(args.cache)
     unet_dirs: Dict[str, Path] = {}
