@@ -1,8 +1,9 @@
 """A main_v2-shaped Model + entrypoints over the tiny pipeline (derive fixture).
 
 Deliberately spelled like the Paul-reviewed sdxl ``main_v2.py``: the stateful
-half is a ``Model[SDXL]`` subclass with contract-object ``lanes=`` class
-kwargs and an imperative ``ctx.compile`` mark inside ``load``; the stateless
+half is a ``Model[SDXL]`` subclass whose header declares the lane MAPPING
+(contract object -> ``lane(request=…)`` demand formula) and its ``shapes=``
+axis, plus an imperative ``ctx.compile`` mark inside ``load``; the stateless
 half is free ctx-first ``@entrypoint`` functions with platform-injected
 adapter slots (``turbo: DistillationAdapter | None`` — the typed-takeover
 guard; ``loras: list[Adapter]``). Trace coverage is auto-enumerated from the
@@ -20,6 +21,7 @@ import torch
 from diffusers import StableDiffusionPipeline
 
 from gen_worker import (
+    STATIC,
     Adapter,
     DistillationAdapter,
     ImageAsset,
@@ -28,7 +30,9 @@ from gen_worker import (
     RequestContext,
     ValidationError,
     entrypoint,
+    lane,
 )
+from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 from lane_contracts import TINY_DIFFUSERS_FP32
 
@@ -60,7 +64,13 @@ class ImageOutput(msgspec.Struct):
     model_used: str
 
 
-class TinyModel(Model[SDXL], lanes=(TINY_DIFFUSERS_FP32,)):
+class TinyModel(
+    Model[SDXL],
+    lanes={TINY_DIFFUSERS_FP32: lane(
+        request=const(MiB(64)) + per_mp_batch(MiB(16)),
+    )},
+    shapes={"aspect": STATIC},
+):
     pipe: Any
 
     def load(self, ctx: LoadContext[SDXL]) -> None:

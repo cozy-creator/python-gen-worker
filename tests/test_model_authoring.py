@@ -20,12 +20,17 @@ import pytest
 
 from gen_worker import (
     Adapter,
+    DYNAMIC,
     DistillationAdapter,
     LoadContext,
     Model,
     RequestContext,
+    STATIC,
+    Structural,
     entrypoint,
+    lane,
 )
+from gen_worker.demand import GiB, MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 from gen_worker.serving import (
     DefaultsError,
@@ -33,11 +38,16 @@ from gen_worker.serving import (
     EndpointHost,
     ServeDispatchError,
     EntrypointDeclarationError,
+    LaneDeclarationError,
     ModelDeclarationError,
     lane_handle,
     load_endpoint,
+    model_declared_lanes,
     model_lanes,
+    model_marks_compile,
     model_requires,
+    model_shapes,
+    model_structural,
     model_type,
 )
 
@@ -103,15 +113,25 @@ def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
     ]
     assert len(lanes) == 2
 
-    # ie#740 placement floors, per lane, from the SAME `lanes=` declaration
-    # (pgw#1404 merged them) — statically extractable, so a deployment is sized
-    # without running author code. VRAM only: the sm floor is derived from each
-    # contract's dtype, and both fixture stand-ins declare float32 (CPU, fake
-    # weights), which derives no floor.
-    assert {h: r.render() for h, r in model_requires(SdxlModel).items()} == {
-        "sdxl.diffusers-bf16@1": "vram12g",
-        "cozy.sdxl-fp8-rowwise@1": "vram8g",
+    # pgw#1599: what each lane declares is its own DEMAND FORMULA — read
+    # statically, so a deployment is sized without running author code. The
+    # formulas DIFFER per lane and that is the point: the fp8 lane's weights
+    # and activations are both smaller, so one per-model number would have
+    # been wrong for one of the two.
+    per_lane = {
+        row.contract_id: row.request.coefficients()
+        for row in model_declared_lanes(SdxlModel)
     }
+    assert per_lane == {
+        "sdxl.diffusers-bf16@1": {"const": MiB(96), "mp_batch": MiB(24)},
+        "cozy.sdxl-fp8-rowwise@1": {"const": MiB(48), "mp_batch": MiB(12)},
+    }
+    # The placement row carries ONLY the floor DERIVED from the contract
+    # dtype, and is ABSENT for a lane that derives none — both fixture
+    # stand-ins declare float32, which has no capability floor, so the honest
+    # answer is no row at all rather than an empty one (an empty row reads to
+    # the resolver as "runs anywhere", which is th#1754's shape).
+    assert model_requires(SdxlModel) == {}
 
 
 def _sdxl_contract() -> Any:
@@ -120,91 +140,242 @@ def _sdxl_contract() -> Any:
     return contracts.SDXL_DIFFUSERS_BF16
 
 
+def _engine_marks(ctx: Any) -> None:
+    """A DELEGATED compile mark: real, and invisible to the AST reader."""
+
+    ctx.compile(object())
+
+
+def _lane() -> Any:
+    """A minimal but REAL lane declaration for a specimen class."""
+
+    return lane(request=const(GiB(1)))
+
+
 def test_model_header_declarations_and_refusals() -> None:
+    """pgw#1599's acceptance (a) and (b): every header either declares REAL
+    lanes with a demand formula, or is REFUSED at class-definition time with
+    a message naming what is missing. Five vocabularies die here."""
+
     with pytest.raises(ModelDeclarationError, match=r"Model\[SDXL\]"):
         type("Bare", (Model,), {})
 
-    with pytest.raises(ModelDeclarationError, match="lanes= must be a tuple"):
-        class BadLanes(Model[SDXL], lanes=["not-a-tuple"]):  # type: ignore[arg-type]
+    # --- lanes= is REQUIRED, real contracts only (Paul's ruling pair) ------
+
+    with pytest.raises(ModelDeclarationError, match="lanes= is REQUIRED"):
+        class NoLanes(Model[SDXL]):
             pass
 
-    with pytest.raises(ModelDeclarationError, match="not a layout contract"):
-        class StringLane(Model[SDXL], lanes=("sdxl.diffusers-bf16@1",)):
+    with pytest.raises(ModelDeclarationError, match="lanes= is EMPTY"):
+        class EmptyLanes(Model[SDXL], lanes={}):
             pass
 
-    # pgw#1488. `lanes=()` is NO LONGER eager-permanent: it says "this class
-    # states no layout contract", and a class that states none still traces —
-    # under a DERIVED lane, named after the model type so both the trace and
-    # the serve address the same row. No contract is borrowed (not even SDXL's
-    # canonical one): borrowing would publish a layout claim nobody made.
-    class NoContractDeclared(Model[SDXL], lanes=()):
-        pass
-
-    (derived,) = model_lanes(NoContractDeclared)
-    assert lane_handle(derived) == "derived.sdxl@1"
-    assert derived.dtype is None  # the checkpoint's own dtype decides
-    assert model_type(NoContractDeclared) is SDXL
-
-    # Eager-forever is a DECLARATION with a mandatory reason, mirroring
-    # `self_loading=` — never an inference from an empty tuple.
-    class EagerPermanent(
-        Model[SDXL], eager_only="the fixture compiles nothing on purpose"
-    ):
-        pass
-
-    assert model_lanes(EagerPermanent) == ()
-    assert model_type(EagerPermanent) is SDXL
-
-    with pytest.raises(ModelDeclarationError, match="eager_only= needs a REASON"):
-        class BlankEager(Model[SDXL], eager_only="   "):
+    # DELETED (1/5): `lanes=()` and the whole DerivedLane machinery. It was
+    # the "I state no layout contract" spelling, and a derived lane names no
+    # layout document — so it could answer neither checkpoint compatibility
+    # nor lane selection, which is what a lane is FOR.
+    with pytest.raises(ModelDeclarationError, match="tuple form is deleted"):
+        class TupleLanes(Model[SDXL], lanes=()):  # type: ignore[arg-type]
             pass
 
-    with pytest.raises(ModelDeclarationError, match="must be a string reason"):
-        class UnreasonedEager(Model[SDXL], eager_only=True):  # type: ignore[arg-type]
-            pass
-
-    with pytest.raises(ModelDeclarationError, match="contradict each other"):
-        class BothWays(
+    with pytest.raises(ModelDeclarationError, match="tuple form is deleted"):
+        class TupleReal(
             Model[SDXL],
-            lanes={_sdxl_contract(): None},
-            eager_only="but it also declares a lane",
+            lanes=(_sdxl_contract(),),  # type: ignore[arg-type]
         ):
             pass
 
-    # pgw#1469's gap, closed statically: a compile mark under an eager-forever
-    # declaration can never produce a graph, and used to pass as a green lock
-    # with a byte-identical document.
-    with pytest.raises(ModelDeclarationError, match="can never produce a graph"):
-        class MarkedButEager(Model[SDXL], eager_only="measured no win"):
-            def load(self, ctx: object) -> None:
-                ctx.compile(object())  # type: ignore[attr-defined]
+    with pytest.raises(ModelDeclarationError, match="MAPPING of tensorfs"):
+        class BadLanes(Model[SDXL], lanes=["not-a-mapping"]):  # type: ignore[arg-type]
+            pass
 
-    # ...and the same words in a DOCSTRING are not a mark. A class that
-    # documents "no ctx.compile here" is the best-behaved one on the fleet and
-    # a substring check would refuse exactly it.
-    class DocumentedEager(Model[SDXL], eager_only="compute-bound; measured no win"):
+    with pytest.raises(ModelDeclarationError, match="not a layout contract"):
+        class StringLane(Model[SDXL], lanes={"sdxl.diffusers-bf16@1": _lane()}):
+            pass
+
+    # DELETED (2/5): the canonical-contract BORROW. An omitted `lanes=` used
+    # to silently adopt `ModelType.canonical_contract`; the attribute is gone
+    # from every model type, so the omission is a refusal (above) rather than
+    # a layout claim the author never made.
+    assert not hasattr(SDXL, "canonical_contract")
+
+    # DELETED (3/5): the floor STRING. Paul, 2026-08-20: "there is no
+    # required VRAM" — demand varies per request, so a lane declares a
+    # FORMULA, not a number.
+    with pytest.raises(ModelDeclarationError, match="machine-floor STRING"):
+        class FloorString(Model[SDXL], lanes={_sdxl_contract(): "vram7g"}):
+            pass
+
+    with pytest.raises(ModelDeclarationError, match=r"lane\(request="):
+        class NoSpec(Model[SDXL], lanes={_sdxl_contract(): None}):
+            pass
+
+    # DELETED (4/5): `eager_only=`. Compilation participation IS the presence
+    # of `ctx.compile` marks — no keyword, and none accepted.
+    with pytest.raises(ModelDeclarationError, match="eager_only.*is DELETED"):
+        class EagerOnly(
+            Model[SDXL],
+            lanes={_sdxl_contract(): _lane()},
+            eager_only="the fixture compiles nothing on purpose",
+        ):
+            pass
+
+    # `requires=` (deleted earlier, pgw#1404) still refuses by name.
+    with pytest.raises(ModelDeclarationError, match="requires.*is DELETED"):
+        class StrayFloor(
+            Model[SDXL],
+            lanes={_sdxl_contract(): _lane()},
+            requires={"sdxl.other@1": "vram8g"},
+        ):
+            pass
+
+    # --- the GREEN header, and everything it makes readable ---------------
+
+    class SdxlLike(
+        Model[SDXL],
+        lanes={_sdxl_contract(): lane(
+            request=const(GiB(1.2)) + per_mp_batch(MiB(220)),
+            resident=("vae",),
+        )},
+        structural={"timestep_dtype": Structural(
+            field="scheduler",
+            classes={"int64": "dpmpp_2m_karras", "float32": "euler"},
+            measured="pgw#1572, CPU: set_timesteps(20) on each served scheduler",
+        )},
+        shapes={"aspect": STATIC},
+    ):
+        def load(self, ctx: object) -> None:
+            self.unet = ctx.compile(object())  # type: ignore[attr-defined]
+
+    assert model_type(SdxlLike) is SDXL
+    (declared,) = model_declared_lanes(SdxlLike)
+    assert declared.contract_id == "sdxl.diffusers-bf16@1"
+    assert declared.dtype == "bfloat16"
+    # DERIVED from the contract dtype, never hand-written — and per LANE,
+    # which is why one hand-written floor could not serve a multi-lane class.
+    assert declared.min_sm == 80
+    assert declared.request.coefficients() == {
+        "const": GiB(1.2), "mp_batch": MiB(220),
+    }
+    assert declared.resident == ("vae",)
+    assert model_shapes(SdxlLike) == {"aspect": STATIC}
+    assert [d.as_document(a) for a, d in model_structural(SdxlLike).items()] == [{
+        "axis": "timestep_dtype",
+        "declared": ["int64", "float32"],
+        "from": "scheduler",
+        "representatives": ["dpmpp_2m_karras", "euler"],
+        "measured": "pgw#1572, CPU: set_timesteps(20) on each served scheduler",
+    }]
+    # The placement row carries the DERIVED floor and nothing else: the VRAM
+    # half went with the strings, and what replaces it is COMPUTED from the
+    # formula (pgw#1600), never annotated.
+    assert {h: r.render() for h, r in model_requires(SdxlLike).items()} == {
+        "sdxl.diffusers-bf16@1": "sm80+",
+    }
+
+    # A hand-written sm floor is still a refusal — two producers of one fact
+    # is how they drift apart (Paul, 2026-08-18).
+    with pytest.raises(ModelDeclarationError, match="lane\\(request="):
+        class HandWrittenSm(Model[SDXL], lanes={_sdxl_contract(): "sm90+"}):
+            pass
+
+    # --- compilation participation is the MARK, and nothing else ----------
+
+    assert model_marks_compile(SdxlLike) is True
+
+    # An EAGER model under the new rules: real lanes like everyone else, zero
+    # `ctx.compile` calls, no keyword anywhere. This is the whole declaration.
+    class EagerModel(Model[SDXL], lanes={_sdxl_contract(): _lane()}):
         def load(self, ctx: object) -> None:
             """No ctx.compile(): torch.compile measured no win here."""
 
-    assert model_lanes(DocumentedEager) == ()
+    assert model_marks_compile(EagerModel) is False
+    assert model_lanes(EagerModel) == (_sdxl_contract(),)
+    # ...and the words in that DOCSTRING are not a mark. A class that
+    # documents "no ctx.compile here" is the best-behaved one on the fleet and
+    # a substring check would refuse exactly it.
 
-    class OmittedLanes(Model[SDXL]):
-        pass
+    # --- fork axes: declared, or refused --------------------------------
 
-    # Omitted lanes = the model type's canonical contract object (pgw#1377),
-    # which satisfies the lane protocol: handle + load dtype.
-    (canonical,) = model_lanes(OmittedLanes)
-    assert canonical is SDXL.canonical_contract
-    assert lane_handle(canonical) == "sdxl.diffusers-bf16@1"
+    # DELETED (5/5): derive's global DYNAMIC_AXES flag. The choice is per
+    # MODEL now, and a compiling class that states none is refused rather
+    # than defaulted.
+    from gen_worker.release import derive as _derive
+    assert not hasattr(_derive, "DYNAMIC_AXES")
+
+    with pytest.raises(LaneDeclarationError, match="shapes= is REQUIRED"):
+        class NoShapes(Model[SDXL], lanes={_sdxl_contract(): _lane()}):
+            def load(self, ctx: object) -> None:
+                ctx.compile(object())  # type: ignore[attr-defined]
+
+    # CFG/batch is a PERMANENTLY STATIC shape fork (Paul, 2026-08-20) — not
+    # declarable at all, in either direction.
+    with pytest.raises(LaneDeclarationError, match="PERMANENTLY STATIC"):
+        class BatchDynamic(
+            Model[SDXL],
+            lanes={_sdxl_contract(): _lane()},
+            shapes={"aspect": STATIC, "batch": DYNAMIC},
+        ):
+            def load(self, ctx: object) -> None:
+                ctx.compile(object())  # type: ignore[attr-defined]
+
+    # BOTH shape declarations are expressible and NEITHER is presumed
+    # (acceptance (d)): the same model, declared the other way.
+    class DynamicAspect(
+        Model[SDXL],
+        lanes={_sdxl_contract(): _lane()},
+        shapes={"aspect": DYNAMIC},
+    ):
+        def load(self, ctx: object) -> None:
+            ctx.compile(object())  # type: ignore[attr-defined]
+
+    assert model_shapes(DynamicAspect) == {"aspect": DYNAMIC}
+
+    # A DELEGATED mark (`self.engine.compile_dit(ctx)`) is invisible to the
+    # AST reader but produces real graphs, so shapes= is PERMITTED — never
+    # refused — on a class the reader calls unmarked. Refusing would make a
+    # correct endpoint undeclarable to buy a tidiness check.
+    class DelegatedMark(
+        Model[SDXL],
+        lanes={_sdxl_contract(): _lane()},
+        shapes={"aspect": STATIC},
+    ):
+        def load(self, ctx: object) -> None:
+            _engine_marks(ctx)
+
+    assert model_marks_compile(DelegatedMark) is False  # the reader's limit
+    assert model_shapes(DelegatedMark) == {"aspect": STATIC}  # declared anyway
+
+    # A structural axis with one variant class is not a fork; a declared fork
+    # with no measurement behind it is a guess wearing a declaration.
+    with pytest.raises(LaneDeclarationError, match="at least TWO variant"):
+        class OneVariant(
+            Model[SDXL],
+            lanes={_sdxl_contract(): _lane()},
+            structural={"t": Structural(
+                field="scheduler", classes={"int64": "ddim"}, measured="m")},
+        ):
+            pass
+
+    with pytest.raises(LaneDeclarationError, match="measured=. is MANDATORY"):
+        class Unmeasured(
+            Model[SDXL],
+            lanes={_sdxl_contract(): _lane()},
+            structural={"t": Structural(
+                field="scheduler",
+                classes={"a": "ddim", "b": "euler"},
+                measured="   ",
+            )},
+        ):
+            pass
+
+    # --- the lane handle's wire shape (unchanged by this issue) ----------
 
     # The SHIPPED tensorfs Contract's attribute shape: `stamp` + `digest`,
-    # and NO `contract` (tensorfs#111). Every stand-in above spells `contract`,
-    # which short-circuits before `digest` is ever reached — so none of them
-    # can catch the defect that actually shipped: reading the bare 64-hex
-    # `digest` as the handle, which put `f1455f56…` where
-    # `sdxl.diffusers-bf16@1` belonged and made torchcg refuse the lane. This
-    # is the producer half of a cross-repo wire agreement, so the shape is
-    # pinned here rather than left to the one consumer that noticed.
+    # and NO `contract` (tensorfs#111). Reading the bare 64-hex `digest` as
+    # the handle put `f1455f56…` where `sdxl.diffusers-bf16@1` belonged and
+    # made torchcg refuse the lane. This is the producer half of a cross-repo
+    # wire agreement, so the shape is pinned here.
     class ShippedContract:
         __slots__ = ("digest", "dtype", "name", "stamp", "version")
 
@@ -229,29 +400,8 @@ def test_model_header_declarations_and_refusals() -> None:
 
     assert lane_handle(AnonymousContract()) == "sha256:" + "a" * 64
 
-    # pgw#1404: a floor over a lane this model does not declare no longer NEEDS
-    # a check — a floor is the value of its own lane key, so it cannot name a
-    # stamp the model does not serve. `requires=` is deleted, typed, and the
-    # refusal names the merged spelling.
-    with pytest.raises(ModelDeclarationError, match="requires.*is DELETED"):
-        class StrayFloor(Model[SDXL], lanes=(), requires={"sdxl.other@1": "vram8g"}):
-            pass
-
-    # The merged spelling: one dict, lane -> VRAM floor. The compute-capability
-    # floor is DERIVED from the contract's dtype and is NOT author-writable
-    # (Paul 2026-08-18: "the sm_x compute floor should fall out of the contract
-    # itself... Only the VRAM requirement needs a separate annotation").
-    from gen_worker._vendor.tensorfs import contracts as _contracts
-
-    with pytest.raises(ModelDeclarationError, match="min_sm is DERIVED"):
-        class HandWrittenSm(
-            Model[SDXL], lanes={_contracts.SDXL_DIFFUSERS_BF16: "vram8g, sm90+"}
-        ):
-            pass
-
     # Cheap __init__: constructing a model does not load anything.
-    instance = EagerPermanent()
-    assert not vars(instance)
+    assert not vars(EagerModel())
 
 
 # Malformed-signature specimens: defined at module level (the contract is
@@ -267,7 +417,7 @@ class _Out(msgspec.Struct):
     ok: bool = True
 
 
-class _M(Model[SDXL], lanes=()):
+class _M(Model[SDXL], lanes={_sdxl_contract(): _lane()}):
     pass
 
 

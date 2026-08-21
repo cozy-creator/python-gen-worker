@@ -171,45 +171,6 @@ def serving_device() -> str:
     return "cpu"
 
 
-def declared_vram_bytes(model_cls: type, lane: Any) -> int:
-    """Bytes of the VRAM floor lane ``lane`` of ``model_cls`` DECLARES; 0 for
-    an undeclared floor, an eager-permanent model, or a lane this class does
-    not name.
-
-    THE FOURTH READ OF THE SAME NUMBER (pgw#1590), and the reason this lives
-    beside :func:`shortfalls` rather than in the residency engine. The module
-    header lists three readers; serving ADMISSION was a fourth reader that had
-    no access to the declaration, so it invented its own answer to "how much of
-    a card does this lane need" — the whole checkpoint tree at its STORED
-    precision, plus 25%. Two producers of one fact, and they disagreed by 2x on
-    minimax-h3: the hub bought an H100 because the lane declares ``vram78g``,
-    and the worker on that H100 then refused the lane as needing 180 GB.
-
-    The declaration wins, because it is the only one of the two that can see
-    what the load path actually does. H3's DiT is stored bf16 and `quantize_()`
-    d to w8a8 inside ``setup()``; a text encoder may never reach the card at
-    all. Neither is visible in a manifest, and both are visible to the author
-    who wrote the floor.
-
-    GiB, like every other read of this term (:class:`DeviceFacts` compares it
-    against ``total_memory / 2**30``) — one spelling, one conversion.
-    """
-
-    from .model import lane_handle, model_requires
-
-    if lane is None:
-        return 0  # eager-permanent: no lane, so no lane floor
-    try:
-        requirements = model_requires(model_cls).get(lane_handle(lane))
-    except Exception:  # noqa: BLE001 — a floor read never costs an admission
-        logger.debug("declared_vram_bytes: unreadable lane", exc_info=True)
-        return 0
-    if requirements is None:
-        return 0
-    gib = float(requirements.min_terms().min_vram_gb or 0.0)
-    return int(gib * _BYTES_PER_GIB) if gib > 0 else 0
-
-
 def shortfalls(
     model_cls: type, lane: Any, *, facts: Optional[DeviceFacts] = None
 ) -> Tuple[Shortfall, ...]:
@@ -285,7 +246,6 @@ __all__ = [
     "ACTIVITY_KIND",
     "DeviceFacts",
     "Shortfall",
-    "declared_vram_bytes",
     "device_facts",
     "serving_device",
     "shortfalls",

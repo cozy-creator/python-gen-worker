@@ -12,7 +12,8 @@ from typing import Any
 import msgspec
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import STATIC, LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker.demand import MiB, const, per_mp_batch
 from lane_contracts import TINY_DIFFUSERS_FP32
 
 
@@ -24,7 +25,13 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-class BadMark(Model[Any], lanes=(TINY_DIFFUSERS_FP32,)):
+class BadMark(
+    Model[Any],
+    lanes={TINY_DIFFUSERS_FP32: lane(
+        request=const(MiB(64)) + per_mp_batch(MiB(16)),
+    )},
+    shapes={"aspect": STATIC},
+):
     pipe: Any
 
     def load(self, ctx: LoadContext[Any]) -> None:

@@ -1,17 +1,25 @@
-"""tiny_endpoint's TWIN, identical but for the LANE DECLARATION (pgw#1488).
+"""tiny_endpoint's TWIN — the graph-hash CONTROL (pgw#1488, re-based pgw#1599).
 
-Every line below is `tiny_endpoint.py`'s, with one difference: the model class
-declares `lanes=()` — no layout contract at all — where the original names
-`TINY_DIFFUSERS_FP32`. So the two derives run the same code, the same
-payload enumeration and the same precision, and differ only in what the lane
-is CALLED.
+What this fixture used to be: `tiny_endpoint.py` with `lanes=()`, so the derive
+INVENTED a lane name (`derived.sdxl@1`) and the two modules differed only in
+what the lane was CALLED. That measured the wire-compatibility claim —
+`cg-graph-v1` is a content hash of the canonical trace plus its ingress and
+passes and `cg-key-v1` is (graph, sm, toolchain), so the contract handle is in
+NEITHER, and a lane could be left undeclared without rekeying a single existing
+artifact.
 
-That is the wire-compatibility measurement the ruling needs. `cg-graph-v1` is
-a content hash of the canonical trace plus its ingress and passes, and
-`cg-key-v1` is (graph, sm, toolchain): the contract handle is in NEITHER. The
-test asserts what that predicts — byte-identical graph hashes across the two
-fixtures, under two different lane names — which is why declaring a contract
-can be made optional without rekeying a single existing artifact.
+pgw#1599 DELETED the premise: `lanes=` is required, `lanes=()` is refused, and
+there is no derived lane to compare a declared one against. So this module now
+declares `TINY_DIFFUSERS_FP32` exactly as `tiny_endpoint.py` does, and what it
+still exercises is the OTHER half of the same measurement — two independently
+declared modules, identical code, identical demand formula and identical shape
+declaration, must derive byte-identical graph hashes. Nothing in the key comes
+from the module, and this is the control that says so.
+
+NOTE: with the derived lane gone this file is now byte-for-byte
+`tiny_endpoint.py` apart from this docstring. If the graph-hash control is not
+worth a second copy of the fixture, delete the module rather than inventing a
+new difference for it to carry.
 """
 
 
@@ -25,6 +33,7 @@ import torch
 from diffusers import StableDiffusionPipeline
 
 from gen_worker import (
+    STATIC,
     Adapter,
     DistillationAdapter,
     ImageAsset,
@@ -33,8 +42,11 @@ from gen_worker import (
     RequestContext,
     ValidationError,
     entrypoint,
+    lane,
 )
+from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
+from lane_contracts import TINY_DIFFUSERS_FP32
 
 
 class Size(StrEnum):
@@ -64,7 +76,13 @@ class ImageOutput(msgspec.Struct):
     model_used: str
 
 
-class TinyModel(Model[SDXL], lanes=()):
+class TinyModel(
+    Model[SDXL],
+    lanes={TINY_DIFFUSERS_FP32: lane(
+        request=const(MiB(64)) + per_mp_batch(MiB(16)),
+    )},
+    shapes={"aspect": STATIC},
+):
     pipe: Any
 
     def load(self, ctx: LoadContext[SDXL]) -> None:

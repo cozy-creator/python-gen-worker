@@ -14,7 +14,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..release.derive import DYNAMIC_AXES
 
 
 def add_subparser(sub: Any) -> None:
@@ -75,17 +74,11 @@ def add_subparser(sub: Any) -> None:
         default=None,
         help="write the document bytes here (default: stdout)",
     )
-    # pgw#1548: see `release.derive.DYNAMIC_AXES`. OFF by default — a dynamic
-    # axis re-keys every graph in the lane, and whether it is free is measured
-    # per model, not assumed.
-    derive.add_argument(
-        "--dynamic-axes",
-        choices=list(DYNAMIC_AXES),
-        default="off",
-        help="export these axes as torch.export Dims instead of one graph per "
-        "observed shape: `batch` collapses the CFG axis, `aspect` collapses "
-        "the aspect-ratio buckets, `all` both (default: off)",
-    )
+    # pgw#1599: `--dynamic-axes` is DELETED. Which axis is worth collapsing is
+    # a MEASURED, per-model question (pgw#1548), so it is declared on the model
+    # class that measured it (`shapes={"aspect": DYNAMIC}`) — a CLI flag
+    # re-keyed every graph in the fleet from one word and left no record on the
+    # model of what was chosen or why.
     derive.set_defaults(_handler=_run_derive)
 
 
@@ -140,7 +133,6 @@ def _run_derive(args: argparse.Namespace) -> int:
             lockfile=lockfile,
             graph_cas=Path(args.graph_cas).resolve() if args.graph_cas else None,
             slot_checkpoints=trees,
-            dynamic_axes=args.dynamic_axes,
         )
     except DeriveError as exc:
         print(f"derive error: {exc}", file=sys.stderr)
@@ -163,13 +155,14 @@ def _run_derive(args: argparse.Namespace) -> int:
     for skipped in result.unservable_payloads:
         print(f"payload SKIPPED (unservable): {skipped}", file=sys.stderr)
     if result.eager_permanent:
-        # pgw#1392: two different reasons reach "no lanes" and the log must
-        # not conflate them — a model held eagerly (`lanes=()`), or NO MODEL
-        # AT ALL (a weightless endpoint: nothing to hold).
+        # pgw#1392: two different reasons reach "no graphs" and the log must
+        # not conflate them — a model that MARKS nothing (it declares real
+        # lanes like every model does; the absent `ctx.compile` mark is the
+        # whole statement), or NO MODEL AT ALL (a weightless endpoint).
         why = (
             "no model class -- weightless endpoint, nothing to compile"
             if result.weightless
-            else "no lanes -- explicit eager-permanent document"
+            else "no graphs -- load() marks no ctx.compile target"
         )
         print(f"{result.endpoint}: {why}", file=sys.stderr)
     for lane_name, hashes in result.lane_graphs.items():

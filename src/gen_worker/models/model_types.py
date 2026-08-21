@@ -128,8 +128,8 @@ from .._vendor.tensorfs import contracts as _tensorfs_contracts
 
 
 class TensorLayoutContract(Protocol):
-    """What ``canonical_contract`` is typed against: the tensorfs ``Contract``
-    surface a lane header, discovery and derive all read."""
+    """The tensorfs ``Contract`` surface a ``lanes=`` header, discovery and
+    derive all read."""
 
     @property
     def stamp(self) -> str: ...
@@ -517,7 +517,7 @@ Z_IMAGE_DIFFUSERS_BF16: Final = _library("z-image.diffusers-bf16", 1)
 
 #: REAL as of tensorfs#124 — FLUX.2 Klein's own transformer-only lane document
 #: (29 declarations). This is what makes ``flux.2-klein-4b``/``-9b``
-#: migratable, and it is what ``Flux2Klein.canonical_contract`` points at.
+#: migratable — the document ``flux.2-klein-*`` names in its ``lanes=``.
 FLUX2_KLEIN_DIFFUSERS_BF16: Final = _library("flux2-klein.diffusers-bf16", 1)
 
 #: REAL as of tensorfs#137 — InternVL-U's generation-decoder lane document (46
@@ -591,7 +591,7 @@ FLUX1_DIFFUSERS_BF16: Final = _library("flux1.diffusers-bf16", 1)
 
 #: REAL, and the only shipped document whose own ``description`` names the Flux
 #: family — but it is a FRAGMENT, not a lane document, and nothing here points
-#: a ``canonical_contract`` at it any more (see ``FLUX1_DIFFUSERS_BF16``). It
+#: any ``lanes=`` header at it (see ``FLUX1_DIFFUSERS_BF16``). It
 #: declares no top-level ``dtype`` on purpose, as the two ``sdxl.clip-g-*``
 #: component fragments do, so claiming it as a serve lane refuses at
 #: declaration instead of reading ``None`` at load.
@@ -668,11 +668,6 @@ class ModelType(Generic[D_co]):
 
     name: ClassVar[str] = ""
     contracts: ClassVar[tuple[str, ...]] = ()
-    #: The lane an endpoint gets when ``lanes=`` is omitted. None for an
-    #: AUXILIARY type whose bytes have no canonical tensorfs layout contract
-    #: yet (Rife) — the same "do not invent" rule that leaves
-    #: ``canonical_scheduler_config`` empty for SD2/HiDreamO1/Wan22.
-    canonical_contract: ClassVar[TensorLayoutContract | None] = None
     #: The architecture's TRAINING-TIME scheduler config (the standard
     #: scheduler_config.json content) — an architecture fact beside the
     #: fingerprint (Paul's ruling, 2026-08-18: the endpoint layer-3 scheduler
@@ -1586,7 +1581,7 @@ class MusicGenDefaults(msgspec.Struct, frozen=True):
     NO ``steps`` field — an AR decoder has no denoising steps to clamp; length
     is token count, which rides ``duration_s`` on the wire and snaps to
     EnCodec's 50 Hz frame grid as a ``ctx.adjusted`` row
-    (``musicgen/main.py:141-146``). NO ``canonical_contract`` and NO
+    (``musicgen/main.py:141-146``). NO LANE DOCUMENT yet and NO
     ``canonical_scheduler_config``: there is no scheduler at all, and the
     checkpoint is a single-file ``transformers`` tree for which the hub
     records NO ``file_layout`` — which th#1937/th#2109 rule CORRECT for a
@@ -1877,7 +1872,6 @@ class SDXL(ModelType[SdxlDefaults]):
 
     name = "sdxl"
     contracts = ("sdxl.*",)
-    canonical_contract = SDXL_DIFFUSERS_BF16
     canonical_scheduler_config = SDXL_SCHEDULER_CONFIG
     # TypeAlias so `config: SDXL.Config` is a valid annotation (main_v2.py).
     Config: TypeAlias = SdxlConfig
@@ -1893,7 +1887,6 @@ class SD15(ModelType[Sd15Defaults]):
 
     name = "sd15"
     contracts = ("sd15.*",)
-    canonical_contract = SD15_DIFFUSERS_BF16
     canonical_scheduler_config = SD15_SCHEDULER_CONFIG
     Config: TypeAlias = Sd15Config
     Defaults = Sd15Defaults
@@ -1909,7 +1902,6 @@ class SD2(ModelType[Sd2Defaults]):
 
     name = "sd2"
     contracts = ("sd2.*",)
-    canonical_contract = SD2_DIFFUSERS_BF16
     Defaults = Sd2Defaults
 
 
@@ -1918,7 +1910,6 @@ class HiDreamO1(ModelType[HiDreamO1Defaults]):
 
     name = "hidream-o1"
     contracts = ("hidream-o1.*",)
-    canonical_contract = HIDREAM_O1_DIFFUSERS_BF16
     Defaults = HiDreamO1Defaults
 
 
@@ -1928,7 +1919,6 @@ class Wan22(ModelType[Wan22Defaults]):
 
     name = "wan22"
     contracts = ("wan22.*",)
-    canonical_contract = WAN22_DIFFUSERS_BF16
     Defaults = Wan22Defaults
 
 
@@ -1942,7 +1932,6 @@ class MiniMaxH3(ModelType[MiniMaxH3Defaults]):
 
     name = "minimax-h3"
     contracts = ("minimax.h3-*",)
-    canonical_contract = MINIMAX_H3_DIT_DIFFUSERS
     Defaults = MiniMaxH3Defaults
 
 
@@ -1953,8 +1942,8 @@ class InternVLU(ModelType[InternVLUDefaults]):
     that is the name the endpoint's own ``register_family("internvl-u", ...)``
     call uses, and it is what the hub's family column carries.
 
-    ``canonical_contract`` is REAL (tensorfs#137), not a sentinel, and it points
-    at the generation decoder alone — the compile subject and the only component
+    Its lane document is REAL (tensorfs#137), not a sentinel, and it describes
+    the generation decoder alone — the compile subject and the only component
     that identifies this family. See :data:`INTERNVL_U_DIFFUSERS_BF16` for the
     two measured exclusions.
 
@@ -1969,7 +1958,6 @@ class InternVLU(ModelType[InternVLUDefaults]):
 
     name = "internvl-u"
     contracts = ("internvl-u.*",)
-    canonical_contract = INTERNVL_U_DIFFUSERS_BF16
     canonical_scheduler_config = INTERNVL_U_SCHEDULER_CONFIG
     Defaults = InternVLUDefaults
 
@@ -2081,7 +2069,6 @@ class Flux1(ModelType[Flux1Defaults]):
 
     name = "flux1"
     contracts = ("flux1.*",)
-    canonical_contract = FLUX1_DIFFUSERS_BF16
     Defaults = Flux1Defaults
 
 
@@ -2093,7 +2080,6 @@ class Flux2Klein(ModelType[Flux2KleinDefaults]):
 
     name = "flux2-klein"
     contracts = ("flux2-klein.*",)
-    canonical_contract = FLUX2_KLEIN_DIFFUSERS_BF16
     canonical_scheduler_config = FLUX2_KLEIN_SCHEDULER_CONFIG
     Defaults = Flux2KleinDefaults
 
@@ -2101,7 +2087,7 @@ class Flux2Klein(ModelType[Flux2KleinDefaults]):
 class Krea2(ModelType[Krea2Defaults]):
     """Krea 2 (Raw + TDM Turbo).
 
-    NO ``canonical_contract``, and uniquely in se#769 the reason is not merely
+    NO LANE DOCUMENT, and uniquely in se#769 the reason is not merely
     that tensorfs ships no ``krea-2.*`` document yet: **the checkpoints are not
     in the hub at all.** krea-2 is ``wave: blocked`` on ie#632
     (``e2e/manifests/fleet.yaml:497-505``) for a MIRROR defect —
@@ -2130,7 +2116,7 @@ class Krea2(ModelType[Krea2Defaults]):
 class Anima(ModelType[AnimaDefaults]):
     """Anima — Cosmos-Predict2-2B backbone, DiffSynth-native split checkpoint.
 
-    NO ``canonical_contract`` yet: the ``anima.*`` lane document is owed and its
+    NO LANE DOCUMENT yet: the ``anima.*`` document is owed (tensorfs#130) and its
     header evidence is already derived (685 flat-BF16 tensors in
     ``split_files/diffusion_models/anima-base-v1.0.safetensors``). It lands in
     the same commit as the document.
@@ -2180,7 +2166,7 @@ class Anima(ModelType[AnimaDefaults]):
 class Ernie(ModelType[ErnieDefaults]):
     """Baidu ERNIE-Image (base + step-distilled Turbo).
 
-    NO ``canonical_contract`` yet: the ``ernie.*`` lane document is owed and its
+    NO LANE DOCUMENT yet: the ``ernie.*`` document is owed (tensorfs#130) and its
     header evidence is derived (409 flat-BF16 tensors over 8 transformer
     shards, ``layers.{0..35}``). It lands in the same commit as the document.
 
@@ -2217,7 +2203,6 @@ class QwenImage(ModelType[QwenImageDefaults]):
 
     name = "qwen-image"
     contracts = ("qwen-image.*",)
-    canonical_contract = QWEN_IMAGE_DIFFUSERS_BF16
     canonical_scheduler_config = QWEN_IMAGE_SCHEDULER_CONFIG
     Defaults = QwenImageDefaults
 
@@ -2228,7 +2213,6 @@ class ZImage(ModelType[ZImageDefaults]):
 
     name = "z-image"
     contracts = ("z-image.*",)
-    canonical_contract = Z_IMAGE_DIFFUSERS_BF16
     canonical_scheduler_config = Z_IMAGE_SCHEDULER_CONFIG
     Defaults = ZImageDefaults
 class StableAudio(ModelType[StableAudioDefaults]):
@@ -2250,7 +2234,6 @@ class StableAudio(ModelType[StableAudioDefaults]):
 
     name = "stable-audio"
     contracts = ("stable-audio.*",)
-    canonical_contract = STABLE_AUDIO_DIFFUSERS_FP16
     canonical_scheduler_config = STABLE_AUDIO_SCHEDULER_CONFIG
     Defaults = StableAudioDefaults
 
@@ -2258,7 +2241,7 @@ class StableAudio(ModelType[StableAudioDefaults]):
 class MusicGen(ModelType[MusicGenDefaults]):
     """Meta MusicGen text-to-music — name + fingerprint + ``Defaults`` only.
 
-    NO ``canonical_contract``, deliberately, and NOT as a placeholder: this is
+    NO LANE DOCUMENT, deliberately, and NOT as a placeholder: this is
     the :class:`Rife` shape and the se#769 ratification behind it — when a
     family genuinely has no lane, declare NO contract rather than a
     ``MissingContract`` sentinel, which is "a standing lie with a to-do
@@ -2295,7 +2278,6 @@ class Trellis2(ModelType[Trellis2Defaults]):
 
     name = "trellis2"
     contracts = ("trellis2.*",)
-    canonical_contract = TRELLIS2_DIT_BF16
     Defaults = Trellis2Defaults
 
 
@@ -2357,7 +2339,6 @@ class Ltx2(ModelType[Ltx2Defaults]):
 
     name = "ltx-2"
     contracts = ("ltx-2.*",)
-    canonical_contract = LTX2_DIFFUSERS_BF16
     canonical_scheduler_config = LTX2_SCHEDULER_CONFIG
     Defaults = Ltx2Defaults
 
@@ -2380,7 +2361,7 @@ class Ltx2Upsampler(ModelType[Ltx2UpsamplerDefaults]):
     clause: those modules "diff to nothing but the type name and one VRAM
     floor", and these diff to everything.
 
-    NO ``canonical_contract`` AND NO ``MissingContract`` SENTINEL. Its artifact
+    NO LANE DOCUMENT AND NO ``MissingContract`` SENTINEL. Its artifact
     is a plain diffusers-layout repo and inventing a tensorfs contract name for
     it would be a guess; a sentinel would be a standing lie with a to-do
     attached, where absence is simply honest. ``Model[Ltx2Upsampler]`` therefore
@@ -2396,7 +2377,7 @@ class Ltx2Upsampler(ModelType[Ltx2UpsamplerDefaults]):
 class JoyCaption(ModelType[JoyCaptionDefaults]):
     """JoyCaption — the LLaVA image captioner ``joycaption`` serves.
 
-    NAME + FINGERPRINT + ``Defaults`` ONLY. **No ``canonical_contract``, and
+    NAME + FINGERPRINT + ``Defaults`` ONLY. **No lane document, and
     deliberately not a :class:`MissingContract` sentinel either** — the
     :class:`MusicGen` / :class:`Hunyuan3d` shape, ratified under the se#769
     umbrella: when a family genuinely has no lane, declare NO contract rather

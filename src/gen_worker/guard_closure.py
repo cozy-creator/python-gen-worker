@@ -316,9 +316,6 @@ def contract_pins(
     text_len = getattr(cfg, "text_len", None)
     if text_len is not None:
         ints.add(int(text_len))
-    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-    if bucket:
-        ints.add(bucket)
     dynamic = tuple(getattr(cfg, "dynamic", ()) or ())
     for d in dynamic:
         ints.add(int(getattr(d, "min", 0)))

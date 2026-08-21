@@ -184,11 +184,19 @@ def test_an_adapter_slot_is_still_exempt() -> None:
 # --------------------------------------------------------------------------- #
 
 
+from gen_worker import lane  # noqa: E402
+from gen_worker._vendor.tensorfs import contracts as _tfs_contracts  # noqa: E402
+from gen_worker.demand import GiB, const  # noqa: E402
 from gen_worker.models import Trellis2  # noqa: E402
 from gen_worker.serving.model import Model  # noqa: E402
 
+#: pgw#1599: `lanes=` is REQUIRED on every model class, so every specimen in
+#: this file names Trellis2's real document. That is orthogonal to what these
+#: tests are about (`self_loading=`), which is the point of the last test here.
+_TRELLIS_LANES = {_tfs_contracts.TRELLIS2_DIT_BF16: lane(request=const(GiB(1)))}
 
-class PlainWithLoad(Model[Trellis2]):
+
+class PlainWithLoad(Model[Trellis2], lanes=_TRELLIS_LANES):
     """Unmarked, with a readable ctx.load — the control for the marker."""
 
     def load(self, ctx):  # type: ignore[no-untyped-def]
@@ -197,6 +205,7 @@ class PlainWithLoad(Model[Trellis2]):
 
 class MarkedAndReadable(
     Model[Trellis2],
+    lanes=_TRELLIS_LANES,
     self_loading="claims ctx.load cannot drive it",
 ):
     """Declares the marker AND calls ctx.load — a contradiction, and the thing
@@ -218,9 +227,9 @@ def _marked_model(reason="bespoke pipeline.json loader; ctx.load drives neither 
     from gen_worker.models import Trellis2
     from gen_worker.serving.model import Model
 
-    namespace = {"Model": Model, "Trellis2": Trellis2}
+    namespace = {"Model": Model, "Trellis2": Trellis2, "LANES": _TRELLIS_LANES}
     exec(  # noqa: S102 - the class header IS the thing under test
-        "class Marked(Model[Trellis2], self_loading=%r):\n"
+        "class Marked(Model[Trellis2], lanes=LANES, self_loading=%r):\n"
         "    def load(self, ctx):\n"
         "        self.pipe = object()\n" % reason,
         namespace,
@@ -276,32 +285,42 @@ def test_the_marker_demands_a_reason() -> None:
     from gen_worker.models import Trellis2
     from gen_worker.serving.model import Model, ModelDeclarationError
 
-    namespace = {"Model": Model, "Trellis2": Trellis2}
+    namespace = {"Model": Model, "Trellis2": Trellis2, "LANES": _TRELLIS_LANES}
     for bad in ("", "   ", 123):
         with pytest.raises(ModelDeclarationError):
             exec(  # noqa: S102
-                "class B(Model[Trellis2], self_loading=%r):\n    pass" % (bad,),
+                "class B(Model[Trellis2], lanes=LANES, self_loading=%r):\n"
+                "    pass" % (bad,),
                 dict(namespace),
             )
 
 
 def test_the_marker_is_ORTHOGONAL_to_lanes() -> None:
-    """A self-loading model still has weights, still has a lane, still needs a
-    VRAM floor. `trellis-3d` declares both; coupling them would strand its
-    floor the way pgw#1423 strands hunyuan's."""
+    """A self-loading model still has weights, still has a lane, still has a
+    demand formula. `trellis-3d` declares both; coupling them would strand its
+    declaration the way pgw#1423 strands hunyuan's.
+
+    pgw#1599: the VRAM FLOOR half of this test is gone with the strings — a
+    lane's memory statement is now its demand FORMULA, and the placement row
+    carries only the floor DERIVED from the contract dtype."""
     from gen_worker._vendor.tensorfs import contracts
 
     from gen_worker.models import Trellis2
-    from gen_worker.serving.model import LANES_ATTR, REQUIRES_ATTR, Model
+    from gen_worker.serving.model import Model, model_declared_lanes
 
-    namespace = {"Model": Model, "Trellis2": Trellis2, "contracts": contracts}
+    namespace = {
+        "Model": Model, "Trellis2": Trellis2, "contracts": contracts,
+        "lane": lane, "const": const, "GiB": GiB,
+    }
     exec(  # noqa: S102
         "class Both(Model[Trellis2],\n"
-        "           lanes={contracts.TRELLIS2_DIT_BF16: 'vram24g'},\n"
+        "           lanes={contracts.TRELLIS2_DIT_BF16: lane(\n"
+        "               request=const(GiB(2)))},\n"
         "           self_loading='bespoke loader'):\n"
         "    pass",
         namespace,
     )
-    both = namespace["Both"]
-    assert [c.stamp for c in getattr(both, LANES_ATTR)] == ["trellis2.dit-bf16@1"]
-    assert "min_vram_gb=24.0" in repr(getattr(both, REQUIRES_ATTR))
+    (declared,) = model_declared_lanes(namespace["Both"])
+    assert declared.contract_id == "trellis2.dit-bf16@1"
+    assert declared.request.coefficients() == {"const": GiB(2)}
+    assert namespace["Both"].__cozy_self_loading__ == "bespoke loader"

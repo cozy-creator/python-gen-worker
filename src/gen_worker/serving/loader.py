@@ -48,10 +48,11 @@ class LoadedEndpoint:
 
     def lane(self, model_cls: type, contract: str = "") -> Any:
         """The active lane for one model class: the deploy's pick by
-        contract handle, or the single declared lane. ``None`` only for a
-        model that declares ``eager_only="<why>"`` (pgw#1488). Ambiguity refuses —
-        a multi-lane model's active lane is the deploy's pick, never a
-        default."""
+        contract handle, or the single declared lane.
+
+        pgw#1599: `lanes=` is required, so the empty case is gone. Ambiguity
+        still refuses — a multi-lane model's active lane is the RESOLVER's
+        pick (pgw#1606's boot-time ladder), never a default chosen here."""
         lanes = self.lanes_of(model_cls)
         if not lanes:
             return None

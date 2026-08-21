@@ -16,11 +16,11 @@ did not matter when it was scratch output:
   drift and reporting it as drift trains people to ignore the check.
 
 Integration through the real CLI against a real endpoint project on disk — no
-mocks. The endpoint declares NO layout contract and marks NO compile target,
-which is deliberate on both counts: it is pgw#1488's traced-by-default state
-(before this change the derive refused the class outright), and it keeps the
+mocks. The endpoint declares a REAL layout contract (pgw#1599 makes `lanes=`
+required, real documents only) and marks NO compile target, which keeps the
 gate's own test off the export path so a lock/`--check` regression cannot hide
-behind a torch failure.
+behind a torch failure. The absent `ctx.compile` mark IS the eager
+declaration — there is no keyword for it.
 """
 
 from __future__ import annotations
@@ -39,11 +39,14 @@ from __future__ import annotations
 
 import msgspec
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker._vendor.tensorfs import contracts
+from gen_worker.demand import GiB, const
 
 
 class Unlaned(msgspec.Struct):
-    """A model type with no canonical contract."""
+    """The fixture's model type. It borrows nothing — the class header below
+    names the contract, which is the only place a lane can come from."""
 
     steps: int = 4
 
@@ -58,9 +61,10 @@ class Out(msgspec.Struct):
 
 class UnlanedModel(
     Model[Unlaned],
+    lanes={contracts.SDXL_DIFFUSERS_BF16: lane(request=const(GiB(1)))},
     self_loading="a lock/--check gate fixture: there is no pipeline at all",
 ):
-    """No `lanes=`, no contract, no ctx.compile — and it locks."""
+    """A real lane, no ctx.compile mark — and it locks."""
 
     def load(self, ctx: LoadContext[Unlaned]) -> None:
         self.ready = True
@@ -76,8 +80,11 @@ def _write_endpoint(root: Path, *, extra_field: str = "") -> None:
     package = root / "src" / "lockcheck_fixture"
     package.mkdir(parents=True, exist_ok=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
+    # `.replace`, not `.format`: the source now contains real dict braces
+    # (`lanes={contracts.…: lane(…)}`) and `str.format` would read them as
+    # fields.
     (package / "main.py").write_text(
-        MAIN.format(extra_field=extra_field), encoding="utf-8"
+        MAIN.replace("{extra_field}", extra_field), encoding="utf-8"
     )
     (root / "endpoint.toml").write_text(
         'schema_version = 1\nmain = "lockcheck_fixture.main"\n', encoding="utf-8"
@@ -147,7 +154,7 @@ def test_lock_is_deterministic_and_check_gates_on_the_document(
     assert code == 0
     first = lock.read_bytes()
     assert summary["derive"] == "traced"
-    # pgw#1488: the trace RAN on a contract-less class and found nothing
+    # pgw#1599: the trace RAN on a lane-declaring class and found nothing
     # marked. That is a posture with a name, not silence.
     assert summary["posture"] == "traced-no-compile-targets"
     assert summary["specializations"] == 0

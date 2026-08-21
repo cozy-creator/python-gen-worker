@@ -114,28 +114,65 @@ def test_the_envelope_serves_end_to_end_with_fake_tensors(tmp_path: Path) -> Non
     # The instance is resident under its reservation (weights + headroom).
     assert manager.tier_of(DREAM, "SdxlModel/sdxl.diffusers-bf16@1") is Tier.VRAM
 
-    # pgw#1404 degraded mode, end to end on the REAL serve path. This test host
-    # has no CUDA device at all, and the fixture's bf16 lane declares vram12g —
-    # so the machine is under the floor by every measure. Paul, 2026-08-18:
-    # "we should be able to place any model on any machine; if the machine is a
-    # poor match, it will complain and warn loudly when it enters degraded
-    # mode, but still run anyway." Both halves are asserted here: the request
-    # SUCCEEDED (everything above this line), and it says why it will be slow.
-    assert len(outcome.warnings) == 1
-    warning = outcome.warnings[0]
-    assert warning.startswith("DEGRADED PLACEMENT: ")
-    assert "sdxl.diffusers-bf16@1" in warning  # the lane
-    assert "12.0 GiB" in warning               # the declared floor
-    assert "0.0 GiB" in warning                # what this machine actually has
-    assert "cpu (no CUDA device)" in warning   # the card
-    assert "Running anyway" in warning         # the consequence, not a refusal
-    # It rides the adjustment ledger (JobResult.adjustments), field-less, so
-    # the hub records it against the request rather than the caller inferring
-    # it from a latency graph.
-    assert [
-        row for row in outcome.adjustments
-        if row["field"] == "" and row["reason"] == warning
-    ]
+    # pgw#1404 degraded mode, end to end on the REAL serve path — and pgw#1599
+    # narrowed WHAT can trigger it, which is asserted here rather than left to
+    # be discovered on a pod.
+    #
+    # Paul, 2026-08-18: "we should be able to place any model on any machine;
+    # if the machine is a poor match, it will complain and warn loudly when it
+    # enters degraded mode, but still run anyway." The half that matters most
+    # is intact and is everything above this line: THE REQUEST SUCCEEDED on a
+    # host with no CUDA device at all.
+    #
+    # The warning half has ONE input now instead of two. This fixture's lanes
+    # are float32 stand-ins (CPU, fake weights), so `capability_floor_for_dtype`
+    # derives NO floor for them and there is no VRAM floor left to be under:
+    # the string that used to say `vram12g` is deleted, and the number that
+    # replaces it is COMPUTED from the lane's demand formula over the
+    # advertised shape envelope (pgw#1600), which is not wired yet.
+    #
+    # So this asserts the honest present state — no floor declared, no
+    # shortfall reported — and the test below proves the surviving `min_sm`
+    # arm can still go RED, so a silently-dead instrument cannot hide here.
+    assert outcome.warnings == ()
+    assert not [row for row in outcome.adjustments if row["field"] == ""]
+
+
+def test_the_degraded_placement_warning_can_still_go_red(tmp_path: Path) -> None:
+    """The instrument is NARROWED, not dead (pgw#1599).
+
+    Its VRAM arm lost its input with the floor strings and gets it back as a
+    COMPUTED number in pgw#1600. Its `min_sm` arm is untouched and still
+    derived from the lane contract's own dtype — so a real bf16 lane on a
+    machine with no CUDA device still warns, loudly, and still serves.
+
+    Written as its own test on purpose: "the warning did not fire" is only
+    honest evidence when something else proves it CAN.
+    """
+    from gen_worker._vendor.tensorfs import contracts
+    from gen_worker.serving.placement import DeviceFacts, shortfalls
+    from gen_worker.serving.model import Model, model_requires
+    from gen_worker import lane
+    from gen_worker.demand import GiB, const
+    from gen_worker.models import SDXL
+
+    real_lane = contracts.SDXL_DIFFUSERS_BF16
+
+    class RealLaneModel(Model[SDXL], lanes={real_lane: lane(request=const(GiB(1)))}):
+        pass
+
+    # The floor is DERIVED from the contract's bf16 dtype, never written.
+    assert model_requires(RealLaneModel)[real_lane.stamp].min_terms().min_sm == 80
+
+    cpu_only = DeviceFacts(sm=0, vram_gib=0.0, name="cpu (no CUDA device)")
+    (shortfall,) = shortfalls(RealLaneModel, real_lane, facts=cpu_only)
+    assert shortfall.term == "min_sm"
+    assert "sdxl.diffusers-bf16@1" in shortfall.message
+    assert "Running anyway" in shortfall.message  # degrade, never refuse
+
+    # ...and a machine that MEETS the derived floor reports nothing.
+    h100 = DeviceFacts(sm=90, vram_gib=80.0, name="NVIDIA H100 80GB HBM3")
+    assert shortfalls(RealLaneModel, real_lane, facts=h100) == ()
 
 
 def test_adapters_ride_the_envelope_and_the_scopes_restore(tmp_path: Path) -> None:
@@ -272,7 +309,16 @@ def test_multi_model_slots_lease_in_stable_slot_name_order(tmp_path: Path) -> No
     assert outcome.result.served_by == "SlowModel+OtherModel"
     # STABLE slot-name order: "left" before "right", whatever the signature
     # order — the multi-model deadlock rule.
-    assert lease_order == ["OtherModel/eager", "SlowModel/eager"]
+    #
+    # pgw#1599: the lane half of each key is a REAL contract handle now. Both
+    # fixture classes used to key as `.../eager`, which was the residency key
+    # a lane-less model got — and `lanes=()` is deleted, so no model is
+    # lane-less any more. The ORDER is what this test is about and it is
+    # unchanged; the handles are asserted so a future re-keying is visible
+    # here rather than only in a store miss.
+    assert lease_order == [
+        "OtherModel/sdxl.diffusers-bf16@1", "SlowModel/sdxl.diffusers-bf16@1"
+    ]
 
 
 def test_single_flight_rides_the_lease_per_instance(tmp_path: Path) -> None:

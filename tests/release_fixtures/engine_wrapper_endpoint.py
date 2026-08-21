@@ -18,7 +18,8 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 from lane_contracts import TINY_DIFFUSERS_FP32
 
@@ -49,7 +50,18 @@ class Engine:
                 return
 
 
-class EngineModel(Model[SDXL], lanes=(TINY_DIFFUSERS_FP32,)):
+class EngineModel(
+    Model[SDXL],
+    lanes={TINY_DIFFUSERS_FP32: lane(
+        request=const(MiB(64)) + per_mp_batch(MiB(16)),
+    )},
+    # NO `shapes=`, and that is the fixture's second finding: the mark here is
+    # `Engine.compile_dit`'s, not `load`'s, so the AST reader that decides
+    # whether `shapes=` is required or refused (`load_marks_compile`) sees no
+    # `ctx.compile` in this class's `load` and declaring an axis would be a
+    # refusal. The derive still observes the graph — the mark is real at
+    # runtime — so a delegated mark keys graphs no header claims.
+):
     engine: Any
 
     def load(self, ctx: LoadContext[SDXL]) -> None:

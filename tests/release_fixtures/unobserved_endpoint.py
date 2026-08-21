@@ -12,7 +12,8 @@ from typing import Any
 import msgspec
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import STATIC, LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker.demand import MiB, const, per_mp_batch
 from lane_contracts import TINY_DIFFUSERS_FP32
 
 
@@ -24,7 +25,13 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-class UnobservedMark(Model[Any], lanes=(TINY_DIFFUSERS_FP32,)):
+class UnobservedMark(
+    Model[Any],
+    lanes={TINY_DIFFUSERS_FP32: lane(
+        request=const(MiB(64)) + per_mp_batch(MiB(16)),
+    )},
+    shapes={"aspect": STATIC},
+):
     # diffusers pipelines compose their components dynamically; the static
     # class carries no `unet`/`vae`.
     pipe: Any
