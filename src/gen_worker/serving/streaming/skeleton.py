@@ -366,13 +366,63 @@ def build(
     return Skeleton(pipeline=pipeline, modules=modules, passthrough=tuple(passthrough))
 
 
+def retie(module: "torch.nn.Module") -> bool:
+    """Re-establish this module's tied weights. Call AFTER streaming.
+
+    pgw#1626. A meta skeleton is built from a config alone, and construction
+    is the ONLY thing that runs: `from_config` / `cls(config)` under
+    :func:`init_empty_weights` never reaches `post_init()`, which is what
+    normally calls `tie_weights()`. So on the skeleton a tied pair is not one
+    tensor under two names — it is TWO INDEPENDENT META TENSORS, and the alias
+    has no container to fill it, because a correctly packaged checkpoint stores
+    the source alone. A `T5EncoderModel` stores `shared.weight` and not
+    `encoder.embed_tokens.weight`; that is what every T5 on the hub looks like.
+    Every T5-bearing pipeline on this loader — StableAudio, every FLUX.1
+    text_encoder_2 — therefore failed 100% of its invokes at `NameMismatch`,
+    with a message that blamed the checkpoint for a defect in the loader.
+
+    AFTER, not before: :func:`gen_worker.serving.streaming.engine._install`
+    REBINDS ``_parameters[leaf]`` to a freshly allocated Parameter, so a tie
+    established at build time would be broken by the very stream that fills
+    it — the alias would keep pointing at the old meta tensor.
+
+    Returns whether a tie ran. Not every component is a
+    ``transformers.PreTrainedModel``; a diffusers `ModelMixin` exposes no
+    `tie_weights` and needs none.
+    """
+    tie = getattr(module, "tie_weights", None)
+    if not callable(tie):
+        return False
+    tie()
+    return True
+
+
+def tied_names(module: "torch.nn.Module") -> Tuple[str, ...]:
+    """The parameter names this class declares to be ALIASES of another name.
+
+    Advisory, and for the refusal message only — never an exemption. A name
+    listed here that is STILL on meta after :func:`retie` means the tensor it
+    aliases was not filled either, which is a genuinely absent tensor and must
+    still be refused.
+    """
+    # A dict ({alias: source}, transformers 5) iterates its ALIASES; the older
+    # list form is already the alias names. One expression reads both.
+    declared = getattr(module, "_tied_weights_keys", None)
+    if not declared:
+        return ()
+    return tuple(sorted(str(name) for name in declared))
+
+
 def meta_survivors(module: "torch.nn.Module") -> Tuple[str, ...]:
     """Every parameter or buffer still on ``meta``.
 
     A survivor is never acceptable: it is a name the checkpoint did not carry,
     silently serving garbage on the first request. ``remove_duplicate=False``
     so a tied weight is reported under every name it answers to rather than
-    hiding behind whichever alias happened to be assigned.
+    hiding behind whichever alias happened to be assigned — which is sound
+    only once :func:`retie` has run and the tie actually EXISTS. Called on an
+    untied skeleton, the same flag manufactures the failure it was written to
+    detect.
     """
     left: List[str] = []
     for name, parameter in module.named_parameters(remove_duplicate=False):
@@ -384,4 +434,12 @@ def meta_survivors(module: "torch.nn.Module") -> Tuple[str, ...]:
     return tuple(sorted(left))
 
 
-__all__ = ["MODEL_INDEX", "Skeleton", "SkeletonError", "build", "meta_survivors"]
+__all__ = [
+    "MODEL_INDEX",
+    "Skeleton",
+    "SkeletonError",
+    "build",
+    "meta_survivors",
+    "retie",
+    "tied_names",
+]
