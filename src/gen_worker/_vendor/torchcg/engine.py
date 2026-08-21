@@ -19,6 +19,12 @@ from .declaration import (
     RuntimeCompatibility,
     _literal_digest_for,
 )
+from .dynamic import (
+    declared_symbol_ranges,
+    format_narrowing,
+    live_symbol_ranges,
+    narrowed_symbols,
+)
 from .host_isa import HostISAError, _admit_host
 from .identity import GRAPH_SPECIALIZATION_BLOCK, CompiledGraphKey, toolchain_axis_digest
 from .introspection import DeclaredConstant, declared_constants
@@ -107,6 +113,40 @@ def _compile_package(plan: _GraphSpecializationPlan, workspace: Path) -> Path:
         plan.declaration.name,
         files,
         workspace / "model.pt2",
+    )
+
+
+def _admit_symbol_ranges(plan: _GraphSpecializationPlan) -> None:
+    """Refuse an artifact compiled for a NARROWER range than its declaration.
+
+    tcg#78. Compiling shares the exported program's ShapeEnv, and the
+    decomposed graph's own guards can narrow a symbol's range -- a size-1
+    contiguity question on a batch axis guards ``>= 2``, and if that leaves a
+    single value the environment replaces the symbol with a constant. The
+    artifact then serves less than the lock promises, and the dispatcher,
+    reading the lock, sends it calls it cannot serve: an sd15 UNet whose batch
+    range collapsed this way returned a batch-2 tensor of garbage for a
+    batch-1 call and raised nothing.
+
+    This asks the question directly instead of hoping a digest notices. The
+    old guard was `declare() != declaration`, which caught the singleton case
+    ONLY because a replaced symbol happens to render differently -- a
+    narrowing that leaves two or more values moved no digest at all and shipped
+    green. Both are refused here, by name.
+    """
+
+    moved = narrowed_symbols(
+        declared_symbol_ranges(plan.spec.program),
+        live_symbol_ranges(plan.spec.program),
+    )
+    if not moved:
+        return
+    raise AdmissionError(
+        f"graph specialization {plan.declaration.name!r} compiled to a NARROWER "
+        f"range than it declares: {format_narrowing(moved)}. The compiled "
+        f"artifact cannot serve every shape the declaration admits, and the "
+        f"dispatcher guards on the declaration -- re-derive with a range the "
+        f"graph's own guards support (tcg#78)."
     )
 
 
@@ -324,6 +364,7 @@ class Engine:
             _admit_constant_table(plan, constants)
             literals = workspace / "constants.safetensors"
             literal_payload_values = _write_literals(plan.spec.program, constants, literals)
+            _admit_symbol_ranges(plan)
             if plan.spec.declare() != plan.declaration:
                 raise AdmissionError(
                     "exported program changed during compilation, packaging, "

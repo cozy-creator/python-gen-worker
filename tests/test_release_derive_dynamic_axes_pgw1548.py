@@ -91,34 +91,62 @@ def test_the_static_fan_is_the_default_and_is_unchanged(lanes: dict) -> None:
             assert all(isinstance(dim, int) for dim in row["shape"])
 
 
-def test_every_axis_dynamic_is_ONE_graph_for_the_whole_fan(lanes: dict) -> None:
-    (record,) = lanes["all"]["graphs"]
-    sample = next(
-        row for row in record["ingress"]["inputs"] if row["name"] == "sample"
-    )
-    batch, channels, height, width = sample["shape"]
-    assert channels == 4
-    symbols = record["ingress"]["symbols"]
-    assert symbols[batch] == [1, 2], "the CFG axis, as a range"
-    assert symbols[height] == [48, 80] and symbols[width] == [48, 80]
-    assert height != width, "H and W are two degrees of freedom"
+def test_every_axis_dynamic_collapses_the_aspect_fan(lanes: dict) -> None:
+    """Six specializations become TWO: the aspects collapse, CFG does not.
+
+    AMENDED BY tcg#78. This asserted ONE graph, with the CFG axis symbolic
+    over [1, 2] — and that graph could not be minted. Torch specializes the
+    sizes 0 and 1 rather than reason about them symbolically, so it guards
+    every dynamic dim `>= 2`; an axis observed at 1 and 2 is contradicted by
+    the graph's own guards the moment it is exported, and the artifact that
+    came out of compiling it answered a batch-1 call with a batch-2 tensor of
+    garbage and raised nothing. The derive now refuses that axis by name.
+
+    Refusing it costs the ASPECT collapse nothing, which is the point: the
+    aspect axis is the one this program is for (sdxl 18 -> 2).
+    """
+
+    graphs = lanes["all"]["graphs"]
+    assert len(graphs) == 2
+    for record in graphs:
+        sample = next(
+            row for row in record["ingress"]["inputs"] if row["name"] == "sample"
+        )
+        batch, channels, height, width = sample["shape"]
+        assert channels == 4
+        assert batch in (1, 2), "the CFG axis is concrete in each record"
+        symbols = record["ingress"]["symbols"]
+        assert symbols[height] == [48, 80] and symbols[width] == [48, 80]
+        assert height != width, "H and W are two degrees of freedom"
+    assert {
+        next(
+            row for row in record["ingress"]["inputs"] if row["name"] == "sample"
+        )["shape"][0]
+        for record in graphs
+    } == {1, 2}
 
 
 def test_ONE_axis_at_a_time_is_the_acceptance_gates_shape(lanes: dict) -> None:
     """Paul's gate adopts per axis, so the derive must be able to do that.
 
-    `batch` collapses the CFG pair and leaves the three aspect buckets
-    concrete (6 -> 3); `aspect` collapses the three buckets and leaves the two
-    CFG batches concrete (6 -> 2). WHICH axis moved is visible in the record.
+    `aspect` collapses the three buckets and leaves the two CFG batches
+    concrete (6 -> 2). WHICH axis moved is visible in the record.
+
+    AMENDED BY tcg#78: `batch` now collapses NOTHING and says so, because that
+    axis is the one torch's `>= 2` guard contradicts. The fan comes back whole
+    (6 -> 6) — which is also what this lane measured on the real sd15 endpoint
+    from the other direction: the batch axis removed ZERO specializations
+    (14 -> 14) even when it appeared to work. The gate's SHAPE is intact; the
+    axis that pays is `aspect`.
     """
 
-    assert len(lanes["batch"]["graphs"]) == 3
+    assert len(lanes["batch"]["graphs"]) == 6
     assert len(lanes["aspect"]["graphs"]) == 2
 
     for record in lanes["batch"]["graphs"]:
+        assert record["ingress"]["symbols"] == {}
         shape = record["ingress"]["inputs"][0]["shape"]
-        assert isinstance(shape[0], str), "batch is a symbol"
-        assert isinstance(shape[2], int) and isinstance(shape[3], int)
+        assert all(isinstance(dim, int) for dim in shape), "the axis was refused"
 
     for record in lanes["aspect"]["graphs"]:
         shape = record["ingress"]["inputs"][0]["shape"]
@@ -138,7 +166,13 @@ def test_the_dynamic_records_still_dispatch_every_observed_shape(
     from gen_worker._vendor.torchcg.document import GraphRecord
     from gen_worker._vendor.torchcg.ingress import CallIngress
 
-    raw = lanes["all"]["graphs"][0]
+    raw = next(
+        candidate
+        for candidate in lanes["all"]["graphs"]
+        if next(
+            row for row in candidate["ingress"]["inputs"] if row["name"] == "sample"
+        )["shape"][0] == 2
+    )
     record = GraphRecord(
         graph=raw["graph"],
         target=raw["target"],
@@ -167,10 +201,11 @@ def test_the_dynamic_records_still_dispatch_every_observed_shape(
         )
 
     for height, width in ((64, 64), (80, 48), (48, 80)):
-        for batch in (1, 2):
-            assert call(batch, height, width), f"{batch}x{height}x{width}"
+        assert call(2, height, width), f"2x{height}x{width}"
     # And refuses what it was never exported for — a dynamic record is a
-    # range, so an unobserved shape still falls to eager.
+    # range, so an unobserved shape still falls to eager. Batch is concrete
+    # here (tcg#78), so the other CFG mode is the OTHER record's business.
+    assert not call(1, 64, 64)
     assert not call(4, 64, 64)
     assert not call(2, 96, 96)
 

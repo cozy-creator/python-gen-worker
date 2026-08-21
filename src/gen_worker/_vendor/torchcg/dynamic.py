@@ -131,6 +131,224 @@ def _dims(flat: Sequence[tuple[str, tuple[Any, ...], Any]]) -> list[tuple[int, i
     ]
 
 
+class RangeRefusal(ValueError):
+    """A declared symbolic range the graph's OWN guards contradict (tcg#78).
+
+    The refusal exists because the alternative was measured, not imagined. An
+    sd15 UNet exported with a batch ``Dim`` over ``[1, 2]`` compiles for
+    84-129 s of GPU and produces an artifact that, called at batch 1, RETURNS
+    A ``(2, 4, 64, 64)`` TENSOR OF GARBAGE AND RAISES NOTHING -- because
+    ``torch._prims.convert_element_type``'s contiguity question
+    (``guard_or_false(prod(sizes) < 2)``) guards ``s53 >= 2``, ``_refine_ranges``
+    narrows ``[1, 2]`` to the singleton ``[2, 2]``, and a singleton range makes
+    the ShapeEnv replace the symbol with the constant 2 everywhere downstream.
+    The lock still said ``[1, 2]``, so the dispatcher would have admitted the
+    batch-1 call the artifact cannot serve.
+
+    The honest answer is not to record the narrowed range -- that makes the
+    declaration a claim the author never made -- but to refuse the AXIS and
+    say which guard refused it. The author then declares the range the graph
+    actually supports, and the shapes outside it get their own concrete
+    specialization or serve eager, exactly as an unobserved bucket always has.
+    """
+
+
+def shape_env_of(program: object) -> Any:
+    """The one ShapeEnv reachable from a program's placeholder metadata."""
+
+    graph = getattr(getattr(program, "graph_module", None), "graph", None)
+    for node in getattr(graph, "nodes", ()) or ():
+        value = (getattr(node, "meta", None) or {}).get("val")
+        for dimension in getattr(value, "shape", ()) or ():
+            environment = getattr(getattr(dimension, "node", None), "shape_env", None)
+            if environment is not None:
+                return environment
+    return None
+
+
+def _integer(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def live_symbol_ranges(program: object) -> dict[str, tuple[int | None, int | None]]:
+    """What the ShapeEnv says RIGHT NOW about every symbol it carries.
+
+    Read before and after a stage, this states what that stage did to the
+    ranges -- which is the only way to see a refinement, because
+    ``ExportedProgram.range_constraints`` is a snapshot taken at export and
+    never moves again. A symbol the environment has REPLACED with a constant
+    reads as that constant's singleton range: a replacement is the strongest
+    narrowing there is, and it must not read as "unchanged".
+    """
+
+    environment = shape_env_of(program)
+    if environment is None:
+        return {}
+    replacements = {
+        str(symbol): value
+        for symbol, value in (getattr(environment, "replacements", {}) or {}).items()
+    }
+    ranges: dict[str, tuple[int | None, int | None]] = {}
+    for symbol, interval in (getattr(environment, "var_to_range", {}) or {}).items():
+        name = str(symbol)
+        replaced = _integer(replacements.get(name))
+        if replaced is not None:
+            ranges[name] = (replaced, replaced)
+            continue
+        ranges[name] = (
+            _integer(getattr(interval, "lower", None)),
+            _integer(getattr(interval, "upper", None)),
+        )
+    return ranges
+
+
+def declared_symbol_ranges(program: object) -> dict[str, tuple[int | None, int | None]]:
+    """The ranges the exported program DECLARES, from its own constraints."""
+
+    return {
+        str(symbol): (
+            _integer(getattr(interval, "lower", None)),
+            _integer(getattr(interval, "upper", None)),
+        )
+        for symbol, interval in (getattr(program, "range_constraints", {}) or {}).items()
+    }
+
+
+def narrowed_symbols(
+    declared: Mapping[str, tuple[int | None, int | None]],
+    live: Mapping[str, tuple[int | None, int | None]],
+) -> dict[str, tuple[tuple[int | None, int | None], tuple[int | None, int | None]]]:
+    """``{symbol: (declared, refined)}`` for every range that got SMALLER.
+
+    Only narrowing is reported. A range that widened -- which nothing observed
+    does -- would still cover every value the declaration promised, so it is
+    not a shape the dispatcher can send somewhere the artifact refuses.
+    """
+
+    moved = {}
+    for name, (low, high) in declared.items():
+        if name not in live:
+            continue
+        live_low, live_high = live[name]
+        if (live_low is not None and low is not None and live_low > low) or (
+            live_high is not None and high is not None and live_high < high
+        ):
+            moved[name] = ((low, high), (live_low, live_high))
+    return moved
+
+
+def range_narrowing(
+    program: object,
+) -> dict[str, tuple[tuple[int | None, int | None], tuple[int | None, int | None]]]:
+    """Which of a program's DECLARED ranges its own ShapeEnv already denies.
+
+    These two are not the same statement and nothing in torch reconciles them.
+    ``range_constraints`` records what the AUTHOR asked for and is frozen at
+    export; the ShapeEnv records what the graph's guards have established and
+    keeps moving. Measured on the sd15 UNet, immediately after an export that
+    raised nothing::
+
+        declared {'s53': (1, 2)}   live {'s53': (2, 2)}
+
+    Every dynamic dim is guarded ``>= 2`` -- torch specializes the sizes 0 and
+    1 rather than reason about broadcasting and contiguity symbolically -- so
+    an axis whose observed minimum is 1 is contradicted the moment it is
+    exported. The lock reads ``range_constraints``, which is why the
+    contradiction survived all the way to a compiled artifact.
+
+    Costs nothing: both sides are already in memory.
+    """
+
+    return narrowed_symbols(declared_symbol_ranges(program), live_symbol_ranges(program))
+
+
+def decomposition_narrowing(
+    program: object,
+) -> dict[str, tuple[tuple[int | None, int | None], tuple[int | None, int | None]]]:
+    """Every declared range the graph's own guards contradict, decomposed.
+
+    The free check first. If it clears, decompose and ask again: an AOTI
+    compile decomposes before it generates code, and some size-1 questions are
+    asked only by the decomposed graph -- ``aten.to.dtype`` carries no such
+    guard, the ``torch._prims.convert_element_type`` it lowers to does. A
+    narrowing found only there would otherwise land 84-129 s into a GPU
+    compile. Asking here costs ~2 s of CPU and no compiler at all (tcg#78).
+
+    The program is not copied: the probe shares its ShapeEnv, so a narrowing
+    it finds has also polluted this program -- which is exactly why a caller
+    that finds one must DISCARD the program rather than declare it. When there
+    is no narrowing, there is nothing to have polluted.
+    """
+
+    if not declared_symbol_ranges(program):
+        return {}
+    moved = range_narrowing(program)
+    if moved:
+        return moved
+    decompose = getattr(program, "run_decompositions", None)
+    if not callable(decompose):
+        return {}
+    decompose()
+    return range_narrowing(program)
+
+
+def contradicted_axes(
+    target: str, ingress: Any, moved: Mapping[str, Any]
+) -> set[tuple[str, str, int]]:
+    """``{(target, ingress name, axis)}`` carried by a contradicted symbol.
+
+    Scoped to the target because ``sample`` axis 0 means one thing on a
+    denoiser and something else on a VAE; a refusal earned by one must not be
+    charged to the other.
+
+    The unit a policy speaks in is the AXIS, not the symbol, so a refusal has
+    to be translated before it can be acted on. A derived dim spells its root
+    in its own name (``16*s3``), which is also the key ``range_constraints``
+    uses, so one ``symbol_terms`` read connects the two.
+
+    Refusing axes rather than the whole export is what keeps a contradicted
+    batch axis from taking the aspect collapse down with it -- the case the
+    dynamic-dims program is actually for (pgw#1548: SDXL 18 -> 2).
+    """
+
+    from .ingress import symbol_terms
+
+    return {
+        (target, row.name, axis)
+        for row in ingress.inputs
+        for axis, dimension in enumerate(row.shape)
+        if isinstance(dimension, str) and symbol_terms(dimension)[1] in moved
+    }
+
+
+def without_axes(
+    policy: DimPolicy | None, refused: set[tuple[str, str, int]]
+) -> DimPolicy:
+    """``policy`` with named axes refused on top of whatever it already refuses."""
+
+    resolved = policy if policy is not None else all_dims
+
+    def narrowed(target: str, name: str, axis: int) -> bool:
+        return (target, name, axis) not in refused and resolved(target, name, axis)
+
+    return narrowed
+
+
+def format_narrowing(
+    moved: Mapping[str, tuple[tuple[int | None, int | None], tuple[int | None, int | None]]],
+) -> str:
+    """``s53 declared [1, 2] but the graph's guards allow only [2, 2]``."""
+
+    return "; ".join(
+        f"{name} declared [{low}, {high}] but the graph's guards allow only "
+        f"[{new_low}, {new_high}]"
+        for name, ((low, high), (new_low, new_high)) in sorted(moved.items())
+    )
+
+
 Call = tuple[tuple[Any, ...], dict[str, Any], Sequence[str]]
 
 
@@ -446,8 +664,18 @@ def alias_ingress(ingress: Any, plan: DynamicPlan) -> Any:
 __all__ = [
     "DimPolicy",
     "DynamicPlan",
+    "RangeRefusal",
     "alias_ingress",
     "all_dims",
+    "contradicted_axes",
+    "declared_symbol_ranges",
+    "decomposition_narrowing",
+    "format_narrowing",
+    "live_symbol_ranges",
+    "narrowed_symbols",
     "plan_exports",
+    "range_narrowing",
     "resolve_policy",
+    "shape_env_of",
+    "without_axes",
 ]
