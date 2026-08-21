@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / "cozy/cozy-creator-tracker/scripts/podguard"))
 import podguard  # noqa: E402
+import podlive  # noqa: E402  -- the uptime corroboration the boot guard needs
 
 CRED = Path.home() / ".cache/cozy/pgw1548/hub-credentials.json"
 PODS = Path.home() / ".cache/cozy/pgw1548/pods.jsonl"
@@ -225,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ram", type=int, default=64)
     parser.add_argument("--budget-usd", type=float, default=4.0)
     parser.add_argument("--max-minutes", type=float, default=180.0)
-    parser.add_argument("--boot-deadline", type=float, default=6.0,
+    parser.add_argument("--boot-deadline", type=float, default=10.0,
                         help="minutes to wait for the boot heartbeat before "
                              "declaring the container never started (the "
                              "heartbeat lands ~17 s in on a healthy pod)")
@@ -358,6 +359,8 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     seen: list[str] = []
     warned_others = False
+    last_uptime = -1
+    stalled = 0
     try:
         while True:
             elapsed_h = (time.time() - started) / 3600.0
@@ -373,19 +376,58 @@ def main(argv: list[str] | None = None) -> int:
                 seen = stages
                 print(f"[stage] +{new}  (all: {stages})  "
                       f"${spent:.2f} / {elapsed_h * 60:.0f} min", flush=True)
-            # BOOT HEARTBEAT DEADLINE (pgw#1548 post-mortem lesson 2). The v3
-            # heartbeat publishes ~17 s after launch on a pod that starts at
-            # all, so silence at T+`--boot-deadline` is not a slow boot, it is
-            # a container that NEVER STARTED. The failed campaign waited 40+
-            # minutes on exactly this signature; the rule now costs one nonce
-            # and a rotation instead of an hour of billed silence.
+            # BOOT HEARTBEAT DEADLINE (post-mortem lesson 2) -- BUT NEVER ON
+            # SILENCE ALONE (post-mortem lesson 3).
+            #
+            # 🔴 THIS GUARD ALREADY FALSE-KILLED ONE HEALTHY POD. Its first
+            # version fired on heartbeat absence by itself and tore down
+            # f7wllw4zj348p6 at T+6 min while that pod's uptime was climbing
+            # 35 -> 95 -> 155 -> 215 s: the container was alive and installing,
+            # and the guard meant to prevent a wasted rental became the thing
+            # that wasted it. That is exactly the error lesson 3 names -- a
+            # kill decided from an absence, with the corroborating signal
+            # available and unread.
+            #
+            # So silence is now only ever a REASON TO LOOK. The provider's
+            # uptime is the corroboration, and the pod dies only when the
+            # heartbeat is missing AND the container is not running (uptime 0,
+            # i.e. never started) or has stalled. `podlive.live` is reused
+            # rather than reimplemented -- it already carries the explicit
+            # User-Agent without which the GraphQL endpoint answers 403 and the
+            # whole instrument reads as unavailable.
             if "boot" not in stages and \
                     (time.time() - started) / 60.0 >= args.boot_deadline:
-                print(f"[stop] NO BOOT HEARTBEAT at T+{args.boot_deadline} min "
-                      f"-- the container never started. Killing and rotating "
-                      f"rather than waiting. (namespace pods/{pod_nonce}/ is "
-                      f"empty; other publishers seen: {others or 'none'})")
-                return 3
+                try:
+                    live = podlive.live(lease.pod_id)
+                except Exception as exc:  # noqa: BLE001
+                    # An unreadable probe is UNKNOWN, never a death sentence.
+                    print(f"[poll] boot missing at T+{args.boot_deadline} min "
+                          f"but the uptime probe failed ({exc!r}) -- HOLDING. "
+                          f"A pod is never killed on an absence plus a blind "
+                          f"instrument.")
+                    live = None
+                if live is not None:
+                    up = live.get("uptime_s") or 0
+                    if up == 0:
+                        print(f"[stop] NO BOOT HEARTBEAT at "
+                              f"T+{args.boot_deadline} min AND uptime==0 -- the "
+                              f"container NEVER STARTED, corroborated at the "
+                              f"provider: {live}. Killing and rotating.")
+                        return 3
+                    if up == last_uptime:
+                        stalled += 1
+                        if stalled >= 3:
+                            print(f"[stop] NO BOOT HEARTBEAT and uptime STALLED "
+                                  f"at {up}s across {stalled} probes -- {live}. "
+                                  f"Killing and rotating.")
+                            return 3
+                    else:
+                        stalled = 0
+                    last_uptime = up
+                    print(f"[poll] boot heartbeat still absent at "
+                          f"{(time.time() - started) / 60.0:.1f} min, but the "
+                          f"container is ALIVE (uptime {up}s, climbing) -- "
+                          f"HOLDING. Install is slow, not dead.", flush=True)
             if expect and all(s in stages for s in expect):
                 print(f"[done] every expected stage landed: {expect}")
                 return 0
