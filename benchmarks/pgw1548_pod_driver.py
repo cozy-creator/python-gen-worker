@@ -119,45 +119,66 @@ def relogin(cred: dict) -> str:
     return cred["access_token"]
 
 
-def published_stages(cred: dict, *, _retried: bool = False) -> list[str]:
-    """Which stages have landed. The hub is the progress signal, not a clock.
+def _get(cred: dict, path: str, *, _retried: bool = False):
+    """One authenticated hub GET, refreshing the 15-minute token on 401/403."""
 
-    Read from `GET /repos/:org/:name/tree?release=…`, which lists real file
-    PATHS. The release listing (`/releases/:release`) was the obvious place to
-    look and is the WRONG one: it reports `checkpoint_id`, `size_bytes` and a
-    file COUNT, but no names — so it can say a pod is progressing and never say
-    at what. Verified against a live publish before this driver depended on it.
-    """
-
-    url = (f"{cred['hub_local']}/api/v1/repos/{cred['org']}/{cred['repo']}"
-           f"/tree?release={cred['release']}")
-    req = urllib.request.Request(url)
+    req = urllib.request.Request(cred["hub_local"] + path)
     req.add_header("Authorization", "Bearer " + cred["access_token"])
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode())
+            return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        # 401/403/404 here is nearly always the 15-minute token expiring, and
-        # an expired token must not read as "the pod stopped publishing".
-        if exc.code in (401, 403, 404) and not _retried:
-            print(f"[poll] hub said {exc.code}; refreshing the user token")
-            try:
-                relogin(cred)
-            except Exception as login_exc:  # noqa: BLE001
-                print(f"[poll] re-login failed ({login_exc}); progress UNKNOWN")
-                return []
-            return published_stages(cred, _retried=True)
-        print(f"[poll] hub read failed ({exc}); progress UNKNOWN this tick")
-        return []
-    except (urllib.error.URLError, TimeoutError) as exc:
-        print(f"[poll] hub read failed ({exc}); progress UNKNOWN this tick")
+        if exc.code in (401, 403) and not _retried:
+            relogin(cred)
+            return _get(cred, path, _retried=True)
+        raise
+
+
+def published_stages(cred: dict) -> list[str]:
+    """Which stages have landed. The hub is the progress signal, not a clock.
+
+    **Read PER VARIANT, and that detail is load-bearing.** Each per-stage
+    publish creates its OWN variant, so once more than one has landed:
+
+    * `GET …/tree?release=v1` returns **404** — with several checkpoints under
+      one release there is no single tree to show; and
+    * `gen-worker download org/repo@release` returns **HTTP 409** for the same
+      reason.
+
+    Both were measured live against this lane's own verdicts repo. A poller
+    that reads only the release route therefore goes blind the moment the pod
+    publishes its SECOND stage — i.e. exactly when it starts making progress —
+    and the failure looks like "no progress", which is the worst possible
+    disguise: the driver would tear a healthy pod down at its budget cap.
+
+    So the release listing supplies the variants, and each variant's tree is
+    fetched by `?checkpoint_id=`, which is the form that works.
+    """
+
+    try:
+        release = _get(cred, f"/api/v1/repos/{cred['org']}/{cred['repo']}"
+                             f"/releases/{cred['release']}")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        # UNKNOWN, never "no progress" — treating a blip as absence is how a
+        # working pod gets killed.
+        print(f"[poll] release read failed ({exc}); progress UNKNOWN this tick")
         return []
     stages: list[str] = []
-    for entry in body.get("entries") or []:
-        path = str(entry.get("path") or "")
-        head = path.split("/", 1)[0] if "/" in path else path.removesuffix(".json")
-        if head and head not in stages:
-            stages.append(head)
+    for variant in sorted(release.get("variants") or [],
+                          key=lambda v: v.get("added_seq", 0)):
+        cid = variant.get("checkpoint_id")
+        if not cid:
+            continue
+        try:
+            tree = _get(cred, f"/api/v1/repos/{cred['org']}/{cred['repo']}"
+                              f"/tree?checkpoint_id={cid}")
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+            continue
+        for entry in tree.get("entries") or []:
+            path = str(entry.get("path") or "")
+            head = path.split("/", 1)[0] if "/" in path else path.removesuffix(".json")
+            if head and head not in stages:
+                stages.append(head)
     return stages
 
 

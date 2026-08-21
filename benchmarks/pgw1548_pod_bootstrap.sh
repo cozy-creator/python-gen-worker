@@ -130,8 +130,19 @@ anima-derive)
   # pod's boot uses (integrity gate included)". So the tree's location is
   # DISCOVERED afterwards rather than dictated -- a hardcoded path would be a
   # guess, and a wrong guess here is a 3-hour derive against nothing.
+  # RELEASE CHOICE IS NOT ARBITRARY, and `latest-cut` is the WRONG answer twice
+  # over. It holds 2 variants, and a multi-variant release is a typed refusal:
+  #   resolve latest-cut -> 409 release_ambiguous
+  #     "holds more than one variant; pin one with ?digest="
+  # (measured; it is what killed the first anima leg in 3 seconds). And the
+  # right single-variant release is not just "one that downloads" — it is the
+  # one the ENDPOINT'S OWN GLOBS put first: main.py documents `@composed-v3`'s
+  # COMPONENT layout as the head of every glob tuple, and that release's notes
+  # say "component-directory layout + model_index.json". `prod` and
+  # `w8a8-staging` also resolve 200, but they are not the layout this code
+  # reaches for first.
   ( cd /workspace/endpoint && timeout 3600 $PY -m gen_worker.cli download \
-      "tensorhub/anima@${PGW1548_ANIMA_RELEASE:-latest-cut}" ) \
+      "tensorhub/anima@${PGW1548_ANIMA_RELEASE:-composed-v3}" ) \
       > /workspace/out/download.log 2>&1
   rc=$?
   "${PY:-python3}" /workspace/publish.py download /workspace/out/download.log || true
