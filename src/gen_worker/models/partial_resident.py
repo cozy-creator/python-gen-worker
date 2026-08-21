@@ -537,6 +537,7 @@ def _install_residency_hooks(
             log.debug("partial_resident: %s could not carry the park mark", name)
 
     seen_parked = False
+    released_confessed: List[bool] = []
     for name in order:
         if name in parked:
             seen_parked = True
@@ -549,6 +550,30 @@ def _install_residency_hooks(
 
         def _release(_m: Any, _a: Any) -> None:
             _park_all_but()
+            # pgw#1627, THE PARK→COMPILED SEAM. Parking strands the parked
+            # components' device blocks in the caching allocator (~1.3 GiB
+            # measured on the 8 GiB death), where eager can spend them and
+            # AOTI — which allocates its first-call pool OUTSIDE the torch
+            # allocator — cannot. So when THIS module's forward is about to
+            # be a compiled call, hand the cache back to the driver first;
+            # when it is eager, keep it (that cache is eager's activation
+            # money, pgw#1586). The gate is read HERE, per request, and
+            # deliberately not at install time: adopt arms the dispatcher
+            # AFTER these hooks are installed (death-log ordering), so an
+            # install-time gate would always read "not compiled" and the
+            # release would never fire — the pgw#1587 wrong-moment shape.
+            if compiled_dispatch_armed(_m):
+                from .memory import release_cached_vram
+
+                release_cached_vram()
+                if not released_confessed:
+                    released_confessed.append(True)
+                    log.info(
+                        "partial_resident: released allocator cache after "
+                        "park — %s carries an armed compiled dispatcher, and "
+                        "AOTI spends driver_free, not cache (pgw#1627)",
+                        type(_m).__name__,
+                    )
 
         module.register_forward_pre_hook(_release)
         break
@@ -608,11 +633,45 @@ def _placement_attribution(torch_mod: Any) -> Dict[str, int]:
     return out
 
 
+def headroom_admits(
+    *, regime: str, free_bytes: int, cache_bytes: int,
+    floor_bytes: int = _PROBE_FLOOR_BYTES, demand_bytes: int = 0,
+) -> tuple[bool, str]:
+    """(admitted, budget basis). THE headroom predicate, REGIME-SPLIT
+    (pgw#1627, implementing pgw#1601's banked ruling).
+
+    * ``eager`` — the budget is ``driver_free + reusable cache`` against the
+      floor. The allocator's cache is spendable by the torch allocator and by
+      NOTHING else, and eager activations come out of that allocator, so
+      counting it is right (pgw#1586: the bug that term fixed was a SPURIOUS
+      REFUSAL, and past the probe the failure mode is retries-and-serve).
+    * ``compiled`` — the budget is ``driver_free`` ONLY, against
+      ``demand + floor``. AOTI's first-call pool (+1154 MiB measured on sdxl
+      sm_89, 4/4 runs, batch-invariant) allocates OUTSIDE the torch allocator
+      and cannot spend the cache. Counting cache here is the arithmetic that
+      killed every 8 GiB compiled-SDXL leg: admitted on ``free+cache`` =
+      2.2 GiB against a real budget of ``driver_free`` = 1.18 GiB, process
+      death at step 0, no traceback — and a mid-graph OOM on the compiled
+      path is uncatchable (pgw#1255 leg 2), so admission is the ONLY safety.
+
+    ``demand_bytes`` is the compiled artifact's out-of-allocator first-call
+    demand — pgw#1601's mint-time stamp once it lands; 0 until a caller has
+    one. The basis string goes on the confession line so a reader of the
+    admit can see WHICH budget the split used without the code in hand.
+    """
+    if regime == "compiled":
+        ok = int(free_bytes) >= int(demand_bytes) + int(floor_bytes)
+        return ok, "driver_free"
+    return int(free_bytes) + int(cache_bytes) >= int(floor_bytes), "free+cache"
+
+
 def probe_plan(
     parked: Dict[str, ParkedComponent], *, free_bytes_now: Any,
     floor_bytes: int = _PROBE_FLOOR_BYTES,
-) -> tuple[bool, int]:
-    """DO the worst onload once and read what is left. Returns (ok, free_bytes).
+    regime: str = "eager", demand_bytes: int = 0,
+) -> tuple[bool, int, str]:
+    """DO the worst onload once and read what is left. Returns
+    (ok, free_bytes, budget_basis).
 
     The planner's transient ceiling is arithmetic over numbers it can read, and
     on the campaign card that arithmetic admitted a plan whose onload then died
@@ -620,9 +679,21 @@ def probe_plan(
     neither the component sizes nor the free-VRAM probe. This is the same
     question asked of the card instead of of a constant, and it costs one copy
     at load.
+
+    The floor check is :func:`headroom_admits` and is REGIME-SPLIT (pgw#1627):
+    eager counts ``free + reusable cache``, compiled counts ``driver_free``
+    only — see that function for why each side is right and what believing
+    the eager arithmetic on a compiled leg cost.
     """
     if not parked:
-        return True, int(free_bytes_now())
+        free = int(free_bytes_now())
+        if regime == "compiled":
+            ok, basis = headroom_admits(
+                regime=regime, free_bytes=free, cache_bytes=0,
+                floor_bytes=floor_bytes, demand_bytes=demand_bytes,
+            )
+            return ok, free, basis
+        return True, free, "free+cache"
     worst = max(parked.values(), key=lambda c: c.bytes)
     worst.onload()
     free = int(free_bytes_now())
@@ -635,24 +706,54 @@ def probe_plan(
         cache = 0
     worst.park()
     # pgw#1586. THE FLOOR IS CHECKED AGAINST WHAT ACTIVATIONS CAN ACTUALLY HAVE,
-    # WHICH IS NOT DRIVER-FREE. A parked component's blocks stay in the caching
-    # allocator's pool: `park()` drops the reference, the allocator keeps the
-    # block, and `mem_get_info` never sees it return. So the same bytes were
-    # counted as freed by the plan and as used by this probe. Measured on the
-    # card: driver_free 0.45 + reusable cache 1.56 = 2.01 GiB against a 2.00 GiB
-    # reserve — the reserve was honoured all along and the probe was reading a
-    # number 1.56 GiB too small.
+    # WHICH FOR THE *EAGER* REGIME IS NOT DRIVER-FREE. A parked component's
+    # blocks stay in the caching allocator's pool: `park()` drops the
+    # reference, the allocator keeps the block, and `mem_get_info` never sees
+    # it return. So the same bytes were counted as freed by the plan and as
+    # used by this probe. Measured on the card: driver_free 0.45 + reusable
+    # cache 1.56 = 2.01 GiB against a 2.00 GiB reserve — the reserve was
+    # honoured all along and the probe was reading a number 1.56 GiB too small.
     #
     # ⚠️ CACHE IS *SOFT* AVAILABILITY, NOT A HARD BUDGET TERM. 1.56 GiB of
     # cached blocks is not 1.56 GiB of CONTIGUOUS space, and the 214 allocator
     # retries this leg logged ARE that discount showing up at runtime — the
     # allocator freeing and remapping segments that do not fit the requested
-    # activation. Counting it here is right because the bug being fixed is a
-    # SPURIOUS REFUSAL and the failure mode past the probe is retries-and-serve,
-    # not a fatal (degrade-never-OOM holds). Do NOT promote this term into a
-    # hard budget: the measured-placement work should treat it as soft, with the
-    # retry count as the natural signal for how soft.
-    return (free + cache) >= floor_bytes, free
+    # activation. Counting it for EAGER is right because the bug being fixed
+    # was a SPURIOUS REFUSAL and the failure mode past the probe is
+    # retries-and-serve, not a fatal (degrade-never-OOM holds). Do NOT promote
+    # this term into a hard budget: the measured-placement work should treat it
+    # as soft, with the retry count as the natural signal for how soft.
+    #
+    # ⚠️ AND IT IS EAGER-ONLY MONEY (pgw#1627). The compiled regime's demand
+    # lands outside the torch allocator, where the cache is not spendable at
+    # all and the failure mode past the probe is process death, not retries.
+    # `headroom_admits` holds the split; do not re-merge the terms.
+    ok, basis = headroom_admits(
+        regime=regime, free_bytes=free, cache_bytes=cache,
+        floor_bytes=floor_bytes, demand_bytes=demand_bytes,
+    )
+    return ok, free, basis
+
+
+def compiled_dispatch_armed(module: Any) -> bool:
+    """Is ``module``'s next forward a COMPILED call? (pgw#1627)
+
+    torchcg's adopt path installs its dispatcher as an INSTANCE attribute —
+    ``module.forward = dispatcher`` (adopt.py) — which is why the read goes
+    through ``__dict__`` rather than ``getattr``: a bare class ``forward``
+    means no dispatcher was ever installed. Duck-typed on the dispatcher's
+    ``armed_graphs()`` (its own arming signal) instead of an isinstance
+    against the vendored class, so a torchcg the release env pins itself
+    still answers. An armed dispatcher can still fall through to eager on a
+    shape miss, so this can over-release — one spare ``empty_cache`` — but
+    never under-protect the compiled call.
+    """
+    try:
+        fwd = getattr(module, "__dict__", {}).get("forward")
+        armed = getattr(fwd, "armed_graphs", None)
+        return bool(callable(armed) and armed())
+    except Exception:  # noqa: BLE001 — a gate that raises would cost the request
+        return False
 
 
 def parks_module(target: Any) -> bool:
@@ -739,28 +840,34 @@ def apply_component_residency(
             )
             return False
         if free_bytes_now is not None:
-            ok, free = probe_plan(parked, free_bytes_now=free_bytes_now)
+            ok, free, basis = probe_plan(parked, free_bytes_now=free_bytes_now)
             # The probe's MEASUREMENT, handed back so the caller can put it on
             # the loud line. pgw#1595: success was `log.info` and inaudible at
             # the endpoint's WARNING level, which makes "probe passed" and
             # "probe never ran" the same picture (pgw#1559 class).
             if facts is not None:
                 facts["probe_free_bytes"] = int(free)
+                # pgw#1627: WHICH budget the admit used (driver_free vs
+                # free+cache), so the regime split is visible from the
+                # confession rather than from the code.
+                facts["headroom_basis"] = str(basis)
                 facts.update(_placement_attribution(torch))
             if not ok:
                 log.warning(
-                    "partial_resident: PROBE REFUSED %s — onloading the largest "
-                    "evicted component left %.2f GiB free, under the %.2f GiB "
-                    "floor. The plan's arithmetic said %.2f GiB peak of %.2f "
-                    "free; the card disagrees, and the card is right.",
-                    ",".join(plan.offloaded), free / _GIB,
+                    "partial_resident: PROBE REFUSED %s (budget basis: %s) — "
+                    "onloading the largest evicted component left %.2f GiB "
+                    "free, under the %.2f GiB floor. The plan's arithmetic "
+                    "said %.2f GiB peak of %.2f free; the card disagrees, and "
+                    "the card is right.",
+                    ",".join(plan.offloaded), basis, free / _GIB,
                     _PROBE_FLOOR_BYTES / _GIB,
                     plan.transient_peak_bytes / _GIB, plan.free_bytes / _GIB,
                 )
                 return False
             log.info(
-                "partial_resident: probe OK — %.2f GiB still free with %s "
-                "onloaded", free / _GIB, ",".join(plan.offloaded),
+                "partial_resident: probe OK (budget basis: %s) — %.2f GiB "
+                "still free with %s onloaded",
+                basis, free / _GIB, ",".join(plan.offloaded),
             )
         _install_residency_hooks(
             pipeline, parked, _pipeline_component_names(pipeline), log
@@ -789,6 +896,8 @@ __all__ = [
     "ParkedComponent",
     "ResidencyPlan",
     "apply_component_residency",
+    "compiled_dispatch_armed",
+    "headroom_admits",
     "parks_module",
     "plan_component_residency",
     "method_driven_components",

@@ -2725,6 +2725,11 @@ def apply_low_vram_config(
                              ("attr_ctx_bytes", "attr_ctx_gb")):
                 if _k in probe_facts:
                     applied[_lbl] = float(probe_facts[_k]) / _GIB
+            if "headroom_basis" in probe_facts:
+                # pgw#1627: the regime-split admit names its budget basis
+                # (driver_free vs free+cache) on the loud line, so the hub can
+                # see WHICH arithmetic admitted without the code in hand.
+                applied["headroom_basis"] = str(probe_facts["headroom_basis"])
             probe_free = probe_facts.get("probe_free_bytes")
             if probe_free is not None:
                 # Probe SUCCESS was `log.info` and therefore inaudible, which
