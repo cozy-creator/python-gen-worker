@@ -52,6 +52,8 @@ import logging
 import time
 from typing import Any, Iterator, Optional
 
+from . import byte_sources
+
 logger = logging.getLogger(__name__)
 
 MIB = 1024 * 1024
@@ -92,6 +94,14 @@ class FetchPosition:
     download layer already calls, so the reporter is wired by handing this
     method to the same callback chain rather than by threading a second one.
     """
+
+    #: pgw#1632 — HOW this number is measured, declared at the site that
+    #: produces it. `CAS_ACCOUNTED`, not a wire meter: the position credits
+    #: bytes that are PRESENT for the manifest whether they came off a socket,
+    #: off the endpoint volume, or were already banked (see the module
+    #: docstring's "what the position MEANS"). No read verb and no write verb
+    #: can say that truthfully, which is why the source admits neither.
+    SOURCE = byte_sources.Source.CAS_ACCOUNTED
 
     def __init__(self, ref: str, total_bytes: int = 0) -> None:
         self.ref = str(ref or "")

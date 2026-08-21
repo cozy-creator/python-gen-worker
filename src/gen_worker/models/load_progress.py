@@ -42,13 +42,23 @@ from pathlib import Path
 from typing import Optional
 
 from .. import activity as activity_mod
+from .. import byte_sources
 from .. import postmortem
 
 logger = logging.getLogger(__name__)
 
 #: One counter name for the whole load path; the hub's stall clock runs on
 #: non-advancement of whatever counter is freshest, not on the name.
-COUNTER_NAME = "load:staged_bytes"
+#:
+#: pgw#1632: was ``load:staged_bytes``. It is sampled from ``/proc/self/io``
+#: read_bytes (with anon-RSS growth as the page-cache-warm alternate) — a READ
+#: meter that wore a WRITE verb, and th#2246's first mechanism lane spent a pass
+#: hunting the per-child write it implied. The rename is wire-safe because the
+#: hub keys on advancement, not on the name (see the module docstring).
+COUNTER_NAME = "load:ingested_bytes"
+#: How :data:`COUNTER_NAME` is measured. `byte_sources` holds the registry the
+#: pgw#1632 lint reads; this is the declaration at the site that produces it.
+COUNTER_SOURCE = byte_sources.Source.PROC_READ_IO
 
 #: A load phase STARTED (``duration_ms`` 0 — nothing is measured yet). This
 #: is the row that names the component a hung load is hung on.
@@ -374,7 +384,7 @@ class LoadProgressReporter:
                 "phase": self._phase,
                 "read_bytes": read,
                 "rss_anon_kb": rss_anon_kb,
-                "staged_bytes": done,
+                "ingested_bytes": done,
                 "total_bytes": self.total_bytes,
                 "started_unix": self._started_unix,
                 "ts_unix": time.time(),
@@ -406,6 +416,7 @@ def thrash_verdict() -> str:
 
 __all__ = [
     "COUNTER_NAME",
+    "COUNTER_SOURCE",
     "EVENT_PHASE",
     "EVENT_PHASE_DONE",
     "EVENT_PHASE_THRASH",
