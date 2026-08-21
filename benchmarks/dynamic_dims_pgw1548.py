@@ -1127,6 +1127,35 @@ def self_test() -> int:
     check("the dtype-lane floor travels with the arithmetic",
           roi_bench.roi()["dtype_lanes"] == 2)
 
+    print("[self-test] the arm order ALTERNATES, so a drifting box cancels")
+    plans = [
+        (["static", "aspect"] if index % 2 == 0
+         else list(reversed(["static", "aspect"])))
+        for index in range(4)
+    ]
+    check("odd rounds reverse the order", plans[1] == ["aspect", "static"])
+    check("even rounds keep it", plans[0] == ["static", "aspect"])
+    first_halves = [plan[0] for plan in plans]
+    check("each arm goes first equally often over an even round count",
+          first_halves.count("static") == first_halves.count("aspect"))
+    # The property that matters: under a monotonic drift, a fixed order gives
+    # the later arm a systematic penalty and ABBA does not.
+    drift = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7]
+    fixed = {"a": [], "b": []}
+    abba = {"a": [], "b": []}
+    tick = iter(drift)
+    for index in range(4):
+        for arm in (["a", "b"] if index % 2 == 0 else ["b", "a"]):
+            abba[arm].append(next(tick))
+    tick = iter(drift)
+    for _index in range(4):
+        for arm in ("a", "b"):
+            fixed[arm].append(next(tick))
+    check("a fixed order charges the drift to the second arm",
+          statistics.mean(fixed["b"]) > statistics.mean(fixed["a"]))
+    check("ABBA cancels it exactly",
+          abs(statistics.mean(abba["a"]) - statistics.mean(abba["b"])) < 1e-9)
+
     print("[self-test] a CACHE HIT is never mistaken for a mint wall")
     roi_bench.mint = {
         "static": {"specializations": 18, "compile_s_per_spec": 0.54,
@@ -1270,7 +1299,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[prepare] {arm} (--dynamic-axes {AXES[arm]})")
         rooms[arm] = bench.prepare(arm)
     for round_index in range(args.rounds):
-        for arm in arms:
+        # ABBA, not AAA-BBB. Measured 2026-08-20 on the campaign card: this box
+        # DRIFTS MONOTONICALLY SLOWER within a run — sd15 static 1:1 went
+        # 3.104 -> 3.603 -> 3.737 s across three rounds while load rose 7.2 ->
+        # 9.0 and the laptop GPU sat at 74-80 C. With a FIXED arm order the
+        # second arm is always measured later inside every round, so a
+        # monotonic drift is charged entirely to it — a systematic bias
+        # favouring whichever arm goes first, in the exact direction that
+        # would have made the dynamic arm look slower. Reversing on odd rounds
+        # cancels a linear drift by construction; the interleave was already
+        # here, but interleaving with a fixed order is not enough.
+        order = arms if round_index % 2 == 0 else list(reversed(arms))
+        for arm in order:
             print(f"[round {round_index}] {arm} (load {os.getloadavg()[0]:.1f})")
             bench.measure(rooms[arm], arm, round_index)
 
