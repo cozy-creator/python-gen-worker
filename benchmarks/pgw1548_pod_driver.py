@@ -61,6 +61,23 @@ def endpoint_tarball(name: str) -> str:
     return base64.b64encode(raw).decode()
 
 
+def lock_cache_tarball(directory: str) -> str:
+    """The pre-derived locks + their `.meta.json` sidecars, tar.gz+base64.
+
+    A GPU pod deriving SDXL would burn 865 s (static) + 201 s (aspect) of
+    RENTED card on `torch.export` tracing that needs no card at all. The
+    pair compresses to ~15 KB, which fits under the env cliff beside the
+    17 KB endpoint archive — so the derive stays paid for exactly once, on
+    the box, and its REAL wall still rides in the sidecars for the ROI.
+    """
+
+    if not directory:
+        return ""
+    raw = subprocess.run(["tar", "czf", "-", "-C", directory, "."],
+                         capture_output=True, check=True).stdout
+    return base64.b64encode(raw).decode()
+
+
 def bank(pod_id: str, lane: str, extra: dict) -> None:
     """Write the id where a DIFFERENT session can find it. Before any wait."""
 
@@ -73,7 +90,36 @@ def bank(pod_id: str, lane: str, extra: dict) -> None:
           flush=True)
 
 
-def published_stages(cred: dict) -> list[str]:
+def relogin(cred: dict) -> str:
+    """Mint a FRESH user access token from the stored password.
+
+    The hub's user tokens live **15 minutes**. A poll loop that reads the hub
+    for an hour therefore starts answering 404/401 partway through — and this
+    driver's own `published_stages` treats a failed read as UNKNOWN, so the
+    symptom is not an error but a pod that silently stops appearing to make
+    progress until the budget cap tears it down mid-derive. Measured on the
+    anima leg: the token minted at 18:35 was dead by 18:49, while the pod was
+    still working.
+
+    So the credential is REFRESHED rather than trusted, and the refresh is by
+    password login (`/api/v1/password/login`) because the stored refresh_token
+    does not redeem on this deployment.
+    """
+
+    body = json.dumps({"login": cred["username"],
+                       "password": cred["password"]}).encode()
+    req = urllib.request.Request(cred["hub_local"] + "/api/v1/password/login",
+                                 data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        out = json.loads(resp.read().decode())
+    cred["access_token"] = out["access_token"]
+    CRED.write_text(json.dumps(cred, indent=2))
+    CRED.chmod(0o600)
+    return cred["access_token"]
+
+
+def published_stages(cred: dict, *, _retried: bool = False) -> list[str]:
     """Which stages have landed. The hub is the progress signal, not a clock.
 
     Read from `GET /repos/:org/:name/tree?release=…`, which lists real file
@@ -90,9 +136,20 @@ def published_stages(cred: dict) -> list[str]:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
-        # A hub read that fails is UNKNOWN, never "no progress" — treating it
-        # as absence is how a working pod gets killed for a network blip.
+    except urllib.error.HTTPError as exc:
+        # 401/403/404 here is nearly always the 15-minute token expiring, and
+        # an expired token must not read as "the pod stopped publishing".
+        if exc.code in (401, 403, 404) and not _retried:
+            print(f"[poll] hub said {exc.code}; refreshing the user token")
+            try:
+                relogin(cred)
+            except Exception as login_exc:  # noqa: BLE001
+                print(f"[poll] re-login failed ({login_exc}); progress UNKNOWN")
+                return []
+            return published_stages(cred, _retried=True)
+        print(f"[poll] hub read failed ({exc}); progress UNKNOWN this tick")
+        return []
+    except (urllib.error.URLError, TimeoutError) as exc:
         print(f"[poll] hub read failed ({exc}); progress UNKNOWN this tick")
         return []
     stages: list[str] = []
@@ -119,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-minutes", type=float, default=180.0)
     parser.add_argument("--expect", default="",
                         help="comma-separated stages that mean SUCCESS")
+    parser.add_argument("--lock-cache", default="",
+                        help="directory of pre-derived locks to ship "
+                             "to the pod (saves rented-card derive time)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     args.cpu_flavors = [f for f in args.cpu_flavors.split(",") if f]
@@ -136,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         "PGW1548_RELEASE": cred["release"],
         "PGW1548_SHA": sha,
         "PGW1548_ENDPOINT_B64": endpoint_tarball(args.endpoint),
+        "PGW1548_LOCKS_B64": lock_cache_tarball(args.lock_cache),
     }
     hf = ""
     for line in (Path.home() / "cozy/e2e/.env").read_text().splitlines():
@@ -164,7 +225,9 @@ def main(argv: list[str] | None = None) -> int:
         # the schema's default is GPU, and a leg that relies on a default is a
         # leg that changes meaning when the provider changes one.
         body["computeType"] = "GPU"
-        body["gpuTypeIds"] = [args.gpu]
+        # A LIST, in preference order: a single id turns a busy
+        # datacenter into a failed rental for no reason.
+        body["gpuTypeIds"] = [g.strip() for g in args.gpu.split(",") if g.strip()]
         body["gpuCount"] = 1
         body["minRAMPerGPU"] = args.ram
         body["minVCPUPerGPU"] = args.vcpu

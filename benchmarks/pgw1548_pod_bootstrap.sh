@@ -108,6 +108,12 @@ mkdir -p /workspace/endpoint
 printf '%s' "$PGW1548_ENDPOINT_B64" | base64 -d | tar xz -C /workspace/endpoint
 ls -la /workspace/endpoint
 
+mkdir -p /workspace/locks
+if [ -n "${PGW1548_LOCKS_B64:-}" ]; then
+  printf '%s' "$PGW1548_LOCKS_B64" | base64 -d | tar xz -C /workspace/locks
+  ls -la /workspace/locks
+fi
+
 note bootstrap "$(printf '{"stage":"bootstrap","ok":true,"mode":"%s","sha":"%s","python":"%s"}' \
   "$PGW1548_MODE" "$PGW1548_SHA" "$($PY -V 2>&1)")"
 
