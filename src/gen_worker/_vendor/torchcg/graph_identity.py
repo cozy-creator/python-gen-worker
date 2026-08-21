@@ -8,11 +8,16 @@ graph, and an edit that changes the trace changes the hash by construction
 (the pgw#1031 closure).
 
 Level 2 positions artifacts under a graph: ``graph -> [env -> .so]``. The
-artifact key is **(trace digest, sm, compile stack)** and nothing else
-(Paul, 2026-08-19, DESIGN-RULINGS addendum 4 as corrected): the trace digest
-is the level-1 graph, ``sm`` is the only free hardware variable, and the
-COMPILE STACK is the compiler's own input signature -- torch, triton and the
-nvidia libraries, whose versions change what inductor EMITS.
+artifact key is **(trace digest, sm, compile stack, compile policy)** and
+nothing else. DESIGN-RULINGS addendum 4 as corrected (Paul, 2026-08-19) states
+the rule the fourth term follows from -- *"minimal sufficient key = the
+compiler's actual input signature"*: the trace digest is the level-1 graph,
+``sm`` is the only free hardware variable, the COMPILE STACK says WHICH
+compiler (torch, triton and the nvidia libraries, whose versions change what
+inductor EMITS), and the COMPILE POLICY (tcg#80) says what that compiler was
+TOLD TO DO. Leaving the options out was not minimalism: it made a
+runtime-constant-folding mint and a non-folding mint of the same graph one
+address, and the second publish died on ``FileExistsError``.
 
 What died with pgw#1489, and why: the key used to be a hash of the WHOLE
 resolved package set. That is a second representation of an environment the
@@ -34,12 +39,18 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 from .declaration import DeclarationError, _canonical_graph, _literal_digest
 from .ingress import CallIngress
 
 GRAPH_SCHEME = "cg-graph-v1"
-ENV_SCHEME = "cg-env-v2"
+#: v3 (tcg#80): the COMPILE POLICY joined the env half. v2 was (compile stack,
+#: sm), which named WHICH compiler but not what it was told to do -- so a mint
+#: with `use_runtime_constant_folding` on and one with it off produced the
+#: same `cg-env-v2` under the same graph hash and collided in the store
+#: (`FileExistsError`, measured twice on 2026-08-21).
+ENV_SCHEME = "cg-env-v3"
 _DIGEST_HEX = 56
 _GRAPH_RE = re.compile(rf"{GRAPH_SCHEME}-[0-9a-f]{{{_DIGEST_HEX}}}\Z")
 _SM_RE = re.compile(r"(sm_[0-9]{2,3}|cpu(-[a-z0-9_]+)?)\Z")
@@ -169,6 +180,46 @@ def require_stack(
     return tuple(sorted(clean.items()))
 
 
+def require_policy(
+    options: Mapping[str, object] | Sequence[tuple[str, object]],
+) -> tuple[tuple[str, object], ...]:
+    """Canonicalize one compile-policy block into sorted, hashable rows.
+
+    tcg#80. Stored as rows rather than a dict for the same reason the stack
+    is: an env is a frozen, hashable value used as an address, and a mapping
+    field would make it neither.
+    """
+
+    pairs = options.items() if isinstance(options, Mapping) else options
+    clean: dict[str, object] = {}
+    for row in pairs:
+        if not isinstance(row, (tuple, list)) or len(row) != 2:
+            raise GraphIdentityError("a compile policy is [name, value] rows")
+        name, value = row
+        if not isinstance(name, str) or not name.strip():
+            raise GraphIdentityError("compile policy option names must be non-empty strings")
+        if not isinstance(value, (bool, int, str)) or isinstance(value, float):
+            raise GraphIdentityError(
+                f"compile policy option {name.strip()!r} must be a bool, int or string"
+            )
+        known = clean.get(name.strip(), _ABSENT)
+        if known is not _ABSENT and known != value:
+            raise GraphIdentityError(
+                f"compile policy option {name.strip()!r} appears twice with different "
+                f"values ({known!r} and {value!r})"
+            )
+        clean[name.strip()] = value
+    if not clean:
+        raise GraphIdentityError(
+            "an env states its compile policy: the options are half the compiler's "
+            "input signature, and an env without them collides across configurations"
+        )
+    return tuple(sorted(clean.items()))
+
+
+_ABSENT = object()
+
+
 @dataclass(frozen=True, slots=True)
 class EnvIdentity:
     """One artifact environment: (compile stack, sm) -- the key's env half.
@@ -195,6 +246,15 @@ class EnvIdentity:
     #: red under mypy against a constructor its docstring invites.
     stack: tuple[tuple[str, str], ...] | Mapping[str, str] | Sequence[tuple[str, str]]
     sm: str
+    #: The codegen-relevant compile options this env compiles under (tcg#80),
+    #: carried as the OPTIONS THEMSELVES for the same reason the stack carries
+    #: versions: a refusal that can say `use_runtime_constant_folding
+    #: True != False` is worth more than one that says two hashes differ.
+    #: It defaults to what THIS build's `compiler` states, because that is the
+    #: only honest answer for an env a caller is describing locally -- and a
+    #: caller who hands one in is restating a REMOTE build's policy, which is
+    #: the only case where it can differ.
+    policy: Mapping[str, object] | Sequence[tuple[str, object]] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stack", require_stack(self.stack))
@@ -202,11 +262,27 @@ class EnvIdentity:
             raise GraphIdentityError(
                 f"env sm must be a concrete 'sm_NN' or cpu capability, got {self.sm!r}"
             )
+        stated = self.policy
+        if stated is None:
+            from .compiler import compile_policy
+
+            stated = compile_policy()
+        object.__setattr__(self, "policy", require_policy(stated))
+
+    @property
+    def options(self) -> dict[str, object]:
+        """The compile policy as a block, for stamping and for refusals."""
+
+        return dict(cast(Sequence[tuple[str, object]], self.policy))
 
     @property
     def value(self) -> str:
         payload = json.dumps(
-            {"sm": self.sm, "stack": [list(row) for row in self.stack]},
+            {
+                "sm": self.sm,
+                "stack": [list(row) for row in self.stack],
+                "policy": self.options,
+            },
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
@@ -222,7 +298,8 @@ class EnvIdentity:
         others = len(rows) - len(head)
         if others:
             head.append(f"+{others} more")
-        return f"{', '.join(head)} @ {self.sm}"
+        options = ", ".join(f"{name}={value!r}" for name, value in self.options.items())
+        return f"{', '.join(head)} @ {self.sm} [{options}]"
 
     def __str__(self) -> str:
         return self.value
@@ -239,5 +316,6 @@ __all__ = [
     "graph_hash",
     "is_compile_relevant",
     "is_graph_hash",
+    "require_policy",
     "require_stack",
 ]

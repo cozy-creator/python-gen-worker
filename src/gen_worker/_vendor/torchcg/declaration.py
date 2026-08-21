@@ -682,8 +682,15 @@ class RuntimeCompatibility:
                 f"Note device is not arch: one {self.device_type!r} trace "
                 f"serves every sm."
             )
+        # tcg#80: the compile policy is read from `compiler`, the one place it
+        # is stated, at the moment the key is asked for. A key that named the
+        # graph, the arch and the toolchain but not the OPTIONS was blind to
+        # the difference between two artifacts this process can build.
+        from .compiler import compile_policy_digest
+
         return from_axes(
             {
+                "compile_policy": compile_policy_digest(),
                 "graph": declaration.specialization_hash,
                 "sm": self.sm,
                 "toolchain": toolchain_axis_digest(self.toolchain),

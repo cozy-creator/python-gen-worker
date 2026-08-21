@@ -14,6 +14,14 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import IO, Any, BinaryIO, cast
 
+from .compiler import (
+    CompileError,
+    compile_policy,
+    constant_folding_fenced,
+    package_constants_in_so,
+    policy_fences_folding,
+    policy_packages_constants,
+)
 from .declaration import DeclarationError, GraphSpecializationDeclaration, _update_literal_digest
 from .host_isa import HostISAError, _validate_host_facts
 from .identity import (
@@ -69,6 +77,7 @@ _TOP_LEVEL_FIELDS = frozenset(
         "host_isa",
         "package_constants_in_so",
         "constant_folding_fenced",
+        "compile_policy",
     )
 )
 
@@ -345,6 +354,61 @@ def _verify_literals(path: Path | None, metadata: Mapping[str, Any]) -> None:
         raise
 
 
+def _validate_compile_policy(metadata: Mapping[str, Any]) -> None:
+    """Refuse an artifact whose declared axes do not follow from its build.
+
+    tcg#80. These two axes used to be written as literals by `build_metadata`
+    and asserted as the same literals here -- the writer and the checker
+    agreeing with themselves, so the axes could never disagree with the build
+    and the guard could never go red. They are now DERIVED, at both ends, from
+    the compile policy the mint ran under, which the artifact states in full.
+    A build whose options do not deliver the weightless, fully-bindable
+    contract now produces metadata that fails right here.
+    """
+
+    policy = metadata.get("compile_policy")
+    if not isinstance(policy, dict) or not policy:
+        raise ArtifactError("compile_policy must be a non-empty object of compile options")
+    for name, value in policy.items():
+        if not isinstance(name, str) or not name or name != name.strip():
+            raise ArtifactError("compile_policy option names must be canonical strings")
+        if not isinstance(value, (bool, int, str)) or isinstance(value, float):
+            raise ArtifactError(
+                f"compile_policy option {name!r} must be a bool, int or string"
+            )
+    try:
+        packages = policy_packages_constants(policy)
+        fenced = policy_fences_folding(policy)
+    except CompileError as exc:
+        raise ArtifactError(f"compile_policy is incomplete: {exc}") from exc
+    if metadata.get("package_constants_in_so") is not packages:
+        raise ArtifactError(
+            f"package_constants_in_so is stamped "
+            f"{metadata.get('package_constants_in_so')!r} but this artifact's own "
+            f"compile_policy says {packages!r}"
+        )
+    if metadata.get("constant_folding_fenced") is not fenced:
+        raise ArtifactError(
+            f"constant_folding_fenced is stamped "
+            f"{metadata.get('constant_folding_fenced')!r} but this artifact's own "
+            f"compile_policy says {fenced!r}"
+        )
+    if packages:
+        raise ArtifactError(
+            "package_constants_in_so must be false: a v1 artifact is code, and its "
+            "constants are raw pointers into the live module's weights"
+        )
+    if not fenced:
+        raise ArtifactError(
+            "constant_folding_fenced must be true: this artifact was compiled with "
+            "both `aot_inductor.use_runtime_constant_folding` and "
+            "`always_keep_tensor_constants` off, so inductor inlined every 0-dim "
+            "and 1-D <= 8-element state-dict constant's VALUES into the generated "
+            "code and the artifact is specific to the checkpoint that minted it "
+            "(pgw#1097, tcg#80)"
+        )
+
+
 def validate_metadata(
     raw: Mapping[str, Any], *, has_literals: bool | None = None
 ) -> dict[str, Any]:
@@ -368,10 +432,7 @@ def validate_metadata(
         )
     if metadata.get("kind") != ARTIFACT_KIND:
         raise ArtifactError(f"kind must be {ARTIFACT_KIND!r}")
-    if metadata.get("package_constants_in_so") is not False:
-        raise ArtifactError("package_constants_in_so must be false")
-    if metadata.get("constant_folding_fenced") is not True:
-        raise ArtifactError("constant_folding_fenced must be true")
+    _validate_compile_policy(metadata)
     sm = metadata.get("sm")
     if not isinstance(sm, str) or not sm or sm != sm.strip():
         raise ArtifactError("sm must be a non-empty string")
@@ -532,8 +593,12 @@ def build_metadata(
         "sm": str(sm),
         "toolchain": dict(toolchain),
         "host_isa": dict(host_isa),
-        "package_constants_in_so": False,
-        "constant_folding_fenced": True,
+        # READ from the compile policy this process mints under, never
+        # restated: the axes are the build's own facts or they are decoration
+        # (tcg#80).
+        "package_constants_in_so": package_constants_in_so(),
+        "constant_folding_fenced": constant_folding_fenced(),
+        "compile_policy": compile_policy(),
     }
     metadata["compiled_graph_key"] = from_artifact_metadata(metadata).value
     return validate_metadata(metadata)

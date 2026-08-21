@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from . import _wrapper_split
 from .host_isa import HostISAError, _impose_host_policy
+from .identity import policy_axis_digest
 
 _COMPILER_OPTIONS: dict[str, object] = {
     # pgw#757 measured 32 -> 4 as effectively free while sharply reducing
@@ -17,9 +18,55 @@ _COMPILER_OPTIONS: dict[str, object] = {
     # the one sealed policy; callers cannot select a compiler topology.
     "compile_threads": 4,
     "aot_inductor.package_constants_in_so": False,
-    "aot_inductor.use_runtime_constant_folding": True,
+    # tcg#80. ONE copy of the weights on the card, and every state-dict
+    # constant bindable. Read `GraphLowering.get_attr` (torch 2.13,
+    # `_inductor/graph.py:1560-1585`): a lifted constant takes the
+    # `add_tensor_constant` path -- a bindable table row -- when EITHER
+    # `use_runtime_constant_folding` OR `always_keep_tensor_constants` is set,
+    # and is otherwise INLINED INTO THE GENERATED CODE whenever its shape is
+    # `()` or 1-D with <= 8 elements. So one of the two must be on, or a
+    # checkpoint's values are compiled into the artifact and the weightless
+    # CAS contract is a lie (pgw#1097 named that fence; sdxl bakes
+    # `conv_out.bias`, 4 floats, with both off).
+    #
+    # The two are NOT equivalent, and that is the whole of tcg#80.
+    # `use_runtime_constant_folding` additionally splits a const-fold subgraph
+    # that runs on the FIRST call and materializes a SECOND full constant set
+    # by direct `cudaMalloc`, outside the caching allocator
+    # (`aoti_runtime/model_base.h:345`, `model_container.h:169-186`). On sdxl
+    # UNet-only that is +4782 MiB of first-call transient on top of the eager
+    # weights the artifact already points at by raw pointer -- ~10.4 GiB
+    # against 7.8 GiB visible on an 8 GiB card, measured. It bought sdxl one
+    # folded constant in 2423.
+    #
+    # `always_keep_tensor_constants` buys the same bindable table with NO
+    # second set: both flags take the identical `add_tensor_constant` branch,
+    # so the table's composition is unchanged and only the folded rows go
+    # away. It is what pgw#1097 shipped first and reverted on a CI red that
+    # its own head 3 later root-caused to a fixture authoring violation
+    # (a plain-attribute table, refused identically under the flag it shipped
+    # instead) -- so the revert's stated reason did not distinguish them.
+    "always_keep_tensor_constants": True,
+    "aot_inductor.use_runtime_constant_folding": False,
     "aot_inductor.package": True,
 }
+
+#: The options whose VALUE decides what the compiler EMITS. These are the
+#: compile-policy axis of an artifact key: two artifacts built under different
+#: values of any of them are different bytes and must not share an address.
+_CODEGEN_OPTIONS = frozenset(
+    (
+        "aot_inductor.package_constants_in_so",
+        "always_keep_tensor_constants",
+        "aot_inductor.use_runtime_constant_folding",
+        "aot_inductor.package",
+    )
+)
+
+#: Options that change only HOW the compile is executed, never what it emits.
+#: Keying on these would split the artifact pool on a scheduling knob, which
+#: is the pgw#1472 disease.
+_TOPOLOGY_OPTIONS = frozenset(("compile_threads",))
 
 
 class CompileError(RuntimeError):
@@ -30,6 +77,90 @@ def _compiler_options() -> dict[str, object]:
     """Return the sole compile policy accepted by pre-launch v1."""
 
     return dict(_COMPILER_OPTIONS)
+
+
+def compile_policy() -> dict[str, object]:
+    """The codegen-relevant compile options, READ from the sole policy.
+
+    This is the source of truth every declared axis and every key derives
+    from, so that a build cannot state a compile property it did not compile
+    under (tcg#80: `package_constants_in_so` and `constant_folding_fenced`
+    were written as literals by the same function that validated them, and
+    two differently-configured mints therefore produced the SAME key and
+    collided in the CAS).
+
+    Every option must be classified. An unclassified one is a refusal rather
+    than a silent omission: a new codegen option that nobody put in a set
+    would otherwise leave the key blind to it, which is the defect this
+    function exists to remove.
+    """
+
+    options = _compiler_options()
+    unclassified = sorted(set(options) - _CODEGEN_OPTIONS - _TOPOLOGY_OPTIONS)
+    if unclassified:
+        raise CompileError(
+            f"compile option(s) {unclassified!r} are neither codegen nor topology. "
+            f"Classify them: a codegen option belongs in the artifact key, a "
+            f"topology option must not be in it (tcg#80)."
+        )
+    return {name: value for name, value in sorted(options.items()) if name in _CODEGEN_OPTIONS}
+
+
+def compile_policy_digest() -> str:
+    """The compile-policy axis of a key this process would mint."""
+
+    return policy_axis_digest(compile_policy())
+
+
+def _option(policy: Mapping[str, object], name: str) -> bool:
+    if name not in policy:
+        raise CompileError(f"compile policy states no {name!r}")
+    return bool(policy[name])
+
+
+def policy_packages_constants(policy: Mapping[str, object]) -> bool:
+    """Whether one STATED policy makes AOTI carry its own constant blob."""
+
+    return _option(policy, "aot_inductor.package_constants_in_so")
+
+
+def policy_fences_folding(policy: Mapping[str, object]) -> bool:
+    """Whether one STATED policy leaves every state-dict constant bindable."""
+
+    return _option(policy, "aot_inductor.use_runtime_constant_folding") or _option(
+        policy, "always_keep_tensor_constants"
+    )
+
+
+def package_constants_in_so() -> bool:
+    """Whether this policy makes AOTI carry its OWN copy of the constants.
+
+    False is the weightless contract: the artifact is code, the constants are
+    raw pointers into the live module's weights (`runner.load_constants(...,
+    user_managed=True)`). True would make AOTI `cudaMalloc` a full constant
+    blob of its own WHILE the eager module's weights stay resident and
+    referenced -- the same double residency runtime folding causes, bought
+    back under another name (tcg#80).
+    """
+
+    return policy_packages_constants(compile_policy())
+
+
+def constant_folding_fenced() -> bool:
+    """Whether this policy leaves EVERY state-dict constant BINDABLE.
+
+    A restatement of torch's own gate (`GraphLowering.get_attr`): with both
+    flags off, inductor inlines a lifted constant's VALUES into the generated
+    kernel when its shape is `()` or 1-D with <= 8 elements, and the constant
+    then appears in no table anyone could rebind. The artifact becomes
+    specific to the checkpoint it was minted from, silently.
+
+    Derived, never asserted: the property is whatever the policy makes true,
+    and `artifact.validate_metadata` refuses an artifact that cannot state it
+    (pgw#1097's fence, now readable off the build that produced it).
+    """
+
+    return policy_fences_folding(compile_policy())
 
 
 def _export_context(program: object) -> tuple[object, object]:

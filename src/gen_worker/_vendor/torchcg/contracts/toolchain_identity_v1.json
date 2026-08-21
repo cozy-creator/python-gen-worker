@@ -13,8 +13,15 @@
     "transformers": "model-library-is-not-compiler",
     "triton": "4444444444444444"
   },
+  "compile_policy": {
+    "always_keep_tensor_constants": true,
+    "aot_inductor.package": true,
+    "aot_inductor.package_constants_in_so": false,
+    "aot_inductor.use_runtime_constant_folding": false
+  },
+  "compile_policy_axis": "31652c1e5b99bdf2",
   "graph": "c59210f4ddf6b420",
-  "key": "cg-key-v1-d4c716660ec9c12c079170810bb18d830594a34b875a83beb0ab6150",
+  "key": "cg-key-v2-aa3c3ca0bbc8d1425d5828d18098ed9cda5fc1399c98468302af7174",
   "sm": "sm_89",
   "toolchain_axis": "88abf09ce9c69ecb"
 }

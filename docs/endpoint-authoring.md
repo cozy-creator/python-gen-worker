@@ -154,15 +154,23 @@ target set, and they are exactly the tensors a fine-tune changes.
 
 Two things close it, and you need neither in your model code:
 
-- every mint compiles under `aot_mint.CONSTANT_BINDING_CONFIGS`
-  (`aot_inductor.use_runtime_constant_folding=True`), which defers the fold to
-  load so nothing is inlined; and
-- ⚠️ **the per-entry PROOF is not verifiable in this repo.** This bullet named
-  `aot_package.folded_weights`, deleted by pgw#1270; no such check exists in
-  `src/` today. Treat the deferral flag above as the whole of what this repo
-  enforces until the arm is re-pointed (pgw#1304). A compiled graph minted before the fence is refused at adoption
-  too — `constant_folding_fenced` is a declared axis, like
-  `package_constants_in_so`.
+- every mint compiles under the sealed compile policy in
+  `gen_worker._vendor.torchcg.compiler`, which sets
+  `always_keep_tensor_constants=True` so inductor keeps every lifted constant as
+  a BINDABLE table row and inlines nothing (tcg#80). It used to set
+  `aot_inductor.use_runtime_constant_folding=True` instead: same bindable table,
+  but it also materialized a SECOND full constant set on the first compiled call
+  by a `cudaMalloc` outside the caching allocator — ~4.8 GiB of transient on an
+  sdxl UNet, which is what kept it off an 8 GiB card; and
+- the per-entry PROOF is `torchcg.engine._admit_constant_table`, which refuses a
+  package that eliminated any state-dict constant, by name, right after the
+  compile. (This bullet used to name `aot_package.folded_weights`, deleted by
+  pgw#1270; the enforcement MOVED into the vendored library rather than
+  vanishing — pgw#1304 can close on it.) A compiled graph minted under a
+  different compile policy is refused at adoption too: `constant_folding_fenced`
+  and `package_constants_in_so` are declared axes DERIVED from the policy the
+  mint ran under, and the policy is part of the artifact key, so the two
+  configurations cannot even collide in the CAS.
 
 What this means for you: the classification you choose by assignment style is
 now the classification you get. A `state_dict` tensor is DYNAMIC all the way to
