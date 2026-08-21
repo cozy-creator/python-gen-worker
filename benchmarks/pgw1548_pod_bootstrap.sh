@@ -37,10 +37,25 @@ STAGE_RC=0
 # A plain python function rather than a CLI: it reuses HubClient.publish_v2,
 # which is what pgw#1568 ruled (reuse, not a second publish path).
 cat > /workspace/publish.py <<'PYEOF'
-import json, os, sys
+import json, os, socket, sys, threading
 from pathlib import Path
 sys.path.insert(0, "/workspace/pgw/src")
 from gen_worker.hubio.client import HubClient, CommitFile
+
+# 🔴 A PUBLISH THAT CAN BLOCK FOREVER IS NOT AN EVIDENCE CHANNEL.
+# Against a stale ngrok tunnel `publish_v2` did NOT fail -- it HUNG (measured:
+# still running past 120 s). The bootstrap's note/fail_out calls are not
+# wrapped in `timeout`, so the FIRST publish a pod attempted blocked forever
+# and four pods died mute with the container still alive. A bare
+# `except Exception` around an un-bounded request converts a transport outage
+# into silence indistinguishable from a dead pod.
+#
+# Two bounds, because they catch different things: the socket default stops a
+# hung read, and the watchdog stops anything that gets past it (a retry loop,
+# a stall between chunks). The watchdog is a daemon thread that hard-exits the
+# PROCESS -- not the leg -- so the stage moves on and the pod keeps working.
+socket.setdefaulttimeout(120)
+threading.Timer(300, lambda: os._exit(75)).start()
 
 stage = sys.argv[1]
 paths = [Path(p) for p in sys.argv[2:] if Path(p).exists()]

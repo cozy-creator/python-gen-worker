@@ -17,6 +17,7 @@ import argparse
 import base64
 import gzip
 import json
+import re
 import secrets
 import subprocess
 import sys
@@ -79,6 +80,105 @@ def lock_cache_tarball(directory: str) -> str:
     raw = subprocess.run(["tar", "czf", "-", "-C", directory, "."],
                          capture_output=True, check=True).stdout
     return base64.b64encode(raw).decode()
+
+
+def pod_facing_hub() -> str:
+    """The POD-FACING front door, READ FRESH from `task stacks` at launch.
+
+    **Never from config, and that is the whole point.** `hub-credentials.json`
+    held `https://cozy-e2e-4.ngrok.app` for this lane's entire life. The stack
+    restarted (th#2250 deploy, ~06:00Z), the tunnel names rotated to `-6`, and
+    `-4` was handed to `ltxfp8` -- a DEAD scratch stack. Four pods then
+    published into a stranger's tunnel and hung. A baked URL is a fact with an
+    expiry date and no expiry check; `task stacks` is the authority.
+    """
+
+    out = subprocess.run(["task", "stacks"], cwd=Path.home() / "cozy/e2e",
+                         capture_output=True, text=True, timeout=240).stdout
+    for line in out.splitlines():
+        if "AUTHORITATIVE" not in line:
+            continue
+        found = re.search(r"frontdoor=bound\s+http=(\S+)", line)
+        if found:
+            return found.group(1).strip()
+    raise SystemExit(
+        "REFUSING TO RENT: `task stacks` shows no AUTHORITATIVE standing stack "
+        "with a bound frontdoor. There is nowhere for a pod to publish, so a "
+        "rental would buy silence.")
+
+
+def assert_pod_can_publish(hub: str, cred: dict, nonce: str) -> None:
+    """Round-trip the POD'S OWN URL, with the POD'S OWN token, BEFORE renting.
+
+    🔴 THIS IS THE CHECK THAT WOULD HAVE REFUSED ALL FOUR MUTE RENTALS, in
+    under two seconds, for $0.
+
+    The campaign's evidence channel had two halves that addressed the service
+    by DIFFERENT NAMES: the box polled `hub_local` (127.0.0.1) and the pod
+    published to `hub_public` (an ngrok tunnel). Nothing ever asserted they
+    were the same hub -- so when the tunnel went stale, the watching half
+    stayed perfectly healthy while the writing half published into nothing.
+    Measured discriminator, same route and same token:
+
+        cozy-e2e-6 (correct)  -> HTTP 403   route EXISTS, auth refused
+        cozy-e2e-4 (stale)    -> HTTP 404   route ABSENT: not our hub
+        127.0.0.1:31550 (box) -> HTTP 403
+
+    **Why a raw bounded GET, and not a real publish.** Two reasons, both
+    measured rather than assumed:
+
+    1. `publish_v2` cannot tell you this quickly, because it treats 404 as
+       RETRYABLE: `POST .../publishes retrying (attempt 6, status=404; no
+       definite answer for 33s of 600s)`. THAT is the hang -- the client spends
+       ten minutes politely re-asking a server that does not have the route.
+       A raw GET sees in 0.19 s exactly the 404 the retry loop hides.
+    2. A publish-based preflight is self-poisoning. Tried it, and the SECOND
+       launch was refused: `release_variant_equal_contract -- release "v1"
+       already has a variant with this exact tensor-layout contract`. A guard
+       that works once and then blocks every later rental is worse than none,
+       and it litters the release with junk variants the harvester must skip.
+
+    So: one bounded GET, no side effects, and the 403/404 split is the signal.
+    403 means the route EXISTS and merely refuses this token's scope -- which
+    is exactly what a correct hub says. 404 means the front door belongs to
+    somebody else.
+    """
+
+    route = (f"/api/v1/repos/{cred['org']}/{cred['repo']}"
+             f"/releases/{cred['release']}")
+    request = urllib.request.Request(hub.rstrip("/") + route)
+    request.add_header("Authorization", "Bearer " + cred["machine_token"])
+    started = time.time()
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    except Exception as exc:  # noqa: BLE001 — DNS, TLS, timeout, refused
+        raise SystemExit(
+            f"REFUSING TO RENT: the pod-facing hub {hub} did not answer in "
+            f"{time.time() - started:.1f}s ({exc!r}). The pod would publish "
+            f"into nothing and read as a silent death.") from exc
+
+    took = time.time() - started
+    if status == 404:
+        raise SystemExit(
+            f"REFUSING TO RENT: {hub} answered 404 for {route} in {took:.2f}s "
+            f"-- the tunnel is UP but IT IS NOT OUR HUB (a correct hub answers "
+            f"403 for this token). This is the exact condition that cost four "
+            f"mute pods and $3.53: a stale ngrok name fronting a dead stack.")
+    if status >= 500:
+        raise SystemExit(
+            f"REFUSING TO RENT: {hub} answered {status} for {route} in "
+            f"{took:.2f}s -- the hub is unhealthy, so a pod would publish "
+            f"into an outage.")
+    print(f"[preflight] pod-facing hub {hub} answered {status} for the "
+          f"release route in {took:.2f}s (403/200 = route exists = it IS our "
+          f"hub) -- proven before any card is billed", flush=True)
+    return
+    print(f"[preflight] pod-facing hub {hub} accepted a real publish in "
+          f"{time.time() - started:.1f}s -- the evidence channel is PROVEN "
+          f"before any card is billed", flush=True)
 
 
 def bank(pod_id: str, lane: str, extra: dict) -> None:
@@ -263,10 +363,21 @@ def main(argv: list[str] | None = None) -> int:
     # a reused id.
     pod_nonce = "pod-" + secrets.token_hex(4)
 
+    # THE URL THE POD WILL USE, resolved fresh and then PROVEN. Both halves
+    # matter: reading it from `task stacks` stops a rotated tunnel being baked
+    # in, and round-tripping it stops a bound-but-wrong front door. Either one
+    # alone would still have bought silence.
+    hub_public = pod_facing_hub()
+    if hub_public != cred.get("hub_public"):
+        print(f"[preflight] pod-facing hub MOVED since config was written: "
+              f"{cred.get('hub_public')} -> {hub_public} (config is stale; "
+              f"`task stacks` wins)")
+    assert_pod_can_publish(hub_public, cred, pod_nonce)
+
     env = {
         "PGW1548_POD": pod_nonce,
         "PGW1548_MODE": args.mode,
-        "PGW1548_HUB": cred["hub_public"],
+        "PGW1548_HUB": hub_public,
         "PGW1548_TOKEN": cred["machine_token"],
         "PGW1548_REPO": f"{cred['org']}/{cred['repo']}",
         "PGW1548_RELEASE": cred["release"],
