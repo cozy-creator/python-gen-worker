@@ -138,12 +138,25 @@ KIND_OUTPUT_INTEGRITY = "output_integrity"
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"
-# pgw#1104: a serve-time recipe reported the lane it APPLIED to the weights
-# (`gen_worker.report_applied_lane`), and `metrics.lane` now follows it instead
-# of the binding. `phase` is the component, `detail` carries the applied lane
-# body, the module counts and the BOUND lane it diverged from — so "which pods
-# serve a lane their checkpoint does not name" is one query, not an inference
-# from allocated-bytes rows.
+# THE LANE THE PLATFORM RESOLVED, emitted once per (model class, checkpoint)
+# by `serving.serve_loop._resolve_for` — the one moment both facts are in hand,
+# the card and what the deploy staged.
+#
+# pgw#1620 REWROTE THIS PRODUCER, and the correction matters more than the
+# field: pgw#1104's emitter was `gen_worker.report_applied_lane()`, an ENDPOINT
+# calling in after `quantize_()` to say what it had done. pgw#1599 retired that
+# call ("the lane is the Model's declared contract") and gave the job to
+# nothing, so every migrated endpoint went silent — no `applied_lane` row, and
+# `metrics.lane` absent, on real completed production requests. The successor
+# is strictly better than what v1 had: the report now comes from the ladder
+# that DECIDED the lane, not from an endpoint remembering to say so.
+#
+# `phase` is the ranked lane BODY (`bf16-w16a16`), a closed fleet vocabulary
+# and therefore countable hub-side; `family` carries the tensorfs contract id
+# (`sdxl.diffusers-bf16@1`); `detail` is the ladder's whole confession — card,
+# reason, and every rejected rung with its numbers. That last part is the point:
+# a ladder that reports only its winner cannot be audited, and its confession
+# was a `logger.info` on a pod with no logs API, which is to say nowhere.
 KIND_APPLIED_LANE = "applied_lane"
 # pgw#1043 §PRODUCTIZATION: the ATTENTION path setup() actually installed
 # (`gen_worker.report_applied_attention`). A third axis beside `lane` and

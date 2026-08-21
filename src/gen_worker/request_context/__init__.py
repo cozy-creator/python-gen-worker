@@ -285,6 +285,15 @@ class RequestContext(Generic[D]):
         self._canceled = False
         self._boot_warmup = bool(boot_warmup)
         self._execution_lane = ""  # executing lane, set by the executor
+        #: pgw#1620: the ladder's own `ResolvedLane` for this request's PRIMARY
+        #: model slot — the platform's decision record, not an author surface
+        #: and never read by author code. It rides the context because the
+        #: context is the one object the dispatcher holds on EVERY terminal
+        #: path: a request that failed inside the handler is exactly the one
+        #: whose lane is worth reporting, and `InvokeOutcome` does not exist
+        #: for it. `None` until the serve loop resolves one (a weightless
+        #: entrypoint never does), which is UNPROVEN and is reported as such.
+        self._resolved_lane: Any = None
         # th#2049/pgw#1294: the executing function DECLARED `publishes=True`,
         # so it may write tensors/repos to the hub. Kind stops implying write
         # authority; this declaration is the one justification. Stamped from
@@ -419,6 +428,11 @@ class RequestContext(Generic[D]):
 
     def _set_execution_lane(self, execution_lane: str) -> None:
         self._execution_lane = str(execution_lane or "").strip()
+
+    def _set_resolved_lane(self, resolved: Any) -> None:
+        """Worker-internal (pgw#1620): the boot ladder's pick for this
+        request's primary slot, stamped by the serve loop."""
+        self._resolved_lane = resolved
 
     @property
     def config(self) -> Dict[str, Any]:

@@ -811,6 +811,9 @@ class Worker:
         self.drained = asyncio.Event()
         self._jobs: Dict[Tuple[str, int], asyncio.Task[None]] = {}
         self._canceled: set[Tuple[str, int]] = set()
+        #: pgw#1620's compiled-vs-eager witness; built on first use, because
+        #: it can only attach to modules an adopt has already produced.
+        self._dispatch: Optional[Any] = None
         self._drain_task: Optional[asyncio.Task[None]] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop_requested = False
@@ -1340,6 +1343,61 @@ class Worker:
                 f"{sorted(self.lanes) or '[]'} — never a silent fallback"
             )
 
+    def _dispatch_counter(self) -> Any:
+        """The compiled-vs-eager witness, attached to whatever this boot
+        adopted (pgw#1620).
+
+        `install` is idempotent per module and `rearm` wraps anything the
+        BACKGROUND MINT armed since the last request — which is the whole
+        reason it is re-asked here rather than once at boot: a pod that adopts
+        nothing and mints for ten minutes flips from eager to compiled
+        mid-life, and a counter wired only at boot would report eager forever.
+        Safe on a worker that adopted nothing: it then reports `armed_modules=0`
+        and the regime is `eager` by measurement rather than by assumption.
+        """
+        # `getattr` rather than the attribute: several suites drive `_run_one`
+        # on an `object.__new__(Worker)` skeleton (the runner's real catch site
+        # is the subject, the collaborators are not), and a witness must not be
+        # the thing that decides whether a terminal ships.
+        counter = getattr(self, "_dispatch", None)
+        if counter is None:
+            from .serving.dispatch_counter import DispatchCounter
+
+            counter = DispatchCounter()
+            self._dispatch = counter
+        counter.install(self)
+        return counter
+
+    def _served_lane(self, ctx_box: List[Any], *, solo: bool) -> str:
+        """`JobMetrics.lane` — the concrete lane that served this request.
+
+        The hub's field (proto 13) is the th#1050 DESCRIPTOR vocabulary
+        (`bf16-w16a16+eager`), and it stays that: `reduce.go` groups the
+        measurement relation on `split_part(lane,'+',1)`, so spelling the new
+        surface's tensorfs CONTRACT here instead would fork that relation by
+        surface and make every historical row incomparable for the same
+        numerics. The contract id is not lost — it rides the `applied_lane`
+        event the ladder emits, beside the reason and the rejected rungs.
+
+        `""` when no lane was resolved (a weightless entrypoint, or a request
+        that died before it held an instance). Absent means UNPROVEN, and the
+        hub stores it as omitted rather than as an empty claim.
+        """
+        ctx = ctx_box[0] if ctx_box else None
+        resolved = getattr(ctx, "_resolved_lane", None) if ctx is not None else None
+        body = str(getattr(resolved, "body", "") or "")
+        if not body:
+            return ""
+        if not solo or len(self._jobs) > 1:
+            return body
+        counts = self._dispatch_counter().take()
+        if counts.armed_modules == 0:
+            return f"{body}+eager"
+        return (
+            f"{body}+compiled" if counts.compiled_graph_calls > 0
+            else f"{body}+eager"
+        )
+
     async def _run_one(self, run: pb.RunJob, key: Tuple[str, int]) -> None:
         accepted_at = time.monotonic()
         if key in self._canceled:
@@ -1358,6 +1416,17 @@ class Worker:
         adjustments: Tuple[Dict[str, str], ...] = ()
         stages: Optional[Any] = None
         started = accepted_at
+        # Hoisted out of the try (pgw#1620): the context is how the lane report
+        # reaches the terminal, and a request that died before the handler ran
+        # must still produce a metrics stamp rather than a NameError.
+        ctx_box: List[Any] = []
+        #: Was this request the only one in flight for its whole window? The
+        #: dispatch counter is per-PROCESS, so a blended window cannot say
+        #: which of two concurrent requests entered a compiled graph. Solo is
+        #: the normal shape of a GPU pod; when it does not hold, the regime is
+        #: reported as UNMEASURED (no `+` suffix) rather than guessed.
+        solo = len(self._jobs) <= 1
+        self._dispatch_counter().reset()
         try:
             self._check_lane(run)
             envelope = self._envelope_of(run)
@@ -1380,7 +1449,6 @@ class Worker:
             # on a worker thread; `on_context` is how it reaches the context
             # object that holds the token.
             renew: Optional[asyncio.Task[None]] = None
-            ctx_box: List[Any] = []
 
             def _bind_context(ctx: Any, box: List[Any] = ctx_box) -> None:
                 box.append(ctx)
@@ -1481,6 +1549,19 @@ class Worker:
             runtime_ms=runtime_ms,
             queue_ms=int((started - accepted_at) * 1000),
         )
+        # pgw#1620: THE LANE THAT SERVED, on every terminal path. The v1
+        # executor stamped this from `ServedIdentity` and died with the v1
+        # hardcut; the v2 worker built a `JobMetrics` of two numbers, so
+        # `payload.metrics.lane` and `request_state.execution_lane` were
+        # STRUCTURALLY ABSENT for every pgw#1599-surface endpoint — measured on
+        # a completed production request (anima 0.5.0, pod qj555emwwvaw03).
+        # Nothing was red: absence reads exactly like "not measured yet", which
+        # is why it survived a full deployment.
+        #
+        # A failed request's lane is the sample most worth having, so this is
+        # read off the CONTEXT (which exists on every path) rather than off the
+        # invoke outcome (which does not).
+        metrics.lane = self._served_lane(ctx_box, solo=solo)
         # pgw#1425: the per-stage breakdown, closed against `runtime_ms` so
         # every emitted stage plus `resid.unattributed` sums to it. Before this
         # the `JobResult.metrics` of every v2 request carried two numbers and
