@@ -70,6 +70,11 @@ _pending: dict = {}
 #: lifetime is longer than any one request, so it cannot live in `_pending`.
 _sticky: dict = {}
 
+#: Strategy C's cache: adapter-key -> [(module, deltas)], the fold MATH done
+#: once. Plus "open" -> the FoldScopes currently installed, so a switch can
+#: restore the previous set before applying the next.
+_prefused: dict = {}
+
 
 def _control() -> dict:
     """Read the mode FRESH per request. The daemon boots once per arm; an env
@@ -201,6 +206,110 @@ def install() -> None:
         # EXIT. Both are per-request and recurring (Paul: "we need to fuse /
         # unfuse the weights after every request"), so they are timed
         # separately and never summed into one "adapter overhead".
+        # ---- STRATEGY C: PRE-FUSED CONSTANT SET -----------------------------
+        # The modern equivalent of the OLD per-LoRA graph specialization
+        # (pgw#790's `lora_bucket` branch), and deliberately NOT the same
+        # thing: an artifact is weight-free (pgw#1567), so a LoRA cannot get
+        # its own `.so`. What it can get is its own CONSTANT SET.
+        #
+        # The fold MATH (`compute_deltas` — routing 834 keys, B@A per leaf,
+        # scaling) is paid ONCE, offline, and cached. A switch is then a
+        # `copy_` of precomputed deltas plus a constant re-arm, with no delta
+        # arithmetic at all. That is the number a LoRA-affine router trades
+        # against, and it is what separates C from B (which recomputes the
+        # delta on every request) and from sticky-B (which merely skips the
+        # restore).
+        #
+        # Three quantities come out, and (i) is the one that must be MEASURED
+        # rather than asserted:
+        #   (i)   per-step against base — "a pre-fused set serves exactly like
+        #         base" is a CLAIM until the wall says so;
+        #   (ii)  switch wall vs B's fold wall — the saving C actually buys;
+        #   (iii) cached bytes per variant — what C costs in memory/storage.
+        if mode == "prefused":
+            from gen_worker.models import lora_fold
+            from gen_worker.serving import adapter_guard
+
+            rearmed = []
+
+            def _rebind_c(module):
+                count = adapter_guard.rearm_constants(module)
+                rearmed.append(int(count or 0))
+                return count
+
+            phase = str(control.get("phase", "switch"))
+            key = "|".join(str(x) for x in paths)
+            _pending["sticky_phase"] = phase
+
+            if phase == "prep":
+                # OFFLINE: compute the deltas and keep them. Timed and reported
+                # separately, because it is a per-variant one-off that a fleet
+                # would pay at publish time, not on the request path.
+                started = time.perf_counter()
+                targets = lora_fold.fold_targets(self.pipe)
+                denoisers = tuple(
+                    __import__("gen_worker.models.w8a8_lora", fromlist=["x"])
+                    .branch_targets(self.pipe))
+                per_adapter = [
+                    lora_fold._route(
+                        __import__("gen_worker.models.w8a8_lora", fromlist=["x"])
+                        .normalize_adapter_state_dict(self.pipe, sd, ref=rf),
+                        targets, denoisers, ref=rf)
+                    for sd, _w, rf in adapters
+                ]
+                plan = []
+                for comp, model in targets.items():
+                    slices = [routed.get(comp, {}) for routed in per_adapter]
+                    if not any(slices):
+                        continue
+                    deltas = lora_fold.compute_deltas(
+                        model, adapters, pipe=self.pipe, keys=slices)
+                    if deltas:
+                        plan.append((model, deltas))
+                _prefused[key] = plan
+                _pending["prep_s"] = time.perf_counter() - started
+                _pending["cached_bytes"] = int(sum(
+                    t.numel() * t.element_size()
+                    for _m, d in plan for t in d.values()
+                    if hasattr(t, "numel")))
+                _pending["fold_s"] = 0.0
+                _pending["restore_s"] = 0.0
+                _pending["rearm_calls"] = 0
+                yield
+                _flush()
+                return
+
+            if phase == "switch":
+                # THE SWITCH: apply cached deltas + re-arm. No delta math.
+                plan = _prefused.get(key)
+                if plan is None:
+                    raise RuntimeError("phase=switch with no prepared set")
+                if _prefused.get("open") is not None:
+                    for sc in _prefused.pop("open"):
+                        sc.restore()
+                started = time.perf_counter()
+                scopes = []
+                for model, deltas in plan:
+                    scopes.append(lora_fold.apply_fold(model, deltas))
+                    _rebind_c(model)
+                _prefused["open"] = scopes
+                _pending["switch_s"] = time.perf_counter() - started
+                _pending["fold_s"] = _pending["switch_s"]
+                _pending["restore_s"] = 0.0
+                _pending["rearm_calls"] = sum(rearmed)
+                yield
+                _flush()
+                return
+
+            # phase == "hold": the set is already installed; zero per-request
+            # work, which is the whole claim being tested.
+            _pending["fold_s"] = 0.0
+            _pending["restore_s"] = 0.0
+            _pending["rearm_calls"] = 0
+            yield
+            _flush()
+            return
+
         # STICKY vs PER-REQUEST. The per-request pattern pays fold+restore on
         # every request; the sticky pattern folds ONCE, serves N requests
         # compiled, and restores ONCE -- which is what a LoRA-affine router

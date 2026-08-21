@@ -271,7 +271,7 @@ LORAEOF
       --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
       --venv /workspace/venv --lock-cache /workspace/locks \
       --latents '1:1=128x128' --arm static \
-      --modes base,fold,eager,sticky,multi \
+      --modes base,fold,eager,prefused,sticky,multi \
       --lora "$LORA" --lora-ref nerijs/pixel-art-xl \
       ${LORA2:+--lora2 "$LORA2"} --sticky-n 3 \
       --aspects 1:1 --cfg on --reps 3 --rounds 3 --steps 20 \

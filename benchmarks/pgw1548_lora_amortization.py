@@ -60,7 +60,7 @@ from dynamic_dims_pgw1548 import (  # noqa: E402
 )
 from pgw1548_endpoint_instrument import install_into  # noqa: E402
 
-MODES = ("base", "fold", "eager", "sticky", "multi")
+MODES = ("base", "fold", "eager", "sticky", "multi", "prefused")
 
 
 @dataclass
@@ -89,6 +89,13 @@ class LoraSample:
     #: The pgw#1586 probe pair for THIS request: what PyTorch's allocator
     #: believes it took, beside what the driver actually handed out.
     vram: dict = field(default_factory=dict)
+    #: Strategy C only. `prep_s` is the OFFLINE fold math (paid once per
+    #: variant, off the request path); `switch_s` is installing a cached set;
+    #: `cached_bytes` is what one variant costs to keep.
+    prep_s: float = 0.0
+    switch_s: float = 0.0
+    cached_bytes: int = 0
+    phase: str = ""
 
     @property
     def per_step_ms(self) -> float:
@@ -205,6 +212,10 @@ class LoraBench(Bench):
             fold_s=float(facts.get("fold_s", 0.0)),
             restore_s=float(facts.get("restore_s", 0.0)),
             rearm_calls=int(facts.get("rearm_calls", 0) or 0),
+            prep_s=float(facts.get("prep_s", 0.0) or 0.0),
+            switch_s=float(facts.get("switch_s", 0.0) or 0.0),
+            cached_bytes=int(facts.get("cached_bytes", 0) or 0),
+            phase=str(facts.get("sticky_phase", "") or ""),
             vram=dict(facts.get("vram") or {}),
             steps=int(facts.get("steps", 0) or 0),
             compiled_calls=sample.compiled_calls,
@@ -218,7 +229,7 @@ class LoraBench(Bench):
         """Each mode has its OWN premise. Scoring them all by one rule is how a
         reference point gets mistaken for a failure."""
 
-        if mode in ("base", "fold", "sticky", "multi"):
+        if mode in ("base", "fold", "sticky", "multi", "prefused"):
             if sample.compiled_calls <= 0:
                 raise SystemExit(
                     f"[{mode}] ZERO compiled calls (eager={sample.eager_calls}, "
@@ -233,8 +244,8 @@ class LoraBench(Bench):
                     f"this arm's cost. Refusing."
                 )
         if mode in ("fold", "multi") or (
-                mode == "sticky" and sample.vram.get("_phase") != "hold"):
-            if sample.rearm_calls <= 0 and mode != "sticky":
+                mode in ("sticky", "prefused") and sample.phase not in ("hold", "prep")):
+            if sample.rearm_calls <= 0 and mode not in ("sticky", "prefused"):
                 raise SystemExit(
                     f"[fold] rearm_constants re-armed ZERO constant tables, so "
                     f"the fold never met a compiled artifact. Either nothing is "
@@ -351,6 +362,42 @@ class LoraBench(Bench):
                     out["sticky"]["breakeven_requests_vs_eager"] = (
                         beats[0] if beats else None)
 
+        # ---- STRATEGY C ------------------------------------------------------
+        # Only the HOLD samples describe C's serving cost; the prep and switch
+        # requests each carry a one-off wall and would drag a median that is
+        # supposed to answer "does a pre-fused set serve like base?".
+        held = [s for s in self.samples if s.mode == "prefused" and s.phase == "hold"]
+        if held:
+            c_step = statistics.median([s.per_step_ms for s in held])
+            out["prefused"] = {
+                "per_step_ms": c_step,
+                "per_step_vs_base_pct": (
+                    (c_step - base_step) / base_step * 100.0
+                    if base_step else None),
+                "offline_prep_s": self._peak("prefused", "prep_s"),
+                "switch_s": self._peak("prefused", "switch_s"),
+                "switch_vs_fold_saving_s": (
+                    (fold_wall - self._peak("prefused", "switch_s"))
+                    if fold_wall is not None
+                    and self._peak("prefused", "switch_s") is not None else None),
+                "cached_bytes_per_variant": self._peak("prefused", "cached_bytes"),
+                "per_request_work_s": 0.0,
+            }
+            # The crossover Paul asked for, stated as a SWITCH FREQUENCY: C
+            # pays `switch_s` once per LoRA change and nothing per request; B
+            # pays `fold_fixed` on EVERY request. So C wins whenever a LoRA
+            # serves more than one request in a row, and the interesting
+            # number is how C compares to A (which pays no switch at all but a
+            # worse per-step) as requests-per-LoRA rises.
+            if eager_step is not None and c_step is not None:
+                sw = out["prefused"]["switch_s"] or 0.0
+                serve_c = c_step * int(self.args.steps) / 1000.0
+                serve_a = eager_step * int(self.args.steps) / 1000.0
+                beats = [n for n in range(1, 101)
+                         if (sw / n + serve_c) <= serve_a]
+                out["prefused"]["breakeven_requests_per_lora_vs_adapter"] = (
+                    beats[0] if beats else None)
+
         multi_fold = self._median("multi", "fold_s")
         if multi_fold is not None and fold_wall:
             out["multi_adapter"] = {
@@ -380,12 +427,20 @@ class LoraBench(Bench):
         lines = [
             f"_{SUBSTRATES[self.args.substrate]}; {self.args.lane_note}_",
             "",
-            "**There is no per-LoRA graph specialization in this architecture, so a "
-            "\"LoRA-specialized\" arm and the FOLDED arm are the same measurement.** "
-            "Artifacts are weight-free (pgw#1567) and a LoRA is a constants delta, so "
-            "base and LoRA serving run the SAME `.so`; there is no LoRA axis in any "
-            "lock (pgw#1572). The whole axis is therefore fold TIMING and COST — which "
-            "is what these rows measure.",
+            "**THREE STRATEGIES, and per-LoRA specialization is the INCUMBENT being "
+            "re-tested — not a footnote.** `eager` = **A**, base resident + adapter ops "
+            "applied at runtime. `fold`/`sticky` = **B**, fuse and unfuse per request "
+            "(sticky is B amortized over N). `prefused` = **C**, the modern form of a "
+            "per-LoRA specialization: an artifact is WEIGHT-FREE (pgw#1567), so a LoRA "
+            "cannot have its own `.so` — it gets its own CONSTANT SET, folded once "
+            "offline and installed by a re-arm with no delta math.",
+            "",
+            "_C is NOT the mechanism pgw#790 measured._ That was an in-graph rank-64 "
+            "branch pair (`lora_bucket`), which cost **+32-46% on adapter-free traffic** "
+            "and was removed for it. C moves the cost out of the graph and into storage, "
+            "so #790's numbers do not price it. The question here is whether C avoids "
+            "what killed the old one — and the deliverable is the CROSSOVER in "
+            "LoRA-switch frequency, not a single winner.",
             "",
             "| mode | RT s (median) | denoise s | per-step ms | fold s | restore s | "
             "rearm | compiled/eager calls | RT spread across rounds |",
@@ -602,12 +657,58 @@ def self_test() -> int:
           a["sticky"]["per_request_folding_s"] is not None
           and a["sticky"]["per_request_folding_s"] > per["3"])
 
-    print("[self-test] the header states the specialization/folded equivalence")
+    print("[self-test] the header frames all THREE strategies, incumbent included")
     rendered = bench.render()
-    check("no per-LoRA specialization is stated where the numbers land",
-          "no per-LoRA graph specialization" in rendered)
-    check("and it names WHY (weight-free artifacts, constants delta)",
-          "weight-free" in rendered and "constants delta" in rendered)
+    check("the three strategies are named A/B/C where the numbers land",
+          "**A**" in rendered and "**B**" in rendered and "**C**" in rendered)
+    check("C is stated as the per-LoRA incumbent's MODERN form, not a footnote",
+          "INCUMBENT" in rendered and "CONSTANT SET" in rendered)
+    check("and WHY it cannot be its own artifact (weight-free)",
+          "WEIGHT-FREE" in rendered)
+    check("pgw#790 is cited as pricing the OLD mechanism only",
+          "pgw#790" in rendered and "+32-46%" in rendered)
+    check("the deliverable is named as a crossover, not a winner",
+          "CROSSOVER" in rendered)
+
+    print("[self-test] strategy C is scored on its HOLD samples only")
+    bench.samples = []
+    for r in (0, 1):
+        bench.samples.append(LoraSample(mode="prefused", round=r, seconds=30.0,
+                                        denoise_s=8.0, steps=20, prep_s=12.0,
+                                        cached_bytes=900_000_000, phase="prep",
+                                        compiled_calls=20))
+        bench.samples.append(LoraSample(mode="prefused", round=r, seconds=9.0,
+                                        denoise_s=8.0, steps=20, switch_s=0.15,
+                                        fold_s=0.15, rearm_calls=1,
+                                        phase="switch", compiled_calls=20))
+        for _ in range(3):
+            bench.samples.append(LoraSample(mode="prefused", round=r, seconds=8.4,
+                                            denoise_s=8.0, steps=20, phase="hold",
+                                            compiled_calls=20))
+        bench.samples.append(LoraSample(mode="base", round=r, seconds=8.4,
+                                        denoise_s=8.0, steps=20, compiled_calls=20))
+        bench.samples.append(LoraSample(mode="fold", round=r, seconds=10.0,
+                                        denoise_s=8.0, steps=20, fold_s=0.6,
+                                        restore_s=0.4, rearm_calls=1,
+                                        compiled_calls=20))
+        bench.samples.append(LoraSample(mode="eager", round=r, seconds=13.0,
+                                        denoise_s=11.0, steps=20,
+                                        compiled_calls=0, eager_calls=20))
+    a = bench.amortization()
+    c = a["prefused"]
+    check("C's per-step comes from HOLD samples, not the prep request",
+          abs(c["per_step_ms"] - 400.0) < 1e-6)
+    check("the 'serves like base' claim is MEASURED as a percentage",
+          abs(c["per_step_vs_base_pct"]) < 1e-6)
+    check("the OFFLINE prep cost is reported separately, not amortized away",
+          abs(c["offline_prep_s"] - 12.0) < 1e-9)
+    check("the switch wall is reported", abs(c["switch_s"] - 0.15) < 1e-9)
+    check("and priced against B's per-request fold",
+          abs(c["switch_vs_fold_saving_s"] - (0.6 - 0.15)) < 1e-9)
+    check("storage per cached variant is on the table",
+          c["cached_bytes_per_variant"] == 900_000_000)
+    check("a break-even in REQUESTS-PER-LORA vs the adapter path is stated",
+          c["breakeven_requests_per_lora_vs_adapter"] == 1)
 
     print()
     print(f"{len(failures)} failure(s)")
@@ -631,7 +732,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="benchmarks/pgw1548/lora")
     parser.add_argument("--arm", default="static",
                         help="which lock arm's graph the modes run against")
-    parser.add_argument("--modes", default="base,fold,eager")
+    parser.add_argument("--modes", default="base,fold,eager,prefused")
     parser.add_argument("--aspects", default="1:1")
     parser.add_argument("--cfg", default="on")
     parser.add_argument("--reps", type=int, default=3)
@@ -711,6 +812,22 @@ def main(argv: list[str] | None = None) -> int:
             for mode in modes:
                 print(f"[round {round_index}] {mode} "
                       f"(load {os.getloadavg()[0]:.1f})")
+                if mode == "prefused":
+                    # prep (offline math, once) -> switch (install cached) ->
+                    # hold x N (zero per-request work: the claim under test).
+                    bench.set_mode("prefused", phase="prep")
+                    bench.samples.append(
+                        bench.lora_request(room, mode, round_index))
+                    bench.set_mode("prefused", phase="switch")
+                    sw = bench.lora_request(room, mode, round_index)
+                    bench.assert_premise(mode, sw)
+                    bench.samples.append(sw)
+                    bench.set_mode("prefused", phase="hold")
+                    for _ in range(args.reps):
+                        held = bench.lora_request(room, mode, round_index)
+                        bench.assert_premise(mode, held)
+                        bench.samples.append(held)
+                    continue
                 if mode == "sticky":
                     # ONE fold, N consecutive compiled requests, ONE restore.
                     bench.set_mode("sticky", phase="open")
