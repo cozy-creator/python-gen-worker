@@ -64,6 +64,7 @@ from gen_worker.models.tensor_layout_contract import (
     known_quant_rules,
     known_topologies,
     parse_lane_stamp,
+    topologies,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,7 +84,11 @@ KINDS: tuple[tuple[str, str], ...] = (
 #: Non-vacuity floors. Read as "the corpus moved or the glob broke", never as a
 #: target: an empty glob makes every set-equality below trivially true, which is
 #: the failure mode this whole file is about.
-EXPECTED_COUNTS = {"rules": 8, "topologies": 21, "morphisms": 5}
+#: Bumped 21 -> 28 by the tensorfs#152 (`ac9c9d4`) re-vendor IN THE SAME
+#: CHANGE, which is what this constant asks for. `rules` did NOT move, so
+#: `lane_ladder._RULE_BODY` needed no new row — the fence in
+#: `test_lane_dtype_fence_pgw1606` would have failed if it had.
+EXPECTED_COUNTS = {"rules": 8, "topologies": 28, "morphisms": 5}
 
 
 def _documents(kind: str) -> dict[str, dict]:
@@ -330,7 +335,10 @@ def test_every_display_name_names_a_PAIR_THAT_EXISTS() -> None:
         assert name.strip(), f"{pair} has a blank display name"
     # Counted AFTER the per-row check, so a dangling row reports as a dangling
     # row rather than as a count that moved.
-    assert len(names) == 18, (
+    # 18 -> 24 with tensorfs#152: seven lanes gained a successor (flux1,
+    # stable-audio, trellis2, qwen-image, internvl-u, krea-2, rife) and one
+    # pair was already display-named. Growing this is fine; saying so is the point.
+    assert len(names) == 24, (
         f"the ratified display-name table has {len(names)} rows; it had 18 "
         f"when this was written. Growing it is fine — say so here."
     )
@@ -419,18 +427,37 @@ def test_a_lane_naming_no_ratified_document_refuses_at_DECLARATION() -> None:
     from gen_worker.models import SDXL
     from gen_worker.serving import Model, ModelDeclarationError
 
+    # The absent handle is DERIVED, never hardcoded. This case used to name
+    # `flux1.diffusers@1` — and tensorfs#152 banked flux1, so the test stopped
+    # testing anything and said "DID NOT RAISE". A name chosen because nobody
+    # has ratified it yet is a name that can be ratified; asserting the absence
+    # first is what keeps the case honest whatever the corpus grows to.
+    absent_topology = "nonesuch-family.diffusers@1"
+    assert absent_topology not in known_topologies(), (
+        f"{absent_topology} is vendored now — pick another absent handle; the "
+        f"point of this case is a handle the corpus does NOT carry"
+    )
+
     with pytest.raises(ModelDeclarationError, match="topology .* not in the vendored"):
 
         class BadTopology(
-            Model[SDXL], lanes={("flux1.diffusers@1", "plain.bf16@1"): _fixture_lane()}
+            Model[SDXL], lanes={(absent_topology, "plain.bf16@1"): _fixture_lane()}
         ):
             def load(self, ctx: object) -> None: ...
+
+    # Same discipline for the rule half. `cozy.q4-k@1` is the natural example
+    # (a GGUF block quant has no ratified v2 rule) and is exactly the kind of
+    # handle that gets authored one day.
+    absent_rule = "cozy.q4-k@1"
+    assert absent_rule not in known_quant_rules(), (
+        f"{absent_rule} is ratified now — pick another absent rule handle"
+    )
 
     with pytest.raises(ModelDeclarationError, match="quant .* not in the vendored"):
 
         class BadRule(
             Model[SDXL],
-            lanes={("sdxl.diffusers@1", "cozy.q4-k@1"): _fixture_lane()},
+            lanes={("sdxl.diffusers@1", absent_rule): _fixture_lane()},
         ):
             def load(self, ctx: object) -> None: ...
 
@@ -442,37 +469,71 @@ def test_a_lane_naming_no_ratified_document_refuses_at_DECLARATION() -> None:
             def load(self, ctx: object) -> None: ...
 
 
-def test_flux1_has_NO_v2_topology_and_that_is_a_refusal_not_a_borrow() -> None:
-    """tensorfs#124's finding, and the reason it still matters under v2.
+def test_flux1_and_klein_are_TWO_topologies_that_v1_could_not_have_separated() -> None:
+    """tensorfs#124's finding, and what v2 does about it.
 
     v1 shipped `flux1.diffusers-bf16@1` and `flux2-klein.diffusers-bf16@1` as
     two documents precisely because the quieter hazard was BORROWING: measured
-    upstream, `flux2-klein` explains 308 of a FLUX.1 transformer's 1160
+    upstream, `flux2-klein` explained 308 of a FLUX.1 transformer's 1160
     tensors with no dtype or rank refusal, so it won every FLUX.1 file
-    outright.
+    outright. The v1 schema is SHAPELESS, so a large shared key set looked
+    exactly like a match.
 
-    The v2 corpus carries `flux2-klein.diffusers@1` and NO flux1 topology at
-    all. That is the honest state — flux1's headers have not been banked — and
-    the property that matters is that the gap REFUSES rather than resolving to
-    its neighbour. Nothing here aliases, so it does; this pins it.
+    This test used to assert that NO flux1 topology existed and to say it would
+    go red when the headers were banked. tensorfs#152 banked them and it went
+    red — and the honest successor is not to delete it, because the
+    anti-borrowing property is now MEASURABLE where v1 could only hope for it.
 
-    Expected to go RED when flux1's headers are banked upstream: at that point
-    delete this test and declare the real lane.
+    Everything below is measured off the vendored corpus rather than recalled.
     """
-    assert "flux2-klein.diffusers@1" in known_topologies()
-    assert not [t for t in known_topologies() if t.startswith("flux1.")], (
-        "a flux1 topology is vendored now — this test's whole premise is gone"
-    )
-
-    from gen_worker.models import Flux2Klein
+    from gen_worker.models import Flux1, Flux2Klein
     from gen_worker.serving import Model, model_declared_lanes
 
+    tops = topologies()
+    flux1, klein = tops["flux1.diffusers@1"], tops["flux2-klein.diffusers@1"]
+
+    def named(one: object) -> set[str]:
+        return {k for tensors in one.values() for k in tensors}  # type: ignore[union-attr]
+
+    shared = named(flux1) & named(klein)
+    assert len(shared) == 348, (
+        f"the flux1/klein shared key set is {len(shared)}, was 348. That number "
+        f"IS the v1 hazard — it is how much of FLUX.1 a shapeless klein document "
+        f"could explain. If it moved, one of the two was re-extracted."
+    )
+
+    # THE SEPARATION, three independent ways. Any one would do; all three are
+    # asserted because v1 had none of them.
+    assert sorted(flux1) != sorted(klein)
+    assert len(named(flux1)) != len(named(klein))
+    differing = [
+        k for k in shared
+        for a in (next(c[k] for c in flux1.values() if k in c),)
+        for b in (next(c[k] for c in klein.values() if k in c),)
+        if a != b
+    ]
+    assert len(differing) == 6, (
+        f"{len(differing)} shared keys differ in SHAPE, expected 6. This is the "
+        f"refusal v1 could not express at all: same name, same rank, different "
+        f"dimensions."
+    )
+
+    # And each declares independently, naming its own pair.
     class KleinModel(
         Model[Flux2Klein],
         lanes={("flux2-klein.diffusers@1", "plain.bf16@1"): _fixture_lane()},
     ):
         def load(self, ctx: object) -> None: ...
 
-    assert [row.contract_id for row in model_declared_lanes(KleinModel)] == [
+    class Flux1Model(
+        Model[Flux1],
+        lanes={("flux1.diffusers@1", "plain.bf16@1"): _fixture_lane()},
+    ):
+        def load(self, ctx: object) -> None: ...
+
+    assert [r.contract_id for r in model_declared_lanes(KleinModel)] == [
         "flux2-klein.diffusers@1+plain.bf16@1"
+    ]
+    assert [r.contract_id for r in model_declared_lanes(Flux1Model)] == [
+        "flux1.diffusers@1+plain.bf16@1"
     ]
