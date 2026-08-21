@@ -483,8 +483,6 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     seen: list[str] = []
     warned_others = False
-    last_uptime = -1
-    stalled = 0
     try:
         while True:
             elapsed_h = (time.time() - started) / 3600.0
@@ -500,76 +498,36 @@ def main(argv: list[str] | None = None) -> int:
                 seen = stages
                 print(f"[stage] +{new}  (all: {stages})  "
                       f"${spent:.2f} / {elapsed_h * 60:.0f} min", flush=True)
-            # BOOT HEARTBEAT DEADLINE (post-mortem lesson 2) -- BUT NEVER ON
-            # SILENCE ALONE (post-mortem lesson 3).
+            # ── THE BOOT GUARD IS DELETED. Not repaired — DELETED. ──────────
+            # It was rewritten three times and killed a HEALTHY pod twice:
+            # f7wllw4zj348p6 (fired on silence alone while uptime climbed
+            # 35->215 s) and rzahnoq94y5zlt (fired on ONE spurious uptime==0
+            # from the provider, 17 min after the driver had itself printed
+            # `[stage] +['telemetry1']`). Between them my guard destroyed more
+            # healthy pods than every real infrastructure fault in this
+            # campaign combined.
             #
-            # 🔴 THIS GUARD ALREADY FALSE-KILLED ONE HEALTHY POD. Its first
-            # version fired on heartbeat absence by itself and tore down
-            # f7wllw4zj348p6 at T+6 min while that pod's uptime was climbing
-            # 35 -> 95 -> 155 -> 215 s: the container was alive and installing,
-            # and the guard meant to prevent a wasted rental became the thing
-            # that wasted it. That is exactly the error lesson 3 names -- a
-            # kill decided from an absence, with the corroborating signal
-            # available and unread.
+            # Each rewrite fixed the previous instance and invented a new way
+            # to be wrong, because the guard's PREMISE is wrong: it tried to
+            # INFER liveness in order to decide a kill, when two mechanisms
+            # already bound the loss without inferring anything --
+            # `--budget-usd` (money is genuinely linear in time) and podguard's
+            # reaper (~30 min if this driver dies). Neither needs to guess
+            # whether a container is alive, and neither can be fooled by a bad
+            # sample.
             #
-            # So silence is now only ever a REASON TO LOOK. The provider's
-            # uptime is the corroboration, and the pod dies only when the
-            # heartbeat is missing AND the container is not running (uptime 0,
-            # i.e. never started) or has stalled. `podlive.live` is reused
-            # rather than reimplemented -- it already carries the explicit
-            # User-Agent without which the GraphQL endpoint answers 403 and the
-            # whole instrument reads as unavailable.
-            # 🔴 PRECONDITION: **ANY** PUBLISH RETIRES THIS GUARD FOREVER.
-            # It used to read `"boot" not in stages`, and that killed a WORKING
-            # pod. `rzahnoq94y5zlt` had already published `telemetry1` -- the
-            # driver PRINTED it, `[stage] +['telemetry1'] $0.08 / 7 min` -- and
-            # was killed 17 minutes later as "the container NEVER STARTED".
-            # A pod that has published has manifestly started; a guard that
-            # asks the provider whether a pod exists, while holding that pod's
-            # own published output in its hand, is asking the weaker witness.
-            # `boot` specifically can be absent for benign reasons (the mode
-            # publishes telemetry first), so the guard must key on evidence of
-            # LIFE, not on one particular stage name.
-            elapsed_min = (time.time() - started) / 60.0
-            if not stages and elapsed_min >= args.boot_deadline:
+            # So the watch loop REPORTS and never decides. Liveness is printed
+            # as an observation for a human to read; nothing here returns.
+            if not stages and (time.time() - started) / 60.0 >= args.boot_deadline:
                 try:
                     live = podlive.live(lease.pod_id)
+                    print(f"[watch] nothing published yet at "
+                          f"{(time.time() - started) / 60.0:.1f} min; provider "
+                          f"says {live}. REPORT ONLY -- the money cap and the "
+                          f"reaper are the bounds.", flush=True)
                 except Exception as exc:  # noqa: BLE001
-                    # An unreadable probe is UNKNOWN, never a death sentence.
-                    print(f"[poll] nothing published at {elapsed_min:.1f} min "
-                          f"but the uptime probe failed ({exc!r}) -- HOLDING. "
-                          f"A pod is never killed on an absence plus a blind "
-                          f"instrument.")
-                    live = None
-                if live is not None:
-                    up = live.get("uptime_s") or 0
-                    # uptime==0 now needs the SAME consecutive confirmation the
-                    # stall case always had. The asymmetry was the second half
-                    # of the false kill: a SINGLE spurious `uptime_s: 0` from
-                    # the provider was enough to tear a pod down, moments after
-                    # nine consecutive reads had it climbing 1133 -> 1373 s.
-                    # One sample is a reading; three is an observation.
-                    if up == 0 or up == last_uptime:
-                        stalled += 1
-                        why = ("uptime==0 (never started?)" if up == 0
-                               else f"uptime STALLED at {up}s")
-                        if stalled >= 3:
-                            print(f"[stop] nothing published at "
-                                  f"{elapsed_min:.1f} min AND {why} across "
-                                  f"{stalled} consecutive probes -- {live}. "
-                                  f"Killing and rotating.")
-                            return 3
-                        print(f"[poll] {why} at {elapsed_min:.1f} min "
-                              f"(probe {stalled}/3) -- HOLDING for "
-                              f"confirmation; one sample is not an observation.",
-                              flush=True)
-                    else:
-                        stalled = 0
-                        print(f"[poll] nothing published at {elapsed_min:.1f} "
-                              f"min, but the container is ALIVE (uptime {up}s, "
-                              f"climbing) -- HOLDING. Install is slow, not "
-                              f"dead.", flush=True)
-                    last_uptime = up
+                    print(f"[watch] liveness probe unreadable ({exc!r}) -- "
+                          f"REPORT ONLY.", flush=True)
             if expect and all(s in stages for s in expect):
                 print(f"[done] every expected stage landed: {expect}")
                 return 0
