@@ -117,7 +117,7 @@ class LoadedEndpoint:
                 raise EndpointLoadError(
                     f"{self.module_name}.{model_cls.__name__}: no lane "
                     f"{contract!r} to pin (declared: "
-                    f"{sorted(lane_handle(l) for l in self.lanes_of(model_cls))})"
+                    f"{sorted(lane_handle(row) for row in self.lanes_of(model_cls))})"
                 )
         # pgw#1599's DeclaredLane rows, filtered to the (possibly pinned)
         # candidate set. Read, never rebuilt: the stamp is not re-parsed and
