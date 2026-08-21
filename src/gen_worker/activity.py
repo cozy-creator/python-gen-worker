@@ -319,6 +319,20 @@ KIND_ENGINE_BOOT = "engine_boot"
 # `model_download_pending` decline explain (th#2191). Phases are a closed
 # vocabulary (`weight_position.PHASE_*`).
 KIND_WEIGHT_FETCH = "weight_fetch"
+# pgw#1613: the boot materialization SPAN — one open activity for the whole
+# fetch loop, from the first ref to the last byte. It is not telemetry: the
+# compute-child watchdog (`procsplit/parent.py` `_hang_verdict`) arms on a
+# silent event loop and then decides by what is OPEN, so a fill that declares
+# nothing takes the `loop_wedged_no_activity` branch and is SIGKILLed while it
+# is provably burning CPU. Measured twice on minimax-h3 (~105 GB) at two
+# different pins: killed at 356 s and 687 s, `cause=watchdog_hang`, oom_kill=0.
+# Its OWN kind, deliberately NOT `weight_fetch`: that kind's rows are the
+# closed-vocabulary BYTE POSITIONS (`weight_position._emit`, fire-and-forget
+# `emit_event` — which is exactly why nothing was ever open), and a span with
+# an empty phase mixed into them would corrupt the one signal th#2191 reads.
+# Nothing hub-side keys on this kind; like `warmup_summary` before it, a new
+# kind is stored and served generically and needs no hub change.
+KIND_BOOT_MATERIALIZE = "boot_materialize"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.
