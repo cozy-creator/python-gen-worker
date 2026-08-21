@@ -129,6 +129,16 @@ def test_static_buckets_bank_symbolic_parents(
     }
     assert len(blobs) < len(records)
 
+    if not torch.cuda.is_available():
+        # The parents are restated to the cuda-class trace device, and
+        # torch.export.load rebuilds their tensors on it — a GPU-less host
+        # cannot. The store-shape assertions above hold everywhere; the
+        # load → respecialize → identity round-trip is proven CPU-side by
+        # tcg#88's own suite and by the mint-child bind smoke
+        # (`test_the_child_binds_a_symbolic_parent_for_a_static_record`),
+        # which compiles a stripped symbolic parent through the REAL
+        # `compile_one`.
+        return
     store = LocalGraphStore(LocalCAS(cas))
     weightless_program.install()
     scratch = tmp_path_factory.mktemp("programs")
