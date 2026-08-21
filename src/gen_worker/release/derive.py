@@ -218,14 +218,6 @@ class ReleaseDeriveResult:
     #: BEFORE the release-wide union, which is what a pipeline log wants to
     #: read when two classes share a lane.
     class_lane_graphs: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
-    #: The component names the construction census states, sorted.
-    census_components: tuple[str, ...] = ()
-    #: Why there is NO census — ``NO_PIPELINE_INDEX`` for a tree that is not a
-    #: diffusers pipeline and is therefore never streaming-served. Empty means
-    #: a census was emitted. There is no third value: a census that could not
-    #: be COMPUTED fails the build.
-    census_absent: str = ""
-
     @property
     def eager_permanent(self) -> bool:
         return not self.lane_graphs
@@ -947,11 +939,12 @@ def _construction_census(
     **ITS KEY IS IMAGE x CONFIG TREE** (th#2287's adjudication, 2026-08-21), not
     source x image like the rest of the release contract — and this function is
     already at that key, because it is the BIND-TIME
-    ``release derive --checkpoint`` run that censuses, and that run has exactly
-    one primary tree. The hub re-keys the emitted document onto the bind
-    (release x image digest x config digest) and never asks this side to.
+    ``release derive --checkpoint`` run that censuses. pgw#1653 runs this once
+    for every distinct tree named to that command; the hub keys each answer on
+    (release x image digest x config digest) and never asks this side to invent
+    or restate the digest.
 
-    **ONE census for the whole release, and the invariance is PROVEN here.**
+    **ONE census for this config tree, and lane invariance is PROVEN here.**
     A lane's only effect on construction is the dtype it casts wide floats to,
     and the census records those as ``census.LANE_DTYPE`` because the lane
     contract and ``engine._assert_lane_dtype`` already state that fact exactly.
@@ -1015,6 +1008,43 @@ def _construction_census(
         return {"absent": NO_PIPELINE_INDEX}
     document: dict[str, Any] = agreed.as_document()
     return document
+
+
+PRIMARY_CENSUS_OWNER = "$primary"
+
+
+def _construction_censuses(
+    primary: Path,
+    trees: Mapping[str, Path],
+    lanes: tuple[tuple[str, Any], ...],
+) -> list[dict[str, Any]]:
+    """One census per DISTINCT config tree, with every owner named.
+
+    The owner labels are routing information inside the derive result, not
+    identity. The hub already computes each tree's config digest and keys the
+    Bind Contract on that digest. Multiple class/slot labels may resolve to the
+    same tree; they are one answer with several owners, never duplicated facts.
+    """
+
+    by_tree: dict[Path, set[str]] = {}
+
+    def add(owner: str, tree: Path) -> None:
+        resolved = Path(tree).resolve()
+        by_tree.setdefault(resolved, set()).add(owner)
+
+    add(PRIMARY_CENSUS_OWNER, primary)
+    for owner, tree in sorted(trees.items()):
+        add(str(owner), Path(tree))
+
+    rows = [
+        {
+            "owners": sorted(owners),
+            "census": _construction_census(tree, lanes),
+        }
+        for tree, owners in by_tree.items()
+    ]
+    rows.sort(key=lambda row: tuple(row["owners"]))
+    return rows
 
 
 def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
@@ -1737,13 +1767,13 @@ def derive_release(
 
     warnings: list[str] = []
 
-    # THE CONSTRUCTION CENSUS (pgw#1647), before any tracing — it is the cheaper
-    # question, and a tree that cannot be built from its own configs must not
-    # spend a trace first. ONE per release, over the PRIMARY tree, under the
-    # union of every declared lane of every subject class: the census is
-    # lane-invariant by construction and that invariance is checked here.
-    construction_census = _construction_census(
-        checkpoint_dir,
+    # THE CONSTRUCTION CENSUSES (pgw#1653), before any tracing — this is the
+    # cheaper question, and a tree that cannot be built from its own configs
+    # must not spend a trace first. Exactly one per DISTINCT config tree, under
+    # the union of every declared lane: a class/slot alias of the same tree is
+    # an additional owner on one row, never a duplicate fact.
+    construction_censuses = _construction_censuses(
+        checkpoint_dir, checkpoint_trees,
         tuple(
             (
                 lane_contract_handle(f"class {cls.__name__!r}", lane),
@@ -1753,26 +1783,6 @@ def derive_release(
             for lane in model_declared_lanes(cls)
         ),
     )
-    for cls in subjects:
-        owner = _checkpoint_tree(checkpoint_trees, checkpoint_dir, cls)
-        if owner != checkpoint_dir:
-            # LOUD, not silent, and not a refusal. The census describes the tree
-            # it was taken from, and th#2281 keys its storage by CONFIG DIGEST —
-            # so a class loading its own tree needs its own census row, which
-            # this document has no field for yet. Saying so is the honest
-            # answer; emitting the primary tree's census as if it described this
-            # class's would be the "second carrier" defect one level up.
-            warnings.append(
-                f"class {cls.__name__!r} loads its own checkpoint tree "
-                f"({owner}), and the construction census in this document is "
-                f"the PRIMARY tree's ({checkpoint_dir}). Nothing is MIS-KEYED: "
-                f"the census's key is image x config tree (th#2287), this run "
-                f"binds the primary tree, and the hub files the document under "
-                f"that bind. It is INCOMPLETE — no published census describes "
-                f"the auxiliary tree, so its serve-time fence replays only the "
-                f"census it builds itself. A per-tree census belongs to the "
-                f"BIND CONTRACT (th#2287 slice 2b), not to this document"
-            )
 
     derivations = [
         _derive_class(
@@ -1821,12 +1831,12 @@ def derive_release(
         # that makes the lockstep matter more than the refusal does.
         "graphs": graphs_document.as_dict(),
         "lane_contracts": lane_contracts,
-        # pgw#1647 / th#2281. What the module IS, per declared lane — the
-        # complete tensor set incl. computed non-persistent buffers, the tied
-        # alias groups, the quantizer's swapped classes, eval mode. The hub
-        # stores it and forwards it; it interprets no torch semantics. The
-        # serve-time fence REPLAYS this instead of re-deriving trust.
-        "construction_census": construction_census,
+        # pgw#1653 / th#2290. What every DISTINCT config tree builds in this
+        # image. Owner labels let the hub join each row to the config digest it
+        # already computed; the digest is the Bind Contract identity and is
+        # never restated in this document. The singular primary-only field is
+        # deleted: absence of an auxiliary answer can no longer render green.
+        "construction_censuses": construction_censuses,
         "entrypoints": entrypoints,
         # pgw#1650: THE PER-CLASS BREAKDOWN, and the authoritative one. A
         # release derives EVERY compile-marking class (Paul, 2026-08-21), each
@@ -1882,10 +1892,6 @@ def derive_release(
             (d.name, lane.contract, tuple(record.graph for record in lane.graphs))
             for d in derivations for lane in d.lanes
         ),
-        census_components=tuple(
-            sorted(construction_census.get("components", {}))
-        ),
-        census_absent=str(construction_census.get("absent", "")),
     )
 
 
