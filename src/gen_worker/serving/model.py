@@ -29,7 +29,7 @@ import inspect
 import textwrap
 import typing
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 from .lane_spec import (
     DYNAMIC,
