@@ -543,3 +543,37 @@ def test_no_stamp_is_the_only_honest_answer_when_the_demand_is_unknown():
         )
         assert g.regime == EAGER, f"{card / GIB:.0f} GiB card: {g.line()}"
         assert any("mint demand stamp" in n for n in g.notes), g.notes
+
+
+def test_an_over_card_grant_is_never_placed_resident(monkeypatch):
+    """The regression this seam could have shipped, caught in self-review.
+
+    `Grant.fully_resident` means NOTHING WAS PAGED. It does not mean the demand fit — a
+    declaration whose only movable component is the denoiser (which is never a paging
+    candidate: SDXL's shape exactly) comes back unpaged AND `over_card`. Routing that to the
+    resident rung places 6.5 GiB of weights on a card that cannot hold them and OOMs at LOAD,
+    which is strictly worse than the coarse rung the old ladder chose.
+
+    The predicate for "may I place this on the card" is BOTH properties, and this pins it
+    through the production entry point rather than at the arithmetic layer where the bug was
+    not visible.
+    """
+    import gen_worker.models.memory as m
+
+    # A card far too small for the fixture pipeline, but readable — so the grant path runs.
+    _with_card(monkeypatch, free_gb=0.000_5, total_gb=24.0)
+    seen = {}
+    real = m._grant_for_pipeline
+
+    def spy(*a: Any, **k: Any) -> Any:
+        g, p = real(*a, **k)
+        seen["grant"] = g
+        return g, p
+
+    monkeypatch.setattr(m, "_grant_for_pipeline", spy)
+    applied = m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
+    g = seen.get("grant")
+    assert g is not None and g.over_card, g.line() if g else "no grant"
+    assert applied["mode"] not in ("off", "vae_only"), (
+        f"an over-card grant was placed resident as {applied['mode']!r} — {g.line()}"
+    )

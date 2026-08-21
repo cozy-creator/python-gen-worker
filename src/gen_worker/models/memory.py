@@ -2717,7 +2717,12 @@ def apply_low_vram_config(
         )
         if grant is not None:
             log.info("low_vram: %s", grant.line())
-            if grant.fully_resident:
+            # `fully_resident` means NOTHING WAS PAGED — it does not mean the
+            # demand fit. A declaration with one movable component (SDXL's
+            # denoiser is never a paging candidate) comes back unpaged AND
+            # over-card, and placing that resident is an OOM at load. The
+            # predicate for "may I place this on the card" is both.
+            if grant.fully_resident and not grant.over_card:
                 requirement = (
                     model_size_gb if model_size_gb is not None
                     else estimate_pipeline_size_gb(pipeline)
