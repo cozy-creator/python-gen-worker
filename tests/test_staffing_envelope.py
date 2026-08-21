@@ -153,14 +153,25 @@ def test_a_weightless_function_can_state_its_cpu_floor(rows: dict[str, dict]) ->
 
 
 def test_both_requires_scopes_fold_rather_than_shadow(rows: dict[str, dict]) -> None:
-    """The model header's lane-keyed `requires=` and the function's own
+    """The model header's lane-derived floor and the function's own
     `Resources(requires=)` both target `functions[].resources.requires`, and
     they FOLD by `term_meets` — the strictest of everything declared for this
     function. Either one shadowing the other is a silent under-declaration
-    the buy path cannot detect."""
+    the buy path cannot detect.
+
+    pgw#1599 changed WHAT the class header contributes, not that it folds.
+    The lane's VRAM floor STRING is deleted (Paul: *"there is no required
+    VRAM"* — demand varies per request), so what the header contributes is
+    `min_sm`, DERIVED from the lane contract's own load dtype. The VRAM half
+    is replaced by a COMPUTED number, not by another annotation: pgw#1600
+    evaluates the lane's demand formula over the advertised shape envelope
+    and serializes `weights + demand(envelope)` into the release document,
+    which is what the hub shops on (se#810).
+    """
 
     requires = rows["generate"]["resources"]["requires"]
-    assert requires["min_vram_gb"] == 78.0                       # from the class header
+    assert "min_vram_gb" not in requires                         # pgw#1599
+    assert requires["min_sm"] == 80                              # from the CONTRACT
     assert requires["recommended"]["min_host_ram_gb"] == 96.0    # from the function
 
 
@@ -168,17 +179,16 @@ def test_the_undeclared_control_is_unchanged(rows: dict[str, dict]) -> None:
     """An entrypoint with no `resources=` emits the class header's floor and
     nothing of its own — the sdxl deploy pins this shape.
 
-    pgw#1404 added `min_sm` beside it, DERIVED from the lane contract's own
-    load dtype (H3_LANE is bf16 -> sm80) rather than hand-annotated. Paul,
-    2026-08-18: "the sm_x compute floor should fall out of the contract
-    itself... Only the VRAM requirement needs a separate annotation." So the
-    author wrote `lanes={H3_LANE: "vram78g"}` and the hub receives BOTH floors:
-    one producer per fact, and the capability floor can never drift from the
-    weights it describes.
+    pgw#1404 added `min_sm`, DERIVED from the lane contract's own load dtype
+    (H3_LANE is bf16 -> sm80) rather than hand-annotated. pgw#1599 finished
+    the thought: the hand-written VRAM half is gone too, so EVERY term in
+    this block is now derived from the contract and none is typed by an
+    author. One producer per fact, and the capability floor can never drift
+    from the weights it describes because it is computed from them.
     """
 
     assert rows["control"]["resources"] == {
-        "gpu": True, "requires": {"min_sm": 80, "min_vram_gb": 78.0},
+        "gpu": True, "requires": {"min_sm": 80},
     }
 
 
@@ -224,7 +234,7 @@ def test_the_block_reaches_the_real_manifest(tmp_path: Path) -> None:
     # pgw#1404: the DERIVED capability floor reaches the real manifest too —
     # `min_sm` beside `min_vram_gb`, in the term the hub already reads.
     assert blocks["control"] == {
-        "gpu": True, "requires": {"min_sm": 80, "min_vram_gb": 78.0},
+        "gpu": True, "requires": {"min_sm": 80},
     }
 
 
