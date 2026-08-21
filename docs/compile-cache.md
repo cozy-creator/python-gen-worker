@@ -34,13 +34,17 @@ is what makes its refusals readable:
 Two further contracts share the word and are neither of the above. Both are
 about the WEIGHTS, not about the compiled program:
 
-- **The tensor-layout contract** — how tensors exist ON DISK: byte packing,
-  scale layout, swizzle, key-naming convention, file topology. Named by a
-  registered descriptor handle `<producer>.<format>@<major>`
-  (`cozy.fp8-rowwise@1`, `cozy.svdq-nvfp4-lr8@1`, …); a decoder declares the
-  handles it implements with `@implements_contract`
-  (`gen_worker.models.tensor_layout_contract`), and the vocabulary itself lives
-  in tensorhub. It says what the bytes ARE and nothing about compilation.
+- **The tensor-layout stamp** — how tensors exist ON DISK, as
+  `quant(topology)`: a TOPOLOGY (which tensors, at which shapes — extracted
+  mechanically from a reference checkpoint's headers) composed with a QUANT
+  RULE (byte packing, scale layout, swizzle — whose convention facts ARE its
+  identity). Identity is the digest pair; the wire rendering is
+  `<topology>@N+<quant>@N` (`sdxl.diffusers@1+cozy.fp8-rowwise@1`). A decoder
+  declares which RULE's bytes it reads with `@implements_quant_rule`
+  (`gen_worker.models.tensor_layout_contract`), and the ratified corpus is
+  tensorfs' `spec/v2/`, vendored here. The old single-handle spellings
+  (`sdxl.diffusers-bf16@1`) survive as DISPLAY names only — never parsed, never
+  a gate (pgw#1621). It says what the bytes ARE and nothing about compilation.
   (th#1580 / th#1721; was called "the artifact contract".) **th#1803 makes this
   a core platform feature:** code is quant-generic over a declared layout, and
   the platform answers compatibility ahead of time — at rebind and at request
