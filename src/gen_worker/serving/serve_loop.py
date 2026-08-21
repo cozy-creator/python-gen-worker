@@ -662,9 +662,11 @@ class ServeLoop:
         off, and a release the hub seeded no per-function bindings for is a
         skip with a reason, never a guess about which bytes to serve.
 
-        Returns one :class:`WarmPass` per entrypoint, in route order.
+        Returns one :class:`WarmPass` per entrypoint, in route-name order.
 
-        Never raises. The caller places it after weights materialize and
+        Never raises (except a `KeyboardInterrupt`/`SystemExit` tearing the
+        process down, which is not a warm-pass failure). The caller places it
+        after weights materialize and
         before ``first_request_servable`` is stamped, which is what makes it a
         REAL readiness probe rather than a stamp asserting the process is up
         (th#2233).
@@ -732,6 +734,10 @@ class ServeLoop:
                         "local_output_dir": scratch,
                     },
                 )
+        except (KeyboardInterrupt, SystemExit):
+            # NOT a warm-pass failure — the process is being torn down, and
+            # swallowing that would make a boot un-interruptible.
+            raise
         except BaseException as exc:  # noqa: BLE001 — a warm pass never bricks
             duration_ms = int((time.monotonic() - started) * 1000)
             detail = (
