@@ -311,6 +311,66 @@ def _pipeline_component_names(pipeline: Any) -> List[str]:
     return names
 
 
+#: Entry points diffusers drives BY NAME rather than through ``__call__``. A
+#: module exposing one of these is reached without ever running ``forward``, so
+#: a ``register_forward_pre_hook`` on it never fires.
+_METHOD_ENTRY_POINTS = ("decode", "encode")
+
+
+def method_driven_components(pipeline: Any) -> List[str]:
+    """Components this rung CANNOT ENTER, and must therefore never park.
+
+    pgw#1619, and it is a defect this module shipped. ``_install_residency_hooks``
+    arms each parked component with ``register_forward_pre_hook``, which fires on
+    ``__call__``/``forward`` and on **nothing else** — while diffusers reaches the
+    VAE only as ``self.vae.decode(latents, ...)``. A parked VAE therefore never
+    onloads, and the decode dies against host weights:
+
+        Input type (CUDABFloat16Type) and weight type (CPUBFloat16Type)
+        should be the same
+
+    **Two things break, not one.** The onload never fires, AND the same hooks
+    enforce this rung's *"at most one parked component on the card"* invariant —
+    so the siblings' eviction does not happen either, and the admission
+    arithmetic assumed both.
+
+    **Why REFUSE rather than "also hook decode".** Hooking ``decode`` fixes the
+    instance and leaves the class: the mechanism's real assumption is *"a
+    component is entered through forward"*, and that is false for anything
+    diffusers drives by name. A component the mechanism cannot enter belongs
+    with the other unhookables, where the planner simply does not choose it —
+    turning a silent correctness bug into a slightly more expensive plan. The
+    detection is STRUCTURAL rather than a name list: ``AutoencoderKL`` exposes
+    ``decode``/``encode`` while ``UNet2DConditionModel``, ``CLIPTextModel`` and
+    ``CLIPTextModelWithProjection`` expose only ``forward``, so the capability
+    separates them without hardcoding ``"vae"`` and keeps working for families
+    nobody has written yet.
+
+    THE LESSON THIS COST: the mechanism was validated on ``text_encoder_2``,
+    the one component whose call shape it happens to support, and shipped as if
+    that generalised.
+    """
+    out: List[str] = []
+    for name, comp in _named_components_of(pipeline):
+        if comp is None or not hasattr(comp, "parameters"):
+            continue
+        if any(callable(getattr(comp, m, None)) for m in _METHOD_ENTRY_POINTS):
+            out.append(name)
+    return sorted(out)
+
+
+def _named_components_of(pipeline: Any) -> List[Tuple[str, Any]]:
+    try:
+        comps = dict(getattr(pipeline, "components", {}) or {})
+    except Exception:  # noqa: BLE001
+        comps = {}
+    pairs = [(n, c) for n, c in comps.items()]
+    for n in _pipeline_component_names(pipeline):
+        if n not in comps:
+            pairs.append((n, getattr(pipeline, n, None)))
+    return pairs
+
+
 def _denoiser_name(pipeline: Any, names: Sequence[str]) -> str:
     """The component whose residency is the point. Named by attribute, in the
     order diffusers itself uses across families."""
@@ -731,6 +791,7 @@ __all__ = [
     "apply_component_residency",
     "parks_module",
     "plan_component_residency",
+    "method_driven_components",
     "plan_for_pipeline",
     "probe_plan",
 ]
