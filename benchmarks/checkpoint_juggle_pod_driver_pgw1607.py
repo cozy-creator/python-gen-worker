@@ -154,6 +154,9 @@ def main() -> int:
     parser.add_argument("--requests", type=int, default=24)
     parser.add_argument("--max-hours", type=float, default=2.0)
     parser.add_argument("--name", default="")
+    parser.add_argument("--retries", type=int, default=3,
+                        help="new-host retries for HOST_DRIVER_TOO_OLD "
+                             "(~$0.01 each, terminated with 404 proof)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -182,15 +185,32 @@ def main() -> int:
         "env": {"PUBLIC_KEY": pub},
         # The fleet line is torch cu13.0; a host driver below the 580 class
         # cannot init it (measured on pod mrgr6tbpa56k9w: driver 570.172.08 /
-        # CUDA 12.8 -> torch 2.13+cu130 refuses, $0.01 to learn). Filter at
-        # the provider, not after boot.
-        "minCudaVersion": "13.0",
+        # CUDA 12.8 -> torch 2.13+cu130 refuses, $0.01 to learn). The REST
+        # schema rejects `minCudaVersion` (measured, $0); `allowedCudaVersions`
+        # is the surviving spelling, and the post-SSH driver gate below is the
+        # backstop if the provider ignores it.
+        "allowedCudaVersions": ["13.0"],
     }
     if args.dry_run:
         print(json.dumps(body, indent=2))
         return 0
 
-    log(f"renting {args.gpu} ({args.cloud}, {args.disk_gb} GB disk) as {name}")
+    for attempt in range(args.retries):
+        try:
+            return run_once(args, api, body, name, attempt)
+        except RuntimeError as exc:
+            if "HOST_DRIVER_TOO_OLD" in str(exc) and attempt + 1 < args.retries:
+                log(f"attempt {attempt + 1}: {exc}; retrying on a new host")
+                body["name"] = f"{name}-r{attempt + 1}"
+                continue
+            raise
+    return 1
+
+
+def run_once(args: argparse.Namespace, api: str, body: dict, name: str,
+             attempt: int) -> int:
+    log(f"renting {args.gpu} ({args.cloud}, {args.disk_gb} GB disk) as "
+        f"{body['name']} (attempt {attempt + 1})")
     lease = podguard.rent(api, body, lane="pgw1607-juggle",
                           lease_seconds=900.0)
     pod_id = lease.pod_id
@@ -213,6 +233,20 @@ def main() -> int:
         if tgt is None:
             raise RuntimeError("SSH never came up inside 15 min")
         log(f"ssh up at {tgt[0]}:{tgt[1]}")
+
+        # DRIVER GATE, before any byte of setup: the host must speak CUDA 13
+        # or torch cu130 will refuse after minutes of spend.
+        rc, out = pod_sh(
+            tgt, "nvidia-smi --query-gpu=driver_version --format=csv,noheader", 60
+        )
+        drv = out.strip().splitlines()[-1].strip() if rc == 0 and out.strip() else ""
+        major = int(drv.split(".")[0]) if drv.split(".")[:1] and drv.split(".")[0].isdigit() else 0
+        log(f"host driver: {drv or 'unreadable'}")
+        if major < 580:
+            raise RuntimeError(
+                f"HOST_DRIVER_TOO_OLD:{drv} — cannot run the cu130 fleet line; "
+                f"terminating and retrying on a different host"
+            )
 
         scp_to(tgt, WHEEL, f"/workspace/{WHEEL.name}")
         scp_to(tgt, FLOORS, "/workspace/fleet-floors.toml")
