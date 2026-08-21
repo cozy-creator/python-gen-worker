@@ -73,6 +73,11 @@ def _dispatch(
         identity=SimpleNamespace(release_id="release"),
         census=None,
     )
+    resolver.bind_store(SimpleNamespace(
+        disk_local_path=lambda candidate: tree if candidate == ref else None,
+        banked_snapshot=lambda candidate: None,
+        disk_refs=lambda: (ref,),
+    ))
     return resolver
 
 

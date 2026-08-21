@@ -417,7 +417,7 @@ def test_the_boot_picks_come_off_the_hubs_OWN_DesiredResidency_Hot() -> None:
     """Nothing is invented: `DesiredResidency.Hot` is `repeated DesiredInstance {function_name, models}` and `models` is the very `ModelBinding` a dispatch carries — slot, ref, the recognized `model` name..."""
     from gen_worker.worker import boot_picks
 
-    loaded = load_endpoint(FIXTURE_DIR)
+    loaded = object()
     desired = pb.DesiredResidency(generation=1, disk_refs=[DREAM, "org/other@1"])
     desired.snapshots[DREAM].CopyFrom(pb.Snapshot(digest="sha256:beef"))
     instance = desired.hot.add()
@@ -439,7 +439,7 @@ def test_no_hot_binding_means_no_boot_pick() -> None:
     """A missing hub binding is absent, never synthesized from disk refs."""
     from gen_worker.worker import boot_picks
 
-    loaded = load_endpoint(FIXTURE_DIR)
+    loaded = object()
 
     single = _config_for(DREAM)
     assert boot_picks(pb.DesiredResidency(), loaded, single) == {}

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from gen_worker import bind_contract
+from gen_worker.serving.context import DeployBinding, LoadContext
 from gen_worker.serving.streaming.census import CensusMismatch, I5_TOTALITY
 
 
@@ -86,3 +88,34 @@ def test_mismatch_report_is_attributed_to_the_bind_not_the_pod() -> None:
         "detail": str(mismatch),
     }
     assert "pod" not in payload and "worker" not in payload
+
+
+def test_serve_compares_against_remote_census_and_reports_before_refusing() -> None:
+    digest, raw = _document()
+    contract = bind_contract.decode(raw, digest=digest)
+    mismatch = CensusMismatch(
+        I5_TOTALITY, "unet", "weight", "shape moved", where="serve Tiny"
+    )
+    reported: list[tuple[bind_contract.BindContract, CensusMismatch]] = []
+
+    class Engine:
+        def build(
+            self, pipeline_cls: type, *, checkpoint_dir: Path,
+            lane: Any, expected_census: Any = None,
+        ) -> Any:
+            assert expected_census is contract.census
+            raise mismatch
+
+    binding = DeployBinding(
+        checkpoint_ref="org/model@release",
+        checkpoint_dir=Path("/unused"),
+        bind_contract=contract,
+        bind_refusal_reporter=lambda got, why: reported.append((got, why)),
+    )
+    context: LoadContext[Any] = LoadContext(binding=binding, lane="plain")
+
+    with pytest.raises(CensusMismatch) as caught:
+        context._streaming_build(Engine(), type("TinyPipeline", (), {}))
+
+    assert caught.value is mismatch
+    assert reported == [(contract, mismatch)]
