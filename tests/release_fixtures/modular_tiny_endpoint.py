@@ -22,11 +22,14 @@ import torch
 from modular_tiny_tree import TinyStreamingPipeline
 
 from gen_worker import (
+    STATIC,
     LoadContext,
     Model,
     RequestContext,
     entrypoint,
+    lane,
 )
+from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 from lane_contracts import TINY_DIFFUSERS_FP32
 
@@ -48,7 +51,13 @@ class LatentOutput(msgspec.Struct):
     model_used: str
 
 
-class ModularModel(Model[SDXL], lanes=(TINY_DIFFUSERS_FP32,)):
+class ModularModel(
+    Model[SDXL],
+    lanes={TINY_DIFFUSERS_FP32: lane(
+        request=const(MiB(64)) + per_mp_batch(MiB(16)),
+    )},
+    shapes={"aspect": STATIC},
+):
     pipe: Any
 
     def load(self, ctx: LoadContext[SDXL]) -> None:

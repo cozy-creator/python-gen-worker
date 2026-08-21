@@ -155,19 +155,31 @@ def test_execution_axis_comes_from_the_runtime_table(fake_image):
     assert lanes == {"fp8-w8a8-dynamic+compiled", "svdq-fp4-w4a4+eager"}
 
 
-def test_lora_bucket_derives_the_exclusion(fake_image):
-    """A4 corollary: no exclusion marker. `lora_bucket` x `composes_lora`."""
+def test_the_function_lane_set_is_the_image_set_ranked(fake_image):
+    """pgw#1599 sweep: `lora_bucket` and the per-function EXCLUSION it
+    computed are DELETED, so a function's lane set IS the image's, ranked.
+
+    The deleted machinery narrowed a function's lanes by `lora_bucket x
+    composes_lora`. It could never fire: nothing in the tree ever set
+    `lora_bucket` non-zero — the sole production caller passed a literal 0 —
+    so the narrowing was unreachable and its always-empty exclusions list
+    looked like a live instrument. The axis survives in two sibling places
+    that die in their own changes: torchcg still HASHES it into graph
+    identity (a dead axis in an identity hash is a live source of phantom
+    cache misses), and tensorhub still accepts it on the wire."""
     derived = derive_execution_lanes(packages=(fake_image,))
 
-    plain, no_exclusions = execution_lanes_for_function(derived, lora_bucket=0)
-    assert set(plain) == {"fp8-w8a8-dynamic+compiled", "svdq-fp4-w4a4+eager"}
-    assert no_exclusions == ()
+    lanes = execution_lanes_for_function(derived)
+    assert set(lanes) == {"fp8-w8a8-dynamic+compiled", "svdq-fp4-w4a4+eager"}
+    # RANKED, deterministically — the one thing this function still does.
+    assert list(lanes) == sorted(lanes, key=list(lanes).index)
 
-    lora, exclusions = execution_lanes_for_function(derived, lora_bucket=4)
-    assert set(lora) == {"fp8-w8a8-dynamic+compiled"}
-    assert [e.execution_lane for e in exclusions] == ["svdq-fp4-w4a4+eager"]
-    assert "lora_bucket=4" in exclusions[0].reason
-    assert "nunchaku.v1@1" in exclusions[0].reason
+    # The vocabulary is gone from the signature, not merely defaulted.
+    import inspect
+
+    assert "lora_bucket" not in inspect.signature(
+        execution_lanes_for_function
+    ).parameters
 
 
 def test_unregistered_contract_fails_the_build():

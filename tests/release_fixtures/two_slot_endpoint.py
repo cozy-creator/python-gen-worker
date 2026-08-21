@@ -19,7 +19,8 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline, UNet2DConditionModel
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import STATIC, LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 from lane_contracts import TINY_DIFFUSERS_FP32
 
@@ -32,7 +33,13 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-class VideoModel(Model[SDXL], lanes=(TINY_DIFFUSERS_FP32,)):
+class VideoModel(
+    Model[SDXL],
+    lanes={TINY_DIFFUSERS_FP32: lane(
+        request=const(MiB(64)) + per_mp_batch(MiB(16)),
+    )},
+    shapes={"aspect": STATIC},
+):
     pipe: Any
 
     def load(self, ctx: LoadContext[SDXL]) -> None:
@@ -40,12 +47,20 @@ class VideoModel(Model[SDXL], lanes=(TINY_DIFFUSERS_FP32,)):
         self.pipe.unet = ctx.compile(self.pipe.unet)
 
 
-class AideModel(Model[SDXL], eager_only="an interpolator has no AOT story here"):
-    """Eager-permanent, and it STILL hydrates -- the drive calls it.
+class AideModel(
+    Model[SDXL],
+    # A REAL lane and no mark. The aide is a second CHECKPOINT, so it answers
+    # lane selection and checkpoint compatibility exactly like the primary
+    # does; what it does not do is compile — an interpolator has no AOT story
+    # here — and the absent `ctx.compile` in `load` is the entire statement.
+    # No `shapes=` follows from that: nothing of this class's is keyed.
+    lanes={TINY_DIFFUSERS_FP32: lane(request=const(MiB(32)))},
+):
+    """Marks nothing, and it STILL hydrates -- the drive calls it.
 
-    Skipping hydration for an eager_only slot was the tempting shortcut and is
-    wrong: the entrypoint body runs at trace and calls this model, so a `None`
-    here fails one layer later with a worse message.
+    Skipping hydration for a model that compiles nothing was the tempting
+    shortcut and is wrong: the entrypoint body runs at trace and calls this
+    model, so a `None` here fails one layer later with a worse message.
     """
 
     net: Any

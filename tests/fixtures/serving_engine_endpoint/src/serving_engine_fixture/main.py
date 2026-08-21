@@ -12,9 +12,12 @@ The v1 shape this replaces, verbatim from the shipped endpoints::
             self._handle.stop()
 
 The v2 shape below states the same facts in the wave's vocabulary: the model
-class is the stateful half, `lanes=()` is eager-permanent (a self-loading
-external binary performs no pytorch lane load), `ctx.engine` is the boot seam,
-and there is no `shutdown` at all — the host stops the engine structurally.
+class is the stateful half, `lanes=` names the contract the CHECKPOINT carries
+(a lane answers checkpoint compatibility and lane selection whether or not
+anything compiles — pgw#1599 deleted `eager_only=`, so the absent `ctx.compile`
+in `load` is the entire no-compile statement), `self_loading=` says why
+`ctx.load` never drives the build, `ctx.engine` is the boot seam, and there is
+no `shutdown` at all — the host stops the engine structurally.
 
 Two engine arms and a CONTROL: llama.cpp, vLLM, and a plain pytorch model
 that must read as hosting NO engine. The arm that actually BOOTS an engine
@@ -35,8 +38,11 @@ from gen_worker import (
     RequestContext,
     VllmServer,
     entrypoint,
+    lane,
 )
+from gen_worker.demand import MiB, const
 from gen_worker.models import SDXL
+from gen_worker.models.model_types import SDXL_DIFFUSERS_BF16
 
 
 class In(msgspec.Struct):
@@ -58,7 +64,10 @@ class FakePipeline:
 
 class GgufModel(
     Model[SDXL],
-    eager_only="an external llama.cpp server owns the weights and the graph",
+    # An external llama.cpp server owns the weights AND the graph, so nothing
+    # here is ever compiled — `load` marks nothing, and no `shapes=` follows.
+    # The lane still stands: it is what the checkpoint IS.
+    lanes={SDXL_DIFFUSERS_BF16: lane(request=const(MiB(64)))},
     self_loading="served by llama-server, which self-loads a GGUF; the "
                  "block-quantized container is the external-binary class "
                  "the streaming engine refuses by design",
@@ -80,7 +89,8 @@ class GgufModel(
 
 class VllmModel(
     Model[SDXL],
-    eager_only="an external vLLM server owns the weights and the graph",
+    # Same posture: an external vLLM server owns the weights and the graph.
+    lanes={SDXL_DIFFUSERS_BF16: lane(request=const(MiB(64)))},
     self_loading="served by vLLM, which self-loads the checkpoint directory; "
                  "ctx.load is never called",
 ):
@@ -95,7 +105,9 @@ class VllmModel(
 
 class PytorchModel(
     Model[SDXL],
-    eager_only="the fixture's in-process arm compiles nothing",
+    # The fixture's in-process arm marks nothing either — the CONTROL is about
+    # hosting no ENGINE, not about compiling.
+    lanes={SDXL_DIFFUSERS_BF16: lane(request=const(MiB(64)))},
 ):
     """THE CONTROL: boots no engine, so the census must not name it."""
 

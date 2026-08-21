@@ -605,6 +605,26 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert model_type_by_name("qwen-image-edit") is None
 
 
+def _library_has(name: str) -> bool:
+    """Whether the VENDORED tensorfs library ships a lane document ``name``.
+
+    pgw#1599 deleted ``ModelType.canonical_contract`` — a model TYPE cannot
+    own a layout, because a layout is a property of a CHECKPOINT and the
+    serving class's ``lanes=`` is what commits to one. The underlying fact
+    these tests were really asserting survives, and this is where it lives
+    now: does tensorfs publish a document for this family at all? An endpoint
+    that cannot name one cannot declare ``lanes=`` and is refused at import,
+    which is tensorfs#130's whole work list.
+    """
+    from gen_worker._vendor.tensorfs import contracts
+
+    try:
+        contracts.get(name)
+    except KeyError:
+        return False
+    return True
+
+
 def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
     """pgw#1422. Both qwen3.6 roots are EXTERNAL-BINARY runtimes (llama.cpp,
     vLLM) that never call `ctx.load`, so they carry no canonical contract —
@@ -616,7 +636,7 @@ def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
     from gen_worker.models import Qwen36A3b, Qwen36Mtp
 
     for model_type in (Qwen36Mtp, Qwen36A3b):
-        assert model_type.canonical_contract is None
+        assert not hasattr(model_type, "canonical_contract")  # pgw#1599
         assert model_type.canonical_scheduler_config == {}
         defaults = model_type.Defaults()
         assert defaults.max_tokens.default == 256
@@ -654,7 +674,7 @@ def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None
     assert model_type_by_name("foundation-1") is None
     assert model_type_by_name("musicgen") is MusicGen
 
-    assert MusicGen.canonical_contract is None
+    assert not _library_has("musicgen.diffusers-bf16")
     assert MusicGen.canonical_scheduler_config == {}
     # StableAudio DOES carry both, and the scheduler config is real (read from
     # the served manifest, identical on both checkpoints) rather than {}.
@@ -670,20 +690,25 @@ def test_the_two_3d_roots_declare_their_lanes_by_evidence() -> None:
     from gen_worker.models import Hunyuan3d, Trellis2
     from gen_worker.models.model_types import MissingContract, Rife
 
-    # TRELLIS.2 HAS a real lane document (tensorfs#132).
-    assert Trellis2.canonical_contract is not None
+    # TRELLIS.2 HAS a real lane document (tensorfs#132), so `trellis-3d` can
+    # name it in `lanes=`.
+    from gen_worker.models.model_types import TRELLIS2_DIT_BF16
 
-    # Hunyuan3D has NO canonical lane AND NO MissingContract sentinel — the
-    # Rife shape. Its checkpoint is a pickle, so no safetensors-shaped document
-    # can ever describe it; a sentinel would assert a document is OWED, which
-    # would be a standing lie with a to-do attached. Absent is honest.
-    assert Hunyuan3d.canonical_contract is None
-    assert Rife.canonical_contract is None  # the precedent it follows
+    assert _library_has("trellis2.dit-bf16")
+    assert not isinstance(TRELLIS2_DIT_BF16, MissingContract)
 
-    # Red/green: `None` must mean ABSENT, never a sentinel that merely reads as
-    # falsy. A MissingContract refuses on every lane-ish read, so if one were
-    # substituted this assertion is the one that would catch it.
-    assert not isinstance(Hunyuan3d.canonical_contract, MissingContract)
+    # Hunyuan3D has NO lane document AND NO MissingContract sentinel. Its
+    # checkpoint is a PICKLE, so no safetensors-shaped document can describe
+    # it; a sentinel would assert a document is OWED, which would be a
+    # standing lie with a to-do attached. Absent is honest — and under
+    # pgw#1599 it is also LOUD: its Model class cannot declare `lanes=` and
+    # is refused at import until the repack-to-safetensors job runs pod-side.
+    assert not _library_has("hunyuan3d.dit-bf16")
+
+    # Rife WAS the precedent Hunyuan3D followed. tensorfs#130 ends that: one
+    # shared `rife.flownet-fp32@1` document now covers the three classes that
+    # used to declare the same type three different ways.
+    del Rife
 
     # Neither noise schedule is invented. Both are {} for a stated reason:
     # TRELLIS.2-4B ships no scheduler/ directory at all, and Hunyuan3D's shape
@@ -837,10 +862,9 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     assert klein["use_dynamic_shifting"] is True
     assert (klein["base_image_seq_len"], klein["max_image_seq_len"]) == (256, 4096)
     assert klein["num_train_timesteps"] == 1000
-    # Rife is the one AUXILIARY type: no canonical lane, and inventing a
-    # tensorfs contract name for its diffusers-layout artifact would be a guess.
-    assert Rife.canonical_contract is None
-    assert MiniMaxH3.canonical_contract is not None
+    # h3's DiT names a real document; Rife is the auxiliary interpolator that
+    # tensorfs#130 finally gives one shared document to.
+    assert _library_has("minimax.h3-dit-diffusers")
 
 
 # ── the flux family (pgw#1393) ───────────────────────────────────────────────
@@ -1090,19 +1114,25 @@ def test_the_root_is_the_registered_family_name_not_the_endpoint_slug() -> None:
 
 
 def test_the_lane_document_resolves_and_is_not_a_sentinel() -> None:
-    contract = Ltx2.canonical_contract
-    assert contract is not None
+    from gen_worker.models.model_types import (
+        LTX2_DIFFUSERS_BF16 as contract,
+        MissingContract,
+    )
+
+    assert not isinstance(contract, MissingContract)
     assert contract.stamp == "ltx-2.diffusers-bf16@1"
     # A `MissingContract` refuses every one of these; a real one answers.
     assert contract.dtype == "bfloat16"
     assert len(contract.digest) == 64
 
 
-def test_the_upsampler_declares_no_contract_and_no_sentinel() -> None:
-    """Absent is honest. A sentinel would be a standing lie with a to-do
-    attached, and `Model[Ltx2Upsampler]` states `lanes=()` explicitly."""
+def test_the_upsampler_has_no_lane_document_and_no_sentinel() -> None:
+    """Absent is honest; a sentinel would be a standing lie with a to-do
+    attached. pgw#1599 makes the absence LOUD rather than quiet: there is no
+    `lanes=()` spelling left, so `Model[Ltx2Upsampler]` cannot be declared at
+    all until tensorfs#130 publishes `ltx-2-upsampler.*`."""
 
-    assert Ltx2Upsampler.canonical_contract is None
+    assert not _library_has("ltx-2-upsampler.diffusers-bf16")
 
 
 def test_the_scheduler_config_is_ltx_s_own_and_not_klein_s() -> None:

@@ -168,8 +168,8 @@ def test_derive_renders_an_envelope_with_no_model_field(
     assert schema["required"] == ["input"]
     assert "model" not in json.dumps(schema)
 
-    # "No lanes" has two causes and the log may not conflate them: a model
-    # held eagerly (`eager_only=`) vs NO MODEL AT ALL.
+    # "No graphs" has two causes and the log may not conflate them: a model
+    # that MARKS nothing vs NO MODEL AT ALL.
     assert result.eager_permanent and result.weightless
 
     sys.path.insert(0, str(FIXTURES))
@@ -180,12 +180,24 @@ def test_derive_renders_an_envelope_with_no_model_field(
         )
     finally:
         sys.path.remove(str(FIXTURES))
+    # pgw#1599: the eager fixture holds a model class with a REAL lane and no
+    # `ctx.compile` mark. It is NOT weightless — the class, its model type and
+    # its lane row all travel — and its lane is reported as UNMARKED, which is
+    # an OBSERVATION of the trace, not a keyword the author wrote. The
+    # `eager_only=` reason string is deleted along with the keyword.
     assert eager.eager_permanent and not eager.weightless
-    # pgw#1488: eager-by-DECLARATION carries the author's reason, and the
-    # reason is the difference between this and "traced, nothing marked".
-    assert eager.eager_only.startswith("the fixture's subject")
-    assert not result.eager_only
-    assert json.loads(eager.document)["entrypoints"] == {}
+    assert eager.unmarked_lanes and not result.unmarked_lanes
+    assert not hasattr(eager, "eager_only")
+    # ...and it PUBLISHES ITS API. Under `eager_only=` this module derived no
+    # entrypoints at all (the keyword hid the model class from the subject
+    # search, so the model slot could not bind and the whole entrypoint was
+    # dropped) — an eager endpoint still serves requests, and its envelope
+    # schema is the hub's auto-generated API docs. Zero GRAPHS is the only
+    # thing eager means.
+    eager_document = json.loads(eager.document)
+    assert set(eager_document["entrypoints"]) == {"analyze"}
+    assert eager_document["graphs"]["lanes"] == []
+    assert eager_document["model_type"] is not None
 
 
 # -- serve ------------------------------------------------------------------

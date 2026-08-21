@@ -46,7 +46,6 @@ __all__ = [
     "DerivedContract",
     "DerivedExecutionLanes",
     "ExcludedDecoderModule",
-    "FunctionExclusion",
     "derive_execution_lanes",
     "execution_lanes_for_function",
     "manifest_block",
@@ -66,11 +65,6 @@ class DerivedExecutionLanes(msgspec.Struct, frozen=True, kw_only=True):
     contracts: tuple[DerivedContract, ...]
     excluded_modules: tuple[ExcludedDecoderModule, ...]
     decode_set: DecodeSet
-
-
-class FunctionExclusion(msgspec.Struct, frozen=True, kw_only=True):
-    execution_lane: str
-    reason: str
 
 
 def _rank() -> dict[str, int]:
@@ -133,46 +127,30 @@ def derive_execution_lanes(
 
 def execution_lanes_for_function(
     derived: DerivedExecutionLanes,
-    *,
-    lora_bucket: int = 0,
-) -> tuple[tuple[str, ...], tuple[FunctionExclusion, ...]]:
-    """The image's derived set narrowed by one function's DECLARED traits.
+) -> tuple[str, ...]:
+    """The image's derived lane set, ranked, for one function.
 
-    The only trait that narrows anything today is ``lora_bucket``: a function
-    that takes runtime adapters cannot run on a lane whose decoder has no
-    adapter branch (``w8a8_lora`` is branch-capable on exactly three lanes),
-    and that is computable here — which is why A4's corollary refuses an
-    exclusion marker. Nothing about owner PREFERENCE lives here; §1.31 layer 2
-    owns ordering.
+    pgw#1599 (sweep, routed from the pgw#1548 archaeology lane): the
+    ``lora_bucket`` parameter and the per-function EXCLUSION it computed are
+    DELETED. ``lora_bucket`` was a DEAD AXIS — nothing in the tree ever set
+    it non-zero (the sole production caller passed a literal 0), so the
+    "function needs runtime adapter composition" narrowing could never fire,
+    and its only effect was to make an always-empty exclusions list look like
+    a live instrument. Two sibling sites carry the same dead axis and die in
+    their OWN changes, deliberately not smuggled in here: torchcg still
+    HASHES it into graph identity (``declaration.py``; a dead axis inside an
+    identity hash is a live source of phantom cache misses — its own torchcg
+    PR + vendor bump), and tensorhub still accepts it on the wire
+    (``manifest_contract.go``).
     """
     rank = _rank()
     keep: list[str] = []
-    exclusions: dict[str, FunctionExclusion] = {}
     for contract in derived.contracts:
         for lane in contract.execution_lanes:
-            if lora_bucket > 0 and not contract.composes_lora:
-                exclusions.setdefault(
-                    lane,
-                    FunctionExclusion(
-                        execution_lane=lane,
-                        reason=(
-                            f"lora_bucket={lora_bucket} needs runtime adapter "
-                            f"composition; decoder {contract.decoder} for "
-                            f"{contract.contract} has no adapter branch"
-                        ),
-                    ),
-                )
-                continue
             if lane not in keep:
                 keep.append(lane)
-    # A lane another contract serves WITH composition is not excluded.
-    for lane in keep:
-        exclusions.pop(lane, None)
     keep.sort(key=lambda lane: rank[lane])
-    ordered = tuple(
-        exclusions[lane] for lane in sorted(exclusions, key=lambda x: rank[x])
-    )
-    return tuple(keep), ordered
+    return tuple(keep)
 
 
 def manifest_block(derived: DerivedExecutionLanes) -> Dict[str, Any]:

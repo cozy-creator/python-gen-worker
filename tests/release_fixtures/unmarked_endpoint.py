@@ -1,20 +1,24 @@
-"""No contract, no eager declaration, no compile mark: it TRACES anyway.
+"""A declared lane, no compile mark: it TRACES, and measures zero graphs.
 
-pgw#1488's middle state. `Whatever` is a model type with no canonical
-contract, so before this change the derive refused the class outright ("omits
-lanes= and its model type has no canonical contract yet"); the remedy the
-refusal named — `lanes=()` — then disabled compilation with no output at all.
+pgw#1488's middle state, re-based on pgw#1599. `Whatever` is a model type with
+no CANONICAL contract, which used to leave three bad options: refuse the class,
+borrow a contract the model type does not have, or write `lanes=()` and
+silently disable compilation. All three are gone. A lane is a property of the
+CHECKPOINT, not of the model family, so this class names the contract its
+checkpoint actually carries — a model type with no canonical lane is no
+obstacle to that — and marks nothing in `load`.
 
-Now the lane is DERIVED, `load` runs, and the honest answer is recorded: the
-author marked nothing, so there is nothing to compile. Zero graphs measured,
-not assumed.
+The result is the honest one: the author marked nothing, so there is nothing to
+compile, and the empty `graphs.lanes` is measured rather than declared.
 """
 
 from __future__ import annotations
 
 import msgspec
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker.demand import MiB, const
+from lane_contracts import TINY_DIFFUSERS_FP32
 
 
 class Whatever(msgspec.Struct):
@@ -31,8 +35,13 @@ class Out(msgspec.Struct):
     echoed: str
 
 
-class UnmarkedModel(Model[Whatever]):
-    """No `lanes=`, no `ctx.compile` — and no refusal."""
+class UnmarkedModel(
+    Model[Whatever],
+    lanes={TINY_DIFFUSERS_FP32: lane(request=const(MiB(64)))},
+    # No `shapes=`: `load` marks no compile target, so nothing is keyed and
+    # declaring an axis would be a refusal.
+):
+    """A real `lanes=`, no `ctx.compile` — and no refusal."""
 
     def load(self, ctx: LoadContext[Whatever]) -> None:
         self.loaded = True

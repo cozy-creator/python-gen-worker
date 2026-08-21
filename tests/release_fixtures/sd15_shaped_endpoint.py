@@ -15,7 +15,8 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import STATIC, LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 from gen_worker.models.model_types import SD15_DIFFUSERS_BF16
 
@@ -33,7 +34,11 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-class Sd15Shaped(Model[SDXL], lanes=(SD15_BF16,)):
+class Sd15Shaped(
+    Model[SDXL],
+    lanes={SD15_BF16: lane(request=const(MiB(64)) + per_mp_batch(MiB(16)))},
+    shapes={"aspect": STATIC},
+):
     pipe: Any
 
     def load(self, ctx: LoadContext[SDXL]) -> None:

@@ -34,7 +34,9 @@ from gen_worker.discovery.entrypoints_v2 import (
     discover_entrypoints,
     lift_engine_runtimes,
 )
-from gen_worker import LlamaServer
+from gen_worker import LlamaServer, lane
+from gen_worker._vendor.tensorfs import contracts as _tfs_contracts
+from gen_worker.demand import GiB, const
 from gen_worker.models import SDXL
 from gen_worker.serving import (
     DeployBinding,
@@ -168,7 +170,8 @@ def test_the_lock_census_names_the_engine_runtime(declarations: Any) -> None:
 
 
 class UnmarkedGgufModel(
-    Model[SDXL], eager_only="an external engine owns the weights and the graph"
+    Model[SDXL],
+    lanes={_tfs_contracts.SDXL_DIFFUSERS_BF16: lane(request=const(GiB(1)))},
 ):
     """Engine-hosted and NOT marked — the mistake a migrating author makes.
 
@@ -177,6 +180,11 @@ class UnmarkedGgufModel(
     the generic refusal's advice: `ctx.load(StableDiffusionXLPipeline)` is a
     load the streaming engine refuses BY DESIGN for a block-quantized
     container, so telling this author to write one sends them into a wall.
+
+    pgw#1599: this class used to carry `eager_only=`, which is deleted. It
+    declares a real lane like every model class does, and it calls no
+    `ctx.compile` — the ABSENT MARK is the entire eager statement, and it is
+    orthogonal to `self_loading=`, which is what this test is about.
     """
 
     def load(self, ctx: LoadContext[SDXL]) -> None:

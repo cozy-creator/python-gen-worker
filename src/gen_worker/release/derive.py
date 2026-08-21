@@ -8,15 +8,15 @@ instrumented discovery, and stamp the observed graph set -- plus the lane
 contracts and the model type's checkpoint-defaults schema -- as the static
 release metadata document.
 
-**A contract is METADATA, never a gate** (Paul, 2026-08-19, "A NORMAL TRACE
-MUST JUST WORK"; pgw#1488). A model class that names no tensorfs contract is
-traced under a DERIVED lane identity — ``derived.<model type>@1``, computed
-identically here and at serve — and its load dtype comes from the checkpoint
-when no contract states one. Nothing rekeys: ``cg-graph-v1`` hashes the
-canonical trace plus ingress plus passes, so the lane's NAME never entered
-graph identity, and a lane that declares a contract publishes exactly the
-bytes it always did. Eager-forever is the class header's ``eager_only=``
-declaration, with a reason, and never an inference from an empty lane tuple.
+**EVERY model class declares REAL lanes** (Paul's ruling pair, 2026-08-20;
+pgw#1597/pgw#1599). A lane answers checkpoint COMPATIBILITY and lane
+SELECTION, not merely compilation, so there is no derived, borrowed or
+implicit identity to trace under — a class that names no tensorfs contract is
+REFUSED at class definition, before this module ever sees it. Contracts are
+made CHEAP rather than optional (tensorfs#130 generates a candidate from a
+safetensors header). **Compilation participation is the MARK**: a model with
+no ``ctx.compile`` call in ``load()`` traces, marks nothing, and is reported
+as an unmarked lane — measured, not assumed. There is no eager keyword.
 
 **Coverage is auto-enumerated -- inputs AND bindings** (Paul rulings,
 2026-08-19/20; ``ctx.is_trace`` is DELETED from the author surface, so author
@@ -74,12 +74,15 @@ from ..serving.entrypoints import ENTRYPOINT_ATTR
 from ..serving.model import (
     Model,
     ModelDeclarationError,
-    eager_only_reason,
-    is_derived_lane,
     lane_handle,
+    model_declared_lanes,
+    model_marks_compile,
     model_lanes,
     model_requires,
+    model_shapes,
+    model_structural,
 )
+from ..serving.lane_spec import DYNAMIC
 from ..serving.model import model_type as _strict_model_type
 from .trace_context import (
     StepBudgetReached,
@@ -105,51 +108,48 @@ ENUM_CAP = 64
 #: modules like a marked VAE decoder). None = the author's own step count.
 TRACE_STEP_BUDGET: Optional[int] = 1
 
-#: The axes a derive may export DYNAMIC, by name (pgw#1548).
-#:
-#: torchcg takes a ``(target, input name, axis) -> bool`` predicate and holds
-#: no opinion about what an axis MEANS; naming them is the endpoint layer's
-#: job, and these two names are the ones Paul's ruling is written in:
-#:
-#: * ``batch`` — axis 0 of any feed. Classifier-free guidance is the whole
-#:   axis: batch 2 is cond+uncond concatenated, batch 1 is the guidance-free
-#:   path, and every shipped lock carries both.
-#: * ``aspect`` — axes 2.. of a rank-4+ feed, i.e. a latent's spatial sides.
-#:   sd15 carries 7 of these and sdxl 9, one graph each.
-#:
-#: ``all`` is both; ``off`` (the default) is the static fan every lock in the
-#: fleet was derived under. The default is deliberately OFF: which axis is
-#: worth collapsing is a MEASURED question per model (pgw#1548's acceptance),
-#: and a flag that silently re-keys every graph in the fleet is not a default.
-DYNAMIC_AXES = ("off", "batch", "aspect", "all")
+#: pgw#1599: the global ``DYNAMIC_AXES`` derive FLAG is DELETED. Which axis is
+#: worth collapsing is a MEASURED, PER-MODEL question (pgw#1548), so it is
+#: declared on the model class that measured it (``shapes={"aspect": DYNAMIC}``)
+#: — never passed on a command line, where one word silently re-keyed every
+#: graph in the fleet at once. torchcg still takes a
+#: ``(target, input name, axis) -> bool`` predicate and holds no opinion about
+#: what an axis MEANS; naming them stays the endpoint layer's job, and
+#: :func:`dynamic_dim_policy` is now built FROM the declaration.
 
 
 class DeriveError(RuntimeError):
     """The release derive cannot state this endpoint's graph set."""
 
 
-def dynamic_dim_policy(axes: str) -> Any:
-    """Turn an axis NAME into the predicate torchcg dispatches on."""
+def dynamic_dim_policy(shapes: Mapping[str, str]) -> Any:
+    """Turn a model class's declared shape axes into torchcg's predicate.
 
-    if axes not in DYNAMIC_AXES:
-        raise DeriveError(
-            f"dynamic dims are declared by axis name, one of "
-            f"{list(DYNAMIC_AXES)!r}; got {axes!r}"
-        )
-    if axes == "off":
+    ``shapes`` is :func:`gen_worker.serving.model.model_shapes`'s answer —
+    ``{axis: "static" | "dynamic"}``, written by the model's author.
+
+    * ``aspect`` — axes 2.. of a rank-4+ feed, i.e. a latent's spatial sides.
+      DYNAMIC collapses the whole aspect fan into one record (measured cold
+      mint: sd15 100 s, SERVABLE — pgw#1548).
+    * ``batch`` — axis 0. NEVER offered, and not declarable: CFG/batch is a
+      PERMANENTLY STATIC shape fork (Paul, 2026-08-20), on two measured
+      grounds — batch-dynamic removed zero specializations on the real
+      endpoint, and batch-dynamic records fail to mint (tcg#78).
+    """
+
+    aspect = shapes.get("aspect") == DYNAMIC
+    if not aspect:
         return None
-    batch = axes in ("batch", "all")
-    aspect = axes in ("aspect", "all")
 
     def policy(_target: str, _name: str, axis: int) -> bool:
         if axis == 0:
-            return batch
+            return False  # batch: permanently static, never offered
         # Rank is not handed to the predicate, so "axis 2 or beyond" is the
         # spelling of spatial here. Axis 1 is a channel or a sequence length
         # and is never offered: neither varies across an aspect fan, so
         # admitting it would widen a graph over an axis no observation
         # supports.
-        return aspect and axis >= 2
+        return axis >= 2
 
     return policy
 
@@ -219,14 +219,11 @@ class ReleaseDeriveResult:
     #: Distinct from eager-permanent, which holds a model and compiles none —
     #: both land on "no lanes", and a log that conflates them lies.
     weightless: bool = False
-    #: pgw#1488: the class's DECLARED eager-forever reason (``eager_only=``).
-    #: Non-empty means no trace was attempted and the author said why.
-    eager_only: str = ""
-    #: Lanes whose identity was DERIVED (no contract declared). Their handles
-    #: read ``derived.*``; contract metadata attaches to the artifacts later.
-    derived_lanes: tuple[str, ...] = ()
     #: Lanes that TRACED and found nothing marked via ``ctx.compile``. Zero
     #: graphs because the author marked zero modules — measured, not assumed.
+    #: pgw#1599: this is now the ONLY eager statement there is. `eager_only=`
+    #: and the derived-lane machinery are deleted; a model with no marks
+    #: declares real lanes like every other and simply mints no graph.
     unmarked_lanes: tuple[str, ...] = ()
     #: pgw#1449: entrypoints the enumerator could not build a trace payload
     #: for, name -> the typed reason. They are STATED, not silently dropped,
@@ -394,17 +391,17 @@ def _assert_weights_free(torch: Any, program: Any) -> None:
 
 
 def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
-    """``(the ONE traced Model subclass or None, the eager_only reason)``.
+    """``(the ONE traced Model subclass or None, "")``.
 
-    pgw#1488: every model class has a lane unless it declares
-    ``eager_only="<reason>"``, so "which class do we trace" is now the same
-    question as "which class is not declared eager". A module whose only model
-    class IS eager-declared answers ``(None, reason)`` — the same shape the
-    eager-permanent path always had, plus the author's own words for it.
+    pgw#1599: EVERY model class declares real lanes — `lanes=` is required,
+    `lanes=()` and `eager_only=` are deleted — so "which class do we trace"
+    is now "which class MARKS a compile target". A module whose model classes
+    mark nothing answers ``(None, "")``: nothing to trace, and the absent
+    mark IS the author's statement (Paul's ruling pair, 2026-08-20).
     """
 
     found: list[type] = []
-    eager: list[tuple[type, str]] = []
+    unmarked: list[type] = []
     for value in vars(module).values():
         if not (
             inspect.isclass(value)
@@ -413,37 +410,52 @@ def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
             and getattr(value, "__module__", None) == module.__name__
         ):
             continue
-        reason = eager_only_reason(value)
-        if reason:
-            eager.append((value, reason))
-            continue
         try:
             lanes = model_lanes(value)
             # pgw#1391: `model_lanes` hands back the lane OBJECTS without
             # reading them, so a class whose lane is a CONTRACT still has to
-            # have that contract read here. A derived lane has nothing to
-            # read — it carries no document by construction, which is the
-            # whole point — so it is not put through the contract check.
+            # have that contract read here.
             from ..serving.model import lane_dtype
 
             for lane in lanes:
-                if is_derived_lane(lane):
-                    continue
                 lane_dtype(lane, where=f"class {value.__qualname__!r}")
+            marked = model_marks_compile(value)
         except ModelDeclarationError as exc:
             raise DeriveError(str(exc)) from exc
-        if lanes:
-            found.append(value)
+        # pgw#1599: the MARK selects the trace subject, not the lane. Every
+        # class declares real lanes now (an auxiliary RIFE interpolator names
+        # the `rife.*` document exactly as the DiT names its own), so "has a
+        # lane" no longer distinguishes the compiled half of an endpoint from
+        # the eager half. The `ctx.compile` mark does, and it is the author's
+        # only statement about it.
+        (found if marked else unmarked).append(value)
     if len(found) > 1:
         raise DeriveError(
-            f"module {module.__name__!r} has more than one compilable model "
-            f"class ({[cls.__name__ for cls in found]!r}); a release derives "
-            f"ONE. An auxiliary model that another slot drives and that "
-            f"compiles nothing declares "
-            f"eager_only=\"<why>\" on its class header — that is the "
-            f"declaration, and it is not an empty lanes tuple."
+            f"module {module.__name__!r} has more than one COMPILE-MARKING "
+            f"model class ({[cls.__name__ for cls in found]!r}); a release "
+            f"derives ONE. An auxiliary model that another slot drives simply "
+            f"calls no `ctx.compile()` in its `load()` — that is the entire "
+            f"eager declaration (Paul, 2026-08-20), and there is no keyword "
+            f"for it."
         )
-    return (found[0] if found else None, eager[0][1] if eager and not found else "")
+    if found:
+        return (found[0], "")
+    # NOBODY MARKS. The module is still not weightless — it holds a model
+    # class with a real lane, a model type and a defaults schema, and all of
+    # those belong in the document. It derives as the subject and reports
+    # ZERO graphs (`unmarked_lanes`), which is the measured answer. Dropping
+    # to `None` here would publish it as WEIGHTLESS — no model_type, no lane
+    # row, no defaults schema — which is a different and false statement.
+    if len(unmarked) > 1:
+        raise DeriveError(
+            f"module {module.__name__!r} has more than one model class "
+            f"({[cls.__name__ for cls in unmarked]!r}) and NONE of them marks "
+            f"a compile target, so which one the release is ABOUT cannot be "
+            f"read. Mark the compiled one via `ctx.compile()` in its `load()`; "
+            f"an auxiliary model that another slot drives marks nothing and is "
+            f"then unambiguous."
+        )
+    return (unmarked[0] if unmarked else None, "")
 
 
 @dataclass(frozen=True)
@@ -703,13 +715,37 @@ def _literal_axis(annotation: Any) -> Optional[list[Any]]:
     return values
 
 
-def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], bool]:
+def _payload_field_names(payload_type: type) -> tuple[str, ...]:
+    """Field names of one entrypoint's payload struct, or ``()``."""
+
+    import msgspec
+
+    try:
+        return tuple(field.name for field in msgspec.structs.fields(payload_type))
+    except TypeError:
+        return ()
+
+
+def _auto_payloads(
+    owner: str,
+    payload_type: type,
+    structural: Mapping[str, Any] = MappingProxyType({}),
+) -> tuple[tuple[Any, ...], bool]:
     """Auto-enumerated trace payloads for one entrypoint, plus the capped flag.
 
     One payload per cross-product entry over the struct's ENUM-typed fields
     (field declaration order x enum declaration order -- deterministic);
     every other field at its default; required non-defaulted fields
     synthesized minimally by type.
+
+    ``structural`` is the model class's declared STRUCTURAL fork axes
+    (pgw#1599). It contributes ONE REPRESENTATIVE PER VARIANT CLASS for the
+    payload field it names — not the field's full value set. That is the
+    whole economy of the declaration: sdxl serves 8 schedulers that produce
+    exactly 2 timestep dtypes, so 2 traces cover 8/8 where the blind
+    cross-product would have cost 8 and `_literal_axis` (string literals
+    excluded as host-side policy) enumerated 0 — which is why 5 of sdxl's 8
+    scheduler configs fell to loud eager with nothing able to say why.
     """
 
     import msgspec
@@ -723,8 +759,22 @@ def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], boo
 
     enum_axes: list[tuple[str, list[Any]]] = []
     base: dict[str, Any] = {}
+    #: payload field -> the declared representatives, one per variant class.
+    declared_axes: dict[str, list[Any]] = {}
+    for axis, declaration in structural.items():
+        variants = declaration.variants()
+        if not any(field.name == declaration.field for field in struct_fields):
+            continue  # this axis forks a DIFFERENT entrypoint's payload
+        declared_axes[declaration.field] = [value for _, value in variants]
     for field in struct_fields:
         annotation = _strip_annotated(field.type)
+        declared_values = declared_axes.pop(field.name, None)
+        if declared_values is not None:
+            # An AUTHOR-DECLARED axis wins over whatever the annotation would
+            # have enumerated: the author measured which values fork the
+            # program, and the platform never invents an axis (pgw#1597).
+            enum_axes.append((field.name, declared_values))
+            continue
         if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
             values = list(annotation)
             if not values:
@@ -1203,13 +1253,6 @@ def _contract_document(
     stand-in — travels stamp-only with a WARNING naming it, never silently.
     """
 
-    if is_derived_lane(lane):
-        # pgw#1488: a DERIVED lane has no contract and never claimed one. The
-        # honest row is no document — the artifacts exist under the derived
-        # identity and a contract, when someone authors one, ATTACHES to them
-        # as fleet metadata. That is a later step, not a precondition.
-        return None
-
     claimed = False
     for attribute in ("document", "as_dict", "to_dict"):
         value = getattr(lane, attribute, None)
@@ -1276,12 +1319,6 @@ def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
     """
 
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
-    if is_derived_lane(lane):
-        # pgw#1488: no contract, so no contract dtype. The precision comes
-        # from the CHECKPOINT, resolved inside the load context (which is the
-        # one place that holds the tree) so the trace and the serve read the
-        # same source. `LaneRef` carries the handle; dtype stays open here.
-        return torchcg.LaneRef(handle, dtype=None)
     try:
         # tensorfs#113's `dtype` is a PROPERTY that RAISES on a contract
         # declaring none (minimax.h3-dit-diffusers today), so this is a try,
@@ -1495,21 +1532,15 @@ def _derive_lane(
                     f"session: {type(exc).__name__}: {exc}"
                 ) from exc
             if not load_ctx.marked_modules:
-                if is_derived_lane(lane):
-                    # pgw#1488. The trace RAN — the model loaded under the
-                    # hollow session and the author marked no module, which is
-                    # an observation, not a failure. Zero graphs is the honest
-                    # answer and the caller prints it as one. The refusal below
-                    # stays for a lane the author DECLARED: declaring a lane is
-                    # saying "graphs key here", and then compiling nothing is a
-                    # contradiction only the author can resolve.
-                    return None
-                raise DeriveError(
-                    f"lane {handle!r}: load() marked nothing via ctx.compile(). "
-                    f"A lane-declaring model compiles SOMETHING; a model that "
-                    f"wants eager-forever declares "
-                    f"eager_only=\"<why>\" instead."
-                )
+                # pgw#1599: the trace RAN — the model loaded under the hollow
+                # session and the author marked no module, which is an
+                # OBSERVATION, not a failure. Under the ruling pair a declared
+                # lane no longer means "graphs key here": a lane answers
+                # checkpoint compatibility and lane selection, and the
+                # `ctx.compile` mark — absent here — is the only compilation
+                # statement there is. Zero graphs is the honest answer and the
+                # caller prints it as one.
+                return None
             modules = _named_marked_modules(model, load_ctx.marked_modules)
 
             # Secondary model slots (an auxiliary model with its own
@@ -1687,7 +1718,6 @@ def derive_release(
     lockfile: Optional[Path] = None,
     graph_cas: Optional[Path] = None,
     slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
-    dynamic_axes: str = "off",
 ) -> ReleaseDeriveResult:
     """Derive the release metadata document for one endpoint module.
 
@@ -1711,11 +1741,10 @@ def derive_release(
         )
     stack = _compile_stack_from_lockfile(lockfile)
 
-    cls, eager_only = _lane_model_class(module)
+    cls, _ = _lane_model_class(module)
     endpoint_name = f"{module.__name__}:{cls.__name__ if cls else ''}".rstrip(":")
 
     lanes: list[Any] = []
-    derived_lanes: list[str] = []
     unmarked_lanes: list[str] = []
     lane_contracts: dict[str, Any] = {}
     entrypoints: dict[str, Any] = {}
@@ -1736,7 +1765,9 @@ def derive_release(
             payloads: tuple[Any, ...] = ()
         else:
             try:
-                payloads, capped = _auto_payloads(owner, plan.payload_type)
+                payloads, capped = _auto_payloads(
+                    owner, plan.payload_type, model_structural(cls)
+                )
             except PayloadEnumerationRefused as exc:
                 # pgw#1449: ONE unenumerable signature used to cost the whole
                 # module — `gen-worker lock` died here and wrote NO lock, so
@@ -1788,6 +1819,25 @@ def derive_release(
             )
 
     if cls is not None:
+        # A declared axis that reaches NO entrypoint payload field enumerates
+        # nothing and would be a silent no-op — the exact silence the
+        # declaration exists to end. Say so; do not refuse (an axis may
+        # legitimately name a field only one of several entrypoints carries,
+        # and `_auto_payloads` already skips it per entrypoint).
+        reachable = {
+            field_name
+            for plan, _ in plans
+            for field_name in _payload_field_names(plan.payload_type)
+        }
+        for axis, declaration in model_structural(cls).items():
+            if declaration.field not in reachable:
+                warnings.append(
+                    f"class {cls.__name__!r}: structural axis {axis!r} names "
+                    f"payload field {declaration.field!r}, which NO derived "
+                    f"entrypoint carries — it enumerated nothing. Either the "
+                    f"field was renamed, or the axis belongs on a different "
+                    f"model class."
+                )
         requires = model_requires(cls)
         for lane in model_lanes(cls):
             lane_graphs = _derive_lane(
@@ -1796,7 +1846,8 @@ def derive_release(
                 slot_checkpoints=slot_checkpoints,
                 endpoint_root=endpoint_source_root(module),
                 unservable=unservable_payloads,
-                dynamic_dims=dynamic_dim_policy(dynamic_axes),
+                # pgw#1599: read off the MODEL CLASS, never a CLI flag.
+                dynamic_dims=dynamic_dim_policy(model_shapes(cls)),
             )
             if lane_graphs is None:
                 # Traced, nothing marked (pgw#1488). No lane row: an empty one
@@ -1805,8 +1856,6 @@ def derive_release(
                     lane_contract_handle(f"class {cls.__name__!r}", lane)
                 )
                 continue
-            if is_derived_lane(lane):
-                derived_lanes.append(lane_graphs.contract)
             lanes.append(lane_graphs)
             entry: dict[str, Any] = {
                 "stamp": lane_graphs.contract,
@@ -1820,13 +1869,6 @@ def derive_release(
                 # states none.
                 "digest": _contract_digest(lane),
             }
-            if is_derived_lane(lane):
-                # pgw#1488: `document: null` is a BUG on a declared contract
-                # (pgw#1391) and the HONEST state on a derived one. The reader
-                # cannot tell those apart from a null, so the producer says
-                # which it is. Written only on the derived branch, so every
-                # contract-declaring release keeps its bytes exactly.
-                entry["derived"] = True
             # ie#740 placement floor for THIS lane, read off the class header
             # (`requires=`). Absent = undeclared, and the platform default is
             # what the deployment gets — the honest state, never an invented
@@ -1865,6 +1907,21 @@ def derive_release(
         # release's auto-generated API docs; a renamed parameter is a
         # visible API break, flagged like a disappearing lane.
         "entrypoints": entrypoints,
+        # pgw#1599: the author's declared FORK AXES travel in the document,
+        # so the mint scheduler and the hub read the CLOSED key set instead of
+        # inferring it. `structural` names the axes that fork the PROGRAM (and
+        # what measurement said so); `shapes` names the per-axis static/dynamic
+        # choice that decides whether a lane mints N bucket artifacts or one
+        # symbolic one. Both empty for a weightless module.
+        "fork_axes": {
+            "structural": [
+                declaration.as_document(axis)
+                for axis, declaration in (
+                    model_structural(cls) if cls is not None else {}
+                ).items()
+            ],
+            "shapes": model_shapes(cls) if cls is not None else {},
+        },
         "checkpoint_defaults_schema": _defaults_schema(
             model_model_type(cls) if cls is not None else None
         ),
@@ -1890,8 +1947,6 @@ def derive_release(
         # declared zero model slots. An eager-permanent module also has no
         # lane class, but its entrypoints carry slots and derive no plan.
         weightless=cls is None and bool(plans),
-        eager_only=eager_only,
-        derived_lanes=tuple(derived_lanes),
         unmarked_lanes=tuple(unmarked_lanes),
         unenumerable_entrypoints=tuple(unenumerable),
         unservable_payloads=tuple(

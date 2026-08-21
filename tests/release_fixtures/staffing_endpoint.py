@@ -19,7 +19,8 @@ from typing import Any
 
 import msgspec
 
-from gen_worker import Model, RequestContext, Resources, entrypoint
+from gen_worker import Model, RequestContext, Resources, entrypoint, lane
+from gen_worker.demand import GiB, MiB, const, per_frame, per_frame_squared
 from gen_worker.models.tensor_layout_contract import LayoutRequirements
 
 
@@ -65,10 +66,15 @@ class AnalyzeOutput(msgspec.Struct):
 
 class H3Model(
     Model[MiniMaxH3],
-    # pgw#1404: the lane and its per-LANE placement floor are ONE declaration —
-    # the floor is a property of the weight format, so it is written as the
-    # lane's own value. VRAM only; the sm floor is derived from the contract.
-    lanes={H3_LANE: "vram78g"},
+    # pgw#1599: the lane's value is its DEMAND FORMULA, not a VRAM string.
+    # `"vram78g"` claimed one number for every request H3 would ever serve, and
+    # H3 is the case that proves there is no such number — a longer video costs
+    # linearly in frames and QUADRATICALLY in the attention term. Fixture-scale
+    # coefficients; the sm floor is still derived from the contract dtype.
+    lanes={H3_LANE: lane(
+        request=const(GiB(1)) + per_frame(MiB(8)) + per_frame_squared(MiB(1)),
+    )},
+    # No `shapes=`: `load` marks no compile target.
 ):
     def load(self, ctx: Any) -> None:
         self.pipe = ctx.load(H3Pipeline)

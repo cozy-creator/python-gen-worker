@@ -233,13 +233,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     _audit_source_only_imports(root=root, top_level=top_level, preloaded=preloaded)
 
     for row in entrypoints:
-        lanes, exclusions = execution_lanes_for_function(derived, lora_bucket=0)
-        row["execution_lanes"] = list(lanes)
-        if exclusions:
-            row["execution_lane_exclusions"] = [
-                {"execution_lane": e.execution_lane, "reason": e.reason}
-                for e in exclusions
-            ]
+        row["execution_lanes"] = list(execution_lanes_for_function(derived))
 
     # pgw#1421: the THIRD derived census — which external engine binaries
     # this image's models boot. Lifted off the slots (which is where the

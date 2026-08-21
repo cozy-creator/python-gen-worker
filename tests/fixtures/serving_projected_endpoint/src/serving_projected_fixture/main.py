@@ -21,8 +21,9 @@ import msgspec
 import torch
 from diffusers import DiffusionPipeline
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
 from gen_worker._vendor.torchcg import LaneRef
+from gen_worker.demand import MiB, const
 
 #: bf16, because that is what the fixture writes to disk and the engine's whole
 #: contract is that bytes land verbatim in the container's own dtype. A lane
@@ -72,7 +73,13 @@ class LoadEvidence(msgspec.Struct):
     unet_checksum: float
 
 
-class StreamModel(Model[Any], lanes={STREAM_LANE: "vram8g"}):
+class StreamModel(
+    Model[Any],
+    # A fixed floor and nothing else: this endpoint's subject is the LOAD, and
+    # `probe` takes an empty payload, so there is no request quantity for a
+    # demand term to scale on. No `shapes=` — `load` marks no compile target.
+    lanes={STREAM_LANE: lane(request=const(MiB(64)))},
+):
     """The stateful half. ``load`` has exactly one spelling and no fallback."""
 
     def load(self, ctx: LoadContext[Any]) -> None:

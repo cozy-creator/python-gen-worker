@@ -15,8 +15,10 @@ from typing import List
 
 import msgspec
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker.demand import MiB, const
 from gen_worker.models import SDXL
+from gen_worker.models.model_types import SDXL_DIFFUSERS_BF16
 from gen_worker.serving.engine_runtime import EngineCommand, EngineSpec
 
 #: Set by the test before boot — the stand-in engine script.
@@ -50,7 +52,10 @@ class StandInSpec(EngineSpec, frozen=True, kw_only=True):
 
 class StandInModel(
     Model[SDXL],
-    eager_only="an external engine process owns the weights and the graph",
+    # An external engine process owns the weights and the graph, so `load`
+    # marks nothing and there is no `shapes=` to declare. The lane is still the
+    # checkpoint's own identity.
+    lanes={SDXL_DIFFUSERS_BF16: lane(request=const(MiB(64)))},
     self_loading="served by an external engine process over HTTP",
 ):
     def load(self, ctx: LoadContext[SDXL]) -> None:

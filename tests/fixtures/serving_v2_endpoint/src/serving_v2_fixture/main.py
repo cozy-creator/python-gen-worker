@@ -32,6 +32,7 @@ from diffusers import (
 )
 
 from gen_worker import (
+    STATIC,
     Adapter,
     DistillationAdapter,
     ImageAsset,
@@ -41,7 +42,9 @@ from gen_worker import (
     PromptRole,
     RequestContext,
     entrypoint,
+    lane,
 )
+from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 
 from . import contracts
@@ -231,17 +234,26 @@ class TinyPipeline:
 class SdxlModel(
     Model[SDXL],
     # A lane IS a tensorfs layout contract — an imported object carrying the
-    # actual layout. Omitting lanes= means one lane: SDXL's canonical contract.
-    # pgw#1404: the lane and what it needs of a machine are ONE declaration,
-    # and the value is the lane's VRAM floor ONLY. Per-lane because the fp8
-    # lane fits smaller. The compute-capability floor is DERIVED from each
-    # contract's own load dtype and is not written here — it reads 0 for both
-    # of these because the stand-ins declare float32 (this fixture serves on
-    # CPU with fake weights), which is exactly the derivation being honest.
+    # actual layout — and its VALUE is that lane's own DEMAND FORMULA, never a
+    # VRAM string (pgw#1599: there is no single number, because a 4 MP image is
+    # not a 1 MP image). Per-lane and not per-model for the reason visible
+    # here: fp8 halves the weight bytes AND shrinks the activation
+    # coefficient, so one formula would be wrong for one of these two. The
+    # compute-capability floor is DERIVED from each contract's own load dtype
+    # and is not written here — it reads 0 for both of these because the
+    # stand-ins declare float32 (this fixture serves on CPU with fake
+    # weights), which is exactly the derivation being honest.
     lanes={
-        contracts.SDXL_DIFFUSERS_BF16: "vram12g",
-        contracts.COZY_SDXL_FP8_ROWWISE: "vram8g",
+        contracts.SDXL_DIFFUSERS_BF16: lane(
+            request=const(MiB(96)) + per_mp_batch(MiB(24)),
+        ),
+        contracts.COZY_SDXL_FP8_ROWWISE: lane(
+            request=const(MiB(48)) + per_mp_batch(MiB(12)),
+        ),
     },
+    # The aspect fan is BAKED: one artifact per bucket, all sharing one traced
+    # program. `batch` is not declarable — CFG is a permanently static fork.
+    shapes={"aspect": STATIC},
 ):
     """The stateful half: weights, compile-marked modules, defaults. One
     instance per (checkpoint x lane), LRU-resident, single-flight."""

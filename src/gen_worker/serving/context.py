@@ -496,13 +496,18 @@ class LoadContext(Generic[MT_co]):
     @property
     def lane(self) -> Any:
         """The active lane (the deploy's pick) — a tensorfs layout contract;
-        ``ctx.lane.dtype`` is the load dtype. Raises for a model that
-        declared ``lanes=()`` — eager-permanent code has no lane to read,
-        and a silent default would invent one."""
+        ``ctx.lane.dtype`` is the load dtype.
+
+        pgw#1599: every model class declares at least one REAL lane, so a
+        missing active lane is now a WIRING defect (nothing passed one in),
+        never an authored state. Resolution among several declared lanes is
+        platform machinery (pgw#1606)."""
         if self._lane is None:
             raise RuntimeError(
-                "ctx.lane: this model declared no execution lanes "
-                "(eager-permanent); there is no active lane to read"
+                "ctx.lane: no active lane was bound for this load. Every "
+                "model class declares real lanes (pgw#1599), so this is a "
+                "platform wiring defect, not an authored state — the caller "
+                "that built this LoadContext passed no `lane=`."
             )
         return self._lane
 

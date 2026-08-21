@@ -255,17 +255,28 @@ def test_the_contract_plane_is_digest_fenced_at_the_one_rev() -> None:
     assert {f"_contracts/{path.name}" for path in DOCUMENTS.glob("*.json")} <= recorded
 
 
+def _fixture_lane():
+    """A minimal but REAL lane declaration (pgw#1599). These tests are about
+    the CONTRACT half of the header, so the demand formula is deliberately
+    the simplest legal one."""
+
+    from gen_worker import lane
+    from gen_worker.demand import GiB, const
+
+    return lane(request=const(GiB(1)))
+
+
 def test_a_dtypeless_FRAGMENT_is_importable_but_refuses_as_a_serve_lane() -> None:
     """pgw#1393's `dit.blocks-fused-qkv@1` is the standing case, and both
     halves matter.
 
-    It is a real library document and `Flux1.canonical_contract` points at it,
-    so `gen_worker.models` must import and that attribute must be readable —
-    refusing at import would break master. But it declares no top-level dtype
-    BECAUSE IT IS A FRAGMENT (a family-plural block spelling), and it matches
-    zero of the 169 tensors in the real Klein transformer header. So claiming
-    it as a serve lane must refuse, whether by omitting `lanes=` or by naming
-    it explicitly — the refusal is the point, not a gap to be waived.
+    It is a real library document, so `gen_worker.models` must import. But it
+    declares no top-level dtype BECAUSE IT IS A FRAGMENT (a family-plural
+    block spelling), and it matches zero of the 169 tensors in the real Klein
+    transformer header. So claiming it as a serve lane must refuse — the
+    refusal is the point, not a gap to be waived. pgw#1599 removes the OTHER
+    half of the old hazard entirely: there is no longer an implicit borrow to
+    claim a fragment by accident, because `lanes=` is required and explicit.
     """
 
     from gen_worker.models import SDXL
@@ -278,20 +289,22 @@ def test_a_dtypeless_FRAGMENT_is_importable_but_refuses_as_a_serve_lane() -> Non
 
     with pytest.raises(ModelDeclarationError, match="declares no load dtype"):
 
-        class ExplicitFragment(Model[SDXL], lanes=(DIT_BLOCKS_FUSED_QKV,)):
+        class ExplicitFragment(
+            Model[SDXL], lanes={DIT_BLOCKS_FUSED_QKV: _fixture_lane()}
+        ):
             def load(self, ctx: object) -> None: ...
 
 
 def test_the_two_flux_roots_resolve_to_their_own_documents() -> None:
     """tensorfs#124, both halves, and the reason the sentinel machinery stayed.
 
-    `Flux1.canonical_contract` was a `MissingContract` from pgw#1393 until
-    tensorfs#136 authored `flux1.diffusers-bf16@1`, and clearing it took NO
-    code change in `model_types.py` — vendoring the document was the whole
-    edit. That is the property the sentinel shape exists to have, and this is
-    the second time it has been exercised (tensorfs#121 cleared four).
+    `flux1.diffusers-bf16@1` was a `MissingContract` from pgw#1393 until
+    tensorfs#136 authored it, and clearing it took NO code change in
+    `model_types.py` — vendoring the document was the whole edit. That is the
+    property the sentinel shape exists to have, and this is the second time it
+    has been exercised (tensorfs#121 cleared four).
 
-    Before either document existed, `Flux1.canonical_contract` pointed at
+    Before either document existed, FLUX.1's declared lane was
     `dit.blocks-fused-qkv@1`, which declares `blocks.{i}.attn.qkv.weight`
     REQUIRED and matches 0 tensors in a real Flux transformer header (the tree
     is `transformer_blocks.*` / `single_transformer_blocks.*`) — a GUARANTEED
@@ -304,23 +317,37 @@ def test_the_two_flux_roots_resolve_to_their_own_documents() -> None:
     """
 
     from gen_worker.models import Flux1, Flux2Klein
-    from gen_worker.serving import Model
+    from gen_worker.models.model_types import (
+        FLUX1_DIFFUSERS_BF16,
+        FLUX2_KLEIN_DIFFUSERS_BF16,
+    )
+    from gen_worker.serving import Model, model_declared_lanes
 
-    assert Flux1.canonical_contract.stamp == "flux1.diffusers-bf16@1"
-    assert Flux1.canonical_contract.dtype == "bfloat16"
-    assert Flux2Klein.canonical_contract.stamp == "flux2-klein.diffusers-bf16@1"
-    assert Flux2Klein.canonical_contract.dtype == "bfloat16"
+    assert FLUX1_DIFFUSERS_BF16.stamp == "flux1.diffusers-bf16@1"
+    assert FLUX1_DIFFUSERS_BF16.dtype == "bfloat16"
+    assert FLUX2_KLEIN_DIFFUSERS_BF16.stamp == "flux2-klein.diffusers-bf16@1"
+    assert FLUX2_KLEIN_DIFFUSERS_BF16.dtype == "bfloat16"
     # Separate documents, separate digests — never one shared "flux" lane.
-    assert Flux1.canonical_contract.digest != Flux2Klein.canonical_contract.digest
+    assert FLUX1_DIFFUSERS_BF16.digest != FLUX2_KLEIN_DIFFUSERS_BF16.digest
 
-    class Flux1Model(Model[Flux1]):
+    # pgw#1599: each root NAMES its own document. There is no canonical
+    # borrow left to get wrong — the header is the only source.
+    class Flux1Model(Model[Flux1], lanes={FLUX1_DIFFUSERS_BF16: _fixture_lane()}):
         def load(self, ctx: object) -> None: ...
 
-    class KleinModel(Model[Flux2Klein]):
+    class KleinModel(
+        Model[Flux2Klein], lanes={FLUX2_KLEIN_DIFFUSERS_BF16: _fixture_lane()}
+    ):
         def load(self, ctx: object) -> None: ...
 
     assert Flux1Model.__cozy_model_type__ is Flux1
     assert KleinModel.__cozy_model_type__ is Flux2Klein
+    assert [row.contract_id for row in model_declared_lanes(Flux1Model)] == [
+        "flux1.diffusers-bf16@1"
+    ]
+    assert [row.contract_id for row in model_declared_lanes(KleinModel)] == [
+        "flux2-klein.diffusers-bf16@1"
+    ]
 
 
 def test_a_lane_naming_no_document_refuses_at_declaration() -> None:
@@ -335,13 +362,10 @@ def test_a_lane_naming_no_document_refuses_at_declaration() -> None:
     nope = MissingContract("nope.not-a-document", 1)
     with pytest.raises(ModelDeclarationError, match="DOES NOT EXIST"):
 
-        class Claimed(Model[SDXL], lanes=(nope,)):
+        class Claimed(Model[SDXL], lanes={nope: _fixture_lane()}):
             def load(self, ctx: object) -> None: ...
 
-    # A floor keyed to a lane the model does not serve is now UNREACHABLE
-    # rather than refused: pgw#1404 merged the two kwargs, so a floor is
-    # written as the VALUE of its own lane and cannot name a second stamp.
-    # `requires=` is deleted, and the refusal names the spelling that replaces
+    # `requires=` is deleted and the refusal names the spelling that replaces
     # it — a silently-ignored floor is exactly what this class of bug was.
     with pytest.raises(ModelDeclarationError, match="requires.*is DELETED"):
 
@@ -352,7 +376,7 @@ def test_a_lane_naming_no_document_refuses_at_declaration() -> None:
     # so folding the kwargs did not cost this fence anything.
     with pytest.raises(ModelDeclarationError, match="DOES NOT EXIST"):
 
-        class ClaimedWithFloor(Model[SDXL], lanes={nope: "vram12g"}):
+        class ClaimedWithSpec(Model[SDXL], lanes={nope: _fixture_lane()}):
             def load(self, ctx: object) -> None: ...
 
 
@@ -415,7 +439,7 @@ def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
     for contract in dtypeless:
         with pytest.raises(ModelDeclarationError, match="no load dtype"):
 
-            class Floored(Model[SDXL], lanes={contract: "vram12g"}):  # noqa: B903
+            class Floored(Model[SDXL], lanes={contract: _fixture_lane()}):  # noqa: B903
                 def load(self, ctx: object) -> None: ...
 
     # ...and the one path that could still buy silence is closed too.
@@ -430,7 +454,8 @@ def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
         with pytest.raises(ModelDeclarationError, match="no load dtype"):
 
             class Hatched(
-                Model[SDXL], lanes={contracts.SDXL_CLIP_G_FUSED_QKV: "vram12g"}
+                Model[SDXL],
+                lanes={contracts.SDXL_CLIP_G_FUSED_QKV: _fixture_lane()},
             ):
                 def load(self, ctx: object) -> None: ...
     finally:

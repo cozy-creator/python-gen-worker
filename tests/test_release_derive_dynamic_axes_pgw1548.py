@@ -1,13 +1,43 @@
-"""pgw#1548: `--dynamic-axes` collapses the shape fan, one axis at a time.
+"""pgw#1548 + pgw#1599: the DECLARED aspect axis collapses the shape fan.
 
-Through the REAL `gen-worker release derive` codepath, over a fixture endpoint
-whose payload enumeration reproduces sd15's actual structure — three aspect
-buckets x two CFG modes. sd15 ships 14 specializations (2 x 7) and sdxl 18
-(2 x 9); nothing declares those counts, they fall out of the enumeration
-driving the marked UNet at a different shape each pass.
+Through the REAL `gen-worker release derive` codepath, over two fixture
+endpoints whose payload enumeration reproduces sd15's actual structure —
+three aspect buckets x two CFG modes. sd15 ships 14 specializations (2 x 7)
+and sdxl 18 (2 x 9); nothing declares those counts, they fall out of the
+enumeration driving the marked UNet at a different shape each pass.
 
-The static arm is the control and it stays exactly as it was: the default is
-`off`, and a lock derived without the flag is the lock the fleet has today.
+**pgw#1599 changed WHERE the choice is written, not what it does.** The
+global `--dynamic-axes` CLI flag is DELETED: it was a whole-run switch, so it
+could only ever be right for every model in the run at once, and it left no
+record on the model of what was chosen or why. The choice is now
+`shapes={"aspect": STATIC | DYNAMIC}` on the model class, written by the
+author who measured what a symbolic aspect dim costs THIS model.
+
+So the two arms here are two FIXTURES, identical but for that one word, and
+the comparison is the controlled measurement pgw#1599 acceptance (d) asks
+for: both spellings are expressible and NEITHER is presumed.
+
+Two flag values that used to be tested are GONE and cannot come back:
+`batch` and `all`. CFG/batch is a PERMANENTLY STATIC fork (Paul, 2026-08-20),
+and this is now enforced ONE STEP EARLIER than it was — a difference worth
+stating, because master reached the same answer from the other end.
+
+tcg#78 (vendored just before this landed) made the derive REFUSE a
+contradicted dynamic axis by name: torch specializes the sizes 0 and 1 rather
+than reason about them symbolically, so it guards every dynamic dim `>= 2`,
+and an axis observed at 1 AND 2 is contradicted by the graph's own guards the
+moment it is exported. The artifact that came out of compiling one answered a
+batch-1 call with a batch-2 tensor of garbage and raised nothing. Under that
+fix, asking for `--dynamic-axes batch` cost a full derive and gave back the
+whole 6-graph fan with a refusal logged.
+
+pgw#1599 makes it unreachable instead: `batch` is not a declarable axis, so
+the refusal happens at CLASS DEFINITION — before any author code runs, before
+any trace — and the two costs the old path paid (a wasted derive, and an
+author who could write the wrong thing at all) are both gone. The measured
+grounds are unchanged and are why the ruling stands even if tcg#78 is ever
+fixed: batch-dynamic removed ZERO specializations on the real sd15 endpoint
+(14 -> 14).
 """
 
 from __future__ import annotations
@@ -23,7 +53,13 @@ pytest.importorskip("transformers")
 import gen_worker._vendor.torchcg  # noqa: E402,F401
 import torch  # noqa: E402
 
-from gen_worker.release.derive import DeriveError, dynamic_dim_policy  # noqa: E402
+from gen_worker.release.derive import dynamic_dim_policy  # noqa: E402
+from gen_worker.serving.lane_spec import (  # noqa: E402
+    DYNAMIC,
+    STATIC,
+    LaneDeclarationError,
+    parse_shapes,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "release_fixtures"
 
@@ -49,23 +85,22 @@ def config_only_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tree
 
 
-def _lane(tree: Path, out: Path, axes: str) -> dict:
+def _lane(tree: Path, out: Path, module: str) -> dict:
     from gen_worker.cli import main
 
-    lockfile = out.parent / f"{axes}-uv.lock"
+    lockfile = out.parent / f"{module}-uv.lock"
     lockfile.write_text(LOCK)
     code = main(
         [
             "release", "derive",
             "--dir", str(FIXTURES),
-            "--module", "dynamic_axes_endpoint",
+            "--module", module,
             "--checkpoint", str(tree),
             "--lockfile", str(lockfile),
-            "--dynamic-axes", axes,
             "--out", str(out),
         ]
     )
-    assert code == 0, f"derive --dynamic-axes {axes} failed"
+    assert code == 0, f"derive {module} failed"
     document = json.loads(out.read_bytes())
     (lane,) = document["graphs"]["lanes"]
     return dict(lane)
@@ -75,15 +110,18 @@ def _lane(tree: Path, out: Path, axes: str) -> dict:
 def lanes(config_only_tree: Path, tmp_path_factory: pytest.TempPathFactory) -> dict:
     room = tmp_path_factory.mktemp("fan-derives")
     return {
-        axes: _lane(config_only_tree, room / f"{axes}.json", axes)
-        for axes in ("off", "batch", "aspect", "all")
+        arm: _lane(config_only_tree, room / f"{arm}.json", module)
+        for arm, module in (
+            ("static", "static_axes_endpoint"),
+            ("aspect", "dynamic_axes_endpoint"),
+        )
     }
 
 
-def test_the_static_fan_is_the_default_and_is_unchanged(lanes: dict) -> None:
-    """The control: 3 aspects x 2 CFG modes = six concrete specializations."""
+def test_the_static_declaration_bakes_the_whole_fan(lanes: dict) -> None:
+    """3 aspects x 2 CFG modes = six concrete specializations, declared."""
 
-    graphs = lanes["off"]["graphs"]
+    graphs = lanes["static"]["graphs"]
     assert len(graphs) == 6
     for record in graphs:
         assert record["ingress"]["symbols"] == {}
@@ -91,67 +129,28 @@ def test_the_static_fan_is_the_default_and_is_unchanged(lanes: dict) -> None:
             assert all(isinstance(dim, int) for dim in row["shape"])
 
 
-def test_every_axis_dynamic_collapses_the_aspect_fan(lanes: dict) -> None:
-    """Six specializations become TWO: the aspects collapse, CFG does not.
+def test_the_declared_dynamic_aspect_collapses_the_fan(lanes: dict) -> None:
+    """The SAME program, the SAME payload axes, ONE word different in the
+    header: 6 keys become 2. The CFG x2 survives in both, by ruling."""
 
-    AMENDED BY tcg#78. This asserted ONE graph, with the CFG axis symbolic
-    over [1, 2] — and that graph could not be minted. Torch specializes the
-    sizes 0 and 1 rather than reason about them symbolically, so it guards
-    every dynamic dim `>= 2`; an axis observed at 1 and 2 is contradicted by
-    the graph's own guards the moment it is exported, and the artifact that
-    came out of compiling it answered a batch-1 call with a batch-2 tensor of
-    garbage and raised nothing. The derive now refuses that axis by name.
-
-    Refusing it costs the ASPECT collapse nothing, which is the point: the
-    aspect axis is the one this program is for (sdxl 18 -> 2).
-    """
-
-    graphs = lanes["all"]["graphs"]
+    graphs = lanes["aspect"]["graphs"]
     assert len(graphs) == 2
+
     for record in graphs:
         sample = next(
             row for row in record["ingress"]["inputs"] if row["name"] == "sample"
         )
         batch, channels, height, width = sample["shape"]
         assert channels == 4
-        assert batch in (1, 2), "the CFG axis is concrete in each record"
+        assert batch in (1, 2), "CFG/batch stays CONCRETE — permanently static"
+        assert isinstance(height, str) and isinstance(width, str)
         symbols = record["ingress"]["symbols"]
         assert symbols[height] == [48, 80] and symbols[width] == [48, 80]
         assert height != width, "H and W are two degrees of freedom"
-    assert {
-        next(
-            row for row in record["ingress"]["inputs"] if row["name"] == "sample"
-        )["shape"][0]
-        for record in graphs
-    } == {1, 2}
 
-
-def test_ONE_axis_at_a_time_is_the_acceptance_gates_shape(lanes: dict) -> None:
-    """Paul's gate adopts per axis, so the derive must be able to do that.
-
-    `aspect` collapses the three buckets and leaves the two CFG batches
-    concrete (6 -> 2). WHICH axis moved is visible in the record.
-
-    AMENDED BY tcg#78: `batch` now collapses NOTHING and says so, because that
-    axis is the one torch's `>= 2` guard contradicts. The fan comes back whole
-    (6 -> 6) — which is also what this lane measured on the real sd15 endpoint
-    from the other direction: the batch axis removed ZERO specializations
-    (14 -> 14) even when it appeared to work. The gate's SHAPE is intact; the
-    axis that pays is `aspect`.
-    """
-
-    assert len(lanes["batch"]["graphs"]) == 6
-    assert len(lanes["aspect"]["graphs"]) == 2
-
-    for record in lanes["batch"]["graphs"]:
-        assert record["ingress"]["symbols"] == {}
-        shape = record["ingress"]["inputs"][0]["shape"]
-        assert all(isinstance(dim, int) for dim in shape), "the axis was refused"
-
-    for record in lanes["aspect"]["graphs"]:
-        shape = record["ingress"]["inputs"][0]["shape"]
-        assert shape[0] in (1, 2), "batch stays concrete"
-        assert isinstance(shape[2], str) and isinstance(shape[3], str)
+    # The declaration is the ONLY difference between the two derives, and it
+    # is visible in the document rather than inferred from the graph count.
+    assert lanes["static"]["contract"] == lanes["aspect"]["contract"]
 
 
 def test_the_dynamic_records_still_dispatch_every_observed_shape(
@@ -166,13 +165,7 @@ def test_the_dynamic_records_still_dispatch_every_observed_shape(
     from gen_worker._vendor.torchcg.document import GraphRecord
     from gen_worker._vendor.torchcg.ingress import CallIngress
 
-    raw = next(
-        candidate
-        for candidate in lanes["all"]["graphs"]
-        if next(
-            row for row in candidate["ingress"]["inputs"] if row["name"] == "sample"
-        )["shape"][0] == 2
-    )
+    raw = lanes["aspect"]["graphs"][0]
     record = GraphRecord(
         graph=raw["graph"],
         target=raw["target"],
@@ -200,37 +193,55 @@ def test_the_dynamic_records_still_dispatch_every_observed_shape(
             },
         )
 
+    # This record is ONE of the two CFG buckets, so it admits its own batch
+    # across the whole aspect range and refuses the other bucket's.
+    mine = int(rows["sample"].shape[0])
     for height, width in ((64, 64), (80, 48), (48, 80)):
-        assert call(2, height, width), f"2x{height}x{width}"
+        assert call(mine, height, width), f"{mine}x{height}x{width}"
     # And refuses what it was never exported for — a dynamic record is a
-    # range, so an unobserved shape still falls to eager. Batch is concrete
-    # here (tcg#78), so the other CFG mode is the OTHER record's business.
-    assert not call(1, 64, 64)
+    # range, so an unobserved shape still falls to eager.
     assert not call(4, 64, 64)
-    assert not call(2, 96, 96)
+    assert not call(mine, 96, 96)
 
 
 def test_the_collapsed_record_is_keyed_at_the_LANES_dtype(lanes: dict) -> None:
     """pgw#1567 holds through the collapse: bf16 lane, bf16 ingress."""
 
-    for record in lanes["all"]["graphs"]:
+    for record in lanes["aspect"]["graphs"]:
         for row in record["ingress"]["inputs"]:
             if row["name"] in ("sample", "encoder_hidden_states"):
                 assert row["dtype"] == "bfloat16"
 
 
 def test_an_unknown_axis_name_REFUSES_rather_than_defaulting() -> None:
-    with pytest.raises(DeriveError, match="axis name"):
-        dynamic_dim_policy("spatial")
+    """The refusal moved to the DECLARATION, where the author can read it."""
+
+    with pytest.raises(LaneDeclarationError, match="not a shape axis"):
+        parse_shapes("X", {"aspect": STATIC, "spatial": DYNAMIC},
+                     marks_compile=True)
 
 
-def test_off_is_the_absence_of_a_policy_and_not_an_empty_one() -> None:
-    """`off` must be `None`, so torchcg takes the untouched static path."""
+def test_batch_CANNOT_be_declared_dynamic_in_either_direction() -> None:
+    """Paul, 2026-08-20: *"CFG stays a fork axes permanently."* The old flag
+    offered `batch` and `all`; the declaration offers neither."""
 
-    assert dynamic_dim_policy("off") is None
-    assert dynamic_dim_policy("all")("unet", "sample", 0) is True
-    assert dynamic_dim_policy("batch")("unet", "sample", 2) is False
-    assert dynamic_dim_policy("aspect")("unet", "sample", 0) is False
-    assert dynamic_dim_policy("aspect")("unet", "sample", 3) is True
+    with pytest.raises(LaneDeclarationError, match="PERMANENTLY STATIC"):
+        parse_shapes("X", {"aspect": STATIC, "batch": DYNAMIC},
+                     marks_compile=True)
+    # ...and not even redundantly as STATIC: it is not a declarable axis.
+    with pytest.raises(LaneDeclarationError, match="PERMANENTLY STATIC"):
+        parse_shapes("X", {"aspect": STATIC, "batch": STATIC},
+                     marks_compile=True)
+
+
+def test_static_is_the_absence_of_a_policy_and_not_an_empty_one() -> None:
+    """STATIC must yield `None`, so torchcg takes the untouched static path."""
+
+    assert dynamic_dim_policy({"aspect": STATIC}) is None
+    assert dynamic_dim_policy({}) is None
+    policy = dynamic_dim_policy({"aspect": DYNAMIC})
+    assert policy("unet", "sample", 0) is False, "batch is NEVER offered"
+    assert policy("unet", "sample", 2) is True
+    assert policy("unet", "sample", 3) is True
     # Axis 1 is a channel or a sequence length: never offered.
-    assert dynamic_dim_policy("all")("unet", "sample", 1) is False
+    assert policy("unet", "sample", 1) is False

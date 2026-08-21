@@ -1,4 +1,14 @@
-"""sd15's SHAPE FAN, in miniature: three aspects x two CFG modes (pgw#1548).
+"""The STATIC ARM of pgw#1599 acceptance (d) — byte-for-byte the dynamic
+fixture beside it, with ONE word changed.
+
+`dynamic_axes_endpoint` declares `shapes={"aspect": DYNAMIC}`; this declares
+`shapes={"aspect": STATIC}`. Everything else — the program, the payload
+axes, the lane, the demand formula — is identical, so the difference in the
+derived key set is attributable to the DECLARATION and to nothing else. That
+is the controlled measurement acceptance (d) asks for: both spellings are
+expressible, and NEITHER is the platform's default.
+
+sd15's SHAPE FAN, in miniature: three aspects x two CFG modes (pgw#1548).
 
 The real sd15 endpoint derives 14 graph specializations — 2 (CFG) x 7 (aspect
 bucket) — and sdxl 18. The COUNT still falls out of the payload enumeration
@@ -6,15 +16,8 @@ driving the marked UNet at a different shape each pass, so this fixture
 reproduces that structure at fixture scale and the collapse is measured through
 the REAL derive, not a stand-in.
 
-What changed (pgw#1599): the aspect axis is DECLARED, not FLAGGED. The global
-`--dynamic-axes` derive flag is deleted — a whole-run switch could only ever be
-right for every model in the run at once — and the choice now lives on the
-model class as `shapes={"aspect": DYNAMIC}`, which is where the person who
-knows what a symbolic aspect dim costs THIS model writes it down. This fixture
-is the dynamic arm; the static arm is every other fixture's
-`shapes={"aspect": STATIC}`. CFG/batch is NOT declarable in either: it is a
-permanently static fork (Paul, 2026-08-20), so the x2 stays whatever the aspect
-choice is.
+CFG/batch is NOT declarable in either arm: it is a permanently static fork
+(Paul, 2026-08-20), so the x2 stays whatever the aspect choice is.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import DYNAMIC, LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker import STATIC, LoadContext, Model, RequestContext, entrypoint, lane
 from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 from gen_worker.models.model_types import SD15_DIFFUSERS_BF16
@@ -68,14 +71,14 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-class FanShaped(
+class StaticFanShaped(
     Model[SDXL],
     lanes={SD15_DIFFUSERS_BF16: lane(
         request=const(MiB(64)) + per_mp_batch(MiB(16)),
     )},
-    # The declaration under test: one artifact over a symbolic aspect dim,
-    # instead of one baked bucket per aspect.
-    shapes={"aspect": DYNAMIC},
+    # The declaration under test: one BAKED BUCKET per aspect, all sharing
+    # one traced program.
+    shapes={"aspect": STATIC},
 ):
     pipe: Any
 
@@ -85,7 +88,7 @@ class FanShaped(
 
 
 @entrypoint
-def generate(ctx: RequestContext, payload: In, model: FanShaped) -> Out:
+def generate(ctx: RequestContext, payload: In, model: StaticFanShaped) -> Out:
     ctx.raise_if_cancelled()
     height, width = SHAPES[payload.aspect]
     with torch.inference_mode():

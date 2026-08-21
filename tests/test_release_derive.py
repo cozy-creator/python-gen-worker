@@ -187,50 +187,66 @@ def test_a_never_called_target_fails_red_not_silent(
     assert "never CALLED" in stderr and "'vae'" in stderr
 
 
-def test_a_no_lane_endpoint_stamps_the_explicit_eager_marker(
+def test_an_endpoint_that_marks_nothing_derives_zero_graphs(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
+    """pgw#1599: `eager_only=` is deleted, so this fixture declares a REAL
+    lane and simply calls no `ctx.compile`. Zero graphs is an OBSERVATION of
+    a trace that ran, never a keyword the author wrote."""
+
     out = tmp_path / "eager.json"
     assert _derive("eager_endpoint", config_only_tree, out) == 0
     document = json.loads(out.read_bytes())
     assert document["graphs"]["lanes"] == []
-    assert document["checkpoint_defaults_schema"] is None
+    # The DEFAULTS SCHEMA is now emitted (`{}` for a model type declaring no
+    # Defaults) rather than `null`. `null` meant "there is no model class
+    # here", which `eager_only=` made true by hiding one; now the class IS the
+    # subject and the schema is read off its model type like any other.
+    assert document["checkpoint_defaults_schema"] == {}
+    # The class is still the release's SUBJECT — its model type travels. Under
+    # `eager_only=` the keyword hid the class from the subject search, and the
+    # document came out shaped like a weightless one.
+    assert document["model_type"] is not None
 
 
-def test_a_contractless_endpoint_traces_under_a_derived_lane(
+def test_graph_identity_does_not_come_from_the_declaring_MODULE(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """pgw#1488 fix (1) + (3): no contract, no `lanes=`, and it still traces.
+    """The control the deleted derived-lane fixture used to provide.
 
-    The twin fixture is `tiny_endpoint` with its `lanes=` emptied and nothing
-    else changed, so this is a controlled measurement rather than an
-    assertion about a second endpoint: SAME graphs, DIFFERENT lane name.
-    A contract handle is a name, not a key — which is the whole argument for
-    letting a contract be optional without rekeying anything that exists.
+    pgw#1599 deletes `lanes=()` and the `derived.<type>@1` identity with it,
+    so "same graphs, different lane NAME" is no longer expressible — every
+    lane names a real document. What the twin fixture still measures is the
+    half that matters downstream: two independently declared modules with the
+    same program derive the SAME graph hashes. `cg-graph-v1` hashes the
+    canonical trace + ingress + passes; nothing about the module or the lane's
+    name enters it, which is why a contract can be re-authored without
+    rekeying a single artifact.
     """
 
     declared = tmp_path / "declared.json"
-    derived = tmp_path / "derived.json"
+    twin = tmp_path / "twin.json"
     assert _derive("tiny_endpoint", config_only_tree, declared) == 0
-    assert _derive("derived_twin_endpoint", config_only_tree, derived) == 0
+    assert _derive("derived_twin_endpoint", config_only_tree, twin) == 0
 
     (contract_lane,) = json.loads(declared.read_bytes())["graphs"]["lanes"]
-    document = json.loads(derived.read_bytes())
-    (derived_lane,) = document["graphs"]["lanes"]
+    document = json.loads(twin.read_bytes())
+    (twin_lane,) = document["graphs"]["lanes"]
 
     assert contract_lane["contract"] == "tiny.diffusers-fp32@1"
-    assert derived_lane["contract"] == "derived.sdxl@1"
-    assert [record["graph"] for record in derived_lane["graphs"]] == [
+    assert twin_lane["contract"] == "tiny.diffusers-fp32@1"
+    assert [record["graph"] for record in twin_lane["graphs"]] == [
         record["graph"] for record in contract_lane["graphs"]
     ]
-    assert len(derived_lane["graphs"]) == 4
+    assert len(twin_lane["graphs"]) == 4
 
-    # The lane row says WHICH KIND of identity it carries. `document: null` is
-    # a bug on a declared contract (pgw#1391) and the honest state on a derived
-    # one, and a reader cannot tell those apart from a null alone.
-    row = document["lane_contracts"]["derived.sdxl@1"]
-    assert row == {"stamp": "derived.sdxl@1", "document": None, "digest": "",
-                   "derived": True}
+    # Every lane row now carries a REAL document. The `derived: true` marker
+    # is gone with the identity it flagged — there is no second kind of lane
+    # left for a reader to have to tell apart.
+    row = document["lane_contracts"]["tiny.diffusers-fp32@1"]
+    assert row["stamp"] == "tiny.diffusers-fp32@1"
+    assert isinstance(row["document"], dict) and row["document"]
+    assert "derived" not in row
 
 
 def test_an_unmarked_endpoint_traces_and_reports_nothing_to_compile(
@@ -238,10 +254,9 @@ def test_an_unmarked_endpoint_traces_and_reports_nothing_to_compile(
 ) -> None:
     """The middle state: traced, and the author marked no compile target.
 
-    Before pgw#1488 this endpoint could not be derived at all — its model type
-    has no canonical contract, so the derive refused the class by name, and the
-    remedy that refusal named (`lanes=()`) silently disabled compilation. Now
-    `load` RUNS and zero graphs is a measurement.
+    pgw#1599: it declares a REAL lane (every class does) and marks no compile
+    target, so `load` RUNS and zero graphs is a MEASUREMENT. There is no
+    keyword that could have asserted it instead.
     """
 
     out = tmp_path / "unmarked.json"

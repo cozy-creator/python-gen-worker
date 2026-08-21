@@ -12,8 +12,10 @@ import threading
 
 import msgspec
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker.demand import MiB, const
 from gen_worker.models import SDXL
+from gen_worker.models.model_types import SDXL_DIFFUSERS_BF16
 
 #: Cross-request observation log: ("request_done" | "unload:<cls>" | ...).
 ORDER: list[str] = []
@@ -50,9 +52,12 @@ class Out(msgspec.Struct):
 
 class SlowModel(
     Model[SDXL],
-    eager_only="a residency/lifecycle fixture: it compiles nothing by design",
+    # A residency/lifecycle fixture: it marks nothing by design, so `load`
+    # carries no `ctx.compile` and the class declares no `shapes=`. The two
+    # subclasses below inherit this lane declaration.
+    lanes={SDXL_DIFFUSERS_BF16: lane(request=const(MiB(64)))},
 ):
-    """Eager-permanent; ``load`` builds cheap state, work is gauged."""
+    """Marks nothing; ``load`` builds cheap state, work is gauged."""
 
     def load(self, ctx: LoadContext[SDXL]) -> None:
         self.loaded = True
@@ -76,13 +81,13 @@ class SlowModel(
         ORDER.append(f"unload:{type(self).__name__}")
 
 
-class OtherModel(SlowModel, eager_only="second residency key, same posture"):
-    pass
+class OtherModel(SlowModel):
+    """Second residency key, same posture — `SlowModel`'s lane, inherited."""
 
 
-class BrokenUnloadModel(
-    SlowModel, eager_only="unload-failure fixture; compiles nothing"
-):
+class BrokenUnloadModel(SlowModel):
+    """Unload-failure fixture; marks nothing, same inherited lane."""
+
     def unload(self, ctx: LoadContext[SDXL]) -> None:
         ORDER.append("unload:BrokenUnloadModel")
         raise RuntimeError("author unload bug — must not pin the eviction")
