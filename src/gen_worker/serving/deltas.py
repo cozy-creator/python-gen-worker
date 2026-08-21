@@ -41,6 +41,12 @@ class ItemDelta(Delta, frozen=True, kw_only=True):
     error: str = ""
 
 
+# How often the stream RE-LOOKS at whether the generate thread is still alive.
+# It ends nothing: every expiry is a re-check, and only the thread's death ends
+# the stream. Shorter costs a wakeup, longer delays noticing a dead producer.
+_RECHECK_CADENCE_S = 0.5
+
+
 def frame_of(chunk: Any) -> Tuple[bytes, str]:
     """``(data, content_type)`` for any chunk — the one encoder."""
     framer = getattr(chunk, "frame", None)
@@ -57,12 +63,30 @@ def iter_transformers_text_deltas(
     generation_kwargs: Mapping[str, Any],
     cancel_checker: Callable[[], bool] | None = None,
     skip_prompt: bool = True,
-    timeout: float | None = 0.5,
+    timeout: float | None = None,
     join_timeout: float = 2.0,
     streamer_cls: type[Any] | None = None,
     decode_kwargs: Mapping[str, Any] | None = None,
 ) -> Iterator[str]:
-    """Stream text chunks out of a ``transformers`` ``model.generate`` call."""
+    """Stream text chunks out of a ``transformers`` ``model.generate`` call.
+
+    ``timeout`` is a RE-CHECK CADENCE, not a bound on the work (th#2267 §6).
+    It used to default to 0.5 s and be handed straight to the streamer, where
+    expiring it raised a bare ``queue.Empty`` out of this generator — untyped,
+    unattributable, and triggered by the most ordinary thing a decode does:
+    prefill. A long prompt or a large model spends whole seconds before the
+    first token, and half a second of that killed the stream. The opposite
+    spelling was no better: ``timeout=None`` (what joycaption passes) blocks
+    the consumer FOREVER when the generate thread dies, because a dead thread
+    never enqueues the end sentinel.
+
+    Neither shape asks the question that matters. The question is whether the
+    thread producing tokens is still alive, so that is what decides: a poll
+    that expires while the thread is running is prefill and the wait continues;
+    a poll that expires once the thread is gone is the end, and any exception
+    it died of is re-raised. How long the decode takes is governed elsewhere,
+    by the in-call progress gate that any ``ctx`` event re-arms.
+    """
     if model is None:
         raise ValueError("model is required")
     if tokenizer is None:
@@ -109,8 +133,11 @@ def iter_transformers_text_deltas(
         except Exception:
             pass
 
+    # Always poll. A blocking streamer cannot notice a dead producer, and a
+    # streamer that gives up cannot survive a prefill; polling separates them.
+    poll_s = _RECHECK_CADENCE_S if timeout is None else max(float(timeout), 0.0)
     streamer = streamer_cls(
-        tokenizer, skip_prompt=bool(skip_prompt), timeout=timeout,
+        tokenizer, skip_prompt=bool(skip_prompt), timeout=poll_s,
         **local_decode_kwargs,
     )
     local_generation_kwargs["streamer"] = streamer
@@ -131,7 +158,23 @@ def iter_transformers_text_deltas(
     )
     thread.start()
     try:
-        for chunk in streamer:
+        stream = iter(streamer)
+        while True:
+            try:
+                chunk = next(stream)
+            except StopIteration:
+                break
+            except queue.Empty:
+                # NOT a verdict. It says only that no token arrived inside one
+                # poll, which is what prefill looks like from here.
+                if thread.is_alive():
+                    if cancel_checker is not None and cancel_checker():
+                        break
+                    continue
+                # The producer is gone and the queue is drained: this is the
+                # end of the stream, however it ended. If it ended badly the
+                # exception is below, typed and attributable.
+                break
             if cancel_checker is not None and cancel_checker():
                 break
             text = str(chunk or "")
