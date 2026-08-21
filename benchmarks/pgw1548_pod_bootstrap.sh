@@ -102,6 +102,53 @@ PY=/workspace/venv/bin/python
 # rather than infinite silence, and the first publish sits where it can
 # actually run -- after the install.
 
+# --- 2a. INSTALLS — restored after a deletion accident, see below -----------
+# ⚠️ THESE LINES WERE ACCIDENTALLY DELETED and it cost a rental. Removing the
+# inert heartbeat block took the pip installs with it, because the slice ran
+# from the heartbeat comment to section 2b and the installs sat inside that
+# range. The pod then created a venv, installed NOTHING, and died on the first
+# `gen_worker` import -- while `sleep infinity` held the container up.
+# MEASURED signature on pod lmkaw20mk0iodt: uptime 3452 s, cpu 0%, mem 0%,
+# nothing published, 57 minutes. The anima pod launched one commit earlier
+# still had these lines, which is exactly why anima worked and SDXL could not.
+#
+# The PUBLISH set goes FIRST and deliberately: importing `HubClient` needs
+# certifi chardet charset_normalizer google grpc grpc_health grpc_reflection
+# grpc_tools idna msgspec psutil requests socks typing_extensions urllib3
+# (measured by blocking every other module). That set is tens of MB against
+# torch's several GB, so paying it up front costs ~1 min and buys the one thing
+# missing all night: an early failure that can PUBLISH ITS OWN LOG instead of
+# dying mute.
+timeout 900 uv pip install --python $PY requests msgspec psutil \
+    grpcio grpcio-tools grpcio-health-checking grpcio-reflection \
+    protobuf PySocks typing_extensions certifi charset-normalizer idna urllib3 \
+    > /workspace/out/pubdeps.log 2>&1 || true
+if PYTHONPATH=/workspace/pgw/src "$PY" -c "from gen_worker.hubio.client import HubClient" 2>/dev/null; then
+  printf '{"stage":"boot","ok":true,"mode":"%s","sha":"%s","note":"publish deps in; torch install starting"}\n' \
+    "$PGW1548_MODE" "$PGW1548_SHA" > /workspace/out/boot.json
+  PYTHONPATH=/workspace/pgw/src "$PY" /workspace/publish.py boot /workspace/out/boot.json || true
+fi
+
+timeout 900 uv pip install --python $PY -r /workspace/pgw/requirements.txt 2>/dev/null || true
+timeout 2700 uv pip install --python $PY -e /workspace/pgw || {
+  fail_out install "the pgw editable install failed or timed out"; exit 91; }
+timeout 1800 uv pip install --python $PY diffusers==0.39.0 transformers safetensors \
+    accelerate huggingface_hub || {
+  fail_out install "the endpoint dependency install failed"; exit 91; }
+if [ "$PGW1548_MODE" = "anima-derive" ]; then
+  timeout 1800 uv pip install --python $PY "diffsynth==2.0.17" torchvision || {
+    fail_out install "diffsynth install failed"; exit 91; }
+fi
+
+# `import tensorfs` (sdxl/main.py, top level) is satisfied WITHOUT shipping or
+# cloning anything: pgw VENDORS tensorfs at src/gen_worker/_vendor, and that
+# directory on PYTHONPATH makes the vendored copy importable under its own
+# top-level name. tensorfs is NOT on PyPI (404) and its source is 2.1 MB, far
+# over the env cliff, so the vendor path is the only free answer.
+export PYTHONPATH=/workspace/pgw/src:/workspace/pgw/src/gen_worker/_vendor
+export TENSORHUB_URL="$PGW1548_HUB"
+$PY -c "import tensorfs; print('tensorfs ok', tensorfs.__file__)" || exit 91
+
 # --- 2b. the endpoint source, from env --------------------------------------
 # MEASURED CEILING, 2026-08-20: RunPod's REST create takes a ~50 KB `env` and
 # returns HTTP 500 on ~150 KB -- and that 500 is its own backend failing to
