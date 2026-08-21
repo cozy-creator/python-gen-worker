@@ -519,39 +519,57 @@ def main(argv: list[str] | None = None) -> int:
             # rather than reimplemented -- it already carries the explicit
             # User-Agent without which the GraphQL endpoint answers 403 and the
             # whole instrument reads as unavailable.
-            if "boot" not in stages and \
-                    (time.time() - started) / 60.0 >= args.boot_deadline:
+            # 🔴 PRECONDITION: **ANY** PUBLISH RETIRES THIS GUARD FOREVER.
+            # It used to read `"boot" not in stages`, and that killed a WORKING
+            # pod. `rzahnoq94y5zlt` had already published `telemetry1` -- the
+            # driver PRINTED it, `[stage] +['telemetry1'] $0.08 / 7 min` -- and
+            # was killed 17 minutes later as "the container NEVER STARTED".
+            # A pod that has published has manifestly started; a guard that
+            # asks the provider whether a pod exists, while holding that pod's
+            # own published output in its hand, is asking the weaker witness.
+            # `boot` specifically can be absent for benign reasons (the mode
+            # publishes telemetry first), so the guard must key on evidence of
+            # LIFE, not on one particular stage name.
+            elapsed_min = (time.time() - started) / 60.0
+            if not stages and elapsed_min >= args.boot_deadline:
                 try:
                     live = podlive.live(lease.pod_id)
                 except Exception as exc:  # noqa: BLE001
                     # An unreadable probe is UNKNOWN, never a death sentence.
-                    print(f"[poll] boot missing at T+{args.boot_deadline} min "
+                    print(f"[poll] nothing published at {elapsed_min:.1f} min "
                           f"but the uptime probe failed ({exc!r}) -- HOLDING. "
                           f"A pod is never killed on an absence plus a blind "
                           f"instrument.")
                     live = None
                 if live is not None:
                     up = live.get("uptime_s") or 0
-                    if up == 0:
-                        print(f"[stop] NO BOOT HEARTBEAT at "
-                              f"T+{args.boot_deadline} min AND uptime==0 -- the "
-                              f"container NEVER STARTED, corroborated at the "
-                              f"provider: {live}. Killing and rotating.")
-                        return 3
-                    if up == last_uptime:
+                    # uptime==0 now needs the SAME consecutive confirmation the
+                    # stall case always had. The asymmetry was the second half
+                    # of the false kill: a SINGLE spurious `uptime_s: 0` from
+                    # the provider was enough to tear a pod down, moments after
+                    # nine consecutive reads had it climbing 1133 -> 1373 s.
+                    # One sample is a reading; three is an observation.
+                    if up == 0 or up == last_uptime:
                         stalled += 1
+                        why = ("uptime==0 (never started?)" if up == 0
+                               else f"uptime STALLED at {up}s")
                         if stalled >= 3:
-                            print(f"[stop] NO BOOT HEARTBEAT and uptime STALLED "
-                                  f"at {up}s across {stalled} probes -- {live}. "
+                            print(f"[stop] nothing published at "
+                                  f"{elapsed_min:.1f} min AND {why} across "
+                                  f"{stalled} consecutive probes -- {live}. "
                                   f"Killing and rotating.")
                             return 3
+                        print(f"[poll] {why} at {elapsed_min:.1f} min "
+                              f"(probe {stalled}/3) -- HOLDING for "
+                              f"confirmation; one sample is not an observation.",
+                              flush=True)
                     else:
                         stalled = 0
+                        print(f"[poll] nothing published at {elapsed_min:.1f} "
+                              f"min, but the container is ALIVE (uptime {up}s, "
+                              f"climbing) -- HOLDING. Install is slow, not "
+                              f"dead.", flush=True)
                     last_uptime = up
-                    print(f"[poll] boot heartbeat still absent at "
-                          f"{(time.time() - started) / 60.0:.1f} min, but the "
-                          f"container is ALIVE (uptime {up}s, climbing) -- "
-                          f"HOLDING. Install is slow, not dead.", flush=True)
             if expect and all(s in stages for s in expect):
                 print(f"[done] every expected stage landed: {expect}")
                 return 0
