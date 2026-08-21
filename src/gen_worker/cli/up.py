@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import endpoint_state
 from .daemon import BootError, BootSpec, serve
@@ -180,6 +180,7 @@ def _detach(args: argparse.Namespace, handle: Any) -> int:
             stderr=subprocess.STDOUT,
             start_new_session=True,
             cwd=os.getcwd(),
+            env=_child_env(),
         )
     finally:
         log.close()
@@ -202,6 +203,21 @@ def _detach(args: argparse.Namespace, handle: Any) -> int:
         f"`gen-worker down` to stop.\n"
     )
     return 0
+
+
+def _child_env() -> Dict[str, str]:
+    """The detached daemon's environment, with the declared settings sealed in AT EXEC.
+
+    The CLI package already imposed them on this process, but `putenv` after the
+    fact is invisible in `/proc/<pid>/environ` and impossible to audit from
+    outside; the serving process is the one that must carry them, so they are
+    written into the child's initial environment explicitly (pgw#1640).
+    """
+    from ..settings_authority import DECLARED_ENV
+
+    env: Dict[str, str] = dict(os.environ)
+    env.update(DECLARED_ENV)
+    return env
 
 
 def _child_argv(args: argparse.Namespace) -> List[str]:
