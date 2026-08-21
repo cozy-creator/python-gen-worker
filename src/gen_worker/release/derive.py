@@ -196,6 +196,9 @@ class ReleaseDeriveResult:
     unmarked_lanes: tuple[str, ...] = ()
     unenumerable_entrypoints: tuple[tuple[str, str], ...] = ()
     unservable_payloads: tuple[str, ...] = ()
+    #: lane handle -> the census digest, or ``NO_PIPELINE_INDEX`` for a tree
+    #: that is not a diffusers pipeline and is therefore not streaming-served.
+    census_digests: tuple[tuple[str, str], ...] = ()
 
     @property
     def eager_permanent(self) -> bool:
@@ -861,6 +864,60 @@ def _compile_stack_from_lockfile(lockfile: Path) -> tuple[tuple[str, str], ...]:
         raise DeriveError(str(exc)) from exc
 
 
+#: Why a lane carries no census. There is no third value and no soft row: a
+#: tree that HAS a `model_index.json` and cannot be censused fails the build.
+NO_PIPELINE_INDEX = "no_model_index_json"
+
+
+def _construction_census(
+    checkpoint_dir: Path, lane_handle: str, dtype: Any
+) -> dict[str, Any]:
+    """The CONSTRUCTION CENSUS of one lane's tree (pgw#1647).
+
+    Computed here because here is where the tree and the IMAGE meet. What a
+    module IS — its tie groups, the classes its config's quantizer swaps in, the
+    buffers its ``__init__`` computes — is a code x config fact, decided by this
+    image's transformers and diffusers, so it binds at RELEASE and not at the
+    tree alone. The tensorfs stamp stays the BYTES' identity; this is the
+    MODULE's.
+
+    Config-only and allocation-free: parameters come up on meta and buffers are
+    computed from config, so a 66 GiB DiT costs what a tiny one costs. It goes
+    through :func:`~gen_worker.serving.streaming.skeleton.build_modules`, which
+    is the reader production serves with — a census taken by a second parser
+    would be a statement about the second parser.
+
+    **REFUSE ON TRACEBACK** (Paul's derive ruling). A tree that carries a
+    ``model_index.json`` and cannot be censused FAILS the build, named. There is
+    no soft row-marking and no green release with the reason in a log, because
+    the entire point of moving this question to publish time is that a release
+    which cannot say what module it builds must never reach a card.
+    """
+    from ..serving.streaming import census as _census
+    from ..serving.streaming.skeleton import MODEL_INDEX
+
+    if not (Path(checkpoint_dir) / MODEL_INDEX).is_file():
+        # Not a refusal: a tree with no component index is not a diffusers
+        # pipeline and the streaming loader never binds to one. The hub's door
+        # (th#2281) is what decides whether a STREAMING-served release may ship
+        # without a census; this side states the fact and never guesses.
+        return {"absent": NO_PIPELINE_INDEX}
+    try:
+        taken = _census.for_tree(checkpoint_dir, compute_dtype=dtype)
+    except Exception as exc:
+        raise DeriveError(
+            f"lane {lane_handle!r}: the CONSTRUCTION CENSUS could not be "
+            f"computed from {checkpoint_dir} — {type(exc).__name__}: {exc}. A "
+            f"release states what module it builds or it is not a release: this "
+            f"is the meta-skeleton family (pgw#1626/#1638/#1644), and every one "
+            f"of those four walls was a construction question answered on a "
+            f"rented card because nothing asked it here first"
+        ) from exc
+    document = taken.as_document()
+    document["digest"] = taken.digest
+    return document
+
+
 def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
 
     if model_type is None:
@@ -1205,6 +1262,7 @@ def derive_release(
     lanes: list[Any] = []
     unmarked_lanes: list[str] = []
     lane_contracts: dict[str, Any] = {}
+    construction_census: dict[str, Any] = {}
     entrypoints: dict[str, Any] = {}
     warnings: list[str] = []
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
@@ -1273,6 +1331,14 @@ def derive_release(
                 )
         requires = model_requires(cls)
         for lane in model_declared_lanes(cls):
+            # THE CONSTRUCTION CENSUS, per lane and BEFORE the trace. Per lane
+            # because the lane's dtype is part of what the module IS; before the
+            # trace because it is the cheaper question — a tree that cannot even
+            # be built from its configs must not first spend the trace.
+            handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
+            construction_census[handle] = _construction_census(
+                checkpoint_dir, handle, _torch_dtype(lane.dtype)
+            )
             lane_graphs = _derive_lane(
                 torchcg, cls, lane, plans, checkpoint_dir, warnings,
                 program_sink=program_sink,
@@ -1344,6 +1410,12 @@ def derive_release(
         # that makes the lockstep matter more than the refusal does.
         "graphs": graphs_document.as_dict(),
         "lane_contracts": lane_contracts,
+        # pgw#1647 / th#2281. What the module IS, per declared lane — the
+        # complete tensor set incl. computed non-persistent buffers, the tied
+        # alias groups, the quantizer's swapped classes, eval mode. The hub
+        # stores it and forwards it; it interprets no torch semantics. The
+        # serve-time fence REPLAYS this instead of re-deriving trust.
+        "construction_census": construction_census,
         "entrypoints": entrypoints,
         "fork_axes": {
             "structural": [
@@ -1381,6 +1453,10 @@ def derive_release(
         unservable_payloads=tuple(
             f"{r['entrypoint']}[{r['payload']}]: {r['error']} (at {r['frame']})"
             for r in unservable_payloads
+        ),
+        census_digests=tuple(
+            (handle, str(row.get("digest") or row.get("absent") or ""))
+            for handle, row in sorted(construction_census.items())
         ),
     )
 

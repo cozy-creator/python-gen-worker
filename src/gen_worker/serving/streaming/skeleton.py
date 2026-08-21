@@ -13,10 +13,20 @@ family instead of renting a pod for it: ``model.eval()``, which both
 ``from_pretrained`` implementations end with and this one never did, leaving
 every weight-bearing component on the fleet serving with dropout armed.
 
-So the preparation is written out here in the order ``from_pretrained`` runs
-it — construct, cast to the lane, swap the modules the config's quantizer
-declares, put the module in eval mode — and its trailing half, which cannot
-run before bytes land, is :func:`finish_quantized`.
+A fourth was paid for the same way (pgw#1644, $0.89): the whole-module
+``.to(device)`` a real load ends with. A config-built RoPE module computes
+``inv_freq`` in ``__init__`` on the DEFAULT device, no container ever names it
+because it is non-persistent, and nothing moved it — 146 floats on the CPU
+under an all-CUDA model, reported as ``mat1 is on cpu`` inside ``diffusers``
+eight milliseconds into a forward.
+
+So the preparation is written out here, ONCE, in the order ``from_pretrained``
+runs it, and :data:`PREPARE_STEPS` enumerates it. It has two halves because the
+bytes arrive in between: :func:`build` runs the leading half, :func:`finish`
+runs the trailing half, and there is no third place a step may be added — the
+`test_prepare_seam_pgw1647` source guard refuses one. What the seam PRODUCES is
+a module whose identity is stated by :mod:`.census`, which is what the release
+carries and what the serve fence replays.
 """
 
 from __future__ import annotations
@@ -35,9 +45,31 @@ from ...models.meta_init import init_empty_weights
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import torch
 
+    from . import census as _census
+
 logger = logging.getLogger(__name__)
 
 MODEL_INDEX = "model_index.json"
+
+#: THE prepare seam, enumerated — every step a real ``from_pretrained`` runs
+#: that a bare ``cls(config)`` skips, in the order it runs them. The first four
+#: are :func:`build`'s (no bytes needed); the last three are :func:`finish`'s
+#: (they read the tensors that are actually there). A step that belongs to this
+#: list and is called anywhere else in the serving tree is a source-level
+#: refusal, because "someone added a preparation step somewhere else" is the
+#: one-sentence history of pgw#1626, pgw#1638 and pgw#1644.
+PREPARE_STEPS: Tuple[str, ...] = (
+    "build on meta",
+    "cast to the lane",
+    "quantizer preprocess_model",
+    "retie",
+    "eval",
+    # ── the bytes arrive here ──
+    "quantizer postprocess_model",
+    "retie",
+    "eval",
+    "device sweep",
+)
 
 
 class SkeletonError(RuntimeError):
@@ -64,14 +96,26 @@ class Quantization:
 
 @dataclass(slots=True)
 class Skeleton:
-    """A meta-built pipeline and the components weights must reach."""
+    """A meta-built pipeline and the components weights must reach.
 
-    pipeline: Any
+    ``pipeline`` is ``None`` for :func:`build_modules`' answer, which is the
+    module half alone — the census, the conformance suite and the release-build
+    fence all ask about MODULES, and a tokenizer's megabytes of real vocabulary
+    bytes are not part of that question.
+    """
+
     modules: Dict[str, Any]
+    pipeline: Any = None
     passthrough: Tuple[str, ...] = ()
     #: component -> its :class:`Quantization`, for the components whose
     #: config declared one. Absent means "no quantizer ran", never "unknown".
     quantized: Dict[str, Quantization] = field(default_factory=dict)
+
+    def census(self) -> "_census.Census":
+        """This skeleton's :class:`~.census.Census` — what it IS, as data."""
+        from . import census as _census_mod
+
+        return _census_mod.take(self.modules, self.quantized)
 
 
 def _resolve(library: str, class_name: str) -> type:
@@ -252,6 +296,17 @@ def _build_on_meta(
             built, config, component=component, directory=directory,
             transformers_class=transformers_class,
         )
+        # RETIE ON META, before anything reads this skeleton (pgw#1647).
+        # `tie_weights()` DOES run during `__init__` (transformers calls it from
+        # `post_init`), and `init_empty_weights` then breaks it right back
+        # apart: the patch re-wraps `_parameters[name]` with a NEW meta
+        # Parameter at registration, so the alias and its source come out of the
+        # build as two distinct objects. That made the skeleton silent about its
+        # own tie structure — and the tie structure is exactly what the census
+        # has to state. The post-fill retie in `finish` is still required and
+        # still for its own reason (the fill rebinds `_parameters[leaf]`, which
+        # breaks the tie again); this one makes the SKELETON honest.
+        retie(built)
         # THE THIRD MEMBER OF THE FAMILY (pgw#1638's audit). Both
         # `from_pretrained` implementations end with `model.eval()` —
         # transformers says why in its own source: "Set model in evaluation
@@ -366,7 +421,7 @@ def component_specs(index_path: Path, index: Mapping[str, Any]) -> List[Componen
 
 def build_modules(
     checkpoint_dir: Path, *, compute_dtype: Any = None,
-) -> Dict[str, Any]:
+) -> Skeleton:
     """Every WEIGHT-BEARING component of a tree, built on meta. No pipeline.
 
     :func:`build` is the production path and stays the production path: it
@@ -385,6 +440,7 @@ def build_modules(
     """
     index_path, index = read_index(checkpoint_dir)
     modules: Dict[str, Any] = {}
+    quantized: Dict[str, Quantization] = {}
     for spec in component_specs(index_path, index):
         if spec.absent:
             continue
@@ -401,14 +457,16 @@ def build_modules(
                 f"{MODEL_INDEX} declares component {spec.name!r} but "
                 f"{directory} is not in the projected tree"
             )
-        modules[spec.name], _ = _build_on_meta(
+        modules[spec.name], quantization = _build_on_meta(
             cls, directory, spec.name, compute_dtype)
+        if quantization is not None:
+            quantized[spec.name] = quantization
     if not modules:
         raise SkeletonError(
             f"{index_path} declares no nn.Module component; there would be "
             f"no weights to stream"
         )
-    return modules
+    return Skeleton(modules=modules, quantized=quantized)
 
 
 def build(
@@ -542,26 +600,48 @@ def tied_names(module: "torch.nn.Module") -> Tuple[str, ...]:
     return tuple(sorted(str(name) for name in declared))
 
 
-def meta_survivors(module: "torch.nn.Module") -> Tuple[str, ...]:
-    """Every parameter or buffer still on ``meta``."""
-    left: List[str] = []
-    for name, parameter in module.named_parameters(remove_duplicate=False):
-        if parameter.device.type == "meta":
-            left.append(name)
-    for name, buffer in module.named_buffers(remove_duplicate=False):
-        if buffer.device.type == "meta":
-            left.append(name)
-    return tuple(sorted(left))
+def finish(
+    module: "torch.nn.Module",
+    quantization: Optional[Quantization] = None,
+    *,
+    target: Any = None,
+) -> int:
+    """The prepare seam's TRAILING half — everything that needs the bytes.
+
+    Ordered as ``from_pretrained`` orders it, and enumerated in
+    :data:`PREPARE_STEPS`. ``eval`` runs LAST of the three module-touching
+    steps rather than only in :func:`_build_on_meta`, because both of the steps
+    before it can install a module: a quantizer's ``postprocess_model`` may
+    replace a layer, and ``tie_weights`` may create one. A module installed
+    after the first ``eval()`` is in TRAIN mode like any other, and pgw#1638's
+    third member is what that costs.
+
+    The device sweep is last because it is the only step that must see the
+    final object graph. Returns the number of tensors it moved.
+    """
+    if quantization is not None:
+        finish_quantized(module, quantization)
+    retie(module)
+    module.eval()
+    if target is None:
+        return 0
+    from . import census as _census
+
+    return _census.place(module, target)
 
 
 __all__ = [
     "MODEL_INDEX",
+    "PREPARE_STEPS",
     "Quantization",
     "Skeleton",
     "SkeletonError",
     "build",
+    "build_modules",
+    "component_specs",
+    "finish",
     "finish_quantized",
-    "meta_survivors",
+    "read_index",
     "retie",
     "tied_names",
 ]

@@ -22,7 +22,7 @@ from gen_worker.serving.streaming import keymap  # noqa: E402
 from gen_worker.serving.streaming.skeleton import (  # noqa: E402
     build as build_skeleton,
 )
-from gen_worker.serving.streaming.skeleton import meta_survivors  # noqa: E402
+from gen_worker.serving.streaming.census import on_meta  # noqa: E402
 from streaming_fixture import Lane, build_source  # noqa: E402
 
 _LEGACY_CLIP_PREFIX = "text_model."
@@ -211,7 +211,7 @@ def test_the_engine_loads_a_legacy_checkpoint_with_nothing_left_on_meta(
     pipeline = _load(legacy["tree"], legacy["pipeline_cls"])
     for component in ("text_encoder", "text_encoder_2", "unet", "vae"):
         module = getattr(pipeline, component)
-        assert meta_survivors(module) == (), component
+        assert on_meta(module) == (), component
 
 
 def test_the_legacy_tree_loads_to_the_same_bytes_as_the_modern_one(
