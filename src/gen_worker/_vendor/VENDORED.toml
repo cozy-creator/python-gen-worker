@@ -162,7 +162,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "c609d65142c3046a4bb792b4fe9a5929580fb03d"
+rev = "dcadeb2d2f93f11ca5d12315e3a2e06037d48a0d"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's
@@ -378,7 +378,7 @@ rewrites = [
 "tensors.py" = "7876bc45dd13ca9bff141d437e16762189c74cd12b08e7439012e6cdc028f47c"
 "writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
 [packages.torchcg.files]
-"__init__.py" = "a1734b7d8218f7f9e97765a505460e77b7332f495c8cf52b3dbd76b7d99fce2f"
+"__init__.py" = "983f717cffa872fd5a9b7bc3e9cab79f0390e57baae0b26b59933ba065f2438b"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
 "_wrapper_split.py" = "1d5a3bc1ccabadeaa2b8b54f1492cba10723e53074a0022b8c7453565a86a4ce"
@@ -397,7 +397,7 @@ rewrites = [
 "contracts/toolchain_identity_v1.json" = "f4114c38ae373f62ddcb2aae5498ffbee30630e80adf11fee99e68bcbdb24282"
 "declaration.py" = "5ea9ad7653ccbc1bda7dffe6e643dc1a55e37de26d5120c8f8bfd918d2d8de9b"
 "discovery.py" = "172f40ea2e7f7c6e88b45699d74a2d029bdb0151f289307a6e9563709042726e"
-"document.py" = "a70f4e53d75dd4cdc5fb6f52be4c8c105e49efee168ab6c295094a09f779d0ad"
+"document.py" = "95a2cceacd7f8622284e37f7de1d8aef5b5a36edbdfffc3d4fb60ebcb7c0081d"
 "dynamic.py" = "9aa0e6e094344b74ba62a693da272fd7c86be5b5b00e0f31d45398f249b666a6"
 "engine.py" = "66cf857bc9b9e0fb147385f767d2aeca1868a6c79422dba017ec75fede7aabad"
 "graph_identity.py" = "88c731a681eb1e0b878f30bc33fcaa4efdbfc16bdc612fd6d406a088e299e567"
@@ -406,7 +406,7 @@ rewrites = [
 "identity.py" = "a460a24836cbd46cc9e65bd684b9f6258f6718e5c56102f26a7071f01574a99e"
 "ingress.py" = "d680f8724fe28eda7ae5f47b8e1a880d33bfce681e2acc68edef76c385b9df69"
 "introspection.py" = "99310298249ee2ada91544bcdbd91f06e33a44f136c525cb268ca8d7125aa9e5"
-"lane.py" = "bdbc92c07f7eb7dbe56e98f02496774f257ad30f400b7c25b4a9c39ed0814aee"
+"lane.py" = "6446193897b790a7937e0aa7cdba9ac9a1bf6bdaaf56ad607243f88a3da82d03"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "quantize.py" = "cb579b4a2c91af02211f6339147584338b278a2da4e1f8f60084b742fce21da6"
 "recipe.py" = "cc6fe9007a7f459ede5ced2cfd5d072e3c807552329d0e1920ade88de8b829a6"
