@@ -118,8 +118,17 @@ _MIB = 1 << 20
 RESIDENT = "resident"
 STREAMED = "streamed"
 
-#: The two regimes. This is ``residency_ledger.REGIMES`` and ``partial_resident``'s
-#: ``regime=`` argument, named once so the three cannot drift.
+#: The two regimes. Same two strings as ``partial_resident``'s ``regime=`` argument and as
+#: pgw#1548's ledger vocabulary, named once here so the three cannot drift.
+#:
+#: The ledger's MODULE is deliberately not named in this file. Its phase-1 safety fence
+#: (``test_phase_one_records_and_decides_nothing``) greps ``src/gen_worker`` for the module
+#: name to prove no placement path consults it yet, and a grep cannot tell a cross-reference
+#: from a consumer. This module is placement code and does NOT consult the ledger, so the
+#: fence's PROPERTY holds; only its INSTRUMENT would have read this comment as a violation.
+#: Left as a note rather than fixed here: tightening someone else's fence mid-phase is not
+#: this change's business, and the conservative grep also catches string-based access an
+#: import check would miss.
 EAGER = "eager"
 COMPILED = "compiled"
 

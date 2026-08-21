@@ -593,3 +593,67 @@ def test_the_declaration_totals_what_the_sizer_totals():
     declared = sum(d.weight_bytes for d in m._component_declaration(pipe))
     estimated = int(m.estimate_pipeline_size_gb(pipe) * (1 << 30))
     assert declared == estimated, f"declaration {declared} vs sizer {estimated}"
+
+
+# --- the group-offload threshold, and what the grant path does to it ------------------------
+
+
+def test_the_group_offload_threshold_is_never_READ_on_the_grant_path(monkeypatch):
+    """`_DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB = 6.0` is a hard boundary that drops TWO rungs at
+    once, and the ComfyUI floor ladder measured the cost: at a 6144 MiB budget our run peaks
+    at 3494 MiB, leaves 5.8 GiB unspent, and takes 37.4-41.4 s against ComfyUI's 24.2 s
+    (1.55-1.71x) — ComfyUI spends 5553 MiB and never leaves its normal path.
+
+    All three uses of the two threshold constants are inside `select_auto_mode`. This asserts
+    the consequence across the whole budget range the ladder covered: with a readable card, a
+    grant is produced and `select_auto_mode` is never CALLED, so the cliff cannot occur.
+
+    The assertion is deliberately "the walk did not run" rather than "the mode was not
+    group_offload". On a cardless test box every offload rung ends as the `cpu` rung
+    downstream (`cuda_ok` is False), so a mode assertion here would pass for the wrong reason
+    — vacuously green, which is the failure class this file exists to avoid. Each iteration
+    also asserts a grant was actually produced, so the guard cannot pass by never reaching
+    the seam either.
+    """
+    import gen_worker.models.memory as m
+
+    # Captured ONCE. Re-reading the attribute inside the loop picks up the previous
+    # iteration's spy — monkeypatch does not undo between iterations — and recurses.
+    real = m._grant_for_pipeline
+    seen: dict = {}
+
+    def spy(*a: Any, **k: Any) -> Any:
+        g, p = real(*a, **k)
+        seen["grant"] = g
+        return g, p
+
+    for free_gb in (7.0, 6.5, 6.0, 5.9, 4.0, 2.5, 1.2, 0.75):
+        seen.clear()
+        _with_card(monkeypatch, free_gb=free_gb, total_gb=8.0)
+        monkeypatch.setattr(m, "_grant_for_pipeline", spy)
+        monkeypatch.setattr(
+            m, "select_auto_mode",
+            lambda **k: pytest.fail(f"the threshold walk ran at {free_gb} GiB free"),
+        )
+        m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
+        assert seen.get("grant") is not None, f"no grant at {free_gb} GiB — guard is vacuous"
+
+
+def test_group_offload_becoming_unreachable_is_an_UNMEASURED_change():
+    """The honest other half, pinned so the test above is not read as a win.
+
+    `group_offload` is the aggressive per-block rung and the grant path can no longer select
+    it: the streamed-set search fall-through lands on `model_offload`. pgw#1604 measured the
+    6.0 cliff costing 2.1x, so removing it SHOULD help mid-band — but the bottom of the curve
+    now serves on a rung it did not use before, and **nothing here has run on a card**.
+
+    There is no assertion to make about speed from a cardless box. What IS assertable is that
+    the grant vocabulary contains no rung at all, which is why the rung question moved out of
+    the decider and into the projection — and why it is the floor-preservation leg, not this
+    file, that decides whether the bottom held.
+    """
+    from gen_worker.models import grant as G
+
+    assert set(G.__all__) & {"RESIDENT", "STREAMED"}
+    assert not any("offload" in n.lower() for n in G.__all__), G.__all__
+    assert not any("rung" in n.lower() for n in G.__all__), G.__all__
