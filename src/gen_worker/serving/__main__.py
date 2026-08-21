@@ -237,14 +237,19 @@ def _stated_env(
 
 
 def _serve_envelopes(args: argparse.Namespace, loaded: Any) -> int:
-    from .residency import ResidencyManager
+    from .residency import HEADROOM_DIVISOR, ResidencyManager
     from .serve_loop import ServeLoop, manifest_sizer
 
     tree = _checkpoint_tree(args, loaded)
     weight = args.weight_bytes or sum(
         f.stat().st_size for f in tree.rglob("*") if f.is_file()
     ) or 1
-    headroom = max(weight // 4, 1)
+    # ONE owner for this quantity (pgw#1649): this local envelope path used to
+    # restate `weight // 4` as a bare literal beside `worker.SnapshotSizer`'s
+    # copy of the same fraction — two producers of one policy, the reasoning
+    # written at neither. It IMPORTS the owner now; the justification, the
+    # casualty and the deletion condition are all at its definition.
+    headroom = max(weight // HEADROOM_DIVISOR, 1)
     budget = int(args.vram_budget_gb * (1024**3)) or (weight + headroom)
 
     class _LocalResolver:

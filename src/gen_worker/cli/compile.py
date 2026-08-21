@@ -670,7 +670,7 @@ def _rederive_programs(
             checkpoint_dir=endpoint_dir,
             lockfile=lockfile or lockfile_beside(str(endpoint_dir)),
             graph_cas=Path(cas_root),
-            slot_checkpoints={},
+            checkpoint_trees={},
         )
     except DeriveError as exc:
         raise CompileError(f"re-derive failed: {exc}") from exc

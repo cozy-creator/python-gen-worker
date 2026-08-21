@@ -13,7 +13,7 @@ from .artifact import (
     ArtifactError,
     ArtifactFormatSkew,
 )
-from .compiler import CompileError
+from .compiler import CompileError, DroppedOptimization, declared_input_layout
 from .declaration import (
     GRAPH_INTERFACE_FORMAT,
     DeclarationError,
@@ -82,6 +82,15 @@ from .lane import (
     require_passes,
     require_targets,
     resolve_target,
+)
+from .layout import (
+    CATALOG as LAYOUT_CATALOG,
+)
+from .layout import (
+    CONTIGUOUS,
+    LayoutError,
+    LayoutMorphism,
+    require_morphism,
 )
 from .quantize import (
     KeptModule,
@@ -206,7 +215,14 @@ __all__ = [
     "ArtifactFormatSkew",
     "ArtifactLoader",
     "CompileError",
+    "CONTIGUOUS",
     "COMPILED_GRAPH_FORMAT",
+    "DroppedOptimization",
+    "LAYOUT_CATALOG",
+    "LayoutError",
+    "LayoutMorphism",
+    "declared_input_layout",
+    "require_morphism",
     "DOCUMENT_FORMAT",
     "DimPolicy",
     "DiscoveryError",

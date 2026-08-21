@@ -43,6 +43,7 @@ from typing import cast
 
 from .declaration import DeclarationError, _canonical_graph, _literal_digest
 from .ingress import CallIngress
+from .layout import LayoutError, require_morphism
 
 GRAPH_SCHEME = "cg-graph-v1"
 #: v3 (tcg#80): the COMPILE POLICY joined the env half. v2 was (compile stack,
@@ -50,7 +51,12 @@ GRAPH_SCHEME = "cg-graph-v1"
 #: with `use_runtime_constant_folding` on and one with it off produced the
 #: same `cg-env-v2` under the same graph hash and collided in the store
 #: (`FileExistsError`, measured twice on 2026-08-21).
-ENV_SCHEME = "cg-env-v3"
+#: v4 (tcg#83): the DECLARED INPUT LAYOUT joined the env half. The level-1
+#: graph hash is stride-BLIND, so without this coordinate a contiguous mint and
+#: a channels_last mint of one graph position at one address while being
+#: different `.so` bytes -- the same collision `cg-env-v3` fixed for the
+#: options, with strides instead of flags.
+ENV_SCHEME = "cg-env-v4"
 _DIGEST_HEX = 56
 _GRAPH_RE = re.compile(rf"{GRAPH_SCHEME}-[0-9a-f]{{{_DIGEST_HEX}}}\Z")
 _SM_RE = re.compile(r"(sm_[0-9]{2,3}|cpu(-[a-z0-9_]+)?)\Z")
@@ -255,6 +261,12 @@ class EnvIdentity:
     #: caller who hands one in is restating a REMOTE build's policy, which is
     #: the only case where it can differ.
     policy: Mapping[str, object] | Sequence[tuple[str, object]] | None = None
+    #: The ratified layout morphism the artifacts at this position were
+    #: compiled against (tcg#83). Defaults to what THIS build declares, for
+    #: the same reason `policy` does -- a locally described env is honest only
+    #: about the local build, and a caller restating a REMOTE artifact's
+    #: position hands in the layout that artifact's metadata states.
+    layout: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stack", require_stack(self.stack))
@@ -268,6 +280,15 @@ class EnvIdentity:
 
             stated = compile_policy()
         object.__setattr__(self, "policy", require_policy(stated))
+        declared = self.layout
+        if declared is None:
+            from .compiler import declared_input_layout
+
+            declared = declared_input_layout()
+        try:
+            object.__setattr__(self, "layout", require_morphism(declared).handle)
+        except LayoutError as exc:
+            raise GraphIdentityError(str(exc)) from exc
 
     @property
     def options(self) -> dict[str, object]:
@@ -282,6 +303,7 @@ class EnvIdentity:
                 "sm": self.sm,
                 "stack": [list(row) for row in self.stack],
                 "policy": self.options,
+                "layout": self.layout,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -299,7 +321,7 @@ class EnvIdentity:
         if others:
             head.append(f"+{others} more")
         options = ", ".join(f"{name}={value!r}" for name, value in self.options.items())
-        return f"{', '.join(head)} @ {self.sm} [{options}]"
+        return f"{', '.join(head)} @ {self.sm} [{options}] in {self.layout}"
 
     def __str__(self) -> str:
         return self.value
