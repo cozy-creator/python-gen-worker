@@ -577,3 +577,19 @@ def test_an_over_card_grant_is_never_placed_resident(monkeypatch):
     assert applied["mode"] not in ("off", "vae_only"), (
         f"an over-card grant was placed resident as {applied['mode']!r} — {g.line()}"
     )
+
+
+def test_the_declaration_totals_what_the_sizer_totals():
+    """The grant is sized from the declaration; every confession beside it quotes
+    `estimate_pipeline_size_gb`. If those two walks ever disagree, the grant admits against one
+    number and reports another, and nothing in either output would say so.
+
+    They agree today because both bottom out in `module_storage_bytes` over the pipeline's
+    component vocabulary. Pinned so a change to either walk has to notice the other.
+    """
+    import gen_worker.models.memory as m
+
+    pipe = _pipe()
+    declared = sum(d.weight_bytes for d in m._component_declaration(pipe))
+    estimated = int(m.estimate_pipeline_size_gb(pipe) * (1 << 30))
+    assert declared == estimated, f"declaration {declared} vs sizer {estimated}"
