@@ -44,11 +44,13 @@ def add_subparser(sub: Any) -> None:
         required=True,
         action="append",
         default=[],
-        metavar="[SLOT=]PATH",
+        metavar="[CLASS=]PATH",
         help="CONFIG-ONLY checkpoint tree the author's load path resolves "
         "(subset snapshot; weights never transit the derive). Repeat as "
-        "`slot=path` to give a SECONDARY model slot its own tree (pgw#1508); "
-        "the bare form is the primary model's.",
+        "`ModelClass=path` to give one model class its own tree — a release "
+        "derives EVERY compile-marking class (pgw#1650) and they bind "
+        "different checkpoints. An entrypoint SLOT name also keys a tree "
+        "(pgw#1508); the bare form is every class that names neither.",
     )
     derive.add_argument(
         "--lockfile",
@@ -88,7 +90,7 @@ def _run_derive(args: argparse.Namespace) -> int:
         if not (_sep and slot.isidentifier()):
             slot, rest = "", raw
         if slot in trees:
-            owner = f"slot {slot!r}" if slot else "the primary model"
+            owner = f"{slot!r}" if slot else "the primary model"
             print(f"error: --checkpoint given twice for {owner}", file=sys.stderr)
             return 2
         resolved = Path(rest).resolve()
@@ -98,8 +100,8 @@ def _run_derive(args: argparse.Namespace) -> int:
         trees[slot] = resolved
     if "" not in trees:
         print(
-            "error: --checkpoint names only secondary slots; the primary "
-            "model's tree is the bare form",
+            "error: --checkpoint names only classes/slots; the tree every "
+            "other model loads from is the bare form",
             file=sys.stderr,
         )
         return 2
@@ -122,7 +124,7 @@ def _run_derive(args: argparse.Namespace) -> int:
             checkpoint_dir=checkpoint,
             lockfile=lockfile,
             graph_cas=Path(args.graph_cas).resolve() if args.graph_cas else None,
-            slot_checkpoints=trees,
+            checkpoint_trees=trees,
         )
     except DeriveError as exc:
         print(f"derive error: {exc}", file=sys.stderr)
@@ -146,10 +148,26 @@ def _run_derive(args: argparse.Namespace) -> int:
             else "no graphs -- load() marks no ctx.compile target"
         )
         print(f"{result.endpoint}: {why}", file=sys.stderr)
-    for lane_name, hashes in result.lane_graphs.items():
-        print(f"lane {lane_name}: {len(hashes)} graph specialization(es)", file=sys.stderr)
+    if result.classes:
+        print(
+            f"{len(result.classes)} model class(es) derived: "
+            f"{', '.join(result.classes)}",
+            file=sys.stderr,
+        )
+    for class_name, lane_name, hashes in result.class_lane_graphs:
+        print(
+            f"{class_name} lane {lane_name}: {len(hashes)} graph "
+            f"specialization(es)",
+            file=sys.stderr,
+        )
         for graph in hashes:
             print(f"  {graph}", file=sys.stderr)
+    for lane_name, hashes in result.lane_graphs.items():
+        print(
+            f"lane {lane_name}: {len(hashes)} graph specialization(es) "
+            f"release-wide",
+            file=sys.stderr,
+        )
     print(f"document sha256: {result.digest}", file=sys.stderr)
     return 0
 

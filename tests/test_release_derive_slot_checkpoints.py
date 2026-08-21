@@ -86,7 +86,10 @@ def test_the_aide_pointed_at_the_PRIMARY_tree_refuses_naming_slot_and_tree(
     assert "slot 'aide'" in message
     assert str(primary_tree) in message
     assert "the PRIMARY checkpoint" in message
-    assert "--checkpoint-ref aide=<ref>" in message
+    # pgw#1650: the remedy names the CLASS, which is what owns a checkpoint —
+    # two entrypoints can hold the same slot NAME over different classes (both
+    # qwen arms take `model:`). The slot name still keys a tree.
+    assert "--checkpoint-ref AideModel=<ref>" in message
 
 
 def test_an_eager_only_slot_STILL_hydrates(
