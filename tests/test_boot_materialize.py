@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, cast
 
 import pytest
 
@@ -694,5 +694,140 @@ def test_an_ABSENT_ref_records_the_check_it_lost_before_the_fetch_it_starts(
             f"got {[(r.phase, r.reason) for r in rows]}")
         assert _fetch_rows(boot_phases.PHASE_WEIGHTS_FETCH), (
             "and the fetch it fell through to must be its own row")
+    finally:
+        origin.close()
+
+
+# ---------------------------------------------------------------------------
+# pgw#1613 — the fetch must be an OPEN ACTIVITY, because the compute-child
+# watchdog decides a silent event loop by what is open
+# ---------------------------------------------------------------------------
+
+
+def _hang_verdict(*, activity_kind: str, now: float = 100.0) -> str | None:
+    """Run the REAL `_ChildSlot._hang_verdict` against a slot that is burning
+    CPU (fresh evidence) with a silent loop, and `activity_kind` open.
+
+    Called unbound on a stand-in so the assertion is about the production
+    decision function itself, not a copy of its logic.
+    """
+    from types import SimpleNamespace
+
+    from gen_worker.procsplit.parent import _ChildSlot
+
+    # A structural stand-in for the four attributes the verdict reads. `cast`
+    # rather than a real `_ChildSlot`: constructing one needs a live parent, a
+    # spawned subprocess and a socket, none of which this decision touches.
+    slot = SimpleNamespace(
+        # evidence is FRESH: the child's tree is accruing kernel-accounted work,
+        # which is what a CAS fill looks like from the parent's /proc sampler.
+        liveness_evidence=1234.5,
+        liveness_evidence_at=now - 0.5,
+        liveness_activity=activity_kind,
+        p=SimpleNamespace(_evidence_hold_window=15.0),
+    )
+    return _ChildSlot._hang_verdict(cast(Any, slot), now)
+
+
+def test_the_watchdog_HOLDS_a_cpu_burning_child_only_because_an_activity_is_open() -> None:
+    """The two halves of pgw#1613, asserted against the real verdict function.
+
+    A child mid-materialization is burning CPU with a starved event loop. What
+    decides its life is whether anything is OPEN. This is the RED ARM for the
+    fix below: delete the `activity.running(...)` scope in `_materialize` and
+    the second assertion is what production does instead — SIGKILL on a live
+    pull.
+    """
+    assert _hang_verdict(activity_kind=activity.KIND_BOOT_MATERIALIZE) == "held", (
+        "a fetch that declares itself must survive a starved event loop"
+    )
+    assert _hang_verdict(activity_kind="") == "loop_wedged_no_activity", (
+        "with nothing open the same child is killed — this is the defect, and "
+        "it is why the fetch has to open an activity at all"
+    )
+
+
+def test_a_cold_fetch_holds_a_weight_fetch_activity_OPEN_for_its_whole_pull(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """Measured on minimax-h3 twice, at two pins: a ~105 GB fill silenced the
+    child's loop and the watchdog killed it at 356 s / 687 s with `cause=
+    watchdog_hang`, no OOM, while the process burned CPU. Nothing was open.
+
+    So: while the pull is in flight, `activity.current()` must be the fetch.
+    The observation is taken from INSIDE the funnel — the store's own byte
+    callback — because that is the only place that is provably mid-pull.
+    """
+    origin = _Origin()
+    try:
+        snapshot = _blobs(origin)
+        wire = _Wire()
+        seen: List[Any] = []
+
+        async def boot() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            store = _store(wire, tmp_path / "cas")
+            inner = store.ensure_local
+
+            async def watched(*a: Any, **kw: Any) -> Any:
+                # mid-pull, by construction: the funnel has been entered and
+                # has not returned.
+                seen.append(activity.current())
+                return await inner(*a, **kw)
+
+            store.ensure_local = watched  # type: ignore[method-assign]
+            mat = CheckpointMaterialization(store)
+            mat.configure(_config(1, _REF, snapshot))
+            await _settle(mat)
+            assert mat.state == STATE_READY
+
+        asyncio.run(boot())
+
+        assert seen, "the cold path never entered the funnel; test proves nothing"
+        kinds = [getattr(a, "kind", None) for a in seen]
+        assert all(k == activity.KIND_BOOT_MATERIALIZE for k in kinds), (
+            "the pull must run under an open weight_fetch activity or the "
+            f"compute-child watchdog SIGKILLs it (pgw#1613); saw {kinds}"
+        )
+    finally:
+        origin.close()
+
+
+def test_a_failed_fetch_ends_the_activity_FAILED_not_completed(
+    tmp_path: Path, _fine_cadence: Any
+) -> None:
+    """`activity.py`'s contract: a silent death is a bug. A materialization
+    that dies must not leave a COMPLETED fetch behind for the hub to read as a
+    successful pull."""
+    origin = _Origin()
+    try:
+        snapshot = _blobs(origin)
+        wire = _Wire()
+
+        async def boot() -> None:
+            activity.bind_sink(wire.send, asyncio.get_running_loop())
+            store = _store(wire, tmp_path / "cas")
+
+            async def boom(*a: Any, **kw: Any) -> Any:
+                raise RuntimeError("origin went away mid-pull")
+
+            store.ensure_local = boom  # type: ignore[method-assign]
+            mat = CheckpointMaterialization(store)
+            mat.configure(_config(1, _REF, snapshot))
+            await _settle(mat)
+            assert mat.state == STATE_FAILED
+            assert activity.current() is None, "the fetch activity outlived its pull"
+
+        asyncio.run(boot())
+
+        fetches = [
+            u for u in wire.updates
+            if u.kind == activity.KIND_BOOT_MATERIALIZE
+        ]
+        assert fetches, "no weight_fetch activity was reported at all"
+        assert fetches[-1].state == pb.ActivityState.ACTIVITY_STATE_FAILED, (
+            "a dead pull must terminate FAILED, not COMPLETED; last state was "
+            f"{fetches[-1].state}"
+        )
     finally:
         origin.close()
