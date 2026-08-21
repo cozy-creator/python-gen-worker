@@ -24,6 +24,73 @@ from typing import Any, Callable, Optional
 from ..serving.context import _lane_torch_dtype
 
 
+class ProjectedTreeAtTrace(RuntimeError):
+    """An author loader failed on a tree whose tensors are POINTERS.
+
+    pgw#1609. The trace half of ``ctx.load`` hands the author's own
+    ``from_pretrained`` the tree ``gen-worker download`` published, and that
+    tree is PROJECTED: every ``.safetensors`` in it is a 128 B ``TFSSTUB1``
+    pointer stub and the bytes are CAS objects. A loader that opens one with
+    the stock safetensors reader reads ``b"TFSSTUB1"`` as a little-endian u64
+    header length — 3,549,493,276,984,952,404 against a 100 MB cap — and says
+    ``header too large``, which reads as a corrupt download of an intact
+    checkpoint. That sentence has now cost two separate multi-day
+    investigations (pgw#1513's, and se#817's rented-pod anima derive).
+
+    This wraps the author's real exception rather than replacing it: the
+    original is the ``__cause__`` and the stub census is the new information.
+    """
+
+
+def _projected_tree_diagnosis(
+    tree: Path, exc: BaseException
+) -> Optional[ProjectedTreeAtTrace]:
+    """The stub-aware reading of ``exc``, or ``None`` when stubs are not it.
+
+    ``None`` for every tree that carries real bytes, so a plain author bug on
+    a plain tree raises exactly what it raised before. Never itself raises:
+    a diagnosis that fails while diagnosing would replace a real failure with
+    its own, which is the pgw#1308 mistake from the other direction.
+    """
+
+    try:
+        from ..models import projection
+
+        stubs = [
+            (path.relative_to(tree).as_posix(), path.lstat().st_size, stub.size)
+            for path in sorted(Path(tree).rglob("*"))
+            if (path.is_file() or path.is_symlink())
+            and (stub := projection.stub_at(path)) is not None
+        ]
+    except Exception:  # noqa: BLE001 — the original failure must survive
+        return None
+    if not stubs:
+        return None
+    shown = ", ".join(
+        f"{rel} ({on_disk} B on disk, names {names} B)"
+        for rel, on_disk, names in stubs[:3]
+    )
+    more = "" if len(stubs) <= 3 else f" (+{len(stubs) - 3} more)"
+    return ProjectedTreeAtTrace(
+        f"{type(exc).__name__}: {exc}\n"
+        f"  ...and {tree} is a PROJECTED tree: {len(stubs)} of its tensor "
+        f"containers are TFSSTUB1 pointer stubs, not weights — {shown}{more}. "
+        f"The checkpoint is intact; its bytes are CAS objects and are not at "
+        f"any file path. A loader that reads a container with the stock "
+        f"safetensors reader sees the stub's first 8 bytes as a header length "
+        f"and reports a corrupt checkpoint.\n"
+        f"  Fix it in the LOADER, by pgw#1303's access ladder:\n"
+        f"    tier 1  gen_worker.models.tensor_source.open_tensor_source(path, "
+        f"why=...) — safe_open's exact shape, reads the CAS, copies nothing;\n"
+        f"    tier 1  ...load_state_dict(path, why=...) — the "
+        f"safetensors.torch.load_file replacement;\n"
+        f"    tier 3  gen_worker.models.materialized_view.third_party_dir("
+        f"path, why=...) — one real file, for third-party code that insists on "
+        f"one (it is a no-op on a tree that is not projected).\n"
+        f"  Worked example: serverless-endpoints anima `main.py` (se#817)."
+    )
+
+
 class TraceLoadContext:
     """What ``Model.load`` sees under ``gen-worker release derive``.
 
@@ -72,11 +139,21 @@ class TraceLoadContext:
         """Hollow-materialize the CONFIG-ONLY tree through the author's loader.
 
         At serve, ``ctx.load`` streams tensors from the chunk store straight
-        to VRAM in the lane contract's layout (pgw#1372). At trace there are
-        no tensors at all: the loader's own ``from_pretrained`` runs against
-        the config-only subset snapshot inside the ambient
-        ``torchcg.hollow_session`` (fake parameters, real buffers), and the
+        to VRAM in the lane contract's layout (pgw#1372). At trace the
+        loader's own ``from_pretrained`` runs inside the ambient
+        ``torchcg.hollow_session`` (fake parameters, real buffers) and the
         lane's registry-derived dtype stands in for the layout's.
+
+        ⚠️ "CONFIG-ONLY TREE" IS A PROPERTY OF THE SESSION, NOT OF THE PATH,
+        and pgw#1609 is the bill for the older wording that said otherwise.
+        ``checkpoint_dir`` is the WHOLE checkpoint tree — ``cli/lock`` passes
+        what ``cli/workspace.resolve_checkpoint`` returned, and nothing
+        anywhere builds a config-only subset. What makes the trace weight-free
+        is that ``hollow_session`` INTERCEPTS the diffusers / transformers /
+        ``ModularPipeline`` loaders. An author loader that reads a container
+        itself is not intercepted, meets the real tree, and — since every
+        hub-materialized tree is projected — meets pointer stubs. See the
+        diagnosis below.
         """
         from_pretrained = getattr(loader, "from_pretrained", None)
         if from_pretrained is None:
@@ -105,7 +182,29 @@ class TraceLoadContext:
         # dtype (pgw#1567, Paul). Precision IS graph identity (pgw#1458), the
         # lane is where that identity is declared, and pgw#1448's "real dtype,
         # never the spelling" rule applies to it.
-        loaded = from_pretrained(self.checkpoint_dir)
+        # pgw#1609: THE TRACE HALF MEETS PROJECTED TREES TOO, and until this
+        # existed it was the only ctx.load on master with no word to say about
+        # one. `cli/workspace.resolve_checkpoint` hands `gen-worker lock` the
+        # tree at `<cas>/snapshots/<id>` — the tree `gen-worker download`
+        # PROJECTS, whose every tensor container is a 128 B TFSSTUB1 pointer
+        # stub — and the serving `LoadContext` guards that case at length
+        # (pgw#1513) while this one did not. An author loader that opens a
+        # container raw therefore died with `SafetensorError: header too
+        # large`, which is a LIE ABOUT THE CHECKPOINT (se#817: anima, on a
+        # rented pod, after a complete integrity-gated 5.6 GB pull).
+        #
+        # A REFUSAL is the wrong instrument here and was rejected: an author
+        # loader that reads the tree correctly — tier 1 via
+        # `models.tensor_source`, tier 3 via `models.materialized_view` — must
+        # keep working, and a pre-check cannot tell the two apart. So the
+        # DIAGNOSIS rides the failure instead, and only a failure.
+        try:
+            loaded = from_pretrained(self.checkpoint_dir)
+        except Exception as exc:  # noqa: BLE001 — re-raised, never swallowed
+            diagnosis = _projected_tree_diagnosis(self.checkpoint_dir, exc)
+            if diagnosis is None:
+                raise
+            raise diagnosis from exc
         # Adapter application mutates WEIGHTS (or injects adapter layers);
         # at trace every parameter is fake and no adapter bytes exist, so the
         # enumeration's fake-adapter arms must not hit real LoRA I/O. The
@@ -819,6 +918,7 @@ class TraceRequestContext:
 
 
 __all__ = [
+    "ProjectedTreeAtTrace",
     "StepBudgetReached",
     "TraceLoadContext",
     "TraceRequestContext",
