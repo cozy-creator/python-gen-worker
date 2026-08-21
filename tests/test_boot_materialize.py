@@ -259,8 +259,9 @@ def test_the_dispatch_resolves_the_tree_BOOT_materialized(
         asyncio.run(run())
 
         pick = _Pick(
-            slot="model", ref=str(_REF), manifest_digest="",
-            model="", inference_defaults="",
+            slot="model", ref=str(_REF), model="", inference_defaults="",
+            bind_contract_digest="sha256:" + "0" * 64,
+            bind_contract_url="https://hub.invalid/bind",
         )
         token = _DISPATCH.set(
             _DispatchPicks(by_ref={str(_REF): pick}, by_slot={"model": str(_REF)})
@@ -281,20 +282,14 @@ def test_the_dispatch_resolves_the_tree_BOOT_materialized(
         origin.close()
 
 
-def test_the_dispatch_supplies_its_own_fetch_pointer(tmp_path: Path) -> None:
-    """`RunJob.snapshots` is keyed by ref and ships on every dispatch."""
-    from gen_worker.worker import _picks_of
+def test_the_dispatch_snapshot_map_has_one_ref_key() -> None:
+    """th#2208 deletes the unused second fetch pointer from ModelBinding."""
+    from gen_worker.wire_snapshots import index_snapshots
 
     run = pb.RunJob()
-    binding = run.models.add()
-    binding.slot = "model"
-    binding.ref = str(_REF)
     run.snapshots[str(_REF)].digest = "b7f2c1a0" * 8
 
-    picks = _picks_of(run)
-    assert picks.by_ref[str(_REF)].manifest_digest == "b7f2c1a0" * 8, (
-        "the dispatch's own snapshot must supply the fetch pointer the wire's "
-        "digest field never carries")
+    assert index_snapshots(run.snapshots)[_REF].digest == "b7f2c1a0" * 8
 
 
 @pytest.fixture

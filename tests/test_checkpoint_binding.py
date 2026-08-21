@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
@@ -58,21 +59,30 @@ def _dispatch(
             pb.ModelBinding(
                 slot="model",
                 ref=ref,
-                manifest_digest=digest,
                 model=model,
                 inference_defaults="" if row is None else json.dumps(row),
+                bind_contract_digest="contract",
+                bind_contract_url="https://hub.invalid/bind",
             )
         ]
     )
     _DISPATCH.set(_picks_of(run))
-    return HubBindingResolver(snapshots_root=root)
+    resolver = HubBindingResolver(snapshots_root=root)
+    resolver._bind_contracts["contract"] = SimpleNamespace(
+        digest="contract",
+        identity=SimpleNamespace(release_id="release"),
+        census=None,
+    )
+    return resolver
 
 
 def test_the_classification_column_is_on_the_wire_at_the_hubs_number() -> None:
     """These numbers are TENSORHUB's, and tensorhub is the only SENDER."""
     fields = pb.ModelBinding.DESCRIPTOR.fields_by_name
     assert fields["model"].number == 9
-    assert fields["manifest_digest"].number == 10
+    assert fields["bind_contract_digest"].number == 11
+    assert fields["bind_contract_url"].number == 12
+    assert "manifest_digest" not in fields
     assert pb.LoraOverlay.DESCRIPTOR.fields_by_name["model"].number == 4
 
 

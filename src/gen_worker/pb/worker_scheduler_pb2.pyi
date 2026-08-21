@@ -492,7 +492,7 @@ class HostCanary(_message.Message):
     peer_gbps: float
     peer_access: bool
     topo_link: str
-    def __init__(self, memcpy_gbps: _Optional[float] = ..., d2h_gbps: _Optional[float] = ..., pinned_alloc_ok: _Optional[bool] = ..., cpu_single_mbps: _Optional[float] = ..., cpu_multi_mbps: _Optional[float] = ..., vcpus: _Optional[int] = ..., ram_total_gb: _Optional[float] = ..., duration_ms: _Optional[int] = ..., interconnect: _Optional[str] = ..., peer_gbps: _Optional[float] = ..., peer_access: _Optional[bool] = ..., topo_link: _Optional[str] = ...) -> None: ...
+    def __init__(self, memcpy_gbps: _Optional[float] = ..., d2h_gbps: _Optional[float] = ..., pinned_alloc_ok: bool = ..., cpu_single_mbps: _Optional[float] = ..., cpu_multi_mbps: _Optional[float] = ..., vcpus: _Optional[int] = ..., ram_total_gb: _Optional[float] = ..., duration_ms: _Optional[int] = ..., interconnect: _Optional[str] = ..., peer_gbps: _Optional[float] = ..., peer_access: bool = ..., topo_link: _Optional[str] = ...) -> None: ...
 
 class ModelResidency(_message.Message):
     __slots__ = ("ref", "tier", "vram_bytes", "snapshot_digest", "residency_generation")
@@ -581,7 +581,7 @@ class DesiredStateCommand(_message.Message):
     mandatory: bool
     changed_config_classes: ConfigClassMask
     parameter_snapshot: bytes
-    def __init__(self, worker_session_id: _Optional[str] = ..., command_seq: _Optional[int] = ..., goal_id: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., config_digest: _Optional[bytes] = ..., issued_at_unix_ms: _Optional[int] = ..., accept_by_unix_ms: _Optional[int] = ..., first_action_by_unix_ms: _Optional[int] = ..., intents: _Optional[_Iterable[_Union[DesiredIntent, _Mapping]]] = ..., mandatory: _Optional[bool] = ..., changed_config_classes: _Optional[_Union[ConfigClassMask, _Mapping]] = ..., parameter_snapshot: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, worker_session_id: _Optional[str] = ..., command_seq: _Optional[int] = ..., goal_id: _Optional[str] = ..., release_id: _Optional[str] = ..., config_generation: _Optional[int] = ..., config_digest: _Optional[bytes] = ..., issued_at_unix_ms: _Optional[int] = ..., accept_by_unix_ms: _Optional[int] = ..., first_action_by_unix_ms: _Optional[int] = ..., intents: _Optional[_Iterable[_Union[DesiredIntent, _Mapping]]] = ..., mandatory: bool = ..., changed_config_classes: _Optional[_Union[ConfigClassMask, _Mapping]] = ..., parameter_snapshot: _Optional[bytes] = ...) -> None: ...
 
 class DesiredIntent(_message.Message):
     __slots__ = ("intent_id", "kind", "cause", "function_name", "ref", "snapshot_digest", "desired_tier", "binding_digest", "parent_intent_id", "waiting_requests", "priority", "mandatory")
@@ -609,7 +609,7 @@ class DesiredIntent(_message.Message):
     waiting_requests: _containers.RepeatedCompositeFieldContainer[RequestAttempt]
     priority: int
     mandatory: bool
-    def __init__(self, intent_id: _Optional[str] = ..., kind: _Optional[_Union[DesiredIntentKind, str]] = ..., cause: _Optional[_Union[DesiredIntentCause, str]] = ..., function_name: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[bytes] = ..., desired_tier: _Optional[_Union[ResidencyTier, str]] = ..., binding_digest: _Optional[bytes] = ..., parent_intent_id: _Optional[str] = ..., waiting_requests: _Optional[_Iterable[_Union[RequestAttempt, _Mapping]]] = ..., priority: _Optional[int] = ..., mandatory: _Optional[bool] = ...) -> None: ...
+    def __init__(self, intent_id: _Optional[str] = ..., kind: _Optional[_Union[DesiredIntentKind, str]] = ..., cause: _Optional[_Union[DesiredIntentCause, str]] = ..., function_name: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[bytes] = ..., desired_tier: _Optional[_Union[ResidencyTier, str]] = ..., binding_digest: _Optional[bytes] = ..., parent_intent_id: _Optional[str] = ..., waiting_requests: _Optional[_Iterable[_Union[RequestAttempt, _Mapping]]] = ..., priority: _Optional[int] = ..., mandatory: bool = ...) -> None: ...
 
 class RequestAttempt(_message.Message):
     __slots__ = ("request_id", "attempt")
@@ -749,7 +749,7 @@ class ConfigClassMask(_message.Message):
     parameters: bool
     bindings: bool
     boot: bool
-    def __init__(self, parameters: _Optional[bool] = ..., bindings: _Optional[bool] = ..., boot: _Optional[bool] = ...) -> None: ...
+    def __init__(self, parameters: bool = ..., bindings: bool = ..., boot: bool = ...) -> None: ...
 
 class ConfigApplication(_message.Message):
     __slots__ = ("release_id", "target_generation", "received_generation", "parameter_snapshot_generation", "binding_ready_generation", "boot_generation", "state", "pending_classes", "error_code")
@@ -813,7 +813,7 @@ class LifecycleSnapshot(_message.Message):
     drain: DrainProjection
     full_replace: bool
     generated_at_unix_ms: int
-    def __init__(self, worker_session_id: _Optional[str] = ..., state_seq: _Optional[int] = ..., intents: _Optional[_Iterable[_Union[IntentState, _Mapping]]] = ..., capabilities: _Optional[_Iterable[_Union[FunctionCapability, _Mapping]]] = ..., config_application: _Optional[_Union[ConfigApplication, _Mapping]] = ..., goal_receipts: _Optional[_Iterable[_Union[GoalReceipt, _Mapping]]] = ..., drain: _Optional[_Union[DrainProjection, _Mapping]] = ..., full_replace: _Optional[bool] = ..., generated_at_unix_ms: _Optional[int] = ...) -> None: ...
+    def __init__(self, worker_session_id: _Optional[str] = ..., state_seq: _Optional[int] = ..., intents: _Optional[_Iterable[_Union[IntentState, _Mapping]]] = ..., capabilities: _Optional[_Iterable[_Union[FunctionCapability, _Mapping]]] = ..., config_application: _Optional[_Union[ConfigApplication, _Mapping]] = ..., goal_receipts: _Optional[_Iterable[_Union[GoalReceipt, _Mapping]]] = ..., drain: _Optional[_Union[DrainProjection, _Mapping]] = ..., full_replace: bool = ..., generated_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class DesiredInstance(_message.Message):
     __slots__ = ("function_name", "models")
@@ -835,7 +835,7 @@ class ModelResolution(_message.Message):
     cast: str
     lane: str
     lane_pinned: bool
-    def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ..., lane: _Optional[str] = ..., lane_pinned: _Optional[bool] = ...) -> None: ...
+    def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ..., lane: _Optional[str] = ..., lane_pinned: bool = ...) -> None: ...
 
 class StateDelta(_message.Message):
     __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets", "compiled_graph_lookups", "disk_usage", "observed_config_generation")
@@ -1019,7 +1019,7 @@ class ResolvedCompute(_message.Message):
     def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
-    __slots__ = ("slot", "ref", "loras", "inference_defaults", "objective", "distilled", "distilled_status", "model", "manifest_digest")
+    __slots__ = ("slot", "ref", "loras", "inference_defaults", "objective", "distilled", "distilled_status", "model", "bind_contract_digest", "bind_contract_url")
     SLOT_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
     LORAS_FIELD_NUMBER: _ClassVar[int]
@@ -1028,7 +1028,8 @@ class ModelBinding(_message.Message):
     DISTILLED_FIELD_NUMBER: _ClassVar[int]
     DISTILLED_STATUS_FIELD_NUMBER: _ClassVar[int]
     MODEL_FIELD_NUMBER: _ClassVar[int]
-    MANIFEST_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    BIND_CONTRACT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    BIND_CONTRACT_URL_FIELD_NUMBER: _ClassVar[int]
     slot: str
     ref: str
     loras: _containers.RepeatedCompositeFieldContainer[LoraOverlay]
@@ -1037,8 +1038,9 @@ class ModelBinding(_message.Message):
     distilled: bool
     distilled_status: str
     model: str
-    manifest_digest: str
-    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ..., distilled_status: _Optional[str] = ..., model: _Optional[str] = ..., manifest_digest: _Optional[str] = ...) -> None: ...
+    bind_contract_digest: str
+    bind_contract_url: str
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., objective: _Optional[str] = ..., distilled: bool = ..., distilled_status: _Optional[str] = ..., model: _Optional[str] = ..., bind_contract_digest: _Optional[str] = ..., bind_contract_url: _Optional[str] = ...) -> None: ...
 
 class LoraOverlay(_message.Message):
     __slots__ = ("ref", "weight", "inference_defaults", "model")
@@ -1053,43 +1055,12 @@ class LoraOverlay(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., weight: _Optional[float] = ..., inference_defaults: _Optional[str] = ..., model: _Optional[str] = ...) -> None: ...
 
 class Snapshot(_message.Message):
-    __slots__ = ("digest", "files", "provenance")
+    __slots__ = ("digest", "files")
     DIGEST_FIELD_NUMBER: _ClassVar[int]
     FILES_FIELD_NUMBER: _ClassVar[int]
-    PROVENANCE_FIELD_NUMBER: _ClassVar[int]
     digest: str
     files: _containers.RepeatedCompositeFieldContainer[SnapshotFile]
-    provenance: ResolvedProvenance
-    def __init__(self, digest: _Optional[str] = ..., files: _Optional[_Iterable[_Union[SnapshotFile, _Mapping]]] = ..., provenance: _Optional[_Union[ResolvedProvenance, _Mapping]] = ...) -> None: ...
-
-class ResolvedProvenance(_message.Message):
-    __slots__ = ("repo", "release", "variant_id", "component_sources")
-    class ComponentSourcesEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: ComponentOrigin
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[ComponentOrigin, _Mapping]] = ...) -> None: ...
-    REPO_FIELD_NUMBER: _ClassVar[int]
-    RELEASE_FIELD_NUMBER: _ClassVar[int]
-    VARIANT_ID_FIELD_NUMBER: _ClassVar[int]
-    COMPONENT_SOURCES_FIELD_NUMBER: _ClassVar[int]
-    repo: str
-    release: str
-    variant_id: str
-    component_sources: _containers.MessageMap[str, ComponentOrigin]
-    def __init__(self, repo: _Optional[str] = ..., release: _Optional[str] = ..., variant_id: _Optional[str] = ..., component_sources: _Optional[_Mapping[str, ComponentOrigin]] = ...) -> None: ...
-
-class ComponentOrigin(_message.Message):
-    __slots__ = ("repo", "release", "variant_id")
-    REPO_FIELD_NUMBER: _ClassVar[int]
-    RELEASE_FIELD_NUMBER: _ClassVar[int]
-    VARIANT_ID_FIELD_NUMBER: _ClassVar[int]
-    repo: str
-    release: str
-    variant_id: str
-    def __init__(self, repo: _Optional[str] = ..., release: _Optional[str] = ..., variant_id: _Optional[str] = ...) -> None: ...
+    def __init__(self, digest: _Optional[str] = ..., files: _Optional[_Iterable[_Union[SnapshotFile, _Mapping]]] = ...) -> None: ...
 
 class SnapshotFile(_message.Message):
     __slots__ = ("path", "size_bytes", "blake3", "url", "digest", "chunk_size_bytes", "chunks")
@@ -1225,7 +1196,7 @@ class JobMetrics(_message.Message):
     width: int
     height: int
     posture: MeasuredPosture
-    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ..., stage_ms: _Optional[_Mapping[str, int]] = ..., serving_mode: _Optional[str] = ..., served_compiled_graph_ref: _Optional[str] = ..., served_eager_fallback: _Optional[bool] = ..., fallback_reason: _Optional[str] = ..., sm: _Optional[str] = ..., steps: _Optional[int] = ..., width: _Optional[int] = ..., height: _Optional[int] = ..., posture: _Optional[_Union[MeasuredPosture, _Mapping]] = ...) -> None: ...
+    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ..., slot_held_ms: _Optional[int] = ..., finalize_wall_ms: _Optional[int] = ..., lane: _Optional[str] = ..., runtime_terms: _Optional[_Mapping[str, float]] = ..., stage_ms: _Optional[_Mapping[str, int]] = ..., serving_mode: _Optional[str] = ..., served_compiled_graph_ref: _Optional[str] = ..., served_eager_fallback: bool = ..., fallback_reason: _Optional[str] = ..., sm: _Optional[str] = ..., steps: _Optional[int] = ..., width: _Optional[int] = ..., height: _Optional[int] = ..., posture: _Optional[_Union[MeasuredPosture, _Mapping]] = ...) -> None: ...
 
 class MeasuredPosture(_message.Message):
     __slots__ = ("execution_lane", "attention_backend", "attention_backend_wanted", "compile_state", "compile_state_wanted", "residency_mode", "applied", "components", "shortfall")
@@ -1411,7 +1382,7 @@ class ActivityUpdate(_message.Message):
     family: str
     compiled_graph_key: str
     graph_specialization: str
-    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: _Optional[bool] = ..., stalled_for_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., family: _Optional[str] = ..., compiled_graph_key: _Optional[str] = ..., graph_specialization: _Optional[str] = ...) -> None: ...
+    def __init__(self, kind: _Optional[str] = ..., phase: _Optional[str] = ..., step: _Optional[int] = ..., total_steps: _Optional[int] = ..., seq: _Optional[int] = ..., state: _Optional[_Union[ActivityState, str]] = ..., error: _Optional[str] = ..., detail: _Optional[str] = ..., updated_at_unix_ms: _Optional[int] = ..., counter: _Optional[str] = ..., counter_unit: _Optional[str] = ..., counter_done: _Optional[float] = ..., counter_total: _Optional[float] = ..., rate_per_s: _Optional[float] = ..., self_stalled: bool = ..., stalled_for_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., family: _Optional[str] = ..., compiled_graph_key: _Optional[str] = ..., graph_specialization: _Optional[str] = ...) -> None: ...
 
 class BootPhase(_message.Message):
     __slots__ = ("boot_id", "ordinal", "parent_ordinal", "phase", "terminal", "started_at_unix_ms", "duration_ms", "process_uptime_ms", "bytes", "source", "ref", "artifact_kind", "artifact_key", "function", "outcome", "reason", "detail", "cumulative")
@@ -1451,7 +1422,7 @@ class BootPhase(_message.Message):
     reason: str
     detail: str
     cumulative: bool
-    def __init__(self, boot_id: _Optional[str] = ..., ordinal: _Optional[int] = ..., parent_ordinal: _Optional[int] = ..., phase: _Optional[str] = ..., terminal: _Optional[bool] = ..., started_at_unix_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., process_uptime_ms: _Optional[int] = ..., bytes: _Optional[int] = ..., source: _Optional[str] = ..., ref: _Optional[str] = ..., artifact_kind: _Optional[str] = ..., artifact_key: _Optional[str] = ..., function: _Optional[str] = ..., outcome: _Optional[str] = ..., reason: _Optional[str] = ..., detail: _Optional[str] = ..., cumulative: _Optional[bool] = ...) -> None: ...
+    def __init__(self, boot_id: _Optional[str] = ..., ordinal: _Optional[int] = ..., parent_ordinal: _Optional[int] = ..., phase: _Optional[str] = ..., terminal: bool = ..., started_at_unix_ms: _Optional[int] = ..., duration_ms: _Optional[int] = ..., process_uptime_ms: _Optional[int] = ..., bytes: _Optional[int] = ..., source: _Optional[str] = ..., ref: _Optional[str] = ..., artifact_kind: _Optional[str] = ..., artifact_key: _Optional[str] = ..., function: _Optional[str] = ..., outcome: _Optional[str] = ..., reason: _Optional[str] = ..., detail: _Optional[str] = ..., cumulative: bool = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")
@@ -1508,4 +1479,4 @@ class ServePosture(_message.Message):
     eager_only: bool
     reason: str
     actor: str
-    def __init__(self, eager_only: _Optional[bool] = ..., reason: _Optional[str] = ..., actor: _Optional[str] = ...) -> None: ...
+    def __init__(self, eager_only: bool = ..., reason: _Optional[str] = ..., actor: _Optional[str] = ...) -> None: ...

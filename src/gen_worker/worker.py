@@ -190,9 +190,10 @@ class _Pick:
 
     slot: str
     ref: str
-    manifest_digest: str
     model: str
     inference_defaults: str
+    bind_contract_digest: str
+    bind_contract_url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,17 +213,13 @@ def _picks_of(run: pb.RunJob) -> _DispatchPicks:
     by_ref: Dict[str, _Pick] = {}
     by_slot: Dict[str, str] = {}
     for binding in run.models:
-        digest = str(binding.manifest_digest).strip()
-        if not digest:
-            snapshot = run.snapshots.get(str(binding.ref))
-            if snapshot is not None:
-                digest = str(snapshot.digest).strip()
         pick = _Pick(
             slot=str(binding.slot),
             ref=str(binding.ref),
-            manifest_digest=digest,
             model=str(binding.model).strip(),
             inference_defaults=str(binding.inference_defaults),
+            bind_contract_digest=str(binding.bind_contract_digest).strip(),
+            bind_contract_url=str(binding.bind_contract_url).strip(),
         )
         by_ref[pick.ref] = pick
         by_slot[pick.slot] = pick.ref
@@ -236,9 +233,10 @@ def _picks_of_bindings(bindings: Any) -> _DispatchPicks:
         pick = _Pick(
             slot=str(binding.slot),
             ref=str(binding.ref),
-            manifest_digest=str(binding.manifest_digest).strip(),
             model=str(binding.model).strip(),
             inference_defaults=str(binding.inference_defaults),
+            bind_contract_digest=str(binding.bind_contract_digest).strip(),
+            bind_contract_url=str(binding.bind_contract_url).strip(),
         )
         by_ref[pick.ref] = pick
         by_slot[pick.slot] = pick.ref
@@ -248,7 +246,7 @@ def _picks_of_bindings(bindings: Any) -> _DispatchPicks:
 def boot_picks(
     desired: Any, loaded: Any, config: "CheckpointConfig"
 ) -> Dict[str, _DispatchPicks]:
-    functions = sorted(getattr(loaded, "entrypoints", {}) or {})
+    del loaded, config
     picks: Dict[str, _DispatchPicks] = {}
     for instance in getattr(desired, "hot", ()) or ():
         name = str(getattr(instance, "function_name", "")).strip()
@@ -257,39 +255,28 @@ def boot_picks(
         table = _picks_of_bindings(getattr(instance, "models", ()))
         if table.by_slot:
             picks[name] = table
-    refs = [str(ref) for ref in config.refs]
-    if len(refs) != 1:
-        return picks
-    only_ref = refs[0]
-    snapshot = config.snapshots.get(WireRef(only_ref))
-    digest = str(getattr(snapshot, "digest", "") or "").strip()
-    for name in functions:
-        if name in picks:
-            continue
-        spec = loaded.entrypoints[name]
-        slots = [slot for slot, _cls in spec.model_params]
-        if len(slots) != 1:
-            continue
-        pick = _Pick(
-            slot=slots[0], ref=only_ref, manifest_digest=digest,
-            model="", inference_defaults="",
-        )
-        picks[name] = _DispatchPicks(
-            by_ref={only_ref: pick}, by_slot={slots[0]: only_ref}
-        )
     return picks
 
 
 class HubBindingResolver:
     """The hub's half of the deploy state, per dispatch."""
 
-    def __init__(self, snapshots_root: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        snapshots_root: Optional[Path] = None,
+        *,
+        release_id: str = "",
+        hub_base_url: str = "",
+    ) -> None:
         self.snapshots_root = (
             Path(snapshots_root)
             if snapshots_root is not None
             else tensorhub_cas_dir() / SNAPSHOTS_DIR
         )
         self._store: Optional[Any] = None
+        self._release_id = str(release_id or "").strip()
+        self._hub_base_url = str(hub_base_url or "").strip()
+        self._bind_contracts: Dict[str, Any] = {}
 
     def bind_store(self, store: Any) -> None:
         """Hand the resolver the store that materializes refs."""
@@ -329,10 +316,6 @@ class HubBindingResolver:
                     if tree.is_dir():
                         return tree
                     tried.append(tree)
-        for tree in self._digest_trees(pick.manifest_digest):
-            if tree.is_dir():
-                return tree
-            tried.append(tree)
         materialized = (
             sorted(str(r) for r in self._store.disk_refs())
             if self._store is not None else []
@@ -340,10 +323,40 @@ class HubBindingResolver:
         raise CheckpointUnresolved(
             f"{model_cls.__name__}: checkpoint {checkpoint_ref!r} is not "
             f"materialized on this worker. Boot materialized "
-            f"{materialized or '[]'}; the dispatch's manifest_digest is "
-            f"{pick.manifest_digest or '(unset — the hub sends none)'}; "
-            f"tried {[str(p) for p in tried] or '[]'}"
+            f"{materialized or '[]'}; tried "
+            f"{[str(p) for p in tried] or '[]'}"
         )
+
+    def _bind_contract(self, pick: _Pick) -> Any:
+        from .bind_contract import BindContractError, fetch
+
+        digest = pick.bind_contract_digest
+        url = pick.bind_contract_url
+        if not digest or not url:
+            raise CheckpointUnresolved(
+                f"checkpoint {pick.ref!r} carries no complete Bind Contract "
+                "reference (digest and URL are both required); pgw#1653 "
+                "does not fall back to a self-census"
+            )
+        cached = self._bind_contracts.get(digest)
+        if cached is None:
+            try:
+                cached = fetch(digest, url)
+            except BindContractError as exc:
+                raise CheckpointUnresolved(str(exc)) from exc
+            if self._release_id and cached.identity.release_id != self._release_id:
+                raise CheckpointUnresolved(
+                    f"Bind Contract {digest} belongs to release "
+                    f"{cached.identity.release_id!r}, not this worker's "
+                    f"{self._release_id!r}"
+                )
+            self._bind_contracts[digest] = cached
+        return cached
+
+    def _report_bind_refusal(self, contract: Any, mismatch: Any) -> None:
+        from .bind_contract import report_refusal
+
+        report_refusal(self._hub_base_url, contract, mismatch)
 
     def resolve(self, model_cls: type, checkpoint_ref: str) -> DeployBinding:
         pick = self._pick(model_cls, checkpoint_ref)
@@ -377,6 +390,8 @@ class HubBindingResolver:
             checkpoint_dir=self.tree_for(model_cls, checkpoint_ref),
             model=pick.model or None,
             defaults=defaults,
+            bind_contract=self._bind_contract(pick),
+            bind_refusal_reporter=self._report_bind_refusal,
         )
 
     def default_pick(self, model_cls: type, slot_name: str) -> str:
@@ -456,7 +471,10 @@ class Worker:
             set_provider_index(build_provider_index_from_manifest(manifest))
 
         self.loaded = harvest_entrypoints(list(user_module_names))
-        self.resolver = HubBindingResolver()
+        self.resolver = HubBindingResolver(
+            release_id=str(settings.worker_release_id or ""),
+            hub_base_url=str(getattr(settings, "tensorhub_url", "") or ""),
+        )
         budget = residency_budget(int(vram_budget_bytes))
         self.residency = ResidencyManager(int(budget), SnapshotSizer(self.resolver))
         hub_base = str(getattr(settings, "tensorhub_url", "") or "").strip()
@@ -989,7 +1007,7 @@ class Worker:
                         request_id=str(run.request_id),
                         attempt=int(run.attempt),
                         input_assets=manifest_from_run_job(run.input_assets),
-                        snapshots=resolved_repos(run.snapshots, run.models),
+                        snapshots=resolved_repos(run.snapshots),
                         context=self._request_context_facts(run),
                         on_context=_bind_context,
                     )
