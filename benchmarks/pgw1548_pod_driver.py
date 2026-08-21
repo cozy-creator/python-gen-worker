@@ -200,12 +200,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lock-cache", default="",
                         help="directory of pre-derived locks to ship "
                              "to the pod (saves rented-card derive time)")
+    parser.add_argument("--ref", default="",
+                        help="git ref the pod checks out "
+                             "(default: this lane's pushed branch)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     args.cpu_flavors = [f for f in args.cpu_flavors.split(",") if f]
 
     cred = json.loads(CRED.read_text())
-    sha = subprocess.run(["git", "rev-parse", "origin/master"],
+    # THE BRANCH, not master. The pod runs THIS lane's harness — `--latents`,
+    # `--venv`, `--lock-cache`, the ABBA order, and `pgw1548_pod_sdxl_tree.py`
+    # itself — and NONE of that is on `origin/master` yet. Checking out master
+    # would clone a tree whose `benchmarks/` lacks the tree-builder outright and
+    # whose `dynamic_dims_pgw1548.py` refuses the flags the bootstrap passes:
+    # a rented card that boots, downloads 13 GB, and then dies on an unknown
+    # argument. python-gen-worker is PUBLIC, so a pushed branch needs no
+    # credential.
+    ref = args.ref or "origin/1548-bench-arms"
+    sha = subprocess.run(["git", "rev-parse", ref],
                          cwd=Path.home() / "cozy/python-gen-worker",
                          capture_output=True, text=True, check=True).stdout.strip()
 
