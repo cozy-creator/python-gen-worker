@@ -605,6 +605,46 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert model_type_by_name("qwen-image-edit") is None
 
 
+#: The documents tensorfs#130 is authoring, and the SINGLE place to flip when
+#: the vendor bump lands. Each name here is a family whose endpoint CANNOT
+#: declare `lanes=` today and is therefore refused at import (pgw#1599) —
+#: which is the whole reason tensorfs#130 is sequenced ahead of se#816's
+#: fleet migration. Delete a row when its document is vendored; the
+#: assertions below go red if you delete one that is not there yet, or leave
+#: one that is.
+TENSORFS_130_OWED: frozenset[str] = frozenset({
+    "anima.diffsynth-bf16",
+    "rife.flownet-fp32",           # ONE document, three drifted declarations
+    "musicgen.diffusers-bf16",
+    "joycaption.diffusers-bf16",
+    "krea-2.diffusers-bf16",
+    "ltx-2-upsampler.diffusers-bf16",
+    "qwen3.6-mtp.gguf-native",
+    "qwen3.6-a3b.fp8",
+})
+
+#: hunyuan3d-2.1 is NOT on that list and never will be by this route: its repo
+#: is PICKLE-only, so no safetensors-shaped document can describe it. The
+#: answer is a repack-to-safetensors at ingest, pod-side (weights-locality) —
+#: never teaching tensorfs to describe pickles. Until then its class carries a
+#: typed refusal, which is honest, rather than a guess.
+PICKLE_ONLY: frozenset[str] = frozenset({"hunyuan3d.dit-bf16"})
+
+
+def _library_lacks(name: str) -> bool:
+    """Assert-helper: the library does NOT ship ``name``, AND that absence is
+    a KNOWN one. A document going missing that nobody planned for is a
+    different event from one that has not been written yet, and reading them
+    as the same is how a vendor bump silently strands an endpoint."""
+
+    assert name in TENSORFS_130_OWED or name in PICKLE_ONLY, (
+        f"{name!r} is absent from the vendored contract library and is on "
+        f"NEITHER the tensorfs#130 work list nor the pickle-only list. Either "
+        f"a document was removed, or this list is stale."
+    )
+    return not _library_has(name)
+
+
 def _library_has(name: str) -> bool:
     """Whether the VENDORED tensorfs library ships a lane document ``name``.
 
@@ -674,7 +714,7 @@ def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None
     assert model_type_by_name("foundation-1") is None
     assert model_type_by_name("musicgen") is MusicGen
 
-    assert not _library_has("musicgen.diffusers-bf16")
+    assert _library_lacks("musicgen.diffusers-bf16")
     assert MusicGen.canonical_scheduler_config == {}
     # StableAudio DOES carry both, and the scheduler config is real (read from
     # the served manifest, identical on both checkpoints) rather than {}.
@@ -703,7 +743,7 @@ def test_the_two_3d_roots_declare_their_lanes_by_evidence() -> None:
     # standing lie with a to-do attached. Absent is honest — and under
     # pgw#1599 it is also LOUD: its Model class cannot declare `lanes=` and
     # is refused at import until the repack-to-safetensors job runs pod-side.
-    assert not _library_has("hunyuan3d.dit-bf16")
+    assert _library_lacks("hunyuan3d.dit-bf16")
 
     # Rife WAS the precedent Hunyuan3D followed. tensorfs#130 ends that: one
     # shared `rife.flownet-fp32@1` document now covers the three classes that
@@ -1132,7 +1172,7 @@ def test_the_upsampler_has_no_lane_document_and_no_sentinel() -> None:
     `lanes=()` spelling left, so `Model[Ltx2Upsampler]` cannot be declared at
     all until tensorfs#130 publishes `ltx-2-upsampler.*`."""
 
-    assert not _library_has("ltx-2-upsampler.diffusers-bf16")
+    assert _library_lacks("ltx-2-upsampler.diffusers-bf16")
 
 
 def test_the_scheduler_config_is_ltx_s_own_and_not_klein_s() -> None:

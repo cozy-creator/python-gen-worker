@@ -175,11 +175,14 @@ def test_model_header_declarations_and_refusals() -> None:
     # layout document — so it could answer neither checkpoint compatibility
     # nor lane selection, which is what a lane is FOR.
     with pytest.raises(ModelDeclarationError, match="tuple form is deleted"):
-        class TupleLanes(Model[SDXL], lanes=()):
+        class TupleLanes(Model[SDXL], lanes=()):  # type: ignore[arg-type]
             pass
 
     with pytest.raises(ModelDeclarationError, match="tuple form is deleted"):
-        class TupleReal(Model[SDXL], lanes=(_sdxl_contract(),)):
+        class TupleReal(
+            Model[SDXL],
+            lanes=(_sdxl_contract(),),  # type: ignore[arg-type]
+        ):
             pass
 
     with pytest.raises(ModelDeclarationError, match="MAPPING of tensorfs"):

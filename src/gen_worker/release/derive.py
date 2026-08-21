@@ -75,7 +75,6 @@ from ..serving.model import (
     Model,
     ModelDeclarationError,
     lane_handle,
-    model_declared_lanes,
     model_marks_compile,
     model_lanes,
     model_requires,
