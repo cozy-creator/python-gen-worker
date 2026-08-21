@@ -98,6 +98,17 @@ def bank(name: str, payload: Dict[str, Any]) -> None:
     print(f"[pgw1607-verdict:{name}] {json.dumps(payload)}", flush=True)
 
 
+def _meminfo(key: str) -> int:
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith(key + ":"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 0
+
+
 def gpu_line() -> str:
     try:
         return subprocess.run(
@@ -181,6 +192,7 @@ def make_rig(
     dtype: Any,
     budget_bytes: int,
     admit: List[str],
+    host_floor_gib: float = 0.0,
 ):
     from gen_worker.models.arena_residency import (
         ArenaResidency,
@@ -215,7 +227,13 @@ def make_rig(
         name: read_manifest(d, variant=pick_variant(d))
         for name, d in unet_dirs.items()
     }
-    catalog = CheckpointCatalog(layout, torch_mod=torch, varena_mod=_varena())
+    import gen_worker.models.checkpoint_juggle as cj
+
+    catalog = CheckpointCatalog(
+        layout, torch_mod=torch, varena_mod=_varena(),
+        host_floor_bytes=int(host_floor_gib * GIB) if host_floor_gib
+        else cj.DEFAULT_HOST_FLOOR_BYTES,
+    )
     for name in admit:
         catalog.admit(name, manifests[name])
     image0 = catalog.ensure_warm(serving)
@@ -460,6 +478,9 @@ def arm_z(torch: Any, juggler: Any, template: Any, dtype: Any, ids: List[str],
     zipf_wall = time.perf_counter() - t0
     zipf_per_req = zipf_wall / requests
     out = {
+        "warm_images_end": len(juggler.catalog.images),
+        "evictions_total": juggler.catalog.evictions,
+        "pressure_epoch": juggler.catalog.pressure_epoch,
         "steps_per_request": steps,
         "baseline_s_per_req": round(baseline_per_req, 3),
         "zipf_s_per_req": round(zipf_per_req, 3),
@@ -485,6 +506,10 @@ def main() -> int:
     parser.add_argument("--steps", type=int, default=28)
     parser.add_argument("--requests", type=int, default=24)
     parser.add_argument("--cache", default="/workspace/hf-cache")
+    parser.add_argument("--host-floor-gib", type=float, default=0.0,
+                        help="raise the warm tier's host floor to force real "
+                             "evictions/hysteresis on big-RAM pods (0 = the "
+                             "adaptive default)")
     args = parser.parse_args()
 
     from gen_worker.rigcheck import assert_fleet_line
@@ -507,6 +532,9 @@ def main() -> int:
     bank("meta", {
         "issue": "pgw#1607", "when": time.strftime("%F %T"), "gpu": gpu_line(),
         "arms": args.arms, "repos": repos, "budget_gib": args.budget_gib,
+        "host_floor_gib": args.host_floor_gib,
+        "mem_total_gib": round(_meminfo("MemTotal") / (1 << 30), 1),
+        "mem_available_gib": round(_meminfo("MemAvailable") / (1 << 30), 1),
         "torch": torch.__version__,
     })
 
@@ -520,6 +548,7 @@ def main() -> int:
     template, residency, juggler, _m = make_rig(
         torch, unet_dirs, ids[0],
         dtype=dtype, budget_bytes=int(args.budget_gib * GIB), admit=ids,
+        host_floor_gib=args.host_floor_gib,
     )
     loud(f"rig up: {residency.layout.virtual_bytes / GIB:.2f} GiB virtual, "
          f"resident={len(residency.plan.all_resident)} "
