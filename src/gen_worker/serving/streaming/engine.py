@@ -6,7 +6,9 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING, Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
+)
 
 from . import keymap as _keymap
 from . import skeleton as _skeleton
@@ -212,11 +214,15 @@ class StreamingLoader:
                     report=report,
                     compute_dtype=compute_dtype,
                     recasts=recasts,
+                    lane_exempt=_lane_exempt(built, component),
                 )
             report.containers = len(self._planned)
         self._cast_to_lane(recasts, compute_dtype, report)
 
         for component, module in built.modules.items():
+            quantization = built.quantized.get(component)
+            if quantization is not None:
+                _skeleton.finish_quantized(module, quantization)
             _skeleton.retie(module)
             survivors = _skeleton.meta_survivors(module)
             if survivors:
@@ -248,7 +254,7 @@ class StreamingLoader:
             )
         self.last_report = report
         self._place_uninstalled(built.pipeline, device)
-        self._assert_lane_dtype(built.modules, compute_dtype)
+        self._assert_lane_dtype(built.modules, compute_dtype, built)
         logger.info(
             "ctx.load: %s resident on %s — %.2f GiB streamed in %.2fs "
             "(%.2f GB/s, staging=%s io=%s, %d tensors over %d windows)",
@@ -318,6 +324,7 @@ class StreamingLoader:
         report: LoadReport,
         compute_dtype: Any = None,
         recasts: Optional[List[Tuple[_Slot, str, Any]]] = None,
+        lane_exempt: FrozenSet[str] = frozenset(),
     ) -> None:
         import torch
 
@@ -358,8 +365,17 @@ class StreamingLoader:
                 )
             pool.track(destination)
             _install(slot, destination)
+            # pgw#1638: a tensor a QUANTIZER owns is out of the lane cast's
+            # scope, whatever its dtype. Property 3 above already says a
+            # quantized container is the lane's own bytes — but it said it of
+            # the WEIGHT only, which fp8 satisfied by not being a wide float.
+            # An `hf.fp8-blockwise@1` scale grid is F32 beside a bf16 lane, so
+            # the cast would have rounded 357 block scales to bf16 and
+            # `_assert_lane_dtype` would then have passed: plausible numbers,
+            # wrong ones, green. The rule's dtypes are the rule's.
             if (recasts is not None and compute_dtype is not None
-                    and dtype is not compute_dtype and _is_wide_float(dtype)):
+                    and dtype is not compute_dtype and _is_wide_float(dtype)
+                    and name not in lane_exempt):
                 recasts.append((slot, f"{component}/{entry.name}", dtype))
             seen.add(entry.name)
             placements.append(
@@ -483,15 +499,21 @@ class StreamingLoader:
                          exc_info=True)
 
     @staticmethod
-    def _assert_lane_dtype(modules: Mapping[str, Any], compute_dtype: Any) -> None:
+    def _assert_lane_dtype(
+        modules: Mapping[str, Any], compute_dtype: Any,
+        built: Optional["_skeleton.Skeleton"] = None,
+    ) -> None:
         if compute_dtype is None:
             return
         offenders: List[str] = []
         for component, module in modules.items():
+            exempt = _lane_exempt(built, component)
             held = list(module.named_parameters(remove_duplicate=False))
             held += list(module.named_buffers(remove_duplicate=False))
             for name, tensor in held:
                 if tensor is None or not _is_wide_float(tensor.dtype):
+                    continue
+                if name in exempt:
                     continue
                 if tensor.dtype is not compute_dtype:
                     offenders.append(f"{component}/{name}={tensor.dtype}")
@@ -506,6 +528,17 @@ class StreamingLoader:
                 f"path this engine did not install and so was never cast — "
                 f"serving it would mix dtypes inside one forward"
             )
+
+
+def _lane_exempt(built: Any, component: str) -> FrozenSet[str]:
+    """The tensor names in ``component`` a quant RULE owns, not the lane.
+
+    Empty for every unquantized component, which is every component the
+    fleet served before pgw#1638 — so this narrows nothing that was working.
+    """
+    quantized = getattr(built, "quantized", None) or {}
+    quantization = quantized.get(component)
+    return quantization.tensors if quantization is not None else frozenset()
 
 
 def _lane_compute_dtype(lane: Any) -> Any:
