@@ -293,7 +293,8 @@ class StreamingLoader:
                 report.weights_streamed_bytes / report.seconds / 1e9
             )
         self.last_report = report
-        self._place_uninstalled(built.pipeline, device)
+        self._place_uninstalled(built, device)
+        self._assert_on_target(built, device)
         self._warn_on_lane(lane, report)
         logger.info(
             "ctx.load: %s resident on %s — %.2f GiB streamed in %.2fs "
@@ -310,7 +311,79 @@ class StreamingLoader:
         )
         return built.pipeline
 
-    def _place_uninstalled(self, pipeline: Any, device: Any) -> None:
+    def _module_roots(self, built: Any) -> List[Any]:
+        """The modules to sweep and to fence, from the SKELETON's own map.
+
+        pgw#1644. This used to read ``pipeline.components`` and fall back to the
+        pipeline itself when that yielded no ``nn.Module``. Both arms miss a
+        MODULAR pipeline: ``MiniMaxH3StreamingPipeline`` is a
+        ``ModularPipeline``/``ConfigMixin`` and is NOT an ``nn.Module``, so the
+        fallback cannot engage, and the sweep silently became a no-op for every
+        component — pgw#1454's fix was present and simply unreachable.
+
+        ``built.modules`` is the map the fill and the survivor check already
+        walk, so sweeping it means the three agree by construction instead of by
+        coincidence. ``pipeline.components`` is still folded in, because a
+        component attached by a stock ``from_pretrained`` passthrough never
+        appears in ``built.modules``.
+        """
+        import torch
+
+        roots: List[Any] = []
+        seen: set[int] = set()
+        for module in (getattr(built, "modules", None) or {}).values():
+            if isinstance(module, torch.nn.Module) and id(module) not in seen:
+                seen.add(id(module))
+                roots.append(module)
+        pipeline = getattr(built, "pipeline", None)
+        components = getattr(pipeline, "components", None) or {}
+        if isinstance(components, dict):
+            for module in components.values():
+                if isinstance(module, torch.nn.Module) and id(module) not in seen:
+                    seen.add(id(module))
+                    roots.append(module)
+        if not roots and isinstance(pipeline, torch.nn.Module):
+            roots = [pipeline]
+        return roots
+
+    def _assert_on_target(self, built: Any, device: Any) -> None:
+        """After the sweep, NOTHING may be on a device other than the target.
+
+        pgw#1644, and this is the half that matters. Property 4 of this module
+        promised "every parameter and buffer is accounted for by name", but the
+        only check enforcing it — :func:`meta_survivors` — asks whether a tensor
+        was FILLED, never whether it LANDED. A non-persistent buffer is in no
+        container and no ``state_dict``, so it was invisible to both, and the
+        first CUDA ``addmm`` reported it instead: one rental to learn that 146
+        floats were on the CPU.
+
+        Walking the MODULE closes the family rather than this instance of it.
+        Every member so far — pgw#1626 (parameters left on meta by a skipped
+        ``tie_weights``), pgw#1638 (container names with no home because the
+        quantizer never swapped) and this one — is a statement about the built
+        module that a module walk can decide offline, at no cost, instead of on
+        a card.
+        """
+        import torch
+
+        target = torch.device(device)
+        if target.type == "meta":
+            return
+        for module in self._module_roots(built):
+            stray = _skeleton.off_target(module, target)
+            if stray:
+                shown = ", ".join(f"{n} on {d}" for n, d in stray[:8])
+                raise LoadError(
+                    f"{type(module).__name__}: {len(stray)} tensor(s) are "
+                    f"neither on {target} nor on meta after the fill and the "
+                    f"placement sweep — {shown}"
+                    + (" …" if len(stray) > 8 else "")
+                    + ". A tensor the container never named is still this "
+                    "engine's to place; serving it would fail at the first "
+                    "matmul with a device mismatch instead of here (pgw#1644)"
+                )
+
+    def _place_uninstalled(self, built: Any, device: Any) -> None:
         """Place tensors the CONTAINER did not carry (pgw#1454).
 
         This engine installs each tensor the container names, straight onto the
@@ -339,10 +412,7 @@ class StreamingLoader:
             return
         moved = 0
         seen: set[int] = set()
-        components = getattr(pipeline, "components", None) or {}
-        roots = [m for m in components.values() if isinstance(m, torch.nn.Module)]
-        if not roots and isinstance(pipeline, torch.nn.Module):
-            roots = [pipeline]
+        roots = self._module_roots(built)
         for root in roots:
             for module in root.modules():
                 if id(module) in seen:

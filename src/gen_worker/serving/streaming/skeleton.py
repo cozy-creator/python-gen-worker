@@ -575,6 +575,51 @@ def meta_survivors(module: "torch.nn.Module") -> Tuple[str, ...]:
     return tuple(sorted(left))
 
 
+def off_target(module: "torch.nn.Module", target: Any) -> Tuple[Tuple[str, str], ...]:
+    """Every parameter or buffer that is neither on ``target`` nor on ``meta``.
+
+    pgw#1644. :func:`meta_survivors` answers "was it filled"; this answers "did
+    it LAND", and the two are not the same question. A non-persistent buffer is
+    in neither the container nor ``state_dict``, so the stream never names it
+    and the survivor check never sees it — it is simply built by ``__init__``
+    on the default device and left there. Qwen3-VL's RoPE
+    ``inv_freq``/``original_inv_freq`` are exactly that: 146 floats on the CPU
+    under a model whose every weight is on CUDA, which surfaces at the first
+    forward as ``mat1 is on cpu`` from inside a CUDA ``addmm`` — a whole rental
+    away from the load that caused it.
+
+    ``meta`` is excluded deliberately: a tensor still on meta is
+    :func:`meta_survivors`' refusal to make, and naming it here too would
+    report one defect as two.
+    """
+    import torch
+
+    want = torch.device(target)
+
+    def lands_on_target(where: "torch.device") -> bool:
+        # INDEX-TOLERANT ON PURPOSE. `torch.device("cuda") != torch.device(
+        # "cuda", 0)` is True, and the stream lands tensors on `cuda:0` while
+        # callers routinely pass a bare "cuda". Comparing with `!=` would make
+        # this fence refuse every healthy load on the most common spelling of
+        # the device it is checking against — a fence that fires on correct
+        # input is worse than the defect it guards.
+        if where.type != want.type:
+            return False
+        if want.index is None or where.index is None:
+            return True
+        return where.index == want.index
+
+    stray: List[Tuple[str, str]] = []
+    for name, tensor in list(module.named_parameters(remove_duplicate=False)) + list(
+        module.named_buffers(remove_duplicate=False)
+    ):
+        if tensor is None or tensor.device.type == "meta":
+            continue
+        if not lands_on_target(tensor.device):
+            stray.append((name, str(tensor.device)))
+    return tuple(sorted(stray))
+
+
 __all__ = [
     "MODEL_INDEX",
     "Quantization",
@@ -583,6 +628,7 @@ __all__ = [
     "build",
     "finish_quantized",
     "meta_survivors",
+    "off_target",
     "retie",
     "tied_names",
 ]
