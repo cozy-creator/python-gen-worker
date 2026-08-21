@@ -163,11 +163,14 @@ def test_there_is_no_exemption_left_to_outlive_its_reason() -> None:
     exemption set at all, so re-introducing one is a visible, deliberate act
     rather than a name quietly added to a tuple nobody re-reads.
     """
-    import tests.test_lane_dtype_fence_pgw1606 as mod
-
+    # `globals()`, not `import tests.test_...`: the package-path import worked
+    # locally (a PYTHONPATH run puts the repo root on `sys.path`) and raised
+    # `ModuleNotFoundError: No module named 'tests'` in CI, where pytest
+    # imports test modules by file path and `tests/` is not a package. The
+    # question this test asks is about THIS module, so ask this module.
     leftovers = [
         name for name in ("PENDING_DTYPE", "CONTAINER_TYPED", "WAIVED", "SKIP")
-        if getattr(mod, name, None)
+        if globals().get(name)
     ]
     assert not leftovers, (
         f"this module grew an exemption set again: {leftovers}. That is "
