@@ -24,6 +24,7 @@ from .memory import (
     log_ram_budget_once,
     repair_device_placement,
 )
+from .grant import COLD_REQUEST_BYTES
 from .pinned_swap import swap_object
 from .pinned_swap import cached_swap_bytes
 from .. import hostfacts
@@ -31,7 +32,18 @@ from .. import hostfacts
 logger = logging.getLogger(__name__)
 
 _GiB = 1024 ** 3
-_VRAM_MARGIN_BYTES = 2 * _GiB
+
+#: The VRAM one request needs BEYOND the weights, spent by `fits_in_vram` and
+#: by the eviction target below.
+#:
+#: pgw#1649 rung (a): this was a bare `2 * _GiB` with no comment — the FOURTH
+#: producer of a quantity `grant.py` states it consolidated ("there is now ONE
+#: of it instead of three"). It imports that owner now, which is the only
+#: member of the family carrying a measurement: pgw#1586's green arm banked
+#: 1847 MiB of activations over resident weights, pgw#1604 independently
+#: ~2058 MiB. The value does not move (2048 MiB == 2 GiB); what moves is that
+#: it can only be changed in one place, and by evidence.
+_VRAM_MARGIN_BYTES = COLD_REQUEST_BYTES
 def _effective_ram_floor_gb() -> float:
     return effective_ram_floor_gb(get_total_ram_gb())
 
