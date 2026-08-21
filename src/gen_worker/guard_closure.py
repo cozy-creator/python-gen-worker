@@ -1,14 +1,13 @@
-"""Guard-closure ADVISORY audit + boundary canonicalization."""
+"""Guard-closure ADVISORY audit."""
 
 from __future__ import annotations
 
 import ast
-import functools
 import logging
 import re
 from dataclasses import dataclass
-from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
-                    Sequence, Tuple)
+from typing import (Any, Dict, Iterable, List, Mapping, Optional, Sequence,
+                    Tuple)
 
 from . import torch_capability
 
@@ -53,8 +52,6 @@ _STRUCTURAL_TYPES = frozenset({
 })
 _IDENTITY_CONSTANT_TYPES = frozenset({"ID_MATCH", "DICT_VERSION"})
 
-_CANONICAL_DEPTH = 4
-
 _ID_SCRUB_RE = re.compile(r"(___check_(?:obj|type)_id\(.*?,\s*)\d+(\))")
 _COMMENT_RE = re.compile(r"\s{2,}#.*$", re.DOTALL)
 _TENSOR_MATCH_RE = re.compile(r"size=\[([^\]]*)\], stride=\[([^\]]*)\]")
@@ -65,10 +62,6 @@ _SOURCE_EMBEDDED_GLOBAL_RE = re.compile(r"\bG[\['.]")
 
 class GuardClosureError(RuntimeError):
     """The mint produced no readable compiled graphs, or a stored manifest is unreadable."""
-
-
-class GuardBoundaryError(RuntimeError):
-    """An input crossed the compiled-graph ingress outside the canonical boundary (dtype drift)."""
 
 
 class PostureError(GuardClosureError):
@@ -359,9 +352,9 @@ def _classify_tensor_match(expr: str) -> Tuple[str, str]:
     ) if len(stride_txt) == len(size) else stride
     if have != want:
         return LEAK, (
-            f"non-canonical stride {list(have)} for size {size} survived "
-            "the ingress pin")
-    return CANONICALIZED, "ingress stride pin + contract shapes"
+            f"non-canonical stride {list(have)} for size {size} — this guard "
+            "pins a layout the artifact does not declare")
+    return CANONICALIZED, "row-major strides + contract shapes"
 
 
 def _scalar_verdict(value: Any, pins: ContractPins) -> Tuple[str, str]:
@@ -543,67 +536,18 @@ def establish_posture() -> Dict[str, str]:
     return dict(CANONICAL_POSTURE)
 
 
-def canonical_strides(shape: Sequence) -> Tuple[int, ...]:
-    """The canonical contiguous stride tuple torch mints for fresh tensors."""
-    return _contiguous_strides(shape)
-
-
-def _canonical_tensor(t: Any, path: str, label: str, dtypes: Dict[str, str]) -> Any:
-    want = _contiguous_strides(t.shape)
-    if tuple(t.stride()) != want:
-        t = t.contiguous()
-        if tuple(t.stride()) != want:
-            t = t.as_strided(tuple(int(v) for v in t.shape), want)
-    seen = dtypes.setdefault(path, str(t.dtype))
-    if seen != str(t.dtype):
-        raise GuardBoundaryError(
-            f"compiled ingress {label}: {path} arrived as {t.dtype} but "
-            f"this boundary first observed {seen} — undeclared dtype "
-            "drift at the compiled graph boundary")
-    return t
-
-
-def _canonical_value(
-    value: Any, path: str, label: str, dtypes: Dict[str, str],
-    torch_mod: Any, depth: int = 0,
-) -> Any:
-    if isinstance(value, torch_mod.Tensor):
-        return _canonical_tensor(value, path, label, dtypes)
-    if depth >= _CANONICAL_DEPTH:
-        return value
-    if isinstance(value, tuple):
-        return tuple(
-            _canonical_value(v, f"{path}[{i}]", label, dtypes, torch_mod, depth + 1)
-            for i, v in enumerate(value))
-    if isinstance(value, list):
-        return [
-            _canonical_value(v, f"{path}[{i}]", label, dtypes, torch_mod, depth + 1)
-            for i, v in enumerate(value)]
-    if isinstance(value, dict):
-        return {
-            k: _canonical_value(v, f"{path}[{k!r}]", label, dtypes, torch_mod, depth + 1)
-            for k, v in value.items()}
-    return value
-
-
-def canonical_ingress(fn: Callable[..., Any], label: str) -> Callable[..., Any]:
-    """Wrap the compiled callable so every entry crosses one canonical boundary: contiguous-canonical strides (stride-perturbed inputs HIT the minted graph instead of recompiling) and per-path dtype asserts."""
-    dtypes: Dict[str, str] = {}
-
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        import torch
-
-        canon_args = tuple(
-            _canonical_value(a, f"args[{i}]", label, dtypes, torch)
-            for i, a in enumerate(args))
-        canon_kwargs = {
-            k: _canonical_value(v, f"kwargs[{k!r}]", label, dtypes, torch)
-            for k, v in kwargs.items()}
-        return fn(*canon_args, **canon_kwargs)
-
-    setattr(wrapper, "_cozy_canonical_ingress", label)
-    return wrapper
+#: DELETED HERE (pgw#1645): `canonical_ingress` and the `_canonical_tensor` /
+#: `_canonical_value` pair it wrapped. That boundary forced EVERY tensor entering a
+#: compiled callable to row-major contiguous strides, which is precisely the transform
+#: the layout-morphism design forbids doing by hand: the artifact DECLARES the layout it
+#: was compiled against (tcg#83) and the load delivers it (tensorfs#154). A silent
+#: re-contiguous at ingress would undo the delivery at full copy cost, and disagree with
+#: the declaration the binder now enforces.
+#:
+#: It cost nothing to remove: `canonical_ingress` had ZERO callers repo-wide — the
+#: wrapper was never installed on the adopt path, so no behaviour changes. The dtype-drift
+#: assert it also carried is not lost in spirit; the binder's typed refusal is the
+#: surviving, WIRED form of "these bytes are not what this artifact was compiled for".
 
 
 __all__ = [
@@ -618,7 +562,6 @@ __all__ = [
     "GATE_KEY",
     "ContractPins",
     "GraphGuards",
-    "GuardBoundaryError",
     "GuardClosureError",
     "GuardRecord",
     "LEAK",
@@ -628,8 +571,6 @@ __all__ = [
     "RUNTIME_STATE",
     "STRUCTURAL",
     "UNPROVEN",
-    "canonical_ingress",
-    "canonical_strides",
     "classify",
     "contract_pins",
     "establish_posture",

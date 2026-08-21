@@ -12,7 +12,13 @@ from typing import Any, cast
 from ..tensorfs import LocalCAS
 
 from .artifact import build_metadata, pack_artifact, read_metadata
-from .compiler import _compile_exported_program, _package_compiled_files
+from .compiler import (
+    LayoutWish,
+    _compile_exported_program,
+    _package_compiled_files,
+    declared_input_layout,
+    layout_violations,
+)
 from .declaration import (
     GraphSpecialization,
     GraphSpecializationDeclaration,
@@ -107,13 +113,67 @@ def _write_literals(
     return _literal_digest_for(program, (constant.fqn for constant in literals))
 
 
-def _compile_package(plan: _GraphSpecializationPlan, workspace: Path) -> Path:
-    files = _compile_exported_program(plan.spec.program)
-    return _package_compiled_files(
+def _compile_package(
+    plan: _GraphSpecializationPlan, workspace: Path
+) -> tuple[Path, tuple[LayoutWish, ...]]:
+    compiled = _compile_exported_program(plan.spec.program)
+    package = _package_compiled_files(
         plan.declaration.name,
-        files,
+        compiled.files,
         workspace / "model.pt2",
     )
+    return package, compiled.wishes
+
+
+def _admit_declared_layout(plan: _GraphSpecializationPlan) -> None:
+    """Refuse a mint whose own tensors are not in the layout it declares.
+
+    tcg#83. The artifact's key and metadata state a layout; its constants bind
+    by RAW POINTER. If the two disagree the artifact is addressed as one thing
+    and compiled as another -- the tcg#80 disease with strides instead of
+    flags. torchcg does not repack to make the declaration true: delivering
+    bytes in the declared layout is the loader's job, so the disagreement is
+    named here, before the compile is paid for.
+    """
+
+    violations = layout_violations(plan.spec.program)
+    if not violations:
+        return
+    raise AdmissionError(
+        f"graph specialization {plan.declaration.name!r} declares input layout "
+        f"{declared_input_layout()!r}, and {len(violations)} of its own tensors "
+        f"are not in it: {violations[:6]!r}. The mint compiles against the bytes "
+        f"it is handed, so an artifact cannot declare a layout its constants do "
+        f"not have -- deliver the tree through the declared morphism, or declare "
+        f"the layout these bytes are actually in (tcg#83)."
+    )
+
+
+def _layout_wishlist(
+    wishes: tuple[LayoutWish, ...], constants: tuple[DeclaredConstant, ...]
+) -> list[dict[str, object]]:
+    """Translate inductor's layout wishes into artifact rows, by FQN.
+
+    The observer speaks inductor's vocabulary (`conv_weight`); the artifact
+    speaks the checkpoint's (`conv.weight`). The package's own constant table
+    carries both, and it is the independent witness -- so the translation is a
+    LOOKUP, never a re-derivation. A wish for a name the package's table does
+    not carry is dropped: the wishlist is an advisory OUTPUT for ratification
+    (`0-DESIGN.md` §1), and the binding contract is the declaration, which is
+    checked against the package table on its own.
+    """
+
+    fqns = {constant.name: constant.fqn for constant in constants}
+    rows: list[dict[str, object]] = [
+        {
+            "fqn": fqns[wish.name],
+            "morphism": wish.morphism,
+            "stride_order": list(wish.stride_order),
+        }
+        for wish in wishes
+        if wish.name in fqns
+    ]
+    return sorted(rows, key=lambda row: str(row["fqn"]))
 
 
 def _admit_symbol_ranges(plan: _GraphSpecializationPlan) -> None:
@@ -250,6 +310,8 @@ class Engine:
             stored_toolchain
         ) != toolchain_axis_digest(plan.runtime.toolchain):
             mismatches.append("toolchain")
+        if metadata.get("declared_input_layout") != declared_input_layout():
+            mismatches.append("declared_input_layout")
         if metadata.get("compiled_graph_key") != str(plan.key):
             mismatches.append("compiled_graph_key")
         if mismatches:
@@ -359,7 +421,8 @@ class Engine:
 
         with tempfile.TemporaryDirectory(prefix="torchcg-mint-") as raw:
             workspace = Path(raw)
-            package = _compile_package(plan, workspace)
+            _admit_declared_layout(plan)
+            package, wishes = _compile_package(plan, workspace)
             constants = declared_constants(package, plan.declaration.name)
             _admit_constant_table(plan, constants)
             literals = workspace / "constants.safetensors"
@@ -393,6 +456,7 @@ class Engine:
                 sm=plan.runtime.sm,
                 toolchain=plan.runtime.toolchain,
                 host_isa=plan.runtime.host_isa,
+                layout_wishlist=_layout_wishlist(wishes, constants),
             )
             artifact = pack_artifact(
                 package,

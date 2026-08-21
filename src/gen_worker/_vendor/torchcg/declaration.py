@@ -686,11 +686,19 @@ class RuntimeCompatibility:
         # is stated, at the moment the key is asked for. A key that named the
         # graph, the arch and the toolchain but not the OPTIONS was blind to
         # the difference between two artifacts this process can build.
-        from .compiler import compile_policy_digest
+        #
+        # tcg#85: it is the EXECUTED policy, asked of this runtime's own
+        # target. An option the target silently drops must not reach the key,
+        # or two cards running the same emitted code disagree on its address.
+        # tcg#83: and the DECLARED INPUT LAYOUT, which the graph axis cannot
+        # see -- the canonical graph form carries shapes and dtypes, never
+        # strides.
+        from .compiler import compile_policy_digest, declared_input_layout
 
         return from_axes(
             {
-                "compile_policy": compile_policy_digest(),
+                "compile_policy": compile_policy_digest(self.device_type),
+                "declared_input_layout": declared_input_layout(),
                 "graph": declaration.specialization_hash,
                 "sm": self.sm,
                 "toolchain": toolchain_axis_digest(self.toolchain),
