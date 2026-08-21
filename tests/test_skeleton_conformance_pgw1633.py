@@ -459,6 +459,90 @@ def test_without_the_quantizer_step_the_incident_reproduces_pgw1638(
     )
 
 
+#: (endpoint, component) -> the module class carrying live `Dropout(p>0)` in
+#: its config-built skeleton, with the count MEASURED at the time of writing
+#: for the record (73 for a T5-XXL/UMT5-XXL, 37 for a T5-XL). Every one is a
+#: T5-family conditioner, and every one was ARMED on the streaming path until
+#: pgw#1638 added `model.eval()`. The SET is checked in both directions — a
+#: new live-dropout component appearing is a failure, not a quieter suite —
+#: while the count is evidence rather than an assertion, so a library refactor
+#: does not fail a suite about eval mode.
+LIVE_DROPOUT: Mapping[Tuple[str, str], str] = {
+    ("flux.1-dev", "text_encoder_2"): "T5EncoderModel",       # 73 measured
+    ("flux.1-schnell", "text_encoder_2"): "T5EncoderModel",   # 73
+    ("foundation-1", "text_encoder"): "T5EncoderModel",       # 37
+    ("stable-audio-open", "text_encoder"): "T5EncoderModel",  # 37
+    ("wan-2.2", "text_encoder"): "UMT5EncoderModel",          # 73
+}
+
+
+def _live_dropouts(module: Any) -> int:
+    return sum(
+        1 for sub in module.modules()
+        if isinstance(sub, torch.nn.Dropout) and float(getattr(sub, "p", 0.0)) > 0.0
+    )
+
+
+@pytest.mark.parametrize("endpoint", sorted(FLEET))
+def test_every_declared_module_comes_off_meta_in_eval_mode_pgw1638(
+    endpoint: str,
+) -> None:
+    """The family's THIRD member, found by audit and not by a rental.
+
+    Both `from_pretrained` implementations end with `model.eval()` —
+    transformers' own source says why: "Set model in evaluation mode to
+    deactivate Dropout modules by default". A config-built module is in TRAIN
+    mode, and nothing on the streaming path ever changed it.
+    """
+    for name, module in skeleton.build_modules(_tree(endpoint)).items():
+        assert not module.training, (
+            f"{endpoint}/{name} ({type(module).__name__}) comes off the meta "
+            f"skeleton in TRAIN mode; `from_pretrained` would have returned it "
+            f"in eval, and this one carries {_live_dropouts(module)} live "
+            f"dropout module(s)"
+        )
+        for sub_name, sub in module.named_modules():
+            assert not sub.training, f"{endpoint}/{name}.{sub_name} is in train mode"
+
+
+def test_the_live_dropout_exposure_is_the_one_recorded_pgw1638() -> None:
+    """What train mode actually cost, measured — not asserted from memory.
+
+    Dropout with p=0 is a no-op, so "every component was in train mode" is
+    only alarming where a dropout is LIVE. These five are, they are every
+    T5/UMT5 conditioner on the fleet, and each was randomizing its
+    conditioning on every request. The roster is pinned so a new one cannot
+    appear silently.
+    """
+    found: Dict[Tuple[str, str], str] = {}
+    for endpoint in sorted(FLEET):
+        for name, module in skeleton.build_modules(_tree(endpoint)).items():
+            if _live_dropouts(module):
+                found[(endpoint, name)] = type(module).__name__
+    assert found == dict(LIVE_DROPOUT), (
+        f"the corpus's live-dropout exposure moved.\n  new: "
+        f"{sorted(set(found) - set(LIVE_DROPOUT))}\n  gone: "
+        f"{sorted(set(LIVE_DROPOUT) - set(found))}\n  reclassified: "
+        f"{sorted(k for k in set(found) & set(LIVE_DROPOUT) if found[k] != LIVE_DROPOUT[k])}"
+    )
+
+
+@pytest.mark.parametrize("endpoint", sorted(QUANTIZED_FLEET))
+def test_the_quantizer_s_replacement_modules_are_in_eval_mode_too_pgw1638(
+    endpoint: str,
+) -> None:
+    """The eval pass runs AFTER the swap, or it misses everything the
+    quantizer built — replacement modules are constructed in train mode like
+    any other, so the order is the assertion."""
+    component, _, swapped_class = QUANTIZED_FLEET[endpoint]
+    module = skeleton.build_modules(_quantized_tree(endpoint))[component]
+    swapped = [
+        sub for sub in module.modules() if type(sub).__name__ == swapped_class
+    ]
+    assert swapped, f"{endpoint}/{component}: no {swapped_class} to check"
+    assert all(not sub.training for sub in swapped)
+
+
 def test_an_unknown_quantization_method_is_refused_by_name_pgw1638(
     tmp_path: Path,
 ) -> None:

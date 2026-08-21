@@ -295,6 +295,14 @@ def test_a_blockwise_fp8_checkpoint_loads_clean(article: Dict[str, Any]) -> None
         "postprocess_model never ran; the loaded model does not describe "
         "itself as quantized"
     )
+    # The family's third member (pgw#1638's audit): `from_pretrained` ends
+    # with `model.eval()` and this loader never did, so every component came
+    # back with dropout armed. Asserted on the SERVED pipeline, including the
+    # modules the quantizer built.
+    for component in ("unet", "vae", "text_encoder"):
+        module = getattr(pipeline, component)
+        assert not module.training, f"{component} was served in train mode"
+        assert all(not sub.training for sub in module.modules())
 
 
 def test_the_scale_grid_keeps_the_rule_s_dtype_not_the_lane_s(

@@ -8,10 +8,15 @@ difference the engine then blames the checkpoint for. Two members have been
 paid for on hardware: ``post_init()``/``tie_weights()`` (pgw#1626, one orphan
 alias) and the quantizer's module swap (pgw#1638, 357 orphan
 ``weight_scale_inv`` — ``cls(config)`` leaves plain ``nn.Linear`` where
-``from_pretrained`` leaves ``FP8Linear``). So the preparation is written out
-here in the order ``from_pretrained`` runs it — construct, cast to the lane,
-swap the modules the config's quantizer declares — and its trailing half,
-which cannot run before bytes land, is :func:`finish_quantized`.
+``from_pretrained`` leaves ``FP8Linear``). A third was found by AUDITING the
+family instead of renting a pod for it: ``model.eval()``, which both
+``from_pretrained`` implementations end with and this one never did, leaving
+every weight-bearing component on the fleet serving with dropout armed.
+
+So the preparation is written out here in the order ``from_pretrained`` runs
+it — construct, cast to the lane, swap the modules the config's quantizer
+declares, put the module in eval mode — and its trailing half, which cannot
+run before bytes land, is :func:`finish_quantized`.
 """
 
 from __future__ import annotations
@@ -247,6 +252,19 @@ def _build_on_meta(
             built, config, component=component, directory=directory,
             transformers_class=transformers_class,
         )
+        # THE THIRD MEMBER OF THE FAMILY (pgw#1638's audit). Both
+        # `from_pretrained` implementations end with `model.eval()` —
+        # transformers says why in its own source: "Set model in evaluation
+        # mode to deactivate Dropout modules by default". A config-built
+        # module is in TRAIN mode, and nothing on this path ever changed it,
+        # so every one of the 44 weight-bearing components on the fleet has
+        # been serving with dropout ARMED. Five of them carry a live
+        # `Dropout(p=0.1)`: every T5/UMT5 conditioner on the fleet
+        # (flux.1-dev, flux.1-schnell, foundation-1, stable-audio-open,
+        # wan-2.2), i.e. randomized conditioning, nondeterministic output, no
+        # error anywhere. AFTER the swap, because a quantizer's replacement
+        # modules are constructed in train mode like any other.
+        built.eval()
         return built, quantization
 
     raise SkeletonError(
