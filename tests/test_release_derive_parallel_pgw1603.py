@@ -94,9 +94,13 @@ def test_items_are_structural_variants_never_buckets(
     prime_sys_path(FIXTURES)
     module = importlib.import_module("static_axes_endpoint")
     items = derive_items(module)
-    # One class, one lane, no Defaults-cfg twin, no structural= axes: ONE
-    # item covers the whole 3-aspect x 2-guidance payload fan.
-    assert len(items) == 1
+    # One class, one lane, no structural= axes, and SDXL's Defaults carries
+    # the cfg twin: TWO items cover the whole 3-aspect x 2-guidance payload
+    # fan — the aspect buckets never become items.
+    assert [
+        (item.class_index, item.lane_index, item.defaults_index, item.pinned)
+        for item in items
+    ] == [(0, 0, 0, ()), (0, 0, 1, ())]
 
 
 def test_static_buckets_bank_symbolic_parents(

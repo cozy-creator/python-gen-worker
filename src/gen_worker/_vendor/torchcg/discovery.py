@@ -39,6 +39,7 @@ from .dynamic import (
     decomposition_narrowing,
     format_narrowing,
     plan_exports,
+    range_narrowing,
     resolve_policy,
     without_axes,
 )
@@ -538,7 +539,20 @@ def discover_modules(
                 # call with a batch-2 tensor of garbage and raises nothing.
                 try:
                     with synthesis:
-                        moved = decomposition_narrowing(program)
+                        # tcg#88: under static_bind, the decompose half of the
+                        # probe protects nothing — the tcg#78 hazard is a RANGE
+                        # binary admitting a call its guards narrowed away, and
+                        # a static bind mints no range binary: every declared
+                        # record is re-traced at concrete shapes and hashed
+                        # from that trace. Export-time narrowing (the measured
+                        # sd15 batch case) still shows in the free check.
+                        # Measured: decompose cost ~30 s per sd15-class group,
+                        # for a question the static path never asks.
+                        moved = (
+                            range_narrowing(program)
+                            if static_bind
+                            else decomposition_narrowing(program)
+                        )
                 except Exception as exc:  # the compile would decompose too
                     moved = {}
                     told(
