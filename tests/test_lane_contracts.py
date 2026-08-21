@@ -54,6 +54,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -492,8 +493,11 @@ def test_flux1_and_klein_are_TWO_topologies_that_v1_could_not_have_separated() -
     tops = topologies()
     flux1, klein = tops["flux1.diffusers@1"], tops["flux2-klein.diffusers@1"]
 
-    def named(one: object) -> set[str]:
-        return {k for tensors in one.values() for k in tensors}  # type: ignore[union-attr]
+    # Typed, not silenced: `topologies()` answers
+    # handle -> component -> key -> shape, so the component map has a real type
+    # and a `type: ignore` here would only be hiding that I had not written it.
+    def named(one: Mapping[str, Mapping[str, tuple[int, ...]]]) -> set[str]:
+        return {k for tensors in one.values() for k in tensors}
 
     shared = named(flux1) & named(klein)
     assert len(shared) == 348, (
