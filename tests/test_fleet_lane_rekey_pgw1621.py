@@ -53,20 +53,28 @@ from gen_worker.serving.lane_spec import lane
 from gen_worker.serving.model import _parse_lanes
 
 #: Endpoints whose declared lane has NO ratified (topology, quant) pair yet.
-#: These are a CORPUS gap, not a surface defect: a v2 topology is extracted
-#: mechanically from a reference checkpoint's banked headers, and these five
-#: have not been banked. Listed by name so the day one lands, this file goes
-#: RED and the name is removed — the same self-deleting shape pgw#1606's dtype
-#: waiver had. An entry that cannot expire is a permanent hole nobody re-reads.
-CORPUS_GAP: dict[str, str] = {
-    "FLUX1_DIFFUSERS_BF16": "flux1.diffusers — `flux1` is declared in tensorfs "
-                            "spec/v2/headers/SOURCES.tsv and was never banked",
-    "STABLE_AUDIO_DIFFUSERS_FP16": "stable-audio.diffusers — likewise declared "
-                                   "in SOURCES.tsv and never banked",
-    "TRELLIS2_DIT_BF16": "trellis2.dit — no source row at all",
-    "QWEN_IMAGE_DIFFUSERS_BF16": "qwen-image.diffusers — no source row at all",
-    "INTERNVL_U_DIFFUSERS_BF16": "internvl-u.diffusers — no source row at all",
-}
+#: A CORPUS gap, never a surface defect: a v2 topology is extracted mechanically
+#: from a reference checkpoint's banked headers, so a missing one is a banking
+#: job and not a declaration bug.
+#:
+#: **EMPTY, AND IT EMPTIED ITSELF.** It held five entries for the length of one
+#: night — flux1, stable-audio, trellis2, qwen-image, internvl-u — and
+#: `test_a_corpus_gap_entry_deletes_itself_when_its_topology_lands` went RED
+#: naming all five the moment tensorfs#152 (`ac9c9d4`) was vendored, which is
+#: the entire behaviour the shape exists to have. tensorfs#152 also closed
+#: krea-2 and rife, which this table never had to name because no endpoint
+#: declares them through `contracts.*`.
+#:
+#: Two of the five were not a gap anyone had chosen: `SOURCES.tsv` DECLARED
+#: `flux1` and `stable-audio` and no header was ever banked for either, because
+#: the bank had been run without `HF_TOKEN` and the 401s were recorded as
+#: "gated". Nothing went red, because every test enumerated the headers that
+#: EXISTED and none asked what was OWED. tensorfs#152 added that gate upstream.
+#:
+#: If an entry is ever needed again it must arrive WITH its reason, so that the
+#: test below can retire it. An exemption that cannot expire is not a waiver, it
+#: is a permanent hole nobody re-reads.
+CORPUS_GAP: dict[str, str] = {}
 
 
 def _sibling() -> Path | None:
