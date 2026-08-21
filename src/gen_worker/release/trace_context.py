@@ -561,7 +561,6 @@ class TraceRequestContext:
         self,
         pipeline: Any,
         *,
-        slot: str = "",
         sampler: str = "",
         seed: Optional[int] = None,
         generator: Optional[Any] = None,
@@ -575,11 +574,16 @@ class TraceRequestContext:
         a different sampler is a different scheduler is a different denoise
         call. A stub returning ``pipeline`` would derive graphs for a
         pipeline no request ever runs, and nothing downstream could tell.
+
+        pgw#1583: ``slot=`` is GONE from both this and the serving twin. It was
+        accepted and immediately discarded (``del slot`` lived right here), and
+        a kwarg that changes nothing is a third way to be silently wrong. This
+        signature must keep matching the serving one or a trace derives graphs
+        for a call the serve path cannot make.
         """
 
         from ..view import for_request as _view_for_request
 
-        del slot
         gen = generator
         if gen is None and seed is not None:
             gen = self.generator(seed)

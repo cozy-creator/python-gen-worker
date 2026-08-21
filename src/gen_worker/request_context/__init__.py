@@ -503,7 +503,6 @@ class RequestContext(Generic[D]):
         self,
         pipeline: Any,
         *,
-        slot: str = "",
         sampler: str = "",
         seed: Optional[int] = None,
         generator: Optional["torch.Generator"] = None,
@@ -512,14 +511,28 @@ class RequestContext(Generic[D]):
     ) -> Any:
         """A per-request VIEW of ``pipeline``: same module objects (shared
         weights; the compiled graph stays bound), OWN scheduler — cloned from
-        the instance scheduler's config, with the resolved checkpoint's
-        OBJECTIVE applied (v-prediction/flow are checkpoint facts the SDK
-        applies here, never payload logic) and ``sampler`` selecting the
+        the instance scheduler's config, with ``sampler`` selecting the
         scheduler class from the SDK table (``gen_worker.view.SAMPLERS``).
 
-        ``slot`` names the resolving slot on a multi-slot class; omitted, the
-        declared root resolves. Ambiguity raises — never a silent
-        objective-less fallback.
+        **THIS VIEW CARRIES NO OBJECTIVE, and that is now stated rather than
+        promised (pgw#1583).** Until this docstring was corrected it claimed
+        twice that the resolved checkpoint's objective was applied here and
+        that ambiguity raised; the body passed ``objective=""`` unconditionally
+        and ``slot=`` was accepted and discarded, so the raise was unreachable
+        and every view built through this method denoised under the platform
+        default. That is worse than an error: v-prediction and flow change what
+        the scheduler DOES, so a wrong objective returns plausible output.
+
+        The reason is plumbing, not policy: ``ModelBinding.objective`` (proto
+        field 6) has no reader anywhere in the SDK — no ``_Pick`` field, no
+        ``DeployBinding`` field, nothing on this context — so there is no
+        checkpoint fact here to apply. **An author who needs one passes it
+        explicitly to the module-level gate**, which is the only surface that
+        honours it::
+
+            from gen_worker.view import for_request
+
+            view = for_request(model.pipe, objective="flow", sampler="ddim")
 
         EVERY sampler-shaped attribute is cloned, not just ``scheduler``: a
         second stateful sampler such as an ltx ``audio_scheduler`` would
@@ -531,12 +544,11 @@ class RequestContext(Generic[D]):
         through, and a module swap the compiled graph guards against.
         """
 
-        objective = ""
         gen = generator
         if gen is None and seed is not None:
             gen = self.generator(seed)
         return _view_for_request(
-            pipeline, sampler=sampler, objective=objective, generator=gen,
+            pipeline, sampler=sampler, objective="", generator=gen,
             scheduler_config=scheduler_config, schedulers=schedulers,
         )
 

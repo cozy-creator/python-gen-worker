@@ -56,6 +56,7 @@ from .models.cache_paths import tensorhub_cache_dir, tensorhub_cas_dir
 from .models.cozy_snapshot import snapshot_dir_key
 from .models.disk_gc import tree_bytes
 from .models.projection import SNAPSHOTS_DIR
+from .models.refs import WireRef
 from .models.store import ModelStore, bind_active_store
 from .boot_materialize import (
     REASON_MODEL_UNAVAILABLE,
@@ -313,6 +314,91 @@ def _picks_of(run: pb.RunJob) -> _DispatchPicks:
         by_ref[pick.ref] = pick
         by_slot[pick.slot] = pick.ref
     return _DispatchPicks(by_ref=by_ref, by_slot=by_slot)
+
+
+def _picks_of_bindings(bindings: Any) -> _DispatchPicks:
+    """``_picks_of``'s table over a bare ``ModelBinding`` list.
+
+    ``DesiredInstance.models`` and ``RunJob.models`` are the SAME message, so
+    the boot warm pass reads its picks through the same builder the dispatch
+    does. The difference is only where the digest fallback comes from: a
+    dispatch has ``RunJob.snapshots`` beside the bindings, boot has the
+    config's, so the caller supplies it below.
+    """
+    by_ref: Dict[str, _Pick] = {}
+    by_slot: Dict[str, str] = {}
+    for binding in bindings or ():
+        pick = _Pick(
+            slot=str(binding.slot),
+            ref=str(binding.ref),
+            manifest_digest=str(binding.manifest_digest).strip(),
+            model=str(binding.model).strip(),
+            inference_defaults=str(binding.inference_defaults),
+        )
+        by_ref[pick.ref] = pick
+        by_slot[pick.slot] = pick.ref
+    return _DispatchPicks(by_ref=by_ref, by_slot=by_slot)
+
+
+def boot_picks(
+    desired: Any, loaded: Any, config: "CheckpointConfig"
+) -> Dict[str, _DispatchPicks]:
+    """Per-function checkpoint picks for the BOOT WARM PASS (pgw#1584).
+
+    Boot has no dispatch, and ``default_pick`` reads one — so without this the
+    warm pass would decode every envelope into *"model slot has no envelope
+    pick and no deployment default"*. The picks exist on the wire the pod
+    already receives: ``DesiredResidency.Hot`` is ``repeated DesiredInstance
+    {function_name, models}``, and ``models`` is the very ``ModelBinding`` the
+    dispatch carries — slot, ref, the recognized ``model`` name and its
+    ``inference_defaults`` row. Nothing is invented; the hub's own boot seed is
+    read.
+
+    **The ONE inference, and its fence.** The hub seeds ``Hot`` for dynamic
+    slot defaults and compile-cache prewarm; a release whose bindings are all
+    static may arrive with ``Hot`` empty. For that case, and ONLY when the
+    entrypoint declares exactly one model slot and the config materialized
+    exactly one ref, the two are bound: with one slot and one ref there is
+    exactly one possible answer, so this is arithmetic rather than a guess.
+    Every other shape yields NO entry, the warm pass skips that function with
+    a reason, and the worker keeps `decode_envelope`'s rule intact — the worker
+    never guesses which bytes to serve.
+    """
+    functions = sorted(getattr(loaded, "entrypoints", {}) or {})
+    picks: Dict[str, _DispatchPicks] = {}
+    for instance in getattr(desired, "hot", ()) or ():
+        name = str(getattr(instance, "function_name", "")).strip()
+        if not name:
+            continue
+        table = _picks_of_bindings(getattr(instance, "models", ()))
+        if table.by_slot:
+            picks[name] = table
+    refs = [str(ref) for ref in config.refs]
+    if len(refs) != 1:
+        return picks
+    only_ref = refs[0]
+    snapshot = config.snapshots.get(WireRef(only_ref))
+    digest = str(getattr(snapshot, "digest", "") or "").strip()
+    for name in functions:
+        if name in picks:
+            continue
+        spec = loaded.entrypoints[name]
+        slots = [slot for slot, _cls in spec.model_params]
+        if len(slots) != 1:
+            continue
+        pick = _Pick(
+            slot=slots[0], ref=only_ref, manifest_digest=digest,
+            # UNKNOWN, and left so. `ctx.defaults()`'s unclassified arm (no
+            # name, no row) is pgw#1377's warn-and-serve platform fallback; a
+            # fabricated classification would warm under a recipe the hub never
+            # resolved, and `resolve()`'s pgw#1415 fence only fires on the
+            # broken pair (a row with no name), which this is not.
+            model="", inference_defaults="",
+        )
+        picks[name] = _DispatchPicks(
+            by_ref={only_ref: pick}, by_slot={slots[0]: only_ref}
+        )
+    return picks
 
 
 class HubBindingResolver:
@@ -682,8 +768,16 @@ class Worker:
         # routable — which is what makes "never fetch inside a user request"
         # true by construction, with no hub-side parking to enforce it.
         self.materialization = CheckpointMaterialization(
-            self.store, announce=self._announce_readiness,
+            self.store,
+            announce=self._announce_readiness,
+            # pgw#1584: one synthetic forward per entrypoint, run between the
+            # last weight landing and this worker calling itself ready.
+            warm=self._run_boot_warmup,
         )
+        #: pgw#1584: per-function checkpoint picks for the warm pass, read off
+        #: the HelloAck's own `DesiredResidency` (see `boot_picks`). Empty
+        #: until the ack arrives, which is also before the warm pass can run.
+        self._boot_picks: Dict[str, _DispatchPicks] = {}
 
         self.draining = False
         self.drained = asyncio.Event()
@@ -840,6 +934,46 @@ class Worker:
             except Exception:  # noqa: BLE001
                 logger.warning("fn_unavailable send failed for %s", fn, exc_info=True)
 
+    # ---- the boot warm pass (pgw#1584) -------------------------------------
+
+    async def _run_boot_warmup(self) -> None:
+        """Drive :meth:`ServeLoop.boot_warmup` off the event loop.
+
+        `invoke` is synchronous and does real work — an admission, a weight
+        load, a forward — so it goes to a thread for the same reason every
+        dispatch does. `asyncio.to_thread` COPIES the context, which is what
+        lets `_bind_boot_picks` set `_DISPATCH` per function from in here.
+
+        Never raises: `boot_warmup` confesses per entrypoint with a
+        `serve_degrade` event and `CheckpointMaterialization._warm` is the
+        second belt. A failed OPTIMIZATION must never cost this pod its boot.
+        """
+        await asyncio.to_thread(self.serve.boot_warmup, prepare=self._bind_boot_picks)
+
+    def _bind_boot_picks(self, function: str) -> str:
+        """Bind the deploy's picks for one warm invocation; '' = proceed.
+
+        The warm pass runs with NO dispatch, and `HubBindingResolver` reads its
+        bindings off `_DISPATCH`. This sets that contextvar to the function's
+        boot picks so `default_pick`/`resolve`/`tree_for` answer exactly as
+        they would for a real request against the same checkpoint.
+
+        A function the ack seeded no bindings for returns a SKIP REASON rather
+        than an empty table: an empty table decodes into "model slot has no
+        envelope pick and no deployment default", which is a correct refusal
+        wearing the costume of a warm-pass defect.
+        """
+        picks = self._boot_picks.get(function)
+        if picks is None or not picks.by_slot:
+            return (
+                "no boot-time checkpoint binding: the HelloAck's "
+                "DesiredResidency seeded no per-function ModelBinding for "
+                f"{function!r} and its slot/ref shape is not unambiguous "
+                "(the worker never guesses which bytes to serve)"
+            )
+        _DISPATCH.set(picks)
+        return ""
+
     def build_hello(self) -> pb.Hello:
         # NO `resources`: the split parent measures the silicon in a process
         # that imported no tenant code and stamps every relayed Hello, so
@@ -887,9 +1021,13 @@ class Worker:
         # the pods least able to explain themselves. Non-blocking: the pull
         # runs on its own task while the transport keeps reading, and the
         # worker stays connected-and-unroutable until it finishes.
-        self.materialization.configure(
-            CheckpointConfig.from_wire(ack.desired_residency)
-        )
+        config = CheckpointConfig.from_wire(ack.desired_residency)
+        # pgw#1584: BEFORE `configure`, because `configure` is what starts the
+        # materialization task that ends in the warm pass. The picks come off
+        # the same ack — `DesiredResidency.Hot` carries the hub's own
+        # per-function `ModelBinding` rows.
+        self._boot_picks = boot_picks(ack.desired_residency, self.loaded, config)
+        self.materialization.configure(config)
         if self.functions and self.materialization.ready:
             # THE cold-boot number, and it now means what it says: the pod
             # holds its weights AND the hub has a Hello advertising these
