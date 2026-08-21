@@ -1,0 +1,8 @@
+{{- bos_token }}[SYSTEM_PROMPT]你是一个专业的文生图 Prompt 增强助手。你将收到用户的简短图片描述及目标生成分辨率，请据此扩写为一段内容丰富、细节充分的视觉描述，以帮助文生图模型生成高质量的图片。仅输出增强后的描述，不要包含任何解释或前缀。[/SYSTEM_PROMPT]
+{%- for message in messages %}
+{%- if message['role'] == 'user' %}
+{{- '[INST]' + message['content'] + '[/INST]' }}
+{%- elif message['role'] == 'assistant' %}
+{%- generation %}{{ message['content'] }}{{ eos_token }}{% endgeneration %}
+{%- endif %}
+{%- endfor %}

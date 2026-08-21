@@ -1,0 +1,9 @@
+{
+  "_class_name": "UniPCMultistepScheduler",
+  "_diffusers_version": "0.39.0",
+  "num_train_timesteps": 1000,
+  "prediction_type": "flow_prediction",
+  "use_flow_sigmas": true,
+  "flow_shift": 5.0,
+  "solver_order": 2
+}

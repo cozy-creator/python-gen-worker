@@ -1,0 +1,8 @@
+{
+  "_class_name": "StableAudioProjectionModel",
+  "_diffusers_version": "0.30.0.dev0",
+  "conditioning_dim": 768,
+  "max_value": 512,
+  "min_value": 0,
+  "text_encoder_dim": 768
+}
