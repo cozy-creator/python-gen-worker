@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, cast
 
 import pytest
 
@@ -715,6 +715,9 @@ def _hang_verdict(*, activity_kind: str, now: float = 100.0) -> str | None:
 
     from gen_worker.procsplit.parent import _ChildSlot
 
+    # A structural stand-in for the four attributes the verdict reads. `cast`
+    # rather than a real `_ChildSlot`: constructing one needs a live parent, a
+    # spawned subprocess and a socket, none of which this decision touches.
     slot = SimpleNamespace(
         # evidence is FRESH: the child's tree is accruing kernel-accounted work,
         # which is what a CAS fill looks like from the parent's /proc sampler.
@@ -723,7 +726,7 @@ def _hang_verdict(*, activity_kind: str, now: float = 100.0) -> str | None:
         liveness_activity=activity_kind,
         p=SimpleNamespace(_evidence_hold_window=15.0),
     )
-    return _ChildSlot._hang_verdict(slot, now)
+    return _ChildSlot._hang_verdict(cast(Any, slot), now)
 
 
 def test_the_watchdog_HOLDS_a_cpu_burning_child_only_because_an_activity_is_open() -> None:
