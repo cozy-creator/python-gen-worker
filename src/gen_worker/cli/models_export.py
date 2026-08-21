@@ -1,14 +1,3 @@
-"""``gen-worker models`` — the model-typed serving-defaults surface (pgw#1377).
-
-``export`` emits the ``{names, schemas}`` document generated from the
-``gen_worker.models`` Defaults structs — the mechanical artifact the hub's
-recognized-name guard (th#2140) and write-time validation (th#2141) consume.
-``classify`` is the ingest classification assist (recorded tensorfs contract
-stamp → model name, for publish tooling to propose a starter row). ``decode``
-runs a candidate hub ``defaults`` row through the read-side typed decode —
-the same verdict a worker reaches at load, available at authoring time.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -92,7 +81,6 @@ def _handle_export(args: argparse.Namespace) -> int:
 def _handle_classify(args: argparse.Namespace) -> int:
     mt = model_type_for_contract(str(args.stamp))
     if mt is None:
-        # Unclassified is legal and visible — the row simply stays NULL.
         sys.stdout.write("unclassified\n")
         return 1
     sys.stdout.write(f"{mt.name}\n")
@@ -100,9 +88,6 @@ def _handle_classify(args: argparse.Namespace) -> int:
 
 
 def _carrier(name: str) -> "CarriesDefaults[msgspec.Struct] | None":
-    """Name → the concrete type class (base or LoRA overlay). The casts exist
-    because the generic ``ModelType`` base cannot DECLARE the ``Defaults``
-    attribute its subclasses all carry (a ClassVar can't hold a typevar)."""
     mt = model_type_by_name(name)
     if mt is not None:
         return cast("CarriesDefaults[msgspec.Struct]", mt)

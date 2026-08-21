@@ -1,30 +1,4 @@
-"""Cheap intrinsic-size walker for a materialized snapshot directory.
-
-Computes ``full_model_bytes`` and ``largest_component_bytes`` by stat-ing the
-weight files on disk. No model instantiation, no torch import, no GPU. The
-output is intended to be attached to a checkpoint as ``metadata.size_facts``
-at ingest time so the orchestrator can gate VRAM placement at submit
-(gen-orchestrator #320):
-
-  required_vram = base + size_mult × size_facts[vram_must_fit] + Σ vram_coef[f] × payload[f]
-
-For a typical diffusers-layout snapshot, the walker iterates each component
-subdir (``transformer/``, ``text_encoder/``, ``vae/``, ...) and sums the
-bytes of weight files inside. For transformers-layout singlefile snapshots
-(``config.json`` + weights at the top level) the whole snapshot counts as
-one component named ``"model"``.
-
-Output shape::
-
-    {
-      "full_model_bytes": int,
-      "largest_component_bytes": int,
-      "components": {
-        "<component_name>": {"total_bytes": int, "file_count": int}
-      },
-      "schema_version": 1
-    }
-"""
+"""Cheap intrinsic-size walker for a materialized snapshot directory."""
 
 from __future__ import annotations
 
@@ -33,25 +7,14 @@ from typing import Any
 
 from ..component_vocab import weight_components
 
-# Weight file extensions counted toward a component's size. Restricted to
-# real weight containers — config.json, tokenizer.json, README, etc. are
-# excluded since they don't load into VRAM.
 _WEIGHT_EXTS: tuple[str, ...] = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf")
 
-# Component subdirs that are weight-bearing — read from the ONE vocabulary at
-# call time, so a component an endpoint declares is sized too rather than
-# silently contributing zero bytes.
 def _diffusers_weight_component_dirs() -> frozenset[str]:
     return frozenset(weight_components())
 
 
 def compute_size_facts(snapshot_path: Path | str) -> dict[str, Any]:
-    """Return ``{full_model_bytes, largest_component_bytes, components, schema_version}``.
-
-    Cheap stat-based walk. Safe to call on any snapshot directory; returns
-    zeros + an empty components map if the directory is empty or contains
-    no weight files.
-    """
+    """Return ``{full_model_bytes, largest_component_bytes, components, schema_version}``."""
     path = Path(snapshot_path)
     if not path.is_dir():
         return {
@@ -63,7 +26,6 @@ def compute_size_facts(snapshot_path: Path | str) -> dict[str, Any]:
 
     components: dict[str, dict[str, int]] = {}
 
-    # Diffusers layout: per-component subdirs.
     diffusers_entries = [
         entry for entry in path.iterdir()
         if entry.is_dir() and entry.name in _diffusers_weight_component_dirs()
@@ -82,7 +44,6 @@ def compute_size_facts(snapshot_path: Path | str) -> dict[str, Any]:
             if total > 0:
                 components[entry.name] = {"total_bytes": total, "file_count": count}
     elif (path / "config.json").is_file():
-        # Transformers-style singlefile snapshot — whole snapshot is one component.
         total = 0
         count = 0
         for f in path.rglob("*"):
@@ -95,7 +56,6 @@ def compute_size_facts(snapshot_path: Path | str) -> dict[str, Any]:
         if total > 0:
             components["model"] = {"total_bytes": total, "file_count": count}
     else:
-        # Bare singlefile or unknown layout — sum any weight files at the top.
         total = 0
         count = 0
         for f in path.rglob("*"):

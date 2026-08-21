@@ -1,9 +1,3 @@
-"""pgw#664 / ie#599: fit-to-native geometry — mechanism tests.
-
-Real PIL images through the real code path; no mocks. The properties under
-test are exactly the ie#599 defect statements inverted.
-"""
-
 from __future__ import annotations
 
 import math
@@ -23,8 +17,6 @@ from gen_worker import (
 from gen_worker.api.errors import ValidationError
 
 
-# The qwen-image EDIT table: the pipeline's own VAE_IMAGE_SIZE, and rows that
-# already exist in the endpoint's declared Compile(shapes=...).
 QWEN_EDIT = FamilyGeometry(
     name="qwen-image",
     native_area=1024 * 1024,
@@ -50,15 +42,10 @@ _TILE.putdata([((x * 7) % 256, (y * 11) % 256, ((x ^ y) * 3) % 256)
 
 
 def _photo(width: int, height: int) -> Image.Image:
-    """A deterministic image with structure in every region."""
     return _TILE.resize((width, height), Image.Resampling.NEAREST)
 
 
-# -- the table itself refuses the defect -----------------------------------
-
-
 def test_t2i_table_on_an_edit_lane_is_refused_at_declaration():
-    """The exact ie#599 root cause: Qwen's ~1.7 MP t2i rows on a 1 MP lane."""
     with pytest.raises(ValueError, match="native area"):
         FamilyGeometry(
             name="qwen-image",
@@ -78,9 +65,6 @@ def test_assert_declared_catches_an_undeclared_row():
         QWEN_EDIT.assert_declared(((1024, 1024),))
 
 
-# -- the input's area must never select the tier ---------------------------
-
-
 @pytest.mark.parametrize("scale", [0.05, 0.25, 1.0, 4.0, 12.0])
 def test_bucket_is_area_invariant(scale: float):
     """A 500x500 thumbnail and a 12 MP photo edit at the SAME bucket."""
@@ -90,14 +74,13 @@ def test_bucket_is_area_invariant(scale: float):
 
 
 def test_bucket_follows_aspect_not_size():
-    assert nearest_bucket(4032, 3024, QWEN_EDIT) == (1152, 864)   # 4:3 phone photo
-    assert nearest_bucket(1920, 1080, QWEN_EDIT) == (1280, 720)   # 16:9
-    assert nearest_bucket(1080, 1920, QWEN_EDIT) == (720, 1280)   # 9:16
+    assert nearest_bucket(4032, 3024, QWEN_EDIT) == (1152, 864)
+    assert nearest_bucket(1920, 1080, QWEN_EDIT) == (1280, 720)
+    assert nearest_bucket(1080, 1920, QWEN_EDIT) == (720, 1280)
     assert nearest_bucket(500, 500, QWEN_EDIT) == (1024, 1024)
 
 
 def test_primary_condition_and_output_share_one_bucket():
-    """The ie#599 pairing: the image being edited sits on the output's row."""
     images = [_photo(768, 512), _photo(400, 400)]
     plan = fit_to_native(images, QWEN_EDIT)
     assert plan.bucket == (1248, 832)
@@ -110,18 +93,13 @@ def test_secondary_references_keep_their_own_native_row():
     plan = fit_to_native(images, QWEN_EDIT)
     assert [image.size for image in plan.images] == [
         (1024, 1024), (1280, 720), (720, 1280)]
-    # Same grid SCALE for every condition — that is what the target latent needs.
     areas = [w * h for w, h in (image.size for image in plan.images)]
     assert max(areas) / min(areas) < 1.2
-
-
-# -- pad, never stretch; crop back to the user's framing -------------------
 
 
 @pytest.mark.parametrize("size", [(768, 512), (500, 500), (1080, 1920), (4032, 3024), (900, 700)])
 def test_pad_then_crop_returns_the_submitted_aspect(size):
     plan = fit_to_native([_photo(*size)], QWEN_EDIT)
-    # The model's own output, faked at the plan's bucket.
     result = restore(_photo(*plan.bucket), plan)
     submitted = size[0] / size[1]
     returned = result.size[0] / result.size[1]
@@ -156,9 +134,6 @@ def test_padding_is_only_ever_a_thin_margin():
         assert used > 0.88, (size, used)
 
 
-# -- output_size ------------------------------------------------------------
-
-
 def test_native_returns_the_bucket_unrestored():
     plan = fit_to_native([_photo(768, 512)], QWEN_EDIT, output_size=OutputSize.NATIVE)
     result = restore(_photo(*plan.bucket), plan)
@@ -181,14 +156,10 @@ def test_preset_requires_a_declared_row():
 
 
 def test_below_native_input_defaults_to_the_native_bucket():
-    """ie#599 §6: small inputs edit at native, not at their own size."""
     plan = fit_to_native([_photo(500, 500)], QWEN_EDIT)
     assert plan.bucket == (1024, 1024)
     assert plan.target_size == (1024, 1024)
     assert not plan.composite
-
-
-# -- the super-resolution stage is declared, pluggable, and absent ---------
 
 
 def test_no_upscaler_means_native_size_stated_honestly():
@@ -204,7 +175,6 @@ def test_no_upscaler_means_native_size_stated_honestly():
 def test_a_registered_upscaler_drives_the_composite():
     source = _photo(2304, 1728)
     plan = fit_to_native([source], QWEN_EDIT)
-    # Stand-in for the capability that does not exist yet.
     def _stub(image, target):
         return image.resize(target, Image.Resampling.LANCZOS)
 
@@ -213,7 +183,6 @@ def test_a_registered_upscaler_drives_the_composite():
     result = restore(edited, plan, upscaler=_stub)
     assert result.size == (2304, 1728)
     assert result.upscaled and result.composited
-    # Untouched corner comes from the SOURCE, not from an upscale of the edit.
     assert result.image.getpixel((5, 5)) == source.getpixel((5, 5))
 
 
@@ -229,23 +198,19 @@ def test_set_upscaler_is_a_registration_seam_with_no_default():
     assert current_upscaler() is None
 
 
-# -- mode ------------------------------------------------------------------
-
-
 def test_compose_mode_fits_references_and_leaves_output_free():
     refs = [_photo(768, 512), _photo(400, 900)]
     plan = fit_to_native(
         refs, KLEIN_EDIT, mode=FitMode.COMPOSE, preset=(1024, 1024),
     )
     assert plan.bucket == (1024, 1024)
-    assert plan.images[0].size == (1248, 832)   # each reference at its own row
+    assert plan.images[0].size == (1248, 832)
     assert plan.images[1].size == (672, 1568)
     result = restore(_photo(1024, 1024), plan)
     assert result.size == (1024, 1024) and not result.composited
 
 
 def test_compose_never_inherits_reference_geometry_silently():
-    """ie#600: compose output geometry is the caller's, not references[0]'s."""
     with pytest.raises(ValidationError, match="owns output geometry"):
         fit_to_native([_photo(1600, 900)], KLEIN_EDIT, mode=FitMode.COMPOSE)
 

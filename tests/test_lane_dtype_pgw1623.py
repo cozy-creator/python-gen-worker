@@ -42,7 +42,6 @@ from gen_worker.serving.streaming import (  # noqa: E402
 from gen_worker.serving.streaming.engine import LaneDtypeUnmet  # noqa: E402
 from streaming_fixture import Lane, tiny_pipeline_class  # noqa: E402
 
-#: What the pod's checkpoint carries, component for component.
 STORED: Dict[str, Any] = {
     "unet": torch.float16,
     "vae": torch.float32,
@@ -52,7 +51,6 @@ STORED: Dict[str, Any] = {
 
 
 def _heterogeneous_source(target: Path) -> type:
-    """A real pipeline saved at wai-illustrious' own per-component dtypes."""
     from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
     from transformers import CLIPTextConfig, CLIPTextModel
 
@@ -136,12 +134,9 @@ def _wide_floats(module: Any) -> Dict[str, Any]:
 
 
 def test_the_article_really_is_three_dtypes_on_disk(loaded: Dict[str, Any]) -> None:
-    """The control arm: without it a green suite proves only that the fixture
-    is uniform, which is the fixture bug this whole class hides behind."""
+    """The control arm: without it a green suite proves only that the fixture is uniform, which is the fixture bug this whole class hides behind."""
     from safetensors import safe_open
 
-    # The projected tree holds POINTER STUBS, so the dtypes are read off the
-    # source the CAS ingested — which is the bytes the store serves.
     stored: Dict[str, set] = {}
     source = loaded["source"]
     for container in sorted(source.rglob("*.safetensors")):
@@ -158,8 +153,6 @@ def test_the_article_really_is_three_dtypes_on_disk(loaded: Dict[str, Any]) -> N
 def test_the_loaded_pipeline_is_one_dtype_and_it_is_the_lanes(
     loaded: Dict[str, Any],
 ) -> None:
-    """RED before pgw#1623: unet/text encoders come back fp16 and the vae fp32,
-    on a lane that declares bf16."""
     pipeline = loaded["pipeline"]
     for component in STORED:
         dtypes = set(_wide_floats(getattr(pipeline, component)).values())
@@ -170,19 +163,14 @@ def test_the_loaded_pipeline_is_one_dtype_and_it_is_the_lanes(
 
 
 def test_the_repair_is_counted_not_silent(loaded: Dict[str, Any]) -> None:
-    """A store defect that is repaired and NOT reported is the same defect one
-    layer down. The count is on the load report, so a fleet query can find
-    every deployment serving bytes its own lane does not name."""
+    """A store defect that is repaired and NOT reported is the same defect one layer down."""
     report = loaded["report"]
     assert report.cast_to_lane > 0
     assert report.attributes()["cast_to_lane"] == report.cast_to_lane
 
 
 def test_the_unet_output_survives_the_vae_pgw1623(loaded: Dict[str, Any]) -> None:
-    """THE REQUEST THAT BURNED. `pipeline_stable_diffusion_xl` reaches the VAE
-    only through `vae.decode(latents)`, with latents carrying the denoiser's
-    own dtype — so a pipeline whose unet and vae disagree dies exactly here,
-    after the whole denoise loop has been paid for."""
+    """THE REQUEST THAT BURNED."""
     pipeline = loaded["pipeline"]
     latents = torch.randn(
         1, 4, 8, 8, dtype=next(pipeline.unet.parameters()).dtype)
@@ -193,8 +181,7 @@ def test_the_unet_output_survives_the_vae_pgw1623(loaded: Dict[str, Any]) -> Non
 def test_a_tensor_that_dodges_the_cast_refuses_by_name(
     loaded: Dict[str, Any],
 ) -> None:
-    """The fence can go RED. An instrument that cannot fail is not one — and
-    this fence's whole job is to catch the sibling bug that does NOT crash."""
+    """The fence can go RED."""
     pipeline = loaded["pipeline"]
     module = pipeline.vae
     leaf = next(name for name, _ in module.named_parameters())

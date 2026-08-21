@@ -1,22 +1,4 @@
 #!/usr/bin/env python3
-"""pgw#1606 GPU leg — the ladder against a REAL card, and the confession it prints.
-
-Everything else about this issue proves on CPU against fabricated cards, which
-is correct: a decision does not need a GPU to be wrong. Exactly two facts
-cannot be fabricated, and this leg is for those two only:
-
-  1. `host_card_facts()` reads a real sm and a real VRAM figure, not sm0.
-  2. `w8a8_gemm_mode()` is a LIVE micro-benchmark — one 16x16 `_scaled_mm`
-     call, then a 4096-cubed GEMM median-of-ten that must clear 1.10x over
-     bf16. Its verdict is the fp8 rung's gate, and on a CPU box it is
-     unaskable. What it answers on THIS card is a measurement, and the whole
-     point of the ladder consuming it rather than assuming it.
-
-Then one real materialization on the card, so the `ctx.load_pipeline` path is
-exercised with CUDA present rather than only on CPU tensors.
-
-Short by construction. Run it, read the four blocks, tear down.
-"""
 
 from __future__ import annotations
 
@@ -90,10 +72,7 @@ def main() -> int:
             self.pipe = ctx.load_pipeline(object)
 
     class Staged:
-        """Both trees staged, fp8 half the bytes — the shape the upcast rung
-        exists for. Sizes are the only fabricated thing here, and they are
-        fabricated because staging two real SDXL trees is a download, not a
-        decision."""
+        """Both trees staged, fp8 half the bytes — the shape the upcast rung exists for."""
 
         def verdict(self, contract_id: str) -> str:
             return L.VERDICT_SATISFIES

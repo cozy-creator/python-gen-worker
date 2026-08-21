@@ -1,77 +1,4 @@
-"""The varena facade: the same residency contract, the arena as the mechanism.
-
-pgw#1507. :mod:`gen_worker.models.stream_residency` (pgw#1497) shipped the
-CONTRACT — :func:`~gen_worker.models.stream_residency.plan_residency`, a
-``{VRAM, RAM}`` :class:`~gen_worker.models.stream_residency.MemoryBudget`, and
-``engage``/``rebudget``/``partial_unload``/``demote_to_host``. It shipped one
-MECHANISM behind it: a pinned-CPU tail cast per forward into a shared ring
-buffer. This module is the SECOND mechanism behind the SAME contract, so the
-rung swaps without an endpoint noticing.
-
-The mechanism, in one paragraph. One :class:`varena.Arena` per model owns the
-lease's VRAM half; one ``Reservation`` owns a virtual range big enough for
-every managed weight and **that range never moves**. Each leaf gets a
-granularity-aligned region inside it. A RESIDENT leaf's region is ``back()``-ed
-— physical chunks mapped under the stable address — and the module's parameter
-is a zero-copy DLPack view of it. A STREAMED leaf's region is unbacked, costing
-zero VRAM, and its forward pre-hook backs the region, refills it (from the
-pinned host mirror, or straight off disk through varena's ``RefillEngine``) and
-binds the view; a bounded ring of DEFERRED unbacks releases it again once the
-compute that read it has actually finished.
-
-**Why the address is the point.** The software rung's tail lands in a shared
-cast buffer, so a leaf's weight sits at a different address on every forward —
-one of the two reasons compiled graphs and offload are mutually exclusive
-(``serving/context.py``). Here the address is a property of the LAYOUT, not of
-residency: promote, demote and rebudget move physical pages under a fixed
-pointer. **That exclusivity is NOT lifted in this lane** — it is roadmap phase
-3 — but the mechanism that lifts it is this one.
-
-**The granularity tax, stated up front.** CUDA VMM maps physical memory in
-chunks (2 MiB on this fleet's cards). Independent per-leaf ``back``/``unback``
-therefore needs per-leaf granularity-aligned regions, so a leaf pays for the
-remainder of its last chunk. That cost is hidden nowhere: the layout reports
-each region's ALIGNED SPAN as its
-:class:`~gen_worker.models.stream_residency.LeafCost`, so the planner spends
-the real number, ``plan.resident_bytes`` equals the bytes actually mapped, and
-``plan.fits`` is exact instead of optimistic. :attr:`ArenaLayout.tax_bytes`
-names the total.
-
-**Nothing here is a policy.** No NVML, no probe, no prefetch, no eviction
-heuristic: the budget is the lease's, the split is pgw#1497's planner, and the
-only decision this module makes is arithmetic. varena's minimalism ruling
-applies to its caller too — the dtype→DLPack table, the layout, the triple
-resolution and the fencing live HERE because they are caller policy, and
-nothing in this lane asked varena to grow.
-
-**Two contracts every caller of this facade inherits** (va#12; varena's
-README carries the same words — this paragraph exists for readers who never
-open it):
-
-* **The arena governs WEIGHTS only.** Activations, VAE workspaces and
-  text-encoder transients live outside it, in torch's allocator, and are the
-  caller's problem — both arms of the ComfyUI floor measurement died at
-  ``VAEDecode``, on memory varena would never have been asked about.
-  "Demand-paged VRAM residency" is a promise about a model's parameters,
-  never about its peak. Weights are immutable and CAS-backed, so demote is
-  unmap-only — parking MUTABLE state would need a write-back leg varena
-  deliberately lacks (refill is one-way disk→pin→VRAM).
-* **The launch window: nothing is unbacked between pre-resident and
-  launch-complete.** The caller is the only party that ever calls
-  ``unback``, so this is a contract to KEEP, not a mechanism varena can
-  enforce or violate on its own. Pre-resident the whole working set, launch,
-  and only then re-budget — the :class:`UnbackRing`'s event gating is this
-  module's implementation of exactly that. It is what makes a stable pointer
-  safe to bake into a compiled artifact or a CUDA graph, and it is universal
-  practice in the field, not a peculiarity of ours: no comparable system
-  pages during a compiled launch.
-
-Residency signatures (scalar ``signature()`` and va#12's per-2 MiB-chunk
-``page_signatures``) are BACKING signatures, never CONTENT signatures: bytes
-changed under an unchanged mapping are invisible to them, and content
-integrity is a caller-side D2H digest (the checkpoint juggle, pgw#1607,
-banks per-region digests at ingest for that reason).
-"""
+"""The varena facade: the residency contract served by an arena — promote/demote/rebudget move physical pages under a FIXED virtual address, which is what makes a stable pointer safe to bake into a compiled artifact. Two contracts every caller inherits: (1) the arena governs WEIGHTS only — activations/workspaces live in torch's allocator, and demote is unmap-only (weights are immutable; refill is one-way disk->pin->VRAM, there is no write-back leg); (2) the launch window — nothing may be unbacked between pre-resident and launch-complete. Residency signatures are BACKING signatures, never CONTENT signatures: bytes changed under an unchanged mapping are invisible to them."""
 
 from __future__ import annotations
 
@@ -104,27 +31,15 @@ from .stream_residency import (
 
 logger = logging.getLogger(__name__)
 
-#: DLPack type codes. varena hands the caller this mapping on purpose (its
-#: minimalism ruling), so it is stated once, here.
 DL_INT, DL_UINT, DL_FLOAT, DL_BFLOAT, DL_BOOL = 0, 1, 2, 4, 6
 
-#: Fallback CUDA VMM allocation granularity. The real number comes from
-#: ``Arena.granularity``; this exists so the pure-arithmetic layout is testable
-#: with no driver present.
 DEFAULT_GRANULARITY = 2 << 20
 
-#: The layout's name for the packed always-resident region.
 CORE_REGION = "__core__"
 
 
 def dlpack_dtype(torch: Any, dtype: Any) -> Tuple[int, int]:
-    """``(code, bits)`` for a torch dtype, or a refusal.
-
-    Deliberately a closed list. An unmapped dtype must be a loud refusal and
-    never a guess: a wrong code hands torch a correctly-SIZED view of
-    misinterpreted bytes, which is a silent numerical fault rather than a
-    crash.
-    """
+    """``(code, bits)`` for a torch dtype, or a refusal."""
     table = {
         torch.float16: (DL_FLOAT, 16),
         torch.float32: (DL_FLOAT, 32),
@@ -146,11 +61,6 @@ def dlpack_dtype(torch: Any, dtype: Any) -> Tuple[int, int]:
         ) from None
 
 
-# ---------------------------------------------------------------------------
-# The layout — pure arithmetic, no torch, no driver
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class SlotSpec:
     """One parameter or buffer at a fixed offset in the reservation."""
@@ -167,13 +77,7 @@ class SlotSpec:
 
 @dataclass(frozen=True)
 class RegionSpec:
-    """One independently mappable unit: a leaf, or the packed forced core.
-
-    ``span`` is granularity-aligned and is what ``back``/``unback`` are called
-    with, so two regions can never share a chunk — which is what makes a
-    per-forward unback unable to pull the ground out from under a neighbour
-    that is still in flight.
-    """
+    """One independently mappable unit: a leaf, or the packed forced core."""
 
     name: str
     offset: int
@@ -192,7 +96,6 @@ class ArenaLayout:
 
     granularity: int
     regions: Tuple[RegionSpec, ...]
-    #: Leaf names packed into the always-resident core region.
     core_names: Tuple[str, ...]
     virtual_bytes: int
     weight_bytes: int
@@ -206,17 +109,10 @@ class ArenaLayout:
         return {r.name: r for r in self.regions}
 
     def costs(self) -> Tuple[LeafCost, ...]:
-        """The planner's costs, priced in ALIGNED SPANS.
-
-        The tax is charged to the planner rather than discovered afterwards. A
-        plan whose ``resident_bytes`` was the raw weight bytes would
-        under-report what the card holds by exactly the remainder of every
-        region's last chunk — a number wrong in the direction that OOMs.
-        """
+        """The planner's costs, priced in ALIGNED SPANS."""
         return tuple(LeafCost(r.name, r.span, r.span) for r in self.regions)
 
 
-#: One leaf as the layout needs it: ``(attr, is_param, nbytes, shape, code, bits)``.
 TensorSpec = Tuple[str, bool, int, Tuple[int, ...], int, int]
 
 
@@ -227,25 +123,7 @@ def plan_layout(
     min_stream_bytes: int = DEFAULT_MIN_STREAM_BYTES,
     exclude: Iterable[str] = (),
 ) -> ArenaLayout:
-    """Lay every managed weight out in one reservation. Pure arithmetic.
-
-    Two kinds of region:
-
-    * **The core**, at offset 0: every leaf that can never stream (smaller than
-      ``min_stream_bytes``, or excluded by the caller — adapters, the
-      dtype-fragile components). Packed together at 512-byte alignment, so the
-      set pays ONE chunk remainder instead of one each. On sd1.5's unet that is
-      226 leaves totalling 67 MB paying a single sub-chunk remainder.
-    * **One region per streaming candidate**, granularity-aligned. This is what
-      buys independent residency: ``unback`` releases the chunks WHOLLY inside
-      its request, so two leaves sharing a chunk could never release it — and
-      two leaves sharing a chunk while one is in flight would race. Alignment
-      is the price of per-leaf residency and it is charged to the planner.
-
-    Region order is the planner's fill order (descending size, ties on name),
-    so the resident set is very nearly a prefix of the reservation and the
-    layout is deterministic for a given tree.
-    """
+    """Lay every managed weight out in one reservation."""
     gran = max(1, int(granularity))
     skip = {str(n) for n in exclude}
     floor = int(min_stream_bytes)
@@ -301,26 +179,10 @@ def plan_layout(
     )
 
 
-# ---------------------------------------------------------------------------
-# (path, offset, len) triples from the local weight files
-# ---------------------------------------------------------------------------
-
-
 def safetensors_triples(
     directory: "str | Path", *, variant: Optional[str] = None
 ) -> Dict[str, Tuple[Path, int, int]]:
-    """``{tensor key: (path, byte offset, byte length)}`` for one component dir.
-
-    The triples ``RefillEngine`` eats. The safetensors header already states
-    each tensor's byte range within the data section, and the data section
-    starts at ``8 + header_len`` — so the file offset is that plus the header's
-    own ``data_offsets[0]``. No tensor is materialised to learn this.
-
-    This function is THE SEAM. The local snapshot is one producer of triples;
-    pgw#1498's CAS-native ingest is another, and it arrives as a different
-    producer of this same dict — one constructor argument
-    (:class:`ArenaResidency` ``triples=``), not a rewrite.
-    """
+    """``{tensor key: (path, byte offset, byte length)}`` for one component dir."""
     root = Path(directory)
     tail = f".{variant}.safetensors" if variant else ".safetensors"
     files = sorted(p for p in root.glob("*.safetensors") if p.name.endswith(tail))
@@ -348,26 +210,8 @@ def safetensors_triples(
     return out
 
 
-# ---------------------------------------------------------------------------
-# The deferred-unback ring
-# ---------------------------------------------------------------------------
-
-
 class UnbackRing:
-    """Deferred unbacks, ``depth`` deep, each gated on a real CUDA event.
-
-    THE correctness point of the module. A forward post-hook fires when the
-    leaf's kernels are ENQUEUED, not when they have run, so unbacking there
-    would unmap memory a live kernel is still reading — a fault the software
-    rung cannot have, because it only rebinds a buffer it keeps alive. Instead
-    the post-hook records an event on the compute stream and the region joins
-    this ring; the unback happens when a LATER leaf needs the room, after that
-    event has actually completed.
-
-    ``depth`` is the planner's ``streams``, and that is not a coincidence: the
-    ring holds at most ``depth`` backed streamed regions at once, which is
-    exactly the in-flight window ``plan_residency`` reserved out of the budget.
-    """
+    """Deferred unbacks, `depth` deep, each gated on a real CUDA event. A forward post-hook fires when the leaf's kernels are ENQUEUED, not when they have run, so unbacking there would unmap memory a live kernel is still reading — instead the post-hook records an event on the compute stream and the unback happens when a later leaf needs the room, after the event completed. `depth` is the planner's `streams`: the ring holds at most that many backed streamed regions, exactly the in-flight window the budget reserved."""
 
     def __init__(self, reservation: Any, depth: int) -> None:
         self._res = reservation
@@ -398,7 +242,6 @@ class UnbackRing:
 
 
 class _ArenaLeaf:
-    """The forward pre/post hook pair over one streamed leaf."""
 
     __slots__ = ("region", "module", "owner", "_handles")
 
@@ -409,10 +252,6 @@ class _ArenaLeaf:
         self._handles: List[Any] = []
 
     def install(self) -> None:
-        # Prepended and ``always_call``-ed for pgw#1497's reasons: the bytes
-        # must land before any other pre-hook reads the weight, and a
-        # mid-forward exception must not leave a view of a region this ring is
-        # about to unmap bound as the module's parameter.
         self._handles.append(self.module.register_forward_pre_hook(self._pre, prepend=True))
         self._handles.append(self.module.register_forward_hook(self._post, always_call=True))
 
@@ -431,28 +270,7 @@ class _ArenaLeaf:
         self.owner._page_out(self.region)
 
 
-# ---------------------------------------------------------------------------
-# The rung
-# ---------------------------------------------------------------------------
-
-
 class ArenaResidency:
-    """pgw#1497's residency contract, served out of a varena arena.
-
-    Surface-identical to
-    :class:`~gen_worker.models.stream_residency.StreamedResidency`: construct
-    over a pipeline or module tree, :meth:`engage`, :meth:`rebudget`,
-    :meth:`partial_unload`, :meth:`demote_to_host`, :meth:`promote_to_device`,
-    :meth:`release`. Each returns the same
-    :class:`~gen_worker.models.stream_residency.ResidencyPlan`.
-
-    ``triples`` is the disk source (see :func:`safetensors_triples`).
-    ``host_mirror=False`` states a RAM half of zero: the tail then has no
-    pinned mirror and every page-in comes off disk through the RefillEngine.
-    That is pgw#1497's owed RAM-half enforcement arriving as a DEGRADE rather
-    than a refusal — a model whose RAM allowance cannot hold the tail still
-    serves, one rung slower.
-    """
 
     def __init__(
         self,
@@ -516,8 +334,6 @@ class ArenaResidency:
         self.adopted = False
         self.page_ins = 0
         self.unpinned_slots = 0
-        #: Every residency mutation's reservation signature, newest last. The
-        #: audit trail the "signature-verified" done-criterion reads.
         self.signatures: List[int] = [int(self.reservation.signature())]
 
     @classmethod
@@ -526,28 +342,7 @@ class ArenaResidency:
 
     @classmethod
     def arm(cls, pipeline: Any, **kwargs: Any) -> "ArenaResidency":
-        """Arm the facade on a diffusers pipeline, the way the rung arms.
-
-        The same three obligations ``_apply_partial_stream`` discharges, and
-        each of them is a defect pgw#1497 MEASURED on this card rather than a
-        precaution:
-
-        1. **Components no rung may hook are excluded AND placed.** An
-           exclusion is a statement about hooks, never about residency — the
-           dtype-fragile VAE excluded and then left to nobody killed the first
-           decode with ``weight type torch.HalfTensor``.
-        2. **The component vocabulary is not all modules.** A pipeline's
-           ``components`` holds tokenizers, schedulers and feature extractors;
-           handing one to ``named_modules`` raises, and the rung then silently
-           served on a coarser one.
-        3. **The handle is stamped on the pipeline and the execution-device
-           repair is installed.** Parking leaves on the host makes
-           ``pipeline.device`` — a PUBLIC answer — report the host, and the
-           pipeline then builds ``input_ids`` there and dies in the first
-           embedding with ``index is on cpu``. The repair already exists and is
-           mechanism-agnostic: it asks the stamped handle where the model
-           executes, so the arena gets it by being stamped.
-        """
+        """Arm the facade on a diffusers pipeline, the way the rung arms."""
         from .memory import (
             STREAM_RESIDENCY_ATTR,
             _named_components,
@@ -593,8 +388,6 @@ class ArenaResidency:
         install_execution_device_fallback()
         return residency
 
-    # -- read side ----------------------------------------------------------
-
     @property
     def costs(self) -> Tuple[LeafCost, ...]:
         return tuple(self._costs)
@@ -621,8 +414,6 @@ class ArenaResidency:
     def is_resident(self, name: str) -> bool:
         return bool(self._backed.get(name))
 
-    # -- the one operation --------------------------------------------------
-
     def engage(self) -> ResidencyPlan:
         plan = self._plan(self.budget)
         self._set_ceiling(plan)
@@ -630,16 +421,10 @@ class ArenaResidency:
 
     def rebudget(self, budget_bytes: "int | MemoryBudget") -> ResidencyPlan:
         pair = MemoryBudget.of(budget_bytes)
-        # A re-plan naming only a VRAM number does not revoke the assigned RAM
-        # half (pgw#1497's pair rule).
         if not pair.ram_bytes and self.budget.ram_bytes:
             pair = MemoryBudget(pair.vram_bytes, self.budget.ram_bytes)
         allow_promote = self.plan is None or pair.vram_bytes >= self.plan.budget_bytes
         self.budget = pair
-        # The arena's ceiling IS the lease: raise it before a promote so the
-        # `back()` has room, lower it after a demote so a later `back()` past
-        # the assigned VRAM is REFUSED by the allocator rather than discovered
-        # as an OOM three kernels later.
         plan = self._plan(pair)
         if pair.vram_bytes > int(self.arena.stats()["budget_bytes"]):
             self._set_ceiling(plan)
@@ -648,15 +433,6 @@ class ArenaResidency:
         return applied
 
     def _set_ceiling(self, plan: ResidencyPlan) -> None:
-        """The arena ceiling: the lease, or what the plan holds if that is more.
-
-        A plan whose forced core plus one in-flight window is already over the
-        lease is over it — ``plan.fits`` says so and pgw#1497's confession
-        machinery reports it. Setting the ARENA's ceiling below what that plan
-        will map would turn a reported over-lease into a ``BudgetExceeded``
-        four kernels into the next forward, which is a worse failure of the
-        same fact.
-        """
         ceiling = max(int(self.budget.vram_bytes), int(plan.device_bytes))
         if ceiling > int(self.budget.vram_bytes):
             logger.warning(
@@ -689,12 +465,7 @@ class ArenaResidency:
         """Every managed weight back, at the SAME addresses it left."""
         return self.partial_load(self.total_bytes)
 
-    # -- planning -----------------------------------------------------------
-
     def _plan(self, budget: MemoryBudget) -> ResidencyPlan:
-        # `min_stream_bytes=0` and the core exclusion, because the LAYOUT
-        # already decided what can stream; re-deciding it here would let the
-        # two disagree.
         return plan_residency(
             self._costs,
             budget_bytes=budget,
@@ -725,8 +496,6 @@ class ArenaResidency:
                 out.append((name, slots))
         return out
 
-    # -- execution ----------------------------------------------------------
-
     def _apply(self, plan: ResidencyPlan, *, allow_promote: bool) -> ResidencyPlan:
         torch = self._torch
         with torch.no_grad():
@@ -755,15 +524,6 @@ class ArenaResidency:
         return plan
 
     def _adopt(self, plan: ResidencyPlan) -> None:
-        """First engage: every managed weight leaves the tree's own tensors.
-
-        Region by region, in LAYOUT order, so the arena's chunk pool is filled
-        front-to-back and the resident prefix is contiguous. Torch's caching
-        allocator is emptied afterwards: the weights it held are unreferenced
-        now, but they stay in ITS pool and are invisible to the driver — which
-        is precisely the coexistence bite that makes an arena `back()` fail
-        with memory that is technically free.
-        """
         torch = self._torch
         resident = set(plan.all_resident)
         if all(self._is_cold(region) for region in self.layout.regions):
@@ -776,9 +536,6 @@ class ArenaResidency:
             if region.name in resident:
                 self.reservation.back(region.offset, region.span)
                 if cold:
-                    # COLD: the tree was built on `meta` and the bytes have
-                    # never been in this process. Disk to arena in one pass —
-                    # no torch tensor is allocated to hold them on the way.
                     self._fill_from_disk(region)
                     for slot in region.slots:
                         self._bind(slot, self._view(slot))
@@ -796,16 +553,6 @@ class ArenaResidency:
         torch.cuda.empty_cache()
 
     def _adopt_cold(self, plan: ResidencyPlan) -> None:
-        """A wholly cold tree: ONE batch, both destinations, one engine pass.
-
-        MEASURED, and it is the whole cold-load story: adopting region by
-        region costs one ``submit``/``wait`` round trip EACH — 239 of them on
-        sd1.5 — and each round trip drains the engine's queue to empty, so the
-        disk never has more than one region's reads outstanding and the io_uring
-        queue depth buys nothing. Handing the engine every triple at once is
-        what lets it keep the queue full, and it is also the shape pgw#1498's
-        CAS ingest will want.
-        """
         torch = self._torch
         resident = set(plan.all_resident)
         base = int(self.reservation.base_ptr)
@@ -844,16 +591,9 @@ class ArenaResidency:
                 self._install_hook(region)
 
     def _is_cold(self, region: RegionSpec) -> bool:
-        """True when this region's weights are not in the process yet.
-
-        A meta-initialised tree states its shapes and dtypes and holds no
-        bytes; that is not an error to route around but the CHEAP path — the
-        weights go disk → arena and never occupy a torch allocation at all.
-        """
         return any(self._live(slot).is_meta for slot in region.slots)
 
     def _promote(self, name: str) -> None:
-        """``back`` the region, refill it, bind views. The address is unchanged."""
         region = self._regions.get(name)
         if region is None or self._backed.get(name):
             return
@@ -869,14 +609,10 @@ class ArenaResidency:
         self._torch.cuda.synchronize(self.device)
 
     def _demote(self, name: str) -> None:
-        """Mirror the region to host RAM (or to nothing), then ``unback`` it."""
         region = self._regions.get(name)
         if region is None or not self._backed.get(name):
             return
         if name == CORE_REGION:
-            # The forced core has no hook, so nothing would ever page it back
-            # in. `plan_residency` keeps forced leaves resident at every
-            # budget, so reaching here means the two disagree.
             raise AssertionError(
                 "arena residency: the forced core was scheduled for demotion; "
                 "the layout and the planner disagree about what can stream"
@@ -896,17 +632,12 @@ class ArenaResidency:
         hook.install()
         self._hooks[region.name] = hook
 
-    # -- the streamed path --------------------------------------------------
-
     def _page_in(self, region: RegionSpec) -> None:
         torch = self._torch
         self.ring.make_room()
         self.reservation.back(region.offset, region.span)
         stream = self._offload[self._offload_index]
         self._offload_index = (self._offload_index + 1) % self.streams
-        # The offload stream must not refill a region the previous forward is
-        # still reading; the compute stream must not read before the refill.
-        # Both fences, exactly as pgw#1497's ring does them.
         stream.wait_stream(torch.cuda.current_stream(self.device))
         with torch.cuda.stream(stream):
             self._fill(region, stream=stream)
@@ -917,17 +648,12 @@ class ArenaResidency:
 
     def _page_out(self, region: RegionSpec) -> None:
         torch = self._torch
-        # Rebind FIRST: nothing may still point into a range the ring will
-        # unmap.
         self._rebind_off_device(region)
         event = torch.cuda.Event()
         event.record(torch.cuda.current_stream(self.device))
         self.ring.defer(region, event)
 
-    # -- byte movement ------------------------------------------------------
-
     def _fill(self, region: RegionSpec, *, stream: Any = None) -> None:
-        """Get a backed region's bytes in, from RAM if there is RAM else disk."""
         host = self._host.get(region.name)
         if host is not None:
             for slot, pinned in zip(region.slots, host):
@@ -947,12 +673,6 @@ class ArenaResidency:
         handle.wait()
 
     def _read_into(self, slot: SlotSpec, pinned: Any) -> None:
-        """One slot's bytes from disk into a pinned host page. Host destination.
-
-        The same engine, the same triple; only the destination differs. A host
-        mirror built this way never allocates a device byte, which is what
-        makes a cold load of the STREAMED tail cost nothing on the card.
-        """
         path, offset, length = self._triple(slot)
         handle = self._engine_for().submit(
             [(str(path), int(offset), int(length), int(pinned.data_ptr()), 0)], 0
@@ -977,8 +697,6 @@ class ArenaResidency:
 
     def _engine_for(self) -> Any:
         if self._engine is None:
-            # Device-only destinations bounce through the engine's own pinned
-            # staging ring. One slab, one engine, for the life of the model.
             self._slab_pool = self._varena.SlabPool(32 << 20, pin="require")
             self._staging_slab = self._slab_pool.alloc(16 << 20)
             self._engine = self._varena.RefillEngine(
@@ -987,24 +705,12 @@ class ArenaResidency:
         return self._engine
 
     def _triple_key(self, slot: SlotSpec) -> str:
-        """``unet.down_blocks.0.x`` + ``weight`` → ``down_blocks.0.x.weight``.
-
-        The root component name is the first segment of the qualified leaf name
-        (:func:`~gen_worker.models.stream_residency.discover_leaves` builds it
-        that way), and a component's own weight file keys its tensors relative
-        to itself.
-        """
         _root, _, rest = slot.leaf.partition(".")
         return f"{rest}.{slot.attr}" if rest else slot.attr
 
     def _capture_host(self, region: RegionSpec, *, from_live: bool) -> None:
-        """Mirror a region into pinned host RAM, unless the RAM half says no."""
         torch = self._torch
         if self._host.get(region.name) is not None:
-            # A mirror already exists (a prior capture, or the checkpoint
-            # juggle's normalized image, pgw#1607). Weights are immutable so
-            # it cannot be stale: demote is unmap-only, never copy-out (the
-            # va#11 write-back invariant).
             self._rebind_off_device(region)
             return
         if not self._host_mirror:
@@ -1027,10 +733,6 @@ class ArenaResidency:
             template = torch.empty(slot.shape, dtype=dtype, device="meta")
             pinned = staging.alloc_pinned_like(torch, template)
             if pinned is None:
-                # Pageable RAM: correct, and MUCH slower, because `non_blocking`
-                # H2D silently becomes synchronous off a pageable page. Counted
-                # so the pricing run can say whether it was measuring the rung
-                # or the pinned pool's ceiling.
                 self.unpinned_slots += 1
                 pinned = torch.empty(slot.shape, dtype=dtype, device="cpu")
             if from_live:
@@ -1038,15 +740,11 @@ class ArenaResidency:
             elif self._backed.get(region.name):
                 pinned.copy_(self._view(slot))
             else:
-                # COLD mirror: the bytes have never been in this process, so
-                # they come off disk straight into the pinned page.
                 self._read_into(slot, pinned)
             mirrors.append(pinned)
         torch.cuda.synchronize(self.device)
         self._host[region.name] = mirrors
         self._rebind_off_device(region)
-
-    # -- binding ------------------------------------------------------------
 
     def _view(self, slot: SlotSpec) -> Any:
         return self._torch.from_dlpack(  # type: ignore[attr-defined]
@@ -1060,18 +758,6 @@ class ArenaResidency:
         return getattr(module, "_parameters" if slot.is_param else "_buffers")[slot.attr]
 
     def _bind(self, slot: SlotSpec, value: Any) -> None:
-        """Point a module's parameter or buffer at ``value``.
-
-        ``Parameter.data = ...`` is the normal move and it preserves the
-        Parameter's identity, which matters: hooks, LoRA wrappers and anything
-        holding the object keep working across every promote and demote.
-
-        A META parameter is the one case where it cannot be used — torch
-        REFUSES ``set_data`` across the meta boundary ("incompatible tensor
-        type"), measured on the cold-load leg. There is no identity worth
-        preserving there either: a meta parameter is a declared shape that has
-        never held a byte, so the object is replaced rather than filled.
-        """
         module = self._leaves.get(slot.leaf)
         if module is None:
             return
@@ -1085,12 +771,6 @@ class ArenaResidency:
         bind_tensor(module, slot.attr, value, slot.is_param)
 
     def _rebind_off_device(self, region: RegionSpec) -> None:
-        """Point every slot at its host mirror, or at meta when there is none.
-
-        A meta tensor is the honest stand-in for "this weight exists, is this
-        shape, and is nowhere right now": any kernel that reads it fails
-        loudly instead of reading an unmapped address.
-        """
         torch = self._torch
         host = self._host.get(region.name)
         for index, slot in enumerate(region.slots):
@@ -1102,16 +782,7 @@ class ArenaResidency:
                     torch.empty(slot.shape, dtype=_dtype_of(torch, slot), device="meta"),
                 )
 
-    # -- everything outside the managed set ---------------------------------
-
     def _place_residue(self) -> None:
-        """Tensors no region owns must be ON the device. pgw#1497's clause.
-
-        A tensor hanging off a module that HAS children (CLIP's
-        ``position_ids``) is never a leaf, so no region covers it. Left on the
-        host it takes down the first kernel that reads it, which is exactly how
-        sd1.5 died at a 5% budget over there.
-        """
         managed = set(self._regions) | set(self.layout.core_names)
         for root_name, root in self._roots:
             for name, module in root.named_modules():
@@ -1123,14 +794,8 @@ class ArenaResidency:
                         continue
                     bind_tensor(module, attr, tensor.to(self.device), is_param)
 
-    # -- teardown -----------------------------------------------------------
-
     def release(self) -> None:
-        """Un-hook, copy every managed weight OUT of the arena, drop residency.
-
-        The tree must be able to outlive the arena: after this every weight is
-        an ordinary torch tensor on the device, exactly as it was found.
-        """
+        """Un-hook, copy every managed weight OUT of the arena, drop residency."""
         torch = self._torch
         with torch.no_grad():
             self.ring.drain()
@@ -1186,12 +851,6 @@ def _recorded(
     demote: Tuple[str, ...],
     costs: Sequence[LeafCost],
 ) -> ResidencyPlan:
-    """The plan an UNLOAD actually produced: ``old`` minus the trim.
-
-    Same clause as the software rung's: the greedy fill is not monotone in the
-    budget, so a call asked to free bytes records what it did, not what a fresh
-    plan at the new budget would have drawn.
-    """
     dropped = set(demote)
     by_name = {c.name: c for c in costs}
     resident = tuple(n for n in old.resident if n not in dropped)

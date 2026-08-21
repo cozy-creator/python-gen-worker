@@ -1,19 +1,4 @@
-"""The serving path has ONE weight source, and it is the tensorfs CAS.
-
-# pgw#1524: Paul's hardcut — "only store + support loading our new tensorfs laid
-# out files ... do not support old systems that lack this. Hardcut."
-
-Two things are proven here:
-
-1.  **Every door refuses, by source class.** Three doors — the ModelStore
-    funnel, the hub-less CLI resolver, and the job plane's reserved-repo
-    materializer — crossed with three source classes.
-
-2.  **The end-to-end shape, at CPU scale.** One synthesized safetensors file.
-    Fetch-shaped (an upstream ref, no snapshot) it is REFUSED; ingested — put
-    in the CAS, named by a resolved manifest, projected — the very same bytes
-    serve, and the tensor reads back byte-exact out of the projected tree.
-"""
+"""The serving path has ONE weight source, and it is the tensorfs CAS."""
 
 from __future__ import annotations
 
@@ -42,9 +27,6 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.serving.reserved_repos import materialize_reserved_inputs_async
 from gen_worker.transfer.grants import TransferReport
 
-#: One ref per SOURCE CLASS, in each class's own grammar. Parametrizing the
-#: doors over this is what makes "per source class" a real axis rather than
-#: three copies of the huggingface case.
 SOURCE_CLASSES: Tuple[Tuple[str, str], ...] = (
     ("hf", "org/model"),
     ("civitai", "123456"),
@@ -52,17 +34,11 @@ SOURCE_CLASSES: Tuple[Tuple[str, str], ...] = (
 )
 
 
-# ---------------------------------------------------------------------------
-# 1. Every door refuses, per source class
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("provider,ref", SOURCE_CLASSES)
 def test_the_model_store_funnel_refuses_an_upstream_source(
     provider: str, ref: str
 ) -> None:
-    """Door 1: ``models.download.ensure_local`` — the free function both the
-    ModelStore funnel and the job plane enter through."""
+    """Door 1: ``models.download.ensure_local`` — the free function both the ModelStore funnel and the job plane enter through."""
     with pytest.raises(NonCasWeightSourceRefused) as caught:
         asyncio.run(ensure_local(ref, provider=provider))
     message = str(caught.value)
@@ -78,8 +54,7 @@ def test_the_model_store_funnel_refuses_an_upstream_source(
 def test_the_hubless_cli_resolver_refuses_an_upstream_source(
     provider: str, ref: str
 ) -> None:
-    """Door 2: ``provision.resolve_local_path`` — what ``gen-worker run`` /
-    ``serve`` / ``up`` drive, which is also cozy-local's door."""
+    """Door 2: ``provision.resolve_local_path`` — what ``gen-worker run`` / ``serve`` / ``up`` drive, which is also cozy-local's door."""
     with pytest.raises(provision.ModelResolutionError) as caught:
         provision.resolve_local_path(
             ref=ref, provider=provider, offline=False, emit=lambda _e: None
@@ -91,9 +66,7 @@ def test_the_hubless_cli_resolver_refuses_an_upstream_source(
 def test_the_hubless_cli_resolver_refuses_offline_too(
     provider: str, ref: str
 ) -> None:
-    """``--offline`` was its own direct-serve rung: it served whatever the HF
-    cache happened to hold. A cached upstream snapshot is still not a CAS
-    snapshot, so it refuses on the same rule."""
+    """``--offline`` was its own direct-serve rung: it served whatever the HF cache happened to hold."""
     with pytest.raises(provision.ModelResolutionError):
         provision.resolve_local_path(
             ref=ref, provider=provider, offline=True, emit=lambda _e: None
@@ -101,8 +74,6 @@ def test_the_hubless_cli_resolver_refuses_offline_too(
 
 
 class _Ctx:
-    """A producer context that WOULD accept the path, so a refusal is the
-    guard's and not an accident of the fixture."""
 
     def __init__(self) -> None:
         self.source_path: str = ""
@@ -121,15 +92,7 @@ class _Payload:
 
 
 def test_the_job_planes_reserved_repo_refuses_an_upstream_bound_repo() -> None:
-    """Door 3: the reserved-repo materializer.
-
-    Its ref is normalized through the tensorhub grammar (pgw#1217), so the
-    SOURCE CLASS arrives from the endpoint.lock binding index rather than from
-    the ref's spelling — which is why this door is driven through that index.
-    A repo the index says came from an upstream registry, with no resolved
-    snapshot, used to fall through to a provider-direct download. Now it
-    refuses.
-    """
+    """Door 3: the reserved-repo materializer."""
     set_provider_index({"org/mirrored": "hf"})
     try:
         ctx = _Ctx()
@@ -144,10 +107,7 @@ def test_the_job_planes_reserved_repo_refuses_an_upstream_bound_repo() -> None:
 
 
 def test_the_job_planes_reserved_repo_keeps_the_hubs_own_failure_distinct() -> None:
-    """The SAME door, one axis over: a tensorhub-bound repo the hub simply did
-    not resolve is the hub owing a resolve, NOT an unservable source class.
-    Collapsing the two would send an operator down the ingest route for what is
-    really a resolve outage — so the types must stay apart at this door too."""
+    """The SAME door, one axis over: a tensorhub-bound repo the hub simply did not resolve is the hub owing a resolve, NOT an unservable source class."""
     set_provider_index({})
     ctx = _Ctx()
     with pytest.raises(MissingSnapshotError):
@@ -156,10 +116,7 @@ def test_the_job_planes_reserved_repo_keeps_the_hubs_own_failure_distinct() -> N
 
 
 def test_a_tensorhub_ref_without_a_snapshot_is_a_DIFFERENT_refusal() -> None:
-    """The two conditions must stay distinguishable by TYPE. A tensorhub ref
-    with no snapshot is the orchestrator owing a resolve (retryable there); an
-    upstream ref is a thing that can never be served (terminal). Collapsing
-    them would send an operator to the ingest route for a hub outage."""
+    """The two conditions must stay distinguishable by TYPE."""
     with pytest.raises(MissingSnapshotError):
         asyncio.run(ensure_local("acme/model@1", provider="tensorhub"))
     assert not issubclass(MissingSnapshotError, NonCasWeightSourceRefused)
@@ -167,16 +124,10 @@ def test_a_tensorhub_ref_without_a_snapshot_is_a_DIFFERENT_refusal() -> None:
 
 
 def test_an_unknown_provider_is_still_an_input_error_not_a_source_refusal() -> None:
-    """The refusal must not swallow a typo. An unparseable provider is bad
-    input (``ValidationError`` -> INVALID), which is a different verdict from
-    "this source class cannot be served"."""
+    """The refusal must not swallow a typo."""
     with pytest.raises((ValidationError, ValueError)):
         asyncio.run(ensure_local("whatever", provider="nosuchregistry"))
 
-
-# ---------------------------------------------------------------------------
-# 2. End to end: the SAME bytes refuse direct and serve after ingest
-# ---------------------------------------------------------------------------
 
 _PAYLOAD = projection_fixture.varied(64, seed=1524)
 _WEIGHTS = projection_fixture.safetensors_bytes(
@@ -187,9 +138,6 @@ _SNAPSHOT_DIGEST = "5f" * 32
 
 
 def _serve_bytes_from_a_platform_ingest(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand in for the transfer: the ingest already put these bytes in the
-    platform's object store, so the worker's fetch resolves them. The CAS,
-    manifest, projection and read-back below are all REAL."""
 
     def _download(grants: Any, cas: Any, *, progress: Any = None) -> TransferReport:
         for grant in grants:
@@ -208,17 +156,7 @@ def _serve_bytes_from_a_platform_ingest(monkeypatch: pytest.MonkeyPatch) -> None
 def test_a_fetched_model_serves_ONLY_after_it_has_been_ingested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One artifact, two routes, opposite verdicts.
-
-    Route A — fetch-shaped: an upstream ref with no resolved snapshot, which is
-    exactly what "point the worker at the HF repo" produced before the cut.
-    REFUSED.
-
-    Route B — ingested: the same bytes named by a resolved manifest, pulled
-    into the CAS and projected. SERVES, and the tensor reads back byte-exact
-    THROUGH the projection — which is the part that proves the tree is a
-    tensorfs projection and not a plain directory of files.
-    """
+    """One artifact, two routes, opposite verdicts."""
     sent: List[Any] = []
 
     async def _emit(msg: pb.WorkerMessage) -> None:
@@ -227,11 +165,9 @@ def test_a_fetched_model_serves_ONLY_after_it_has_been_ingested(
     cas_root = tmp_path / "cas"
     store = ModelStore(_emit, cache_dir=cas_root)
 
-    # Route A ---------------------------------------------------------------
     with pytest.raises(NonCasWeightSourceRefused):
         asyncio.run(ensure_local("acme/tiny-model", provider="hf"))
 
-    # Route B ---------------------------------------------------------------
     _serve_bytes_from_a_platform_ingest(monkeypatch)
     snapshot = pb.Snapshot(
         digest=_SNAPSHOT_DIGEST,
@@ -246,8 +182,6 @@ def test_a_fetched_model_serves_ONLY_after_it_has_been_ingested(
     )
     tree = asyncio.run(store.ensure_local(WireRef("acme/tiny-model"), snapshot))
 
-    # It is a PROJECTION, not a directory of real files: the container on disk
-    # is a pointer stub and the bytes live in the CAS.
     projected = require_projection(tree, why="pgw#1524 end-to-end proof")
     container = Path(tree) / "model.safetensors"
     assert container.stat().st_size < len(_WEIGHTS), (
@@ -255,7 +189,6 @@ def test_a_fetched_model_serves_ONLY_after_it_has_been_ingested(
         "means the tree was materialized, not projected")
     assert projected.cas.contains(CASRef(_HEX), size=len(_WEIGHTS))
 
-    # And it READS: the tensor comes back byte-exact through the CAS.
     state = load_state_dict(container, why="pgw#1524 end-to-end proof")
     assert set(state) == {"model.weight"}
     assert state["model.weight"].numpy().tobytes() == _PAYLOAD, (
@@ -266,8 +199,7 @@ def test_a_fetched_model_serves_ONLY_after_it_has_been_ingested(
 def test_the_end_to_end_proof_would_notice_a_silently_empty_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The e2e test's own red-arm: if the ingest route produced nothing, the
-    assertions above must fail rather than pass over an absent tree."""
+    """The e2e test's own red-arm: if the ingest route produced nothing, the assertions above must fail rather than pass over an absent tree."""
     _serve_bytes_from_a_platform_ingest(monkeypatch)
     empty = tmp_path / "cas" / "snapshots" / "deadbeef"
     empty.mkdir(parents=True)

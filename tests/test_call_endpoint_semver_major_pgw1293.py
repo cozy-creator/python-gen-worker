@@ -1,18 +1,3 @@
-"""pgw#1293 / th#2044: `ctx.call_endpoint` addresses `/vN/`, and nothing else.
-
-Endpoint tags are dead (Paul, 2026-08-16 — canary included). Route-1 grammar
-is `POST /{owner}/{name}/v{semver_major}/{function}`, the semver-major a
-REQUIRED path segment with no default. The retired arm built
-`{function}:{(tag or 'prod')}`, so an empty or `None` tag silently routed to
-whatever `prod` pointed at — no raise, no log. This file fences the
-replacement against inheriting that.
-
-The assertions are about the URL that WENT OUT (a real HTTP server records
-it) and about the published signature, which is a wheel contract that
-inference-endpoints / training-endpoints / private-inference-endpoints call
-at runtime.
-"""
-
 from __future__ import annotations
 
 import inspect
@@ -28,7 +13,6 @@ from gen_worker.request_context import RequestContext
 
 
 class _Recorder:
-    """Answers every submit with a request id and records the path."""
 
     def __init__(self) -> None:
         self.paths: List[str] = []
@@ -76,9 +60,6 @@ def _client(base_url: str) -> CalloutClient:
     )
 
 
-# -- the wire ---------------------------------------------------------------
-
-
 @pytest.mark.parametrize("semver_major,segment", [(0, "v0"), (1, "v1"), (12, "v12")])
 def test_submit_addresses_the_semver_major_segment(
     semver_major: int, segment: str
@@ -89,11 +70,7 @@ def test_submit_addresses_the_semver_major_segment(
             "acme/child", "generate", {"prompt": "x"}, semver_major=semver_major
         )
     assert rec.paths == [f"/acme/child/{segment}/generate"]
-    # The retired arm's tail. `:` is outside the whole Route-1 grammar.
     assert ":" not in rec.paths[0]
-
-
-# -- the S4 fence: no default, and no silent default-on-None ----------------
 
 
 def test_submit_without_semver_major_refuses_naming_the_parameter() -> None:
@@ -105,7 +82,6 @@ def test_submit_without_semver_major_refuses_naming_the_parameter() -> None:
 
 
 def test_semver_major_none_raises_rather_than_defaulting() -> None:
-    """The direct S4 fence: `(tag or 'prod')` used to swallow exactly this."""
     with _Recorder() as rec:
         client = _client(rec.base_url)
         with pytest.raises(TypeError, match="semver_major"):
@@ -125,9 +101,6 @@ def test_negative_semver_major_refuses() -> None:
         semver_major_segment(-1)
 
 
-# -- the published signature ------------------------------------------------
-
-
 def _param(fn: Any, name: str) -> Optional[inspect.Parameter]:
     return inspect.signature(fn).parameters.get(name)
 
@@ -145,12 +118,7 @@ def test_semver_major_is_required_keyword_only_and_tag_is_gone(fn: Any) -> None:
 
 
 def test_ctx_call_endpoint_addresses_a_non_zero_major_over_the_real_client() -> None:
-    """`ctx` is a pass-through: the major it is handed is the one on the wire.
-
-    Through the production `_callout_client()` -> `CalloutClient` -> HTTP path
-    (the pipelining suite covers v0 end to end; this pins that the major is
-    not re-derived or floored on the way out).
-    """
+    """`ctx` is a pass-through: the major it is handed is the one on the wire."""
     with _Recorder() as rec:
         ctx = RequestContext.__new__(RequestContext)
         ctx._canceled = False  # type: ignore[attr-defined]
@@ -158,11 +126,6 @@ def test_ctx_call_endpoint_addresses_a_non_zero_major_over_the_real_client() -> 
         ctx._request_id = "req-parent"  # type: ignore[attr-defined]
         ctx._worker_capability_token = "tok"  # type: ignore[attr-defined]
         ctx._file_api_base_url = rec.base_url  # type: ignore[attr-defined]
-        # pgw#1579: child calls are a DECLARED capability again, and a
-        # hand-built context must state it — `_callout_client` refuses an
-        # undeclared body with the hub's own `child_calls_not_declared` before
-        # a socket opens. Left absent it is an AttributeError, which is the
-        # right answer for a fixture that skipped a load-bearing field.
         ctx._child_calls = True  # type: ignore[attr-defined]
 
         handle = ctx.call_endpoint(
@@ -170,9 +133,6 @@ def test_ctx_call_endpoint_addresses_a_non_zero_major_over_the_real_client() -> 
         )
     assert handle is not None
     assert rec.paths == ["/acme/child/v7/generate"]
-
-
-# -- the grammar helper itself ----------------------------------------------
 
 
 @pytest.mark.parametrize("n,want", [(0, "v0"), (3, "v3"), (10, "v10")])

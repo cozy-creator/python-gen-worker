@@ -1,20 +1,4 @@
-"""Refuse host-RAM module moves that cannot fit the cgroup budget.
-
-Endpoint code calling ``model.to("cpu")`` on a tens-of-GB composed pipeline
-exhausts container RAM, and that is a cgroup SIGKILL — no exception, no
-finally, process gone mid-instruction — so nothing downstream of the allocation
-can save the worker; the only honest place to fail is BEFORE the copy. A move of
-a module of known size is checkable: this guard patches
-``torch.nn.Module.to``/``.cpu()`` so any move landing >= ``_MIN_GUARDED_GIB``
-of non-CPU-resident weights into host RAM first asks the cgroup-truthful probe,
-and raises a typed :class:`HostRamMoveRefusedError` when the budget cannot hold
-it. Small moves (offload-ladder leaf hops, schedulers, tiny encoders) never pay
-the probe.
-
-Framework-level by construction: it covers endpoint-authored ``.to("cpu")``,
-``.cpu()``, and every per-component move inside ``DiffusionPipeline.to``,
-however the module was obtained. ``GEN_WORKER_HOST_MOVE_GUARD=0`` disables.
-"""
+"""Refuse host-RAM module moves that cannot fit the cgroup budget."""
 
 from __future__ import annotations
 
@@ -30,12 +14,10 @@ from .models.residency import _effective_ram_floor_gb
 logger = logging.getLogger(__name__)
 
 _GIB = 1 << 30
-# Below this many incoming bytes the probe is skipped entirely.
 _MIN_GUARDED_GIB = 1.0
 _DISABLE_ENV = "GEN_WORKER_HOST_MOVE_GUARD"
 
 _installed = False
-# Test seam: point the probe at synthetic cgroup files.
 _probe_root: Optional[Path] = None
 _probe_self: Optional[Path] = None
 
@@ -45,8 +27,6 @@ def _enabled() -> bool:
 
 
 def _target_is_cpu(args: tuple, kwargs: dict) -> bool:
-    """Whether this ``Module.to`` call targets the CPU. Uses torch's own
-    argument parser; falls back to a conservative False on any surprise."""
     try:
         import torch
 
@@ -67,16 +47,6 @@ class _Unmeasurable(RuntimeError):
 
 
 def _incoming_bytes(module: Any) -> int:
-    """Bytes this module would newly land in host RAM: parameters + buffers
-    not already CPU-resident.
-
-    Raises :class:`_Unmeasurable` rather than returning 0: a 0 flows straight
-    into ``incoming < _MIN_GUARDED_GIB`` and returns, silently no-opping the
-    guard on precisely the shapes most likely to be huge —
-    ``module.parameters()`` raises on meta-device modules, on
-    accelerate-hooked modules mid-dispatch, and on custom ``nn.Module``
-    subclasses that override ``parameters``.
-    """
     total = 0
     try:
         for t in module.parameters(recurse=True):
@@ -94,13 +64,6 @@ def _incoming_bytes(module: Any) -> int:
 
 
 def _refuse_if_over_budget(incoming: int, **probe_kwargs: Any) -> None:
-    """The budget decision, separated from the torch module it came from.
-
-    ``probe_host_ram`` reports THIS process's share of a cgroup it may split
-    with G-1 sibling compute children, so the same 20 GiB move that fits a solo
-    worker on a 64 GiB pod is correctly refused for one of four. The guard needs
-    no group logic of its own — the share is in the probe.
-    """
     ram = probe_host_ram(**probe_kwargs)
     available = int(ram.available_gb * _GIB)
     floor = int(_effective_ram_floor_gb() * _GIB)
@@ -119,16 +82,10 @@ def _refuse_if_over_budget(incoming: int, **probe_kwargs: Any) -> None:
 
 
 def check_host_ram_move(module: Any) -> None:
-    """Raise :class:`HostRamMoveRefusedError` when moving ``module`` to CPU
-    cannot fit ``available - floor``. Shared by both patched entry points."""
+    """Raise :class:`HostRamMoveRefusedError` when moving ``module`` to CPU cannot fit ``available - floor``."""
     try:
         incoming = _incoming_bytes(module)
     except _Unmeasurable as exc:
-        # The failure this guard prevents is UNCATCHABLE (see the module
-        # docstring), so a move it cannot size is the one it must NOT wave
-        # through. It is checked against the host's own headroom instead — the
-        # conservative reading of an unknown size that still lets a small move
-        # on a roomy host proceed.
         logger.warning("host-RAM move guard: %s — checking the floor anyway", exc)
         kwargs = {}
         if _probe_root is not None and _probe_self is not None:
@@ -144,8 +101,7 @@ def check_host_ram_move(module: Any) -> None:
 
 
 def install() -> bool:
-    """Patch ``torch.nn.Module.to``/``.cpu``. Idempotent; returns whether the
-    guard is active."""
+    """Patch ``torch.nn.Module.to``/``.cpu``."""
     global _installed
     if _installed:
         return True

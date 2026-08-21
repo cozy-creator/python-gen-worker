@@ -1,17 +1,3 @@
-"""pgw#1080: the meta-instantiation gate, including ie#628's call-time widening.
-
-The RED control is the z-image rope pattern, transcribed: a plain object (not
-an `nn.Module`) holding `None`, which builds its tables on FIRST CALL inside
-`with torch.device("cpu")`. Nothing happens at `__init__`, so an
-`__init__`-inspecting gate sees a clean instantiation and the violation lands
-mid-trace. That is the exact shape ie#628 widened the gate for.
-
-The GREEN control is ie#630's fix for the same family: an `nn.Module` whose
-tables are `register_buffer`ed at `__init__` with no device pin. The gate must
-stay SILENT on it — a gate that fires on correctly-authored code is worse than
-no gate, because it teaches authors to route around it.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -23,17 +9,8 @@ import torch.nn as nn  # noqa: E402
 from gen_worker import meta_instantiation as mi  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# The two controls, transcribed from the real families
-# ---------------------------------------------------------------------------
-
-
 class LazyPinnedRope:
-    """RED — upstream z-image's `RopeEmbedder` shape (transformer_z_image.py).
-
-    Not an `nn.Module`; tables are `None` until first call; the build pins
-    `torch.device("cpu")`, which OVERRIDES any ambient meta context.
-    """
+    """RED — upstream z-image's `RopeEmbedder` shape (transformer_z_image.py)."""
 
     def __init__(self, dim: int = 8, end: int = 16) -> None:
         self.dim = dim
@@ -48,7 +25,6 @@ class LazyPinnedRope:
 
 
 class BoundRope(nn.Module):
-    """GREEN — ie#630's fix: a buffer at `__init__`, no device pin."""
 
     def __init__(self, dim: int = 8, end: int = 16) -> None:
         super().__init__()
@@ -57,11 +33,6 @@ class BoundRope(nn.Module):
 
     def forward(self) -> torch.Tensor:
         return self.freqs
-
-
-# ---------------------------------------------------------------------------
-# The property the gate keeps
-# ---------------------------------------------------------------------------
 
 
 def test_the_bound_rope_instantiates_entirely_on_meta() -> None:
@@ -74,11 +45,6 @@ def test_the_bound_rope_instantiates_entirely_on_meta() -> None:
 
 
 def test_a_device_pin_at_CALL_time_is_caught_even_though_init_was_clean() -> None:
-    """RED control, and the whole reason ie#628 widened the scope.
-
-    Instantiation is clean — an `__init__`-inspecting gate would pass this —
-    and the violation happens on first call, under the pin.
-    """
     with mi.guard("instantiation") as census:
         with mi.meta_device():
             rope = LazyPinnedRope()
@@ -92,14 +58,12 @@ def test_a_device_pin_at_CALL_time_is_caught_even_though_init_was_clean() -> Non
     error = caught.value
     assert error.phase == "trace"
     assert error.device.startswith("cpu")
-    # The refusal must be actionable: it names the authoring rule and the fix.
     assert "register_buffer" in str(error)
     assert "torch.device" in str(error)
 
 
 def test_the_refusal_names_the_ENDPOINT_site_not_an_sdk_frame() -> None:
-    """A refusal whose `file:line` points into the SDK names the observer
-    instead of the cause, and an author cannot act on it."""
+    """A refusal whose `file:line` points into the SDK names the observer instead of the cause, and an author cannot act on it."""
     with pytest.raises(mi.MetaMaterializationError) as caught:
         with mi.guard("trace"):
             with mi.meta_device():
@@ -119,9 +83,7 @@ def test_an_explicit_real_device_kwarg_is_caught_too() -> None:
 
 
 def test_fake_tensors_are_VIRTUAL_and_never_refused() -> None:
-    """`FakeTensorMode` reports a real device by design — that is what makes it
-    faithful to trace against. Refusing it would refuse the mechanism the gate
-    exists to protect."""
+    """`FakeTensorMode` reports a real device by design — that is what makes it faithful to trace against."""
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     with mi.guard("trace") as census:

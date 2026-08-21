@@ -1,12 +1,4 @@
-"""A dual-expert w8a8 artifact must be served WHOLE.
-
-Wan 2.2 A14B is a mixture of two denoisers, and the producer quantizes both
-(`fp8_default_components()` is the denoiser vocabulary). The consumer used to
-return the FIRST match and wire only that one, so the low-noise expert was
-handed fp8 bytes by a loader with no scales to read them with — half the
-denoise on a lane it was never meant to be on, with no picture-level symptom
-to catch it downstream.
-"""
+"""A dual-expert w8a8 artifact must be served WHOLE."""
 from __future__ import annotations
 
 import json
@@ -18,9 +10,6 @@ import pytest
 
 
 def _shard(path: Path, layers: tuple[str, ...]) -> None:
-    """A safetensors file carrying the w8a8 contract. Detection is header-only,
-    so the payload never has to be a real model — but the HEADER has to be
-    exactly what a produced shard writes."""
     header: dict[str, Any] = {"__metadata__": {"quant_scheme": "fp8-w8a8"}}
     offset = 0
     for layer in layers:
@@ -63,8 +52,6 @@ def test_both_experts_are_detected(moe_tree: Path) -> None:
     arts = detect_w8a8_artifacts(moe_tree)
     assert [a.component for a in arts] == ["transformer", "transformer_2"]
     assert len(arts[0].quantized) == 2 and len(arts[1].quantized) == 1
-    # The singular helper still answers the yes/no question, and answers it
-    # with the first expert — callers that only ask "is this w8a8?" are intact.
     assert detect_w8a8_artifact(moe_tree) == arts[0]
 
 

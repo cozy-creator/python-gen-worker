@@ -1,10 +1,3 @@
-"""Real compute-child process for the pgw#763 split tests.
-
-Run as a subprocess by ParentControl with GEN_WORKER_COMPUTE_CHILD=1 and
-GEN_WORKER_CHILD_SOCKET set. A REAL Worker (executor + lifecycle) wired to a
-ChildTransport — the production child codepath, minus the container.
-"""
-
 from __future__ import annotations
 
 import os
@@ -17,23 +10,12 @@ def main() -> int:
     from gen_worker.procsplit.oom_rank import raise_own_oom_score_adj
     from gen_worker.worker import Worker
 
-    # pgw#975: the production entrypoint does this first thing in the
-    # compute-child branch. The harness enters one layer lower, so reproduce it
-    # here — otherwise the split's OOM victim order is tested on a process that
-    # never declared one.
     raise_own_oom_score_adj()
 
-    # The container entrypoint installs this before constructing Worker.  The
-    # harness enters one layer lower, so reproduce that production hook here
-    # rather than testing a child that cannot emit native-fault evidence.
     postmortem.enable_fault_dump()
 
-    # worker_jwt is deliberately NOT overridden: the loader reads WORKER_JWT
-    # from the environment exactly as production does, so the pgw#763 delta-1
-    # proof (the parent strips it from the child's env) is a real measurement
-    # of this process and not a test fixture asserting itself.
     settings = load_settings(
-        orchestrator_public_addr="127.0.0.1:1",  # unused: the parent owns gRPC
+        orchestrator_public_addr="127.0.0.1:1",
         worker_id=os.environ.get("PGW763_WORKER_ID", "split-child"),
         tensorhub_cache_dir=os.environ.get("TENSORHUB_CACHE_DIR", ""),
     )

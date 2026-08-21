@@ -1,14 +1,4 @@
-"""Measured disk telemetry.
-
-statvfs on the REAL mount points the worker uses (CAS root on the container
-disk; the attached endpoint volume when mounted; a shared NFS mount when one
-exists), plus per-tier "safely reclaimable" bytes: ref-index entries that are
-inactive AND not in the current desired set — exactly the disk-GC LRU's
-eligible set, i.e. evictions the hub may cause without touching live work.
-
-Everything here is O(mounts + refs) over in-memory state and a couple of
-statvfs/stat syscalls — never a tree rescan.
-"""
+"""Measured disk telemetry."""
 
 from __future__ import annotations
 
@@ -18,13 +8,10 @@ from typing import List, Optional, Sequence, Tuple
 
 import msgspec
 
-# Mirror proto StorageTier values (worker_scheduler.proto).
 TIER_CONTAINER = 1
 TIER_VOLUME = 2
 TIER_NFS = 3
 
-# Free/used are floored to this quantum so statvfs jitter does not churn the
-# edge-triggered StateDelta or the capacity generation.
 DISK_QUANTUM_BYTES = 64 * 1024 * 1024
 
 
@@ -43,8 +30,6 @@ class TierUsage(msgspec.Struct, frozen=True, kw_only=True):
 
 
 def _statvfs_totals(path: str) -> Optional[Tuple[int, int]]:
-    """(total, free) bytes for the filesystem holding ``path``; walks up to
-    the nearest existing parent (the cache dir may not exist yet)."""
     p = Path(path)
     for candidate in (p, *p.parents):
         try:
@@ -72,8 +57,7 @@ def measure_tiers(
     mounts: Sequence[MountSpec],
     reclaimable_entries: Sequence[Tuple[str, int]],
 ) -> List[TierUsage]:
-    """Measure each mount and attribute reclaimable (path, bytes) entries to
-    the mount whose device holds them (first mount wins ties/unknowns)."""
+    """Measure each mount and attribute reclaimable (path, bytes) entries to the mount whose device holds them (first mount wins ties/unknowns)."""
     devices: List[Optional[int]] = [_device_of(m.path) for m in mounts]
     reclaimable = [0] * len(mounts)
     for entry_path, entry_bytes in reclaimable_entries:

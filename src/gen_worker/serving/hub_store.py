@@ -55,25 +55,15 @@ from .._vendor.torchcg.graph_identity import EnvIdentity
 from .._vendor.torchcg.requirements import RequirementsError, RequirementsManifest
 from .._vendor.torchcg.store import PublishOutcome, StoreError
 
-#: One explicit budget per hub hop; a hung boot pull must fail visibly.
 HTTP_TIMEOUT_S = 60.0
 
-#: The route's own path, one spelling. ``procsplit.actions`` allowlists this
-#: shape and the parent refuses anything else, so the two must not drift.
 ADOPT_PATH = "/v1/worker/releases/{release_id}/compiled-graphs"
 
-#: A hit's per-graph row states these; a miss states only the fetch key.
 HIT = "hit"
 
 
 class ReleaseNotStamped(Exception):
-    """The release carries no stamped compiled-graph document.
-
-    NOT an error: an un-stamped release has no adopt-first story (th#2134
-    gates that), and the worker's answer is its eager path. The hub says it
-    with a typed 404 rather than an empty document, and this is that fact
-    crossing the transport seam.
-    """
+    """The release carries no stamped compiled-graph document."""
 
 
 class ReleaseGraphTransport(Protocol):
@@ -82,10 +72,7 @@ class ReleaseGraphTransport(Protocol):
     def release_compiled_graphs(
         self, release_id: str, lane: str, sm: str
     ) -> Mapping[str, Any]:
-        """The one boot ask: the release's per-graph adopt answer.
-
-        Raises :class:`ReleaseNotStamped` when the hub answers its typed 404.
-        """
+        """The one boot ask: the release's per-graph adopt answer."""
         ...
 
     def fetch_blob(self, url: str) -> bytes:
@@ -94,15 +81,7 @@ class ReleaseGraphTransport(Protocol):
 
 
 class BrokerReleaseGraphTransport:
-    """The PRODUCTION transport: the adopt ask, parent-mediated.
-
-    ``procsplit.broker.request`` is the one call shape for both execution
-    modes — it dials directly when the split is off and rides the seam when
-    it is on — so this class has no split-mode branch for a bug to hide in.
-    The ARTIFACT bytes do not ride the seam: presigned URLs are fetched by
-    this process directly, which is the same division the compiled-graph
-    resolve already uses ("the seam carries control, not data").
-    """
+    """The PRODUCTION transport: the adopt ask, parent-mediated."""
 
     def __init__(
         self,
@@ -111,8 +90,6 @@ class BrokerReleaseGraphTransport:
         bearer: str = "",
         timeout_s: float = HTTP_TIMEOUT_S,
     ) -> None:
-        # Used ONLY in single-process mode; under the split the parent
-        # supplies both and ignores whatever this passed.
         self.base_url = base_url.rstrip("/")
         self.bearer = bearer
         self.timeout_s = timeout_s
@@ -161,7 +138,6 @@ def _graph_rows(answer: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
 
 
 class HubGraphStore:
-    """torchcg's ``GraphStore``, read side, over the th#2133 answer."""
 
     def __init__(
         self, transport: ReleaseGraphTransport, release_id: str, lane: str, sm: str
@@ -173,8 +149,6 @@ class HubGraphStore:
         self._answer: Optional[Mapping[str, Any]] = None
         self._document: Optional[GraphSetDocument] = None
         self._rows: Optional[dict[str, Mapping[str, Any]]] = None
-
-    # -- the one ask --------------------------------------------------------
 
     def _resolve(self) -> Mapping[str, Any]:
         if self._answer is None:
@@ -199,13 +173,7 @@ class HubGraphStore:
 
     @property
     def misses(self) -> tuple[str, ...]:
-        """The graph hashes this env still needs, in answer order.
-
-        The hub already counted them; this is the ORDERED list behind the
-        count, which is what pgw#1371's background mint takes as ``holes``.
-        A ``transport_unavailable`` row is NOT a hole — the artifact exists
-        and the transport is retryable — so it is excluded deliberately.
-        """
+        """The graph hashes this env still needs, in answer order."""
 
         return tuple(
             str(row.get("graph_hash") or "")
@@ -221,44 +189,20 @@ class HubGraphStore:
 
     def _entry(self, graph: str, env: EnvIdentity) -> Optional[Mapping[str, Any]]:
         if env != self._env():
-            # This store holds exactly one env — the release's own. Any other
-            # ask is a clean miss, never a compat answer (exact-env ruling).
             return None
         row = self._row(graph)
         if row is None or str(row.get("status") or "") != HIT:
             return None
         return row
 
-    # -- GraphStore ---------------------------------------------------------
-
     def get_graphs(self, name: str) -> Optional[GraphSetDocument]:
-        """Rebuild THIS lane's graph document out of the adopt answer.
-
-        The answer is per-(release, lane, sm), so the rebuilt document holds
-        exactly one lane — which is all the boot's AdoptSession reads. An
-        ``empty`` answer rebuilds the EXPLICIT eager-permanent document
-        (no lanes), never ``None``: absent and eager-permanent are different
-        facts and the route states which one it means.
-        """
+        """Rebuild THIS lane's graph document out of the adopt answer."""
 
         if name != self._release_id:
             return None
         if self._document is not None:
             return self._document
-        # ``ReleaseNotStamped`` PROPAGATES. It used to be caught here and
-        # flattened into ``None``, which erased the one distinction the typed
-        # 404 exists to carry: "this release has no adopt story" (ordinary,
-        # serve eager) versus "the route answered and rebuilt to nothing"
-        # (drift, worth a defect). Both callers already catch it around this
-        # call — swallowing it made their handlers dead code and left every
-        # unstamped pod reporting the drift reason.
         answer = self._resolve()
-        # pgw#1489: the release states its COMPILE STACK (torch/triton/nvidia
-        # rows of its uv.lock). The old `env_lockfile_hash` was a digest of
-        # the whole resolved set — a second representation of the endpoint's
-        # lock that split the artifact pool on packages that cannot reach the
-        # compiler. A hub still answering only that shape cannot be adopted
-        # from, and says so rather than keying on a hash of the wrong thing.
         raw_stack = answer.get("env_compile_stack")
         if not isinstance(raw_stack, (list, tuple)) or not raw_stack:
             raise StoreError(
@@ -282,11 +226,6 @@ class HubGraphStore:
                         f"{row.get('graph_hash')!r} carries no ingress contract; "
                         f"the adopt answer cannot be dispatched against"
                     )
-                # NO `program`: the reconstructed document is address-free
-                # (Paul, 2026-08-19). The hub may still send the key on rows it
-                # stamped before the ruling; it is not read, because a
-                # serialized program's digest is machine-scoped and this pod
-                # can only use bytes it made — found by the graph identity.
                 records.append({
                     "graph": str(row.get("graph_hash") or ""),
                     "target": str(row.get("module_path") or ""),
@@ -301,33 +240,18 @@ class HubGraphStore:
                 str(target) for target in (answer.get("unobserved_targets") or [])
                 if isinstance(target, str)
             ]
-            # A lane that states no target list still has one: every target a
-            # graph names. Stating it beats refusing an otherwise-adoptable
-            # answer over a field the row set already implies.
             targets = sorted(observed | set(declared) | set(unobserved))
             lanes.append({
                 "contract": str(answer.get("lane") or self._lane),
                 "targets": targets,
                 "graphs": records,
                 "unobserved_targets": sorted(set(unobserved) - observed),
-                # tcg#52: the transform passes that ran BEFORE these graphs
-                # were derived are a cg-graph-v1 derivation input, so they
-                # are part of the row, not decoration -- `AdoptSession`
-                # refuses a boot whose ran-pass set differs from this. Carried
-                # through from the hub's answer rather than assumed: an
-                # endpoint with no passes says so with an empty list.
                 "passes": [
                     str(name) for name in (answer.get("passes") or [])
                     if isinstance(name, str)
                 ],
             })
         try:
-            # DOCUMENT_FORMAT, never a literal: this reconstructs a document
-            # for torchcg's own decoder, so the version is torchcg's to state.
-            # A hardcoded 2 here silently stopped decoding the moment the
-            # address-free change bumped it to 3, and the only symptom was
-            # `sink_for` returning None — i.e. a pod serving eager for a reason
-            # nothing printed.
             self._document = GraphSetDocument.decode(
                 {"v": DOCUMENT_FORMAT, "stack": stack, "lanes": lanes}
             )
@@ -386,12 +310,6 @@ class HubGraphStore:
         entry: Mapping[str, Any],
         artifact_path: str,
     ) -> bytes:
-        """Pull one artifact out of the hit's presigned snapshot manifest.
-
-        The transport is the same checkpoint file manifest the per-key
-        resolve builds — the artifact is ONE file inside it, addressed by
-        ``artifact_path``, and possibly chunked.
-        """
 
         transport = entry.get("transport")
         files = transport.get("files") if isinstance(transport, Mapping) else None

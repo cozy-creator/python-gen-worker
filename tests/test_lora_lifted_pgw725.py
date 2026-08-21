@@ -1,21 +1,3 @@
-"""LoRA input-lifting (pgw#725, the pgw#704 S9/S12-b mechanism).
-
-Everything here runs the REAL machinery on CPU: canonical placement via
-``enable_lora_branches``, the shipped ``apply_branch_adapters`` swap (key
-mapping, rank-concat, alpha/rank*weight fold into B), the shipped instance
-forward wrap, ``torch.export`` and ``torch.compile``.
-
-The stack is CONDITIONED — LayerNorm between layers and weights scaled by
-1/sqrt(dim) so activations stay O(1). pgw#704's pod harness compared 8 chained
-unnormalized fp8 GEMMs whose activations reached ~1e12, which made its 1e-2
-absolute-tolerance verdict meaningless; the fix is conditioning, and the checks
-below are relative.
-
-The w8a8 lane's slot home (non-persistent registered buffers, read natively by
-``_Fp8ScaledLinear.forward`` on the PRE-QUANT activation) is covered on the meta
-device — no GPU and no fp8 kernel needed to prove where a bound view lands.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -54,8 +36,6 @@ DT = torch.float32
 
 
 class _Stack(nn.Module):
-    """A conditioned denoiser stand-in: branch-capable Linears with a LayerNorm
-    between them, so activations stay O(1) over the whole depth."""
 
     def __init__(self, seed: int = 0) -> None:
         super().__init__()
@@ -78,7 +58,6 @@ class _Stack(nn.Module):
 
 def _adapter_sd(model: nn.Module, rank: int, seed: int,
                 alpha: float | None = None) -> Dict[str, Any]:
-    """A real diffusers/peft-shaped adapter over every branch-capable Linear."""
     g = torch.Generator().manual_seed(seed)
     sd: Dict[str, Any] = {}
     for path, mod in branch_modules(model).items():
@@ -97,8 +76,6 @@ def _rel(got: torch.Tensor, want: torch.Tensor) -> float:
 
 
 def _eager_reference(x: torch.Tensor, *adapters: Dict[str, Any]) -> List[torch.Tensor]:
-    """Outputs of the SHIPPED buffer-copy path: one per adapter, then the
-    cleared (zero-B) case, all from one canonically-placed model."""
     model = _Stack().eval()
     enable_lora_branches(model, BUCKET)
     outs: List[torch.Tensor] = []
@@ -119,20 +96,12 @@ def _lifted(
     return model, install_lifted_lora_forward(model)
 
 
-# --------------------------------------------------------------------------
-# G2 — the behavioural gate that cannot be fooled.
-# --------------------------------------------------------------------------
-
-
 def test_g2_swap_matches_eager_and_differs_export() -> None:
-    """Swap A->B on ONE exported artifact: out(B) matches eager-B, out(A)
-    matches eager-A, and the two differ. Plus the zero-adapter case from the
-    same artifact."""
+    """Swap A->B on ONE exported artifact: out(B) matches eager-B, out(A) matches eager-A, and the two differ."""
     x = torch.randn(TOK, DIM, dtype=DT)
     sd_a = _adapter_sd(_Stack(), rank=8, seed=1, alpha=16.0)
     sd_b = _adapter_sd(_Stack(), rank=8, seed=2, alpha=4.0)
     ref_a, ref_b, ref_zero = _eager_reference(x, sd_a, sd_b)
-    # Conditioning check: the comparison is only meaningful on an O(1) stack.
     assert ref_a.abs().max().item() < 1e3
     assert _rel(ref_a, ref_b) > 1e-3, "the two adapters must be distinguishable"
 
@@ -142,29 +111,23 @@ def test_g2_swap_matches_eager_and_differs_export() -> None:
         ep = torch.export.export(
             model, (x,), dict(zip(LIFTED_INPUT_NAMES, binding.tensors)),
             strict=False)
-    # NOTE: ``ep.module()`` shares buffer STORAGE with the live module, so it
-    # would happily "swap" a baked adapter too — it proves the lifted call
-    # convention and the numerics, never the absence of baking. The anti-baking
-    # bite comes from G3 (constant table).
     graph = ep.module()
 
     with torch.no_grad():
         out_a = graph(x, **binding.call_kwargs()).clone()
-        binding.swap([(sd_b, 1.0, "B")])          # SWAP = new argument data
+        binding.swap([(sd_b, 1.0, "B")])
         out_b = graph(x, **binding.call_kwargs()).clone()
-        binding.clear()                            # zero-B deactivation
+        binding.clear()
         out_zero = graph(x, **binding.call_kwargs()).clone()
 
     assert _rel(out_a, ref_a) < 1e-5, f"lifted A vs eager A: {_rel(out_a, ref_a)}"
     assert _rel(out_b, ref_b) < 1e-5, f"lifted B vs eager B: {_rel(out_b, ref_b)}"
     assert _rel(out_zero, ref_zero) < 1e-5
-    # The anti-baking assertion: a baked adapter gives identical outputs.
     assert _rel(out_a, out_b) > 1e-3
 
 
 def test_g2_swap_under_dynamo() -> None:
-    """The same swap through torch.compile — one call convention serves both
-    the dynamo and the export paths."""
+    """The same swap through torch.compile — one call convention serves both the dynamo and the export paths."""
     x = torch.randn(TOK, DIM, dtype=DT)
     sd_a = _adapter_sd(_Stack(), rank=8, seed=3, alpha=16.0)
     sd_b = _adapter_sd(_Stack(), rank=8, seed=4, alpha=16.0)
@@ -183,8 +146,7 @@ def test_g2_swap_under_dynamo() -> None:
 
 
 def test_multi_adapter_rank_concat_and_weight_fold() -> None:
-    """Two adapters at once, non-unit user weights: the lifted swap reproduces
-    the shipped rank-concat + scale fold exactly."""
+    """Two adapters at once, non-unit user weights: the lifted swap reproduces the shipped rank-concat + scale fold exactly."""
     x = torch.randn(TOK, DIM, dtype=DT)
     sd_a = _adapter_sd(_Stack(), rank=4, seed=5, alpha=8.0)
     sd_b = _adapter_sd(_Stack(), rank=8, seed=6)
@@ -204,8 +166,7 @@ def test_multi_adapter_rank_concat_and_weight_fold() -> None:
 
 
 def test_flat_pair_holds_exactly_the_shipped_buffer_values() -> None:
-    """The flat pair is a RE-LAYOUT of the shipped buffers, not a new
-    computation: every slot equals what the buffer-copy path writes."""
+    """The flat pair is a RE-LAYOUT of the shipped buffers, not a new computation: every slot equals what the buffer-copy path writes."""
     sd = _adapter_sd(_Stack(), rank=8, seed=7, alpha=32.0)
 
     ref = _Stack().eval()
@@ -221,11 +182,6 @@ def test_flat_pair_holds_exactly_the_shipped_buffer_values() -> None:
         assert torch.equal(b_view, ref_mods[path].lora_b), path
         seen += 1
     assert seen == DEPTH
-
-
-# --------------------------------------------------------------------------
-# G3 — the gate degenerates to a signature check.
-# --------------------------------------------------------------------------
 
 
 def test_g3_lifted_export_has_no_lora_constant_and_carries_the_pair() -> None:
@@ -244,8 +200,7 @@ def test_g3_lifted_export_has_no_lora_constant_and_carries_the_pair() -> None:
 
 
 def test_g3_catches_a_baked_adapter() -> None:
-    """RED proof: the pre-lifting shape — adapter halves as registered buffers —
-    lands in the constant table, and the gate refuses NAMING the tensors."""
+    """RED proof: the pre-lifting shape — adapter halves as registered buffers — lands in the constant table, and the gate refuses NAMING the tensors."""
     x = torch.randn(TOK, DIM, dtype=DT)
     model = _Stack().eval()
     for lin in model.layers:
@@ -267,8 +222,7 @@ def test_g3_catches_a_baked_adapter() -> None:
 
 
 def test_g3_catches_a_traced_away_branch() -> None:
-    """A MISSING pair is the same defect wearing a different hat: exporting the
-    branchless graph serves the base model for every request."""
+    """A MISSING pair is the same defect wearing a different hat: exporting the branchless graph serves the base model for every request."""
     x = torch.randn(TOK, DIM, dtype=DT)
     model = _Stack().eval()
     with torch.no_grad():
@@ -276,11 +230,6 @@ def test_g3_catches_a_traced_away_branch() -> None:
     assert lora_constant_fqns(ep) == ()
     with pytest.raises(ValidationError, match="traced away"):
         assert_no_baked_adapter(ep, label="branchless")
-
-
-# --------------------------------------------------------------------------
-# Preserved semantics and fail-closed refusals.
-# --------------------------------------------------------------------------
 
 
 def test_bucket_zero_is_its_own_class_and_refuses_lifting() -> None:
@@ -304,28 +253,6 @@ def test_a_HALF_supplied_adapter_pair_refuses_by_name() -> None:
 
 
 def test_a_plain_call_TAKES_THE_PLAIN_BRANCH_at_serving_time() -> None:
-    """CHANGED BY pgw#1001, deliberately, and this docstring is the record.
-
-    This case used to assert `model(x)` REFUSES with "'lora_a' is missing".
-    That assertion was written when the only caller was the mint/trace path,
-    and it encodes a SERVING BREAK: `install_lifted_lora_forward` replaces
-    `model.forward` wholesale, so a plain call that worked the instant before
-    the install raised the instant after it, and a branchless request falling
-    back to eager on an ARMED pod hit it in production. Measured on the
-    pgw#997 rig; it is what refused a whole 5-entry lora compiled graph as
-    `numerics_refused`.
-
-    The invariant: **arming a bucket must not alter the semantics of calls
-    that do not use the bucket.**
-
-    The old assertion also doubled as a belt-and-braces against CAPTURING an
-    adapter class without its operands. That is retired deliberately: tracing
-    the BRANCHLESS arm with no operands is correct (it is what an
-    `adapter=false` entry is), and a compiling-guard to separate the two reads
-    False under STRICT export — the mint's own mode — so it would ship unable
-    to fire. The real protection belongs at the mint, on the adapter arm's
-    feed. See pgw#1001.
-    """
     x = torch.randn(TOK, DIM, dtype=DT)
     plain = _Stack().eval()
     with torch.no_grad():
@@ -351,8 +278,7 @@ def test_wrong_operand_layout_refuses() -> None:
 
 
 def test_over_bucket_adapter_refuses_instead_of_resizing() -> None:
-    """A wider set is a different graph specialization — a lifted unit never recompiles
-    at swap time."""
+    """A wider set is a different graph specialization — a lifted unit never recompiles at swap time."""
     x = torch.randn(TOK, DIM, dtype=DT)
     model, binding = _lifted(x)
     wide = _adapter_sd(_Stack(), rank=BUCKET * 2, seed=9)
@@ -361,8 +287,7 @@ def test_over_bucket_adapter_refuses_instead_of_resizing() -> None:
 
 
 def test_sparse_placement_is_refused() -> None:
-    """Sparse (eager-only) placement is per-coverage and would be a graph per
-    adapter set — lifting requires canonical placement."""
+    """Sparse (eager-only) placement is per-coverage and would be a graph per adapter set — lifting requires canonical placement."""
     model = _Stack().eval()
     enable_lora_branches(model, BUCKET)
     lin = model.layers[1]
@@ -401,10 +326,7 @@ def test_conv_slots_keep_their_branch_shapes() -> None:
 
 
 def test_w8a8_slot_home_is_the_registered_buffer() -> None:
-    """The w8a8 lane reads ``lora_a``/``lora_b`` as non-persistent BUFFERS from
-    its own forward (pre-quant addend, scale folded into B). A bound view must
-    land there, or the shipped forward would not see it. Meta device: no GPU
-    and no fp8 kernel needed to prove the slot home."""
+    """The w8a8 lane reads ``lora_a``/``lora_b`` as non-persistent BUFFERS from its own forward (pre-quant addend, scale folded into B)."""
     cls = fp8_scaled_linear_class()
     mod = cls(DIM, DIM, bias=False, compute_dtype=torch.bfloat16,
               static_input_scale=False, gemm_mode="pertensor")
@@ -412,7 +334,7 @@ def test_w8a8_slot_home_is_the_registered_buffer() -> None:
     holder.add_module("q", mod)
     alloc_branch_buffers(mod, BUCKET)
     assert "lora_a" in mod._buffers and "lora_b" in mod._buffers
-    assert not [k for k in mod.state_dict() if "lora" in k]  # non-persistent
+    assert not [k for k in mod.state_dict() if "lora" in k]
 
     plan = build_plan(holder, BUCKET)
     assert plan.dtype is torch.bfloat16
@@ -421,7 +343,6 @@ def test_w8a8_slot_home_is_the_registered_buffer() -> None:
     resolved = resolve_slots(holder, plan)
     prior = bind_views(resolved, plan, a, b)
     assert prior == (original,)
-    # The view landed in the BUFFER slot the shipped forward reads natively.
     assert mod._buffers["lora_a"].shape == (BUCKET, DIM)
     assert mod._buffers["lora_b"].shape == (DIM, BUCKET)
     assert mod._buffers["lora_a"] is not original[0]

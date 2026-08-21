@@ -1,24 +1,4 @@
-"""Ergonomic CLI payload args — httpie-style ``field=value`` instead of JSON.
-
-Instead of ``--payload '{"prompt":"a cat","seed":42}'`` a user can type::
-
-    gen-worker run "a cat" seed=42 guidance=3.5 hires=true
-
-The grammar:
-
-* ``field=value``  — set ``field``; value COERCED by the payload Struct's field
-  type (``seed=42`` -> int, ``prompt=hi`` -> str, ``hires=true`` -> bool).
-* ``field:=json``  — raw JSON value for lists/objects/explicit types:
-  ``tags:='["a","b"]'``, ``size:=1024``.
-* ``field@path``   — load the field's value from a file (long prompts, etc.).
-* bare positional  — the payload's PRIMARY field (first required ``str`` field),
-  so ``run "a cat"`` works without naming the prompt field.
-* ``a.b=value``    — dotted key sets a nested object (best-effort coercion).
-
-``--payload '<json>'`` stays the escape hatch; ``field=`` tokens merge over it.
-Coercion uses the function's ``msgspec.Struct`` so errors and bounds match the
-real decode path.
-"""
+"""Ergonomic CLI payload args — httpie-style ``field=value`` instead of JSON."""
 
 from __future__ import annotations
 
@@ -38,21 +18,13 @@ _RE_SET = re.compile(rf"^(?P<key>{_KEY})=(?P<val>.*)$", re.DOTALL)
 
 
 class ArgError(Exception):
-    """A bad ergonomic-arg token. The caller maps this to a usage error."""
+    """A bad ergonomic-arg token."""
 
 
 def looks_like_field_token(tok: str) -> bool:
-    """True if ``tok`` is a ``field=`` / ``field:=`` / ``field@`` token.
-
-    A bare positional (primary value) is NOT a field token. Used to decide
-    whether an argument vector is ergonomic args vs. a single JSON/@file blob.
-    """
+    """True if ``tok`` is a ``field=`` / ``field:=`` / ``field@`` token."""
     return bool(_RE_JSON.match(tok) or _RE_FILE.match(tok) or _RE_SET.match(tok))
 
-
-# --------------------------------------------------------------------------
-# Type-directed coercion against the payload Struct
-# --------------------------------------------------------------------------
 
 _NODEFAULT = getattr(msgspec, "NODEFAULT", object())
 
@@ -72,8 +44,7 @@ def _is_required(field: Any) -> bool:
 
 
 def primary_field(struct_type: Any) -> Optional[str]:
-    """The field a bare positional fills: first required ``str``, else first
-    required, else first declared field. ``None`` if the struct has no fields."""
+    """The field a bare positional fills: first required ``str``, else first required, else first declared field."""
     try:
         fields = list(msgspec.structs.fields(struct_type))
     except Exception:
@@ -97,7 +68,6 @@ def _to_bool(value: str) -> bool:
 
 
 def _guess(value: str) -> Any:
-    """Schema-less coercion for nested/unknown fields (httpie-ish)."""
     low = value.strip().lower()
     if low in ("true", "false"):
         return low == "true"
@@ -139,13 +109,8 @@ def coerce(value: str, typ: Any) -> Any:
             f"field expects {getattr(origin,'__name__',origin)}; pass it as raw "
             f"JSON with ':=' (e.g. key:='[1,2]'), not '='"
         )
-    # Enums, Literal, nested Struct, bytes, etc.: fall back to a best-effort guess.
     return _guess(value)
 
-
-# --------------------------------------------------------------------------
-# Token -> payload assembly
-# --------------------------------------------------------------------------
 
 def _set_path(obj: Dict[str, Any], dotted: str, value: Any) -> None:
     parts = dotted.split(".")
@@ -166,20 +131,7 @@ def build_payload(
     base: Optional[Dict[str, Any]] = None,
     primary: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Assemble a payload dict from ergonomic tokens, coerced via ``struct_type``.
-
-    ``base`` (e.g. a ``--payload`` JSON object) is the starting point; tokens
-    merge over it. Raises :class:`ArgError` on a malformed token.
-
-    ``struct_type`` may be ``None``: that is the SOCKET CLIENT case (pgw#1491's
-    ``gen-worker run``), which holds no struct because importing the endpoint
-    to send a string would mean importing torch. It then guesses scalar shapes
-    httpie-style and accepts any field name, and ``primary`` supplies the one
-    fact it cannot guess — which field a bare positional fills — published by
-    the daemon from the live struct. The authoritative decode still happens
-    there, so a bad field is a typed refusal from the real decode path rather
-    than from a client-side copy of the schema.
-    """
+    """Assemble a payload dict from ergonomic tokens, coerced via ``struct_type``."""
     out: Dict[str, Any] = dict(base or {})
     field_types = _struct_field_types(struct_type) if struct_type is not None else {}
     if primary is None and struct_type is not None:
@@ -215,8 +167,6 @@ def build_payload(
             if "." in key:
                 _set_path(out, key, _guess(raw))
             elif not field_types:
-                # No schema available (e.g. invoke without an importable module):
-                # accept any field, guess its type (httpie-ish).
                 out[key] = _guess(raw)
             elif key not in field_types:
                 raise ArgError(
@@ -225,7 +175,6 @@ def build_payload(
             else:
                 out[key] = coerce(raw, field_types[key])
             continue
-        # Bare positional -> primary field.
         if primary is None:
             raise ArgError(
                 f"bare value {tok!r} but the payload has no field to fill; "

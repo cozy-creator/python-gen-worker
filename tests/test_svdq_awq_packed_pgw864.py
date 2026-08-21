@@ -1,9 +1,3 @@
-"""pgw#864 — packed-resident AWQ W4A16 modulation, box-side proofs.
-
-The resident buffers must dequantize to EXACTLY the weight the decode path
-builds (same bytes, same adanorm undo, same bias delta); the kernel itself is
-GPU-gated and rides the pgw#865 harness + the arming self-check."""
-
 from __future__ import annotations
 
 import pytest
@@ -26,8 +20,8 @@ def _synth(oc: int, ic: int, splits: int, seed: int = 0):
 
 @pytest.mark.parametrize("oc,ic,splits", [
     (512, 256, 1),
-    (768, 256, 6),      # qwen img_mod/txt_mod shape class (adanorm)
-    (18432, 3072, 6),   # the real qwen modulation shape
+    (768, 256, 6),
+    (18432, 3072, 6),
 ])
 def test_packed_buffers_dequantize_to_the_decoded_weight(
     oc: int, ic: int, splits: int,
@@ -38,8 +32,6 @@ def test_packed_buffers_dequantize_to_the_decoded_weight(
     ref = decode_awq_linear(tensors, oc, ic, adanorm_splits=splits)
     mod = pk.build_awq_packed_linear(tensors, oc, ic, adanorm_splits=splits)
 
-    # Reconstruct the weight the kernel computes: nibble unpack -> per-group
-    # dequant -> bf16 round.
     codes = torch.empty(oc, ic, dtype=torch.uint8)
     codes[:, 0::2] = mod.weight & 0xF
     codes[:, 1::2] = mod.weight >> 4
@@ -61,7 +53,7 @@ def test_packed_resident_bytes_are_quarter_of_bf16() -> None:
                    for t in (mod.weight, mod.wscales, mod.wzeros,
                              mod.bias.data))
     dense = oc * ic * 2 + oc * 2
-    assert resident < dense * 0.30  # 4-bit + group scales ≈ 28% of bf16
+    assert resident < dense * 0.30
 
 
 def test_group_size_mismatch_refuses_typed() -> None:
@@ -72,8 +64,8 @@ def test_group_size_mismatch_refuses_typed() -> None:
     t32 = enc(torch.randn(512, 256) * 0.05, torch.randn(512), group_size=32)
     with pytest.raises(pk.AwqPackedError):
         pk.build_awq_packed_linear(t32, 512, 256)
-    assert not pk.awq_packed_supported(512, 200)  # ic % 128
-    assert not pk.awq_packed_supported(500, 256)  # oc % 16
+    assert not pk.awq_packed_supported(512, 200)
+    assert not pk.awq_packed_supported(500, 256)
 
 
 def test_awq_kernel_compiles_for_blackwell() -> None:
@@ -97,8 +89,6 @@ def test_awq_kernel_compiles_for_blackwell() -> None:
                 fn = candidate
                 break
         except ReferenceError:
-            # gc.get_objects() can contain an expired weak proxy. It is not a
-            # kernel candidate, and dereferencing it must not flake this proof.
             continue
     assert fn is not None
     src = ASTSource(

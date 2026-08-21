@@ -1,27 +1,3 @@
-"""pgw#1121: the clone disk preflight sizes an UNTAGGED source by reading it.
-
-`_preflight_disk` sized a materialized output from the source's storage width,
-and the width came from the PLAN-time classification — which could only read a
-dtype off a filename VARIANT TAG (`model.fp16.safetensors`). Upstream diffusers
-repos carry no tag: `Wan-AI/Wan2.2-T2V-A14B-Diffusers` ships plain
-`transformer_2/diffusion_pytorch_model-00001-of-00012.safetensors`. So the
-untagged case fell to a 4-bit default and modelled a 53.2 GiB **fp32** tree as
-packed 4-bit — a bf16 cast was budgeted at 4x the source and refused before a
-byte moved:
-
-    CloneDiskSpaceError: not enough disk for clone: need ~268.1 GiB free
-    (source 53.2 GiB; 1 materialized output tree(s); 2 GiB margin),
-    have 199.9 GiB
-
-The true need is 53.2 + 26.6 + 2 = ~82 GiB, which fits the 200 GB conversion pod
-2.4x over; unfixed, every dense fp32 upstream is un-castable at ingest.
-
-The numbers below are a real request's: 57,154,175,562 B of transformer_2 across
-12 shards, 199.9 GiB free.
-
-    pytest tests/convert/test_clone_preflight_dtype_pgw1121.py -q
-"""
-
 from __future__ import annotations
 
 import json
@@ -41,7 +17,6 @@ from gen_worker.convert.clone import (
 from gen_worker.convert.ingest import plan_huggingface
 
 GIB = 1024 ** 3
-# The live request's own numbers.
 TRANSFORMER_2_BYTES = 57_154_175_562
 SHARDS = 12
 POD_FREE_BYTES = int(199.9 * GIB)
@@ -51,8 +26,6 @@ _WIDTH = {"F32": 4, "BF16": 2, "F16": 2}
 
 
 def _safetensors_bytes(*tensors: tuple[str, int]) -> bytes:
-    """A real (tiny) safetensors file — the header is what gets read.
-    Each `(dtype, params)` pair becomes one tensor."""
     header: dict[str, Any] = {}
     offset = 0
     for i, (dtype, params) in enumerate(tensors):
@@ -65,8 +38,6 @@ def _safetensors_bytes(*tensors: tuple[str, int]) -> bytes:
 
 
 def _wan22_remote(tmp_path: Path, dtype: str = "F32") -> Path:
-    """The Wan2.2-T2V-A14B-Diffusers shape: a diffusers tree whose weight
-    files carry NO dtype variant tag."""
     remote = tmp_path / "remote"
     (remote / "transformer_2").mkdir(parents=True)
     (remote / "model_index.json").write_text(json.dumps({
@@ -83,9 +54,6 @@ def _wan22_remote(tmp_path: Path, dtype: str = "F32") -> Path:
 
 
 def _fake_hf(remote: Path, *, headers_readable: bool = True) -> Any:
-    """The huggingface_hub surface `gen_worker.convert.ingest` uses. Reported
-    SIZES are the production ones; the bytes on disk are tiny, because weights
-    never transit a dev box and the plan never reads them."""
 
     def _files() -> list[Path]:
         return sorted(p for p in remote.rglob("*") if p.is_file())
@@ -164,8 +132,7 @@ BF16 = OutputSpec(dtype="bf16", file_layout="multi-file", file_type="safetensors
 def test_untagged_fp32_source_resolves_its_dtype_at_plan_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No filename says fp32 — the safetensors HEADER does, and the plan
-    reads it. This also makes `dtype: "source"` honest before the transfer."""
+    """No filename says fp32 — the safetensors HEADER does, and the plan reads it."""
     plan = _plan(tmp_path, monkeypatch)
 
     assert plan.classification.attrs["dtype"] == "fp32"
@@ -174,28 +141,21 @@ def test_untagged_fp32_source_resolves_its_dtype_at_plan_time(
 def test_bf16_cast_of_the_live_wan22_leg_is_not_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Request 3190bc31: 53.2 GiB of untagged fp32 -> bf16 on a 200 GB pod.
-
-    Revert-turns-red: restore the 4-bit default in `_preflight_disk` (or drop
-    the `resolve_plan_source_width` call in `plan_huggingface`) and this asks
-    for 268.1 GiB again."""
+    """Request 3190bc31: 53.2 GiB of untagged fp32 -> bf16 on a 200 GB pod."""
     plan = _plan(tmp_path, monkeypatch)
     _with_free(monkeypatch, POD_FREE_BYTES)
 
-    _preflight_disk(tmp_path, plan, [BF16])  # must not raise
+    _preflight_disk(tmp_path, plan, [BF16])
 
 
 def test_the_estimate_is_source_plus_half_plus_margin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bracket the bound: a bf16 output of an fp32 source is HALF the source,
-    so ~82 GiB is required and ~81 GiB is not enough. Asserting only "does
-    not raise at 199.9 GiB" would also pass on an estimate that is far too
-    small."""
+    """Bracket the bound: a bf16 output of an fp32 source is HALF the source, so ~82 GiB is required and ~81 GiB is not enough."""
     plan = _plan(tmp_path, monkeypatch)
     source_bytes = sum(size for _, size, _ in plan.bank_files())
     required = source_bytes + -(-source_bytes // 2) + 2 * GIB
-    assert 81 * GIB < required < 82 * GIB  # the tracker's ~82 GiB
+    assert 81 * GIB < required < 82 * GIB
 
     _with_free(monkeypatch, required)
     _preflight_disk(tmp_path, plan, [BF16])
@@ -209,15 +169,12 @@ def test_the_estimate_is_source_plus_half_plus_margin(
 def test_an_unreadable_header_assumes_the_widest_dense_width_and_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When no header can be read the preflight still has to guess, and the
-    guess is 32 bits — the direction whose failure is a late, loud, retryable
-    ENOSPC rather than an early, permanent refusal of a job that fits. The
-    refusal names the assumption so the reader is not left deriving it."""
+    """When no header can be read the preflight still has to guess, and the guess is 32 bits — the direction whose failure is a late, loud, retryable ENOSPC rather than an early, permanent refusal of a jo..."""
     plan = _plan(tmp_path, monkeypatch, headers_readable=False)
     assert not plan.classification.attrs.get("dtype")
 
     _with_free(monkeypatch, POD_FREE_BYTES)
-    _preflight_disk(tmp_path, plan, [BF16])  # 82 GiB, not 268 GiB
+    _preflight_disk(tmp_path, plan, [BF16])
 
     _with_free(monkeypatch, 40 * GIB)
     with pytest.raises(CloneDiskSpaceError) as excinfo:
@@ -228,10 +185,7 @@ def test_an_unreadable_header_assumes_the_widest_dense_width_and_says_so(
 def test_a_mixed_dtype_tree_is_sized_by_bits_per_parameter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Half fp32, half fp16 by BYTES. Naming one dtype would be a lie either
-    way; bits-per-parameter is exact — 8 bytes of source hold 3 parameters, so
-    a bf16 output of it is 0.75x the source, and that is what the estimate
-    says."""
+    """Half fp32, half fp16 by BYTES."""
     remote = _wan22_remote(tmp_path)
     for p in sorted((remote / "transformer_2").glob("*.safetensors")):
         p.write_bytes(_safetensors_bytes(("F32", 4), ("F16", 8)))
@@ -241,7 +195,7 @@ def test_a_mixed_dtype_tree_is_sized_by_bits_per_parameter(
         "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
         source_include=["model_index.json", "transformer_2/*"],
     )
-    assert plan.source_storage_bits == 21  # floor(8 * 8 / 3)
+    assert plan.source_storage_bits == 21
 
     source_bytes = sum(size for _, size, _ in plan.bank_files())
     _with_free(monkeypatch, int(source_bytes * 1.77) + 2 * GIB)
@@ -255,8 +209,7 @@ def test_a_mixed_dtype_tree_is_sized_by_bits_per_parameter(
 def test_a_tagged_source_still_wins_over_the_header_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The stamp only fills a GAP: a source the variant-tag heuristic already
-    resolved is untouched, so no existing classification changes shape."""
+    """The stamp only fills a GAP: a source the variant-tag heuristic already resolved is untouched, so no existing classification changes shape."""
     remote = _wan22_remote(tmp_path, dtype="BF16")
     for p in sorted((remote / "transformer_2").glob("*.safetensors")):
         p.rename(p.with_name(p.name.replace(".safetensors", ".fp16.safetensors")))

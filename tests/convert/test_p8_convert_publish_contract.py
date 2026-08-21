@@ -1,22 +1,4 @@
-"""The convert/publish contract, hermetic (fake tensorhub HTTP server, no
-torch/GPU, no real weight downloads).
-
-  * an explicit dtype mismatch on a publish_as_is (dense-safetensors) source
-    casts for real — never silent passthrough under a correct-looking label; a
-    matching dtype is genuinely zero-work; non-cast-eligible strategies (gguf)
-    still refuse loud.
-  * classifier variant-tag selection against a real-world-shaped filename
-    corpus (a table, not a one-off regression case).
-  * TEST-FIRST, FIX OPEN: kohya-SGM SDXL adapter normalization must pass
-    ``unet_config`` through **kwargs-only converters (the real diffusers
-    ``StableDiffusionXLPipeline.lora_state_dict`` shape) so the SGM block remap
-    actually runs — it currently only checks for a NAMED parameter and silently
-    skips it.
-  * NOT COVERED: the W8A8 source verifier's one-ULP gate (writer.py's
-    ``verify_w8a8_byte_gate``) operates on real safetensors artifact files with
-    no factored-out standalone comparator; a hermetic fixture for it needs a
-    real (if tiny) w8a8 production round-trip.
-"""
+"""The convert/publish contract, hermetic (fake tensorhub HTTP server, no torch/GPU, no real weight downloads)."""
 
 from __future__ import annotations
 
@@ -76,11 +58,6 @@ def _stub_build_flavor_tree(monkeypatch: pytest.MonkeyPatch, calls: list) -> Non
     monkeypatch.setattr("gen_worker.convert.clone.build_flavor_tree", fake_build_flavor_tree)
 
 
-# ---------------------------------------------------------------------------
-# dtype passthrough honesty.
-# ---------------------------------------------------------------------------
-
-
 def test_explicit_dtype_mismatch_casts_not_silent_passthrough(
     fake_hub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -99,7 +76,7 @@ def test_explicit_dtype_mismatch_casts_not_silent_passthrough(
 
     assert not result.failed_flavors, result.failed_flavors
     assert result.published[0]["dtype"] == "bf16"
-    assert len(calls) == 1 and calls[0]["dtype"] == "bf16"  # a real cast ran
+    assert len(calls) == 1 and calls[0]["dtype"] == "bf16"
 
 
 def test_matching_dtype_is_genuinely_zero_work(
@@ -125,9 +102,6 @@ def test_matching_dtype_is_genuinely_zero_work(
 def test_non_cast_eligible_strategy_refuses_mismatch_loudly(
     fake_hub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """gguf is a binary quant container, not a dense-safetensors tree — the
-    th#901 fix must not weaken its existing loud refusal into a silent
-    passthrough."""
     _FakeHub.state["finalize_calls"] = 1
     monkeypatch.setenv("COZY_CONVERT_WORKDIR", str(tmp_path / "work"))
     dest = tmp_path / "source"
@@ -150,11 +124,6 @@ def test_non_cast_eligible_strategy_refuses_mismatch_loudly(
             outputs=[{"dtype": "bf16", "file_layout": "single-file", "file_type": "gguf"}],
         )
     assert calls == [], "a refused dtype mismatch must never reach the cast path"
-
-
-# ---------------------------------------------------------------------------
-# classifier corpus (real-world-shaped filenames).
-# ---------------------------------------------------------------------------
 
 
 _CLASSIFIER_CORPUS = [
@@ -202,16 +171,8 @@ def test_classifier_refuses_oversized_unclassifiable_repo() -> None:
         classify_repo(["random_blob.bin"] * 3, sizes={"random_blob.bin": 200 * 1024**3})
 
 
-# distinct classifier bug-classes with real incident
-# history, absorbed from tests/convert/test_classifier.py before its deletion
-# (its ~20 other tests cover shapes with no incident pin — collapsed here to
-# the ones that map to a real production failure or refusal-path regression).
-
-
 def test_diffusers_skips_root_allinone_checkpoints() -> None:
-    """e2e J7 live: SD1.5's component tree + all-in-one root checkpoints
-    (12GB) on top — an ingest that doesn't skip the root files selected
-    14.7GB instead of 2.75GB and ENOSPC'd the pod."""
+    """e2e J7 live: SD1.5's component tree + all-in-one root checkpoints (12GB) on top — an ingest that doesn't skip the root files selected 14.7GB instead of 2.75GB and ENOSPC'd the pod."""
     files = [
         "model_index.json", "scheduler/scheduler_config.json",
         "text_encoder/config.json", "text_encoder/model.fp16.safetensors",
@@ -228,9 +189,7 @@ def test_diffusers_skips_root_allinone_checkpoints() -> None:
 
 
 def test_standalone_diffusers_component_selects_canonical_weight_only() -> None:
-    """gw#426: madebyollin's SDXL VAE is a Diffusers component (not
-    Transformers), and its A1111-alias root files are not extra logical
-    weights the classifier should also select."""
+    """gw#426: madebyollin's SDXL VAE is a Diffusers component (not Transformers), and its A1111-alias root files are not extra logical weights the classifier should also select."""
     files = [
         ".gitattributes", "README.md", "config.json",
         "diffusion_pytorch_model.bin", "diffusion_pytorch_model.safetensors",
@@ -269,40 +228,21 @@ def test_gguf_explicit_quant_pick_and_not_found_refusal() -> None:
 
 
 @pytest.mark.parametrize("files,reason", [
-    # Representative rows of the one refusal table (pickle = the classic,
-    # onnx = the common export, tensorrt = the exotic edge); the remaining
-    # formats ride the same branch.
     (["pytorch_model.bin"], "pickle_only"),
     (["model.onnx"], "onnx_only"),
     (["model.engine"], "tensorrt_only"),
 ])
 def test_classifier_refuses_non_safetensors_only_repos(files: list, reason: str) -> None:
-    """A repo shipping ONLY a non-safetensors weight format must refuse
-    typed, not silently misclassify into an empty/wrong selection — the
-    contract every producer flavor decision depends on."""
+    """A repo shipping ONLY a non-safetensors weight format must refuse typed, not silently misclassify into an empty/wrong selection — the contract every producer flavor decision depends on."""
     with pytest.raises(RepoRefusal) as exc:
         classify_repo(files)
     assert exc.value.reason == reason
 
 
-# ---------------------------------------------------------------------------
-# kohya-SGM SDXL adapter normalization.
-# ---------------------------------------------------------------------------
-
-
 def test_normalize_passes_unet_config_through_kwargs_only_converters() -> None:
-    """pgw#566 FIXED (was xfail-strict): diffusers' real
-    `StableDiffusionXLPipeline.lora_state_dict` takes `**kwargs` only, so the
-    old NAMED-parameter test meant `unet_config` was never passed on the one
-    class that needs it — the SGM block remap never ran and the live
-    nerijs/pixel-art-xl r32 repro failed with 2166 unresolved keys."""
     captured: Dict[str, Any] = {}
 
     class _KwargsOnlySDXLPipe:
-        """Pipeline-shaped stub reproducing diffusers' REAL SDXL signature
-        shape (no NAMED unet_config parameter) — not a mock of gen_worker
-        code, a stand-in third-party pipeline like this repo's other
-        _StubPipeline/_RamPressurePipeline fixtures."""
 
         def __init__(self) -> None:
             self.unet = SimpleNamespace(config={"down_block_types": ()})

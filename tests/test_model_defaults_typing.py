@@ -1,18 +1,3 @@
-"""The strict-typing acceptance for pgw#1377 (Paul's end-to-end-typed ruling).
-
-``assert_type`` claims here are checked by the CI mypy-strict pass over
-``tests`` — a loosened surface (an ``Any`` leak, a shared int|float return, a
-broken generic projection) turns this module red STATICALLY. The runtime
-asserts keep the same expressions honest as behavior.
-
-It also pins the typevar plumbing agreed with the SDK-core lane (pgw#1382):
-``LoadContext`` generic over the ModelType subclass, with
-``def defaults(self: "LoadContext[ModelType[D]]") -> D`` projecting the
-Defaults struct out of the generic — ``_LoadContext`` below is that spelling,
-so ``ctx.defaults()`` on a ``_LoadContext[SDXL]`` is ``SDXL.Defaults``
-statically, no cast caller-side.
-"""
-
 from __future__ import annotations
 
 from typing import Generic, Mapping, TypeVar, assert_type, cast
@@ -30,7 +15,6 @@ MT_co = TypeVar("MT_co", bound=ModelType[msgspec.Struct], covariant=True)
 
 
 class _LoadContext(Generic[MT_co]):
-    """The pgw#1382 ``LoadContext[SDXL]`` typevar plumbing, in miniature."""
 
     def __init__(
         self,
@@ -44,9 +28,6 @@ class _LoadContext(Generic[MT_co]):
         self._row = defaults
 
     def defaults(self: "_LoadContext[ModelType[D]]") -> D:
-        # The ONE internal cast: the generic base cannot declare the
-        # ``Defaults`` class attribute (ClassVar can't be generic), so the
-        # structural protocol re-asserts it here. Callers stay cast-free.
         model_type = cast("CarriesDefaults[D]", self._model_type)
         return decode_model_defaults(model_type, model=self._model, defaults=self._row)
 
@@ -55,7 +36,7 @@ def test_the_generic_chain_projects_the_defaults_type() -> None:
     ctx = _LoadContext(SDXL, model="sdxl", defaults={"cfg": False})
     d = ctx.defaults()
     assert_type(d, SdxlDefaults)
-    assert SDXL.Defaults is SdxlDefaults  # the contract-file spelling
+    assert SDXL.Defaults is SdxlDefaults
     assert isinstance(d, SDXL.Defaults)
     assert d.cfg is False
 
@@ -69,7 +50,7 @@ def test_knob_resolution_is_typed_per_instantiation() -> None:
     assert_type(d.guidance, Knob[float])
 
     steps = d.steps.resolve(None, rctx)
-    assert_type(steps, int)  # NOT int | float
+    assert_type(steps, int)
     guidance = d.guidance.resolve(14.0, rctx)
     assert_type(guidance, float)
 
@@ -83,22 +64,20 @@ def test_knob_resolution_is_typed_per_instantiation() -> None:
 
 
 class _FakeAdapter:
-    """The ``turbo: Adapter | None`` shape main_v2.py reads defaults from."""
 
     def __init__(self, defaults: SdxlLoraDefaults) -> None:
         self.defaults = defaults
 
 
 def test_the_config_is_one_nominal_type() -> None:
-    """main_v2.py annotates ``config: SDXL.Config`` — both Defaults types
-    inherit it, so ``turbo.defaults if turbo else d`` needs no union."""
+    """main_v2.py annotates ``config: SDXL.Config`` — both Defaults types inherit it, so ``turbo.defaults if turbo else d`` needs no union."""
     rctx: RequestContext[GenerationDefaults] = RequestContext("typed-2")
     d = SDXL.Defaults()
     turbo: _FakeAdapter | None = _FakeAdapter(SDXL.Lora.Defaults())
 
     config: SdxlConfig = turbo.defaults if turbo is not None else d
     assert_type(config, SdxlConfig)
-    assert SDXL.Config is SdxlConfig  # the contract-file spelling
+    assert SDXL.Config is SdxlConfig
 
     assert_type(config.cfg, bool)
     assert_type(config.steps, Knob[int])
@@ -119,15 +98,12 @@ def test_the_config_is_one_nominal_type() -> None:
     assert_type(lora.strength, Knob[float])
     assert_type(lora.trigger_words, tuple[str, ...])
     assert_type(lora.distillation, bool)
-    # The scheduler demand lives on the ADAPTER overlay only.
     scheduler: SchedulerName | None = lora.scheduler
     assert scheduler == "euler_trailing"
 
 
 def test_the_h3_contract_files_exact_usage_holds() -> None:
-    """`main_v2.py` (minimax-h3): `Model[MiniMaxH3]` / `Model[Rife]`, and
-    `d = ctx.defaults()` projecting `MiniMaxH3.Defaults` — video_shift /
-    audio_shift, no guidance or steps knob (H3-Base is guidance-distilled)."""
+    """`main_v2.py` (minimax-h3): `Model[MiniMaxH3]` / `Model[Rife]`, and `d = ctx.defaults()` projecting `MiniMaxH3.Defaults` — video_shift / audio_shift, no guidance or steps knob (H3-Base is guidance-d..."""
     from gen_worker.models import MiniMaxH3, Rife
     from gen_worker.models.model_types import MiniMaxH3Defaults, RifeDefaults
 

@@ -1,23 +1,3 @@
-"""pgw#1330: the two ways a consumer got a projected tree catastrophically wrong.
-
-Both defects are the SAME shape and neither is a format bug. A TFSSTUB1 stub
-fails loudly at the parse site exactly as designed; these two callers read that
-correct loud failure and concluded, respectively, CORRUPTION and ABSENCE:
-
-* ``ModelStore._verify_snapshot_tree`` ran on first use EVERY BOOT, scored
-  every stub structurally invalid, quarantined the tree — which deletes the
-  tree, the CAS blobs it was built from, and re-downloads. Project a tree,
-  reboot the pod, lose the model. Every boot. Forever.
-* ``detect_on_disk_dtype`` skipped every stub via ``continue``, returned "",
-  and its own docstring states the consequence: *"a bf16 snapshot silently
-  loads via diffusers' fp32 default — 2x the VRAM."*
-
-Every arm here runs against a real ``LocalCAS``, a real pinned manifest and a
-real projected tree (``tests/projection_fixture.py``). The control arms matter
-as much as the fixed arms: a "fix" that merely stops verifying, or that stops
-detecting dtypes, would pass the first half of this file and fail the second.
-"""
-
 from __future__ import annotations
 
 import json
@@ -38,23 +18,11 @@ def _store(base: Path) -> ModelStore:
 
 
 def _verify(base: Path, tree: Path, snapshot: Any) -> tuple[bool, list[str]]:
-    # The verifier duck-types its protobuf argument (path / digest /
-    # size_bytes), so the fixture's message stands in for it exactly.
     return ModelStore._verify_snapshot_tree(_store(base), tree, snapshot)
 
 
-# --------------------------------------------------------------------------
-# Defect 1 — boot verification over a projected tree
-# --------------------------------------------------------------------------
-
-
 def test_boot_verification_of_a_projected_tree_is_clean(tmp_path: Path) -> None:
-    """THE RED PROOF for the infinite re-download.
-
-    Before the fix this returns ``(False, [<every weight digest>])``, and the
-    caller at ``store.py`` turns that into rmtree + delete_blobs + a fresh
-    download of the whole model, on every boot.
-    """
+    """THE RED PROOF for the infinite re-download."""
 
     built = fixture.build(tmp_path)
     ok, bad = _verify(tmp_path, built.tree, built.snapshot_message())
@@ -63,8 +31,7 @@ def test_boot_verification_of_a_projected_tree_is_clean(tmp_path: Path) -> None:
 
 
 def test_boot_verification_reads_no_tensor_bytes(tmp_path: Path) -> None:
-    """It must be clean because it checked the right thing, not because it
-    skipped: hashing a stub at its path is a check of the wrong bytes."""
+    """It must be clean because it checked the right thing, not because it skipped: hashing a stub at its path is a check of the wrong bytes."""
 
     from gen_worker.models.volume_verify import (
         snapshot_verify_targets,
@@ -85,8 +52,7 @@ def test_boot_verification_reads_no_tensor_bytes(tmp_path: Path) -> None:
 
 
 def test_a_stub_naming_the_wrong_body_is_still_corrupt(tmp_path: Path) -> None:
-    """The fix must still DISCRIMINATE. A stub is checked against the manifest,
-    so a stub pointing at other bytes is caught — without reading a byte."""
+    """The fix must still DISCRIMINATE."""
 
     built = fixture.build(tmp_path)
     victim = next(iter(fixture.iter_stubs(built.tree)))
@@ -122,9 +88,7 @@ def test_a_symlink_pointing_out_of_the_store_is_still_corrupt(tmp_path: Path) ->
 
 
 def test_a_truncated_materialized_shard_is_still_corrupt(tmp_path: Path) -> None:
-    """THE CONTROL ARM. A fix that simply stopped verifying would pass every
-    arm above; this is the one it cannot pass. The materialized path keeps its
-    mandatory hash."""
+    """THE CONTROL ARM."""
 
     built = fixture.build(tmp_path)
     tree = fixture.read_entry_tree(tmp_path, built)
@@ -140,17 +104,11 @@ def test_a_truncated_materialized_shard_is_still_corrupt(tmp_path: Path) -> None
 
 
 def test_a_manifestless_projected_tree_is_not_scored_corrupt(tmp_path: Path) -> None:
-    """The structural sweep runs on trees the manifest cannot cover (hf,
-    civitai, single-file). It must not call a stub a truncated shard."""
+    """The structural sweep runs on trees the manifest cannot cover (hf, civitai, single-file)."""
 
     built = fixture.build(tmp_path)
     ok, bad = _verify(tmp_path, built.tree, None)
     assert ok, f"the structural sweep scored a projected tree corrupt: {bad}"
-
-
-# --------------------------------------------------------------------------
-# Defect 2 — dtype detection over a projected tree
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -159,12 +117,7 @@ def test_a_manifestless_projected_tree_is_not_scored_corrupt(tmp_path: Path) -> 
 def test_dtype_over_a_projected_tree_comes_from_the_manifest(
     tmp_path: Path, safetensors_dtype: str, expected: str
 ) -> None:
-    """THE RED PROOF for the silent 2x VRAM.
-
-    Before the fix every stub is skipped by ``continue``, ``counts`` stays
-    empty and this returns "" — which the loader reads as "no dtype known" and
-    hands to diffusers' fp32 default.
-    """
+    """THE RED PROOF for the silent 2x VRAM."""
 
     built = fixture.build(tmp_path, dtype=safetensors_dtype)
     assert detect_on_disk_dtype(built.tree) == expected
@@ -181,8 +134,7 @@ def test_dtype_is_identical_projected_and_materialized(tmp_path: Path) -> None:
 def test_an_unresolvable_projection_REFUSES_rather_than_defaulting(
     tmp_path: Path,
 ) -> None:
-    """The half that matters most: when the manifest cannot be recovered the
-    answer is an exception, NOT "". Silence here is the whole defect."""
+    """The half that matters most: when the manifest cannot be recovered the answer is an exception, NOT ""."""
 
     orphan = tmp_path / "orphan"
     orphan.mkdir()
@@ -194,8 +146,7 @@ def test_an_unresolvable_projection_REFUSES_rather_than_defaulting(
 
 
 def test_a_projected_tree_whose_pin_is_gone_REFUSES(tmp_path: Path) -> None:
-    """Same refusal via the production path: the tree is where it belongs but
-    its manifest ref has been collected."""
+    """Same refusal via the production path: the tree is where it belongs but its manifest ref has been collected."""
 
     built = fixture.build(tmp_path)
     (tmp_path / "refs").rename(tmp_path / "refs-gone")
@@ -213,14 +164,8 @@ def test_dtype_of_a_tree_with_no_weights_is_still_empty(tmp_path: Path) -> None:
     assert detect_on_disk_dtype(empty) == ""
 
 
-# --------------------------------------------------------------------------
-# The rest of the B2 column — the 39 header readers that fail OPEN
-# --------------------------------------------------------------------------
-
-
 def test_a_quantized_artifact_is_still_detected_as_quantized(tmp_path: Path) -> None:
-    """``_quantized_layers`` returning () routes an fp8 artifact to the plain
-    bf16 lane. Nothing raises; the model is simply the wrong model."""
+    """``_quantized_layers`` returning () routes an fp8 artifact to the plain bf16 lane."""
 
     from gen_worker.models.w8a8 import detect_w8a8_artifacts
 
@@ -247,13 +192,6 @@ def test_component_weight_bytes_are_the_real_bytes(tmp_path: Path) -> None:
 
 
 def test_adapter_sizes_are_the_LOGICAL_sizes(tmp_path: Path) -> None:
-    """pgw#1308's "discovery-only is not the same as unaffected".
-
-    ``utils/lora.py`` compares ``.safetensors`` files by size twice — to pick
-    the largest adapter, and to enforce ``MAX_LORA_FILE_BYTES``. A stub's own
-    ``st_size`` is ~128 B no matter how large the adapter behind it is, so both
-    comparisons stop being about the adapter.
-    """
 
     from gen_worker._vendor.tensorfs import LocalCAS, project_snapshot
     from cas_fixture import ingest_repository
@@ -288,13 +226,7 @@ def test_adapter_sizes_are_the_LOGICAL_sizes(tmp_path: Path) -> None:
 
 
 def test_the_adapter_size_cap_still_REFUSES_over_a_stub(tmp_path: Path) -> None:
-    """The consumer-level half, and the one with teeth.
-
-    ``MAX_LORA_FILE_BYTES`` exists so a caller cannot hand this worker an
-    arbitrarily large adapter. Measured at the stub's inode that ceiling is
-    ~128 B against a cap of gigabytes, so EVERY adapter passes — the guard
-    stops guarding without failing.
-    """
+    """The consumer-level half, and the one with teeth."""
 
     from gen_worker.api.errors import ValidationError
     from gen_worker.utils.lora import MAX_LORA_FILE_BYTES, load_adapter_state_dict
@@ -307,11 +239,6 @@ def test_the_adapter_size_cap_still_REFUSES_over_a_stub(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="too large"):
         load_adapter_state_dict(oversize, ref="x")
-
-
-# --------------------------------------------------------------------------
-# The projection resolver itself
-# --------------------------------------------------------------------------
 
 
 def test_resolve_projection_recovers_the_manifest_from_the_tree_path(

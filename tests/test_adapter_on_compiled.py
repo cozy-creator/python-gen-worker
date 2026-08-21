@@ -1,20 +1,4 @@
-"""A LoRA on a compiled-armed module must never silently serve the base model.
-
-pgw#1571 measured the defect on the v1 arm and fixed it there. pgw#1573's
-reachability read then found that ``aot_serve.wrap_module`` — where that fix
-lives — has ZERO non-test callers: the production arm is
-``torchcg.adopt.AdoptSession``, which none of it touches. So the P0 was open on
-the path that runs, and it was masked only by adoption itself being broken.
-pgw#1573 fixed adoption; this file is the guard on the live path plus the proof
-that it fires.
-
-**These drive the real dispatcher.** ``AdoptSession`` is constructed with a
-real document, a real store and a real artifact, and the module that comes back
-is the one the author's ``ctx.compile`` returned — the same object a request is
-dispatched against. The only stand-in is the bytes-to-callable loader, because
-that is AOTInductor on a GPU; what it returns is a callable that is
-DISTINGUISHABLE from the eager forward, which is the whole measurement.
-"""
+"""A LoRA on a compiled-armed module must never silently serve the base model."""
 
 from __future__ import annotations
 
@@ -59,7 +43,6 @@ class Toy(torch.nn.Module):
 
 
 def _document(module: Toy) -> GraphSetDocument:
-    """The real publish-time derive over the real module."""
     def drive() -> None:
         module(torch.zeros(2, 4))
 
@@ -82,12 +65,6 @@ def _store_with_artifact(tmp_path: Path, document: GraphSetDocument) -> Any:
 
 
 def _loader(calls: List[str]) -> Any:
-    """A compiled callable that is DISTINGUISHABLE from the eager forward.
-
-    It returns ``sample * 0`` — nothing the eager path can produce for a
-    non-zero input — so "which forward served this call" is a value, not a
-    counter somebody has to trust.
-    """
 
     def load(path: Path, record: Any, module: Any) -> Any:
         def compiled(sample: torch.Tensor) -> torch.Tensor:
@@ -109,7 +86,6 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
 
 
 def _armed(tmp_path: Path, calls: List[str]) -> Toy:
-    """One module, adopted through the GUARDED sink and armed for real."""
     module = Toy()
     document = _document(module)
     store = _store_with_artifact(tmp_path, document)
@@ -126,8 +102,7 @@ def _armed(tmp_path: Path, calls: List[str]) -> Toy:
 def test_the_compiled_graph_serves_when_no_adapter_is_attached(
     tmp_path: Path,
 ) -> None:
-    """POLARITY. The guard must not turn compiled serving off by itself —
-    otherwise every assertion below passes for the wrong reason."""
+    """POLARITY."""
     calls: List[str] = []
     module = _armed(tmp_path, calls)
 
@@ -141,24 +116,9 @@ def test_the_compiled_graph_serves_when_no_adapter_is_attached(
 def test_a_LIVE_adapter_routes_EAGER_instead_of_serving_the_base_model(
     tmp_path: Path, wire: List[tuple]
 ) -> None:
-    """THE P0 (pgw#1571), on the path that runs.
-
-    peft wraps a denoiser's SUBMODULES; the armed graph replaces the PARENT's
-    forward and never enters them. So an adapter attached after arming does not
-    execute, and the artifact returns the base result with no refusal and no
-    log — measured there as eager ``max|delta| = 2.2e-02`` against armed
-    ``0.0`` with 32 wrappers attached.
-
-    The guard's answer is EAGER: correctness over speed, stated once. What is
-    forbidden is the silence.
-    """
     calls: List[str] = []
     module = _armed(tmp_path, calls)
 
-    # peft's own marker, and a wrapper on the submodule the graph traced
-    # through — the exact shape `inject_adapter_in_model` leaves behind.
-    # , not attribute assignment:  types its
-    # own attributes, and peft writes this one from outside that contract.
     setattr(module, "peft_config", {"default": object()})
     with torch.no_grad():
         module.proj.weight.mul_(2.0)
@@ -182,8 +142,6 @@ def test_a_LIVE_adapter_routes_EAGER_instead_of_serving_the_base_model(
         f"guard exists to end (pgw#760): {wire}")
     assert "BASE MODEL" in rows[0][2] and "lora_fold" in rows[0][2], rows[0][2]
 
-    # Said ONCE per module, not per request: an alarm on the hot path is an
-    # alarm operators learn to ignore.
     module(sample)
     module(sample)
     assert len([row for row in wire
@@ -193,16 +151,10 @@ def test_a_LIVE_adapter_routes_EAGER_instead_of_serving_the_base_model(
 def test_detaching_the_adapter_puts_the_compiled_graph_back(
     tmp_path: Path,
 ) -> None:
-    """The degradation is FOR THE DURATION, not for the life of the pod.
-
-    peft deletes `peft_config` on unload, so the next call is compiled again.
-    A guard that latched would quietly cost every later request its speed.
-    """
+    """The degradation is FOR THE DURATION, not for the life of the pod."""
     calls: List[str] = []
     module = _armed(tmp_path, calls)
 
-    # , not attribute assignment:  types its
-    # own attributes, and peft writes this one from outside that contract.
     setattr(module, "peft_config", {"default": object()})
     module(torch.ones(2, 4))
     assert calls == []
@@ -213,13 +165,6 @@ def test_detaching_the_adapter_puts_the_compiled_graph_back(
 
 
 def test_the_v2_armed_marker_is_what_lora_fold_reads(tmp_path: Path) -> None:
-    """``lora_fold._compiled_armed`` asked ``aot_serve``, whose marker no pod
-    has carried since pgw#1373 — so on a real worker it answered False for
-    every armed module and every compiled-aware branch behind it was dead.
-
-    Red arm: point the predicate back at the v1 tier alone and this goes red
-    on a module that IS armed.
-    """
     from gen_worker.models import lora_fold
 
     calls: List[str] = []
@@ -231,20 +176,10 @@ def test_the_v2_armed_marker_is_what_lora_fold_reads(tmp_path: Path) -> None:
 def test_rearm_constants_refuses_by_name_rather_than_serving_stale_weights(
     tmp_path: Path,
 ) -> None:
-    """The fold path's precondition, stated as a refusal.
-
-    AOTI folds its constants once on the first ``run()`` and never re-folds on
-    a bare tensor write, so folding an adapter INTO the weights needs the bound
-    table re-installed. A runner that exposes no such table must say so — a
-    folded constant that keeps serving pre-fold weights is a plausible wrong
-    image and no error at all.
-    """
+    """The fold path's precondition, stated as a refusal."""
     calls: List[str] = []
     module = _armed(tmp_path, calls)
 
-    # This file's loader returns a bare closure, not a `CompiledGraphCall`, so
-    # there is no runner to re-arm — which is exactly the shape the refusal is
-    # written for.
     with pytest.raises(adapter_guard.ConstantRearmUnsupported, match="stale"):
         adapter_guard.rearm_constants(module)
 
@@ -252,19 +187,7 @@ def test_rearm_constants_refuses_by_name_rather_than_serving_stale_weights(
         "an eager module has nothing to re-arm and that is not an error")
 
 
-# --------------------------------------------------------------------------
-# The WIRING: both ctx.compile hosts hand out the guarded sink
-# --------------------------------------------------------------------------
-
-
 def _fixture_host(tmp_path: Path, calls: List[str]) -> Any:
-    """The real `EndpointHost`, booted with a real document over a real store.
-
-    Everything above proves the guard WORKS. This proves the production host
-    installs it — without which the guard is a correct object nothing calls,
-    which is the exact shape of the defect it replaces (pgw#1571's fix lives in
-    `aot_serve.wrap_module`, which has no caller).
-    """
     from test_serving_adopt_first import (
         ENV as FIXTURE_ENV, LANE as FIXTURE_LANE, OVERRIDES, SM as FIXTURE_SM,
         STACK as FIXTURE_STACK, fresh_host, manifest, publish_document,
@@ -302,9 +225,7 @@ def _fixture_host(tmp_path: Path, calls: List[str]) -> Any:
 def test_the_PRODUCTION_host_installs_the_guard(
     tmp_path: Path, wire: List[tuple]
 ) -> None:
-    """RED ARM FOR THE WIRING. Hand `EndpointHost.setup` the bare
-    `session.adopt` again and this goes red — which is what makes the guard a
-    property of the serving path rather than of this test file."""
+    """RED ARM FOR THE WIRING."""
     calls: List[str] = []
     host = _fixture_host(tmp_path, calls)
     (instance,) = host.instances.values()
@@ -327,23 +248,9 @@ def test_the_PRODUCTION_host_installs_the_guard(
     assert [row for row in wire if row[1] == "adapter_ops_on_compiled"], wire
 
 
-# --------------------------------------------------------------------------
-# The OPERATOR'S ORDER (pgw#1589, carrying pgw#1587's intent to the live path)
-# --------------------------------------------------------------------------
-
-
 def test_an_operator_eager_only_order_suppresses_compiled_dispatch(
     tmp_path: Path, wire: List[tuple]
 ) -> None:
-    """pgw#1589. The hub sends the order, `worker.on_message` applies it, and
-    until now exactly ONE thing read it: `aot_serve`'s arm, which has no
-    production caller. pgw#1587 added a second read in `arm_aot` — same
-    orphaned tier. So an operator could issue `serve_posture{eager_only:true}`,
-    get an ack, and watch the pod keep serving from its compiled graphs.
-
-    Read here, on the path that dispatches, so the order is observed by the
-    thing it is about.
-    """
     from gen_worker import serve_posture
 
     calls: List[str] = []
@@ -360,9 +267,6 @@ def test_an_operator_eager_only_order_suppresses_compiled_dispatch(
             "an operator ordered this worker EAGER and it dispatched to a "
             "compiled graph anyway (pgw#1589)")
 
-        # The DISPATCH row, on its own phase — `serve_posture` emits its own
-        # TRANSITION row on `PHASE_SUPPRESSED`, and one phase carrying two
-        # vocabularies is a metric that means neither (pgw#1441's split).
         rows = [row for row in wire
                 if row[0] == activity_mod.KIND_LORA_HYGIENE
                 and row[1] == serve_posture.REASON]
@@ -372,8 +276,6 @@ def test_an_operator_eager_only_order_suppresses_compiled_dispatch(
             "no emitter since pgw#1142 defined it")
         assert "operator@cozy" in rows[0][2] and "drain" in rows[0][2]
 
-        # REVERSIBLE, and with no re-arm: `apply_command` promises it and the
-        # read is per call, never latched at arm time.
         serve_posture.apply_command(False, actor="operator@cozy")
         module(torch.ones(2, 4))
         assert calls, (
@@ -383,24 +285,10 @@ def test_an_operator_eager_only_order_suppresses_compiled_dispatch(
         serve_posture.reset()
 
 
-# --------------------------------------------------------------------------
-# pgw#1591: a WRAPPED dispatcher is not a displaced one, and a displaced one
-# still reports what it measured
-# --------------------------------------------------------------------------
-
-
 def test_the_guard_does_not_read_as_a_DISPLACED_dispatcher(
     tmp_path: Path,
 ) -> None:
-    """THE P1. `DispatchCounter` asked `module.forward is dispatcher`, and this
-    guard installs itself AS `module.forward` — so every guarded module read
-    DISPLACED the moment pgw#1573 landed.
-
-    Measured in the field before it was understood: sd15, 12/12 requests of
-    both benchmark arms, `dispatch: DISPLACED on UNet2DConditionModel`, and a
-    whole GPU leg discarded because the lane could not tell eager from
-    compiled. The arm was fine; the question was wrong.
-    """
+    """THE P1."""
     from gen_worker.serving.dispatch_counter import DispatchCounter
 
     calls: List[str] = []
@@ -421,16 +309,7 @@ def test_the_guard_does_not_read_as_a_DISPLACED_dispatcher(
 def test_a_DISPLACED_module_still_reports_what_it_MEASURED(
     tmp_path: Path,
 ) -> None:
-    """The second half, and the one that cost the #1548 lane its window.
-
-    The displaced branch used to end "so all N call(s) ran eager" — a sentence
-    it never measured. The same logs carried 120 AOTI wrapper invocations per
-    arm, so the lane had two irreconcilable readings and correctly refused to
-    pick one. Neither was right: compiled DID execute and the message
-    overcounted eager.
-
-    Displacement and dispatch are separate facts. Both get stated.
-    """
+    """The second half, and the one that cost the #1548 lane its window."""
     from gen_worker.serving.dispatch_counter import DispatchCounts
 
     displaced_but_served = DispatchCounts(

@@ -1,9 +1,4 @@
-"""Chunk-writable output stream used by RequestContext.
-
-Pulled out of the monolithic request_context module. Forward-ref to
-`RequestContext` is string-typed (via `from __future__ import annotations`)
-to avoid a circular import between this module and `__init__.py`.
-"""
+"""Chunk-writable output stream used by RequestContext."""
 
 from __future__ import annotations
 
@@ -31,19 +26,13 @@ if TYPE_CHECKING:
 
 
 class _RequestOutputStream:
-    """Chunk-writable output writer with finalize() -> Asset/Tensors.
-
-    All writes are buffered to a temp file. On finalize(), the file is hashed
-    with BLAKE3, then uploaded via presigned S3 multipart URLs obtained from
-    TensorHub.
-    """
 
     def __init__(
         self,
         *,
         ctx: "RequestContext[Any]",
         ref: str,
-        kind: str,  # "asset" | "checkpoint"
+        kind: str,
         format: Optional[str] = None,
         create: bool = False,
         expected_size_bytes: Optional[int] = None,
@@ -65,9 +54,6 @@ class _RequestOutputStream:
             _enforce_output_file_size_limit(self._expected_size_bytes)
         self._stream_remote = bool(self._ctx._should_stream_output_to_file_api(self._ref))
         self._sha = hashlib.sha256()
-        # Fan BLAKE3 across cores; `AUTO` (== -1) lets the impl pick. The
-        # hasher itself stays thread-confined to the writer; AUTO only
-        # affects internal parallelism within a single update() call.
         self._blake3_hasher = blake3(max_threads=blake3.AUTO)
         self._bytes_written = 0
         self._bytes_uploaded = 0
@@ -82,19 +68,12 @@ class _RequestOutputStream:
         self._last_progress_mono = self._started_mono
         self._last_progress_uploaded = 0
         self._session_id: Optional[str] = None
-        # Split routing by artifact kind: checkpoint streams publish
-        # via the /commits API when the job carries a destination_repo scope
-        # (job-bound create_checkpoint grant, multi-GB per-file caps);
-        # asset streams (sample images, media outputs) always ride the media
-        # route — that's what the upload_media grant authorizes and caps.
-        # Inference jobs have no destination_repo, so scope stays None.
         self._repo_job_scope = (
             self._ctx._repo_job_upload_scope() if self._kind == "checkpoint" else None
         )
         self._finalized = False
         self._result: Any = None
 
-        # Always buffer to temp file.
         suffix = Path(self._ref).suffix or ".bin"
         prefix = f"gw-out-{ctx.request_id}-"
         fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=suffix)
@@ -165,7 +144,6 @@ class _RequestOutputStream:
             if self._stream_remote:
                 finalize_t0 = time.monotonic()
                 try:
-                    # The upload tail, reported as JobMetrics.stage_ms.
                     with stage_of(self._ctx, "upload"):
                         if self._repo_job_scope is not None:
                             self._result = self._finalize_checkpoint_commit()
@@ -299,10 +277,6 @@ class _RequestOutputStream:
         self._ctx._emit_event("request.upload_progress", payload)
 
     def _emit_upload_failed(self, exc: Exception) -> None:
-        """Typed upload-failure report, so a broken route is not invisible in
-        worker logs alone. Emitted BEFORE the exception propagates; non-fatal
-        callers (sample harvest) emit-and-continue, fatal paths
-        emit-then-raise."""
         payload: Dict[str, Any] = {
             "code": "artifact_upload_failed",
             "kind": "checkpoint" if self._kind == "checkpoint" else "sample",
@@ -315,16 +289,7 @@ class _RequestOutputStream:
         self._ctx._emit_event("request.warning", payload)
 
     def _finalize_checkpoint_commit(self) -> Tensors:
-        """Publish the buffered checkpoint file as ONE tensorhub publish.
-
-        Goes over the chunked sha256 route through the same client the compiled graph
-        self-mint uses — one save_checkpoint == one publish == one finalized
-        repo revision, with the repo auto-created server-side under the job's
-        create_repo grant on first publish. A multi-GB adapter retries a 64 MiB
-        chunk instead of a whole shard, and the digest is signed into each
-        presigned PUT.
-        """
-        from ..hubio.client import CommitFile, HubClient  # lazy: keeps `import gen_worker` off the convert/requests stack
+        from ..hubio.client import CommitFile, HubClient
 
         assert self._tmp_path is not None
         assert self._repo_job_scope is not None
@@ -338,7 +303,6 @@ class _RequestOutputStream:
             base_url=ctx._get_file_api_base_url(),
             token=ctx._get_worker_capability_token(),
         )
-        # Worker-addable provenance stamp fields only.
         provenance: Dict[str, Any] = {}
         if self._lineage_step_number and self._lineage_step_number > 0:
             provenance["step_number"] = int(self._lineage_step_number)
@@ -351,9 +315,6 @@ class _RequestOutputStream:
                 self._chunks_uploaded = parts_done
             self._maybe_emit_progress(stage="stream_upload")
 
-        # th#2202: a mid-run checkpoint goes to the run's own SCRATCH repo,
-        # which DERIVES its release — the decision, and the surviving refusal
-        # for a destination that HAS an author, live in one named place.
         try:
             release = ctx._checkpoint_release(repo)
         except RuntimeError as exc:
@@ -383,34 +344,25 @@ class _RequestOutputStream:
             format=fmt,
             size_bytes=int(file_size),
             sha256=self._sha.hexdigest(),
-            # The published blob is sha256-addressed, so the digest this reports
-            # is the one the hub actually stored it under. A `blake3:`
-            # blob_digest here would name a key nothing can resolve.
             blob_digest=f"sha256:{self._sha.hexdigest()}",
             snapshot_digest=str((ckpt or {}).get("snapshot_digest") or "").strip() or None,
             stream_mode=self.stream_mode,
         )
 
     def _finalize_presigned_upload(self) -> Any:
-        """Hash the buffered temp file, then upload to the MEDIA route via
-        presigned S3 multipart. Checkpoint saves with a repo-job scope go
-        through `_finalize_checkpoint_commit` instead."""
-        from ..presigned_upload import presigned_upload_file  # lazy: keeps `import gen_worker` requests-free
+        from ..presigned_upload import presigned_upload_file
 
         assert self._tmp_path is not None
         file_size = os.path.getsize(self._tmp_path)
         if file_size <= 0:
             raise RuntimeError("file save failed (empty file)")
 
-        # Use the rolling hash if available (was computed during writes).
         blake3_hex = self._blake3_hasher.hexdigest()
 
-        # Build auth headers.
         base = self._ctx._get_file_api_base_url()
         token = self._ctx._get_worker_capability_token()
         headers: Dict[str, str] = {"Authorization": f"Bearer {token}"}
 
-        # Build endpoint and create payload.
         create_payload: Dict[str, Any] = {}
         req_id = str(self._ctx.request_id or "").strip()
         if req_id:
@@ -418,19 +370,8 @@ class _RequestOutputStream:
         content_type = self._infer_content_type()
         if content_type and content_type != "application/octet-stream":
             create_payload["content_type"] = content_type
-        # DECLARE the sha256 (computed during the writes, `self._sha`). Without
-        # it the hub cannot presign into the final content-addressed key — it
-        # does not know where the bytes belong, so every save is staged, copied
-        # and deleted. Declaring it lets the hub mint a store-enforced PUT
-        # straight to the final key and drops five serialized object-store
-        # round trips (~1060 ms server-side per image) from /complete.
         create_payload["sha256"] = self._sha.hexdigest()
 
-        # Media upload: an upload addresses the CALLER'S OWN namespace, so the
-        # hub derives the org from the credential and the path never names one.
-        # The client cannot get the org wrong because it does not supply it —
-        # a dispatch-stamped ctx.owner slug could resolve to a different org
-        # than the capability grant's and 403.
         create_payload["ref"] = self._ref
         job_id = str(self._ctx._job_id or "").strip()
         if job_id:
@@ -444,9 +385,6 @@ class _RequestOutputStream:
             self._maybe_emit_progress(stage="stream_upload")
 
         def _phase_cb(phase: str, seconds: float) -> None:
-            # `upload` is one bracket around create -> PUT -> complete and it is
-            # ~99% of the finalize tail. Report the legs separately so any fix
-            # is aimed by measurement.
             record_phase_of(self._ctx, "upload", phase, seconds)
 
         result = presigned_upload_file(
@@ -463,12 +401,9 @@ class _RequestOutputStream:
             on_phase=_phase_cb,
         )
 
-        # Sample peak RSS to verify streaming keeps memory bounded. ru_maxrss is
-        # KiB on Linux, bytes on macOS. With per-file streaming this stays well
-        # under 1 GiB even for 5 GB shards.
         try:
             ru = resource.getrusage(resource.RUSAGE_SELF)
-            peak_kib = int(ru.ru_maxrss)  # Linux: KiB; macOS: bytes
+            peak_kib = int(ru.ru_maxrss)
             logger.debug(
                 "upload_stream peak_resident=%d_kib ref=%s file_size=%d",
                 peak_kib, self._ref, int(file_size),
@@ -479,7 +414,6 @@ class _RequestOutputStream:
         with self._progress_lock:
             self._bytes_uploaded = file_size
 
-        # Build return type from metadata.
         meta = dict(result.meta)
         size = int(meta.get("size_bytes") or file_size)
         sha = str(meta.get("sha256") or "").strip() or self._sha.hexdigest()

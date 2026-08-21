@@ -1,34 +1,4 @@
-"""Parent-side authorization for child-requested hub actions (pgw#763 delta 1).
-
-The worker JWT is the pod's signing identity: it authenticates the gRPC stream,
-mints per-job capability tokens, publishes compiled graphs, and authorizes the platform
-C2PA signing oracle. Before this it was handed to the compute child on every
-rotation (the deleted ``T_TOKEN`` frame) and read straight out of the child's
-environment — which is to say it was handed to tenant endpoint code, since that
-code is imported into the same process. th#1311's credential laundering had all
-the material it needed.
-
-The child now holds no credential at all. When it needs a hub call that requires
-worker identity, it ASKS: the parent decides whether to make the call, chooses
-the base URL, attaches the JWT, and returns only the response.
-
-Treat this table as the authorization surface it is:
-
-* **The child never names a host.** ``base_url`` is the parent's, taken from the
-  HelloAck it relayed. A child that could name the host could point the pod's
-  credential at an attacker's server (th#1312's base-URL item).
-* **The child never names a free-form path.** Every request must match one entry
-  below by method AND full-path regex.
-* **The child never names a header.** Authorization is the parent's to add.
-* **Query and body keys are enumerated per entry**, so an allowlisted path
-  cannot be used to smuggle a parameter the action was never meant to carry.
-* Semantic narrowing that needs parent state (is this request actually in
-  flight? is this capability token scoped to it?) lives in ``parent.py``, which
-  owns the in-flight table — see delta 4.
-
-Anything not in the table is refused and reported. A refusal is a security
-event, not a 404.
-"""
+"""Parent-side AUTHORIZATION for child-requested hub actions. The compute child holds no credential; when it needs an identity-bearing hub call it ASKS, and the parent decides, chooses the base URL, attaches the JWT and returns only the response. Treat this table as the authorization surface it is: the child never names a host; never a free-form path (every request must match an entry by method AND full-path regex); never a header (Authorization is the parent's to add); query and body keys are ENUMERATED per entry so an allowlisted path cannot smuggle a parameter. Anything not in the table is refused and reported — a refusal is a security event, not a 404."""
 
 from __future__ import annotations
 
@@ -51,10 +21,7 @@ class HubAction:
     path: re.Pattern
     query: frozenset
     body: frozenset
-    # Longest a parent will hold its own control loop for this call.
     timeout_s: float
-    # Actions that carry per-job authority get parent-side semantic checks in
-    # parent.py; flagged here so the dispatcher cannot forget to run them.
     scoped_to_job: bool = False
 
 
@@ -79,17 +46,11 @@ def _a(
     )
 
 
-# A repo segment: owner/name, both restricted. Deliberately no "%", no dots and
-# no slashes beyond the single separator — a path allowlist that admits ".." or
-# an encoded slash is not an allowlist.
 _REPO = r"[A-Za-z0-9._-]{1,64}/[A-Za-z0-9._-]{1,64}"
 
 ACTIONS: Dict[str, HubAction] = {
     a.name: a
     for a in (
-        # Per-job capability renewal (th#639). The parent additionally proves
-        # the (request_id, attempt) is one it actually dispatched and applies
-        # the delta-4 token policy to what comes back.
         _a(
             "capability.renew",
             "POST",
@@ -97,22 +58,12 @@ ACTIONS: Dict[str, HubAction] = {
             body=("request_id", "attempt", "capability_token"),
             scoped_to_job=True,
         ),
-        # th#1307: the platform signing oracle. The child sends claim bytes and
-        # receives a signature; the key is the hub's and the credential that
-        # authenticates the ask is the parent's. See delta 5.
         _a(
             "c2pa.sign",
             "POST",
             r"^/v1/worker/c2pa/sign$",
             body=("alg", "claim_b64"),
         ),
-        # pgw#709 compiled graph-receipt gate: fetch one receipt, fetch the revocation
-        # list. Read-only, and the gate fails closed without them.
-        # ``artifact_digest`` is ONE algorithm-tagged digest (pgw#1034 collapsed
-        # the multi-algorithm ceremony; the bare ``blake3`` key had already gone
-        # with the v1 publish protocol). The repeat handling below still accepts
-        # a list — it is parse-side input validation on an untrusted seam, not a
-        # promise to any particular caller.
         _a(
             "compiled_graphs.receipt",
             "GET",
@@ -124,24 +75,6 @@ ACTIONS: Dict[str, HubAction] = {
             "GET",
             r"^/v1/worker/compiled-graphs/revocations$",
         ),
-        # Self-mint publish (gw#587/th#910). publish-intent returns a
-        # key-pinned capability token — a short-TTL, least-authority grant, the
-        # one credential shape the child is explicitly allowed to hold.
-        # The body enumerations are the LIVE payloads `fleet_compiled_graphs.publish`
-        # sends, and nothing else. An unlisted key is an ActionRefused, not a
-        # silent drop — so a publisher that grows a field the table does not
-        # know refuses the whole publish under the split (the only execution
-        # model since pgw#783). `identity_axes`/`mint_duration_ms` (th#1355)
-        # were exactly that gap; `status`/`detail`/`axes` were names on
-        # `publish-complete` that no caller and no hub route ever had.
-        # pgw#1224 (th#1842 PR #1121): the intent is a BATCH. `entries[]`
-        # carries the per-artifact facts — `compiled_graph_key`, `identity_axes` (all
-        # three key axes restated, never hoisted), `mint_duration_ms` — and
-        # `axes` stays batch-level because all three of ITS members are
-        # properties of the POD, not of a compiled graph. The old top-level
-        # `compiled_graph_key`/`identity_axes`/`mint_duration_ms` are GONE: a table that
-        # still admitted them would let a client speak the dead shape past the
-        # one gate that can refuse it.
         _a(
             "compiled_graphs.publish_intent",
             "POST",
@@ -149,13 +82,6 @@ ACTIONS: Dict[str, HubAction] = {
             body=("family", "axes", "entries"),
             timeout_s=60.0,
         ),
-        # pgw#1090/th#1750 (§4.29), batched by pgw#1224 (th#1842 PR #1118):
-        # pull-by-key-SET. The body carries the family and the derived keys and
-        # NOTHING else — every entitlement input is resolved hub-side from the
-        # live session, and a body naming one is a named 400
-        # (`compiled_graph_resolve_client_supplied_field`), not an ignored field. So this
-        # enumeration is not a convention, it is the request: an action table
-        # that admitted one more key would make the whole resolve refuse.
         _a(
             "compiled_graphs.resolve",
             "POST",
@@ -163,33 +89,12 @@ ACTIONS: Dict[str, HubAction] = {
             body=("family", "keys"),
             timeout_s=30.0,
         ),
-        # th#2123 / pgw#1353 option (b): the compiled-graph KEY SET, pulled and
-        # pushed by its CLOSURE DIGEST. Two entries, and the path regex pins the
-        # address grammar — 32 lowercase hex, the same shape
-        # `keyset.identifiers.parse_closure_digest` admits and the same one the
-        # hub's own CHECK constraint enforces. A looser `[^/]+` would let a
-        # child put anything it liked in a path segment the parent signs for.
-        #
-        # WITHOUT THESE TWO ENTRIES THE TIER IS DEAD ON EVERY FLEET POD, and it
-        # is dead SILENTLY: the split's parent refuses any path not in this
-        # table, `keyset.hub` treats a refusal as a miss (correctly — it must
-        # never block a boot), and the pod derives for 805 s exactly as it did
-        # before while every unit test that patches `broker.request` stays
-        # green. That is pgw#1309's shape precisely, which is why
-        # `test_the_keyset_actions_are_allowlisted_pgw1353b` asserts the table
-        # rather than the client.
-        #
-        # GET carries no query and no body — the address is the whole request.
         _a(
             "keysets.fetch",
             "GET",
             r"^/v1/worker/keysets/[0-9a-f]{32}$",
             timeout_s=10.0,
         ),
-        # PUT carries the document, whose only top-level keys are the
-        # `cg-keyset-v1` envelope. Enumerated for the same reason the resolve
-        # body is: an action table that admitted one more key would let a child
-        # smuggle a field the hub's admission never agreed to read.
         _a(
             "keysets.publish",
             "PUT",
@@ -204,24 +109,6 @@ ACTIONS: Dict[str, HubAction] = {
             body=("family", "compiled_graph_key", "checkpoint_id", "ok", "error"),
             timeout_s=60.0,
         ),
-        # th#2133 / pgw#1372 — THE ADOPT ROUTE, the boot's one ask:
-        # `[release x lane x sm]` answered per graph, hit or miss. Without
-        # this entry the whole adopt-first boot is dead under the split (the
-        # only execution model since pgw#783) and dead SILENTLY, exactly as
-        # pgw#1353's keyset tier was: the parent refuses any unlisted path and
-        # the boot store treats the refusal as "no document", so every pod
-        # serves eager forever while nothing logs a defect.
-        #
-        # The path is the whole request except (lane, sm), so both are
-        # enumerated. `release_id` is the pod's OWN release either way — the
-        # hub refuses a credential adopting for a sibling release
-        # (`release_compiled_graphs_release_mismatch`) — but the grammar is
-        # pinned here too: identifiers, never a path.
-        #
-        # The ANSWER carries control only: per-graph digests, the mint's
-        # requirements manifest, and a PRESIGNED snapshot manifest. The .so
-        # bytes are fetched by the child directly off those URLs, so the seam
-        # stays inside its control-body ceiling on a 36-graph endpoint.
         _a(
             "release.compiled_graphs",
             "GET",
@@ -229,9 +116,6 @@ ACTIONS: Dict[str, HubAction] = {
             query=("lane", "sm"),
             timeout_s=30.0,
         ),
-        # compiled graph discovery: list a system repo's checkpoints, resolve one
-        # manifest. The manifest's artifact URL is PRESIGNED, so the bytes are
-        # fetched by the child directly — the seam carries control, not data.
         _a(
             "repo.checkpoints",
             "GET",
@@ -247,85 +131,36 @@ ACTIONS: Dict[str, HubAction] = {
     )
 }
 
-# Non-HTTP action: the child asks the parent to dial the hub with a typed
-# worker report (gw#640's HardwareUnsuitable carrier). The child cannot open
-# that gRPC stream itself any more — it has no credential — and it should not:
-# a HardwareUnsuitable claim is a FLEET-WIDE verdict key (th#1310), so it is
-# worth strictly more coming from the process that does not run tenant code.
 ACTION_REPORT_DETAIL = "report.detail"
 
-# Non-HTTP action: the child asks the parent WHO THIS POD IS (pgw#1122). The
-# parent decodes the two hub-stamped viewer claims (`graph_read_endpoint_id`,
-# `graph_read_org_id`) out of the credential it holds and returns THEM — never
-# the token. A claim is not a credential, so this widens nothing: the child
-# already learns its worker id and release id as plain env values at spawn, and
-# these two are the same shape of fact.
-#
-# It exists because the alternative was measured twice, on the same seam, one
-# gate apart: a process that holds no credential BY CONSTRUCTION cannot answer a
-# question about its own identity by reading one, and every gate that tried
-# refused on 100% of real serving pods while looking like a security decision
-# (pgw#1108, then pgw#1122). There is now ONE resolver — `gen_worker.
-# worker_identity` — and under the split it ends here.
 ACTION_VIEWER_IDENTITY = "identity.viewer"
 
 _MAX_STR = 8192
-# Repeats per query key. No action sends a repeated key today (pgw#1034 made
-# the receipt fetch's ``artifact_digest`` a scalar); this bounds the shape the
-# PARSER must accept from a process that runs tenant code, so it stays.
 _MAX_QUERY_REPEATS = 8
-# The seam's control-body cap. pgw#783's job-result seam accountant
-# (procsplit/seam.py) reuses THIS constant as its ceiling so the two halves of
-# "the seam carries CONTROL, not DATA" — the delta-1 action broker and the
-# fan-in relay — cannot drift apart.
 _MAX_JSON_BYTES = 256 * 1024
 CONTROL_BODY_CEILING_BYTES = _MAX_JSON_BYTES
 
 
-#: pgw#980: the two actions that WRITE a compiled graph into a shared family namespace.
-#: Every other action in the table reads, renews or reports.
 PUBLISH_ACTIONS = frozenset({"compiled_graphs.publish_intent", "compiled_graphs.publish_complete"})
 
-#: pgw#980: the env that marks a pod a LIVE-EDIT PROBE. A probe runs code that
-#: was rsync'd onto it — code that is, by construction, not any released
-#: version and not any built image. Its mints are therefore stamped with a
-#: `gen_worker` version that lies (the dist-info does not move with the source)
-#: and a `code_closure` axis no other pod can reproduce. A probe publishing into
-#: the shared family namespace poisons every pod that later adopts from it.
 _PROBE_ENV = "GEN_WORKER_PROBE"
 
-#: And the deliberate, explicit arming. Two names rather than one truthy flag:
-#: "this is a probe" and "this probe may write to the store" are different
-#: decisions, and the second must never be reachable by forgetting the first.
 _PROBE_PUBLISH_ARM_ENV = "GEN_WORKER_PROBE_PUBLISH_ARMED"
 
 
 def probe_pod() -> bool:
-    """Whether this pod is a live-edit probe (pgw#980)."""
     return str(os.environ.get(_PROBE_ENV, "")).strip().lower() in ("1", "true", "yes")
 
 
 def publish_disarmed() -> bool:
-    """Whether compiled graph publish is disarmed for this pod.
-
-    Read in the PARENT, which is the point. The compute child is where the
-    swapped code runs and where a tenant endpoint executes; the parent holds
-    the credential and owns this table, and nothing rsync'd into the child's
-    site-packages can reach either. Disarming here is structural — a probe
-    cannot publish by editing the code it is running.
-    """
+    """Whether compiled graph publish is disarmed for this pod."""
     return probe_pod() and (
         str(os.environ.get(_PROBE_PUBLISH_ARM_ENV, "")).strip().lower()
         not in ("1", "true", "yes"))
 
 
 def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[Dict[str, Any]]]:
-    """Validate one child action request against the table.
-
-    Returns ``(action, query, json_body)`` ready for the parent to execute, or
-    raises :class:`ActionRefused` naming exactly what was wrong. The caller adds
-    the base URL and the credential; neither is representable in ``req``.
-    """
+    """Validate one child action request against the table."""
     method = str(req.get("method") or "").upper()
     path = str(req.get("path") or "")
     if not method or not path:
@@ -345,9 +180,6 @@ def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[
             "hub calls)"
         )
     if match.name in PUBLISH_ACTIONS and publish_disarmed():
-        # Refused, not dropped: the parent counts, logs and dials every
-        # ActionRefused, so a probe whose operator MEANT to publish learns it
-        # from a named refusal rather than from a compiled graph that never appeared.
         raise ActionRefused(
             f"{match.name} is disarmed on this pod: {_PROBE_ENV} marks it a "
             f"live-edit probe running rsync'd code, whose compiled graphs carry a "
@@ -365,9 +197,6 @@ def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[
         if key not in match.query:
             raise ActionRefused(f"{match.name}: query parameter {key!r} is not permitted")
         if isinstance(value, (list, tuple)):
-            # A repeated query key (requests encodes a list as repeated
-            # params). Still an allowlisted key, still scalar items, still
-            # size-capped — a list is not a hole in the enumeration.
             items: List[str] = []
             for item in value:
                 text = "" if item is None else str(item)
@@ -403,10 +232,6 @@ def authorize(req: Dict[str, Any]) -> Tuple[HubAction, Dict[str, Any], Optional[
         except (TypeError, ValueError) as exc:
             raise ActionRefused(f"{match.name}: body is not JSON-encodable: {exc}") from exc
         if size > _MAX_JSON_BYTES:
-            # The seam carries CONTROL, not DATA. A body this size is either a
-            # bug or an attempt to route the data plane through the parent's
-            # single interpreter — the exact thing that would evaporate the
-            # multi-GPU win one layer up.
             raise ActionRefused(
                 f"{match.name}: body of {size} bytes exceeds the control-plane "
                 f"limit of {_MAX_JSON_BYTES}"

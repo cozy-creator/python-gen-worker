@@ -1,9 +1,4 @@
-"""The ONE payload/return schema rendering, shared by both manifest halves.
-
-A schema hash that differs between the v1 ``functions[]`` block and the v2
-``entrypoints[]`` block for the same struct would be a wire lie, so there is
-exactly one canonicalization and both call it.
-"""
+"""The ONE payload/return schema rendering, shared by both manifest halves."""
 
 from __future__ import annotations
 

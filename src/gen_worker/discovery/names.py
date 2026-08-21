@@ -7,17 +7,7 @@ _DUP_SLUG_SEPARATORS = re.compile(r"-{2,}")
 
 
 def slugify_name(raw: str) -> str:
-    """
-    Normalize an identifier to a URL/path-safe slug.
-
-    Rules:
-    - lowercase
-    - `_` -> `-`
-    - replace non [a-z0-9.] with `-`
-    - collapse repeated `-`
-    - trim leading/trailing `-` and `.`
-    - cap to 128 chars
-    """
+    """Normalize an identifier to a URL/path-safe slug."""
     raw = (raw or "").strip().lower().replace("_", "-")
     if not raw:
         return ""

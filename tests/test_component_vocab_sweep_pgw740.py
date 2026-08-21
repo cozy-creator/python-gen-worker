@@ -1,13 +1,3 @@
-"""pgw#740 B5/B6: one ``declare_components`` call reaches every consumer.
-
-B5 landed the vocabulary module; the 20+ copies of ``("transformer","unet",…)``
-across ``models/`` and ``convert/`` were repointed to it. These tests pin the
-OUTCOME the sweep bought: a declared component reaches every consumer, and it
-reaches consumers whose modules were imported BEFORE the declaration ran —
-the import-time-freeze hazard that dropped Wan's ``transformer_2`` and LTX's
-``connectors``.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -29,11 +19,7 @@ def _clean_vocabulary():
 
 
 def test_a_declared_component_reaches_every_swept_consumer() -> None:
-    """One declaration, every consumer — the point of the sweep.
-
-    LTX's ``connectors`` is the real case: it carries weights, so it must be
-    walked, sized, offloaded and quantized, and it is not a diffusers name.
-    """
+    """One declaration, every consumer — the point of the sweep."""
     from gen_worker.convert import size_walk, source
     from gen_worker.convert.layout_spec import LayoutSignals
     from gen_worker.models import memory
@@ -45,7 +31,6 @@ def test_a_declared_component_reaches_every_swept_consumer() -> None:
     assert component_vocabulary().role_of("connectors") == "auxiliary"
     assert "connectors" in weight_components()
     assert "connectors" in quant_candidate_components()
-    # ...and in each swept consumer's own derived view
     assert "connectors" in size_walk._diffusers_weight_component_dirs()
     assert "connectors" in source._weight_component_dirs()
     assert "connectors" in source._diffusers_component_dirs()
@@ -54,9 +39,7 @@ def test_a_declared_component_reaches_every_swept_consumer() -> None:
 
 
 def test_a_declaration_after_import_is_still_seen() -> None:
-    """The freeze hazard, directly. These modules are imported at the top of
-    this test session; the declaration happens now. A module-level tuple would
-    have snapshotted the vocabulary before this line and missed it."""
+    """The freeze hazard, directly."""
     from gen_worker.convert import size_walk
 
     before = size_walk._diffusers_weight_component_dirs()
@@ -68,8 +51,7 @@ def test_a_declaration_after_import_is_still_seen() -> None:
 
 
 def test_a_declared_component_is_sized_rather_than_counted_as_zero(tmp_path) -> None:
-    """End of the line for the bug: an undeclared component contributes zero
-    bytes to the size facts the orchestrator gates VRAM placement on."""
+    """End of the line for the bug: an undeclared component contributes zero bytes to the size facts the orchestrator gates VRAM placement on."""
     from gen_worker.convert.size_walk import compute_size_facts
 
     (tmp_path / "transformer").mkdir()
@@ -88,9 +70,7 @@ def test_a_declared_component_is_sized_rather_than_counted_as_zero(tmp_path) -> 
 
 
 def test_both_moe_experts_are_lora_branch_targets() -> None:
-    """gw#679's defect restated as a vocabulary test: a dual-expert pipeline
-    must offer BOTH experts as branch targets, or the low expert serves
-    undistilled weights on a distilled ladder."""
+    """gw#679's defect restated as a vocabulary test: a dual-expert pipeline must offer BOTH experts as branch targets, or the low expert serves undistilled weights on a distilled ladder."""
     from gen_worker.models.w8a8_lora import branch_targets
 
     class _Mod:
@@ -105,16 +85,7 @@ def test_both_moe_experts_are_lora_branch_targets() -> None:
 
 
 def test_block_window_offload_defaults_to_every_denoiser() -> None:
-    """``apply_block_window_offload``'s default was a literal
-    ``("transformer","unet")`` in the signature — a default argument, so even
-    repointing it would have frozen the vocabulary at def time.
-
-    pgw#1497 briefly deleted this function and this test with it, on the
-    evidence that nothing in `src/` called it. A PROD endpoint did
-    (`serverless-endpoints/ltx-video-2.3`), so both are back — and the
-    def-time hazard is back with them, which is why the assertion is restored
-    rather than replaced.
-    """
+    """``apply_block_window_offload``'s default was a literal ``("transformer","unet")`` in the signature — a default argument, so even repointing it would have frozen the vocabulary at def time."""
     import inspect
 
     from gen_worker.models.loading import apply_block_window_offload
@@ -124,9 +95,7 @@ def test_block_window_offload_defaults_to_every_denoiser() -> None:
 
 
 def test_the_rung_behind_it_reads_no_component_vocabulary_either() -> None:
-    """The implementation is now `StreamedResidency`, which takes no component
-    vocabulary at all — it discovers leaves from the tree it is handed — so the
-    def-time-frozen-default hazard cannot recur one layer down."""
+    """The implementation is now `StreamedResidency`, which takes no component vocabulary at all — it discovers leaves from the tree it is handed — so the def-time-frozen-default hazard cannot recur one l..."""
     import inspect
 
     from gen_worker.models.stream_residency import StreamedResidency

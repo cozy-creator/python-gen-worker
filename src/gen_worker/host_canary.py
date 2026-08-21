@@ -1,35 +1,4 @@
-"""Boot host canary: measure the host ONCE, report at registration.
-
-The GPU-pod host lottery lives entirely in the CPU-bound stages: identical
-per-step denoise times across every host sampled, while VAE-decode tails ranged
-26-147 s and mp4-encode 27-301 s on the SAME job. The hub's degraded-host watch
-only trips AFTER slow completions. This canary measures the three host
-properties those tails depend on — host memcpy bandwidth, pinned PCIe H2D/D2H
-bandwidth, raw CPU throughput — in a bounded ~1.5 s at boot, and ships them in
-``Hello.resources`` so a bad host is visible BEFORE it serves.
-
-A **2-GPU leg** follows the same principle. Sequence
-parallelism's whole latency case rests on the GPU-to-GPU fabric a delivered
-pod actually has, and the hub cannot infer it: the SKU says SXM, the pod
-says nothing about whether ITS two cards have peer access. The leg measures
-what the fabric really is (nvlink / pcie-p2p / host-staged) plus the achieved
-pairwise bandwidth, so the biggest unknown in the design becomes a fleet
-observable at every boot rather than a one-off probe.
-
-Two depths, one file:
-
-- :func:`measure_host_canary` runs the **cheap** leg — topology, peer access,
-  and a timed cross-device copy. Bounded, boot-safe, no subprocesses.
-- :func:`measure_peer_collective` runs the **deep** leg — a real NCCL
-  ``all_to_all_single`` on the production activation shape across N spawned
-  ranks. Never at boot (it costs seconds and forks); it is the seqpar-p0
-  probe, kept here so the cheap leg's classification can be validated
-  against ground truth on any multi-GPU pod we ever rent.
-  ``python -m gen_worker.host_canary`` runs both and prints JSON.
-
-No config knobs: sizes and repetitions are fixed; thresholds live hub-side,
-justified from the measured fleet distribution.
-"""
+"""Boot host canary: measure the host ONCE, report at registration."""
 
 from __future__ import annotations
 
@@ -49,62 +18,32 @@ from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
-# Fixed measurement geometry (bounded: ~6 memcpy passes over 256 MiB, 3 PCIe
-# round-trips of 256 MiB, and <=0.6 s of hashing).
 _BUF_BYTES = 256 << 20
 _MEMCPY_REPS = 3
 _PCIE_REPS = 3
 _CPU_SLICE_S = 0.25
 _HASH_BLOCK = 1 << 20
-# 2-GPU leg: same 256 MiB buffer, 3 timed peer copies.
 _PEER_REPS = 3
 
-# Measured interconnect classes, worst to best.
-INTERCONNECT_NONE = ""            # single GPU / not measurable
+INTERCONNECT_NONE = ""
 INTERCONNECT_HOST_STAGED = "host-staged"
 INTERCONNECT_PCIE_P2P = "pcie-p2p"
 INTERCONNECT_NVLINK = "nvlink"
 
-# SP_MIN_PEER_GBPS is the measured-bandwidth floor a pod must clear
-# to carry a platform-sharded group, IN ADDITION to classifying ``nvlink`` —
-# the hub's ``topology.SPMinPeerGbps`` (tensorhub topology/interconnect.go),
-# verbatim. Class alone is a string a degraded NV4 host also prints. The
-# 2026-07-29 fleet survey found the populations separated by an empty band
-# under EITHER leg a canary might report into ``peer_gbps``:
-#
-#   achieved all-to-all    NVLink 241.9 - 273.9  |  everything else <= 30.2
-#   device-to-device copy  NVLink 388.2 - 389.8  |  everything else <= 52.9
-#
-# 200 GB/s sits inside both gaps. Hub and worker gate INDEPENDENTLY on the same
-# measurement with the same two-term predicate — they agree only while the
-# predicates match, so the constants must move together — and there is
-# deliberately no HelloAck demote field.
+# SP_MIN_PEER_GBPS is the measured-bandwidth floor a pod must clear to carry a platform-sharded group, IN ADDITION to classifying nvlink — tensorhub's topology.SPMinPeerGbps verbatim. Hub and worker gate independently on the same measurement with the same two-term predicate, so the constants must move together; there is deliberately no HelloAck demote field.
 SP_MIN_PEER_GBPS = 200.0
 
 
 def sp_admits(interconnect: str, peer_gbps: float) -> bool:
-    """Whether this pod's MEASURED fabric may carry a platform-sharded group.
-
-    Both terms required: the class must be ``nvlink`` AND the bandwidth must
-    clear ``SP_MIN_PEER_GBPS``. Unknown/unmeasured admits nothing — the fast
-    tier's promise is only kept when the pod proved it.
-    """
+    """Whether this pod's MEASURED fabric may carry a platform-sharded group."""
     return interconnect == INTERCONNECT_NVLINK and peer_gbps >= SP_MIN_PEER_GBPS
 
 
 def is_fabric_wedge(peer_access: bool, peer_gbps: float) -> bool:
-    """An NCCL WEDGE, not a slow host: peer access reported, bandwidth measured
-    exactly zero. The collective then HANGS — no exception, no timeout, no log —
-    and a pod serving in that state strands every request routed to it. Zero
-    WITHOUT peer access is just "not measured" (a 1-GPU pod), no verdict. Mirrors
-    the hub's ``topology.IsFabricWedge``.
-    """
+    """An NCCL WEDGE, not a slow host: peer access reported, bandwidth measured exactly zero."""
     return peer_access and peer_gbps == 0.0
 
-# The wan-2.2 A14B production activation shape one Ulysses all-to-all moves:
-# [batch, heads, tokens, head_dim] bf16 = 387 MB.
 PRODUCTION_ACTIVATION_SHAPE: Tuple[int, ...] = (1, 40, 37800, 128)
-# 4 all-to-alls per layer x 40 layers = one model call's worth of collectives.
 PRODUCTION_COLLECTIVES_PER_CALL = 160
 
 
@@ -121,22 +60,19 @@ class HostCanaryReport:
     vcpus: int = 0
     ram_total_gb: float = 0.0
     duration_ms: int = 0
-    # 2-GPU leg. All inert on a 1-GPU pod: gpu_count<=1 leaves
-    # interconnect "" and peer_gbps 0, which the hub reads as "not measured".
     gpu_count: int = 0
     interconnect: str = INTERCONNECT_NONE
     peer_gbps: float = 0.0
     peer_access: bool = False
-    topo_link: str = ""  # raw nvidia-smi code for the first pair (NV18/PIX/SYS/...)
+    topo_link: str = ""
 
 
 def _measure_memcpy_gbps() -> float:
-    """Host-RAM copy bandwidth over a buffer far larger than LLC."""
     import numpy as np
 
     src = np.ones(_BUF_BYTES, dtype=np.uint8)
     dst = np.empty_like(src)
-    np.copyto(dst, src)  # warm faults
+    np.copyto(dst, src)
     t0 = time.perf_counter()
     for _ in range(_MEMCPY_REPS):
         np.copyto(dst, src)
@@ -145,11 +81,6 @@ def _measure_memcpy_gbps() -> float:
 
 
 def _measure_cpu_mbps(workers: int) -> float:
-    """Aggregate sha256 throughput (MB/s) across ``workers`` threads.
-
-    sha256 releases the GIL and stresses the ALU + memory system — a stable
-    proxy for the x264/VAE-postprocess CPU work the encode tail is made of.
-    """
 
     block = b"\xa5" * _HASH_BLOCK
 
@@ -175,8 +106,6 @@ def _measure_cpu_mbps(workers: int) -> float:
 
 
 def _measure_pcie() -> tuple[float, float, bool]:
-    """Pinned H2D/D2H bandwidth (GB/s) — the exact transfer the media staging
-    path uses. Returns (h2d, d2h, pinned_alloc_ok); zeros sans CUDA."""
     try:
         import torch
 
@@ -195,7 +124,7 @@ def _measure_pcie() -> tuple[float, float, bool]:
         dev = torch.empty(_BUF_BYTES, dtype=torch.uint8, device="cuda")
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
-            dev.copy_(host, non_blocking=True)  # warm
+            dev.copy_(host, non_blocking=True)
         stream.synchronize()
 
         def bw(direction: str) -> float:
@@ -221,19 +150,8 @@ def _measure_pcie() -> tuple[float, float, bool]:
         return 0.0, 0.0, pinned_ok
 
 
-# ---------------------------------------------------------------------------
-# The 2-GPU leg: what fabric does THIS pod actually have?
-# ---------------------------------------------------------------------------
-
-
 def parse_nvidia_smi_topo(text: str, a: int, b: int) -> str:
-    """The raw link code ``nvidia-smi topo -m`` reports for the (a, b) pair.
-
-    The matrix is a header row of GPU columns followed by one row per GPU;
-    trailing columns (CPU/NUMA affinity) are not GPU columns and are skipped
-    by indexing off the header's GPU labels rather than off the row end.
-    Returns "" when the pair is not in the matrix.
-    """
+    """The raw link code ``nvidia-smi topo -m`` reports for the (a, b) pair."""
     header: Optional[List[str]] = None
     for raw in text.splitlines():
         graphs = raw.split()
@@ -249,8 +167,6 @@ def parse_nvidia_smi_topo(text: str, a: int, b: int) -> str:
             col = header.index(f"GPU{b}")
         except ValueError:
             return ""
-        # Row compiled graphs after the row label line up with the header columns, but
-        # "X" on the diagonal is printed as a bare token like every other.
         values = graphs[1:]
         if col < len(values):
             return values[col].strip()
@@ -275,31 +191,7 @@ def _nvidia_smi_topo_link(a: int, b: int) -> str:
 
 
 def classify_interconnect(topo_link: str, peer_access: bool) -> str:
-    """Map (topology code, peer-access capability) onto the fabric class the
-    latency model cares about. These are PERFORMANCE classes, not mechanisms:
-    each names a row of the projected-wall table, and all three were measured on
-    real RunPod pods.
-
-    ``nvidia-smi`` reports NV# for an NVLink pair; PIX/PXB/PHB/NODE/SYS are
-    PCIe paths of decreasing quality.
-
-    Two rules, both measured rather than assumed:
-
-    - **Peer access overrules good-looking wiring.** Without it every transfer
-      is staged through host RAM however adjacent the cards look. Two RTX 4090s
-      reporting ``NODE`` and ``peer_access=False`` achieved **1.96 GB/s** on an
-      all-to-all — and the identical number with ``NCCL_P2P_DISABLE=1``, which
-      is the proof NCCL was already host-staging.
-    - **``SYS`` overrules peer access.** A cross-socket pair traverses the CPU
-      interconnect, and the P2P flag then buys nothing: two H100 PCIe cards
-      reporting ``SYS`` and ``peer_access=True`` achieved **14.5 GB/s**, again
-      bit-identical with P2P disabled. That is the host-staged row of the
-      table (assumed 15 GB/s), not the PCIe-P2P row (assumed 40). Calling it
-      ``pcie-p2p`` would overstate the achievable wall by 2.8x.
-
-    The raw code always rides alongside in ``topo_link``, so a consumer that
-    wants the mechanism rather than the class still has it.
-    """
+    """Map (topology code, peer-access capability) onto the fabric class the latency model cares about."""
     link = (topo_link or "").strip().upper()
     if not peer_access:
         return INTERCONNECT_HOST_STAGED
@@ -311,11 +203,6 @@ def classify_interconnect(topo_link: str, peer_access: bool) -> str:
 
 
 def _measure_peer(devices: Tuple[int, int] = (0, 1)) -> Tuple[str, float, bool, str]:
-    """Cheap boot leg: (interconnect, peer_gbps, peer_access, topo_link).
-
-    ``peer_gbps`` is a timed device-to-device copy of the same 256 MiB buffer
-    the other legs use — the raw fabric throughput NCCL's collectives ride.
-    """
     a, b = int(devices[0]), int(devices[1])
     try:
         import torch
@@ -339,7 +226,7 @@ def _measure_peer(devices: Tuple[int, int] = (0, 1)) -> Tuple[str, float, bool, 
         dst = torch.empty(_BUF_BYTES, dtype=torch.uint8, device=f"cuda:{b}")
         stream = torch.cuda.Stream(device=a)
         with torch.cuda.stream(stream):
-            dst.copy_(src, non_blocking=True)  # warm (may allocate peer mappings)
+            dst.copy_(src, non_blocking=True)
         stream.synchronize()
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -363,9 +250,6 @@ def measure_host_canary() -> HostCanaryReport:
     """Run every axis once; failures zero their axis instead of raising."""
     t0 = time.perf_counter()
     memcpy = single = multi = 0.0
-    # NOT os.cpu_count(): it reports the HOST's cores — 32 on a pod that owns 4 —
-    # which next to a cgroup-derived ram_total_gb reads as "32 vCPUs / 14.9 GB".
-    # Report what this container may use, and benchmark with that many threads.
     vcpus = effective_cpu_count()
     try:
         memcpy = _measure_memcpy_gbps()
@@ -435,16 +319,9 @@ def get_host_canary() -> HostCanaryReport:
     return _cached
 
 
-# ---------------------------------------------------------------------------
-# The deep leg — the seqpar-p0 probe, kept next to the canary it validates.
-# NEVER runs at boot: it forks ranks and costs seconds.
-# ---------------------------------------------------------------------------
-
-
 def _collective_rank_main(
     rank: int, world_size: int, shape: Tuple[int, ...], iters: int, out_dir: str,
 ) -> None:
-    """One NCCL rank: init, time ``all_to_all_single``, write its JSON."""
     import torch
     import torch.distributed as dist
 
@@ -452,8 +329,6 @@ def _collective_rank_main(
     try:
         torch.cuda.set_device(rank)
         dist.init_process_group("nccl", rank=rank, world_size=world_size)
-        # all_to_all_single splits along dim 0, so the production activation
-        # is viewed as [world_size, -1]: identical byte volume, divisible.
         numel = 1
         for d in shape:
             numel *= int(d)
@@ -473,10 +348,8 @@ def _collective_rank_main(
             torch.cuda.synchronize()
             return float(start.elapsed_time(end)) / n
 
-        timed(3)  # warm
+        timed(3)
         ms = timed(iters)
-        # Bytes that actually cross the fabric per rank per call: every chunk
-        # but this rank's own.
         over_link = tensor_bytes * (world_size - 1) / world_size
         result.update(
             ok=True,
@@ -512,13 +385,7 @@ def measure_peer_collective(
     p2p_disable: bool = False,
     port: int = 29577,
 ) -> Dict[str, Any]:
-    """Ground truth for the cheap leg: a real NCCL ``all_to_all_single`` on
-    the production activation shape, across ``world_size`` spawned ranks.
-
-    ``p2p_disable=True`` sets ``NCCL_P2P_DISABLE=1`` for the spawned ranks,
-    which bounds the host-staged floor — NCCL reads it at init, so it can
-    only be varied across process groups, never within one.
-    """
+    """Ground truth for the cheap leg: a real NCCL ``all_to_all_single`` on the production activation shape, across ``world_size`` spawned ranks."""
 
     import torch
     import torch.multiprocessing as mp
@@ -566,8 +433,6 @@ def measure_peer_collective(
 
 
 def _main() -> None:  # pragma: no cover - operator entry point
-    """``python -m gen_worker.host_canary`` — the boot leg plus, on a
-    multi-GPU host, both collective arms. Prints one JSON object."""
     logging.basicConfig(level=logging.INFO)
     report = measure_host_canary()
     out: Dict[str, Any] = {"canary": asdict(report)}

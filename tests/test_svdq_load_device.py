@@ -1,16 +1,3 @@
-"""te#150 svdq load path: decode-on-device plumbing.
-
-The 13 GB qwen fp4_r128 artifact decoded in 223 s on CPU (5090 bench,
-2026-08-02) because every fragment unpack/repack ran single-threaded on host;
-nunchaku loads the same bytes in ~8 s because its kernels consume the on-disk
-layout verbatim. Ours cannot (torch._scaled_mm wants blocked scales + plain
-packed nibbles), so the transforms now run ON the target device.
-
-This proves the plumbing changes NOTHING about the decoded bytes: the cpu
-path is bit-identical to a direct decode_linear/decode_awq_linear (the
-historical loader body). The ``_Art``/``_write_multiunit`` builders are shared
-with the pgw#1330 projected-tree suites.
-"""
 from __future__ import annotations
 
 import json
@@ -94,8 +81,6 @@ class _Art:
 
 def _write_multiunit(tmp_path, *, dim_heads: int = 4, head_dim: int = 32,
                      layers: int = 1, rank: int = 128, name: str = "multi"):
-    """A tiny-qwen single file with THREE unit kinds: a fused W4A4 to_qkv,
-    a plain W4A4 to_out.0, and an AWQ img_mod.1 — everything else verbatim."""
     from safetensors.torch import save_file
 
     model = _tiny_qwen(dim_heads, head_dim, layers)
@@ -160,9 +145,7 @@ def _bit_equal(a: Any, b: Any) -> bool:
 
 
 def test_cpu_load_bytes_match_direct_decode(tmp_path) -> None:
-    """The loader's device plumbing changes nothing: every SvdqLinear buffer
-    equals a direct convert_linear of the same entry, and the AWQ modulation
-    Linear equals a direct decode_awq_linear — bit for bit."""
+    """The loader's device plumbing changes nothing: every SvdqLinear buffer equals a direct convert_linear of the same entry, and the AWQ modulation Linear equals a direct decode_awq_linear — bit for bit."""
     path, state, dim = _write_multiunit(tmp_path)
     model = native.load_svdq_native_denoiser(
         _Art(path), mode="blockwise", device="cpu")

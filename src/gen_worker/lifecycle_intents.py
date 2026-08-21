@@ -13,33 +13,9 @@ from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .pb import worker_scheduler_pb2 as pb
 
-# Retention bounds on hub-driven maps in a long-lived worker process: the hub
-# opens intents and the worker answers with receipts, and neither side ever
-# says "you may forget this one". Without a bound the registry leaks at a rate
-# set by hub traffic. Trimmed oldest-first, so what is dropped is what no
-# reconnect projection will be asked about.
 _MAX_INTENTS = 128
 _MAX_RECEIPTS = 32
-#: How long a caller waits for an intent's first report before proceeding
-#: without one. Not a kill: nothing is cancelled, the caller just stops
-#: blocking on a report that is a courtesy.
 _UNREPORTED_WAIT_TIMEOUT_S = 2.0
-# Fallback deadline for a WAITING state with no blocker and no retry time.
-# Mirrors the hub's shadow first-action budget (60s). NOT a kill: it ends
-# nothing on this side. `deadline_at_unix_ms` is a required wire field (the
-# hub's shadow validator rejects a WAITING state carrying none of
-# blocker/retry/deadline), so this fills a protocol hole and the hub owns what
-# it decides at expiry. Changing it is a protocol change, not a tuning.
-#
-# pgw#1336 RE-READ IT AGAINST th#2052's `RunJob.phase_budget_s` and KEPT IT:
-# they answer different questions and are not two spellings of one number.
-# This one fills a REQUIRED FIELD on a WAITING report — every WAITING intent
-# needs one of blocker/retry/deadline or the hub's shadow validator rejects
-# the frame, whoever authored the intent. `phase_budget_s` is the operator's
-# POSITION-ADVANCE budget for one job's body (`jobs.ProgressWatch`), applies
-# only to a job, and kills nothing here either. Deleting this with the RunJob
-# compat minter would have made every blockerless WAITING report invalid,
-# including hub-authored ones.
 _WAITING_DEADLINE_FALLBACK_MS = 60_000
 _ACTIVE_INTENT_STATES = {
     pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,
@@ -78,7 +54,6 @@ def _clone(message: Any) -> Any:
 
 
 def _command_digest(command: "pb.DesiredStateCommand") -> bytes:
-    """Stable across transport resend timestamps for the same desired goal."""
     semantic = _clone(command)
     semantic.issued_at_unix_ms = 0
     semantic.accept_by_unix_ms = 0
@@ -119,10 +94,6 @@ class IntentRegistry:
         on_change: Optional[Callable[[], None]] = None,
         unreported_wait_timeout_s: float = _UNREPORTED_WAIT_TIMEOUT_S,
     ) -> None:
-        # Under the process split the PARENT mints the session id once and
-        # passes it down (GEN_WORKER_SESSION_ID) so it survives child respawns;
-        # a child-minted id changes on every respawn and the hub rejects the
-        # cross-session shadow state. Absent the env (no split), a fresh uuid.
         self.worker_session_id = (
             os.environ.get("GEN_WORKER_SESSION_ID", "").strip() or uuid.uuid4().hex
         )
@@ -138,12 +109,6 @@ class IntentRegistry:
         self._last_receipt: Optional[pb.GoalReceipt] = None
         self._command_receipts: "OrderedDict[tuple[int, bytes], pb.GoalReceipt]" = OrderedDict()
         self._target_config_generation = 0
-        # Two distinct facts, not one number. ``_boot_config_injected`` False
-        # means no boot-only environment exists for this process to be stale
-        # against (a host-process/BYO worker: tensorhub injects
-        # WORKER_CONFIG_GENERATION only into pod-launch env), so the boot class
-        # is NOT APPLICABLE and converges. A pod-launched worker with a
-        # genuinely old stamp still reports BOOT_STALE so the hub replaces it.
         self._boot_config_injected = int(boot_config_generation) >= 0
         self._boot_config_generation = max(0, int(boot_config_generation))
         self._intents: "OrderedDict[str, pb.IntentState]" = OrderedDict()
@@ -229,12 +194,7 @@ class IntentRegistry:
         *,
         current_config_generation: int = 0,
     ) -> "pb.GoalReceipt":
-        """Validate, register, and acknowledge a desired-state command.
-
-        A byte-equivalent resend at the same sequence returns the original
-        receipt. Unknown or malformed mandatory work sets ``protocol_rejected``
-        so Lifecycle can stop legacy fallback and advertise ERROR.
-        """
+        """Validate, register, and acknowledge a desired-state command."""
         digest = _command_digest(command)
         cached = self._command_receipts.get((int(command.command_seq), digest))
         if cached is not None:
@@ -407,12 +367,6 @@ class IntentRegistry:
                     )
                 )
 
-        # The hub declares fail-closed scope PER INTENT. Errors on mandatory
-        # work reject the command and latch; a command-level error rejects and
-        # latches only when it abandons mandatory work not already registered
-        # under the same identity; errors scoped to advisory intents decline
-        # exactly those intents and accept the rest, so a bad preposition or
-        # binding cannot brick the process.
         declined: dict[str, tuple["pb.LifecycleErrorCode", str]] = {}
         if command_errors:
             intents_by_id = {
@@ -455,12 +409,6 @@ class IntentRegistry:
         ]
         incoming_ids = {str(intent.intent_id) for intent in accepted_intents}
         for intent_id, state in self._intents.items():
-            # A command is a full replacement of COMMAND-OWNED work only.
-            # Worker-local compat obligations (job/setup/materialize carriers,
-            # never present in any hub command) must survive a generation bump:
-            # superseding them terminalizes a LIVE job's intent mid-flight, so
-            # its next legal transition raises. Command-born intents are exactly
-            # the ids in _intent_digests.
             if intent_id not in self._intent_digests:
                 continue
             if intent_id not in incoming_ids and int(state.status) in _ACTIVE_INTENT_STATES:
@@ -607,18 +555,7 @@ class IntentRegistry:
         function_name: str = "",
         ref: str = "",
     ) -> str:
-        """Find command-owned work or create a compatibility intent.
-
-        Never returns "" when a command is registered but the matching intent
-        is terminal or absent: re-verifying converged command work is
-        legitimate and needs a REPORTABLE carrier, so this mints the same
-        worker-local compat intent the no-command path uses. Without one, the
-        reconcile re-pass's first await (``wait_idle``, which blocks for the
-        whole duration of any in-flight tenant job) trips the unreported-wait
-        timeout and drives a healthy worker to WORKER_PHASE_ERROR.
-        ``guard_await``'s fail-closed remains for waits that genuinely carry
-        no intent id.
-        """
+        """Find command-owned work or create a compatibility intent."""
         intent_id = self.intent_id(kind, function_name=function_name, ref=ref)
         if intent_id:
             return intent_id
@@ -665,22 +602,7 @@ class IntentRegistry:
         function_name: str = "",
         detail: str = "",
     ) -> str:
-        """Create a bounded worker-local compatibility obligation.
-
-        These intents cover operations protocol v5 does not carry an intent
-        for: ``setup`` / ``materialize`` and their single-flight waiters (the
-        hub opens FUNCTION_READY / MATERIALIZE intents when it commands the
-        work, and none at all when the worker reaches it on its own), plus a
-        SERVED REQUEST, which has no intent kind on this protocol by design —
-        a request is what an intent gets BLOCKED on (``IntentState
-        .blocker_request``), never an intent itself.
-
-        **A JOB is NOT one of them** (pgw#1336 / th#2052): a job dispatch arrives
-        owning a hub-authored carrier and goes through :meth:`adopt_dispatch_intent`.
-
-        Their IDs are deterministic for one operation identity, but they never
-        impersonate a hub-authored DesiredIntent.
-        """
+        """Create a bounded worker-local compatibility obligation."""
         raw = f"{scope}\0{identity}\0{function_name}".encode()
         base_intent_id = f"compat-{scope}-{hashlib.sha256(raw).hexdigest()[:24]}"
         intent_id = base_intent_id
@@ -718,31 +640,7 @@ class IntentRegistry:
         *,
         detail: str = "",
     ) -> str:
-        """Register the HUB-AUTHORED lifecycle carrier a dispatch names.
-
-        th#2052 put ``intent_kind`` / ``intent_id`` / ``goal_id`` on ``RunJob``,
-        so a job dispatch now arrives owning its carrier and the worker reports
-        against THAT id instead of minting a worker-local ``compat-*`` one.
-        That minting is what pgw#1307 arm (8) could not delete, and the reason
-        it could not was this exact absence.
-
-        **The id is never renamed.** The compat minter appended a ``-N`` suffix
-        when it found a terminal state under the id it wanted, because the id
-        was its own to choose. This one is the hub's: a redelivery naming an id
-        the registry already holds terminal is the hub saying "this obligation
-        again", so the entry is REPLACED under the same id rather than reported
-        under a second one the hub has never heard of. An id it holds ACTIVE is
-        the same live obligation and is returned untouched.
-
-        Deliberately NOT written into ``_desired_intents``/``_intent_digests``:
-        those are the command-born set, rebuilt wholesale by every
-        ``apply_command`` and superseded on a generation bump. An in-flight
-        job's carrier must survive both. For the same reason
-        ``DESIRED_INTENT_KIND_RUN_JOB`` is deliberately absent from
-        ``_SUPPORTED_INTENT_KINDS``: the hub stamps it on the DISPATCH, never
-        opens it as a DesiredIntent in a command, so accepting one there would
-        be claiming support for a shape the hub does not send.
-        """
+        """Register the HUB-AUTHORED lifecycle carrier a dispatch names."""
         intent_id = str(intent_id or "").strip()
         if not intent_id:
             raise ValueError(
@@ -821,11 +719,6 @@ class IntentRegistry:
             state.ClearField("blocker_request")
         else:
             state.blocker_request.CopyFrom(blocker_request)
-        # A WAITING state MUST carry a blocker, a retry time, or a deadline —
-        # the hub's shadow validator requires one of the three, and an intent
-        # minted outside a DesiredStateCommand (a compat carrier, or th#2052's
-        # adopted dispatch carrier) has none of its own. Guaranteed at this
-        # single choke point rather than at each call site.
         if int(status) == pb.LIFECYCLE_INTENT_STATUS_WAITING:
             blocked = bool(state.blocker_intent_id) or bool(
                 state.blocker_request.request_id
@@ -904,22 +797,7 @@ class IntentRegistry:
         *,
         operation: str,
     ) -> _T:
-        """Assert that a long protocol-owned await already has typed state.
-
-        An already-reported wait is awaited DIRECTLY, in the caller's own task,
-        never wrapped in ``ensure_future``: a wrapper opens a window where the
-        inner task completes, the caller is cancelled before it resumes, and
-        asyncio discards the result. When that result is an ACQUISITION the
-        resource is then held by nobody for the life of the process. Awaited
-        inline, ``Lock.acquire``/``Semaphore.acquire`` handle their own
-        cancel-after-grant and the leak is structurally impossible.
-
-        An UNREPORTED wait still needs its own task, because the fail-closed
-        timer must fire while the awaitable is still running. There the inner
-        task is cancelled explicitly on every exit path — ``asyncio.wait`` does
-        not cancel what it was given, so a cancellation arriving mid-window
-        would otherwise orphan it.
-        """
+        """Assert that a long protocol-owned await already has typed state. An already-reported wait is awaited DIRECTLY in the caller's task, never wrapped in ensure_future: a wrapper opens a window where the inner task completes, the caller is cancelled before resuming, and asyncio discards the result — for an acquisition the resource is then held by nobody forever. An unreported wait still gets its own task (the fail-closed timer must fire while it runs), with the inner task cancelled explicitly on every exit path."""
         if self._reported(intent_id):
             return await awaitable
         task = asyncio.ensure_future(awaitable)
@@ -1045,13 +923,6 @@ class IntentRegistry:
         current.target_generation = gen
         current.received_generation = gen
         if initial:
-            # Only the pod-launch stamp proves which boot-only environment this
-            # process received; the first command proves receipt, not boot
-            # convergence. Unless there IS no boot-only environment: a process
-            # never pod-launched received no WORKER_CONFIG_GENERATION, so
-            # "stale boot config" is vacuous and the only advertised remedy
-            # (pod replacement) does not exist. Converge the class instead of
-            # pending it forever against every target >= 1.
             current.boot_generation = (
                 min(gen, self._boot_config_generation)
                 if self._boot_config_injected
@@ -1196,8 +1067,6 @@ class IntentRegistry:
                 for target in executor.compile_targets()
                 for name in target.function_names
             }
-            # Per-function serving tier ("eager" | "compiled"), carried only on
-            # READY capabilities.
             tiers_fn = getattr(executor, "serving_tiers", None)
             tiers: dict[str, str] = tiers_fn() if callable(tiers_fn) else {}
             config_state = int(self._config_application.state)
@@ -1281,9 +1150,6 @@ class IntentRegistry:
         error_code: "pb.LifecycleErrorCode" = pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED,
     ) -> None:
         now = _now_ms()
-        # `ensure_intent` is TOTAL: it returns hub-authored work when there is
-        # any, and otherwise mints the `compat-` carrier. There is no third
-        # answer, so a drain projection never needs a fabricated goal id.
         intent_id = self.ensure_intent(pb.DESIRED_INTENT_KIND_DRAIN)
         state = self._intents[intent_id]
         transition_status = {

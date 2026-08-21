@@ -1,22 +1,4 @@
-"""Lane serve gate: promote-on-use for LRU-swappable pipelines.
-
-Multi-lane endpoints dispatch to a lane handler-side, so
-the executor cannot know pre-dispatch which lane a request will run. When the
-lanes overcommit VRAM, one sits demoted in host RAM — and nothing between
-"demoted" and "the handler calls the pipeline" would otherwise re-promote it,
-so the pipeline executes with its transformer on cpu and crashes mid-denoise
-(addmm / cuda-generator shapes).
-
-The gate closes that hole at the shared machinery level: each lane pipeline's
-``__call__`` is wrapped (dynamic subclass — object identity, isinstance and
-attributes all preserved) to first pin the lane and promote it if demoted,
-LRU-swapping the idle sibling out. Alternating t2i/edit traffic on one worker
-becomes swap-per-alternation: degraded-but-correct, logged loudly with timing.
-When VRAM truly cannot fit, the lane waits for as long as the card keeps
-returning memory (a silence window over free VRAM, never a wall budget), then
-raises the executor-injected retryable error. It never executes a cpu-resident
-lane.
-"""
+"""Lane serve gate: promote-on-use for LRU-swappable pipelines."""
 
 from __future__ import annotations
 
@@ -39,18 +21,8 @@ _GATED_FLAG = "_cozy_lane_gated"
 
 _GiB = 1024 ** 3
 
-# a SILENCE window over free VRAM, not a wall budget.
-# This loop polls `get_available_vram_gb()` four times a second, so free VRAM
-# IS the progress signal — a sibling demoting a large pipeline returns bytes in
-# visible steps, and the old flat 45 s deadline gave up on a card that was
-# still handing memory back. It gives up only when the card has stopped
-# MOVING for the window: a genuinely stuck card looks identical either way, and
-# a slow-but-working demote no longer fails a request that was about to serve.
 _HEADROOM_SILENCE_WINDOW_S = 45.0
 _POLL_S = 0.25
-# Free-VRAM quantum for "something moved" (64 MiB). Coarser than allocator
-# jitter and far finer than any component demote, so noise cannot keep the
-# window alive and a real demote cannot fail to register.
 _HEADROOM_STEP_GB = 1.0 / 16.0
 
 
@@ -59,9 +31,6 @@ def _cuda_available() -> bool:
 
 
 def _inference_mode_off() -> Any:
-    """Endpoints call pipelines under ``torch.inference_mode()``; tensors the
-    swap creates in that scope would be inference tensors (poisonous outside
-    it). Disable it around the promote."""
     try:
         import torch
 
@@ -90,17 +59,9 @@ class LaneResidencyGate:
         self.residency = residency
         self.label = label or ref
         self.retry_exc = retry_exc
-        #: The SILENCE window over free VRAM (see the module constant), not a
-        #: total wait. A card that keeps returning memory is never given up on.
         self.wait_s = wait_s
-        self.on_swap = on_swap  # (ref, promote_ms) — degraded-serve reporting
-        # When promote truly cannot fit: arm a coherent offload rung instead
-        # of failing (monolithic pipelines only — offload hooks on a shared
-        # component would poison sibling lanes).
+        self.on_swap = on_swap
         self.offload_fallback = offload_fallback
-        # Serializes swap decisions across threads for THIS lane; residency
-        # itself is thread-safe, but two callers promoting the same demoted
-        # lane should pay the wait once.
         self._lock = threading.Lock()
 
     @contextmanager
@@ -113,20 +74,16 @@ class LaneResidencyGate:
 
     def _promote_if_needed(self) -> None:
         if not _cuda_available():
-            return  # CPU-only host: everything already runs on cpu
+            return
         res = self.residency
         if not res.movable(self.ref):
-            # Offload-hooked pipelines own their placement; object-less refs
-            # have nothing to move.
             return
         obj = res.obj(self.ref)
         if obj is not None and _obj_offload_hooked(obj):
-            return  # block-window offload: hooks own placement
+            return
         with self._lock, _inference_mode_off():
             tier = res.tier(self.ref)
             if tier is Tier.VRAM:
-                # Paranoid completeness walk (metadata-only when clean): a
-                # crashed rollback must not serve a mixed-device pipeline.
                 if res.promote(self.ref) or res.tier(self.ref) is not Tier.RAM:
                     return
                 tier = Tier.RAM
@@ -163,8 +120,6 @@ class LaneResidencyGate:
                             "%.1f GiB); serving CPU-offloaded",
                             self.label, get_available_vram_gb(),
                         )
-                        # a serve-time quality decision — this lane
-                        # now runs CPU-offloaded; countable on the wire.
                         activity_mod.emit_event(
                             activity_mod.KIND_SERVE_DEGRADE,
                             f"ref={self.ref} label={self.label} "
@@ -188,18 +143,13 @@ class LaneResidencyGate:
 
 
 def arm_lane_residency_gate(pipe: Any, gate: LaneResidencyGate) -> bool:
-    """Wrap ``pipe.__call__`` with the gate. Idempotent: an already-gated
-    pipeline just gets the fresh gate. Object identity and isinstance are
-    preserved (dynamic subclass with the same class name)."""
+    """Wrap ``pipe.__call__`` with the gate."""
     if pipe is None:
         return False
     if getattr(type(pipe), _GATED_FLAG, False):
         object.__setattr__(pipe, _GATE_ATTR, gate)
         return True
     cls = type(pipe)
-    # Only wrap classes that define an INSTANCE ``__call__`` somewhere in the
-    # MRO — plain ``getattr(cls, "__call__")`` on a call-less class resolves
-    # to the metaclass constructor, which must never be captured.
     if not any("__call__" in vars(k) for k in cls.__mro__):
         return False
     base_call = cls.__call__
@@ -224,9 +174,6 @@ def arm_lane_residency_gate(pipe: Any, gate: LaneResidencyGate) -> bool:
             "lane gate could not wrap %s (%s: %s); lane relies on eager "
             "promotion only", cls.__name__, type(exc).__name__, exc,
         )
-        # The crash class (a demoted lane executing on cpu mid-denoise) is
-        # only prevented by this wrap, so its silent absence is a serving
-        # hazard the hub should see.
         activity_mod.emit_event(
             activity_mod.KIND_SERVE_DEGRADE,
             f"ref={gate.ref} label={gate.label} cls={cls.__name__}: lane "

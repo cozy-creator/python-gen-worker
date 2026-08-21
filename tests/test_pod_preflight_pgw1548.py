@@ -1,12 +1,3 @@
-"""pgw#1548: the pod preflight refuses a tree that does not satisfy the lane.
-
-This check is the thing standing between a rental and the most expensive
-possible way to learn nothing: a tree whose containers are fp16 under a lane
-whose graphs key bf16 serves EAGER on every request, so an A/B measures eager
-in both arms and reports a beautiful 0% delta. Every arm below is a shape that
-has actually cost this workspace something.
-"""
-
 from __future__ import annotations
 
 import importlib.util
@@ -17,11 +8,6 @@ from pathlib import Path
 
 import pytest
 
-# `pythonpath` is ["src", "tests"], so `benchmarks/` is not importable by name.
-# Loading it by PATH keeps the harness where it belongs (beside the other
-# benchmarks) while still putting its refusals under CI — the alternative is a
-# check that only ever runs when someone remembers to run it, which for a gate
-# standing in front of a rental is no gate at all.
 _MODULE = Path(__file__).resolve().parents[1] / "benchmarks" / "pgw1548_pod_preflight.py"
 _spec = importlib.util.spec_from_file_location("pgw1548_pod_preflight", _MODULE)
 assert _spec and _spec.loader
@@ -37,7 +23,6 @@ survey = preflight.survey
 
 
 def _tree(root: Path, components: dict[str, tuple[str, list[str]]]) -> Path:
-    """A config-free tree of real safetensors HEADERS (no weight bytes)."""
 
     for component, (dtype, keys) in components.items():
         directory = root / component
@@ -69,7 +54,6 @@ def test_a_conforming_tree_passes(tmp_path: Path) -> None:
 
 
 def test_an_fp16_tree_under_a_bf16_lane_is_REFUSED(tmp_path: Path) -> None:
-    """pgw#1567's shape arriving on the serve side — armed N, entered 0."""
 
     tree = _tree(tmp_path, {"unet": ("F16", SPLIT)})
     with pytest.raises(Nonconforming, match="declares bfloat16"):
@@ -95,11 +79,6 @@ def test_integer_containers_do_not_count_as_a_dtype_violation(tmp_path: Path) ->
 
 
 def test_a_FUSED_qkv_tree_is_REFUSED_even_at_the_right_dtype(tmp_path: Path) -> None:
-    """te#185: one key in common, found after a 71 GB fetch onto a 4xH100.
-
-    The dtype axis cannot see this and neither can the `plain.bf16@1` stamp —
-    which is the entire reason the key convention is asserted separately.
-    """
 
     tree = _tree(tmp_path, {"unet": ("BF16", FUSED)})
     with pytest.raises(Nonconforming, match="FUSED attention key"):
@@ -107,12 +86,7 @@ def test_a_FUSED_qkv_tree_is_REFUSED_even_at_the_right_dtype(tmp_path: Path) -> 
 
 
 def test_a_tree_carrying_NEITHER_convention_is_REFUSED_not_passed(tmp_path: Path) -> None:
-    """The silence arm: nothing found is not the same as nothing wrong.
-
-    A check that passes when it located no attention at all has verified
-    nothing while reading as green — the exact vacuity this workspace keeps
-    paying for.
-    """
+    """The silence arm: nothing found is not the same as nothing wrong."""
 
     tree = _tree(tmp_path, {"unet": ("BF16", ["some.mlp.fc1.weight"])})
     with pytest.raises(Nonconforming, match="ZERO split attention keys"):

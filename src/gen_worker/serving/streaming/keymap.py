@@ -1,51 +1,3 @@
-"""The key migration the LIBRARY applies on load, asked of the library (pgw#1453).
-
-``from_pretrained`` does not install a checkpoint's tensors under the names the
-checkpoint spells. Every model library carries its own history of renames and
-applies them on the way in, which is why a stock sd1.5 mirror loads through the
-eager bridge and produced a correct image — while this engine, which installs
-tensors by EXACT name onto a meta skeleton, matched **0 of 197** tensors in
-sd1.5's ``text_encoder``:
-
-    skeleton (`CLIPTextModel`, transformers 5)  embeddings.token_embedding.weight
-    checkpoint (published against transformers 4)
-                                     text_model.embeddings.token_embedding.weight
-
-The refusal itself was right — ``ctx.load`` never guesses, and installing 0 of
-197 tensors silently would be far worse. What was missing is that **nothing
-performed the rename**.
-
-**The map is never hand-maintained here, and that is the whole design.** The
-renames are SEMANTIC, not textual: transformers' flattening of the
-``text_model.`` prefix is a prefix drop, but diffusers'
-``query/key/value/proj_attn -> to_q/to_k/to_v/to_out.0`` is not expressible as
-any string rule (``key`` is not a suffix of ``to_k``). Only the library knows
-its own history, so this module ASKS each library for its own migration and
-applies nothing of its own:
-
-* **transformers** exports :func:`get_model_conversion_mapping` (the ordered
-  ``WeightTransform`` list ``from_pretrained`` itself loads with) and
-  :func:`rename_source_key`, a pure name->name function. Handing it the meta
-  skeleton's own key set as ``meta_state_dict`` is what resolves the
-  ``base_model_prefix`` add/strip, so the answer is the model's, not a guess.
-* **diffusers** exports ``ModelMixin._fix_state_dict_keys_on_load``, which
-  renames a state dict's KEYS in place and touches no value — so a dict of
-  ``{name: name}`` comes back as ``{new_name: old_name}``, the library's own map
-  with no tensor read and no byte moved.
-
-It runs UNCONDITIONALLY, like pgw#1473's variant detection, because both
-libraries answer "no change" for a checkpoint already spelled the way the
-installed version spells it (verified: 0 renames over sd1.5's 686-tensor unet
-and 248-tensor vae, and re-feeding the migrated names is a fixed point).
-
-**Where this stops.** transformers distinguishes a RENAMING from a CONVERTER —
-a fuse, split, transpose or RoPE permutation, which changes the bytes and not
-only the name. This engine installs a container's bytes verbatim; a checkpoint
-that needs a value transform is not streamable at all, and
-:class:`UnstreamableCheckpoint` says so by name rather than installing raw bytes
-under a converted name.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -66,12 +18,7 @@ class UnstreamableCheckpoint(KeyMigrationError):
 
 
 def migration(module: "torch.nn.Module", names: Iterable[str]) -> Mapping[str, str]:
-    """checkpoint tensor name -> the name ``module`` answers to.
-
-    Only the entries that actually CHANGE; a caller reads it as
-    ``renames.get(name, name)``. Empty for a checkpoint whose names the
-    installed library already spells, which is every converted artifact.
-    """
+    """checkpoint tensor name -> the name ``module`` answers to."""
 
     keys = list(names)
     if not keys:
@@ -100,12 +47,6 @@ def migration(module: "torch.nn.Module", names: Iterable[str]) -> Mapping[str, s
 
 
 def _refuse_collisions(module: Any, mapped: Mapping[str, str]) -> None:
-    """Two checkpoint names must never migrate onto ONE skeleton name.
-
-    A collision means one of the two tensors is dropped — the exact silent loss
-    the ``NameMismatch`` refusal exists to prevent, so it is refused here rather
-    than discovered as garbage on the first forward.
-    """
 
     landing: Dict[str, list[str]] = {}
     for source, target in mapped.items():
@@ -130,7 +71,6 @@ def _refuse_collisions(module: Any, mapped: Mapping[str, str]) -> None:
 def _transformers_migration(
     module: Any, keys: list[str]
 ) -> Mapping[str, str] | None:
-    """transformers' own ``from_pretrained`` rename, or ``None`` if not one."""
 
     try:
         from transformers.modeling_utils import PreTrainedModel
@@ -138,9 +78,6 @@ def _transformers_migration(
         return None
     if not isinstance(module, PreTrainedModel):
         return None
-    # `conversion_mapping` is where this lives; `modeling_utils` re-exports it
-    # without declaring it, which mypy is right to refuse — a re-export nobody
-    # promised is a name that can move without a deprecation.
     from transformers.conversion_mapping import get_model_conversion_mapping
     from transformers.core_model_loading import (
         WeightConverter,
@@ -157,11 +94,6 @@ def _transformers_migration(
             f"checkpoint's names cannot be migrated the way from_pretrained "
             f"migrates them"
         ) from exc
-    # `WeightRenaming` and `WeightConverter` are SIBLINGS under
-    # `WeightTransform`, so each arm is selected by what it IS rather than by
-    # "not the other one" — and a third kind this code has never seen is
-    # refused by name instead of being dropped into neither list, which would
-    # silently skip a transform `from_pretrained` applies.
     renamings = [t for t in transforms if isinstance(t, WeightRenaming)]
     converters = [
         t for t in transforms
@@ -179,8 +111,6 @@ def _transformers_migration(
             f"would silently skip something from_pretrained applies, so the "
             f"migration is refused rather than half-applied."
         )
-    # The skeleton's OWN key set is what decides whether `base_model_prefix`
-    # is added or stripped — the model answering about itself.
     meta_state_dict: Dict[str, None] = {
         name: None for name in _skeleton_names(module)
     }
@@ -204,7 +134,6 @@ def _transformers_migration(
 
 
 def _diffusers_migration(module: Any, keys: list[str]) -> Mapping[str, str] | None:
-    """diffusers' own ``_fix_state_dict_keys_on_load``, driven name-only."""
 
     fix = getattr(module, "_fix_state_dict_keys_on_load", None)
     if not callable(fix):
@@ -219,8 +148,6 @@ def _diffusers_migration(module: Any, keys: list[str]) -> Mapping[str, str] | No
             f"reads tensor VALUES in this version, so the engine cannot ask it "
             f"what a name becomes without loading the checkpoint"
         ) from exc
-    # diffusers returns the dict it mutated; older spellings mutate in place
-    # and return None.
     result = sentinel if returned is None else returned
     if not isinstance(result, dict) or len(result) != len(keys):
         raise KeyMigrationError(

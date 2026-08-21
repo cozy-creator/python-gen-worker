@@ -96,52 +96,20 @@ from .trace_context import (
     TraceRequestContext,
 )
 
-#: A hollow derive's REAL tensors are config-computed buffers and lifted
-#: constants -- KB to MB. Anything past this is a checkpoint weight that
-#: escaped hollow instantiation, and it must never reach a graph blob.
 _REAL_TENSOR_BYTES_CEILING = 64 * 1024 * 1024
 
 DOCUMENT_KIND = "gen-worker.release-metadata@1"
 
-#: Auto-enumeration cross-product cap. Overflow warns and traces the
-#: deterministic prefix (field declaration order x enum declaration order);
-#: the rest is first-encounter discovery.
 ENUM_CAP = 64
 
-#: Denoise steps per enumerated pass. Every step of a diffusion loop runs the
-#: SAME shapes, so one is the whole observation; the derive re-drives
-#: unbudgeted when a marked module has still not been reached (post-loop
-#: modules like a marked VAE decoder). None = the author's own step count.
 TRACE_STEP_BUDGET: Optional[int] = 1
-
-#: pgw#1599: the global ``DYNAMIC_AXES`` derive FLAG is DELETED. Which axis is
-#: worth collapsing is a MEASURED, PER-MODEL question (pgw#1548), so it is
-#: declared on the model class that measured it (``shapes={"aspect": DYNAMIC}``)
-#: — never passed on a command line, where one word silently re-keyed every
-#: graph in the fleet at once. torchcg still takes a
-#: ``(target, input name, axis) -> bool`` predicate and holds no opinion about
-#: what an axis MEANS; naming them stays the endpoint layer's job, and
-#: :func:`dynamic_dim_policy` is now built FROM the declaration.
-
 
 class DeriveError(RuntimeError):
     """The release derive cannot state this endpoint's graph set."""
 
 
 def dynamic_dim_policy(shapes: Mapping[str, str]) -> Any:
-    """Turn a model class's declared shape axes into torchcg's predicate.
-
-    ``shapes`` is :func:`gen_worker.serving.model.model_shapes`'s answer —
-    ``{axis: "static" | "dynamic"}``, written by the model's author.
-
-    * ``aspect`` — axes 2.. of a rank-4+ feed, i.e. a latent's spatial sides.
-      DYNAMIC collapses the whole aspect fan into one record (measured cold
-      mint: sd15 100 s, SERVABLE — pgw#1548).
-    * ``batch`` — axis 0. NEVER offered, and not declarable: CFG/batch is a
-      PERMANENTLY STATIC shape fork (Paul, 2026-08-20), on two measured
-      grounds — batch-dynamic removed zero specializations on the real
-      endpoint, and batch-dynamic records fail to mint (tcg#78).
-    """
+    """Turn a model class's declared shape axes into torchcg's predicate."""
 
     aspect = shapes.get("aspect") == DYNAMIC
     if not aspect:
@@ -149,31 +117,13 @@ def dynamic_dim_policy(shapes: Mapping[str, str]) -> Any:
 
     def policy(_target: str, _name: str, axis: int) -> bool:
         if axis == 0:
-            return False  # batch: permanently static, never offered
-        # Rank is not handed to the predicate, so "axis 2 or beyond" is the
-        # spelling of spatial here. Axis 1 is a channel or a sequence length
-        # and is never offered: neither varies across an aspect fan, so
-        # admitting it would widen a graph over an axis no observation
-        # supports.
+            return False
         return axis >= 2
 
     return policy
 
 
 class PayloadEnumerationRefused(DeriveError):
-    """THIS ENTRYPOINT's payload cannot be auto-enumerated (pgw#1449).
-
-    A property of one signature, never of the module -- so it is caught per
-    entrypoint, stated in the document, and the entrypoints that CAN be
-    enumerated are derived anyway. Deliberately a NARROW subclass with
-    exactly one raise site: catching ``DeriveError`` instead would swallow
-    slot-order violations, empty enums and non-msgspec payloads, which are
-    author defects that must still take the module down.
-
-    The distinction is the one the derive already draws for a combination
-    the author refuses with ``ValidationError``: an enumeration the derive
-    cannot reach is counted and named, not treated as a broken endpoint.
-    """
 
     def __init__(self, owner: str, field: str, annotation: Any) -> None:
         self.owner = owner
@@ -188,7 +138,6 @@ class PayloadEnumerationRefused(DeriveError):
 
 
 def _render_annotation(annotation: Any) -> str:
-    """A stable spelling of a type for the document (never ``repr`` noise)."""
 
     name = getattr(annotation, "__name__", None)
     if name and not typing.get_args(annotation):
@@ -240,25 +189,11 @@ class ReleaseDeriveResult:
     document: bytes
     digest: str
     endpoint: str
-    lane_graphs: dict[str, tuple[str, ...]]  # lane contract -> graph hashes
+    lane_graphs: dict[str, tuple[str, ...]]
     warnings: tuple[str, ...] = ()
-    #: pgw#1392: NO model class anywhere, so there is nothing to hold at all.
-    #: Distinct from eager-permanent, which holds a model and compiles none —
-    #: both land on "no lanes", and a log that conflates them lies.
     weightless: bool = False
-    #: Lanes that TRACED and found nothing marked via ``ctx.compile``. Zero
-    #: graphs because the author marked zero modules — measured, not assumed.
-    #: pgw#1599: this is now the ONLY eager statement there is. `eager_only=`
-    #: and the derived-lane machinery are deleted; a model with no marks
-    #: declares real lanes like every other and simply mints no graph.
     unmarked_lanes: tuple[str, ...] = ()
-    #: pgw#1449: entrypoints the enumerator could not build a trace payload
-    #: for, name -> the typed reason. They are STATED, not silently dropped,
-    #: and they no longer take the module's other entrypoints down with them.
     unenumerable_entrypoints: tuple[tuple[str, str], ...] = ()
-    #: pgw#1527: enumerated payloads the ENDPOINT's own code refused to serve.
-    #: One line each, naming the author frame — a skipped payload has to be
-    #: louder than a missing one.
     unservable_payloads: tuple[str, ...] = ()
 
     @property
@@ -267,13 +202,6 @@ class ReleaseDeriveResult:
 
 
 def _torchcg() -> ModuleType:
-    """The VENDORED torchcg -- the one the miner compiles with.
-
-    Never a top-level ``torchcg``: if an endpoint pinned one, the trace and
-    the mint would run different compilers and their graph identities could
-    disagree silently. The vendored rev is recorded in
-    ``gen_worker/_vendor/VENDORED.toml``.
-    """
 
     from .._vendor import torchcg
 
@@ -281,12 +209,6 @@ def _torchcg() -> ModuleType:
 
 
 def _hollow() -> ModuleType:
-    """The publish-time hollow session module, imported BY ITS OWN NAME.
-
-    torchcg deliberately does not re-export ``hollow`` from the package root
-    (it names diffusers/transformers loaders; a root export would put them on
-    every serve-role import closure).
-    """
 
     import importlib
 
@@ -294,27 +216,6 @@ def _hollow() -> ModuleType:
 
 
 def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
-    """Store each discovered graph's SERIALIZED ExportedProgram in the CAS.
-
-    Paul, 2026-08-19 (address-free): the bytes are local and their digest is
-    machine-scoped, so nothing about them travels. What the document carries is
-    the cg-graph-v1 identity; what this stores is one machine's bytes for that
-    identity, under it. A mint on any box asks its own store for "the program
-    for graph X" and never for a digest somebody else computed.
-
-    Bytes-at-rest is tensorfs's charter (LIBRARY-BOUNDARIES), so the blob goes
-    into a tensorfs ``LocalCAS`` through torchcg's ``LocalGraphStore``, which
-    owns the graph->bytes ref.
-
-    ⚠️ THIS BODY WAS SILENTLY REVERTED ONCE (pgw#1512 `c2edae08`, a conflict
-    resolution in a commit about per-component dtype that says nothing about
-    the sink). The revert restored digest-keyed banking while the document
-    already carried NO address, so producer and consumer keyed on different
-    things and no program could ever be resolved — a total break with no
-    error anywhere, because a miss is silent. `test_derive_runs_in_a_release_
-    env_with_no_top_level_torchcg_or_tensorfs` now asserts `has_program` per
-    identity, which is the fence: this cannot be reverted green again.
-    """
 
     if cas_root is None:
         return None
@@ -330,9 +231,6 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
 
     def sink(graph: str, program: Any) -> None:
         _assert_weights_free(torch, program)
-        # torch.export.save to a FILE, because the store admits files: it
-        # hashes and links them in, so a large program never has to exist
-        # twice in memory the way a BytesIO round-trip forces.
         with tempfile.TemporaryDirectory() as scratch:
             staged = Path(scratch) / "program.pt2"
             torch.export.save(program, str(staged))
@@ -342,59 +240,11 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
 
 
 def _trace_device() -> str:
-    """The DEVICE CLASS this derive traces on. Always ``cuda``, GPU or not.
-
-    pgw#1458 stands: a graph's device is established at TRACE time and cannot
-    be re-homed downstream, so a cpu-traced graph cannot be cuda-minted, and
-    torchcg refuses the mismatch by name (`RuntimeCompatibility.key`). What
-    is gone (Paul, 2026-08-19 "A NORMAL TRACE MUST JUST WORK"; tcg#64) is the
-    HOST answering the question. It never should have: the fleet compiles
-    cuda graphs, so a derive that emits cpu-class ones because the box it ran
-    on had no GPU produces a document nothing can serve, and hands the author
-    a device taxonomy to reason about for a device the trace never uses.
-
-    A trace needs no silicon. torchcg's session drives the author's code on a
-    device that EXISTS -- real sigmas, real token ids, real `encode_prompt` --
-    and restates each exported program onto the stated device before it is
-    hashed. Measured: a CPU-only sd1.5 derive reproduces the graph keys of the
-    GPU-traced one, key for key.
-
-    This is what makes `gen-worker lock` an AUTHOR-time command (2026-08-19
-    "the full artifact axis and who runs what"): endpoint.lock is committed to
-    git, produced once per version on whatever machine the author has.
-    """
 
     return "cuda"
 
 
 def _assert_weights_free(torch: Any, program: Any) -> None:
-    """Prove the blob carries no weights -- WITHOUT rewriting anyone's device.
-
-    This used to be ``_demote_fakes_to_meta``, which replaced every fake tensor
-    with a META one. The rationale was real -- ``torch.export.save`` must not
-    write a phantom storage that makes the archive claim bytes it does not have
-    -- but the cure destroyed the device, and pgw#1458 made the device
-    load-bearing. The result was one blob with TWO device stories: 1,922 graph
-    node metas on ``cuda:0`` against 686 state-dict entries on ``meta``, and
-    AOTI reads BOTH, so every sd1.5 class died on
-    ``FakeTensorDeviceMismatchError cuda:0 and meta`` -- the mirror image of
-    the failure the device work had just fixed. ``meta`` has no device
-    sub-type, so it cannot express "no bytes, on cuda"; a fake tensor already
-    does.
-
-    Measured, which is why the rewrite is gone rather than adjusted: saving a
-    fake-parameter program writes **0 bytes** of weight payload and records the
-    fake tensor's OWN device in ``model_weights_config.json`` (cpu trace ->
-    cpu, cuda trace -> cuda), and the cpu blob reloads with its state dict
-    intact. Shape + dtype + device + no bytes is exactly the property the
-    demotion was reaching for, and the fake tensor has it already.
-
-    What survives is the INVARIANT, asserted instead of enforced by rewriting:
-    a real tensor with real storage in the state dict would put weights in a
-    graph artifact. Buffers hollow_session computed for REAL are legitimate and
-    small (their values are what a literal-bearing trace digests), so the
-    refusal names a size floor rather than realness.
-    """
 
     from torch._subclasses.fake_tensor import FakeTensor
 
@@ -418,14 +268,6 @@ def _assert_weights_free(torch: Any, program: Any) -> None:
 
 
 def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
-    """``(the ONE traced Model subclass or None, "")``.
-
-    pgw#1599: EVERY model class declares real lanes — `lanes=` is required,
-    `lanes=()` and `eager_only=` are deleted — so "which class do we trace"
-    is now "which class MARKS a compile target". A module whose model classes
-    mark nothing answers ``(None, "")``: nothing to trace, and the absent
-    mark IS the author's statement (Paul's ruling pair, 2026-08-20).
-    """
 
     found: list[type] = []
     unmarked: list[type] = []
@@ -449,12 +291,6 @@ def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
             marked = model_marks_compile(value)
         except ModelDeclarationError as exc:
             raise DeriveError(str(exc)) from exc
-        # pgw#1599: the MARK selects the trace subject, not the lane. Every
-        # class declares real lanes now (an auxiliary RIFE interpolator names
-        # the `rife.*` document exactly as the DiT names its own), so "has a
-        # lane" no longer distinguishes the compiled half of an endpoint from
-        # the eager half. The `ctx.compile` mark does, and it is the author's
-        # only statement about it.
         (found if marked else unmarked).append(value)
     if len(found) > 1:
         raise DeriveError(
@@ -467,12 +303,6 @@ def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
         )
     if found:
         return (found[0], "")
-    # NOBODY MARKS. The module is still not weightless — it holds a model
-    # class with a real lane, a model type and a defaults schema, and all of
-    # those belong in the document. It derives as the subject and reports
-    # ZERO graphs (`unmarked_lanes`), which is the measured answer. Dropping
-    # to `None` here would publish it as WEIGHTLESS — no model_type, no lane
-    # row, no defaults schema — which is a different and false statement.
     if len(unmarked) > 1:
         raise DeriveError(
             f"module {module.__name__!r} has more than one model class "
@@ -487,41 +317,18 @@ def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
 
 @dataclass(frozen=True)
 class _Entrypoint:
-    """One entrypoint, bound BY ANNOTATION ROLE, order-agnostic.
-
-    The payload parameter is the msgspec Struct; the model parameter is the
-    ``Model`` subclass (its annotation IS the model declaration, its NAME is
-    the slot name); ctx is the RequestContext-annotated (or sole remaining)
-    parameter; every OTHER parameter is a platform-injected FACT
-    (``turbo: Adapter | None``, ``loras: list[Adapter]``) and takes its
-    trace value from its annotation shape -- Optional injects None, a
-    sequence injects empty. The derive calls by KEYWORD, so the author owns
-    the order.
-    """
 
     name: str
     fn: Any
     payload_param: str
     payload_type: type
-    #: ``None`` for a WEIGHTLESS entrypoint (pgw#1392) — no model, no lane,
-    #: nothing traced; it is never a trace subject.
     model_param: Optional[str]
     ctx_param: str
-    #: (param name, annotation, base trace value) per platform-injected fact.
     injected: tuple[tuple[str, Any, Any], ...]
-    #: Every model slot in signature order: (param name = SLOT NAME, class).
-    #: The lane-declaring class may fill more than one slot (h3's `video` and
-    #: `video_ref` are two checkpoints of one model type).
     model_slots: tuple[tuple[str, type], ...] = ()
 
 
 def _injected_trace_value(name: str, parameter_name: str, annotation: Any) -> Any:
-    """The trace-time value of a platform-injected fact, by annotation shape.
-
-    No adapter is ever bound at trace (the derive stamps a RELEASE, not a
-    deployment), so Optional facts inject None and sequence facts inject
-    empty. A fact the shape cannot state is refused by name.
-    """
 
     if _optional_none(annotation):
         return None
@@ -537,24 +344,12 @@ def _injected_trace_value(name: str, parameter_name: str, annotation: Any) -> An
     )
 
 
-#: The RULED signature order (Paul, 2026-08-19 line review; pgw#1382): one
-#: rule with ``load(self, ctx)``. Malformed order is a typed refusal HERE, at
-#: derive/publish, not a runtime surprise.
 _SLOT_ORDER = ("ctx", "payload", "model", "adapter")
 
 
 def _entrypoints(
     module: ModuleType, model_cls: Optional[type]
 ) -> list[_Entrypoint]:
-    """The module's entrypoints bound to ``model_cls``.
-
-    ``model_cls`` is ``None`` for a module that declares no lane-bearing
-    Model class. Two disjoint cases live behind that: an eager-permanent
-    (``lanes=()``) module — whose entrypoints DO carry model slots and
-    derive no lane, exactly as before — and a WEIGHTLESS module (pgw#1392),
-    whose entrypoints carry ZERO model slots. Only the latter derive here,
-    so an eager-permanent release is byte-identical to what it was.
-    """
     import msgspec
 
     from ..request_context import RequestContext
@@ -576,8 +371,6 @@ def _entrypoints(
                 payload_param, payload_type = parameter.name, annotation
                 roles.append((parameter.name, "payload"))
             elif isinstance(annotation, type) and issubclass(annotation, Model):
-                # Every Model-annotated parameter is a SLOT; its NAME is the
-                # slot name in the request envelope (th#2140 5c).
                 model_slots.append((parameter.name, annotation))
                 if annotation is model_cls and model_param is None:
                     model_param = parameter.name
@@ -591,9 +384,6 @@ def _entrypoints(
                 rest.append((parameter.name, hints.get(parameter.name)))
                 roles.append((parameter.name, "adapter"))
         if model_cls is None:
-            # No lane-bearing class: only a WEIGHTLESS entrypoint (pgw#1392)
-            # derives. One that declares slots belongs to a lane this module
-            # does not have (eager-permanent) — unchanged, skipped.
             if model_slots:
                 continue
         elif model_param is None:
@@ -604,8 +394,6 @@ def _entrypoints(
                 f"payload struct"
             )
         if ctx_param is None:
-            # No RequestContext annotation anywhere: the sole remaining
-            # parameter is ctx (the minimal (payload, model, ctx) shape).
             if len(rest) == 1:
                 ctx_param = rest.pop(0)[0]
                 roles = [
@@ -648,12 +436,6 @@ def _entrypoints(
 
 
 def _check_slot_order(name: str, roles: list[tuple[str, str]]) -> None:
-    """ctx-FIRST: ``(ctx, payload, model(s), adapter(s))`` -- a typed refusal.
-
-    One rule with ``load(self, ctx)`` (Paul, 2026-08-19). The derive still
-    calls by KEYWORD; the order is a READABILITY contract the publish gate
-    enforces so every endpoint in the fleet reads the same way.
-    """
 
     ranks = [_SLOT_ORDER.index(role) for _, role in roles]
     if ranks != sorted(ranks):
@@ -666,7 +448,6 @@ def _check_slot_order(name: str, roles: list[tuple[str, str]]) -> None:
 
 
 def _strip_annotated(annotation: Any) -> Any:
-    """``Annotated[T, ...]`` carries wire metadata; the trace wants T."""
 
     while typing.get_origin(annotation) is typing.Annotated:
         annotation = typing.get_args(annotation)[0]
@@ -681,7 +462,6 @@ def _optional_none(annotation: Any) -> bool:
 
 
 def _synthesize_field(owner: str, name: str, annotation: Any) -> Any:
-    """A minimal trace value for a REQUIRED non-enum field, by type."""
 
     annotation = _strip_annotated(annotation)
     if annotation is str:
@@ -698,23 +478,6 @@ def _synthesize_field(owner: str, name: str, annotation: Any) -> Any:
 
 
 def _literal_axis(annotation: Any) -> Optional[list[Any]]:
-    """A ``Literal[...]`` field's values -- a PRESET axis, same as an enum.
-
-    Shape-rich packed models state their reachable QUANTITIES as numeric
-    Literals rather than enums (h3's ``StepPreset = Literal[20, 30, 50]``,
-    ``DurationS = Literal[5, 10]``, ``Fps = Literal[24, 48, 60]``): the API
-    boundary refuses everything else, so the Literal IS the preset-reachable
-    set, and enumerating it is exactly the lazy-coverage rule -- enumerate
-    what presets reach, discover the rest on first encounter.
-
-    NUMERIC literals only, deliberately. A numeric preset is a quantity the
-    model RUNS at (it reaches the graph's ingress: sequence length, frame
-    count, step ladder); a STRING literal names a host-side policy
-    (``SdxlScheduler``, ``ImageFormat``) that never changes a marked
-    module's shapes, and cross-producting it would explode the enumeration
-    for zero graph specializations. A string axis that DOES bear shape is spelled as
-    a StrEnum, which enumerates on the branch above.
-    """
 
     stripped = _strip_annotated(annotation)
     if typing.get_origin(stripped) is typing.Literal:
@@ -743,7 +506,6 @@ def _literal_axis(annotation: Any) -> Optional[list[Any]]:
 
 
 def _payload_field_names(payload_type: type) -> tuple[str, ...]:
-    """Field names of one entrypoint's payload struct, or ``()``."""
 
     import msgspec
 
@@ -758,22 +520,6 @@ def _auto_payloads(
     payload_type: type,
     structural: Mapping[str, Any] = MappingProxyType({}),
 ) -> tuple[tuple[Any, ...], bool]:
-    """Auto-enumerated trace payloads for one entrypoint, plus the capped flag.
-
-    One payload per cross-product entry over the struct's ENUM-typed fields
-    (field declaration order x enum declaration order -- deterministic);
-    every other field at its default; required non-defaulted fields
-    synthesized minimally by type.
-
-    ``structural`` is the model class's declared STRUCTURAL fork axes
-    (pgw#1599). It contributes ONE REPRESENTATIVE PER VARIANT CLASS for the
-    payload field it names — not the field's full value set. That is the
-    whole economy of the declaration: sdxl serves 8 schedulers that produce
-    exactly 2 timestep dtypes, so 2 traces cover 8/8 where the blind
-    cross-product would have cost 8 and `_literal_axis` (string literals
-    excluded as host-side policy) enumerated 0 — which is why 5 of sdxl's 8
-    scheduler configs fell to loud eager with nothing able to say why.
-    """
 
     import msgspec
 
@@ -786,20 +532,16 @@ def _auto_payloads(
 
     enum_axes: list[tuple[str, list[Any]]] = []
     base: dict[str, Any] = {}
-    #: payload field -> the declared representatives, one per variant class.
     declared_axes: dict[str, list[Any]] = {}
     for axis, declaration in structural.items():
         variants = declaration.variants()
         if not any(field.name == declaration.field for field in struct_fields):
-            continue  # this axis forks a DIFFERENT entrypoint's payload
+            continue
         declared_axes[declaration.field] = [value for _, value in variants]
     for field in struct_fields:
         annotation = _strip_annotated(field.type)
         declared_values = declared_axes.pop(field.name, None)
         if declared_values is not None:
-            # An AUTHOR-DECLARED axis wins over whatever the annotation would
-            # have enumerated: the author measured which values fork the
-            # program, and the platform never invents an axis (pgw#1597).
             enum_axes.append((field.name, declared_values))
             continue
         if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
@@ -826,10 +568,6 @@ def _auto_payloads(
     if not enum_axes:
         return (payload_type(**base),), False
 
-    # pgw#1384: the DEFAULT-parameter combination comes FIRST -- the serving
-    # hole list inherits document order and the miner mints in that order,
-    # so the class an all-defaults payload exercises must lead. Then enum
-    # declaration order for the rest.
     default_combo = tuple(
         field.default if field.default in values else values[0]
         for (name, values), field in zip(
@@ -859,7 +597,6 @@ def _auto_payloads(
     return tuple(payloads), capped
 
 
-#: One adapter pick on the wire: the fully-pinned hub ref plus its strength.
 _ADAPTER_PICK: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -872,15 +609,6 @@ _ADAPTER_PICK: dict[str, Any] = {
 
 
 def _envelope_schema(plan: "_Entrypoint") -> dict[str, Any]:
-    """The request envelope's JSON Schema, DERIVED FROM THE SIGNATURE.
-
-    Parameter name IS slot name (th#2140 5c): an author naming a parameter
-    ``turbo`` publishes the envelope key ``adapters.turbo``; a model
-    parameter named ``video_ref`` publishes ``models.video_ref``. Renaming a
-    parameter is therefore a VISIBLE API BREAK and publish flags it exactly
-    as it flags a disappearing lane. The hub publishes this schema as the
-    entrypoint's auto-generated docs.
-    """
 
     import msgspec
 
@@ -950,14 +678,6 @@ def _envelope_schema(plan: "_Entrypoint") -> dict[str, Any]:
 def _fake_adapter(
     model_type: Optional[type], adapter_cls: Optional[type] = None
 ) -> Any:
-    """A synthesized adapter for the enumeration's adapter-riding arms.
-
-    Carries the model type's platform ``Lora.Defaults`` (what
-    ``adapter.defaults`` reads as); its path points nowhere -- adapter I/O is
-    neutralized at trace by the load context. ``adapter_cls`` is the slot's
-    declared KIND (``DistillationAdapter`` for a distillation slot — the
-    annotation is the declaration, pgw#1382's typed-takeover guard).
-    """
 
     from ..serving.context import Adapter
 
@@ -974,11 +694,6 @@ def _fake_adapter(
 
 
 def _adapter_arm_class(annotation: Any) -> Optional[type]:
-    """The Adapter subclass an adapter-shaped fact declares, else None.
-
-    ``DistillationAdapter | None`` and ``list[Adapter]`` both answer their
-    ELEMENT type, so the synthesized fake is the slot's own kind.
-    """
     from ..serving.context import Adapter
 
     stack = [_strip_annotated(annotation)]
@@ -993,11 +708,6 @@ def _adapter_arm_class(annotation: Any) -> Optional[type]:
 def _injected_axes(
     plan: "_Entrypoint", model_type: Optional[type]
 ) -> list[list[tuple[str, Any]]]:
-    """Per injected parameter, its enumerated trace values.
-
-    Adapter-shaped facts enumerate BOTH states (absent and riding); other
-    facts keep their single trace value.
-    """
 
     axes: list[list[tuple[str, Any]]] = []
     for parameter_name, annotation, base_value in plan.injected:
@@ -1015,12 +725,6 @@ def _injected_axes(
 
 
 def _defaults_variants(model_type: Optional[type]) -> list[Any]:
-    """The recipe-relevant checkpoint-defaults variants, platform values.
-
-    The platform row always runs; when the schema carries ``cfg``, its
-    flipped twin runs too -- cfg selects the executed arm (batch-2 guidance
-    vs guidance-free) and therefore the graph set.
-    """
 
     if model_type is None:
         return [None]
@@ -1044,20 +748,10 @@ def _defaults_variants(model_type: Optional[type]) -> list[Any]:
     return variants
 
 
-#: How far the provenance walk descends from the model instance (pgw#1506).
-#: `model.engine.pipeline.components[...]` is depth 2; the headroom is for a
-#: second wrapper, and the bound exists so a cyclic or pathological object
-#: graph refuses with a sentence instead of running forever.
 PROVENANCE_MAX_DEPTH = 4
 
 
 def _components_mapping(value: Any) -> Optional[Mapping[str, Any]]:
-    """``value.components`` when it is a Mapping -- the diffusers convention.
-
-    Read through ``try`` because ``components`` is a PROPERTY on every
-    diffusers pipeline and a half-built one can raise; a wrapper that cannot
-    answer is simply not a component holder.
-    """
 
     try:
         components = getattr(value, "components", None)
@@ -1067,14 +761,6 @@ def _components_mapping(value: Any) -> Optional[Mapping[str, Any]]:
 
 
 def _is_wrapper(value: Any) -> bool:
-    """A plain object that may HOLD a pipeline -- worth descending into.
-
-    Deliberately narrow. An ``nn.Module`` is never descended: its ``vars()``
-    is ``_parameters``/``_modules``/``_buffers``, so walking one would offer
-    provenance names for the marked module's own internals and turn a 10 GiB
-    denoiser into a traversal. Everything without an instance ``__dict__``
-    (msgspec Structs, primitives, containers) has no attributes to walk.
-    """
 
     import torch
 
@@ -1086,40 +772,9 @@ def _is_wrapper(value: Any) -> bool:
 
 
 def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
-    """Deterministic provenance names for the author's ctx.compile marks.
-
-    The author marks REAL objects; the document needs stable names. Names
-    come from where the module actually lives on the model instance:
-    component names of any ``.components``-bearing attribute (the diffusers
-    convention), then bare attribute names, then the dotted PATH as the
-    disambiguated spelling. A marked module that cannot be named on the
-    instance is refused -- provenance is part of the release row.
-
-    **The walk is RECURSIVE (pgw#1506).** It used to look exactly one level
-    deep -- ``vars(instance)`` plus ``.components`` on each value -- which
-    assumed the model holds its pipeline directly. That is sdxl's and sd15's
-    shape, not a rule: an endpoint with a runtime engine owns the engine and
-    the ENGINE owns the pipeline, so minimax-h3's DiT sits at
-    ``model.engine.pipeline.components['transformer']`` and the resolver
-    could not see it. The engine wrapper carries real state (an AdaLN cache,
-    conditioner buffers, the serve recipe), so it is a legitimate authoring
-    shape and the tracer is what had to learn to traverse it. Adding a
-    second reference to the pipeline on the model would have satisfied
-    depth 1 and left every other engine-wrapper endpoint broken.
-
-    Depth-1 endpoints are unaffected by construction: the candidate set at
-    depth 1 is offered exactly as before, and the recursion only ADDS names
-    that were previously unreachable.
-    """
 
     candidates: dict[int, str] = {}
-    #: (owner path, component name, component) for every components mapping
-    #: found anywhere in the walk -- uniqueness is decided across ALL of them,
-    #: because "is this bare name unique?" is a question about the instance,
-    #: not about one attribute.
     component_rows: list[tuple[str, str, Any]] = []
-    #: Paths not descended because the depth bound was reached. Named only if
-    #: a marked module turns out to be unnameable, where it is the likely why.
     truncated: list[str] = []
 
     def offer(module: Any, name: str) -> None:
@@ -1127,8 +782,6 @@ def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
         if identity not in candidates or len(name) < len(candidates[identity]):
             candidates[identity] = name
 
-    # Cycle safety by IDENTITY: an engine that back-references its model
-    # (`self.engine.model is self`) is an ordinary shape and must not loop.
     visited: set[int] = {id(instance)}
 
     def descend(node: Any, path: tuple[str, ...], depth: int) -> None:
@@ -1148,8 +801,6 @@ def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
                     if component is None or not isinstance(component_name, str):
                         continue
                     component_rows.append((name, component_name, component))
-                # A pipeline's components ARE its provenance; there is nothing
-                # below them worth a name.
                 continue
             if not _is_wrapper(value):
                 continue
@@ -1167,9 +818,6 @@ def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
     for _owner, component_name, component in component_rows:
         by_name.setdefault(component_name, []).append(component)
     for owner, component_name, component in component_rows:
-        # The bare name when it means ONE object across the whole instance,
-        # the full dotted path otherwise -- the same preference order as
-        # before, asked across every mapping the walk found instead of one.
         unique = all(other is component for other in by_name[component_name])
         offer(component, component_name if unique else f"{owner}.{component_name}")
 
@@ -1203,13 +851,6 @@ def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
 
 
 def _compile_stack_from_lockfile(lockfile: Path) -> tuple[tuple[str, str], ...]:
-    """The endpoint's compile stack, from the ONE definition (pgw#1489).
-
-    The body lives in :mod:`gen_worker.env_identity`: a serving process reads
-    the SAME rows off the SAME file to decide whether these artifacts are
-    hers, and a second implementation of "what compiles this" is precisely
-    how the two ends came to disagree.
-    """
 
     from ..env_identity import EnvIdentityError, compile_stack_from_lockfile
 
@@ -1220,13 +861,6 @@ def _compile_stack_from_lockfile(lockfile: Path) -> tuple[tuple[str, str], ...]:
 
 
 def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
-    """msgspec JSON Schema of the class-header model type's Defaults.
-
-    ``Model[SDXL]`` is the single, statically-extractable source of the
-    endpoint's model type; the schema of ``SDXL.Defaults`` is what the hub
-    validates per-checkpoint deploy rows against. This replaces the
-    hub-embedded per-family defaults registry (storage half: th#2133).
-    """
 
     if model_type is None:
         return None
@@ -1236,9 +870,6 @@ def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
     return msgspec.json.schema(defaults_type)
 
 
-#: safetensors dtype spellings -> torch dtypes (tensorfs#113 carries the
-#: contract's load dtype in the document's additive top-level `dtype` field,
-#: safetensors spelling; torch never appears in tensorfs).
 _SAFETENSORS_DTYPES = {
     "BF16": "bfloat16",
     "F16": "float16",
@@ -1303,26 +934,7 @@ def _resolve_lane(torchcg: ModuleType, lane: Any) -> Any:
 
 
 def endpoint_source_root(module: ModuleType) -> Optional[Path]:
-    """The SOURCE ROOT the author's modules live under, or None if unknowable.
-
-    The sys.path entry that holds the endpoint's code — `minimax_h3.main` ->
-    `<repo>/src`, a bare fixture module -> the directory holding it. None when
-    the module has no file (namespace/frozen), and None is treated as "cannot
-    prove endpoint-owned", which keeps the conservative default.
-
-    **pgw#1533: this used to return the top-level PACKAGE directory**
-    (`<repo>/src/minimax_h3`), which silently uncovered every author module
-    that is not inside that one package. h3's fps refusal raises in
-    `src/cozy_rife.py` — a SIBLING top-level module at the same source root —
-    so `deepest_endpoint_frame` could not prove it was the author's and the
-    whole derive died on a product bug that pgw#1527 exists to skip. A shared
-    helper module beside the main package is the common case, not an exotic
-    one, so the roster was wrong for most endpoints rather than a few.
-
-    Widening the root is safe only because :func:`deepest_endpoint_frame`
-    SUBTRACTS: the SDK and any third-party install root are excluded from it
-    explicitly, so a wider root can add author files and never adds a library.
-    """
+    """The SOURCE ROOT the author's modules live under, or None if unknowable."""
 
     import sys
 
@@ -1335,20 +947,12 @@ def endpoint_source_root(module: ModuleType) -> Optional[Path]:
         here = Path(path).resolve()
     except OSError:
         return None
-    # A PACKAGE's `__init__.py` sits one level below the source root; a bare
-    # module sits directly in it.
     if here.name == "__init__.py":
         return here.parent.parent
     return here.parent
 
 
 def _third_party_root(where: Path) -> bool:
-    """Is this path inside an installed-dependency tree?
-
-    Named by the install layout rather than by a list of libraries, so torch,
-    diffusers and anything else an endpoint pulls in are covered without being
-    enumerated.
-    """
 
     return any(
         part in ("site-packages", "dist-packages", "__pypackages__")
@@ -1365,26 +969,7 @@ def _sdk_root() -> Path:
 def deepest_endpoint_frame(
     exc: BaseException, endpoint_root: Optional[Path]
 ) -> Optional[traceback.FrameSummary]:
-    """The DEEPEST frame of ``exc``, but only if the author's code raised it.
-
-    pgw#1527, and the narrowness IS the ruling. A payload the endpoint cannot
-    serve is a product fact and should cost ONE payload; an SDK defect is the
-    derive's whole point and must still kill it loudly. Walls 1-8 were every
-    one of them an SDK-frame exception (torchcg's hollow session, the trace
-    context, the provenance walk, the output floor) — a blanket catch would
-    have swallowed all eight and turned each into a quiet coverage gap, which
-    is exactly the counter-argument the filer raised against themselves.
-
-    So the test is positive and it is on the DEEPEST frame only: the innermost
-    thing that actually raised must be a file under the endpoint's own source
-    root. Author code that calls into torch and trips a shape error there
-    reports a TORCH frame, and stays fatal — deliberately, because this cannot
-    tell that apart from an SDK-induced one without guessing.
-
-    Never endpoint-owned: anything under the SDK, even if the two roots
-    somehow overlap. Returns None whenever it cannot PROVE the frame is the
-    author's, so "unsure" always means "fatal".
-    """
+    """The DEEPEST frame of ``exc``, but only if the author's code raised it."""
 
     if endpoint_root is None:
         return None
@@ -1396,21 +981,6 @@ def deepest_endpoint_frame(
         where = Path(deepest.filename).resolve()
     except OSError:
         return None
-    # THE SUBTRACTION, and it is what makes a wide source root safe (pgw#1533).
-    # The root is now the sys.path entry holding the author's modules, so a
-    # sibling helper beside the main package is covered — but a root can only
-    # ADD author files if everything that is not the author's is removed from
-    # it first, and removed by construction rather than by a list:
-    #
-    #   * the SDK, even if it somehow sits under the same root;
-    #   * any installed-dependency tree (site-packages / dist-packages), which
-    #     is where torch, diffusers and everything else an endpoint pulls in
-    #     actually live.
-    #
-    # The degenerate case is the safe one: an endpoint pip-INSTALLED into
-    # site-packages has a source root that is entirely subtracted, so nothing
-    # is claimed and every failure stays fatal. "Unsure" still resolves to
-    # fatal, which is the property pgw#1527 was built on.
     if where.is_relative_to(_sdk_root()):
         return None
     if _third_party_root(where):
@@ -1433,15 +1003,6 @@ def _derive_lane(
     unservable: Optional[list[dict[str, Any]]] = None,
     dynamic_dims: Any = None,
 ) -> Optional[Any]:
-    """One lane's instrumented runs, merged across defaults variants.
-
-    Per variant: fresh model, ``load`` (defaults variants change what
-    ``ctx.defaults()`` answers, so the instance is rebuilt), then every
-    (entrypoint x payload x adapter-state) combination drives under
-    instrumented discovery. Combinations the author REFUSES with
-    ``ValidationError`` are legitimately impossible servings and are
-    skipped, counted in the warnings.
-    """
 
     from ..api.errors import ValidationError
 
@@ -1463,28 +1024,11 @@ def _derive_lane(
             model_type=model_type,
             defaults_instance=defaults_instance,
         )
-        # TRACE_STEP_BUDGET: every step of a denoise loop runs the same
-        # shapes, so one step per enumerated pass observes the whole set.
-        # Modules that run after the loop are caught by the unbudgeted
-        # re-drive below.
         request_ctx = TraceRequestContext(
             lane=resolved,
             checkpoint_ref=f"trace:{checkpoint_dir.name}",
             step_budget=TRACE_STEP_BUDGET,
         )
-        # pgw#1458: the session is CAPTURED and handed to discovery. A
-        # GPU-less cuda trace fakes the lifted constants; `discover_modules`
-        # restores their real values FROM THE SESSION before it hashes and
-        # before `program_sink` serializes. Omitting `session=` does not
-        # degrade quietly — torchcg raises `DiscoveryError` naming the faked
-        # constants — but a digest taken over faked values would be a lie,
-        # so the wiring is the point, not the refusal.
-        # pgw#1512: the session asks the derive for EACH component's
-        # precision instead of being handed one dtype for the tree. The
-        # resolver is total over every tree in this session — the primary's
-        # and each secondary slot's (pgw#1508) — because it decides from the
-        # tree and subfolder it is given, so there is nothing to swap when an
-        # aide loads from its own checkpoint.
         with hollow.hollow_session(
             _trace_device(), dtype_for=load_ctx.component_dtype
         ) as session:
@@ -1498,32 +1042,9 @@ def _derive_lane(
                     f"session: {type(exc).__name__}: {exc}"
                 ) from exc
             if not load_ctx.marked_modules:
-                # pgw#1599: the trace RAN — the model loaded under the hollow
-                # session and the author marked no module, which is an
-                # OBSERVATION, not a failure. Under the ruling pair a declared
-                # lane no longer means "graphs key here": a lane answers
-                # checkpoint compatibility and lane selection, and the
-                # `ctx.compile` mark — absent here — is the only compilation
-                # statement there is. Zero graphs is the honest answer and the
-                # caller prints it as one.
                 return None
             modules = _named_marked_modules(model, load_ctx.marked_modules)
 
-            # Secondary model slots (an auxiliary model with its own
-            # checkpoint, e.g. h3's RIFE interpolator): a fresh instance per
-            # slot, loaded under the SAME hollow session. Every slot named in
-            # a signature must be fillable at trace or the release cannot
-            # state its graph set.
-            #
-            # pgw#1508: EACH SLOT GETS ITS OWN TREE. This comment said "an
-            # auxiliary model with its own checkpoint" and then handed every
-            # aide the PRIMARY's `checkpoint_dir`, so h3's `generate`
-            # (video -> minimax-h3, rife -> rife-4.25) tried to build a RIFE
-            # interpolator out of the DiT's tree and refused on a missing
-            # `flownet`. The binding table has been per-slot since 0.9.0; the
-            # derive's world-model now matches it. A slot with no entry falls
-            # back to the primary tree, which is every single-slot endpoint
-            # and is why their documents do not move.
             aides: dict[str, Any] = {}
             for plan, _payloads in plans:
                 for slot_name, slot_cls in plan.model_slots:
@@ -1541,11 +1062,6 @@ def _derive_lane(
                             )
                         )
                     except Exception as exc:
-                        # Name the SLOT and the TREE IT WAS GIVEN. The failure
-                        # that produced pgw#1508 read as a broken aide class
-                        # when it was a wrong checkpoint, and one line saying
-                        # which tree was used is the difference between a
-                        # one-read diagnosis and an afternoon.
                         shared = (
                             " (the PRIMARY checkpoint — this slot has no "
                             "--checkpoint-ref of its own; an auxiliary model "
@@ -1584,21 +1100,10 @@ def _derive_lane(
                                     **dict(binding),
                                 })
                             except StepBudgetReached:
-                                # The pass observed its shapes; the remaining
-                                # denoise steps repeat them.
                                 pass
                             except ValidationError:
-                                # The author refusing an impossible serving
-                                # combination is correct behavior, not a
-                                # derive failure.
                                 refused += 1
                             except Exception as exc:
-                                # pgw#1527: ONE unservable payload costs one
-                                # payload, not the document — but only when the
-                                # AUTHOR's code is what raised. Anything deeper
-                                # in the SDK, torch or diffusers is still fatal:
-                                # the derive exists to find those, and walls 1-8
-                                # were every one of them.
                                 frame = deepest_endpoint_frame(exc, endpoint_root)
                                 if frame is None or unservable is None:
                                     raise DeriveError(
@@ -1616,9 +1121,6 @@ def _derive_lane(
                                         str(k): str(v)
                                         for k, v in dict(binding).items()
                                     },
-                                    # WHERE the author's code raised, so a
-                                    # skipped payload points at the line that
-                                    # has to change.
                                     "frame": (
                                         f"{Path(frame.filename).name}:"
                                         f"{frame.lineno} in {frame.name}"
@@ -1636,9 +1138,6 @@ def _derive_lane(
                 if set(lane_graphs.targets) - {
                     record.target for record in lane_graphs.graphs
                 }:
-                    # A marked module the budgeted drive never reached (it
-                    # runs AFTER the denoise loop). Re-drive unbudgeted
-                    # before calling it unobserved.
                     request_ctx.step_budget = None
                     lane_graphs = torchcg.discover_modules(
                         handle, modules, drive, program_sink=program_sink,
@@ -1685,15 +1184,7 @@ def derive_release(
     graph_cas: Optional[Path] = None,
     slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
 ) -> ReleaseDeriveResult:
-    """Derive the release metadata document for one endpoint module.
-
-    ``checkpoint_dir`` is the PRIMARY model's tree. ``slot_checkpoints`` maps a
-    secondary model slot to its OWN tree (pgw#1508) -- an auxiliary model is a
-    different model with a different checkpoint, which the serving binding
-    table has said since 0.9.0 and the derive used to contradict. A slot with
-    no entry falls back to the primary tree, so every single-slot endpoint
-    derives exactly the bytes it did before.
-    """
+    """Derive the release metadata document for one endpoint module."""
 
     torchcg = _torchcg()
     program_sink = _program_sink(graph_cas)
@@ -1717,17 +1208,11 @@ def derive_release(
     warnings: list[str] = []
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
     unenumerable: list[tuple[str, str]] = []
-    #: pgw#1527: payloads the ENDPOINT could not serve, one row each.
     unservable_payloads: list[dict[str, Any]] = []
     for plan in _entrypoints(module, cls):
         owner = f"@entrypoint {plan.name}"
         refusal: Optional[PayloadEnumerationRefused] = None
         if cls is None:
-            # pgw#1392: a WEIGHTLESS entrypoint has no lane, so there is no
-            # trace subject and no pass is ever run. `traced_passes` says 0
-            # because 0 is the truth, not because the enumeration was
-            # skipped. It still publishes its envelope schema — the hub's
-            # auto-generated API docs are the point of this block.
             payloads: tuple[Any, ...] = ()
         else:
             try:
@@ -1735,13 +1220,6 @@ def derive_release(
                     owner, plan.payload_type, model_structural(cls)
                 )
             except PayloadEnumerationRefused as exc:
-                # pgw#1449: ONE unenumerable signature used to cost the whole
-                # module — `gen-worker lock` died here and wrote NO lock, so
-                # the entrypoints the enumerator CAN reach never got written
-                # either. The derive is a pre-warming completeness aid, never
-                # a correctness gate: an endpoint that derives 2 of 3
-                # entrypoints is strictly more useful than one that derives
-                # none, and the third is STATED rather than dropped.
                 refusal = exc
                 payloads = ()
                 capped = False
@@ -1756,8 +1234,6 @@ def derive_release(
             plans.append((plan, payloads))
         entrypoints[plan.name] = {
             "envelope_schema": _envelope_schema(plan),
-            # Renders EMPTY for a weightless entrypoint — an honest {}, never
-            # a fabricated slot.
             "model_slots": {
                 slot_name: slot_cls.__name__
                 for slot_name, slot_cls in plan.model_slots
@@ -1765,11 +1241,6 @@ def derive_release(
             "traced_passes": len(payloads),
         }
         if refusal is not None:
-            # A TYPED row, not a warning string: the hub and the miner read
-            # this document, and "this entrypoint has no traced coverage, for
-            # this reason" is a fact about the release, not a log line. The
-            # key is absent on every enumerable entrypoint, so a document that
-            # has no refusals is byte-identical to one derived before this.
             entrypoints[plan.name]["unenumerable"] = {
                 "field": refusal.field,
                 "type": refusal.annotation,
@@ -1785,11 +1256,6 @@ def derive_release(
             )
 
     if cls is not None:
-        # A declared axis that reaches NO entrypoint payload field enumerates
-        # nothing and would be a silent no-op — the exact silence the
-        # declaration exists to end. Say so; do not refuse (an axis may
-        # legitimately name a field only one of several entrypoints carries,
-        # and `_auto_payloads` already skips it per entrypoint).
         reachable = {
             field_name
             for plan, _ in plans
@@ -1812,12 +1278,9 @@ def derive_release(
                 slot_checkpoints=slot_checkpoints,
                 endpoint_root=endpoint_source_root(module),
                 unservable=unservable_payloads,
-                # pgw#1599: read off the MODEL CLASS, never a CLI flag.
                 dynamic_dims=dynamic_dim_policy(model_shapes(cls)),
             )
             if lane_graphs is None:
-                # Traced, nothing marked (pgw#1488). No lane row: an empty one
-                # would claim a keyed graph set that does not exist.
                 unmarked_lanes.append(
                     lane_contract_handle(f"class {cls.__name__!r}", lane)
                 )
@@ -1834,10 +1297,6 @@ def derive_release(
             # computed, not stored, so there is no per-lane document to inline.
             # See the block above `_resolve_lane`.
             entry: dict[str, Any] = {"stamp": lane_graphs.contract}
-            # ie#740 placement floor for THIS lane, read off the class header
-            # (`requires=`). Absent = undeclared, and the platform default is
-            # what the deployment gets — the honest state, never an invented
-            # floor.
             floor = requires.get(lane_graphs.contract)
             if floor is not None:
                 entry["requires"] = floor.render()
@@ -1846,9 +1305,6 @@ def derive_release(
             # is the same expression and not a second spelling of it.
             lane_contracts[lane_graphs.contract] = entry
 
-    # pgw#1527: a skipped payload is STATED, per entrypoint, and is absent
-    # entirely when nothing was skipped — so a document with no unservable
-    # payload is byte-identical to one derived before this existed.
     for row in unservable_payloads:
         row_entry = entrypoints.get(str(row["entrypoint"]))
         if row_entry is None:
@@ -1876,17 +1332,7 @@ def derive_release(
         # that makes the lockstep matter more than the refusal does.
         "graphs": graphs_document.as_dict(),
         "lane_contracts": lane_contracts,
-        # The per-entrypoint request envelope, DERIVED FROM THE SIGNATURE
-        # (parameter name = slot name). The hub publishes these as the
-        # release's auto-generated API docs; a renamed parameter is a
-        # visible API break, flagged like a disappearing lane.
         "entrypoints": entrypoints,
-        # pgw#1599: the author's declared FORK AXES travel in the document,
-        # so the mint scheduler and the hub read the CLOSED key set instead of
-        # inferring it. `structural` names the axes that fork the PROGRAM (and
-        # what measurement said so); `shapes` names the per-axis static/dynamic
-        # choice that decides whether a lane mints N bucket artifacts or one
-        # symbolic one. Both empty for a weightless module.
         "fork_axes": {
             "structural": [
                 declaration.as_document(axis)
@@ -1917,9 +1363,6 @@ def derive_release(
             for lane in graphs_document.lanes
         },
         warnings=tuple(warnings),
-        # No lane class AND entrypoints still derived => every one of them
-        # declared zero model slots. An eager-permanent module also has no
-        # lane class, but its entrypoints carry slots and derive no plan.
         weightless=cls is None and bool(plans),
         unmarked_lanes=tuple(unmarked_lanes),
         unenumerable_entrypoints=tuple(unenumerable),

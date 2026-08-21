@@ -1,25 +1,4 @@
-"""An SP follower must die with rank 0 — including on an ABORT.
-
-Under the process split the compute child (rank 0) can die ``rc=-6``
-(the NCCL abort), where atexit never runs, so ``daemon=True`` reaps
-nothing. The parent then respawns the group onto the same cards in ~1 s while
-the orphaned followers hold a full weight replica for their own 300 s
-collective timeout — a crash loop seeded by its own orphans.
-
-The fix is in the follower's OWN bootstrap (``_follower_main`` ->
-``_die_with_rank0``): ``PR_SET_PDEATHSIG(SIGKILL)`` plus the spawn-race
-re-parent check. This test drives the REAL bootstrap through the real
-``multiprocessing`` spawn context and kills rank 0 with SIGKILL — the one
-signal that cannot be handled, exactly like an abort for reaping purposes.
-Reverting ``_die_with_rank0`` (or the ``rank0_pid`` plumbing in
-``RankGroup.form``) turns this red: the follower survives its parent.
-
-The ready signal is a FILE, not an mp queue, deliberately: the assertion must
-only fire once the follower is provably past spawn bootstrap and inside
-``entry`` (a follower killed mid-bootstrap dies of its half-built pipes and
-would fake a reap), and a file does not put semaphores in the spawn payload —
-the channel object is not what this test is about.
-"""
+"""An SP follower must die with rank 0 — including on an ABORT."""
 
 from __future__ import annotations
 
@@ -38,10 +17,6 @@ pytestmark = pytest.mark.skipif(
 
 _SRC = str(Path(__file__).resolve().parent.parent / "src")
 
-# Rank 0's stand-in: spawns ONE follower through the real _follower_main with
-# the real spawn context and the real rank0_pid plumbing, then parks until the
-# test SIGKILLs it. The entry reports ready (via the file channel) and parks —
-# the property under test is the bootstrap, not the rendezvous.
 _DRIVER = textwrap.dedent(
     """
     import multiprocessing as mp
@@ -95,8 +70,6 @@ def test_a_follower_is_reaped_when_rank0_aborts(tmp_path):
         stdout=subprocess.PIPE, env=env)
     try:
         follower_pid = int(rank0.stdout.readline().decode().strip())
-        # Only a follower that is provably past bootstrap and inside `entry`
-        # (pdeathsig armed) proves anything about surviving an abort.
         progress_wait.await_progress(
             ready.exists,
             lambda seen: seen,
@@ -109,8 +82,6 @@ def test_a_follower_is_reaped_when_rank0_aborts(tmp_path):
         )
         assert ready.read_text() == "1"
         os.kill(follower_pid, 0)
-        # Rank 0 "aborts": SIGKILL, like rc=-6, runs no atexit and no
-        # multiprocessing daemon cleanup. Only the kernel can reap now.
         rank0.kill()
         rank0.wait(timeout=10)
 

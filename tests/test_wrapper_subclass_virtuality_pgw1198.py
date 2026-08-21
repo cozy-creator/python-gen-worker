@@ -1,32 +1,4 @@
-"""Virtuality is a question about STORAGE, never about TYPE.
-
-The boundary of the structure-only forge is not a list of pipeline classes — a
-family survey goes stale the day one of them adds a quantizer. It is two
-properties, and this file tests the second because the first is already fenced:
-
-1. the declared compile target must be buildable from code + config
-   (``load_config`` + ``from_config``, named in ``model_index.json``) — refused
-   by name in ``StructureOnlyUnsupported``, covered by
-   ``test_structure_only_pgw1080``;
-2. **whatever the endpoint's own ``setup()``/``warmup()`` then does to that
-   module must remain visible AS virtual.** A quantizer that re-wraps a fake
-   parameter in a tensor subclass is the shape the fleet actually ships
-   (``wan-2.2``, ``minimax-h3``): torchao's ``Float8Tensor`` is not a
-   ``FakeTensor``, its inner ``qdata``/``scale`` are, and pricing
-   ``numel * element_size`` at the OUTER bf16 dtype charges an entire checkpoint
-   for storage that does not exist.
-
-Torchao is not in this image, so the subclass here is written to torch's own
-wrapper-subclass contract — ``__tensor_flatten__`` / ``__tensor_unflatten__``,
-outer dtype bf16 over an fp8 payload and an fp32 scale — which is precisely the
-contract ``Float8Tensor`` implements and precisely what the fix consults. The
-test drives the REAL seams: ``structure_only.build_component`` on the micro
-family's real tree, then the real fences.
-
-The rows below pin both directions: a subclass over FAKE data is weight-free,
-and a subclass over REAL data (or over a MIX) is still a breach, by the same
-walk.
-"""
+"""Virtuality is a question about STORAGE, never about TYPE."""
 
 from __future__ import annotations
 
@@ -50,18 +22,8 @@ from gen_worker.models import structure_only as so  # noqa: E402
 from gen_worker.models.memory import device_mismatches  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# The shape the fleet actually produces: a quantizer's wrapper subclass
-# ---------------------------------------------------------------------------
-
-
 class Quantized(torch.Tensor):
-    """torchao ``Float8Tensor``'s contract, minus torchao.
-
-    Outer dtype is the HIGH-PRECISION one (that is what makes the outer
-    ``numel * element_size`` overstate by 2x on an fp8 payload); the storage
-    lives in the inner tensors, which are whatever the weight was made of.
-    """
+    """torchao ``Float8Tensor``'s contract, minus torchao."""
 
     @staticmethod
     def __new__(cls, qdata: Any, scale: Any, dtype: Any) -> "Quantized":
@@ -86,10 +48,6 @@ class Quantized(torch.Tensor):
     @classmethod
     def __torch_dispatch__(cls, func: Any, types: Any, args: Any = (),
                            kwargs: Any = None) -> Any:
-        # `nn.Parameter(...)` detaches its data, so the subclass has to survive
-        # that much — the same op torchao's own table implements first. Nothing
-        # else is claimed: an op this test never exercises must say so rather
-        # than silently produce a plain tensor.
         if func in (torch.ops.aten.detach.default, torch.ops.aten.alias.default):
             held = args[0]
             return cls(func(held.qdata), func(held.scale), held.dtype)
@@ -97,12 +55,7 @@ class Quantized(torch.Tensor):
 
 
 def quantize_like_setup(module: Any) -> int:
-    """What ``wan-2.2``'s ``setup()`` does to the module the forge just built.
-
-    Runs inside the module's OWN fake mode, exactly as torchao's ``quantize_``
-    does when it is handed a structure-only expert: the inner tensors it
-    derives from a fake weight are fake, and it hands back a subclass.
-    """
+    """What ``wan-2.2``'s ``setup()`` does to the module the forge just built."""
     mode = so.fake_mode_of(module)
     swapped = 0
     for sub in module.modules():
@@ -121,12 +74,7 @@ def quantize_like_setup(module: Any) -> int:
 
 def real_quantized(shape: Tuple[int, ...], *, scale_real: bool = True,
                    qdata_real: bool = True) -> Any:
-    """The same subclass over REAL storage — the case that must still breach.
-
-    ``scale_real=False`` / ``qdata_real=False`` build the MIXED tensor: part
-    fake, part real. Every inner tensor has to be virtual for the whole to be,
-    so a mix is real.
-    """
+    """The same subclass over REAL storage — the case that must still breach."""
     def _make(size: Tuple[int, ...], dtype: Any, real: bool) -> Any:
         if real:
             return torch.empty(size, dtype=dtype)
@@ -139,8 +87,6 @@ def real_quantized(shape: Tuple[int, ...], *, scale_real: bool = True,
 
 
 class _Composed:
-    """A diffusers-shaped composition: ``.components`` plus plain attributes,
-    the same fixture shape ``test_weight_free_premise_pgw1173`` uses."""
 
     def __init__(self, **parts: Any) -> None:
         self._parts = dict(parts)
@@ -154,9 +100,7 @@ class _Composed:
 
 @pytest.fixture(scope="module")
 def tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A config-only tree. pgw#1373 deleted `examples/micro-diffusion`, which
-    was where this came from; `harness.structure_tree` is the replacement and
-    builds it out of a REAL diffusers class instead of a vendored toy."""
+    """A config-only tree."""
     from harness.structure_tree import build_config_only_tree
 
     return build_config_only_tree(tmp_path_factory.mktemp("structure-tree"))
@@ -168,11 +112,6 @@ def quantized_target(tree: Path) -> Any:
     assert quantize_like_setup(module) > 0, (
         "the denoiser must carry Linears for this to test anything")
     return module
-
-
-# ---------------------------------------------------------------------------
-# 1. The primitive: virtuality answers about STORAGE
-# ---------------------------------------------------------------------------
 
 
 def test_a_subclass_over_fake_data_is_VIRTUAL() -> None:
@@ -196,8 +135,7 @@ def test_a_subclass_over_REAL_data_is_NOT_virtual() -> None:
 @pytest.mark.parametrize("qdata_real,scale_real", [(True, False), (False, True)])
 def test_a_MIXED_subclass_is_NOT_virtual(qdata_real: bool,
                                          scale_real: bool) -> None:
-    """All-of, not any-of. A quantizer that leaves a real scale beside a fake
-    payload has allocated, and the fence must charge for it."""
+    """All-of, not any-of."""
     assert not mi.is_virtual(
         real_quantized((64, 32), qdata_real=qdata_real, scale_real=scale_real))
 
@@ -206,19 +144,9 @@ def test_a_plain_real_tensor_is_still_NOT_virtual() -> None:
     assert not mi.is_virtual(torch.empty((8, 8), dtype=torch.bfloat16))
 
 
-# ---------------------------------------------------------------------------
-# 2. The fence pod 729431an6ugbvq tripped
-# ---------------------------------------------------------------------------
-
-
 def test_the_weight_free_fence_passes_a_setup_QUANTIZED_structure(
     quantized_target: Any,
 ) -> None:
-    """RED before pgw#1198: this is the wan-2.2 refusal, reproduced.
-
-    Without the fix every quantized Linear is priced at its OUTER bf16 dtype,
-    so the breach total is the whole checkpoint of a module holding nothing.
-    """
     pipe = _Composed(transformer=quantized_target)
 
     assert so.weight_free_breaches(pipe, ("transformer",)) == ()
@@ -228,13 +156,7 @@ def test_the_weight_free_fence_passes_a_setup_QUANTIZED_structure(
 def test_the_fence_still_FIRES_when_the_quantizer_left_real_weights(
     quantized_target: Any,
 ) -> None:
-    """The other direction, in the same walk. A fence that cannot fire is
-    worse than no fence, and widening what counts as virtual must not have
-    bought that."""
-    # Any Linear will do, and NAMING one is how this row broke when the
-    # fixture family changed (`proj_out` was the deleted micro denoiser's).
-    # What the fence is about is a real-storage parameter anywhere under the
-    # component, so reach for the first one the walk would see.
+    """The other direction, in the same walk."""
     victim = next(
         m for _n, m in quantized_target.named_modules()
         if isinstance(m, nn.Linear)
@@ -252,13 +174,6 @@ def test_the_fence_still_FIRES_when_the_quantizer_left_real_weights(
 
 
 def test_the_placement_walk_does_not_read_a_quantized_structure_as_misplaced() -> None:
-    """``device_mismatches`` had the same ``isinstance`` and the same blindness
-    (pgw#1124 defect 2, arriving by the other door): a structure that allocates
-    nothing cannot be moved, and counting it makes a CPU rollback unsatisfiable.
-
-    The parameter must CLAIM THE CARD for this to test anything — that is the
-    whole shape on the pod, and a fake tensor can claim one on a cardless box.
-    """
     from torch._subclasses.fake_tensor import FakeTensorMode
 
     with FakeTensorMode(), torch.device("cuda"):
@@ -273,33 +188,16 @@ def test_the_placement_walk_does_not_read_a_quantized_structure_as_misplaced() -
 
 
 def test_a_META_tensor_is_still_reported_by_the_placement_walk() -> None:
-    """The one virtual thing that walk must keep reporting: outside a
-    structure-only component a meta tensor is an unmaterialized load, and
-    ``meta_tensors`` reads it out of here."""
+    """The one virtual thing that walk must keep reporting: outside a structure-only component a meta tensor is an unmaterialized load, and ``meta_tensors`` reads it out of here."""
     module = nn.Linear(4, 4, device="meta")
     found = device_mismatches(_Composed(transformer=module), "cpu")
     assert [name for _c, name, _d in found] == ["weight", "bias"]
 
 
-# ---------------------------------------------------------------------------
-# 3. Re-virtualizing must preserve the QUANTIZED topology
-# ---------------------------------------------------------------------------
-
-
 def test_revirtualizing_keeps_the_quantized_topology(
     quantized_target: Any,
 ) -> None:
-    """`virtualize` rebuilt every parameter as a plain tensor of its OUTER
-    dtype, which turns a quantized weight into a bf16 one — so the export would
-    trace bf16 Linears for a pod that serves fp8: a compiled graph for a graph the pod
-    never executes, which is exactly what `_refuse_artifact_lanes` exists to
-    prevent, arriving by the other door.
-
-    (The rows that used to sit here drove `materialize_random` — the pgw#984
-    warm proof's real-value materialisation. pgw#1199 deleted it: the proof
-    runs on the RESIDENT parent now, so nothing in this module can put values
-    on a structure. `test_structure_only_pgw1080` asserts that absence.)
-    """
+    """`virtualize` rebuilt every parameter as a plain tensor of its OUTER dtype, which turns a quantized weight into a bf16 one — so the export would trace bf16 Linears for a pod that serves fp8: a compi..."""
     quantized = {name for name, p in quantized_target.named_parameters()
                  if isinstance(p.data, Quantized) or isinstance(p, Quantized)}
     assert quantized, "the fixture must have swapped something"

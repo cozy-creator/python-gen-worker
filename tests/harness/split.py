@@ -1,16 +1,3 @@
-"""The pgw#763 process-split rig: one hub double, one real ParentControl, real children.
-
-Hoisted out of `test_procsplit_pgw763.py` by pgw#1362. That module was a TEST
-module that four other test modules imported as a fixture library — the fold
-made the coupling impossible to keep (`from test_procsplit_pgw763 import ...`
-names a file that no longer exists), and a shared rig belongs in `harness/`
-where the other shared rigs already live, not in whichever test file happened
-to define it first.
-
-Consumers: `test_procsplit.py`, `test_pod_isolation.py`, `test_child_faults.py`,
-`test_receipts_trust.py`.
-"""
-
 from __future__ import annotations
 
 import os
@@ -44,10 +31,6 @@ def postmortem_dir(tmp: Path) -> Path:
     return d
 
 
-#: `tests/`, NOT `tests/harness/` — this module lives one level deeper than
-#: the test files that used to own these paths (pgw#1362 hoist). Getting this
-#: wrong spawns the child from `tests/harness/harness/...` and every split
-#: test dies in a boot-crash loop, which is how it was caught.
 TESTS_DIR = Path(__file__).resolve().parent.parent
 
 SRC_DIR = TESTS_DIR.parent / "src"
@@ -92,16 +75,9 @@ class SplitHarness:
             ),
             "TENSORHUB_CACHE_DIR": str(tmp / "cache"),
             "GEN_WORKER_CHILD_WATCHDOG_PING_S": "0.5",
-            # Test-scoped post-mortem markers: the parent consumes the child's
-            # in-flight file, so both sides must agree on a per-test dir and
-            # never touch the host's (or another test's) markers.
             "GEN_WORKER_BOOT_RECORD": str(postmortem_dir(tmp) / _BOOT_RECORD_NAME),
         }
         child_env.update(extra_child_env or {})
-        #: What the CHILD will resolve its paths from. Exposed because a row
-        #: that computes an expected path from the PYTEST process's own
-        #: environment is measuring the wrong process — this harness
-        #: deliberately overrides TENSORHUB_CACHE_DIR for the child.
         self.child_env = dict(child_env)
         self.pc = ParentControl(
             settings,
@@ -121,8 +97,6 @@ class SplitHarness:
         )
         self.exit_code: Optional[int] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
-        # a parent that exited can never dial in (definitive), and a
-        # child boot's silence is worth whatever it costs on THIS runner.
         self.scheduler.worker_alive = lambda: self.alive
         self.scheduler.boot_cost = lambda: measure_child_boot_cost_s(child_env)
         self._thread.start()
@@ -135,7 +109,6 @@ class SplitHarness:
         return self._thread.is_alive()
 
     def signal(self, signum: int) -> None:
-        """pgw#763: Deliver a signal to the PARENT (the container's PID 1 in split mode)."""
         loop = self.pc._loop
         assert loop is not None
         loop.call_soon_threadsafe(self.pc._forward_signal, signum)
@@ -151,7 +124,6 @@ class SplitHarness:
 
 @pytest.fixture(autouse=True)
 def isolated_postmortem(tmp_path, monkeypatch):
-    """The parent CONSUMES the dying child's markers (pgw#676 parity), so the in-process parent must read the sa..."""
 
     d = postmortem_dir(tmp_path)
     monkeypatch.setattr(postmortem, "INFLIGHT_PATH", d / _INFLIGHT_NAME)

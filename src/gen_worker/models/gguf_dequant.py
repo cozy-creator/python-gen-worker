@@ -1,48 +1,18 @@
-"""GGML block-format dequantization as vectorized torch ops.
-
-A GGML quantized tensor is a flat byte array cut into fixed-size BLOCKS. Each
-block packs a scale (and for some types a min, or a second level of 6-bit
-sub-scales) next to the packed weight nibbles/crumbs. Dequantizing is pure bit
-arithmetic: split the block into its fields, shift, mask, scale. No kernel, no
-vendor extension — every function here is a handful of batched torch ops that
-run identically on CUDA, ROCm, MPS and CPU.
-
-This is the half of the GGUF lane that lets quantized weights STAY quantized in
-memory: :mod:`gen_worker.models.gguf_torch` holds the block bytes on the device
-and calls in here once per forward, per layer, to materialize the weight for
-one matmul and then drop it. Weight residency is the quantized size (2-4x under
-bf16); the dequant is memory-bound and costs ~10-20% of step time.
-
-Ported from city96's ComfyUI-GGUF ``dequant.py`` (Apache-2.0), whose numerics
-are the de-facto reference for the diffusion GGUF ecosystem. The 13 types below
-are the ones with a vectorized form; IQ1/IQ2/IQ3 (importance-matrix 2-3 bit)
-have no batched decode and are deliberately NOT supported — a per-block numpy
-fallback would be slower than not serving the rung at all, so an unsupported
-qtype raises instead of silently degrading.
-
-Correctness is pinned to the ``gguf`` package's own numpy implementation:
-``tests/test_ggml_decode.py`` asserts BIT-EXACT equality against
-``gguf.quants.dequantize`` over random block bytes for every type here.
-"""
+"""GGML block-format dequantization as vectorized torch ops."""
 
 from __future__ import annotations
 
 import functools
 from typing import Any, Callable, Dict, Tuple
 
-#: K-quant super-block: 256 weights, 8 or 16 sub-blocks with their own scales.
 QK_K = 256
 
-#: Bytes holding a K-quant super-block's packed 6-bit scale/min pairs.
 K_SCALE_SIZE = 12
 
-#: IQ4 codebook. The 4-bit index selects one of these 16 int8 levels, which are
-#: spaced non-linearly to match a normal-ish weight distribution.
 _IQ4_KVALUES: Tuple[int, ...] = (
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 )
 
-#: Types torch holds natively — no block decode, just a dtype view.
 _PASSTHROUGH_NAMES: Tuple[str, ...] = ("F32", "F16")
 
 
@@ -53,7 +23,6 @@ def _shifts(values: Tuple[int, ...], shape: Tuple[int, ...], device: Any) -> Any
 
 
 def _split(blocks: Any, *widths: int) -> Tuple[Any, ...]:
-    """Cut each block row into ``widths`` byte fields plus the remainder."""
     import torch
 
     dims = list(widths) + [blocks.shape[1] - sum(widths)]
@@ -61,7 +30,6 @@ def _split(blocks: Any, *widths: int) -> Tuple[Any, ...]:
 
 
 def _to_uint32(x: Any) -> Any:
-    """Little-endian u32 from 4 uint8 columns (torch has no uint32)."""
     import torch
 
     x = x.view(torch.uint8).to(torch.int32)
@@ -75,15 +43,11 @@ def _to_uint16(x: Any) -> Any:
     return (x[:, 0] | x[:, 1] << 8).unsqueeze(1)
 
 
-# --- full-precision -------------------------------------------------------
-
 def _blocks_bf16(blocks: Any, block_size: int, type_size: int, dtype: Any) -> Any:
     import torch
 
     return (blocks.view(torch.int16).to(torch.int32) << 16).view(torch.float32)
 
-
-# --- legacy quants (32-weight blocks) -------------------------------------
 
 def _blocks_q8_0(blocks: Any, block_size: int, type_size: int, dtype: Any) -> Any:
     import torch
@@ -146,10 +110,7 @@ def _blocks_q4_0(blocks: Any, block_size: int, type_size: int, dtype: Any) -> An
     return d * ((qs & 0x0F).reshape((n, -1)).to(torch.int8) - 8)
 
 
-# --- K quants (256-weight super-blocks) -----------------------------------
-
 def _scale_min(scales: Any) -> Tuple[Any, Any]:
-    """Unpack a K-quant's 12 scale bytes into 8 six-bit scales and 8 mins."""
     import torch
 
     n = scales.shape[0]
@@ -254,8 +215,6 @@ def _blocks_q2_k(blocks: Any, block_size: int, type_size: int, dtype: Any) -> An
     return (dl * qs - ml).reshape((n, -1))
 
 
-# --- IQ4 (codebook) -------------------------------------------------------
-
 def _kvalues(like: Any) -> Any:
     import torch
 
@@ -302,8 +261,6 @@ def _blocks_iq4_xs(blocks: Any, block_size: int, type_size: int, dtype: Any) -> 
 
 _Kernel = Callable[[Any, int, int, Any], Any]
 
-#: qtype NAME -> block decoder. Keyed by name so the table needs no ``gguf``
-#: import to exist; :func:`_kernels` resolves the names to the wire ids once.
 _BY_NAME: Dict[str, _Kernel] = {
     "BF16": _blocks_bf16,
     "Q8_0": _blocks_q8_0,
@@ -369,13 +326,7 @@ def block_geometry(qtype: int) -> Tuple[int, int]:
 
 
 def dequantize(data: Any, qtype: int, shape: Any, *, dtype: Any = None) -> Any:
-    """Decode packed GGML ``data`` into a dense tensor of logical ``shape``.
-
-    ``data`` is the raw block bytes exactly as they sit in the store — any
-    dtype whose bytes are the block stream; it is reinterpreted as uint8. The
-    whole tensor decodes in ONE batched pass over ``(n_blocks, type_size)``:
-    there is no python loop over blocks anywhere in this module.
-    """
+    """Decode packed GGML ``data`` into a dense tensor of logical ``shape``."""
     import torch
 
     qtype = int(qtype)

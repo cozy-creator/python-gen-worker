@@ -1,161 +1,48 @@
-"""Worker `Settings` struct — the canonical typed config for the worker process.
-
-Ruling §1.18: NEVER load envs in the middle of code — load from the config
-pipeline and pass the value around. Exactly one component in this process reads
-the process environment — `gen_worker.config` — and it produces exactly one
-typed struct, which is **passed by parameter**.
-
-Each process entry performs one bootstrap-owned `load_settings()`:
-`entrypoint._run_main()` for the worker, `procsplit.parent.main()` for the
-control parent, and the `cli/` command group for the standalone CLI. Nothing
-else loads; nothing else reads env. There is deliberately **no** cached
-process-global accessor: a `lru_cache`d singleton is the same defect as a raw
-env read wearing better clothes — unreachable by a caller that wants to pass a
-different value, invisible to a test that does not clear the cache, and latched
-by whichever module happened to import first.
-
-Raw `os.environ` reads outside this package are the residue, not the rule:
-prefer a parameter or `config.current()`.
-
-Built on msgspec.Struct (already a worker dep) instead of pydantic-settings to
-avoid pulling in pydantic. The source-loader layering (env → .env → secrets dir
-→ yaml → defaults) lives next to this in `loader.py`.
-"""
+"""Worker `Settings` struct — the canonical typed config for the worker process."""
 import msgspec
 
-# No boot-only environment (``WORKER_CONFIG_GENERATION``) was ever injected into
-# this process. Distinct from generation 0, which is a real — and genuinely
-# ancient — injected generation.
 BOOT_CONFIG_GENERATION_ABSENT = -1
 
 
 class Settings(msgspec.Struct, frozen=True, kw_only=True):
-    """Worker-process configuration. Loaded once at startup, passed by reference.
+    """Worker-process configuration."""
 
-    All fields default to their zero value so the loader can omit any field
-    that isn't explicitly set in any source — msgspec.convert applies struct
-    defaults for missing keys. Required-ness is enforced by callers (e.g.
-    `Worker.__init__` raises if `orchestrator_public_addr` is empty).
-    """
-
-    # HuggingFace credentials/cache. Universal across endpoints — read by the
-    # huggingface_hub library and our HF download helpers.
     hf_token: str = ""
     hf_home: str = ""
 
-    # Service endpoints injected by gen-orchestrator at pod launch.
     tensorhub_public_url: str = ""
-    # Public address of the orchestrator router (ALPN-multiplexed HTTP + gRPC).
-    # Single shared value across the cluster — the router resolves us to the
-    # per-release lease owner. gen-orchestrator issue #317.
     orchestrator_public_addr: str = ""
 
-    # Per-pod worker identity (orchestrator-injected).
     worker_id: str = ""
-    # Path to the discovery manifest (endpoint.lock). Default is the baked
-    # container location; non-container runs (e2e, bare-metal dev) override it.
     endpoint_lock_path: str = "/app/.tensorhub/endpoint.lock"
-    # pgw#1466 cozy-local store roots. Empty = "use the box default"; the
-    # defaults live in `cli/workspace.py` beside the code that explains WHY
-    # weights and graphs are separate stores, not here as bare strings.
-    # Fields rather than direct env reads (§1.18): these are config, and the
-    # CLI installs Settings at process entry like every other entry point.
     weights_cas_root: str = ""
     graph_cas_root: str = ""
-    # pgw#1526: where `compile` builds artifacts and `up` adopts them.
-    # Empty = the box default in `cli/workspace.py`. The cwd-relative
-    # `.compiled-graphs` default is DELETED, not deprecated.
     artifacts_root: str = ""
-    # pgw#1491/cl#85: `~/.cozy` — the USER-GLOBAL root cozy-local also
-    # resolves, holding the shared credential store both tools read. A Settings
-    # field rather than a direct env read (§1.18) because it IS configuration:
-    # one login serves every endpoint venv on the machine, and the location of
-    # that store is exactly the kind of value the pipeline should carry.
-    cozy_home: str = ""            # COZY_HOME
-    # pgw#1491: where `up` publishes its handle and `run`/`down` find it.
-    # Empty = the box default in `cli/endpoint_state.py`, beside the code that
-    # explains why liveness is a signal-0 and not the file's existence.
+    cozy_home: str = ""
     endpoint_state_root: str = ""
-    # pgw#1462 part 2: the IMAGE's read-only exported-program CAS — where the
-    # builder bakes this release's serialized ExportedPrograms. Distinct from
-    # `graph_cas_root` (the CLI's own store) and from the pod's
-    # `<TENSORHUB_CACHE_DIR>/cas` (where its own mints land). Empty = "use the
-    # baked container default"; see `models/cache_paths.baked_program_cas_dir`.
     baked_program_cas_root: str = ""
-    # NOT "the worker's JWT". It is the BOOTSTRAP copy — the
-    # value the hub injected at pod create, frozen there forever and updated by
-    # nothing. The live credential is rotated over the scheduler stream at ~80 %
-    # of TTL, and `gen_worker.worker_credential` is the ONLY source of truth for
-    # it. The name is deliberately NOT `worker_jwt`: that spelling reads like
-    # "the worker's JWT" and invites a caller to present an expired token, which
-    # wedges the pod. Any surviving `settings.worker_jwt` reader is an
-    # AttributeError at the call site, not a stale string. Read this field from
-    # `worker_credential` and nowhere else.
+    # NOT "the worker's JWT" — the BOOTSTRAP copy the hub injected at pod create, frozen forever. The live credential is rotated over the scheduler stream; gen_worker.worker_credential is its only source of truth. Read it there, never here — presenting this expired copy wedges the pod.
     bootstrap_worker_jwt: str = ""
-    # The worker's release identity, delivered SEPARATELY from the JWT. Under
-    # the process split the compute child holds no JWT (the
-    # parent strips it), so it cannot read `release_id` out of the claims — but
-    # the intent registry and every lifecycle snapshot are keyed on it. A claim
-    # is not a credential: the control parent decodes its own token and hands
-    # this one value down to the compute child.
     worker_release_id: str = ""
 
-    # Runtime introspection (set by the RunPod runtime; not configuration).
     runpod_pod_id: str = ""
 
-    # Local mutable-config snapshot file (atomic-rewritten on each
-    # config-generation push; per-invoke subprocesses read it). Empty =
-    # runtime_config.DEFAULT_SNAPSHOT_PATH.
-    config_snapshot_path: str = ""  # GEN_WORKER_CONFIG_SNAPSHOT_PATH
-    # Config generation whose boot-only environment was injected when this pod
-    # was created. Never inferred from the first desired-state command.
-    #
-    # The DEFAULT is the sentinel -1, meaning "no boot-only environment was ever
-    # injected into this process" — which is NOT the same fact as "the injected
-    # boot config is generation 0". Tensorhub injects WORKER_CONFIG_GENERATION
-    # only into pod-launch env, so a host-process worker never receives one;
-    # conflating the two makes every such worker report BOOT_STALE for its whole
-    # life, with a remedy (pod replacement) that does not exist for it.
-    boot_config_generation: int = BOOT_CONFIG_GENERATION_ABSENT  # WORKER_CONFIG_GENERATION
+    config_snapshot_path: str = ""
+    # The sentinel default -1 means "no boot-only environment was ever injected", which is NOT "generation 0": the hub injects WORKER_CONFIG_GENERATION only into pod-launch env, so a host-process worker never receives one, and conflating the two makes it report BOOT_STALE for its whole life.
+    boot_config_generation: int = BOOT_CONFIG_GENERATION_ABSENT
 
-    # Immutable image provenance stamped by Tensorhub from the release image
-    # variant it selected for this pod.
-    worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
+    worker_image_digest: str = ""
 
-    # Where the post-mortem boot record is written. It is a FIELD so the parent
-    # and the child cannot disagree about the carrier. Empty = let
-    # `postmortem` pick a DURABLE default (the model-cache volume when it is not
-    # itself volatile; /tmp only as a last resort, and loudly).
-    boot_record_path: str = ""  # GEN_WORKER_BOOT_RECORD
+    boot_record_path: str = ""
 
-    # Tensorhub access for standalone clients (run/serve/prefetch). Production
-    # workers get orchestrator-resolved manifests and never dial these.
-    tensorhub_url: str = ""        # TENSORHUB_URL
-    tensorhub_token: str = ""      # TENSORHUB_TOKEN
-    # The single cache root moves all Tensorhub state, including tensorfs's
-    # local CAS, off /tmp (cozy local persists weights across reboots).
-    tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
-    # Endpoint-scoped datacenter-warm fill source (RunPod network volume mount),
-    # tried before R2. Never the CAS root itself — see
-    # models/cache_paths.py::tensorhub_fill_source_dir.
-    tensorhub_fill_source_dir: str = ""  # TENSORHUB_FILL_SOURCE_DIR
+    tensorhub_url: str = ""
+    tensorhub_token: str = ""
+    tensorhub_cache_dir: str = ""
+    tensorhub_fill_source_dir: str = ""
 
-    # Civitai provider credential (CIVITAI_API_KEY, alias CIVITAI_TOKEN).
     civitai_api_key: str = ""
 
-    # C2PA Content Credentials signing (EU AI Act Art. 50).
-    # Signing is ON iff cert material is set (inline PEM or path): every
-    # generated media asset gets a signed provenance manifest at save time
-    # (content_credentials.py). Inline *_PEM carries the PEM content itself —
-    # the hub injects it into pod env at launch (RunPod pods have no file
-    # mounts) — and takes precedence over *_PATH. Chain = leaf first.
-    # There is deliberately NO key field. The PRIVATE KEY never reaches a pod;
-    # the hub signs claims over POST /v1/worker/c2pa/sign. A pod that finds
-    # GEN_WORKER_C2PA_KEY_PEM/_KEY_PATH in ANY config source refuses to start —
-    # env via content_credentials._refuse_pod_private_key_material (a ratchet,
-    # re-checked at every read of the signing state), and .env / /run/secrets /
-    # yaml via loader.REFUSED_KEY_MATERIAL. ANY source, not just env.
-    c2pa_cert_pem: str = ""   # GEN_WORKER_C2PA_CERT_PEM (inline PEM chain)
-    c2pa_cert_path: str = ""  # GEN_WORKER_C2PA_CERT_PATH
-    c2pa_alg: str = "es256"   # GEN_WORKER_C2PA_ALG (COSE alg matching the cert key)
-    c2pa_ta_url: str = ""     # GEN_WORKER_C2PA_TA_URL (optional RFC3161 TSA)
+    c2pa_cert_pem: str = ""
+    c2pa_cert_path: str = ""
+    c2pa_alg: str = "es256"
+    c2pa_ta_url: str = ""

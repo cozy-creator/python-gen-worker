@@ -1,23 +1,4 @@
-"""Tensorhub publish client — the ONE publish path, CHUNKED SHA-256.
-
-  POST /api/v1/repos/{org}/{name}/publishes
-      {files: [{path, size_bytes, digest:"sha256:<hex>", chunks?}], mode,
-       release, dtype/file_layout/file_type, artifact_contract,
-       metadata, provenance, ...}
-  → {publish_id, have: [...], need: [{digest, put_url, headers, ...}]}
-
-Then PUT every `need` grant VERBATIM (the sha256 is signed into the presigned
-URL, so the store itself refuses bytes that do not hash to the key), re-plan
-`.../grants` to resume, and POST `.../complete`. One publish == one
-checkpoint; N artifacts are N publishes joining one RELEASE, told apart there
-by their tensor-layout contracts. th#1987 deleted the tag axis and its head.
-
-THE v1 (blake3) `/commits` PROTOCOL IS GONE FROM THIS CLIENT: it is frozen
-hub-side (every new v1 commit answers 410 `unsupported_digest_algorithm`),
-and a retired protocol left resident in the tree is a runtime failure on a
-rented pod instead of a compile failure in CI. The by-reference add went with
-it — a digest must be proven from bytes in hand.
-"""
+"""Tensorhub publish client — the ONE publish path, CHUNKED SHA-256."""
 
 from __future__ import annotations
 
@@ -46,62 +27,20 @@ from .publish_state import JOURNAL_NAME, STATE_NAME, ProducerRecovery
 
 logger = logging.getLogger(__name__)
 
-# The retry loop's PACE, and deliberately not its end — the give-up is
-# `SilenceWindow(_SEND_SILENCE_WINDOW_S)` over definite hub answers, so these
-# two decide only how often a hub that is down gets asked. A publish riding out
-# a hub rebuild for the better part of an hour must not become a retry flood
-# against it, and must not stall an hour between attempts once it recovers. The
-# ceiling also bounds a hostile or buggy `Retry-After`, which `_retry_after_s`
-# clamps to it.
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
 
-# Connect timeout split from read (mirrors gen_worker.hubio.transport and the
-# download-side floor): a dead host fails in seconds instead of consuming the
-# whole read budget.
 _CONNECT_TIMEOUT_S = 15.0
 
-# Bounded RE-PLAN passes for a publish whose granted objects did not all land.
-# Resume needs no client state: the need set comes back smaller because what
-# landed is now resident, so a pass costs only the objects still missing.
 _REUPLOAD_ATTEMPTS = 2
 
-# Re-plans spent purely on RE-MINTING expired presigns, charged to
-# their own budget. An expired grant is not a failed transfer — nothing about
-# the bytes is in question — so consuming a re-upload pass for one is how a
-# 2 h TTL crossed mid-publish turns into a fatal job. Small, because the CAS
-# grant TTL is 2 h and a publish that crosses it twice has a different problem.
 _EXPIRY_REPLAN_ATTEMPTS = 3
 
-# tensorhub's /complete verifies the publish synchronously before answering.
-# For a large tree that can outlast whatever timeout sits in front of the hub,
-# and the client must not read its own impatience as a failure.
 _COMPLETE_TIMEOUT_S = 600.0
 
-# How long the client tolerates hearing NOTHING DEFINITE from the hub before
-# giving up on the completion — network errors, edge-masked 5xx, proxy-shaped
-# 404s. Silence-bounded, never attempt-counted: a hub restart is seconds and a
-# tunnel re-dial is minutes, and an attempt cap classifies both FATAL and
-# throws away paid work at the finish line.
-#
-# BOUNDED BY THE HUB'S OWN PATIENCE, not by what the pod could afford to wait.
-# `note_progress()` below is a HEARTBEAT and the orchestrator's stall guard
-# refuses to be fooled by one — it kills a job whose DECLARED POSITION has not
-# moved for its 10-minute phase budget, and a retry loop does not move the
-# position. A window at or past that budget therefore does not buy patience; it
-# only guarantees that the verdict on the job is the guard's untyped
-# `job_progress_stalled` instead of this client's typed, classified refusal.
-# Four minutes rides out every front-door blip measured so far (a re-dial is
-# seconds to tens of seconds) and still leaves the client the one to speak.
 _COMPLETE_SILENCE_WINDOW_S = 240.0
 
 def _dtype_token(v: str) -> str:
-    """Publish-body dtype hygiene: the internal dtype-axis colon
-    forms (``gguf:q4_k_m``, ``int8:awq``) publish as ``-`` forms.
-
-    `dtype` is the only field normalized here — `flavor`/`flavors`/
-    `default_flavor` are not part of the publish body at all.
-    """
     return str(v or "").replace(":", "-")
 
 
@@ -109,9 +48,6 @@ _SESSION: Optional[requests.Session] = None
 
 
 def _http_session() -> requests.Session:
-    """Shared session with TCP keepalives so NAT/conntrack middleboxes don't
-    evict the idle flow while the server verifies (no response bytes for
-    minutes)."""
 
     global _SESSION
     if _SESSION is not None:
@@ -135,15 +71,7 @@ def _http_session() -> requests.Session:
 
 
 class HubPublishError(RuntimeError):
-    """Terminal failure talking to tensorhub's commit API.
-
-    ``status`` and ``code`` carry the hub's OWN classification when it gave
-    one (the ``{"error": {"code": ...}}`` envelope, or a projection's
-    ``status.failure.code``). Callers that report a publish outcome to the
-    fleet need a stable token to put on the wire; re-deriving one by matching
-    substrings of ``str(exc)`` is how a refusal reason turns into prose that
-    nothing can group by. "" / 0 honestly mean "the hub named nothing".
-    """
+    """Terminal failure talking to tensorhub's commit API."""
 
     def __init__(self, message: str, *, status: int = 0, code: str = "",
                  retryable: Optional[bool] = None) -> None:
@@ -153,43 +81,22 @@ class HubPublishError(RuntimeError):
         self.retryable = retryable
 
 
-# The hub's typed refusal for a publish naming a release nobody cut (th#1980).
 RELEASE_NOT_FOUND = "release_not_found"
 
-#: The ONE legal "no release" on a v2 publish. A self-minted compiled graph is
-#: selected by its endpoint-scoped `compiled_graph_store` row, never by
-#: contract, so it joins no release and the hub answers `release_forbidden` to a
-#: body that names one. It is a NAMED value rather than an empty string so a
-#: caller that simply forgot is refused instead of silently taking the exemption.
+# The ONE legal "no release" on a v2 publish: a self-minted compiled graph is selected by its endpoint-scoped store row, never by contract, so it joins no release and the hub answers release_forbidden to a body that names one. A NAMED value rather than an empty string, so a caller that simply forgot is refused instead of silently taking the exemption.
 COMPILED_GRAPH_NO_RELEASE = "compiled-graph:no-release"
 
 
 class HubReleaseRequiredError(HubPublishError):
-    """The publish named no release, and th#1987 made one mandatory.
-
-    Raised HERE rather than after a multi-GB upload: the hub refuses at DECLARE
-    with `release_required`, and a producer that cannot say which release its
-    output belongs to has a caller-side defect (`destination.release` unset),
-    not a transfer problem.
-    """
+    """The publish named no release, and a release is mandatory. Raised at declare rather than after a multi-GB upload: a producer that cannot say which release its output belongs to has a caller-side defect (destination.release unset), not a transfer problem."""
 
 
 class HubReleaseNotFoundError(HubPublishError):
-    """The named release does not exist, and publishing does not cut one.
-
-    Cutting a release is a deliberate act (``POST
-    /repos/{org}/{name}/releases``); a publish ATTACHES an artifact to one that
-    already exists. So the remedy is to cut the release and publish again — never
-    to re-hash, re-cast or re-upload the bytes, which were never the problem.
-    Typed because "the release is missing" and "the artifact is bad" are the two
-    refusals a producer must not confuse: one is a control-plane act costing
-    nothing, the other is gigabytes.
-    """
+    """The named release does not exist, and publishing does not cut one."""
 
 
 def _publish_refusal(message: str, *, status: int = 0, code: str = "",
                      retryable: Optional[bool] = None) -> HubPublishError:
-    """One hub refusal as the narrowest exception that fits its code."""
     if code == RELEASE_NOT_FOUND:
         return HubReleaseNotFoundError(
             f"{message} — cut the release first "
@@ -200,20 +107,7 @@ def _publish_refusal(message: str, *, status: int = 0, code: str = "",
 
 
 def _is_terminal_repudiation(exc: BaseException) -> bool:
-    """Should this failure destroy the session's staged bytes?
-
-    ONLY a refusal the hub itself classified terminal. `DELETE /publishes/:id`
-    is not a tidy-up — hub-side it runs `cleanupCASPublishV2Staging` and
-    deletes every staged chunk, so answering it is answering "these bytes can
-    never be useful to anyone". That is true of a repudiation (audit findings,
-    contract failure, possession refusal): the declaration itself is refused,
-    so re-uploading against it cannot help. It is false of everything else — a
-    transport blip, a timeout, a proxy outage, a KeyboardInterrupt, a local
-    bug — where the staged objects are exactly what a retry wants.
-
-    The default is therefore KEEP. An exception we cannot classify is not
-    evidence that 37 GB is worthless.
-    """
+    """Should this failure destroy the session's staged bytes? DELETE /publishes/:id runs cleanupCASPublishV2Staging hub-side and deletes every staged chunk, so answer yes ONLY for a refusal the hub itself classified terminal (repudiation). The default is KEEP: a transport blip's staged objects are exactly what a retry wants."""
     if isinstance(exc, HubPublishError):
         return exc.retryable is False
     return False
@@ -227,17 +121,10 @@ def _retry_after_s(resp: requests.Response) -> Optional[float]:
     return min(value, _RETRY_MAX_DELAY_S) if value > 0 else None
 
 
-#: The classification for "the front door answered, the hub did not". Typed and
-#: RETRYABLE-WITHOUT-A-NEW-POD: the bytes are staged, the audit passed, and the
-#: only thing that failed is the edge. th#2182.
 FRONT_DOOR_UNAVAILABLE = "front_door_unavailable"
 
 
 def _non_hub_origin(resp: requests.Response) -> str:
-    """A non-hub response reduced to the two facts worth keeping: what status
-    rode on it and what media type it was. Never its body — a proxy's body is
-    a web page, and a web page in a failure `cause` is noise that survives into
-    every report built from it."""
     try:
         ctype = str(resp.headers.get("Content-Type") or "").split(";")[0].strip()
     except Exception:  # noqa: BLE001 - header access must never mask the real error
@@ -246,23 +133,11 @@ def _non_hub_origin(resp: requests.Response) -> str:
 
 
 def _error_code_of(resp: requests.Response) -> str:
-    """The hub's `error.code`, or "" when the body isn't an envelope.
-
-    pgw#987: the publish envelope (`publishError.body()`) and gin's
-    `AbortWithStatusJSON` both emit the code as a STRING alongside a sibling
-    `message`. Dropping it left `_publish_failure_phase` with only `http_413`
-    to group 32 identical refusals by, when the hub had named the fault
-    exactly. pgw#1229 moved both shapes into the one parser.
-    """
     from ..hub_error import hub_error_of
 
     return hub_error_of(resp).code
 
 
-# How long _send_with_retries tolerates hearing nothing DEFINITE from the hub
-# (network errors, 5xx, 429, proxy-shaped 404s) before giving up. A hub restart
-# is seconds and a tunnel re-dial is minutes, so the bound is SILENCE, never an
-# attempt count.
 _SEND_SILENCE_WINDOW_S = 600.0
 
 
@@ -273,18 +148,6 @@ def _send_with_retries(
     silence_window_s: Optional[float] = None,
     definite: Optional[Callable[[requests.Response], bool]] = None,
 ) -> requests.Response:
-    """Origin-discriminating, silence-bounded retry.
-
-    Only a DEFINITE hub answer ends the loop: 2xx/3xx, or a 4xx that is
-    really the hub speaking (not a proxy's offline page). Indefinite answers
-    — network errors, 429, 5xx, and ANY proxy-shaped status (ngrok with no
-    healthy backend while the hub restarts answers 404 AND 503 with the same
-    HTML page) — retry with backoff until nothing definite has been
-    heard for ``silence_window_s``, then surface the last state. Unknown
-    exception types never leak raw: they become a typed ``HubPublishError``.
-    Returns the last response for non-retryable statuses — callers keep their
-    own status handling.
-    """
 
     if silence_window_s is None:
         silence_window_s = _SEND_SILENCE_WINDOW_S
@@ -304,19 +167,11 @@ def _send_with_retries(
                 f"{what} failed ({type(exc).__name__}): {exc}") from exc
         else:
             code = int(resp.status_code)
-            # `definite` lets a caller supply its OWN definiteness rule for a
-            # route whose refusals are not envelope-shaped (a v2 completion
-            # answers with a projection carrying an explicit `retryable` flag).
-            # The default stays the shape heuristic.
             is_definite = definite(resp) if definite is not None else is_definite_hub_answer(resp)
             if code != 429 and is_definite:
-                return resp  # definite hub answer
+                return resp
             last_resp, last_exc = resp, None
             delay = _retry_after_s(resp) or delay
-        # This loop can legitimately run for the better part of an hour riding
-        # out a hub rebuild, and a publisher silent for an hour is the dead-job
-        # signature the watchdogs kill on. Waiting IS work — say so on the
-        # liveness channel.
         _activity.note_progress()
         if contact.stalled():
             if last_resp is not None:
@@ -336,11 +191,7 @@ def _send_with_retries(
 
 @dataclass
 class CommitFile:
-    """One file to publish: repo path + the LOCAL BYTES.
-
-    There is no by-reference form. v2's guarantee is that a digest is proven
-    from bytes in hand — a caller who cannot supply them has nothing the
-    protocol can attest."""
+    """One file to publish: repo path + the LOCAL BYTES."""
 
     path: str
     local_path: Optional[Path] = None
@@ -353,9 +204,6 @@ class CommitResult:
     uploaded: int
     deduped: int
     total_bytes: int
-    # Content-addressed checkpoint id minted at finalize (tensorhub derives it
-    # from the snapshot manifest); THE id for tree/lineage queries. The
-    # revision_id above is the upload-session id, not queryable post-finalize.
     checkpoint_id: str = ""
     response: dict[str, Any] = field(default_factory=dict)
 
@@ -373,12 +221,6 @@ class HubClient:
         self.base_url = str(base_url or "").strip().rstrip("/")
         self.token = str(token or "").strip()
         self.timeout_s = timeout_s
-        # th#2148: NAME THE HALF THAT IS MISSING, and call it what it is —
-        # INFRA. One message covering two values could not be acted on: the
-        # held-open-pod failure spent three runs and a real pod before anyone
-        # could say which of the two was empty. And a platform credential the
-        # PLATFORM failed to deliver is not the tenant's code failing, so it is
-        # retryable — a requeue lands on a pod that has one.
         if not self.base_url and not self.token:
             raise HubPublishError(
                 "the dispatch carried neither a tensorhub base URL nor a "
@@ -399,8 +241,6 @@ class HubClient:
         base = str(getattr(ctx, "_file_api_base_url", "") or "").strip()
         token = str(getattr(ctx, "_worker_capability_token", "") or "").strip()
         return cls(base_url=base, token=token)
-
-    # ---- internals ----
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
@@ -432,16 +272,6 @@ class HubClient:
 
     @staticmethod
     def _v2_failure(resp: requests.Response) -> Optional[dict[str, Any]]:
-        """The v2 routes' TYPED failure, or None.
-
-        A v2 completion does not answer with an error envelope: it answers with
-        the th#1301 PROJECTION, and a refusal is
-        ``{"status": {"stage": "repudiated", "terminal": true,
-                      "failure": {"code", "retryable", "message"}}}``.
-        That `retryable` bit is the hub's own classification — the whole point
-        of th#1301's retryable-vs-terminal split — so it is read, never guessed
-        at from the body's shape.
-        """
         try:
             body = resp.json() if resp.text else {}
         except Exception:  # noqa: BLE001 - an unparseable body is not a verdict
@@ -457,8 +287,6 @@ class HubClient:
         return failure
 
     def _abort_publish(self, repo_path: str, publish_id: str) -> None:
-        """Land a REPUDIATED session in a terminal state. Destroys staging —
-        call only from :func:`_is_terminal_repudiation`'s branch."""
         if not publish_id:
             return
         try:
@@ -472,37 +300,11 @@ class HubClient:
 
     @staticmethod
     def _v2_complete_is_definite(resp: requests.Response) -> bool:
-        """Did the HUB answer this completion, or did the front door?
-
-        Three shapes are the hub speaking and end the loop:
-
-          * 2xx/3xx — nothing in front of us fabricates a promotion.
-          * the th#1301 PROJECTION (`status.failure.code`) at ANY status — a v2
-            refusal is not an error envelope, so the generic shape heuristic
-            would read a real, typed, `retryable: false` repudiation as a proxy
-            non-answer and retry it. The retry then finds the session terminal
-            and returns 409 `publish_repudiated`: a consequence in place of the
-            cause, which is gone (pgw#743's defect, in a different route).
-          * the hub's `{"error": {...}}` envelope — `is_definite_hub_answer`.
-
-        Everything else did NOT come from the hub. This is the pgw#1435 /
-        th#2182 defect: this predicate used to be `lambda resp: True`, so the
-        690-byte ngrok "no healthy backend" HTML page that rides a transient
-        503 counted as a verdict, and TWO ingests — 16.2 GB and 17.9 GB, both
-        already uploaded, staged and AUDITED — were destroyed at their last
-        call, in two different lanes, in the same window. The completion is the
-        one call where a non-answer is most expensive and where retrying is
-        free: tensorhub's `/complete` is idempotent (an already-promoted
-        session returns its terminal status and checkpoint id) and RESUMABLE (a
-        retryable stage failure leaves the session live, so a later pass copies
-        only what is still missing).
-        """
         if HubClient._v2_failure(resp) is not None:
             return True
         return is_definite_hub_answer(resp)
 
     def _post_v2_complete(self, path: str) -> requests.Response:
-        """POST the hub's idempotent, resumable v2 completion."""
         return _send_with_retries(
             f"POST {path}",
             lambda: _http_session().post(
@@ -518,27 +320,8 @@ class HubClient:
         *,
         destination_repo: str,
         files: list[CommitFile],
-        # The release this artifact ATTACHES to (th#1980), REQUIRED since
-        # th#1987 — no default, so every call site states one. It must ALREADY
-        # have been cut: publishing never cuts a release, exactly as uploading a
-        # binary to GitHub never creates the release it lands in. An unknown
-        # identifier is a typed, non-retryable `release_not_found`
-        # (:class:`HubReleaseNotFoundError`), whose remedy is a control-plane
-        # act, never a re-upload. `COMPILED_GRAPH_NO_RELEASE` is the ONE legal
-        # empty value — see its docstring.
         release: str,
-        # "replace" — a checkpoint is COMPLETE IN ITSELF. "merge" unions this
-        # publish with the repo's prior manifest, so a caller that never
-        # mentioned a sibling INHERITS its bytes (an fp8 checkpoint carrying
-        # the fp16 base weights; a differently-sharded base spliced into a
-        # quantization). Both this default and the hub's are "replace"; pass
-        # mode="merge" explicitly and only for what it is for: assembling ONE
-        # checkpoint across several commits (clone.py's chunked full-clone,
-        # _stream.py's streamed output).
         mode: str = "replace",
-        # `ns.name@N` — what the bytes ARE. PROVEN at tier 1 against
-        # the safetensors header, so an unprovable claim refuses the publish
-        # instead of being stored as a maybe.
         artifact_contract: str = "",
         dtype: str = "",
         file_layout: str = "",
@@ -558,61 +341,12 @@ class HubClient:
         journal_path: Optional[Path] = None,
         journal_state: Optional[Mapping[str, Any]] = None,
     ) -> CommitResult:
-        """Publish one checkpoint over the CHUNKED SHA-256 CAS.
-
-        Declare -> `{have, need}` -> PUT the needed objects -> complete. What
-        makes this different from :meth:`commit` is not the transport but WHO
-        GUARANTEES INTEGRITY: each object's sha256 is signed into its presigned
-        PUT, so R2 refuses bytes that do not hash to the key (400, and the
-        object does not exist afterwards) and refuses a substituted claim (403).
-        A claimed digest stops being assertable, which kills the
-        inherit/overwrite class structurally rather than by guard.
-
-        Files may become an ordered list of enforced chunks at any size. Each
-        manifest length is authoritative, so a retry costs one bounded object
-        and progress is monotone across retries — a lemon host is bounded by
-        the unit of work rather than by a new watchdog.
-
-        THERE IS NO PROTOCOL AUTO-SELECT AND NO ENV KNOB. The caller names the
-        protocol, so flipping a producer class to sha256 is a code change and a
-        deploy. A hub without these routes answers 404, and this deliberately
-        does NOT fall back: a silent downgrade to blake3 would make "did this
-        publish v2?" unanswerable from the outside (and a 404 from a PROXY is
-        not a 404 from the hub).
-
-        ``provenance`` carries the WORKER-ADDABLE stamp subset only, exactly as
-        :meth:`commit` does — the hub resolves the authoritative stamp from the
-        capability token, so lineage cannot be forged from here
-        and is identical whichever protocol published it.
-
-        ``on_stage(stage, facts)`` reports the protocol's own legs —
-        ``declared`` (publish_id + the have/need split, i.e. what dedup
-        actually saved), ``resumed`` (a journalled session re-adopted),
-        ``uploading`` (objects and bytes this pass will move), ``committing``
-        — so a caller whose publish is otherwise a silent background thread can
-        put the LEG on the wire instead of only its terminus. Never
-        load-bearing: a raising callback is the caller's bug and must not fail
-        a publish that is transferring correctly.
-
-        ``journal_path`` turns "the upload died" into "re-upload"
-        rather than "re-run the cast". The session id is recorded beside the
-        produced bytes BEFORE the first PUT, so a retry on this pod re-adopts
-        the same tensorfs session (same staging prefix) and re-plans it instead
-        of declaring a fresh one.
-        """
+        """Publish one checkpoint over the CHUNKED SHA-256 CAS."""
 
         if not files:
             raise HubPublishError("publish_v2 requires at least one file")
         attaches_to_no_release = release == COMPILED_GRAPH_NO_RELEASE
         release = "" if release == COMPILED_GRAPH_NO_RELEASE else release.strip()
-        # th#2202: a SCRATCH repo DERIVES its release, so an empty one is legal
-        # there and the body simply omits the field. This precondition is the
-        # SDK's mirror of the hub's own rule and must not be stricter than it:
-        # the scratch repo is the destination the hub hands EVERY publishing
-        # run, and a callee whose typed input declares the scalar
-        # `destination_repo` can never be told a `destination.release` — so this
-        # refusal used to make `ctx.save_checkpoint` impossible, client-side,
-        # before any HTTP, at step 200 of a paid-for training run.
         derives = scratchrepo.derives_its_release(destination_repo)
         if not release and not attaches_to_no_release and not derives:
             raise HubReleaseRequiredError(
@@ -625,8 +359,6 @@ class HubClient:
 
         repo_path = self._repo_path(destination_repo)
 
-        # tensorfs owns the local objects and manifest. A by-reference add has
-        # no bytes to ingest and therefore cannot enter this protocol.
         cas = open_worker_cas()
         entries = []
         for f in files:
@@ -640,7 +372,6 @@ class HubClient:
         manifest_ref = manifest.digest()
 
         def _tensorhub_file(entry: Any) -> dict[str, object]:
-            """Adapt tensorfs v1 to Tensorhub's ordered-sha256 request shape."""
             raw = cast(dict[str, object], entry.to_dict())
             chunks = raw.get("chunks")
             if isinstance(chunks, list):
@@ -672,17 +403,6 @@ class HubClient:
         if metadata:
             body["metadata"] = dict(metadata)
         if provenance:
-            # The v2 declare decodes this STRICTLY into the same
-            # `commitProvenanceInput` v1 uses, so the accepted subset is exactly
-            # `step_number | epoch_number | quantization_method |
-            # quantization_library | upstream_revision | upstream_attestation`.
-            # `parents` / `derivation_op` / `upstream_ref` / `job_id` are
-            # orchestrator-derived (signed into the capability token) and are a
-            # 400 that NAMES the field — deliberately, because a silent drop
-            # would leave the worker believing it had stamped lineage it had
-            # not. The merged stamp is captured at DECLARE, where the token is
-            # presented, and replayed through `resolvePublishProvenance` at
-            # completion, so v1 and v2 mirrors record identical lineage.
             allowed = {
                 "step_number",
                 "epoch_number",
@@ -743,9 +463,6 @@ class HubClient:
             return out
 
         def _replan(pid: str) -> Mapping[str, Any]:
-            """Re-plan an EXISTING session. This is also the CAS path's presign
-            re-mint: the hub answers with fresh grants for whatever the need
-            set still names."""
             again = self._post(f"{repo_path}/publishes/"
                                f"{urllib.parse.quote(pid, safe='')}/grants")
             if again.status_code < 200 or again.status_code >= 300:
@@ -754,18 +471,6 @@ class HubClient:
                     status=again.status_code, code=_error_code_of(again))
             return self._json(again)
 
-        # Adopt a journalled session before declaring a new one. Its
-        # staging prefix is session-scoped, so reusing the id is the ONLY way
-        # to reach bytes a predecessor already moved. A session the hub no
-        # longer accepts simply falls through to a fresh declare — resuming is
-        # an optimization and must never be a way to fail.
-        #
-        # The DECLARATION is not re-sent: the session already carries it, and
-        # the journal key is the declared object set, so an adopted session is
-        # about exactly these bytes and declaration semantics. The journal key
-        # includes a canonical digest of tags, metadata and policy fields, so a
-        # caller changing those facts declares a fresh session instead of
-        # silently completing the predecessor's request.
         session: Optional[Mapping[str, Any]] = None
         publish_id = ""
         prior = journal.find(session_name, manifest_ref) if journal is not None else None
@@ -803,8 +508,6 @@ class HubClient:
         resident = int(session.get("resident_objects") or 0)
         uploaded_objects = 0
 
-        # Recorded BEFORE the first PUT: a journal written after the transfer
-        # is a journal that never survives the transfer failing.
         if journal is not None:
             journal.record(TransferSession(session_name, publish_id, manifest_ref))
             if recovery is not None:
@@ -835,9 +538,6 @@ class HubClient:
                 if report.ok:
                     break
                 if report.needs_replan:
-                    # Nothing failed — presigns went stale. Re-mint them
-                    # without charging the re-upload budget, which exists for
-                    # objects that would not land.
                     expiry_replans += 1
                     if expiry_replans > _EXPIRY_REPLAN_ATTEMPTS:
                         raise HubPublishError(
@@ -861,10 +561,6 @@ class HubClient:
                             for digest, detail in report.failures[:5]
                         )
                     )
-                # RESUME NEEDS NO CLIENT STATE FOR THIS PROCESS: re-plan and
-                # the need set names what still has to move, and it comes back
-                # SMALLER because what landed is now resident. The journal
-                # above is what lets a LATER process re-enter this same loop.
                 grants = _grants_of(_replan(publish_id))
 
             _stage("committing", publish_id=publish_id, objects=distinct,
@@ -873,10 +569,6 @@ class HubClient:
                 f"{repo_path}/publishes/{urllib.parse.quote(publish_id, safe='')}/complete")
 
             if done.status_code < 200 or done.status_code >= 300:
-                # Lead with the hub's OWN typed classification when it gave one.
-                # A refusal that reports its `code`, its `retryable` bit and the
-                # stage that produced it is actionable; a bare status code plus
-                # 800 bytes of truncated projection is not.
                 failure = self._v2_failure(done)
                 if failure:
                     stage = ""
@@ -896,13 +588,6 @@ class HubClient:
                         retryable=bool(failure.get("retryable")),
                     )
                 if not response_is_from_hub(done):
-                    # NOT the hub. Only the front door can answer here after
-                    # the retry above has run its silence window out, and its
-                    # answer is a web page: pasting 690 bytes of ngrok HTML
-                    # into a job's `cause` gives an operator `<!DOCTYPE html>`
-                    # and gives every consumer downstream nothing to group by.
-                    # Collapse it to what it actually is — one classified,
-                    # retryable token plus the status and the media type.
                     raise _publish_refusal(
                         f"publish {publish_id}: the hub never answered complete — "
                         f"{FRONT_DOOR_UNAVAILABLE} ({_non_hub_origin(done)}). "
@@ -928,13 +613,6 @@ class HubClient:
                     f"publish {publish_id} completed without a checkpoint id: "
                     f"{json.dumps(final)[:500]}", code="checkpoint_id_missing")
         except BaseException as exc:
-            # ABORT ONLY ON A TERMINAL REFUSAL. `DELETE /publishes/:id` runs
-            # `cleanupCASPublishV2Staging` hub-side, which deletes every staged
-            # chunk — aborting on a transport blip throws away every transferred
-            # byte to keep a session row tidy. A transport failure, a timeout or
-            # a KeyboardInterrupt leaves the session intact so a retry (this
-            # pod, via the journal) can resume it. Sessions that genuinely leak
-            # are the staging lifecycle's problem.
             if _is_terminal_repudiation(exc):
                 self._abort_publish(repo_path, publish_id)
                 if journal is not None:
@@ -948,15 +626,10 @@ class HubClient:
                     publish_id, type(exc).__name__)
             raise
 
-        # Promoted. The produced tree and this journal entry have no further
-        # job: the bytes are in the CAS.
         if journal is not None:
             journal.clear(session_name, session_id=publish_id)
         if recovery is not None:
             recovery.clear(publish_id)
-        # Surfaced, not swallowed: the hub names which canonical checks it did
-        # NOT run. A list that promises 19 and silently runs 14 is worse than
-        # one promising 14.
         skipped = final.get("checks_unavailable") or []
         if skipped:
             logger.info("publish %s checks_unavailable=%s", publish_id, skipped)
@@ -977,12 +650,7 @@ class HubClient:
 
 
 def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
-    """Build CommitFile entries for every regular file under ``tree``.
-
-    ``.cache/huggingface/**`` is skipped: huggingface_hub's local-dir download
-    metadata is cache-layout junk, never repo content. Publish recovery state
-    and its locks are bookkeeping about the tree, not part of it.
-    """
+    """Build CommitFile entries for every regular file under ``tree``."""
     tree = Path(tree)
     out: list[CommitFile] = []
     for f in sorted(tree.rglob("*")):

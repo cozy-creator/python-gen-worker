@@ -1,20 +1,4 @@
-"""``gen-worker up [-d]`` / ``gen-worker down`` — the resident endpoint.
-
-pgw#1491, docker-compose semantics by Paul's ruling: bare ``up`` is
-FOREGROUND — logs stream to the terminal and Ctrl-C stops the endpoint — and
-``up -d`` detaches, leaving it resident for ``run`` clients until ``down``.
-
-Foreground is the default because it is the introspection-friendly mode: you
-see the boot ladder, the adopt report, the per-request compiled-vs-eager
-counter and the teardown, live, in the shell you typed into. ``-d`` is the
-daemon mode a client talks to.
-
-``up`` is also where the checkpoint lands. Its boot pulls the refs its runtime
-config names through the SAME download path ``gen-worker download`` uses, and
-it does not accept a request until they are on disk — which is the whole reason
-``run`` may require ``up`` instead of parking a multi-GB fetch inside a user
-request (th#2204's invariant, holding by construction rather than by protocol).
-"""
+"""``gen-worker up [-d]`` / ``gen-worker down`` — the resident endpoint."""
 
 from __future__ import annotations
 
@@ -29,9 +13,6 @@ from . import endpoint_state
 from .daemon import BootError, BootSpec, serve
 from .endpoint_state import EndpointStateError
 
-#: Hidden flag the detaching parent passes to the child it re-execs. Not part
-#: of the user surface; a user who types it gets exactly what the parent would
-#: have run, which is the honest behavior for an internal flag.
 DETACHED_CHILD_FLAG = "--detached-child"
 
 
@@ -66,9 +47,6 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
     up.add_argument("--graph-store", default="", metavar="DIR",
                     help="compiled-graph CAS to adopt from. Default: the box "
                          "graph CAS when it exists; absent = serve eager.")
-    # pgw#1526: NO default here. Unset means "ask `cli/workspace.py`", which
-    # is the one place that answers it; a default spelled here would be a
-    # second answer that can drift from the daemon's.
     up.add_argument("--artifacts-dir", default="", metavar="DIR",
                     help="where compiled artifacts are built and adopted "
                          "from. Default: the box cache "
@@ -103,20 +81,7 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
     down.set_defaults(_handler=run_down)
 
 
-# --------------------------------------------------------------------------
-# up
-# --------------------------------------------------------------------------
-
-
 def _artifacts_dir(args: argparse.Namespace) -> Path:
-    """STATED wins; otherwise the box cache (pgw#1526).
-
-    Resolved HERE and passed to the detached child as an absolute path, not
-    re-defaulted there: `up -d` re-execs with a different cwd, so a relative
-    or re-derived answer would put the child's artifacts somewhere the parent
-    never looks — a build under one address and a lookup under another, which
-    reads as an endless cache miss rather than as an error.
-    """
     from . import workspace
 
     stated = str(getattr(args, "artifacts_dir", "") or "").strip()
@@ -134,19 +99,9 @@ def _spec(args: argparse.Namespace) -> BootSpec:
     sm = args.sm or workspace.host_sm()
     graph_store: Optional[Path] = None
     if args.graph_store:
-        # STATED explicitly. If the sm cannot be resolved, adoption is
-        # impossible and refusing is right — the user asked for a store.
         graph_store = Path(args.graph_store)
     else:
         default = workspace.graph_cas_root()
-        # DEFAULTED. Two defaults have to agree, and they did not: the store
-        # defaulted ON whenever the box CAS existed while the sm defaulted to
-        # empty, so `_adoption_source` refused and a bare `gen-worker up`
-        # could not bring ANY endpoint up on a machine that had ever compiled
-        # anything (pgw#1523, measured on the echo example: "--sm is required
-        # to adopt"). A default that makes the common invocation refuse is not
-        # a default. With no sm there is nothing to adopt FOR, so the eager
-        # bridge is the honest answer and the log says so.
         if default.is_dir() and sm:
             graph_store = default
         elif default.is_dir():
@@ -214,14 +169,6 @@ def run_up(args: argparse.Namespace) -> int:
 
 
 def _detach(args: argparse.Namespace, handle: Any) -> int:
-    """Re-exec this same command as a detached child and wait for READY.
-
-    A re-exec rather than a fork: the child must not inherit a half-initialized
-    CUDA context or an argparse namespace this process mutated, and re-running
-    the identical argv means the detached endpoint is booted by exactly the
-    code path the foreground one is — not a second boot function that could
-    drift from it.
-    """
     handle.state_dir.mkdir(parents=True, exist_ok=True)
     argv = _child_argv(args)
     log = handle.log_path.open("ab", buffering=0)
@@ -242,8 +189,6 @@ def _detach(args: argparse.Namespace, handle: Any) -> int:
     )
     sys.stderr.flush()
     try:
-        # `child.poll` REAPS; a bare pid check would see the zombie of a child
-        # that already refused and wait forever (pgw#1523).
         document = endpoint_state.wait_for_handle(
             handle, still_running=lambda: child.poll() is None
         )
@@ -260,7 +205,6 @@ def _detach(args: argparse.Namespace, handle: Any) -> int:
 
 
 def _child_argv(args: argparse.Namespace) -> List[str]:
-    """This invocation, minus ``-d``, plus the detached-child marker."""
     argv = [sys.executable, "-m", "gen_worker.cli", "up",
             str(Path(args.endpoint_dir).resolve()), DETACHED_CHILD_FLAG]
     for ref in args.checkpoint_ref:
@@ -283,11 +227,6 @@ def _child_argv(args: argparse.Namespace) -> List[str]:
         "--idle-timeout", str(args.idle_timeout),
     ]
     return argv
-
-
-# --------------------------------------------------------------------------
-# down
-# --------------------------------------------------------------------------
 
 
 def run_down(args: argparse.Namespace) -> int:

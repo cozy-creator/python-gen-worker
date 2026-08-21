@@ -1,42 +1,4 @@
-"""Native svdq-fp4 serving — SVDQuant checkpoints without nunchaku.
-
-The ``"native"`` svdq ENGINE. `SvdqLinear` is `W4A4Linear` plus the three things
-an SVDQuant checkpoint needs:
-
-1. a per-OUTPUT-CHANNEL second-level weight scale (``wcscales``) as well as the
-   scalar form (``wtscale``) — free, the epilogue already multiplies;
-2. the low-rank branch ``y += (x @ proj_down) @ proj_up.T``, which is what makes
-   4-bit survive qwen-class outliers (plain nvfp4 PTQ measured lpips 0.63-0.69
-   vs the official svdq artifact's 0.105);
-3. ``smooth_factor``, which DIVIDES the activation feeding the 4-bit branch
-   ONLY — the low-rank branch consumes RAW x, because deepcompressor
-   pre-divides ``proj_down`` by the smooth vector at export (nunchaku
-   backend/nunchaku/convert.py L42-48). Getting this backwards silently
-   corrupts every output.
-
-Everything the module holds arrives fragment-packed: see ``svdq_layout``'s
-header for the per-tensor citations. Reading any of them verbatim renders noise
-(lpips 0.82, psnr 4.6 dB) through BOTH the blockwise and the dense lane, because
-both share ``decode_linear``.
-
-And one thing it must NOT do: an svdq checkpoint has NO ``input_scale``.
-nunchaku's activation quant is fully dynamic single-level per-16-block, so
-SvdqLinear always runs the dynamic path — a real contract difference from
-``#nvfp4-w4a4``, not an omission in the artifact.
-
-Why this exists: nunchaku's fp4 kernels are ``sm_120a``-only, and its wheels
-couple to one (torch minor, CUDA) build AND one diffusers transformer signature
-window per release. The native engine is stock
-``torch._scaled_mm`` + one triton quantizer, so it needs no nunchaku wheel, no
-diffusers window, no pin-matrix row and no torch downgrade — and it adds
-sm_100/103 coverage nunchaku will never have.
-
-Degrade, never refuse: a host without fp4 tensor cores serves the SAME artifact
-through :func:`fold_to_dense`, which collapses the 4-bit weight, the smoothing
-vector and the low-rank branch into ONE plain bf16 Linear. That is exact in the
-dequant limit (``W_eff = W_q / smooth + proj_up @ proj_down.T``), so the
-artifact stays servable everywhere at bf16 cost.
-"""
+"""Native svdq-fp4 serving — SVDQuant checkpoints without nunchaku."""
 
 from __future__ import annotations
 
@@ -77,24 +39,17 @@ _SVDQ_WHY = (
     "tensor comes from this one read; without it the model cannot be built"
 )
 
-# Blackwell fp4 tensor cores — the SAME silicon window as the #nvfp4-w4a4 lane
-# (both are block-scaled nvfp4 through torch._scaled_mm / cuBLASLt). torch's own
-# gate is only `major >= 9 || (8,9)`, which ADMITS sm_89/sm_90, but neither Ada
-# nor Hopper has fp4 tensor cores; below Blackwell the honest degrade is fp8
-# rowwise, which we already ship. Never emulate fp4.
+# Blackwell fp4 tensor cores — the same silicon window as the #nvfp4-w4a4 lane. torch's own gate is only `major >= 9 || (8,9)`, which ADMITS sm_89/sm_90, but neither Ada nor Hopper has fp4 tensor cores; below Blackwell the honest degrade is fp8 rowwise, which we already ship. Never emulate fp4.
 SVDQ_NATIVE_FP4_SMS = (100, 103, 120, 121)
 
-# nunchaku fuses these projections; diffusers keeps them separate. The split is
-# exact in the logical domain (svdq_layout.split_decoded) and is verified
-# against the target model's actual out_features, never assumed.
 _FUSED_SPLITS: dict[str, tuple[str, ...]] = {
     "to_qkv": ("to_q", "to_k", "to_v"),
     "add_qkv_proj": ("add_q_proj", "add_k_proj", "add_v_proj"),
     "qkv_proj": ("q_proj", "k_proj", "v_proj"),
 }
 
-_K_ALIGN = 32  # fp4 scaled_mm: in_features % 32
-_N_ALIGN = 16  # fp4 scaled_mm: out_features % 16
+_K_ALIGN = 32
+_N_ALIGN = 16
 
 
 class SvdqNativeError(RuntimeError):
@@ -106,8 +61,7 @@ def svdq_native_sm_supported(gpu_sm: int) -> bool:
 
 
 def svdq_native_reason() -> Optional[str]:
-    """Why the native engine cannot serve fp4 HERE, or None when it can. No
-    nunchaku, no diffusers window, no pin matrix — only silicon + torch."""
+    """Why the native engine cannot serve fp4 HERE, or None when it can."""
     try:
         import torch
     except ImportError:
@@ -126,18 +80,11 @@ def svdq_native_reason() -> Optional[str]:
 
 
 def svdq_native_available() -> bool:
-    """Silicon + the real w4a4 arming path (kernel probe, numerics self-check,
-    profitability gate, fused-quantizer bit-identity gate) — the native engine
-    shares all of it with the ``#nvfp4-w4a4`` lane."""
+    """Silicon + the real w4a4 arming path (kernel probe, numerics self-check, profitability gate, fused-quantizer bit-identity gate) — the native engine shares all of it with the ``#nvfp4-w4a4`` lane."""
     if svdq_native_reason() is not None:
         return False
 
     return w4a4_gemm_mode() == "blockwise"
-
-
-# ---------------------------------------------------------------------------
-# The module.
-# ---------------------------------------------------------------------------
 
 
 def _build_svdq_linear_class() -> type:
@@ -145,28 +92,13 @@ def _build_svdq_linear_class() -> type:
     import torch.nn as nn
 
     class _SvdqLinear(nn.Module):
-        """SVDQuant W4A4 linear: 4-bit branch + low-rank bf16 branch.
 
-        ``y = Q4(x / smooth) @ Wq.T * (s2_act * wscale2) + (x @ down) @ up.T
-        + bias``
-
-        The activation second-level scale is always DYNAMIC (svdq checkpoints
-        carry no ``input_scale``). The low-rank branch is a separate skinny
-        bf16 GEMM pair costing ~10-15% of the 4-bit win; fusing it the way
-        nunchaku does (down into the quantize kernel, up into the GEMM
-        epilogue) is named headroom, not a blocker. NOTE: never
-        ``.to(dtype=...)`` this module (device moves are fine)."""
-
-        # Structural marker, twin of _cozy_w4a4_linear.
         _cozy_svdq_linear = True
 
         def __init__(self, in_features: int, out_features: int, *,
                      rank: int, bias: bool, compute_dtype: Any,
                      per_channel_scale: bool, smooth: bool) -> None:
             super().__init__()
-            # Record it: the packed weight is uint8 and every compute-dtype
-            # tensor here (smooth_factor, proj_*, bias) is optional, so a
-            # rank-0 bias-free instance states it nowhere else.
             self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
@@ -209,10 +141,7 @@ def _build_svdq_linear_class() -> type:
 
             shape = x.shape
             x2 = x.reshape(-1, self.in_features)
-            # smooth_factor DIVIDES the 4-bit branch's activation only; the
-            # low-rank branch below consumes RAW x2.
             xs = x2 if self.smooth_factor is None else x2 / self.smooth_factor
-            # Dynamic per-tensor second level — an svdq checkpoint has none.
             s2 = (xs.abs().amax().float()
                   / (E2M1_MAX * FP8_MAX)).clamp(min=1e-12)
             xq, sa_blocked = quantize_activation(xs, s2)
@@ -269,13 +198,7 @@ def build_svdq_linear(buf: SvdqBuffers, *, compute_dtype: Any = None,
 
 
 def fold_to_dense(dec: DecodedLinear, *, compute_dtype: Any = None) -> Any:
-    """The any-hardware fallback: ONE plain bf16 ``nn.Linear`` equivalent to the
-    whole svdq linear.
-
-    Exact in the dequant limit. The 4-bit branch sees ``x / smooth``, so its
-    dequantized weight absorbs the smoothing as ``W_q / smooth`` (broadcast over
-    in-channels); the low-rank branch adds ``(x @ down) @ up.T``, i.e. a weight
-    of ``up @ down.T``. Hence ``W_eff = W_q / smooth + up @ down.T``."""
+    """The any-hardware fallback: ONE plain bf16 ``nn.Linear`` equivalent to the whole svdq linear."""
     import torch
     import torch.nn as nn
 
@@ -298,11 +221,6 @@ def fold_to_dense(dec: DecodedLinear, *, compute_dtype: Any = None) -> Any:
     return lin
 
 
-# ---------------------------------------------------------------------------
-# Swapping a decoded checkpoint into a real diffusers denoiser.
-# ---------------------------------------------------------------------------
-
-
 def _module_at(model: Any, path: str) -> Any:
     try:
         parent_path, _, leaf = path.rpartition(".")
@@ -319,12 +237,7 @@ def _set_module(model: Any, path: str, new: Any) -> None:
 
 
 def plan_targets(model: Any, prefix: str) -> tuple[tuple[str, int], ...]:
-    """Where one nunchaku linear prefix lands in ``model``.
-
-    ``((path, out_features), ...)`` — one entry for a 1:1 name, three for a
-    fused ``to_qkv``-style prefix. The split is validated against the target
-    modules' ACTUAL ``out_features``; an unknown or mismatched layout raises
-    rather than guessing."""
+    """Where one nunchaku linear prefix lands in ``model``."""
     import torch.nn as nn
 
     direct = _module_at(model, prefix)
@@ -358,12 +271,7 @@ def swap_svdq_linears(
     mode: str = "",
     device: Any = None,
 ) -> dict:
-    """Replace ``model``'s Linears with the checkpoint's svdq linears.
-
-    ``mode`` ``"blockwise"`` (fp4 tensor cores) | ``"dense"`` (folded bf16
-    fallback); default probes the host. Fused ``to_qkv``-style prefixes are
-    split across the diffusers projections. Layers whose dims break fp4
-    alignment fold to dense individually rather than refusing."""
+    """Replace ``model``'s Linears with the checkpoint's svdq linears."""
     import torch
 
     compute = compute_dtype or torch.bfloat16
@@ -413,15 +321,6 @@ def swap_svdq_linears(
     return counts
 
 
-# ---------------------------------------------------------------------------
-# Loading a whole nunchaku-format checkpoint natively.
-# ---------------------------------------------------------------------------
-
-# adaLN split counts per (diffusers class, module suffix). The exporter's
-# adanorm transform is NOT recoverable from the tensors, and a wrong count
-# yields a plausible weight with silently wrong output (svdq_awq), so an
-# unknown modulation layer REFUSES instead of guessing. Adding a family is a
-# one-line, reviewable change.
 _ADANORM_SPLITS: dict[tuple[str, str], int] = {
     ("QwenImageTransformer2DModel", "img_mod.1"): 6,
     ("QwenImageTransformer2DModel", "txt_mod.1"): 6,
@@ -441,8 +340,7 @@ def adanorm_splits_for(model_class: str, prefix: str) -> int:
 
 
 def native_denoiser_class(model_class: str) -> Any:
-    """The diffusers class behind a nunchaku ``model_class`` name (the native
-    engine subclasses nothing — it loads the STOCK diffusers module)."""
+    """The diffusers class behind a nunchaku ``model_class`` name (the native engine subclasses nothing — it loads the STOCK diffusers module)."""
     import diffusers
 
     name = (model_class[len("Nunchaku"):]
@@ -467,16 +365,7 @@ def _group_by_prefix(names: Any) -> dict[str, list[str]]:
 
 def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                              mode: str = "", device: Any = None) -> Any:
-    """Materialize a nunchaku-format svdq checkpoint as a STOCK diffusers
-    denoiser: skeleton on meta, W4A4 linears swapped for :class:`SvdqLinear`
-    (fused ``to_qkv`` split across the diffusers projections), AWQ modulation
-    layers decoded to bf16 Linears, everything else assigned verbatim.
-
-    ``device`` is where the DECODE runs and where the result lives. Default:
-    the fragment unpack/repack chain runs on CUDA when the blockwise lane is the
-    target — the same transforms measure 223s single-threaded on CPU vs seconds
-    as device-bandwidth permutes. ``"cpu"`` reproduces that path
-    byte-identically."""
+    """Materialize a nunchaku-format svdq checkpoint as a STOCK diffusers denoiser: skeleton on meta, W4A4 linears swapped for :class:`SvdqLinear` (fused ``to_qkv`` split across the diffusers projections)..."""
 
     import torch
     from accelerate import init_empty_weights
@@ -484,8 +373,6 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     compute = compute_dtype or torch.bfloat16
     meta = _read_safetensors_metadata(art.file)
     model_class = str(meta.get("model_class") or "")
-    # The metadata flag declares the branch scheme; absent = bf16.
-    # decode_linear enforces bytes == declaration.
     lowrank_quant = str(meta.get(LOWRANK_QUANT_KEY) or "bf16")
     if lowrank_quant not in ("bf16",) + LOWRANK_QUANT_SCHEMES:
         raise SvdqNativeError(
@@ -515,17 +402,10 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                   else "cpu")
     dev = torch.device(device)
 
-    # Only the modulation axis is read here; `swap_svdq_linears` below owns
-    # the linear one and asks for it itself.
     mod_execution_lane = svdq_modulation_execution_lane() if mode == "blockwise" else "dense"
     t0 = time.perf_counter()
     plain: Dict[str, Any] = {}
     swapped = awq = awq_packed = 0
-    # pgw#1330, THE WORKED EXAMPLE for the weights column. This is the svdq
-    # lane's PRIMARY weight-materialization loop, and it was already the shape
-    # the cutover targets: `from_config` on meta four lines above, then fill by
-    # NAME. It never wanted a directory, so it is independent of #1303 — the
-    # whole cut is the source of the tensors, and nothing else moves.
     with open_tensor_source(art.file, device=str(dev), why=_SVDQ_WHY) as fh:
         groups = _group_by_prefix(fh.keys())
         for prefix, leaves in sorted(groups.items()):
@@ -539,10 +419,6 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                 splits = adanorm_splits_for(type(model).__name__, prefix)
                 out_f = int(target.out_features)
                 in_f = int(target.in_features)
-                # Modulation stays packed-resident (this dequant is the +6.8 GB
-                # delta). It is a SEPARATE axis from the linear lane — a card can
-                # want packed modulation and baseline linears at once, and sm_100
-                # does. Degrade per-layer.
                 if mod_execution_lane == "packed" and awq_packed_supported(out_f, in_f):
                     _set_module(model, prefix, build_awq_packed_linear(
                         tensors, out_f, in_f, adanorm_splits=splits,
@@ -593,10 +469,7 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
 
 def load_svdq_native_pipeline(cls: Any, path: Any, art: Any, *,
                              compute_dtype: Any = None) -> Any:
-    """Build the pipeline with a natively-loaded svdq denoiser wired in.
-
-    Compute dtype is bf16 for the same reason the nunchaku lane pins it: the
-    checkpoint's scales and low-rank branch are bf16-oriented."""
+    """Build the pipeline with a natively-loaded svdq denoiser wired in."""
     import torch
 
     compute = compute_dtype or torch.bfloat16

@@ -1,32 +1,4 @@
-"""Installing context parallelism on a pipeline — the runtime's job, never the
-endpoint's.
-
-The endpoint declares *how many devices one instance needs*; the worker owns
-placement, and CP **is** placement. This is the same line ``Resources``'s own
-docstring draws (*"endpoint code NEVER picks devices"*), so nothing in an
-endpoint ever sees a degree or a rank.
-
-**The ordering is forced:** ``set_attention_backend`` → ``enable_parallelism``
-→ ``torch.compile``. CP is installed as diffusers ``ModelHook``s
-(``ContextParallelSplitHook.pre_forward`` splits,
-``ContextParallelGatherHook.post_forward`` gathers). Compiling *after* the
-hooks puts the split/all-to-all/gather inside the traced graph; compiling first
-and installing hooks after wraps a compiled callable in Python hooks — correct,
-but the collectives fall outside the graph and the comm/compute overlap is
-forfeit.
-
-**``enable_parallelism`` is a ``ModelMixin`` method, not a pipeline one.**
-Wan 2.2 A14B runs two experts (``transformer`` high-noise, ``transformer_2``
-low-noise) with a mid-schedule handoff, so BOTH need the call — exactly as the
-endpoint's own ``_use_cudnn_attention`` already iterates its expert tuple. A
-group where one expert is sharded and the other is not diverges silently.
-
-**CP and CPU offload do not compose** (diffusers #12533: *"Enabling CPU offload
-before enabling parallelism will raise a shape error after the first pipe
-call"*). Offload/expert-swap is our standard answer below 80 GB, so sequence
-parallelism is an 80 GB-class-card feature and the two levers must never be
-armed together — a second, independent reason consumer multi-GPU is out.
-"""
+"""Installing context parallelism on a pipeline — the runtime's job, never the endpoint's. The ordering is FORCED: set_attention_backend -> enable_parallelism -> torch.compile — compiling AFTER the hooks puts the split/all-to-all/gather inside the traced graph; hooks-after-compile is correct but forfeits the comm/compute overlap. enable_parallelism is a ModelMixin method, not a pipeline one: BOTH Wan 2.2 experts need the call, or the group diverges silently. CP and CPU offload do not compose (diffusers #12533 — a shape error after the first call), so the two levers must never be armed together."""
 
 from __future__ import annotations
 
@@ -38,21 +10,7 @@ from typing import Any, List, Optional, Sequence, Tuple, cast
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# The gated-call flag.
-#
-# Installing CP puts split/all-to-all/gather hooks ON THE MODULES, so from that
-# moment EVERY forward through them issues collectives — and the only seam that
-# supplies participants on the other ranks is the pipeline-level ``__call__``
-# gate. A forward from anywhere else (a hot-swap warm compile, a mint seed, a
-# proof warmup, an activation/degraded probe, an endpoint calling a component
-# by hand) runs on rank 0 alone and HANGS the whole group in NCCL.
-#
-# The flag is thread-local because that is exactly the failure boundary: the
-# gate wraps the call on the requesting thread, while every stray forward comes
-# from a different thread (the shared shape-warm thread, a background mint turn)
-# or from outside the gate on the same one.
-# ---------------------------------------------------------------------------
+# The gated-call flag. Installing CP puts split/all-to-all/gather hooks ON THE MODULES, so from that moment EVERY forward through them issues collectives — and the pipeline-level __call__ gate is the only seam that supplies participants on the other ranks. A forward from anywhere else (a warm compile, a mint seed, a probe, an endpoint calling a component by hand) runs on rank 0 alone and HANGS the whole group in NCCL. Thread-local because that is exactly the failure boundary: stray forwards come from other threads or from outside the gate on the same one.
 
 _tls = threading.local()
 
@@ -70,54 +28,27 @@ class gated_call:
 def in_gated_call() -> bool:
     return bool(getattr(_tls, "active", 0))
 
-# Every module diffusers can shard declares a plan. No plan means the model was
-# never adapted for CP, and installing anyway would shard something whose
-# attention does not expect it.
 _CP_PLAN_ATTR = "_cp_plan"
 
 
 class ContextParallelUnavailable(RuntimeError):
-    """This pipeline cannot be sharded, named exactly. A typed refusal — the
-    hub demotes the pod; the worker never silently serves degree 1 against a
-    degree-2 promise."""
+    """This pipeline cannot be sharded, named exactly."""
 
 
 class UngatedShardedForward(ContextParallelUnavailable):
-    """A forward through a CP-sharded module outside the group's call gate.
-    Raised BY NAME, with the caller's thread, instead of hanging the group in a
-    collective no other rank will ever join."""
+    """A forward through a CP-sharded module outside the group's call gate."""
 
 
 @dataclass(frozen=True)
 class CpComms:
-    """The GROUP's communication facts, passed explicitly.
-
-    ``pg`` is the group's NON-default ProcessGroup (from
-    ``parallel.group.init_rank``), ``rank`` this process's rank within THAT
-    group, ``device`` the rank's own card. CP is never installed against the
-    default process group again: the worker process is rank 0 of every
-    group, so "the default group" is not a well-defined thing to shard over.
-    """
+    """The GROUP's communication facts, passed explicitly."""
 
     pg: Any
     rank: int
-    device: Any  # torch.device or str
+    device: Any
 
 
 class _GroupMesh:
-    """The exact DeviceMesh surface diffusers' CP machinery consumes, backed
-    by ONE explicit process group.
-
-    diffusers ``ContextParallelConfig.setup`` performs
-    ``mesh["ring", "ulysses"]._flatten()`` / ``mesh["ring"]`` /
-    ``mesh["ulysses"]`` / ``get_local_rank()``, and the hooks + attention
-    dispatch then use only ``.size()``, ``.get_group()`` and
-    ``dist.get_rank/get_world_size(group)``. Ring degree is always 1 here
-    (Ulysses only), so the ring axis is a size-1 shim whose ``get_group`` is
-    a typed refusal — nothing may ever run a ring collective through it. A test
-    pins this contract against the installed diffusers so an upstream change
-    breaks loudly, not silently.
-    """
 
     def __init__(self, pg: Any, size: int, local_rank: int, *, axis: str = "ulysses") -> None:
         self._pg = pg
@@ -156,12 +87,6 @@ class _GroupMesh:
 
 
 def _sharding_candidates(pipeline: Any) -> List[Tuple[str, Any]]:
-    """Every component that declares a CP plan, in declaration order.
-
-    Discovered from the objects themselves rather than from a hard-coded
-    expert tuple: a two-expert MoE, a single DiT and a future three-stage
-    model are all just "the components that declare a plan".
-    """
     out: List[Tuple[str, Any]] = []
     candidates = list(getattr(pipeline, "components", {}) or {})
     for extra in ("transformer", "transformer_2"):
@@ -182,19 +107,7 @@ def _sharding_candidates(pipeline: Any) -> List[Tuple[str, Any]]:
 def install_context_parallel(
     pipeline: Any, *, degree: int, comms: Optional[CpComms] = None,
 ) -> Tuple[str, ...]:
-    """Install Ulysses sequence parallelism at ``degree`` on every expert.
-
-    Returns the component names that were sharded. Degree 1 installs nothing
-    and returns ``()`` — a single-device group must be byte-identical to a
-    worker that has never heard of this module.
-
-    ``comms`` is REQUIRED at degree>1: installation binds the CP
-    hooks to that group's explicit process group. diffusers'
-    ``enable_parallelism`` reads rank/world/device from the DEFAULT process
-    group, which in the worker process (rank 0 of every group) is a size-1
-    local group — so this replicates its install sequence with group-correct
-    facts instead of calling it.
-    """
+    """Install Ulysses sequence parallelism at ``degree`` on every expert."""
     if int(degree) <= 1:
         return ()
     components = _sharding_candidates(pipeline)
@@ -214,13 +127,6 @@ def install_context_parallel(
 
     installed: List[str] = []
     for name, comp in components:
-        # diffusers #12536, at the one moment it costs nothing: the all-to-all
-        # shards the HEAD dimension, so an expert whose declared head count
-        # does not divide the degree fails as an inscrutable shape mismatch
-        # mid-denoise, on a paying request, on a pod that has already rented.
-        # The head count is a property of the MODEL and is knowable here; the
-        # sequence length is a property of a REQUEST and is not, so it is not
-        # stated (see `refuse_unless_divisible`).
         refuse_unless_divisible(
             tokens=0, heads=_declared_heads(comp), degree=int(degree))
         _install_on_component(comp, degree=int(degree), comms=comms)
@@ -237,15 +143,6 @@ _GUARD_ATTR = "_gen_worker_cp_gate_guard"
 
 
 def _install_gate_guard(comp: Any, name: str) -> None:
-    """Refuse an ungated forward through a sharded module BY NAME.
-
-    The hooks are on the module, so the module is where the failure domain is
-    knowable. A forward pre-hook is the cheapest possible check (one thread-
-    local read per call, no wrapper object, no change to the module's class, so
-    `torch.compile`'s class keying is untouched) and it fires on rank 0 exactly
-    where a stray forward would otherwise enter an unmatched collective and
-    hang every rank of the group.
-    """
     if getattr(comp, _GUARD_ATTR, None) is not None:
         return
 
@@ -269,17 +166,6 @@ def _install_gate_guard(comp: Any, name: str) -> None:
 
 
 def _install_on_component(comp: Any, *, degree: int, comms: CpComms) -> None:
-    """The group-aware half of diffusers' ``ModelMixin.enable_parallelism``.
-
-    Same sequence, same objects: backend-compatibility check, a ParallelConfig
-    set up with THIS group's rank/world/device/mesh, ``_parallel_config``
-    stamped on the model and every attention processor, then
-    ``apply_context_parallel`` installs the split/gather hooks. The only
-    deltas are the mesh (an explicit-group ``_GroupMesh``, never
-    ``init_device_mesh`` over the default world) and rank/world/device (the
-    group's, never ``dist.get_rank()``'s). Pinned to diffusers 0.39.x by the
-    serving image; a surface change raises typed here instead of corrupting.
-    """
     import torch
 
     try:
@@ -308,9 +194,6 @@ def _install_on_component(comp: Any, *, degree: int, comms: CpComms) -> None:
     cp_config = ContextParallelConfig(ulysses_degree=int(degree))
     config = ParallelConfig(context_parallel_config=cp_config)
 
-    # Backend compatibility, exactly as upstream checks it: the active
-    # attention backend must support CP or the hooks shard tensors an
-    # incompatible kernel then mis-reads.
     for module in comp.modules():
         if not isinstance(module, attention_classes):
             continue
@@ -351,11 +234,8 @@ def _install_on_component(comp: Any, *, degree: int, comms: CpComms) -> None:
 
 
 def _refuse_if_offloaded(pipeline: Any) -> None:
-    """diffusers #12533: CPU offload enabled BEFORE parallelism raises a shape
-    error after the first pipe call. Catch it here, named, instead of as an
-    inscrutable shape mismatch mid-denoise."""
     markers = (
-        "_all_hooks",              # accelerate cpu_offload bookkeeping
+        "_all_hooks",
         "_offload_gpu_id",
         "hf_device_map",
     )
@@ -370,13 +250,6 @@ def _refuse_if_offloaded(pipeline: Any) -> None:
 
 
 def _declared_heads(comp: Any) -> int:
-    """A sharding candidate's declared attention-head count, or 0.
-
-    Read off the DECLARATION (the model config), never counted from modules: a
-    module walk answers a different question (how many attention blocks) and
-    would produce a confident wrong number. 0 means the component declares
-    none, and an undeclared count is not a divisibility failure.
-    """
     config = getattr(comp, "config", None)
     for attr in ("num_attention_heads", "num_heads", "attention_heads"):
         for holder in (config, comp):
@@ -394,17 +267,7 @@ def _declared_heads(comp: Any) -> int:
 def refuse_unless_divisible(
     *, tokens: int, heads: int, degree: int
 ) -> None:
-    """The diffusers #12536 assertion, checked BEFORE a pod is committed.
-
-    Ulysses shards the sequence across ranks and the head dimension inside the
-    all-to-all, so both must divide the degree.
-
-    Either term may be 0 — "this caller cannot state it" — and 0 asserts
-    nothing rather than asserting falsely. ``install_context_parallel`` is
-    exactly such a caller: the head count is a property of the MODEL and is
-    knowable before the pod commits to a packing; the sequence length is a
-    property of a REQUEST and is not knowable at install.
-    """
+    """The diffusers #12536 assertion, checked BEFORE a pod is committed."""
     d = int(degree)
     if d <= 1:
         return
@@ -420,15 +283,7 @@ def refuse_unless_divisible(
 
 
 def refuse_unless_shard_invariant_quant(pipeline: Any, *, degree: int) -> None:
-    """W8A8 composes with CP — with one exception that must be typed.
-
-    ``rowwise`` derives a scale per TOKEN, which is a function of that token
-    alone and therefore identical whichever rank holds it. ``pertensor``
-    derives one scalar from the whole activation, i.e. from the LOCAL shard —
-    so two ranks quantize the same logical tensor differently and the group
-    produces silently wrong output. That is the quiet failure mode, which is
-    why this refuses rather than warns.
-    """
+    """W8A8 composes with CP — with one exception that must be typed: "rowwise" derives a scale per TOKEN, a function of that token alone and identical whichever rank holds it; "pertensor" derives one scalar from the whole activation, i.e. from the LOCAL shard, so two ranks quantize the same logical tensor differently and the group produces silently wrong output. That is the quiet failure mode, which is why this refuses rather than warns."""
     if int(degree) <= 1:
         return
     bad: List[str] = []
@@ -465,11 +320,7 @@ def _named_modules(pipeline: Any) -> Sequence[Tuple[str, Any]]:
 
 
 def w8a8_gemm_mode(pipeline: Any) -> str:
-    """The one w8a8 GEMM mode this pipeline's quantized linears run, or "".
-
-    Reported into the GroupPlan so the mode is a GROUP fact that rank 0
-    decides, not something each rank re-derives from its own SM (which is
-    exactly how two ranks end up quantizing differently)."""
+    """The one w8a8 GEMM mode this pipeline's quantized linears run, or ""."""
     modes = {
         m for _n, mod in _named_modules(pipeline)
         if (m := str(getattr(mod, "gemm_mode", "") or ""))

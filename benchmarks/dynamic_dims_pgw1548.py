@@ -1,47 +1,14 @@
-"""pgw#1548 acceptance: dynamic dims vs the static bucket fan, per shape.
+"""Acceptance: dynamic dims vs the static bucket fan, per shape.
 
-Paul's gate, verbatim in shape: *"For SDXL, Anima, and SD1.5, do 'aspect ratio
-is dynamic dim' versus 'static dim, with many graph specializations' and then
-compile them and test inference time"*, plus a SEPARATE cost for the CFG axis
-(*"I doubt CFG can be a dynamic dim, but it's worth investigating how much time
-we lose if it is"*). Adoption is per axis and per model, and only where the
-regression is within a few percent.
+Arms: ``static`` (control, one graph per observed shape), ``aspect``,
+``batch`` (the CFG axis, costed on its own), ``all``. Adoption is per axis and
+per model, only where the regression is within a few percent.
 
-**The production serve path, not a rig.** Every number is a round-trip through
-`gen-worker up` + `gen-worker run` — the same two commands a cozy-local user
-types — because a hand-built pipeline measures a codepath nobody serves. The
-harness never imports diffusers itself.
-
-**Reported per shape, never averaged.** An average over aspect buckets is the
-one summary that can hide the exact thing this gate is looking for: dynamic
-dims cost differently at different sizes, and a mean of a win and a loss reads
-as "no change".
-
-## The arms
-
-| arm | `--dynamic-axes` | what it is |
-|---|---|---|
-| `static` | `off` | the control — one graph per observed shape, today's fleet |
-| `aspect` | `aspect` | Paul's headline question |
-| `batch` | `batch` | the CFG axis, costed on its own |
-| `all` | `all` | both, the best case for mint cost |
-
-## Discipline
-
-* `VARENA_GPU_WINDOW=1` gates every card-touching step. Set it ONLY on a
-  granted window.
-* `--self-test` is CPU-ONLY, needs no window and no card. It red-arms the
-  window gate, the per-shape table (a table that cannot show a regression is
-  not an instrument) and the arm plan.
-* Compile is bounded: the static arm builds ONLY the specializations this run
-  actually benchmarks (`--first <selector> --fill none`), never all 14/18.
-  Compiling buckets nobody measures spends the card on nothing.
-* `nice -n 19` on every child; one heavy child at a time.
-
-    .venv/bin/python benchmarks/dynamic_dims_pgw1548.py --self-test
-    VARENA_GPU_WINDOW=1 .venv/bin/python benchmarks/dynamic_dims_pgw1548.py \
-        --endpoint ~/cozy/serverless-endpoints/sd15 --checkpoint <tree> \
-        --arms static,aspect --reps 5 --out benchmarks/pgw1548/sd15
+Every number is a round-trip through ``gen-worker up`` + ``gen-worker run`` —
+the production serve path, never a hand-built pipeline. Results are reported
+per shape, never averaged: dynamic dims cost differently at different sizes,
+and a mean of a win and a loss reads as "no change".
+``VARENA_GPU_WINDOW=1`` gates every card-touching step.
 """
 
 from __future__ import annotations
@@ -58,15 +25,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-#: What substrate produced these numbers, stamped into the verdict and the
-#: table so a row CANNOT be published without it (coordinator, 2026-08-20).
-#:
-#: A raw pod runs `gen-worker lock/compile/up/run` — the endpoint's own serving
-#: code, which is what the measurement law asks for — but it does NOT go
-#: through release packaging and deploy. That is the right subject for a
-#: graph-shape A/B (packaging does not touch a per-step wall) and it is a real
-#: limit on what the number describes, so the limit travels WITH the number
-#: rather than in a paragraph someone has to remember to quote.
 SUBSTRATES = {
     "raw-pod": (
         "raw-pod substrate; numbers describe the graphs, not the deploy path"
@@ -104,20 +62,9 @@ def _run(cmd: list[str], *, cwd: Path | None = None, env: dict | None = None,
     )
 
 
-# ---------------------------------------------------------------------------
-# The measurement
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class Sample:
-    """One request's round-trip, stamped with WHEN and under WHAT load.
-
-    The load stamp is not decoration: this box runs several agent sessions and
-    a peer's CPU job moves a wall by more than a dynamic dim ever will. A
-    number without the load it was taken under cannot be compared to one taken
-    an hour later, and `round` is what makes two arms comparable at all.
-    """
+    """One request's round-trip, stamped with WHEN and under WHAT load."""
 
     arm: str
     aspect: str
@@ -125,10 +72,6 @@ class Sample:
     seconds: float
     round: int = 0
     load1: float = 0.0
-    #: THE MEASURED dispatch facts for THIS request, read off the response
-    #: envelope (`gen-worker run --json` carries `dispatch`). Not inferred from
-    #: a log string, and not a proxy: pgw#1591 was an instrument that INFERRED
-    #: "all N ran eager" from a flag instead of reading the counter beside it.
     compiled_calls: int = 0
     eager_calls: int = 0
     displaced: tuple[str, ...] = ()
@@ -136,12 +79,7 @@ class Sample:
 
 @dataclass
 class Table:
-    """Per-shape round-trips, and the comparison the gate is decided on.
-
-    The unit of judgement is one (aspect, cfg) CELL: `static` is the control
-    and every other arm is a percentage against it, IN THAT CELL. Nothing here
-    ever averages across cells — see the module docstring.
-    """
+    """Per-shape round-trips, and the comparison the gate is decided on."""
 
     samples: list[Sample] = field(default_factory=list)
 
@@ -173,12 +111,7 @@ class Table:
         return sorted({s.round for s in self.samples})
 
     def spread(self, arm: str, aspect: str, cfg: str) -> float | None:
-        """The CONTROL's own round-to-round spread, as a percentage.
-
-        The decidability test the coordinator set (2026-08-20): a cell whose
-        reference arm cannot reproduce itself across rounds within 15% is
-        measuring the box, not the graph, and no verdict may be read from it.
-        """
+        """The CONTROL's own round-to-round spread, as a percentage."""
 
         per_round = []
         for index in self.rounds():
@@ -195,15 +128,6 @@ class Table:
         return (high - low) / low * 100.0 if low else None
 
     def undecidable(self, aspect: str, cfg: str, limit: float = 15.0) -> bool:
-        """Is this cell's verdict unreadable — for EITHER reason?
-
-        Two ways, and the second one used to read as decidable, which is the
-        silent-vacuity shape this file exists to avoid: a cell measured in
-        only ONE round has no reproducibility evidence at all, so `spread`
-        answers None, and "no evidence" must never score as "no problem". A
-        run cut short to fit a window is exactly when that happens, so the
-        absence is treated as undecidable rather than as a pass.
-        """
 
         spread = self.spread("static", aspect, cfg)
         if spread is None:
@@ -211,7 +135,7 @@ class Table:
         return spread > limit
 
     def regression(self, arm: str, aspect: str, cfg: str) -> float | None:
-        """Percent SLOWER than the static control in this cell. Negative = faster."""
+        """Percent SLOWER than the static control in this cell."""
 
         control = self.median("static", aspect, cfg)
         measured = self.median(arm, aspect, cfg)
@@ -248,13 +172,7 @@ class Table:
         return "\n".join(lines)
 
     def verdict(self, arm: str, tolerance: float) -> tuple[bool, list[str]]:
-        """Adopt this axis? Only if EVERY decidable cell is inside tolerance.
-
-        One bad bucket is a reason not to adopt an axis, not a number to
-        average away — a request that lands in it pays the regression every
-        time, forever. An UNDECIDABLE cell blocks adoption too: it is not a
-        pass, it is a measurement that has to be re-run on a quiet box.
-        """
+        """Adopt this axis? Only if EVERY decidable cell is inside tolerance."""
 
         offenders = []
         for aspect, cfg in self.shapes():
@@ -278,9 +196,6 @@ class Table:
     def as_dict(self) -> dict[str, Any]:
         return {
             "samples": [vars(s) for s in self.samples],
-            # The premise, carried BESIDE the timings so a reader cannot take
-            # the numbers without the evidence that they measured compiled
-            # serving at all.
             "dispatch": {
                 f"{arm}": {
                     "compiled_calls": sum(
@@ -315,11 +230,6 @@ class Table:
         }
 
 
-# ---------------------------------------------------------------------------
-# The arms, on the card
-# ---------------------------------------------------------------------------
-
-
 class Bench:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -328,18 +238,9 @@ class Bench:
         self.out.mkdir(parents=True, exist_ok=True)
         self.table = Table()
         self.mint: dict[str, dict[str, Any]] = {}
-        #: arm -> the SERVING daemon's log (not the launcher's output).
         self._daemon_log: dict[str, Path | None] = {}
 
-    # -- the endpoint copy: never mutate a shared checkout ------------------
     def _workspace(self, arm: str) -> Path:
-        """A per-arm COPY of the endpoint.
-
-        `gen-worker up` reads the endpoint's own `endpoint.lock`, so an arm has
-        to write one — and `~/cozy/serverless-endpoints` is a shared checkout
-        with a sibling lane working in it. The copy is the isolation; the
-        `.venv` is symlinked because it is the environment, not the source.
-        """
 
         room = self.out / f"arm-{arm}"
         if room.exists():
@@ -364,7 +265,6 @@ class Bench:
         return str(venv) if venv.exists() else sys.executable
 
     def _gen_worker(self, room: Path, argv: list[str], timeout: float) -> subprocess.CompletedProcess:
-        """The CLI, running THIS branch's source (PYTHONPATH wins over the pin)."""
 
         return _run(
             [self._python(), "-m", "gen_worker.cli", *argv],
@@ -373,7 +273,6 @@ class Bench:
             timeout=timeout,
         )
 
-    # -- one arm ------------------------------------------------------------
     def lock(self, room: Path, arm: str) -> float:
         started = time.monotonic()
         result = self._gen_worker(
@@ -387,14 +286,7 @@ class Bench:
         return time.monotonic() - started
 
     def specializations(self, room: Path) -> list[dict[str, Any]]:
-        """Every graph specialization this arm's lock declares.
-
-        `read_lock` answers a plain dict (NOT an object with attributes) and
-        the derive document sits under `["derive"]["document"]` as a JSON
-        STRING. Both facts are asserted here rather than assumed: an attribute
-        read that works on nothing would have raised on the pod, minutes into
-        a paid window, after the compile it was supposed to plan.
-        """
+        """Every graph specialization this arm's lock declares."""
 
         from gen_worker.cli import endpoint_lock as el
 
@@ -417,7 +309,7 @@ class Bench:
         return records
 
     def compile(self, room: Path, arm: str, selectors: list[str]) -> float:
-        """Build ONLY what this run benchmarks. One selector per child."""
+        """Build ONLY what this run benchmarks."""
 
         require_window()
         started = time.monotonic()
@@ -436,11 +328,6 @@ class Bench:
 
     def serve(self, room: Path, arm: str) -> None:
         require_window()
-        # --sm is NOT optional: `gen-worker up --help` says it is "required to
-        # adopt compiled graphs". Without it the boot serves EAGER, both arms
-        # measure eager, and the table reports a beautiful 0% delta — the same
-        # vacuous green the preflight exists to stop, arriving from the boot
-        # side. The whole run would be worthless and would look fine.
         argv = ["up", str(room), "-d", "--checkpoint", str(self.args.checkpoint),
                 "--idle-timeout", str(self.args.idle_timeout)]
         if self.args.sm:
@@ -450,11 +337,6 @@ class Bench:
             raise SystemExit(f"[{arm}] up failed:\n{up.stdout}\n{up.stderr}")
         banner = (up.stdout or "") + (up.stderr or "")
         (self.out / f"up-{arm}.log").write_text(banner)
-        # `up -d` DETACHES: its own output is a three-line launcher banner and
-        # says nothing about adoption. The serving daemon's log is a different
-        # file, and the launcher prints where — so read THAT. Checking the
-        # launcher's output for the word "adopt" is how this harness spent a
-        # window measuring eager against eager (pgw#1591).
         self._daemon_log[arm] = None
         for line in banner.splitlines():
             if "logs:" in line:
@@ -502,14 +384,6 @@ class Bench:
         )
 
     def _dispatch_facts(self, arm: str, stdout: str) -> dict[str, Any]:
-        """The `dispatch` block of the response envelope, or a typed refusal.
-
-        `gen-worker run --json` prints the raw envelope and the serving path
-        puts `DispatchCounts.facts()` in it, so every request carries its own
-        compiled/eager counts. An envelope without them is not a request this
-        harness can score: it would leave the premise unmeasured, which is
-        exactly how pgw#1591 nearly shipped a table of eager timings.
-        """
 
         envelope: dict[str, Any] = {}
         for line in reversed((stdout or "").splitlines()):
@@ -530,16 +404,11 @@ class Bench:
         return facts
 
     def prepare(self, name: str) -> Path:
-        """Lock + compile ONE arm. The card cost, paid once per arm."""
+        """Lock + compile ONE arm."""
 
         room = self._workspace(name)
         lock_s = self.lock(room, name)
         records = self.specializations(room)
-        # `--first` matches a facet by EQUALITY or the graph identity by
-        # PREFIX (>= 8 chars) — `compile.Spec.short` is `graph[:16]`, scheme
-        # included. A SUFFIX matches neither, so every compile would have been
-        # refused with "names no specialization this endpoint has" — on the
-        # pod, after the lock, inside the paid window.
         selectors = self.args.selectors or [r["graph"][:16] for r in records]
         compile_s = self.compile(room, name, selectors)
         self.mint[name] = {
@@ -552,16 +421,7 @@ class Bench:
         return room
 
     def measure(self, room: Path, name: str, round_index: int) -> None:
-        """One arm's turn in ONE round.
-
-        Boot, one warm-up per cell (the first call through a fresh graph pays
-        load and allocator costs no later request pays — reporting it would
-        measure the boot), `--reps` measured calls, tear down. Rounds are the
-        interleave: a peer's CPU job that lands mid-run then falls on every
-        arm rather than on whichever one happened to be running, and the
-        control's round-to-round spread is what says whether the cell is
-        decidable at all.
-        """
+        """One arm's turn in ONE round."""
 
         self.serve(room, name)
         try:
@@ -570,10 +430,6 @@ class Bench:
                 for cfg in self.args.cfg:
                     warmup = self.request(room, name, aspect, cfg, round_index)
                     if first:
-                        # The warm-up call has now exercised the serve path
-                        # once and CARRIES ITS OWN COUNTS. Check the premise
-                        # here, at the cheapest possible point, before paying
-                        # for the rest of the arm — let alone the other arm.
                         self.assert_compiled(name, warmup)
                         first = False
                     for _ in range(self.args.reps):
@@ -584,21 +440,7 @@ class Bench:
             self.down(room)
 
     def assert_compiled(self, arm: str, sample: Sample) -> None:
-        """Did THIS request actually serve compiled? Typed abort if not.
-
-        Reads the MEASURED counts off the request's own envelope. It used to
-        prove compiled serving by grepping the daemon log for `wrapper.tcg` —
-        a string that exists only because of the alignment defect pgw#1593 is
-        fixing. That check would have started aborting every HEALTHY arm the
-        moment someone fixed that defect: an instrument whose green depends on
-        another bug staying unfixed. The counter is the real evidence and it
-        survives both fixes.
-
-        Displacement is no longer read as "everything ran eager" either
-        (pgw#1591): it is a separate fact, and a displaced module can still
-        have served compiled calls. So the bar is what it always should have
-        been — compiled calls happened, and none fell through.
-        """
+        """Did THIS request actually serve compiled? Typed abort if not."""
 
         if sample.compiled_calls <= 0:
             raise SystemExit(
@@ -629,9 +471,6 @@ class Bench:
         return {
             "endpoint": str(self.endpoint),
             "substrate": self.args.substrate,
-            # The attribution rides in the verdict itself, not only in the
-            # rendered table, so a consumer reading the JSON cannot get the
-            # numbers without the sentence that bounds them.
             "substrate_note": SUBSTRATES[self.args.substrate],
             "tolerance_pct": self.args.tolerance,
             "mint": self.mint,
@@ -639,11 +478,6 @@ class Bench:
             "adoption": adoption,
             **self.table.as_dict(),
         }
-
-
-# ---------------------------------------------------------------------------
-# The CPU-only self-test: every instrument proven able to go red
-# ---------------------------------------------------------------------------
 
 
 def self_test() -> int:
@@ -674,9 +508,6 @@ def self_test() -> int:
 
     print("[self-test] the per-shape table CAN show a regression")
     table = Table()
-    # TWO rounds: a single-round cell is undecidable by construction now, so a
-    # fixture that wants to exercise the regression arithmetic has to supply
-    # the reproducibility evidence a real run would.
     for round_index in range(2):
         for _ in range(3):
             table.add(Sample("static", "1:1", "on", 1.000, round=round_index))
@@ -730,8 +561,6 @@ def self_test() -> int:
 
     print("[self-test] the table never averages across shapes")
     rendered = table.render()
-    # header + separator + one row per shape, and render() joins without a
-    # trailing newline, so the count is one less than the line count.
     check(
         "every shape has its own row",
         len(rendered.splitlines()) == 2 + len(table.shapes()),

@@ -1,23 +1,4 @@
-"""gw#668: "no boot config was ever injected" is not "boot config generation 0".
-
-Tensorhub injects ``WORKER_CONFIG_GENERATION`` only into POD-LAUNCH env, so a
-host-process worker (the e2e local-worker shape, the dev loop, any BYO /
-externally managed fleet) never receives one. ``min(gen, 0)`` conflated the two
-facts: the stamp stayed 0, ``pending_boot`` was true against every target >= 1,
-and ``_refresh_config_application`` reported BOOT_STALE for the process's whole
-life. Since the protocol forbids a boot-stale config from advertising a READY
-capability, every ``FunctionCapability`` projected BOOT_STALE and the hub's
-exact-capability dispatch gate refused the worker for every request — with a
-remedy (pod replacement) that does not exist for a pod-less worker.
-
-Both directions are pinned here, on the real ``IntentRegistry`` and the real
-``Settings`` loader:
-
-  * a worker booted with NO ``WORKER_CONFIG_GENERATION`` converges its config
-    application and advertises READY capabilities;
-  * a worker booted with a STALE one (an injected, genuinely ancient
-    generation) still reports BOOT_STALE, so the rollout replaces it.
-"""
+"""gw#668: "no boot config was ever injected" is not "boot config generation 0"."""
 
 from __future__ import annotations
 
@@ -101,8 +82,6 @@ def test_a_pod_less_worker_converges_its_boot_class() -> None:
 
 
 def test_the_absent_stamp_is_the_default() -> None:
-    # Nothing has to pass the sentinel explicitly for a host-process worker:
-    # the DEFAULT is "no boot-only env was injected".
     assert _converge(None).state == pb.CONFIG_APPLICATION_STATE_CONVERGED
 
 
@@ -112,7 +91,6 @@ def test_a_pod_launched_worker_with_a_stale_stamp_still_reports_boot_stale() -> 
         assert application.boot_generation == stamp, stamp
         assert application.state == pb.CONFIG_APPLICATION_STATE_BOOT_STALE, stamp
         assert application.pending_classes.boot, stamp
-    # ...and an up-to-date pod-launched stamp converges, as before.
     assert _converge(4).state == pb.CONFIG_APPLICATION_STATE_CONVERGED
 
 

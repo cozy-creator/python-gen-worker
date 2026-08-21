@@ -1,16 +1,4 @@
-"""The repackage declaration schema — typed maps the SDK engine executes.
-
-``convert/`` carries a registration hook like every other package, so a
-family's layout knowledge is declared by the family rather than living as a
-module-level private constant inside the SDK.
-
-This module defines the *vocabulary*; :mod:`gen_worker.convert.repack_registry`
-holds the registrations; :mod:`gen_worker.convert.repack_engine` executes them.
-No family appears in any of the three.
-
-The unit of declaration is :class:`RepackageFamily`. Onboarding a family means
-writing one of these in the endpoint repo and registering it — zero SDK changes.
-"""
+"""The repackage declaration schema — typed maps the SDK engine executes."""
 
 from __future__ import annotations
 
@@ -22,23 +10,12 @@ RenameKind = Literal["prefix", "substring", "alternation"]
 
 
 class DeclarationError(ValueError):
-    """A declaration is malformed. Raised at registration time, never at run time."""
+    """A declaration is malformed."""
 
 
 @dataclass(frozen=True)
 class RenameRule:
-    """One ordered key-rewrite pass over a component's state-dict keys.
-
-    ``prefix``      — for every pair, if the key starts with ``src`` the first
-                      occurrence of ``src`` is replaced by ``dst``. Pairs are
-                      applied in order and a key may match more than one.
-    ``substring``   — every occurrence of ``src`` is replaced by ``dst``, pairs
-                      applied in order.
-    ``alternation`` — all pairs compiled into ONE regex alternation and applied
-                      in a single pass, so an earlier replacement's output can
-                      never be rewritten by a later pair. Longest source first,
-                      which is what the CLIP keyspaces require.
-    """
+    """One ordered key-rewrite pass over a component's state-dict keys."""
 
     kind: RenameKind
     pairs: tuple[tuple[str, str], ...]
@@ -86,12 +63,7 @@ _ALTERNATION_CACHE: dict[tuple[tuple[str, str], ...], re.Pattern[str]] = {}
 
 @dataclass(frozen=True)
 class RepackVariant:
-    """One way a component may need converting. First match wins.
-
-    ``probe_key`` is a raw state-dict key whose presence selects this variant
-    (SD 2.0's ``text_model.embeddings.position_ids`` is the canonical case).
-    A variant with ``probe_key=None`` matches unconditionally and must be last.
-    """
+    """One way a component may need converting."""
 
     out_prefix: str = ""
     rules: tuple[RenameRule, ...] = ()
@@ -135,15 +107,7 @@ class ComponentRepack:
 
 @dataclass(frozen=True)
 class LayoutSignature:
-    """The component set a tree MUST look like for this family's converter to run.
-
-    This is the permanent guard: two copies of a family's signature can
-    disagree and route a tree to the wrong converter. With the signature
-    declared beside the converter there is only one copy, and the engine
-    refuses by name when the
-    tree on disk does not match — whether the family was auto-detected or passed
-    in by a caller.
-    """
+    """The component set a tree MUST look like for this family's converter to run."""
 
     requires_all: tuple[str, ...] = ()
     requires_any: tuple[tuple[str, ...], ...] = ()
@@ -165,13 +129,7 @@ class LayoutSignature:
 
 @dataclass(frozen=True)
 class SinglefileTarget:
-    """A diffusers pipeline class (+ optional config donor repos) to try, in order.
-
-    ``config_repos`` are HuggingFace repo ids used only as *config* donors when a
-    single-file checkpoint omits a component (DiT-only fine-tunes ship no text
-    encoder). They are foreign-catalog coordinates, which is why they are
-    declared rather than hardcoded in the SDK.
-    """
+    """A diffusers pipeline class (+ optional config donor repos) to try, in order."""
 
     pipeline_class: str
     config_repos: tuple[str, ...] = ()
@@ -183,11 +141,7 @@ class SinglefileTarget:
 
 @dataclass(frozen=True)
 class DtypePolicy:
-    """How a requested output dtype maps onto the load/save dtype.
-
-    Generic, not family knowledge: ``preserve_fp16`` exists because loading an
-    fp16 source in bf16 rounds a 10-bit mantissa to 7 bits irrecoverably.
-    """
+    """How a requested output dtype maps onto the load/save dtype."""
 
     load_default: str = "bf16"
     preserve: tuple[str, ...] = ("fp16", "fp32")
@@ -196,12 +150,7 @@ class DtypePolicy:
 
 @dataclass(frozen=True)
 class RepackageFamily:
-    """One family's complete repackage declaration.
-
-    ``aliases`` / ``alias_prefixes`` replace the SDK's ``_normalize_family``
-    ladder: a fine-tune lineage (``sdxl-illustrious``, ``flux1-dev``) names the
-    family it repackages as, declared by whoever owns the family.
-    """
+    """One family's complete repackage declaration."""
 
     family: str
     aliases: tuple[str, ...] = ()

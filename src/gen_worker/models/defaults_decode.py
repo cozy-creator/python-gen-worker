@@ -1,29 +1,4 @@
-"""The read-side typed decode (pgw#1377 point 3 — the AUTHORITY).
-
-A checkpoint's hub row is TWO COLUMNS: ``model`` text + ``defaults`` JSONB, a
-PARTIAL object carrying only the fields the checkpoint has an opinion on.
-``decode_model_defaults`` turns that row into a typed ``Defaults`` struct:
-
-* ``model`` matches the expected type → decode the JSONB over the zero-arg
-  platform values, field-level overlay;
-* ``model`` NULL/absent → platform values + the visible
-  ``checkpoint_defaults_unclassified`` warning (serves, never guesses
-  silently);
-* ``model`` set but ≠ the expected type → :class:`ModelTypeMismatch`, a typed
-  refusal at setup (a misdeploy, not a warning);
-* an ill-typed field value → :class:`DefaultsDecodeError` NAMING the field —
-  never a silent skip.
-
-Evolution rule (pgw#1376, core): lenient decode + additive-only + a name
-never changes meaning. Unknown JSONB fields are ignored (an old wheel reads
-newer rows); missing fields take the struct defaults (a new wheel reads old
-rows). No version stamp.
-
-Knob fields merge to the NARROWEST [lo, hi] across the platform and
-checkpoint layers, and the merged default is kept inside that range so the
-decoded struct stays servable by construction (``resolve(None)`` returns it
-unclamped).
-"""
+"""Read-side typed decode of a checkpoint's hub row (model text + PARTIAL defaults JSONB) into a typed Defaults struct: matching model -> field-level overlay onto platform values; NULL model -> platform values + visible unclassified warning; wrong model -> typed ModelTypeMismatch; ill-typed field -> DefaultsDecodeError naming the field. Evolution rule: lenient decode, additive-only, a name never changes meaning — unknown fields ignored, missing fields take struct defaults, no version stamp. Knob fields merge to the NARROWEST [lo, hi] across the platform and checkpoint layers, so a platform envelope must be the WIDEST any lane declares or a checkpoint row's own recipe becomes unreachable (a silently clamped default, or an empty range)."""
 
 from __future__ import annotations
 
@@ -38,9 +13,7 @@ D = TypeVar("D", bound=msgspec.Struct)
 
 
 class CarriesDefaults(Protocol[D]):
-    """Structural face of a ModelType / LoraOverlay class: a wire ``name``
-    plus its ``Defaults`` struct. ``SDXL`` and ``SDXL.Lora`` both satisfy it
-    (as class objects), so one decode covers checkpoints and adapters."""
+    """Structural face of a ModelType / LoraOverlay class: a wire ``name`` plus its ``Defaults`` struct."""
 
     name: str
     Defaults: type[D]
@@ -60,9 +33,6 @@ class DefaultsDecodeError(ValueError):
 
 
 class ModelTypeMismatch(ValueError):
-    """Typed refusal at setup: the row's ``model`` is not the expected type —
-    a misdeploy, not a warning (the re-assert leg of the single-source rule,
-    pgw#1377 point 3)."""
 
     def __init__(self, *, expected: str, actual: str) -> None:
         self.expected = expected
@@ -74,9 +44,6 @@ class ModelTypeMismatch(ValueError):
 
 
 class CheckpointDefaultsUnclassified(UserWarning):
-    """The named unclassified warning (pgw#1377 point 3): the checkpoint has
-    no ``model`` classification, so it serves on platform fallbacks —
-    legally, visibly, never silently."""
 
     code = "checkpoint_defaults_unclassified"
 
@@ -130,15 +97,11 @@ def _merge_float_knob(
 def _merge_knob(
     platform: "Knob[int] | Knob[float]", raw: object, *, field: str, model: str
 ) -> "Knob[int] | Knob[float]":
-    """Field-level overlay for a knob: the row narrows, never widens, and its
-    unknown keys (including a stray ``name``) are ignored per the evolution
-    rule."""
     if isinstance(platform.default, int):
         try:
             int_patch = msgspec.convert(raw, type=_IntKnobPatch)
         except msgspec.ValidationError as e:
             raise DefaultsDecodeError(model=model, field=field, reason=str(e)) from e
-        # platform.default narrowed to int ⇒ this is the Knob[int] arm.
         return _merge_int_knob(
             Knob(platform.default, lo=_as_int(platform.lo), hi=_as_int(platform.hi),
                  name=platform.name),
@@ -168,14 +131,7 @@ def _as_float(value: "int | float | None") -> float | None:
 def decode_defaults(
     cls: type[D], row: Mapping[str, object] | None, *, model_name: str = ""
 ) -> D:
-    """Decode one partial JSONB object over ``cls``'s platform values.
-
-    The struct-level engine — :func:`decode_model_defaults` is the
-    classification-aware caller. Exposed for the evolution-rule seam: any
-    frozen msgspec struct with servable field defaults decodes here, which is
-    how v1-written rows read under a v2 struct (missing fields → defaults)
-    and v2 rows under a v1 struct (unknown fields → ignored).
-    """
+    """Decode one partial JSONB object over ``cls``'s platform values."""
     if not row:
         return cls()
     values: dict[str, object] = {}
@@ -203,11 +159,7 @@ def decode_model_defaults(
     model: str | None,
     defaults: Mapping[str, object] | None,
 ) -> D:
-    """The read-side authority: hub row → typed ``Defaults`` (module
-    docstring has the matrix). Works for base types (``SDXL``) and adapter
-    overlays (``SDXL.Lora``) alike — a base-mismatched adapter (an
-    ``sd15.lora`` row where ``sdxl.lora`` is expected) is the same
-    :class:`ModelTypeMismatch` typed refusal at bind."""
+    """The read-side authority: hub row → typed ``Defaults`` (module docstring has the matrix)."""
     expected = model_type.name
     if model is None or model == "":
         warnings.warn(

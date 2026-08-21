@@ -1,31 +1,4 @@
-"""The test that was always missing: the POD's caller, on a projected tree.
-
-pgw#1551. For ~21 h no endpoint in the fleet completed a serve, and every
-local red/green stayed green throughout. The reason was not a missing
-assertion. It was that **every test's caller was ``EndpointHost``, and no
-pod has ever used ``EndpointHost``.** A pod builds ``ServeLoop``
-(``worker.py:582``), ``ServeLoop`` built its load contexts with no engine, and
-so nothing on a pod ever asked for the streaming loader. The bug lived
-entirely in the gap between the caller under test and the caller in
-production — *a unit test is a caller that the production path is not*.
-
-So this suite fixes the CALLER, not the coverage:
-
-* the object under test is ``ServeLoop``, constructed with exactly the keyword
-  arguments ``worker.py`` passes on a pod and no others;
-* the tree is a REAL projected tensorfs snapshot — a real ``LocalCAS``, a real
-  ingested manifest, a real pin, projected by the same ``project_snapshot``
-  the chokepoint calls — so its tensor containers really are ~128 B
-  ``TFSSTUB1`` pointer stubs whose bytes no path-based read can reach;
-* the store is a REAL ``ModelStore``;
-* **nothing is mocked on the seam.** A fake engine is what let this defect
-  live for weeks: an injected engine makes "was one asked for?" — the only
-  question that mattered — unaskable.
-
-The red arm is not hypothetical. ``test_the_pre_1544_state_FAILS_this_test``
-reconstructs the exact production state of the outage (``engine_for`` never
-reached from ``ctx.load``) and requires this suite to go red for it.
-"""
+"""The test that was always missing: the POD's caller, on a projected tree."""
 
 from __future__ import annotations
 
@@ -60,12 +33,6 @@ KEY = "e5" * 32
 
 
 class _PodResolver:
-    """The ``BindingResolver`` seam, answering the projected tree.
-
-    Deliberately answers a checkpoint_ref that is NOT the string the store
-    banks under: pgw#1543 proved a ref-keyed lookup silently no-ops on a
-    spelling mismatch, and the pod holds the resolver's `pick.ref`.
-    """
 
     def __init__(self, tree: Path) -> None:
         self.tree = tree
@@ -82,15 +49,13 @@ class _PodResolver:
 
 @pytest.fixture(scope="module")
 def projected(tmp_path_factory: pytest.TempPathFactory) -> Dict[str, Any]:
-    """A real bf16 pipeline, ingested, pinned, and projected. No mocks."""
+    """A real bf16 pipeline, ingested, pinned, and projected."""
     base = tmp_path_factory.mktemp("pod-cas")
     source = base / "source-model"
     build_source(source)
 
     cas = LocalCAS(base)
     manifest = ingest_repository(cas, source)
-    # Exactly what `cozy_snapshot._pin_manifest` does, so `resolve_projection`
-    # runs against the production pinning and not a test convention.
     cas.compare_and_swap_ref(
         REF_PREFIX + KEY, cas.store_manifest(manifest), expected=None)
     tree = base / SNAPSHOTS_DIR / KEY
@@ -118,7 +83,6 @@ def bound_store(projected: Dict[str, Any]) -> Iterator[ModelStore]:
     for entry in projected["manifest"].files:
         snapshot.files.add(path=entry.path, size_bytes=entry.size_bytes,
                            digest=str(entry.digest))
-    # Banked under a DIFFERENT spelling than the one served, on purpose.
     store.bank_snapshot(WireRef("fixture/streamer"), snapshot)
     store_mod.bind_active_store(store)
     try:
@@ -128,14 +92,7 @@ def bound_store(projected: Dict[str, Any]) -> Iterator[ModelStore]:
 
 
 def pod_serve_loop(projected: Dict[str, Any], tmp_path: Path) -> ServeLoop:
-    """``ServeLoop`` as ``worker.py`` builds it on a pod — and ONLY that.
-
-    The keyword set is copied from `worker.py`'s construction. Nothing is
-    added here that a pod does not pass, because the whole finding is that a
-    test which passes one extra argument is testing a different program: for
-    ~21 h the extra argument was `engine=`, supplied by every test's
-    `EndpointHost` and by no pod.
-    """
+    """``ServeLoop`` as ``worker.py`` builds it on a pod — and ONLY that."""
     loaded = load_endpoint(FIXTURE)
     return ServeLoop(
         loaded,
@@ -153,14 +110,7 @@ def pod_serve_loop(projected: Dict[str, Any], tmp_path: Path) -> ServeLoop:
 def test_the_POD_loop_serves_a_projected_tree_through_the_streaming_engine(
     projected: Dict[str, Any], bound_store: ModelStore, tmp_path: Path,
 ) -> None:
-    """The whole point, in one request, on the caller a pod actually uses.
-
-    Before pgw#1544 this request raised `ProjectedTreeNotStreamable` — the
-    fleet's exact refusal — because `ServeLoop` handed `engine=None` down and
-    `ctx.load` never asked for one. The fix moved the ask into `ctx.load`,
-    which is the one place that always has the tree; pgw#1549 then deleted the
-    second construction site so there is nothing left to disagree with it.
-    """
+    """The whole point, in one request, on the caller a pod actually uses."""
     loop = pod_serve_loop(projected, tmp_path)
 
     outcome = loop.invoke("probe", {"model": REF, "input": {}},
@@ -172,12 +122,6 @@ def test_the_POD_loop_serves_a_projected_tree_through_the_streaming_engine(
         "engine and `ctx.load` did not ask, so this projected tree fell to the "
         "eager `from_pretrained` bridge and met a pointer stub — the ~21 h "
         "fleet outage, reproduced")
-    # BOTH stores read the chunked CAS objects; they differ in speed, not in
-    # source (`bridge` copies in Python at ~0.59 GiB/s, `native` at ~6.4). The
-    # claim under test is that the bytes came out of the CHUNK STORE at all —
-    # which of the two answered is a property of the vendored tensorfs build,
-    # and pinning it here would make this suite fail for a reason that has
-    # nothing to do with the outage.
     assert evidence.stream_source in ("native", "bridge"), (
         f"source={evidence.stream_source!r} is neither chunk-store reader, so "
         f"these weights did not come out of the CAS")
@@ -198,13 +142,7 @@ def test_the_POD_loop_serves_a_projected_tree_through_the_streaming_engine(
 def test_the_POD_loop_reads_no_tensor_file_and_materializes_nothing(
     projected: Dict[str, Any], bound_store: ModelStore, tmp_path: Path,
 ) -> None:
-    """The stubs stay stubs, and no second copy of the tree appears.
-
-    The load succeeding is not by itself proof it streamed: a tier-3
-    materialization would also produce a working pipeline, at 2x the disk, and
-    is exactly what Paul's 2026-08-19 no-fill ruling removed from the serving
-    path. So this measures the FILE SYSTEM afterwards.
-    """
+    """The stubs stay stubs, and no second copy of the tree appears."""
     from gen_worker.models import materialized_view
 
     tree = projected["tree"]
@@ -231,19 +169,7 @@ def test_the_POD_loop_reads_no_tensor_file_and_materializes_nothing(
 def test_the_pre_1544_state_FAILS_this_test(
     projected: Dict[str, Any], bound_store: ModelStore, tmp_path: Path,
 ) -> None:
-    """THE RED ARM. Put the outage back and require this suite to catch it.
-
-    A fence that has never been observed red proves nothing when green, and
-    this suite's entire claim is that it would have caught the outage. So the
-    pre-pgw#1544 production state is reconstructed exactly — `ctx.load`'s
-    projected branch cannot reach `engine_for` — and the request must refuse
-    with the fleet's own error rather than quietly serving from somewhere else.
-
-    Reconstructed by neutering the ASK (`_bind_streaming_engine` answering
-    "no engine bound", which is what the pre-fix code path did when it fell
-    through to the refusal), NOT by injecting a fake engine: an injected
-    engine is the very thing that hid this.
-    """
+    """THE RED ARM."""
     from gen_worker.serving import context as context_mod
     from gen_worker.serving.context import ProjectedTreeNotStreamable
 
@@ -276,17 +202,6 @@ def test_the_pre_1544_state_FAILS_this_test(
 def test_the_pod_loop_hands_down_the_workers_placement_decision(
     projected: Dict[str, Any], bound_store: ModelStore, tmp_path: Path,
 ) -> None:
-    """pgw#1549: `ServeLoop` named no device, so `_placed` placed nothing.
-
-    pgw#1452 fixed exactly this defect — the eager bridge returning a pipeline
-    on the CPU because nobody handed it the worker's placement decision — and
-    landed the fix on `EndpointHost`, which is not the caller a pod uses. On
-    the pod path `LoadContext._device` stayed `""` and `_placed` returned
-    early, for the entire life of the v2 worker.
-
-    The device this box probes to is whatever it is; the claim under test is
-    that the decision is MADE and handed down, never left empty.
-    """
     from gen_worker.serving.placement import serving_device
 
     loop = pod_serve_loop(projected, tmp_path)

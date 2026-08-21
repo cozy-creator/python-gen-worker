@@ -1,39 +1,4 @@
-"""Host-driver preflight for measurement rigs.
-
-``rigcheck`` answers "is the SOFTWARE on the fleet line". This module answers
-**can this HOST run it at all.** RunPod's driver version is per-host, not
-per-datacenter and not per-GPU type — one host draws ``580.159.04`` while an
-H100 elsewhere draws ``570.211.01``, which is CUDA 12.8 and cannot run a cu130
-build. torch 2.13+cu130 *imports* perfectly there and then fails on the first
-allocation with
-``CUDA initialization: driver too old``, so the failure looks like a torch bug and
-arrives ~20 minutes in, after the multi-GB weight fetch.
-
-Two consequences, both mechanical here:
-
-1. **Probe on the FIRST ssh, before any fetch.** :func:`probe_host` shells out to
-   ``nvidia-smi`` only; it needs no torch, no venv and no gen-worker install, so
-   it runs as the first command on a bare pod.
-2. **A too-old driver is repairable, not fatal.** NVIDIA ships a forward-compat
-   libcuda (``cuda-compat-13-0``) for data-center GPUs; installing it and putting
-   it ahead of the host's libcuda makes a cu130 build run against a 570 host
-   driver. :func:`ensure_cuda_line` installs it and re-verifies; only when THAT
-   fails is the verdict "re-roll this host".
-
-The module always says which of the three paths it took — ``native``,
-``compat`` or ``reroll`` — because a wall measured through forward-compat libcuda
-is a fact about the report, not a detail.
-
-CLI (the bringup call, exit codes are the contract)::
-
-    python3 -m gen_worker.rigboot --cuda 13.0        # probe, repair, verify
-    #   0  usable (see JSON `path`: native | compat)
-    #  91  RE-ROLL THIS HOST — no usable path to the required CUDA line
-    #  92  no NVIDIA driver at all (not a GPU host)
-
-It is deliberately NOT gated on :func:`gen_worker.rigcheck.assert_fleet_line`: it
-runs BEFORE the environment is correct, and its whole job is to make it correct.
-"""
+"""Host-driver preflight for measurement rigs."""
 
 from __future__ import annotations
 
@@ -61,25 +26,10 @@ __all__ = [
     "verify_allocation",
 ]
 
-#: Where NVIDIA's forward-compat libcuda lands, and what has to precede the
-#: host's copy on the loader path for a cu13x build to see it.
 COMPAT_LIB_DIRS = ("/usr/local/cuda/compat", "/usr/local/cuda-{major}.{minor}/compat")
 
-#: Written by :func:`ensure_cuda_line` so every later step of the bring-up (and
-#: the detached pod-side driver, which does not inherit our shell) picks up the
-#: loader path. Sourced, not exported — LD_LIBRARY_PATH only takes effect at
-#: process start, so a repair applied inside a running interpreter is invisible
-#: to it and must be re-exec'd from a fresh one.
 ENV_FILE = "/etc/profile.d/zz-cuda-compat.sh"
 
-#: Linux minimum driver per CUDA major, from NVIDIA's CUDA compatibility table.
-#: Keyed by MAJOR only: within a major, minor-version compatibility means any
-#: driver from that major's branch runs any minor of it. Off-table majors are
-#: treated as unknown and the probe reports rather than guesses.
-#:
-#: TUPLES, not floats. ``580.159.04`` is NEWER than the ``580.65.06`` floor, and
-#: as floats 580.159 < 580.65 — a float comparison rejects hosts that run cu130
-#: natively.
 _MIN_DRIVER_BY_CUDA_MAJOR: dict[int, tuple[int, ...]] = {
     11: (450, 80, 2),
     12: (525, 60, 13),
@@ -92,11 +42,7 @@ class NoDriver(RuntimeError):
 
 
 class DriverTooOld(RuntimeError):
-    """The host driver cannot run the required CUDA line, and no repair worked.
-
-    Carries the full :func:`ensure_cuda_line` record on ``.record`` so a caller
-    that wants to bank the evidence does not have to re-run the probe.
-    """
+    """The host driver cannot run the required CUDA line, and no repair worked."""
 
     def __init__(self, message: str, record: Optional[dict[str, Any]] = None) -> None:
         super().__init__(message)
@@ -121,13 +67,7 @@ class HostProbe:
         return self.driver is not None
 
 
-# --------------------------------------------------------------------------- #
-# probe
-# --------------------------------------------------------------------------- #
-
-
 def _version_tuple(text: Optional[str]) -> Optional[tuple[int, ...]]:
-    """``'570.211.01'`` -> ``(570, 211, 1)``; ``'13.0'`` -> ``(13, 0)``."""
     if not text:
         return None
     parts = re.findall(r"\d+", str(text).strip())
@@ -141,14 +81,7 @@ def _pad(v: Sequence[int], n: int) -> tuple[int, ...]:
 
 
 def parse_smi(query_csv: str, banner: str = "") -> HostProbe:
-    """Parse ``nvidia-smi`` output into a :class:`HostProbe`.
-
-    ``query_csv`` is the body of ``--query-gpu=driver_version,name
-    --format=csv,noheader``; ``banner`` is plain ``nvidia-smi`` output, whose
-    header carries the *driver's* max supported CUDA version (the number that
-    decides whether a cu130 build can run, and the one that is NOT the CUDA
-    toolkit version in the image).
-    """
+    """Parse ``nvidia-smi`` output into a :class:`HostProbe`."""
     drivers: list[str] = []
     gpus: list[str] = []
     for line in (query_csv or "").splitlines():
@@ -181,18 +114,13 @@ def _run(cmd: Sequence[str], timeout: float = 60.0) -> tuple[int, str]:
 
 
 def probe_host() -> HostProbe:
-    """Ask the host's driver what it is. No torch, no venv, no fetch."""
+    """Ask the host's driver what it is."""
     smi = shutil.which("nvidia-smi")
     if not smi:
         return HostProbe(driver=None, driver_cuda=None, gpus=())
     _, query = _run([smi, "--query-gpu=driver_version,name", "--format=csv,noheader"])
     _, banner = _run([smi])
     return parse_smi(query, banner)
-
-
-# --------------------------------------------------------------------------- #
-# the decision
-# --------------------------------------------------------------------------- #
 
 
 def min_driver_for_cuda(cuda: str) -> Optional[tuple[int, ...]]:
@@ -204,12 +132,7 @@ def min_driver_for_cuda(cuda: str) -> Optional[tuple[int, ...]]:
 
 
 def driver_supports_cuda(driver: Optional[str], cuda: str) -> Optional[bool]:
-    """Can ``driver`` run a build of ``cuda``? None when it cannot be decided.
-
-    Decided from the driver version against NVIDIA's table rather than from
-    ``nvidia-smi``'s "CUDA Version:" banner alone, because the banner is absent
-    on some container images while the driver version never is.
-    """
+    """Can ``driver`` run a build of ``cuda``? None when it cannot be decided."""
     floor = min_driver_for_cuda(cuda)
     found = _version_tuple(driver)
     if floor is None or found is None:
@@ -248,12 +171,6 @@ def _existing_compat_dir(cuda: str) -> Optional[str]:
 
 
 def _install_compat(cuda: str, log: TextIO) -> Optional[str]:
-    """Install NVIDIA's forward-compat libcuda. Returns its directory, or None.
-
-    The fleet base image (``pytorch/pytorch:*-cuda13.0-*``) descends from
-    ``nvidia/cuda``, so the CUDA apt repo is usually already configured; the
-    keyring install is the fallback for images where it is not.
-    """
     package = compat_package(cuda)
     if not package:
         return None
@@ -276,10 +193,6 @@ def _install_compat(cuda: str, log: TextIO) -> Optional[str]:
     apt("update", "-qq")
     code, out = apt("install", "-y", "-qq", package)
     if code != 0:
-        # The fleet base (`pytorch/pytorch:*-runtime`) does NOT carry NVIDIA's
-        # apt repo, and it has no curl either. So the deb is fetched with the
-        # stdlib and dpkg'd directly: no keyring, no repo, no extra package
-        # needed to install a package.
         print(f"[rigboot] apt has no {package} ({out.strip()[-200:]}); "
               "fetching the .deb straight from NVIDIA", file=log, flush=True)
         deb = _download_compat_deb(package, log)
@@ -297,7 +210,6 @@ def _install_compat(cuda: str, log: TextIO) -> Optional[str]:
 
 
 def _download_compat_deb(package: str, log: TextIO) -> Optional[str]:
-    """Newest ``<package>_*.deb`` from NVIDIA's repo, fetched with the stdlib."""
     import urllib.request
 
     arch = {"x86_64": "x86_64", "aarch64": "sbsa"}.get(os.uname().machine, "x86_64")
@@ -338,7 +250,6 @@ def _download_compat_deb(package: str, log: TextIO) -> Optional[str]:
 
 
 def _distro_tag() -> str:
-    """``ubuntu2404`` etc., for NVIDIA's repo path. Defaults to the fleet base's."""
     try:
         with open("/etc/os-release", encoding="utf-8") as handle:
             data = dict(
@@ -354,7 +265,6 @@ def _distro_tag() -> str:
 
 
 def _persist_ld_path(directory: str, log: TextIO) -> None:
-    """Make the compat libcuda win for every LATER process on this pod."""
     line = f'export LD_LIBRARY_PATH="{directory}:${{LD_LIBRARY_PATH:-}}"\n'
     try:
         os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
@@ -392,12 +302,7 @@ _ALLOC_SNIPPET = (
 
 
 def verify_allocation() -> dict[str, Any]:
-    """Run a REAL tiny allocation in a FRESH interpreter and return the verdict.
-
-    Fresh, because a loader path repaired inside this process cannot change the
-    libcuda already mapped into it; real, because the whole trap is that version
-    strings look right while allocation fails.
-    """
+    """Run a REAL tiny allocation in a FRESH interpreter and return the verdict."""
     code, out = _run([sys.executable, "-c", _ALLOC_SNIPPET], timeout=300)
     for line in reversed(out.strip().splitlines()):
         try:
@@ -410,15 +315,7 @@ def verify_allocation() -> dict[str, Any]:
 def ensure_cuda_line(
     cuda: str, *, log: Optional[TextIO] = None, allow_compat: bool = True
 ) -> dict[str, Any]:
-    """Make this host able to run ``cuda``, or say it must be re-rolled.
-
-    Returns a record carrying ``path`` — ``native`` (host driver is new enough),
-    ``compat`` (forward-compat libcuda installed and verified) or ``reroll``
-    (nothing worked) — plus the probe and the allocation verdict. Raises nothing
-    for the reroll case: the CLI turns it into exit 91 and the caller kills the
-    pod. :class:`NoDriver` is raised only when there is no GPU at all, which is a
-    different mistake (wrong pod type) than an old driver.
-    """
+    """Make this host able to run ``cuda``, or say it must be re-rolled."""
     log = log or sys.stderr
     probe = probe_host()
     if not probe.present:
@@ -445,17 +342,11 @@ def ensure_cuda_line(
         "driver_floor": floor,
         "gpus": list(probe.gpus),
         "native_ok": supported,
-        # The FLEET question, answered per host in a stable field: a serving pod
-        # on this host would need the same forward-compat libcuda. `hardware_report`
-        # already ships `driver_version` for every worker, so the same predicate
-        # (`driver_supports_cuda`) classifies the whole deployed fleet off-pod.
         "needs_compat": supported is False,
     }
 
     existing = _existing_compat_dir(cuda)
     if supported is False and existing:
-        # A previous run (or the image) already staged it; use it rather than
-        # reinstalling, but still prove it works.
         _persist_ld_path(existing, log)
         record["compat_dir"] = existing
 
@@ -507,12 +398,7 @@ def ensure_cuda_line(
 
 
 def assert_cuda_usable(cuda: str, *, log: Optional[TextIO] = None) -> dict[str, Any]:
-    """:func:`ensure_cuda_line`, but a re-roll verdict is a typed exception.
-
-    For rigs that want the abort rather than the record. :class:`DriverTooOld`
-    carries the whole diagnosis, because the failure it replaces (a cu130
-    allocation error 20 minutes into a run) reads as a torch bug.
-    """
+    """:func:`ensure_cuda_line`, but a re-roll verdict is a typed exception."""
     record = ensure_cuda_line(cuda, log=log)
     if record.get("path") == "reroll":
         raise DriverTooOld(
@@ -525,11 +411,6 @@ def assert_cuda_usable(cuda: str, *, log: Optional[TextIO] = None) -> dict[str, 
             record,
         )
     return record
-
-
-# --------------------------------------------------------------------------- #
-# CLI
-# --------------------------------------------------------------------------- #
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -577,8 +458,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(str(exc), file=sys.stderr)
         return 92
     except DriverTooOld as exc:
-        # The CLI and the library agree by construction: one decision path, the
-        # exception carries the diagnosis, the exit code carries the verdict.
         reroll = str(exc)
         record = exc.record
 

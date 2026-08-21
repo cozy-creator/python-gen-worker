@@ -1,10 +1,4 @@
-"""The orphaned serve-path wires, exercised through the seam that lost them.
-
-pgw#1418 measured one of these on a rented pod; pgw#1425 found nine siblings
-sitting in the (since-deleted) unreached-surface baseline, put there wholesale.
-Every case here drives the WIRE, never the function:
-the bug in all ten was that nothing CALLED a function that worked fine.
-"""
+"""The orphaned serve-path wires, exercised through the seam that lost them."""
 
 from __future__ import annotations
 
@@ -33,8 +27,7 @@ _TRACK_BYTES = b"RIFF....WAVEfmt " + b"audio" * 64
 
 
 class UnorderedAssets(msgspec.Struct):
-    """Module scope on purpose: `get_type_hints` resolves against module
-    globals, and a locally-declared struct is the OTHER refusal below."""
+    """Module scope on purpose: `get_type_hints` resolves against module globals, and a locally-declared struct is the OTHER refusal below."""
 
     images: set[ImageAsset]
 
@@ -74,14 +67,7 @@ def _loop() -> ServeLoop:
 
 @pytest.fixture()
 def origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """A real HTTP origin on loopback, serving real bytes.
-
-    The ONE seam faked: the SSRF policy blocks loopback, so a local origin
-    cannot be a caller transport without lifting that check. Everything else —
-    URL validation shape, the streamed download, the byte cap, the mime sniff,
-    the `local_path` assignment and the attempt-directory cleanup — is the
-    production code path.
-    """
+    """A real HTTP origin on loopback, serving real bytes."""
     root = tmp_path / "origin"
     root.mkdir()
     (root / "clip.mp4").write_bytes(_CLIP_BYTES)
@@ -103,14 +89,10 @@ def origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         server.server_close()
 
 
-# -- pgw#1418, half one: the moderation block ------------------------------
-
-
 def test_the_moderation_block_names_every_media_and_prompt_path(
     media: ModuleType,
 ) -> None:
-    """The hub will not guess which payload fields are media. This is the only
-    thing that tells it, and the v2 row emitted no such key at all."""
+    """The hub will not guess which payload fields are media."""
     block = payload_moderation(media.ExtractFrameInput)
     assert block["media"] == [
         {"field": "video", "kind": "video"},
@@ -127,8 +109,7 @@ def test_the_moderation_block_names_every_media_and_prompt_path(
 
 
 def test_a_text_only_payload_emits_no_block_at_all() -> None:
-    """Absence is the answer for a payload with neither, so the row of every
-    existing text endpoint stays byte-identical."""
+    """Absence is the answer for a payload with neither, so the row of every existing text endpoint stays byte-identical."""
     import msgspec
 
     class TextOnly(msgspec.Struct):
@@ -139,8 +120,7 @@ def test_a_text_only_payload_emits_no_block_at_all() -> None:
 
 
 def test_discovery_emits_the_block_on_the_manifest_row(media: ModuleType) -> None:
-    """The WIRE assertion: the block reaches `entrypoints[]`, which is what the
-    hub decodes into `PayloadModerationMetadata`."""
+    """The WIRE assertion: the block reaches `entrypoints[]`, which is what the hub decodes into `PayloadModerationMetadata`."""
     from gen_worker.discovery.entrypoints_v2 import discover_entrypoints
 
     sys.path.insert(0, str(FIXTURES))
@@ -165,15 +145,7 @@ def test_an_asset_on_an_unordered_container_is_a_build_error() -> None:
 
 
 def test_unresolvable_hints_REFUSE_instead_of_emitting_an_empty_block() -> None:
-    """Found by RUNNING this file, not by reading it.
-
-    Under `from __future__ import annotations` every annotation is a STRING
-    until `get_type_hints` resolves it. The v1 collector swallowed a resolution
-    failure and fell back to `__annotations__` — strings — which the walk skips,
-    so the block came out EMPTY: no media, no prompts, no error, and an
-    endpoint that cannot be served an asset. Same silence class as pgw#1418
-    itself, one layer down. It now refuses, naming the struct.
-    """
+    """Found by RUNNING this file, not by reading it."""
     module = ModuleType("pgw1425_unresolvable")
     exec(  # noqa: S102 — a REAL module whose annotations cannot be resolved
         "from __future__ import annotations\n"
@@ -186,15 +158,10 @@ def test_unresolvable_hints_REFUSE_instead_of_emitting_an_empty_block() -> None:
         payload_moderation(module.Payload)
 
 
-# -- pgw#1418, half two: materialization at the serve seam ------------------
-
-
 def test_the_serve_path_materializes_a_typed_media_input(
     media: ModuleType, origin: str
 ) -> None:
-    """THE regression. The endpoint's own `_local_path` raises
-    `video asset not materialized` when `local_path` is falsy — so this passes
-    only if the PLATFORM filled it before the body ran."""
+    """THE regression."""
     outcome = _loop().invoke(
         "extract_frame",
         {
@@ -209,16 +176,13 @@ def test_the_serve_path_materializes_a_typed_media_input(
     )
     assert outcome.result.size_bytes == len(_CLIP_BYTES)
     assert Path(outcome.result.local_path).exists()
-    # A duplicate occurrence shares ONE worker-owned download.
     assert outcome.result.nested_paths == [outcome.result.local_path]
 
 
 def test_the_regression_itself_without_the_wire(
     media: ModuleType, origin: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """RED-PROOF: remove the call the fix added and the measured failure comes
-    back verbatim. Without this, a green suite proves only that the fixture is
-    easy to satisfy."""
+    """RED-PROOF: remove the call the fix added and the measured failure comes back verbatim."""
     from gen_worker.api.errors import ValidationError
     from gen_worker.serving import serve_loop as loop_mod
 
@@ -251,12 +215,8 @@ def test_the_attempt_directory_is_gone_when_materialization_fails(
     assert not inputs_dir_for_request("pgw1418-refuse", 1).exists()
 
 
-# -- the stage timer, read out at last -------------------------------------
-
-
 def test_the_outcome_carries_the_stage_timer(media: ModuleType, origin: str) -> None:
-    """`RequestContext` always FILLED a StageTimer; nothing read it out, so
-    every v2 `JobResult.metrics` carried two numbers and no breakdown."""
+    """`RequestContext` always FILLED a StageTimer; nothing read it out, so every v2 `JobResult.metrics` carried two numbers and no breakdown."""
     from gen_worker.stage_timing import stage_ms_for_metrics
 
     outcome = _loop().invoke(
@@ -267,15 +227,13 @@ def test_the_outcome_carries_the_stage_timer(media: ModuleType, origin: str) -> 
     )
     assert outcome.stages is not None
     rendered = stage_ms_for_metrics(outcome.stages, 5)
-    # `input_fetch` is a PRE stage: reported, never folded into runtime_ms.
     assert "input_fetch" in rendered
 
 
 def test_on_context_hands_out_the_live_request_context(
     media: ModuleType, origin: str
 ) -> None:
-    """The seam the capability-renewal loop needs: the token lives on the
-    context and the context is built inside `invoke`."""
+    """The seam the capability-renewal loop needs: the token lives on the context and the context is built inside `invoke`."""
     seen: list[Any] = []
     _loop().invoke(
         "analyze",
@@ -289,18 +247,11 @@ def test_on_context_hands_out_the_live_request_context(
     assert seen[0]._worker_capability_token == "cap-abc"
 
 
-# -- receipts: the fail-OPEN, closed ---------------------------------------
-
-
 def test_the_unconfigured_receipt_gate_now_REFUSES(tmp_path: Path) -> None:
-    """pgw#1425's security item. `gate_delivered_artifact` returned True when
-    nobody had configured it, and the v2 serve path configured nobody — so
-    every fleet worker armed hub-delivered native code with no receipt checked
-    at all. The default posture must refuse."""
     artifact = tmp_path / "graph.tar"
     artifact.write_bytes(b"not a real artifact")
 
-    receipts.reset()  # the DEFAULT posture, deliberately
+    receipts.reset()
     assert receipts.posture() == receipts.POSTURE_UNSET
     assert receipts.gate_delivered_artifact(artifact, "flux") is False
 
@@ -312,8 +263,7 @@ def test_the_unconfigured_receipt_gate_now_REFUSES(tmp_path: Path) -> None:
 def test_the_refusal_is_typed_and_named_on_the_wire(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A silent False is a second silence. The refusal rides the same typed
-    event every other receipt refusal does, with its own reason."""
+    """A silent False is a second silence."""
     from gen_worker import activity as activity_mod
 
     events: list[tuple[str, str, str]] = []
@@ -332,8 +282,6 @@ def test_the_refusal_is_typed_and_named_on_the_wire(
 
 
 def test_an_empty_base_url_can_no_longer_arm_nothing_quietly() -> None:
-    """`configure("")` used to return silently, which made "the hub named no
-    file API" indistinguishable from "HelloAck never arrived"."""
     receipts.reset()
     with pytest.raises(receipts.ReceiptError, match="gate_unconfigurable"):
         receipts.configure("", lambda: "jwt")

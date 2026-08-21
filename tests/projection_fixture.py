@@ -1,11 +1,4 @@
-"""A real CAS, a real manifest, and a real projected tree — no mocks.
-
-Everything under pgw#1330 is about what a consumer does when it meets a tree
-whose tensor bytes are not at any file path. A fake tree proves nothing about
-that, so this builds the article: bytes ingested into a real ``LocalCAS``, the
-manifest pinned exactly as ``cozy_snapshot.ensure_snapshot`` pins it, and the
-tree projected by the same ``project_snapshot`` the chokepoint will call.
-"""
+"""A real CAS, a real manifest, and a real projected tree — no mocks."""
 
 from __future__ import annotations
 
@@ -24,19 +17,13 @@ from gen_worker._vendor.tensorfs import (
 from cas_fixture import ingest_repository
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR
 
-# safetensors dtype -> (itemsize, struct format for one element)
 _DTYPES: dict[str, int] = {"BF16": 2, "F16": 2, "F32": 4, "F8_E4M3": 1}
 
 
 def safetensors_bytes(
     tensors: Mapping[str, Tuple[str, Sequence[int], bytes]]
 ) -> bytes:
-    """One safetensors file, written by hand so the fixture owns the bytes.
-
-    ``tensors`` maps name -> (dtype, shape, payload). The payload is real
-    content, never a constant fill: a byte-exactness assertion over a constant
-    cannot see a wrong offset (DONE-STANDARD, "fixture shape").
-    """
+    """One safetensors file, written by hand so the fixture owns the bytes."""
 
     header: dict[str, object] = {}
     body = bytearray()
@@ -145,12 +132,7 @@ def write_model(source: Path, *, dtype: str = "BF16") -> None:
 
 
 def write_fp8_model(source: Path) -> None:
-    """A w8a8 artifact: an fp8 ``transformer`` with the weight/scale pairing.
-
-    This is the shape ``_quantized_layers`` sniffs for. Under stubs its header
-    read returned ``{}``, ``quantized`` came back empty, and the artifact
-    stopped being detected as quantized at all — routed to the plain bf16 lane.
-    """
+    """A w8a8 artifact: an fp8 ``transformer`` with the weight/scale pairing."""
 
     source.mkdir(parents=True, exist_ok=True)
     (source / "model_index.json").write_text(
@@ -172,7 +154,7 @@ def write_fp8_model(source: Path) -> None:
 def build(
     base: Path, *, dtype: str = "BF16", key: str = "a" * 64, fp8: bool = False
 ) -> Fixture:
-    """Ingest a model, pin its manifest, project the tree. No materialization."""
+    """Ingest a model, pin its manifest, project the tree."""
 
     source = base / "source-model"
     if fp8:
@@ -181,8 +163,6 @@ def build(
         write_model(source, dtype=dtype)
     cas = LocalCAS(base)
     manifest = ingest_repository(cas, source)
-    # Exactly what `cozy_snapshot._pin_manifest` does, so `resolve_projection`
-    # is exercised against the production pinning and not a test convention.
     cas.compare_and_swap_ref(REF_PREFIX + key, cas.store_manifest(manifest), expected=None)
     tree = base / SNAPSHOTS_DIR / key
     project_snapshot(cas, manifest, tree)
@@ -190,20 +170,7 @@ def build(
 
 
 def read_entry_tree(base: Path, fixture: Fixture, name: str = "materialized") -> Path:
-    """The same manifest as a tree of REAL files, for the control arm.
-
-    Built with ``read_entry``, NOT with the single-file materialization hatch:
-    the hatch is the thing this whole program is retiring, and new code reaching
-    for it in a test is the example that spreads. ``read_entry`` also verifies
-    the reconstruction against the manifest's whole-file digest, so the control
-    arm is known-good bytes rather than merely copied ones.
-
-    NAMED for what it uses (pgw#1308 step ⑥). It was called ``materialize``,
-    which made the hatch census report it as an unpriced hatch call the moment
-    the fence learned the pinned rev's spelling — a docstring saying "this is
-    not the hatch" does not reach a grep, and a helper whose name is the thing
-    it is not is the example that spreads just as fast.
-    """
+    """The same manifest as a tree of REAL files, for the control arm."""
 
     target = base / SNAPSHOTS_DIR / name
     target.mkdir(parents=True, exist_ok=True)
@@ -215,17 +182,7 @@ def read_entry_tree(base: Path, fixture: Fixture, name: str = "materialized") ->
 
 
 def bytes_at(tree: Path, rel: str) -> bytes:
-    """What ``rel`` HOLDS in a snapshot tree, wherever its bytes really live.
-
-    The one idiom every pre-flip assertion of the form
-    ``(snapshot / "model.safetensors").read_bytes() == payload`` becomes after
-    pgw#1308 step ⑥. Reading the path directly is not a weaker assertion, it
-    is an assertion about a ~128 B pointer stub — and it fails loudly, which
-    is how these tests were found rather than silently kept.
-
-    A symlink or an ordinary file is read at the path, because that is where
-    those bytes are.
-    """
+    """What ``rel`` HOLDS in a snapshot tree, wherever its bytes really live."""
 
     from gen_worker.models.projection import require_projection, stub_at
 

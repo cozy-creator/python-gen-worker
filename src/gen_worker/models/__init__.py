@@ -1,15 +1,4 @@
-"""Models layer: refs, download (ensure_local), memory decisions, residency.
-
-**The package index is LAZY, and that is a serve-path guarantee (pgw#1331).**
-An eager re-export of ``residency`` pulls in ``loading``, which constructs
-diffusers and transformers objects — so *any* ``from .models import x`` would
-execute the whole eager weight loader and the adopt-only serve role could not
-be asserted model-free through a package root it never wanted. PEP 562:
-importing this package costs nothing,
-and asking for a name costs exactly the one submodule that defines it. Same
-shape as ``gen_worker/__init__`` and ``gen_worker/model/__init__``, same
-reason.
-"""
+"""Models layer: refs, download (ensure_local), memory decisions, residency."""
 
 from __future__ import annotations
 
@@ -111,9 +100,6 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         Tier,
     )
 
-#: Exported name -> the submodule that defines it. The eager import block it
-#: replaces is reproduced verbatim under ``if TYPE_CHECKING`` above, so the two
-#: cannot say different things without mypy noticing.
 _EXPORTS: Final[dict[str, str]] = {
     "CarriesDefaults": "defaults_decode",
     "CheckpointDefaultsUnclassified": "defaults_decode",

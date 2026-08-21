@@ -1,17 +1,3 @@
-"""pgw#1191: the publish gate proves the tree that was BUILT, not the one named.
-
-Both directions are asserted, because the failure mode of a stricter gate is a
-gate that refuses everything and looks like rigour while blocking every release
-(the same over-refusal leg the adopt gate carries):
-
-  * a `pull_request` run carrying the tag's tree is REFUSED, typed; and
-  * a `workflow_dispatch` / `push` run on the same commit still PASSES.
-
-The decision code under test is the code the workflow runs. Only the two I/O
-edges differ (fixtures instead of `gh api`), and the CLI is driven end to end as
-a subprocess so the exit codes and the operator-facing message are covered too.
-"""
-
 from __future__ import annotations
 
 import importlib.util
@@ -29,7 +15,7 @@ PUBLISH_YAML = REPO / ".github" / "workflows" / "publish.yaml"
 
 TAG_TREE = "aaaa111122223333444455556666777788889999"
 OTHER_TREE = "bbbb111122223333444455556666777788889999"
-HEAD_SHA = "c0a9bbb097086d56cb2cf49a6f4222c0ab600348"  # the real 0.113.0 cut commit
+HEAD_SHA = "c0a9bbb097086d56cb2cf49a6f4222c0ab600348"
 
 
 def _load() -> ModuleType:
@@ -53,32 +39,19 @@ def _trees(**mapping: str):
     return lambda sha: mapping.get(sha)
 
 
-# --------------------------------------------------------------------------
-# the refusal — the defect this issue is about
-# --------------------------------------------------------------------------
-
-
 def test_pull_request_run_is_not_proof_even_carrying_the_exact_tree() -> None:
-    """The 0.113.0 shape: the cut PR's run names the tagged commit and is green.
-
-    It built `refs/pull/<n>/merge`, so it proves nothing about this tree.
-    """
+    """The 0.113.0 shape: the cut PR's run names the tagged commit and is green."""
     verdict = gate.assess(
         TAG_TREE, [_run(31643923466, "pull_request")], _trees(**{HEAD_SHA: TAG_TREE}))
 
     assert verdict.proven is False
     assert verdict.kind == gate.ONLY_PULL_REQUEST_PROOF
-    # The refusal must NAME the mechanism, not merely decline.
     assert "refs/pull" in verdict.detail
     assert str(31643923466) in verdict.detail
 
 
 def test_refusal_distinguishes_wrong_evidence_from_no_evidence() -> None:
-    """Two different problems must not share one message.
-
-    `only_pull_request_proof` means "dispatch CI"; `no_run_carries_tree` means
-    "this content has never been tested anywhere".
-    """
+    """Two different problems must not share one message."""
     wrong_kind = gate.assess(
         TAG_TREE, [_run(1, "pull_request")], _trees(**{HEAD_SHA: TAG_TREE}))
     nothing = gate.assess(
@@ -89,17 +62,11 @@ def test_refusal_distinguishes_wrong_evidence_from_no_evidence() -> None:
 
 
 def test_an_unclassified_event_cannot_prove_a_release() -> None:
-    """Admissibility is a deny-by-default allow-list, so a new event type is
-    refused until someone classifies it."""
+    """Admissibility is a deny-by-default allow-list, so a new event type is refused until someone classifies it."""
     verdict = gate.assess(
         TAG_TREE, [_run(3, "merge_group")], _trees(**{HEAD_SHA: TAG_TREE}))
 
     assert verdict.proven is False
-
-
-# --------------------------------------------------------------------------
-# the OVER-REFUSAL leg — a gate that blocks every release is not rigour
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("event", sorted(gate.ADMISSIBLE_EVENTS))
@@ -113,11 +80,7 @@ def test_a_dispatched_run_on_the_same_commit_still_publishes(event: str) -> None
 
 
 def test_the_pr_run_does_not_poison_a_legitimate_dispatch_on_the_same_commit() -> None:
-    """The realistic cut: a PR run AND a dispatched run, same commit, same tree.
-
-    The admissible one must win regardless of order — an early PR row must not
-    short-circuit into a refusal.
-    """
+    """The realistic cut: a PR run AND a dispatched run, same commit, same tree."""
     runs = [_run(1, "pull_request"), _run(2, "workflow_dispatch")]
 
     assert gate.assess(TAG_TREE, runs, _trees(**{HEAD_SHA: TAG_TREE})).proven is True
@@ -140,15 +103,10 @@ def test_a_squash_or_cherry_pick_with_identical_CONTENT_still_proves() -> None:
 def test_failed_and_unresolvable_runs_are_ignored_not_trusted() -> None:
     runs = [
         _run(5, "workflow_dispatch", conclusion="failure"),
-        _run(6, "workflow_dispatch", head_sha="deadbeef"),  # tree unresolvable
+        _run(6, "workflow_dispatch", head_sha="deadbeef"),
     ]
 
     assert gate.assess(TAG_TREE, runs, _trees(**{HEAD_SHA: TAG_TREE})).proven is False
-
-
-# --------------------------------------------------------------------------
-# the CLI, driven exactly as publish.yaml drives it
-# --------------------------------------------------------------------------
 
 
 def _cli(tmp_path: Path, runs: list[dict], trees: dict[str, str]) -> subprocess.CompletedProcess:
@@ -173,7 +131,6 @@ def test_cli_exits_nonzero_and_explains_itself_on_a_pr_only_proof(tmp_path: Path
     assert proc.returncode == 1
     assert "::error::" in proc.stderr
     assert gate.ONLY_PULL_REQUEST_PROOF in proc.stderr
-    # It must tell the releaser the ONE command that fixes it.
     assert "gh workflow run ci.yaml" in proc.stderr
 
 
@@ -188,14 +145,8 @@ def test_cli_exits_zero_on_a_dispatched_proof(tmp_path: Path) -> None:
     assert "PROVEN" in proc.stdout
 
 
-# --------------------------------------------------------------------------
-# the fence: the workflow must keep USING this gate
-# --------------------------------------------------------------------------
-
-
 def test_publish_workflow_calls_the_gate_and_keeps_no_inline_matcher() -> None:
-    """A gate that can be quietly replaced by the shell loop it fixed is not a
-    gate. This is the row that goes red if someone inlines the match again."""
+    """A gate that can be quietly replaced by the shell loop it fixed is not a gate."""
     text = PUBLISH_YAML.read_text()
 
     assert "scripts/assert_ci_proof.py" in text

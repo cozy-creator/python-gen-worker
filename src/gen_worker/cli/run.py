@@ -1,26 +1,4 @@
-"""``gen-worker run`` — one request against the endpoint that is already up.
-
-pgw#1491, Paul's ruling verbatim: *"'run' runs a request against that endpoint;
-for run to work 'up' must have already been run."* So this module executes NO
-inference. It opens a socket, writes one request, prints what comes back, and
-exits. When nothing is up it REFUSES by name and never auto-starts — an
-auto-start would be a second boot path, and two paths that both serve requests
-is the failure this whole surface is shaped to prevent (measured three times in
-one day: a harness, a driver script and the CLI all "working" while disagreeing
-about what actually ran).
-
-Usage is the ergonomic payload grammar (``cli/args``)::
-
-    gen-worker run "a lighthouse at dusk"
-    gen-worker run "a cat" seed=42 steps=30
-    gen-worker run --function generate prompt@./long-prompt.txt
-
-Coercion is DELIBERATELY thin here. The client guesses scalar shapes; the
-authoritative decode happens in the daemon against the entrypoint's own msgspec
-struct, so a bad field comes back as a typed ``payload_invalid`` naming the
-field — from the real decode path, not from a client-side copy of the schema
-that could disagree with it.
-"""
+"""``gen-worker run`` — one request against the endpoint that is already up."""
 
 from __future__ import annotations
 
@@ -35,14 +13,11 @@ from . import endpoint_state, sockaddr
 from .args import ArgError, build_payload
 from .endpoint_state import EndpointStateError
 
-#: How long to wait for the daemon to accept the connection. NOT a bound on
-#: the request: a cold first request legitimately spends minutes arming graphs,
-#: and the read below is unbounded for that reason.
 CONNECT_TIMEOUT_S = 10.0
 
 
 class NotUp(RuntimeError):
-    """Nothing is resident for this endpoint. The typed refusal, by name."""
+    """Nothing is resident for this endpoint."""
 
 
 def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
@@ -105,7 +80,7 @@ def _pick_function(document: Dict[str, Any], requested: str) -> str:
 
 
 def request(document: Dict[str, Any], frame: Dict[str, Any]) -> Dict[str, Any]:
-    """One NDJSON round trip. The read is unbounded on purpose — see above."""
+    """One NDJSON round trip."""
     listen = str(document.get("socket") or "")
     if not listen:
         raise NotUp("the handle names no socket; `gen-worker down` and up again")
@@ -191,12 +166,6 @@ def run_run(args: argparse.Namespace) -> int:
 
 
 def _print_dispatch(envelope: Dict[str, Any]) -> None:
-    """State compiled-vs-eager on every request, always.
-
-    Not a verbose mode. A run that quietly fell through to eager is
-    indistinguishable from a compiled one by its output — that is precisely how
-    twelve eager images were nearly published as a compile measurement.
-    """
     facts = envelope.get("dispatch")
     if not isinstance(facts, dict):
         return
@@ -217,12 +186,6 @@ def _print_dispatch(envelope: Dict[str, Any]) -> None:
 
 
 def _print_result(result: Any) -> None:
-    """Print the saved media paths if there are any, else the raw result.
-
-    A local serve writes media to disk and returns an asset carrying
-    ``local_path``; printing that path is what makes ``run`` end in a file the
-    user can open, which is the whole point of the verb.
-    """
     paths = sorted(_local_paths(result))
     if paths:
         for path in paths:

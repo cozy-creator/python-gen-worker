@@ -1,25 +1,4 @@
-"""A standalone diffusers component published in a SUBFOLDER.
-
-PrunaAI/PrunaVAED publishes ``vae/config.json`` +
-``vae/diffusion_pytorch_model.safetensors`` with no root ``config.json`` and no
-``model_index.json``. A classifier that requires a ROOT marker refuses the repo
-``unknown_shape``, full-repo and with ``source_include=["vae/*"]`` alike —
-``apply_source_include`` filters paths, it never re-roots them.
-
-The fixture is the repo's REAL file listing (``tests/testdata/
-prunavaed_hf_listing.json``, metadata only, no weight bytes) so the red case
-is the production repo, not a hand-drawn approximation.
-
-Both standalone-component shapes are first-class and the mirror PRESERVES the
-publisher's layout — ingest learns to READ the shape, it never transforms it.
-``vae/`` stays ``vae/``, which is exactly what ``load_component``'s
-``src = root / component`` resolves, and the root-config shape
-(``tensorhub/sdxl-vae-fp16-fix``) is unchanged.
-
-The ingest test drives the real ``plan_huggingface``/``ingest_huggingface``
-code path against a local stand-in for the provider (the only thing that
-cannot be real here — HF weight bytes never transit a dev box).
-"""
+"""A standalone diffusers component published in a SUBFOLDER."""
 
 from __future__ import annotations
 
@@ -57,8 +36,6 @@ def test_real_prunavaed_listing_classifies_as_a_subfolder_component() -> None:
     assert c.runtime_library == "diffusers"
     assert c.component_subfolder == "vae"
     assert c.attrs["architecture"] == "AutoencoderKLLTX2Video"
-    # Only the component's own tree (+ root readme/license) is mirrored — the
-    # demo videos and example prompts are not part of the artifact.
     assert set(c.allow_patterns) == {
         "README.md",
         "vae/config.json",
@@ -67,8 +44,7 @@ def test_real_prunavaed_listing_classifies_as_a_subfolder_component() -> None:
 
 
 def test_ambiguous_component_subfolders_still_refuse() -> None:
-    """Two component subfolders and no root marker is a shape we do not
-    guess at — fail closed with the same typed refusal as before."""
+    """Two component subfolders and no root marker is a shape we do not guess at — fail closed with the same typed refusal as before."""
     paths = [
         "README.md",
         "vae/config.json", "vae/diffusion_pytorch_model.safetensors",
@@ -81,7 +57,6 @@ def test_ambiguous_component_subfolders_still_refuse() -> None:
         })
     assert excinfo.value.reason == "unknown_shape"
 
-    # ...and the caller's narrowing resolves it.
     c = classify_repo(
         apply_source_include(paths, ["vae/*"]),
         component_configs={"vae": {"_class_name": "AutoencoderKLLTX2Video"}},
@@ -91,8 +66,7 @@ def test_ambiguous_component_subfolders_still_refuse() -> None:
 
 def test_ingest_leaves_a_root_component_repo_alone(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The root-config shape publishes exactly as it did before: diffusers
-    library declared, single-file layout, nothing opted out."""
+    """The root-config shape publishes exactly as it did before: diffusers library declared, single-file layout, nothing opted out."""
     remote = tmp_path / "remote"
     remote.mkdir()
     (remote / "config.json").write_text(
@@ -112,11 +86,6 @@ def test_ingest_leaves_a_root_component_repo_alone(
         "config.json", "diffusion_pytorch_model.safetensors"]
 
 
-# ---------------------------------------------------------------------------
-# End-to-end ingest over a local stand-in for the provider
-# ---------------------------------------------------------------------------
-
-
 def _safetensors_bytes() -> bytes:
     header = json.dumps(
         {"decoder.weight": {"dtype": "BF16", "shape": [1], "data_offsets": [0, 2]}}
@@ -125,7 +94,6 @@ def _safetensors_bytes() -> bytes:
 
 
 def _remote_repo(tmp_path: Path) -> Path:
-    """The PrunaVAED shape on disk, with real (tiny) safetensors bytes."""
     remote = tmp_path / "remote"
     (remote / "vae").mkdir(parents=True)
     (remote / "example").mkdir(parents=True)
@@ -139,7 +107,6 @@ def _remote_repo(tmp_path: Path) -> Path:
 
 
 def _fake_hf(remote: Path) -> Any:
-    """The huggingface_hub surface gen_worker.convert.ingest actually uses."""
 
     def _files() -> list[Path]:
         return sorted(p for p in remote.rglob("*") if p.is_file())
@@ -194,17 +161,12 @@ def test_ingest_mirrors_the_publisher_layout_unchanged(
     source = ingest_huggingface(
         "PrunaAI/PrunaVAED", tmp_path / "snapshot", plan=plan)
 
-    # The publisher's layout, byte for byte — vae/ stays vae/.
     on_disk = sorted(p.relative_to(source.dir).as_posix()
                      for p in source.dir.rglob("*") if p.is_file())
     assert on_disk == ["vae/config.json", "vae/diffusion_pytorch_model.safetensors"]
-    # ...which is precisely what load_component resolves: src = root/<component>.
     assert (source.dir / "vae").is_dir()
     assert json.loads((source.dir / "vae" / "config.json").read_text())["_class_name"] \
         == "AutoencoderKLLTX2Video"
-    # class_name is the fact tensorhub's component binding check narrows on;
-    # library_name is the sanctioned opt-out (the hub's diffusers contract is
-    # still root-anchored, so a declared library would refuse this tree).
     assert source.repo_spec["class_name"] == "AutoencoderKLLTX2Video"
     assert source.repo_spec["library_name"] == ""
     assert source.repo_spec["kind"] == "model"

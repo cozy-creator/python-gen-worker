@@ -1,15 +1,4 @@
-"""Listen/connect address parsing for serve + invoke.
-
-The default transport is a Unix domain socket (same-host / same-container). For
-the Docker / cross-process story, ``serve --listen tcp://0.0.0.0:PORT`` (and
-``invoke --socket tcp://host:PORT``) speak the same NDJSON protocol over TCP so
-``docker run -p PORT:PORT`` works without exec / bind-mounts (#347).
-
-Address forms:
-  * ``tcp://host:port``  -> TCP
-  * ``unix:///abs/path`` -> Unix domain socket
-  * bare path (default)  -> Unix domain socket
-"""
+"""Listen/connect address parsing for serve + invoke."""
 
 from __future__ import annotations
 
@@ -17,28 +6,9 @@ import socket
 from pathlib import Path
 from typing import NamedTuple
 
-# The default listen/connect address, and the reason this module exists at the
-# bottom of the cli package: `serve` legitimately depends on `run` (it reuses
-# its dispatch, its exit codes and its errors), so `run` and `invoke` may not
-# reach back into `serve` for a constant — that cycle makes `import
-# gen_worker.cli.serve` an ImportError whenever it is the first cli module
-# imported.
 DEFAULT_SOCKET_PATH = "./.gen-worker.sock"
 
-#: The largest NDJSON line either end will buffer before refusing.
-#:
-#: Both ends read bytes into a `bytearray` until a newline arrives, and neither
-#: end counted them: a peer that never sends `\n` grows that buffer until the
-#: process dies. The socket timeout does not bound it — `settimeout` bounds one
-#: `recv`, and a peer dribbling one byte per second resets it forever.
-#:
-#: This bound is NOT downgraded by "it is only the local dev socket": the same
-#: reader serves `--listen tcp://0.0.0.0:PORT`, where the peer is whoever
-#: reached the port.
-#:
-#: 256 MiB sits above the largest envelope this protocol legitimately carries
-#: (a multi-image result inlined as base64) and far below the memory of a host
-#: that can run the models behind it.
+# Largest NDJSON line either end will buffer before refusing: both ends grow a bytearray until a newline, and the socket timeout bounds one recv, not total growth — and the same reader serves --listen tcp://0.0.0.0. 256 MiB sits above the largest legitimate envelope (multi-image base64 result).
 MAX_NDJSON_LINE_BYTES = 256 << 20
 
 
@@ -46,7 +16,7 @@ class Address(NamedTuple):
     """("unix", path, 0) | ("tcp", host, port)."""
 
     scheme: str
-    host: str  # unix socket path when scheme == "unix"
+    host: str
     port: int = 0
 
 
@@ -73,7 +43,7 @@ def display(spec: str) -> str:
 
 
 def create_listener(spec: str, backlog: int = 8) -> socket.socket:
-    """Bind + listen on ``spec``. Removes a stale unix socket first."""
+    """Bind + listen on ``spec``."""
     addr = parse_addr(spec)
     if addr.scheme == "unix":
         path = Path(addr.host)

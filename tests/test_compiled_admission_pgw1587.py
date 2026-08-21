@@ -1,31 +1,4 @@
-"""Compiled admission is PROBED and per-target — never a declared refusal.
-
-pgw#1587. Paul, 2026-08-20, on the ``vram12g`` lane declaration that made a
-7.3 GiB card refuse to mint or arm SDXL at all:
-
-    *"Every card should be able to run any job. There is a minimum floor,
-    below which running compiled does not work; we keep eager. The advantage
-    of eager is that it's more flexible. For SDXL in particular, we need to
-    offload the text encoders to free up room for the Unet, and then it works,
-    during inference. This doesn't conflict with compilation however because
-    [we] are only running the compiled UNet. Remove this '12gb floor'."*
-
-    *"having some memory requirement per tensor-layout-contract makes sense.
-    But yeah, this limit is too high. And we should be able to serve
-    no-compiled below this limit."*
-
-So the declaration stays and the REFUSAL is gone. What decides compiled
-admission is the compiled graph's own working set — its weights held by
-reference, its activation peak — measured on the card, with every component
-outside the graph offloadable to make room for it. Three causes send a load to
-eager and all three are LOUD and NAMED: the operator ordered it, the probe
-refused, or the target's own weights move. Nothing refuses the JOB.
-
-The two directions are both armed here, because the failure this replaces was
-symmetric: a card that fits must ARM (the old gate said no on a declaration),
-and a card that cannot must fall to EAGER by name (never an OOM, never a
-crash).
-"""
+"""Compiled admission is PROBED and per-target — never a declared refusal."""
 
 from __future__ import annotations
 
@@ -65,7 +38,6 @@ class _Block(ModelMixin, ConfigMixin):
 
 
 class _Pipeline(DiffusionPipeline):
-    """SDXL's shape in miniature: two things before the denoiser, one after."""
 
     model_cpu_offload_seq = "text_encoder->unet->vae"
     text_encoder: Any
@@ -80,11 +52,6 @@ class _Pipeline(DiffusionPipeline):
 
 
 def _armed_pipeline() -> Any:
-    """A pipeline with the rung ARMED: encoder parked, denoiser resident.
-
-    Same shape the rung takes on the campaign card — the components before the
-    denoiser go to pinned host RAM so the denoiser can stay on the card.
-    """
     pipe = _Pipeline(_Block(8), _Block(16), _Block(4))
     plan = plan_for_pipeline(
         pipe,
@@ -103,11 +70,6 @@ def _armed_pipeline() -> Any:
 
 
 def _ctx(sink_calls: List[Any]) -> "LoadContext[Any]":
-    """A context whose compile sink RECORDS and answers ``"ARMED"``.
-
-    The sink is torchcg's adoption seam; what it returns is irrelevant here and
-    what it was CALLED WITH is the whole fact under test.
-    """
 
     def sink(target: Any) -> Any:
         sink_calls.append(target)
@@ -119,20 +81,8 @@ def _ctx(sink_calls: List[Any]) -> "LoadContext[Any]":
     )
 
 
-# --------------------------------------------------------------------------
-# The rung vocabulary: two different facts, no longer one
-# --------------------------------------------------------------------------
-
-
 def test_the_rung_that_parks_named_components_is_not_the_rung_that_moves_all() -> None:
-    """`touches_host_ram` is ACCOUNTING; `moves_every_component` is STABILITY.
-
-    Reading the first as the second is the whole defect: `partial_resident`
-    charges host RAM (it really does hold weights there) and leaves every
-    component it did not name device-resident for the life of the load. One
-    boolean answering both questions is what made "small card" mean "no
-    compiled graph, ever".
-    """
+    """`touches_host_ram` is ACCOUNTING; `moves_every_component` is STABILITY."""
     assert touches_host_ram("partial_resident"), "it does hold weights on the host"
     assert not moves_every_component("partial_resident"), (
         "it moves only what it named — that is the point of the rung"
@@ -143,19 +93,8 @@ def test_the_rung_that_parks_named_components_is_not_the_rung_that_moves_all() -
     assert not moves_every_component("native")
 
 
-# --------------------------------------------------------------------------
-# Direction 1 — A CARD THAT FITS MUST ADMIT COMPILED
-# --------------------------------------------------------------------------
-
-
 def test_the_resident_denoiser_compiles_under_the_offload_rung() -> None:
-    """PAUL'S CASE, as a test. The encoders come off the card, the compiled
-    UNet stays on it, and the two do not conflict.
-
-    RED ARM: before pgw#1587 `ctx.compile` refused every target whenever any
-    host-RAM-touching rung was engaged, so this assertion failed and SDXL on a
-    7.3 GiB card served eager no matter what was minted for it.
-    """
+    """PAUL'S CASE, as a test."""
     pipe = _armed_pipeline()
     sink_calls: List[Any] = []
     ctx = _ctx(sink_calls)
@@ -172,8 +111,7 @@ def test_the_resident_denoiser_compiles_under_the_offload_rung() -> None:
 def test_the_parked_component_serves_eager_and_says_so(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The other half of per-target: what the rung DID park still cannot
-    compile, and the refusal names the rung and the reason."""
+    """The other half of per-target: what the rung DID park still cannot compile, and the refusal names the rung and the reason."""
     pipe = _armed_pipeline()
     sink_calls: List[Any] = []
     ctx = _ctx(sink_calls)
@@ -192,9 +130,6 @@ def test_the_parked_component_serves_eager_and_says_so(
 def test_a_rung_that_moves_everything_still_refuses_every_target(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """pgw#1486 IS NOT WEAKENED. Under accelerate's hooks every component's
-    weights are onloaded per forward and freed after, so a bound constant is a
-    dangling pointer — an uncatchable SIGSEGV, not an OOM anyone retries."""
     module = torch.nn.Linear(2, 2)
     sink_calls: List[Any] = []
     ctx = _ctx(sink_calls)
@@ -215,20 +150,7 @@ def test_no_rung_engaged_is_unchanged() -> None:
     assert sink_calls == [module]
 
 
-# --------------------------------------------------------------------------
-# Direction 2 — A CARD THAT CANNOT HOLD IT FALLS TO EAGER, BY NAME
-# --------------------------------------------------------------------------
-
-
 def test_the_probe_refuses_a_plan_the_arithmetic_admitted() -> None:
-    """The admission is asked of the CARD, not of a constant (pgw#1577).
-
-    Arithmetic over component sizes and a free-VRAM read cannot see allocator
-    fragmentation or a co-tenant's share; on the campaign card a plan those
-    numbers admitted then died 5 MiB short. The probe does the worst onload
-    once and reads what is left, and a refusal leaves NOTHING armed — the
-    caller falls to the next rung rather than inheriting half an arrangement.
-    """
     pipe = _Pipeline(_Block(8), _Block(16), _Block(4))
     plan = plan_for_pipeline(
         pipe,
@@ -242,8 +164,6 @@ def test_the_probe_refuses_a_plan_the_arithmetic_admitted() -> None:
 
     armed = apply_component_residency(
         pipe, plan, device="cpu", log=logging.getLogger("t"),
-        # The card answers with almost nothing free once the worst evicted
-        # component is on it. Same shape as the measured 5 MiB shortfall.
         free_bytes_now=lambda: 0,
     )
     assert not armed, "the card disagreed with the plan, and the card is right"
@@ -253,28 +173,7 @@ def test_the_probe_refuses_a_plan_the_arithmetic_admitted() -> None:
 
 
 def test_an_operator_eager_only_order_is_observed_by_the_dispatch_seam() -> None:
-    """The third entry into loud eager, RE-AIMED at the seam that runs.
-
-    pgw#1587 filed this correctly and pointed it one layer off. Its reader was
-    `compile_cache.arming_block` (the v1 precondition authority), so this row
-    moved it to `provision.arm_aot` and called that "the v2 arm" — but
-    `arm_aot` imports `aot_serve`, i.e. it is the SAME v1 tier, which pgw#1573
-    measured as having no production caller. Both readers were in dead code, so
-    an operator could issue the order, get an ack, and watch the pod keep
-    serving from its compiled graphs (filed as pgw#1589).
-
-    The v2 arm is `AdoptSession` installing a dispatcher; the order arrives
-    over a live control channel long AFTER that and is RELEASABLE, so the
-    honest altitude is the dispatch itself. `serving.adapter_guard` reads it
-    per call — which makes both directions work with no re-arm and no de-arm,
-    exactly the reversibility `apply_command` promises.
-
-    The behavioural proof lives beside the seam, in
-    `tests/test_adapter_on_compiled.py`
-    (`test_an_operator_eager_only_order_suppresses_compiled_dispatch`, red-armed).
-    What this row keeps is pgw#1587's own claim: the order is a REFUSAL WITH A
-    NAME, and that name is the token the enum reserved for it.
-    """
+    """The third entry into loud eager, RE-AIMED at the seam that runs."""
     from gen_worker.serving import adapter_guard
 
     serve_posture.reset()
@@ -292,7 +191,6 @@ def test_an_operator_eager_only_order_is_observed_by_the_dispatch_seam() -> None
             "never counted with the failure classes, never with "
             "`hub_ordered_eager` (one PLAN's backend, not a standing order)")
 
-        # RELEASED: policy stops being the cause, with nothing re-armed.
         assert serve_posture.apply_command(False, actor="operator@test")
         assert adapter_guard._eager_only_reason() == "", (
             "releasing the order must let dispatch run normally again")
@@ -301,12 +199,6 @@ def test_an_operator_eager_only_order_is_observed_by_the_dispatch_seam() -> None
 
 
 def test_the_declared_requirement_never_refuses_a_load() -> None:
-    """A lane requirement INFORMS; it does not permit (Paul, 2026-08-18, and
-    again 2026-08-20). The worker's reader warns on every request and loads.
-
-    This is the fence on the deleted gate: if a declared number ever regains
-    the power to stop a load, it fails here rather than on a card.
-    """
     from gen_worker.serving.placement import DeviceFacts, Shortfall, shortfalls
 
     facts = DeviceFacts(name="tiny", vram_gib=4.0, sm=89)

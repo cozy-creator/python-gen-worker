@@ -1,22 +1,4 @@
-"""GPU->host frame staging for the video encode path.
-
-The finalize wall and the D2H stall inside the compute wall are CPU/PCIe
-bound (measured: identical GPU step-ms, 4-10x spread in decode/encode tails).
-Three levers live here, all behind the stable ``write_video`` surface:
-
-- **uint8 on-GPU before D2H**: a float32 frame chunk crossing PCIe costs 4x
-  the bytes of the uint8 the encoder actually consumes (bf16: 2x). Convert
-  on-device, transfer 1 byte/px/channel.
-- **pinned double-buffer + dedicated copy stream**: chunk N's D2H runs on
-  the copy engine while the producer decodes chunk N+1 on the SMs and the
-  CPU encodes chunk N-1. Pinned staging keeps the copy DMA-speed; pageable
-  and CPU-only inputs degrade to the exact previous behavior.
-- **zero-copy handoff**: the pinned buffer is exposed to the encoder as a
-  numpy view (no intermediate copy); the encoder wraps it with PyAV's
-  ``from_numpy_buffer`` when available (see ``video_encode``).
-
-Frame buffers are transient media staging, NOT model placement.
-"""
+"""GPU->host frame staging for the video encode path."""
 
 from __future__ import annotations
 
@@ -27,29 +9,18 @@ from .api.errors import ValidationError
 
 logger = logging.getLogger(__name__)
 
-#: Staging buffers above this stay pageable. THE bound on how much pinned host
-#: memory this worker may hold: pinned pages are non-swappable and shared with
-#: every other process on the pod, so an unbounded pin is a host-RAM leak the
-#: OOM killer resolves. Owned here and imported by `models.w8a8_lora`, which
-#: stages LoRA adapters under the same rule, so the two cannot drift.
+# Staging buffers above this stay pageable — THE bound on pinned host memory this worker may hold: pinned pages are non-swappable and shared with every process on the pod, so an unbounded pin is a host-RAM leak the OOM killer resolves. Imported by models.w8a8_lora so the two cannot drift.
 PIN_MAX_BYTES = 512 << 20
 
 
 def _as_torch_cuda(chunk: Any) -> Optional[Any]:
-    """The chunk as a CUDA torch tensor, or None for every other input."""
     if not hasattr(chunk, "detach") or not getattr(chunk, "is_cuda", False):
         return None
     return chunk
 
 
 def gpu_frames_to_uint8(t: Any) -> Any:
-    """On-device mirror of ``video_encode.frames_to_uint8`` for torch tensors.
-
-    Returns a contiguous uint8 ``[F, H, W, 3]`` tensor on the same device,
-    cropped to even H/W (the encoder's yuv420p rule) so the host array never
-    needs a non-contiguous crop. Floats in [0, 1] are scaled; anything else
-    is clipped to [0, 255].
-    """
+    """On-device mirror of ``video_encode.frames_to_uint8`` for torch tensors."""
     import torch
 
     t = t.detach()
@@ -71,10 +42,9 @@ def gpu_frames_to_uint8(t: Any) -> Any:
 
 
 class _PinnedSlot:
-    """One reusable host staging buffer (pinned when the size allows)."""
 
     def __init__(self) -> None:
-        self.buf: Any = None  # flat uint8 CPU tensor
+        self.buf: Any = None
         self.pinned = False
 
     def ensure(self, nbytes: int, torch: Any) -> None:
@@ -85,8 +55,6 @@ class _PinnedSlot:
             self.buf = torch.empty(nbytes, dtype=torch.uint8, pin_memory=pin)
             self.pinned = pin
         except Exception:
-            # Pinned alloc can fail on RAM-starved hosts; pageable still works
-            # (the copy silently degrades to staged cudaMemcpy speed).
             self.buf = torch.empty(nbytes, dtype=torch.uint8, pin_memory=False)
             self.pinned = False
             logger.warning(
@@ -95,14 +63,12 @@ class _PinnedSlot:
 
 
 class _Staged:
-    """An in-flight D2H copy: the event to wait on + the host view."""
 
     __slots__ = ("event", "view", "_device_ref")
 
     def __init__(self, event: Any, view: Any, device_ref: Any) -> None:
         self.event = event
         self.view = view
-        # Keep the device-side uint8 tensor alive until the copy completes.
         self._device_ref = device_ref
 
     def take(self) -> Any:
@@ -113,13 +79,7 @@ class _Staged:
 
 
 class FrameStager:
-    """Double-buffered pinned staging over a dedicated CUDA copy stream.
-
-    ``stage`` enqueues (convert-on-GPU already done by the caller) an async
-    D2H copy and returns immediately; ``take`` on the returned handle blocks
-    only until THAT copy's event fires. With two slots, the buffer a consumer
-    is encoding from is never the one being DMA'd into.
-    """
+    """Double-buffered pinned staging over a dedicated CUDA copy stream."""
 
     def __init__(self) -> None:
         self._slots = (_PinnedSlot(), _PinnedSlot())
@@ -147,18 +107,7 @@ class FrameStager:
 
 
 def staged_uint8_chunks(chunks: Iterable[Any]) -> Iterator[Any]:
-    """Pipeline an iterator of frame chunks into host uint8 arrays.
-
-    CUDA torch tensor chunks are converted to uint8 on-device (2-4x PCIe byte
-    cut) and staged through :class:`FrameStager`, one chunk behind the
-    producer — chunk N's D2H overlaps chunk N+1's production and chunk N-1's
-    CPU encode. Every other chunk type (numpy, PIL list, CPU tensor) passes
-    through unchanged, in order, so the encoder's own coercion applies and
-    CPU-only hosts keep the exact previous behavior.
-
-    Each yielded array borrows a reused staging buffer: it is valid until the
-    next iteration step (the encoder consumes it synchronously in ``add``).
-    """
+    """Pipeline an iterator of frame chunks into host uint8 arrays."""
     stager: Optional[FrameStager] = None
     pending: Optional[_Staged] = None
     for chunk in chunks:
@@ -180,13 +129,7 @@ def staged_uint8_chunks(chunks: Iterable[Any]) -> Iterator[Any]:
 
 
 def cuda_tensor_to_uint8_host(t: Any) -> Tuple[Any, bool]:
-    """Buffered-input path: convert a CUDA tensor on-device, one D2H of uint8.
-
-    Returns ``(numpy_array, True)`` when handled, ``(original, False)`` when
-    the input is not a CUDA tensor. No pinned staging here: the win for a
-    single buffered tensor is the byte cut; a clip-sized pinned buffer is not
-    worth the non-swappable host RAM.
-    """
+    """Buffered-input path: convert a CUDA tensor on-device, one D2H of uint8."""
     dev = _as_torch_cuda(t)
     if dev is None:
         return t, False

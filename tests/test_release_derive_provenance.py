@@ -1,19 +1,3 @@
-"""pgw#1506: the provenance walk must reach a pipeline inside an ENGINE.
-
-`_named_marked_modules` looked exactly one level deep -- `vars(instance)` plus
-`.components` on each value -- so an endpoint whose model owns an engine that
-owns the pipeline could not name its own compiled denoiser:
-
-    error: derive: a module marked via ctx.compile()
-    (MiniMaxH3Transformer3DModel) is not reachable as a model attribute or
-    pipeline component; the release document cannot name its provenance
-
-Measured on minimax-h3 by introspecting the live instance: the DiT is at
-`model.engine.pipeline.components['transformer']`, depth 2, and the pipeline
-is internally consistent (attribute and registry are one object) -- so this is
-reachability FROM THE MODEL, not an attachment failure.
-"""
-
 from __future__ import annotations
 
 import json
@@ -53,11 +37,7 @@ def config_only_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def test_a_pipeline_inside_an_engine_names_its_denoiser_like_any_other(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """End to end through the CLI: the depth-2 DiT is named `unet`.
-
-    The bare component name, exactly as a depth-1 endpoint gets -- the wrapper
-    changes where the module LIVES, never what the graph is called.
-    """
+    """End to end through the CLI: the depth-2 DiT is named `unet`."""
 
     from gen_worker.cli import main
 
@@ -135,12 +115,7 @@ def test_a_module_nested_BELOW_the_bound_refuses_and_says_where_it_stopped() -> 
 
 
 def test_the_same_bare_name_at_two_paths_takes_the_DOTTED_spelling() -> None:
-    """The existing preference order, asked across the whole instance.
-
-    Two different denoisers both called `unet` must not collapse onto one
-    name -- each keeps its full path, so both are nameable and neither is
-    picked over the other.
-    """
+    """The existing preference order, asked across the whole instance."""
 
     first = torch.nn.Linear(2, 2)
     second = torch.nn.Linear(2, 2)
@@ -155,22 +130,13 @@ def test_the_same_bare_name_at_two_paths_takes_the_DOTTED_spelling() -> None:
 
 
 def test_two_marks_that_collapse_onto_ONE_name_refuse_by_name() -> None:
-    """The ambiguity the walk cannot resolve is refused, never guessed.
-
-    A module reachable BOTH as a bare attribute and as the unique component
-    of a pipeline held under that same attribute name: the shortest-name
-    preference gives them one spelling, and two graphs cannot share one
-    provenance row.
-    """
+    """The ambiguity the walk cannot resolve is refused, never guessed."""
 
     from gen_worker.release.derive import DeriveError
 
     first = torch.nn.Linear(2, 2)
     second = torch.nn.Linear(2, 2)
     model = _Model()
-    # Both marked modules are offered the SAME bare name: `second` as the
-    # unique `unet` component, `first` as the attribute literally called
-    # `unet`. Equal length, so neither displaces the other.
     model.unet = first  # type: ignore[attr-defined]
     model.pipe = _Pipe(unet=second)  # type: ignore[attr-defined]
 

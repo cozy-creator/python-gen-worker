@@ -1,22 +1,4 @@
-"""Reachability collection over the local store.
-
-FIRST-PARTY (pgw#1575). Upstream never owned this: `LocalCAS.collect_garbage`'s
-own docstring said "TensorFS deliberately owns no retention policy", and the
-policy — what counts as reachable, and how long a freshly produced object is
-protected — has always been `models/disk_gc.py`'s. The reachability WALK was
-the only part that lived upstream, and it walks nothing but the ref record and
-manifest formats, both of which are still upstream's and still vendored.
-
-Master's `LocalCAS` has no successor for it: the Rust `ObjectStore` collects
-abandoned TEMPORARIES (`collect_abandoned_temps`, which is a lease sweep, not a
-reachability pass) and nothing else. So a bumped snapshot deletes this and puts
-nothing in its place — which is exactly why it is here now.
-
-`_store_lock` and `_object_lock` are `LocalCAS` privates. Reaching for them is
-deliberate and is the whole reason this module sits beside the store rather
-than in `models/`: collection has to exclude concurrent admission, and the
-exclusive store lock is the only thing that does.
-"""
+"""Reachability collection over the local store."""
 
 from __future__ import annotations
 
@@ -41,7 +23,6 @@ class GCReport:
 
 
 def _logical_roots(cas: LocalCAS) -> set[CASRef]:
-    """Every current logical ref's target. Call under the store lock."""
 
     roots: set[CASRef] = set()
     for path in cas.refs.iterdir():
@@ -69,13 +50,7 @@ def collect_garbage(
     manifests: Iterable[RepositoryManifest] = (),
     older_than: float,
 ) -> GCReport:
-    """Delete unreferenced immutable objects older than a caller cutoff.
-
-    Current logical refs are always roots. The caller adds active byte refs and
-    repository manifests. The age cutoff is required, and it protects freshly
-    produced bytes during the gap between a writer finishing and its consumer
-    installing the logical ref that makes them reachable.
-    """
+    """Delete unreferenced immutable objects older than a caller cutoff."""
 
     if older_than <= 0:
         raise ValueError("garbage collection requires a positive age grace")
@@ -86,8 +61,6 @@ def collect_garbage(
             for entry in manifest.files:
                 keep.update(ref for ref, _size in entry.objects())
 
-        # A logical ref commonly targets a stored repository manifest. Expand
-        # valid manifests; arbitrary object bytes simply remain roots.
         for root in tuple(keep):
             path = cas.object_path(root)
             try:

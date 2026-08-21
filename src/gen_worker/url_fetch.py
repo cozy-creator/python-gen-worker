@@ -1,35 +1,4 @@
-"""The ONE guarded HTTP fetch for endpoint code.
-
-Endpoints that accept a URL from a caller — a VLM caption input, an img2img
-source — must not hand-roll `urlopen(url).read()`: that is an SSRF hole (the
-worker sits inside a datacenter network with a cloud metadata endpoint at
-169.254.169.254) plus an unbounded read into a pod's RAM.
-
-This module is that policy's single home:
-
-  * **scheme** — http/https only;
-  * **destination** — every hop's host is resolved and refused if it lands on a
-    private / loopback / link-local / multicast / reserved address;
-  * **redirects** — followed MANUALLY, with the policy re-applied to each hop.
-    A public URL 302-ing to the metadata service is the standard bypass, and
-    `urlopen` follows redirects silently, so anything that delegates redirect
-    handling to urllib has this hole open;
-  * **size** — streamed against a byte cap, checked against `Content-Length`
-    first and again per chunk, so a lying header cannot blow up the pod;
-  * **time** — an explicit timeout on every hop;
-  * **content** — optional MIME allowlist, sniffed from the bytes rather than
-    trusted from the header.
-
-Refusals are typed `ValidationError` (caller-caused -> INVALID); transport
-failures are `RetryableError`, matching the input-asset vocabulary.
-
-**Known limit, stated rather than papered over:** validation resolves the
-hostname, then the connection resolves it again — a DNS rebinding attacker can
-win that race. Closing it means pinning the connection to the validated address
-with an explicit Host header, which breaks TLS SNI/verification for the general
-case. Per-hop validation is the practical guard; do not describe it as proof
-against a rebinding adversary.
-"""
+"""The ONE guarded HTTP fetch for endpoint code — never hand-roll urlopen(url).read(): that is an SSRF hole (the worker sits inside a datacenter network with a cloud metadata endpoint at 169.254.169.254) plus an unbounded read. The policy: http/https only; every hop's host resolved and refused on private/loopback/link-local/multicast/reserved addresses; redirects followed MANUALLY with the policy re-applied per hop (urlopen follows silently — a public URL 302-ing to the metadata service is the standard bypass); size streamed against a byte cap checked against Content-Length first and again per chunk; an explicit timeout on every hop; MIME sniffed from the bytes, never trusted from the header. Known limit, stated rather than papered over: validation resolves the hostname and the connection resolves it again, so a DNS-rebinding attacker can win that race — per-hop validation is the practical guard; do not describe it as proof against a rebinding adversary."""
 
 from __future__ import annotations
 
@@ -53,13 +22,11 @@ __all__ = [
     "open_guarded_stream",
 ]
 
-DEFAULT_MAX_BYTES = 50 << 20  # 50 MiB — tensorhub's default media cap
+DEFAULT_MAX_BYTES = 50 << 20
 DEFAULT_TIMEOUT_S = 30.0
 MAX_REDIRECTS = 5
 _CHUNK = 1 << 20
 
-# Deployment-wide outer bound. When set, NO fetch may leave these hosts, whatever
-# an endpoint passes as `allowed_hosts`.
 ALLOWED_HOSTS_ENV = "GEN_WORKER_URL_FETCH_ALLOWED_HOSTS"
 
 
@@ -108,9 +75,6 @@ def _check_hop(
         raise ValidationError(
             f"url_fetch_refused: {what} host {host!r} is not in the caller's allowlist"
         )
-    # Resolved at CALL time: the module global is the one policy, and a
-    # caller that already owns a reference to it (input_assets) passes its
-    # own so the two cannot drift or be patched apart.
     check = is_blocked or _url_is_blocked
     try:
         blocked = check(url)
@@ -123,7 +87,6 @@ def _check_hop(
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Hand redirects back to us instead of following them blind."""
 
     def redirect_request(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -143,13 +106,7 @@ def open_guarded_stream(
     headers: dict[str, str] | None = None,
     is_blocked: Callable[[str], bool] | None = None,
 ) -> Iterator[Any]:
-    """Open ``url`` with the full policy applied to every hop.
-
-    Yields the live ``http.client.HTTPResponse`` — the caller owns the read
-    (and its byte cap). ``extra_allowed_hosts`` names hosts that are exempt
-    from the private-address refusal but not from the scheme/allowlist rules:
-    a deployment's internal object store, which is private BY DESIGN.
-    """
+    """Open ``url`` with the full policy applied to every hop."""
     allow = frozenset(h.strip().lower() for h in allowed_hosts if h and h.strip())
     exempt = frozenset(h.strip().lower() for h in extra_allowed_hosts if h and h.strip())
     current = str(url or "")
@@ -174,10 +131,6 @@ def open_guarded_stream(
                 exc.close()
                 current = urllib.parse.urljoin(current, location)
                 continue
-            # Not a redirect: the STATUS is the caller's business, not this
-            # opener's. Re-raise it untouched so input_assets keeps its own
-            # (retryable) reading of a 404 on an authorized transport, while
-            # fetch_bytes below maps it to a typed refusal.
             exc.close()
             raise
         except (ValidationError, RetryableError):
@@ -201,12 +154,7 @@ def fetch_bytes(
     allowed_mime_types: Sequence[str] = (),
     max_redirects: int = MAX_REDIRECTS,
 ) -> FetchedUrl:
-    """Fetch ``url`` under the full policy and return its bytes.
-
-    ``max_bytes`` is enforced against ``Content-Length`` AND against the bytes
-    actually read, so a lying header buys nothing. ``allowed_mime_types`` is
-    matched against the SNIFFED type, never the server's claim.
-    """
+    """Fetch ``url`` under the full policy and return its bytes."""
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     try:

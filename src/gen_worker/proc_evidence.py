@@ -1,13 +1,4 @@
-"""Kernel-accounted evidence that another process is doing real work.
-
-The producer every progress-keyed bound over a LOCAL child is built from: a
-monotonic number that rises while a process tree burns CPU or moves bytes, and
-stops rising the moment it wedges. It needs no cooperation from the process
-being watched, which is what makes it usable against a follower that has no
-protocol of its own between spawn and ready.
-
-ONE implementation, shared by ``procsplit.parent`` and ``parallel.group``.
-"""
+"""Kernel-accounted evidence that another process is doing real work."""
 
 from __future__ import annotations
 
@@ -26,22 +17,7 @@ def _cpu_seconds(proc: Any) -> float:
 
 
 def tree_evidence(pid: int) -> Optional[float]:
-    """This process tree's kernel-accounted work, or ``None`` when it cannot
-    be read at all.
-
-    CPU seconds for the WHOLE tree — live AND already-reaped descendants
- — plus process disk I/O MB, the same combination
-    ``activity._default_evidence`` trusts, measured from ``/proc``. Either
-    source advancing on its own proves life: a weights download is CPU-light
-    and moves real bytes; an inductor compile burns child CPU with flat I/O;
-    a true hang advances neither.
-
-    The reaped half is not optional. A descendant's CPU moves into its
-    parent's ``cutime``/``cstime`` when it is waited for, so a tree summed
-    over live members only would go DOWN whenever a subprocess finishes —
-    which is why every caller compares this against a HIGH-WATER MARK rather
-    than against the previous sample.
-    """
+    """This process tree's kernel-accounted work, or ``None`` when it cannot be read at all."""
     try:
         import psutil
     except Exception:
@@ -62,6 +38,4 @@ def tree_evidence(pid: int) -> Optional[float]:
                 continue
         return total
     except (psutil.Error, ValueError, OSError):
-        # ValueError: psutil refuses a non-positive pid outright, which is
-        # "cannot say" like every other unreadable process here.
         return None

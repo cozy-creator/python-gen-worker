@@ -1,19 +1,3 @@
-"""pgw#1527: an unservable payload costs ONE payload, not the document.
-
-A single member of a 7-payload sweep that the endpoint cannot serve used to
-cost every graph the other six would produce — against the enumeration's own
-"pre-warming completeness aid, never a correctness gate" doctrine and against
-pgw#1449's skip-and-count precedent for entrypoints.
-
-**The cut is deliberately narrow and the narrowness IS the fix.** Catch-and-
-count only where the DEEPEST traceback frame is ENDPOINT-owned. An SDK-frame
-exception stays fatal, because walls 1-8 were every one of them an SDK defect
-surfacing exactly this way (the hollow session, the trace context, the
-provenance walk, the output-integrity floor) and a blanket catch would have
-turned all eight into quiet coverage gaps instead of the refusals that got
-them fixed.
-"""
-
 from __future__ import annotations
 
 import json
@@ -97,7 +81,6 @@ def test_the_skipped_payload_is_STATED_with_the_author_frame(
     assert skipped["payload"] == 1
     assert "cannot serve the large bucket" in skipped["error"]
     assert skipped["error"].startswith("ValueError:")
-    # The line that has to change, in the AUTHOR's file.
     assert skipped["frame"].startswith("unservable_payload_endpoint.py:")
     assert "_side_for" in skipped["frame"]
 
@@ -112,10 +95,6 @@ def test_an_endpoint_with_NOTHING_skipped_carries_no_such_key(
 
     for entry in json.loads(out.read_bytes())["entrypoints"].values():
         assert "unservable" not in entry
-
-
-# ---------------------------------------------------------------------------
-# The predicate itself. These are the assertions that keep the cut narrow.
 
 
 def _raise_from(where: Any) -> BaseException:
@@ -134,33 +113,21 @@ def test_an_SDK_frame_is_NEVER_endpoint_owned() -> None:
     class NotAStruct:
         pass
 
-    # A REAL raise from inside gen_worker: the deepest frame is derive.py's
-    # own line, not this file's. (Raising an SDK-defined exception FROM here
-    # would prove nothing — the frame is what is classified, not the class.)
     import traceback
 
     import gen_worker
 
     exc = _raise_from(lambda: _auto_payloads("@entrypoint x", NotAStruct))
     sdk = Path(gen_worker.__file__).resolve().parent
-    # Pin the PREMISE, or the assertions below could pass for the wrong
-    # reason: the deepest frame really is inside the SDK.
     deepest = Path(traceback.extract_tb(exc.__traceback__)[-1].filename).resolve()
     assert deepest.is_relative_to(sdk), deepest
 
-    # Even with the endpoint root set to the SDK's OWN directory — the most
-    # permissive root that could possibly be passed — an SDK frame is refused.
     assert deepest_endpoint_frame(exc, sdk) is None
     assert deepest_endpoint_frame(exc, Path(__file__).resolve().parent) is None
 
 
 def test_a_frame_OUTSIDE_the_endpoint_root_is_not_claimed() -> None:
-    """torch/diffusers/stdlib raise from their own files: still fatal.
-
-    Conservative on purpose: author code that trips a shape error inside torch
-    reports a TORCH frame, and this cannot tell that apart from an SDK-induced
-    one without guessing.
-    """
+    """torch/diffusers/stdlib raise from their own files: still fatal."""
 
     exc = _raise_from(lambda: json.loads("{bad"))
     assert deepest_endpoint_frame(exc, FIXTURES) is None
@@ -188,11 +155,7 @@ def test_an_UNKNOWABLE_root_means_fatal() -> None:
 
 
 def test_the_endpoint_root_is_the_TOP_LEVEL_package_directory() -> None:
-    """A package endpoint's helpers count as its own code.
-
-    h3 raises from `long_video.py`, not from `main.py`, so a root narrowed to
-    the main module's file would miss every real case.
-    """
+    """A package endpoint's helpers count as its own code."""
 
     sys.path.insert(0, str(FIXTURES))
     try:
@@ -203,18 +166,8 @@ def test_the_endpoint_root_is_the_TOP_LEVEL_package_directory() -> None:
     assert endpoint_source_root(ep) == FIXTURES
 
 
-# ---------------------------------------------------------------------------
-# pgw#1533: the source root is the sys.path ENTRY, not the main package.
-
-
 def test_a_SIBLING_top_level_module_is_endpoint_owned(tmp_path: Path) -> None:
-    """h3's actual shape, and the hole that killed its run.
-
-    `endpoint_source_root` used to return the main module's top-level PACKAGE
-    directory, so a helper module BESIDE that package — `src/cozy_rife.py`
-    next to `src/minimax_h3/` — was not provably the author's, and a product
-    bug raised there took the whole derive down.
-    """
+    """h3's actual shape, and the hole that killed its run."""
 
     sys.path.insert(0, str(FIXTURES))
     try:
@@ -237,7 +190,7 @@ def test_a_PACKAGE_endpoints_root_is_the_directory_ABOVE_the_package() -> None:
 
     sys.path.insert(0, str(FIXTURES))
     try:
-        import modular_tiny_endpoint  # a module inside no package
+        import modular_tiny_endpoint
     finally:
         sys.path.remove(str(FIXTURES))
 
@@ -245,12 +198,7 @@ def test_a_PACKAGE_endpoints_root_is_the_directory_ABOVE_the_package() -> None:
 
 
 def test_the_SUBTRACTION_keeps_an_SDK_frame_fatal_even_under_a_WIDE_root() -> None:
-    """The original concern, tested at its worst case.
-
-    A wider root can only be safe if everything that is not the author's is
-    removed from it. This hands the matcher a root so wide it contains the
-    SDK — the filesystem ROOT — and the SDK frame is still refused.
-    """
+    """The original concern, tested at its worst case."""
 
     import gen_worker
     from gen_worker.release.derive import _auto_payloads
@@ -266,13 +214,7 @@ def test_the_SUBTRACTION_keeps_an_SDK_frame_fatal_even_under_a_WIDE_root() -> No
 
 
 def test_the_SUBTRACTION_keeps_a_THIRD_PARTY_frame_fatal_under_a_wide_root() -> None:
-    """torch/diffusers live in site-packages, and a wide root would swallow it.
-
-    Named by install LAYOUT rather than by a list of libraries, so it holds for
-    whatever an endpoint pulls in next. The raise site is real diffusers PYTHON
-    code — a C extension reports `<string>` and would make this pass without
-    testing anything.
-    """
+    """torch/diffusers live in site-packages, and a wide root would swallow it."""
 
     import traceback
 
@@ -280,21 +222,13 @@ def test_the_SUBTRACTION_keeps_a_THIRD_PARTY_frame_fatal_under_a_wide_root() -> 
 
     exc = _raise_from(lambda: AutoencoderKL.load_config("/nonexistent-tree"))
     deepest = Path(traceback.extract_tb(exc.__traceback__)[-1].filename).resolve()
-    # Pin the PREMISE: this really is a third-party python frame.
     assert _third_party_root(deepest), deepest
 
-    # A root wide enough to contain it — the filesystem root — and it is still
-    # refused, because the install tree is subtracted.
     assert deepest_endpoint_frame(exc, Path(deepest.anchor)) is None
 
 
 def test_an_endpoint_INSTALLED_into_site_packages_claims_nothing() -> None:
-    """The degenerate case resolves the SAFE way.
-
-    If the author's code were itself installed into site-packages, the whole
-    source root is subtracted and nothing is claimed — every failure stays
-    fatal, which is the property this design rests on.
-    """
+    """The degenerate case resolves the SAFE way."""
 
     import traceback
 
@@ -304,5 +238,4 @@ def test_an_endpoint_INSTALLED_into_site_packages_claims_nothing() -> None:
     installed = Path(traceback.extract_tb(exc.__traceback__)[-1].filename).resolve()
     assert _third_party_root(installed)
 
-    # Treat that very tree as the "endpoint source root".
     assert deepest_endpoint_frame(exc, installed.parent) is None

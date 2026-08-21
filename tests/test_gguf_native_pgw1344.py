@@ -1,21 +1,3 @@
-"""pgw#1344: the HF->GGUF conversion reads and writes through tensorfs, and the
-GGUF it produces COMPOSES THROUGH THE STORE.
-
-The acceptance property is not "it converted". It is that a tensor whose GGUF
-bytes equal its safetensors bytes is admitted under the digest it already has,
-so a GGUF flavor of a resident model costs only the tensors that genuinely
-change. That is asserted here by comparing CAS object digests, per tensor, and
-it distinguishes shared-because-identical from new-because-transformed rather
-than claiming blanket sharing.
-
-**Why the fixture's tensors are 64 MiB and not four floats.** The store's own
-grid packs tensors below `MAX_CHUNK_SIZE` in with their neighbours, so a tensor
-under that size has no digest of its own to share and the property is
-structurally unobservable. 64 MiB is the boundary the property lives at; a
-smaller fixture would pass vacuously. The fixture is still synthetic and
-CPU-trivial -- zeros and constant fills, no model, no compile.
-"""
-
 from __future__ import annotations
 
 import json
@@ -51,15 +33,6 @@ CONFIG = {
     "vocab_size": VOCAB,
 }
 
-# name -> (safetensors dtype, shape, seed). Two tensors are exactly one CAS
-# object wide, one on each side of the permute: `q_proj` is rewritten and
-# `v_proj` is not, which is the whole comparison.
-#
-# The values VARY ALONG ROWS on purpose. A constant fill made the first draft
-# of this test lie: the rope permute is a row shuffle, so permuting a constant
-# tensor reproduces it byte for byte and the permuted tensor "shared" its
-# source objects. Content the shuffle can actually move is what makes
-# "transformed => new objects" a real assertion instead of a coincidence.
 FIXTURE: dict[str, tuple[str, tuple[int, ...], int]] = {
     "model.embed_tokens.weight": ("F32", (VOCAB, HIDDEN), 0x11),
     "model.layers.0.input_layernorm.weight": ("F32", (HIDDEN,), 0x22),
@@ -75,7 +48,6 @@ _ITEMSIZE = {"F32": 4, "F16": 2, "BF16": 2}
 
 
 def _content(shape: tuple[int, ...], seed: int) -> bytes:
-    """Finite float32 that varies along the row axis, generated not stored."""
 
     import numpy as np
 
@@ -108,7 +80,7 @@ def _safetensors_bytes(tensors: dict[str, tuple[str, tuple[int, ...], int]]) -> 
 
 @pytest.fixture(scope="module")
 def snapshot(tmp_path_factory: pytest.TempPathFactory) -> tuple[LocalCAS, RepositoryManifest]:
-    """A synthetic HF snapshot, resident in a real CAS. No directory is read."""
+    """A synthetic HF snapshot, resident in a real CAS."""
 
     root = tmp_path_factory.mktemp("pgw1344")
     cas = LocalCAS(root / "cas")
@@ -117,8 +89,6 @@ def snapshot(tmp_path_factory: pytest.TempPathFactory) -> tuple[LocalCAS, Reposi
     (staged / "model.safetensors").write_bytes(_safetensors_bytes(FIXTURE))
     (staged / "config.json").write_text(json.dumps(CONFIG))
     manifest = ingest_repository(cas, staged)
-    # The staged tree exists only to be admitted; from here the conversion sees
-    # the store and nothing else.
     for path in sorted(staged.rglob("*"), reverse=True):
         path.unlink() if path.is_file() else path.rmdir()
     staged.rmdir()
@@ -138,11 +108,7 @@ def _source_digests(manifest: RepositoryManifest) -> set[str]:
 def test_the_source_grid_gives_the_large_tensors_objects_of_their_own(
     snapshot: tuple[LocalCAS, RepositoryManifest],
 ) -> None:
-    """The precondition the whole property rests on, asserted rather than hoped.
-
-    If the store ever packed a 64 MiB tensor in with its neighbours, every
-    sharing assertion below would go vacuously green on an unshareable source.
-    """
+    """The precondition the whole property rests on, asserted rather than hoped."""
 
     _cas, manifest = snapshot
     entry = next(e for e in manifest.files if e.path == "model.safetensors")
@@ -155,7 +121,6 @@ def test_the_source_grid_gives_the_large_tensors_objects_of_their_own(
 def test_an_unpermuted_tensor_shares_its_objects_with_its_safetensors_source(
     snapshot: tuple[LocalCAS, RepositoryManifest],
 ) -> None:
-    """THE acceptance property (pgw#1344), measured on real CAS digests."""
 
     cas, manifest = snapshot
     blob, count = _metadata("f32")
@@ -164,9 +129,6 @@ def test_an_unpermuted_tensor_shares_its_objects_with_its_safetensors_source(
     )
     sharing = result.sharing
 
-    # Everything except q_proj and k_proj passes through untouched at f32;
-    # those two are rope-permuted, so their bytes -- and therefore their
-    # objects -- differ.
     assert set(sharing.shared) == {
         "token_embd.weight",
         "blk.0.attn_v.weight",
@@ -177,18 +139,8 @@ def test_an_unpermuted_tensor_shares_its_objects_with_its_safetensors_source(
     }
     assert set(sharing.transformed) == {"blk.0.attn_q.weight", "blk.0.attn_k.weight"}
 
-    # NOTHING is unshareable, and the four names that used to be here are the
-    # measured value of pgw#1365. This test shipped asserting them as an
-    # accepted loss -- "a tensor below MAX_CHUNK_SIZE was packed in with its
-    # neighbours when the snapshot was admitted, so it has no digest of its own
-    # for anything to share" -- which was true only because `ingest_file`
-    # planned with the retired greedy packer instead of the Rust planner's
-    # grid. On the canonical grid every tensor owns its objects, so 2 of 8
-    # tensors sharing became 6 of 8 with no change to the converter at all.
     assert set(sharing.unshareable) == set(), sharing.describe()
 
-    # The comparison that makes it a measurement rather than a claim: the
-    # SHARED tensor's own objects are literally the source's objects.
     source = _source_digests(manifest)
     passthrough = [d for d in result.dispositions if d.passthrough and d.objects]
     assert passthrough, "the plan transformed every tensor; nothing could share"
@@ -200,8 +152,6 @@ def test_an_unpermuted_tensor_shares_its_objects_with_its_safetensors_source(
             f"objects -- the GGUF stopped composing through the store"
         )
 
-    # And the converse, so a mutation that shares EVERYTHING is red too: a
-    # permuted tensor must NOT be carrying the source's digests.
     for item in result.dispositions:
         if item.transform == "permute":
             assert not (set(item.objects) & source), (
@@ -212,12 +162,7 @@ def test_an_unpermuted_tensor_shares_its_objects_with_its_safetensors_source(
 def test_a_dtype_cast_legitimately_shares_nothing(
     snapshot: tuple[LocalCAS, RepositoryManifest],
 ) -> None:
-    """f16 from an f32 source rewrites every 2-D tensor, and says so.
-
-    This is the discriminating half of the acceptance bar: sharing is a
-    consequence of the bytes being equal, never a property the converter
-    asserts. A converter that "shared" here would be wrong.
-    """
+    """f16 from an f32 source rewrites every 2-D tensor, and says so."""
 
     cas, manifest = snapshot
     blob, count = _metadata("f16")
@@ -229,7 +174,6 @@ def test_a_dtype_cast_legitimately_shares_nothing(
     assert all(not d.passthrough for d in two_dimensional), (
         "a cast to f16 left a 2-D tensor claiming passthrough"
     )
-    # The 1-D norms stay F32 by llama.cpp's own rule, so they still pass through.
     assert any(d.passthrough for d in result.dispositions if len(d.shape) == 1)
 
 
@@ -252,12 +196,7 @@ def test_the_norms_keep_f32_whatever_encoding_was_asked_for(
 def test_the_conversion_reads_no_directory(
     snapshot: tuple[LocalCAS, RepositoryManifest], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The seam is not merely unused -- it is unreachable from this path.
-
-    pgw#1303's ladder is enforced by `models.materialized_view.third_party_dir`
-    logging every projection. Making it raise turns "the converter no longer
-    projects" from an absence into an assertion.
-    """
+    """The seam is not merely unused -- it is unreachable from this path."""
 
     import gen_worker.models.materialized_view as materialized_view
 
@@ -293,7 +232,6 @@ def test_the_output_parses_as_a_gguf_the_store_can_read_back(
         names = {tensor.name for tensor in header.tensors}
         assert "blk.0.attn_q.weight" in names
         assert "output_norm.weight" in names
-        # GGUF `ne` is the reverse of safetensors' row-major shape.
         v = next(t for t in header.tensors if t.name == "blk.0.attn_v.weight")
         assert v.shape == (HIDDEN, HIDDEN)
         assert reader["blk.0.attn_v.weight"].nbytes == MAX_CHUNK_SIZE
@@ -304,11 +242,7 @@ def test_the_output_parses_as_a_gguf_the_store_can_read_back(
 def test_an_architecture_without_a_written_down_rule_is_refused(
     snapshot: tuple[LocalCAS, RepositoryManifest],
 ) -> None:
-    """Gemma rewrites norm VALUES; a name map cannot express that.
-
-    The refusal is the point: a converter that mapped gemma by name alone would
-    emit a GGUF that loads and is quietly wrong.
-    """
+    """Gemma rewrites norm VALUES; a name map cannot express that."""
 
     cas, manifest = snapshot
     gemma = dict(CONFIG, model_type="gemma", architectures=["GemmaForCausalLM"])
@@ -332,26 +266,9 @@ def test_a_k_quant_encoding_is_refused_by_name(
 
 
 def test_the_remaining_gguf_hatch_is_named_and_is_the_only_one() -> None:
-    """pgw#1344's residue, pinned so it can only shrink.
-
-    The tensor plane is native. What still runs `convert_hf_to_gguf.py` as a
-    subprocess is the METADATA block -- a model's vocabulary, its chat template
-    and its pre-tokenizer identity -- and that is deliberate: reproducing a
-    tokenizer faithfully is thousands of lines of upstream script that changes
-    weekly, and a GGUF whose vocabulary this repo guessed would load and be
-    quietly wrong. That is the exact failure this issue exists to prevent, so
-    the honest state is one NAMED hatch rather than a second tokenizer.
-
-    This fence does two things a comment cannot: it refuses a SECOND hatch
-    appearing anywhere in the conversion package, and it refuses the native
-    converter growing one.
-    """
 
     convert = Path(__file__).resolve().parents[1] / "src" / "gen_worker" / "convert"
 
-    # Call-shaped, not word-shaped: this module's prose says "materialized"
-    # and "subprocess" repeatedly, and a fence that cannot tell the two apart
-    # is one somebody deletes. The tensorfs hatch itself is NOT spelled here.
     native = (convert / "gguf_native.py").read_text()
     for forbidden in ("third_party_dir(", "run_process(", "import subprocess"):
         assert forbidden not in native, (
@@ -359,20 +276,9 @@ def test_the_remaining_gguf_hatch_is_named_and_is_the_only_one() -> None:
             f"path composes through the store; a hatch there is the whole defect."
         )
 
-    # The conversion package's seam CENSUS, with the issue that owns each row.
-    # Written down rather than counted so it can only shrink: a file that
-    # appears here without a row is a new hatch, and a row whose file stopped
-    # calling is a cut somebody has to come back and delete.
     census = {
-        # pgw#1344: the METADATA block only. The tensors are native above.
         "gguf_tools.py": "pgw#1344",
-        # pgw#1335 owns these -- the conversion pipeline is still directory
-        # shaped end to end, and cutting them is that issue's pipeline cut.
         "source.py": "pgw#1335",
-        # pgw#1344 states why NOT: this site is handed an ordinary civitai
-        # download whose home is `dest_dir`, not a snapshot, so the seam is a
-        # no-op there today and cutting it correctly needs the projection-aware
-        # read pgw#1335's pipeline supplies.
         "ingest.py": "pgw#1335",
     }
     callers = {
@@ -393,15 +299,7 @@ def test_the_remaining_gguf_hatch_is_named_and_is_the_only_one() -> None:
 
 
 def test_a_two_dimensional_norm_weight_is_pinned_to_f32_too() -> None:
-    """The half of llama.cpp's dtype rule a llama fixture cannot reach.
-
-    `_target_dtype` pins BOTH one-dimensional tensors and anything named
-    `*_norm.weight`. A llama's norms are one-dimensional, so a mutation that
-    deleted the name clause survived every test above -- the fixture could not
-    tell the two clauses apart. Architectures with a 2-D norm exist, and
-    llama.cpp keeps those at F32 as well, so the clause is asserted directly
-    rather than left to a fixture that happens not to exercise it.
-    """
+    """The half of llama.cpp's dtype rule a llama fixture cannot reach."""
 
     from gen_worker.convert.gguf_native import _target_dtype
 

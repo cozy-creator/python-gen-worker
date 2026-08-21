@@ -1,47 +1,4 @@
-"""Fleet-line preflight for measurement rigs.
-
-A rig measures a rig. When the rig's torch/CUDA line drifts off the fleet's, its
-verdict is about software nobody runs — and it reads as a verdict about
-production. So the rule is mechanical: **every rig calls
-:func:`assert_fleet_line` as its first act, and a rig that has not asserted the
-fleet line has produced no evidence.**
-
-THE EXPECTED VALUES ARE READ, NEVER HARDCODED. A constant copied into this module
-is the same failure one layer down — it would go stale the next time the fleet
-moves and nobody would notice. Authorities, all of them files production itself
-reads, best-first:
-
-1. ``endpoint.toml`` ``[[build.profiles]]`` — ``torch`` + ``cuda``. This is the
-   exact declaration tensorhub's builder resolves the managed base image from
-   (``internal/builder/baseimage.go``), so it is what the endpoint's production
-   image literally runs. It ships inside the endpoint sdist, so a rig that has the
-   endpoint source — which every rig must, since the rig imports the endpoint's
-   own code — has this file. The only authority that declares CUDA.
-2. ``fleet-floors.toml`` ``[floors] torch`` — the fleet-wide floor CI enforces
-   against every endpoint's lock. Fleet-scoped, torch only.
-3. Installed distribution metadata — the ENDPOINT dist's own ``torch>=…``
-   requirement. Torch only, and never this SDK's own: ``gen-worker`` pins the
-   very torch the rig is being asked to prove, so consulting it made the SDK
-   its own last-resort authority and no rig could ever fail to find one.
-
-Every authority found is compared and the STRICTEST floor wins, so a rig sitting
-between two of them fails rather than picking the lenient one. **No authority
-found is also an abort**: nothing to compare against is not permission to
-measure.
-
-There is deliberately no override and no "warn" mode. A missing wheel for the
-fleet line is a FINDING to report, never permission to measure on an old one.
-
-VERSION STRINGS ARE NOT USABILITY. Matching ``torch.version.cuda``
-proves the WHEEL is right and says nothing about the HOST. RunPod's driver is
-per-host: on ``570.211.01`` (CUDA 12.8) a cu130 torch imports fine, prints every
-version correctly, and then cannot allocate — a failure that surfaces ~20 minutes
-in, after the weight fetch, and reads as a torch bug. So the assertion also
-performs a REAL tiny allocation and raises :class:`CudaUnusable` when a card is
-present and it fails. Repair it at bring-up with
-``python3 -m gen_worker.rigboot`` (forward-compat libcuda, or a re-roll verdict)
-BEFORE anything is downloaded.
-"""
+"""Fleet-line preflight for measurement rigs."""
 
 from __future__ import annotations
 
@@ -65,15 +22,9 @@ __all__ = [
     "resolve_fleet_line",
 ]
 
-#: Config value (a path), not a logic flag: point the resolver at the authority
-#: when the rig's layout hides it. It changes WHERE the expectation is read from,
-#: never WHETHER the assertion runs.
 FLEET_LINE_FILE_ENV = "GEN_WORKER_FLEET_LINE_FILE"
 
 
-#: Wheels whose version decides whether a kernel/quantization result is about the
-#: fleet's stack or about the rig's. Reported on every run; absence is reported,
-#: not raised — an unbuildable wheel is the finding.
 REPORTED_PACKAGES = (
     "gen-worker",
     "torch",
@@ -95,20 +46,15 @@ _MAX_WALK_UP = 8
 
 
 class FleetLineMismatch(RuntimeError):
-    """The rig is not on the fleet's torch/CUDA line. Measuring is forbidden."""
+    """The rig is not on the fleet's torch/CUDA line."""
 
 
 class FleetLineUnknown(RuntimeError):
-    """No authority declared a fleet line. Nothing to assert against."""
+    """No authority declared a fleet line."""
 
 
 class CudaUnusable(FleetLineMismatch):
-    """The wheel is on the fleet line but the HOST cannot run it.
-
-    A subclass of :class:`FleetLineMismatch` so every existing rig handler still
-    aborts, and a distinct type so the caller can tell "rebuild the environment"
-    (wrong wheel) from "repair or re-roll the host" (wrong driver).
-    """
+    """The wheel is on the fleet line but the HOST cannot run it."""
 
 
 @dataclass(frozen=True)
@@ -138,13 +84,7 @@ class FleetLine:
         return ".".join(str(p) for p in self.cuda) if self.cuda else "undeclared"
 
 
-# --------------------------------------------------------------------------- #
-# version parsing
-# --------------------------------------------------------------------------- #
-
-
 def _version(text: object, parts: int = 3) -> Optional[tuple[int, ...]]:
-    """``'2.13.0+cu130'`` -> ``(2, 13, 0)``. None when nothing numeric is there."""
     if text is None:
         return None
     head = str(text).strip().split("+")[0].split(" ")[0]
@@ -173,7 +113,6 @@ def _below(found: Optional[Sequence[int]], floor: Sequence[int]) -> bool:
 
 
 def _requirement_floor(requirement: str, name: str) -> Optional[tuple[int, ...]]:
-    """Lowest version ``name`` may take under one PEP 508 requirement string."""
     req = requirement.split(";")[0].strip()
     head = re.match(r"^([A-Za-z0-9._-]+)", req)
     if not head or head.group(1).lower().replace("_", "-") != name:
@@ -184,11 +123,6 @@ def _requirement_floor(requirement: str, name: str) -> Optional[tuple[int, ...]]
         if parsed and (best is None or parsed > best):
             best = parsed
     return best
-
-
-# --------------------------------------------------------------------------- #
-# authorities
-# --------------------------------------------------------------------------- #
 
 
 def _walk_up(start: Path, name: str) -> Iterable[Path]:
@@ -217,7 +151,6 @@ def _candidate_files(name: str, start: Optional[Path]) -> list[Path]:
             if hit not in found:
                 found.append(hit)
         if root.is_dir():
-            # One level down covers the pod layout `/src/<endpoint>/endpoint.toml`.
             for child in sorted(root.iterdir()):
                 hit = child / name
                 if child.is_dir() and hit.is_file() and hit not in found:
@@ -317,9 +250,6 @@ def _collect_authorities(
         found = _fleet_floors_authority(path)
         if found:
             authorities.append(found)
-    # ENDPOINT dists only — never `gen-worker` itself. The SDK certifying its own
-    # floor means every rig passes and `FleetLineUnknown`, the finding this
-    # function exists to produce, is unreachable on any machine that can run one.
     for dist in endpoint_dists:
         found = _metadata_authority(dist)
         if found:
@@ -332,10 +262,7 @@ def resolve_fleet_line(
     start: Optional[os.PathLike[str] | str] = None,
     endpoint_dists: Sequence[str] = (),
 ) -> FleetLine:
-    """Read every reachable authority and return the STRICTEST floor.
-
-    Raises :class:`FleetLineUnknown` when nothing declares a line.
-    """
+    """Read every reachable authority and return the STRICTEST floor."""
     root = Path(start).resolve() if start else None
     authorities = _collect_authorities(root, endpoint_dists)
     torch_floors = [a.torch for a in authorities if a.torch]
@@ -352,11 +279,6 @@ def resolve_fleet_line(
         cuda=max(cuda_floors) if cuda_floors else None,
         authorities=tuple(authorities),
     )
-
-
-# --------------------------------------------------------------------------- #
-# resolved environment
-# --------------------------------------------------------------------------- #
 
 
 def _driver_version() -> Optional[str]:
@@ -431,15 +353,6 @@ def resolve_environment() -> dict[str, Any]:
 
 
 def _usability(env: Mapping[str, Any]) -> dict[str, Any]:
-    """Can this interpreter actually ALLOCATE on the card?
-
-    ``torch.version.cuda`` matching the fleet line proves the WHEEL is right and
-    nothing about the HOST. RunPod's driver is per-host: on a 570.211.01 host
-    (CUDA 12.8) a cu130 torch imports fine, reports every version string
-    correctly, and then dies on the first allocation ~20 minutes later, which
-    reads as a torch bug. So the check is a real allocation, and the result is
-    part of the environment table.
-    """
     from gen_worker.cuda_probe import classify_probe_failure, probe_cuda
 
     out: dict[str, Any] = {}
@@ -454,7 +367,6 @@ def _usability(env: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _usability_text(env: Mapping[str, Any]) -> str:
-    """One line: a real allocation either worked, or why it did not."""
     usable = env.get("cuda_usable")
     if usable is None:
         return "not probed"
@@ -504,14 +416,7 @@ def assert_fleet_line(
     endpoint_dists: Sequence[str] = (),
     stream: Any = None,
 ) -> dict[str, Any]:
-    """Abort unless this interpreter is on the fleet's torch/CUDA line.
-
-    Call it as the FIRST act of any rig, harness, probe or scoring script. On
-    success it prints the resolved environment table (so every report carries
-    it) and returns that environment as a dict. On mismatch it raises
-    :class:`FleetLineMismatch`; when no authority is reachable it raises
-    :class:`FleetLineUnknown`. Both are fatal by design — there is no override.
-    """
+    """Abort unless this interpreter is on the fleet's torch/CUDA line."""
     out = stream if stream is not None else sys.stderr
     line = resolve_fleet_line(start=start, endpoint_dists=endpoint_dists)
     env = resolve_environment()
@@ -534,16 +439,6 @@ def assert_fleet_line(
                 f"{line.cuda_text}"
             )
 
-    # A HOST fault is reported before a WHEEL fault even when both are present:
-    # on a too-old driver every version string above can be perfect while nothing
-    # allocates, and "rebuild the environment" is then the wrong instruction.
-    # NOT gated on `driver` any more: reading a driver version means
-    # `nvidia-smi` RAN, and a host broken enough that it does not is exactly the
-    # host this refusal is for — the check was skipping the machines it was
-    # written for. The carve-out it was carrying ("no card at all is a different
-    # mistake") survives, on a signal a broken diagnostic cannot fake: the probe
-    # says WHICH failure this is, and only a host that has a driver to fail can
-    # answer `driver_too_old`/`cuda_error`.
     from .cuda_probe import CARDLESS_PROBE_CLASSES
 
     if (env.get("cuda_usable") is False
@@ -582,8 +477,7 @@ def assert_fleet_line(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """``python -m gen_worker.rigcheck`` — 0 on the line, 90 off it, 91 when the
-    line is installed but the HOST cannot run it (repair or re-roll)."""
+    """``python -m gen_worker.rigcheck`` — 0 on the line, 90 off it, 91 when the line is installed but the HOST cannot run it (repair or re-roll)."""
     args = list(sys.argv[1:] if argv is None else argv)
     start = args[0] if args else None
     try:

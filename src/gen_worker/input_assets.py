@@ -1,13 +1,4 @@
-"""Fail-closed materialization of RunJob input ``Asset`` values (v4).
-
-Canonical MessagePack keeps the caller's opaque stored refs. Tensorhub ships an
-ordered, credential-free ``RunJob.input_assets`` manifest; the assigned worker
-validates the payload's private refs against it, resolves fresh transport URLs
-once per attempt via the worker capability, downloads and verifies the exact
-attested bytes, and sets only worker-local ``local_path`` on every occurrence.
-Caller HTTP(S) refs stay public transports and never enter the manifest.
-Capabilities, URLs, opaque refs, and resolver bodies never enter errors/logs.
-"""
+"""Fail-closed materialization of RunJob input ``Asset`` values (v4)."""
 
 from __future__ import annotations
 
@@ -37,30 +28,11 @@ from .url_fetch import DEFAULT_MAX_BYTES, open_guarded_stream
 
 logger = logging.getLogger(__name__)
 
-# ONE number for tensorhub's media cap, owned by url_fetch. open_guarded_stream
-# deliberately caps nothing ("the caller owns the read and its byte cap"), so
-# this path enforces it here — but must not re-decide the value.
 _DEFAULT_MAX_BYTES = DEFAULT_MAX_BYTES
-# Per-CALL socket budgets, not kill decisions: neither ends work that is
-# advancing, and without them a hub or an origin that accepts a connection and
-# then says nothing pins a request thread for the life of the pod.
-# `_DOWNLOAD_TIMEOUT_S` is the read budget handed to `url_fetch`, which owns the
-# byte cap; `_RESOLVE_TIMEOUT_S` bounds one small JSON round trip to the hub and
-# is deliberately the shorter of the two.
 _DOWNLOAD_TIMEOUT_S = 120
 _RESOLVE_TIMEOUT_S = 30
-# The resolver's answer is read into memory whole, so its size is the bound.
-# The threat is the hub answering with an unbounded body (compromised, wedged,
-# or simply an origin that is not the hub — this is an HTTP response, and
-# nothing about it is verified before it is read). 8 MiB is orders above any
-# real manifest; `+ 1` at the read sites is how over-cap is DETECTED rather
-# than silently truncated into a parse error.
 _MAX_RESOLVE_BODY = 8 << 20
-# Recursion bound on the `Asset` walk, whose input is endpoint/tenant-supplied
-# and may nest arbitrarily. Without it a hostile or looping manifest exhausts
-# the interpreter stack, which is a process death, not an exception.
 _MAX_WALK_DEPTH = 32
-# Streaming read buffer, not a bound — it refuses nothing.
 _CHUNK = 1 << 20
 _INPUT_DIR_PREFIX = "gen-worker-inputs-"
 _RESOLVE_PATH = "/api/v1/worker/input-assets/resolve"
@@ -77,7 +49,6 @@ _EXT_BY_MIME = {
     "audio/wav": ".wav",
 }
 
-# (url, headers, body) -> (http_status, response_body). Injectable for tests.
 ResolveTransport = Callable[[str, Mapping[str, str], bytes], tuple[int, bytes]]
 
 
@@ -131,8 +102,8 @@ class _AssetOccurrence:
 @dataclass
 class _DownloadUnit:
     occurrences: list[_AssetOccurrence]
-    entry: InputManifestEntry | None = None  # None = public caller transport
-    url: str = ""  # transport ref (public) or resolver-minted URL (private)
+    entry: InputManifestEntry | None = None
+    url: str = ""
 
 
 @dataclass
@@ -163,10 +134,6 @@ def inputs_dir_for_request(request_id: str, attempt: int = 0) -> Path:
 def _iter_asset_occurrences(
     obj: Any, path: str = "$", depth: int = 0
 ) -> Iterator[_AssetOccurrence]:
-    """Deterministic traversal: msgspec struct declaration order, list/tuple
-    index, lexicographically sorted string map keys. Unordered containers and
-    non-string map keys are defensively rejected (build discovery already
-    refuses such schemas)."""
     if depth > _MAX_WALK_DEPTH:
         raise ValidationError("input_asset_payload_too_deep: nested Asset walk exceeded its limit")
     if isinstance(obj, Asset):
@@ -186,8 +153,6 @@ def _iter_asset_occurrences(
                     "inside an unordered set/frozenset"
                 )
     elif isinstance(obj, dict):
-        # Map keys may contain caller data: error paths use sorted positions,
-        # never the keys themselves.
         for index, key in enumerate(_sorted_string_keys(obj, path)):
             yield from _iter_asset_occurrences(obj[key], f"{path}[{index}]", depth + 1)
 
@@ -202,7 +167,6 @@ def _sorted_string_keys(obj: dict, path: str) -> list[str]:
 
 
 def _iter_assets(obj: Any, depth: int = 0) -> Iterator[Asset]:
-    """Compatibility iterator: ordered, duplicate-preserving Asset objects."""
     for occurrence in _iter_asset_occurrences(obj, depth=depth):
         yield occurrence.asset
 
@@ -218,12 +182,6 @@ def _declared_kind(asset: Asset) -> str:
 
 
 def _classify_ref(ref: str, path: str) -> bool:
-    """True = private opaque stored ref; False = public HTTP(S) transport.
-
-    Mirrors tensorhub's submit-time classifier so ``input_payload`` and the
-    manifest can never disagree: padded/empty refs and every non-HTTP scheme
-    are invalid.
-    """
     value = str(ref or "")
     if not value or value != value.strip():
         raise ValidationError(f"invalid_input_asset_ref: {path} ref is empty or padded")
@@ -312,13 +270,8 @@ def _decode_image(path: Path, occurrences: list[_AssetOccurrence]) -> str:
             with Image.open(path) as image:
                 width, height = image.size
                 mime = str(image.get_format_mimetype() or "").lower()
-                # Tensorhub's assignment-specific bounds are intentionally
-                # tighter than Pillow's process-global bomb threshold. Check
-                # them from the header before any pixel buffer is allocated.
                 _validate_image_dimensions(occurrences, int(width), int(height))
                 image.verify()
-            # ``verify`` checks container integrity without decoding pixels.
-            # Reopen and load to prove the first image is actually decodable.
             with Image.open(path) as image:
                 image.load()
     except ValidationError:
@@ -387,9 +340,6 @@ def _resolve_private_urls(
     resolve_transport: ResolveTransport | None,
     cancel_check: Callable[[], bool] | None,
 ) -> list[str]:
-    """Exactly one bounded resolver POST per attempt. Returns URLs aligned to
-    ``manifest`` order. Response identity must byte-match the dispatched
-    manifest; anything else is a platform malfunction (retryable)."""
     _check_cancel(cancel_check)
     if not file_base_url or not capability_token:
         raise RetryableError(
@@ -412,8 +362,6 @@ def _resolve_private_urls(
         ) from None
     _check_cancel(cancel_check)
     if status == 409:
-        # This attempt is no longer the assigned one (or its manifest moved):
-        # stop without publishing anything; the hub owns the successor.
         raise CanceledError("canceled")
     if status != 200:
         raise RetryableError(
@@ -463,10 +411,6 @@ def _parse_rfc3339(value: str) -> bool:
 
 
 def _internal_object_hosts() -> frozenset[str]:
-    """GEN_WORKER_INTERNAL_OBJECT_HOSTS: exact hostnames of a deployment's
-    internal object store (datacenter MinIO/NFS gateway). Honored ONLY for
-    resolver-minted private-input URLs; caller public transports always face
-    the full SSRF policy."""
     raw = os.environ.get("GEN_WORKER_INTERNAL_OBJECT_HOSTS", "")
     return frozenset(host.strip().lower() for host in raw.split(",") if host.strip())
 
@@ -508,12 +452,7 @@ def _download(
                 f"input_asset_too_large: {occurrences[0].path} exceeds its byte cap"
             )
         cap = entry.size_bytes
-    # Redirects go through the guarded opener, which re-applies the SSRF policy
-    # to EVERY hop: `urlopen` follows them silently, so the pre-flight
-    # `_validate_transport_url` only covers hop 0 and a caller transport that
-    # 302s at the metadata service would otherwise be reachable. Private
-    # (resolver-minted, blake3-attested) units keep their internal-object-host
-    # exemption, which is the whole reason that env var exists.
+    # Redirects go through the guarded opener, which re-applies the SSRF policy to EVERY hop: urlopen follows them silently, so a pre-flight URL validation covers only hop 0 and a caller transport that 302s to the metadata service would otherwise be reachable. Resolver-minted private units keep their internal-object-host exemption.
     resolver_minted = entry is not None
     try:
         fd, tmp_name = tempfile.mkstemp(prefix=f"input-{index}-", suffix=".part", dir=dest_dir)
@@ -533,9 +472,6 @@ def _download(
                 extra_allowed_hosts=(
                     tuple(_internal_object_hosts()) if resolver_minted else ()
                 ),
-                # This module's own reference to the destination policy, so
-                # the pre-flight check and the per-hop check are provably the
-                # same function.
                 is_blocked=_url_is_blocked,
             ) as response:
                 raw_length = str(response.headers.get("Content-Length") or "").strip()
@@ -640,11 +576,7 @@ def _remove_scope_state(state: _ScopeState) -> None:
 
 
 def cleanup_input_assets(request_id: str, attempt: int = 0) -> None:
-    """Remove one attempt's materialized inputs and clear every assigned path.
-
-    Scopes are keyed by (request_id, attempt): cleaning attempt N+1 can never
-    remove attempt N's directory, and vice versa.
-    """
+    """Remove one attempt's materialized inputs and clear every assigned path."""
     key = _scope_key(request_id, attempt)
     with _scope_lock:
         state = _scope_states.pop(key, None)
@@ -677,8 +609,6 @@ def _collect_units(
     occurrences: list[_AssetOccurrence],
     manifest: Sequence[InputManifestEntry],
 ) -> list[_DownloadUnit]:
-    """Classify occurrences, fence the private sequence against the dispatched
-    manifest, and return download units in payload first-occurrence order."""
     units: list[_DownloadUnit] = []
     public_by_url: dict[str, _DownloadUnit] = {}
     private_by_key: dict[tuple[str, str], _DownloadUnit] = {}
@@ -700,9 +630,6 @@ def _collect_units(
                 units.append(unit)
             unit.occurrences.append(occurrence)
 
-    # The ordered unique private sequence must equal the dispatched manifest
-    # exactly (count, order, ref, kind) with valid immutable metadata BEFORE
-    # any resolver call or GET. A mismatch is a non-retryable contract breach.
     private_sequence = list(private_by_key)
     manifest_sequence = [(entry.source_ref, entry.kind) for entry in manifest]
     if private_sequence != manifest_sequence:
@@ -730,14 +657,7 @@ def materialize_input_assets(
     cancel_check: Callable[[], bool] | None = None,
     resolve_transport: ResolveTransport | None = None,
 ) -> int:
-    """Materialize all ordered input assets transactionally.
-
-    Returns the number of distinct downloads. Duplicate occurrences retain
-    their payload positions and share one worker-owned path. Every decoded
-    Asset field is preserved — only ``local_path`` is assigned. Any failure
-    clears assigned paths and removes the whole attempt directory before
-    propagating a stable causal error.
-    """
+    """Materialize all ordered input assets transactionally."""
     cleanup_input_assets(request_id, attempt)
     occurrences = list(_iter_asset_occurrences(payload))
     for occurrence in occurrences:
@@ -761,9 +681,6 @@ def materialize_input_assets(
             "input_asset_attempt_invalid: private inputs require a positive attempt"
         )
 
-    # Validate the complete public transport set before the resolver call and
-    # before downloading the first item, so a later blocked ref cannot cause
-    # partial materialization work.
     for unit in units:
         if unit.entry is None:
             _validate_transport_url(unit.url, unit.occurrences[0].path)

@@ -42,10 +42,9 @@ from gen_worker.models.fill_plan import FillPlan, PlannedObject, plan_fill
 from gen_worker.models.refs import WireRef
 from gen_worker.models.store import _DISK_GC_MARGIN_BYTES, ModelStore
 
-# The incident, /1000. Ratio-preserving, so the arithmetic under test is identical.
 TREE_BYTES = 104_956_706
 RESIDENT_BYTES = 86_200_000
-REMAINING_BYTES = TREE_BYTES - RESIDENT_BYTES  # ~18.76 MB
+REMAINING_BYTES = TREE_BYTES - RESIDENT_BYTES
 
 
 async def _emit(_msg: Any) -> None:
@@ -61,7 +60,6 @@ def _store(tmp_path: Path, free: int) -> ModelStore:
 
 
 def _partial_plan() -> FillPlan:
-    """One resident object and one missing one, summing to the whole tree."""
     return FillPlan(
         present=(PlannedObject("sha256:" + "a" * 64, RESIDENT_BYTES),),
         missing=(PlannedObject("sha256:" + "b" * 64, REMAINING_BYTES),),
@@ -75,19 +73,13 @@ def _cold_plan() -> FillPlan:
 def test_a_partially_resident_ref_passes_on_its_REMAINING_bytes(
     tmp_path: Path,
 ) -> None:
-    """THE REGRESSION. Free space covers what is missing but not the whole tree.
-
-    This is exactly the incident's shape: most of the tree is already down, the
-    disk cannot fit a second copy of it, and the fetch has only a little left to
-    write. Before pgw#1596 this raised; it must now pass.
-    """
-    free = REMAINING_BYTES + _DISK_GC_MARGIN_BYTES  # enough for the remainder
+    """THE REGRESSION."""
+    free = REMAINING_BYTES + _DISK_GC_MARGIN_BYTES
     assert free < TREE_BYTES + _DISK_GC_MARGIN_BYTES, (
         "the scenario is only meaningful when the WHOLE tree would NOT fit"
     )
     store = _store(tmp_path, free)
 
-    # No raise == the gate charged the remainder, not the tree.
     asyncio.run(
         store._ensure_disk_headroom(WireRef("acme/model@prod"), _partial_plan())
     )
@@ -96,16 +88,13 @@ def test_a_partially_resident_ref_passes_on_its_REMAINING_bytes(
 def test_the_gate_still_refuses_when_even_the_REMAINDER_does_not_fit(
     tmp_path: Path,
 ) -> None:
-    """The twin one input away. Subtracting resident bytes must not disarm it."""
+    """The twin one input away."""
     store = _store(tmp_path, REMAINING_BYTES // 2)
 
     with pytest.raises(InsufficientDiskError) as caught:
         asyncio.run(
             store._ensure_disk_headroom(WireRef("acme/model@prod"), _partial_plan())
         )
-    # required_bytes is the REMAINDER, and the message shows its working — the
-    # old message named only the whole tree, which is why an 86 GB-resident
-    # refusal read as a 105 GB shortfall.
     assert caught.value.required_bytes == REMAINING_BYTES
     text = str(caught.value)
     assert str(REMAINING_BYTES) in text
@@ -117,7 +106,7 @@ def test_the_gate_still_refuses_when_even_the_REMAINDER_does_not_fit(
 def test_a_cold_disk_is_unchanged_and_still_charges_the_whole_tree(
     tmp_path: Path,
 ) -> None:
-    """Nothing resident means remaining == total. The first-pass case must not move."""
+    """Nothing resident means remaining == total."""
     store = _store(tmp_path, TREE_BYTES // 2)
 
     with pytest.raises(InsufficientDiskError) as caught:

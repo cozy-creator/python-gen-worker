@@ -1,22 +1,4 @@
-"""gw#627: curated turbo LoRA onto the fp8 w8a8 lane — the live sdxl fatal.
-
-The failure: pushing a Lightning adapter through raw diffusers/peft
-``load_lora_weights`` onto a UNet whose Linears are ``_Fp8ScaledLinear``
-(pertensor) is fatal — peft rejects the module class. The sanctioned route is
-the additive branch via ``AdapterResidency``, which must carry the 49 CONV LoRA
-pairs every curated sdxl distill adapter ships.
-
-These tests run the REAL codepath end-to-end on CPU: a real (tiny)
-diffusers ``UNet2DConditionModel`` with real ``_Fp8ScaledLinear`` pertensor
-swaps, an adapter in the exact live key grammar (kohya-flat diffusers
-naming: ``lora_unet_*.lora_down.weight`` / ``.lora_up.weight`` /
-``.alpha``, conv pairs 4-d), driven through
-``AdapterResidency.activate/deactivate`` with the compiled marker set —
-asserting the branch carries the adapter and peft is never consulted for
-the denoiser half. Forward numerics for the conv branch run on the plain
-lane (CPU has no ``torch._scaled_mm``; the Fp8ScaledLinear branch addend is
-unchanged here).
-"""
+"""gw#627: curated turbo LoRA onto the fp8 w8a8 lane — the live sdxl fatal."""
 
 from __future__ import annotations
 
@@ -52,8 +34,6 @@ def _tiny_unet() -> Any:
 
 
 def _swap_scaled(unet: Any, path: str) -> Any:
-    """Replace one plain Linear with a REAL _Fp8ScaledLinear (pertensor —
-    the live L4 mode) carrying the quantized form of its weights."""
     cls = fp8_scaled_linear_class()
     parent_path, _, leaf = path.rpartition(".")
     parent = unet.get_submodule(parent_path) if parent_path else unet
@@ -73,8 +53,6 @@ def _swap_scaled(unet: Any, path: str) -> Any:
 
 
 class _PeftRecorder:
-    """Stub diffusers-pipeline LoRA surface: every call is recorded; the
-    denoiser half must never arrive here."""
 
     def __init__(self) -> None:
         self.calls: list = []
@@ -84,10 +62,6 @@ class _PeftRecorder:
 
 
 class _Pipe:
-    """Minimal pipeline holding the real unet — plus the REAL diffusers SDXL
-    ``lora_state_dict`` converter, so normalization runs the exact live path
-    (which emits legacy attn-processor names for kohya-flat sdxl adapters —
-    the gw#627 second live find; normalize must fall back to raw keys)."""
 
     def __init__(self, unet: Any) -> None:
         self.unet = unet
@@ -106,8 +80,6 @@ def _install_real_converter() -> None:
 _install_real_converter()
 
 
-# Live key grammar: kohya-flat diffusers naming, exactly what
-# sdxl_lightning_4step_lora.safetensors ships (rank 64 there; small here).
 _RANK = 8
 
 
@@ -120,7 +92,6 @@ def _turbo_style_adapter(unet: Any) -> Dict[str, Any]:
         sd[f"lora_unet_{flat}.lora_up.weight"] = b
         sd[f"lora_unet_{flat}.alpha"] = torch.tensor(float(_RANK))
 
-    # Linear pair onto the (quantized) attention projection.
     q = unet.get_submodule(
         "down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_q")
     pair(
@@ -128,9 +99,6 @@ def _turbo_style_adapter(unet: Any) -> Dict[str, Any]:
         torch.randn(_RANK, q.in_features) * 0.05,
         torch.randn(q.out_features, _RANK) * 0.05,
     )
-    # Conv pairs — the gw#627 gap: downsampler conv + resnet conv, 4-d
-    # halves at the base conv's kernel size (the 49-pair class every
-    # curated sdxl distill adapter carries).
     ds = unet.get_submodule("down_blocks.0.downsamplers.0.conv")
     pair(
         "down_blocks_0_downsamplers_0_conv",
@@ -158,16 +126,12 @@ def _prepared(unet: Any, name: str = "turbo-lightning-4step") -> PreparedAdapter
 
 
 def test_turbo_adapter_rides_the_branch_on_a_w8a8_pertensor_unet() -> None:
-    """The exact live shape: compiled w8a8 pipeline, quantized attention
-    Linears, conv-bearing curated adapter — activate must land the whole
-    adapter on the additive branch, never on peft."""
+    """The exact live shape: compiled w8a8 pipeline, quantized attention Linears, conv-bearing curated adapter — activate must land the whole adapter on the additive branch, never on peft."""
     unet = _tiny_unet()
     scaled = _swap_scaled(
         unet, "down_blocks.1.attentions.0.transformer_blocks.0.attn1.to_q")
     unet._cozy_w8a8_mode = "pertensor"
     pipe = _Pipe(unet)
-    # The arming path (Compile.lora_bucket / apply_lora_execution_lane) pre-enables
-    # canonical zeroed branches; the compiled marker forbids resizes.
     w8a8_lora.enable_lora_branches(unet, 16)
     pipe._cozy_compile = object()
 
@@ -177,19 +141,14 @@ def test_turbo_adapter_rides_the_branch_on_a_w8a8_pertensor_unet() -> None:
     assert not pipe.load_lora_weights.calls, "denoiser half must never hit peft"
     assert not pipe.set_adapters.calls
     assert w8a8_lora.branches_active(unet)
-    assert w8a8_lora.branch_bucket(unet) == 16  # no resize under compile
-    # Quantized Linear carries the pair in its registered buffers.
+    assert w8a8_lora.branch_bucket(unet) == 16
     assert float(scaled.lora_b.abs().sum()) > 0
-    # Conv branches carry theirs as __dict__ attrs (4-d).
     ds = unet.get_submodule("down_blocks.0.downsamplers.0.conv")
     assert ds.lora_a.dim() == 4 and float(ds.lora_b.abs().sum()) > 0
-    # Uncovered modules keep canonical zeroed slots.
     r2 = unet.get_submodule("down_blocks.0.resnets.0.conv2")
     assert getattr(r2, "lora_a", None) is not None
     assert float(r2.lora_b.abs().sum()) == 0
 
-    # Deactivate zeroes B (graph stays); re-activate repopulates — the
-    # th#1036 "second request contributes nothing" class must stay dead.
     residency.deactivate("pipeline", pipe, request_id="t1")
     assert float(scaled.lora_b.abs().sum()) == 0
     assert float(ds.lora_b.abs().sum()) == 0
@@ -199,8 +158,7 @@ def test_turbo_adapter_rides_the_branch_on_a_w8a8_pertensor_unet() -> None:
 
 
 def test_conv_branch_changes_output_and_clears_bit_exact() -> None:
-    """Plain-lane numerics on CPU: the conv branch addend is real, and a
-    cleared branch restores the exact baseline output."""
+    """Plain-lane numerics on CPU: the conv branch addend is real, and a cleared branch restores the exact baseline output."""
     unet = _tiny_unet().eval()
     pipe = _Pipe(unet)
     sample = torch.randn(1, 4, 16, 16)

@@ -1,29 +1,4 @@
-"""A cancel that lands around an acquisition's GRANT must not walk away holding
-it.
-
-Mechanism: wrapping the awaitable in its OWN task (as `IntentRegistry.guard_await`
-did) means that when the caller is cancelled in the window where that task has
-already completed, asyncio delivers CancelledError to the caller and the
-completed result is discarded. `ensure_local` then never sets `acquired = True`,
-so its `finally` never releases the per-ref lock — held, forever, by nobody.
-Every later materialization of that ref blocks on it, and because
-`_reconcile_pass` is serialized the worker silently stops converging desired
-residency for good.
-
-The canceller is ordinary: `Lifecycle.on_message` preempts the residency
-reconcile on every run_job, so a tenant job arriving at the instant a reconcile
-was granted the ref lock wedges that worker permanently.
-
-Three sibling call sites have the identical shape — `_intent_lock`, the exclusive
-group permits, and the per-job GPU permit (a leak there costs the worker a GPU
-slot per cancelled job until it can run nothing at all).
-
-Why this sweeps offsets instead of naming one: the defect lives in HOW MANY task
-hops sit between the grant and the caller resuming, and the fix removes a hop.
-A test pinned to one offset would have measured the bug before the fix and an
-empty window after it. Cancelling at every scheduling offset across the grant is
-deterministic (asyncio steps, not wall clock) and stays honest across the fix.
-"""
+"""A cancel that lands around an acquisition's GRANT must not walk away holding it."""
 
 from __future__ import annotations
 
@@ -35,9 +10,6 @@ from gen_worker.models.store import ModelStore
 from gen_worker.lifecycle_intents import IntentRegistry
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
-# Enough scheduling steps to cover the grant and several hops past it. The
-# pre-fix leak sits at the offset where the wrapper task had completed and the
-# caller had not yet resumed.
 _OFFSETS = range(6)
 
 
@@ -56,15 +28,14 @@ def test_no_cancel_offset_around_the_ref_lock_grant_can_wedge_the_ref(
     tmp_path: Path,
 ) -> None:
     async def preempt_at(offset: int, cache_dir: Path) -> bool:
-        """Preempt a queued materialization ``offset`` scheduling steps after the
-        ref lock is handed to it. Returns whether the lock was left held."""
+        """Preempt a queued materialization ``offset`` scheduling steps after the ref lock is handed to it."""
         registry = IntentRegistry("release-1", [])
         store = ModelStore(_noop_send, cache_dir=cache_dir)
         store.bind_intent_registry(registry)
         ref = WireRef("owner/model@latest")
 
         lock = store._lock(ref)
-        await lock.acquire()  # a sibling materialization owns the ref
+        await lock.acquire()
 
         preempted = asyncio.create_task(store.ensure_local(ref))
         for _ in range(8):
@@ -80,7 +51,7 @@ def test_no_cancel_offset_around_the_ref_lock_grant_can_wedge_the_ref(
                 "sweep never reaches the grant it is about to preempt"
             )
 
-        lock.release()  # granted to the preempted materialization
+        lock.release()
         for _ in range(offset):
             await asyncio.sleep(0)
         preempted.cancel()

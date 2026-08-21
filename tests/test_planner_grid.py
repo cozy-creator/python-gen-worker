@@ -1,28 +1,3 @@
-"""The publish path chunks on the Rust planner's grid, not the retired packer.
-
-`hubio/client.py::publish_v2` admits every file it publishes through
-`LocalCAS.ingest_file`, which until this lane planned with the greedy
-small-tensor packer upstream deleted at tensorfs `00c57c1` ("one chunker — the
-legacy Python data plane is gone"). The mixed-CAS ruling (Paul, 2026-08-16)
-says verbatim "one chunker (the Rust planner is canonical)"; inside tensorfs
-that was true and in the fleet it was not, so every fleet upload cut its
-objects where nothing else in the system cuts them and deduped against store
-content only by accident.
-
-The oracle is upstream's own released conformance corpus, `spec/v1/planner-vectors`,
-vendored under `tests/testdata/planner-vectors/`. It is language-neutral on
-purpose — Rust, Go and Python decode the same fixtures and must produce the
-same ordered regions and the same object digests.
-
-MEASURED before this lane (all twelve cases, `plan_chunks` vs the corpus):
-3/12 disagreed — `safetensors-two-tensors` packed a 3-byte and a 5-byte tensor
-into one 8-byte object where the planner emits two, and BOTH GGUF cases were
-planned as raw blobs because the retired module had no GGUF planner at all.
-"""
-
-# pgw#1365: `ingest_file` planned with the greedy packer upstream deleted at
-# tensorfs `00c57c1`, so fleet uploads cut objects on a non-canonical grid.
-
 from __future__ import annotations
 
 import hashlib
@@ -55,8 +30,6 @@ UPSTREAM = Path(
     os.environ.get("TENSORFS_REPO", Path.home() / "cozy" / "tensorfs")
 ).expanduser()
 
-# The corpus as ONE number, so a hand-edit of any fixture is red offline and in
-# CI, where no sibling checkout exists. Regenerate with `_corpus_digest()`.
 PLANNER_VECTORS_DIGEST = "c180e5ebf28b96b475f75059ef914acaecf886e26d3b1e0f2dfb7a3f32449983"
 
 
@@ -81,11 +54,6 @@ def _source(case: dict) -> bytes:
 
 def _Bytes(data: bytes) -> BinaryIO:
     return io.BytesIO(data)
-
-
-# ---------------------------------------------------------------------------
-# 1. The corpus, object for object
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("case", _cases(), ids=lambda c: c["name"])
@@ -116,15 +84,7 @@ def test_every_planner_vector_agrees_object_for_object(case: dict) -> None:
 
 
 def test_the_corpus_is_the_one_upstream_released() -> None:
-    """The vendored corpus is pinned by digest AND compared to the sibling.
-
-    Two layers, because either alone passes on a tree the other refuses. The
-    digest is the offline layer and it runs everywhere. The sibling comparison
-    runs only where a tensorfs checkout exists — and where the DIRECTORY
-    resolves but the corpus does not, it FAILS rather than skipping, because a
-    path that silently stops matching is how a rename turns a gate into a
-    `continue` (WORKSPACE-GIT-POLICY, "read the COUNT, not the verdict").
-    """
+    """The vendored corpus is pinned by digest AND compared to the sibling."""
 
     assert _corpus_digest(VECTORS) == PLANNER_VECTORS_DIGEST, (
         "the vendored planner-vector corpus was edited. It is upstream's "
@@ -133,8 +93,6 @@ def test_the_corpus_is_the_one_upstream_released() -> None:
 
     upstream = UPSTREAM / "spec" / "v1" / "planner-vectors"
     if not UPSTREAM.is_dir():
-        # Path-free ON PURPOSE: pgw#966's census keys a skip by its reason, so a
-        # machine-specific path would make this row a different key on every box.
         pytest.skip("no tensorfs checkout beside this repo (set TENSORFS_REPO)")
     assert upstream.is_dir(), (
         f"{UPSTREAM} exists but {upstream} does not. The corpus moved or the "
@@ -149,19 +107,8 @@ def test_the_corpus_is_the_one_upstream_released() -> None:
     assert compared == 15, f"compared {compared} files, expected the whole 15-file corpus"
 
 
-# ---------------------------------------------------------------------------
-# 2. The drift, named
-# ---------------------------------------------------------------------------
-
-
 def test_the_retired_greedy_pack_is_gone() -> None:
-    """The concrete drift: two small tensors are two objects, not one pack.
-
-    The retired `_tensor_lengths` accumulated tensors below the 64 MiB floor
-    into one object, so this fixture came out `(113, 8)`. A packed object spans
-    two tensors, owns neither's digest, and therefore cannot be inherited by
-    `TensorWriter` or shared with any other packaging of the same weights.
-    """
+    """The concrete drift: two small tensors are two objects, not one pack."""
 
     case = next(c for c in _cases() if c["name"] == "safetensors-two-tensors")
     raw = _source(case)
@@ -170,20 +117,12 @@ def test_the_retired_greedy_pack_is_gone() -> None:
 
 @pytest.mark.parametrize("name", ["gguf-v2-f32", "gguf-v3-q4-0"])
 def test_gguf_is_planned_as_gguf_and_not_as_a_raw_blob(name: str) -> None:
-    """The retired module had no GGUF planner: every GGUF fell through to the
-    fixed grid. pgw#1344 already writes GGUFs on the planner grid through
-    `TensorWriter`; publishing one re-cut it on a grid that shared nothing."""
 
     case = next(c for c in _cases() if c["name"] == name)
     raw = _source(case)
     planned = plan(_Bytes(raw), len(raw))
     assert planned.planner == GGUF_V1
     assert len(planned.regions) > 1
-
-
-# ---------------------------------------------------------------------------
-# 3. The writer and the planner cut in the same places
-# ---------------------------------------------------------------------------
 
 
 def _assemble(cas: LocalCAS, entry: FileEntry) -> bytes:
@@ -200,10 +139,7 @@ def _write_safetensors(
 
 
 def test_the_writer_and_the_planner_cut_in_the_same_places(tmp_path: Path) -> None:
-    """`TensorWriter` emits the seal planner's grid (upstream asserts that
-    against the real Rust planner). Re-planning its output must reproduce its
-    object list exactly — otherwise a conversion's carefully inherited objects
-    are re-cut the moment the result is published."""
+    """`TensorWriter` emits the seal planner's grid (upstream asserts that against the real Rust planner)."""
 
     cas = LocalCAS(tmp_path / "cas")
     entry = _write_safetensors(
@@ -226,9 +162,7 @@ def test_the_writer_and_the_planner_cut_in_the_same_places(tmp_path: Path) -> No
 
 
 def test_the_writer_and_the_planner_agree_on_gguf_padding(tmp_path: Path) -> None:
-    """GGUF's per-tensor alignment padding is its own object. Folding it into
-    the tensor is what stops a GGUF sharing tensor objects with a safetensors
-    twin, so the planner and the writer have to isolate it identically."""
+    """GGUF's per-tensor alignment padding is its own object."""
 
     cas = LocalCAS(tmp_path / "cas")
     header = gguf.GGUFHeader(
@@ -242,7 +176,6 @@ def test_the_writer_and_the_planner_agree_on_gguf_padding(tmp_path: Path) -> Non
         tensors=(),
     )
     writer = TensorWriter(cas, "model.gguf", gguf_header=header)
-    # 7 and 13 bytes both need padding to the 32-byte alignment.
     writer.add("a", "I8", (7,), b"\x01" * 7)
     writer.add("b", "I8", (13,), b"\x02" * 13)
     entry = writer.finish()
@@ -256,15 +189,8 @@ def test_the_writer_and_the_planner_agree_on_gguf_padding(tmp_path: Path) -> Non
     )
 
 
-# ---------------------------------------------------------------------------
-# 4. Blobs: the control, and the one deviation
-# ---------------------------------------------------------------------------
-
-
 def test_a_below_grid_blob_still_packs_as_one_chunkless_object() -> None:
-    """The control. Every non-tensor file at or below the grid constant — every
-    `config.json`, every small image — is one whole object with no chunks, which
-    is exactly `blob-v1`."""
+    """The control."""
 
     payload = b"{\n  \"not\": \"a tensor container\"\n}\n" * 100
     assert plan(_Bytes(payload), len(payload)).planner == BLOB_V1
@@ -273,16 +199,11 @@ def test_a_below_grid_blob_still_packs_as_one_chunkless_object() -> None:
 
 
 def test_the_oversized_blob_deviation_is_the_only_one() -> None:
-    """The plan is faithful; the v1-manifest ADAPTER deviates above 64 MiB, and
-    only there. tensorhub's publish-v2 lane promotes with a single PUT
-    (`internal/s3/sha256_cas.go`, `verified promote: ... 0..67108864`), so a
-    whole-blob entry for a large `.so` would be refused terminally. pgw#1366
-    closes it by putting publish-v2 grants on th#2064's multipart blob lane."""
+    """The plan is faithful; the v1-manifest ADAPTER deviates above 64 MiB, and only there."""
 
     size = MAX_OBJECT_SIZE * 2 + 7
 
     class _Sparse:
-        """A multi-GB blob without the multi GB: reads answer from nowhere."""
 
         _at = 0
 
@@ -303,15 +224,7 @@ def test_the_oversized_blob_deviation_is_the_only_one() -> None:
 
 
 def test_the_duplicate_metadata_key_gap_is_named() -> None:
-    """The one structural refusal this pure-Python port cannot see.
-
-    `gguf.rs::parse` refuses a duplicate metadata key; `gguf.read_header` skips
-    values without recording keys, so we plan the tensor grid where upstream
-    plans `blob-v1`. Coverage is exact and the manifest is valid either way —
-    the cost is a dedup miss on an already-malformed file. This test asserts
-    the CURRENT behaviour so closing the gap is a deliberate edit here, not a
-    surprise.
-    """
+    """The one structural refusal this pure-Python port cannot see."""
 
     entry = gguf.encode_symbol(b"k") + struct.pack("<II", 4, 0)
     raw = gguf.encode_prefix(3, 0, 2) + entry + entry
@@ -322,14 +235,8 @@ def test_the_duplicate_metadata_key_gap_is_named() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# 5. The publish path itself, and what the grid buys
-# ---------------------------------------------------------------------------
-
-
 def test_ingest_file_admits_on_the_planner_grid(tmp_path: Path) -> None:
-    """`hubio/client.py::publish_v2` calls exactly this. Nothing else in the
-    publish protocol decides where a fleet upload's objects begin."""
+    """`hubio/client.py::publish_v2` calls exactly this."""
 
     case = next(c for c in _cases() if c["name"] == "safetensors-two-tensors")
     raw = _source(case)
@@ -344,17 +251,7 @@ def test_ingest_file_admits_on_the_planner_grid(tmp_path: Path) -> None:
 
 
 def test_a_second_publish_moves_only_the_tensors_that_changed(tmp_path: Path) -> None:
-    """The dedup consequence, measured rather than asserted.
-
-    Two checkpoints, sixteen 1 KiB tensors each, differing in exactly ONE of
-    them. On the planner's grid the second publish moves 1,024 bytes: one
-    object, the changed tensor. The header object is byte-identical because the
-    names, shapes and offsets did not move, so it deduplicates too.
-
-    Under the retired packer every tensor was below the 64 MiB floor, so all
-    sixteen packed into ONE object and the second publish moved all 16,384
-    bytes of the data section — 16x, and the ratio grows with tensor count.
-    """
+    """The dedup consequence, measured rather than asserted."""
 
     small = {f"t{i}": bytes([i + 1]) * 1024 for i in range(16)}
     a = tmp_path / "a.safetensors"
@@ -375,7 +272,7 @@ def test_a_second_publish_moves_only_the_tensors_that_changed(tmp_path: Path) ->
     assert [chunk.length for chunk in new] == [1024], (
         f"a one-tensor edit should move exactly that tensor; moved {new}"
     )
-    tensors = list(second.chunks[1:])  # chunk 0 is the header region
+    tensors = list(second.chunks[1:])
     assert len(tensors) == 16, "one object per tensor"
     assert all(chunk.length == 1024 for chunk in tensors)
     assert sum(chunk.length for chunk in tensors) == 16384

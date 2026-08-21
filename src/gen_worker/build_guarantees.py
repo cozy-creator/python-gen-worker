@@ -1,31 +1,4 @@
-"""What the SYNTHESIZED Dockerfile does, enumerated — and asked of custom ones.
-
-Tensorhub builds an endpoint image one of two ways. Dockerfile-LESS families get
-a Dockerfile the hub SYNTHESIZES, and every platform invariant is established
-there by writing a layer. A family that ships its own Dockerfile gets none of
-those layers: its file is author-owned content and the platform never injects
-into it. So on that path the platform can only VERIFY — and each invariant it
-forgets to verify is a guarantee that quietly holds on one path and not the
-other.
-
-This module is the mechanism: ONE enumerated registry of the steps a
-hand-written Dockerfile owes, each row naming where the platform itself refuses
-if the author skips it, and a checker any repo can run over its own endpoints::
-
-    python -m gen_worker.build_guarantees path/to/endpoint [more...]
-
-The SDK owns the registry's correctness; the author owns invoking the check —
-the same division as ``python -m gen_worker.cuda_root``, and for the same
-reason: three spellings of one platform requirement drift the moment a base
-image changes.
-
-SCOPE: a STATIC pre-flight over a source tree, not the authority —
-``aot_preconditions`` (in-image, at build) and tensorhub's post-build image
-inspection are, and every row here names which one. Its value is where it runs:
-in CI, on a diff, before a build exists. The registry enumerates what the
-synthesized file DOES, line by line, not what it INSTALLS — which is why some
-rows are not packages at all.
-"""
+"""What the SYNTHESIZED Dockerfile does, enumerated — and asked of custom ones."""
 
 from __future__ import annotations
 
@@ -36,36 +9,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Pattern, Sequence, Tuple
 
-#: Applicability: this step is owed by every hand-written Dockerfile.
 ALWAYS = "always"
-#: Applicability: owed only when an endpoint in the tree declares ``compile=``.
 DECLARES_AOT_EXPORT = "aot_export"
 
-#: A ``verified_by`` value naming an in-image ``aot_preconditions`` row. The
-#: registry test resolves the suffix against that module and asserts the row is
-#: reachable from ``static_mint_preconditions`` — a guarantee whose verifier is
-#: unwired is the very defect this registry exists to stop.
 PRECONDITION = "precondition:"
 
-#: `compile=Compile(...)` on an `@endpoint` is the AOT declaration. Conservative
-#: by construction: a family that hides the object behind an alias reads as
-#: no-AOT here and is still caught in-image by `aot_preconditions`, which asks
-#: the registered declaration rather than the source text.
 RE_AOT_DECLARATION = re.compile(r"compile\s*=\s*Compile\s*\(")
 
-# tensorhub/internal/builder/validation.go: reBuildKitCacheMount
 RE_BUILDKIT_CACHE_MOUNT = re.compile(r"(?i)--mount\s*=\s*type\s*=\s*cache\b")
 
 
 @dataclass(frozen=True)
 class Guarantee:
-    """One step the synthesized Dockerfile takes, and the custom path's answer.
-
-    ``require``/``forbid`` are what a hand-written Dockerfile must carry or must
-    not; exactly one is set. ``verified_by`` names the platform's own refusal —
-    a row that cannot name one is a guarantee nothing enforces, and the registry
-    test refuses it.
-    """
+    """One step the synthesized Dockerfile takes, and the custom path's answer."""
 
     id: str
     synthesized: str
@@ -75,9 +31,7 @@ class Guarantee:
     cost: str
     require: Optional[Pattern[str]] = None
     forbid: Optional[Pattern[str]] = None
-    #: The hub matches the RAW BYTES of a Dockerfile for its bans, comments
-    #: included, so a `forbid` row must read comments too. A `require` row must
-    #: not: a comment mentioning a step is not the step.
+    # The hub matches the RAW BYTES of a Dockerfile for its bans, comments included — so a forbid row must read comments too, and a require row must not (a comment mentioning a step is not the step).
     reads_comments: bool = False
 
 
@@ -107,9 +61,6 @@ REGISTRY: Tuple[Guarantee, ...] = (
         id="cxx_toolchain",
         synthesized="generate_dockerfile.go — the apt line (pgw#823)",
         applies=DECLARES_AOT_EXPORT,
-        # `\bg\+\+\b` does NOT match "g++ " — `+` is a non-word character, so
-        # there is no word boundary after it. A trailing `\b` here silently
-        # refuses every Dockerfile that DOES install the compiler.
         require=re.compile(r"\bg\+\+(?!\w)|\bbuild-essential\b"),
         line="RUN apt-get update \\\n"
              " && apt-get install -y --no-install-recommends "
@@ -169,13 +120,7 @@ def guarantee(guarantee_id: str) -> Guarantee:
 
 
 def verifier_text(row: Guarantee) -> str:
-    """``verified_by``, rendered for the author rather than for the registry.
-
-    A ``precondition:`` row stores the CONSTANT's name so the registry test can
-    resolve it and prove the gate emits it. What an author needs is the string
-    they will read in a failing build, so it is resolved here — one table, two
-    audiences, no second spelling of the check name.
-    """
+    """``verified_by``, rendered for the author rather than for the registry."""
     if not row.verified_by.startswith(PRECONDITION):
         return row.verified_by
     from . import aot_preconditions as ap
@@ -186,11 +131,6 @@ def verifier_text(row: Guarantee) -> str:
 
 
 def _instructions(text: str) -> str:
-    """The Dockerfile with comment lines removed.
-
-    A `require` row asks what the file DOES. A comment explaining a step — or
-    explaining why a step is missing — is not the step.
-    """
     return "\n".join(
         line for line in text.splitlines() if not line.lstrip().startswith("#")
     )
@@ -256,12 +196,7 @@ def _indent(block: str) -> str:
 
 
 def check_endpoint(source_dir: Path) -> List[Finding]:
-    """Check one endpoint source tree.
-
-    A tree with NO Dockerfile is silently fine: it takes the synthesized path,
-    where every row in the registry is established by a layer the hub writes.
-    That asymmetry is the whole subject of this module.
-    """
+    """Check one endpoint source tree."""
     if source_dir.is_file() and source_dir.name == "Dockerfile":
         source_dir = source_dir.parent
     dockerfile = source_dir / "Dockerfile"
@@ -313,8 +248,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not path.exists():
             print(f"error: {path}: no such path", file=sys.stderr)
             return 2
-        # Say what was checked. A check that passes because it looked at
-        # nothing reads exactly like a check that passed.
         target = path.parent if path.name == "Dockerfile" else path
         if not (target / "Dockerfile").is_file():
             print(f"{path}: no Dockerfile — this endpoint takes the "

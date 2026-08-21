@@ -1,20 +1,3 @@
-"""pgw#1043 §PRODUCTIZATION — the attention axis and the block-sparse mechanism.
-
-The revert-turns-red assertions:
-
-* an attention mode that is not in the grammar cannot be reported (a lane-style
-  vocabulary error, not a free-text field);
-* a report made inside a setup scope is attributed to that scope and one made
-  outside is not — the pgw#1104 forgery rule, applied to the third axis;
-* the fused BlockMask builder is BIT-IDENTICAL to §INDEXER's sort-based
-  reference, which is the only thing that makes it admissible;
-* the protocol's forced blocks (local diagonal, global prefix) survive every
-  path through the builder.
-
-CPU-only by construction: the builder is index arithmetic, and it is exactly the
-part that must be right before a GPU second is spent.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -26,7 +9,6 @@ from gen_worker.models import attention_modes as am  # noqa: E402
 from gen_worker.models import provision  # noqa: E402
 
 
-# --------------------------------------------------------------- vocabulary
 def test_the_grammar_admits_dense_and_sparse_k_and_nothing_else():
     assert am.valid_attention_mode("dense")
     assert am.valid_attention_mode("sparse-k16")
@@ -39,8 +21,7 @@ def test_the_grammar_admits_dense_and_sparse_k_and_nothing_else():
 
 
 def test_sparsity_is_not_a_lane_body():
-    """The axes are separate on purpose. If someone ever tries to smuggle a
-    sparse token into the lane table this turns red."""
+    """The axes are separate on purpose."""
     from gen_worker.models import execution_lanes
 
     for mode in am.known_attention_modes():
@@ -48,24 +29,18 @@ def test_sparsity_is_not_a_lane_body():
 
 
 def test_the_instance_mode_never_over_claims_fidelity():
-    # Sparse wins over dense and the SMALLER budget wins, for the same reason
-    # `_most_quantized_lane` picks the most-quantized: a request that ran any
-    # component sparse did not run dense.
     assert am.most_sparse_mode(["dense", "sparse-k32"]) == "sparse-k32"
     assert am.most_sparse_mode(["sparse-k32", "sparse-k16"]) == "sparse-k16"
     assert am.most_sparse_mode(["dense", "dense"]) == "dense"
     assert am.most_sparse_mode([]) == "dense"
 
 
-# ------------------------------------------------------------- the report
 def test_a_report_needs_a_setup_scope_and_a_grammatical_mode():
     with pytest.raises(ValueError):
         provision.report_applied_attention("transformer", "sparse")
     with pytest.raises(ValueError):
         provision.report_applied_attention("transformer", "sparse-k16",
                                            k_blocks=32)
-    # Outside a scope: logged, not raised, not attributed. Every endpoint may
-    # call this unconditionally.
     assert provision.report_applied_attention("transformer", "dense") is False
 
 
@@ -80,14 +55,10 @@ def test_a_report_inside_the_scope_carries_k_and_the_measured_density():
     detail = entry.detail()
     assert "attention=sparse-k16" in detail and "k=16" in detail
     assert "density=0.0826" in detail and "selector=indexer" in detail
-    # The scope closes; a later report is unattributed.
     assert provision.report_applied_attention("transformer", "dense") is False
 
 
-# -------------------------------------------------------- the mask builder
 def _reference_mask(scores, k, geom, heads):
-    """§INDEXER's builder: bool `keep` -> BlockMask via a full-width sort. The
-    thing `build_block_mask` must reproduce exactly to be admissible."""
     from torch.nn.attention.flex_attention import BlockMask
 
     X, NQ, NB = scores.shape
@@ -145,11 +116,11 @@ def _same(a, b) -> bool:
 
 
 @pytest.mark.parametrize("seq_len,n_global,heads,groups,k", [
-    (37763, 467, 8, 8, 16),      # H3's real shape: partial last block
+    (37763, 467, 8, 8, 16),
     (37763, 467, 8, 8, 32),
-    (128 * 20, 467, 4, 4, 5),    # exact multiple: no partial block
-    (128 * 20 + 7, 130, 4, 2, 3),  # grouped selection + partial block
-    (128 * 9, 0, 2, 2, 2),       # no global prefix at all
+    (128 * 20, 467, 4, 4, 5),
+    (128 * 20 + 7, 130, 4, 2, 3),
+    (128 * 9, 0, 2, 2, 2),
 ])
 def test_the_fused_builder_is_bit_identical_to_the_reference(
         seq_len, n_global, heads, groups, k):

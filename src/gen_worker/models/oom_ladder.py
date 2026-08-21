@@ -1,30 +1,3 @@
-"""Reactive OOM ladders (pgw#1499) — IN-RUNG retries for the catchable cases.
-
-The placement ladder (``rung.py``) answers *"where do the weights live"* and
-descends a rung when a LOAD OOMs. It has nothing to say about a request that
-loads fine and then exhausts the card inside one op — a full-frame VAE decode,
-or an attention matmul at an unusually long sequence. Those are eager, they are
-catchable, and the cheap answer is to retry the SAME op smaller, on the same
-rung, rather than to spill the whole pipeline to host RAM.
-
-Two wrappers, installed once per pipeline by ``memory.apply_low_vram_config``:
-
-* ``vae.decode`` — full frame first; on OOM, tile and retry, shrinking the tile
-  each further OOM. Tiling is applied REACTIVELY here, unlike
-  ``_apply_vae_and_attention``'s per-rung proactive tiling: a pipeline that
-  fits natively pays nothing until the day a request is too big for the card.
-* the denoiser's ``forward`` (``unet``/``transformer``) — on OOM, empty the
-  cache and retry ONE step with a finer attention slice, to a cap.
-
-Both are degradations and both confess through ``memory._confess_serve_degrade``
-— a tiled retry is a confession, not a silent save.
-
-SCOPE, stated so it is not widened by accident. This is the EAGER half only.
-A mid-graph OOM inside a compiled artifact is not catchable (pgw#1255 leg 2);
-``serving/context.py`` decides that case by admission before the weights land
-and ``aot_serve`` serves the request eager. Nothing here changes either.
-"""
-
 from __future__ import annotations
 
 import inspect
@@ -42,44 +15,21 @@ from .rung import transition_line
 
 _LOG = logging.getLogger(__name__)
 
-#: Phase tokens for the two confessions. Countable hub-side in
-#: `worker_activity_events` beside `cpu_offload_engaged`.
 VAE_TILED_RETRY_PHASE = "vae_tiled_retry"
 ATTENTION_SLICED_RETRY_PHASE = "attention_sliced_retry"
 
-#: Marker attribute — install is idempotent per object, and
-#: `apply_low_vram_config` runs again on every rung of a placement descent.
 _INSTALLED = "_cozy_oom_ladder"
 
-#: Peak live decoder activations, counted in units of
-#: "one full-resolution buffer at the decoder's WIDEST channel count".
-#: Calibrated against ComfyUI's hand-measured per-VAE table: their sd15/SDXL
-#: coefficient is 2178*64 bytes per latent element, and
-#: 17 * 128ch * 8*8 spatial * 2 B/elem = 278528 vs their 278784 — 0.1%.
-#: Wan-2.1 lands within 1.5x of their number on the same formula. It is a
-#: FIRST GUESS only: every rung below it is chosen by a real OOM, not by this.
 ACTIVATION_BUFFERS = 17
 
-#: Fraction of free VRAM one tile may plan to occupy.
 BUDGET_FRACTION = 0.8
 
-#: diffusers' attention-slicing knob has exactly these two useful settings
-#: ("auto" halves the slice dim, "max" slices to 1) — that IS the chunk-count
-#: doubling for the sliced-attention implementation we run.
 ATTENTION_LADDER: Tuple[str, ...] = ("auto", "max")
-
-
-# ---------------------------------------------------------------------------
-# The tile solver — pure arithmetic, no torch, unit-testable on a cardless box
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class TilePlan:
-    """One rung of the tiling ladder, in LATENT units.
-
-    ``frames`` is 0 for an image VAE (no temporal axis to tile).
-    """
+    """One rung of the tiling ladder, in LATENT units."""
 
     edge: int
     frames: int = 0
@@ -95,8 +45,7 @@ class TilePlan:
 
 def tile_bytes(plan: TilePlan, *, latent_h: int, latent_w: int,
                latent_frames: int, bytes_per_latent: float) -> float:
-    """Peak bytes of ONE tile's decode. A tiled decode's peak is per-tile, so a
-    tile clamped below the real extent is what makes the estimate drop."""
+    """Peak bytes of ONE tile's decode."""
     h = min(plan.edge, latent_h)
     w = min(plan.edge, latent_w)
     t = min(plan.frames, latent_frames) if plan.frames else max(1, latent_frames)
@@ -115,26 +64,7 @@ def solve_tile_ladder(
     min_frames: int = 1,
     max_rungs: int = 5,
 ) -> Tuple[TilePlan, ...]:
-    """The tile ladder for one decode, largest tile first.
-
-    Rung 0 is the ComfyUI solve: start at ``base_edge``, halve the TEMPORAL
-    tile until one tile fits the budget, then double the SPATIAL tile while it
-    still fits. Temporal first because a video decoder's activations are linear
-    in frames and quadratic in edge — shrinking time costs the least seam.
-
-    One addition ComfyUI does not need. Their base tile is smaller than any
-    latent they tile, so their rung 0 is always a real shrink; this ladder is
-    solved only ONCE THE FULL FRAME HAS ALREADY OOMED, and it can be handed a
-    latent no bigger than the base tile — or a budget that says the frame fits,
-    which the allocator has just falsified. A rung that reproduces the shape
-    that failed is not a rung, so the spatial axis halves while the budget says
-    it does not fit, and rung 0 is shrunk once more if it still covers the
-    whole latent.
-
-    Every rung after that halves again (time to ``min_frames``, then space to
-    ``min_edge``), because the budget is an ESTIMATE and the allocator is the
-    only authority: rung N+1 is only ever reached by rung N actually OOMing.
-    """
+    """The tile ladder for one decode, largest tile first."""
     latent_h = max(1, int(latent_h))
     latent_w = max(1, int(latent_w))
     latent_frames = max(0, int(latent_frames))
@@ -177,15 +107,7 @@ def solve_tile_ladder(
 
 
 def decode_bytes_per_latent(vae: Any, *, dtype_bytes: int = 2) -> float:
-    """Estimated peak decode bytes per LATENT element for this VAE.
-
-    ``ACTIVATION_BUFFERS`` buffers at FULL output resolution, which is where a
-    decoder's activations dominate: ``block_out_channels[0]`` is the width
-    there (the 512-channel blocks live at 1/8 the resolution and cost less
-    despite the wider tensor). A VAE that answers none of the config gets the
-    sd-family shape, which is the wrong answer for exactly the models whose
-    next rung is one OOM away anyway.
-    """
+    """Estimated peak decode bytes per LATENT element for this VAE."""
     cfg = getattr(vae, "config", None)
     channels = 128
     blocks = getattr(cfg, "block_out_channels", None) if cfg is not None else None
@@ -200,23 +122,8 @@ def decode_bytes_per_latent(vae: Any, *, dtype_bytes: int = 2) -> float:
                  * max(1, int(dtype_bytes)))
 
 
-# ---------------------------------------------------------------------------
-# Applying a plan to a diffusers VAE
-# ---------------------------------------------------------------------------
-
-
 def apply_tile_plan(vae: Any, plan: TilePlan) -> Dict[str, Any]:
-    """Turn a ``TilePlan`` into whatever tiling knobs THIS VAE exposes.
-
-    diffusers is not consistent here: ``AutoencoderKL.enable_tiling()`` takes
-    no arguments and reads ``tile_sample_min_size``/``tile_overlap_factor``
-    attributes, while every video VAE takes keyword tile sizes and each takes a
-    different subset of them. So the knobs are discovered by signature, and the
-    attribute route is the fallback rather than a second implementation.
-
-    Returns what was actually set — the confession quotes it, so an operator
-    reads the tile the decode RAN at, not the one we asked for.
-    """
+    """Turn a ``TilePlan`` into whatever tiling knobs THIS VAE exposes."""
     enable = getattr(vae, "enable_tiling", None)
     if not callable(enable):
         return {}
@@ -244,7 +151,6 @@ def apply_tile_plan(vae: Any, plan: TilePlan) -> Dict[str, Any]:
 
     applied: Dict[str, Any] = {}
     if not kwargs:
-        # The attribute route (AutoencoderKL and friends).
         attrs: Tuple[Tuple[str, Any], ...] = (
             ("tile_sample_min_size", sample_edge),
             ("tile_latent_min_size", plan.edge),
@@ -260,24 +166,7 @@ def apply_tile_plan(vae: Any, plan: TilePlan) -> Dict[str, Any]:
     return applied
 
 
-# ---------------------------------------------------------------------------
-# The wrappers
-# ---------------------------------------------------------------------------
-
-
 def _grad_warning() -> str:
-    """Empty unless autograd is on — in which case say so, because it is the
-    one condition under which tiling CANNOT help.
-
-    Measured on a real card (sd1.5 VAE, 320² latent, RTX 4070): with grad
-    enabled every tile's activations are retained for backward, so the tiled
-    retry accumulates instead of bounding, and the ladder walks all four rungs
-    down to an 8² tile and still fails. Under ``no_grad`` — which is what
-    diffusers' pipelines decode under — the SAME decode succeeds on the first
-    tiled rung at 2.7 GiB peak. Serving never wants the graph, so this is a
-    caller defect; the confession names it rather than leaving an operator to
-    infer it from four identical OOMs.
-    """
     try:
         import torch
 
@@ -291,7 +180,6 @@ def _grad_warning() -> str:
 
 
 def _latent_geometry(args: Sequence[Any], kwargs: Dict[str, Any]) -> Tuple[int, int, int, int]:
-    """``(h, w, frames, dtype_bytes)`` of the latent this decode was handed."""
     tensor = None
     for candidate in list(args) + list(kwargs.values()):
         if hasattr(candidate, "shape") and hasattr(candidate, "ndim"):
@@ -306,15 +194,6 @@ def _latent_geometry(args: Sequence[Any], kwargs: Dict[str, Any]) -> Tuple[int, 
 
 
 def _wrap_vae_decode(vae: Any, log: logging.Logger) -> bool:
-    """Full-frame decode, tiled retry on OOM, smaller tile on every OOM after.
-
-    THE ORDER MATTERS AND IT IS NOT COSMETIC. Inside the ``except`` block the
-    traceback holds every frame of the failed decode, and those frames hold
-    every live activation — so a retry started there runs against a card that
-    is still full and OOMs again on a tile that would have fitted. The except
-    block therefore does the minimum: record that it happened, drop the
-    traceback, and let the retry run after the scope closes.
-    """
     original = getattr(vae, "decode", None)
     if not callable(original):
         return False
@@ -329,8 +208,6 @@ def _wrap_vae_decode(vae: Any, log: logging.Logger) -> bool:
                 if not is_cuda_oom(exc):
                     raise
                 failed = f"{type(exc).__name__}: {exc}"
-                # Drop the frames (and with them the activations) NOW; keep the
-                # text, never the exception object, so nothing outlives this.
                 exc.__traceback__ = None
 
             flush_memory()
@@ -380,40 +257,16 @@ def _wrap_vae_decode(vae: Any, log: logging.Logger) -> bool:
                 log=log,
             )
 
-    # Same rule as the denoiser's (pgw#1534). `decode` is not a `forward` and
-    # adoption does not read it today, but a wrapper that erases the signature
-    # of what it wraps is wrong for the same reason wherever it is installed,
-    # and the two wrappers must not diverge on it.
     _carry_signature(decode, original)
     setattr(vae, "decode", decode)
     return True
 
 
 def _carry_signature(wrapper: Any, wrapped: Any) -> None:
-    """Make ``wrapper`` present the signature of what it wraps (pgw#1534).
-
-    A ``*args, **kwargs`` wrapper is invisible to anything that INTROSPECTS the
-    forward it replaced, and adoption is exactly that: torchcg claims a graph
-    record for a marked module when the module's forward accepts every
-    parameter the record's ingress names. An erased signature therefore does not
-    degrade adoption — it silently switches it off for that module, everywhere,
-    permanently, and no mint can turn it back on because nothing is missing.
-
-    ``functools.wraps`` is not used: it copies ``__dict__`` and ``__wrapped__``
-    too, and this wrapper's identity should stay its own. Only the one fact a
-    caller introspects is carried, and a wrapped object that has no readable
-    signature (a builtin, a C-implemented forward) leaves the wrapper as it is
-    rather than failing a load — an unarmed ladder must never fail a load, and
-    neither must an unsigned one.
-    """
+    """Make `wrapper` present the signature of what it wraps: torchcg adoption reads inspect.signature(module.forward) to decide whether a module claims a graph record, so a bare *args/**kwargs wrapper silently and permanently disables the compiled path for that module. Anything installed onto a module's forward must present the wrapped signature (fence-tested). functools.wraps is deliberately not used (it copies __dict__/__wrapped__); an unsignaturable wrapped object (builtin/C forward) is left as-is — an unsigned ladder must never fail a load."""
     try:
         wrapper.__signature__ = inspect.signature(wrapped)
     except Exception:  # noqa: BLE001 — an unsigned ladder must never fail a load
-        # Deliberately broad, and it is this module's own rule rather than a
-        # shrug: `inspect.signature` runs arbitrary code through `__signature__`
-        # descriptors and `__get__`, so the exception set is not enumerable.
-        # `install` catching it one frame up would abandon the WHOLE ladder over
-        # a cosmetic step, which is a worse trade than an unsigned wrapper.
         return
     for attribute in ("__name__", "__qualname__", "__doc__"):
         try:
@@ -431,36 +284,6 @@ def _denoiser(pipeline: Any) -> Optional[Any]:
 
 
 def _wrap_denoiser_forward(pipeline: Any, module: Any, log: logging.Logger) -> bool:
-    """One denoise step, retried with a finer attention slice on OOM.
-
-    The step is the right granularity: it is a pure function of its inputs, so
-    a retry is free of side effects, and it is where a long-sequence attention
-    matmul actually allocates. Retrying the whole request instead would pay for
-    every step already taken.
-
-    ``nn.Module.__call__`` resolves ``self.forward`` as an INSTANCE attribute,
-    which is why this can be installed without touching the class — and it is
-    the same seam ``aot_serve`` swaps, so an armed artifact simply captures
-    this wrapper as its eager fallback.
-
-    🔴 **AND IT MUST CARRY THE WRAPPED SIGNATURE (pgw#1534).** That seam is not
-    only where a graph is armed; it is where adoption decides WHETHER to arm
-    one. ``torchcg`` claims a graph record for a marked module when the
-    module's forward accepts every parameter the record's ingress names, and it
-    reads those names off ``inspect.signature(module.forward)``. A bare
-    ``*args, **kwargs`` wrapper has no named parameters at all, so after this
-    installed, a 13-parameter unet forward presented an EMPTY set and **every
-    record in the lane went unclaimed** — measured on a real boot with all 14
-    artifacts present in the store: ``adopted: 0, holes: 0, armed: 0``.
-
-    pgw#1499 armed this ladder on EVERY rung, which is correct and is also what
-    made a per-OOM-path wrapper into a permanent, universal disabling of the
-    compiled path. ``models/lora_lifted.py`` already restores ``__signature__``
-    on its own forward wrapper; this one did not, and the two wrappers sit four
-    files apart. The rule is general and belongs to the seam, not to either
-    wrapper: **anything installed onto a module's ``forward`` must present the
-    signature it wrapped** — a fence test holds it.
-    """
     slicer = getattr(pipeline, "enable_attention_slicing", None)
     original = getattr(module, "forward", None)
     if not callable(slicer) or not callable(original):
@@ -514,11 +337,7 @@ def _wrap_denoiser_forward(pipeline: Any, module: Any, log: logging.Logger) -> b
 
 
 def install(pipeline: Any, *, logger: Optional[logging.Logger] = None) -> Dict[str, bool]:
-    """Arm both ladders on ``pipeline``. Idempotent, cheap, never raises.
-
-    Nothing here costs anything until an OOM: both wrappers are one Python
-    frame around a call that was going to happen anyway.
-    """
+    """Arm both ladders on ``pipeline``."""
     if pipeline is None or getattr(pipeline, _INSTALLED, None) is not None:
         return {}
     log = logger or _LOG

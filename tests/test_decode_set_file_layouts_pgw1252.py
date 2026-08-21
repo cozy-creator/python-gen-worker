@@ -61,8 +61,6 @@ SVDQ_META = {
 
 
 class _Pipe:
-    """A pipeline class shaped like the ones the loader dispatches on. Never
-    constructed: every arm under test refuses before any load."""
 
     @staticmethod
     def from_pretrained(*a: Any, **kw: Any) -> Any:  # pragma: no cover
@@ -74,8 +72,6 @@ def _svdq_file(path: Path) -> None:
     save_file({"x": torch.zeros(4, dtype=torch.uint8)}, str(path),
               metadata=SVDQ_META)
 
-
-# ── one home, imported ───────────────────────────────────────────────────────
 
 def test_the_axis_is_the_imported_vocabulary_not_a_transcription() -> None:
     """The publish side validates through the same module OBJECT — not a
@@ -141,7 +137,6 @@ def test_observed_layout_matches_the_publish_side_shapes(tmp_path: Path) -> None
     assert fl.observed_file_layout(loose) == fl.SINGLE_FILE
     assert fl.observed_file_layout(loose / "model.safetensors") == fl.SINGLE_FILE
 
-    # An unclassifiable shape states NOTHING rather than guessing.
     bare = tmp_path / "bare"
     bare.mkdir()
     assert fl.observed_file_layout(bare) == fl.NOT_APPLICABLE

@@ -1,18 +1,4 @@
-"""The checkpoint juggle's card-free half: admission, images, validity.
-
-Everything here is decidable without a GPU: the shape-identity admission
-proof, the normalized-image build (bytes, casts, digests), the adaptive
-catalog (pressure eviction, protection, hysteresis) and the serving-validity
-ledger. What is left for the card — the in-place refill, the zero-re-arm
-proof, the mid-refill kill — runs in ``benchmarks/checkpoint_juggle_pgw1607.py``
-under a granted GPU window.
-
-Real ``nn.Module`` trees and real safetensors files throughout — no mocks
-(the test-suite convention): a mocked header would agree with whatever the
-admission check believes about it, which is the one thing worth checking.
-
-# pgw#1607: the checkpoint juggle (implements pgw#1602's multi-checkpoint scope).
-"""
+"""The checkpoint juggle's card-free half: admission, images, validity."""
 
 from __future__ import annotations
 
@@ -58,20 +44,15 @@ _SAFETENSORS_SPELLING = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Real trees, real files
-# ---------------------------------------------------------------------------
-
-
 class Net(nn.Module):
     """A lane template: one streaming-sized leaf, small leaves, a buffer."""
 
     def __init__(self, seed: int = 0) -> None:
         super().__init__()
         g = torch.Generator().manual_seed(seed)
-        self.big = nn.Linear(1024, 1024, bias=False)  # 4 MiB fp32: streams
-        self.small = nn.Linear(16, 16, bias=False)  # core
-        self.norm = nn.LayerNorm(16)  # core
+        self.big = nn.Linear(1024, 1024, bias=False)
+        self.small = nn.Linear(16, 16, bias=False)
+        self.norm = nn.LayerNorm(16)
         with torch.no_grad():
             for p in self.parameters():
                 p.copy_(torch.randn(p.shape, generator=g))
@@ -81,12 +62,7 @@ class Net(nn.Module):
 
 
 def write_safetensors(path: Path, tensors: Dict[str, Any]) -> None:
-    """A real safetensors file, written the way the format states it.
-
-    Deliberately NOT the library writer: the admission check reads headers,
-    so the fixture states its own header and the two implementations must
-    agree from opposite sides.
-    """
+    """A real safetensors file, written the way the format states it."""
     header: Dict[str, Any] = {}
     blobs: List[bytes] = []
     offset = 0
@@ -135,14 +111,9 @@ def layout_for(module: nn.Module) -> Any:
     return plan_layout(specs_for(module), granularity=GRAN, min_stream_bytes=MIB)
 
 
-# ---------------------------------------------------------------------------
-# D1 — admission
-# ---------------------------------------------------------------------------
-
-
 def test_a_checkpoint_of_the_same_architecture_is_admitted(tmp_path: Path) -> None:
     template = Net(seed=0)
-    other = Net(seed=1)  # a distinct fine-tune, same architecture
+    other = Net(seed=1)
     manifest = read_manifest(checkpoint_dir(tmp_path, "b", other))
     assert admission_refusal(layout_for(template), manifest) is None
 
@@ -204,11 +175,6 @@ def test_manifest_refuses_unknown_dtype_spellings(tmp_path: Path) -> None:
         read_manifest(directory)
 
 
-# ---------------------------------------------------------------------------
-# D5 — the normalized image
-# ---------------------------------------------------------------------------
-
-
 def build_image(
     tmp_path: Path, name: str, template: nn.Module, module: nn.Module, **kw: Any
 ) -> Tuple[Any, CheckpointImage]:
@@ -255,16 +221,10 @@ def test_ingest_casts_once_and_values_match(tmp_path: Path) -> None:
 
 
 def test_the_image_pays_the_layouts_virtual_bytes(tmp_path: Path) -> None:
-    """The image is the ARENA's shape, alignment tax included — that is what
-    makes the swap one contiguous copy per region."""
+    """The image is the ARENA's shape, alignment tax included — that is what makes the swap one contiguous copy per region."""
     template = Net(seed=0)
     layout, image = build_image(tmp_path, "b", template, Net(seed=9))
     assert image.nbytes == layout.virtual_bytes
-
-
-# ---------------------------------------------------------------------------
-# The catalog — adaptive, protected, hysteretic
-# ---------------------------------------------------------------------------
 
 
 def make_catalog(
@@ -293,7 +253,6 @@ def test_pressure_evicts_lru_first_and_never_the_protected(tmp_path: Path) -> No
         admit_real(catalog, tmp_path, name, seed=10 + i)
         assert catalog.ensure_warm(name) is not None
     catalog.protected.add("a")
-    # Starve RAM: the next ingest must evict — b (oldest unprotected), not a.
     mem["available"] = (4 << 30) + layout.virtual_bytes // 2
     admit_real(catalog, tmp_path, "d", seed=13)
     catalog.ensure_warm("d")
@@ -307,17 +266,13 @@ def test_hysteresis_a_pressure_evicted_image_stays_cold_this_epoch(tmp_path: Pat
     mem = {"available": 2 << 30}
     _layout, catalog = make_catalog(tmp_path, template, mem, floor=4 << 30)
     admit_real(catalog, tmp_path, "a", seed=20)
-    # RAM refuses: disk-direct, a pressure epoch opens, and the SAME id does
-    # not rebuild within it even when RAM returns.
     assert catalog.ensure_warm("a") is None
     epoch = catalog.pressure_epoch
     mem["available"] = 64 << 30
     assert catalog.ensure_warm("a") is None
     assert catalog.pressure_epoch == epoch
-    # A different id is not under the epoch's hysteresis.
     admit_real(catalog, tmp_path, "b", seed=21)
     assert catalog.ensure_warm("b") is not None
-    # The next epoch releases it.
     catalog.pressure_epoch += 1
     assert catalog.ensure_warm("a") is not None
 
@@ -331,30 +286,21 @@ def test_an_unadmitted_checkpoint_cannot_be_warmed(tmp_path: Path) -> None:
         catalog.ensure_warm("ghost")
 
 
-# ---------------------------------------------------------------------------
-# D7 — the serving-validity ledger (the franken-weights fence)
-# ---------------------------------------------------------------------------
-
-
 def test_ledger_happy_path_and_all_three_red_arms(tmp_path: Path) -> None:
     layout = layout_for(Net(seed=0))
     ledger = ValidityLedger(layout, "a")
     ledger.assert_servable("a")
 
     first = layout.regions[0].name
-    # RED 1: mid-refill is not servable.
     ledger.begin(first, "b")
     with pytest.raises(RegionInvalid, match="refilling"):
         ledger.assert_servable("a")
-    # RED 2: a poisoned region refuses loudly, and names recovery.
     ledger.poison(first)
     with pytest.raises(RegionInvalid, match="idempotent"):
         ledger.assert_servable("a")
     assert ledger.of(first) == (RegionValidity.INVALID, "b")
-    # Recovery: a completed re-refill serves again.
     ledger.begin(first, "b")
     ledger.complete(first)
-    # RED 3: mixed checkpoints — region 0 holds b, the rest hold a.
     if len(layout.regions) > 1:
         with pytest.raises(RegionInvalid, match="mixed"):
             ledger.assert_servable("b")
@@ -365,8 +311,7 @@ def test_ledger_happy_path_and_all_three_red_arms(tmp_path: Path) -> None:
 
 
 def test_a_partial_switch_is_never_servable_under_either_identity(tmp_path: Path) -> None:
-    """The exact franken state the coordinator's requirement names: some
-    regions swapped to B, one died mid-refill. Neither A nor B may serve."""
+    """The exact franken state the coordinator's requirement names: some regions swapped to B, one died mid-refill."""
     layout = layout_for(Net(seed=0))
     if len(layout.regions) < 2:
         pytest.skip("needs two regions to interleave")

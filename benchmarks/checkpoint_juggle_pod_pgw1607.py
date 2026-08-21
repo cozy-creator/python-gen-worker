@@ -1,44 +1,3 @@
-"""pgw#1607 phase 4: the checkpoint juggle at SDXL scale, on a rented pod.
-
-Runs ON the pod (weights never transit the box). Downloads K public SDXL
-fine-tune UNets from HF (the 16 header-curated compatible repos), builds ONE
-UNet lane over the arena, and prices the juggle for real: 5 GB-class
-checkpoints, real denoise-shaped requests, a real torch.compile artifact.
-
-Arms (default SWCZ; each banks its verdict before the next runs):
-
-* **S — smoke/correctness** (the spend gate: nothing else runs if S is red).
-  3 checkpoints: distinct outputs at fixed inputs, bitwise round-trip,
-  D2H digests == ingest digests, zero re-arms (pointer + forward identity),
-  and the REAL-COMPILE leg: `torch.compile`d UNet serves distinct outputs
-  across swaps with ZERO recompiles (dynamo counters, not eyeballs).
-* **W — warm matrix.** All K ingested (the warm set sizes itself from the
-  pod's RAM — watching it evict IS the measurement), round-robin warm
-  switches, walls + GB/s against the same-pod pinned H2D floor.
-* **C — cold.** Evict → switch (disk → image → VRAM, the rebuild path) and
-  hysteresis-forced disk-direct, against the pod's measured disk floor.
-* **Z — zipf.** Real ~seconds requests (28 UNet steps, 1024^2-shaped),
-  single-checkpoint baseline FIRST (the phase-3 ordering lesson), then the
-  zipf mix; the honest product is seconds-per-request and switch cost per
-  request, not a toy ratio.
-* **B — cast arm (optional).** The bf16 lane over fp16 files: ingest casts
-  once, warm switches only (disk-direct correctly REFUSES under a cast).
-
-Lane dtype is FP16 by default — the files' native dtype, so disk triples
-are byte-true and disk-direct switching is legal. (fp16 and bf16 are both
-16-bit: raw fp16 bytes in a bf16 slot would pass every length check and be
-silent garbage, which is why the juggler refuses casts outside ingest and
-why this harness loads the template through the IMAGE, never raw triples.)
-
-Overlap, stated honestly: a UNet-only lane has no phase to hide a swap
-under — the bytes cannot be overwritten while any step still reads them, so
-the switch serializes after the request tail and its floor is the transfer
-bound (measured). What CAN overlap is host-side prefetch (disk -> pin under
-compute), which arm Z exercises via hint_next. Phase-overlap (TE/VAE while
-UNet computes) needs a multi-component lane — pgw#1602 integration, not
-this harness.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -55,7 +14,6 @@ from typing import Any, Dict, List, Optional
 MIB = 1 << 20
 GIB = 1 << 30
 
-#: Header-curated 2026-08-20 ($0, ranged reads; SSD-1B red-armed the check).
 CURATED = [
     "stabilityai/stable-diffusion-xl-base-1.0",
     "playgroundai/playground-v2-1024px-aesthetic",
@@ -72,8 +30,6 @@ CURATED = [
     "fluently/Fluently-XL-v4",
     "zenless-lab/sdxl-blue-pencil-xl-v7",
     "dataautogpt3/OpenDalleV1.1",
-    # deliberately NOT ColorfulXL-Lightning here: F32 on disk, it belongs to
-    # arm B (the cast arm), not the byte-true fp16 lane.
 ]
 
 OUT_DIR = Path(os.environ.get("PGW1607_POD_OUT", "/workspace/pgw1607-out"))
@@ -84,12 +40,7 @@ def loud(msg: str) -> None:
 
 
 def bank(name: str, payload: Dict[str, Any]) -> None:
-    """Write the arm's verdict NOW — a later death keeps earlier arms.
-
-    The payload is ALSO printed inline: the driver captures this stream over
-    SSH, so even a dead scp path leaves every verdict in the box-side
-    transcript (the pgw#1568 lesson: an evidence path that can die must not
-    be the only one)."""
+    """Write the arm's verdict NOW — a later death keeps earlier arms."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"{name}.json"
     blob = json.dumps(payload, indent=2)
@@ -118,11 +69,6 @@ def gpu_line() -> str:
         ).stdout.strip()
     except Exception:  # noqa: BLE001
         return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Downloads — pod-side only
-# ---------------------------------------------------------------------------
 
 
 def fetch_unet(repo: str, cache: Path) -> Path:
@@ -154,11 +100,6 @@ def pick_variant(unet_dir: Path) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Rig
-# ---------------------------------------------------------------------------
-
-
 def build_unet(torch: Any, config_dir: Path, dtype: Any) -> Any:
     from diffusers import UNet2DConditionModel
 
@@ -169,8 +110,7 @@ def build_unet(torch: Any, config_dir: Path, dtype: Any) -> Any:
 
 
 def load_template_from_image(torch: Any, template: Any, image: Any) -> None:
-    """Template weights from the NORMALIZED image — never raw triples (the
-    fp16/bf16 same-length hazard)."""
+    """Template weights from the NORMALIZED image — never raw triples (the fp16/bf16 same-length hazard)."""
     with torch.no_grad():
         state = dict(template.state_dict())
         for region in image.layout.regions:
@@ -287,7 +227,7 @@ def one_step(torch: Any, model: Any, inputs: Dict[str, Any]) -> Any:
 
 
 def request(torch: Any, juggler: Any, model: Any, inputs: Dict[str, Any], steps: int) -> Any:
-    """A denoise-shaped request: `steps` UNet forwards. Seconds, not ms."""
+    """A denoise-shaped request: `steps` UNet forwards."""
     juggler.assert_servable()
     out = None
     with torch.no_grad():
@@ -321,13 +261,8 @@ def measure_h2d_floor(torch: Any, nbytes: int) -> float:
     return nbytes / best / 1e9
 
 
-# ---------------------------------------------------------------------------
-# Arms
-# ---------------------------------------------------------------------------
-
-
 def arm_s(torch: Any, juggler: Any, template: Any, dtype: Any, ids: List[str]) -> Dict[str, Any]:
-    """The spend gate. Everything here must be green before matrix money."""
+    """The spend gate."""
     inputs = unet_inputs(torch, dtype)
     a, b = ids[0], ids[1]
 
@@ -340,7 +275,6 @@ def arm_s(torch: Any, juggler: Any, template: Any, dtype: Any, ids: List[str]) -
     assert torch.equal(y_a, y_a2), "round trip not bitwise"
     loud("S: distinct outputs + bitwise round trip GREEN")
 
-    # Digests on every backed region for the serving checkpoint.
     residency = juggler.residency
     image = juggler.catalog.warm(a)
     checked = 0
@@ -351,14 +285,12 @@ def arm_s(torch: Any, juggler: Any, template: Any, dtype: Any, ids: List[str]) -
             checked += 1
     loud(f"S: {checked} region digests GREEN")
 
-    # THE REAL-COMPILE LEG: torch.compile once, swap, zero recompiles.
     import torch._dynamo as dynamo
 
     dynamo.reset()
     compiled = torch.compile(template)
-    _ = one_step(torch, compiled, inputs)  # compile happens here
+    _ = one_step(torch, compiled, inputs)
     torch.cuda.synchronize()
-    # The sharpest instrument available: ANY recompile from here on RAISES.
     dynamo.config.error_on_recompile = True
     from torch._dynamo.utils import counters as dyn_counters
 
@@ -404,7 +336,7 @@ def arm_w(torch: Any, juggler: Any, ids: List[str]) -> Dict[str, Any]:
         if juggler.residency.is_resident(r.name)
     )
     for name in ids:
-        juggler.hint_next(name)  # ingest what RAM admits; eviction is data
+        juggler.hint_next(name)
     rows = []
     for name in ids * 2:
         if name == juggler.serving_id:
@@ -457,7 +389,6 @@ def arm_z(torch: Any, juggler: Any, template: Any, dtype: Any, ids: List[str],
     import random
 
     inputs = unet_inputs(torch, dtype)
-    # BASELINE FIRST (phase-3 ordering lesson), on a warm-mirrored serving ck.
     juggler.hint_next(juggler.serving_id)
     t0 = time.perf_counter()
     for _ in range(max(4, requests // 4)):
@@ -493,11 +424,6 @@ def arm_z(torch: Any, juggler: Any, template: Any, dtype: Any, ids: List[str],
     return out
 
 
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arms", default="SWCZ")
@@ -525,9 +451,6 @@ def main() -> int:
     import torch
 
     assert torch.cuda.is_available()
-    # FAIL FAST on the whole import closure BEFORE any multi-GB download —
-    # try 2 died on a missing module AFTER 29 GB of fetches ($0.04; this
-    # line makes that class cost $0.01).
     from gen_worker.models.arena_residency import ArenaResidency  # noqa: F401
     from gen_worker.models.checkpoint_juggle import CheckpointJuggler  # noqa: F401
     from diffusers import UNet2DConditionModel  # noqa: F401

@@ -1,10 +1,3 @@
-"""A WEIGHTLESS module (pgw#1392): entrypoints, no Model class anywhere.
-
-The shape se#757 blocker C measured as unmigratable — `dj-utils`'s shipped
-`def f(ctx, payload) -> Out` CPU workflow helpers, v2-spelled. No lanes, no
-weights, no compile subject, nothing resident.
-"""
-
 from __future__ import annotations
 
 import msgspec

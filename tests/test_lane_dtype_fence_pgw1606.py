@@ -103,9 +103,7 @@ def _documents() -> list[tuple[str, dict]]:
 
 
 def test_the_vendored_set_is_actually_there() -> None:
-    """Read the COUNT, not the verdict. An empty glob would make every
-    assertion below vacuously true, which is the failure mode this whole file
-    is about."""
+    """Read the COUNT, not the verdict."""
     rows = _documents()
     assert len(rows) == 8, (
         f"only {len(rows)} quant-rule documents found under {_RULES} — the "
@@ -282,11 +280,6 @@ def test_there_is_no_exemption_left_to_outlive_its_reason() -> None:
     exemption set at all, so re-introducing one is a visible, deliberate act
     rather than a name quietly added to a tuple nobody re-reads.
     """
-    # `globals()`, not `import tests.test_...`: the package-path import worked
-    # locally (a PYTHONPATH run puts the repo root on `sys.path`) and raised
-    # `ModuleNotFoundError: No module named 'tests'` in CI, where pytest
-    # imports test modules by file path and `tests/` is not a package. The
-    # question this test asks is about THIS module, so ask this module.
     leftovers = [
         name for name in
         ("PENDING_DTYPE", "CONTAINER_TYPED", "FRAGMENTS", "WAIVED", "SKIP")

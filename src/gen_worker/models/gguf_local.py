@@ -1,16 +1,4 @@
-"""Local-only GGUF snapshot detection.
-
-This is the DETECTION half only: a materialized snapshot dir that carries
-:data:`GGUF_MARKER` is a composed gguf tree, and the loading layer reads the
-marker to pick its lane.
-
-There is deliberately no SELECTION half. Selecting a gguf member by
-`owner/repo#gguf-<qtype>` addressed a flavor column that no longer exists —
-`repo_tags` is keyed on (repo, tag, checkpoint), the resolve emits `tag_members`
-and rejects `?flavor=`, and the `#` tail is not an address. Re-addressing the
-gguf member by CHECKPOINT DIGEST and re-composing is a build that has not
-happened.
-"""
+"""Local-only GGUF snapshot detection."""
 
 from __future__ import annotations
 
@@ -21,9 +9,6 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Written into a composed snapshot dir after materialization; the loading
-# layer's lane detection reads it (with a structural fallback for a dir that
-# lost the marker mid-crash).
 GGUF_MARKER = ".cozy-gguf.json"
 
 GGUF_QUALITY_ORDER = (
@@ -44,9 +29,7 @@ GGUF_QUALITY_ORDER = (
 
 
 def gguf_qtype(token: str) -> str:
-    """The quant type named by a ``gguf-<qtype>`` token; "" when it names no
-    known gguf quantization. The token comes off a MARKER on disk now, never
-    off a ref."""
+    """The quant type named by a ``gguf-<qtype>`` token; "" when it names no known gguf quantization."""
     t = str(token or "").strip().lower()
     if not t.startswith("gguf-"):
         return ""

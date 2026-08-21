@@ -19,11 +19,6 @@ from typing import Protocol
 from gen_worker._vendor.tensorfs.local import DigestMismatch, LocalCAS
 from gen_worker._vendor.tensorfs.refs import CASRef
 
-#: How many objects one machine moves at once. ONE number for every fan-out
-#: this worker runs over its uplink and its disk: the R2 downloader below and
-#: (pgw#1556) the volume-fill scan in `models/cozy_snapshot`, which was serial
-#: while this path was 8-wide on the same pod. Public because a second copy of
-#: it in the other module is a second answer to "how wide is this machine".
 DEFAULT_PARALLEL = 8
 _PROCESS_TRANSFER_BUDGET = threading.BoundedSemaphore(16)
 _EXPIRY_MARGIN_SECONDS = 120.0
@@ -133,7 +128,6 @@ class _GrantTransport(Protocol):
 
 
 class _HTTPTransport:
-    """Small stdlib transport for verbatim grant URLs and headers."""
 
     def __init__(self, *, timeout: float = 120.0, block_bytes: int = 1 << 20) -> None:
         self.timeout = timeout
@@ -293,26 +287,6 @@ def _run_parallel(
             except Exception as exc:
                 results[index] = ("failed", f"{type(exc).__name__}: {exc}")
 
-    # `progress` answers "is this transfer advancing toward readiness", so a
-    # RESIDENT object advances it exactly as a fetched one does: verifying an
-    # object already on disk is completed work toward readiness, and callers
-    # size their denominator over every planned object. Counting only fetched
-    # bytes made a resumed transfer — where the previous attempt already landed
-    # most objects — look identical to a dead one, which is how a healthy pod
-    # gets condemned. `bytes_transferred` still counts only what actually moved.
-    #
-    # `progress` fires as each object lands, NOT from the report loop below.
-    # Emitting after the drain means a multi-gigabyte transfer reports nothing
-    # until its last object is on disk, and a caller that watches the counter
-    # for liveness — tensorhub's transfer freshness window, and the worker's
-    # own stall detector — condemns a download that is proceeding correctly.
-    # Objects are capped at 64 MiB, so a live transfer now advances at least
-    # once per 64 MiB.
-    #
-    # It still runs on the CALLER's thread, from the completion loop rather
-    # than from inside `run`. Callers hand this callback shared state that is
-    # not theirs to lock, so moving it onto the pool's threads would fix the
-    # timing by breaking the contract.
     with ThreadPoolExecutor(max_workers=parallel, thread_name_prefix="tensorfs") as pool:
         futures = {
             pool.submit(run, index, grant): index
@@ -352,7 +326,6 @@ def _upload(
     sleep: Callable[[float], None] = time.sleep,
     progress: Callable[[CASRef, int], None] | None = None,
 ) -> TransferReport:
-    """Upload a remote plan's missing objects from an authoritative local CAS."""
 
     def one(grant: TransferGrant) -> bool:
         path = source.verify_object(grant.digest, size=grant.size_bytes)
@@ -397,15 +370,12 @@ def _download(
     sleep: Callable[[float], None] = time.sleep,
     progress: Callable[[CASRef, int], None] | None = None,
 ) -> TransferReport:
-    """Fetch missing objects; resident verified objects are the resume journal."""
 
     def one(grant: TransferGrant) -> bool:
         try:
             if destination.contains(grant.digest, size=grant.size_bytes):
                 return True
         except DigestMismatch:
-            # Re-fetch. LocalCAS.adopt_file atomically replaces only the corrupt
-            # object at this same digest after checking the new bytes.
             pass
         descriptor, name = tempfile.mkstemp(prefix="download-", dir=destination.tmp)
         os.close(descriptor)

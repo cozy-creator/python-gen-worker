@@ -1,21 +1,4 @@
-"""Source-layout / family detection — the generic engine over declared matchers.
-
-File-selection logic lives in :mod:`gen_worker.convert.classifier`. This module
-answers the downstream metadata question: given a repo_dir + file list, which
-model family / variant is this? The output feeds destination checkpoint tags.
-
-Family ladders are :class:`~.layout_spec.LayoutDeclaration` records registered by
-the endpoint that owns the family. This file evaluates them; it names no family.
-The four detection channels run in a fixed order:
-
-1. ``model_index.json``'s ``_name_or_path`` as a free-text hint
-2. ``model_index.json``'s ``_class_name``
-3. the top-level component directory set
-4. per-file hints, then root-file sentinels, then the whole listing as one hint
-
-Ordering within a channel is the declaration's ``order`` field, which is how a
-more specific variant (``flux2``) stays ahead of a broader one (``flux1``).
-"""
+"""Source-layout / family detection — the generic engine over declared matchers."""
 
 from __future__ import annotations
 
@@ -71,11 +54,7 @@ def infer_model_family_from_hint(value: str | None) -> str:
 
 @dataclass(frozen=True)
 class SourceLayoutInfo:
-    """Lightweight metadata about a detected HF repo (for tagging only).
-
-    File selection is the classifier's job — see hf_classifier. This struct is
-    populated for downstream taggers that need a model-family hint.
-    """
+    """Lightweight metadata about a detected HF repo (for tagging only)."""
 
     source_layout: str
     model_family: str
@@ -144,11 +123,6 @@ def _detect_variant_from_paths(paths: list[str]) -> str:
 
 
 def _detect_variant_from_sentinels(paths: list[str]) -> str:
-    """Root-file sentinels: a repackage layout whose filenames carry no family token.
-
-    The LTX-2 case (``video_vae_encoder.safetensors`` + friends) is ONE
-    declaration, read by both the worker and the trainer.
-    """
     root = _root_files(paths)
     for decl in registered_layouts():
         if decl.variant and decl.matches_sentinels(root):
@@ -157,16 +131,9 @@ def _detect_variant_from_sentinels(paths: list[str]) -> str:
 
 
 def detect_huggingface_source_layout(*, repo_dir: Path, files: list[str]) -> SourceLayoutInfo:
-    """Tagging-only metadata: detect diffusers-vs-singlefile shape + family variant.
-
-    Used by ingest_from_source to populate ``model_family`` / ``model_family_variant``
-    in the destination checkpoint metadata. Not a load-bearing decision —
-    the file-selection strategy is determined upstream by the classifier.
-    """
+    """Tagging-only metadata: detect diffusers-vs-singlefile shape + family variant."""
     signals = _DEFAULT_SIGNALS
     normalized = _normalize_paths(files)
-    # Annotated `str`, not inferred: the ruled tokens are `Final[Literal[...]]`
-    # so an inferred type here would narrow to the first branch's literal.
     source_layout: str
     if _has_diffusers_layout_signals(normalized, signals):
         source_layout = MULTI_FILE

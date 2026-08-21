@@ -1,25 +1,4 @@
-"""Property tests over the ref grammar, the CAS-ref parser, and the
-chunked-manifest entry decode.
-
-Three decode boundaries, one theme: each turns cross-service bytes into a value
-the worker then acts on, and each fails SILENTLY rather than loudly.
-
-* **ref grammar** (``gen_worker.models.refs``) is the Python half of a contract
-  whose vectors are vendored byte-identically from tensorhub
-  (``ref_grammar_vectors.json``). The vectors assert the cases somebody thought
-  of; the properties here assert the ones nobody did — chiefly that the NORMAL
-  FORM IS A FIXED POINT, because hub-minted refs and worker wire refs are
-  compared byte-wise, so a ref that normalizes two ways is a cache miss that
-  presents as a missing model.
-* **CAS refs** (``tensorfs.CASRef``): a bare hex
-  string must not default to ``blake3:``. ``len(digest) == 64`` cannot tell
-  blake3 from sha256 — both are 32 bytes — so a length check is not a
-  discriminator, it only looks like one.
-* **chunked entries** (``gen_worker.models.hub_client.parse_chunk_list``): a
-  malformed chunk list must be a hard failure, never a silent empty list. An
-  empty list is indistinguishable from "stored whole", and reading a chunked
-  file as whole is how a 40 GiB shard becomes a 0-byte one.
-"""
+"""Property tests over the ref grammar, the CAS-ref parser, and the chunked-manifest entry decode."""
 
 from __future__ import annotations
 
@@ -47,27 +26,18 @@ REF_VECTORS = pathlib.Path(__file__).parent / "testdata" / "ref_grammar_vectors.
 HEX64 = "a" * 64
 
 
-# ---------------------------------------------------------------------------
-# ref grammar
-# ---------------------------------------------------------------------------
-
 def _ref_seeds() -> list[str]:
     seeds = [
         "", " ", "/", "//", "a/", "/b", "owner/repo", "owner/repo:", "owner/repo@prod",
         "owner/repo@latest", "owner/repo#fp8", "owner/repo#FP8", "owner/repo#",
-        "owner/repo:prod",    # refused: the retired tag production
-        "owner/repo:latest",  # refused: the retired tag production
+        "owner/repo:prod",
+        "owner/repo:latest",
         "owner/repo#a#b", "owner/repo#fp8?attr=1",
-        # An over-long fragment. pgw#1213 widened the cap to MAX_FRAGMENT_LEN
-        # so a `cg-key-v1` key (66 chars) fits, so the seed tracks the cap
-        # rather than the old literal 64 — its job is to be one too long.
         "owner/repo#" + "a" * (MAX_FRAGMENT_LEN + 1),
         f"owner/repo@sha256:{HEX64}", f"owner/repo@blake3:{'b' * 64}",
         f"owner/repo@SHA256:{HEX64.upper()}", "owner/repo@sha256:", "owner/repo@deadbeef",
         "owner/repo@v1",
-        f"owner/repo:tag@sha256:{HEX64}#fp8",  # refused: the retired tag production
-        # th#1388's shape: a codepoint whose .lower() is not length-preserving,
-        # which shifts an index computed on the lowercased copy.
+        f"owner/repo:tag@sha256:{HEX64}#fp8",
         f"owner/rİpo@SHA256:{HEX64}",
         f"owner/repo@blake3:x@sha256:{HEX64}",
         "owner/repo/extra", "owner/repo:a:b", "0/0:/", "0/::", "  owner/repo  ",
@@ -84,25 +54,19 @@ def _ref_seeds() -> list[str]:
 @settings(max_examples=400, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(st.one_of(st.sampled_from(_ref_seeds()), st.text(max_size=60)))
 @example("owner/repo")
-@example("owner/repo:latest#fp8")  # refused: the retired tag production
+@example("owner/repo:latest#fp8")
 @example(f"owner/repo@sha256:{HEX64}")
-@example(f"owner/rİpo@SHA256:{HEX64}")   # pgw#872 index/slice mismatch (fixed)
-@example("owner/repo/extra")                   # th#1387 unbounded path segments
-@example("0/::")                               # th#1387 round-trip break
-@example("owner/repo@prod?quant=plain.bf16@1")  # th#2006 lane spec, `@` inside
-@example("owner/repo@prod?")                    # refused: an empty lane spec
+@example(f"owner/rİpo@SHA256:{HEX64}")
+@example("owner/repo/extra")
+@example("0/::")
+@example("owner/repo@prod?quant=plain.bf16@1")
+@example("owner/repo@prod?")
 def test_ref_normal_form_is_a_fixed_point(raw: str) -> None:
-    """``parse(format(parse(s))) == address(parse(s))``, formatting idempotent.
-
-    This is the property the whole grammar exists to provide. th#2006 named the
-    one thing the projection drops: a `?<lane-spec>` is a RESOLUTION input, not
-    part of what a ref addresses, so the normal form is the ADDRESS and the
-    spec does not survive it. Everything a ref NAMES does.
-    """
+    """``parse(format(parse(s))) == address(parse(s))``, formatting idempotent."""
     try:
         parsed = parse_model_ref(raw)
     except ValueError:
-        return  # a typed refusal is a correct outcome
+        return
     normal = format_model_ref(parsed)
     again = parse_model_ref(str(normal))
     assert again == _address_of(parsed), (
@@ -113,7 +77,6 @@ def test_ref_normal_form_is_a_fixed_point(raw: str) -> None:
 
 
 def _address_of(parsed: ParsedModelRef) -> ParsedModelRef:
-    """``parsed`` with its lane spec cut — what ``canonical()`` addresses."""
     th = parsed.tensorhub
     assert th is not None
     return dataclasses.replace(
@@ -131,57 +94,31 @@ def test_ref_acceptance_implies_well_formed_components(raw: str) -> None:
     th = parsed.tensorhub
     assert th is not None and parsed.provider == "tensorhub"
     assert th.owner and th.repo, f"{raw!r} accepted with an empty owner/repo"
-    # th#1387's hole is CLOSED (th#1987 re-key): no accepted component may
-    # carry a grammar separator, which is what makes the normal form injective.
     for name, part in (("owner", th.owner), ("repo", th.repo), ("release", th.release)):
         assert not any(c in part for c in REF_GRAMMAR_SEPARATORS), (
             f"{raw!r} accepted with a separator inside {name}={part!r}")
     if th.fragment is not None:
-        # th#2031: a fragment survives parsing only on a compile COMPILED GRAPH repo.
         assert th.owner == "root" and th.repo.startswith("family-"), (
             f"{raw!r} accepted a fragment on a non-compiled graph repo")
         assert th.fragment == th.fragment.lower()
         assert 1 <= len(th.fragment) <= MAX_FRAGMENT_LEN
     if th.digest is not None:
-        # A digest that reached a parsed ref is used to ADDRESS CAS objects, so
-        # "present" is not enough — it must name its algorithm. An inferred
-        # algorithm addresses the wrong namespace silently.
         assert ":" in th.digest, f"{raw!r} accepted an untagged digest {th.digest!r}"
         algo, _, _ = th.digest.partition(":")
         assert algo in ("sha256", "blake3"), f"{raw!r} accepted digest algorithm {algo!r}"
 
 
 def test_ref_grammar_lower_index_pgw872() -> None:
-    """pgw#872 FIXED (tensorhub twin: th#1388) — revert-turns-red guard.
-
-    ``parse_model_ref`` used to compute ``low = s.lower()``, find ``@sha256:``
-    with ``low.index(...)``, and slice ``s`` with that index. ``str.lower()`` is
-    not length-preserving (``len("\u0130") == 1`` but ``len("\u0130".lower()) == 2``),
-    so the split landed in the wrong place: the repo kept a stray ``@`` and the
-    digest silently lost a hex character while still LOOKING like a digest — a
-    wrong CAS address with no error anywhere. The Go twin PANICKED on the
-    mirror-image input (``slice bounds out of range``), because ToLower GROWS
-    invalid UTF-8.
-
-    The fix on both sides is the same: index and slice the SAME string. Here
-    ``_ascii_lower`` is a 1:1 character map, so an index taken on it is a valid
-    index into the original.
-    """
     parsed = parse_model_ref(f"owner/r\u0130po@SHA256:{HEX64}").tensorhub
     assert parsed is not None
     assert parsed.repo == "r\u0130po", (
         f"repo={parsed.repo!r}: the split landed on an index taken from a lowercased copy"
     )
     assert parsed.digest == f"sha256:{HEX64}", f"digest={parsed.digest!r}"
-    # The fold itself: every case spelling of the marker finds the same split.
     for spelling in ("@sha256:", "@SHA256:", "@ShA256:", "@sHa256:"):
         th = parse_model_ref(f"owner/repo{spelling}{HEX64}").tensorhub
         assert th is not None and th.repo == "repo" and th.digest == f"sha256:{HEX64}"
 
-
-# ---------------------------------------------------------------------------
-# CAS refs
-# ---------------------------------------------------------------------------
 
 @settings(max_examples=400, deadline=None)
 @given(st.one_of(
@@ -194,11 +131,10 @@ def test_ref_grammar_lower_index_pgw872() -> None:
         f"owner/repo@sha256:{HEX64}", "sha256:../../etc/passwd",
     ]),
 ))
-@example(HEX64)             # the th#1357 museum piece
+@example(HEX64)
 @example(f"sha256:{HEX64}")
 def test_parse_cas_ref_acceptance_is_fully_determined(ref: str) -> None:
-    """Acceptance implies a complete, self-consistent (algo, hex) pair, and the
-    parse is idempotent under its own normal form."""
+    """Acceptance implies a complete, self-consistent (algo, hex) pair, and the parse is idempotent under its own normal form."""
     try:
         parsed = CASRef.parse(ref)
     except ValueError:
@@ -212,31 +148,14 @@ def test_parse_cas_ref_acceptance_is_fully_determined(ref: str) -> None:
 
 
 def test_bare_hex_is_refused_pgw871() -> None:
-    """pgw#871 FIXED — the two CAS readers in this repo agree with each other
-    AND with the hub. Revert-turns-red guard.
-
-    th#1357 DELETED the bare-hex read-path default from the hub:
-    ``storage.ParseCASRef`` refuses an untagged ref outright ("bare hex is
-    refused; write \"sha256:<hex>\""). ``parse_cas_ref`` used to infer
-    ``blake3`` from bare hex while its docstring claimed to match the hub — so
-    the same 64-character string the hub REFUSED, this side resolved, into the
-    WRONG namespace: a 64-char hex cannot distinguish blake3 from sha256,
-    because both digests are 32 bytes. The length check is not a discriminator,
-    it only looks like one.
-    """
     with pytest.raises(ValueError, match="algorithm-tagged"):
         CASRef.parse(HEX64)
-    # The other CAS-digest reader in this repo, which already refused it.
     with pytest.raises(ValueError):
         resolved_entry_digest({"digest": HEX64})
     assert CASRef.parse(f"sha256:{HEX64}") == CASRef(HEX64)
     with pytest.raises(ValueError, match="unsupported algorithm"):
         CASRef.parse(f"blake3:{HEX64}")
 
-
-# ---------------------------------------------------------------------------
-# chunked manifest entries
-# ---------------------------------------------------------------------------
 
 _CHUNK = st.fixed_dictionaries({}, optional={
     "digest": st.one_of(st.text(max_size=70), st.just(HEX64), st.just(f"sha256:{HEX64}"), st.none()),
@@ -254,20 +173,15 @@ _CHUNK = st.fixed_dictionaries({}, optional={
 )
 @example([{"digest": HEX64, "url": "https://x/1", "len": 5}], None)
 @example([{"digest": HEX64, "len": 5}], ["https://x/1"])
-@example([{"digest": HEX64, "len": 5}], [])                    # empty url list
-@example([{"digest": HEX64, "len": 5}], ["a", "b"])            # misaligned url list
-@example([{"digest": HEX64, "url": "u", "len": 0}], None)      # the `or 0` launder
+@example([{"digest": HEX64, "len": 5}], [])
+@example([{"digest": HEX64, "len": 5}], ["a", "b"])
+@example([{"digest": HEX64, "url": "u", "len": 0}], None)
 def test_chunk_list_is_all_or_typed_refusal(raw: Any, urls: Any) -> None:
-    """A malformed chunk list is a HARD failure, never a silent short list.
-
-    Index alignment is the only thing binding a URL to its digest, so a list
-    that parses to FEWER chunks than were declared is the defect: it reads as
-    "fetch fewer chunks" and the file is silently truncated.
-    """
+    """A malformed chunk list is a HARD failure, never a silent short list."""
     try:
         out = parse_chunk_list("t", "p", raw, urls)
     except HubResolveError:
-        return  # typed refusal — the correct outcome for anything malformed
+        return
     except (ValueError, TypeError, AttributeError) as exc:
         pytest.fail(
             f"parse_chunk_list raised an UNTYPED {type(exc).__name__}: {exc} — "
@@ -289,12 +203,11 @@ def test_chunk_list_is_all_or_typed_refusal(raw: Any, urls: Any) -> None:
 @settings(max_examples=200, deadline=None)
 @given(st.dictionaries(st.sampled_from(["digest", "path", "url"]),
                        st.one_of(st.text(max_size=70), st.none(), st.integers()), max_size=3))
-@example({"digest": HEX64})                 # untagged — must refuse
+@example({"digest": HEX64})
 @example({"digest": f"sha256:{HEX64}"})
 @example({})
 def test_resolved_entry_digest_never_infers(entry: dict[str, Any]) -> None:
-    """An integrity check with no digest is a REFUSAL, never a skip — and an
-    untagged digest is never given an algorithm."""
+    """An integrity check with no digest is a REFUSAL, never a skip — and an untagged digest is never given an algorithm."""
     try:
         digest = resolved_entry_digest(entry)
     except ValueError:

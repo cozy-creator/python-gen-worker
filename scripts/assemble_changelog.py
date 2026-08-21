@@ -1,49 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble changelog.d/ fragments into CHANGELOG.md sections at cut time.
-
-Every lane appending to one mutable CHANGELOG.md makes a conflict near-certain
-for any PR that sits through a sibling merge. Lanes write
-changelog.d/<issue>.md -- a path nobody else touches -- and a cut concatenates
-them here.
-
-pgw#1226: a cut MARKS the fragments it consumed in changelog.d/consumed.tsv; it
-no longer deletes them, and it does not decide which version a fragment belongs
-to. That is DERIVED from git.
-
-pgw#1339: what is derived is the version containing the fragment's SUBJECT WORK,
-not the version containing the fragment FILE. A fragment is a document about a
-change; the change is the thing a release note dates. So
-
-  * the issue's authored commits are resolved from commit SUBJECTS
-    (`pgw#1323: ...`), falling back to the commit that added the fragment file
-    when no subject names the issue;
-  * the fragment is attributed to the earliest release tag whose tree contains
-    ALL of them -- a note is only true once everything it describes has shipped;
-  * if no tag contains them it belongs to the version being cut, and only if
-    that version is not itself already released and the work is in the cut ref.
-    Otherwise the fragment stays PENDING and is listed, never swept.
-
-A fragment name may carry a per-lane suffix -- `pgw1346-b3-math.md` -- so the
-lanes of one batched issue write DISJOINT paths instead of queueing behind a
-shared `pgw1346.md`. The `<prefix><number>` core is what dates and orders it, so
-it stays mandatory; the suffix is only a filename.
-
-Two failures this kills, both observed:
-
-  * 0.114.3 shipped pgw#1244's code with changelog.d/pgw1244.md unconsumed, and
-    the old tooling would have written that bullet under the NEXT version -- a
-    release note pointing at a wheel that did not contain the change.
-  * `--version 0.121.0`, run to date ONE late fragment into an already-released
-    section, dated every other pending fragment to 0.121.0 as well: 16 of them
-    on the 0.123.0 cutter's tree, including work that had shipped in no wheel at
-    all. The old rule's "in no tag -> the version being cut" fallback cannot
-    tell a repair from a cut. This one can: those 16 are in no tag AND 0.121.0
-    is already released, so they stay pending.
-
-    scripts/assemble_changelog.py --check
-    scripts/assemble_changelog.py --version 0.92.0 --headline "**what changed**"
-    scripts/assemble_changelog.py --version 0.121.0   # repair: append-only
-"""
+"""Assemble changelog.d/ fragments into CHANGELOG.md sections at cut time."""
 
 from __future__ import annotations
 
@@ -57,34 +13,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# <prefix><number>[-<suffix>].md -- prefix names the id space (pgw, th, te, ...).
-#
-# The optional suffix is pgw#1346's lesson: ~10 lanes of one batched issue were
-# all appending to a single `pgw1346.md`, which re-serialised the merge queue on
-# a shared path and cost repeated CONFLICTING ejections -- the exact failure
-# `changelog.d/` exists to remove. `pgw1346-b3-math.md` and `pgw1346-b4-video.md`
-# are disjoint files that still resolve to issue pgw#1346 for dating, and land
-# adjacent in the section. The <prefix><number> core stays mandatory: it is what
-# attribution keys on, so a suffix can never smuggle in an undatable fragment.
 NAME = re.compile(
-    # A 2+ letter prefix, so a suffixed name cannot be read as one: `b3-math`
-    # would otherwise parse as issue b#3 and be dated by nothing.
     r"^(?P<prefix>[a-z]{2,})(?P<number>\d+)(?:-(?P<suffix>[a-z0-9][a-z0-9-]*))?$"
 )
 UNRELEASED = re.compile(r"^## Unreleased\b.*?(?=^## )", re.M | re.S)
 VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 RELEASE_TAG = re.compile(r"^v(?P<version>\d+\.\d+\.\d+)$")
-# `pgw#1323: ...`, `th#2082 follow-up: ...` -- an issue reference in a commit
-# SUBJECT. Bodies are excluded on purpose: a body cites related issues, a
-# subject claims authorship of the change.
-#
-# Every ref in the subject counts, not just the leading one: 8 of the last 451
-# subjects here trail it (`ci: fence the launch boundary (pgw#1239)`), and
-# dropping those would date those fragments by the wrong signal. The cost is
-# that a subject cross-referencing a second issue (67 of 451) lends it a commit
-# it did not author -- which the all-commits rule below fails SAFE on: a stray
-# commit outside a tag only ever moves a fragment LATER or into the printed
-# pending list, never into a wheel that lacks the change.
 SUBJECT_REF = re.compile(r"(?<![0-9a-z])(?P<prefix>[a-z]+)#0*(?P<number>\d+)(?![0-9])")
 
 LEDGER = "consumed.tsv"
@@ -98,9 +32,6 @@ LATE_NOTE = (
     f"{LATE_NOTE_MARK}: the change below shipped in this version's tag and was "
     "not assembled into the section at cut time.*"
 )
-# Consumed fragments stay on disk for this many PRIOR releases, so that a
-# fragment a recently-merged branch could still be carrying is never removed
-# underneath it. The cut's own are always kept.
 RETAIN_PRIOR_RELEASES = 1
 
 
@@ -147,11 +78,7 @@ def write_ledger(root: Path, rows: list[tuple[str, str]]) -> None:
 def collect(
     root: Path,
 ) -> tuple[list[tuple[int, str, str, Path]], list[tuple[str, Path]]]:
-    """(pending, consumed) fragments.
-
-    Pending is ordered by issue NUMBER, then by suffix -- so one issue's
-    per-lane fragments land adjacent in the section, unsuffixed one first.
-    """
+    """(pending, consumed) fragments."""
     consumed_at = {stem: version for version, stem in read_ledger(root)}
     pending: list[tuple[int, str, str, Path]] = []
     consumed: list[tuple[str, Path]] = []
@@ -195,17 +122,7 @@ def release_versions(root: Path) -> list[str]:
 
 
 def subject_index(root: Path, refs: list[str]) -> dict[str, list[str]]:
-    """`pgw1323` -> the commits whose SUBJECT claims that issue.
-
-    One `git log` pass over the whole search space, because doing it per
-    fragment is the same history walked N times. Merges are excluded: a merge
-    subject names the PR number, not the issue, and its parents are here anyway.
-
-    The space is the cut ref, HEAD and the release tags -- deliberately NOT
-    `--all`: every open lane worktree carries commits whose subjects claim an
-    issue, and letting unmerged work count would hold that issue's fragment out
-    of a cut it genuinely belongs in.
-    """
+    """`pgw1323` -> the commits whose SUBJECT claims that issue."""
     index: dict[str, list[str]] = {}
     out = git(root, "log", "--no-merges", "--format=%H%x1f%s", *refs)
     for line in out.splitlines():
@@ -243,17 +160,17 @@ class Work:
     """What a fragment's issue actually shipped in, derived from git."""
 
     stem: str
-    issue: str  # `pgw#1346` -- the suffix does not date anything
+    issue: str
     commits: tuple[str, ...]
     from_subject: bool
-    released_in: str | None  # earliest release tag containing ALL of `commits`
+    released_in: str | None
 
 
 def resolve(
     root: Path, path: Path, index: dict[str, list[str]], cache: dict[str, set[str]]
 ) -> Work:
     m = NAME.match(path.stem)
-    assert m is not None, path  # collect() already refused anything else
+    assert m is not None, path
     key = f"{m['prefix']}{int(m['number'])}"
     issue = f"{m['prefix']}#{int(m['number'])}"
     commits = list(dict.fromkeys(index.get(key, [])))
@@ -333,9 +250,6 @@ def plan_versions(
         if work.released_in is not None:
             by_version.setdefault(work.released_in, []).append(path)
             continue
-        # In no release tag. It rides the version being cut only if that
-        # version is not itself already released -- otherwise this is a repair
-        # run, and dating unshipped work into a shipped wheel is the defect.
         in_cut = all(is_ancestor(root, c, cut_ref) for c in work.commits)
         if not cutting_released and in_cut:
             by_version.setdefault(cutting, []).append(path)
@@ -375,8 +289,6 @@ def main() -> int:
     if not pending:
         sys.exit("no unconsumed fragments in changelog.d/ -- nothing to release")
 
-    # Attribution reads tags, and a graft file makes `tag --contains` answer
-    # about a history the repo does not have. Refuse rather than mis-attribute.
     if git(root, "rev-parse", "--is-shallow-repository") == "true":
         sys.exit("refusing: shallow repository -- run `git fetch --unshallow` first")
     released = release_versions(root)
@@ -393,8 +305,6 @@ def main() -> int:
 
     changelog = root / "CHANGELOG.md"
     text = changelog.read_text()
-    # Late attributions first: inserting the new section shifts every offset
-    # below it, and the sections being appended to are all below it.
     late = sorted(
         (v for v in by_version if v != cutting or cutting_released), key=version_key
     )
@@ -410,8 +320,6 @@ def main() -> int:
         for path in mine:
             print(f"{path.name} -> {cutting}")
     elif not late:
-        # Not an error to name a version nothing belongs to -- but nothing is
-        # written for it either, and the held listing below says why.
         print(f"note: nothing pending belongs to {cutting} -- no new section")
     if held:
         print(f"{len(held)} fragment(s) pending, not in {cutting}:")
@@ -432,10 +340,6 @@ def main() -> int:
     changelog.write_text(text)
     write_ledger(root, ledger)
 
-    # Consumed fragments are marked, not deleted -- but they do not accumulate
-    # forever either. Prune what an older release already consumed. The window
-    # is anchored on the NEWEST version known, so a repair run of an older
-    # version prunes exactly what a cut would, and no more.
     known = sorted({*released, cutting}, key=version_key)
     keep = {cutting, *known[-(RETAIN_PRIOR_RELEASES + 1) :]}
     for version, path in consumed:

@@ -1,18 +1,3 @@
-"""pgw#783: the N-child RUNTIME proof — a real parent spawning TWO real compute
-children (one per execution group) and routing dispatches between them.
-
-The unit rows in ``test_group_processes_pgw783`` prove the parent's routing and
-fan-in LOGIC on a real ParentControl; this proves the whole thing at RUNTIME:
-two child subprocesses, one unix server per group, the per-group env delta
-applied at spawn, a dispatch to each group's rank-0 device served by THAT group,
-and one child's death attributed to ITS request while the sibling keeps serving.
-
-Real everything on the worker side: a real ParentControl (real Transport,
-real supervision, two real ``_ChildSlot``s) speaking real gRPC to the hub-double,
-spawning two real compute children. The hub is the only double. The toy child is
-CPU-only, so it boots identically with or without CUDA visibility.
-"""
-
 from __future__ import annotations
 
 import os
@@ -62,8 +47,7 @@ def _postmortem_dir(tmp: Path) -> Path:
 
 
 class G2Harness:
-    """One hub-double + one ParentControl with a 2-group topology + two real
-    child subprocesses."""
+    """One hub-double + one ParentControl with a 2-group topology + two real child subprocesses."""
 
     def __init__(self, tmp: Path) -> None:
         self.scheduler = FakeScheduler()
@@ -89,7 +73,6 @@ class G2Harness:
             child_cmd=[sys.executable, str(CHILD_MAIN)],
             child_env=child_env,
             socket_path=str(tmp / "ctl.sock"),
-            # TWO execution groups, one device each — the 4.00x shape at width 2.
             topology=ExecutionTopology(gpu_count=2, gpus_per_execution_group=1),
             respawn_backoff_base_s=0.1,
             respawn_backoff_cap_s=0.5,
@@ -99,8 +82,6 @@ class G2Harness:
         )
         self.exit_code: Optional[int] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
-        # Same two gates as SplitHarness — a dead parent is definitive,
-        # and TWO children's spawn-plus-import is what the silence is worth here.
         self.scheduler.worker_alive = lambda: self.alive
         self.scheduler.boot_cost = lambda: measure_child_boot_cost_s(child_env)
         self._thread.start()
@@ -155,36 +136,30 @@ def g2(tmp_path, _dials):
 
 
 def test_two_children_boot_and_each_group_serves_its_own_dispatch(g2):
-    """The whole worker is READY only once BOTH groups are (the fan-in merges
-    phase to the least-ready), and a dispatch to each group's rank-0 device is
-    served by THAT group's child — proven by the ordinal it reports."""
+    """The whole worker is READY only once BOTH groups are (the fan-in merges phase to the least-ready), and a dispatch to each group's rank-0 device is served by THAT group's child — proven by the ordina..."""
     conn = g2.scheduler.wait_connection(0)
-    # READY requires the parent to have merged two children's state to READY.
     conn.wait_for(is_ready)
 
-    # Two real children exist, one per group.
     assert g2.pc.execution_groups == 2
     assert all(slot.proc is not None for slot in g2.pc._slots)
     assert g2.pc._slots[0].socket_path != g2.pc._slots[1].socket_path
 
-    # A dispatch to group 0's rank-0 device (gpu_index 0) is served by g0.
     conn.send(run_job=pb.RunJob(
         request_id="r-g0", attempt=1, function_name="whoami",
         input_payload=_payload(), compute=pb.ResolvedCompute(gpu_index=0)))
     r0 = conn.wait_for(is_result_for("r-g0"), timeout=60.0)
     assert r0.job_result.status == pb.JOB_STATUS_OK
     assert b"g=0" in r0.job_result.inline
-    assert b"cvd=0" in r0.job_result.inline   # scoped to card 0
-    assert b"sib=2" in r0.job_result.inline    # knows it shares the pod
+    assert b"cvd=0" in r0.job_result.inline
+    assert b"sib=2" in r0.job_result.inline
 
-    # A dispatch to group 1's rank-0 device (gpu_index 1) is served by g1.
     conn.send(run_job=pb.RunJob(
         request_id="r-g1", attempt=1, function_name="whoami",
         input_payload=_payload(), compute=pb.ResolvedCompute(gpu_index=1)))
     r1 = conn.wait_for(is_result_for("r-g1"), timeout=60.0)
     assert r1.job_result.status == pb.JOB_STATUS_OK
     assert b"g=1" in r1.job_result.inline
-    assert b"cvd=1" in r1.job_result.inline   # scoped to card 1
+    assert b"cvd=1" in r1.job_result.inline
 
     assert g2.alive and g2.exit_code is None
 
@@ -192,16 +167,11 @@ def test_two_children_boot_and_each_group_serves_its_own_dispatch(g2):
 def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(
     g2, _dials, tmp_path,
 ):
-    """A group where one of the children dies is not a dead group: only the dead
-    child's in-flight job is attributed, only its group respawns, and the sibling
-    group serves throughout — the pgw#783 failure model on real processes."""
     conn = g2.scheduler.wait_connection(0)
     conn.wait_for(is_ready)
 
     slot1_pid_before = g2.pc._slots[1].proc.pid
 
-    # Keep a real request open in g1 while g0 dies.  Its marker is the exact
-    # cross-process evidence pgw#938 found the shared path could unlink.
     conn.send(run_job=pb.RunJob(
         request_id="r-sleep-g1", attempt=1, function_name="sleepy",
         input_payload=_payload(), compute=pb.ResolvedCompute(gpu_index=1)))
@@ -216,8 +186,6 @@ def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(
     )
     assert g1_marker.exists(), "g1 never published its per-group in-flight marker"
 
-    # Kill group 0 below Python while group 1's request and fault-dump file are
-    # live.  The parent must consume only g0's one-writer evidence.
     conn.send(run_job=pb.RunJob(
         request_id="r-die-g0", attempt=1, function_name="segfault",
         input_payload=_payload(), compute=pb.ResolvedCompute(gpu_index=0)))
@@ -249,7 +217,6 @@ def test_one_childs_death_is_attributed_to_its_request_siblings_keep_serving(
         "reaping group 0 destroyed group 1's live marker"
     )
 
-    # The sibling group (g1) never died — same process — and still serves.
     assert g2.pc._slots[1].proc is not None
     assert g2.pc._slots[1].proc.pid == slot1_pid_before, "sibling group was disturbed"
     conn.send(cancel_job=pb.CancelJob(request_id="r-sleep-g1", attempt=1))

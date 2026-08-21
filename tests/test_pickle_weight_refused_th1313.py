@@ -1,16 +1,3 @@
-"""th#1313: a worker refuses to materialize a snapshot containing pickle weights.
-
-Paul, 2026-07-30: "definitely ban all of these."
-
-tensorhub now refuses these at PUBLISH. This is the defence in depth, and the
-depth is the point: blobs already in the shared CAS predate that refusal, and a
-worker is where unpickling would actually execute — ``torch.load`` /
-``from_pretrained`` on a hostile ``.bin`` runs the attacker's code inside a pod
-holding hub credentials and other tenants' work.
-
-The refusal lives in ``_validate_resolved``, which every wire boundary parses
-through, so the bytes are never even downloaded.
-"""
 from __future__ import annotations
 
 import pytest
@@ -57,13 +44,11 @@ def _ref() -> TensorhubRef:
 def test_resolve_refuses_every_pickle_format(bad: str) -> None:
     with pytest.raises(PickleWeightRefused) as exc:
         _validate_resolved(_ref(), _resolved("model.safetensors", bad))
-    # The refusal must name the file, or the publisher cannot act on it.
     assert bad.rsplit("/", 1)[-1].lower() in str(exc.value).lower()
 
 
 def test_resolve_accepts_a_clean_snapshot() -> None:
-    """False-positive guard: names that merely resemble the banned extensions
-    must still resolve, and a normal safetensors tree must be untouched."""
+    """False-positive guard: names that merely resemble the banned extensions must still resolve, and a normal safetensors tree must be untouched."""
     res = _validate_resolved(_ref(), _resolved(
         "model_index.json",
         "unet/diffusion_pytorch_model.safetensors",
@@ -79,8 +64,6 @@ def test_resolve_accepts_a_clean_snapshot() -> None:
 
 
 def test_extension_set_matches_the_hub_ban() -> None:
-    """The worker's list must not drift from tensorhub's
-    catalog.PickleWeightExtensions — a worker that accepts what the hub refuses
-    is the hole this closes."""
+    """The worker's list must not drift from tensorhub's catalog.PickleWeightExtensions — a worker that accepts what the hub refuses is the hole this closes."""
     assert PICKLE_WEIGHT_EXTENSIONS == (".bin", ".ckpt", ".pt", ".pth", ".pkl", ".pickle")
     assert first_pickle_weight_path(["x/model.safetensors"]) == ""

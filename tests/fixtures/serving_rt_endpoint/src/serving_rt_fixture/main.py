@@ -1,11 +1,3 @@
-"""Runtime-contract fixture: author code instrumented to OBSERVE the
-pgw#1382 lifecycle/concurrency contract (single-flight, drain-then-unload,
-best-effort unload, multi-model slots). Kept separate from the
-main_v2-shaped fixture so that one stays contract-exact.
-
-All coordination is event-based (progress-gated), never clock-based.
-"""
-
 from __future__ import annotations
 
 import threading
@@ -20,11 +12,8 @@ from gen_worker.models import SDXL
 #: cannot invent one. The v1 constant it replaces is deleted.
 SDXL_DIFFUSERS_BF16 = ("sdxl.diffusers@1", "plain.bf16@1")
 
-#: Cross-request observation log: ("request_done" | "unload:<cls>" | ...).
 ORDER: list[str] = []
-#: Set by the test to let held requests proceed.
 RELEASE = threading.Event()
-#: Released once per held request entering the model work section.
 ENTERED = threading.Semaphore(0)
 
 _gauge_lock = threading.Lock()
@@ -55,9 +44,6 @@ class Out(msgspec.Struct):
 
 class SlowModel(
     Model[SDXL],
-    # A residency/lifecycle fixture: it marks nothing by design, so `load`
-    # carries no `ctx.compile` and the class declares no `shapes=`. The two
-    # subclasses below inherit this lane declaration.
     lanes={SDXL_DIFFUSERS_BF16: lane(request=const(MiB(64)))},
 ):
     """Marks nothing; ``load`` builds cheap state, work is gauged."""
@@ -106,7 +92,6 @@ def run(ctx: RequestContext, payload: In, m: SlowModel) -> Out:
 @entrypoint
 def pair(ctx: RequestContext, payload: In, right: SlowModel,
          left: OtherModel) -> Out:
-    # Slot params in declaration order; slot NAME keys the envelope pick.
     return Out(value=payload.value, served_by=f"{right.name}+{left.name}")
 
 

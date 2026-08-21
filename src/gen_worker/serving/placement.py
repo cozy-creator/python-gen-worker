@@ -36,10 +36,6 @@ from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-#: Wire-shared activity kind (tensorhub
-#: `internal/orchestrator/grpc/worker_activity.go`). One COMPLETED event per
-#: unmet floor per residency-admit, so "how often did we serve degraded, and on
-#: what" is a COUNT over `worker_activity_events`, not a log-scrape.
 ACTIVITY_KIND = "placement_degraded"
 
 _BYTES_PER_GIB = float(1024 ** 3)
@@ -103,22 +99,10 @@ class Shortfall:
 
 
 def device_facts(index: int = 0) -> DeviceFacts:
-    """This worker's actual card. Never raises — a machine that will not
-    describe itself reads as the emptiest possible one, which makes every
-    declared floor unmet and therefore LOUD. Silence is the one answer a
-    placement report must never give.
-
-    A CPU-only host (cozy-local) is exactly that case and is not special-cased:
-    0 GiB of VRAM is under every floor, so it warns, and then it runs.
-    """
+    """This worker's actual card."""
     from ..hostfacts import cuda_ready
 
     try:
-        # `cuda_ready()` is the ONE `torch.cuda.is_available()` site in `src/`
-        # (fenced by tests/test_hostfacts_pgw896.py), and it is the right
-        # question here: this is a CAPABILITY check — "may I read a card?" —
-        # for which degrading on a device that will not answer is correct,
-        # because an unreadable device is under every floor anyway.
         if not cuda_ready():
             return DeviceFacts(name="cpu (no CUDA device)", vram_gib=0.0, sm=0)
         import torch
@@ -136,26 +120,6 @@ def device_facts(index: int = 0) -> DeviceFacts:
 
 
 def serving_device() -> str:
-    """The device this worker serves on, PROBED — never assumed (pgw#1452).
-
-    The host used to default to the literal string ``"cuda"``. That is an
-    enumeration of what a pod usually is, not a measurement of what this
-    machine is, and it reaches two places at once: ``engine_for(device=)`` on
-    the streaming arm and ``_placed`` on the eager bridge. On a host with no
-    card it turns a boot into a bare ``torch`` device error rather than a
-    sentence naming the fallback.
-
-    So it is asked the strong way. ``hostfacts.cuda_state`` is the
-    probe-BY-ALLOCATION verdict (allocate, op, synchronize, free) rather than
-    ``is_available()``, which is why a card that is present but will not answer
-    reads as ``device_unreadable`` and takes the CPU arm with its probe class
-    named — instead of failing on the first tensor with no explanation.
-
-    The fallback is LOUD by design, exactly as ``derive._trace_device``'s is:
-    cozy-local on a CPU-only box is a supported way to run (Paul, 2026-08-18:
-    *"still run anyway"*), and serving on the wrong processor silently is the
-    defect this replaces.
-    """
 
     from ..hostfacts import cuda_state
 
@@ -175,14 +139,11 @@ def serving_device() -> str:
 def shortfalls(
     model_cls: type, lane: Any, *, facts: Optional[DeviceFacts] = None
 ) -> Tuple[Shortfall, ...]:
-    """Every floor lane ``lane`` of ``model_cls`` declares that this machine
-    does not meet. Empty for an undeclared floor, an eager-permanent model, or
-    a machine that is simply big enough.
-    """
+    """Every floor lane ``lane`` of ``model_cls`` declares that this machine does not meet."""
     from .model import lane_handle, model_requires
 
     if lane is None:
-        return ()  # eager-permanent: no lane, so no lane floor
+        return ()
     requirements = model_requires(model_cls).get(lane_handle(lane))
     if requirements is None:
         return ()
@@ -191,9 +152,6 @@ def shortfalls(
         facts = device_facts()
 
     out: list[Shortfall] = []
-    # `min_sm` first: a card that cannot do the arithmetic at all is the more
-    # fundamental complaint, and an operator reading two lines should see it
-    # before the size one.
     if terms.min_sm and facts.sm < terms.min_sm:
         out.append(Shortfall("min_sm", lane_handle(lane), terms.min_sm,
                              facts.sm, facts.name))
@@ -207,19 +165,7 @@ def shortfalls(
 def warn_if_degraded(
     model_cls: type, lane: Any, *, facts: Optional[DeviceFacts] = None
 ) -> Tuple[str, ...]:
-    """Report every unmet floor on BOTH channels, and return the messages so
-    the caller can also make them caller-visible.
-
-    Operator-visible: one COMPLETED ``placement_degraded`` activity event per
-    unmet floor (countable, per-pod, on the channel every other worker fact
-    already lands on) plus a WARNING on the logger, which on cozy-local IS the
-    progress UI. Caller-visible: the returned messages, which the serve path
-    hands to ``ctx.warn`` so they ride the response envelope's adjustment
-    ledger on every request this instance serves.
-
-    Never raises and never refuses — best-effort reporting around a load that
-    is going to happen either way.
-    """
+    """Report every unmet floor on BOTH channels, and return the messages so the caller can also make them caller-visible."""
     try:
         found = shortfalls(model_cls, lane, facts=facts)
     except Exception:  # noqa: BLE001

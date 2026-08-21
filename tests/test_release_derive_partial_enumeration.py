@@ -1,22 +1,3 @@
-"""pgw#1449: one unenumerable entrypoint must not cost the whole module.
-
-Verbatim, on minimax-h3, at master before this:
-
-    derive error: @entrypoint generate_long: required payload field 'slots' of
-    type list[minimax_h3.long_video.LongVideoSlot] cannot be auto-synthesized
-    for the trace.
-
-`generate_long` is one of three, and its unsynthesizable field stopped
-`generate` and `reference_to_video` from being derived at all -- so
-`gen-worker lock` died there and wrote NO lock, and even the enumerable
-entrypoint's specializations never reached the document.
-
-The derive is a pre-warming completeness aid, never a correctness gate (its
-own words), so an entrypoint it cannot enumerate is SKIPPED-AND-STATED --
-exactly as an enumerated combination the author refuses with
-``ValidationError`` already is.
-"""
-
 from __future__ import annotations
 
 import enum
@@ -42,7 +23,6 @@ LOCK = (
     '\n[[package]]\nname = "diffusers"\nversion = "0.39.0"\n'
 )
 
-#: The two h3-shaped signatures the enumerator cannot reach.
 REFUSED = ("generate_long", "reference_to_video")
 
 
@@ -107,8 +87,6 @@ def test_the_enumerable_entrypoint_derives_while_two_others_cannot(
     entrypoints = document["entrypoints"]
     assert sorted(entrypoints) == ["generate", "generate_long", "reference_to_video"]
 
-    # The one that CAN be enumerated is fully derived: 2 Size values, and the
-    # lane carries their graph specializations.
     assert entrypoints["generate"]["traced_passes"] == 2
     assert "unenumerable" not in entrypoints["generate"]
     (lane,) = document["graphs"]["lanes"]
@@ -120,11 +98,7 @@ def test_the_enumerable_entrypoint_derives_while_two_others_cannot(
 def test_each_refused_entrypoint_is_STATED_in_the_document_not_dropped(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """Typed, per entrypoint, naming the field and its type.
-
-    A silent drop would leave the hub publishing an envelope schema for an
-    entrypoint with no traced coverage and no way to know that.
-    """
+    """Typed, per entrypoint, naming the field and its type."""
 
     out = tmp_path / "release.json"
     assert _derive(config_only_tree, out) == 0
@@ -135,8 +109,6 @@ def test_each_refused_entrypoint_is_STATED_in_the_document_not_dropped(
         assert row["traced_passes"] == 0
         assert row["unenumerable"]["reason"] == "payload_field_not_synthesizable"
         assert row["unenumerable"]["type"].startswith("list[")
-        # Still published as API surface: the envelope schema and model slots
-        # come from the SIGNATURE and never needed the enumeration.
         assert row["envelope_schema"]
         assert row["model_slots"] == {"model": "MixedModel"}
 
@@ -168,18 +140,11 @@ def test_the_result_names_both_refusals_so_a_caller_need_not_parse_prose(
     assert [name for name, _reason in result.unenumerable_entrypoints] == list(REFUSED)
     for _name, reason in result.unenumerable_entrypoints:
         assert "cannot be auto-synthesized" in reason
-    # The prose warning survives too -- it carries the author's remedy.
     assert any("NOT enumerated" in warning for warning in result.warnings)
 
 
 def test_the_refusal_stays_NARROW_and_a_real_defect_still_fails_the_module() -> None:
-    """The isolation must not become a blanket swallow.
-
-    ``PayloadEnumerationRefused`` has exactly one raise site. An empty enum,
-    a non-msgspec payload and an out-of-order signature are author defects
-    and still take the module down -- catching ``DeriveError`` instead of the
-    narrow subclass would have quietly turned all of them into "eager".
-    """
+    """The isolation must not become a blanket swallow."""
 
     from gen_worker.release.derive import (
         DeriveError,
@@ -197,7 +162,6 @@ def test_the_refusal_stays_NARROW_and_a_real_defect_still_fails_the_module() -> 
         _auto_payloads("@entrypoint x", NotAStruct)  # type: ignore[arg-type]
     assert not isinstance(second.value, PayloadEnumerationRefused)
 
-    # And the narrow one still fires where it should.
     with pytest.raises(PayloadEnumerationRefused) as refusal:
         _auto_payloads("@entrypoint x", Unsynthesizable)
     assert refusal.value.field == "slots"

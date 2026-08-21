@@ -1,25 +1,3 @@
-"""Real ``torchcg`` artifacts, built without torch (pgw#1283).
-
-The local compiled graph store used to hold OPAQUE bytes — it hashed whatever it was
-handed and re-hashed it on the way out — so every test about it could feed it
-``b"packed-compiled graph-bytes"``. pgw#1283 moved byte custody to TCG, which admits an
-artifact only if it unpacks, restates its own key, and names a host ISA this
-machine can run. Opaque bytes are now correctly refused, so the tests need the
-real envelope.
-
-Building one needs no torch and no GPU: the envelope is a gzip+USTAR tar of a
-metadata block and a code-only AOTInductor ``.pt2`` zip, and TCG's introspection
-reads the wrapper source and the ELF section table rather than loading either.
-The ELF and wrapper shapes below are the minimum ``torchcg``
-accepts; they are ported from TCG's own ``tests/test_artifact.py`` fixture,
-which is the authority on that shape.
-
-``host_isa`` is taken from :func:`torchcg.host_isa._host_requirement`
-— a private symbol, deliberately: an artifact stamped with a hard-coded
-``x86-64-v3`` would be refused on an arm64 runner, and a fixture whose
-admissibility depends on which machine ran it is a flake, not a fence.
-"""
-
 from __future__ import annotations
 
 import struct
@@ -31,8 +9,6 @@ from gen_worker._vendor.torchcg import CallIngress, CallInput, GraphSpecializati
 from gen_worker._vendor.torchcg.artifact import build_metadata, pack_artifact
 from gen_worker._vendor.torchcg.host_isa import _host_requirement
 
-#: The default compiler-content facts. Two artifacts that differ only here get
-#: different ``ck1`` keys, which is how a test asks for a second compiled graph.
 TOOLCHAIN: Dict[str, str] = {"torch": "record-digest", "triton": "compiler-digest"}
 
 GRAPH_CLASS = "denoiser/h=64,w=64"
@@ -46,13 +22,7 @@ def host_isa() -> Dict[str, str]:
 
 def aoti_package(path: Path, *, graph_specialization: str = GRAPH_CLASS,
                  filler: str = "") -> Path:
-    """A code-only AOTInductor package TCG's introspection accepts.
-
-    ``filler`` appends an inert comment to the wrapper source: it changes the
-    package's BYTES without changing a single fact TCG derives from it, which
-    is the only way to build two artifacts that state the same key over
-    different content — i.e. TCG's ``DIVERGENT`` case.
-    """
+    """A code-only AOTInductor package TCG's introspection accepts."""
     names = b"\0.shstrtab\0.lrodata\0"
     section_offset = 64
     section_size = 64
@@ -171,17 +141,7 @@ def unpacked(
     sm: str = "sm_89",
     toolchain: Optional[Mapping[str, str]] = None,
 ) -> Path:
-    """A real UNPACKED artifact directory at ``destination``.
-
-    What ``Engine.compile`` leaves behind (``metadata.json`` + ``model.pt2``),
-    and since pgw#1561 the only builder output ``publish_compiled`` accepts —
-    the publish repacks it into the ENVELOPE the adopt loader reads, so a
-    bare ``model.pt2`` in a directory with no metadata is now unrepresentable
-    on the publish path rather than silently banked.
-
-    ``destination`` must not exist yet: ``unpack_artifact`` materializes
-    atomically and refuses an occupied target, exactly like the engine.
-    """
+    """A real UNPACKED artifact directory at ``destination``."""
     from gen_worker._vendor.torchcg.artifact import unpack_artifact
 
     envelope = destination.parent / f".{destination.name}.envelope.tar.gz"

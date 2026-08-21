@@ -1,18 +1,4 @@
-"""The fail-closed adapter-fidelity gate.
-
-An adapter that the serving dtype destroys must be a TYPED REFUSAL, never a
-silently-unadapted image. The hazard is exact, not statistical: the base weight
-already sits ON
-the target grid, so an element moves only if its own delta clears half an ULP,
-and fp8-E4M3's half-ulp is 3.1-6.25% of each weight against bf16's 0.20-0.39%.
-
-Everything below runs the REAL machinery — the real quantizer the producer
-writes with (``convert/writer.py``'s ``amax(row)/448``), the real
-``map_adapter`` key resolution, the real ``apply_branch_adapters`` swap, the
-real ``Fp8ScaledLinear`` module class. No mocked grid, no stand-in quantizer.
-
-Everything is synthesized on CPU; no downloads, no real checkpoints.
-"""
+"""The fail-closed adapter-fidelity gate."""
 
 from __future__ import annotations
 
@@ -52,10 +38,6 @@ def _attach(root: nn.Module, path: str, leaf: nn.Module) -> None:
 
 
 def _to_fp8_rowwise(root: nn.Module) -> nn.Module:
-    """Re-express every Linear as the SHIPPED ``Fp8ScaledLinear``, quantized
-    exactly the way ``convert/writer.py`` writes the artifact. This is the real
-    serving module class on the real w8a8 grid — the destination the gate is
-    supposed to judge against."""
     cls = fp8_scaled_linear_class()
     for name, mod in list(root.named_modules()):
         if not isinstance(mod, nn.Linear):
@@ -82,19 +64,9 @@ def _events(monkeypatch: Any) -> List[Any]:
     return seen
 
 
-# ---------------------------------------------------------------------------
-# Policy
-# ---------------------------------------------------------------------------
-
-
 def test_policy_thresholds_bracket_the_measured_evidence() -> None:
-    """The floor is DERIVED, and the derivation is the test.
-
-    Every measured configuration pgw#794 §3 (and this lane) recorded, with the
-    verdict the policy must give it. A future edit to either constant that
-    moves any row across its boundary fails here with the evidence in hand."""
+    """The floor is DERIVED, and the derivation is the test."""
     measured = [
-        # (label, cosine, must be refused?)
         ("qwen lightning-8step, fp8 fuse (§3)", 0.074, True),
         ("sdxl lightning-4step, fp8 fuse (§3)", 0.254, True),
         ("sdxl dmd2-4step, fp8 fuse (§3)", 0.258, True),
@@ -108,14 +80,11 @@ def test_policy_thresholds_bracket_the_measured_evidence() -> None:
     ]
     for label, cosine, refused in measured:
         assert (cosine < af.FIDELITY_FLOOR) is refused, label
-    # ... and the floor sits in the EMPTY band, not on either edge of it.
     best_refused = 0.689
     worst_accepted = 0.900
     assert best_refused < af.FIDELITY_FLOOR < worst_accepted
     assert af.FIDELITY_FLOOR == pytest.approx(
         math.sqrt(best_refused * worst_accepted), abs=0.02)
-    # The gray band exists and is entered, not vacuous: the bf16 sdxl fuse is
-    # degraded-but-served, the branch is silent.
     assert af.FIDELITY_FLOOR < 0.900 < af.FIDELITY_WARN < 1.0
 
 
@@ -133,11 +102,6 @@ def test_verdicts_are_the_two_tier_shape() -> None:
     assert verdict(0.074) == af.VERDICT_DESTROYED
 
 
-# ---------------------------------------------------------------------------
-# The grid is READ off the destination — the correction to te#86's detector
-# ---------------------------------------------------------------------------
-
-
 def test_grid_is_read_from_the_module_not_from_the_source_dtype() -> None:
     plain = nn.Linear(8, 8, dtype=torch.bfloat16)
     assert af.grid_of_module(plain, path=af.PATH_FUSE) == af.TargetGrid(
@@ -151,16 +115,11 @@ def test_grid_is_read_from_the_module_not_from_the_source_dtype() -> None:
         scaled.weight_scale.fill_(1.0)
     grid = af.grid_of_module(scaled, path=af.PATH_FUSE)
     assert grid == af.TargetGrid(af.PATH_FUSE, "float8_e4m3fn", "per-out-channel")
-    # The BRANCH of that very same module is bf16 — same module, two grids,
-    # because the two paths put the delta in different places. This is the
-    # "refuse only on the path that destroys it" rule, structurally.
     assert af.grid_of_module(scaled, path=af.PATH_BRANCH).dtype == "bfloat16"
 
 
 def test_a_future_fp8_branch_is_judged_as_fp8_without_an_edit_here() -> None:
-    """Requirement 4's forward half: the branch grid is the LIVE buffer's dtype
-    when one is armed, so an fp8-branch variant is gated the day it allocates
-    fp8 A/B — nothing in this module has to learn about it first."""
+    """Requirement 4's forward half: the branch grid is the LIVE buffer's dtype when one is armed, so an fp8-branch variant is gated the day it allocates fp8 A/B — nothing in this module has to learn abou..."""
     lin = nn.Linear(8, 8, dtype=torch.bfloat16)
     alloc_branch_buffers(lin, 16)
     assert af.grid_of_module(lin, path=af.PATH_BRANCH).dtype == "bfloat16"
@@ -170,9 +129,7 @@ def test_a_future_fp8_branch_is_judged_as_fp8_without_an_edit_here() -> None:
 
 
 def test_quantizer_mirrors_the_producer_byte_for_byte() -> None:
-    """The gate must judge the grid we SHIP. Same formula as
-    ``convert/writer.py``: per-row ``amax/448``, round in fp32, clamp (torch's
-    fp8 cast does not saturate), dequantize through the same scale."""
+    """The gate must judge the grid we SHIP."""
     w = torch.randn(64, 128) * 0.02
     scale = (w.abs().amax(dim=1, keepdim=True) / 448.0).clamp(min=1e-12)
     q = (w / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
@@ -181,24 +138,9 @@ def test_quantizer_mirrors_the_producer_byte_for_byte() -> None:
     assert torch.equal(af.quantizer_for(grid)(w), expected)
 
 
-# ---------------------------------------------------------------------------
-# RED-VERIFY: the whole pre-existing guard surface passes what fp8 destroys
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Wiring — runs everywhere, no cached artifacts needed
-# ---------------------------------------------------------------------------
-
-
 def _pair(model: nn.Module, rel: float, *, rank: int = 8) -> Dict[str, Any]:
-    """A real low-rank pair over ``model``'s real Linears, scaled so the delta
-    is ``rel`` of the weight norm. Real tensors, real arithmetic — the only
-    thing chosen is the magnitude, which is the axis under test."""
     sd: Dict[str, Any] = {}
     g = torch.Generator().manual_seed(7)
-    # branch_modules IS the production selector — an Fp8ScaledLinear is not an
-    # nn.Linear, so picking by isinstance would silently build an empty adapter.
     for name, mod in branch_modules(model).items():
         a = torch.randn(rank, mod.in_features, generator=g)
         b = torch.randn(mod.out_features, rank, generator=g)
@@ -227,12 +169,9 @@ def _fp8_stack(width: int = 128, depth: int = 4) -> nn.Module:
 def test_the_branch_attach_of_an_inert_adapter_refuses_before_a_buffer_moves(
     monkeypatch: Any,
 ) -> None:
-    """The gate lives on ``_stage_for``'s PURE pass, so a refusal leaves the
-    pipeline exactly as it was — the never-partially-attach rule."""
+    """The gate lives on ``_stage_for``'s PURE pass, so a refusal leaves the pipeline exactly as it was — the never-partially-attach rule."""
     model = _fp8_stack()
     enable_lora_branches(model, 16)
-    # An adapter whose factors underflow the branch dtype entirely: real
-    # tensors, real cast, and the delta genuinely does not survive it.
     sd = _pair(model, rel=1e-3, rank=8)
     for key in list(sd):
         if key.endswith("lora_down.weight"):
@@ -264,9 +203,7 @@ def test_a_healthy_branch_attach_is_silent_and_lands(monkeypatch: Any) -> None:
 
 
 def test_the_same_adapter_refuses_on_fuse_and_passes_on_branch() -> None:
-    """The requirement stated as one row: refuse ONLY on the path that
-    destroys it. A delta three orders of magnitude below fp8's half-ulp is a
-    no-op in the weights and is intact in the branch."""
+    """The requirement stated as one row: refuse ONLY on the path that destroys it."""
     model = _fp8_stack()
     sd = _pair(model, rel=3e-5, rank=8)
     mapped = map_adapter(sd, model, ref="t/tiny")
@@ -291,7 +228,7 @@ def test_gray_band_serves_but_confesses_once(monkeypatch: Any) -> None:
         (af.ModuleSurvival("mid.attn.to_q", 1024, 3.2e-3, 1.11, 0.87, 0.45),),
         cosine=0.900, retention=1.111)
     seen = _events(monkeypatch)
-    assert af.gate(degraded, request_id="r") is degraded          # served
+    assert af.gate(degraded, request_id="r") is degraded
     assert af.gate(degraded, request_id="r", announce=False) is degraded
     rows = [u for u in seen if u.kind == activity_mod.KIND_LORA_FIDELITY]
     assert [u.phase for u in rows] == [af.PHASE_DEGRADED]
@@ -312,8 +249,8 @@ def test_evidence_names_identity_grid_aggregate_and_worst_modules() -> None:
     assert "fuse:float8_e4m3fn, per-out-channel" in ev
     assert "cosine=0.0740" in ev and "retention=15.290" in ev
     assert f"floor={af.FIDELITY_FLOOR:g}" in ev
-    assert "blocks.0.attn.to_q" in ev  # the worst module, named
-    assert "blocks.7.attn.to_q" not in ev  # only the worst few, bounded
+    assert "blocks.0.attn.to_q" in ev
+    assert "blocks.7.attn.to_q" not in ev
 
 
 def test_a_mixed_grid_set_is_judged_on_its_coarsest_rung() -> None:

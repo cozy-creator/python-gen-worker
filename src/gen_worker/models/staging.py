@@ -1,27 +1,4 @@
-"""Pinned host staging + the dedicated H2D copy stream.
-
-Rotating double-buffer serving (WORKER-RESIDENCY-DESIGN, Paul-ratified)
-stages the NEXT checkpoint while the current job computes. Two shared
-facilities live here:
-
-- :class:`PinnedPool` — bounded accounting for pinned (page-locked) host
-  RAM. Pinned memory is unswappable; an unbounded pinned tier can push the
-  host into the reclaim-thrash livelock exactly like an unbounded warm
-  tier. The budget is MEASURED (available RAM minus the residency
-  floor, hard-capped at half of total RAM) — no knobs, per the standing
-  no-developer-facing-residency-knobs rule. Reservations release by
-  weakref finalizer on the pinned tensor, so accounting tracks the actual
-  allocation lifetime with no explicit free protocol.
-
-- the process copy stream — a dedicated CUDA stream for weight H2D.
-  Copy engines are separate hardware from the SMs, so a pinned-memory H2D
-  on this stream runs concurrently with the serving job's compute instead
-  of serializing behind it on the default stream. Interference is measured
-  from ordinary production traffic, never from a bespoke harness.
-
-CPU-only hosts (and the CPU-only test suite) get honest no-ops: no CUDA
-means no copy stream and pinned allocation falls back to pageable.
-"""
+"""Pinned host staging + the dedicated H2D copy stream."""
 
 from __future__ import annotations
 
@@ -42,16 +19,10 @@ logger = logging.getLogger(__name__)
 
 _GiB = 1024 ** 3
 
-# Pinned memory is the harshest host allocation (unswappable): never let it
-# claim more than half of physical RAM even on an idle host.
 _PINNED_TOTAL_FRACTION = 0.5
 
 
 def _current_group() -> int:
-    """Which execution group is asking. Import-local: staging is imported by
-    the residency/loading core that topology itself imports."""
-    # CYCLE: topology -> residency -> staging; hoisting leaves REPLICATED
-    # unbound while residency is still initializing.
     from ..topology import current_device_group
 
     try:
@@ -61,31 +32,16 @@ def _current_group() -> int:
 
 
 def _floor_bytes() -> int:
-    """The host-RAM floor the warm/pinned tiers must leave alone, in bytes.
-    One owner (`memory.effective_ram_floor_gb`); never restate residency's
-    constants or its derivation here."""
     return int(effective_ram_floor_gb(get_total_ram_gb()) * _GiB)
 
 
 class PinnedPool:
-    """Bounded pinned host-RAM accounting. Thread-safe.
-
-    ``try_reserve`` admits an allocation against the measured budget;
-    :func:`alloc_pinned_like` attaches the matching release to the pinned
-    tensor's lifetime. A refusal is not an error — callers fall back to
-    pageable memory (slower H2D, still correct).
-    """
+    """Bounded pinned host-RAM accounting."""
 
     def __init__(self, budget_fn: Optional[Callable[[], int]] = None) -> None:
         self._budget_fn = budget_fn
         self._lock = threading.Lock()
         self._reserved = 0
-        # pinned host RAM is a POD budget, not a per-instance
-        # one, and it is the harshest allocation class there is (unswappable).
-        # With G execution groups the cap must be SHARED, or group 0 claims
-        # the whole 50% and a G=4 degraded pod pages itself to death (§4.3
-        # caveat 2). One process gets the honest total for free; this is the
-        # fair-share half — each group may claim at most cap/G.
         self._groups = 1
         self._reserved_by_group: dict = {}
 
@@ -128,9 +84,6 @@ class PinnedPool:
         nbytes = int(nbytes)
         if nbytes <= 0:
             return True
-        # budget_bytes() measures AVAILABLE ram, which already reflects prior
-        # pinned allocations that actually landed; only the total-RAM cap
-        # needs the reserved counter (handled inside budget_bytes).
         if nbytes > self.budget_bytes():
             return False
         group = _current_group()
@@ -166,11 +119,7 @@ def set_pinned_pool(pool: PinnedPool) -> PinnedPool:
 
 
 def alloc_pinned_like(torch: Any, t: Any) -> Optional[Any]:
-    """A pinned host tensor shaped like ``t``, budget-gated through the
-    pool. ``None`` = refused or allocation failed; the caller uses pageable
-    memory instead. The pool reservation releases when the returned tensor
-    is garbage-collected (weakref finalizer), so accounting follows the
-    real lifetime."""
+    """A pinned host tensor shaped like ``t``, budget-gated through the pool."""
     nbytes = int(t.numel()) * int(t.element_size())
     if not _pool.try_reserve(nbytes):
         logger.info(
@@ -188,26 +137,12 @@ def alloc_pinned_like(torch: Any, t: Any) -> Optional[Any]:
     return host
 
 
-# ---------------------------------------------------------------------------
-# The H2D copy stream
-# ---------------------------------------------------------------------------
-
 _stream_lock = threading.Lock()
 _streams: dict = {}
 
 
 def copy_stream(device: Optional[Any] = None) -> Optional[Any]:
-    """The dedicated H2D copy stream FOR ONE DEVICE; ``None`` off-CUDA.
-
-    ONE STREAM PER DEVICE, keyed by the target. A process-wide singleton created
-    on the first caller's device queues a promote onto ``cuda:3`` in card 0's
-    stream context (falling through to card 3's DEFAULT/compute stream) and then
-    synchronizes card 0 — the overlap-with-compute property is silently lost for
-    every group but 0, and the ``finally`` sync guards the wrong card.
-
-    ``device`` may be a ``torch.device``, an index, or ``None`` (= the
-    thread-current device, which handler threads pin per group).
-    """
+    """The dedicated H2D copy stream FOR ONE DEVICE; ``None`` off-CUDA."""
     try:
         import torch
     except Exception:
@@ -231,12 +166,7 @@ def copy_stream(device: Optional[Any] = None) -> Optional[Any]:
 
 @contextlib.contextmanager
 def copy_stream_ctx(device: Optional[Any] = None) -> Iterator[Optional[Any]]:
-    """Run enclosed CUDA copies on the device's copy stream (no-op off-CUDA).
-
-    Yields the stream (or ``None``). Callers that need completion before
-    returning tensors to compute streams call ``stream.synchronize()`` —
-    NEVER ``torch.cuda.synchronize()``, which would also wait on the
-    serving job's queued compute kernels."""
+    """Run enclosed CUDA copies on the device's copy stream (no-op off-CUDA)."""
     stream = copy_stream(device)
     if stream is None:
         yield None

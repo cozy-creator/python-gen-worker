@@ -1,66 +1,4 @@
-"""GGML-quantized weights served by the ORDINARY torch path.
-
-Today a GGUF checkpoint can only be served by a separate llama.cpp engine on a
-torch-free image (``serving/gguf_fit.py``) — llama-shaped LLMs only, and it gets
-none of the torch stack: no diffusers pipeline, no LoRA, no ladder, no VAE
-tiling, no compiled graphs. This module makes GGML a weight STORAGE format
-inside the same torch serving path as bf16, so a 4-bit flux/wan/sdxl runs on a
-small card with everything else intact.
-
-**The weights stay quantized — as far as the lease says they must.** Each leaf
-holds its own block bytes on the device and, once per forward, decodes them
-(:mod:`gen_worker.models.gguf_dequant`), matmuls at compute precision, and drops
-the dense copy. Residency is the quantized size; peak transient is ONE leaf's
-dense weight; the decode is memory-bound and costs ~10-20% of step time.
-
-That is one end of a DIAL, not the only setting (Paul, 2026-08-19). A worker
-handed surplus memory should use it: :func:`dequant_ahead` decodes as many
-weights ONCE at load as the surplus pays for, largest first, because paying a
-per-forward decode every step for the life of the endpoint is worse than paying
-it once. ``surplus_bytes=0`` is the constrained tier, ``math.inf`` the surplus
-tier, anything between graduates per layer. Nothing is ever RE-quantized — the
-dial only moves a weight from "decoded every step" to "decoded once", and the
-ladder still SELECTS artifacts rather than manufacturing them (``rung.py``).
-LoRA semantics are identical on both sides of the dial.
-
-Three deliberate divergences from the reference (city96's ComfyUI-GGUF, which
-these kernels and the attach-never-merge LoRA are ported from):
-
-1. **No lying tensor subclass.** The reference wraps every tensor in a
-   ``torch.Tensor`` subclass whose ``.shape`` reports the DEQUANTIZED shape, so
-   ComfyUI's shape-sniffing model detection keeps working on a quantized state
-   dict. We build models from a config-only snapshot, never by sniffing shapes,
-   so we pay none of that — and a lying ``.shape`` would corrupt exactly the
-   thing this lane exists for: every VRAM/residency walk in the worker reads
-   buffer shapes, and would over-report a 4-bit denoiser by ~4x. The qtype and
-   the logical shape live on the LEAF (:class:`QuantSpec`), where they are also
-   free of the subclass/``torch.compile`` interaction the reference has to
-   version-gate. Nothing traces a subclass because there is no subclass.
-2. **Blocks are uint8 buffers, not parameters.** ``nn.Module._apply`` only casts
-   FLOATING-POINT tensors, so ``model.to(dtype=bf16)`` silently skips them —
-   the fp8-storage lane's standing "never ``.to(dtype=...)`` a restructured
-   module" hazard simply does not exist here. Device moves work normally.
-3. **mmap release is a copy at install**, not the reference's
-   ``.to(load_device).to(offload_device)`` bounce. A ``.gguf`` read through
-   ``GGUFReader`` hands out numpy views of an mmap; leaving them installed means
-   every step faults through the page cache and the tensors can never be pinned.
-   One forced copy at install time is the same fix stated directly.
-
-The restructure itself is the repo's CLASS PUN (see
-:mod:`gen_worker.models.fp8_storage`): the leaf keeps its identity, FQNs and
-attributes, and only ``forward`` changes, so ``isinstance`` stays true for the
-offload rung, LoRA branch targeting and dtype introspection.
-
-**LoRA is attached, never merged.** Merging into a 4-bit grid would requantize
-and lose the adapter; attaching costs one rank-r product per forward and is
-LOSSLESS, with instant unpatch. See :func:`attach_lora` for why this does NOT
-trip the refuse-adapters-on-a-quantized-grid rule.
-
-Where the bytes come from is not this module's business. :func:`read_gguf` is
-the EDGE reader for a community ``.gguf`` file; the normalized path is per-tensor
-block bytes out of the CAS, which arrive at :func:`install_quantized_weights` as
-the same :class:`QuantizedTensor` values.
-"""
+"""GGML-quantized weights served by the ORDINARY torch path."""
 
 from __future__ import annotations
 
@@ -74,40 +12,20 @@ from .fp8_storage import BASE_ATTR, structural_base
 
 logger = logging.getLogger(__name__)
 
-#: Class attribute marking a punned leaf. Structural marker, never a name check.
 LEAF_MARKER = "_cozy_gguf_leaf"
 
-#: ``BASE_ATTR`` and :func:`structural_base` are IMPORTED, not redefined. "the
-#: plain class this leaf was punned from" is ONE concept with ONE spelling, so
-#: every module walker that already resolves an fp8-storage leaf
-#: (``w8a8_lora.branch_modules`` above all) resolves a GGML leaf by construction
-#: rather than by a second lookup somebody has to remember to add. Two attribute
-#: names left a GGML Linear invisible to LoRA branch targeting while every walk
-#: still looked correct — pgw#1498's wiring lane, red arm on record.
-
-#: Per-leaf attribute: ``{"weight": QuantSpec, ...}`` for the tensors that are
-#: block bytes. A tensor absent from this map is dense and used as-is.
 SPEC_ATTR = "gguf_specs"
 
-#: Per-leaf attribute: ``{"weight": (LoraPatch, ...)}`` applied post-dequant.
 ADAPTER_ATTR = "gguf_adapters"
 
-#: Per-leaf attribute: the specs of tensors :func:`dequant_ahead` already
-#: decoded. They are dense now, but the lane still owns them — an adapter may
-#: still attach, and residency reporting must not lose track of where the bytes
-#: came from.
 MATERIALIZED_ATTR = "gguf_materialized"
 
-#: (plain class, kind) -> punned class. One class object per pair: the module
-#: TYPE enters the compiled graph's composition digest and must be stable for
-#: the life of the process.
 _PUNNED: Dict[Tuple[Any, str], type] = {}
 
 
 @dataclass(frozen=True)
 class QuantSpec:
-    """What a leaf needs to decode one tensor: the GGML type and the shape the
-    flat block stream expands to."""
+    """What a leaf needs to decode one tensor: the GGML type and the shape the flat block stream expands to."""
 
     qtype: int
     shape: Any
@@ -121,8 +39,7 @@ class QuantSpec:
 
 @dataclass(frozen=True)
 class QuantizedTensor:
-    """Block bytes plus what they decode to — the unit that crosses into this
-    module, whether it came from a ``.gguf`` file or from the CAS."""
+    """Block bytes plus what they decode to — the unit that crosses into this module, whether it came from a ``.gguf`` file or from the CAS."""
 
     blocks: Any
     spec: QuantSpec
@@ -138,12 +55,7 @@ class QuantizedTensor:
 
 @dataclass(frozen=True)
 class LoraPatch:
-    """One low-rank adapter branch, applied to the DEQUANTIZED weight.
-
-    ``down`` is ``[rank, in...]`` and ``up`` is ``[out, rank...]``; conv branches
-    carry the extra kernel dims, which flatten into the rank product. ``scale``
-    is the caller's strength already folded with ``alpha / rank``.
-    """
+    """One low-rank adapter branch, applied to the DEQUANTIZED weight."""
 
     down: Any
     up: Any
@@ -156,19 +68,7 @@ class LoraPatch:
         return product.reshape(like.shape) * self.scale
 
 
-# ---------------------------------------------------------------------------
-# decode
-# ---------------------------------------------------------------------------
-
 def _materialize(leaf: Any, name: str, dtype: Any) -> Any:
-    """One tensor of ``leaf``, dense and at ``dtype``, for THIS forward.
-
-    Three cases, one expression. Block bytes -> decode. Already dense, because
-    the packer left it alone (norms, biases) or because :func:`dequant_ahead`
-    decoded it at load -> a cast, which is free when the dtype already matches.
-    Then every attached adapter, in BOTH cases: LoRA semantics must not depend
-    on which side of the budget dial a leaf landed on.
-    """
     tensor = getattr(leaf, name, None)
     if tensor is None:
         return None
@@ -190,16 +90,6 @@ def _materialize(leaf: Any, name: str, dtype: Any) -> Any:
 
 
 def _compute_dtype(leaf: Any, x: Any) -> Any:
-    """The dtype this op must run in.
-
-    THE ACTIVATION DECIDES, not the load-time declaration. A weight that does
-    not match its input is not a precision choice, it is a `RuntimeError` —
-    caught by running the stack at bf16 with fp32 activations, which is exactly
-    the mixed state a partially-cast pipeline is in. ``compute_dtype`` answers
-    only where the input carries no float dtype of its own: an Embedding is
-    indexed by int64, so its output precision cannot be read off its input.
-    ``dequant_dtype`` remains the separate knob for the DECODE's own precision.
-    """
     import torch
 
     if x is not None and x.is_floating_point():
@@ -209,10 +99,6 @@ def _compute_dtype(leaf: Any, x: Any) -> Any:
 
 @functools.lru_cache(maxsize=1)
 def _forwards() -> Dict[str, Any]:
-    """One ``forward`` per layer KIND — the stock torch forward with the weight
-    decoded at the use site. Upstream's own weight-parameterized entry point is
-    used where one exists (``_conv_forward``), so padding modes and
-    output-padding math are never reimplemented."""
     import torch.nn.functional as F
 
     def linear_forward(self: Any, x: Any) -> Any:
@@ -256,8 +142,6 @@ def _forwards() -> Dict[str, Any]:
 
 
 def _kind(module: Any) -> str:
-    """The pun kind for one leaf, ``""`` when it has none. Order matters:
-    transposed convs are not ``nn.ConvNd`` subclasses."""
     import torch.nn as nn
 
     if isinstance(module, nn.Linear):
@@ -273,9 +157,7 @@ def _kind(module: Any) -> str:
 
 
 def punned_class(base: Any, kind: str) -> type:
-    """The GGML-storage twin of ``base``: same class, same attributes, only
-    ``forward`` replaced by the decode-at-use-site form. Cached, so one class
-    object per (base, kind)."""
+    """The GGML-storage twin of ``base``: same class, same attributes, only ``forward`` replaced by the decode-at-use-site form."""
     cached = _PUNNED.get((base, kind))
     if cached is not None:
         return cached
@@ -303,10 +185,6 @@ def gguf_leaves(model: Any) -> Dict[str, Any]:
     return {n: m for n, m in model.named_modules() if is_gguf_leaf(m)}
 
 
-# ---------------------------------------------------------------------------
-# install
-# ---------------------------------------------------------------------------
-
 def install_quantized_weights(
     model: Any,
     tensors: Mapping[str, Any],
@@ -315,19 +193,7 @@ def install_quantized_weights(
     device: Any = None,
     dequant_dtype: Any = None,
 ) -> List[str]:
-    """Install ``tensors`` into ``model``, punning every leaf that gets blocks.
-
-    ``tensors`` maps a state-dict key (``"...to_q.weight"``) to either a
-    :class:`QuantizedTensor` or a plain dense tensor. Dense tensors land
-    unchanged at ``compute_dtype``; quantized ones land as uint8 buffers on a
-    punned leaf. Returns the punned leaf paths, sorted.
-
-    Every tensor is COPIED onto ``device`` on the way in. That is not an
-    optimization: a ``.gguf`` read hands out numpy views of an mmap, and an
-    installed mmap view faults through the page cache on every step and can
-    never be pinned. One copy here is the reference's mmap-release bounce,
-    stated directly.
-    """
+    """Install ``tensors`` into ``model``, punning every leaf that gets blocks."""
     import torch
 
     if device is not None:
@@ -382,40 +248,15 @@ def install_quantized_weights(
 
 
 def _detached(tensor: Any, device: Any) -> Any:
-    """``tensor`` on ``device``, guaranteed NOT to alias its source storage.
-
-    ``copy=True`` is the whole point and is never redundant: a ``.gguf`` read
-    hands out numpy views of an mmap, and ``.to(same_device)`` would keep the
-    view. Installed mmap views fault through the page cache on every step and
-    can never be pinned — the reference works around this after the fact by
-    bouncing each module ``.to(load_device).to(offload_device)``; forcing the
-    copy once, here, is the same fix said directly.
-    """
     if device is None:
         return tensor.detach().clone()
     return tensor.detach().to(device=device, copy=True)
 
 
 def _install_parameter(leaf: Any, name: str, tensor: Any) -> None:
-    """Install a DENSE tensor, keeping it a Parameter.
-
-    Load-bearing, and the opposite call from :func:`_install_buffer` on
-    purpose. diffusers resolves ``ModelMixin.dtype`` by walking for the first
-    floating-point PARAMETER, and a denoiser that casts to ``self.dtype``
-    inside forward breaks when that walk finds nothing. Installing a whole
-    checkpoint through here is exactly the case that would leave a model with
-    no floating-point parameters at all — every dense tensor demoted to a
-    buffer — so dense tensors stay parameters and only the block bytes become
-    buffers. The blocks need no such care: they are uint8 and the walk skips
-    them either way.
-    """
     import torch
 
     param = leaf._parameters.get(name)
-    # A `meta` placeholder holds no storage to point anywhere, and `set_data`
-    # refuses it outright ("incompatible tensor type"). Config-only construction
-    # (`gguf_diffusers.build_denoiser`) makes that the NORMAL case rather than an
-    # edge: every parameter arrives as a meta placeholder and is replaced here.
     if param is not None and param.device.type != "meta":
         param.data = tensor
         param.requires_grad_(False)
@@ -426,25 +267,10 @@ def _install_parameter(leaf: Any, name: str, tensor: Any) -> None:
 
 
 def _install_buffer(leaf: Any, name: str, tensor: Any) -> None:
-    """Replace ``leaf.<name>`` with ``tensor`` as a persistent BUFFER.
-
-    Buffer, not Parameter, because block bytes are storage rather than
-    weights — nothing trains them, nothing should cast them, and they must not
-    appear in a ``parameters()`` walk that expects weights. state_dict keys are
-    unchanged.
-    """
     param = leaf._parameters.get(name)
     if param is not None and param.device.type == "meta":
-        # Nothing holds a meta placeholder worth following, and `set_data`
-        # refuses it. Drop it; the buffer registration below is the whole move.
         param = None
     if param is not None and param.data.data_ptr() != tensor.data_ptr():
-        # Rebind the outgoing Parameter onto the new storage before dropping it,
-        # so anything still holding it (accelerate device hooks, an earlier
-        # `list(model.parameters())`) follows instead of pinning the original.
-        # `requires_grad` has to go first: torch refuses to point an autograd
-        # leaf at integer storage, and block bytes are uint8. Nothing here
-        # trains, so dropping it is the truth, not a workaround.
         param.requires_grad_(False)
         param.data = tensor
     leaf._parameters.pop(name, None)
@@ -452,34 +278,8 @@ def _install_buffer(leaf: Any, name: str, tensor: Any) -> None:
     leaf.register_buffer(name, tensor, persistent=True)
 
 
-# ---------------------------------------------------------------------------
-# the budget dial
-# ---------------------------------------------------------------------------
-
 def dequant_ahead(model: Any, *, surplus_bytes: float, dtype: Any) -> List[str]:
-    """Decode as many weights ONCE at load as ``surplus_bytes`` pays for.
-
-    Paul, 2026-08-19: quantized-resident and fully-dequantized are the two
-    ENDPOINTS OF ONE DIAL, set from the residency lease at load time. A worker
-    handed surplus memory should use it — a single dequant pass beats paying a
-    per-forward decode on every step for the life of the endpoint — and a
-    constrained worker pays per forward. Nothing is ever re-quantized: this only
-    ever moves a weight from "decoded every step" to "decoded once".
-
-    ``surplus_bytes`` is the lease's headroom over the quantized-resident plan,
-    so ``0`` is the constrained tier, ``math.inf`` the surplus tier, and
-    anything between graduates per layer. The price of one weight is the DELTA
-    (dense minus its blocks), because its blocks are dropped.
-
-    LARGEST FIRST, and the order is not arbitrary. Per-step decode saved is
-    proportional to bytes either way, so that alone would not pick an order —
-    but the transient headroom the fit plan must reserve is set by the LARGEST
-    still-quantized weight, and largest-first is the only order that shrinks it.
-    Spending continues past a weight too big for what is left, so a small
-    remainder is not stranded.
-
-    Returns the materialized ``"<path>.<tensor>"`` keys, largest first.
-    """
+    """Decode as many weights ONCE at load as ``surplus_bytes`` pays for."""
     import torch
 
     itemsize = torch.empty((), dtype=dtype).element_size()
@@ -508,8 +308,7 @@ def dequant_ahead(model: Any, *, surplus_bytes: float, dtype: Any) -> List[str]:
 
 
 def materialize(leaf: Any, name: str, *, dtype: Any) -> None:
-    """Decode one weight once and drop its blocks. The leaf STAYS punned, so
-    adapters keep applying exactly as they did on the quantized side."""
+    """Decode one weight once and drop its blocks."""
     specs = getattr(leaf, SPEC_ATTR, {})
     spec = specs.get(name)
     if spec is None:
@@ -518,14 +317,11 @@ def materialize(leaf: Any, name: str, *, dtype: Any) -> None:
                                     dtype=dtype)
     del specs[name]
     getattr(leaf, MATERIALIZED_ATTR)[name] = spec
-    # A Parameter, not a buffer: past the dial this leaf IS an ordinary dense
-    # layer and should look like one to every walk in the worker.
     _install_parameter(leaf, name, dense.contiguous())
 
 
 def peak_transient_bytes(model: Any, *, dtype: Any) -> int:
-    """The largest weight still decoded per forward — the headroom a fit plan
-    must reserve on top of the resident bytes. Falls as the dial turns up."""
+    """The largest weight still decoded per forward — the headroom a fit plan must reserve on top of the resident bytes."""
     import torch
 
     itemsize = torch.empty((), dtype=dtype).element_size()
@@ -544,8 +340,7 @@ def _elements(shape: Any) -> int:
 
 
 def quantized_bytes(model: Any) -> int:
-    """Resident bytes of block storage — the number the small-card ladder cares
-    about. Honest precisely because ``.shape`` was not made to lie."""
+    """Resident bytes of block storage — the number the small-card ladder cares about."""
     total = 0
     for leaf in gguf_leaves(model).values():
         for name in getattr(leaf, SPEC_ATTR, {}):
@@ -555,29 +350,9 @@ def quantized_bytes(model: Any) -> int:
     return total
 
 
-# ---------------------------------------------------------------------------
-# adapters
-# ---------------------------------------------------------------------------
-
 def attach_lora(leaf: Any, patches: Iterable[LoraPatch], *,
                 name: str = "weight") -> None:
-    """Attach adapter branches to one leaf, applied AFTER the decode.
-
-    Never merged. Merging a LoRA into a 4-bit grid means dequantize, add,
-    requantize — which rounds the delta away on exactly the small quants this
-    lane exists to serve, and cannot be undone. Attaching costs one rank-r
-    product per forward, is numerically identical to applying the adapter to the
-    bf16 weight, and unpatching is :func:`detach_lora`.
-
-    RECONCILED with the refuse-adapters-on-a-quantized-grid rule
-    (``models/adapter_fidelity.py``): that rule refuses to WRITE an adapter INTO
-    a quantized grid, because the grid's scales were fit to the base weights and
-    a merged delta is silently rounded. Nothing here writes to the grid. The
-    block bytes are read-only and byte-identical before and after; the delta is
-    added to a dense fp copy that lives for one op. The refusal's premise —
-    "the merge damages the quantization" — has no referent when there is no
-    merge, so it does not apply and must not be extended here.
-    """
+    """Attach adapter branches to one leaf, applied AFTER the decode."""
     if not is_gguf_leaf(leaf):
         raise ValueError("gguf-torch: attach_lora expects a punned leaf")
     if name not in getattr(leaf, SPEC_ATTR, {}) and \
@@ -589,7 +364,7 @@ def attach_lora(leaf: Any, patches: Iterable[LoraPatch], *,
 
 
 def detach_lora(model: Any) -> int:
-    """Drop every attached adapter. Instant, because nothing was ever merged."""
+    """Drop every attached adapter."""
     dropped = 0
     for leaf in gguf_leaves(model).values():
         adapters = getattr(leaf, ADAPTER_ATTR, None)
@@ -599,26 +374,9 @@ def detach_lora(model: Any) -> int:
     return dropped
 
 
-# ---------------------------------------------------------------------------
-# the store: per-tensor block bytes, no container
-# ---------------------------------------------------------------------------
-
 def quantized_tensors_from_views(views: Mapping[str, Any], *,
                                  pin_memory: bool = False) -> Dict[str, Any]:
-    """The SERVED path: :class:`tensorfs.tensors.TensorView` -> installable values.
-
-    No ``.gguf`` file is involved and none is composed. tensorfs' ``gguf-v1``
-    planner already cuts a container into one CAS region per tensor, and a
-    ``TensorView`` already carries the two facts a quantized parameter needs
-    that safetensors has no equivalent for: the GGML type (``dtype``, e.g.
-    ``"Q4_K"``) and the block geometry (``block``, e.g. ``(256, 144)``). The
-    block BYTES cross unchanged — dequantizing at ingest would forfeit the 4x
-    that is the entire reason this lane exists.
-
-    ``shape`` is translated: GGUF stores ``ne`` fastest-varying-first, torch is
-    row-major, so the dims reverse. That reversal is the only transformation
-    applied to anything here.
-    """
+    """The SERVED path: :class:`tensorfs.tensors.TensorView` -> installable values."""
     import gguf
     import torch
 
@@ -637,14 +395,9 @@ def quantized_tensors_from_views(views: Mapping[str, Any], *,
     return out
 
 
-# ---------------------------------------------------------------------------
-# the .gguf edge
-# ---------------------------------------------------------------------------
-
 @dataclass
 class GgufRead:
-    """What one ``.gguf`` file yields: tensors keyed by their name in the file,
-    plus the container's own metadata."""
+    """What one ``.gguf`` file yields: tensors keyed by their name in the file, plus the container's own metadata."""
 
     tensors: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -652,16 +405,7 @@ class GgufRead:
 
 
 def read_gguf(path: Any, *, prefix: str = "") -> GgufRead:
-    """Read a ``.gguf`` container into :class:`QuantizedTensor` values.
-
-    This is an EDGE reader — community ingest and local development. The served
-    path takes block bytes per-tensor out of the CAS and never sees a container.
-
-    GGML stores a quantized tensor as flat bytes, so the logical shape is
-    metadata: the reversed ``tensor.shape`` dims, unless the packer recorded a
-    true original shape under ``comfy.gguf.orig_shape.<name>`` (5-D tensors get
-    split by every packer, and conv weights lose their trailing 1s).
-    """
+    """Read a ``.gguf`` container into :class:`QuantizedTensor` values."""
     import warnings
 
     import gguf

@@ -1,16 +1,3 @@
-"""Convert/publish producer lane (th#960/pgw#609 Phase 2b): a consolidated
-kept file — the coordinator's one authorized "no P-test home" lane for the
-clone/publish producer contract (separate from P8's dtype/classifier
-contract, which stays in test_p8_convert_publish_contract.py).
-
-Absorbed from (all deleted after this file lands): test_clone_concurrency.py
-(gw#442, e2e J19 double-clone), test_clone_hygiene.py (gw#462, J24 ENOSPC),
-test_download_skip.py, test_publish_resilience.py (gw#462, J24
-lost-staged-object). Their other tests (disk-budget arithmetic variants,
-GGUF intermediate-peak sizing, sweep/lock edge cases) have no distinct
-incident pin beyond what's kept here and are git-history-archived.
-"""
-
 from __future__ import annotations
 
 import threading
@@ -19,14 +6,6 @@ from pathlib import Path
 
 
 from fake_hub import _FakeHub
-
-# ---------------------------------------------------------------------------
-# concurrent duplicate clones must serialize on the keyed
-# workdir — a crash-recovery re-queue put two clones of the same source on
-# one worker; unserialized, hf_hub's local-dir download unlinked files a
-# peer clone was mid-read on.
-# ---------------------------------------------------------------------------
-
 
 def test_concurrent_same_source_clones_serialize(fake_hub, tmp_path: Path, monkeypatch) -> None:
     from gen_worker.convert.clone import CloneResult, run_clone
@@ -63,7 +42,7 @@ def test_concurrent_same_source_clones_serialize(fake_hub, tmp_path: Path, monke
         with guard:
             state["active"] += 1
             state["max_active"] = max(state["max_active"], state["active"])
-        time.sleep(0.5)  # hold the window open: an unserialized peer would overlap
+        time.sleep(0.5)
         dest_dir = Path(dest_dir)
         dest_dir.mkdir(parents=True, exist_ok=True)
         (dest_dir / "config.json").write_text("{}")

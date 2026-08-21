@@ -1,33 +1,4 @@
-"""Reading a PROJECTED tree: who may, who must refuse, and what they say.
-
-# pgw#1513: the eager bridge must refuse a projected tree, by name.
-
-# The incident, and why it looked like a short write for two days
-
-Two endpoints (sd15, sdxl), two volumes, 20x apart in size, identical
-`SafetensorError: header too large`, hub source bytes verified intact. Every
-short-write theory was dead on arrival once the write paths were read: the CAS
-hashes and size-checks every object before committing it, tensorfs'
-materializer re-hashes each object AND the whole file and refuses a short read,
-and `project_snapshot` builds in a scratch directory and renames.
-
-What actually happens is that a projected tree's tensor containers are ~128 B
-TFSSTUB1 POINTER STUBS — the weights live in the CAS — and the stock
-safetensors reader that `from_pretrained` uses knows nothing about stubs. It
-reads the stub's first eight bytes as a header length and raises. The stub is a
-FIXED SIZE regardless of the model behind it, which is exactly why a 3.4 GB and
-a 68 GB checkpoint failed byte-identically, and that coincidence is what a
-genuine truncation could never produce.
-
-`ctx.load` is supposed to route a projected tree to the pgw#1380 streaming
-engine, whose whole job is reading those stubs. The eager `from_pretrained`
-bridge is documented for "a tree with no chunk store behind it — a bare
-download, a local run, a fixture". Reaching the bridge WITH a projected tree
-means the engine declined it, and the bridge then reports a corrupt checkpoint
-for a checkpoint that is intact.
-
-So the bridge refuses instead, naming the stub and its two sizes.
-"""
+"""Reading a PROJECTED tree: who may, who must refuse, and what they say."""
 
 from __future__ import annotations
 
@@ -46,14 +17,11 @@ from gen_worker.serving.context import (
     _projection_artifacts,
 )
 
-# The two shapes from the field, so the fixed-size-stub signature is asserted
-# rather than described.
 _SD15_BYTES = 3_400_000_000
 _SDXL_BYTES = 68_000_000_000
 
 
 def _stubbed_tree(root: Path, named_bytes: int) -> Path:
-    """A tree whose tensor container is a pointer, as `_project_entry` writes it."""
     tree = root / "snapshots" / ("sha256:" + "b7" * 32)
     (tree / "unet").mkdir(parents=True)
     (tree / "unet" / "diffusion_pytorch_model.safetensors").write_bytes(
@@ -64,8 +32,6 @@ def _stubbed_tree(root: Path, named_bytes: int) -> Path:
 
 
 class _Pipeline:
-    """A loader that would happily be called — so the refusal is the guard's,
-    not an accident of the fixture."""
 
     called: list[Any] = []
 
@@ -74,7 +40,6 @@ class _Pipeline:
         cls.called.append(path)
         from safetensors import safe_open
 
-        # Exactly what diffusers does: the stock reader, on the container.
         with safe_open(
             str(Path(path) / "unet" / "diffusion_pytorch_model.safetensors"),
             framework="pt",
@@ -93,7 +58,7 @@ def test_the_eager_bridge_REFUSES_a_projected_tree_by_name(
 
     ctx: LoadContext[Any] = LoadContext(
         binding=DeployBinding(checkpoint_ref="acme/m@1", checkpoint_dir=tree),
-        engine=None,  # the engine declined — the state the field pods were in
+        engine=None,
     )
 
     with pytest.raises(ProjectedTreeNotStreamable) as caught:
@@ -114,12 +79,7 @@ def test_the_eager_bridge_REFUSES_a_projected_tree_by_name(
 
 
 def test_the_stub_signature_is_FIXED_SIZE_across_a_20x_model(tmp_path: Path) -> None:
-    """The coincidence that killed every short-write theory, asserted.
-
-    A truncation is proportional to what was being written; a stub is not. Two
-    models 20x apart produce stubs within a byte or two of each other, which is
-    why the two field errors were identical.
-    """
+    """The coincidence that killed every short-write theory, asserted."""
     small = _projection_artifacts(_stubbed_tree(tmp_path / "a", _SD15_BYTES))
     large = _projection_artifacts(_stubbed_tree(tmp_path / "b", _SDXL_BYTES))
 
@@ -135,15 +95,9 @@ def test_the_stub_signature_is_FIXED_SIZE_across_a_20x_model(tmp_path: Path) -> 
 
 
 def test_a_MATERIALIZED_tree_still_takes_the_eager_bridge(tmp_path: Path) -> None:
-    """The guard must not fire on the trees the bridge legitimately serves.
-
-    A bare download / fixture / local run has no chunk store and no stubs, and
-    it is exactly what the eager bridge exists for. If this test ever fails,
-    the guard has started refusing the local development path.
-    """
+    """The guard must not fire on the trees the bridge legitimately serves."""
     tree = tmp_path / "snapshots" / "plain"
     (tree / "unet").mkdir(parents=True)
-    # Real (tiny) safetensors bytes, not a pointer.
     import torch
     from safetensors.torch import save_file
 
@@ -164,17 +118,7 @@ def test_a_MATERIALIZED_tree_still_takes_the_eager_bridge(tmp_path: Path) -> Non
 
 
 def test_a_tree_with_a_MISSING_PIN_is_not_answered_as_resident(tmp_path: Path) -> None:
-    """The one state that is byte-perfect and still unservable.
-
-    `resolve_projection` recovers a tree's manifest through a `snapshot:<key>`
-    ref keyed on the tree's own directory name. Without it the streaming
-    engine cannot bind, `ctx.load` falls to the eager bridge, and the bridge
-    reads a stub. Verification alone does not catch this: every byte is
-    correct.
-
-    So `announce_resident` refuses, and the refusal sends the ref through
-    `ensure_local`, which re-pins WITHOUT moving bytes.
-    """
+    """The one state that is byte-perfect and still unservable."""
     import asyncio
 
     from gen_worker.models import projection
@@ -190,7 +134,6 @@ def test_a_tree_with_a_MISSING_PIN_is_not_answered_as_resident(tmp_path: Path) -
     (tree / "unet").mkdir(parents=True)
     (tree / "unet" / "x.safetensors").write_bytes(stub_bytes("a" * 64, 3_400_000_000))
 
-    # Byte-perfect and stubbed, but nothing pinned it.
     assert projection.stub_at_any(tree) is True
     assert projection.resolve_projection(tree) is None
 
@@ -216,18 +159,6 @@ def test_a_tree_with_a_MISSING_PIN_is_not_answered_as_resident(tmp_path: Path) -
 def test_a_tree_whose_OBJECTS_WERE_COLLECTED_says_so_and_not_malformed(
     tmp_path: Path,
 ) -> None:
-    """se#790's state D, measured on a real 5.6 GB `@composed-v3` tree.
-
-    A tree's manifest pin is the ONLY GC root its objects have. Drop the pin,
-    run a GC, and every object is deleted while the tree stands: the tensor
-    containers are still stubs and the NON-tensor files — `model_index.json`
-    among them — become dangling symlinks. `skeleton.build` then reports
-    "carries no model_index.json" about a tree that has one, which is a
-    reader-level fact rendered as a claim about the checkpoint.
-
-    The refusal must name the real condition, and must not be confused with
-    the cheap missing-pin case: these bytes are GONE and must be re-fetched.
-    """
     base = tmp_path / "cas"
     (base / "refs").mkdir(parents=True)
     objects = base / "objects"
@@ -235,7 +166,6 @@ def test_a_tree_whose_OBJECTS_WERE_COLLECTED_says_so_and_not_malformed(
     tree = base / "snapshots" / ("sha256:" + "d4" * 32)
     tree.mkdir(parents=True)
 
-    # A projected non-tensor entry whose object has been collected.
     (tree / "model_index.json").symlink_to(
         Path("..") / ".." / "objects" / "sha256" / "de" / "ad" / ("de" * 32)
     )
@@ -263,15 +193,6 @@ def test_a_tree_whose_OBJECTS_WERE_COLLECTED_says_so_and_not_malformed(
 
 
 def test_collected_entries_puts_model_index_json_FIRST(tmp_path: Path) -> None:
-    """se#790's refinement, and the reason it is not cosmetic.
-
-    `model_index.json` is the entry whose absence produces the false "carries
-    no model_index.json", so it is the one a reader most needs to see in the
-    truncated list the refusal shows. Plain alphabetical order drops it out of
-    that window on any tree with early-alphabet components — measured on a real
-    `@composed-v3` tree, where it landed 2nd of 3 by luck of `dit/` sorting
-    first. Everything after it keeps sorted order so the list stays diffable.
-    """
     from gen_worker.models import projection
 
     for rel in ("model_index.json", "aaa/config.json", "dit/config.json",
@@ -289,25 +210,7 @@ def test_collected_entries_puts_model_index_json_FIRST(tmp_path: Path) -> None:
 
 
 def test_the_decline_REASON_survives_the_wire_truncation(tmp_path: Path) -> None:
-    """The clause this refusal exists to deliver must survive the 512-char cap.
-
-    # pgw#1513 follow-up, from the FIRST FIELD FIRING of this refusal.
-
-    It worked — a pod reported `ProjectedTreeNotStreamable` naming four stubs
-    with bytes-on-disk against bytes-named — and then lost the one clause the
-    whole mechanism exists for. `JobResult.safe_message` is sliced to 512 chars
-    in `worker.py::_send_result` (deliberate: that layer declines to put an
-    unbounded string on a wire it owns), and `THE ENGINE DECLINED BECAUSE: …`
-    sat at the END of a longer message. It was truncated away, so the pod said
-    WHAT was wrong and never WHY — and WHY is the half nobody can reconstruct
-    from the logs afterwards.
-
-    Leading with the reason is structural: it survives any cap at any layer,
-    including caps nobody has told us about. This test asserts that property
-    against the real limit and the real field shape, so a later edit that
-    "tidies" the message ordering fails here instead of on a rental.
-    """
-    #: The exact slice `_send_result` applies.
+    """The clause this refusal exists to deliver must survive the 512-char cap."""
     WIRE_CAP = 512
 
     tree = Path("/tensorhub-endpoint-cache/cas/snapshots/sha256:" + "b7" * 32)
@@ -332,24 +235,7 @@ def test_the_decline_REASON_survives_the_wire_truncation(tmp_path: Path) -> None
 
 
 def test_a_missing_manifest_pin_is_REPAIRED_not_refused_forever(tmp_path: Path) -> None:
-    """The pod's condition 3, verbatim, and the loop it was stuck in.
-
-    # pgw#1526: measured on an L4, same volume, pin the only variable:
-    #   ENGINE DECLINED: the manifest pin `snapshot:sha256:5bd90786…` is
-    #   MISSING from the store at /tmp/tensorhub-cache/cas
-
-    `_pin_manifest` has exactly ONE caller, `ensure_snapshot`. But
-    `_materialize_local`'s cached short-circuits return a tree already on disk
-    without going through it, so a tree that reaches residency by any other
-    route is unpinned — and `ensure_local` can never repair it, because it
-    short-circuits on that same tree forever. pgw#1513 refused and bounced to
-    `ensure_local` expecting a re-pin; on a pod the bounce lands right back on
-    the unpinned tree. Refusing was right; refusing forever was the bug.
-
-    So: stage a real tree, DELETE its pin the way the pod's is missing, and
-    assert the store repairs it — without moving bytes — so the streaming
-    engine can bind and the checkpoint actually serves.
-    """
+    """The pod's condition 3, verbatim, and the loop it was stuck in."""
     import asyncio
 
     from gen_worker import activity
@@ -383,9 +269,6 @@ def test_a_missing_manifest_pin_is_REPAIRED_not_refused_forever(tmp_path: Path) 
         tree = asyncio.run(stage())
         assert projection.resolve_projection(tree) is not None, "fixture never pinned"
 
-        # THE POD'S STATE: bytes fine, pin gone.
-        # Refs are stored under a hashed id, so the pin is found by the NAME it
-        # records rather than by its filename.
         import json as _json
 
         wanted = "snapshot:" + tree.name
@@ -421,16 +304,6 @@ def test_a_missing_manifest_pin_is_REPAIRED_not_refused_forever(tmp_path: Path) 
 def test_the_boot_census_NAMES_an_unpinned_stubbed_tree(
     tmp_path: Path, caplog: Any
 ) -> None:
-    """pgw#1536: the one combination that cannot serve must be loud at boot.
-
-    The pod incident turned on a tree existing WITHOUT its manifest pin, and
-    nobody could say whether that tree predated the boot or was built during
-    it — because nothing ever looked. A census at boot answers that for free
-    on any run that happens anyway, instead of costing a rental.
-
-    UNPINNED + STUBBED is the state that cannot be served, so it is the one
-    that logs at ERROR rather than INFO.
-    """
     import logging
 
     from gen_worker._vendor.tensorfs.project import stub_bytes
@@ -463,19 +336,6 @@ def test_the_boot_census_NAMES_an_unpinned_stubbed_tree(
 def test_the_census_fingerprint_SURVIVES_TEARDOWN_as_an_activity_row(
     tmp_path: Path,
 ) -> None:
-    """pgw#1541: a log line dies with the pod; the fingerprint must not.
-
-    pgw#1536's census emitted logger lines ONLY, which made it invisible to
-    every DB-reading harness and deleted at teardown — a rental ending in a
-    teardown script silently loses the exact fact the census exists to
-    preserve. Its "free on any run" value held only for a runner who knew to
-    pull `cozy logs` while the pod was still alive.
-
-    So the one state that cannot serve also lands as a
-    `worker_activity_events` row. Asserted here on the REAL emit path, not a
-    mock: `activity.bind_sink` is bound to a recorder exactly as `arun` binds
-    it to the worker's wire.
-    """
     import asyncio
 
     from gen_worker import activity
@@ -526,19 +386,7 @@ def test_the_census_fingerprint_SURVIVES_TEARDOWN_as_an_activity_row(
 def test_a_HEALTHY_census_STILL_emits_a_row_so_absence_means_one_thing(
     tmp_path: Path,
 ) -> None:
-    """The row is unconditional, and this test is the reason why.
-
-    My first cut fired the row only when something was unservable, reasoning
-    that a healthy row is noise. That was wrong, and it broke the exact
-    question the census exists to answer. The residue is PREDATE-vs-BUILT-
-    THIS-BOOT, and it is read off the census being ABSENT at boot while the
-    failure shows up later. Fire-on-bad-only makes absence ambiguous — healthy
-    boot, crashed census, and no-trees-on-disk all render identically as "no
-    row", and an absent instrument that reads as a clean bill of health is
-    worse than no instrument at all.
-
-    So: absence now means exactly one thing — the census did not run.
-    """
+    """The row is unconditional, and this test is the reason why."""
     import asyncio
 
     from gen_worker import activity
@@ -548,7 +396,6 @@ def test_a_HEALTHY_census_STILL_emits_a_row_so_absence_means_one_thing(
     base = tmp_path / "cas"
     (base / "refs").mkdir(parents=True)
     (base / "objects").mkdir(parents=True)
-    # A materialized tree: real bytes, no stubs, needs no pin.
     tree = base / "snapshots" / "plain"
     tree.mkdir(parents=True)
     (tree / "weights.bin").write_bytes(b"real bytes")
@@ -581,13 +428,7 @@ def test_a_HEALTHY_census_STILL_emits_a_row_so_absence_means_one_thing(
 def test_an_EMPTY_store_emits_the_row_that_ANSWERS_predate_vs_this_boot(
     tmp_path: Path,
 ) -> None:
-    """`of=0` at boot is the residue's answer, not a boring case to skip.
-
-    An empty snapshot store at boot means any stubbed tree found later was
-    BUILT THIS BOOT. That is the whole predate-vs-built-this-boot question,
-    settled by one row — so the empty case is the LAST one that should have
-    been an early return, and it used to be one.
-    """
+    """`of=0` at boot is the residue's answer, not a boring case to skip."""
     import asyncio
 
     from gen_worker import activity
@@ -626,17 +467,6 @@ def test_an_EMPTY_store_emits_the_row_that_ANSWERS_predate_vs_this_boot(
 def test_the_repair_outcome_SURVIVES_THE_512_CHAR_CAP_on_a_realistic_refusal(
     tmp_path: Path,
 ) -> None:
-    """pgw#1542: position two, because the tail gets sliced off.
-
-    `worker.py::_send_result` slices `safe_message` at 512 chars. pgw#1513
-    already lost the decline reason to that cap once, by putting it last. The
-    repair outcome has the same property — per-incident, unreconstructable
-    afterwards — so appending it would have repeated the identical bug.
-
-    This asserts on a REALISTIC message: a full-length snapshot tree name and
-    three long stub paths, which is what a real refusal carries. The naive
-    append placement fails this test.
-    """
     from gen_worker.models import projection as proj
     from gen_worker.serving.context import ProjectedTreeNotStreamable
 
@@ -655,17 +485,11 @@ def test_the_repair_outcome_SURVIVES_THE_512_CHAR_CAP_on_a_realistic_refusal(
     assert "repair attempted: ATTEMPTED and FAILED: PermissionError" in capped, (
         "the repair outcome must survive the 512-char wire cap — that is the "
         f"entire reason it sits in position two. Capped message: {capped!r}")
-    # And the decline reason still leads, unchanged by the insertion.
     assert capped.startswith("ENGINE DECLINED: no manifest pin")
 
 
 def test_an_UNATTEMPTED_repair_never_renders_as_a_clean_bill_of_health() -> None:
-    """Absence must say `not attempted`, never blank.
-
-    A blank field reads as "no repair was needed", which is the false-negative
-    this whole change exists to prevent — the same missing-renders-as-fine
-    failure the boot census hit one layer up.
-    """
+    """Absence must say `not attempted`, never blank."""
     from gen_worker.models.projection import pin_outcome
 
     assert pin_outcome("a-tree-nobody-touched") == "not attempted"
@@ -675,11 +499,7 @@ def test_an_UNATTEMPTED_repair_never_renders_as_a_clean_bill_of_health() -> None
 def test_the_outcome_registry_is_PER_TREE_not_a_global_last_writer(
     tmp_path: Path,
 ) -> None:
-    """A pod serves many trees; a global slot would misattribute the repair.
-
-    Recording one tree's failed repair and then reading a DIFFERENT tree's
-    refusal must not blame the second tree for the first tree's outcome.
-    """
+    """A pod serves many trees; a global slot would misattribute the repair."""
     from gen_worker.models import projection as proj
     from gen_worker.serving.context import ProjectedTreeNotStreamable
 
@@ -703,18 +523,11 @@ def test_the_registry_is_BOUNDED_so_a_long_lived_pod_cannot_grow_it() -> None:
     for i in range(proj._PIN_OUTCOMES_CAP * 3):
         proj.record_pin_outcome(f"bounded-probe-{i}", "not needed: already pinned")
     assert len(proj._PIN_OUTCOMES) <= proj._PIN_OUTCOMES_CAP
-    # The most RECENT survive — a live refusal is about a recent repair.
     assert proj.pin_outcome(f"bounded-probe-{proj._PIN_OUTCOMES_CAP * 3 - 1}") == (
         "not needed: already pinned")
 
 
 class _PipelineCls:
-    """Stands in for a real pipeline class: it HAS `from_pretrained`.
-
-    `ctx.load` refuses a class without one BEFORE it reaches the projection
-    checks, so a bare `object` never gets far enough to exercise the repair.
-    Every real pipeline (`StableDiffusionPipeline`, `FluxPipeline`, …) has it.
-    """
 
     @classmethod
     def from_pretrained(cls, *a: Any, **k: Any) -> Any:  # pragma: no cover
@@ -723,7 +536,6 @@ class _PipelineCls:
 
 
 def _unpinned_projected_tree(tmp_path: Path) -> Path:
-    """A tree that is STUBBED and UNPINNED — the fleet's exact failing state."""
     from gen_worker._vendor.tensorfs.project import stub_bytes
 
     base = tmp_path / "cas"
@@ -740,26 +552,6 @@ def _unpinned_projected_tree(tmp_path: Path) -> Path:
 def test_the_repair_RUNS_ON_THE_REAL_PATH_with_a_MISMATCHED_ref_spelling(
     tmp_path: Path,
 ) -> None:
-    """pgw#1543, on a REAL `ModelStore` — no stubbed store, no stubbed pin.
-
-    Two things are proven here, and the second is the one a mock would miss.
-
-    1. The repair reaches the path that actually refuses. `ensure_pinned`
-       shipped in pgw#1526 with two callers — `announce_resident` (boot) and
-       `_materialize_local` (materialization) — and NEITHER is on `ctx.load`.
-       A pod whose tree was materialized already, or whose announce ran before
-       the repair existed, hits the engine decline on every request and refuses
-       forever while a working repair sits two modules away. That is a ~19h
-       fleet-wide serve outage that needs no log line to explain.
-
-    2. The repair does not depend on REF SPELLING. The store banks snapshots by
-       ref; the serving path holds `DeployBinding.checkpoint_ref`, which is the
-       resolver's `pick.ref` and need not be the same string. A ref-keyed
-       lookup would SILENTLY NO-OP on a mismatch — miss, return False, refuse
-       exactly as before — and every stubbed test would still pass. So this
-       banks under one spelling and serves under a deliberately DIFFERENT one,
-       and still requires the pin to be written.
-    """
     from gen_worker.models import projection
     from gen_worker.models import store as store_mod
     from gen_worker.models.refs import WireRef
@@ -772,10 +564,6 @@ def test_the_repair_RUNS_ON_THE_REAL_PATH_with_a_MISMATCHED_ref_spelling(
     (base / "objects").mkdir(parents=True)
     tree = base / "snapshots" / digest
     (tree / "unet").mkdir(parents=True)
-    # Under 64 MiB on purpose: a real manifest for a larger file carries chunk
-    # entries, and `_manifest` rightly refuses to build one without them. The
-    # pin mechanism under test is identical either way, and the field's
-    # multi-GB shapes are asserted by the stub-signature tests above.
     (tree / "unet" / "x.safetensors").write_bytes(stub_bytes("a" * 64, 4096))
 
     assert projection.stub_at_any(tree) is True
@@ -788,21 +576,15 @@ def test_the_repair_RUNS_ON_THE_REAL_PATH_with_a_MISMATCHED_ref_spelling(
     snap = pb.Snapshot(digest=digest)
     snap.files.add(path="unet/x.safetensors", size_bytes=4096,
                    digest="sha256:" + "a" * 64)
-    # Banked under the STORE's spelling ...
     store.bank_snapshot(WireRef("acme/sd15@1"), snap)
     store_mod.bind_active_store(store)
     try:
         ctx: Any = LoadContext(
-            # ... and served under a DIFFERENT one. A ref-keyed repair no-ops here.
             binding=DeployBinding(
                 checkpoint_ref="acme/sd15", checkpoint_dir=tree),
-            engine=None,          # the engine DECLINED — the failing state
+            engine=None,
             device="cuda",
         )
-        # The load cannot COMPLETE here — this fixture has no `model_index.json`
-        # and no real weights, so once the repair lets the engine bind, the
-        # skeleton builder rightly objects. That is fine and is not what is
-        # under test: the claim is that the PIN GETS WRITTEN on this path.
         with contextlib.suppress(Exception):
             ctx.load(_Pipeline)
     finally:
@@ -818,13 +600,7 @@ def test_the_repair_RUNS_ON_THE_REAL_PATH_with_a_MISMATCHED_ref_spelling(
 
 
 def test_a_REFUSING_pod_REPAIRS_AT_THE_DECLINE_and_serves(tmp_path: Path) -> None:
-    """The conversion the fleet needs: would-have-refused now returns a pipeline.
-
-    The companion to the test above. That one proves the pin is really written
-    on the real path; this one proves that once the engine can bind, the
-    request SERVES instead of refusing — a currently-refusing pod becoming a
-    serving pod on its next request, with no bytes moved.
-    """
+    """The conversion the fleet needs: would-have-refused now returns a pipeline."""
     from gen_worker.models import store as store_mod
     import gen_worker.serving.streaming as streaming_mod
 
@@ -865,12 +641,7 @@ def test_a_REFUSING_pod_REPAIRS_AT_THE_DECLINE_and_serves(tmp_path: Path) -> Non
 def test_a_repair_that_FAILS_leaves_the_original_refusal_intact(
     tmp_path: Path,
 ) -> None:
-    """A failed repair must not replace a precise diagnosis with a traceback.
-
-    The refusal is the most valuable artifact this path produces — it is the
-    one channel that survives the pod. A repair attempt that raises, or that
-    re-pins and still gets no engine, must fall through to it unchanged.
-    """
+    """A failed repair must not replace a precise diagnosis with a traceback."""
     from gen_worker.models import store as store_mod
     from gen_worker.serving.context import (
         DeployBinding, LoadContext, ProjectedTreeNotStreamable,
@@ -904,15 +675,7 @@ def test_a_repair_that_FAILS_leaves_the_original_refusal_intact(
 def test_repair_is_NOT_attempted_when_the_objects_were_COLLECTED(
     tmp_path: Path,
 ) -> None:
-    """The GC'd case must NEVER be re-pinned — that would serve a lie.
-
-    se#790 measured the worse state on a real tree: the manifest pin is a
-    tree's only GC root, so a tree outliving its pin and then meeting a GC pass
-    has its objects DELETED (5.6 GB there, 134 GB on H3), leaving stubs plus
-    dangling symlinks. Writing a pin over absent bytes would convert an honest
-    refusal into a corrupt serve, so `collected` is checked FIRST and the
-    repair must not run.
-    """
+    """The GC'd case must NEVER be re-pinned — that would serve a lie."""
     from gen_worker.models import store as store_mod
     from gen_worker.models import projection as proj_mod
     from gen_worker.serving.context import (
@@ -951,43 +714,7 @@ def test_repair_is_NOT_attempted_when_the_objects_were_COLLECTED(
         "bytes are gone and a pin over them is a corrupt serve")
 
 
-# ── pgw#1544: the refusal contradicted itself, and nobody was asking ──────────
-#
-# THE FIELD ARTIFACT, one string, from `request_state.error_message_safe` on the
-# standing stack (pod 6r92qnflyt9blk, release b98aad88…, pin e3527cab):
-#
-#   ENGINE DECLINED: the manifest pin `snapshot:sha256:5bd90786…` is MISSING
-#   from the store at /tmp/tensorhub-cache/cas … | repair attempted: not
-#   needed: already pinned | PROJECTED TREE, 4 pointer stub(s) …
-#
-# The pin is MISSING and the repair says already pinned, in one sentence. It was
-# read as two lookups of one fact disagreeing. It is not: there was only ever
-# ONE lookup. `_projection_declined_because`'s last branch was the else of two
-# STRUCTURAL checks and asserted the pin was missing without ever looking, so
-# the repair MEASURED and the message ASSUMED — and on the fleet the message was
-# the one that was wrong. The pin was there the whole time.
-#
-# Which raises the question the contradiction was hiding: if the tree is pinned
-# and streamable, why was the eager bridge holding it at all? Because on a POD
-# nobody asks for an engine. `engine_for` has two production call sites:
-# `EndpointHost` — which only `serving/__main__.py` (the local CLI) and
-# `cli/daemon.py` construct — and pgw#1543's repair. The serverless worker
-# builds `ServeLoop` (`worker.py:582`) with NO `engine=`, and
-# `ServeLoop._backend_factory` hands `engine=self._engine` to every
-# `LoadContext`. So every projected tree on every pod fell to the eager bridge
-# and refused, on every request, blaming the store.
-#
-# That is why every local red/green passed while every pod failed: the tests
-# went through `EndpointHost`, which asks, and the fleet went through
-# `ServeLoop`, which does not.
-
-
 def _pinned_projected_tree(tmp_path: Path) -> Path:
-    """sd15's real shape, through the REAL store: 4 pointer stubs, PINNED.
-
-    Built by `ModelStore.ensure_local` over a real CAS and a real HTTP origin,
-    so the pin is the one production writes rather than one a fixture staged.
-    """
     import asyncio
 
     from gen_worker import activity
@@ -1004,7 +731,6 @@ def _pinned_projected_tree(tmp_path: Path) -> Path:
         "unet/diffusion_pytorch_model.fp16.safetensors",
         "vae/diffusion_pytorch_model.fp16.safetensors",
         "text_encoder/model.fp16.safetensors",
-        # The member the field refusal named, at its field size.
         "safety_checker/model.fp16.safetensors",
     ]
     origin = _Origin()
@@ -1027,19 +753,6 @@ def _pinned_projected_tree(tmp_path: Path) -> Path:
 def test_a_PINNED_projected_tree_REACHES_THE_STREAMING_ENGINE_on_the_serve_path(
     tmp_path: Path,
 ) -> None:
-    """pgw#1544's reproduction, and the fleet fix: the pod's own state.
-
-    A real store, a real pinned projected tree in sd15's shape, and a
-    `LoadContext` built EXACTLY as `ServeLoop._backend_factory` builds one on a
-    pod — `engine=None`, no `device=`, no `io=`. Before this fix that
-    combination refused every request with a message blaming a pin that was
-    sitting right there.
-
-    The load cannot COMPLETE over a fixture tree with no `model_index.json` —
-    the skeleton builder rightly objects, and that objection is the proof: it
-    comes from INSIDE the streaming engine, which is a place the pod's requests
-    never reached.
-    """
     from gen_worker.models import projection
     from gen_worker.serving.streaming.skeleton import SkeletonError
 
@@ -1055,7 +768,7 @@ def test_a_PINNED_projected_tree_REACHES_THE_STREAMING_ENGINE_on_the_serve_path(
     ctx: LoadContext[Any] = LoadContext(
         binding=DeployBinding(
             checkpoint_ref="tensorhub/sd15-base@prod", checkpoint_dir=tree),
-        engine=None,  # ServeLoop hands this to every load on every pod
+        engine=None,
     )
 
     with pytest.raises(SkeletonError):
@@ -1074,13 +787,7 @@ def test_a_PINNED_projected_tree_REACHES_THE_STREAMING_ENGINE_on_the_serve_path(
 def test_the_PRODUCTION_dispatcher_hands_its_loads_NO_ENGINE(
     tmp_path: Path,
 ) -> None:
-    """The premise of the test above, asserted on the real object.
-
-    `worker.py:582` constructs `ServeLoop` with no `engine=`. This builds one
-    the same way and reads what its own factory manufactures. If a future
-    change starts binding an engine here, this test says so — rather than
-    leaving the test above passing for a reason that has quietly changed.
-    """
+    """The premise of the test above, asserted on the real object."""
     import sys
 
     from gen_worker.serving.loader import load_endpoint_module
@@ -1129,13 +836,7 @@ def test_the_PRODUCTION_dispatcher_hands_its_loads_NO_ENGINE(
 
 
 def test_the_decline_reason_is_MEASURED_and_never_ASSERTED(tmp_path: Path) -> None:
-    """The self-contradiction, killed at its source.
-
-    `_projection_declined_because` returned "the manifest pin ... is MISSING"
-    as the ELSE of two structural checks — a sentence about the store that
-    nothing in the function had looked at. Both states are driven here on real
-    trees: the claim must follow the disk, in both directions.
-    """
+    """The self-contradiction, killed at its source."""
     from gen_worker.models import projection
 
     pinned = _pinned_projected_tree(tmp_path / "good")
@@ -1156,13 +857,7 @@ def test_the_decline_reason_is_MEASURED_and_never_ASSERTED(tmp_path: Path) -> No
 def test_the_refusal_and_the_repair_OUTCOME_can_never_contradict_each_other(
     tmp_path: Path,
 ) -> None:
-    """The field artifact, as an invariant.
-
-    "the pin is MISSING" and "not needed: already pinned" must never appear in
-    one refusal again, whatever else changes. Driven over a real pinned tree
-    with the repair's own outcome recorded against it — the exact pairing the
-    pod produced.
-    """
+    """The field artifact, as an invariant."""
     from gen_worker.models import projection
 
     tree = _pinned_projected_tree(tmp_path)
@@ -1182,22 +877,6 @@ def test_the_refusal_and_the_repair_OUTCOME_can_never_contradict_each_other(
 def test_the_boot_census_FIRES_ON_THE_RECONCILE_where_rows_reach_the_hub(
     tmp_path: Path,
 ) -> None:
-    """pgw#1544: the census had a caller and still produced zero rows.
-
-    `rescan_disk` runs inside `arun` BEFORE the transport task is created, and
-    on the field pods NOTHING emitted in that window survived: the four
-    verification pods of 2026-08-19/20 each produced exactly `weight_fetch` and
-    `snapshot_pull` rows and not one row of any boot-window kind —
-    `snapshot_census`, `process_role` and `boot_stages` are all absent, while
-    pods from a day earlier carry all three. So a second boot-window caller
-    would have bought a second unreadable row.
-
-    `announce_resident` runs on the reconcile, after HelloAck, in the same
-    window that delivered `snapshot_pull` — and before this pod materializes
-    anything, so it still answers the predate-vs-built-this-boot question.
-    Driven through the REAL store with a REAL bound activity sink: the check is
-    that a ROW is EMITTED, not that a symbol exists.
-    """
     import asyncio
 
     from gen_worker import activity
@@ -1219,12 +898,9 @@ def test_the_boot_census_FIRES_ON_THE_RECONCILE_where_rows_reach_the_hub(
         activity.bind_sink(wire.send, asyncio.get_running_loop())
         store = ModelStore(wire.send, cache_dir=base)
         snapshot = pb.Snapshot(digest="sha256:" + "e5" * 32)
-        # Twice on purpose: a pod reconciles every configured ref, and the
-        # census is one statement about the whole store.
         for _ in range(2):
             await store.announce_resident(WireRef("tensorhub/sd15-base@prod"),
                                           snapshot)
-        # The activity sink ships on the loop; let those tasks run.
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 

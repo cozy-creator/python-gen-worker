@@ -1,9 +1,4 @@
-"""Module-level helpers for RequestContext: parsing, SSRF checks, hashing, etc.
-
-These are pure utilities with no dependency on RequestContext or
-_RequestOutputStream. Pulled out of the monolithic request_context.py so the
-class files only hold class bodies.
-"""
+"""Module-level helpers for RequestContext: parsing, SSRF checks, hashing, etc."""
 
 from __future__ import annotations
 
@@ -22,11 +17,10 @@ import mimetypes
 logger = logging.getLogger(__name__)
 
 
-_MAX_OUTPUT_FILE_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB hard cap per file.
+_MAX_OUTPUT_FILE_BYTES = 20 * 1024 * 1024 * 1024
 
 
 def _infer_mime_type(ref: str, head: bytes) -> str:
-    # Prefer magic bytes when available.
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if head.startswith(b"\xff\xd8\xff"):
@@ -35,8 +29,6 @@ def _infer_mime_type(ref: str, head: bytes) -> str:
         return "image/gif"
     if len(head) >= 12 and head[0:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "image/webp"
-
-    # Fall back to extension.
 
     guessed, _ = mimetypes.guess_type(ref)
     return guessed or "application/octet-stream"
@@ -68,10 +60,6 @@ def _infer_tensors_format(ref_or_path: str) -> str:
 
 
 def _require_worker_capability_token() -> str:
-    # Callers must prefer RequestContext._get_worker_capability_token(), which
-    # uses the per-request token plumbed from
-    # JobExecutionRequest.worker_capability_token and only falls back here when
-    # none is available. Without one, file operations cannot proceed.
     raise RuntimeError("worker_capability_token is required for file operations")
 
 

@@ -1,25 +1,4 @@
-"""Every quantized leaf records its `compute_dtype`, and the consumer refuses
-to default one.
-
-One leaf accepting `compute_dtype` and throwing it away is enough:
-`adapter_fidelity.branch_compute_dtype` then falls back to bf16 on bias-free
-layers while their bias-bearing siblings in the SAME module set get float32 —
-two dtypes in one module set, and the first branch-bearing forward dies inside
-torch.
-
-Two halves here, and neither is a mock: every module below is the real class
-the serving lanes materialize, built through its real accessor.
-
-1. THE CONSUMER REFUSES. `branch_compute_dtype` no longer defaults. The
-   branch-capable universe (`w8a8_lora.branch_modules`) is closed and every
-   member of it can state a compute dtype, so a default could only ever be a
-   leaf that forgot to record one.
-
-2. THE PRODUCERS RECORD. Every quantized leaf in `gen_worker.models` takes a
-   `compute_dtype` and now stores it, checked bias-free — the shape in which
-   the fact is recoverable from nothing else. Discovery is by accessor, so a
-   NEW leaf that skips it fails here instead of on a pod.
-"""
+"""Every quantized leaf records its `compute_dtype`, and the consumer refuses to default one."""
 
 from __future__ import annotations
 
@@ -43,15 +22,8 @@ from gen_worker.models.w4a4 import w4a4_linear_class  # noqa: E402
 from gen_worker.models.w8a8 import fp8_scaled_linear_class  # noqa: E402
 from gen_worker.models.w8a8_lora import alloc_branch_buffers  # noqa: E402
 
-#: The lane dtype under test is deliberately NOT bf16: bf16 is what the old
-#: fallback returned, so a bf16 lane cannot tell a recorded fact from a guess.
-#: This is why pgw#1015 was invisible on sdxl for as long as it was.
 LANE = torch.float32
 
-#: The census, as constructor calls. Every leaf is built BIAS-FREE and with
-#: every optional compute-dtype tensor absent — the shape in which nothing but
-#: an explicit record can answer. `dims` satisfy each lane's own alignment
-#: contract (fp4 K/N alignment, awq out%16/in%128, fused rank%16).
 LEAVES = {
     "_Fp8ScaledLinear": (fp8_scaled_linear_class, dict(
         in_features=128, out_features=128, bias=False, compute_dtype=LANE,
@@ -70,34 +42,22 @@ LEAVES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# 1. The consumer refuses
-# ---------------------------------------------------------------------------
-
-
 def test_a_leaf_that_states_no_compute_dtype_is_refused_by_name() -> None:
-    """The pgw#1015 module, exactly as it shipped before b03b6703: a real
-    `_Fp8ScaledLinear` on an fp32 lane with no bias and no recorded fact. It
-    used to answer `torch.bfloat16` — silently, and wrongly."""
     cls, kwargs = LEAVES["_Fp8ScaledLinear"]
     mod = cls()(**kwargs)
-    del mod.compute_dtype  # the pre-pgw#1015 state of this very class
+    del mod.compute_dtype
 
     with pytest.raises(af.UnknownComputeDtypeError) as excinfo:
         af.branch_compute_dtype(mod)
 
     msg = str(excinfo.value)
-    # The refusal names the module, what it was asked, and the FIX — a
-    # refusal that does not say what to do is a different failure.
     assert "_Fp8ScaledLinear" in msg
-    assert "float8_e4m3fn" in msg          # what the weight actually holds
+    assert "float8_e4m3fn" in msg
     assert "self.compute_dtype = compute_dtype" in msg
     assert "pgw#1015" in msg
 
 
 def test_the_allocator_refuses_too_because_it_shares_the_definition() -> None:
-    """`alloc_branch_buffers` and the pgw#794 gate read ONE definition, so
-    the refusal reaches the allocator without a second edit."""
     cls, kwargs = LEAVES["_Fp8ScaledLinear"]
     mod = cls()(**kwargs)
     del mod.compute_dtype
@@ -109,18 +69,13 @@ def test_the_allocator_refuses_too_because_it_shares_the_definition() -> None:
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 def test_every_branch_capable_kind_answers_without_the_fallback(dtype) -> None:
-    """The closed universe `w8a8_lora.branch_modules` admits, on every compute
-    dtype — this is the evidence the refusal is safe. Nothing here relies on
-    the removed default."""
+    """The closed universe `w8a8_lora.branch_modules` admits, on every compute dtype — this is the evidence the refusal is safe."""
     plain = nn.Linear(8, 8, dtype=dtype)
     assert af.branch_compute_dtype(plain) is dtype
 
     conv = nn.Conv2d(4, 4, 3, dtype=dtype)
     assert af.branch_compute_dtype(conv) is dtype
 
-    # A pgw#727 fp8-storage leaf: weight AND bias rest in fp8, so ONLY the
-    # recorded fact can answer. This is the case the fallback was written for
-    # and the case that proves the record already exists.
     leaf = nn.Linear(8, 8, dtype=dtype)
     holder = nn.Module()
     holder.inner = leaf
@@ -137,18 +92,12 @@ def test_every_branch_capable_kind_answers_without_the_fallback(dtype) -> None:
 
 
 def test_a_live_branch_buffer_still_outranks_the_rule() -> None:
-    """`branch_grid_dtype` reads the destination first; only the unarmed case
-    falls through to the (now refusing) rule."""
+    """`branch_grid_dtype` reads the destination first; only the unarmed case falls through to the (now refusing) rule."""
     lin = nn.Linear(8, 8, dtype=torch.bfloat16)
     alloc_branch_buffers(lin, 16)
     lin.lora_a = lin.lora_a.to(torch.float8_e4m3fn)
     lin.lora_b = lin.lora_b.to(torch.float8_e4m3fn)
     assert af.branch_grid_dtype(lin) is torch.float8_e4m3fn
-
-
-# ---------------------------------------------------------------------------
-# 2. The producers record — the sweep, as an invariant
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", sorted(LEAVES))
@@ -162,11 +111,7 @@ def test_every_quantized_leaf_records_its_compute_dtype(name: str) -> None:
 
 
 def test_the_census_covers_every_leaf_accessor_in_models() -> None:
-    """Discovery, so a NEW quantized leaf cannot be added without a row.
-
-    Every `*_class()` accessor under `gen_worker.models` that returns a
-    module class taking `compute_dtype` must appear in :data:`LEAVES`.
-    """
+    """Discovery, so a NEW quantized leaf cannot be added without a row."""
     import gen_worker.models as models_pkg
 
     found: dict[str, str] = {}
@@ -179,7 +124,7 @@ def test_the_census_covers_every_leaf_accessor_in_models() -> None:
                 continue
             try:
                 cls = fn()
-            except Exception:  # an accessor needing a live card is not a leaf
+            except Exception:
                 continue
             if not (inspect.isclass(cls) and issubclass(cls, nn.Module)):
                 continue

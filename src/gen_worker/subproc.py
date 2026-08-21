@@ -1,11 +1,4 @@
-"""Run a delegated subprocess (ai-toolkit run.py, external trainers) with
-cancellation and log tailing.
-
-The primitive is generic: run a command, stream its merged stdout/stderr
-lines to a callback, honor ``ctx.cancelled`` by SIGTERM-ing the process
-group (escalating to SIGKILL after a grace period). Endpoints own all
-line parsing — e.g. mapping trainer output to ``ctx.progress(...)``.
-"""
+"""Run a delegated subprocess (ai-toolkit run.py, external trainers) with cancellation and log tailing."""
 from __future__ import annotations
 
 import logging
@@ -30,18 +23,7 @@ _POLL_INTERVAL_S = 0.2
 
 
 class LineTail:
-    """Reader thread over a child's merged stdout+stderr.
-
-    Streams every line to ``on_line`` and stamps a :class:`SilenceWindow`, so
-    "the child has said nothing for N seconds" is answerable at any moment.
-    Draining is not optional: a child whose pipe fills BLOCKS, so whoever
-    captures output must keep reading for the process's whole life.
-
-    ``run_process`` uses it to bound a run-to-completion tool;
-    ``serving.engine_runtime`` uses it to bound an engine BOOT while keeping
-    the child alive afterwards (pgw#1421 — the v1 ``runtimes.server`` this
-    line used to name was deleted by the pgw#1373 hardcut).
-    """
+    """Reader thread over a child's merged stdout+stderr."""
 
     __slots__ = ("_proc", "_on_line", "_window", "_thread")
 
@@ -91,12 +73,7 @@ class LineTail:
 
 
 class ProcessStalledError(RuntimeError):
-    """The child produced no output for its stall window — presumed wedged.
-
-    Raised only by ``run_process(stall_window_s=...)``. It is the
-    progress-based replacement for a wall-clock ``timeout=``: a long job that
-    keeps talking is never killed, a silent one is killed quickly.
-    """
+    """The child produced no output for its stall window — presumed wedged."""
 
     def __init__(self, cmd: Sequence[str], silent_for_s: float, window_s: float) -> None:
         super().__init__(
@@ -117,23 +94,7 @@ def run_process(
     term_grace_s: float = _DEFAULT_TERM_GRACE_S,
     stall_window_s: Optional[float] = None,
 ) -> int:
-    """Run ``cmd``, streaming merged stdout+stderr lines to ``on_line``.
-
-    - ``ctx``: anything with a ``cancelled`` bool (a RequestContext). When it
-      flips true, the process GROUP gets SIGTERM; after ``term_grace_s``
-      seconds without exit, SIGKILL. Raises ``CanceledError`` afterwards.
-    - ``on_line``: called from a reader thread with each output line
-      (trailing newline stripped). Exceptions in the callback are logged
-      and swallowed — a bad parse must not kill the trainer.
-    - ``stall_window_s``: optional PROGRESS watchdog. Every output line is an
-      advance; the group is terminated and ``ProcessStalledError`` raised only
-      once the child has been silent this long. ``None`` (default) = no
-      watchdog. There is deliberately no total-runtime bound: a wall clock
-      cannot tell a healthy 3-hour quantize from a wedge, so it is either
-      useless or it kills real work.
-    - Returns the process exit code on natural exit (callers decide whether
-      nonzero is fatal).
-    """
+    """Run ``cmd``, streaming merged stdout+stderr lines to ``on_line``."""
 
     invocation_snapshot_path = _write_invocation_snapshot(ctx)
     child_env = dict(env) if env is not None else None
@@ -153,7 +114,7 @@ def run_process(
             env=child_env,
             text=True,
             bufsize=1,
-            start_new_session=True,  # own process group → group-wide signals
+            start_new_session=True,
         )
 
         window = (
@@ -180,7 +141,7 @@ def run_process(
                     raise ProcessStalledError(cmd, silent_for, window)
                 time.sleep(_POLL_INTERVAL_S)
         finally:
-            if proc.poll() is None:  # unexpected exit path (exception in caller)
+            if proc.poll() is None:
                 _terminate_group(proc, term_grace_s=term_grace_s)
     finally:
         if invocation_snapshot_path:
@@ -208,7 +169,6 @@ def _write_invocation_snapshot(ctx: Any) -> str:
 
 
 def _terminate_group(proc: "subprocess.Popen[str]", *, term_grace_s: float) -> None:
-    """SIGTERM the process group, escalate to SIGKILL after the grace."""
     pgid = None
     try:
         pgid = os.getpgid(proc.pid)

@@ -1,11 +1,4 @@
-"""Disk retention (#370): a persistent ref->bytes index + deletion helpers.
-
-The CAS stores tensorhub models by snapshot digest, HF models under the HF
-cache, civitai under version dirs — none of which map back to wire refs on
-their own. ``RefIndex`` persists {ref: path, bytes, last_used} at
-``<cache_dir>/ref-index.json`` so disk GC and the boot-time rescan can reason
-in refs (the vocabulary of `keep`, Residency, and ModelEvents).
-"""
+"""Disk retention (#370): a persistent ref->bytes index + deletion helpers."""
 
 from __future__ import annotations
 
@@ -58,7 +51,6 @@ class RefIndex:
 
     @contextmanager
     def _locked(self, *, exclusive: bool) -> Iterator[None]:
-        """Refresh while flocking the stable cache-directory inode."""
         with self._lock:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             directory = os.open(
@@ -77,12 +69,7 @@ class RefIndex:
                 os.close(directory)
 
     def _save_locked(self) -> None:
-        """Write the index through, atomically.
-
-        The caller holds both the thread lock and the process-shared flock and
-        has refreshed ``self._data`` from disk. A unique temp file keeps the
-        replacement atomic; file and directory fsync make it durable.
-        """
+        """The caller holds both the thread lock and the process-shared flock and has refreshed ``self._data`` from disk."""
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp_name = tempfile.mkstemp(
@@ -90,9 +77,6 @@ class RefIndex:
                 suffix=".tmp")
             tmp = Path(tmp_name)
             try:
-                # The cache directory is the write authority. Keep the index
-                # readable when a root control parent writes it after granting
-                # that directory to the dropped compute uid.
                 os.fchmod(fd, 0o644)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     fh.write(json.dumps(self._data))
@@ -145,31 +129,17 @@ class RefIndex:
 
 
 def tree_bytes(path: Path) -> int:
-    """Bytes under ``path`` (file or tree), hardlinked inodes counted once.
-
-    **A PROJECTED snapshot tree is sized from its MANIFEST** (pgw#1308 step
-    ⑥), not by walking it. The walk would answer with the stubs and the
-    symlink targets it happens to reach — a few hundred bytes plus the
-    non-tensor files — for a model of any size. Every caller of this function
-    is asking "how much disk does this ref hold", and the honest answer is the
-    objects the tree's manifest pins, because deleting the tree drops its ref
-    and `sweep_orphan_blobs` then reclaims exactly those. Answering ~0 would
-    make eviction believe a resident 30 GiB model frees nothing, and a pod
-    that cannot reclaim disk does not fail loudly — it fills up.
-    """
+    """Bytes under ``path`` (file or tree), hardlinked inodes counted once."""
     p = Path(path)
     try:
         from . import projection
 
         snapshot = projection.resolve_projection(p)
-    except Exception:  # a probe must never be the thing that fails
+    except Exception:
         snapshot = None
     if snapshot is not None:
         from .materialized_view import view_root_for
 
-        # The manifest's objects, PLUS any tier-3 copy a materializing site
-        # asked for (pgw#1303). Both die when this ref's bytes are deleted, so
-        # both are what deleting it reclaims.
         return sum(
             int(entry.size_bytes) for entry in snapshot.manifest.files
         ) + tree_bytes(view_root_for(p))
@@ -195,12 +165,6 @@ def tree_bytes(path: Path) -> int:
 
 
 def _regular_files(path: Path) -> Iterator[Tuple[Path, os.stat_result]]:
-    """Regular files reachable from ``path`` without following directories.
-
-    Snapshot files may be hardlinks or Hugging Face-style symlinks into an
-    immutable blob store.  Following a file symlink is safe here: file advice
-    changes only page-cache residency, never bytes or metadata.
-    """
     root = Path(path)
     candidates: Iterable[Path]
     if root.is_dir():
@@ -223,17 +187,7 @@ def _regular_files(path: Path) -> Iterator[Tuple[Path, os.stat_result]]:
 def reclaim_file_cache(
     path: Path, *, preserve_paths: Iterable[Path] = (),
 ) -> int:
-    """Drop clean cached pages for an immutable local snapshot, best effort.
-
-    ``POSIX_FADV_DONTNEED`` keeps every model byte on disk while returning
-    recently-read file pages to the kernel under host-RAM pressure.  Inodes
-    reachable from ``preserve_paths`` are skipped, including hardlinks: a
-    shared VAE or current request therefore cannot be chilled through another
-    snapshot tree.  Unsupported platforms simply return zero.
-
-    The return value is bytes successfully advised, not claimed reclaimed
-    memory.  Callers must re-probe real cgroup headroom before proceeding.
-    """
+    """Drop clean cached pages for an immutable local snapshot, best effort."""
     advise = getattr(os, "posix_fadvise", None)
     dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
     if advise is None or dontneed is None:
@@ -271,9 +225,6 @@ def reclaim_file_cache(
 
 
 def _retention_unit(path: Path, cas_dir: Path) -> Path:
-    """The directory/file that must be deleted to reclaim a ref's bytes:
-    the snapshot dir for CAS refs, the ``models--*`` repo dir for HF refs,
-    the tracked path otherwise."""
     p = Path(path)
     snaps_root = Path(cas_dir) / "snapshots"
     try:
@@ -300,10 +251,6 @@ def delete_ref_bytes(ref: str, path: Path, cas_dir: Path) -> None:
                 cas.compare_and_swap_ref(name, None, expected=current)
             except RefConflict:
                 logger.info("disk-gc: snapshot ref %s changed while deleting", name)
-        # The tier-3 copy (pgw#1303), if a materializing site ever asked for
-        # one. It is keyed by this snapshot and readable only through it, so a
-        # view that outlived its tree would be disk nothing could name or
-        # reclaim.
         from .materialized_view import view_root_for
 
         shutil.rmtree(view_root_for(unit), ignore_errors=True)
@@ -323,28 +270,16 @@ def sweep_orphan_blobs(cas_dir: Path) -> int:
     )
 
 
-# Generous: the largest blobs can legitimately take hours on a slow link.
-# Only genuinely abandoned (crashed/killed writer) temp artifacts are this
-# old — a live writer keeps rewriting its temp, advancing its mtime.
 _STALE_WRITER_TEMP_AGE_S = 6 * 3600
 
 
 def sweep_stale_writer_temp(
     cas_dir: Path, *, older_than_s: float = _STALE_WRITER_TEMP_AGE_S,
 ) -> int:
-    """Remove abandoned snapshot-materialization staging directories.
-
-    tensorfs owns transfer temporaries under its ``tmp/`` namespace. The
-    worker owns the product-level ``snapshots/`` destination, including an
-    atomic materialization that died before rename. Only directories idle past
-    ``older_than_s`` are removed.
-    """
+    """Remove abandoned snapshot-materialization staging directories."""
     removed = 0
     root = Path(cas_dir)
     now = time.time()
-    # tensorfs owns objects/ and tmp/. This worker scans only its product-level
-    # materialization namespace; generic transfer-temporary cleanup belongs to
-    # the library.
     for base_name in ("snapshots",):
         base = root / base_name
         if not base.is_dir():

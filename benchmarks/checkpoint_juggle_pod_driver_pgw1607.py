@@ -1,21 +1,3 @@
-"""pgw#1607 phase 4: the box-side pod driver.
-
-Rents ONE RunPod GPU pod through podguard (renting and arming teardown are
-one act), bootstraps the fleet line + this branch + the post-va#12 varena
-wheel, runs `checkpoint_juggle_pod_pgw1607.py`, ships the verdicts OFF the
-pod before teardown, and terminates with provider-404 proof. One pod per
-invocation; the matrix is sequential invocations, each gated on the last.
-
-    nice -n 19 .venv/bin/python benchmarks/checkpoint_juggle_pod_driver_pgw1607.py \\
-        --gpu "NVIDIA GeForce RTX 4090" --disk-gb 120 --repos 6 --arms SWCZ
-
-Discipline (the va#5/#1548 shape, reused not reinvented): the pod id is
-BANKED to the ledger file the moment it exists, before any wait loop; every
-exit path runs terminate_and_confirm; results are scp'd out BEFORE teardown;
-the driver refuses to start if a previous pod from this ledger is still
-alive (one heavy thing at a time).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -186,12 +168,6 @@ def main() -> int:
         "supportPublicIp": True,
         "ports": ["22/tcp"],
         "env": {"PUBLIC_KEY": pub},
-        # The fleet line is torch cu13.0; a host driver below the 580 class
-        # cannot init it (measured on pod mrgr6tbpa56k9w: driver 570.172.08 /
-        # CUDA 12.8 -> torch 2.13+cu130 refuses, $0.01 to learn). The REST
-        # schema rejects `minCudaVersion` (measured, $0); `allowedCudaVersions`
-        # is the surviving spelling, and the post-SSH driver gate below is the
-        # backstop if the provider ignores it.
         "allowedCudaVersions": ["13.0"],
     }
     if args.dry_run:
@@ -226,8 +202,6 @@ def run_once(args: argparse.Namespace, api: str, body: dict, name: str,
     try:
         log("waiting for SSH ...")
         tgt = None
-        # 25 min: va#5 measured healthy pods 12+ min into a big image pull —
-        # a 15-min bound tears down working hosts (try 3, $0.09).
         deadline = time.time() + 1500
         while time.time() < deadline:
             tgt = ssh_target(api, lease)
@@ -242,8 +216,6 @@ def run_once(args: argparse.Namespace, api: str, body: dict, name: str,
             )
         log(f"ssh up at {tgt[0]}:{tgt[1]}")
 
-        # DRIVER GATE, before any byte of setup: the host must speak CUDA 13
-        # or torch cu130 will refuse after minutes of spend.
         rc, out = pod_sh(
             tgt, "nvidia-smi --query-gpu=driver_version --format=csv,noheader", 60
         )
@@ -266,11 +238,6 @@ def run_once(args: argparse.Namespace, api: str, body: dict, name: str,
         if rc != 0:
             raise RuntimeError("bootstrap failed")
 
-        # EVIDENCE EGRESS IS PART OF THE SMOKE GATE (coordinator rider,
-        # 2026-08-20; pgw#1568 measured SSH egress dead on raw pods of a
-        # different shape). A full round trip with content verification runs
-        # BEFORE any download or arm — if this fails, abort at ~$0.05 and
-        # wire the publishes channel rather than losing verdicts at the end.
         canary = f"pgw1607-egress-{pod_id}-{int(time.time())}"
         rc, _ = pod_sh(tgt, f"mkdir -p /workspace/pgw1607-out && "
                             f"echo -n {shlex.quote(canary)} "

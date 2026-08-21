@@ -1,10 +1,4 @@
-"""Worker config — the ONE component in this process that reads the environment.
-
-`load_settings()` is called exactly once per process entry and the resulting
-`Settings` is passed by parameter. There is deliberately no cached accessor: a
-`lru_cache`d process-global is the same defect as a raw env read, only harder to
-see.
-"""
+"""Worker config — the ONE component in this process that reads the environment."""
 from .loader import (
     UnknownSettingError,
     load_settings,

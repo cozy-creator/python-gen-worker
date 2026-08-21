@@ -75,13 +75,6 @@ def _tiny_llama(hidden: int = 128, inter: int = 256) -> tuple[Any, Any]:
 def _write_component(
     d: Path, *, kind: str = "blockwise", hidden: int = 128, inter: int = 256,
 ) -> None:
-    """A real transformers component tree.
-
-    ``blockwise`` is ``hf.fp8-blockwise@1``; ``transposed`` writes the same
-    tree with the scale grid transposed (the silently-wrong-numbers case);
-    ``rowwise`` writes ``cozy.fp8-rowwise@1``'s per-row leaf and declares no
-    ``weight_block_size``; ``dense`` writes plain bf16.
-    """
     cfg, model = _tiny_llama(hidden, inter)
     out: dict[str, Any] = {}
     for key, value in model.state_dict().items():
@@ -130,11 +123,7 @@ def _tree(tmp_path: Path, kind: str, **kw: Any) -> Path:
 
 @pytest.fixture()
 def ran(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record WHICH decoder the production dispatch drove.
-
-    Both spies delegate to the real function — this instruments a real
-    end-to-end load, it does not stand in for one.
-    """
+    """Record WHICH decoder the production dispatch drove."""
     seen: list[str] = []
     explicit = load_hf_fp8_blockwise
     generic = LlamaForCausalLM.from_pretrained
@@ -156,13 +145,11 @@ def ran(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def test_production_dispatch_runs_the_declared_blockwise_decoder(
     tmp_path: Path, ran: list[str],
 ) -> None:
-    """RED before pgw#1253: ``ran`` held only the generic from_pretrained."""
     obj = load_component(_tree(tmp_path, "blockwise"), COMPONENT)
 
     assert ran[0] == (
         "gen_worker.models.hf_fp8_blockwise:load_hf_fp8_blockwise"), (
         f"the declared hf.fp8-blockwise@1 decoder did not run; ran={ran}")
-    # and it produced a materialized module, not a shell.
     weight = obj.model.layers[0].self_attn.q_proj.weight
     assert not weight.is_meta and torch.isfinite(weight.float()).all()
 
@@ -170,12 +157,7 @@ def test_production_dispatch_runs_the_declared_blockwise_decoder(
 def test_transposed_scale_grid_refuses_through_the_production_dispatch(
     tmp_path: Path,
 ) -> None:
-    """The refusal that only exists on the explicit arm. No spies: the
-    dispatch either reaches the verifier or it does not.
-
-    RED before pgw#1253: this tree loaded, and every block scale was applied
-    to the wrong span of the wrong row.
-    """
+    """The refusal that only exists on the explicit arm."""
     root = _tree(tmp_path, "transposed", hidden=128, inter=384)
     with pytest.raises(HfFp8BlockwiseLayoutError) as excinfo:
         load_component(root, COMPONENT)
@@ -185,9 +167,7 @@ def test_transposed_scale_grid_refuses_through_the_production_dispatch(
 def test_rowwise_tree_is_not_claimed_by_the_blockwise_arm(
     tmp_path: Path, ran: list[str],
 ) -> None:
-    """Detection is the config's own claim: no ``weight_block_size``, no
-    claim. Over-claiming here would route ``cozy.fp8-rowwise@1`` bytes into a
-    128x128 reader, which is the conflation the two handles exist to stop."""
+    """Detection is the config's own claim: no ``weight_block_size``, no claim."""
     root = _tree(tmp_path, "rowwise")
     assert detect_hf_fp8_blockwise(root / COMPONENT) is None
     load_component(root, COMPONENT)

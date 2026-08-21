@@ -1,23 +1,4 @@
-"""The torch GGML dequant kernels are BIT-EXACT against the `gguf` package.
-
-pgw#1498: ported from city96's ComfyUI-GGUF so ggml is a weight STORAGE format
-inside the ordinary torch serving path.
-
-The reference is ``gguf.quants.dequantize`` — the numpy implementation that
-defines the format. Two independent inputs, because each catches what the other
-cannot:
-
-1. RANDOM BLOCK BYTES. The kernels are pure functions of bytes, so random bytes
-   exercise scale/min/sub-scale fields real weights never reach (all-ones
-   exponents, saturated 6-bit scales, every codebook index). This is the only
-   input available for the K-quants and IQ4 at all: the `gguf` package can
-   DEQUANTIZE them but raises NotImplementedError on `quantize`.
-2. ROUND-TRIPPED REAL VALUES, for the six types `gguf` can quantize. Proves the
-   decode agrees on the byte distribution an actual checkpoint produces.
-
-No weights are downloaded and nothing runs on a GPU: the kernels are device
-agnostic torch ops and CPU is the honest place to pin numerics.
-"""
+"""The torch GGML dequant kernels are BIT-EXACT against the `gguf` package."""
 
 from __future__ import annotations
 
@@ -29,8 +10,6 @@ gguf = pytest.importorskip("gguf")
 
 from gen_worker.models import gguf_dequant
 
-#: Every type the lane claims. Values are (name, logical columns) — K-quants
-#: need a multiple of 256, legacy quants a multiple of 32.
 QTYPES = [
     ("BF16", 512),
     ("Q8_0", 512),
@@ -47,7 +26,6 @@ QTYPES = [
     ("IQ4_XS", 512),
 ]
 
-#: The subset `gguf.quants.quantize` implements.
 QUANTIZABLE = {"BF16", "Q8_0", "Q5_1", "Q5_0", "Q4_1", "Q4_0"}
 
 ROWS = 6
@@ -74,8 +52,6 @@ def _ours(raw: np.ndarray, name: str, shape: tuple[int, ...]) -> np.ndarray:
 def _assert_bit_exact(ours: np.ndarray, ref: np.ndarray, name: str) -> None:
     ref = ref.astype(np.float32)
     assert ours.shape == ref.shape, f"{name}: shape {ours.shape} != {ref.shape}"
-    # Bit patterns, not tolerances: NaN must land in the same places and every
-    # finite value must be the same float32.
     ours_bits = ours.view(np.uint32)
     ref_bits = ref.view(np.uint32)
     finite = np.isfinite(ref)
@@ -107,14 +83,12 @@ def test_round_tripped_weights_match_gguf_reference(name: str, cols: int) -> Non
 
     ref = gguf.quants.dequantize(raw, gguf.GGMLQuantizationType[name])
     _assert_bit_exact(_ours(raw, name, (ROWS, cols)), ref, name)
-    # …and the decode is a faithful approximation, not merely self-consistent.
     assert np.abs(ref - values).max() < 0.02
 
 
 @pytest.mark.parametrize("name,cols", QTYPES)
 def test_multi_dim_logical_shape_is_restored(name: str, cols: int) -> None:
-    """Conv weights are 4-D; the block stream is flat. The logical shape is
-    metadata, so the decode must honour any shape with the right element count."""
+    """Conv weights are 4-D; the block stream is flat."""
     rng = np.random.default_rng(7)
     raw = rng.integers(0, 256, size=(4, _row_bytes(name, cols)), dtype=np.uint8)
     flat = _ours(raw, name, (4 * cols,))

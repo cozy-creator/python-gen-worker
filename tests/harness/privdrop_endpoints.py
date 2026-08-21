@@ -1,22 +1,3 @@
-"""pgw#858 probes: TENANT CODE going after the pod's credentials via /proc.
-
-Every handler here is an attack the threat model says untrusted endpoint code
-can run — it is imported into the compute child, so all of it is reachable. The
-guards assert each one comes back denied while the drop is in effect, and the
-SAME handlers are re-run with the drop removed, where they must succeed.
-
-Separate file from procsplit_endpoints.py so this lane owns its fixture outright
-(shared-worktree etiquette).
-
-pgw#1373: ported from the deleted `@endpoint` CLASS to module-level
-`@entrypoint` functions. Every probe was already stateless — it reads /proc or
-writes a path and returns — so the class was never carrying state, and the
-weightless form (pgw#1392: zero model slots is a valid declaration) is what
-these actually are. The probe BODIES are byte-identical; only the declaration
-moved, which is what keeps this a fixture port and not a rewrite of the thing
-under test.
-"""
-
 from __future__ import annotations
 
 import json
@@ -37,10 +18,6 @@ class ProbeOut(msgspec.Struct):
 
 
 def _read_environ(pid: int) -> dict:
-    """Try to steal another process's environment through /proc.
-
-    Reports the OUTCOME, never raises: a guard that cannot distinguish "denied"
-    from "the probe crashed" is not a guard."""
     path = f"/proc/{pid}/environ"
     try:
         raw = Path(path).read_bytes()
@@ -76,9 +53,7 @@ def report_identity(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def escalation_surface(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """A stock base image ships setuid binaries (su, mount, passwd...), so
-    "no setuid escalation path" is a property we IMPOSE, not one we inherit:
-    NoNewPrivs is what makes them harmless to a dropped child."""
+    """A stock base image ships setuid binaries (su, mount, passwd...), so "no setuid escalation path" is a property we IMPOSE, not one we inherit: NoNewPrivs is what makes them harmless to a dropped child."""
     status = Path("/proc/self/status").read_text(encoding="utf-8")
     flags = dict(
         (line.split(":", 1)[0].strip(), line.split(":", 1)[1].strip())
@@ -97,15 +72,12 @@ def escalation_surface(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def steal_pid1_environ(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """THE ATTACK th#1380 measured: RunPod's account-authority key lives in
-    PID 1's environment and cannot be suppressed at the create call."""
     return ProbeOut(response=json.dumps(_read_environ(1)))
 
 
 @entrypoint
 def steal_parent_environ(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """THE ATTACK that defeated the delta-1 strip: the parent still holds
-    WORKER_JWT in its own environment, one /proc read away at a shared uid."""
+    """THE ATTACK that defeated the delta-1 strip: the parent still holds WORKER_JWT in its own environment, one /proc read away at a shared uid."""
     return ProbeOut(response=json.dumps(_read_environ(os.getppid())))
 
 
@@ -117,16 +89,7 @@ def own_environ_keys(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def write_probe(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """The positive control for the grant list: the child must still be
-    able to write every path it was given. `data.text` is a path.
-
-    pgw#1349: it CREATES A SUBDIRECTORY too, because that is the operation
-    that actually died in production. Every child-side writer under a
-    granted root reaches it through
-    ``path.parent.mkdir(parents=True, exist_ok=True)`` — the local compiled graph
-    store's memo and sidecar writes are exactly that — and a probe that
-    only writes a file into a directory the PARENT made would have gone
-    green on the tree where the child could not make one."""
+    """The positive control for the grant list: the child must still be able to write every path it was given."""
     root = Path(data.text)
     nested = root / "pgw858-probe-dir" / "nested"
     target = root / "pgw858-write-probe"
@@ -145,11 +108,6 @@ def write_probe(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def config_snapshot_probe(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """th#1087's config snapshot is the one child-side writer that RAISES
-    on failure, and it lives in the root-owned image tree (/app/.tensorhub).
-    Mirrors `_write_snapshot_locked` exactly — mkstemp in the SAME dir plus
-    os.replace — and takes its path from the module, so the two cannot
-    drift apart silently."""
     import tempfile
 
     from gen_worker import runtime_config
@@ -170,8 +128,7 @@ def config_snapshot_probe(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def home_probe(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """`~` and getpass.getuser() must resolve for an account-less uid —
-    HF cache, ~/.triton and inductor's default cache dir all depend on it."""
+    """`~` and getpass.getuser() must resolve for an account-less uid — HF cache, ~/.triton and inductor's default cache dir all depend on it."""
     import getpass
 
     return ProbeOut(response=json.dumps({
@@ -183,8 +140,6 @@ def home_probe(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def read_root_home(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """Anything the control parent leaves in root's home must be out of
-    reach — th#1380 checked this on the real pod alongside /proc."""
     try:
         return ProbeOut(response="read:" + ",".join(sorted(os.listdir("/root"))))
     except OSError as exc:

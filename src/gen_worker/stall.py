@@ -1,28 +1,4 @@
-"""Progress-based give-up for retry and poll loops.
-
-Standing rule: nothing that can END REAL WORK may key on a wall clock. A fixed
-budget cannot tell a healthy three-hour transfer from a wedge, so it is either
-useless or it kills work that was about to succeed. The honest question is
-always "has anything advanced lately?".
-
-Two tiny values answer it, and every long loop in the SDK is built from
-them:
-
-:class:`SilenceWindow`
-    Time since the last ADVANCE, where the caller decides what an advance
-    is — a peer that answered, a state token that changed, a floor that was
-    cleared. ``stalled()`` is the give-up test. There is deliberately no
-    total-runtime bound: a loop that keeps advancing runs as long as the
-    work does.
-
-:class:`ProgressFloor`
-    A monotonic total that must GROW BY A FLOOR to count as an advance (a
-    trickle is a stall). Without it, a byte a minute keeps an any-progress
-    watchdog alive forever.
-
-Both take their clock by injection so tests drive them deterministically
-rather than by sleeping.
-"""
+"""Progress-based give-up for retry and poll loops."""
 
 from __future__ import annotations
 
@@ -35,14 +11,7 @@ _UNSET: Any = object()
 
 
 class SilenceWindow:
-    """How long since anything advanced — the only legitimate give-up test.
-
-    ``window_s`` is a SILENCE window, never a work budget: it bounds how
-    long the loop tolerates hearing nothing, not how long the work may take.
-    Derive it from the loop's own cadence (a per-call network timeout, a
-    protocol's reporting interval) times headroom, so it is a statement
-    about the channel rather than a guess about the job.
-    """
+    """How long since anything advanced — the only legitimate give-up test."""
 
     __slots__ = ("window_s", "_now", "_last", "_marker")
 
@@ -61,9 +30,7 @@ class SilenceWindow:
         self._last = self._now()
 
     def touch_if_changed(self, marker: Any) -> bool:
-        """Advance only when a peer-reported ``marker`` differs from the last
-        one observed. Returns whether this counted as an advance (the first
-        observation always does)."""
+        """Advance only when a peer-reported ``marker`` differs from the last one observed."""
         if self._marker is not _UNSET and marker == self._marker:
             return False
         self._marker = marker
@@ -79,12 +46,7 @@ class SilenceWindow:
 
 
 class ProgressFloor:
-    """A monotonic total that must move by ``floor`` to count as progress.
-
-    ``cleared(total)`` rebases and returns True only once ``total`` has grown
-    by at least ``floor`` since the last clearance — so a transfer that
-    trickles can never masquerade as a healthy one.
-    """
+    """A monotonic total that must move by ``floor`` to count as progress."""
 
     __slots__ = ("floor", "_base")
 

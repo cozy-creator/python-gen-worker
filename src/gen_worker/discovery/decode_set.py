@@ -61,14 +61,10 @@ from gen_worker.models.tensor_layout_contract import (
     unregistered_decode_path_of,
 )
 
-# Names the MECHANISM, so an image that predates it emits no block at all and
-# is UNPROVEN to a reader — distinct from one that derived an empty set.
 DERIVATION = "gen_worker.discovery.decode_set@1"
 
 DEFAULT_DECODER_PACKAGES: tuple[str, ...] = ("gen_worker.models",)
 
-#: The typed refusal wire codes. One spelling each, here, so the worker and the
-#: hub cannot drift into two names for one refusal.
 REFUSAL_RULE_UNDECLARED = "decode_set_rule_undeclared"
 REFUSAL_KEY_TOPOLOGY_UNCLASSIFIED = "decode_set_key_topology_unclassified"
 REFUSAL_DECODE_SET_DRIFT = "decode_set_drift"
@@ -123,12 +119,6 @@ def _census(
     tuple[UnregisteredDecodePath, ...],
     tuple[ExcludedDecoderModule, ...],
 ]:
-    """Import every decoder module and harvest the markers that survived.
-
-    Import is the whole test: a module that raises contributes NO declaration
-    and one excluded-with-reason record. There is no third state where a
-    decoder is claimed but absent.
-    """
     declared: dict[tuple[str, str], QuantRuleDecoder] = {}
     unregistered: dict[str, UnregisteredDecodePath] = {}
     excluded: list[ExcludedDecoderModule] = []
@@ -159,12 +149,6 @@ def _census(
 
 
 def _digest(ds: DecodeSet) -> str:
-    """sha256 over the canonical encoding of everything but the digest.
-
-    Sorted throughout, so two builds of one image agree byte-for-byte and a
-    changed declaration moves the digest. This is what makes "derived at image
-    build" checkable rather than asserted.
-    """
     payload = msgspec.json.encode(msgspec.structs.replace(ds, digest=""))
     return hashlib.sha256(payload).hexdigest()
 
@@ -262,9 +246,6 @@ def manifest_block(ds: DecodeSet) -> Dict[str, Any]:
     }
 
 
-# ── The refusal ──────────────────────────────────────────────────────────────
-
-
 def _parts(handle: str) -> tuple[str, str, frozenset[str]]:
     namespace, _, rest = handle.partition(".")
     name, _, _major = rest.partition("@")
@@ -350,12 +331,7 @@ _RUNTIME_SET: Optional[DecodeSet] = None
 
 
 def runtime_decode_set() -> DecodeSet:
-    """This process's decode-set, derived once.
-
-    The image's build-time block in endpoint.lock is the artifact the HUB
-    reads; this is the same derivation run against the same code, and
-    :func:`assert_matches_baked` is what proves they are the same answer.
-    """
+    """This process's decode-set, derived once."""
     global _RUNTIME_SET
     if _RUNTIME_SET is None:
         _RUNTIME_SET = derive_decode_set()
@@ -363,13 +339,7 @@ def runtime_decode_set() -> DecodeSet:
 
 
 class DecodeSetDriftError(Exception):
-    """The set this process derives is not the one stamped at image build.
-
-    Fails the boot closed. The hub selected variants against the LOCK's set,
-    so a process that would derive a different one accepts work it may not be
-    able to decode — a stale `endpoint.lock` layer, or a decoder whose
-    dependency is present at build and absent in the shipped image.
-    """
+    """The set this process derives is not the one stamped at image build."""
 
     code = REFUSAL_DECODE_SET_DRIFT
 

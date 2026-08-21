@@ -1,31 +1,3 @@
-"""pgw#1300 / th#2055: the placement stamp is DELETED, and `precision_class`
-is the one key that survives it.
-
-Replaces `tests/convert/test_placement_stamp_pgw1286.py`, which is deleted
-rather than skipped. That fence transcribed tensorhub's `defaultPlacement`
-mirror and asserted, at the wire, that pgw stamped the same SM allow-lists,
-SM floors and engine lists. **The thing it fenced no longer exists**: th#2055
-(`65f0882f2`) deleted `PlacementFromMetadata`, `Placement`, `defaultPlacement`,
-`admitted()` and `AdmitLiteral`'s sm/engine arms, so pod purchase depends only
-on the endpoint owner's (GPU, lane) ladder and the compute floor is the
-registered contract's own `Requires.MinComputeCapability`. Restoring the old
-fence would re-derive a stamp the hub cannot read and would re-create the
-defect that opened pgw#1300: `sm_allowed=(120, 121) + engines=("nunchaku",)`
-told the hub that svdq-fp4 needs a wheel the fleet does not install, on
-silicon a B200 is not — vetoing a flavor the native engine serves on sm_100.
-A CORRECTED allow-list was rejected too: it still vetoes an owner's own rung.
-
-What IS fenced here is the surviving half. `precision.StoredPrecisionOf` reads
-`placement.precision_class` as its strongest evidence for a stored class where
-no tensor-layout contract is proven, so pgw must keep writing exactly that key
-and no other.
-
-Revert-turns-red: re-add any admission key to `_precision_class_block`
-(`convert/publish.py`), or drop the block, and a row fails at the wire.
-
-    pytest tests/convert/test_precision_class_stamp_pgw1300.py -q
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -38,15 +10,8 @@ from gen_worker.convert.produced import ProducedFlavor
 from gen_worker.convert.publish import publish_flavors
 from gen_worker.models import ladder
 
-#: Cut by `tests/convert/conftest.py`'s fake repo.
 RELEASE = "2026.08"
 
-#: The block the hub must receive, per DECLARED class (A18 / pgw#1319: the
-#: flavor token is deleted and the class is stated by the producer). Written as
-#: literals: a fence that derived them from the module under test would agree
-#: with itself. `None` = no block at all, which is exact — the hub's fallback
-#: for an unstamped row is `ClassBase`, so `base` and "declared nothing" are
-#: the same wire shape on purpose.
 EXPECTED: dict[str, dict[str, Any] | None] = {
     "": None,
     "base": None,
@@ -55,14 +20,9 @@ EXPECTED: dict[str, dict[str, Any] | None] = {
     "svdq-fp4": {"precision_class": "svdq-fp4"},
     "nvfp4": {"precision_class": "nvfp4"},
     "nvfp4-w4a4": {"precision_class": "nvfp4-w4a4"},
-    # pgw#1498 (`4d2bce0c`) added the SEVENTH class. It stamps like any other:
-    # the hub reads `placement.precision_class` verbatim, so a gguf row reaches
-    # the catalog carrying its class even though `precision.StoredPrecisionOf`
-    # does not RANK it yet (the hub half is OWED and named in `ladder.py`).
     "gguf": {"precision_class": "gguf"},
 }
 
-#: The keys th#2055 stopped reading. Any of them at the wire is the regression.
 DELETED_ADMISSION_KEYS = ("sm_allowed", "sm_min", "engines")
 
 
@@ -102,9 +62,7 @@ def _publish(fake_hub: Any, tmp_path: Path, cls: str, **attrs: str) -> dict:
 def test_the_declared_block_is_precision_class_and_nothing_else(
     fake_hub: Any, tmp_path: Path, cls: str
 ) -> None:
-    """Read off the declare request the fake hub actually receives: every
-    laddered class carries its `precision_class`, and no class carries an
-    admission key the hub deleted."""
+    """Read off the declare request the fake hub actually receives: every laddered class carries its `precision_class`, and no class carries an admission key the hub deleted."""
     meta = _publish(fake_hub, tmp_path, cls)
 
     expected = EXPECTED[cls]
@@ -123,9 +81,6 @@ def test_the_declared_block_is_precision_class_and_nothing_else(
 def test_no_admission_key_survives_at_the_wire(
     fake_hub: Any, tmp_path: Path, cls: str
 ) -> None:
-    """The pgw#1300 defect, stated as the thing that must not come back: the
-    svdq-fp4 row used to declare `sm_allowed=[120, 121]` + `engines=
-    ["nunchaku"]`, which refused a B200 (sm_100) the native engine serves."""
     block = _publish(fake_hub, tmp_path, cls)["placement"]
     present = [k for k in DELETED_ADMISSION_KEYS if k in block]
     assert present == [], f"{cls!r} re-stamped deleted admission keys: {present}"
@@ -134,9 +89,6 @@ def test_no_admission_key_survives_at_the_wire(
 def test_the_dead_placement_override_attrs_are_dropped_not_published(
     fake_hub: Any, tmp_path: Path
 ) -> None:
-    """The DELETED `placement_*` override attrs are dropped rather than
-    published as prose — `training-endpoints`' modelopt quantizer still writes
-    `placement_sm_allowed`, and an attr pgw no longer reads is not metadata."""
     meta = _publish(
         fake_hub, tmp_path, "nvfp4-w4a4",
         placement_sm_allowed="89", placement_engines="nunchaku,triton",
@@ -147,11 +99,7 @@ def test_the_dead_placement_override_attrs_are_dropped_not_published(
 
 
 def test_every_exported_class_constant_is_in_the_vocabulary_and_back() -> None:
-    """The self-consistency half, which no transcribed literal can state: the
-    `CLASS_*` names `__all__` exports and the members of `PRECISION_CLASSES`
-    are the SAME set. pgw#1498 added `CLASS_GGUF` to both and to the exports;
-    a future class added to only one of the three would publish a value the
-    publish gate refuses, or export a name nothing checks against."""
+    """The self-consistency half, which no transcribed literal can state: the `CLASS_*` names `__all__` exports and the members of `PRECISION_CLASSES` are the SAME set."""
     exported_classes = {
         getattr(ladder, name) for name in ladder.__all__
         if name.startswith("CLASS_")

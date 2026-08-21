@@ -1,22 +1,3 @@
-"""pgw#1421 — the engine-hosted (external-binary) runtime, ISOLATED.
-
-Paul's 2026-08-19 working loop: isolate the unit, RUN it, introspect deeply,
-then widen. The unit here is process supervision, and the thing it supervises
-is deliberately NOT llama.cpp or vLLM: it is a trivial stand-in HTTP server
-whose behaviour each arm dictates — serves, dies on exec, dies after N
-seconds, goes silent, or talks slowly. That isolation is legitimate because
-the boundary is strict and side-effect-free: ``EngineSpec`` hands
-:func:`boot_engine` an argv and a health route and learns nothing else about
-the engine, so an arm that proves the supervisor against a stand-in proves it
-against llama-server.
-
-$0, no GPU, no weights, no network beyond loopback. What it does NOT prove —
-and this is the widening a real pod owes — is that ``vllm serve`` and
-``llama-server`` accept the argv these specs build. Those are their
-CONTRACTS, not this code's behaviour, and the qwen3.6 activation lane owns
-that leg.
-"""
-
 from __future__ import annotations
 
 import subprocess
@@ -40,10 +21,6 @@ from gen_worker.serving.engine_runtime import (
     boot_engine,
     free_port,
 )
-
-# --------------------------------------------------------------------------
-# The stand-in engine: an HTTP server whose boot behaviour the arm dictates.
-# --------------------------------------------------------------------------
 
 _STAND_IN = textwrap.dedent(
     '''
@@ -103,8 +80,7 @@ def stand_in(tmp_path_factory: Any) -> Path:
 
 
 class StandIn(EngineSpec, frozen=True, kw_only=True):
-    """A one-rung spec around the stand-in. ``script`` is the only thing this
-    spec knows that a real one gets from the platform."""
+    """A one-rung spec around the stand-in."""
 
     runtime = "stand-in"
     health_path = "/health"
@@ -142,12 +118,7 @@ class StandInLadder(StandIn, frozen=True, kw_only=True):
 
 @pytest.fixture
 def events(monkeypatch: pytest.MonkeyPatch) -> Iterator[List[Any]]:
-    """Every typed event this test's code emits, in order.
-
-    Introspection is the point: a boot that "worked" but reported nothing is
-    a boot no operator can read, so the arms assert the PHASES as hard as
-    they assert the process.
-    """
+    """Every typed event this test's code emits, in order."""
     captured: List[Any] = []
     monkeypatch.setattr(activity, "_sink", captured.append)
     yield captured
@@ -167,11 +138,6 @@ def _dead(proc: subprocess.Popen, *, within_s: float = 10.0) -> bool:
     return False
 
 
-# --------------------------------------------------------------------------
-# 1. start -> health -> dispatch -> terminate, with the typed events
-# --------------------------------------------------------------------------
-
-
 def test_boot_health_dispatch_terminate(
     stand_in: Path, tmp_path: Path, events: List[Any]
 ) -> None:
@@ -181,19 +147,16 @@ def test_boot_health_dispatch_terminate(
     try:
         assert isinstance(handle, EngineHandle)
         assert handle.alive
-        # HEALTH: boot_engine returned only because /health answered 2xx.
         with urllib.request.urlopen(handle.base_url + "/health", timeout=5) as r:
             assert r.status == 200
-        # DISPATCH: an entrypoint's POST target is reachable on base_url.
         with urllib.request.urlopen(handle.base_url + "/v1/chat", timeout=5) as r:
             assert r.read() == b"READY /v1/chat"
     finally:
         handle.stop()
 
-    # TERMINATE, and the process is genuinely reaped rather than orphaned.
     assert not handle.alive
     assert _dead(handle.process)
-    handle.stop()  # idempotent: the host's structural stop cannot double-kill
+    handle.stop()
 
     phases = _phases(events, activity.KIND_ENGINE_BOOT)
     assert phases == [
@@ -203,24 +166,13 @@ def test_boot_health_dispatch_terminate(
         e for e in events
         if e.kind == activity.KIND_ENGINE_BOOT and e.phase == "engine_stopped"
     ]
-    # HOW it stopped, not just that it did: `manner=kill` is the row an
-    # operator needs, because an engine that had to be SIGKILLed is the shape
-    # that strands VRAM anywhere less careful than here.
     assert "manner=term" in stopped[0].detail
     healthy = [
         e for e in events
         if e.kind == activity.KIND_ENGINE_BOOT and e.phase == "engine_healthy"
     ]
-    # The boot wall is a NUMBER in the duration column, not a sentence: a
-    # reader can percentile it. The stand-in warms for 0.5s, so a zero here
-    # would mean the span was never measured.
     assert healthy[0].duration_ms >= 400, healthy[0].duration_ms
     assert handle.base_url in healthy[0].detail
-
-
-# --------------------------------------------------------------------------
-# 2. the boot ABORTS on engine death — and leaves nothing running
-# --------------------------------------------------------------------------
 
 
 def test_boot_aborts_when_the_engine_exits(
@@ -230,8 +182,6 @@ def test_boot_aborts_when_the_engine_exits(
         boot_engine(StandIn(script=str(stand_in), die_code=3), tmp_path)
     assert "exited during boot (code 3)" in str(excinfo.value)
     assert "engine_boot_failed" in _phases(events, activity.KIND_ENGINE_BOOT)
-    # The failure is not a HEALTHY row with a sad detail — nothing claimed
-    # readiness.
     assert "engine_healthy" not in _phases(events, activity.KIND_ENGINE_BOOT)
 
 
@@ -248,12 +198,6 @@ def test_boot_refuses_an_engine_that_cannot_exec(tmp_path: Path) -> None:
     assert "could not exec" in str(excinfo.value)
 
 
-# --------------------------------------------------------------------------
-# 3. THE DOCTRINE ARM: a boot is bounded by SILENCE, not by a clock.
-#    Red and green differ ONLY in whether the child keeps talking.
-# --------------------------------------------------------------------------
-
-
 def test_a_silent_engine_is_wedged(stand_in: Path, tmp_path: Path) -> None:
     started = time.monotonic()
     with pytest.raises(EngineBootError) as excinfo:
@@ -263,17 +207,13 @@ def test_a_silent_engine_is_wedged(stand_in: Path, tmp_path: Path) -> None:
             tmp_path,
         )
     assert "produced no output" in str(excinfo.value)
-    # It gave up on SILENCE, long before the 60s the engine claimed to need.
     assert time.monotonic() - started < 20.0
 
 
 def test_a_talking_engine_outlives_the_window(
     stand_in: Path, tmp_path: Path
 ) -> None:
-    """The control for the arm above, and the whole point of the design: this
-    boot takes 3s with a 1.5s window and SUCCEEDS, because every line the
-    engine prints is proof it is still loading. A wall-clock budget would
-    have killed it; that is the mistake this module refuses to make."""
+    """The control for the arm above, and the whole point of the design: this boot takes 3s with a 1.5s window and SUCCEEDS, because every line the engine prints is proof it is still loading."""
     handle = boot_engine(
         StandIn(script=str(stand_in), warmup_s=3.0, chatter_s=0.25,
                 stall_window_s=1.5),
@@ -283,11 +223,6 @@ def test_a_talking_engine_outlives_the_window(
         assert handle.alive
     finally:
         handle.stop()
-
-
-# --------------------------------------------------------------------------
-# 4. degrade, never OOM — and the degraded rung CONFESSES
-# --------------------------------------------------------------------------
 
 
 def test_the_ladder_degrades_and_says_so(
@@ -303,9 +238,6 @@ def test_the_ladder_degrades_and_says_so(
     boot = _phases(events, activity.KIND_ENGINE_BOOT)
     assert boot.count("engine_boot_failed") == 1
     assert boot.count("engine_healthy") == 1
-    # Two channels on purpose (the z-image finding: report_* does not subsume
-    # emit_event). The degrade is a COUNTABLE row on the quality channel, not
-    # only a phase inside the boot's own story.
     degrades = [e for e in events if e.kind == activity.KIND_SERVE_DEGRADE]
     assert len(degrades) == 1
     assert degrades[0].phase == "engine_degraded"
@@ -329,6 +261,4 @@ def test_every_rung_failing_raises_the_last_failure(
 
     with pytest.raises(EngineBootError) as excinfo:
         boot_engine(AllBad(script=str(stand_in)), tmp_path)
-    # The LAST rung's failure, not the first: a caller that swallowed this
-    # would serve requests against a base URL nothing is listening on.
     assert "code 7" in str(excinfo.value)

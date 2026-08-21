@@ -1,41 +1,3 @@
-"""A compute-child PEER (not a mock of our code) for pgw#763 stage-2 races.
-
-The real child in ``procsplit_child_main.py`` is the primary subject of this
-suite. This process exists only for timings the real child cannot produce
-deterministically — chiefly "write a JobResult and die in the same breath",
-where whether the parent has read the frame yet is a kernel-buffer race. It
-speaks the same frame protocol over the same socket, exactly as the hub-double
-speaks real gRPC.
-
-Behaviour is chosen by PGW763_FAKE_MODE:
-  result_then_die : accept + OK result for each RunJob, then SIGKILL itself
-                    immediately (frame and death adjacent).
-  result_then_exit: accept + OK result, then exit 0 (deliberate exit with a
-                    result the parent still owes the hub).
-  result_then_recycle
-                  : accept + OK result, then exit EXIT_JOB_RECYCLE (pgw#1324's
-                    run-once lifecycle). The parent must RESPAWN — this is
-                    neither a crash nor a shutdown, and rc 0 or a plain
-                    non-zero would give the wrong one.
-  ignore_sigterm  : serve nothing, ignore SIGTERM forever (TimeoutStopSec).
-  spontaneous_result_then_exit
-                  : write one JobResult on connect and exit 0 immediately, so
-                    the parent owns a durable result it can never ship (the
-                    stream needs a Hello this child never answers).
-  forge_hello     : pgw#763 delta 1+2. Answers T_HELLO_REQ with a Hello that
-                    lies about everything a compute child must not be trusted
-                    to assert: another worker's id and release, a fabricated
-                    gpu_name/gpu_sm/VRAM, and a HostCanary of invented floats.
-                    Tenant code reaches the real child's Hello builder, so this
-                    is a faithful stand-in for what it could send — and each of
-                    these values is a FLEET-WIDE verdict key (th#1310), not a
-                    per-pod cosmetic.
-  forge_metrics   : pgw#763 delta 3. Serves each RunJob instantly and reports
-                    JobMetrics claiming hours of runtime, a fabricated
-                    concurrency and a fabricated RSS — the code being billed
-                    writing its own bill (th#1309).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -58,7 +20,6 @@ FORGED_RELEASE_ID = "victim-release-0000"
 FORGED_GPU_NAME = "NVIDIA H200-141GB"
 FORGED_VRAM_BYTES = 141 * (1 << 30)
 FORGED_MEMCPY_GBPS = 999.0
-# Three hours of "runtime" for a job the parent watched take milliseconds.
 FORGED_RUNTIME_MS = 3 * 60 * 60 * 1000
 FORGED_CONCURRENCY = 97
 FORGED_RSS_BYTES = 999 * (1 << 30)
@@ -144,7 +105,6 @@ async def main() -> int:
             inline=b"fake-ok",
         )
         if MODE == "forge_metrics":
-            # The code being billed, writing its own bill (th#1309).
             result.metrics.CopyFrom(pb.JobMetrics(
                 runtime_ms=FORGED_RUNTIME_MS,
                 queue_ms=FORGED_RUNTIME_MS,

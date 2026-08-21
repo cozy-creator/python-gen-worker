@@ -1,30 +1,4 @@
-"""The request envelope: SIGNATURE-DERIVED, decoded per entrypoint (pgw#1372).
-
-Paul's envelope ruling: the checkpoint pick leaves the payload entirely —
-the platform wire shape is derived from the entrypoint's own signature,
-never declared twice::
-
-    {"model": "org/ckpt@3",                    # ONE model slot
-     "adapters": {"turbo": {...row...},        # per adapter-slot picks,
-                  "loras": [{...}, {...}]},    #   keyed by PARAMETER NAME
-     "input": {...the payload struct...}}
-
-    {"models": {"base": "...", "refiner": "..."},   # >1 model slots:
-     "input": {...}}                                #   keyed by slot name
-
-``input`` is the entrypoint's payload schema (typed 400s stay msgspec's).
-Adapter values are the HUB'S resolution output riding the request — fully
-pinned refs, local paths, decoded defaults, platform-clamped scale; the
-worker never resolves picks itself. A ``DistillationAdapter`` slot only
-accepts a distillation-marked row (the typed takeover guard, enforced here
-again even though the hub refuses first — a misdeploy must not seize the
-serving config).
-
-Everything unknown refuses loudly: an unknown top-level key, a pick for an
-undeclared slot, ``"model"`` against a multi-model signature (or
-``"models"`` against a single-model one), a list where the slot is single.
-Silence is never an outcome — a dropped pick would serve the wrong bytes.
-"""
+"""The request envelope: SIGNATURE-DERIVED, decoded per entrypoint. Shape: {"model": "org/ckpt@3"} for one model slot or {"models": {slot: ref}} for several, {"adapters": {slot: row | [rows]}} keyed by PARAMETER NAME, and {"input": {...payload struct...}}. Adapter values are the HUB's resolution output riding the request — fully pinned refs, local paths, decoded defaults, platform-clamped scale; the worker never resolves picks itself, and a DistillationAdapter slot re-enforces the distillation-marked guard even though the hub refuses first. Everything unknown refuses loudly (unknown top-level key, pick for an undeclared slot, "model" against a multi-model signature, a list where the slot is single): a dropped pick would serve the wrong bytes."""
 
 from __future__ import annotations
 
@@ -43,11 +17,7 @@ class EnvelopeError(ValueError):
 
 
 class AdapterRow(msgspec.Struct, forbid_unknown_fields=True):
-    """One hub-resolved adapter as it rides the wire.
-
-    ``distillation`` is the hub's kind marker (release metadata records
-    which slots demand it); ``defaults`` is the decoded overlay row the
-    model type's schema gives meaning to."""
+    """One hub-resolved adapter as it rides the wire."""
 
     ref: str
     path: str
@@ -57,11 +27,7 @@ class AdapterRow(msgspec.Struct, forbid_unknown_fields=True):
     distillation: bool = False
 
     def materialize(self, defaults_schema: Optional[type]) -> Adapter:
-        """Build the typed slot value. ``defaults_schema`` is the model
-        type's adapter-defaults struct (``SDXL.Lora.Defaults`` — pgw#1377's
-        adapter-of-base scoping); the wire row's overlay decodes into it,
-        an absent overlay takes the schema's zero-arg servable values, and
-        an ill-typed one refuses naming the adapter."""
+        """Build the typed slot value."""
         cls = DistillationAdapter if self.distillation else Adapter
         defaults: Any = self.defaults
         if defaults_schema is not None:
@@ -86,7 +52,6 @@ class AdapterRow(msgspec.Struct, forbid_unknown_fields=True):
 
 
 class _Envelope(msgspec.Struct, forbid_unknown_fields=True):
-    """The raw wire shape; slot-level validity is per-entrypoint, below."""
 
     input: msgspec.Raw
     model: Optional[str] = None
@@ -99,11 +64,7 @@ class DecodedRequest:
     """One envelope, decoded against one entrypoint's signature."""
 
     payload: Any
-    #: Checkpoint pick per MODEL slot name (every declared slot present —
-    #: deploy defaults are the caller's to fill before decode refuses).
     model_picks: Tuple[Tuple[str, str], ...]
-    #: Materialized value per ADAPTER slot name: Adapter | None for single
-    #: slots, list[Adapter] for plural ones.
     adapter_values: Tuple[Tuple[str, Any], ...]
 
 
@@ -135,8 +96,6 @@ def _decode_adapter_value(
     if slot.annotation is DistillationAdapter and not isinstance(
         value, DistillationAdapter
     ):
-        # The typed takeover guard, worker-side: a style LoRA cannot seize a
-        # distillation slot even when a misconfigured hub let it through.
         raise EnvelopeError(
             f"adapter slot {slot.name!r} takes a distillation adapter; "
             f"{row.ref!r} is not distillation-marked (a misdeploy the hub "
@@ -152,13 +111,7 @@ def decode_envelope(
     default_picks: Optional[Mapping[str, str]] = None,
     adapter_defaults_schema: Optional[type] = None,
 ) -> DecodedRequest:
-    """Decode one wire envelope against one entrypoint's signature.
-
-    ``default_picks`` are the DEPLOYMENT's per-slot checkpoint defaults
-    (slot name -> ref); an envelope that names no pick for a slot falls back
-    there, and a slot with neither is a typed refusal — the worker never
-    guesses which bytes to serve.
-    """
+    """Decode one wire envelope against one entrypoint's signature."""
 
     if isinstance(envelope, (bytes, bytearray)):
         raw_bytes = bytes(envelope)
@@ -172,14 +125,10 @@ def decode_envelope(
     model_slots = dict(spec.model_params)
     defaults = dict(default_picks or {})
 
-    # -- model picks: "model" xor "models", derived from the signature ------
     if parsed.model is not None and parsed.models is not None:
         raise EnvelopeError('an envelope carries "model" or "models", never both')
     picks: Dict[str, str] = {}
     if not model_slots:
-        # pgw#1392: a WEIGHTLESS entrypoint. Its envelope has NO model field
-        # — not a null one, not an empty one — so a pick is a typed refusal
-        # naming the real reason instead of advising the other spelling.
         if parsed.model is not None or parsed.models is not None:
             raise EnvelopeError(
                 f"{spec.name!r} declares no model slot; its envelope carries "
@@ -220,7 +169,6 @@ def decode_envelope(
                 )
             picks[slot_name] = fallback
 
-    # -- adapter picks: keyed by slot name, declared slots only -------------
     adapter_slots = {slot.name: slot for slot in spec.slots if slot.kind != "model"}
     sent = dict(parsed.adapters or {})
     unknown = sorted(set(sent) - set(adapter_slots))
@@ -244,7 +192,6 @@ def decode_envelope(
         else:
             values[name] = None
 
-    # -- the payload, last: its schema is the entrypoint's own --------------
     payload = msgspec.json.decode(parsed.input, type=spec.payload_type)
 
     return DecodedRequest(

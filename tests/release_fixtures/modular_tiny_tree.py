@@ -1,16 +1,3 @@
-"""The tiny tree re-indexed as a MODULAR checkpoint repo (pgw#1450).
-
-A modular repo declares its components in ``modular_model_index.json`` as
-three-element entries -- ``[library, class_name, {repo, subfolder, ...}]`` --
-and ``ModularPipeline.from_pretrained`` turns those into SPECS, not objects.
-Which is the whole subject: the classic tree's loader hands back a populated
-pipeline and this one hands back a registry of names.
-
-The blocks and pipeline classes are resolved by NAME off the ``diffusers``
-package, exactly as a real endpoint's are (they ship inside the repo the index
-names), so the fixture registers them there.
-"""
-
 from __future__ import annotations
 
 import json
@@ -27,7 +14,6 @@ from diffusers.modular_pipelines.modular_pipeline_utils import ComponentSpec
 
 import tiny_tree
 
-#: The tiny tree's components in the modular index's own spelling.
 COMPONENTS = {
     "unet": ("diffusers", "UNet2DConditionModel"),
     "vae": ("diffusers", "AutoencoderKL"),
@@ -76,12 +62,7 @@ class TinyModularBlocks(SequentialPipelineBlocks):  # type: ignore[misc]
 
 
 class TinyStreamingPipeline(ModularPipeline):  # type: ignore[misc]
-    """The adapter every modular endpoint writes (minimax-h3's, verbatim).
-
-    ``ModularPipeline.__init__`` routes ``**kwargs`` to ``load_config`` and
-    registers every component as ``None``, so an author who wants a pipeline
-    that KEEPS the components ``ctx.load`` hands it attaches them afterwards.
-    """
+    """The adapter every modular endpoint writes (minimax-h3's, verbatim)."""
 
     default_blocks_name = "TinyModularBlocks"  # type: ignore[assignment]
 

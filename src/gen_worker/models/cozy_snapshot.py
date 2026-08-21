@@ -1,21 +1,4 @@
-"""Tensorhub snapshot policy composed over tensorfs.
-
-Tensorhub supplies a resolved manifest and opaque GET grants. tensorfs owns
-what is true about bytes at rest -- the chunk manifest, the local object store,
-and the PROJECTION of a manifest into a tree. **The transfer is OURS**
-(pgw#1308,
-:mod:`gen_worker.transfer.grants`): the grants are tensorhub's wire format and
-the retry ladder, fan-out width and progress emission are this worker's policy
-about this worker's uplink. This module retains the rest of that policy:
-component selection, pickle refusal, disk headroom, endpoint-volume fill order,
-and boot observability.
-
-**A snapshot this module publishes is a PROJECTED tree** (pgw#1308 step ⑥):
-symlinks into ``objects/`` for everything that is not a tensor container,
-~128 B TFSSTUB1 pointer stubs for everything that is, and no tensor byte at
-any path in it. Whole-tree materialization -- a second complete copy -- has no
-caller in this repo.
-"""
+"""Tensorhub snapshot policy composed over tensorfs."""
 
 from __future__ import annotations
 
@@ -100,20 +83,14 @@ class _SnapshotEntry:
 
 
 def _norm_rel_path(path: str) -> str:
-    """Tensorhub path adapter; tensorfs performs the authoritative check."""
 
     value = str(path or "").strip()
-    # Constructing an entry applies tensorfs's complete portable-path policy.
     return FileEntry(value, 0, CASRef("0" * 64)).path
 
 
 def _component_of(path: str) -> str:
     head, separator, _ = _norm_rel_path(path).partition("/")
     return head if separator else "(root)"
-
-
-# PICKLE_WEIGHT_EXTENSIONS and first_pickle_weight_path moved to .errors
-# (pgw#1273) so the HF lane refuses on the same list this one does.
 
 
 def _manifest_entry(file: WorkerResolvedRepoFile) -> FileEntry:
@@ -124,20 +101,7 @@ def _manifest_entry(file: WorkerResolvedRepoFile) -> FileEntry:
     )
     path = _norm_rel_path(file.path)
     size = int(file.size_bytes)
-    # pgw#1575: THE 64 MiB CHUNKLESS CEILING IS THIS REPO'S, SO IT IS ENFORCED
-    # HERE. tensorfs's own `manifest.py` dropped it (a chunkless entry is one
-    # blob of ANY size upstream), and the vendored snapshot carries upstream's
-    # bytes. But in THIS fleet an object above 64 MiB cannot exist: tensorhub's
-    # publish-v2 lane promotes with a single PUT and refuses anything larger,
-    # which is why `cas/planner.py::plan_chunks` still cuts an oversized blob on
-    # the fixed grid (pgw#1366). So a hub snapshot describing a large file as
-    # ONE object names an object nothing can ever hold, and accepting it is not
-    # harmless: `store.ensure_pinned` would write a pin for it, and
-    # `announce_resident` would then advertise a tree whose bytes are
-    # unreachable — an eager-bridge `header too large` about an intact
-    # checkpoint. The old, stricter vendored parser refused this by accident;
-    # this refuses it on purpose, at the one place every hub-derived entry is
-    # built. It closes with pgw#1366, together with the planner deviation.
+    # The 64 MiB chunkless ceiling is THIS repo's, enforced here: upstream tensorfs accepts a chunkless entry of any size, but in this fleet an object above 64 MiB cannot exist — tensorhub's publish-v2 lane promotes with a single PUT and refuses anything larger. A hub snapshot describing a large file as ONE object names bytes nothing can hold; accepting it would pin and advertise a tree whose bytes are unreachable.
     if not chunks and size > MAX_CHUNK_SIZE:
         raise ValueError(
             f"resolved model file {path}: {size} bytes with no chunks. An "
@@ -194,9 +158,7 @@ def snapshot_dir_key(
     snapshot_digest: str,
     components: Sequence[str] = (),
 ) -> str:
-    """The snapshot directory name. th#1941: for a hub-composed manifest the
-    digest IS the whole key — the composition is already in it. ``components``
-    is the author-declared positive subset (HF/Hub ``components=``)."""
+    """The snapshot directory name."""
     included = sorted({str(value).strip() for value in components if str(value).strip()})
     key = snapshot_digest
     if included:
@@ -227,18 +189,6 @@ def _scan_fanout(
     account: Callable[[TransferGrant], None],
     grants: Sequence[TransferGrant],
 ) -> None:
-    """Run the residency/fill verdict over every grant, `DEFAULT_PARALLEL`-wide.
-
-    pgw#1556. Called from ONE `asyncio.to_thread` rather than one per object,
-    so the event loop is released for the whole scan (unchanged, and the
-    reason the off-thread hop exists) while the objects themselves overlap.
-
-    A failure is never swallowed here: `account` already converts every
-    per-object verdict, including the failures, into `missing` — the fetch
-    that follows is the recovery. What must not happen is a thread dying with
-    an exception nobody reads, so the pool is drained by RESULT and the first
-    exception is re-raised at the caller, on the caller's thread.
-    """
     width = max(1, min(DEFAULT_PARALLEL, len(grants)))
     if width == 1:
         for grant in grants:
@@ -291,16 +241,6 @@ def _file_matches(path: Path, entry: FileEntry) -> bool:
 
 
 def _entry_matches(path: Path, entry: FileEntry) -> bool:
-    """Whether the tree already holds this entry, projected or materialized.
-
-    A projected artifact is judged structurally against the manifest
-    (:func:`projection.projection_fault`); anything holding real bytes is
-    hashed. Both arms are live on purpose: a pod that upgrades across the
-    chokepoint flip meets its own pre-flip MATERIALIZED tree under the same
-    key, and converging on it is correct — it holds the bytes the manifest
-    names. This function never WRITES a materialized tree, and nothing else
-    here can either.
-    """
 
     if projection.is_projection_artifact(path):
         return (
@@ -317,9 +257,6 @@ def _tree_matches(path: Path, manifest: RepositoryManifest) -> bool:
         actual = {
             candidate.relative_to(path).as_posix()
             for candidate in path.rglob("*")
-            # A symlink into `objects/` IS this entry's file. A BROKEN one is
-            # not, and dropping it here is what makes the set comparison
-            # refuse a tree whose store was swept underneath it.
             if candidate.is_file() or candidate.is_symlink()
         }
     except OSError:
@@ -337,20 +274,6 @@ def _publish_snapshot(
     *,
     symlinks: bool,
 ) -> Path:
-    """Project one snapshot tree under its process-shared lock.
-
-    **This is pgw#1308 step ⑥ — the chokepoint.** It PROJECTS rather than asking
-    the store for a whole-tree materialization, which writes a complete second copy
-    of every byte the store already holds (pgw#1296(a) measured the 2.000x):
-    non-tensor files are relative symlinks into ``objects/``, tensor containers are
-    ~128 B TFSSTUB1 pointer stubs, and the tensors are read out of the CAS
-    through
-    :func:`gen_worker.models.tensor_source.open_tensor_source`.
-
-    ``symlinks`` is the caller's ONE probe of the target filesystem, passed
-    through rather than re-probed, so the disk check upstream of this sized
-    the tree this writes (:func:`projection.projection_write_bytes`).
-    """
 
     lock_path = target.parent / f".{target.name}.lock"
     with lock_path.open("a+b") as lock:
@@ -359,8 +282,6 @@ def _publish_snapshot(
             if target.exists():
                 if _tree_matches(target, manifest):
                     return target
-                # This exact target is protected by the flock. Never remove a
-                # tree based on validation performed before acquiring it.
                 shutil.rmtree(target)
             return project_snapshot(cas, manifest, target, symlinks=symlinks)
         finally:
@@ -431,8 +352,6 @@ class CozySnapshotDownloader:
                     _TRUSTED_SNAPSHOTS.add(trust_key)
                     return target
 
-            # Probed ONCE, here, and passed to both the disk check and the
-            # projector: the two must agree about what the tree will cost.
             symlinks = await asyncio.to_thread(
                 projection.symlinks_supported, snapshots
             )
@@ -450,11 +369,6 @@ class CozySnapshotDownloader:
                     manifest, symlinks=symlinks
                 ),
             )
-            # pgw#1351: emitted HERE and not inside `_ensure_objects`, because
-            # the snapshot id is the coordinate the measurement is keyed on and
-            # `_ensure_objects` is handed a file list, not a snapshot. A pull
-            # whose bytes cannot be attributed to a snapshot answers nothing
-            # about which models overlap.
             snapshot_pull.emit_pull(
                 stats,
                 snapshot=selected.snapshot_digest,
@@ -463,9 +377,6 @@ class CozySnapshotDownloader:
                 duration_ms=int(round((time.monotonic() - started) * 1000)),
             )
             cas = open_worker_cas(base_dir)
-            # Pinned BEFORE the tree exists: `projection.resolve_projection`
-            # recovers a tree's manifest through this ref, so a tree readable
-            # before its ref is a tree every stub-aware consumer must refuse.
             await asyncio.to_thread(_pin_manifest, cas, key, manifest)
             await asyncio.to_thread(
                 _publish_snapshot, cas, manifest, target, symlinks=symlinks
@@ -538,8 +449,6 @@ class CozySnapshotDownloader:
         done = 0
         total = sum(grant.size_bytes for grant in grants)
 
-        # Report per grant: a counter frozen at zero reads as a stalled
-        # transfer and the pod is killed mid-progress.
         def report_residency() -> None:
             if progress is not None:
                 progress(done, total)
@@ -554,29 +463,6 @@ class CozySnapshotDownloader:
             )
 
         def filled(grant: TransferGrant) -> bool:
-            """Volume -> pod CAS, hashing every byte ONCE (pgw#1556).
-
-            This used to call `fill.verify_object` first, which reads and
-            SHA-256s the whole source purely to check it, and then handed the
-            same path to `put_file`, which reads it again and hashes it again
-            while copying. Two full hash passes over every byte on the exact
-            path the flagship 134 GB warm-volume boot runs down.
-
-            **Digest verification is NOT relaxed — it is deduplicated.**
-            `put_file(expected=..., size=...)` already hashes streaming
-            alongside the copy and raises `DigestMismatch` on any mismatch, and
-            it additionally fstats the source before and after to refuse a file
-            that changed mid-read. The deleted pass proved nothing the surviving
-            pass does not prove, one read earlier. Measured on this box over 48
-            synthetic 64 MiB objects (paired alternation, min of 3):
-            203.6 -> 348.9 MiB/s sequential, 1.71x, and it compounds with the
-            fan-out below.
-
-            `object_path` is presence-free by design, so a source that is not on
-            the volume raises `FileNotFoundError` out of `put_file`'s own open —
-            the same verdict `verify_object` used to return, from the layer that
-            was going to open the file anyway.
-            """
             if fill is None:
                 return False
             try:
@@ -586,64 +472,18 @@ class CozySnapshotDownloader:
             except (DigestMismatch, FileNotFoundError, OSError, ValueError):
                 return False
 
-        # Every check re-hashes the object — ~1.0s of solid CPU per GiB WARM,
-        # but that is the fast end of a ~14x spread: measured cold-and-contended
-        # it is ~14s/GiB (tensorfs#42), which is what puts a large resident
-        # snapshot past the hub's window. A resume re-hashes everything earlier
-        # attempts landed. On the caller's
-        # loop thread that stranded the heartbeat and every queued event until
-        # the scan ended, so each check runs off-thread and only the emission
-        # stays on the caller's thread.
-        # pgw#1351: the residency verdict is the dedup measurement, and this
-        # loop is the only place it is ever made. Counted HERE, per object,
-        # rather than reconstructed afterwards from `len(grants) - len(missing)`
-        # — that subtraction cannot tell a pod-local CAS hit from an endpoint
-        # volume fill, and the two are the numerators of different questions.
         resident_objects = 0
         resident_bytes = 0
         filled_objects = 0
         filled_bytes = 0
         report_residency()
 
-        # pgw#1556: ONE OBJECT AT A TIME was the whole cost model.
-        #
-        # `await asyncio.to_thread(...)` inside a `for` buys zero parallelism —
-        # it is awaited in the loop body, so exactly one object is ever in
-        # flight. Its purpose (above) is real and is preserved: keep the hash
-        # off the event loop so the heartbeat is not stranded. But the fetch
-        # path RIGHT BESIDE THIS ONE has run `DEFAULT_PARALLEL`-wide since
-        # pgw#1308, so the same pod that pulls 8 objects at once from R2 filled
-        # them from an attached volume strictly serially — and volume fill is
-        # the path the ops-side pre-warm exists to make fast.
-        #
-        # The work is `hashlib` + read + write, all of which release the GIL, so
-        # threads are real concurrency here rather than interleaving. Same width
-        # and the same constant as the transfer path: two fan-outs over one
-        # uplink and one disk should not be able to disagree about how wide the
-        # machine is.
-        #
-        # Measured on this box, 48 synthetic 64 MiB objects, paired alternation,
-        # min of 3 reps, against the REAL `LocalCAS`:
-        #
-        #     sequential + double hash (before)   203.6 MiB/s   1.00x
-        #     sequential + single hash            348.9 MiB/s   1.71x
-        #     8-wide     + single hash            880.3 MiB/s   4.32x
-        #
-        # ORDER IS NOT PRESERVED and does not need to be: `settle` is already
-        # lock-guarded and per-object, `missing` is drained by a fan-out
-        # downloader that reorders anyway, and the byte position is an
-        # AGGREGATE (`done`), not a cursor. What order DOES still buy is the
-        # ordering of `config.refs` one layer up (boot_materialize), which is
-        # untouched — a pod still finishes the 134 GB checkpoint before the
-        # 22 MB interpolator.
         tally_lock = threading.Lock()
 
         def account(grant: TransferGrant) -> None:
             nonlocal done, resident_objects, resident_bytes
             nonlocal filled_objects, filled_bytes
-            # The verdict is taken OUTSIDE the lock — it is the expensive part,
-            # and holding a mutex across a 64 MiB hash would rebuild the serial
-            # loop this replaces with extra steps.
+            # The verdict is taken OUTSIDE the lock — it is the expensive part, and holding a mutex across a 64 MiB hash would rebuild the serial loop this replaces with extra steps.
             if resident(grant):
                 source = boot_phases.SOURCE_LOCAL
             elif filled(grant):
@@ -661,9 +501,7 @@ class CozySnapshotDownloader:
                     filled_bytes += grant.size_bytes
                 else:
                     missing.append(grant)
-                # Inside the lock so a slower thread can never publish a
-                # position an earlier one already passed: the hub advances on
-                # STRICT INCREASE and a regressing position reads as a wedge.
+                # Inside the lock so a slower thread can never publish a position an earlier one already passed: the hub advances on STRICT INCREASE, and a regressing position reads as a wedge.
                 report_residency()
             if source:
                 settle(grant.digest, source)
@@ -671,21 +509,6 @@ class CozySnapshotDownloader:
         if grants:
             await asyncio.to_thread(_scan_fanout, account, grants)
 
-        # SIZE WHAT IS ACTUALLY WRITTEN, and nothing else. This arithmetic has
-        # been wrong in both directions (pgw#1296(b)): it first sized only the
-        # MISSING objects while `_publish_snapshot` wrote a full second copy
-        # with no check at all, and pgw#1263 then corrected it to
-        # fetch + one whole model. Step ⑥ deleted that second copy — a
-        # projection writes stubs, symlinks and the CAS objects themselves —
-        # so charging a whole model here would now over-reserve by exactly the
-        # model and refuse boots that fit. `publish_bytes` is
-        # `projection.projection_write_bytes` over the SAME symlink probe the
-        # projector is given, so the two cannot disagree.
-        #
-        # The `missing and` guard that once skipped this check entirely stays
-        # gone: fully-resident is still a real case, and it is now the case
-        # where the requirement is genuinely near zero rather than the case
-        # where the publish is the only writer.
         fetch = sum(grant.size_bytes for grant in missing)
         publish = publish_bytes
         required = fetch + publish + _DISK_HEADROOM_BYTES
@@ -724,11 +547,6 @@ class CozySnapshotDownloader:
                 report = await asyncio.to_thread(
                     download, tuple(missing), cas, progress=on_object
                 )
-                # pgw#1351: the wire numbers come from the transfer's OWN
-                # report, never from the grant sizes. A grant's `size_bytes` is
-                # what the object weighs; `bytes_transferred` is what was moved,
-                # and on any path where those differ the second one is the
-                # answer to "what did this pod download".
                 fetched_objects = report.succeeded
                 fetched_bytes = report.bytes_transferred
                 late_resident_objects = report.skipped_resident

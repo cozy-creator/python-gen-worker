@@ -1,22 +1,3 @@
-"""pgw#939 + pgw#940 — missing evidence is a refusal, never a skipped check.
-
-**pgw#939 (supply chain).** `if expected { compare }` — so an absent expected
-value ADMITS. The artifact in every case is bytes that will subsequently be
-safetensors-loaded or armed as a compiled graph, and `DESIGN-RULINGS.md` §1.22
-decides all of them the same way: missing evidence is an integrity verdict,
-not a disabled check.
-
-**pgw#940 (measurement).** One question — *how much VRAM is free?* — answered
-four times, with `0` meaning both "no card" and "the probe raised", and the
-code reading the shared zero as the permissive case. §1.22 again, and the
-asymmetry decides it: admitting on an unreadable measurement OOMs paid tenant
-work, refusing costs a rung of performance.
-
-TCG now owns compiled-graph declaration and admission, so the first rows use
-its closed public declaration instead of the deleted worker verifier. The
-remaining rows preserve the independent download and measurement checks.
-"""
-
 from __future__ import annotations
 
 import json
@@ -85,40 +66,10 @@ def test_tcg_refuses_an_absent_graph_witness() -> None:
         _declaration(graph_witness="")
 
 
-# ---------------------------------------------------------------------------
-# pgw#939 "also in scope" — the cubin arch gate vanished per kernel
-# ---------------------------------------------------------------------------
-
-
-# pgw#1181 REMOVED the four `_ptx_jit_gaps` rows (pgw#939 site 2: an unreadable
-# cubin must be a GAP, not a skip). The gate they cover ran inside
-# `compile_cache.pack`, over the inductor/triton capture a
-# `torch-inductor-cache` compiled graph was built from — a completeness check on kernels
-# packed into that artifact. The format has had no writer since pgw#1178 and is
-# deleted here, so there is no capture to walk and no pack to refuse.
-#
-# The pgw#939 PRINCIPLE this file exists for is untouched and the other 19 rows
-# still assert it on live sites: absent evidence is an integrity verdict, never
-# a disabled check. On the exported lane the same principle is enforced by the
-# key — a compiled graph that cannot state an axis has no identity and never resolves.
-
-
-# ---------------------------------------------------------------------------
-# pgw#939 §1-2 — civitai downloads
-# ---------------------------------------------------------------------------
-
-
 def test_an_unhashed_download_is_distinguishable_from_a_verified_one(
     tmp_path: Path,
 ) -> None:
-    """Civitai publishes `AutoV2`/`CRC32`/`BLAKE3` without `SHA256` for many
-    large/GGUF files. The manifest recorded `"sha256": ""` for those, with no
-    marker separating "hash matched" from "no hash was available" — so every
-    downstream reader saw a completed, verified download.
-
-    Refusing is not available (ingesting those files is what the lane is for),
-    so the acceptance is that the two states stop looking alike.
-    """
+    """Civitai publishes `AutoV2`/`CRC32`/`BLAKE3` without `SHA256` for many large/GGUF files."""
     from gen_worker.models import download
 
     verified = download._civitai_adoptable(
@@ -143,13 +94,10 @@ def _sized(path: Path, n: int) -> Path:
 def test_an_undeclared_size_no_longer_adopts_whatever_is_at_the_path(
     tmp_path: Path,
 ) -> None:
-    """`if dst.exists() and (not f["size_bytes"] or st_size == size)`. The
-    left half of the `or` short-circuits: with no declared size ANY file at
-    that path was adopted as a complete download — no size, no hash, no read.
-    A truncated prior attempt is exactly that state."""
+    """`if dst.exists() and (not f["size_bytes"] or st_size == size)`."""
     from gen_worker.models import download
 
-    dst = _sized(tmp_path / "big.gguf", 3)  # a stub, not the model
+    dst = _sized(tmp_path / "big.gguf", 3)
     assert download._civitai_adoptable(
         dst, {"name": "big.gguf", "size_bytes": 0, "sha256": ""}, None,
     ) is None
@@ -158,8 +106,7 @@ def test_an_undeclared_size_no_longer_adopts_whatever_is_at_the_path(
 def test_an_undeclared_size_adopts_against_our_own_completed_manifest(
     tmp_path: Path,
 ) -> None:
-    """The fast path survives where there IS evidence: this directory's own
-    manifest, which is written only after every file completed."""
+    """The fast path survives where there IS evidence: this directory's own manifest, which is written only after every file completed."""
     from gen_worker.models import download
 
     dst = _sized(tmp_path / "big.gguf", 3)
@@ -203,35 +150,11 @@ def test_a_torn_prior_manifest_is_no_evidence(tmp_path: Path) -> None:
     assert download._civitai_prior_manifest(m) == {}
 
 
-# ---------------------------------------------------------------------------
-# pgw#940 §1 — DELETED WITH ITS SUBJECT
-# ---------------------------------------------------------------------------
-#
-# pgw#940 §1 covered `entry_workers`' DEVICE bound: an unreadable card used to
-# share the "0 free VRAM" branch with an absent one and licensed 8 concurrent
-# compile children on a card nobody could read. The fix was right and the rows
-# were real; §4.33 then deleted the bound they guarded. K is f(cores, one
-# measured child RSS) — free VRAM is not divided, sampled, or read at all, so
-# there is no zero left to misread and `DeviceProbeError`, `device_facts` and
-# `CardCensus` are gone with it.
-#
-# The behaviour §1 protected is covered by its ABSENCE: `entry_workers` takes
-# no device reading, and `test_aot_compile_pool_pgw809
-# .test_the_width_and_its_inputs_ride_the_telemetry` fails if a device term
-# reappears in the width record. pgw#940 §2 below is a DIFFERENT site (the
-# offload-rung selector in `models.memory`) and is untouched.
-
 _GIB = 1024 ** 3
 
 
-# ---------------------------------------------------------------------------
-# pgw#940 §2 — zero free VRAM selected the most memory-hungry rung
-# ---------------------------------------------------------------------------
-
-
 def test_no_cuda_still_selects_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """"off" on a CPU host is not a placement claim — there is no card to
-    offload FROM. Unchanged."""
+    """"off" on a CPU host is not a placement claim — there is no card to offload FROM."""
     from gen_worker.models import memory
 
     monkeypatch.setattr(
@@ -243,11 +166,7 @@ def test_no_cuda_still_selects_off(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_unreadable_card_does_not_select_full_residency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`"off"` means fully resident, no offload at all — the single most
-    memory-hungry rung. On a GPU host whose probe failed, a pipeline that
-    needed `group_offload` was loaded fully resident and OOMed during load.
-    The unknown-model-size branch a few lines below has always descended to
-    `group_offload`; only the unknown-free-VRAM branch opened."""
+    """`"off"` means fully resident, no offload at all — the single most memory-hungry rung."""
     from gen_worker.models import memory
 
     monkeypatch.setattr(
@@ -283,25 +202,10 @@ def test_the_reading_carries_its_zero_cause(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=_Broken()))
     reading = memory.available_vram()
     assert reading.reason == memory.VRAM_UNREADABLE and not reading.measured
-    # The reporting shape keeps collapsing them; that is what it is for.
     assert memory.get_available_vram_gb() == 0.0
 
 
-# ---------------------------------------------------------------------------
-# pgw#940 §3 — a saturated card read as an empty one
-# ---------------------------------------------------------------------------
-
-
-# pgw#1373: `test_a_saturated_card_no_longer_reads_as_empty` deleted with the
-# module it drove (executor). `_Unsizable` below is NOT part of that case — it
-# is the shared fixture the two host-move-guard tests use, and it sat between
-# them.
-
-
 class _Unsizable:
-    """The shape the guard no-opped on: `parameters()` raises, as it does for
-    meta-device modules, accelerate-hooked modules mid-dispatch, and custom
-    `nn.Module` subclasses that override `parameters`."""
 
     def parameters(self, recurse: bool = True) -> Any:
         raise RuntimeError("meta device: parameters are not materialized")
@@ -313,10 +217,7 @@ class _Unsizable:
 def test_an_unmeasurable_module_no_longer_skips_the_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`except Exception: return 0` -> `0 < 1 GiB` -> early return -> the move
-    proceeds. The guard exists solely to refuse a `.to("cpu")` that gets the
-    container cgroup-SIGKILLed: "no exception, no finally, process gone
-    mid-instruction"."""
+    """`except Exception: return 0` -> `0 < 1 GiB` -> early return -> the move proceeds."""
     from gen_worker import host_move_guard as guard
 
     seen: list[int] = []
@@ -333,8 +234,7 @@ def test_an_unmeasurable_module_no_longer_skips_the_guard(
 def test_a_small_measurable_move_still_short_circuits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The guard is not turned into a per-move probe: a module it CAN size
-    and that is below the floor still returns without touching the budget."""
+    """The guard is not turned into a per-move probe: a module it CAN size and that is below the floor still returns without touching the budget."""
     torch = pytest.importorskip("torch")
     from gen_worker import host_move_guard as guard
 

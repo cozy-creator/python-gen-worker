@@ -1,35 +1,4 @@
-"""A dtype cast is TREE-wide; precision pins are PER-COMPONENT.
-
-``families.facts`` states which component CLASSES must come off disk wider
-than the composition's compute dtype (``AutoencoderKLWan -> fp32``), and
-``models.loading`` honours it on every materialize. Without a producer half, a
-plain ``dtype: "bf16"`` clone casts every weight group in the tree, so a
-published "bf16" wan flavor carries a bf16 VAE the load side then upcasts back
-into fp32 — truncated, and invisible at every gate.
-
-This module is that producer half. It reads the TREE'S OWN
-``model_index.json`` (authoritative: a fine-tune may substitute a class), asks
-``families.facts`` — never a second table — and answers two questions:
-
-* :func:`cast_exempt_components` — which components a narrowing cast must
-  leave at source dtype. The tree-wide cast SKIPS them and says so; it does
-  not refuse, because "publish a bf16 flavor of this model" is a tree-level
-  intent with no per-component spelling that could satisfy both it and the
-  pin, and the loader would widen the component right back anyway. Refusing
-  would leave the caller with a workaround (a third pod leg, plus an operator
-  who already knows the fact) as the only path to the same tree.
-* :func:`check_explicit_pin_conflict` — the caller NAMING a pinned component
-  as a quant target is a per-component instruction that contradicts the pin.
-  That is refused, typed and by name: the caller can repair it (drop the
-  component), and silently ignoring an explicit instruction is its own
-  invisibility bug.
-
-:func:`verify_produced_tree` is the publish gate. It compares the tree about
-to be published against the pins and refuses when a pinned component is
-narrower than its pin AND the source was not — i.e. when WE narrowed it. An
-upstream whose own VAE ships bf16 is still mirrorable; the fact is recorded,
-not enforced onto someone else's bytes.
-"""
+"""A dtype cast is TREE-wide; precision pins are PER-COMPONENT."""
 
 from __future__ import annotations
 
@@ -39,25 +8,6 @@ from typing import Dict, Iterable, Mapping, Optional
 
 from ..families.facts import ComponentDtype, component_dtypes_for_classes
 
-# Storage width per dtype spelling, for the ONE comparison this module makes:
-# is the requested/produced precision NARROWER than the pin? Quant dtypes are
-# all narrower than every pin, which is the answer that matters.
-#
-# pgw#1291: KEYS ARE SEPARATOR- AND CASE-FOLDED before lookup (see
-# :func:`dtype_bits`), so `fp8:e4m3`, `fp8_e4m3`, `fp8-e4m3` and `F8_E4M3` are
-# ONE entry. That is not tidiness — an unknown spelling scores 0 bits, and 0
-# bits makes :func:`is_narrowing` answer False, which turns this whole gate
-# SILENTLY OFF for the artifact it was pointed at. Four live spellings did
-# exactly that: `int8` and `uint8` (which the module docstring claims are
-# caught: "quant dtypes are all narrower than every pin"), and tensorhub's
-# canonical `fp8_e4m3`/`fp8_e5m2`, which is the vocabulary `tensorlayout`
-# derives and the catalog is moving to. Measured before the fix:
-# `dtype_bits("int8") == 0`, `is_narrowing("int8", "fp32") is False`.
-#
-# `_dtype_vocabulary_is_complete` (tests/test_dtype_pins_vocabulary_pgw1291.py)
-# is the fence: every token any producer in this repo can EMIT must have a
-# width here, so the next vocabulary addition fails a test instead of
-# disarming the gate 45 minutes into a conversion.
 DTYPE_BITS: Dict[str, int] = {
     "fp64": 64, "f64": 64, "float64": 64,
     "fp32": 32, "f32": 32, "float32": 32,
@@ -70,39 +20,23 @@ DTYPE_BITS: Dict[str, int] = {
     "q3_k_m": 3, "q3_k_s": 3, "q2_k": 2,
 }
 
-# The separators a dtype flavor is spelled with across the four vocabularies
-# that meet here: `fp8:e4m3` (this module + clone), `fp8_e4m3` (tensorlayout /
-# the catalog), `fp8-e4m3` (producer labels), `F8_E4M3` (the safetensors
-# header). One fact, four spellings; fold them rather than enumerate them.
 _DTYPE_SEPARATORS = ("_", "-")
 
 
 def _fold_dtype(dtype: str) -> str:
-    """The lookup key: lowercased, with every flavor separator folded to ':'.
-
-    Applied to BOTH sides — the table is written with ':' and folded on load —
-    so no entry can be reachable by one spelling and not another.
-    """
     key = str(dtype or "").strip().lower()
     for sep in _DTYPE_SEPARATORS:
         key = key.replace(sep, ":")
     return key
 
 
-# Fold the table itself, once, so lookups compare like with like. Written with
-# ':' above for readability; `q4_k_m` and friends fold to `q4:k:m` and stay
-# addressable only through the same fold.
 _DTYPE_BITS_FOLDED: Dict[str, int] = {
     _fold_dtype(k): v for k, v in DTYPE_BITS.items()
 }
 
 
 class ComponentDtypePinError(ValueError):
-    """A requested conversion contradicts a component's load-dtype pin.
-
-    Carries the component, its class, the pin and the reason the pin exists,
-    so the refusal names what to change instead of describing a rule.
-    """
+    """A requested conversion contradicts a component's load-dtype pin."""
 
     def __init__(self, component: str, class_name: str, fact: ComponentDtype,
                  requested: str) -> None:
@@ -120,12 +54,7 @@ class ComponentDtypePinError(ValueError):
 
 
 def dtype_bits(dtype: str) -> int:
-    """Storage width of a dtype spelling; 0 when unknown (never compared).
-
-    Spelling-insensitive across the separator vocabularies (pgw#1291): a
-    flavored fp8 answers 8 however it is written, because answering 0 disarms
-    the caller's gate instead of failing it.
-    """
+    """Storage width of a dtype spelling; 0 when unknown (never compared)."""
     return _DTYPE_BITS_FOLDED.get(_fold_dtype(dtype), 0)
 
 
@@ -136,11 +65,7 @@ def is_narrowing(requested: str, pin: str) -> bool:
 
 
 def model_index_classes(tree: Path | str) -> Dict[str, str]:
-    """``{component: class name}`` a tree's ``model_index.json`` declares.
-
-    Empty for single-file / transformers layouts, which carry no per-component
-    class vocabulary and therefore no pins.
-    """
+    """``{component: class name}`` a tree's ``model_index.json`` declares."""
     out: Dict[str, str] = {}
     try:
         with open(Path(tree) / "model_index.json", "r", encoding="utf-8") as f:
@@ -159,17 +84,12 @@ def model_index_classes(tree: Path | str) -> Dict[str, str]:
 
 
 def component_pins(tree: Path | str) -> Dict[str, ComponentDtype]:
-    """``{component: ComponentDtype}`` the tree's own classes pin. One source
-    of truth: :mod:`gen_worker.families.facts`, the table the loader reads."""
+    """``{component: ComponentDtype}`` the tree's own classes pin."""
     return component_dtypes_for_classes(model_index_classes(tree))
 
 
 def cast_exempt_components(tree: Path | str, requested_dtype: str) -> Dict[str, ComponentDtype]:
-    """Components a cast to ``requested_dtype`` must NOT touch.
-
-    Only NARROWING is exempted: a cast to fp32 of an fp32-pinned component is
-    a no-op, and widening never contradicts a pin.
-    """
+    """Components a cast to ``requested_dtype`` must NOT touch."""
     return {
         comp: fact for comp, fact in component_pins(tree).items()
         if is_narrowing(requested_dtype, fact.dtype)
@@ -179,12 +99,7 @@ def cast_exempt_components(tree: Path | str, requested_dtype: str) -> Dict[str, 
 def check_explicit_pin_conflict(
     tree: Path | str, requested_dtype: str, named_components: Iterable[str] | None,
 ) -> None:
-    """Refuse when the caller NAMED a pinned component as a conversion target.
-
-    A tree-wide cast skips a pinned component (see module docstring); an
-    explicit per-component instruction is refused instead, because it has a
-    repair and ignoring it would be a second silent behaviour.
-    """
+    """Refuse when the caller NAMED a pinned component as a conversion target."""
     named = {str(c).strip() for c in (named_components or []) if str(c).strip()}
     if not named:
         return
@@ -202,11 +117,7 @@ def component_dtype(component_dir: Path | str) -> str:
 
 
 def component_dtypes_on_disk(tree: Path | str) -> Dict[str, str]:
-    """``{component: dtype}`` read from the produced tree's own safetensors
-    headers — the per-component precision report a publish carries so a
-    downcast can never again be invisible. A tree with no component subdirs
-    (single-file / transformers layout) reports its one weight set as
-    ``"model"``, matching :func:`size_walk.compute_size_facts`."""
+    """``{component: dtype}`` read from the produced tree's own safetensors headers — the per-component precision report a publish carries so a downcast can never again be invisible."""
     root = Path(tree)
     out: Dict[str, str] = {}
     if not root.is_dir():
@@ -224,9 +135,7 @@ def component_dtypes_on_disk(tree: Path | str) -> Dict[str, str]:
 
 
 class ComponentDtypePinViolation(RuntimeError):
-    """A tree about to be published carries a component NARROWER than its pin,
-    and the source was not — i.e. this producer truncated it. Publishing would
-    ship silent quality loss the load side cannot recover."""
+    """A tree about to be published carries a component NARROWER than its pin, and the source was not — i.e."""
 
     def __init__(self, component: str, class_name: str, pin: str, produced: str,
                  source: str, reason: str) -> None:
@@ -247,14 +156,7 @@ def verify_produced_tree(
     tree: Path | str, *, source_dir: Optional[Path | str] = None,
     source_dtypes: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, str]:
-    """Publish gate. Returns ``{component: dtype}`` for the produced tree.
-
-    Raises :class:`ComponentDtypePinViolation` when a pinned component is
-    narrower than its pin AND the source component was not — the producer
-    truncated it. A source that ALREADY ships the component narrow is
-    mirrorable: the pin is a fact about the architecture, not a licence to
-    refuse someone else's bytes, and the load side widens it either way.
-    """
+    """Publish gate."""
     produced = component_dtypes_on_disk(tree)
     pins = component_pins(tree)
     if source_dtypes is None:
@@ -267,7 +169,7 @@ def verify_produced_tree(
             continue
         src = str(source_dtypes.get(comp, "") or "")
         if src and is_narrowing(src, fact.dtype):
-            continue  # upstream's own precision — mirrored, not truncated here
+            continue
         raise ComponentDtypePinViolation(
             comp, classes.get(comp, ""), fact.dtype, got, src, fact.reason)
     return produced

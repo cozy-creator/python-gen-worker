@@ -1,30 +1,4 @@
-"""Packed-resident AWQ W4A16 modulation serving.
-
-The baseline decodes every ``img_mod``/``txt_mod`` layer to a dense bf16
-``nn.Linear`` AT LOAD (`svdq_awq.decode_awq_linear`) — the entire measured
-+6.8 GB peak-VRAM delta vs nunchaku. This module keeps the weights RESIDENT at
-4 bits and dequantizes per-group in-kernel:
-
-  ``y = x @ (codes * wscales + wzeros).T + bias`` — group-64 asymmetric int4,
-  zeros pre-scaled AND pre-negated (the svdq_awq byte contract).
-
-Resident buffers are a load-time swizzle of the on-disk tensors (the on-disk
-format is untouched):
-
-  weight   uint8 [oc, ic/2]  row-major nibble pairs (element 2j LOW nibble),
-                             adanorm row-interleave UNDONE on the codes
-                             (a row permutation — exact in the 4-bit domain)
-  wscales  bf16  [oc, ng]    live rows only, transposed, row-permuted
-  wzeros   bf16  [oc, ng]    same
-  bias     bf16  [oc]        adanorm +1 delta subtracted (as the decode path)
-
-Modulation GEMMs are skinny (x = timestep embedding, M = batch): this is a
-VRAM feature first (tracker: ms priced by the pending per-op profile). The
-kernel rounds the dequantized weight to bf16 before the multiply, so its
-per-element math matches the baseline's bf16 ``nn.Linear`` weight exactly;
-only fp32 accumulation order differs (quantified on the parity harness).
-Gated by the same probe/env as the fused svdq lane.
-"""
+"""Packed-resident AWQ W4A16 modulation serving."""
 
 from __future__ import annotations
 
@@ -105,8 +79,6 @@ def _build_awq_op() -> Optional[Any]:
                             (BN, BK // GS, GS // 2))
             wo = tl.reshape((qp >> 4).to(tl.float32),
                             (BN, BK // GS, GS // 2))
-            # Round to bf16 like the decoded nn.Linear weight — per-element
-            # parity with the baseline; only accumulation order differs.
             we = (we * sg[:, :, None] + zg[:, :, None]).to(
                 tl.bfloat16).to(tl.float32)
             wo = (wo * sg[:, :, None] + zg[:, :, None]).to(
@@ -149,24 +121,17 @@ def awq_op() -> Optional[Any]:
     return _build_awq_op()
 
 
-# ---------------------------------------------------------------------------
-# Module + builder.
-# ---------------------------------------------------------------------------
-
-
 def _build_awq_linear_class() -> type:
     import torch
     import torch.nn as nn
 
     class _AwqPackedLinear(nn.Module):
-        """AWQ W4A16 modulation layer served packed-resident."""
 
         _cozy_awq_packed = True
 
         def __init__(self, in_features: int, out_features: int, *,
                      bias: bool, compute_dtype: Any) -> None:
             super().__init__()
-            # record it (twin of _SvdqLinear).
             self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
@@ -210,13 +175,10 @@ def awq_packed_linear_class() -> type:
 
 
 def _undo_interleave_perm(oc: int, splits: int, device: Any) -> Any:
-    """Row permutation that undoes the exporter's adaLN interleave: stored row
-    ``j*splits + s`` is original row ``s*(oc/splits) + j``."""
     import torch
 
     per = oc // splits
     idx = torch.arange(oc, device=device)
-    # original row r = s*per + j  ->  stored row j*splits + s
     s, j = idx // per, idx % per
     return j * splits + s
 
@@ -225,9 +187,7 @@ def build_awq_packed_linear(tensors: dict[str, Any], out_features: int,
                             in_features: int, *, adanorm_splits: int = 1,
                             compute_dtype: Any = None,
                             device: Any = None) -> Any:
-    """Packed-resident module from the on-disk AWQ tensors. The load-time
-    swizzle: unpack -> undo adanorm row interleave -> row-major nibble
-    repack; scales/zeros transposed + permuted; bias per the decode path."""
+    """Packed-resident module from the on-disk AWQ tensors."""
     import torch
     import torch.nn as nn
 

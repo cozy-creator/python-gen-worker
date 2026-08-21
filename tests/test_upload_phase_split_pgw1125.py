@@ -1,20 +1,3 @@
-"""pgw#1125 / th#1795: `stage_ms.upload` splits into its three real legs.
-
-MEASURED on the standing `master` stack (2026-08-11): a fast image request
-waits 2917 ms, of which the GPU slot is held 12 ms (0.4%) and `finalize` is
-2623 ms (89.9%) — 98.6% of that being `upload`. The upload does NOT scale with
-payload size (n=88 spanning 46 KB -> 13 MB: intercept 2971 ms, slope
-0.72 ms/MB, R² = 1.5e-6), so it is round-trip count, not bandwidth. Which of
-the three legs owns the round trips decides which fix is worth building, and
-the whole 2587 ms was reported under ONE key.
-
-The test drives the REAL client (`presigned_upload_file`: real
-`requests.Session`, real `PutPool`, real part PUTs) against a real localhost
-server that implements all three legs. Each leg is given a distinct, disjoint
-artificial delay, so a callback that attributed time to the wrong leg cannot
-pass: the assertion is per-leg and the bands do not overlap.
-"""
-
 from __future__ import annotations
 
 import json
@@ -32,7 +15,6 @@ COMPLETE_DELAY_S = 0.90
 
 
 class _ThreeLegHub(BaseHTTPRequestHandler):
-    """create -> PUT part -> complete, each leg deliberately slow."""
 
     def log_message(self, *_a: Any) -> None:
         pass
@@ -104,16 +86,13 @@ def test_the_three_legs_are_attributed_separately(tmp_path) -> None:
     assert result.dedup is False
     phases = dict(seen)
     assert set(phases) == {"create", "put", "complete"}
-    # Disjoint bands: an off-by-one-leg attribution cannot satisfy all three.
     assert CREATE_DELAY_S <= phases["create"] < PUT_DELAY_S
     assert PUT_DELAY_S <= phases["put"] < COMPLETE_DELAY_S
     assert COMPLETE_DELAY_S <= phases["complete"] < COMPLETE_DELAY_S + PUT_DELAY_S
 
 
 def test_a_failed_leg_still_reports_its_cost(tmp_path) -> None:
-    """A leg that raised still spent its time; a callback that only fires on
-    success would make the slow failure mode invisible — exactly the case an
-    operator is looking at when the tail blows up."""
+    """A leg that raised still spent its time; a callback that only fires on success would make the slow failure mode invisible — exactly the case an operator is looking at when the tail blows up."""
     src = tmp_path / "out.webp"
     src.write_bytes(b"x" * 16)
 
@@ -154,11 +133,7 @@ def test_a_failed_leg_still_reports_its_cost(tmp_path) -> None:
 
 
 def test_sub_phases_do_not_disturb_the_reconciliation_invariant() -> None:
-    """The stage map's headline property is that measured stages plus
-    `resid.unattributed` equal `total.runtime`. Sub-phases are a rollup like
-    `denoise.step_mean`: reported, never summed. If they were charged as
-    stages, `upload` would silently start meaning "upload minus its legs" and
-    every number already measured against it would stop comparing."""
+    """The stage map's headline property is that measured stages plus `resid.unattributed` equal `total.runtime`."""
     timer = StageTimer()
     timer.handler_open()
     with timer.stage("upload"):
@@ -172,7 +147,6 @@ def test_sub_phases_do_not_disturb_the_reconciliation_invariant() -> None:
     assert out["upload.create"] == 5
     assert out["upload.put"] == 4
     assert out["upload.complete"] == 8
-    # `upload` still means the whole bracket, unchanged.
     assert out["upload"] >= 20
     attributed, total = reconciliation(out)
     assert attributed == total
@@ -182,14 +156,7 @@ def out_runtime(timer: StageTimer) -> int:
     return int(timer.snapshot().get("total.handler", 0))
 
 
-# ---------------------------------------------------------------------------
-# The store-enforced single PUT
-# ---------------------------------------------------------------------------
-
-
 class _DirectFinalHub(BaseHTTPRequestHandler):
-    """The hub answering a create that declared sha256: one PUT grant into the
-    final key, with the signed checksum header, and no part URLs at all."""
 
     creates: List[Dict[str, Any]] = []
     puts: List[Tuple[str, Dict[str, str], int]] = []
@@ -239,10 +206,7 @@ class _DirectFinalHub(BaseHTTPRequestHandler):
 
 
 def test_a_direct_final_grant_is_put_once_with_the_signed_headers_verbatim(tmp_path) -> None:
-    """The whole win depends on two things the client must not get wrong: it
-    PUTs ONCE (no multipart ceremony) and it sends the grant's headers
-    verbatim. Editing or dropping `x-amz-checksum-sha256` is a 403 from the
-    store, because the checksum is inside the signature."""
+    """The whole win depends on two things the client must not get wrong: it PUTs ONCE (no multipart ceremony) and it sends the grant's headers verbatim."""
     src = tmp_path / "out.webp"
     src.write_bytes(b"y" * 2048)
     _DirectFinalHub.creates = []
@@ -272,17 +236,11 @@ def test_a_direct_final_grant_is_put_once_with_the_signed_headers_verbatim(tmp_p
     assert path == "/final/abc.webp"
     assert sent == 2048
     assert headers.get("x-amz-checksum-sha256") == "Zm9vYmFy"
-    # All three legs are still attributed on this path.
     assert set(dict(seen)) == {"create", "put", "complete"}
 
 
 def test_a_real_serve_declares_the_sha256_of_the_bytes_it_uploaded() -> None:
-    """The two-line unlock, on the REAL serve path: a real worker, a real
-    dispatch, a real upload create against a real local sink. The digest was
-    computed during the writes and then dropped on the floor; without it on the
-    create the hub cannot name the final content-addressed key, so every save
-    is staged, copied and deleted. RED before the declare: the create body has
-    no `sha256` key at all."""
+    """The two-line unlock, on the REAL serve path: a real worker, a real dispatch, a real upload create against a real local sink."""
     import hashlib
 
     import msgspec
@@ -303,10 +261,6 @@ def test_a_real_serve_declares_the_sha256_of_the_bytes_it_uploaded() -> None:
                 request_id="r-1125-sha", attempt=1, function_name="save-a-large-file",
                 input_payload=msgspec.msgpack.encode(EchoIn(text="x")),
                 org=org_id, capability_token="cap-token",
-                # NOT MEDIA_BYTES_INLINE: an inline preference under the
-                # 4 MiB threshold returns the bytes to the client and
-                # performs no upload, which would pass this test without
-                # the upload it is about.
             ))
             res = conn.wait_for(is_result_for("r-1125-sha")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message

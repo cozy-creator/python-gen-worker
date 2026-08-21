@@ -1,12 +1,4 @@
-"""Length-prefixed frames over the parent<->child unix socket.
-
-The seam carries the SAME serialized protobuf messages that cross the
-worker<->hub gRPC stream (WorkerMessage / SchedulerMessage bytes), plus a
-handful of msgpack control frames. No second serialization of payloads or
-results exists: what was already wire-bytes stays wire-bytes.
-
-Header: 1-byte frame type + 4-byte big-endian payload length.
-"""
+"""Length-prefixed frames over the parent<->child unix socket."""
 
 from __future__ import annotations
 
@@ -17,52 +9,25 @@ from typing import Any, Tuple
 import msgspec
 
 _HEADER = struct.Struct(">BI")
-# One frame comfortably holds the largest gRPC message the stream itself
-# allows (64 MiB) with headroom.
 MAX_FRAME_BYTES = 128 * 1024 * 1024
 
-# parent -> child
-T_HELLO_ACK = 1      # pb.HelloAck bytes
-T_SCHED = 2          # pb.SchedulerMessage bytes
-T_SHIPPED = 3        # pb.WorkerMessage bytes (model_event delivery receipts)
-T_HELLO_REQ = 4      # msgpack {}
-T_CONNECTED = 5      # empty
-T_DISCONNECTED = 6   # empty
-# 7 was T_TOKEN — the worker JWT, handed to the child on every rotation.
-# DELETED (delta 1): the child must never hold the signing identity, so there is
-# nothing to send. What replaced it is T_ACTION_REQ/RESP below: the child ASKS
-# the parent for a narrow, allowlisted, audited action and the parent — which
-# holds the JWT — performs it.
-T_FLUSH_ACK = 8      # msgpack {"flushed": bool}
-T_ACTION_RESP = 9    # msgpack {"id": int, "ok": bool, "status": int,
-                     #          "body": str, "error": str}
-# written by the parent as soon as it has
-# RECORDED a T_BOOT_FATAL verdict. The dying child waits (bounded) for this
-# before exiting, so the parent's respawn decision can never race the frame
-# still sitting in the socket buffer.
-T_BOOT_FATAL_ACK = 10  # msgpack {}
+T_HELLO_ACK = 1
+T_SCHED = 2
+T_SHIPPED = 3
+T_HELLO_REQ = 4
+T_CONNECTED = 5
+T_DISCONNECTED = 6
+T_FLUSH_ACK = 8
+T_ACTION_RESP = 9
+T_BOOT_FATAL_ACK = 10
 
-# child -> parent
-T_HELLO = 20         # pb.Hello bytes
-T_WORKER_MSG = 21    # pb.WorkerMessage bytes
-T_PREPEND = 22       # msgpack [pb.WorkerMessage bytes, ...]
-T_FLUSH_REQ = 23     # msgpack {"timeout": float | None}
-T_WATCHDOG = 24      # msgpack {}  (event-loop liveness: the loop is turning)
-# Which activity is open, written by a THREAD over a dedicated pipe so
-# a starved event loop cannot silence it. Evidence is NOT carried here — the
-# parent measures the child's CPU/IO itself, because a GIL-starved thread
-# cannot be the decider of its own process's liveness.
-T_LIVENESS = 25      # msgpack {"act": bool, "kind": str}
-# delta 1: the child's request for a parent-mediated action. The IPC surface is
-# an AUTHORIZATION surface — the child names an action and its arguments; the
-# parent decides, supplies the credential and the base URL, and returns only the
-# result. msgpack {"id": int, "method": str, "path": str, "query": {..},
-#                  "json": {..}, "timeout": float}
+T_HELLO = 20
+T_WORKER_MSG = 21
+T_PREPEND = 22
+T_FLUSH_REQ = 23
+T_WATCHDOG = 24
+T_LIVENESS = 25
 T_ACTION_REQ = 26
-# a TERMINAL typed boot verdict, sent pre-transport by a child that is
-# about to exit (e.g. the CUDA probe failed). The parent propagates the report
-# on its credential and exits 1 instead of respawning.
-# msgpack {"kind": str, "terminal": bool, "report": {..HardwareReport fields..}}
 T_BOOT_FATAL = 27
 
 
@@ -98,8 +63,7 @@ class FrameWriter:
 
 
 def frame_bytes(ftype: int, payload: bytes = b"") -> bytes:
-    """One frame as a single buffer — for callers that must write it with one
-    atomic ``os.write`` from a thread (the liveness pipe)."""
+    """One frame as a single buffer — for callers that must write it with one atomic ``os.write`` from a thread (the liveness pipe)."""
     return _HEADER.pack(ftype, len(payload)) + payload
 
 

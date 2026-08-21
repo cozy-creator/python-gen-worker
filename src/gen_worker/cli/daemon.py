@@ -1,37 +1,4 @@
-"""The resident endpoint: ONE booted host, one socket, many warm requests.
-
-pgw#1491. This is what ``gen-worker up`` runs and what ``gen-worker run`` is a
-client of. There is exactly one execution path for a request in this package and
-it is here — ``run`` does not boot, does not load, and does not dispatch. That
-is not tidiness: two paths that both "run a request" drift, and the drift is
-invisible because both of them keep producing images (measured three times in
-one day, pgw#1491).
-
-## Wire
-
-NDJSON over a Unix socket, one request per connection, response on the same
-connection:
-
-* request   ``{"function": str, "payload": {...}, "request_id": str?}``
-* ok        ``{"ok": true, "result": ..., "warnings": [...], "dispatch": {...}}``
-* refusal   ``{"ok": false, "error": {"kind": str, "message": str}}``
-* control   ``{"status": {}}``  -> the handle document plus live counters
-
-``dispatch`` is :class:`~gen_worker.serving.dispatch_counter.DispatchCounts` —
-every response states whether it was served by a compiled graph or eagerly.
-
-The old ``stream: true`` half of this protocol is NOT restored: entrypoints
-return one value today (``EndpointHost.dispatch``/``ServeLoop.invoke`` are not
-generators), so a streaming frame shape would be a wire contract with no
-producer behind it. It comes back with the producer, not before.
-
-## Requests are serialized
-
-One request at a time, on the accept thread's worker. The card is one lane and
-``ModelInstance.admission`` already single-flights per model; a second dispatch
-would queue on that lock anyway, so serializing here keeps the counters
-attributable to the request that produced them.
-"""
+"""The resident endpoint: ONE booted host, one socket, many warm requests; `run` is a client and executes no inference. Wire: NDJSON over a Unix socket, one request per connection — request {"function", "payload", "request_id"?}; ok {"ok":true,"result",...,"warnings","dispatch"}; refusal {"ok":false,"error":{"kind","message"}}; control {"status":{}}. Requests are serialized, one at a time."""
 
 from __future__ import annotations
 
@@ -54,13 +21,11 @@ from .workspace import artifacts_root
 from .endpoint_state import EndpointHandle
 from .protocol import PROTOCOL_VERSION, gen_worker_version
 
-#: How long a client has to finish sending its request line. The long wait is
-#: the DISPATCH, which happens after this and is not bounded here.
 REQUEST_LINE_TIMEOUT_S = 30.0
 
 
 class BootError(RuntimeError):
-    """The endpoint could not be brought up. Always names what failed."""
+    """The endpoint could not be brought up."""
 
 
 @dataclass(slots=True)
@@ -68,11 +33,7 @@ class BootSpec:
     """Everything ``up`` decided, frozen before anything is loaded."""
 
     endpoint_dir: Path
-    #: Checkpoint refs this endpoint serves — RUNTIME CONFIG, never a
-    #: declaration by the endpoint (DESIGN-RULINGS 2026-08-19). Materialized
-    #: through the same code path `gen-worker download` uses.
     checkpoint_refs: Tuple[str, ...] = ()
-    #: An already-materialized tree, bypassing the ref resolution entirely.
     checkpoint_dir: Optional[Path] = None
     checkpoint_ref_label: str = "local/checkpoint"
     model: str = ""
@@ -80,20 +41,8 @@ class BootSpec:
     lane: str = ""
     sm: str = ""
     graph_store: Optional[Path] = None
-    #: pgw#1526: the BOX cache, stated once in `cli/workspace.py` beside
-    #: `graph_cas_root()`. It was `Path(".compiled-graphs")` — relative to
-    #: whatever cwd the daemon happened to start in, which put a
-    #: machine-scoped artifact store inside an endpoint source tree.
-    #: A `default_factory` and not a module-level constant: the address is
-    #: config (`COZY_ARTIFACTS`), so it must be read when a BootSpec is
-    #: built, not frozen at import — a process that installs Settings after
-    #: import would otherwise silently keep the pre-config answer.
     artifacts_dir: Path = field(default_factory=artifacts_root)
     output_dir: Path = Path("outputs")
-    #: Background pre-warm posture: "auto" mints the adopt session's holes in
-    #: the background, "off" never compiles. `gen-worker compile` is the
-    #: explicit front door; this is the serve-coordinated half of the same
-    #: work ledger (DESIGN-RULINGS compile addendum 2).
     compile_policy: str = "auto"
     idle_timeout_s: float = 0.0
     env_lockfile: Optional[Path] = None
@@ -109,31 +58,19 @@ class Booted:
     checkpoint_dir: Path
     adopted: Tuple[str, ...] = ()
     holes: Tuple[str, ...] = ()
-    #: Per-hole WHY, parallel to nothing — keyed rows, because the graph name
-    #: alone answered "which" while the field failure needed "why" (pgw#1564:
-    #: fourteen `cannot decompress` reasons sat unread on the session while a
-    #: campaign diagnosed the resulting zero as a new defect).
     hole_reasons: Tuple[Tuple[str, str], ...] = ()
     mint: Any = None
     warnings: List[str] = field(default_factory=list)
 
 
 def boot(spec: BootSpec) -> Booted:
-    """Load the endpoint, materialize its checkpoints, adopt, arm the counter.
-
-    The order is the invariant: bytes on disk BEFORE anything is asked to
-    serve. ``run`` requires ``up`` for exactly this reason, and a pod's boot is
-    the same three steps in one process (th#2204).
-    """
+    """Load the endpoint, materialize its checkpoints, adopt, arm the counter."""
     from .. import receipts
     from ..serving.context import DeployBinding
     from ..serving.dispatch_counter import DispatchCounter
     from ..serving.host import EndpointHost
     from ..serving.loader import load_endpoint
 
-    # The store is a directory this operator owns, not a hub delivery: the
-    # receipt gate is DECLARED off rather than left unset, because a process
-    # that declares neither posture refuses.
     receipts.trust_local_store(
         "gen-worker up: the compiled-graph store is a local directory the "
         "operator owns, not a hub delivery"
@@ -190,12 +127,6 @@ def boot(spec: BootSpec) -> Booted:
 
 
 def _checkpoint_tree(spec: BootSpec, loaded: Any) -> Tuple[Path, str]:
-    """Put the configured checkpoint on disk and return (tree, ref label).
-
-    A weightless endpoint (zero model slots, pgw#1392) names no checkpoint and
-    is not asked for one — absence is legal exactly when nothing can consume
-    it, and refused BY NAME the moment something can.
-    """
     if spec.checkpoint_dir is not None:
         return Path(spec.checkpoint_dir), spec.checkpoint_ref_label
     if spec.checkpoint_refs:
@@ -219,26 +150,6 @@ def _checkpoint_tree(spec: BootSpec, loaded: Any) -> Tuple[Path, str]:
 
 
 def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
-    """(store, document) for this boot, or (None, None) — the eager bridge.
-
-    An UNREADABLE graph-set document is a MISS, never a boot failure (pgw#1525).
-    Compiled graphs are derived and disposable: a document this build's torchcg
-    cannot decode — a v1 document under a v3 decoder, the ordinary shape after a
-    re-vendor — means this box holds nothing usable for this endpoint, which is
-    exactly what an empty store means. Both answers are "serve eager and let the
-    mint refill", so they must not have different outcomes.
-
-    `LocalGraphStore.get_graphs` RAISES `StoreError` on a decode failure rather
-    than answering a clean miss, and this call site used to let it through — so
-    a stale store did not degrade, it killed `up` before any author code ran.
-    That is the cold-start regression pgw#1525 names, and it is worst precisely
-    when recovery matters most: right after the format bump that produced it.
-
-    The refusal is caught HERE and not repaired in the store because the two
-    halves belong to different repos. The store-side fix (answer a clean miss
-    and GC the unreadable leftover) is torchcg's; this is the serving side
-    refusing to die on it either way.
-    """
     if spec.graph_store is None:
         return None, None
     if not spec.sm:
@@ -249,18 +160,10 @@ def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
     from .._vendor.torchcg.store import StoreError
     from ..serving.mint_store import graph_store
 
-    # THE ONE STORE (pgw#1573). This built a bare `LocalGraphStore` — no hub
-    # tier, no baked tier, and a different object from the one this boot's
-    # background mint would publish through — so `up` and a pod disagreed about
-    # what "present" means. `graph_store` is what every entry point builds now;
-    # `upstream=None` is the honest statement that a box boot has no release to
-    # adopt for, not a second class of store.
     store = graph_store(Path(spec.graph_store))
     try:
         document = store.get_graphs(module_name)
     except StoreError as exc:
-        # LOUD and typed: silence here would read as "this endpoint compiles to
-        # nothing", which is a different fact with the same shape.
         print(
             f"adopt: graph_store_unreadable — the compiled-graph document for "
             f"{module_name} in {spec.graph_store} cannot be decoded by this "
@@ -271,30 +174,8 @@ def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
             f"graphs in the current format; the stale entries are reclaimable.",
             file=sys.stderr,
         )
-        # `(store, None)` and NOT `(None, None)`: an undecodable document must
-        # land on the SAME value an empty store produces, or the two "I hold
-        # nothing usable" states diverge again one layer down. The store stays
-        # bound because it is still WRITABLE — `put_graphs` compare-and-swaps a
-        # ref and does not care that the old bytes are undecodable, so a re-mint
-        # can refill this very store rather than needing it deleted first.
         return store, None
     if document is None:
-        # THE REMEDY IS PRINTED FOR THE MISS ITSELF, not only for a raise.
-        #
-        # tcg#69 made `LocalGraphStore` answer a clean miss and discard the
-        # stale bytes, so the branch above no longer fires for the local store
-        # — it survives for backends that still raise (the hub-backed one).
-        # Printing the remedy only there would have silently retired the
-        # operator-facing line on the exact path pgw#1525 exists to fix.
-        #
-        # Naming ONE outcome for both states is not a loss of information, it
-        # is this issue's own conclusion: an undecodable document and an empty
-        # store are the same fact — this box holds nothing usable — and the
-        # remedy is the same verb. WHICH of the two it was is still said, by
-        # torchcg's discard WARNING, which names the graph-set, the bytes and
-        # the decode failure. That warning reaches the terminal even with no
-        # logging configured (`logging.lastResort` handles WARNING+), which
-        # was verified rather than assumed.
         print(
             f"adopt: no compiled-graph document for {module_name} in "
             f"{spec.graph_store}.\n"
@@ -308,7 +189,6 @@ def _adoption_source(spec: BootSpec, module_name: str) -> Tuple[Any, Any]:
 
 
 def _stated_stack(spec: BootSpec, document: Any) -> Optional[Any]:
-    """This boot's compile stack, off the endpoint's own uv.lock (pgw#1489)."""
     if document is None:
         return None
     from ..env_identity import (
@@ -328,14 +208,6 @@ def _stated_stack(spec: BootSpec, document: Any) -> Optional[Any]:
 
 
 def _start_background_mint(spec: BootSpec, host: Any, store: Any) -> Any:
-    """Fill this boot's holes without blocking a single request.
-
-    Paul's "take over the running compile" lands as the WORK LEDGER, not
-    process adoption: this mint and an external ``gen-worker compile`` key work
-    by the same CAS entries, so each skips what the other already landed
-    (skip-if-present measured at ~10 s/hit) and whichever survives finishes the
-    remainder.
-    """
     from ..toolchain import toolchain_digest
     from ..serving.self_mint import SelfMint
 
@@ -348,11 +220,6 @@ def _start_background_mint(spec: BootSpec, host: Any, store: Any) -> Any:
     )
     box.arm(host)
     return box
-
-
-# --------------------------------------------------------------------------
-# The resident process
-# --------------------------------------------------------------------------
 
 
 class ResidentEndpoint:
@@ -368,8 +235,6 @@ class ResidentEndpoint:
         self._last_activity = time.time()
         self._booted_at = time.time()
 
-    # -- handle -------------------------------------------------------------
-
     def _document(self, state: str) -> Dict[str, Any]:
         return {
             "protocol_version": PROTOCOL_VERSION,
@@ -380,22 +245,12 @@ class ResidentEndpoint:
             "module": self.booted.loaded.module_name,
             "socket": str(self.handle.socket_path),
             "functions": sorted(self.booted.loaded.entrypoints),
-            # The ONE fact a client needs to turn `run "a cat"` into a payload:
-            # which field a bare positional fills. Published from the live
-            # msgspec struct rather than copied into a schema the client would
-            # then have to keep in step — and it is one name, not a type map,
-            # because the authoritative decode still happens here.
             "primary_fields": self._primary_fields(),
             "checkpoint_dir": str(self.booted.checkpoint_dir),
             "checkpoint_refs": list(self.spec.checkpoint_refs),
             "output_dir": str(self.spec.output_dir.resolve()),
             "adopted_graphs": list(self.booted.adopted),
             "holes": list(self.booted.holes),
-            # WHY each hole is a hole (pgw#1564): the handle is the ONE thing
-            # an out-of-process caller can read after boot, and it carried
-            # only names — so the 2026-08-20 field zero, whose fourteen
-            # reasons all said `cannot decompress`, was reported as
-            # reasonless. The verdict block makes the query one field read.
             "hole_reasons": [
                 {"graph": graph, "reason": reason}
                 for graph, reason in self.booted.hole_reasons
@@ -424,12 +279,8 @@ class ResidentEndpoint:
     def publish(self, state: str) -> None:
         endpoint_state.write_handle(self.handle, self._document(state))
 
-    # -- serving ------------------------------------------------------------
-
     def dispatch(self, frame: Dict[str, Any]) -> Dict[str, Any]:
-        """Run one request. Never raises — every failure is a typed envelope,
-        because a transport that dies on a bad payload takes the warm models
-        with it."""
+        """Run one request. Never raises — every failure is a typed envelope, because a transport that dies on a bad payload takes the warm models with it."""
         function = frame.get("function")
         payload = frame.get("payload", {})
         request_id = str(frame.get("request_id") or f"run-{self._served}")
@@ -437,8 +288,6 @@ class ResidentEndpoint:
             self._last_activity = time.time()
             self._served += 1
             counter = self.booted.counter
-            # A late mint arms artifacts onto the live session; re-wrap before
-            # the request so graphs landed since the last one are counted.
             counter.rearm()
             counter.reset()
             ctx = self.booted.host.make_context(request_id)
@@ -477,8 +326,6 @@ class ResidentEndpoint:
             except Exception:  # noqa: BLE001 — status must never fail
                 document["mint"] = {"state": "unreadable"}
         return {"ok": True, "status": document}
-
-    # -- transport ----------------------------------------------------------
 
     def serve_forever(self) -> int:
         listen = str(self.handle.socket_path)
@@ -577,7 +424,6 @@ class ResidentEndpoint:
 
 
 def _error_kind(exc: BaseException) -> str:
-    """The typed word for a dispatch failure. One vocabulary, closed."""
     from ..serving.host import ServeDispatchError
 
     if isinstance(exc, ServeDispatchError):
@@ -619,7 +465,7 @@ def _send(conn: socket.socket, envelope: Dict[str, Any]) -> None:
 
 
 def serve(spec: BootSpec, handle: EndpointHandle) -> int:
-    """Boot and serve until SIGINT/SIGTERM. The body of ``up``, both modes."""
+    """Boot and serve until SIGINT/SIGTERM."""
     booted = boot(spec)
     resident = ResidentEndpoint(booted, spec, handle)
 

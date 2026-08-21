@@ -1,17 +1,3 @@
-"""pgw#1005 B: functional coverage for `_upload_transport`.
-
-The audit found this module — the one that exists BECAUSE of production
-incidents — with zero functional tests: three files mention it, and all three
-test something else (an import-purity assertion, the download side, and a
-source grep for a deleted constant name). Untested were the re-open-per-attempt
-invariant that is the entire reason `_BoundedFileReader` exists, the
-fresh-pool-per-retry fix for the R2 ``SSLV3_ALERT_BAD_RECORD_MAC`` incident,
-both classifiers, the backoff, and the 2xx-without-ETag refusal.
-
-Real sockets, real files, a real S3-shaped server. No wall-clock assertions:
-where a delay matters, ``time.sleep`` is captured and read.
-"""
-
 from __future__ import annotations
 
 import http.server
@@ -44,7 +30,6 @@ def blob(n: int, seed: int = 5) -> bytes:
 
 
 class _S3(http.server.BaseHTTPRequestHandler):
-    """S3-shaped part endpoint with injectable failures."""
 
     protocol_version = "HTTP/1.1"
 
@@ -59,7 +44,6 @@ class _S3(http.server.BaseHTTPRequestHandler):
             plan = srv.plan.pop(0) if srv.plan else 200
         n = int(self.headers.get("Content-Length") or 0)
         if plan == "reset":
-            # Read part of the body, then sever mid-stream.
             try:
                 self.rfile.read(min(n, 16))
                 self.connection.close()
@@ -108,11 +92,6 @@ def no_sleep(monkeypatch):
     return calls
 
 
-# ---------------------------------------------------------------------------
-# _BoundedFileReader — the re-open-per-attempt invariant
-# ---------------------------------------------------------------------------
-
-
 def test_bounded_reader_serves_exactly_its_span_and_caps_each_read(tmp_path):
     data = blob(1000)
     p = tmp_path / "f.bin"
@@ -124,16 +103,12 @@ def test_bounded_reader_serves_exactly_its_span_and_caps_each_read(tmp_path):
         rest = r.read(-1)
         assert rest == data[164:350]
         assert r.read(10) == b""
-    # A huge ask is capped at the stream chunk, never materialized whole.
     with _BoundedFileReader(str(p), 0, 1000) as r:
         assert len(r.read(1 << 30)) == 1000
 
 
 def test_a_retry_re_reads_the_part_FROM_ITS_TRUE_OFFSET(s3, tmp_path, no_sleep):
-    """The entire reason the reader class exists (`hubio/transport.py:29-32`).
-    The first attempt is severed mid-stream; the retry must send the part's
-    full bytes starting at its own offset, not resume where a stalled
-    generator left off."""
+    """The entire reason the reader class exists (`hubio/transport.py:29-32`)."""
     data = blob(4096, seed=7)
     p = tmp_path / "f.bin"
     p.write_bytes(data)
@@ -177,8 +152,7 @@ def test_a_4xx_is_terminal_on_the_first_attempt(s3, tmp_path, no_sleep):
 
 
 def test_a_2xx_WITHOUT_an_etag_is_refused_rather_than_retried(s3, tmp_path, no_sleep):
-    """An S3-compatible server that answers 200 with no ETag is malformed, and
-    re-PUTting a part that already succeeded is not a fix."""
+    """An S3-compatible server that answers 200 with no ETag is malformed, and re-PUTting a part that already succeeded is not a fix."""
     p = tmp_path / "f.bin"
     p.write_bytes(blob(64, seed=13))
     s3.plan = ["no_etag", 200]
@@ -219,17 +193,9 @@ def test_cancel_check_interrupts_before_an_attempt(s3, tmp_path):
     assert s3.attempts == 0
 
 
-# ---------------------------------------------------------------------------
-# Pool isolation — the R2 SSLV3_ALERT_BAD_RECORD_MAC fix
-# ---------------------------------------------------------------------------
-
-
 def test_a_failed_first_attempt_DISCARDS_the_shared_pools_connections(
     s3, tmp_path, no_sleep,
 ):
-    """The 2026-05-16 incident: a pooled socket R2's edge had half-closed was
-    handed straight back to the retry. Only the FIRST attempt may use the
-    save-scoped pool, and any transport failure clears it."""
     data = blob(256, seed=19)
     p = tmp_path / "f.bin"
     p.write_bytes(data)
@@ -279,11 +245,6 @@ def test_every_retry_attempt_allocates_its_own_pool_manager(s3, tmp_path, no_sle
     assert len(made) == 3, "one fresh PoolManager per attempt"
 
 
-# ---------------------------------------------------------------------------
-# The classifiers and the backoff, branch by branch
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("status,retryable", [
     (200, None), (204, None),
     (429, True), (500, True), (502, True), (503, True),
@@ -322,7 +283,6 @@ def test_backoff_is_decorrelated_jitter_bounded_by_the_cap():
     for attempt in range(1, 8):
         samples = [backoff_sleep_s(attempt) for _ in range(200)]
         assert all(tr._BACKOFF_BASE_S <= s <= tr._BACKOFF_CAP_S for s in samples)
-    # The window widens with the attempt number, then saturates at the cap.
     early = [backoff_sleep_s(1) for _ in range(200)]
     late = [backoff_sleep_s(6) for _ in range(200)]
     assert max(early) < tr._BACKOFF_CAP_S

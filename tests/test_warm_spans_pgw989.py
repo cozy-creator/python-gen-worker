@@ -1,11 +1,3 @@
-"""pgw#989: the dynamo mint's warm hour gets a breakdown, and the phase that
-never measured a compile stops claiming to.
-
-The rows are written against the REAL seams — the real metric keys of the
-pinned torch, the real ledger, the real parent emitter — so moving any of them
-moves the test.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -18,14 +10,6 @@ from gen_worker._vendor.torchcg import spans
 from gen_worker import warm_spans
 
 
-# ---------------------------------------------------------------------------
-# the partition
-# ---------------------------------------------------------------------------
-
-#: One real ``torch.compile`` call's ``compilation_time_metrics`` delta,
-#: MEASURED on the pin (torch 2.13.0+cu130, CPU inductor, 5.06 s wall). Frozen
-#: here rather than re-measured: the point of the row is the ARITHMETIC over a
-#: real key set, and a compile inside a unit test would price CI, not the code.
 REAL_DELTA: Dict[str, float] = {
     "compile_file": 8.638,
     "_compile.compile_inner": 5.054,
@@ -59,43 +43,29 @@ def test_partition_sums_to_the_dynamo_total_with_a_named_residual() -> None:
     total = members["dynamo_compile_s"]
     assert total == REAL_DELTA[warm_spans.TOTAL_KEY]
     named = sum(v for k, v in members.items() if k != "dynamo_compile_s")
-    # A partition, not a sample: the members plus the residual ARE the total.
     assert named == pytest.approx(total, abs=0.01)
     assert members["compile_other_s"] > 0
 
 
 def test_the_aot_partition_would_have_missed_this_compile() -> None:
-    """The reason this module exists rather than reusing the AOT key set.
-
-    ``AotCodeCompiler.compile`` never runs on the JIT path, so the AOT ledger
-    prices a JIT compile at a fifth of its cost and calls the rest residual.
-    """
+    """The reason this module exists rather than reusing the AOT key set."""
     aot_members, _o, _raw = spans.phase_delta({}, REAL_DELTA)
     aot_total = sum(aot_members.values())
     jit_members, _ = warm_spans.partition(REAL_DELTA)
 
     assert aot_members["host_compile_s"] == 0.0
     assert aot_total < 0.3 * jit_members["dynamo_compile_s"]
-    # ...and the member that recovers it is the JIT kernel load.
     assert jit_members["kernel_compile_s"] == pytest.approx(3.203)
 
 
 def test_overlays_are_reported_and_never_summed_into_the_partition() -> None:
     members, overlays = warm_spans.partition(REAL_DELTA)
     assert overlays["async_wait_s"] == pytest.approx(2.886)
-    # It legitimately exceeds the wall — it prices the async workers' own CPU.
     assert overlays["parallel_kernel_cpu_s"] > members["dynamo_compile_s"]
     assert set(overlays) & set(members) == set()
 
 
-# ---------------------------------------------------------------------------
-# the ledger
-# ---------------------------------------------------------------------------
-
 class _FakeDynamoUtils:
-    """Stands in for ``torch._dynamo.utils`` so a row can drive the ledger
-    without a compile. The ledger reads the module the production code reads;
-    only the counters are synthetic."""
 
     def __init__(self) -> None:
         self.compilation_time_metrics: Dict[str, List[float]] = {}
@@ -125,7 +95,6 @@ def test_ledger_splits_compile_from_forward_per_job(
 
     with ledger.job("generate/a"):
         fake_dynamo.add(REAL_DELTA)
-    # A second job that hits the in-process cache: real wall, no compile.
     with ledger.job("generate/b"):
         pass
 
@@ -134,11 +103,8 @@ def test_ledger_splits_compile_from_forward_per_job(
     assert totals["warm_jobs"] == 2
     assert totals["warm_jobs_compiling"] == 1
     assert totals["warm_compile_s"] == pytest.approx(5.054)
-    # The residual is the forwards. It is never negative and never invented.
     assert totals["warm_execute_s"] == pytest.approx(
         totals["warm_wall_s"] - totals["warm_compile_s"], abs=0.01)
-    # The synthetic jobs take microseconds, so the ratio has no denominator —
-    # and it is OMITTED rather than reported as "compiled 0 %".
     assert "compile_fraction" not in totals
 
     rows = {r["job"]: r for r in table["jobs"]}
@@ -156,9 +122,6 @@ def test_an_empty_plan_reports_absence_not_zero_cost() -> None:
 def test_a_failing_warm_job_still_lands_in_the_ledger(
     fake_dynamo: _FakeDynamoUtils,
 ) -> None:
-    """The job's exception propagates untouched and its seconds are kept —
-    a mint that died in the warm plan is exactly the one whose spent minutes
-    have to reach the hub (pgw#825's rule, applied to this ledger)."""
     ledger = warm_spans.WarmLedger()
     with pytest.raises(RuntimeError, match="boom"):
         with ledger.job("generate/dies"):
@@ -166,12 +129,4 @@ def test_a_failing_warm_job_still_lands_in_the_ledger(
             raise RuntimeError("boom")
     assert ledger.table()["totals"]["warm_jobs"] == 1
     assert ledger.jobs[0]["compile_s"] == pytest.approx(2.0)
-
-
-# ---------------------------------------------------------------------------
-# the phase rename, and the parent's emission
-# ---------------------------------------------------------------------------
-
-# pgw#1373: case deleted with the module it drove (mint_child).
-
 

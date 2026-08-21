@@ -1,17 +1,4 @@
-"""gw#551 pod validation (H100 SECURE).
-
-Reproduces the te#79 crash shapes at real scale, proves the lane-gate fix
-with alternating traffic, and measures swap performance (pageable-before vs
-pinned-after; RAM->VRAM and disk->VRAM).
-
-Usage on the pod:
-    ARM=before python3 gw551_pod_validate.py   # 0.29.0 (pre-fix) semantics
-    ARM=after  python3 gw551_pod_validate.py   # branch (lane gate + pinned swap)
-
-Both arms drive the REAL Residency machinery; the lanes are diffusers-shaped
-pipelines whose exclusive transformers overcommit the card exactly like the
-merged qwen endpoint (2 x ~38 GiB + ~15 GiB shared encoder on 80 GiB).
-"""
+"""gw#551 pod validation (H100 SECURE)."""
 
 from __future__ import annotations
 
@@ -46,9 +33,6 @@ def big_module(gb: float) -> nn.Module:
 
 
 class ExecutionLanePipe:
-    """diffusers-shaped pipeline: latents are created on the device it
-    BELIEVES it is on (first transformer param); the shared encoder's cuda
-    output feeds the transformer — the two te#79 crash shapes when demoted."""
 
     def __init__(self, transformer: nn.Module, encoder: nn.Module, name: str) -> None:
         self.transformer = transformer
@@ -62,13 +46,13 @@ class ExecutionLanePipe:
     def __call__(self, seed: int | None = None) -> str:
         dev = self.device
         if seed is not None:
-            gen = torch.Generator(device="cuda")  # ctx.generator on a cuda host
+            gen = torch.Generator(device="cuda")
             gen.manual_seed(seed)
             latents = torch.randn(1, WIDTH, device=dev, dtype=DTYPE, generator=gen)
         else:
             latents = torch.randn(1, WIDTH, device=dev, dtype=DTYPE)
         emb = self.encoder[0](latents.to(next(self.encoder.parameters()).device))
-        out = self.transformer[0](emb)  # addmm: cuda emb x lane weights
+        out = self.transformer[0](emb)
         torch.cuda.synchronize()
         return str(out.device)
 
@@ -82,7 +66,7 @@ def build(res) -> tuple["ExecutionLanePipe", "ExecutionLanePipe"]:
     execution_lanes = {"t2i": big_module(EXECUTION_LANE_GB), "edit": big_module(EXECUTION_LANE_GB)}
     log.info("built modules in %.1fs", time.monotonic() - t0)
 
-    shared.cuda()  # shared encoder: resident + refcount-held (gw#479 shape)
+    shared.cuda()
     key = LoadedComponentKey.for_component(
         content_digest="gw551-shared-te", component="text_encoder")
     res.acquire_shared(key, lambda: shared,
@@ -133,7 +117,6 @@ def main() -> None:
                 ref=refs[p.name], residency=res, label=refs[p.name],
                 retry_exc=RetryableError))
 
-    # ---- Part 1: the te#79 crash shapes (requests on the demoted lane). ----
     demoted = t2i if res.tier(refs["t2i"]) is Tier.RAM else edit
     log.info("demoted lane after setup: %s", demoted.name)
     part1 = {}
@@ -153,7 +136,6 @@ def main() -> None:
                 raise
     report["demoted_lane_calls"] = part1
 
-    # ---- Part 2 (after only): alternating traffic, measured swaps. ---------
     if ARM == "after":
         timings = []
         for i in range(3):
@@ -169,7 +151,6 @@ def main() -> None:
         report["alternating"] = timings
         report["transition_stats"] = res.transition_stats()
 
-    # ---- Part 3: raw swap timing on one ~EXECUTION_LANE_GB transformer. --------------
     tr = t2i.transformer
     if ARM == "after":
         from gen_worker.models.pinned_swap import swap_module
@@ -205,7 +186,6 @@ def main() -> None:
         edit.transformer.cpu()
     torch.cuda.empty_cache()
 
-    # ---- Part 4: disk -> VRAM cold path (safetensors, load direct to GPU). -
     if os.environ.get("SKIP_DISK") != "1":
         from safetensors.torch import load_file, save_file
 

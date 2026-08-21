@@ -1,16 +1,3 @@
-"""pgw#1606 — `ctx.load_pipeline` materializes the lane, and PROVES it did.
-
-CPU-only, on a real tiny diffusers pipeline and the real executor module
-classes. Nothing here is mocked: `fp8_scaled_linear_class()` builds the actual
-`_Fp8ScaledLinear` the fp8 lane serves on, so the census is reading the same
-marker production reads.
-
-The point of the file is the pair of refusals. A loader that only reports its
-successes cannot be audited, and the audit behind this issue found four places
-where a lane's numerics could silently be something other than the lane's name.
-Both refusals are exercised, in both directions.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -82,15 +69,9 @@ def _tiny_unet() -> Any:
 
 
 class _Pipe:
-    """A pipeline shaped the way `_denoisers` looks for one."""
 
     def __init__(self, unet: Any) -> None:
         self.unet = unet
-
-
-# --------------------------------------------------------------------------
-# The census reads MARKERS, not dtypes
-# --------------------------------------------------------------------------
 
 
 def test_census_counts_plain_linears_on_an_unquantized_denoiser():
@@ -100,17 +81,13 @@ def test_census_counts_plain_linears_on_an_unquantized_denoiser():
 
 
 def test_census_sees_a_real_fp8_module_by_its_marker_not_its_dtype():
-    """A quantized leaf reports the LOGICAL dtype it emulates, so a dtype
-    census reads per-row fp8 as bf16 and answers 'no fp8 here' about a fully
-    quantized model. The census must key on the structural marker instead —
-    this is `_cozy_w8a8_linear`, set by the executor itself."""
+    """A quantized leaf reports the LOGICAL dtype it emulates, so a dtype census reads per-row fp8 as bf16 and answers 'no fp8 here' about a fully quantized model."""
     from gen_worker.models.w8a8 import fp8_scaled_linear_class
 
     cls = fp8_scaled_linear_class()
     leaf = cls(16, 16, bias=False, compute_dtype=torch.bfloat16,
                static_input_scale=False)
     unet = _tiny_unet()
-    # Replace one real Linear in the tree with a real fp8 module.
     name = next(n for n, m in unet.named_modules()
                 if type(m).__name__ == "Linear")
     parent = unet.get_submodule(name.rsplit(".", 1)[0]) if "." in name else unet
@@ -121,22 +98,15 @@ def test_census_sees_a_real_fp8_module_by_its_marker_not_its_dtype():
     assert M.lane_of(_Pipe(unet)) == FP8_BODY
 
 
-# --------------------------------------------------------------------------
-# THE TWO REFUSALS — and both must be able to fire
-# --------------------------------------------------------------------------
-
-
 def test_a_quantized_lane_over_an_unquantized_pipeline_REFUSES():
-    """The matched-nothing refusal. This is the one that stops a bf16 model
-    from being served, priced and compile-keyed as fp8."""
+    """The matched-nothing refusal."""
     pipe = _Pipe(_tiny_unet())
     with pytest.raises(M.LaneMaterializationError, match="ZERO quantized leaves"):
         M._assert_lane(pipe, _resolved(FP8_BODY), swapped=17)
 
 
 def test_a_baseline_lane_carrying_quantized_leaves_REFUSES():
-    """The other direction, which is just as silent: a baseline lane's
-    pricing, compiled-graph key and executed-lane claim all say bf16."""
+    """The other direction, which is just as silent: a baseline lane's pricing, compiled-graph key and executed-lane claim all say bf16."""
     from gen_worker.models.w8a8 import fp8_scaled_linear_class
 
     unet = _tiny_unet()
@@ -158,10 +128,7 @@ def test_a_baseline_lane_over_a_clean_pipeline_passes():
 def test_the_fp8_arm_refuses_a_tree_that_carries_no_fp8_artifact(
     tmp_path: Path,
 ) -> None:
-    """The ladder resolved fp8 because the deploy said the bytes were staged.
-    Detection reads the safetensors HEADERS, so an empty result means the tree
-    on disk is not the one the contract names — and the honest move is to
-    refuse, not to quietly serve whatever is there."""
+    """The ladder resolved fp8 because the deploy said the bytes were staged."""
     (tmp_path / "unet").mkdir(parents=True)
     with pytest.raises(M.LaneMaterializationError, match="no fp8 artifact"):
         M.materialize(_Pipe(_tiny_unet()), _resolved(FP8_BODY), tree=tmp_path)
@@ -170,12 +137,7 @@ def test_the_fp8_arm_refuses_a_tree_that_carries_no_fp8_artifact(
 def test_the_nvfp4_arm_refuses_the_same_way_the_fp8_arm_does(
     tmp_path: Path,
 ) -> None:
-    """Symmetry is the point. The nvfp4 rung is proven against a FABRICATED
-    document (the flat nvfp4 layout pgw serves has no registered contract —
-    `models/w4a4.py:500-510` says so deliberately, since it is NOT
-    `bfl.nvfp4-preswizzled@1` and conflating them measured LPIPS 1.11), so what
-    can be proven today is that its arm refuses on the same terms rather than
-    being the one path that quietly serves whatever is on disk."""
+    """Symmetry is the point."""
     (tmp_path / "transformer").mkdir(parents=True)
     with pytest.raises(M.LaneMaterializationError, match="no fp4 artifact"):
         M.materialize(_Pipe(_tiny_unet()), _resolved("nvfp4-w4a4-static"),
@@ -183,17 +145,10 @@ def test_the_nvfp4_arm_refuses_the_same_way_the_fp8_arm_does(
 
 
 def test_a_body_with_no_materializer_is_refused_rather_than_ignored():
-    """If the lane table can name a body nothing can build, the table and the
-    materializer disagree and one of them is wrong. Silence would pick the
-    wrong one."""
+    """If the lane table can name a body nothing can build, the table and the materializer disagree and one of them is wrong."""
     with pytest.raises(M.LaneMaterializationError, match="no materializer"):
         M.materialize(_Pipe(_tiny_unet()), _resolved("svdq-fp4-w4a4"),
                       tree=Path("."))
-
-
-# --------------------------------------------------------------------------
-# ctx.load_pipeline
-# --------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -210,9 +165,7 @@ def tiny_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def test_load_pipeline_materializes_the_baseline_lane_and_confesses(
     tiny_tree: Path, caplog: Any
 ) -> None:
-    """End to end on the eager bridge: a resolved baseline lane, a real tree,
-    a real pipeline — and the confession on the log naming the lane, the
-    reason and the rejected rungs."""
+    """End to end on the eager bridge: a resolved baseline lane, a real tree, a real pipeline — and the confession on the log naming the lane, the reason and the rejected rungs."""
     import logging
 
     from diffusers import DDPMPipeline
@@ -242,8 +195,7 @@ def test_load_pipeline_materializes_the_baseline_lane_and_confesses(
 def test_load_pipeline_without_a_resolved_lane_degrades_to_load(
     tiny_tree: Path,
 ) -> None:
-    """A fixture, a derive and the local CLI all build a context with no
-    ladder behind it. No silent default lane — the call just builds."""
+    """A fixture, a derive and the local CLI all build a context with no ladder behind it."""
     from diffusers import DDPMPipeline
 
     from gen_worker.serving.context import DeployBinding, LoadContext
@@ -257,9 +209,7 @@ def test_load_pipeline_without_a_resolved_lane_degrades_to_load(
 def test_the_resolved_lane_selects_its_own_tree_out_of_a_multi_lane_binding(
     tiny_tree: Path,
 ) -> None:
-    """The binding half of the multi-lane fix: `checkpoint_dir` answers the
-    tree for the lane the ladder picked, and for the UPCAST rung it answers
-    the tree whose BYTES are fetched, not the lane's own."""
+    """The binding half of the multi-lane fix: `checkpoint_dir` answers the tree for the lane the ladder picked, and for the UPCAST rung it answers the tree whose BYTES are fetched, not the lane's own."""
     from gen_worker.serving.context import DeployBinding, LoadContext
 
     binding = DeployBinding(
@@ -285,7 +235,6 @@ def test_the_resolved_lane_selects_its_own_tree_out_of_a_multi_lane_binding(
         "the upcast rung fetches the QUANTIZED tree and serves baseline "
         "modules out of it")
 
-    # A single-lane binding carries no map and is unchanged.
     single: LoadContext = LoadContext(
         binding=DeployBinding(checkpoint_ref="t@1", checkpoint_dir=tiny_tree),
         resolved=plain.resolved_lane,

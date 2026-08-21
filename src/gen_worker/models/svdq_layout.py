@@ -1,61 +1,4 @@
-"""nunchaku "v1 single-file" svdq layout -> our SvdqLinear buffers.
-
-Converts an official SVDQuant checkpoint's per-Linear tensors into the layout
-``torch._scaled_mm`` wants, so ONE module serves svdq-fp4 on every Blackwell
-part instead of nunchaku's sm_120a-only kernels.
-
-EVERY tensor in the file is swizzled, not just ``qweight``/``wscales``; reading
-any of them verbatim renders noise. Each inverse below replays ONE named
-deepcompressor forward packer backwards; the citations are exact, at
-``nunchaku-ai/deepcompressor@main``:
-
-  deepcompressor/backend/utils.py
-    MmaWeightPackerBase.__init__            L91-141  (all geometry constants)
-  deepcompressor/backend/nunchaku/utils.py
-    NunchakuWeightPacker.pack_weight        L21-60   -> unpack_qweight
-    NunchakuWeightPacker.pack_micro_scale   L109-151 -> unpack_wscales
-    NunchakuWeightPacker.pack_scale         L62-107  -> unpack_vector
-    NunchakuWeightPacker.unpack_lowrank_weight L184-214 -> unpack_lowrank
-  deepcompressor/backend/nunchaku/convert.py
-    L42-48  lora_down /= smooth  (the runtime branch therefore eats RAW x)
-    L62-71  which tensor gets which name
-
-  qweight   I8   [out, in/2]    mma.sync m16n8k64 FRAGMENT interleave
-  wscales   E4M3 [in/16, out]   pack_micro_scale: (4, 4, 8) row split, NOT
-                                (4, 8, 4) — see unpack_wscales
-  wcscales  BF16 [out]          per-OUTPUT-CHANNEL 2nd-level scale (pack_scale
-                                swizzled), or
-  wtscale   BF16 [1]            per-TENSOR 2nd-level scale (scalar, unswizzled)
-  proj_down BF16 [in, rank]     pack_lowrank_weight(down=True) of [rank, in]
-  proj_up   BF16 [out, rank]    pack_lowrank_weight(down=False) of [out, rank]
-  smooth_factor      BF16 [in]  pack_scale swizzled; DIVIDES the activation,
-                                4-bit branch ONLY
-  smooth_factor_orig BF16 [in]  provenance only — never read at runtime
-  bias      BF16 [out]          pack_scale swizzled
-
-QUANTIZED LOW-RANK BRANCH (cozy extension, LoRaQ arXiv 2604.18117):
-the ``__metadata__`` key ``lowrank_quant`` = ``"int8"`` | ``"fp8_e4m3"``
-declares that the branch pair is stored quantized. Per-block scales, block=32
-along each factor's CONTRACTION dim (LoRaQ §4.3 quantizes by MX blocks of 32;
-at 8 bits their MXFP8e4 edges MXINT8 — Table 3 — so both lanes ship and the
-gate picks). nunchaku cannot serve a quantized-branch file regardless, so
-these four tensors are PLAIN row-major — the 16x16 lowrank fragment pack is
-defined for 16-bit operands only and is not applied:
-
-  proj_down        I8|E4M3 [in, rank]     logical, NOT fragment-packed
-  proj_down_scale  F32 [in/32, rank]      per-block absmax scale
-  proj_up          I8|E4M3 [out, rank]    logical, NOT fragment-packed
-  proj_up_scale    F32 [out, rank/32]     per-block absmax scale
-
-Everything else in the file keeps the nunchaku-v1 layout above; a bf16-branch
-artifact (no ``lowrank_quant`` key) is byte-identical to the historical format.
-
-Decoding lands in a LOGICAL domain first (nibble codes [out, in] + flat scales
-[out, in/16] + row-major vectors) for a reason: nunchaku fuses q/k/v into one
-``to_qkv`` while diffusers keeps ``to_q``/``to_k``/``to_v`` separate, and
-splitting is exact in logical space along the output dim but not in any of the
-packed layouts.
-"""
+"""nunchaku "v1 single-file" svdq layout -> our SvdqLinear buffers, each inverse replaying ONE named deepcompressor forward packer backwards. EVERY tensor in the file is swizzled — reading any verbatim renders noise: qweight I8 [out, in/2] is an mma.sync m16n8k64 fragment interleave; wscales E4M3 [in/16, out] is pack_micro_scale's (4, 4, 8) row split — NOT (4, 8, 4), which reshapes without error and silently permutes channels; wcscales/smooth_factor/bias are pack_scale-swizzled; proj_down/proj_up are pack_lowrank_weight-packed; wtscale is the one unswizzled scalar. smooth_factor DIVIDES the activation feeding the 4-bit branch ONLY — the low-rank branch consumes RAW x (proj_down is pre-divided by smooth at export). Quantized low-rank branch (metadata key lowrank_quant = "int8"|"fp8_e4m3"): those four tensors are PLAIN row-major with per-block-32 scales along each factor's contraction dim — the 16-bit fragment pack is not applied. Decode lands in a LOGICAL domain first because splitting nunchaku's fused to_qkv into diffusers' to_q/to_k/to_v is exact only there."""
 
 from __future__ import annotations
 
@@ -65,45 +8,32 @@ from typing import Any, Optional, Sequence
 from .tensor_layout_contract import unregistered_decode_path
 from .nvfp4_quant import BLOCK, pack_e2m1, to_blocked_scales
 
-# deepcompressor MmaWeightPackerBase geometry, bits=4 / warp_n=128
-# (backend/utils.py L91-141: comp_k = insn_k = mem_k = 256//bits = 64,
-# mem_n = warp_n = 128, reg_k = 32//bits = 8, k_pack_size = n_pack_size = 2,
-# num_k_lanes = 4, num_n_lanes = 8, num_k_packs = 1, num_n_packs = 8).
 _FRAG = dict(mem_n=128, mem_k=64, num_n_packs=8, n_pack_size=2, num_n_lanes=8,
              reg_n=1, num_k_packs=1, k_pack_size=2, num_k_lanes=4, reg_k=8)
 _FWD_PERM = (0, 5, 6, 1, 3, 8, 2, 7, 4, 9)
 
 _WARP_N = 128
 _INSN_K = 64
-_NUM_K_UNROLLS = 2   # NunchakuWeightPacker.__init__ (nunchaku/utils.py L19)
+_NUM_K_UNROLLS = 2
 
-# pack_micro_scale (nunchaku/utils.py L149-151), warp_n=128 => s_pack_size=4,
-# num_s_lanes=32, num_s_packs=1. The 128 output channels of a tile split
-# (s_pack_size=4, 4, 8) with strides (32, 8, 1) — the third factor is 8, not 4.
 _MICRO_FWD_PERM = (0, 5, 1, 4, 3, 2, 6)
-_MICRO_ROW_DIMS = (1, 4, 4, 8)          # (num_s_packs, s_pack_size, 4, 8)
+_MICRO_ROW_DIMS = (1, 4, 4, 8)
 
-# pack_scale, group_size=-1 (nunchaku/utils.py L105-107): the per-vector
-# swizzle applied to wcscales, smooth_factor AND bias.
 _VEC_FWD_PERM = (0, 6, 1, 2, 4, 3, 5)
-_VEC_ROW_DIMS = (1, 8, 2, 4, 2)         # (num_s_packs, num_s_lanes//4,
-                                        #  s_pack_size//2, 4, 2)
+_VEC_ROW_DIMS = (1, 8, 2, 4, 2)
 
-# pack_lowrank_weight (nunchaku/utils.py L153-182): reg_k is 2 for 16-bit
-# operands (32 bits / 16 bits), so both pack tiles are 16x16.
 _LR_REG_N, _LR_REG_K = 1, 2
-_LR_PACK_N = 16                         # n_pack_size * num_n_lanes * reg_n
-_LR_PACK_K = 16                         # k_pack_size * num_k_lanes * reg_k
-_LR_PACK_PERM = (0, 1, 3, 6, 2, 5, 4, 7)    # forward, L181
-_LR_UNPACK_PERM = (0, 1, 4, 2, 6, 5, 3, 7)  # inverse, L208
+_LR_PACK_N = 16
+_LR_PACK_K = 16
+_LR_PACK_PERM = (0, 1, 3, 6, 2, 5, 4, 7)
+_LR_UNPACK_PERM = (0, 1, 4, 2, 6, 5, 3, 7)
 
 E2M1_LUT = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
             -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 
-# Quantized low-rank branch.
-LOWRANK_QUANT_KEY = "lowrank_quant"          # __metadata__ flag
+LOWRANK_QUANT_KEY = "lowrank_quant"
 LOWRANK_QUANT_SCHEMES = ("int8", "fp8_e4m3")
-LOWRANK_QUANT_BLOCK = 32                     # LoRaQ MX block size
+LOWRANK_QUANT_BLOCK = 32
 _INT8_QMAX = 127.0
 _E4M3_QMAX = 448.0
 
@@ -125,16 +55,16 @@ class DecodedLinear:
 
     out_features: int
     in_features: int
-    codes: Any                    # uint8 [out, in], e2m1 nibble codes
-    scales: Any                   # e4m3 [out, in/16], flat row-major
-    second: Any                   # fp32 [out] (per_channel) | [1] (per_tensor)
-    second_kind: str              # "per_channel" | "per_tensor"
+    codes: Any
+    scales: Any
+    second: Any
+    second_kind: str
     rank: int = 0
-    proj_down: Optional[Any] = None   # [in, rank]
-    proj_up: Optional[Any] = None     # [out, rank]
-    smooth_factor: Optional[Any] = None  # [in]
-    bias: Optional[Any] = None        # [out]
-    lowrank_quant: str = "bf16"       # on-disk branch scheme (decoded to bf16)
+    proj_down: Optional[Any] = None
+    proj_up: Optional[Any] = None
+    smooth_factor: Optional[Any] = None
+    bias: Optional[Any] = None
+    lowrank_quant: str = "bf16"
 
 
 @dataclass(frozen=True)
@@ -143,9 +73,9 @@ class SvdqBuffers:
 
     out_features: int
     in_features: int
-    weight: Any            # uint8 [out, in/2] packed e2m1 (even elem LOW nibble)
-    weight_scale: Any      # e4m3 1-D, cuBLAS blocked layout
-    weight_scale_2: Any    # fp32 [1, out] (per_channel) | [1, 1] (per_tensor)
+    weight: Any
+    weight_scale: Any
+    weight_scale_2: Any
     second_kind: str
     rank: int = 0
     proj_down: Optional[Any] = None
@@ -154,25 +84,12 @@ class SvdqBuffers:
     bias: Optional[Any] = None
 
 
-# ---------------------------------------------------------------------------
-# Fragment / swizzle inverses.
-# ---------------------------------------------------------------------------
-
-
 def unpack_qweight(qweight: Any, out_features: int, in_features: int) -> Any:
-    """nunchaku ``qweight`` int8 [out, in/2] -> nibble codes uint8 [out, in].
-
-    Row index in the packed tensor is NOT the output channel — the layout is an
-    ``mma.sync m16n8k64`` fragment interleave (``packed[1,0]``'s low nibble is
-    logical ``(o=48, k=0)``). Replays the packer backwards."""
+    """nunchaku ``qweight`` int8 [out, in/2] -> nibble codes uint8 [out, in]."""
     import torch
 
     g = _FRAG
     n, k = int(out_features), int(in_features)
-    # pack_weight asserts k % (mem_k * num_k_unrolls) with num_k_unrolls = 2
-    # (nunchaku/utils.py L26-29), and pad_weight pads to that (L221), so a real
-    # checkpoint is always [%128, %128]. A looser k % 64 would admit a shape the
-    # exporter cannot emit and the vector swizzles cannot express.
     if n % g["mem_n"] or k % (g["mem_k"] * _NUM_K_UNROLLS):
         raise SvdqLayoutError(
             f"svdq qweight [{n}, {k}] is not a multiple of the padded "
@@ -195,21 +112,7 @@ def _micro_logical(out_f: int, ng: int) -> tuple[int, ...]:
 
 
 def unpack_wscales(wscales: Any, out_features: int, in_features: int) -> Any:
-    """nunchaku ``wscales`` [in/16, out] -> flat row-major [out, in/16].
-
-    Inverse of ``pack_micro_scale`` (deepcompressor nunchaku/utils.py L149-151)::
-
-        scale.view(n // warp_s, num_s_packs, s_pack_size, 4, 8, -1,
-                   insn_k // group_size).permute(0, 5, 1, 4, 3, 2, 6)
-
-    With warp_n=128 that is dims ``(out/128, 1, 4, 4, 8, in/64, 4)``, i.e. a
-    tile's 128 output channels split (4, 4, 8) with strides (32, 8, 1). The
-    upstream store-order table at L136-148 is the check: stored 32-bit word j
-    holds channel ``(j%4)*32 + ((j//4)%4)*8 + (j//16)``.
-
-    (4, 8, 4) reshapes without error and silently permutes output channels
-    within every 128-row tile, giving each channel another channel's block
-    scales; a round trip against our own ``pack_wscales`` cannot catch it."""
+    """nunchaku ``wscales`` [in/16, out] -> flat row-major [out, in/16]."""
     ng = int(in_features) // BLOCK
     out_f = int(out_features)
     if out_f % _WARP_N or ng % 4:
@@ -223,21 +126,7 @@ def unpack_wscales(wscales: Any, out_features: int, in_features: int) -> Any:
 
 
 def unpack_vector(vec: Any, n: int) -> Any:
-    """One nunchaku ``pack_scale(group_size=-1)`` vector -> row-major [n].
-
-    Inverse of deepcompressor nunchaku/utils.py L105-107::
-
-        scale.view(n // warp_s, num_s_packs, num_s_lanes // 4,
-                   s_pack_size // 2, 4, 2, -1).permute(0, 6, 1, 2, 4, 3, 5)
-
-    warp_n=128 => dims ``(n/128, 1, 8, 2, 4, 2, 1)``. Applies to ``wcscales``,
-    ``smooth_factor`` and ``bias`` — every one of them goes through
-    ``pack_scale`` in ``convert_to_nunchaku_w4x4y16_linear_weight`` (L297-308).
-    Upstream's store-order table (L93-104) is the check: stored positions
-    0,1,2,3,... hold logical channels 0,1,8,9,2,3,10,11,...
-
-    ``wtscale`` is exempt: it is reduced to ``scale.view(-1)[0]`` at L313-314,
-    so a scalar carries no swizzle."""
+    """One nunchaku ``pack_scale(group_size=-1)`` vector -> row-major [n]."""
     n = int(n)
     if n % _WARP_N:
         raise SvdqLayoutError(
@@ -249,16 +138,7 @@ def unpack_vector(vec: Any, n: int) -> Any:
 
 
 def unpack_lowrank(weight: Any, *, down: bool) -> Any:
-    """nunchaku ``proj_down``/``proj_up`` -> the plain low-rank factor.
-
-    Verbatim port of deepcompressor ``unpack_lowrank_weight``
-    (nunchaku/utils.py L184-214). Returns ``[rank, in]`` for ``down=True`` and
-    ``[out, rank]`` for ``down=False`` — the shapes the exporter was HANDED,
-    before ``pack_lowrank_weight`` rearranged them into the mma fragment layout
-    and re-viewed the result as ``[in, rank]`` / ``[out, rank]``.
-
-    Reading the stored tensors as plain matrices scrambles the rank-128 branch
-    that carries SVDQuant's entire outlier budget."""
+    """nunchaku ``proj_down``/``proj_up`` -> the plain low-rank factor."""
     c, r = int(weight.shape[0]), int(weight.shape[1])
     if down:
         if r % _LR_PACK_N or c % _LR_PACK_K:
@@ -280,16 +160,6 @@ def unpack_lowrank(weight: Any, *, down: bool) -> Any:
     if down:
         return w.permute(1, 2, 0, 3).contiguous().reshape(r, c)
     return w.permute(0, 2, 1, 3).contiguous().reshape(c, r)
-
-
-# Forward packers — the encode side of the same contract. Used by the producer
-# to emit nunchaku-readable artifacts, and by the tests to synthesize
-# checkpoints in THEIR layout. Serving only ever unpacks.
-#
-# A round trip through these proves BIJECTIVITY, not agreement with nunchaku: a
-# pack/unpack pair can agree with each other and with nothing else. Anything
-# asserting the CONVENTION must check against real upstream bytes — see
-# tests/test_svdq_official_layout_pgw770.py.
 
 
 def pack_qweight(codes: Any) -> Any:
@@ -317,8 +187,7 @@ def pack_wscales(scales: Any, out_features: int, in_features: int) -> Any:
 
 
 def pack_vector(vec: Any, n: int) -> Any:
-    """row-major [n] -> nunchaku ``pack_scale(group_size=-1)`` order. The
-    encode side for ``wcscales``, ``smooth_factor`` and ``bias``."""
+    """row-major [n] -> nunchaku ``pack_scale(group_size=-1)`` order."""
     n = int(n)
     if n % _WARP_N:
         raise SvdqLayoutError(
@@ -328,8 +197,7 @@ def pack_vector(vec: Any, n: int) -> Any:
 
 
 def pack_lowrank(weight: Any, *, down: bool) -> Any:
-    """``[rank, in]`` (down) / ``[out, rank]`` (up) -> nunchaku's stored form.
-    Port of deepcompressor ``pack_lowrank_weight`` (nunchaku/utils.py L153-182)."""
+    """``[rank, in]`` (down) / ``[out, rank]`` (up) -> nunchaku's stored form."""
     g = _FRAG
     if down:
         r, c = int(weight.shape[0]), int(weight.shape[1])
@@ -350,12 +218,7 @@ def pack_lowrank(weight: Any, *, down: bool) -> Any:
     w = w.reshape(c_packs, r_packs, g["n_pack_size"], g["num_n_lanes"],
                   _LR_REG_N, g["k_pack_size"], g["num_k_lanes"], _LR_REG_K)
     w = w.permute(*_LR_PACK_PERM).contiguous()
-    return w.reshape(c, r)   # down -> [in, rank], up -> [out, rank]
-
-
-# ---------------------------------------------------------------------------
-# Quantized low-rank branch. Plain row-major on disk — see header.
-# ---------------------------------------------------------------------------
+    return w.reshape(c, r)
 
 
 def _lowrank_qdtype(scheme: str) -> Any:
@@ -371,7 +234,6 @@ def _lowrank_qdtype(scheme: str) -> Any:
 
 
 def _lowrank_scheme_of(t: Any) -> str:
-    """The scheme a stored factor's dtype declares, or "bf16" for any float."""
     import torch
 
     if t.dtype == torch.int8:
@@ -382,8 +244,6 @@ def _lowrank_scheme_of(t: Any) -> str:
 
 
 def _lowrank_block_absmax(w32: Any, block_dim: int) -> Any:
-    """absmax per block of LOWRANK_QUANT_BLOCK along ``block_dim``:
-    [n0, n1] -> [n0/B, n1] (dim 0) | [n0, n1/B] (dim 1)."""
     if block_dim not in (0, 1):
         raise SvdqLayoutError(f"block_dim must be 0 or 1, got {block_dim}")
     n0, n1 = int(w32.shape[0]), int(w32.shape[1])
@@ -400,12 +260,7 @@ def _lowrank_block_absmax(w32: Any, block_dim: int) -> Any:
 
 def quantize_lowrank(w: Any, *, scheme: str,
                      block_dim: int) -> tuple[Any, Any]:
-    """One low-rank factor -> (quantized tensor, fp32 per-block scales).
-
-    Symmetric absmax per block of :data:`LOWRANK_QUANT_BLOCK` along
-    ``block_dim`` (the factor's contraction dim: 0 for ``proj_down`` [in, rank],
-    1 for ``proj_up`` [out, rank]). Encode side for the producer and the tests;
-    serving only dequantizes."""
+    """One low-rank factor -> (quantized tensor, fp32 per-block scales)."""
     import torch
 
     qdtype = _lowrank_qdtype(scheme)
@@ -446,7 +301,6 @@ def dequantize_lowrank(q: Any, scale: Any, *, block_dim: int) -> Any:
 def _decode_quantized_lowrank(
     tensors: dict[str, Any], out_features: int, in_features: int,
 ) -> tuple[Any, Any, int, str]:
-    """The quantized-branch leg of :func:`decode_linear`."""
     down, up = tensors["proj_down"], tensors["proj_up"]
     dscale = tensors.get("proj_down_scale")
     uscale = tensors.get("proj_up_scale")
@@ -470,11 +324,6 @@ def _decode_quantized_lowrank(
             f"[out_features={out_features}, rank={rank}]")
     return (dequantize_lowrank(down, dscale, block_dim=0),
             dequantize_lowrank(up, uscale, block_dim=1), rank, scheme)
-
-
-# ---------------------------------------------------------------------------
-# Decode / split / pack.
-# ---------------------------------------------------------------------------
 
 
 # NO QUANT RULE NAMES THESE BYTES (pgw#1621). The two v1 handles this decoder
@@ -514,13 +363,7 @@ def _decode_quantized_lowrank(
 def decode_linear(tensors: dict[str, Any], out_features: int,
                   in_features: int, *,
                   lowrank_quant: Optional[str] = None) -> DecodedLinear:
-    """One nunchaku svdq Linear's tensors -> :class:`DecodedLinear`. Raises on
-    a layout we do not understand rather than guessing.
-
-    ``lowrank_quant`` is the artifact-level ``__metadata__`` declaration
-    ("bf16" | "int8" | "fp8_e4m3"): when given, a branch stored in any OTHER
-    scheme refuses — the flag and the bytes must agree. ``None`` decodes
-    whatever the tensors self-describe (dtype is unambiguous, not a guess)."""
+    """One nunchaku svdq Linear's tensors -> :class:`DecodedLinear`."""
 
     missing = [k for k in ("qweight", "wscales") if k not in tensors]
     if missing:
@@ -528,9 +371,6 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
     codes = unpack_qweight(tensors["qweight"], out_features, in_features)
     scales = unpack_wscales(tensors["wscales"], out_features, in_features)
 
-    # wcscales / smooth_factor / bias all leave the exporter through
-    # pack_scale(group_size=-1) and are NOT in channel order on disk.
-    # wtscale escapes it: it is reduced to a scalar (nunchaku/utils.py L313).
     if "wcscales" in tensors:
         if int(tensors["wcscales"].numel()) != int(out_features):
             raise SvdqLayoutError(
@@ -569,7 +409,6 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
                 f"artifact declares lowrank_quant={lowrank_quant!r} but the "
                 f"branch is stored as {scheme!r}")
         if scheme != "bf16":
-            # Quantized branch: plain row-major on disk (see header).
             down, up, rank, scheme = _decode_quantized_lowrank(
                 tensors, out_features, in_features)
         else:
@@ -582,9 +421,6 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
                 raise SvdqLayoutError(
                     f"proj_up {tuple(up.shape)} != "
                     f"[out_features={out_features}, rank={rank}]")
-            # Fragment-packed on disk. unpack_lowrank returns [rank, in] for
-            # the down leg; SvdqLinear/fold_to_dense want [in, rank] for
-            # `x @ down`.
             down = unpack_lowrank(down, down=True).t().contiguous()
             up = unpack_lowrank(up, down=False)
 
@@ -594,7 +430,6 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
     bias = tensors.get("bias")
     if bias is not None:
         bias = unpack_vector(bias.reshape(-1), out_features)
-    # smooth_factor_orig is provenance and is deliberately NOT read.
     return DecodedLinear(
         out_features=int(out_features), in_features=int(in_features),
         codes=codes, scales=scales, second=second, second_kind=second_kind,
@@ -605,13 +440,7 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
 
 def split_decoded(dec: DecodedLinear,
                   sections: Sequence[int]) -> tuple[DecodedLinear, ...]:
-    """Split a FUSED linear (nunchaku's ``to_qkv`` / ``add_qkv_proj``) into the
-    separate diffusers projections, along the output dim.
-
-    Exact: every per-output-channel quantity slices by row, and the low-rank
-    branch splits because ``y_i = (x @ proj_down) @ proj_up_i.T`` — the down
-    projection is SHARED, only ``proj_up`` rows are partitioned. ``in``-sized
-    quantities (``proj_down``, ``smooth_factor``) are shared verbatim."""
+    """Split a FUSED linear (nunchaku's ``to_qkv`` / ``add_qkv_proj``) into the separate diffusers projections, along the output dim."""
     total = sum(int(s) for s in sections)
     if total != dec.out_features:
         raise SvdqLayoutError(
@@ -642,8 +471,7 @@ def split_decoded(dec: DecodedLinear,
 
 
 def to_buffers(dec: DecodedLinear) -> SvdqBuffers:
-    """:class:`DecodedLinear` -> the device buffers SvdqLinear holds (our
-    packed-nibble convention + the cuBLAS blocked scale layout)."""
+    """:class:`DecodedLinear` -> the device buffers SvdqLinear holds (our packed-nibble convention + the cuBLAS blocked scale layout)."""
     second = (dec.second.reshape(1, dec.out_features)
               if dec.second_kind == "per_channel" else dec.second.reshape(1, 1))
     return SvdqBuffers(
@@ -662,8 +490,7 @@ def convert_linear(tensors: dict[str, Any], out_features: int,
 
 
 def dequantize_decoded(dec: DecodedLinear) -> Any:
-    """Reference dequant: ``W ~= e2m1(codes) * scales * (wcscales|wtscale)``.
-    The bf16-fallback weight and the tests' parity reference."""
+    """Reference dequant: ``W ~= e2m1(codes) * scales * (wcscales|wtscale)``."""
     import torch
 
     lut = torch.tensor(E2M1_LUT, dtype=torch.float32, device=dec.codes.device)

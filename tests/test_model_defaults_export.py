@@ -1,12 +1,4 @@
-"""``gen-worker models export`` — the mechanical ``{names, schemas}`` artifact.
-
-Acceptance: the document carries all five family names + the launch LoRA
-overlay names; every schema is a valid draft-2020-12 document; platform
-values and real hub rows round-trip through jsonschema validation; and the
-validator is never stricter than the decoder (partial rows and unknown
-fields pass). Exercised through the real CLI dispatcher, not the function
-alone.
-"""
+"""``gen-worker models export`` — the mechanical ``{names, schemas}`` artifact."""
 
 from __future__ import annotations
 
@@ -27,43 +19,16 @@ def _validator(schema: dict[str, object]) -> jsonschema.Draft202012Validator:
     return jsonschema.Draft202012Validator(schema)
 
 
-#: THE PINNED LAUNCH SET. Hoisted out of the test body (pgw#1432) so a FENCE can
-#: read it: it is the THIRD registration site a new ModelType owes, beside the
-#: `MODEL_TYPES` tuple and `defaults_vocabularies()`, and it was the only one of
-#: the three with nothing asserting it against the registry.
 LAUNCH_SET_NAMES: list[str] = [
     "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
-    # pgw#1422: the two qwen3.6 LLM roots — the first NON-DIFFUSION
-    # vocabularies in the export (max_tokens/temperature/top_p, no steps
-    # and no guidance).
     "qwen3.6-27b-mtp", "qwen3.6-35b-a3b",
-    # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b).
     "flux1", "flux2-klein",
     "qwen-image", "z-image",
-    # pgw#1427 (se#769 wave 3).
     "krea-2", "anima", "ernie",
-    # pgw#1430 (se#769 audio lane): stable-audio covers stable-audio-open
-    # AND foundation-1 (one root, two checkpoint rows); musicgen is its own
-    # root — transformers, autoregressive, no scheduler.
     "stable-audio", "musicgen",
-    # pgw#1420 (se#769): LTX-2 and its 2x spatial latent upsampler — TWO roots,
-    # their headers sharing ZERO keys. Added here by the pgw#1432 fence below,
-    # which named them on the first rebase that brought them in; the pinned
-    # list had gone stale exactly as predicted, one lane later.
     "ltx-2", "ltx-2-upsampler",
-    # pgw#1432 (se#769 vlm lane): InternVL-U is a unified VLM serving
-    # TEXT-TO-IMAGE, so it is an ordinary diffusion vocabulary here despite
-    # the name — one sourced `steps` knob and nothing else, the Rife shape.
     "internvl-u",
-    # pgw#1424 (se#769 3D lane): the two 3D roots, declaring OPPOSITE lane
-    # facts — trellis2 carries a real lane document (trellis2.dit-bf16@1),
-    # hunyuan3d deliberately carries NONE and no MissingContract sentinel
-    # either, because every core model in its repo is a pickle and no
-    # safetensors-shaped document can ever describe one.
     "trellis2", "hunyuan3d",
-    # pgw#1574 (se#798): joycaption, the last endpoint of 26 without a type.
-    # A LLaVA captioner — no lane document, no scheduler, and an AR sampling
-    # vocabulary (max_new_tokens/temperature/top_p) rather than a diffusion one.
     "joycaption",
     "sdxl.lora", "sd15.lora",
 ]
@@ -78,34 +43,10 @@ def test_the_document_names_the_launch_set() -> None:
 
 
 def test_the_pinned_list_above_cannot_go_STALE_against_the_registry() -> None:
-    """pgw#1432 — the FENCE for the list in the test above.
-
-    A new ModelType has THREE registration sites: the ``MODEL_TYPES`` tuple,
-    ``defaults_vocabularies()`` (what the export emitter actually reads), and
-    the pinned ``names`` list in the test above. The first two are fenced —
-    pgw#1001 asserts ``MODEL_TYPES`` ⊆ ``defaults_vocabularies()`` — and the
-    third was not, so a type registered in both fenced sites still shipped a
-    stale export list.
-
-    THAT GAP IS EXPENSIVE OUT OF PROPORTION TO ITS SIZE, because of WHERE it
-    fails. The pinned list lives in the full ``tests`` job, which is red on
-    master for unrelated reasons; a lane that adds a ModelType, sees ``tests``
-    red, and diffs the COUNT against the known baseline concludes "not mine"
-    and enqueues. Only diffing failure NAMES catches it, and nothing forced
-    anyone to.
-
-    So this asserts the pinned list against the registry rather than against a
-    human's memory, and it fails by NAMING the missing family instead of
-    printing a list diff.
-    """
 
     from gen_worker.models.model_types import LORA_OVERLAYS, MODEL_TYPES
 
     registry = {mt.name for mt in MODEL_TYPES} | {ov.name for ov in LORA_OVERLAYS}
-    # Deliberately the CONSTANT, not `export_document()["names"]`. The document
-    # is built from `defaults_vocabularies()`, so comparing against it would
-    # only re-assert pgw#1001's fence and leave the pinned list unguarded —
-    # which is the exact hole this closes.
     pinned = set(LAUNCH_SET_NAMES)
 
     missing = sorted(registry - pinned)
@@ -120,15 +61,6 @@ def test_the_pinned_list_above_cannot_go_STALE_against_the_registry() -> None:
         "MODEL_TYPES/LORA_OVERLAYS — a deleted family left its name behind."
     )
 
-    # MEMBERSHIP IS NOT ENOUGH: the sibling assertion compares LISTS, and the
-    # emitted order is `defaults_vocabularies()` INSERTION order — which is not
-    # the `MODEL_TYPES` tuple order and genuinely differs from it today
-    # (the tuple runs ... Flux2Klein, Krea2, Anima, Ernie, QwenImage, ZImage ...
-    # while the emitter runs ... flux2-klein, qwen-image, z-image, krea-2 ...).
-    # So a set-equal fence stays green while the sibling stays red on a
-    # reordering, which is the same "green fence, red job" split this whole
-    # test exists to close. Checked here so the reordering case ALSO fails by
-    # naming the position rather than printing two long lists.
     emitted = cast("list[str]", export_document()["names"])
     if emitted != LAUNCH_SET_NAMES:
         first = next(
@@ -152,11 +84,8 @@ def test_every_schema_is_valid_2020_12_and_round_trips_platform_values() -> None
         assert isinstance(schema, dict)
         assert schema["title"] == name
         validator = _validator(schema)
-        # The zero-arg platform opinion validates against its own schema
-        # (through JSON, the shape a hub row actually takes).
         full_row = msgspec.json.decode(msgspec.json.encode(cls()))
         validator.validate(full_row)
-        # The hub's JSONB is PARTIAL: the empty object must validate too.
         validator.validate({})
 
 
@@ -166,8 +95,6 @@ def test_the_validator_is_never_stricter_than_the_decoder() -> None:
     sdxl = schemas["sdxl"]
     assert isinstance(sdxl, dict)
     validator = _validator(sdxl)
-    # Partial knob objects and unknown (newer-schema) fields both pass —
-    # the evolution rule says the decoder ignores/fills them.
     validator.validate({"steps": {"default": 8}, "cfg": False})
     validator.validate({"a_future_field": 123})
 
@@ -189,7 +116,6 @@ def test_the_document_is_json_stable(tmp_path: Path) -> None:
     a = json.dumps(export_document(), sort_keys=True)
     b = json.dumps(export_document(), sort_keys=True)
     assert a == b
-    # And JSON-safe end to end: no Python-native residue survives dumps/loads.
     assert json.loads(a) == export_document()
 
 
@@ -230,9 +156,6 @@ def test_the_cli_classifies_contract_stamps(
     assert capsys.readouterr().out.strip() == "minimax-h3"
     assert cli_main(["models", "classify", "minimax-h3.diffusers@1+plain.bf16@1"]) == 0
     assert capsys.readouterr().out.strip() == "minimax-h3"
-    # Unrecognized = unclassified, visibly — the row stays NULL. The SHARED
-    # flux/timm block-spelling fragment is deliberately one of these: it
-    # names no single family, so it classifies nothing (pgw#1393).
     assert cli_main(["models", "classify", "dit.blocks-fused-qkv@1"]) == 1
     assert capsys.readouterr().out.strip() == "unclassified"
     # And the RETIRED v1 handle is the other kind: v2 moved `h3-dit` out of the
@@ -255,14 +178,11 @@ def test_the_cli_decodes_a_row_with_the_worker_verdict(
     assert decoded["cfg"] is False
     assert decoded["positive_preamble"] == "masterpiece, best quality"
 
-    # The LoRA overlay decodes through the same surface.
     assert cli_main(["models", "decode", "sdxl.lora", "--row", '{"scheduler": "lcm"}']) == 0
     assert json.loads(capsys.readouterr().out)["scheduler"] == "lcm"
 
-    # A typed refusal names the field and exits 1.
     assert cli_main(["models", "decode", "sdxl", "--row", '{"steps": "fast"}']) == 1
     assert "steps" in capsys.readouterr().err
 
-    # An unrecognized name is a usage error naming the recognized set.
     assert cli_main(["models", "decode", "flux"]) == 2
     assert "sdxl.lora" in capsys.readouterr().err

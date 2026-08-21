@@ -1,23 +1,3 @@
-"""pgw#1606 acceptance (d) — the ONE reader for hardware/numerics branches in
-an endpoint's `load()`.
-
-Two halves, deliberately:
-
-* **Inline fixtures** — always run, no sibling repo, no torch. They prove the
-  reader finds what it must AND that it does not fire on the shapes that look
-  similar and are fine (a comment saying a model does not branch; a helper
-  named `load` that is not the ruled signature).
-* **The real fleet** — runs only when `serverless-endpoints` is checked out
-  beside this repo. It asserts the EXACT set of offenders the audit named, so
-  the count is a ledger: it may go down as se#816 migrates endpoints, and a
-  reader that quietly stops seeing them goes red rather than green.
-
-The second half is why the first half exists. A cross-repo scan cannot run in
-CI (there are no sibling checkouts there), and the workspace has been bitten
-before by a scan that skipped a missing sibling and still printed green — so
-the reader's own red arm is forced here, on fixtures, where it always runs.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -30,11 +10,6 @@ from gen_worker.serving import lane_fence as F
 
 def _findings(src: str) -> tuple[F.Finding, ...]:
     return F.scan_source(src)
-
-
-# --------------------------------------------------------------------------
-# The reader fires on what it must
-# --------------------------------------------------------------------------
 
 
 def test_it_finds_a_capability_read():
@@ -92,11 +67,6 @@ class M:
     assert [f.name for f in found] == ["sanitize_w8a8_state_dict"]
 
 
-# --------------------------------------------------------------------------
-# ...and does NOT fire on the shapes that merely look like it
-# --------------------------------------------------------------------------
-
-
 def test_a_clean_load_is_clean():
     assert _findings("""
 class M:
@@ -108,9 +78,7 @@ class M:
 
 
 def test_a_comment_explaining_that_it_does_NOT_branch_is_not_a_branch():
-    """Parsed, never grepped. A substring check would refuse exactly the
-    classes that documented themselves best — which is the same reason
-    `load_marks_compile` parses."""
+    """Parsed, never grepped."""
     assert _findings('''
 class M:
     def load(self, ctx):
@@ -122,9 +90,7 @@ class M:
 
 
 def test_a_feature_branch_is_not_a_dtype_branch():
-    """sdxl's FreeU branch is a FEATURE decision the author owns. The fence
-    must not sweep it in — an over-broad fence gets disabled, and then it
-    protects nothing."""
+    """sdxl's FreeU branch is a FEATURE decision the author owns."""
     assert _findings("""
 class M:
     def load(self, ctx):
@@ -153,11 +119,6 @@ class M:
     assert len(found) == 1, "load(self, <anything>) is the ruled two-arg shape"
 
 
-# --------------------------------------------------------------------------
-# The reader's own red arm, forced
-# --------------------------------------------------------------------------
-
-
 def test_the_refusal_names_the_rows_and_points_at_the_replacement():
     found = _findings("""
 class M:
@@ -177,23 +138,8 @@ def test_a_non_function_node_is_answered_not_crashed_on():
     assert F.load_branches_on_hardware(None) == ()
 
 
-# --------------------------------------------------------------------------
-# The real fleet — a LEDGER, and it may only go down
-# --------------------------------------------------------------------------
-
-
 _FLEET = Path.home() / "cozy" / "serverless-endpoints"
 
-#: MEASURED 2026-08-20 against the fleet, per endpoint: (branches inside
-#: `load()`, branches anywhere in the endpoint package). se#816 drives both
-#: columns to zero; this table is the countdown and it may only shrink.
-#:
-#: 🔴 READ THE SECOND COLUMN. It is the reason acceptance (d)'s wording —
-#: "zero dtype/quant branches in endpoint `load()` bodies" — is very nearly
-#: VACUOUS: 21 of the 23 branches live ONE FUNCTION outside `load()`, and four
-#: of these five endpoints already pass the `load()`-scoped scan today with
-#: every branch intact. A fence written to the letter of (d) would have gone
-#: green on the day it landed and protected nothing.
 FLEET_LEDGER: dict[str, tuple[int, int]] = {
     "anima": (0, 5),
     "joycaption": (2, 3),
@@ -250,12 +196,7 @@ def test_the_fleet_ledger_matches_the_audit_and_may_only_shrink():
 
 @pytest.mark.skipif(not _FLEET.is_dir(), reason="no sibling checkout")
 def test_the_load_scoped_fence_is_measurably_weaker_than_the_module_one():
-    """The finding itself, as an assertion — so that if someone later narrows
-    the fence back to `load()` to make it pass, this goes red and says why.
-
-    This is not pedantry. The workspace's own recurring defect is a guard that
-    is green because of its scope rather than because of the tree, and it is
-    invisible from either side once it lands."""
+    """The finding itself, as an assertion — so that if someone later narrows the fence back to `load()` to make it pass, this goes red and says why."""
     counts = _fleet_counts()
     in_load = sum(c[0] for c in counts.values())
     anywhere = sum(c[1] for c in counts.values())

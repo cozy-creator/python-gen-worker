@@ -1,13 +1,4 @@
-"""Publish ProducedFlavor outputs to Tensorhub — THE producer publish contract.
-
-A conversion / dataset / training endpoint writes files locally, calls
-``publish_flavors(ctx, flavors)``, and returns a result struct. Each flavor's
-``path`` (file or directory) becomes ONE Tensorhub publish against the
-destination repo (explicit ``destination_repo=`` or the job payload's
-reserved ``destination.ref`` field). Nothing publishes implicitly.
-
-Publishes over the chunked sha256 CAS (``HubClient.publish_v2``).
-"""
+"""Publish ProducedFlavor outputs to Tensorhub — THE producer publish contract."""
 
 from __future__ import annotations
 
@@ -26,53 +17,19 @@ from .produced import ProducedFlavor
 from .writer import assert_one_file_per_component
 from ..models.file_layout import validate_file_layout
 
-# pgw#1300 deleted the ``placement_*`` OVERRIDE SURFACE, not just its defaults:
-# the block no longer carries an SM allow-list, an SM floor or an engine list,
-# so there is nothing left to override. Producers still set these — e.g.
-# `training-endpoints/conversion/src/conversion/quant/modelopt.py:1263` writes
-# `placement_sm_allowed` — and an attribute pgw does not read must not land in
-# `checkpoints.metadata` as prose. They are dropped here until those producers
-# stop writing them; then this tuple goes too.
 _DEAD_PLACEMENT_ATTRS = ("placement_sm_allowed", "placement_sm_min", "placement_engines")
 
 
-#: A base row is bf16/fp16/fp32 — 16 bits or wider. Anything narrower is on a
-#: quantization lane, and only its producer knows which one (fp4 bytes are
-#: svdq-fp4 or nvfp4-w4a4 depending on how they were made).
 _BASE_STORAGE_BITS = 16
 
 
 class PrecisionClassRefusal(ValidationError):
-    """A publish whose precision class cannot be recorded as the hub reads it.
-
-    A18 / pgw#1319 replaced ``classify_flavor_token`` — which guessed the class
-    from a producer-local label — with a DECLARATION. A guess that missed
-    published a row with no class at all, and the hub's fallback for an
-    unstamped row is `ClassBase`: an fp8 checkpoint served as though it were
-    bf16, invisibly, for as long as nobody looked (te#225 found two such rows
-    live). So the failure mode is now a refusal at the call site, before a byte
-    moves, naming the attribute to declare.
-    """
+    """A publish whose precision class cannot be recorded as the hub reads it."""
 
 
 def _precision_class_block(
     attrs: Mapping[str, str], produced_dtypes: Mapping[str, str],
 ) -> dict[str, Any] | None:
-    """The ONE surviving key of ``checkpoints.metadata["placement"]``.
-
-    pgw#1300 / th#2055: card admission is gone — pod purchase depends only on
-    the endpoint owner's (GPU, lane) ladder — but `precision_class` survives,
-    because tensorhub's `precision.StoredPrecisionOf` reads it as its strongest
-    evidence for a stored class where no tensor-layout contract is proven.
-
-    It is the producer's own ``precision_class`` attribute and nothing else.
-    Base rows stay unstamped: the hub's own fallback for an unstamped row is
-    `ClassBase`, so a block would restate it. Two refusals stand where the
-    token classifier used to guess — a class outside the vocabulary, and narrow
-    bytes nobody classified. ``produced_dtypes`` is read off the published
-    tree's own safetensors headers, so the second one is decided by the bytes
-    rather than by anything the producer says about them.
-    """
     cls = str(attrs.get("precision_class", "") or "").strip().lower()
     if cls and cls not in PRECISION_CLASSES:
         raise PrecisionClassRefusal(
@@ -116,10 +73,6 @@ def _flavor_files(flavor: ProducedFlavor) -> list[CommitFile]:
 
 
 def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None]:
-    """The restatement default: the classification stamps of the checkpoint
-    being converted, read from the hub's resolve of ``ctx.source``. Best-effort —
-    on any failure the publish proceeds unstamped and the hub's
-    classification gate stays the enforcement."""
     info = getattr(ctx, "source", None) or {}
     ref = str((info.get("ref") if isinstance(info, dict) else "") or "").strip()
     if not ref:
@@ -132,12 +85,6 @@ def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None
         if th is None:
             return None, None
         resolved = resolve_repo(th, base_url=client.base_url, token=client.token)
-        # `distilled_status` tells us whether false is evidence or merely the
-        # wire default. Never turn unknown into an authored false on the
-        # derived checkpoint. Only "classified" is evidence — the hub's own
-        # rule (`modelfamily.StoredCheckpointFacts`), and an EMPTY status is
-        # one of the unknowns: the resolve route omits the key whenever the
-        # stored column is empty, so "" means nothing measured the axis.
         distilled = (
             resolved.distilled
             if resolved.distilled_status == "classified"
@@ -153,29 +100,10 @@ def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None
 
 
 def _journal_beside(flavor: ProducedFlavor) -> Path:
-    """The publish journal for one produced flavor.
-
-    NEXT TO the tree, never inside it: ``files_from_tree`` walks a flavor
-    directory wholesale, and a journal written into it would publish itself as
-    repo content on the next flavor. One journal per produced-output directory
-    also means one file holding every flavor's in-flight session, which is
-    exactly the set a successor should try to resume.
-    """
     return Path(flavor.path).parent / JOURNAL_NAME
 
 
 def _publish_leg(dest: str, artifact: str, stage: str, facts: Mapping[str, Any]) -> None:
-    """One typed `convert_publish` event per LEG of the publish protocol.
-
-    Without these, the highest-volume producer on the platform emits ZERO
-    `worker_activity_events` legs for a multi-hour publish, and "declared 590
-    objects and is moving 37 GB" is indistinguishable from "was refused before
-    a byte left". Mirrors ``fleet_compiled_graphs._publish_leg``.
-
-    ``artifact`` is the produced path's own name — what tells one leg of an
-    N-artifact export from another. It was the flavor token, which A18 deleted;
-    a filename is the thing that actually exists, and it is always present.
-    """
     detail = " ".join(f"{k}={v}" for k, v in sorted(dict(facts).items()))
     _activity.emit_event(
         "convert_publish", f"repo={dest} artifact={artifact}: {detail}",
@@ -183,21 +111,7 @@ def _publish_leg(dest: str, artifact: str, stage: str, facts: Mapping[str, Any])
 
 
 def destination_release(ctx: Any, explicit: str = "", dest: str = "") -> str:
-    """THE release a producer's output attaches to: the explicit argument, else
-    the invoking request's ``destination.release``.
-
-    th#1987 made `release` mandatory at the hub's DECLARE, so a producer that
-    can name none has a caller-side defect. Refusing here — before a byte
-    moves — names the field the invoke must carry instead of costing the run a
-    multi-GB upload and a 400.
-
-    th#2202: ``dest`` is the repo actually being published into, and a SCRATCH
-    one DERIVES its release. Since th#1901 the hub rewrites EVERY producer's
-    destination to `<org>/_job-<request-id>` on the wire, so this is the
-    ordinary case, not the exception — and demanding a release the caller has
-    no payload member to state made the whole scalar-destination surface
-    unpublishable. Empty is returned and the hub cuts.
-    """
+    """THE release a producer's output attaches to: the explicit argument, else the invoking request's ``destination.release``."""
     rel = str(explicit or "").strip()
     if rel:
         return rel
@@ -217,17 +131,7 @@ def destination_release(ctx: Any, explicit: str = "", dest: str = "") -> str:
 
 
 def destination_ref(ctx: Any, explicit: str = "") -> str:
-    """THE bare ``owner/repo`` a producer publishes into: the explicit
-    argument, else the invoking request's ``destination.ref``.
-
-    ONE vocabulary with ``executor._producer_destination_repo``: the reserved
-    struct's key is ``ref``, and tag/flavor/checkpoint selectors are stripped
-    so a caller that passed ``owner/repo:tag`` still addresses the repo.
-
-    pgw#1305: it reads the SAME ``destination={ref, release}`` shape
-    :func:`destination_release`'s refusal asks for — the two halves of one
-    reserved struct may not disagree about its key.
-    """
+    """THE bare ``owner/repo`` a producer publishes into: the explicit argument, else the invoking request's ``destination.ref``."""
     ref = str(explicit or "").strip()
     if not ref:
         info = getattr(ctx, "destination", None) or {}
@@ -257,31 +161,7 @@ def publish_flavors(
     distilled: bool | None = None,
     journal_path: Path | None = None,
 ) -> list[CommitResult]:
-    """Publish each ProducedFlavor as one commit. ``destination_repo`` falls
-    back to the reserved-name ``ctx.destination`` payload field.
-
-    ``mode`` defaults to ``"replace"``: a producer's flavor export is a
-    complete tree by definition, and merging with the repo's prior :latest
-    ships a quantized checkpoint carrying the base weights. Pass
-    ``mode="merge"`` explicitly only for deliberate overlay publishes (e.g. a
-    vae swap on top of an existing tree).
-
-    ``release`` names the ALREADY-CUT release each flavor attaches to
-    (th#1980), and it is MANDATORY (th#1987) — it falls back to the invoking
-    request's ``destination.release`` and refuses when neither states one, so
-    the producer is told at the call site instead of after the upload. Every
-    flavor of one export lands in the same release and is told apart there by
-    its contract. Publishing never cuts a release, so an unknown identifier is
-    a typed ``HubReleaseNotFoundError`` — cut it and publish again, never
-    re-upload. It is a first-class field on the declare request: stating it in
-    ``metadata`` publishes inert prose the hub never reads.
-
-    ``journal_path`` is where the in-flight ``publish_id`` is recorded so a
-    retry on this pod re-uploads instead of re-casting. Pass the produced
-    tree's own directory; omit it and the publish is unrecoverable."""
-    # The hub-write declaration, checked before anything is read or uploaded
-    # (pgw#1294). Undeclared code never had a grant minted for it, so this is
-    # that refusal arriving at the call site instead of after the bytes moved.
+    """Publish each ProducedFlavor as one commit; destination_repo falls back to ctx.destination. mode defaults to "replace" — a flavor export is a complete tree, and merging with the repo's prior :latest ships a quantized checkpoint carrying the base weights. release is MANDATORY and names an ALREADY-CUT release (publishing never cuts one; unknown id is a typed HubReleaseNotFoundError). journal_path records the in-flight publish_id so a retry re-uploads instead of re-casting — omit it and the publish is unrecoverable."""
     require = getattr(ctx, "_require_publish_declaration", None)
     if callable(require):
         require("publish_flavors")
@@ -289,12 +169,6 @@ def publish_flavors(
     release = destination_release(ctx, release, dest)
 
     client = HubClient.from_ctx(ctx)
-    # A v2 publish mints a new identity and inherits nothing, so a publish into
-    # a classified repo must restate objective/distilled. Default: restate the
-    # SOURCE checkpoint's hub stamps — this producer just derived the flavors
-    # from exactly that source, and quantize/fuse/cast preserve
-    # objective/distillation, so the restatement is a first-hand declaration
-    # rather than silent inheritance. Explicit caller values win.
     if objective is None or distilled is None:
         src_objective, src_distilled = _source_stamps(ctx, client)
         if objective is None:
@@ -303,25 +177,10 @@ def publish_flavors(
             distilled = src_distilled
     results: list[CommitResult] = []
     for flavor in flavors:
-        # OUR producers never emit shards, and this is the last place a
-        # conversion / training-promote / compiled graph-publish output can be checked
-        # before it becomes somebody's checkpoint. NOT a universal publish gate
-        # — a user's own sharded upload never reaches this function; it goes to
-        # the hub's upload API and is accepted as given. Checked rather than
-        # assumed because save_pretrained shards on its own.
         assert_one_file_per_component(
             Path(flavor.path), producer=f"publish_flavors[{dest}]")
-        # Same seam, same argument: our producers do not get to publish a
-        # component NARROWER than its families.facts pin. Here there is no
-        # source tree to compare against — this path is our own output, not a
-        # mirror — so the pin is enforced outright, and the per-component
-        # precision is published either way.
         produced_dtypes = verify_produced_tree(Path(flavor.path))
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
-        # Worker-addable provenance stamp fields. Producers declare quant
-        # identity in the flavor attribute bag; it rides the commit's
-        # `provenance` object onto the checkpoint's node stamp (parents /
-        # derivation_op come from the orchestrator's token claim, never here).
         provenance = {
             k: attrs[k]
             for k in ("quantization_method", "quantization_library")
@@ -331,36 +190,19 @@ def publish_flavors(
         meta = {**(dict(metadata) if metadata else {}), **attrs}
         for k in _DEAD_PLACEMENT_ATTRS:
             meta.pop(k, None)
-        # It rides its own typed field (and is PROVEN there); a metadata copy
-        # would be an unproven second statement of the same thing.
         meta.pop("artifact_contract", None)
         if placement:
             meta["placement"] = placement
         if produced_dtypes:
             meta["component_dtypes"] = dict(produced_dtypes)
-        # v2 is safe here for the reason v2 requires: every file is a real
-        # local file (`_flavor_files` walks the produced tree), so each digest
-        # is PROVEN from bytes in hand rather than asserted. There is no
-        # auto-select and no env knob — naming the protocol at the call site is
-        # what makes "which producers are on v2 today?" answerable by reading
-        # the code instead of by sampling traffic.
-        #
-        # A `merge` onto a prior blake3 manifest is a typed refusal
-        # (`mixed_algorithm_manifest`), not a silent partial; `mode` here
-        # defaults to "replace", so the common path is unaffected.
         results.append(client.publish_v2(
             destination_repo=dest,
             files=_flavor_files(flavor),
             release=release,
             mode=mode,
-            # The conversion producer's own legs. (The per-object liveness beat
-            # lives in tensorfs's transfer progress callback, so it
-            # cannot be lost by a caller who forgets to pass a callback.)
             on_stage=functools.partial(
                 _publish_leg, dest, Path(flavor.path).name),
             journal_path=journal_path or _journal_beside(flavor),
-            # When the producer declares one, the hub PROVES it against the
-            # header before recording it.
             artifact_contract=attrs.get("artifact_contract", ""),
             dtype=attrs.get("dtype", ""),
             file_layout=validate_file_layout(attrs.get("file_layout", "")),

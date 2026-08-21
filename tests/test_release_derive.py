@@ -1,12 +1,3 @@
-"""pgw#1370: `gen-worker release derive` over real author-shaped code.
-
-Integration through the actual CLI codepath: a main_v2-shaped endpoint
-(stock diffusers pipeline, lanes-only surface) against a CONFIG-ONLY
-checkpoint tree, on CPU, no weights, no GPU. Coverage is auto-enumerated
-from the payload schemas; the document is byte-reproducible across a
-subprocess fence; every refusal names its cause.
-"""
-
 from __future__ import annotations
 
 import json
@@ -19,8 +10,6 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 pytest.importorskip("transformers")
-# se#786/pgw#1462: the derive imports the VENDORED torchcg (the miner's copy),
-# which ships in this wheel — so this is a hard import, never a skip.
 import gen_worker._vendor.torchcg  # noqa: E402,F401
 
 FIXTURES = Path(__file__).resolve().parent / "release_fixtures"
@@ -36,9 +25,6 @@ def config_only_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tiny_tree.save_config_only(tmp_path_factory.mktemp("tiny-config-only"))
 
 
-#: A derive STATES the compile stack it traced under, and reads it from the
-#: endpoint's uv.lock (pgw#1489) — so every derive here states one. Restating
-#: the installed set instead is exactly what that issue deleted.
 LOCK = (
     'version = 1\n'
     '\n[[package]]\nname = "torch"\nversion = "2.13.0"\n'
@@ -91,7 +77,6 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
     (lane,) = document["graphs"]["lanes"]
     assert lane["contract"] == "sd15.diffusers@1+plain.f32@1"
     assert lane["unobserved_targets"] == []
-    # 2 Size values x {CFG batch-2 generate, batch-1 turbo} = 4 graph specializations.
     assert len(lane["graphs"]) == 4
     assert {record["target"] for record in lane["graphs"]} == {"unet"}
     batches = sorted(
@@ -99,17 +84,8 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
     )
     assert batches == [1, 1, 2, 2]
 
-    # pgw#1384: the DEFAULT-parameter class LEADS the document -- the serving
-    # hole list inherits document order and the miner mints in it, so the
-    # class an all-defaults request needs is the first one published.
-    # GenerateInput defaults size=LARGE (64px; the tiny VAE has ONE block, so
-    # the latent equals the pixel size) under the platform (cfg-on) row: the
-    # first row is the batch-2 latent-64 class even though SMALL precedes
-    # LARGE in enum declaration order.
     assert lane["graphs"][0]["ingress"]["inputs"][0]["shape"] == [2, 4, 64, 64]
 
-    # The exported defaults schema: the successor of the hub-embedded
-    # per-family defaults registry (one schema per release, endpoint-owned).
     schema = document["checkpoint_defaults_schema"]
     assert schema is not None
     rendered = json.dumps(schema)
@@ -119,14 +95,7 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
 def test_document_is_byte_stable_across_a_subprocess_fence(
     config_only_tree: Path, tmp_path: Path, lockfile: Path
 ) -> None:
-    """Two FRESH interpreters derive identical bytes.
-
-    The production artifact is what the CLI process emits, so the fence
-    compares subprocess against subprocess. (In-process determinism is
-    covered separately below; comparing in-process against subprocess would
-    make this test assert that every OTHER test sharing this interpreter
-    left torch's global state untouched, which is not this test's claim.)
-    """
+    """Two FRESH interpreters derive identical bytes."""
 
     first = tmp_path / "first.json"
     again = tmp_path / "again.json"
@@ -190,39 +159,18 @@ def test_a_never_called_target_fails_red_not_silent(
 def test_an_endpoint_that_marks_nothing_derives_zero_graphs(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """pgw#1599: `eager_only=` is deleted, so this fixture declares a REAL
-    lane and simply calls no `ctx.compile`. Zero graphs is an OBSERVATION of
-    a trace that ran, never a keyword the author wrote."""
 
     out = tmp_path / "eager.json"
     assert _derive("eager_endpoint", config_only_tree, out) == 0
     document = json.loads(out.read_bytes())
     assert document["graphs"]["lanes"] == []
-    # The DEFAULTS SCHEMA is now emitted (`{}` for a model type declaring no
-    # Defaults) rather than `null`. `null` meant "there is no model class
-    # here", which `eager_only=` made true by hiding one; now the class IS the
-    # subject and the schema is read off its model type like any other.
     assert document["checkpoint_defaults_schema"] == {}
-    # The class is still the release's SUBJECT — its model type travels. Under
-    # `eager_only=` the keyword hid the class from the subject search, and the
-    # document came out shaped like a weightless one.
     assert document["model_type"] is not None
 
 
 def test_graph_identity_does_not_come_from_the_declaring_MODULE(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """The control the deleted derived-lane fixture used to provide.
-
-    pgw#1599 deletes `lanes=()` and the `derived.<type>@1` identity with it,
-    so "same graphs, different lane NAME" is no longer expressible — every
-    lane names a real document. What the twin fixture still measures is the
-    half that matters downstream: two independently declared modules with the
-    same program derive the SAME graph hashes. `cg-graph-v1` hashes the
-    canonical trace + ingress + passes; nothing about the module or the lane's
-    name enters it, which is why a contract can be re-authored without
-    rekeying a single artifact.
-    """
 
     declared = tmp_path / "declared.json"
     twin = tmp_path / "twin.json"
@@ -265,20 +213,13 @@ def test_graph_identity_does_not_come_from_the_declaring_MODULE(
 def test_an_unmarked_endpoint_traces_and_reports_nothing_to_compile(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """The middle state: traced, and the author marked no compile target.
-
-    pgw#1599: it declares a REAL lane (every class does) and marks no compile
-    target, so `load` RUNS and zero graphs is a MEASUREMENT. There is no
-    keyword that could have asserted it instead.
-    """
+    """The middle state: traced, and the author marked no compile target."""
 
     out = tmp_path / "unmarked.json"
     assert _derive("unmarked_endpoint", config_only_tree, out) == 0
     document = json.loads(out.read_bytes())
     assert document["graphs"]["lanes"] == []
     assert document["lane_contracts"] == {}
-    # It is NOT weightless and NOT eager-by-declaration: the entrypoint's
-    # envelope is published exactly as a compiled endpoint's is.
     assert set(document["entrypoints"]) == {"analyze"}
     assert document["entrypoints"]["analyze"]["model_slots"] == {
         "model": "UnmarkedModel"
@@ -288,13 +229,7 @@ def test_an_unmarked_endpoint_traces_and_reports_nothing_to_compile(
 def test_binding_enumeration_reaches_adapter_and_cfg_arms(
     config_only_tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """is_trace is DELETED: arm coverage is the derive's binding enumeration.
-
-    The fixture's guidance-free batch-1 arm is reachable two ways -- a fake
-    riding adapter, and the cfg-flipped defaults variant -- and the
-    impossible combination (adapter stacked on a distilled checkpoint) is
-    REFUSED by the author's own ValidationError and skipped, counted.
-    """
+    """is_trace is DELETED: arm coverage is the derive's binding enumeration."""
 
     from gen_worker import Adapter, DistillationAdapter
     from gen_worker.models import SDXL
@@ -307,7 +242,6 @@ def test_binding_enumeration_reaches_adapter_and_cfg_arms(
     assert isinstance(fake, Adapter)
     assert fake.defaults is not None and fake.defaults.cfg is False
     assert fake.defaults.steps.default == 4
-    # A distillation SLOT enumerates its own KIND (the typed-takeover guard).
     marked = _fake_adapter(SDXL, DistillationAdapter)
     assert isinstance(marked, DistillationAdapter)
 
@@ -320,12 +254,6 @@ def test_binding_enumeration_reaches_adapter_and_cfg_arms(
 def test_the_compile_stack_is_the_env_identity_and_only_the_compiler_is_in_it(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """pgw#1489: the derive stamps the lock's COMPILE STACK, not its closure.
-
-    Two lockfiles differing only in a package no compiler can see stamp the
-    SAME env; a torch bump stamps a different one. Env identity never leaks
-    into graph identity either way.
-    """
 
     stack_only = tmp_path / "a.lock"
     stack_only.write_text(LOCK)
@@ -346,7 +274,6 @@ def test_the_compile_stack_is_the_env_identity_and_only_the_compiler_is_in_it(
     assert documents["stack"]["graphs"]["stack"] != documents["bump"]["graphs"]["stack"]
     assert ["diffusers", "0.39.0"] not in documents["stack"]["graphs"]["stack"]
     assert ["torch", "2.13.0"] in documents["stack"]["graphs"]["stack"]
-    # Env identity never leaks into GRAPH identity: same graphs every time.
     graphs = [
         [record["graph"] for lane in document["graphs"]["lanes"]
          for record in lane["graphs"]]
@@ -368,25 +295,12 @@ def test_a_derive_with_no_lockfile_refuses_instead_of_restating_the_env(
     assert "pass `lockfile=`" in capsys.readouterr().err
 
 
-# --- the sys.path priming the derive shares with discovery -------------------
-
-
 def test_the_derive_cli_can_resolve_its_own_imports() -> None:
-    """pgw#1440 REGRESSION. `_run_derive` imported `_ensure_sys_path` from
-    `cli/run.py`, which pgw#1373 (`cd46c957`) deleted with the v1 SDK, so
-    `gen-worker release derive` raised `ModuleNotFoundError` on the second
-    line of its handler — every derive, on every tree.
-
-    Asserted by RESOLVING the handler's imports rather than by grepping for
-    the module: the failure was an import that could not be satisfied, so the
-    check has to be one that a second dead import would also fail.
-    """
     from gen_worker.cli import release as release_cli
 
     source = Path(release_cli.__file__).read_text()
     assert "cli.run" not in source and "from .run import" not in source
 
-    # The real gate: run the handler's own import block in a clean process.
     proc = subprocess.run(
         [sys.executable, "-c",
          "from gen_worker.discovery.discover import prime_sys_path;"
@@ -398,13 +312,7 @@ def test_the_derive_cli_can_resolve_its_own_imports() -> None:
 
 
 def test_priming_puts_src_ahead_of_root_and_repeats_cleanly(tmp_path: Path) -> None:
-    """The ORDER is load-bearing and was nearly lost in the extraction.
-
-    Both inserts go to position 0, so writing them root-then-src yields
-    `src` ahead of `root` — which is what a `src/`-layout endpoint needs.
-    Swapping the two statements reverses the precedence silently, and the
-    only thing that catches it is an assertion on the resulting order.
-    """
+    """The ORDER is load-bearing and was nearly lost in the extraction."""
     from gen_worker.discovery.discover import prime_sys_path
 
     root = tmp_path / "endpoint"
@@ -414,15 +322,14 @@ def test_priming_puts_src_ahead_of_root_and_repeats_cleanly(tmp_path: Path) -> N
         prime_sys_path(root)
         assert sys.path.index(str(root / "src")) < sys.path.index(str(root))
         before = list(sys.path)
-        prime_sys_path(root)  # idempotent: no duplicate entries
+        prime_sys_path(root)
         assert sys.path == before
     finally:
         sys.path[:] = saved
 
 
 def test_priming_omits_a_src_dir_that_does_not_exist(tmp_path: Path) -> None:
-    """A flat endpoint has no `src/`, and a path entry to a missing directory
-    is a silent import-order hazard rather than a harmless no-op."""
+    """A flat endpoint has no `src/`, and a path entry to a missing directory is a silent import-order hazard rather than a harmless no-op."""
     from gen_worker.discovery.discover import prime_sys_path
 
     root = tmp_path / "flat"
@@ -439,19 +346,6 @@ def test_priming_omits_a_src_dir_that_does_not_exist(tmp_path: Path) -> None:
 def test_the_blob_keeps_ONE_device_story_and_carries_no_weights(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """pgw#1465: the graph's device and the state dict's device must AGREE.
-
-    `_demote_fakes_to_meta` rewrote every fake tensor to META. Its rationale
-    was real -- a phantom storage must not make the archive claim bytes it
-    does not have -- but the cure destroyed the device, and pgw#1458 made the
-    device load-bearing. One blob then told TWO device stories (1,922 graph
-    node metas on cuda:0 against 686 state-dict entries on meta), AOTI reads
-    both, and every sd1.5 class died on `FakeTensorDeviceMismatchError`.
-
-    So this reads the blob's OWN recorded devices -- the same archive metadata
-    a CPU-side check can read without a GPU -- and asserts they are the single
-    device the trace ran on, plus that no real weight rode along.
-    """
 
     import json
     import zipfile
@@ -494,20 +388,6 @@ def test_the_blob_keeps_ONE_device_story_and_carries_no_weights(
             f"artifact carries structure and the miner binds real weights"
         )
 
-
-# se#786 / pgw#1462 / th#2192 — THE BARE RELEASE ENV, AND THE PROGRAM BLOB.
-#
-# Measured 2026-08-19 in `serverless-endpoints/sdxl`'s own venv (the release
-# env, built from its uv.lock): `release derive` refused with
-# "torchcg is a release dependency there ... gen-worker deliberately does not
-# bundle it", and NO endpoint in the fleet pins torchcg. Every other production
-# site — `serving/mint_child.py`, `serving/host.py`, `serving/hub_store.py` —
-# imports `gen_worker._vendor.torchcg`, so an endpoint-pinned torchcg would let
-# the publish-time TRACE and the serving-time MINT run different compilers.
-#
-# The blocker below is the whole test: this env HAS both distributions
-# installed as dev dependencies, so without it the assertion would pass on a
-# derive that never touched the vendored copy.
 
 _BLOCKER = """
 import sys
@@ -552,16 +432,6 @@ def test_derive_runs_in_a_release_env_with_no_top_level_torchcg_or_tensorfs(
     )
     assert completed.returncode == 0, completed.stderr[-4000:]
 
-    # WHAT THIS USED TO ASSERT, AND WHY IT CHANGED. It read `record["program"]`
-    # and required a non-empty blob address on every graph — th#2192's
-    # consequence, on the premise that the address was the miner's fetch key.
-    # tcg#67 deleted the field: `torch.export.save` emits different bytes on
-    # different machines for the same traced graph (pgw#1462p2 measured 14/14
-    # graph identities reproducing across boxes and 0/14 blob digests), so the
-    # address was machine-scoped and made the DOCUMENT unportable. The property
-    # worth asserting survived the field: `--graph-cas` is still the only thing
-    # that banks the programs, and a derive that banks none is still unusable
-    # locally. It is just keyed by IDENTITY now.
     document = json.loads(out.read_bytes())
     graphs = [
         record["graph"]
@@ -571,18 +441,12 @@ def test_derive_runs_in_a_release_env_with_no_top_level_torchcg_or_tensorfs(
     assert graphs, document["graphs"]
     assert all(g.startswith("cg-graph-v1-") for g in graphs), graphs
 
-    # THE ADDRESS-FREE CONTRACT, FENCED POSITIVELY rather than by deletion: a
-    # stale assertion that merely stops running proves nothing, so this asserts
-    # the field is ABSENT. Reintroducing it anywhere upstream fails here.
     assert not any(
         "program" in record
         for lane in document["graphs"]["lanes"]
         for record in lane["graphs"]
     ), document["graphs"]
 
-    # And the bytes ARE banked, under the identity — the address-free
-    # replacement for "the document names a blob". This is the assertion that
-    # still catches a derive run without `--graph-cas`.
     from gen_worker._vendor.tensorfs import LocalCAS
     from gen_worker._vendor.torchcg.store import LocalGraphStore
 
@@ -593,12 +457,7 @@ def test_derive_runs_in_a_release_env_with_no_top_level_torchcg_or_tensorfs(
 
 
 def test_the_blocker_itself_can_go_red(config_only_tree: Path, tmp_path: Path) -> None:
-    """The negative control: with the blocker armed, the OLD import fails.
-
-    Without this, a blocker that silently stopped blocking would make the test
-    above pass for the wrong reason — the exact fixture-instead-of-emitter hole
-    that kept th#2192 green.
-    """
+    """The negative control: with the blocker armed, the OLD import fails."""
     import os
 
     sitecustomize = tmp_path / "sitecustomize.py"
@@ -617,15 +476,7 @@ def test_the_blocker_itself_can_go_red(config_only_tree: Path, tmp_path: Path) -
 def test_the_default_lockfile_is_the_one_BESIDE_the_endpoint(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
-    """The production shape: no `--lockfile`, and the lock is found anyway.
-
-    tensorhub's builder runs `gen-worker release derive --module M --checkpoint
-    /derive/checkpoint` with no lockfile flag, in an image whose `WORKDIR /app`
-    holds `pyproject.toml` and `uv.lock` (docs/dockerfile.md). `--dir` defaults
-    to that cwd, so the endpoint's own lock is beside it — which is the ONLY
-    reason a required lockfile does not break the fleet's derive path. This
-    reproduces that layout with real files rather than trusting the Dockerfile.
-    """
+    """The production shape: no `--lockfile`, and the lock is found anyway."""
 
     endpoint = tmp_path / "app"
     endpoint.mkdir()

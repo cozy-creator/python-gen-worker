@@ -1,16 +1,3 @@
-"""pgw#1308 step ⑥: what `ensure_snapshot` publishes is a PROJECTED tree.
-
-Everything else in the mixed-CAS program is machinery that a pod never meets
-until this one call stops materializing. pgw#1330 proved every consumer works
-over a projected tree built by a FIXTURE; these arms run the production
-chokepoint and assert the tree it publishes is that tree.
-
-The measurement that matters is single residency (pgw#1296(a)). It is stated
-as bytes on disk from `du`, against a control arm that materializes the same
-manifest, because "the diff removed a copy" is a reading of a diff and not a
-measurement.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -44,9 +31,6 @@ from gen_worker.models.volume_verify import (
     verify_projection,
 )
 
-#: Big enough that ~128 B stubs are noise against it, small enough to stay a
-#: unit test. A fixture too small to reach the path is its own failure mode
-#: (DONE-STANDARD, "fixture shape").
 _SHARD_TENSOR_BYTES = 1 << 20
 
 
@@ -55,7 +39,6 @@ def _ref() -> TensorhubRef:
 
 
 def _write_model(source: Path) -> None:
-    """A diffusers-shaped model: JSON, a tokenizer, media, and two shards."""
 
     source.mkdir(parents=True, exist_ok=True)
     (source / "model_index.json").write_text(
@@ -86,11 +69,6 @@ def _write_model(source: Path) -> None:
 
 
 def _resident(base: Path, source: Path) -> WorkerResolvedRepo:
-    """Admit every file as one CAS object and describe it as tensorhub would.
-
-    Resident on purpose: the transfer is pgw#781/#1289's subject, and the
-    publish is this file's.
-    """
 
     cas = LocalCAS(base)
     files: list[WorkerResolvedRepoFile] = []
@@ -111,7 +89,6 @@ def _resident(base: Path, source: Path) -> WorkerResolvedRepo:
 
 
 def _du(root: Path) -> int:
-    """Bytes the files under ``root`` occupy. Never follows a symlink."""
 
     total = 0
     for directory, _subdirs, names in os.walk(root, followlinks=False):
@@ -136,7 +113,7 @@ def published(tmp_path: Path) -> dict[str, Path]:
 
 
 def test_the_chokepoint_publishes_symlinks_and_stubs(published: dict[str, Path]) -> None:
-    """Every file in the tree is a pointer. Nothing in it is a copy."""
+    """Every file in the tree is a pointer."""
 
     tree, source = published["tree"], published["source"]
     seen: set[str] = set()
@@ -156,7 +133,6 @@ def test_the_chokepoint_publishes_symlinks_and_stubs(published: dict[str, Path])
         else:
             assert path.is_symlink(), f"{rel} is a copy, not a symlink"
             assert projection.object_of_symlink(path) is not None
-            # A symlink is only useful if reading through it is the file.
             assert path.read_bytes() == original.read_bytes()
     assert seen == {
         p.relative_to(source).as_posix() for p in source.rglob("*") if p.is_file()
@@ -164,11 +140,7 @@ def test_the_chokepoint_publishes_symlinks_and_stubs(published: dict[str, Path])
 
 
 def test_no_tensor_byte_is_at_a_filesystem_path(published: dict[str, Path]) -> None:
-    """The claim the whole layout exists to make true, asserted directly.
-
-    Not "the shards are stubs" — every regular file anywhere in the published
-    tree is under one block, so there is nowhere for a tensor to be hiding.
-    """
+    """The claim the whole layout exists to make true, asserted directly."""
 
     tree = published["tree"]
     for path in sorted(tree.rglob("*")):
@@ -179,12 +151,6 @@ def test_no_tensor_byte_is_at_a_filesystem_path(published: dict[str, Path]) -> N
 
 
 def test_a_resident_model_occupies_disk_ONCE(published: dict[str, Path]) -> None:
-    """pgw#1296(a), as bytes rather than as a reading of the diff.
-
-    The control arm is the same manifest written out as real files. Both
-    numbers come from the same walk, so the ratio is not an artifact of two
-    different measurements.
-    """
 
     base, tree = published["base"], published["tree"]
     snapshot = projection.require_projection(tree, why="pgw#1308 residency arm")
@@ -200,10 +166,9 @@ def test_a_resident_model_occupies_disk_ONCE(published: dict[str, Path]) -> None
     materialized_total = projected_total + _du(control)
 
     model = sum(entry.size_bytes for entry in snapshot.manifest.files)
-    assert objects >= model  # the bytes, stored once
+    assert objects >= model
     assert projected_total < objects + 4096
     assert materialized_total > objects + model - 4096
-    # The claim, stated the way the issue states it.
     assert projected_total / model < 1.01
     assert materialized_total / model > 1.99
 
@@ -211,12 +176,7 @@ def test_a_resident_model_occupies_disk_ONCE(published: dict[str, Path]) -> None
 def test_the_published_tree_resolves_to_its_own_manifest(
     published: dict[str, Path]
 ) -> None:
-    """`resolve_projection` needs the ref the chokepoint pins, and gets it.
-
-    Every stub-aware consumer in this repo recovers `(cas, manifest)` from a
-    bare directory path this way. A tree published without its ref would be an
-    `UnresolvedProjection` at every one of them.
-    """
+    """`resolve_projection` needs the ref the chokepoint pins, and gets it."""
 
     tree = published["tree"]
     snapshot = projection.resolve_projection(tree)
@@ -238,13 +198,9 @@ def test_weights_read_byte_exact_out_of_the_published_tree(
     snapshot = projection.require_projection(tree, why="pgw#1308 read-back arm")
     for component in ("transformer", "vae"):
         rel = f"{component}/diffusion_pytorch_model.safetensors"
-        # `read_entry` reassembles from the CAS objects AND verifies the
-        # result against the manifest's whole-file digest, so a byte-exact
-        # match here is a statement about the store, not about a copy.
         assert read_entry(snapshot.cas, snapshot.entry(rel)) == (
             (source / rel).read_bytes()
         )
-    # And the tensors themselves, by name, with no file anywhere behind them.
     with snapshot.open_tensors() as reader:
         for component in ("transformer", "vae"):
             view = reader[f"{component}.weight"]
@@ -257,13 +213,6 @@ def test_weights_read_byte_exact_out_of_the_published_tree(
 def test_boot_verification_of_the_published_tree_is_clean(
     published: dict[str, Path]
 ) -> None:
-    """The pgw#1330 defect, closed against the PRODUCTION publish.
-
-    `store._verify_snapshot_tree` runs on first use every boot. Against a
-    materialized tree it hashes; against this one it must verify structurally
-    and report REAL work, or the vacuity guard scores a clean pass as
-    untrustworthy and the pod quarantines the model it just published.
-    """
 
     tree = published["tree"]
     snapshot = projection.require_projection(tree, why="pgw#1308 boot arm")
@@ -277,14 +226,12 @@ def test_boot_verification_of_the_published_tree_is_clean(
         for entry in snapshot.manifest.files
     ]
     projected, material = split_projection_targets(targets)
-    # The empty file is the one entry that holds its own (zero) bytes.
     assert {t.path.name for t in material} <= {"empty.txt"}
     report = verify_projection(projected)
     assert report.ok
     assert report.projected == len(projected)
     assert report.hashed == 0
 
-    # And the whole-tree verdict the store reaches on first use every boot.
     ok, bad = ModelStore._verify_snapshot_tree(
         object.__new__(ModelStore), tree, None
     )
@@ -294,20 +241,11 @@ def test_boot_verification_of_the_published_tree_is_clean(
 def test_the_headroom_prediction_is_what_the_projection_writes(
     tmp_path: Path
 ) -> None:
-    """pgw#1296(b): the disk check sizes the tree the projector writes.
-
-    `projection_write_bytes` mirrors `tensorfs.project._project_entry` arm for
-    arm, and a mirror drifts. So it is compared against a real `du` of a real
-    projection over a manifest carrying all four arms — stub, empty file,
-    symlink, and the reassembled chunked non-tensor file that is the only one
-    costing its whole size.
-    """
 
     base = tmp_path / "store"
     cas = LocalCAS(base)
     source = tmp_path / "source"
     _write_model(source)
-    # Give the chunked arm a file whose contents exist only as several objects.
     parts = [fixture.varied(2048, 3), fixture.varied(2048, 5)]
     for part in parts:
         cas.put_bytes(part)
@@ -351,7 +289,6 @@ def test_the_headroom_prediction_is_what_the_projection_writes(
     project_snapshot(cas, manifest, tree, symlinks=True)
 
     assert predicted == tree_bytes(tree)
-    # And it is nowhere near the model, which is the point of the restatement.
     assert predicted < sum(e.size_bytes for e in manifest.files) // 4
 
 

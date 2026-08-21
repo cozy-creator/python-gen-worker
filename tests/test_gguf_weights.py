@@ -1,18 +1,4 @@
-"""A layer stack holding GGML block bytes computes what dequantized-eager does.
-
-pgw#1498: the storage layer — punned leaves, the install path, the dequant-ahead
-budget dial, and the two byte sources (a `.gguf` container, and the CAS).
-
-The claim under test is the whole lane: weights RESIDE quantized, each forward
-decodes its own weight, and the answer is the one you would get from a model
-whose weights had been dequantized up front — with an attached LoRA on top, and
-with the block bytes still byte-identical afterwards.
-
-Everything is synthesized here (``gguf.quants.quantize`` over random values) and
-everything runs on CPU. No community checkpoint is downloaded: multi-GB weights
-must not transit this machine, and nothing about cast-per-forward needs a GPU to
-be true.
-"""
+"""A layer stack holding GGML block bytes computes what dequantized-eager does."""
 
 from __future__ import annotations
 
@@ -43,9 +29,6 @@ from gen_worker.models.gguf_torch import (
     structural_base,
 )
 
-#: The types `gguf.quants.quantize` implements. The K-quants' DECODE is pinned
-#: bit-exactly in tests/test_ggml_decode.py; the packing side is
-#: llama-quantize's, so the stack here is built from what we can pack locally.
 LINEAR_QTYPE = "Q4_0"
 CONV_QTYPE = "Q5_1"
 EMBED_QTYPE = "Q8_0"
@@ -70,11 +53,6 @@ class Tiny(nn.Module):
 
 
 def _pack(weight: Any, name: str) -> tuple[QuantizedTensor, Any]:
-    """``(installable block bytes, what they decode to)`` for one weight.
-
-    A GGML row is the flattened per-output row — that is why the logical shape
-    has to travel as metadata rather than being read off the byte array.
-    """
     qtype = gguf.GGMLQuantizationType[name]
     rows = weight.detach().numpy().reshape(weight.shape[0], -1).astype(np.float32)
     raw = gguf.quants.quantize(rows, qtype)
@@ -85,7 +63,6 @@ def _pack(weight: Any, name: str) -> tuple[QuantizedTensor, Any]:
 
 
 def _stack() -> tuple[Tiny, Tiny, dict[str, object]]:
-    """A punned model and the dequantized-eager model it must agree with."""
     torch.manual_seed(1498)
     reference = Tiny().to(torch.float32)
 
@@ -100,8 +77,6 @@ def _stack() -> tuple[Tiny, Tiny, dict[str, object]]:
         param = reference.get_parameter(key)
         packed, dense = _pack(param, qname)
         tensors[key] = packed
-        # The reference holds exactly what the blocks decode to, so any
-        # difference in the outputs is the LANE's, never the quantizer's.
         with torch.no_grad():
             param.copy_(dense)
     for key in ("fc1.bias", "fc2.bias", "conv.bias"):
@@ -121,9 +96,6 @@ def _inputs() -> tuple[Any, Any]:
     return torch.randint(0, 64, (3, 5)), torch.randn(2, 8, 6, 6)
 
 
-# ---------------------------------------------------------------------------
-
-
 def test_cast_per_forward_matches_dequantized_eager() -> None:
     quantized, reference, _ = _stack()
     ids, img = _inputs()
@@ -133,8 +105,6 @@ def test_cast_per_forward_matches_dequantized_eager() -> None:
 def test_every_quantized_leaf_kind_was_punned() -> None:
     quantized, _, _ = _stack()
     assert sorted(gguf_leaves(quantized)) == ["conv", "embed", "fc1", "fc2"]
-    # The pun keeps identity: isinstance still answers for the offload rung,
-    # LoRA branch targeting and dtype introspection.
     assert isinstance(quantized.fc1, nn.Linear)
     assert isinstance(quantized.conv, nn.Conv2d)
     assert structural_base(quantized.fc1) is nn.Linear
@@ -154,9 +124,7 @@ def test_weights_stay_quantized_in_memory() -> None:
 
 
 def test_a_dtype_cast_cannot_touch_the_blocks() -> None:
-    """``model.to(dtype=...)`` is the fp8-storage lane's standing hazard. Here
-    it is structurally impossible: ``nn.Module._apply`` casts only
-    floating-point tensors, and block bytes are uint8."""
+    """``model.to(dtype=...)`` is the fp8-storage lane's standing hazard."""
     quantized, reference, _ = _stack()
     before = {n: m.weight.clone() for n, m in gguf_leaves(quantized).items()}
     quantized.to(torch.bfloat16)
@@ -166,26 +134,18 @@ def test_a_dtype_cast_cannot_touch_the_blocks() -> None:
 
 
 def test_installing_a_whole_stack_leaves_the_model_with_float_parameters() -> None:
-    """diffusers reads ``ModelMixin.dtype`` off the first floating-point
-    PARAMETER, and a denoiser that casts to ``self.dtype`` inside forward breaks
-    when that walk finds nothing. Installing a checkpoint is exactly the case
-    that would demote every dense tensor to a buffer."""
+    """diffusers reads ``ModelMixin.dtype`` off the first floating-point PARAMETER, and a denoiser that casts to ``self.dtype`` inside forward breaks when that walk finds nothing."""
     quantized, _, _ = _stack()
     floats = [n for n, p in quantized.named_parameters() if p.is_floating_point()]
     assert "fc1.bias" in floats and "norm.weight" in floats
-    # …and the block bytes are NOT parameters.
     assert not any(p.dtype is torch.uint8 for p in quantized.parameters())
 
-    # Past the dial a leaf is an ordinary dense layer and looks like one.
     gguf_torch.dequant_ahead(quantized, surplus_bytes=math.inf, dtype=torch.float32)
     assert "fc1.weight" in dict(quantized.named_parameters())
 
 
 def test_shape_does_not_lie() -> None:
-    """The reference makes ``.shape`` report the DEQUANTIZED shape so ComfyUI's
-    shape-sniffing model detection keeps working. We report the storage shape,
-    because every residency walk in the worker reads buffer shapes and the lie
-    would over-report a quantized denoiser by the compression ratio."""
+    """The reference makes ``.shape`` report the DEQUANTIZED shape so ComfyUI's shape-sniffing model detection keeps working."""
     quantized, reference, _ = _stack()
     stored = quantized.fc1.weight
     logical = getattr(quantized.fc1, gguf_torch.SPEC_ATTR)["weight"].shape
@@ -195,33 +155,19 @@ def test_shape_does_not_lie() -> None:
 
 
 def test_the_lane_runs_at_the_production_compute_dtype() -> None:
-    """Everything else here pins numerics in fp32. Production serves bf16.
-
-    RED before the fix: the punned forward cast the weight to the leaf's
-    declared ``compute_dtype`` while the activation kept its own, so a bf16
-    leaf fed an fp32 activation raised `RuntimeError: Input type (float) and
-    bias type (c10::BFloat16) should be the same`. The activation decides;
-    ``compute_dtype`` answers only for an Embedding, whose int64 indices carry
-    no float dtype to read.
-    """
+    """Everything else here pins numerics in fp32."""
     quantized, reference, _ = _stack()
     for leaf in gguf_leaves(quantized).values():
         leaf.compute_dtype = torch.bfloat16
     ids, img = _inputs()
 
-    # Mixed state on purpose: bf16 leaves, fp32 activations. The op runs in the
-    # activation's dtype and the embedding — whose input is int64 — in bf16.
     got = quantized(ids, img)
     assert torch.isclose(got.float(), reference(ids, img), rtol=5e-2, atol=5e-2)
 
-    # …and a fully bf16 stack, which is what production actually feeds.
     all_bf16 = quantized(ids, img.to(torch.bfloat16))
     assert all_bf16.dtype is torch.bfloat16
     assert torch.isclose(all_bf16.float(), reference(ids, img),
                          rtol=5e-2, atol=5e-2)
-
-
-# --- LoRA -----------------------------------------------------------------
 
 
 def _patch(out_features: int, in_features: int, rank: int = 4) -> LoraPatch:
@@ -244,10 +190,7 @@ def test_attached_lora_equals_the_same_delta_merged_into_dense_weights() -> None
 
 
 def test_attaching_a_lora_leaves_the_quantized_grid_byte_identical() -> None:
-    """The reconciliation with the refuse-adapters-on-a-quantized-grid rule,
-    asserted rather than argued: the blocks the refusal protects are not
-    written. Nothing here can round a delta into a 4-bit grid, because nothing
-    here writes to the grid."""
+    """The reconciliation with the refuse-adapters-on-a-quantized-grid rule, asserted rather than argued: the blocks the refusal protects are not written."""
     quantized, _, _ = _stack()
     before = quantized.fc1.weight.clone()
     attach_lora(quantized.fc1, [_patch(64, 32)])
@@ -288,9 +231,6 @@ def test_a_dense_tensor_refuses_the_attach_path() -> None:
         attach_lora(quantized.norm, [_patch(32, 32)])
 
 
-# --- the budget dial -------------------------------------------------------
-
-
 def test_a_full_surplus_decodes_everything_once_and_answers_identically() -> None:
     """The surplus tier: same outputs, no per-forward decode left."""
     quantized, reference, _ = _stack()
@@ -319,31 +259,26 @@ def test_a_zero_surplus_leaves_every_weight_quantized() -> None:
 
 
 def test_a_partial_surplus_graduates_largest_first_and_shrinks_the_transient() -> None:
-    """The dial between the endpoints. Largest first is the ordering that also
-    lowers the transient headroom a fit plan must reserve, which is the reason
-    it is the ordering."""
+    """The dial between the endpoints."""
     quantized, reference, _ = _stack()
     ids, img = _inputs()
     before = quantized(ids, img)
     assert gguf_torch.peak_transient_bytes(quantized, dtype=torch.float32) == 64 * 32 * 4
 
-    # Buy the three 2048-element weights (embed, fc1, fc2) and not the 512-element
-    # conv, so what is left is strictly smaller than what was bought.
     price = sum(64 * 32 * 4 - getattr(quantized, n).weight.numel()
                 for n in ("embed", "fc1", "fc2"))
     done = gguf_torch.dequant_ahead(quantized, surplus_bytes=price,
                                     dtype=torch.float32)
 
     assert sorted(done) == ["embed.weight", "fc1.weight", "fc2.weight"]
-    assert gguf_torch.quantized_bytes(quantized) > 0  # conv still pays per forward
+    assert gguf_torch.quantized_bytes(quantized) > 0
     assert gguf_torch.peak_transient_bytes(quantized, dtype=torch.float32) == 16 * 8 * 2 * 2 * 4
     assert torch.equal(quantized(ids, img), before)
     assert torch.equal(quantized(ids, img), reference(ids, img))
 
 
 def test_lora_semantics_are_identical_on_both_sides_of_the_dial() -> None:
-    """A weight decoded at load takes the SAME attach path as one decoded per
-    forward — the tier must not be observable through the adapter."""
+    """A weight decoded at load takes the SAME attach path as one decoded per forward — the tier must not be observable through the adapter."""
     per_forward, reference, _ = _stack()
     at_load, _, _ = _stack()
     gguf_torch.dequant_ahead(at_load, surplus_bytes=math.inf, dtype=torch.float32)
@@ -364,8 +299,7 @@ def test_lora_semantics_are_identical_on_both_sides_of_the_dial() -> None:
 
 
 def test_the_dial_never_requantizes() -> None:
-    """Turning the dial up is one-way by construction: there is no path back to
-    block bytes, which is the rung.py rule (the ladder SELECTS artifacts)."""
+    """Turning the dial up is one-way by construction: there is no path back to block bytes, which is the rung.py rule (the ladder SELECTS artifacts)."""
     quantized, _, _ = _stack()
     gguf_torch.dequant_ahead(quantized, surplus_bytes=math.inf,
                              dtype=torch.float32)
@@ -375,25 +309,16 @@ def test_the_dial_never_requantizes() -> None:
 
 
 def test_the_fuse_gate_refuses_a_gguf_leaf_instead_of_inventing_a_grid() -> None:
-    """The other half of the reconciliation, at the site of the check.
-
-    ``adapter_fidelity.grid_of_module`` reads the grid off the module's
-    ``weight``. On a GGML leaf that is BLOCK BYTES, so the unguarded answer
-    would be a "uint8 grid" — a fuse gated against a fiction. It refuses.
-    """
+    """The other half of the reconciliation, at the site of the check."""
     from gen_worker.models import adapter_fidelity
 
     quantized, _, _ = _stack()
     with pytest.raises(ValueError, match="no fuse into a quantized grid"):
         adapter_fidelity.grid_of_module(quantized.fc1,
                                         path=adapter_fidelity.PATH_FUSE)
-    # …and an ordinary Linear is untouched by the new arm.
     plain = nn.Linear(4, 4)
     assert adapter_fidelity.grid_of_module(
         plain, path=adapter_fidelity.PATH_FUSE).dtype == "float32"
-
-
-# --- install refusals ------------------------------------------------------
 
 
 def test_a_leaf_with_no_decode_forward_refuses_block_bytes() -> None:
@@ -426,13 +351,8 @@ def test_installed_blocks_do_not_alias_the_source() -> None:
     assert model.fc1.weight.data_ptr() != packed.blocks.data_ptr()
 
 
-# --- the .gguf edge --------------------------------------------------------
-
-
 def _write_gguf(path: Path, raw: np.ndarray, qtype: Any) -> None:
     writer = gguf.GGUFWriter(str(path), arch="llama")
-    # `raw_shape` is the BYTE shape; the writer derives the logical shape from
-    # the block geometry and stores it in GGUF's reversed `ne` order.
     writer.add_tensor("fc1.weight", raw, raw_shape=raw.shape, raw_dtype=qtype)
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
@@ -450,8 +370,7 @@ def _packed_weight() -> tuple[np.ndarray, Any, Any]:
 
 
 def test_a_written_gguf_round_trips_through_the_edge_reader(tmp_path: Path) -> None:
-    """A real container, written and read back — the community-ingest edge,
-    proved without downloading anything."""
+    """A real container, written and read back — the community-ingest edge, proved without downloading anything."""
     raw, qtype, dense = _packed_weight()
     path = tmp_path / "tiny.gguf"
     _write_gguf(path, raw, qtype)
@@ -472,14 +391,6 @@ def test_a_written_gguf_round_trips_through_the_edge_reader(tmp_path: Path) -> N
 
 
 def test_the_served_path_reads_block_bytes_out_of_the_cas(tmp_path: Path) -> None:
-    """The NORMALIZED path, Paul 2026-08-19: the store hands back per-tensor
-    block bytes and the serving side never sees a container.
-
-    tensorfs' ``gguf-v1`` planner already cuts the file into one region per
-    tensor, and a ``TensorView`` already carries the GGML type and the block
-    geometry. Nothing is dequantized on the way in — the bytes that land in the
-    buffer are the bytes that were ingested.
-    """
     from gen_worker._vendor.tensorfs import LocalCAS
     from cas_fixture import ingest_repository
     from gen_worker._vendor.tensorfs.tensors import open_tensors

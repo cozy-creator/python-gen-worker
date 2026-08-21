@@ -1,16 +1,4 @@
-"""The arena residency layout and its (path, offset, len) triples.
-
-The layout arithmetic and the triple resolution decide every byte the arena
-ever maps, and both are decidable without a card. What is left for the GPU is
-the driver's own behaviour, which is varena#1/#2's ground and is verified by
-`benchmarks/arena_facade_pgw1507.py`.
-
-Real ``nn.Module`` trees and real safetensors files throughout — no mocks. A
-mock leaf would agree with whatever the layout believes about it, which is the
-one thing worth checking.
-
-# pgw#1507: the varena facade behind pgw#1497's planner contract.
-"""
+"""The arena residency layout and its (path, offset, len) triples."""
 
 from __future__ import annotations
 
@@ -43,23 +31,16 @@ GRAN = DEFAULT_GRANULARITY
 MIB = 1 << 20
 
 
-# ---------------------------------------------------------------------------
-# Real trees
-# ---------------------------------------------------------------------------
-
-
 class Pyramid(nn.Module):
     """A real tree with big leaves, small leaves and a parent that owns a buffer."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.big = nn.Linear(2048, 2048, bias=False)  # 16 MiB fp32
-        self.mid = nn.Linear(1024, 1024, bias=False)  # 4 MiB
-        self.odd = nn.Linear(1024, 768, bias=False)  # 3 MiB — half a chunk over
-        self.small = nn.Linear(16, 16, bias=False)  # 1 KiB
+        self.big = nn.Linear(2048, 2048, bias=False)
+        self.mid = nn.Linear(1024, 1024, bias=False)
+        self.odd = nn.Linear(1024, 768, bias=False)
+        self.small = nn.Linear(16, 16, bias=False)
         self.norm = nn.LayerNorm(16)
-        # A tensor on a module that HAS children: never a leaf, so no region
-        # can own it. pgw#1497 measured what happens when nobody places it.
         self.register_buffer("position_ids", torch.arange(16))
 
     def forward(self, x: Any) -> Any:  # pragma: no cover
@@ -79,19 +60,8 @@ def specs_for(module: nn.Module, name: str = "root") -> List[Tuple[str, List[Any
     return out
 
 
-# ---------------------------------------------------------------------------
-# The layout
-# ---------------------------------------------------------------------------
-
-
 def test_every_candidate_region_is_granularity_aligned_and_disjoint():
-    """The invariant the whole design rests on.
-
-    ``unback`` releases the chunks WHOLLY inside its request. Two regions
-    sharing a chunk could therefore never release it — and if one were in
-    flight while the other unbacked, the shared chunk would be pulled out from
-    under a live kernel. Alignment is what makes per-leaf residency safe.
-    """
+    """The invariant the whole design rests on."""
     layout = plan_layout(specs_for(Pyramid()), granularity=GRAN, min_stream_bytes=MIB)
     seen = []
     for region in layout.regions:
@@ -107,19 +77,13 @@ def test_the_forced_set_pays_one_chunk_remainder_not_one_each():
     """Small leaves are packed into the core, which is the point of the core."""
     layout = plan_layout(specs_for(Pyramid()), granularity=GRAN, min_stream_bytes=MIB)
     core = layout.by_name()[CORE_REGION]
-    # `small` (1 KiB), `norm` (2 x 64 B) — three leaves, one region, one chunk.
     assert set(layout.core_names) == {"root.small", "root.norm"}
     assert core.offset == 0 and core.span == GRAN
     assert core.weight_bytes == 16 * 16 * 4 + 16 * 4 * 2
 
 
 def test_the_granularity_tax_is_charged_to_the_planner_not_discovered_later():
-    """``plan.resident_bytes`` must equal the bytes the arena really maps.
-
-    ``odd`` is 3 MiB and occupies two 2 MiB chunks. A planner priced in raw
-    weight bytes would believe 3 MiB is on the card when 4 MiB is — an error
-    in the direction that OOMs.
-    """
+    """``plan.resident_bytes`` must equal the bytes the arena really maps."""
     layout = plan_layout(specs_for(Pyramid()), granularity=GRAN, min_stream_bytes=MIB)
     odd = layout.by_name()["root.odd"]
     assert odd.weight_bytes == 1024 * 768 * 4
@@ -128,7 +92,6 @@ def test_the_granularity_tax_is_charged_to_the_planner_not_discovered_later():
 
     costs = {c.name: c for c in layout.costs()}
     assert costs["root.odd"].resident_bytes == odd.span
-    # Every region backed = every span mapped, and the layout says so.
     assert sum(c.resident_bytes for c in layout.costs()) == sum(
         r.span for r in layout.regions
     )
@@ -136,12 +99,7 @@ def test_the_granularity_tax_is_charged_to_the_planner_not_discovered_later():
 
 
 def test_layout_is_deterministic_and_ordered_like_the_planner_fills():
-    """Same tree, same layout — twice, and in descending-size order.
-
-    Determinism is not a nicety here: a compiled artifact keyed on a weight
-    address and a residency plan both depend on this order being a function of
-    the tree alone.
-    """
+    """Same tree, same layout — twice, and in descending-size order."""
     a = plan_layout(specs_for(Pyramid()), granularity=GRAN, min_stream_bytes=MIB)
     b = plan_layout(specs_for(Pyramid()), granularity=GRAN, min_stream_bytes=MIB)
     assert [(r.name, r.offset, r.span) for r in a.regions] == [
@@ -152,13 +110,7 @@ def test_layout_is_deterministic_and_ordered_like_the_planner_fills():
 
 
 def test_excluded_leaves_go_to_the_core_and_can_never_stream():
-    """An exclusion is a statement about HOOKS, and here about residency too.
-
-    pgw#1497 measured the other reading: a component excluded from the ring
-    that nobody then placed died on the first decode. Here the exclusion puts
-    the leaf in the always-resident core, so there is no third state it can be
-    in.
-    """
+    """An exclusion is a statement about HOOKS, and here about residency too."""
     layout = plan_layout(
         specs_for(Pyramid()), granularity=GRAN, min_stream_bytes=MIB, exclude=["root.mid"]
     )
@@ -257,19 +209,10 @@ def test_a_non_contiguous_leaf_keeps_its_whole_leaf_out_of_the_arena():
     layout = plan_layout(specs, granularity=GRAN, min_stream_bytes=MIB)
     assert "root.weird" not in layout.by_name()
     assert "root.plain" in layout.by_name()
-    assert ArenaResidency is not None  # the facade is what applies this filter
+    assert ArenaResidency is not None
 
 
 def test_adapter_leaves_land_in_the_core_and_can_never_stream():
-    """pgw#1507's LoRA clause, and it is the SAME code as the streamed rung's.
-
-    An attach-based adapter is a pair of tiny leaves NEXT TO the base layer, so
-    the base layer streams through its own region exactly as an unpatched one
-    does and the adapters are forced resident. MEASURED on the 4070 with 96
-    attached pairs: 192 adapter leaves, all in the core, none ever streamed,
-    36 of their base layers streaming, outputs bitwise identical at every
-    budget. This is the arithmetic half of that.
-    """
 
     class LoRALinear(nn.Module):
         def __init__(self, base: nn.Linear, r: int = 8) -> None:
@@ -296,7 +239,6 @@ def test_adapter_leaves_land_in_the_core_and_can_never_stream():
         exclude=adapters,
     )
     assert set(layout.core_names) == adapters
-    # The base layer keeps its own region and therefore still streams.
     assert "unet.to_q.base_layer" in layout.by_name()
     plan = plan_residency(
         layout.costs(), budget_bytes=0, streams=2, min_stream_bytes=0,
@@ -307,40 +249,24 @@ def test_adapter_leaves_land_in_the_core_and_can_never_stream():
 
 
 def test_binding_across_the_meta_boundary_replaces_the_parameter():
-    """The cold-load defect, in one test.
-
-    ``Parameter.data = other`` is the normal bind and it preserves the
-    Parameter's identity. Across the META boundary torch REFUSES it
-    ("incompatible tensor type"), which is how the cold-load leg died on the
-    card — so a meta parameter, which has never held a byte and has no
-    identity worth preserving, is REPLACED instead.
-    """
+    """The cold-load defect, in one test."""
     from gen_worker.models.stream_residency import bind_tensor
 
     real = nn.Linear(4, 4, bias=False)
     with torch.device("meta"):
         empty = nn.Linear(4, 4, bias=False)
 
-    # The refusal is real and is what the facade routes around.
     with pytest.raises(RuntimeError, match="incompatible tensor type"):
         bind_tensor(empty, "weight", real.weight.detach().clone(), True)
 
-    # The facade's rule: replace, do not fill.
     value = real.weight.detach().clone()
     empty._parameters["weight"] = nn.Parameter(value, requires_grad=False)
     assert not empty.weight.is_meta
     assert torch.equal(empty.weight, real.weight)
 
-    # And an ordinary bind still preserves identity, which is why it is the
-    # default: hooks and LoRA wrappers hold the object across every promote.
     identity = real.weight
     bind_tensor(real, "weight", torch.ones(4, 4), True)
     assert real.weight is identity
-
-
-# ---------------------------------------------------------------------------
-# The triples
-# ---------------------------------------------------------------------------
 
 
 def _write_safetensors(path: Path, tensors: dict) -> None:
@@ -360,7 +286,7 @@ def _write_safetensors(path: Path, tensors: dict) -> None:
 
 
 def test_triples_name_the_exact_bytes_of_every_tensor(tmp_path):
-    """Read back through the triple and compare to the tensor. Byte-exact."""
+    """Read back through the triple and compare to the tensor."""
     tensors = {
         "a.weight": torch.arange(64, dtype=torch.float32).reshape(8, 8),
         "b.weight": torch.linspace(-1, 1, 128, dtype=torch.float16).reshape(8, 16),
@@ -381,11 +307,7 @@ def test_triples_name_the_exact_bytes_of_every_tensor(tmp_path):
 
 
 def test_the_variant_selects_the_file_and_the_plain_name_does_not_pick_it_up(tmp_path):
-    """``model.fp16.safetensors`` and ``model.safetensors`` are two checkpoints.
-
-    Mixing them is a silent dtype fault: the header would say fp16 while the
-    module says fp32, and the triple lengths would disagree by 2x.
-    """
+    """``model.fp16.safetensors`` and ``model.safetensors`` are two checkpoints."""
     _write_safetensors(
         tmp_path / "diffusion_pytorch_model.safetensors",
         {"w": torch.zeros(4, 4, dtype=torch.float32)},

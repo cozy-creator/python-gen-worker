@@ -1,16 +1,3 @@
-"""pgw#1472: a permanent adoption refusal must be a STATE, not a log line.
-
-`ServeAdoption.sink_for` swallows every failure into eager-forever, and that is
-correct as a boot policy — adoption must never kill a pod. It is wrong as an
-observability one: **an unconditional refusal is indistinguishable from a
-correct one**, because both read as "serving eager". That is how an env-identity
-mismatch could have made every locally derived boot eager forever while looking
-healthy, and it is why the first version of pgw#1472's own filing was wrong for
-an hour.
-
-So the distinction is carried on the object.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,8 +13,7 @@ def adoption(tmp_path: Path) -> ServeAdoption:
 
 
 def test_a_fresh_session_claims_no_refusal_at_all(adoption: ServeAdoption) -> None:
-    """Absent must not render as `False`-because-nothing-happened: before any
-    refusal, BOTH the reason and the permanence read as unset."""
+    """Absent must not render as `False`-because-nothing-happened: before any refusal, BOTH the reason and the permanence read as unset."""
 
     assert adoption.refusal == ""
     assert adoption.refusal_permanent is False
@@ -49,8 +35,7 @@ def test_a_hub_failure_is_marked_RETRYABLE(adoption: ServeAdoption) -> None:
 
 
 def test_the_permanent_set_is_named_and_every_member_is_reachable() -> None:
-    """A vocabulary nothing emits is folklore. Each of these is a phase this
-    module actually passes to `_refuse`, or an exception type it catches."""
+    """A vocabulary nothing emits is folklore."""
 
     import gen_worker.serving.serve_adoption as module
 
@@ -64,8 +49,7 @@ def test_the_permanent_set_is_named_and_every_member_is_reachable() -> None:
 def test_the_refusal_is_readable_off_the_OBJECT_not_only_the_log(
     adoption: ServeAdoption, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The whole point. A pod's stdout goes nowhere (pgw#760), so a fact that
-    reaches only the logger is a fact nothing can count."""
+    """The whole point."""
 
     adoption._refuse("environment_mismatch", "closure mismatch")
     assert (adoption.refusal, adoption.refusal_permanent) == (

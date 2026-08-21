@@ -1,54 +1,4 @@
-"""The layout converter registry — the CONVERTIBLE rung.
-
-The tensor-layout contract is ONE vocabulary with TWO sides: the code side
-DEMANDS (`Slot(layouts=...)`), the artifact side SUPPLIES. When the two do not
-match exactly, the ladder decides what happens next:
-
-    COMPATIBLE   the supply's LayoutId is in the demand set
-    CONVERTIBLE  a registered LOSSLESS mapping reaches an accepted LayoutId
-    PRODUCIBLE   only a re-quantization from a named higher-precision source
-                 reaches one — a priced production JOB, never a converter
-    INCOMPATIBLE none of the above; refused, both sides named
-
-This module owns the CONVERTIBLE edge set and the relation over it. Four
-properties are load-bearing and are enforced by construction rather than by
-review:
-
-**1. Re-quantization is structurally unregistrable.** A registration is a PAIR
-— forward and inverse — and :func:`prove_layout_conversion` runs `A -> B -> A`
-over the declared corpus at REGISTRATION, requiring the recovered shard's
-content digest to equal the source's. A cast that discards bits has no inverse
-that can satisfy that, so it cannot enter this registry at all. It is not a
-convention that a lossy transform stays out; the registry cannot hold one.
-Re-quantization is :class:`LayoutProduction` — a different edge set, a different
-rung, carrying a recipe NAME and a quality gate, never a transform.
-
-**2. A topology converter cannot touch payload bytes.** It declares
-:class:`~gen_worker.convert.repack_spec.RenameRule` passes — the SDK's existing
-key-rewrite vocabulary, reused rather than re-invented — and the engine copies
-each tensor by raw byte range (`writer.rewrite_safetensors_keys`), never
-decoding one. Bit-losslessness on that axis is a property of the API, not of
-the converter's care. It is also DATA, so a topology edge is readable by an AST
-sweep and by the hub, not only by a Python interpreter.
-
-**3. The relation never grows a special case.** Registering a converter adds an
-EDGE. :func:`plan_layout_conversions` and :func:`classify_layout` are fixed
-logic — membership, then reachability — and must never gain a per-format
-branch, a similarity score or a "close enough" fallback. Neither function
-contains a literal handle string.
-
-**4. Preference is NOT here.** The accepted
-set is a compatibility FILTER whose order carries no preference, and preference
-has exactly one authority — the author-configured ordered ladder of (GPU, lane)
-pairs. So the planner returns EVERY reachable accepted target and orders the
-result deterministically for reproducibility; the caller that owns a ladder
-chooses. A planner that picked "the earliest accepted layout" would be a second
-ordering that can disagree with the first.
-
-The wheel ships this registry EMPTY, like the other five: converters
-are declared by the endpoint that owns the format and registered through
-`load_declaration_module`.
-"""
+"""The layout converter registry — the CONVERTIBLE rung."""
 
 from __future__ import annotations
 
@@ -84,16 +34,8 @@ from .writer import (
     write_safetensors_shard,
 )
 
-#: A corpus case's synthesized payload budget. The admission proof runs at
-#: REGISTRATION — on a serving pod, at endpoint import — so a corpus that could
-#: cost real I/O would make declaring a converter expensive. Real HEADERS,
-#: synthetic payloads: structure and reversibility are what this proves.
 MAX_CORPUS_PAYLOAD_BYTES = 1 << 20
 
-#: How many rewrites of the weights one plan may cost, per axis. A COST bound,
-#: not a correctness one: lossless∘lossless is lossless at any length, but each
-#: hop is a full weight rewrite, and a 3-hop need means a missing direct edge —
-#: which the planner says in its refusal rather than silently paying for.
 MAX_PLAN_HOPS_PER_AXIS = 2
 
 RepackFn = Callable[["ConversionIO"], None]
@@ -108,26 +50,16 @@ _DTYPE_ITEMSIZE: Dict[str, int] = {
 
 
 class ConversionProofError(DeclarationError):
-    """A converter's bit-exactness obligation did not hold over its corpus.
-
-    Raised at REGISTRATION, never at run time: an unproven converter never
-    enters the registry, so nothing downstream has to ask whether an edge was
-    checked.
-    """
+    """A converter's bit-exactness obligation did not hold over its corpus."""
 
 
 class LayoutRung(str, Enum):
-    """The four-valued ladder. The only verdict vocabulary — do not fork it."""
+    """The four-valued ladder."""
 
     COMPATIBLE = "compatible"
     CONVERTIBLE = "convertible"
     PRODUCIBLE = "producible"
     INCOMPATIBLE = "incompatible"
-
-
-# ---------------------------------------------------------------------------
-# The corpus: a REAL artifact header, synthetic payloads
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -153,13 +85,7 @@ class CorpusTensor:
 
 @dataclass(frozen=True)
 class ConversionCase:
-    """One corpus case: the KEYS, dtypes and shapes of a real artifact.
-
-    The corpus method at header granularity — the part of a real checkpoint a
-    key map and a repack actually act on. Nothing multi-GB touches
-    CI or a developer box; payloads are synthesized deterministically from the
-    case name so a proof is reproducible.
-    """
+    """One corpus case: the KEYS, dtypes and shapes of a real artifact."""
 
     name: str
     tensors: Mapping[str, CorpusTensor]
@@ -182,9 +108,6 @@ class ConversionCase:
 
 
 def _synthetic_payload(case: str, key: str, nbytes: int) -> bytes:
-    """Deterministic bytes for one corpus tensor. Values are irrelevant to a
-    key map and must be irrelevant to a lossless repack; a repack that behaves
-    differently on real values is not value-agnostic and is out of contract."""
     out = bytearray()
     seed = f"{case}\x00{key}".encode()
     counter = 0
@@ -205,19 +128,8 @@ def materialize_case(case: ConversionCase, path: Path) -> Path:
     return path
 
 
-# ---------------------------------------------------------------------------
-# The quant-axis I/O: streaming, torch-free, no network
-# ---------------------------------------------------------------------------
-
-
 class ConversionIO:
-    """One component shard, in and out, for a QUANT-axis repack.
-
-    Streaming: payloads are read one tensor at a time and emitted into a spool,
-    so a repack never holds a component in memory. Deliberately NOT handed to a
-    topology converter — that axis declares rename rules and the engine copies
-    by byte range, which is what makes its bit-losslessness structural.
-    """
+    """One component shard, in and out, for a QUANT-axis repack."""
 
     def __init__(self, source: Path, target: Path) -> None:
         self._target = Path(target)
@@ -235,8 +147,6 @@ class ConversionIO:
             for k, v in (self._header.get("__metadata__") or {}).items()
         }
         self._cursor = 0
-
-    # -- source side --------------------------------------------------------
 
     def keys(self) -> Tuple[str, ...]:
         return tuple(k for k in self._header if k != "__metadata__")
@@ -267,8 +177,6 @@ class ConversionIO:
 
     def source_metadata(self) -> Mapping[str, str]:
         return dict(self._metadata)
-
-    # -- target side --------------------------------------------------------
 
     def emit(self, key: str, *, dtype: str, shape: Sequence[int],
              payload: bytes) -> None:
@@ -318,21 +226,10 @@ class ConversionIO:
             self._spool_path.unlink(missing_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# The declarations
-# ---------------------------------------------------------------------------
-
-
 def apply_rename_rules(
     keys: Sequence[str], rules: Sequence[RenameRule],
 ) -> Dict[str, str]:
-    """Run the declared rename passes over a key set: ``{old: new}``, total.
-
-    The passes are ``convert.repack_spec.RenameRule`` verbatim — the same
-    prefix / substring / alternation vocabulary the repackage engine already
-    executes. One vocabulary, one semantics; a topology edge that needed a
-    different one would be describing something that is not a rename.
-    """
+    """Run the declared rename passes over a key set: ``{old: new}``, total."""
     out: Dict[str, str] = {}
     for key in keys:
         renamed = key
@@ -344,15 +241,7 @@ def apply_rename_rules(
 
 @dataclass(frozen=True)
 class TopologyConversion:
-    """A TOPOLOGY-axis mapping: declared rename passes, and their inverse.
-
-    The whole declaration is DATA — two tuples of
-    :class:`~gen_worker.convert.repack_spec.RenameRule` — so the engine copies
-    each tensor by raw byte range and "bit-lossless" is a property of this
-    class rather than a claim a converter makes about itself. There is
-    deliberately no payload hook and no callable: a topology edge that wanted
-    to touch bytes is a quant edge that has not admitted it.
-    """
+    """A TOPOLOGY-axis mapping: declared rename passes, and their inverse."""
 
     from_id: str
     to_id: str
@@ -378,15 +267,7 @@ class TopologyConversion:
 
 @dataclass(frozen=True)
 class QuantRepack:
-    """A QUANT-axis SAME-NUMERICS repack: different packing, identical values.
-
-    Unlike topology, this axis genuinely rewrites payload bytes, so the
-    transform is code. `equivalence` is the obligation — the target contract's
-    own reference dequant applied to both shards — and it runs over
-    the corpus at registration alongside the round trip. It is required, not
-    optional: a quant-axis edge with nothing proving the values survived is
-    exactly the re-quantization this registry must not hold.
-    """
+    """A QUANT-axis SAME-NUMERICS repack: different packing, identical values."""
 
     from_id: str
     to_id: str
@@ -407,12 +288,7 @@ LayoutConversion = Union[TopologyConversion, QuantRepack]
 
 @dataclass(frozen=True)
 class LayoutProduction:
-    """The PRODUCIBLE rung: re-quantization from a named higher-precision source.
-
-    An EDGE DECLARATION and nothing else — no transform lives here. Producing
-    new numerics is a priced job with a quality gate, and putting an `apply` on
-    this class is how it would quietly become automatic.
-    """
+    """The PRODUCIBLE rung: re-quantization from a named higher-precision source."""
 
     axis: str
     from_id: str
@@ -461,25 +337,14 @@ class LayoutVerdict:
     reason: str = ""
 
 
-# ---------------------------------------------------------------------------
-# The registry
-# ---------------------------------------------------------------------------
-
 _lock = RLock()
 _edges: Dict[Tuple[str, str, str], ConversionHop] = {}
 _specs: Dict[Tuple[str, str, str], LayoutConversion] = {}
-_directions: Dict[Tuple[str, str, str], bool] = {}  # key -> is the spec's forward
+_directions: Dict[Tuple[str, str, str], bool] = {}
 _productions: Dict[Tuple[str, str, str], LayoutProduction] = {}
 
 
 def _module_content_digest(fn: Callable[..., object]) -> str:
-    """Content identity of the module a repack's code lives in.
-
-    Reuses the SDK's one code-identity primitive rather than reinventing it: a
-    second mechanism would be a second answer to "did the bytes change".
-    Content, not mtime — the digest must be identical on the hub and on a laptop
-    or the derived-artifact identity stops deduping.
-    """
     module = sys.modules.get(getattr(fn, "__module__", ""), None)
     path = getattr(module, "__file__", None)
     if not path:
@@ -489,12 +354,6 @@ def _module_content_digest(fn: Callable[..., object]) -> str:
 
 
 def _body_digest(spec: LayoutConversion, *, forward: bool) -> str:
-    """What the edge DOES, as a content address.
-
-    Topology edges are data, so their body IS the declared rename passes —
-    fully deterministic, no code identity needed. Quant edges are code, so
-    their body is the content digest of the module the transform lives in.
-    """
     if isinstance(spec, TopologyConversion):
         rules = spec.rules if forward else spec.inverse_rules
         return hashlib.sha256(json.dumps(
@@ -507,11 +366,7 @@ def _body_digest(spec: LayoutConversion, *, forward: bool) -> str:
 def converter_digest(
     axis: str, from_id: str, to_id: str, version: int, body: str,
 ) -> str:
-    """`sha256(axis ‖ from ‖ to ‖ version ‖ body digest)`.
-
-    Bumping `version` changes the digest, which changes every derived
-    artifact's identity — bytes never silently change under a name.
-    """
+    """`sha256(axis ‖ from ‖ to ‖ version ‖ body digest)`."""
     payload = "\x00".join([axis, from_id, to_id, str(int(version)), body])
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -519,13 +374,7 @@ def converter_digest(
 def derived_artifact_identity(
     source_digest: str, chain_digests: Sequence[str], target: LayoutId,
 ) -> str:
-    """`sha256(source ‖ ordered converter digests ‖ target LayoutId)`.
-
-    ONE identity function, shipped here and called by every producer of a
-    converted artifact — the hub's convert-once-into-the-CAS and cozy-local's
-    derived store — so a machine that later pulls the hub's copy recognizes it
-    as the same object instead of converting again.
-    """
+    """`sha256(source ‖ ordered converter digests ‖ target LayoutId)`."""
     payload = "\x00".join(
         [str(source_digest), *[str(d) for d in chain_digests], target.render()])
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -534,16 +383,7 @@ def derived_artifact_identity(
 def register_layout_conversion(
     spec: LayoutConversion, *, replace: bool = False,
 ) -> LayoutConversion:
-    """Admit ONE lossless mapping — both directions — after proving it.
-
-    Refuses, by name: an unknown handle on the axis, a self-edge, a re-declared
-    edge with different content, and any mapping whose `A -> B -> A` round trip
-    over its own corpus does not recover the source content exactly.
-
-    Both directions are registered because a lossless mapping is invertible and
-    the inverse was proven in the same pass: withholding it would be an edge
-    the platform knows is safe and refuses to use.
-    """
+    """Admit ONE lossless mapping — both directions — after proving it."""
     _validate_declaration(spec)
     prove_layout_conversion(spec)
 
@@ -573,14 +413,7 @@ def register_layout_conversion(
 def register_layout_production(
     spec: LayoutProduction, *, replace: bool = False,
 ) -> LayoutProduction:
-    """Declare a PRODUCIBLE edge: new numerics from a named source, by recipe.
-
-    Deliberately a different call from :func:`register_layout_conversion`, with
-    no transform and no round-trip obligation, because the two rungs are
-    different things. Anything that would fail the converter registry's
-    admission bar and still needs to exist belongs here — priced, offered, and
-    never automatic.
-    """
+    """Declare a PRODUCIBLE edge: new numerics from a named source, by recipe."""
     if spec.axis not in LAYOUT_AXES:
         raise DeclarationError(
             f"unknown layout axis {spec.axis!r}; the axes are {list(LAYOUT_AXES)}")
@@ -608,11 +441,7 @@ def register_layout_production(
 
 
 def registered_layout_conversions() -> Tuple[ConversionHop, ...]:
-    """Every registered EDGE, both directions, in a deterministic order.
-
-    This is the edge table the hub reads to compute the CONVERTIBLE rung —
-    data, never code.
-    """
+    """Every registered EDGE, both directions, in a deterministic order."""
     with _lock:
         return tuple(sorted(
             _edges.values(), key=lambda e: (e.axis, e.from_id, e.to_id)))
@@ -625,7 +454,7 @@ def registered_layout_productions() -> Tuple[LayoutProduction, ...]:
 
 
 def reset_layout_conversions() -> None:
-    """Drop every registration. Tests only."""
+    """Drop every registration."""
     with _lock:
         _edges.clear()
         _specs.clear()
@@ -648,30 +477,8 @@ def _validate_declaration(spec: LayoutConversion) -> None:
             "what the bit-exactness obligation runs against.")
 
 
-# ---------------------------------------------------------------------------
-# The admission proof
-# ---------------------------------------------------------------------------
-
-
 def prove_layout_conversion(spec: LayoutConversion) -> Tuple[str, ...]:
-    """Run the mapping's bit-exactness obligation over its own corpus.
-
-    Returns the obligations that passed, so a caller can print them. Raises
-    :class:`ConversionProofError` naming the case and the obligation otherwise.
-
-    The obligations, in the order they catch things:
-
-    1. **key bijection** — the map is total (every source key mapped) and
-       injective (no two keys collide). An unmapped key is a REFUSAL, never a
-       silent skip.
-    2. **payload invariance** (topology) — per-tensor payload sha256 identical
-       before and after. Structural for a key map, and checked anyway because a
-       structural claim nobody executes is a comment.
-    3. **round trip** — `A -> B -> A` recovers the source shard's content
-       digest exactly. This is the obligation re-quantization cannot satisfy.
-    4. **dequant equivalence** (quant) — the declared reference dequant agrees
-       across the pair.
-    """
+    """Run the mapping's bit-exactness obligation over its own corpus."""
     passed: List[str] = []
     with tempfile.TemporaryDirectory(prefix="cozy-layout-proof-") as tmp:
         root = Path(tmp)
@@ -726,8 +533,6 @@ def _run_hop_or_raise(
 def _apply_hop(
     spec: LayoutConversion, source: Path, target: Path, *, forward: bool,
 ) -> None:
-    """Execute ONE hop. Topology goes through the raw byte-range rewrite and
-    never decodes; quant goes through the streaming IO."""
     if isinstance(spec, TopologyConversion):
         rules = spec.rules if forward else spec.inverse_rules
         keys = tuple(name for name, _ in shard_tensor_entries(source))
@@ -772,32 +577,13 @@ def _prove_payload_invariance(
             "only — 'what the weights ARE' is the quant axis.")
 
 
-# ---------------------------------------------------------------------------
-# The relation: membership, then reachability. Never a heuristic.
-# ---------------------------------------------------------------------------
-
-
 def _axis_satisfied(demand: Optional[str], supply: Optional[str]) -> bool:
-    """One axis of the digest-identity comparison.
-
-    Exact equality, with two DECLARED escapes and no inferred ones: a demand
-    that declares itself agnostic accepts anything, and an axis neither side
-    declares is not part of this demand. The SDK compares handles; the hub
-    compares the digests it resolved those handles to at ingest, which is the
-    stricter form of the same relation across registry versions.
-    """
     if demand is None or demand == LAYOUT_AXIS_ANY:
         return True
     return demand == supply
 
 
 def _unevaluated(source: LayoutId, accepts: Sequence[LayoutId]) -> Tuple[str, ...]:
-    """Axes this verdict did NOT decide, because one side never stated them.
-
-    Reported rather than assumed: an unstated axis is UNDECLARED, which is a
-    different fact from "agnostic", and a caller that needs exactness on it
-    must refuse rather than read silence as agreement.
-    """
     return tuple(
         axis for axis in LAYOUT_AXES
         if source.axis(axis) is None
@@ -808,8 +594,6 @@ def _unevaluated(source: LayoutId, accepts: Sequence[LayoutId]) -> Tuple[str, ..
 def _shortest_chain(
     axis: str, source: Optional[str], target: Optional[str],
 ) -> Optional[Tuple[ConversionHop, ...]]:
-    """BFS over the registered edges of ONE axis, capped at
-    :data:`MAX_PLAN_HOPS_PER_AXIS`. ``None`` means unreachable."""
     if _axis_satisfied(target, source):
         return ()
     if source is None or source == LAYOUT_AXIS_ANY or target is None:
@@ -836,17 +620,7 @@ def _shortest_chain(
 def plan_layout_conversions(
     source: LayoutId, accepts: Sequence[LayoutId],
 ) -> Tuple[ConversionPlan, ...]:
-    """Every accepted LayoutId reachable from ``source`` over LOSSLESS edges.
-
-    Per axis, independently, then paired — which is what makes N+M
-    registrations cover what a composite vocabulary would need N*M for.
-
-    **The result carries no preference.** The demand is a filter, and the one
-    authority on preference is the (GPU, lane) ladder.
-    The order here is (hop count, rendered target) — determinism so two runs
-    agree, not a ranking. A caller that must pick one and holds no ladder takes
-    the first and is choosing arbitrarily, honestly.
-    """
+    """Every accepted LayoutId reachable from ``source`` over LOSSLESS edges."""
     plans: List[ConversionPlan] = []
     for target in accepts:
         topology = _shortest_chain(
@@ -857,7 +631,7 @@ def plan_layout_conversions(
         if quant is None:
             continue
         if not topology and not quant:
-            continue  # already COMPATIBLE; not a conversion
+            continue
         plans.append(ConversionPlan(
             target=target, topology=topology, quant=quant))
     return tuple(sorted(
@@ -867,9 +641,6 @@ def plan_layout_conversions(
 def _reachable_productions(
     source: LayoutId, accepts: Sequence[LayoutId],
 ) -> Tuple[LayoutProduction, ...]:
-    """PRODUCIBLE: one declared recipe edge from the supply to an accepted
-    layout. One hop, deliberately — a chain of re-quantizations would be a
-    quality decision nobody made."""
     with _lock:
         productions = list(_productions.values())
     out: List[LayoutProduction] = []
@@ -888,13 +659,7 @@ def _reachable_productions(
 def classify_layout(
     source: LayoutId, accepts: Sequence[LayoutId],
 ) -> LayoutVerdict:
-    """The ladder for ONE (component, supply, demand): the whole verdict.
-
-    Three relations, all fixed forever, all extended only by DATA: membership,
-    lossless-edge reachability, production-edge reachability. If a new format
-    ever needs this function to change, the descriptor SCHEMA is wrong — version
-    the schema, never the relation.
-    """
+    """The ladder for ONE (component, supply, demand): the whole verdict."""
     accepted = tuple(accepts)
     unevaluated = _unevaluated(source, accepted)
     if not accepted:
@@ -933,16 +698,8 @@ def classify_layout(
                f"recipe produces one")
 
 
-# ---------------------------------------------------------------------------
-# The engine
-# ---------------------------------------------------------------------------
-
-#: The `__metadata__` key an artifact's conversion chain rides in. Artifacts
-#: self-describe, so anyone can re-derive the identity without the hub.
 CONVERSION_PROVENANCE_KEY = "cozy.conversion"
 
-#: `produced_by` value the publish path REFUSES: a conversion done on an
-#: untrusted machine is for that machine's own store, forever.
 PRODUCED_BY_LOCAL = "local_conversion"
 
 
@@ -958,12 +715,7 @@ def run_layout_conversion(
     plan: ConversionPlan, source: Path, target: Path, *,
     source_digest: str, produced_by: str,
 ) -> ConversionResult:
-    """Execute a plan, hop by hop, and stamp the chain onto the output.
-
-    Upstream of compute, always: this runs before the tree is materialized for
-    `setup()`, so the endpoint observes only its own declared layout and the
-    traced graph — hence the compiled graph key — cannot move.
-    """
+    """Execute a plan, hop by hop, and stamp the chain onto the output."""
     if not str(produced_by or "").strip():
         raise DeclarationError(
             "run_layout_conversion(produced_by=) is required: an artifact that "

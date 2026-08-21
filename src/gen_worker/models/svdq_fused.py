@@ -1,31 +1,4 @@
-"""Fused native execution lane for SvdqLinear.
-
-The serving path is the HYBRID measured on the 5090: the baseline's ~8-op
-unfused chain per unit becomes
-
-  1. ``svdq_quant`` — one pass over RAW x: smooth-divide fused in-register
-     (bf16-rounded to match the aten reference) + per-16-block e4m3
-     quantization BIT-IDENTICAL to the reference chain, storing scales in
-     either the cuBLAS blocked layout (serving) or plain flat [M, K/16].
-  2. the PROVEN cuBLAS block-scaled fp4 GEMM (``_gemm_w4a4`` — measured
-     107us vs 265us for the best pure-triton ``tl.dot_scaled`` tile at qwen
-     shapes on sm_120) with ``lora_down`` as a plain cuBLAS mm beside it.
-  3. ``svdq_epilogue_lora`` — ONE pass over the GEMM output: second-level
-     scale + ``lora_act @ proj_up.T`` + bias, fp32 accumulate, single bf16
-     writeback (replaces the baseline's separate mul/mm/add/add chain).
-
-``svdq_gemm_w4a4_lora`` (pure-triton block-scaled MMA GEMM with the low-rank
-epilogue fused; native ``kind::mxf4nvf4`` on sm_120a, tcgen05 on sm_100a) is
-kept registered as the measured alternative and the sm_100 seed, but is NOT
-the serving path on sm_120.
-
-Numerics vs the baseline lane: activation quantization is bit-identical by
-construction (same formulas, ``div_rn``, ties-up e2m1, same s2 — the arming
-self-check enforces it), and the GEMM is literally the same kernel; the
-epilogue accumulates in fp32 with ONE final bf16 round where the baseline
-rounds at every op boundary. Divergence is quantified per shape on the parity
-harness, never assumed.
-"""
+"""Fused native execution lane for SvdqLinear."""
 
 from __future__ import annotations
 
@@ -45,26 +18,16 @@ _QUANT_OP = "cozy_gen_worker::svdq_quant"
 _GEMM_OP = "cozy_gen_worker::svdq_gemm_w4a4_lora"
 _EPI_OP = "cozy_gen_worker::svdq_epilogue_lora"
 
-# The fused lane's operand contract. K alignment comes from the qweight
-# fragment tile (every real checkpoint is in%128); rank from the mma tile.
 _K_ALIGN = 128
 _N_ALIGN = 16
 _RANK_ALIGN = 16
 
 _SELF_CHECK_PROBES = ((128, 512, 256), (77, 3072, 384))
 
-# Quantizer launch config per SM. Module level so a bench can sweep it per
-# card instead of anyone editing source.
-# sm_120: 8 warps on the strided kernel. sm_100: 1 warp on the contiguous
-# kernel — a whole-sweep optimum on B200, where more warps only add
-# contention on an already memory-bound kernel.
 _QUANT_WARPS_BY_SM = {100: 1, 103: 1, 120: 8, 121: 8}
 _QUANT_WARPS_DEFAULT = 4
-# 16-element blocks handled per program, per SM.
 _QBPP = 128
 _QBPP_BY_SM = {100: 128, 103: 128, 120: 128, 121: 128}
-# SMs served by the contiguous-load quantizer. sm_120 keeps the
-# strided kernel: register re-layout measured SLOWER there.
 _CONTIG_QUANT_SMS = (100, 103)
 
 
@@ -78,14 +41,8 @@ def fused_shape_supported(out_features: int, in_features: int,
             and rank > 0 and rank % _RANK_ALIGN == 0)
 
 
-# ---------------------------------------------------------------------------
-# Kernels. Built lazily, registered as custom ops (compile-safe).
-# ---------------------------------------------------------------------------
-
-
 @functools.lru_cache(maxsize=1)
 def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
-    """Compile-register both fused ops. ``None`` when triton is unavailable."""
     try:
         import torch
         import triton
@@ -96,8 +53,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
 
     @triton.jit
     def _e2m1_code(q):  # type: ignore[no-untyped-def]
-        """RTN e2m1 nibble codes, ties at 0.75/1.75/2.5 round UP — identical
-        to nvfp4_quant's kernel (modelopt convention)."""
         a = tl.abs(q)
         code = ((a > 0.25).to(tl.uint8) + (a > 0.75).to(tl.uint8)
                 + (a > 1.25).to(tl.uint8) + (a > 1.75).to(tl.uint8)
@@ -112,24 +67,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
                 and c.kwargs["BK"] <= k]
         return keep or configs[:1]
 
-    # Structure mirrors nvfp4_quant's proven fused kernel (27.6us at qwen
-    # shapes): one row x BLOCKS_PER_PROG 16-elem groups per program, even/odd
-    # strided loads. Two 5090-measured constraints: fusing the rank-R lora_down
-    # here reloads its tile per M-tile (~16x slower — it stays a cuBLAS mm);
-    # and a 2-D [BM, BK] tile with tl.split/reshape re-layout ran 179us vs this
-    # structure. Differences vs the reference chain: optional in-register smooth
-    # divide (bf16-rounded to match the aten reference) and FLAT [M, K/16] scale
-    # stores (dot_scaled's native layout) instead of the cuBLAS blocked swizzle.
-    #
-    # The stride-2 pair of loads is why there are TWO kernels below. It costs
-    # nothing on sm_120, but on sm_100 it leaves the quantizer at 9-21% of
-    # B200's own measured 6.0 TB/s copy roofline, and no (blocks-per-program,
-    # warps) combination moves it — the whole sweep lands in one band.
-    # `_quant_contig_kernel` loads the block as ONE contiguous [BPP, 16] tile
-    # and de-interleaves in registers instead; measured 1.10-1.73x on B200
-    # across the real qwen shapes, bit-identical output in both scale layouts.
-    # It is NOT made the sm_120 path: re-layout in registers loses there, and an
-    # "improvement" that regresses the card we ship on is not an improvement.
     @triton.jit
     def _quant_smooth_kernel(  # type: ignore[no-untyped-def]
         x_ptr, sm_ptr, s2_ptr, q_ptr, s_ptr,
@@ -149,8 +86,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
         xe = tl.load(base + offs_lo, mask=m2, other=0.0).to(tl.float32)
         xo = tl.load(base + offs_hi, mask=m2, other=0.0).to(tl.float32)
         if HAS_SMOOTH:
-            # bf16-rounded divide — matches the aten `x2 / smooth` the
-            # baseline lane feeds its quantizer (opmath float, rn to bf16).
             sme = tl.load(sm_ptr + offs_lo, mask=m2, other=1.0).to(tl.float32)
             smo = tl.load(sm_ptr + offs_hi, mask=m2, other=1.0).to(tl.float32)
             xe = tl.math.div_rn(xe, sme).to(tl.bfloat16).to(tl.float32)
@@ -170,7 +105,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
         offs_p = offs_b[:, None] * 8 + tl.arange(0, 8)[None, :]
         tl.store(q_ptr + row * (K // 2) + offs_p, packed, mask=m2)
         if BLOCKED:
-            # cuBLAS blocked layout — the scaled_mm path.
             rb = row // 128
             rr = row % 128
             tile = rb * NCB + (offs_b // 4)
@@ -185,12 +119,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
         K, KB, NCB,
         HAS_SMOOTH: tl.constexpr, BLOCKED: tl.constexpr, BPP: tl.constexpr,
     ):
-        """Same arithmetic as ``_quant_smooth_kernel``, contiguous loads.
-
-        Every value is read exactly once by an adjacent lane; the even/odd
-        split the packer needs happens after the codes exist, as a register
-        reshape + split. Bit-identity with the strided kernel is enforced by
-        ``fused_self_check`` before the lane can arm."""
         row = tl.program_id(0)
         blk0 = tl.program_id(1) * BPP
         s2 = tl.load(s2_ptr)
@@ -331,7 +259,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
         ncb = (kb + 3) // 4
         q = torch.empty(m, k // 2, dtype=torch.uint8, device=x2.device)
         if blocked:
-            # Padding rows/cols are never written — must start zeroed.
             s = torch.zeros(blocked_scale_numel(m, kb),
                             dtype=torch.float8_e4m3fn, device=x2.device)
         else:
@@ -378,9 +305,6 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
         return (x2.new_empty(m, k // 2, dtype=torch.uint8),
                 x2.new_empty(*s_shape, dtype=torch.float8_e4m3fn))
 
-    # Fused epilogue for the HYBRID path (cuBLAS block-scaled GEMM upstream):
-    # y = y0 * (s2 * second) + la @ up.T + bias — replaces the baseline's
-    # separate [M,N] scale-mul, lora-up mm, add and bias passes.
     epi_cfgs = [
         triton.Config({"BM": 64, "BN": 128}, num_warps=4, num_stages=3),
         triton.Config({"BM": 128, "BN": 128}, num_warps=8, num_stages=3),
@@ -471,15 +395,7 @@ def fused_ops() -> Optional[tuple[Any, Any, Any]]:
     return _build_fused_ops()
 
 
-# ---------------------------------------------------------------------------
-# Self-check — the arming gate the dispatch probe calls.
-# ---------------------------------------------------------------------------
-
-
 def _reference_quant_flat(xs: Any, s2: Any) -> tuple[Any, Any]:
-    """The reference quantization chain with FLAT [M, K/16] scales (the fused
-    lane consumes plain scales; flat->blocked bijectivity is proven
-    separately)."""
     import torch
 
     in_f = int(xs.shape[1])
@@ -493,10 +409,6 @@ def _reference_quant_flat(xs: Any, s2: Any) -> tuple[Any, Any]:
 
 
 def _dyn_s2(x2: Any, smooth: Optional[Any]) -> Any:
-    """Per-tensor second-level scale from column-amax — bit-identical to the
-    baseline lane's ``(x2 / smooth).abs().amax()`` (rounding is monotonic and
-    sign-symmetric, so amax commutes with the bf16 divide; max(|min|,|max|)
-    is exactly amax(|x|) — and aminmax skips the [M, K] abs temporary)."""
     import torch
 
     mn, mx = x2.aminmax(dim=0)
@@ -507,9 +419,7 @@ def _dyn_s2(x2: Any, smooth: Optional[Any]) -> Any:
 
 
 def fused_self_check() -> Optional[str]:
-    """Arm gate for the serving (hybrid) path: quantization BIT-IDENTICAL to
-    the reference chain in BOTH scale layouts, and the fused epilogue within
-    tolerance of its torch reference. Returns None when armed."""
+    """Arm gate for the serving (hybrid) path: quantization BIT-IDENTICAL to the reference chain in BOTH scale layouts, and the fused epilogue within tolerance of its torch reference."""
     import torch
 
     ops = fused_ops()
@@ -554,18 +464,11 @@ def fused_self_check() -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# The module + builder (twin of svdq_native.build_svdq_linear).
-# ---------------------------------------------------------------------------
-
-
 def _build_fused_linear_class() -> type:
     import torch
     import torch.nn as nn
 
     class _SvdqFusedLinear(nn.Module):
-        """SvdqLinear on the fused lane: quant kernel + cuBLAS lora_down +
-        fused GEMM/epilogue kernel per forward."""
 
         _cozy_svdq_linear = True
         _cozy_svdq_fused = True
@@ -585,8 +488,6 @@ def _build_fused_linear_class() -> type:
                     f"breaks the fused contract (in%{_K_ALIGN}, "
                     f"out%{_N_ALIGN}, rank%{_RANK_ALIGN})")
             meta = torch.device("meta")
-            # Hybrid serving operands: cuBLAS block-scaled GEMM consumes the
-            # SAME weight layout as the baseline SvdqLinear.
             self.register_buffer("weight", torch.empty(
                 out_features, in_features // 2, dtype=torch.uint8,
                 device=meta))
@@ -642,8 +543,7 @@ def svdq_fused_linear_class() -> type:
 
 def build_svdq_fused_linear(dec: Any, *, compute_dtype: Any = None,
                             device: Any = None) -> Any:
-    """A device-resident fused-lane module from a ``DecodedLinear``. The
-    resident swizzle (pack + transpose) runs once, here, at load."""
+    """A device-resident fused-lane module from a ``DecodedLinear``."""
     import torch
     import torch.nn as nn
 

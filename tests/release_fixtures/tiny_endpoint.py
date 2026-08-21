@@ -1,15 +1,4 @@
-"""A main_v2-shaped Model + entrypoints over the tiny pipeline (derive fixture).
-
-Deliberately spelled like the Paul-reviewed sdxl ``main_v2.py``: the stateful
-half is a ``Model[SDXL]`` subclass whose header declares the lane MAPPING
-(contract object -> ``lane(request=…)`` demand formula) and its ``shapes=``
-axis, plus an imperative ``ctx.compile`` mark inside ``load``; the stateless
-half is free ctx-first ``@entrypoint`` functions with platform-injected
-adapter slots (``turbo: DistillationAdapter | None`` — the typed-takeover
-guard; ``loras: list[Adapter]``). Trace coverage is auto-enumerated from the
-payload schemas (the ``Size`` enum is this fixture's aspect-ratio analogue);
-no samples surface, no catalog.
-"""
+"""A main_v2-shaped Model + entrypoints over the tiny pipeline (derive fixture)."""
 
 from __future__ import annotations
 
@@ -47,8 +36,6 @@ _BUCKETS: dict[Size, int] = {Size.SMALL: 32, Size.LARGE: 64}
 
 class GenerateInput(msgspec.Struct, forbid_unknown_fields=True):
     prompt: str
-    # LARGE deliberately: the payload DEFAULT differs from enum declaration
-    # order, so pgw#1384's default-first document ordering is observable.
     size: Size = Size.LARGE
     guidance_scale: float | None = None
     num_inference_steps: int | None = None
@@ -98,12 +85,7 @@ def _run(model: TinyModel, ctx: Any, *, steps: int, guidance: float,
 def generate(ctx: RequestContext, payload: GenerateInput, model: TinyModel,
              turbo: DistillationAdapter | None,
              loras: list[Adapter]) -> ImageOutput:
-    """Contract-file shape: ctx-first order, platform-injected adapter slots.
-
-    A riding distillation adapter (or a cfg-off checkpoint) serves the
-    guidance-free batch-1 arm -- the derive's binding enumeration reaches it
-    without any real adapter bytes.
-    """
+    """Contract-file shape: ctx-first order, platform-injected adapter slots."""
     ctx.raise_if_cancelled()
     d = model.defaults
     if turbo is not None and not d.cfg:

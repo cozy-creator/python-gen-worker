@@ -1,14 +1,4 @@
-"""Worker -> hub hardware-unsuitable report, dialed BEFORE the boot-time CUDA
-probe's silent exit.
-
-A probe failure that logs ``GEN_WORKER_CUDA_PROBE_FAILED`` and exit(1)s with no
-orchestrator contact kills the pod invisibly to every layer of telemetry. This
-module sends ONE ``HardwareUnsuitable`` ``WorkerMessage`` on the Connect stream, in
-place of Hello, so the hub can attribute the death and reschedule/blacklist
-the host. Bounded best-effort: a couple of short retries, then give up — the
-silent exit remains the fallback when the hub cannot be REACHED at all, which
-is the one condition no report can route around.
-"""
+"""Worker -> hub hardware-unsuitable report, dialed BEFORE the boot-time CUDA probe's silent exit."""
 
 from __future__ import annotations
 
@@ -36,11 +26,6 @@ from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
-# Bounded budget: this is a best-effort diagnostic dial ahead of an exit that
-# has already been decided, never a reason to delay it materially — an
-# unroutable/blackholed address must not turn a clean pre-hello exit into a
-# multi-minute pod-billing hang. Total worst case ~=
-# _MAX_ATTEMPTS * _REPORT_RPC_TIMEOUT_S + sum(_RETRY_BACKOFF_S) ~= 7s.
 _REPORT_RPC_TIMEOUT_S = 3.0
 _MAX_ATTEMPTS = 2
 _RETRY_BACKOFF_S = (1.0,)
@@ -59,10 +44,6 @@ class HardwareReport(msgspec.Struct, frozen=True):
 
 
 def _nvidia_smi_driver_and_gpu() -> Tuple[str, str]:
-    """driver_version + gpu_name via nvidia-smi/NVML — the point of asking
-    here rather than torch is that this must work even when the CUDA
-    *runtime* is unusable (that mismatch is exactly the failure we report;
-    NVML/nvidia-smi talks to the driver directly, no CUDA context needed)."""
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=driver_version,name", "--format=csv,noheader"],
@@ -80,10 +61,7 @@ def _nvidia_smi_driver_and_gpu() -> Tuple[str, str]:
 
 
 def build_hardware_report(probe: CudaProbeResult, settings: Settings) -> HardwareReport:
-    """Assemble the typed report from the failed probe + whatever hardware/
-    build identity can still be read. Every field degrades to "" rather than
-    raising — a probe failure is exactly the moment nothing can be assumed
-    to work."""
+    """Assemble the typed report from the failed probe + whatever hardware/ build identity can still be read."""
     driver_version, gpu_name = _nvidia_smi_driver_and_gpu()
     torch_version = ""
     torch_cuda_version = ""
@@ -121,13 +99,8 @@ def build_hardware_report(probe: CudaProbeResult, settings: Settings) -> Hardwar
 
 
 def _identity_from_settings(settings: Settings) -> Tuple[str, str]:
-    """(worker_id, release_id): Settings.worker_id when set, else the JWT
-    claims, mirroring Lifecycle's own identity resolution (lifecycle.py)."""
     worker_id = (settings.worker_id or "").strip()
     release_id = ""
-    # The CURRENT credential, never the frozen boot one. This dial
-    # opens its own Connect, so past T+30 min a stale token here is a fresh
-    # `worker_token_expired` on every report — three of which wedge the pod.
     token = worker_credential.current()
     if token:
         try:
@@ -164,11 +137,6 @@ def _report_to_wire(report: HardwareReport, worker_id: str, release_id: str) -> 
 async def _send_once(
     target: str, use_tls: bool, token: str, msg: pb.WorkerMessage,
 ) -> bool:
-    """One dial attempt: open Connect, write the report, half-close, and wait
-    for the hub to end the call. Returns True only on a clean, unrejected
-    round trip (delivered); any exception (unreachable, UNAUTHENTICATED, a
-    refused connection) is "not delivered" — the caller retries or falls
-    through to the silent exit."""
     channel = (
         grpc.aio.secure_channel(target, grpc.ssl_channel_credentials())
         if use_tls
@@ -201,9 +169,6 @@ async def _report_async(settings: Settings, report: HardwareReport) -> bool:
     if not target:
         return False
     worker_id, release_id = _identity_from_settings(settings)
-    # The CURRENT credential, never the frozen boot one. This dial
-    # opens its own Connect, so past T+30 min a stale token here is a fresh
-    # `worker_token_expired` on every report — three of which wedge the pod.
     token = worker_credential.current()
     msg = _report_to_wire(report, worker_id, release_id)
     for attempt in range(_MAX_ATTEMPTS):
@@ -215,9 +180,7 @@ async def _report_async(settings: Settings, report: HardwareReport) -> bool:
 
 
 def deliver_hardware_report(settings: Settings, report: HardwareReport) -> bool:
-    """Dial the hub with an already-built report. Never raises. Also the path a
-    control parent uses to relay a compute child's terminal boot verdict on its
-    own credential."""
+    """Dial the hub with an already-built report."""
     if not (settings.orchestrator_public_addr or "").strip():
         return False
     try:
@@ -228,8 +191,5 @@ def deliver_hardware_report(settings: Settings, report: HardwareReport) -> bool:
 
 
 def report_hardware_unsuitable(settings: Settings, probe: CudaProbeResult) -> bool:
-    """Bounded best-effort: build the typed report and dial the hub with it
-    in place of Hello. Never raises. Returns whether the hub is believed to
-    have received it — the entrypoint logs+exits either way; this is purely
-    the diagnostic channel, not a gate on shutting down."""
+    """Bounded best-effort: build the typed report and dial the hub with it in place of Hello."""
     return deliver_hardware_report(settings, build_hardware_report(probe, settings))

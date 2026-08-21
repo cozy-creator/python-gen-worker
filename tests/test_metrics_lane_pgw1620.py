@@ -1,24 +1,3 @@
-"""pgw#1620: a completed request NAMES the lane that served it.
-
-THE DEFECT WAS A SILENCE. anima 0.5.0 completed a real request on a rented
-A4500 — real image, real card, real money — and `payload.metrics.lane` was
-absent, `request_state.execution_lane` was empty, and no `applied_lane` row
-existed. Nothing failed. Under the measurement law an absent metric is
-UNPROVEN, so that run proved nothing about which lane executed, and every lane
-claim on every pgw#1599-surface endpoint was unfalsifiable from the hub.
-
-Root cause: `metrics.lane` is `JobResult.metrics.lane` (proto field 13), which
-the v1 executor stamped from `ServedIdentity`. The v1 hardcut deleted the
-executor and the v2 worker built a `JobMetrics` of two numbers.
-
-THE CALLER HERE IS THE POD'S (pgw#1551's lesson, and tonight's): the object
-under test is a REAL `ServeLoop` over a REAL projected tensorfs tree, driven
-through the REAL `Worker._run_one` — the same except chain, the same
-`pb.JobResult` construction, the same wire bound. Only the socket is captured.
-A test that stamped a context itself and then read it back would prove the
-getter and nothing else, which is exactly how this hole opened.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -37,9 +16,6 @@ from gen_worker.models.store import ModelStore  # noqa: E402
 from gen_worker.pb import worker_scheduler_pb2 as pb  # noqa: E402
 from gen_worker.worker import Worker  # noqa: E402
 
-# The pod-shaped fixture: a real ServeLoop, a real CAS, a real projected tree.
-# Re-exported under the fixture names pytest resolves by, aliased on import so
-# the test signatures below are parameters rather than redefinitions.
 from test_pod_serve_loop_streams import LANE, REF, pod_serve_loop  # noqa: E402
 from test_pod_serve_loop_streams import bound_store as _bound_store  # noqa: E402
 from test_pod_serve_loop_streams import projected as _projected  # noqa: E402
@@ -59,12 +35,6 @@ EXPECTED = "bf16-w16a16+eager"
 
 
 class _PodWorker:
-    """`Worker._run_one` over the REAL pod serve loop, with the socket captured.
-
-    Everything that produces the lane is production code: the ladder resolves
-    it inside the instance build, `ServeLoop.invoke` stamps it on the request
-    context, and `Worker._served_lane` reads it at the terminal.
-    """
 
     def __init__(self, loop: Any) -> None:
         self.sent: List[pb.WorkerMessage] = []
@@ -113,10 +83,6 @@ def emitted(monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, str]]:
 def test_a_completed_request_carries_the_lane_that_served_it(
     projected: Dict[str, Any], bound_store: ModelStore, tmp_path: Path,
 ) -> None:
-    """RED before pgw#1620: `metrics.lane` is the empty string on a COMPLETED
-    request from an endpoint that declares a lane — which the hub omits from
-    the payload entirely, and which every dashboard reads exactly the way it
-    reads 'not measured yet'."""
     result = _PodWorker(pod_serve_loop(projected, tmp_path)).run()
 
     assert result.status == pb.JOB_STATUS_OK, result.safe_message
@@ -130,15 +96,10 @@ def test_a_completed_request_carries_the_lane_that_served_it(
 def test_the_regime_is_MEASURED_not_assumed(
     projected: Dict[str, Any], bound_store: ModelStore, tmp_path: Path,
 ) -> None:
-    """`+eager` here is the dispatch counter's answer, not a default: this
-    fixture adopts nothing, so `armed_modules == 0` and the pod says eager
-    because it counted, which is the same instrument that caught twelve
-    'compiled' images being served entirely eager (pgw#1491)."""
+    """`+eager` here is the dispatch counter's answer, not a default: this fixture adopts nothing, so `armed_modules == 0` and the pod says eager because it counted, which is the same instrument that caug..."""
     result = _PodWorker(pod_serve_loop(projected, tmp_path)).run()
     assert result.metrics.lane.endswith("+eager")
     body, _, regime = result.metrics.lane.partition("+")
-    # `reduce.go` groups the measurement relation on `split_part(lane,'+',1)`,
-    # so the body half must stay a member of the fleet's ranked table.
     from gen_worker.models.execution_lanes import known_execution_lane_bodies
 
     assert body in known_execution_lane_bodies(), body
@@ -149,10 +110,7 @@ def test_the_ladders_confession_leaves_the_pod(
     projected: Dict[str, Any], bound_store: ModelStore, tmp_path: Path,
     emitted: List[Dict[str, str]],
 ) -> None:
-    """The other half of the filing. `resolved.confession()` — the audit line
-    pgw#1606 wrote so a ladder that reports only its winner cannot exist — was
-    a `logger.info` on a RunPod pod, which has no logs API: measured ZERO times
-    in the hub log and in zero `worker_activity_events` rows."""
+    """The other half of the filing."""
     _PodWorker(pod_serve_loop(projected, tmp_path)).run()
 
     lanes = [row for row in emitted if row["kind"] == activity.KIND_APPLIED_LANE]
@@ -163,15 +121,12 @@ def test_the_ladders_confession_leaves_the_pod(
     row = lanes[0]
     assert row["phase"] == "bf16-w16a16", row
     assert row["family"] == LANE, row
-    # The confession names what it did NOT do, or it is not an audit line.
     assert "LANE=" in row["detail"] and "rejected=" in row["detail"], row
     assert "contract=" in row["detail"], row
 
 
 def test_a_lane_that_was_never_resolved_is_reported_ABSENT(tmp_path: Path) -> None:
-    """Absence must stay possible and stay honest: a weightless entrypoint
-    resolves no lane, and inventing one would be the worse failure. `""` is
-    what the hub stores as omitted rather than as an empty claim."""
+    """Absence must stay possible and stay honest: a weightless entrypoint resolves no lane, and inventing one would be the worse failure."""
     w = object.__new__(Worker)
     w._jobs = {}
     w._dispatch = None

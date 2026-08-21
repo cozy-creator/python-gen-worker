@@ -1,17 +1,3 @@
-"""th#1362 item 2: repos WE pull are de-sharded on the way in.
-
-Drives the REAL ingest path — `build_flavor_tree` for the pure pass-through
-mirror (dtype="source"), and `deshard_mirror_tree` for the tree walk — over
-REAL safetensors files written by the real safetensors library. Nothing about
-the bytes is faked, because the property under test is that the tensors come
-out identical while the file layout does not.
-
-The complementary half of the ruling is pinned here too: READ tolerance is
-permanent, so a sharded tree must still load after all of this.
-
-Run: pytest tests/test_deshard_mirror_th1362.py -q
-"""
-
 from __future__ import annotations
 
 import json
@@ -47,7 +33,6 @@ def _write_sharded(
     out_dir: Path, prefix: str, tensors: dict[str, "torch.Tensor"], per_shard: int,
     metadata: dict[str, str] | None = None,
 ) -> Path:
-    """A real HF shard set: N member files plus the index that maps into them."""
     out_dir.mkdir(parents=True, exist_ok=True)
     names = list(tensors)
     groups = [names[i:i + per_shard] for i in range(0, len(names), per_shard)]
@@ -85,8 +70,6 @@ def _load_sharded(index: Path) -> dict[str, "torch.Tensor"]:
         out.update(_load(index.parent / member))
     return out
 
-
-# --------------------------------------------------------------------------
 
 def test_a_shard_set_merges_to_one_file_with_identical_tensors(tmp_path):
     tensors = _tensors(1, 6)
@@ -139,16 +122,13 @@ def test_every_component_is_desharded_and_unsharded_ones_are_untouched(tmp_path)
     for comp in ("transformer", "text_encoder", "vae"):
         weights = sorted(p.name for p in (tmp_path / comp).glob("*.safetensors"))
         assert len(weights) == 1, f"{comp} is not one file per component: {weights}"
-    # A component that was never sharded is not rewritten.
     assert (tmp_path / "vae" / "diffusion_pytorch_model.safetensors").read_bytes() \
         == vae_before
     assert (tmp_path / "model_index.json").exists()
 
 
 def test_an_index_that_lies_about_its_bytes_is_refused_at_ingest(tmp_path):
-    """The klein-4b bug class: the index names a tensor the shards do not hold.
-    Catching it here, at ingest, is the point — it used to surface as an
-    unloadable published checkpoint on a GPU pod."""
+    """The klein-4b bug class: the index names a tensor the shards do not hold."""
     tensors = _tensors(6, 4)
     index = _write_sharded(tmp_path / "text_encoder", "model", tensors, per_shard=2)
     payload = json.loads(index.read_text())
@@ -177,8 +157,7 @@ def test_shards_that_both_define_a_tensor_are_refused(tmp_path):
 
 
 def test_sharded_reads_still_work_after_the_ruling(tmp_path):
-    """Read tolerance is PERMANENT, not transitional: nothing in this change
-    may make a sharded tree unreadable."""
+    """Read tolerance is PERMANENT, not transitional: nothing in this change may make a sharded tree unreadable."""
     tensors = _tensors(9, 4)
     index = _write_sharded(tmp_path / "unet", "diffusion_pytorch_model", tensors,
                            per_shard=2)
@@ -187,10 +166,6 @@ def test_sharded_reads_still_work_after_the_ruling(tmp_path):
     for k, want in tensors.items():
         assert torch.equal(got[k], want)
 
-
-# --------------------------------------------------------------------------
-# The real mirror path
-# --------------------------------------------------------------------------
 
 def _source(tmp_path: Path, layout: str = "multi-file") -> IngestedSource:
     return IngestedSource(
@@ -201,9 +176,7 @@ def _source(tmp_path: Path, layout: str = "multi-file") -> IngestedSource:
 
 
 def test_pure_passthrough_mirror_is_desharded(tmp_path):
-    """dtype="source" is the purest mirror there is — it rewrites no tensor
-    values at all — and the ruling says it de-shards anyway, so that the corpus
-    we own has ONE shape."""
+    """dtype="source" is the purest mirror there is — it rewrites no tensor values at all — and the ruling says it de-shards anyway, so that the corpus we own has ONE shape."""
     src = tmp_path / "src"
     tensors = _tensors(10, 6)
     _write_sharded(src / "transformer", "diffusion_pytorch_model", tensors, per_shard=3)
@@ -221,14 +194,12 @@ def test_pure_passthrough_mirror_is_desharded(tmp_path):
     got = _load(tree / "transformer" / "diffusion_pytorch_model.safetensors")
     for k, want in tensors.items():
         assert torch.equal(got[k], want)
-    # The source is someone else's tree and must be left exactly as ingested.
     assert (src / "transformer" /
             "diffusion_pytorch_model.safetensors.index.json").exists()
 
 
 def test_dtype_matching_mirror_is_desharded(tmp_path):
-    """The other pass-through: requested dtype already equals the source's, so
-    no cast runs. It must still come out one-file-per-component."""
+    """The other pass-through: requested dtype already equals the source's, so no cast runs."""
     src = tmp_path / "src"
     tensors = _tensors(11, 4)
     _write_sharded(src / "transformer", "diffusion_pytorch_model", tensors, per_shard=2)

@@ -1,57 +1,4 @@
-"""The streamed-chunk vocabulary (pgw#1576) — what ``ctx.emit`` puts on the wire.
-
-An entrypoint declares its chunk type once, on the decorator, and emits chunks
-of that type while it works::
-
-    @entrypoint(streams=TokenDelta)
-    async def complete(ctx: RequestContext, payload: CompletionInput,
-                       model: QwenModel) -> Completion:
-        parts: list[str] = []
-        async for token in engine.stream(payload.prompt):
-            ctx.raise_if_cancelled()
-            parts.append(token)
-            ctx.emit(TokenDelta(text=token))
-        return Completion(text="".join(parts))
-
-The function is an ORDINARY ``async def`` (or ``def``) returning a
-``msgspec.Struct``, because the wire has two channels and they carry different
-promises: ``JobProgress`` deltas are ordered, live, never persisted and
-DROPPABLE by contract, while the returned struct is the single authoritative
-``JobResult``. An async-generator entrypoint could express only the first —
-Python forbids ``return <value>`` inside one — so it is refused at declaration
-with the migration line, and the terminal is a real ``return``.
-
-**TWO delta types, because they answer two different questions.**
-
-* :class:`TokenDelta` — MORE OF ONE OUTPUT. One completion, growing. Frames as
-  raw UTF-8 ``text/plain``, so an SSE subscriber concatenates
-  ``payload.delta`` and has the answer.
-* :class:`ItemDelta` — WHICH OF N OUTPUTS ADVANCED. A batch, item by item, each
-  with its own index, terminal flag and per-item error. Frames as
-  ``application/json``.
-
-Collapsing them into one struct would hand every token five fields it must
-leave at zero. An author who needs a third shape subclasses :class:`Delta`
-(default framing: ``application/json``) or overrides :meth:`Delta.frame`.
-
-**One handler may declare several shapes** — ``@entrypoint(streams=(TokenDelta,
-ItemDelta))`` — and the manifest publishes a discriminated ``anyOf`` over them.
-Note before reaching for it: per-token progress WITHIN one batch item is
-``ItemDelta(index=…, text=…, finished=False)``, which is one shape and what
-joycaption's own v1 body did (it wrapped every ``iter_transformers_text_deltas``
-piece in a ``BatchItemDelta``, never mixing the two). The union is for a stream
-that genuinely carries both. A consumer tells them apart by ``content_type``
-(``text/plain`` is token text) or by the ``type`` tag inside a JSON frame.
-
-**Framing is UTF-8 text, and that is a wire constraint rather than a
-preference.** The hub renders every non-``audio/*`` chunk as
-``payload["delta"] = string(data)`` inside a JSON SSE envelope
-(``internal/orchestrator/http/requests.go``), so binary framing arrives as
-replacement-character mojibake. v1's ``BatchItemDelta.chunk: bytes`` +
-``application/x-batch-item+msgpack`` was undeliverable for exactly that reason
-and is not restored: binary rides the ``audio/*`` arm (base64'd by the hub as
-``audio_chunk``) or the terminal result.
-"""
+"""The streamed-chunk vocabulary — what ctx.emit puts on the wire. The wire has two channels with different promises: JobProgress deltas are ordered, live, never persisted and DROPPABLE by contract; the returned struct is the single authoritative JobResult (an async-generator entrypoint is refused at declaration — Python forbids `return <value>` inside one). TokenDelta = more of ONE output, framed raw UTF-8 text/plain (subscribers concatenate payload.delta); ItemDelta = which of N outputs advanced, framed application/json. Framing must be UTF-8 text, a wire constraint: the hub renders every non-audio/* chunk as payload["delta"] = string(data) inside a JSON SSE envelope, so binary framing arrives as replacement-character mojibake — binary rides the audio/* arm (base64'd by the hub as audio_chunk) or the terminal result."""
 
 from __future__ import annotations
 
@@ -62,22 +9,12 @@ from typing import Any, Tuple
 
 import msgspec
 
-#: What a chunk frames to when its type states nothing else.
 JSON_CONTENT_TYPE = "application/json"
-#: The concatenable token stream every SSE consumer already reads.
 TEXT_CONTENT_TYPE = "text/plain"
 
 
 class Delta(msgspec.Struct, frozen=True, kw_only=True, tag_field="type", tag=True):
-    """Base for a streamed chunk. Frames as JSON unless a subclass says else.
-
-    TAGGED on ``type`` (each subclass's own class name), for two reasons and
-    neither is decoding: a JSON frame tells a consumer WHICH shape it is
-    without a second channel, and ``streams=(A, B)`` — one handler, two shapes,
-    which joycaption needs — can only be published as a discriminated
-    ``anyOf`` if the arms carry a tag. An untagged multi-arm declaration is
-    refused at import rather than published as an ambiguous schema.
-    """
+    """Base for a streamed chunk."""
 
     def frame(self) -> Tuple[bytes, str]:
         """This chunk on the wire: ``(data, content_type)``."""
@@ -85,12 +22,7 @@ class Delta(msgspec.Struct, frozen=True, kw_only=True, tag_field="type", tag=Tru
 
 
 class TokenDelta(Delta, frozen=True, kw_only=True):
-    """More of ONE output — the successor to v1's ``IncrementalTokenDelta``.
-
-    ``text`` is the increment, never the accumulation: the caller concatenates.
-    The complete text belongs in the entrypoint's returned struct, which is what
-    a non-streaming caller (and the persisted request record) reads.
-    """
+    """More of ONE output — the successor to v1's ``IncrementalTokenDelta``."""
 
     text: str = ""
 
@@ -99,12 +31,7 @@ class TokenDelta(Delta, frozen=True, kw_only=True):
 
 
 class ItemDelta(Delta, frozen=True, kw_only=True):
-    """WHICH of N outputs advanced — the successor to v1's ``BatchItemDelta``.
-
-    ``finished`` marks an item's terminal delta and ``error`` (non-empty) fails
-    that ITEM without failing the request; the entrypoint still returns a
-    terminal struct describing the whole batch.
-    """
+    """WHICH of N outputs advanced — the successor to v1's ``BatchItemDelta``."""
 
     index: int = 0
     total: int = 0
@@ -115,11 +42,7 @@ class ItemDelta(Delta, frozen=True, kw_only=True):
 
 
 def frame_of(chunk: Any) -> Tuple[bytes, str]:
-    """``(data, content_type)`` for any chunk — the one encoder.
-
-    A chunk that defines ``frame()`` frames itself; anything else is JSON. Kept
-    a free function so the emitter never has to care which it holds.
-    """
+    """``(data, content_type)`` for any chunk — the one encoder."""
     framer = getattr(chunk, "frame", None)
     if callable(framer):
         data, content_type = framer()
@@ -139,16 +62,7 @@ def iter_transformers_text_deltas(
     streamer_cls: type[Any] | None = None,
     decode_kwargs: Mapping[str, Any] | None = None,
 ) -> Iterator[str]:
-    """Stream text chunks out of a ``transformers`` ``model.generate`` call.
-
-    Wraps ``TextIteratorStreamer`` and runs ``generate`` on a background thread,
-    yielding progressive text. ``cancel_checker`` is wired into the generation's
-    stopping criteria when transformers exposes them, so a cancelled request
-    stops the decode rather than draining it. An exception raised inside the
-    generate thread is re-raised here.
-
-    Chunks are text SEGMENTS, not guaranteed single tokens.
-    """
+    """Stream text chunks out of a ``transformers`` ``model.generate`` call."""
     if model is None:
         raise ValueError("model is required")
     if tokenizer is None:
@@ -193,7 +107,6 @@ def iter_transformers_text_deltas(
                     list(existing) + [cancel_criteria]
                 )
         except Exception:
-            # Streaming still works without cooperative stopping criteria.
             pass
 
     streamer = streamer_cls(

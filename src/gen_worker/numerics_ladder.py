@@ -1,29 +1,4 @@
-"""The verdict ladder, shared.
-
-ONE fail-closed fidelity gate — cosine as the gated quantity,
-``HEALTHY / DEGRADED / DESTROYED``, a typed refusal to the caller AND a typed
-activity event to the hub. The LADDER transfers between populations; the
-low-rank machinery around it does not:
-
-* ``_gram_cosine`` / ``evaluate_branch`` / ``evaluate_fuse`` exploit ``D = BA``
-  to get ``tr(D'^T D)`` from two ``r x r`` Grams. Comparing two OUTPUT tensors
-  is ``O(n)`` and needs none of it.
-* ``TargetGrid`` is a weight-grid concept with no output-comparison meaning.
-* ``FIDELITY_FLOOR`` / ``FIDELITY_WARN`` are calibrated for adapter deltas and
-  must NOT be inherited by an output comparison.
-
-So this module owns the parts that are population-independent — the verdict
-ladder, the aggregate rule, the evidence formatting and the gate shape — and
-each caller brings its own :class:`Thresholds` and its own evaluator.
-:mod:`gen_worker.models.adapter_fidelity` is one caller; the compiled graph
-assembled-vs-eager population (whose calibrated defaults live below) is the
-other.
-
-**The aggregate rule:** one norm-weighted number over every row, never a
-per-row median. A median lets a handful of destroyed high-norm rows hide behind
-many intact low-norm ones, which is precisely the shape of an artifact that
-diverges in its last blocks.
-"""
+"""The verdict ladder, shared."""
 
 from __future__ import annotations
 
@@ -36,26 +11,15 @@ from . import activity as activity_mod
 
 logger = logging.getLogger(__name__)
 
-#: The ladder's three rungs. Ordered worst-first by :data:`_ORDER`.
 VERDICT_HEALTHY = "healthy"
 VERDICT_DEGRADED = "degraded"
 VERDICT_DESTROYED = "destroyed"
 
 _ORDER = {VERDICT_HEALTHY: 0, VERDICT_DEGRADED: 1, VERDICT_DESTROYED: 2}
 
-#: Typed event phases. A DEGRADED subject is served and confesses; a DESTROYED
-#: subject is refused and confesses. Both reach the hub, because the error
-#: reaches only the caller of one request while a fleet-wide rate is only
-#: countable from activity records.
 PHASE_DEGRADED = "degraded"
 PHASE_REFUSED = "refused"
 
-#: An armed exported compiled graph took no warm dispatch this boot, which is the
-#: NORMAL state of every adopted compiled graph (the arm precedes setup) and is NOT a
-#: verdict about it. Carried on this kind so one
-#: query (`?kind=compiled_graph_numerics`) still answers what happened to every compiled graph that
-#: armed on a pod, and emitted because an unannounced posture is
-#: indistinguishable from a gate that never ran.
 PHASE_ARMED_UNDISPATCHED = "armed_undispatched"
 
 
@@ -68,37 +32,12 @@ def worst_of(*verdicts: str) -> str:
 
 @dataclass(frozen=True)
 class Thresholds:
-    """One population's calibration of the ladder.
-
-    ``floor`` and ``warn`` are cosine bounds: below ``floor`` the subject is
-    DESTROYED (typed refusal), in ``[floor, warn)`` DEGRADED (served, typed
-    event), at or above ``warn`` HEALTHY (silent).
-
-    ``retention_floor`` gates the SECOND number, and it is not decoration.
-    Cosine is scale-invariant, so a compiled artifact that reproduces eager's
-    direction perfectly at 0.9x the magnitude scores a perfect cosine while
-    serving a systematically dimmer image. The band is symmetric in the log:
-    ``retention`` outside ``[retention_floor, 1 / retention_floor]`` is at
-    least DEGRADED. ``0.0`` disables it (the adapter population gates cosine
-    only — a DESTROYED adapter measures retention 15.3, so there the number is
-    evidence, not a bound).
-    """
+    """One population's calibration of the ladder."""
 
     floor: float
     warn: float
     retention_floor: float = 0.0
-    #: Where these numbers came from. Carried into every refusal so the
-    #: reader can argue with the calibration instead of guessing at it.
     label: str = ""
-    #: The PROVENANCE of the band, in the closed vocabulary below, set by
-    #: whoever resolved it — :data:`SOURCE_DECLARED` when a family's own
-    #: declaration supplied a number, :data:`SOURCE_SDK_DEFAULT` when it did
-    #: not. It rides the object rather than being re-derived at the reader,
-    #: because a second reader of the declaration is exactly the defect this
-    #: field closes: answering the question again from `cfg.numerics_floor`
-    #: alone judges a family that declared only `numerics_warn` at its DECLARED
-    #: band while every wire row says `sdk-default`. "" for populations that are
-    #: not family-declared at all (the adapter ladder).
     source: str = ""
 
     def __post_init__(self) -> None:
@@ -112,8 +51,7 @@ class Thresholds:
                 f"{self.retention_floor!r}")
 
     def verdict(self, cosine: float, retention: float = 1.0) -> str:
-        """The rung ``(cosine, retention)`` lands on — the WORST of the two
-        bounds, never an average of them."""
+        """The rung ``(cosine, retention)`` lands on — the WORST of the two bounds, never an average of them."""
         by_cosine = VERDICT_HEALTHY
         if cosine < self.floor:
             by_cosine = VERDICT_DESTROYED
@@ -125,8 +63,6 @@ class Thresholds:
             if not lo <= retention <= hi:
                 by_retention = VERDICT_DEGRADED
         elif self.retention_floor > 0.0:
-            # A zero-norm subject against a non-zero reference is not
-            # "slightly off" — it is the output missing entirely.
             by_retention = VERDICT_DESTROYED
         return worst_of(by_cosine, by_retention)
 
@@ -139,20 +75,12 @@ class Thresholds:
 
 @dataclass(frozen=True)
 class RowStat:
-    """One comparable unit's own numbers — an output tensor, a module's delta.
-
-    Carried as evidence so a refusal names WHICH unit parted from the
-    reference, which is the difference between an actionable hub record and a
-    number nobody can act on.
-    """
+    """One comparable unit's own numbers — an output tensor, a module's delta."""
 
     name: str
     elements: int
     cosine: float
     retention: float
-    #: ``|candidate - reference| / |reference|``. Reported because it is what
-    #: the AOT literature quotes; never gated on — it conflates direction and
-    #: scale, which is exactly the conflation the two gated numbers separate.
     rel_l2: float = 0.0
 
     def __str__(self) -> str:
@@ -164,14 +92,10 @@ class RowStat:
 class Comparison:
     """One subject's whole-artifact agreement with its reference."""
 
-    #: What was compared against (``"eager"``, the true adapter delta, ...).
     reference: str
-    #: What is on trial (a compiled graph key, an adapter ref, ...).
     subject: str
     thresholds: Thresholds
     rows: Tuple[RowStat, ...]
-    #: The GATED quantity: norm-weighted over every row, i.e. the cosine of
-    #: the concatenated subject against the concatenated reference.
     cosine: float
     retention: float
     rel_l2: float = 0.0
@@ -201,11 +125,6 @@ class Comparison:
         return head + " | worst: " + "; ".join(str(r) for r in worst)
 
 
-# ---------------------------------------------------------------------------
-# The O(n) output evaluator
-# ---------------------------------------------------------------------------
-
-
 def _flatten_tensors(value: Any, prefix: str, out: List[Tuple[str, Any]]) -> None:
     import torch
 
@@ -221,8 +140,6 @@ def _flatten_tensors(value: Any, prefix: str, out: List[Tuple[str, Any]]) -> Non
             _flatten_tensors(
                 value[key], f"{prefix}.{key}" if prefix else str(key), out)
         return
-    # A dataclass-ish output container (diffusers' ``*Output``): walk its
-    # public tensor fields in NAME order so two runs pair the same tensors.
     fields = getattr(value, "__dict__", None)
     if isinstance(fields, dict) and fields:
         for key in sorted(fields, key=str):
@@ -233,12 +150,7 @@ def _flatten_tensors(value: Any, prefix: str, out: List[Tuple[str, Any]]) -> Non
 
 
 def flatten_outputs(value: Any) -> Tuple[Tuple[str, Any], ...]:
-    """Every tensor in a forward's return, NAMED and in a deterministic order.
-
-    Two runs of the same model must produce the same name sequence or the
-    comparison is pairing different tensors — which is why ordering is by NAME
-    at every dict/attribute level rather than by insertion.
-    """
+    """Every tensor in a forward's return, NAMED and in a deterministic order."""
     out: List[Tuple[str, Any]] = []
     _flatten_tensors(value, "", out)
     return tuple(out)
@@ -252,18 +164,7 @@ def compare_outputs(
     reference_label: str = "eager",
     subject_label: str = "",
 ) -> Comparison:
-    """Compare two forward RETURNS, tensor by tensor, in ``O(n)``.
-
-    Both sides are flattened to named tensors and paired by name; a name
-    present on one side only is a structural mismatch and raises, because a
-    silently-dropped output is the failure this gate exists to catch, not a
-    row to average over.
-
-    Everything is accumulated in float32 on the tensors' own device — the
-    comparison must not itself be the source of the loss it measures, and a
-    bf16 dot product over a 4096-token latent loses more precision than the
-    artifact under test.
-    """
+    """Compare two forward RETURNS, tensor by tensor, in ``O(n)``."""
     import torch
 
     ref_rows = flatten_outputs(reference)
@@ -315,7 +216,6 @@ def compare_outputs(
 def _cosine(cross: float, ref_sq: float, sub_sq: float) -> float:
     denom = math.sqrt(max(ref_sq, 0.0)) * math.sqrt(max(sub_sq, 0.0))
     if denom <= 0.0:
-        # Both sides all-zero is agreement; one side zero is not.
         return 1.0 if ref_sq <= 0.0 and sub_sq <= 0.0 else 0.0
     return max(-1.0, min(1.0, cross / denom))
 
@@ -326,11 +226,6 @@ def _ratio(num_sq: float, den_sq: float) -> float:
     return math.sqrt(max(num_sq, 0.0) / den_sq)
 
 
-# ---------------------------------------------------------------------------
-# The gate shape
-# ---------------------------------------------------------------------------
-
-
 def gate(
     comparison: Optional[Comparison],
     *,
@@ -339,13 +234,7 @@ def gate(
     context: str = "",
     announce: bool = True,
 ) -> Optional[Comparison]:
-    """Fail closed below the floor; confess in the gray band; silent above.
-
-    ``refuse`` builds the caller's OWN typed exception from the message and
-    the comparison — this module refuses to own a shared error type, because
-    "this adapter cannot serve here" and "this compiled graph must not arm" route
-    through completely different classifiers.
-    """
+    """Fail closed below the floor; confess in the gray band; silent above."""
     if comparison is None:
         return None
     verdict = comparison.verdict
@@ -371,58 +260,13 @@ def gate(
         comparison)
 
 
-# ---------------------------------------------------------------------------
-# The compiled graph (assembled-vs-eager) calibration — the measured band
-# ---------------------------------------------------------------------------
-# The calibration is family-GENERAL: it reads `Compile.numerics_floor` /
-# `numerics_warn`, which whole-graph families (sdxl: 0.995/0.999) declare too.
-
-#: Cosine floor for an ASSEMBLED-vs-EAGER comparison — below it the compiled graph is
-#: DESTROYED and refuses to arm.
-#:
-#: Derived from the measured band on the production toolchain (torch
-#: 2.13.0+cu130, L4/sm_89), NOT inherited from the adapter floors, which are
-#: calibrated for adapter deltas and must not be assumed here:
-#:
-#:   worst configuration we ACCEPT   0.9890  flux2 w8a8 pertensor vs eager at
-#:                                           T_img=4096 (0.9926 at 8160)
-#:   best configuration we REFUSE    0.9730  flux2 w8a8 ROWWISE whole-graph vs
-#:                                           eager — the artifact the platform
-#:                                           decided is not servable.
-#:
-#: 0.98 is that band's geometric midpoint (sqrt(0.9890 * 0.9730) = 0.98097),
-#: 1.0092x of headroom below the worst accepted case and 1.0072x above the
-#: best refused one. The healthy population sits far above it: bf16 control
-#: 0.99979, sdxl w8a8 whole-graph 0.99984.
 NUMERICS_FLOOR = 0.98
 
-#: Gray-band ceiling — at or above this the arm is silent, below it the compiled graph
-#: arms and confesses ``compiled_graph_numerics phase=degraded``.
-#:
-#: Every configuration anyone has called healthy measures 0.9998+ (bf16
-#: control 0.99979, sdxl w8a8 whole-graph 0.99984), so an artifact that has
-#: lost more than 0.1% of the output's DIRECTION has lost it to something —
-#: fp8 accumulation drift, a fused reassociation — and that is worth counting
-#: fleet-wide even when it is served.
 NUMERICS_WARN = 0.999
 
-#: Magnitude band. Cosine is scale-invariant, so an artifact that reproduces
-#: eager's direction exactly at 0.9x the magnitude scores a PERFECT cosine
-#: while serving a systematically dimmer image. The adapter population cannot
-#: gate on it (there retention is evidence, not a bound — a destroyed adapter
-#: measures 15.3); this one can.
-#:
-#: Derived from the same measured band: worst accepted 0.997 (bf16 control),
-#: best refused 0.905 (flux2 w8a8 pertensor whole-graph; rowwise 0.902).
-#: sqrt(0.997 * 0.905) = 0.9500. Applied symmetrically in the log, so
-#: retention outside [0.95, 1.0526] is at least DEGRADED.
 NUMERICS_RETENTION_FLOOR = 0.95
 
-#: :attr:`Thresholds.source` when a family's own declaration supplied at least
-#: one of the two bounds.
 SOURCE_DECLARED = "declared"
-#: :attr:`Thresholds.source` when the family declared neither bound and the
-#: measured SDK band above decided.
 SOURCE_SDK_DEFAULT = "sdk-default"
 
 DEFAULT_THRESHOLDS = Thresholds(
@@ -433,23 +277,7 @@ DEFAULT_THRESHOLDS = Thresholds(
 
 
 def declared_thresholds(cfg: Any) -> Thresholds:
-    """The tolerance THIS family declares, falling back to the SDK default.
-
-    A declared per-family tolerance, because bf16 attention reassociation
-    makes exact equality the wrong bar and the right bar is not the same for
-    a 25-block fp8 DiT and a conv-bearing UNet. A family that declares
-    nothing gets :data:`DEFAULT_THRESHOLDS`, whose derivation is the measured
-    band above — a default with evidence, not a guess.
-
-    THE ONE PLACE that decides declared-vs-default, and it stamps its own
-    answer onto :attr:`Thresholds.source`. Nobody may re-derive it: the defect
-    class here is a declaration read by a second party that drifts from the
-    authority.
-
-    ``cfg`` is duck-typed on purpose — it is a raw ``Compile`` on the author-CI
-    path and a ``registry.CompileContract`` on every fleet path, and both carry the
-    two fields (``CompileContract.from_declaration`` is what keeps that true).
-    """
+    """The tolerance THIS family declares, falling back to the SDK default."""
     floor = getattr(cfg, "numerics_floor", None)
     warn = getattr(cfg, "numerics_warn", None)
     if floor is None and warn is None:

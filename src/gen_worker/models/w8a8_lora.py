@@ -1,49 +1,4 @@
-"""Runtime LoRA additive branches.
-
-Denoiser adapter halves ride a compute-dtype SIDE-BRANCH — ``y += B(A @ x)``
-reading the original activation and adding onto the output — never peft
-module wrapping (peft fights the layerwise-cast hooks) and never a
-weight mutation. Three lanes are branch-capable:
-
-- **w8a8 scaled_mm**: Fp8ScaledLinear reads ``lora_a``/``lora_b``
-  non-persistent buffers natively in its forward.
-- **fp8-storage layerwise-cast**: plain ``nn.Linear`` under
-  diffusers cast hooks gets an idempotent instance-forward wrap; branch
-  tensors live in the module ``__dict__`` (plain attrs) so ``.to(dtype)``
-  cast hooks never round-trip them through fp8.
-- **plain bf16/fp16 resident**: same wrap; removal restores the
-  original forward path bit-exactly.
-
-Graph stability: every branch-capable Linear gets a branch under canonical
-placement (zeroed slots for layers an adapter doesn't cover), and the
-concatenated rank of the active adapter set is padded to a fixed bucket
-(:data:`RANK_BUCKETS`). Every adapter set inside one bucket shares ONE traced
-graph; hot-swap is a buffer copy. Multiple active adapters rank-concat into
-one A/B pair; per-adapter scale (alpha/rank x user weight) is folded into the
-B copy.
-
-The branch-bearing pipeline stamps ``_cozy_weight_lane =
-"<base-lane>-lora<bucket>"`` (``w8a8-lora32``, ``fp8-hooks-lora32``,
-``lora32`` for plain bf16) so the SYMMETRIC ``compile_cache.lane_drift``
-guard keeps LoRA-bearing pipelines and branchless compiled graphs apart in
-both directions.
-
-**Branch targets are PER-COMPONENT.** A pipeline's denoiser is a
-SET, not a module: Wan 2.2 A14B is a dual-expert MoE (``transformer``
-high-noise + ``transformer_2`` low-noise, handed off at ``boundary_ratio``)
-and its distillation is correspondingly two adapters. Every branch
-operation therefore runs over :func:`branch_targets` — the bucket container
-is allocated on each expert, and an adapter set is ROUTED to the component
-its own keys name (``transformer.`` / ``transformer_2.`` / ``unet.``).
-Routing is data, never a wire field: diffusers already namespaces
-multi-denoiser pipelines by component, so a per-expert adapter is mirrored
-with its component prefix. On a multi-denoiser pipeline an adapter that
-does NOT name its component is refused: ``diffusers``' Wan converters
-rewrite every non-diffusers key to the ``transformer.`` prefix whatever
-expert the file was trained for, so both halves would land on the high
-expert with a clean log. Single-denoiser pipelines route every denoiser key
-to their one target.
-"""
+"""Runtime LoRA additive branches."""
 
 from __future__ import annotations
 
@@ -55,9 +10,6 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
-# Flat staging buffers above this size stay pageable — pinned host memory
-# is shared and non-swappable, and the cache holds up to _MAPCACHE_MAX.
-# ONE owner for the worker's whole pinned budget.
 from ..media_transfer import PIN_MAX_BYTES as _PIN_MAX_BYTES
 from . import adapter_fidelity
 from .fp8_storage import structural_base
@@ -68,8 +20,6 @@ from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
-# Padded-rank buckets: one traced graph per bucket. 16/32 cover the bulk of
-# the civitai catalog; 64/128 the high-rank tail.
 RANK_BUCKETS = (16, 32, 64, 128)
 
 _BUCKET_ATTR = "_cozy_lora_bucket"
@@ -77,11 +27,7 @@ _ACTIVE_ATTR = "_cozy_lora_active"
 _SPARSE_ATTR = "_cozy_lora_sparse"
 _MAPCACHE_ATTR = "_cozy_lora_mapcache"
 _MAPCACHE_MAX = 8
-# The kohya-flat prefixes are NOT component namespaces (see below) and are not
-# vocabulary — sd-scripts emits them verbatim, so they stay literal here.
 _KOHYA_FLAT_PREFIXES = ("lora_unet_", "lora_transformer_")
-# The denoiser components a pipeline can carry, in stamp order. A dual-expert
-# MoE carries transformer (high noise) AND transformer_2 (low).
 _denoiser_components = denoiser_components
 
 
@@ -90,17 +36,10 @@ def _denoiser_prefixes() -> tuple[str, ...]:
 
 
 def _component_prefixes() -> tuple[tuple[str, str], ...]:
-    """Key prefix -> the component it NAMES, longest first (``transformer_2.``
-    must win over ``transformer.``). DOTTED forms only: that prefix IS the
-    diffusers component namespace. The kohya-flat ``lora_unet_`` prefix is
-    NOT a declaration — sd-scripts emits it for transformer denoisers too
-    (flux/qwen adapters serve fine on the branch today) — so those keys name
-    no component and follow the unprefixed rules below."""
     return tuple(
         (f"{c}.", c)
         for c in sorted(_denoiser_components(), key=len, reverse=True)
     )
-# (normalized suffix marker, is_down) — dotted forms after key normalization.
 _DOWN_SUFFIXES = (".lora_down.weight", ".lora.down.weight", ".lora_A.weight")
 _UP_SUFFIXES = (".lora_up.weight", ".lora.up.weight", ".lora_B.weight")
 
@@ -117,20 +56,7 @@ def rank_bucket(total_rank: int) -> int:
 
 
 def branch_targets(pipe: Any) -> Dict[str, Any]:
-    """component name -> denoiser module for EVERY branch-capable denoiser
-    the pipeline carries, in stamp order.
-
-    One entry for an ordinary pipeline (LTX/sdxl/qwen: ``transformer`` or
-    ``unet``) — every operation below then degenerates to single-target
-    behavior. TWO for a dual-expert MoE (Wan 2.2 A14B), and both are real
-    branch targets: adapting only the high expert leaves the low one running
-    undistilled weights on a distilled ladder.
-
-    Branch-capability is lane-agnostic (w8a8 scaled_mm, fp8-storage
-    layerwise-cast, plain resident). Deliberately NO module scan
-    here: this runs on every demote (residency.pre_demote -> detach) —
-    adapters that map onto no Linear fail typed in :func:`map_adapter` (with
-    the plain-lane peft fallback in AdapterResidency.activate)."""
+    """component name -> denoiser module for EVERY branch-capable denoiser the pipeline carries, in stamp order."""
     out: Dict[str, Any] = {}
     for name in _denoiser_components():
         denoiser = getattr(pipe, name, None)
@@ -140,8 +66,7 @@ def branch_targets(pipe: Any) -> Dict[str, Any]:
 
 
 def declared_component(key: str) -> str:
-    """The pipeline component one adapter key NAMES, or ``""`` when the key
-    carries no component prefix (bare/kohya-flat module paths)."""
+    """The pipeline component one adapter key NAMES, or ``""`` when the key carries no component prefix (bare/kohya-flat module paths)."""
     for prefix, comp in _component_prefixes():
         if key.startswith(prefix):
             return comp
@@ -151,15 +76,7 @@ def declared_component(key: str) -> str:
 def require_component_declaration(
     components: Iterable[str], raw_sd: Mapping[str, Any], *, ref: str = "",
 ) -> None:
-    """Fail-closed, checked against the adapter's RAW keys.
-
-    On a MULTI-denoiser pipeline an adapter must name the expert it adapts.
-    This cannot be checked after normalization: diffusers' Wan converters
-    rewrite every non-diffusers key (``diffusion_model.…``, ``lora_unet_…``)
-    to the ``transformer.`` prefix regardless of which expert the file was
-    trained for, so an unmirrored per-expert half would arrive looking like
-    an explicit high-noise declaration and land there with a clean log.
-    Mirror per-expert adapters with their component prefix instead."""
+    """Fail-closed, checked against the adapter's RAW keys."""
     comps = tuple(components)
     if len(comps) < 2:
         return
@@ -179,17 +96,7 @@ def require_component_declaration(
 def route_denoiser_keys(
     den_sd: Dict[str, Any], components: Iterable[str], *, ref: str = "",
 ) -> Dict[str, Dict[str, Any]]:
-    """Partition one adapter's denoiser keys by the component they target
-. Keys keep their prefixes — :func:`map_adapter` strips them.
-
-    A key naming a component the pipeline does not carry is unroutable on
-    ANY topology and refuses. Beyond that, a single-denoiser pipeline takes
-    every remaining key, prefixed or not (an unresolvable key still fails
-    typed in :func:`map_adapter`, which is what keeps the plain-lane peft
-    fallback reachable). With two or more experts
-    routing is explicit and total: a key naming no component is ambiguous
-    and refuses too. Both refuse before anything is attached — never a
-    partial application."""
+    """Partition one adapter's denoiser keys by the component they target ."""
     comps = tuple(components)
     if not den_sd:
         return {}
@@ -205,7 +112,6 @@ def route_denoiser_keys(
         else:
             routed.setdefault(comp, {})[key] = tensor
     if not foreign and bare and len(comps) == 1:
-        # One target: prefixed and unprefixed keys alike are its own.
         routed.setdefault(comps[0], {}).update(bare)
         bare = {}
     if bare and not foreign:
@@ -228,17 +134,11 @@ def route_denoiser_keys(
 
 
 def branch_execution_lane(model: Any) -> str:
-    """The denoiser's base weight lane for branch policy/stamping:
-    ``"w8a8"`` | ``"fp8-hooks"`` | ``"gguf"`` | ``""`` (plain resident). Both
-    fp8 GEMM dispatch branches (rowwise sm_90+, pertensor sm_89) are the w8a8
-    lane; the additive LoRA branch is orthogonal to the scaling mode."""
+    """The denoiser's base weight lane for branch policy/stamping: ``"w8a8"`` | ``"fp8-hooks"`` | ``"gguf"`` | ``""`` (plain resident)."""
     if getattr(model, "_cozy_w8a8_mode", "") in ("rowwise", "pertensor"):
         return "w8a8"
     if getattr(model, "_cozy_fp8_storage_applied", False):
         return "fp8-hooks"
-    # pgw#1498: a GGML-storage denoiser traces differently from a plain one —
-    # every Linear decodes its weight inside forward — so it is its own graph
-    # family, and its bucketed branch lanes are `gguf-lora<N>`.
     from .gguf_torch import is_gguf_leaf
 
     if any(is_gguf_leaf(m) for _, m in model.named_modules()):
@@ -247,24 +147,7 @@ def branch_execution_lane(model: Any) -> str:
 
 
 def branch_modules(model: Any) -> Dict[str, Any]:
-    """name -> branch-capable module for the denoiser: Fp8ScaledLinear,
-    plain nn.Linear, or plain nn.Conv2d (the curated sdxl distill adapters
-    carry conv pairs; convs are never quantized, so their branch is always
-    the eager instance-forward wrap). Other module kinds are not
-    branch targets — adapters that name them fail loud in
-    :func:`map_adapter`. Selection is by EXACT class over
-    :func:`fp8_storage.structural_base`, so an fp8-storage leaf is
-    targeted as the plain class it was restructured from (its branch reads
-    the compute-dtype activation and adds onto the compute-dtype output —
-    the fp8 storage is never touched, exactly as under the hook lane).
-
-    pgw#1498: a GGML-storage leaf is targeted by the SAME rule and for the same
-    reason — ``structural_base`` is one function over one shared marker, so a
-    pun this walk has never heard of is admitted by construction. The branch
-    wraps the punned ``forward``, which means it adds onto the DECODED output;
-    the block bytes are never touched. Order is load-bearing: block bytes are
-    installed first (``install_quantized_weights`` REFUSES a leaf that already
-    carries an instance forward), branches second."""
+    """name -> branch-capable module for the denoiser: Fp8ScaledLinear, plain nn.Linear, or plain nn.Conv2d (the curated sdxl distill adapters carry conv pairs; convs are never quantized, so their branch ..."""
     import torch.nn as nn
 
     fp8_cls = fp8_scaled_linear_class()
@@ -280,17 +163,12 @@ def branch_bucket(model: Any) -> int:
 
 
 def lora_execution_lane(bucket: int, sparse: bool = False, base: str = "w8a8") -> str:
-    # Sparse (eager-only) placement is a different graph per coverage
-    # pattern — the "-sparse" suffix can never match a produced compiled graph label.
-    # ``base`` is the branchless lane the branch rides on ("w8a8",
-    # "fp8-hooks", or "" for plain resident).
     prefix = f"{base}-" if base else ""
     return f"{prefix}lora{int(bucket)}" + ("-sparse" if sparse else "")
 
 
 def split_state_dict(sd: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """(denoiser keys, everything else). Text-encoder halves stay on the
-    peft path — TEs are not quantized."""
+    """(denoiser keys, everything else)."""
     den: Dict[str, Any] = {}
     rest: Dict[str, Any] = {}
     for k, v in sd.items():
@@ -299,8 +177,6 @@ def split_state_dict(sd: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
 
 
 def _base_and_kind(key: str) -> Tuple[str, str]:
-    """(base module name, 'down'|'up'|'alpha'|'') for one adapter key.
-    Handles adapter-scoped peft keys (``.lora_A.<name>.weight``)."""
     if key.endswith(".alpha"):
         return key[: -len(".alpha")], "alpha"
     for suf in _DOWN_SUFFIXES:
@@ -309,7 +185,6 @@ def _base_and_kind(key: str) -> Tuple[str, str]:
     for suf in _UP_SUFFIXES:
         if key.endswith(suf):
             return key[: -len(suf)], "up"
-    # adapter-scoped peft: ...lora_A.<adapter>.weight
     if key.endswith(".weight"):
         stem = key[: -len(".weight")]
         head, _, _scope = stem.rpartition(".")
@@ -321,12 +196,6 @@ def _base_and_kind(key: str) -> Tuple[str, str]:
 
 
 def _kohya_sgm_normalize(sd: Dict[str, Any], model: Any) -> Optional[Dict[str, Any]]:
-    """Rename SGM/LDM block indices (input_blocks_4_1 ...) to diffusers block
-    paths using the REAL unet config — diffusers' own pre-pass, the same one
-    the bf16 peft path runs. Keys stay kohya-flat afterwards and resolve
-    against the model's module paths directly (down/up/alpha handled
-    natively; the full non-diffusers converter is NOT used — it emits legacy
-    attn-processor names that match no real module)."""
     try:
         from diffusers.loaders.lora_conversion_utils import (
             _maybe_map_sgm_blocks_to_diffusers,
@@ -336,9 +205,6 @@ def _kohya_sgm_normalize(sd: Dict[str, Any], model: Any) -> Optional[Dict[str, A
     except Exception:
         logger.warning("w8a8 lora: SGM block normalization failed", exc_info=True)
         return None
-    # The SGM pass renumbers blocks but keeps the sgm family names; the
-    # family rename is _convert_unet_lora_key's job in diffusers — do just
-    # that part here.
     return {
         k.replace("input_blocks", "down_blocks")
          .replace("middle_block", "mid_block")
@@ -353,7 +219,6 @@ def _group_keys(
     flat = {p.replace(".", "_"): p for p in mods}
 
     def resolve(base: str) -> str:
-        # Longest first: "transformer_2." must not be read as "transformer.".
         for pref in ("unet.", "transformer_2.", "transformer."):
             if base.startswith(pref) and base[len(pref):] in mods:
                 return base[len(pref):]
@@ -379,15 +244,7 @@ def _group_keys(
 def map_adapter(
     den_sd: Dict[str, Any], model: Any, *, ref: str = ""
 ) -> Dict[str, Tuple[Any, Any, float]]:
-    """Resolve one adapter's denoiser keys onto the model's quantized
-    modules: module path -> (A [r, in], B [out, r], alpha_scale).
-
-    Dotted diffusers/peft names resolve after stripping the component
-    prefix; kohya flattened names resolve against the model's own module
-    paths, falling back to diffusers' kohya converter (LDM block naming,
-    SDXL sd-scripts). Any key that does not land on a branch-capable module
-    is a hard error — a silently-dropped block would change the adapter's
-    output."""
+    """Resolve one adapter's denoiser keys onto the model's quantized modules: module path -> (A [r, in], B [out, r], alpha_scale)."""
     mods = branch_modules(model)
     groups, unresolved = _group_keys(den_sd, mods)
     if unresolved and any(
@@ -423,8 +280,6 @@ def map_adapter(
 
 
 def _validated_pair(path: str, mod: Any, a: Any, b: Any, *, ref: str) -> Tuple[Any, Any]:
-    """Shape-check one down/up pair against its branch module; conv pairs
- normalize the up half to [out, r, 1, 1]."""
     import torch.nn as nn
 
     def bad(detail: str) -> RefCompatibilitySurprise:
@@ -455,10 +310,6 @@ def _validated_pair(path: str, mod: Any, a: Any, b: Any, *, ref: str) -> Tuple[A
 
 
 def _stage_adapter(mapped: Dict[str, Tuple[Any, Any, float]]) -> Dict[str, Any]:
-    """One adapter's swap-ready form: per-dtype flat CPU staging tensors
-    (pinned when small enough on CUDA hosts) + an index of every layer's
-    (dtype, offset, shape) slices. Built once per resident adapter; hot-swaps
-    then pay only one H2D transfer + device-side placement."""
     import torch
 
     by_dtype: Dict[Any, List[Tuple[str, str, Any]]] = {}
@@ -497,12 +348,6 @@ def _is_scaled_linear(mod: Any) -> bool:
 
 
 def _install_branch_forward(mod: Any) -> None:
-    """Idempotent instance-forward wrap for a plain ``nn.Linear``
-    (``y = orig(x) + (x @ A.T) @ B.T``) or plain ``nn.Conv2d``
-    (``y = orig(x) + conv1x1(conv(x, A), B)``). Branch tensors are
-    read from the module ``__dict__`` so layerwise-cast hooks
-    (``.to(dtype)``) never see them. With no branch
-    installed the wrap is a pure pass-through — removal is bit-exact."""
     if getattr(mod, _WRAP_ATTR, False):
         return
     orig = mod.forward
@@ -514,11 +359,6 @@ def _install_branch_forward(mod: Any) -> None:
         if a is None or b is None:
             return y
         if a.device != x.device:
-            # Self-heal after a host-resident alloc (block-offload lane):
-            # branch tensors are tiny; pin them to the execution device.
-            # Rebind ONLY if the module still holds the exact pair we read —
-            # a concurrent realloc must never be clobbered with stale copies
-            # (the compute below uses the consistent local pair either way).
             a2, b2 = a.to(x.device), b.to(x.device)
             if (mod.__dict__.get("lora_a") is a
                     and mod.__dict__.get("lora_b") is b):
@@ -543,13 +383,6 @@ def _install_branch_forward(mod: Any) -> None:
 
 
 def _clear_branch_slots(mod: Any) -> None:
-    """Drop one module's branch tensors.
-
-    ``Fp8ScaledLinear`` keeps its slots DECLARED as ``None`` buffers
- — popping them would leave plain attributes behind, which is
-    both the shape ``register_buffer`` refuses and the shape export cannot
-    see. Plain Linear/Conv keep the ``__dict__`` form their forward wrap
-    reads."""
     if _is_scaled_linear(mod):
         mod._buffers["lora_a"] = None
         mod._buffers["lora_b"] = None
@@ -562,24 +395,11 @@ def _clear_branch_slots(mod: Any) -> None:
 
 
 def alloc_branch_buffers(mod: Any, bucket: int) -> None:
-    """Zeroed A/B branch tensors on one branch-capable module.
-
-    Fp8ScaledLinear registers non-persistent buffers (they move with the
-    module and its forward reads them natively; the w8a8 denoiser carries
-    no cast hooks). Plain ``nn.Linear``/``nn.Conv2d`` get a forward wrap +
-    plain ``__dict__`` attrs instead — registered buffers would be
-    round-tripped bf16->fp8->bf16 by the layerwise-cast hooks on the
-    fp8-storage lane. Conv branches: A [bucket, in, kh, kw] runs
-    the base conv's stride/padding, B [out, bucket, 1, 1] projects up."""
+    """Zeroed A/B branch tensors on one branch-capable module."""
     import torch
     import torch.nn as nn
 
     dev = mod.weight.device
-    # Branch tensors compute in the module's COMPUTE dtype — never its
-    # storage dtype (on the fp8-storage lane weight AND bias rest in fp8).
-    # ONE definition, shared with the fidelity gate: the grid the gate judges
-    # the delta against must be the grid the buffers are allocated in, by
-    # construction rather than by two copies agreeing.
     dtype = adapter_fidelity.branch_compute_dtype(mod)
     _clear_branch_slots(mod)
     if isinstance(mod, nn.Conv2d):
@@ -603,10 +423,7 @@ def alloc_branch_buffers(mod: Any, bucket: int) -> None:
 
 
 def enable_lora_branches(model: Any, bucket: int) -> None:
-    """Allocate branch buffers on EVERY branch-capable Linear (canonical
-    placement — one traced graph over all coverage patterns; the compiled
-    lane). Idempotent at the same bucket; a different bucket reallocates
-    (a new graph family)."""
+    """Allocate branch buffers on EVERY branch-capable Linear (canonical placement — one traced graph over all coverage patterns; the compiled lane)."""
     if bucket not in RANK_BUCKETS:
         raise ValidationError(f"invalid lora rank bucket {bucket} (valid: {RANK_BUCKETS})")
     if branch_bucket(model) == bucket and not getattr(model, _SPARSE_ATTR, False):
@@ -619,8 +436,7 @@ def enable_lora_branches(model: Any, bucket: int) -> None:
 
 
 def disable_lora_branches(model: Any) -> None:
-    """Drop the branch buffers entirely (back to the branchless graph
-    family). Used on demote/teardown, never between requests."""
+    """Drop the branch buffers entirely (back to the branchless graph family)."""
     for mod in branch_modules(model).values():
         _clear_branch_slots(mod)
     if hasattr(model, _BUCKET_ATTR):
@@ -630,10 +446,7 @@ def disable_lora_branches(model: Any) -> None:
 
 
 def clear_branch_adapters(model: Any) -> None:
-    """Deactivate. Canonical (compiled) placement zeroes B — the addend is
-    exactly 0 and the traced graph stays. Sparse (eager) placement DROPS the
-    buffers instead: eager pays per-kernel launch cost even for zeroed
-    branches, so bare requests go back to exactly branchless speed."""
+    """Deactivate."""
     if not branch_bucket(model):
         return
     if getattr(model, _SPARSE_ATTR, False):
@@ -649,16 +462,8 @@ def branches_active(model: Any) -> bool:
     return bool(getattr(model, _ACTIVE_ATTR, False))
 
 
-# ---------------------------------------------------------------------------
-# Set-level operations: every branch-capable denoiser the pipeline
-# carries moves TOGETHER — one bucket, one lane stamp, one active set.
-# ---------------------------------------------------------------------------
-
-
 def enable_branch_execution_lanes(pipe: Any, bucket: int) -> Dict[str, Any]:
-    """Allocate the rank-``bucket`` branch container on EVERY branch-capable
-    denoiser (both experts of an MoE — the ``Compile(lora_bucket=)`` arming
-    contract). Returns the targets it armed."""
+    """Allocate the rank-``bucket`` branch container on EVERY branch-capable denoiser (both experts of an MoE — the ``Compile(lora_bucket=)`` arming contract)."""
     targets = branch_targets(pipe)
     for model in targets.values():
         enable_lora_branches(model, bucket)
@@ -678,8 +483,7 @@ def clear_branch_execution_lanes(pipe: Any) -> None:
 
 
 def pipeline_branch_bucket(pipe: Any) -> int:
-    """The pipeline's branch bucket — one value across the denoiser set (the
-    set is always enabled/resized together), 0 when no branch is enabled."""
+    """The pipeline's branch bucket — one value across the denoiser set (the set is always enabled/resized together), 0 when no branch is enabled."""
     return max(
         (branch_bucket(m) for m in branch_targets(pipe).values()), default=0)
 
@@ -688,21 +492,6 @@ def _stage_for(
     model: Any, adapters: Sequence[Tuple[Dict[str, Any], float, str]],
     *, request_id: str = "",
 ) -> List[Tuple[Dict[str, Any], float, str]]:
-    """Map + stage one component's adapters. PURE — no module is touched, so
-    an unmappable adapter fails before anything is attached (never partially
-    attach). Repeat swaps of a resident adapter (the AdapterCache serves the
-    SAME dict object) skip the key-mapping pass AND the CPU flatten — the
-    flatten measured ~700ms at SDXL scale, the actual H2D+device placement
-    ~130ms.
-
-    Also where the branch's FIDELITY gate runs. The delta is measured
-    against the dtype the branch buffers are actually allocated in — read from
-    the modules, so an fp8 branch would be judged as fp8 without an edit — and
-    an adapter the branch would destroy is refused HERE, on the pure pass,
-    before a buffer is touched. Survival is a property of (adapter, model), so
-    it is computed once on the cold path and cached beside the staging entry
-    (0.86 s for all 788 modules of sdxl lightning-4step on 4 CPU threads);
-    warm swaps re-check the cached verdict for free."""
     cache: Dict[Any, Any] = getattr(model, _MAPCACHE_ATTR, None) or {}
     staged: List[Tuple[Dict[str, Any], float, str]] = []
     for sd, w, ref in adapters:
@@ -712,13 +501,6 @@ def _stage_for(
         if entry is None:
             mapped = map_adapter(sd, model, ref=ref)
             if not mapped:
-                # VACUOUS GUARD. `evaluate_branch` returns None for an empty
-                # mapping and `gate(None)` is a no-op, so an adapter that maps
-                # to ZERO modules would sail through the fidelity gate and the
-                # request would render with NO adapter applied while reporting
-                # success. Reachable: `_normalize_lora_keys` falls back to RAW
-                # keys when `lora_state_dict` normalization raises, and raw
-                # kohya keys match no module path on this model.
                 logger.error(
                     "adapter %s mapped ZERO modules on %s; the request will "
                     "render WITHOUT it", ref, type(model).__name__)
@@ -745,7 +527,6 @@ def _stage_for(
 
 
 def _needed_rank(staged: Sequence[Tuple[Dict[str, Any], float, str]]) -> int:
-    """The widest per-layer concatenated rank this staged set needs."""
     per_layer: Dict[str, int] = {}
     for entry, _w, _ref in staged:
         for path, r in entry["ranks"].items():
@@ -756,15 +537,12 @@ def _needed_rank(staged: Sequence[Tuple[Dict[str, Any], float, str]]) -> int:
 def _settle_bucket(
     models: Sequence[Any], want: int, *, uniform: bool, allow_resize: bool,
 ) -> int:
-    """The bucket the whole branch SET lands on, allocated under canonical
-    placement. One value for every component: two experts on different
-    buckets would be two graph families under one lane stamp."""
     current = max((branch_bucket(m) for m in models), default=0)
     was_sparse = any(bool(getattr(m, _SPARSE_ATTR, False)) for m in models)
     if not uniform:
         return want
     if current >= want and current and not was_sparse:
-        want = current  # never shrink — stay on the already-traced graph
+        want = current
     if current != want or was_sparse:
         if not allow_resize:
             raise ValidationError(
@@ -786,7 +564,6 @@ def _place_adapters(
     current: int,
     t0: float,
 ) -> Dict[str, Any]:
-    """Copy one component's staged adapters into its branch buffers."""
     import torch
 
     mapped = list(staged)
@@ -808,10 +585,6 @@ def _place_adapters(
     covered = 0
     mods = branch_modules(model)
     with torch.no_grad():
-        # One H2D transfer per adapter of its CACHED flat staging buffer
-        # (pinned when small enough), then index-addressed device-side
-        # cast/scale-fold/placement — the per-swap CPU flatten measured
-        # ~700ms at SDXL scale; staged warm swaps pay only transfer+place.
         device = None
         for mod in mods.values():
             if getattr(mod, "lora_a", None) is not None:
@@ -826,7 +599,7 @@ def _place_adapters(
                           for t in entry["flat"].values())
         for path, mod in mods.items():
             if getattr(mod, "lora_a", None) is None:
-                continue  # sparse placement: uncovered layer has no branch
+                continue
             hit_any = False
             r0 = 0
             for (entry, w, _ref), df in zip(mapped, dev_flats):
@@ -852,13 +625,10 @@ def _place_adapters(
             if hit_any:
                 covered += 1
             else:
-                mod.lora_b.zero_()  # canonical zeroed slot (uniform)
+                mod.lora_b.zero_()
         if cuda_ready():
             torch.cuda.synchronize()
     if mapped and not covered:
-        # Every mapped key resolved to a branch-capable module, so zero
-        # covered means this component carries no branch CONTAINER — the
-        # adapter would be a silent no-op (half-armed MoE).
         raise RefCompatibilitySurprise(
             f"the adapter maps onto {len(mapped)} module set(s) of this "
             "denoiser but none of them carries a branch container — the "
@@ -890,23 +660,7 @@ def apply_branch_adapters(
     request_id: str = "",
     rank_floor: int = 0,
 ) -> Dict[str, Any]:
-    """Make exactly ``adapters`` (state_dict, user weight, ref) ONE denoiser's
-    active branch set. Rank-concat across adapters, pad to the bucket, fold
-    ``alpha/rank * weight`` into the B copy. Returns swap stats.
-
-    ``uniform=True`` (compiled pipelines) keeps canonical placement — every
-    quantized Linear carries a branch, zeroed slots for uncovered layers,
-    never shrinking the bucket; ``allow_resize=False`` additionally refuses
-    bucket changes (a resize is a new graph family, and prod never compiles
-    at runtime). ``uniform=False`` (eager) allocates branches ONLY on
-    covered layers and drops stale ones — eager pays a per-kernel launch
-    tax even for zeroed slots, so sparse placement keeps uncovered layers
-    at exactly branchless speed.
-
-    ``rank_floor`` is the widest rank a SIBLING expert needs: the
-    components of one pipeline always share a bucket. Prefer
-    :func:`apply_branch_adapter_set` — it routes an adapter set across the
-    whole denoiser set and computes the floor itself."""
+    """Make exactly ``adapters`` (state_dict, user weight, ref) ONE denoiser's active branch set."""
     t0 = time.monotonic()
     if not adapters:
         clear_branch_adapters(model)
@@ -935,18 +689,7 @@ def apply_branch_adapter_set(
     uniform: bool = False,
     request_id: str = "",
 ) -> Dict[str, Any]:
-    """Make exactly ``routed`` (component -> adapters) the PIPELINE's active
-    branch set.
-
-    Every branch-capable denoiser is settled in one pass: components named
-    in ``routed`` take their own adapters, components not named are cleared
-    (a stale expert branch is exactly the silent-wrong-picture class this
-    guards), and all of them share one bucket so the pipeline carries a
-    single coherent graph family and lane stamp.
-
-    Fail-closed: an unroutable component and any unmappable adapter key
-    raise BEFORE a single buffer is touched — a half-attached MoE serves a
-    distilled expert next to an undistilled one."""
+    """Make exactly ``routed`` (component -> adapters) the PIPELINE's active branch set."""
     t0 = time.monotonic()
     targets = branch_targets(pipe)
     unknown = sorted(c for c in routed if c not in targets)
@@ -957,8 +700,6 @@ def apply_branch_adapter_set(
             f"{', '.join(targets) or 'no branch-capable denoiser'})",
             axis="component_missing",
         )
-    # Pure pass first: map + stage every component. Raises here leave the
-    # pipeline exactly as it was.
     staged: Dict[str, List[Tuple[Dict[str, Any], float, str]]] = {}
     for comp, model in targets.items():
         entries = list(routed.get(comp) or ())
@@ -973,10 +714,6 @@ def apply_branch_adapter_set(
             list(targets.values()), rank_bucket(max(want, 1)),
             uniform=uniform, allow_resize=allow_resize)
     if uniform:
-        # A half-armed set (one expert carrying the container, the other not
-        # — e.g. a family that declares only `transformer` as a compile
-        # target) would place the sibling's adapter into nothing. Refuse
-        # before touching either expert.
         bare = [c for c, s in staged.items() if s and not branch_bucket(targets[c])]
         if bare:
             raise RefCompatibilitySurprise(
@@ -1019,16 +756,7 @@ def apply_branch_adapter_set(
 
 
 def effective_base_execution_lane(pipe: Any) -> str:
-    """The branchless base weight lane COMPILED GRAPH IDENTITY rides on — the ONE
-    resolution :func:`stamp_lane` memoizes: the memoized base, else the
-    pipeline's stamped/probed lane, else the denoiser's own lane markers
-    (:func:`branch_lane`), which see the w8a8 GEMM mode
-    (``_cozy_w8a8_mode``) that ``loading.pipeline_weight_lane`` cannot.
-
-    The advertised requested compiled graph key and the minted/published compiled graph key MUST
-    resolve the base lane identically. When they don't, the published compiled graph is
-    never requested by any worker, adoption is structurally impossible, and
-    every cold pod re-mints."""
+    """The branchless base weight lane COMPILED GRAPH IDENTITY rides on — the ONE resolution :func:`stamp_lane` memoizes: the memoized base, else the pipeline's stamped/probed lane, else the denoiser's ow..."""
     base = getattr(pipe, "_cozy_lora_base_lane", None)
     if base is not None:
         return str(base)
@@ -1042,24 +770,13 @@ def effective_base_execution_lane(pipe: Any) -> str:
 
 
 def stamp_execution_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None) -> None:
-    """Keep the compile-cache graph key honest: branch-bearing pipelines are
-    a different graph family per (base lane, bucket) — lane_drift guards
-    both directions. The branchless base lane is remembered on first stamp
-    so clearing the branch restores it exactly.
-
-    The stamp is per PIPELINE, over its whole denoiser set: the
-    components always carry the same bucket, and how many experts a family
-    has is a property of the pipeline class, not of the lane — so the lane
-    STRING (and therefore every published compiled graph key) is unchanged by MoE
-    support."""
+    """Keep the compile-cache graph key honest: branch-bearing pipelines are a different graph family per (base lane, bucket) — lane_drift guards both directions."""
     tg = branch_targets(pipe) if targets is None else dict(targets)
     models = list(tg.values())
     bucket = max((branch_bucket(m) for m in models), default=0)
     sparse = any(bool(getattr(m, _SPARSE_ATTR, False)) for m in models)
     base = getattr(pipe, "_cozy_lora_base_lane", None)
     if base is None:
-        # The same resolution the advertised requested key uses, so the
-        # stamped/published key can never diverge from it.
         base = effective_base_execution_lane(pipe)
         try:
             pipe._cozy_lora_base_lane = base
@@ -1072,12 +789,6 @@ def stamp_execution_lane(pipe: Any, targets: Optional[Mapping[str, Any]] = None)
 
 
 def _accepts_unet_config(fn: Any) -> bool:
-    """Whether ``unet_config`` reaches ``fn`` — a named parameter OR
-    ``**kwargs``. Diffusers' real ``StableDiffusionXLPipeline.lora_state_dict``
-    takes ``**kwargs``, so asking only for the named parameter silently skips
-    the SGM block remap on the one class that needs it, and every kohya SDXL
-    adapter then fails loud with thousands of unresolved keys.
-    """
     try:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
@@ -1089,11 +800,6 @@ def _accepts_unet_config(fn: Any) -> bool:
 
 
 def _unresolved_count(pipe: Any, sd: Dict[str, Any]) -> Optional[int]:
-    """How many of ``sd``'s DENOISER keys land on no branch-capable module.
-
-    ``None`` when the question cannot be asked (no denoiser resident, no
-    denoiser keys, torch absent) — an unanswerable probe must never decide.
-    """
     try:
         den, _rest = split_state_dict(sd)
         if not den:
@@ -1116,18 +822,6 @@ def _unresolved_count(pipe: Any, sd: Dict[str, Any]) -> Optional[int]:
 def _converted_resolves_at_least_as_well(
     pipe: Any, raw: Dict[str, Any], converted: Dict[str, Any], *, ref: str = "",
 ) -> bool:
-    """Does the converted dict actually RESOLVE against this model?
-
-    The ``.processor.`` check below is a NAME test and only catches the family
-    it was written from — half-converted SGM block indices carry no
-    ``.processor.`` and sail through. So the question is asked with
-    ``map_adapter``'s own oracle rather than a second copy of its grammar, so
-    the two can never drift.
-
-    Strictly worse than the raw keys ⇒ keep the raw keys, which the
-    ``map_adapter`` kohya/SGM grammar then maps directly. Equal or better ⇒
-    prefer the converted dict, the zero-drift path, which stays the default.
-    """
     after = _unresolved_count(pipe, converted)
     if after in (None, 0):
         return True
@@ -1145,14 +839,7 @@ def _converted_resolves_at_least_as_well(
 def normalize_adapter_state_dict(
     pipe: Any, sd: Dict[str, Any], *, ref: str = ""
 ) -> Dict[str, Any]:
-    """Normalize a raw adapter through the pipeline class's own
-    ``lora_state_dict`` converter (zero drift: byte-identical key handling
-    with the boot-time ``load_lora_weights`` path). Falls back
-    to the raw dict when the class has no converter or it fails — the
-    :func:`map_adapter` grammar (diffusers/peft/kohya) then applies as
-    before. sdxl-class converters receive ``unet_config`` for SGM block
-    remapping of kohya adapters. Returned ``network_alphas`` fold back in as
-    ``<module>.alpha`` entries."""
+    """Normalize a raw adapter through the pipeline class's own ``lora_state_dict`` converter (zero drift: byte-identical key handling with the boot-time ``load_lora_weights`` path)."""
 
     fn = getattr(type(pipe), "lora_state_dict", None)
     if fn is None:
@@ -1183,11 +870,6 @@ def normalize_adapter_state_dict(
     if not _converted_resolves_at_least_as_well(pipe, sd, converted, ref=ref):
         return sd
     if any(".processor." in k for k in converted):
-        # diffusers' non-diffusers converter emits LEGACY
-        # attn-processor names for kohya sdxl attention keys
-        # (…attn1.processor.to_q_lora.down.weight) — they match no real
-        # module, so the whole adapter would fail typed. The raw kohya-flat
-        # keys resolve directly against module paths in map_adapter.
         logger.info(
             "lora_state_dict normalization for %s emitted legacy "
             "attn-processor names; using raw keys", ref,
@@ -1201,22 +883,7 @@ def normalize_adapter_state_dict(
 
 
 def apply_lora_execution_lane(pipe: Any, bucket: int) -> bool:
-    """Put the pipeline on the branch-bearing graph family for ``bucket``
-    (gw#561): canonical zeroed rank-``bucket`` branches on every
-    branch-capable denoiser Linear (the gw#547 compiled-lane contract) + the
-    ``<base>-lora<bucket>`` lane stamp. Raises when the pipeline has no
-    branch-capable denoiser — a declared bucket that cannot trace must fail
-    loud, not publish/adopt the wrong graph.
-
-    gw#679: the container is allocated on EVERY denoiser the pipeline carries,
-    so a dual-expert MoE traces both experts branch-bearing and a per-expert
-    adapter set can land at request time without a recompile.
-
-    pgw#1573 moved this beside the machinery it wraps. It lived in
-    ``compile_cache`` — the v1 arming brain, orphaned since pgw#1373 deleted
-    its only caller and deleted outright here — while every line of its body is
-    this module's.
-    """
+    """Put the pipeline on the branch-bearing graph family for ``bucket`` (gw#561): canonical zeroed rank-``bucket`` branches on every branch-capable denoiser Linear (the gw#547 compiled-lane contract) + ..."""
     if not bucket:
         return False
     targets = enable_branch_execution_lanes(pipe, int(bucket))
@@ -1230,9 +897,7 @@ def apply_lora_execution_lane(pipe: Any, bucket: int) -> bool:
 
 
 def drop_lora_execution_lane(pipe: Any) -> None:
-    """Undo :func:`apply_lora_execution_lane`: drop the branch buffers on every
-    denoiser and restore the branchless lane stamp (the eager rollback —
-    canonical zeroed branches cost +21-32% eager, gw#547)."""
+    """Undo :func:`apply_lora_execution_lane`: drop the branch buffers on every denoiser and restore the branchless lane stamp (the eager rollback — canonical zeroed branches cost +21-32% eager, gw#547)."""
     targets = branch_targets(pipe)
     if not targets:
         return

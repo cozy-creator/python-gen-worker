@@ -1,19 +1,3 @@
-"""th#1362 item 4: OUR producers never EMIT shards — and somebody else's
-sharded artifact is still accepted as given.
-
-The split is by WHO OWNS THE BYTES, so both halves are pinned here:
-
-*   a real streaming cast over a real multi-component tree comes out
-    one-file-per-component, with no index.json and no ``-NNNNN-of-MMMMM``
-    member — asserted on the OUTPUT, not on the absence of a planner;
-*   the producer assertion fails CLOSED if something upstream of it shards
-    anyway (``save_pretrained`` does, at its own default, which is exactly why
-    this is checked rather than assumed);
-*   a sharded artifact still READS, permanently.
-
-Run: pytest tests/test_producer_no_shards_th1362.py -q
-"""
-
 from __future__ import annotations
 
 import json
@@ -56,13 +40,8 @@ def _sharded_component(comp: Path, prefix: str, tensors, per_shard: int) -> None
         json.dumps({"metadata": {"total_size": 0}, "weight_map": weight_map}))
 
 
-# --------------------------------------------------------------------------
-# The OUTCOME: what our producers write
-# --------------------------------------------------------------------------
-
 def test_a_real_cast_of_a_sharded_source_emits_one_file_per_component(tmp_path):
-    """Read a SHARDED input, write an UNSHARDED output — both halves of the
-    ruling in one run of the real streaming cast."""
+    """Read a SHARDED input, write an UNSHARDED output — both halves of the ruling in one run of the real streaming cast."""
     src = tmp_path / "src"
     unet = _tensors(1, 8)
     te = _tensors(2, 4)
@@ -106,13 +85,8 @@ def test_a_cast_of_an_unsharded_source_stays_one_file(tmp_path):
         == ["diffusion_pytorch_model.safetensors"]
 
 
-# --------------------------------------------------------------------------
-# The assertion itself — it must fail CLOSED
-# --------------------------------------------------------------------------
-
 def test_the_invariant_refuses_a_shard_set_a_producer_left_behind(tmp_path):
-    """save_pretrained shards on its own, so a producer that forgets to say
-    otherwise must be caught rather than trusted."""
+    """save_pretrained shards on its own, so a producer that forgets to say otherwise must be caught rather than trusted."""
     _sharded_component(tmp_path / "unet", "diffusion_pytorch_model",
                        _tensors(4, 4), per_shard=2)
     with pytest.raises(ConversionImplementationError,
@@ -143,9 +117,7 @@ def test_the_invariant_passes_a_one_file_per_component_tree(tmp_path):
 
 
 def test_the_invariant_does_not_fire_on_dtype_variants(tmp_path):
-    """Two unrelated weight files in one component are not a shard set — the
-    check is narrow on purpose, so it cannot turn into a general 'one weight
-    file' rule that refuses legitimate trees."""
+    """Two unrelated weight files in one component are not a shard set — the check is narrow on purpose, so it cannot turn into a general 'one weight file' rule that refuses legitimate trees."""
     comp = tmp_path / "unet"
     comp.mkdir()
     safetensors_torch.save_file(
@@ -162,14 +134,8 @@ def test_a_single_produced_file_is_accepted(tmp_path):
     assert_one_file_per_component(lora, producer="training promote")
 
 
-# --------------------------------------------------------------------------
-# The other half of the ruling
-# --------------------------------------------------------------------------
-
 def test_a_sharded_artifact_still_reads(tmp_path):
-    """Read tolerance is PERMANENT. Nothing item 4 adds may make somebody
-    else's sharded checkpoint unreadable — it is only refused as OUR OWN
-    producer output, never as an input and never as an upload."""
+    """Read tolerance is PERMANENT."""
     tensors = _tensors(9, 4)
     _sharded_component(tmp_path / "unet", "diffusion_pytorch_model", tensors,
                        per_shard=2)

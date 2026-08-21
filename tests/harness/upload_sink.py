@@ -1,25 +1,4 @@
-"""A real local stand-in for tensorhub's media-upload route family.
-
-Answers a dedup create, so a test needs no S3 part-PUT scripting to prove that
-an upload really happened. `requests_seen` being non-empty is the observable:
-it distinguishes "uploaded" from "returned a ref for bytes that never left the
-process", which is the pgw#767 defect class and cannot be told apart from the
-result envelope alone.
-
-**The sink ROUTES; it does not accept everything.** `_ORG_LESS_ROUTES` mirrors
-`registerMediaUploadRoutes(v1, "/media")` in tensorhub `internal/api/files.go`
-(th#1722 §C, `de30113d`): the org is derived from the credential and is never a
-path segment. Anything else 404s exactly as gin does — including the
-transitional org-addressed alias `/api/v1/media/<org>/uploads`, which th#1799
-deletes. That is what makes a client's URL construction testable end to end: a
-test that let the server answer any path could not tell the two shapes apart,
-which is the defect class pgw#1138 was filed against.
-
-The v2 suite has its own richer `UploadSink` fixture (`tests_v2/conftest.py`,
-with a `status=` knob for refusal rows). This is the v1 suite's minimal twin —
-kept separate deliberately, because a cross-suite import would make the v2
-fixture surface load-bearing for v1 tests.
-"""
+"""A real local stand-in for tensorhub's media-upload route family."""
 
 from __future__ import annotations
 
@@ -29,12 +8,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar, Dict, List, Tuple
 
-#: The canonical create route. Clients build this and nothing else.
 MEDIA_UPLOADS_PATH = "/api/v1/media/uploads"
 
-#: The org-less media-upload family, one entry per tensorhub route. Kept as
-#: patterns rather than prefixes so `/api/v1/media/<org>/uploads` — one extra
-#: segment — cannot match by accident.
 _ORG_LESS_ROUTES: Tuple[re.Pattern[str], ...] = tuple(
     re.compile(p)
     for p in (
@@ -97,8 +72,7 @@ def reset_upload_sink() -> None:
 
 
 def serve_upload_sink() -> Tuple[ThreadingHTTPServer, str]:
-    """Start the sink on an ephemeral port. Caller shuts it down and calls
-    `reset_upload_sink()`."""
+    """Start the sink on an ephemeral port."""
     reset_upload_sink()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), DedupUploadSink)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

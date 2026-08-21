@@ -1,13 +1,4 @@
-"""Component-granular residency: the admission arithmetic and the mechanism.
-
-Lineage: pgw#1577. The mechanism tests drive a REAL ``diffusers.DiffusionPipeline``
-through ``diffusers``' own offload code with ``torch.nn.Module.to`` counted — the
-same instrument the issue's decomposition used, just on the CPU execution device
-so it runs without a card. The counter is what makes the defect visible: the
-stock rung moves every component every request, and the first test here asserts
-that it does. If that test ever goes green without the second changing, the
-instrument has gone blind.
-"""
+"""Component-granular residency: the admission arithmetic and the mechanism."""
 
 from __future__ import annotations
 
@@ -34,7 +25,6 @@ from gen_worker.models.partial_resident import (  # noqa: E402
 _MIB = 1 << 20
 _GIB = 1 << 30
 
-# SDXL bf16, measured on the campaign card (pgw#1577).
 _SDXL = {
     "text_encoder": int(0.25 * _GIB),
     "text_encoder_2": int(1.39 * _GIB),
@@ -57,44 +47,21 @@ def _plan(sizes, *, free_gb, budget_gb=None, forced=(), denoiser="unet", order=N
     )
 
 
-# --------------------------------------------------------------------------
-# Admission arithmetic
-# --------------------------------------------------------------------------
-
-
 def test_sdxl_on_a_7_45_gib_card_keeps_the_denoiser_and_evicts_the_encoders():
-    # free 7.45, reserve 2.00 -> budget 5.45. `vae` is forced resident on this
-    # family (the `force_upcast` one) and unet+vae alone is 5.31, so the budget
-    # admits only the plan that evicts BOTH encoders: resident 5.31, peak 6.70.
-    # The single-encoder plan (resident 5.56) is excluded because 5.56 + the
-    # 2.00 reserve exceeds 7.45 — which is exactly what the reserve is for.
     plan = _plan(_SDXL, free_gb=7.45, forced=("vae",), order=_SDXL_ORDER)
     assert plan.fits, plan.refusal
     assert plan.offloaded == ("text_encoder", "text_encoder_2")
     assert plan.resident == ("unet", "vae")
-    # The whole point: per-request traffic collapses from the pipeline's full
-    # weight set, twice over, to one encoder once.
     assert plan.offloaded_bytes < sum(_SDXL.values()) / 4
 
 
 def test_a_busier_card_refuses_the_rung_rather_than_admitting_a_plan_that_ooms():
-    # 7.1 GiB free — a co-tenant took 200 MiB. Nothing clears the transient
-    # ceiling any more, and the honest answer is to REFUSE and let the load fall
-    # to `model_offload`: slow, correct, loud. This IS a performance cliff and it
-    # is owed work (see `_TRANSIENT_RESERVE_BYTES`) — but the alternative was
-    # measured on this card and it is an OOM inside `ParkedComponent.onload`.
     plan = _plan(_SDXL, free_gb=7.1, forced=("vae",), order=_SDXL_ORDER)
     assert not plan.fits
-    # At the truthful 2.00 reserve the denoiser plus its activations no longer
-    # fit at all on this card, so the refusal comes from the BUDGET rather than
-    # the transient ceiling. Falling to `model_offload` is the honest answer.
     assert "forced-resident set alone" in plan.refusal
 
 
 def test_fewest_bytes_wins_over_fewest_components():
-    # Freeing 1.0 GiB: one 1.5 GiB component fits and so do two 0.6 GiB ones.
-    # PCIe charges bytes, so the pair is the cheaper plan, and a search that
-    # stopped at the first admitting subset size would pick the single.
     sizes = {"unet": 4 * _GIB, "big": int(1.5 * _GIB), "a": int(0.6 * _GIB),
              "b": int(0.6 * _GIB)}
     plan = _plan(sizes, budget_gb=5.7, free_gb=16.0)
@@ -109,27 +76,18 @@ def test_the_denoiser_is_never_a_candidate_for_eviction():
 
 
 def test_a_denoiser_larger_than_the_budget_refuses_rather_than_evicting_it():
-    # This is where `model_offload` remains the right rung, and the plan must
-    # say so instead of quietly producing one that reproduces it.
     plan = _plan(_SDXL, budget_gb=4.0, free_gb=6.0, order=_SDXL_ORDER)
     assert not plan.fits
     assert "forced-resident set" in plan.refusal
 
 
 def test_forced_resident_components_are_never_evicted():
-    # SDXL's force_upcast VAE (gw#441/gw#469) must stay on the card. Diffusers'
-    # own `_exclude_from_cpu_offload` does NOT achieve this — it is consulted
-    # only for components absent from `model_cpu_offload_seq`, and `vae` is in
-    # SDXL's — so this rung enforces it itself.
     plan = _plan(_SDXL, free_gb=7.45, forced=("vae",), order=_SDXL_ORDER)
     assert plan.fits, plan.refusal
     assert "vae" not in plan.offloaded
 
 
 def test_the_transient_ceiling_rejects_a_plan_the_budget_alone_admits():
-    # Budget says the resident set fits; onloading the evicted component during
-    # the request would still exceed free VRAM. Admission has to see both, or
-    # the rung OOMs mid-encode on a plan that looked fine at load.
     sizes = {"unet": 5 * _GIB, "encoder": 3 * _GIB}
     roomy = _plan(sizes, budget_gb=5.0, free_gb=9.0)
     assert roomy.fits and roomy.offloaded == ("encoder",)
@@ -153,11 +111,6 @@ def test_a_refusal_always_names_a_reason():
     assert plan.refusal
 
 
-# --------------------------------------------------------------------------
-# Mechanism, against real diffusers code
-# --------------------------------------------------------------------------
-
-
 class _Block(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(self, width: int = 8):
@@ -169,11 +122,6 @@ class _Block(ModelMixin, ConfigMixin):
 
 
 class _ThreeStagePipeline(DiffusionPipeline):
-    """A real ``DiffusionPipeline``: diffusers' own offload code runs on it.
-
-    The component attributes are created by ``register_modules`` at runtime and
-    carry no annotations upstream, so they are declared here rather than
-    silenced per line."""
 
     model_cpu_offload_seq = "text_encoder->unet->vae"
     text_encoder: Any
@@ -188,7 +136,7 @@ class _ThreeStagePipeline(DiffusionPipeline):
 
     def run_once(self) -> None:
         self.text_encoder(torch.randn(2, 8))
-        for _ in range(3):  # a denoise loop, in miniature
+        for _ in range(3):
             self.unet(torch.randn(2, 16))
         self.vae(torch.randn(2, 4))
         cast(Any, self).maybe_free_model_hooks()
@@ -199,8 +147,6 @@ def _pipeline():
 
 
 class _MoveCounter:
-    """Counts ``Module.to`` by component. This is the PCIe bill, on a device
-    where the copies are free — the count is the fact under test."""
 
     def __init__(self, pipe):
         self.moved: List[str] = []
@@ -228,9 +174,7 @@ class _MoveCounter:
 
 
 def test_stock_model_offload_moves_every_component_every_request():
-    """THE DEFECT, stated as a passing test. `model_offload` evicts the whole
-    pipeline after each call and re-onloads it before the next — on SDXL that
-    is 13 GiB of PCIe per request to reclaim 1.2 GiB (pgw#1577)."""
+    """THE DEFECT, stated as a passing test."""
     pipe = _pipeline()
     pipe.enable_model_cpu_offload(device="cpu")
     with _MoveCounter(pipe) as counter:
@@ -288,8 +232,7 @@ def test_an_evicted_component_lives_in_its_host_mirror_between_requests():
 
 
 def test_at_most_one_evicted_component_holds_the_card_at_a_time():
-    """The transient ceiling the plan admitted assumes exactly this. If two can
-    be resident together the admission arithmetic is a fiction."""
+    """The transient ceiling the plan admitted assumes exactly this."""
     pipe = _pipeline()
     plan = plan_component_residency(
         sizes={"text_encoder": 400, "unet": 1000, "vae": 300},
@@ -310,9 +253,7 @@ def test_at_most_one_evicted_component_holds_the_card_at_a_time():
 
 
 def test_the_evicted_component_is_released_before_the_denoiser_runs():
-    """It must be off the card BEFORE the denoise loop, not at the end of the
-    call — otherwise the peak the plan admitted is a floor the request never
-    comes back under."""
+    """It must be off the card BEFORE the denoise loop, not at the end of the call — otherwise the peak the plan admitted is a floor the request never comes back under."""
     pipe = _pipeline()
     _, armed = _arm(pipe)
     assert armed
@@ -339,13 +280,7 @@ def test_arming_does_not_change_what_the_pipeline_computes():
 
 
 def test_the_free_hooks_override_does_not_re_arm_the_stock_rung():
-    """RED ARM for the trap that makes this rung worse than useless without it.
-
-    ``DiffusionPipeline.maybe_free_model_hooks`` ends by calling
-    ``enable_model_cpu_offload``, whose FIRST statement is ``self.to("cpu")``.
-    Left in place it drags the resident denoiser to the host and back on every
-    call. Delete the override in ``_install_residency_hooks`` and this fails.
-    """
+    """RED ARM for the trap that makes this rung worse than useless without it."""
     pipe = _pipeline()
     _arm(pipe)
 
@@ -381,12 +316,6 @@ def test_arming_refuses_a_plan_that_does_not_fit_rather_than_half_applying_it():
 
 
 def test_the_placement_census_reads_live_devices_not_the_flag_that_set_them():
-    """pgw#1577's red arm for the confession itself. `_pin_unhookable_components`
-    has reported `vae_resident` since gw#441 by setting diffusers'
-    `_exclude_from_cpu_offload` — a list diffusers consults ONLY for components
-    absent from `model_cpu_offload_seq`, where SDXL's `vae` is not. The claim
-    was decorative and nothing could see that. A census can, because it reads
-    the tensors."""
     from gen_worker.models.memory import component_placement_census
 
     pipe = _pipeline()
@@ -401,16 +330,7 @@ def test_the_placement_census_reads_live_devices_not_the_flag_that_set_them():
     assert "vae@cpu" in moved
 
 
-# --------------------------------------------------------------------------
-# pgw#1595 / pgw#1586 — the confession states the DECISION, and the reserve
-# comes from the REQUEST
-# --------------------------------------------------------------------------
-
-
 def test_the_applied_summary_separates_techniques_from_their_numbers():
-    """pgw#1586 item 3. It used to print the KEY of anything truthy, so two data
-    entries rendered as savers that engaged — four names for two techniques. The
-    split is by TYPE so the next data entry cannot masquerade either."""
     from gen_worker.models.memory import _applied_summary
 
     line = _applied_summary({
@@ -431,10 +351,6 @@ def test_the_applied_summary_separates_techniques_from_their_numbers():
 
 
 def test_the_confession_reports_the_free_vram_the_DECISION_saw():
-    """RED ARM for pgw#1595, which was filed against the wrong cause because of
-    exactly this. The rung is chosen against free VRAM BEFORE placement; the old
-    line re-read it AFTER, so a plan made at 7.3 GiB printed `free_gb=0.4`
-    beside its own name."""
     import gen_worker.models.memory as m
 
     seen = {}
@@ -446,7 +362,7 @@ def test_the_confession_reports_the_free_vram_the_DECISION_saw():
     real_line, real_free, real_size = (
         m.transition_line, m.get_available_vram_gb, m.estimate_pipeline_size_gb)
     m.transition_line = fake_line
-    m.get_available_vram_gb = lambda *a, **k: 0.4       # post-placement truth
+    m.get_available_vram_gb = lambda *a, **k: 0.4
     m.estimate_pipeline_size_gb = lambda *a, **k: 6.5
     try:
         m._report_offload_engaged(
@@ -467,9 +383,6 @@ def test_the_confession_reports_the_free_vram_the_DECISION_saw():
 
 
 def test_a_declared_per_request_peak_raises_the_reserve_above_the_constant():
-    """pgw#1595. The reserve was a constant from ONE workload shape, and a
-    28-step job overran it. The endpoint's declared peak was already in the
-    caller and was being dropped."""
     import gen_worker.models.memory as m
     from gen_worker.models.partial_resident import PARTIAL_RESIDENT_RESERVE_GB
 
@@ -498,16 +411,11 @@ def test_a_declared_per_request_peak_raises_the_reserve_above_the_constant():
     assert len(budgets) == 2
     assert abs(budgets[0] - (8.0 - PARTIAL_RESIDENT_RESERVE_GB)) < 0.01, (
         "the constant is no longer the floor when nothing is declared")
-    # declared 9.0 total - 6.5 weights = 2.5 GiB of activations, above the 1.25
-    # constant, so the budget must shrink by the declared figure instead.
     assert abs(budgets[1] - (8.0 - 2.5)) < 0.01, (
         "the declared per-request peak was ignored — the defect pgw#1595 found")
 
 
 def test_the_probe_reports_its_measurement_even_when_it_passes():
-    """pgw#1559 class, in this rung's own code: success was INFO and inaudible
-    at the endpoint's WARNING level, so a passing probe and a probe that never
-    ran looked identical."""
     pipe = _pipeline()
     plan, _ = _arm(pipe)
     facts: dict = {}
@@ -521,21 +429,7 @@ def test_the_probe_reports_its_measurement_even_when_it_passes():
 
 
 def test_the_production_planner_leaves_room_for_the_reserve_it_planned_against():
-    """THE INVARIANT THE RESERVE EXISTS FOR — asserted through the PRODUCTION
-    path, `_plan_partial_resident`, because that is where the budget formula
-    lives.
-
-    An earlier version of this test called `plan_component_residency` directly
-    and computed the budget itself, which made it TAUTOLOGICAL: it passed with
-    the reserve reverted AND with the budget formula stripped of its reserve
-    subtraction. A test that cannot fail is not a test. This one goes through
-    the real planner, so breaking `budget = free - reserve` turns it red.
-
-    The denoise phase holds resident weights and activations at once, so
-    `resident + reserve <= free` must hold for every admitted plan — otherwise a
-    plan fits its own budget and still OOMs mid-denoise, which is what pgw#1595
-    found on the card.
-    """
+    """THE INVARIANT THE RESERVE EXISTS FOR — asserted through the PRODUCTION path, `_plan_partial_resident`, because that is where the budget formula lives."""
     import gen_worker.models.memory as m
 
     pipe = _pipeline()
@@ -544,8 +438,6 @@ def test_the_production_planner_leaves_room_for_the_reserve_it_planned_against()
         for c in pipe.components.values()
         if isinstance(c, torch.nn.Module) for p in c.parameters()
     )
-    # Sit free VRAM just above the reserve so this toy tree is genuinely over
-    # budget and eviction is forced, exactly as SDXL is on the real card.
     free_bytes = int(PARTIAL_RESIDENT_RESERVE_GB * _GIB) + 1200
     real_free, real_unhook = m.get_available_vram_gb, m.unhookable_components
     m.get_available_vram_gb = lambda *a, **k: free_bytes / _GIB
@@ -569,16 +461,6 @@ def test_the_production_planner_leaves_room_for_the_reserve_it_planned_against()
 
 
 def test_the_probe_counts_the_reusable_allocator_pool_as_available():
-    """pgw#1586. A parked component's blocks stay in the caching allocator's
-    pool — `park()` drops the reference, the allocator keeps the block, and
-    `mem_get_info` never sees it return. The plan counted those bytes as freed
-    while this probe counted them as used, so the SAME bytes were both.
-
-    Measured on the card: driver_free 0.45 + reusable cache 1.56 = 2.01 GiB
-    against a 2.00 GiB reserve. Reading driver-free alone made a workable plan
-    look 1.56 GiB short, which is a SPURIOUS REFUSAL — the conservative
-    direction, which is why nothing had failed from it yet.
-    """
     import gen_worker.models.partial_resident as pr
 
     pipe = _pipeline()
@@ -587,8 +469,8 @@ def test_the_probe_counts_the_reusable_allocator_pool_as_available():
     parked = getattr(pipe, PARKED_COMPONENTS_ATTR)
 
     floor = 256 * _MIB
-    driver_free = 100 * _MIB          # on its own, below the floor
-    cache = 400 * _MIB                # reusable pool the allocator still holds
+    driver_free = 100 * _MIB
+    cache = 400 * _MIB
 
     real_attr = pr._placement_attribution
     pr._placement_attribution = lambda torch_mod: {"attr_cache_bytes": cache}
@@ -1019,22 +901,6 @@ def test_the_seam_gate_reads_the_DENOISER_not_whichever_module_holds_the_hook():
 
 
 def test_EVERY_rung_confesses_the_decision_time_free_vram_not_a_re_read():
-    """pgw#1586 closing the class pgw#1595 opened.
-
-    pgw#1595's fix threaded the plan-time figure into the `partial_resident`
-    confession ONLY. Six siblings — `model_offload`, `sequential`,
-    `partial_stream`, both `cpu` arms and the fall-through — kept re-reading
-    free VRAM AT REPORT TIME, after placement. Within hours the pgw#1548 lane
-    read `free_gb=0.4` off a `model_offload` line on a card with 7.9 GiB free at
-    boot and reached for a boot-ordering cause — the SAME wrong conclusion
-    pgw#1595 was filed on, from the same artefact, on a rung the fix had not
-    covered.
-
-    So this asserts the CLASS, by reading the source: no `_report_offload_engaged`
-    call may omit `plan_free_gb`. A per-rung test would have passed for
-    `partial_resident` and missed the other six, which is exactly how the first
-    fix shipped incomplete.
-    """
     import inspect
     import re
 
@@ -1050,13 +916,7 @@ def test_EVERY_rung_confesses_the_decision_time_free_vram_not_a_re_read():
     )
 
 
-# --------------------------------------------------------------------------
-# pgw#1619 — a component this rung cannot ENTER must never be parked
-# --------------------------------------------------------------------------
-
-
 class _MethodDrivenBlock(_Block):
-    """Reached the way diffusers reaches a VAE: by name, never via ``__call__``."""
 
     def decode(self, x: Any) -> Any:
         return self.lin(x)
@@ -1079,14 +939,7 @@ class _PipelineWithMethodDrivenComponent(DiffusionPipeline):
 
 
 def test_a_forward_pre_hook_does_NOT_fire_on_a_named_method():
-    """THE DEFECT ITSELF, asserted so it cannot silently stop being true.
-
-    pgw#1619: `_install_residency_hooks` arms every parked component with
-    `register_forward_pre_hook`, and diffusers reaches the VAE only as
-    `self.vae.decode(...)`. If this ever starts firing, the refusal below
-    becomes unnecessary — and if it stops being asserted, the reason for the
-    refusal is lost.
-    """
+    """THE DEFECT ITSELF, asserted so it cannot silently stop being true."""
     m = _MethodDrivenBlock(8)
     fired: List[str] = []
     m.register_forward_pre_hook(lambda mod, a: fired.append("forward"))
@@ -1101,16 +954,6 @@ def test_a_forward_pre_hook_does_NOT_fire_on_a_named_method():
 
 
 def test_a_component_this_rung_cannot_enter_is_never_parked():
-    """RED ARM for pgw#1619. Before the fix the minimum-byte planner selects the
-    method-driven component — it is small and evicting it is cheap — and the
-    request then dies at decode against host weights:
-
-        Input type (CUDABFloat16Type) and weight type (CPUBFloat16Type)
-        should be the same
-
-    (observed by the pgw#1548 lane, not predicted). After the fix it is forced
-    resident and the planner simply chooses a more expensive plan.
-    """
     from gen_worker.models.partial_resident import method_driven_components
 
     pipe = _PipelineWithMethodDrivenComponent(_Block(8), _Block(16), _MethodDrivenBlock(4))
@@ -1131,20 +974,9 @@ def test_a_component_this_rung_cannot_enter_is_never_parked():
 
 
 def test_the_PRODUCTION_planner_refuses_to_park_what_it_cannot_enter():
-    """THE ONE THAT GUARDS THE FIX, through `_plan_partial_resident`.
-
-    The tests above call `plan_for_pipeline` and pass `forced_resident`
-    themselves, so they assert the HELPER and would pass with the production
-    wiring torn out — verified, they did. That is the same tautology this lane
-    already shipped once for the reserve invariant, so it is checked here rather
-    than trusted: sizes are chosen so the minimum-byte search WANTS the
-    method-driven component (it is the cheapest subset that clears the budget),
-    and only the guard stops it.
-    """
+    """THE ONE THAT GUARDS THE FIX, through `_plan_partial_resident`."""
     import gen_worker.models.memory as m
 
-    # unet 1088 B forced; vae 360 B is the cheapest way to clear the budget;
-    # text_encoder 1680 B is the next-cheapest and is what the guard forces.
     pipe = _PipelineWithMethodDrivenComponent(
         _Block(20), _Block(16), _MethodDrivenBlock(9)
     )
@@ -1170,11 +1002,7 @@ def test_the_PRODUCTION_planner_refuses_to_park_what_it_cannot_enter():
 
 
 def test_the_structural_check_does_not_over_refuse_the_denoiser_or_encoders():
-    """The guard must cost only what it has to. `UNet2DConditionModel`,
-    `CLIPTextModel` and `CLIPTextModelWithProjection` expose only `forward`, so
-    a capability test separates them from `AutoencoderKL` without hardcoding
-    `"vae"` — and without refusing to park the components this rung exists to
-    park."""
+    """The guard must cost only what it has to."""
     from gen_worker.models.partial_resident import method_driven_components
 
     pipe = _PipelineWithMethodDrivenComponent(_Block(8), _Block(16), _MethodDrivenBlock(4))

@@ -1,14 +1,4 @@
-"""Foreign-catalog enum adapters — injected, never shipped.
-
-Civitai's ``baseModel`` enum is a *foreign catalog's* vocabulary: 46 keys
-mapping onto 35 canonical slugs, changing whenever civitai adds a base model.
-It has nothing to do with what a worker can execute, so the table lives OUTSIDE
-the SDK: the ingest endpoint (or the hub catalog) injects it with
-:func:`declare_foreign_family_map` and the SDK only performs the lookup.
-
-An unmapped value returns ``None`` — the caller stamps nothing rather than
-guessing a family from a string it does not recognize.
-"""
+"""Foreign-catalog enum adapters — injected, never shipped."""
 
 from __future__ import annotations
 
@@ -24,11 +14,7 @@ CIVITAI = "civitai"
 def declare_foreign_family_map(
     source: str, mapping: Mapping[str, str], *, replace: bool = False
 ) -> None:
-    """Inject one foreign catalog's ``enum value -> canonical family`` table.
-
-    Keys are matched case-sensitively after stripping, exactly as the upstream
-    API emits them.
-    """
+    """Inject one foreign catalog's ``enum value -> canonical family`` table."""
     name = str(source or "").strip().lower()
     if not name:
         raise ValueError("foreign family map needs a source name")
@@ -51,9 +37,7 @@ def foreign_to_family(source: str, value: str) -> Optional[str]:
 
 
 def civitai_to_family(value: str) -> Optional[str]:
-    """Map a Civitai ``baseModel`` enum value to the canonical family.
-    Returns None for unrecognized inputs, and for every input until the ingest
-    endpoint has injected the table."""
+    """Map a Civitai ``baseModel`` enum value to the canonical family."""
     return foreign_to_family(CIVITAI, value)
 
 

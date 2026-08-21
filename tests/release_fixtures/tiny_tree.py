@@ -1,10 +1,4 @@
-"""A tiny SD15-class CONFIG-ONLY checkpoint tree for the derive tests.
-
-Real author-shaped subject: stock diffusers ``StableDiffusionPipeline``
-composition, box-generated tiny weights saved and then DELETED -- the tree
-the derive sees carries configs and tokenizer files only, exactly what the
-publish pipeline's subset snapshot holds (weights-locality by construction).
-"""
+"""A tiny SD15-class CONFIG-ONLY checkpoint tree for the derive tests."""
 
 from __future__ import annotations
 

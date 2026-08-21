@@ -1,26 +1,4 @@
-"""The boot warm pass's payload: one entrypoint's schema at NEUTRAL DEFAULTS.
-
-pgw#1584. The v1 warm plan was *"a single run at the schema's neutral
-defaults, at BOOT, before any request exists"* (the int32 incident's own
-record), and the v2 hardcut dropped it with no tombstone row. This module is
-that synthesis, restored: given an ``@entrypoint``'s payload struct it builds
-ONE instance where every DEFAULTED field keeps its declared default and every
-REQUIRED field takes a minimal, self-contained value.
-
-**Why defaults rather than an author declaration.** v1 also shipped
-``@endpoint(warmup=…)`` and ``NoWarmup(reason)``. Both are TOMBSTONED —
-``v1_deleted.REPLACEMENTS["NoWarmup"]`` reads *"no successor — warmup is not an
-author declaration"* — so the restoration is the default-on synthesis half and
-nothing else. An endpoint cheapens its warm pass through ``ctx.boot_warmup``
-inside the body (``steps = 1 if ctx.boot_warmup else steps``), which is the
-surface the docstring has advertised all along.
-
-**A schema that cannot synthesize is SKIPPED, never invented.** A required
-``VideoAsset`` has no honest 2 KB stand-in, and a fabricated one would warm a
-code path with bytes no request will ever carry. :func:`neutral_payload`
-returns the reason instead, and the caller records it — "nobody warmed" and
-"warming was free" have to stay different answers.
-"""
+"""The boot warm pass's payload: one entrypoint's schema at NEUTRAL DEFAULTS."""
 
 from __future__ import annotations
 
@@ -37,22 +15,13 @@ import msgspec
 
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 
-#: The filler for a required ``str`` field. Named because
-#: ``output_integrity.judged`` documents the warm input by this name: a
-#: degenerate output from a degenerate input is the expected result there.
 WARMUP_TEXT = "warmup"
 
-#: 128px, not v1's 512. The warm pass exists to grow the allocator pool and
-#: settle cuBLAS/cuDNN heuristics, and both are driven by the SHAPES the
-#: schema's own defaults ask for — an oversized input asset only enlarges the
-#: encode, and `output_integrity`'s docstring already describes the warm image
-#: as "a flat mid-gray 128px PNG".
 _IMAGE_SIDE = 128
 _AUDIO_SECONDS = 1.0
 _AUDIO_RATE = 48_000
 _MAX_DEPTH = 4
 
-#: ``factory(dir_path) -> value``; ``dir_path`` hosts any synthetic asset file.
 _Factory = Callable[[str], Any]
 
 
@@ -60,7 +29,7 @@ def synthetic_png(dir_path: str) -> str:
     """Write a flat mid-gray RGB PNG (stdlib only) and return its path."""
     path = os.path.join(dir_path, "boot-warmup.png")
     side = _IMAGE_SIDE
-    row = b"\x00" + b"\x80" * (side * 3)  # filter byte 0 + gray pixels
+    row = b"\x00" + b"\x80" * (side * 3)
     idat = zlib.compress(row * side, 6)
 
     def chunk(tag: bytes, data: bytes) -> bytes:
@@ -112,7 +81,6 @@ def _unwrap(annotation: Any) -> Any:
 
 
 def _field_factory(annotation: Any, depth: int) -> Tuple[Optional[_Factory], str]:
-    """``(factory, blocked_reason)`` — exactly one side is meaningful."""
     annotation = _unwrap(annotation)
     if depth > _MAX_DEPTH:
         return None, f"nesting deeper than {_MAX_DEPTH}"
@@ -120,7 +88,6 @@ def _field_factory(annotation: Any, depth: int) -> Tuple[Optional[_Factory], str
     if origin in (typing.Union, py_types.UnionType):
         args = typing.get_args(annotation)
         if type(None) in args:
-            # An optional required field: absent IS the neutral value.
             return (lambda _dir: None), ""
         for arm in args:
             factory, _ = _field_factory(arm, depth + 1)
@@ -142,9 +109,6 @@ def _field_factory(annotation: Any, depth: int) -> Tuple[Optional[_Factory], str
     if annotation is float:
         return (lambda _dir: 0.0), ""
     if isinstance(annotation, type):
-        # Concrete media kinds BEFORE the ambiguous bases: `ImageAsset` and
-        # `AudioAsset` both subclass `MediaAsset` subclasses `Asset`, so a
-        # base-first walk would answer "not synthesizable" for both.
         if issubclass(annotation, ImageAsset):
             return _image_asset, ""
         if issubclass(annotation, AudioAsset):
@@ -183,9 +147,6 @@ def _struct_factory(
     except TypeError as exc:
         return None, f"{payload_type!r} is not a msgspec struct: {exc}"
     for field in struct_fields:
-        # NOT required means the schema already states its neutral value.
-        # Leaving it out of the constructor call is what "at the schema's
-        # defaults" MEANS — this is the whole warm plan in one branch.
         if not field.required:
             continue
         factory, reason = _field_factory(field.type, depth)
@@ -204,11 +165,7 @@ def _struct_factory(
 
 
 def payload_factory(payload_type: type) -> Tuple[Optional[_Factory], str]:
-    """``(factory, reason)`` for one entrypoint's payload struct.
-
-    The factory takes a scratch directory (any synthetic asset file is written
-    there and referenced by ``local_path``) and returns a fresh payload.
-    """
+    """``(factory, reason)`` for one entrypoint's payload struct."""
     return _struct_factory(payload_type, 0)
 
 

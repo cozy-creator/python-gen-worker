@@ -1,25 +1,3 @@
-"""The STATIC ARM of pgw#1599 acceptance (d) — byte-for-byte the dynamic
-fixture beside it, with ONE word changed.
-
-`dynamic_axes_endpoint` declares `shapes={"aspect": DYNAMIC}`; this declares
-`shapes={"aspect": STATIC}`. Everything else — the program, the payload
-axes, the lane, the demand formula — is identical, so the difference in the
-derived key set is attributable to the DECLARATION and to nothing else. That
-is the controlled measurement acceptance (d) asks for: both spellings are
-expressible, and NEITHER is the platform's default.
-
-sd15's SHAPE FAN, in miniature: three aspects x two CFG modes (pgw#1548).
-
-The real sd15 endpoint derives 14 graph specializations — 2 (CFG) x 7 (aspect
-bucket) — and sdxl 18. The COUNT still falls out of the payload enumeration
-driving the marked UNet at a different shape each pass, so this fixture
-reproduces that structure at fixture scale and the collapse is measured through
-the REAL derive, not a stand-in.
-
-CFG/batch is NOT declarable in either arm: it is a permanently static fork
-(Paul, 2026-08-20), so the x2 stays whatever the aspect choice is.
-"""
-
 from __future__ import annotations
 
 from enum import StrEnum
@@ -39,20 +17,13 @@ from gen_worker.models import SDXL
 SD15_DIFFUSERS_BF16 = ("sd15.diffusers@1", "plain.bf16@1")
 
 class Aspect(StrEnum):
-    """The aspect axis, spelled the way sd15's own `AspectRatio` is.
-
-    A shape-bearing string axis is a StrEnum, never a string Literal: the
-    derive enumerates enums and NUMERIC literals, and deliberately refuses to
-    cross-product string literals (they name host-side policy, not shape).
-    """
+    """The aspect axis, spelled the way sd15's own `AspectRatio` is."""
 
     SQUARE = "square"
     TALL = "tall"
     WIDE = "wide"
 
 
-#: latent side = pixel side here (the fixture VAE has one block), so these are
-#: the three aspect buckets the UNet actually sees.
 SHAPES: dict[str, tuple[int, int]] = {
     Aspect.SQUARE: (64, 64),
     Aspect.TALL: (80, 48),
@@ -62,12 +33,7 @@ SHAPES: dict[str, tuple[int, int]] = {
 
 class In(msgspec.Struct, forbid_unknown_fields=True):
     prompt: str = "a cat"
-    #: The aspect axis. Each value is one bucket, and the enumeration drives
-    #: the marked module once per value.
     aspect: Aspect = Aspect.SQUARE
-    #: The CFG axis: guided runs concatenate cond+uncond (batch 2), the
-    #: guidance-free path does not (batch 1). Spelled as an int enum because
-    #: msgspec refuses a bool Literal.
     guided: Literal[1, 0] = 1
 
 
@@ -80,8 +46,6 @@ class StaticFanShaped(
     lanes={SD15_DIFFUSERS_BF16: lane(
         request=const(MiB(64)) + per_mp_batch(MiB(16)),
     )},
-    # The declaration under test: one BAKED BUCKET per aspect, all sharing
-    # one traced program.
     shapes={"aspect": STATIC},
 ):
     pipe: Any

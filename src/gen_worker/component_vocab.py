@@ -1,18 +1,4 @@
-"""The ONE component-name vocabulary.
-
-the tuple ``("transformer", "unet", ...)`` was copy-pasted into
-20+ modules across ``models/`` and ``convert/``. The copies disagreed — Wan MoE's
-``transformer_2`` and LTX's ``connectors`` were absent from several of them, which
-is how components ended up silently un-offloaded and un-quantized.
-
-The vocabulary is now declared, not repeated. The SDK ships the *generic*
-diffusers vocabulary (the names diffusers itself defines); an endpoint whose
-composition carries additional components declares them with
-:func:`declare_components` and every consumer sees them at once.
-
-Nothing here encodes a family: ``transformer_2`` is a diffusers component name,
-not "Wan". A family-specific component (``connectors``) arrives by declaration.
-"""
+"""The ONE component-name vocabulary."""
 
 from __future__ import annotations
 
@@ -22,20 +8,12 @@ from threading import RLock
 
 @dataclass(frozen=True)
 class ComponentVocabulary:
-    """Component names grouped by the role a consumer selects on.
-
-    Order is meaningful: consumers that pick "the denoiser" take the first
-    present name, so the most specific/likely name leads.
-    """
+    """Component names grouped by the role a consumer selects on."""
 
     denoisers: tuple[str, ...]
     text_encoders: tuple[str, ...]
     vaes: tuple[str, ...]
     extras: tuple[str, ...]
-    #: Weight-bearing components that are not one of the three primary roles
-    #: (``controlnet``, ``prior``, ``decoder``, ``image_encoder``). They carry
-    #: tensors — so they are walked, sized and quantized — but no consumer ever
-    #: picks "the denoiser" or "the VAE" and means one of these.
     auxiliaries: tuple[str, ...] = ()
 
     @property
@@ -66,7 +44,6 @@ class ComponentVocabulary:
 
 
 def _head(name: str) -> str:
-    """``vae.decode`` / ``transformer/config.json`` -> ``vae`` / ``transformer``."""
     raw = str(name or "").strip().strip("/")
     for sep in (".", "/"):
         if sep in raw:
@@ -74,9 +51,6 @@ def _head(name: str) -> str:
     return raw
 
 
-# The generic diffusers vocabulary. ``transformer_2`` is diffusers' name for a
-# second denoiser stack (MoE experts / high-noise+low-noise pairs); ``dit`` is
-# the name single-file exports use. Neither is family knowledge.
 _GENERIC = ComponentVocabulary(
     denoisers=("transformer", "unet", "transformer_2", "dit"),
     text_encoders=("text_encoder", "text_encoder_2", "text_encoder_3", "text_encoder_4"),
@@ -91,7 +65,7 @@ _current = _GENERIC
 
 
 def component_vocabulary() -> ComponentVocabulary:
-    """The vocabulary every consumer reads. Never mutate the result."""
+    """The vocabulary every consumer reads."""
     with _lock:
         return _current
 
@@ -104,12 +78,7 @@ def declare_components(
     extras: tuple[str, ...] = (),
     auxiliaries: tuple[str, ...] = (),
 ) -> ComponentVocabulary:
-    """Extend the vocabulary from an endpoint declaration. Additive and idempotent.
-
-    Called at endpoint-module import time, before any component enumeration.
-    Names already present keep their position, so a declaration cannot reorder
-    the generic vocabulary out from under another endpoint in the same process.
-    """
+    """Extend the vocabulary from an endpoint declaration."""
     global _current
     with _lock:
         _current = ComponentVocabulary(
@@ -123,7 +92,7 @@ def declare_components(
 
 
 def reset_component_vocabulary() -> None:
-    """Restore the generic vocabulary. Tests only."""
+    """Restore the generic vocabulary."""
     global _current
     with _lock:
         _current = replace(_GENERIC)
@@ -147,23 +116,13 @@ def text_encoder_components() -> tuple[str, ...]:
 
 
 def weight_components() -> tuple[str, ...]:
-    """Components that carry weights worth quantizing/offloading/walking.
-
-    Everything except the config-only extras (scheduler, tokenizers,
-    feature_extractor, safety_checker).
-    """
+    """Components that carry weights worth quantizing/offloading/walking."""
     vocab = component_vocabulary()
     return _concat(vocab.denoisers, vocab.text_encoders, vocab.vaes, vocab.auxiliaries)
 
 
 def quant_candidate_components() -> tuple[str, ...]:
-    """Weight-bearing components a quantization pass may target.
-
-    :func:`weight_components` minus the VAEs. A quantized VAE is the first
-    thing to show as visible artifacting, so QUANTIZATION-POLICY.md keeps it
-    at compute precision and no default pass proposes it. Callers that want a
-    VAE quantized must name it explicitly.
-    """
+    """Weight-bearing components a quantization pass may target: weight_components minus the VAEs — a quantized VAE is the first thing to show visible artifacting, so no default pass proposes one; callers must name a VAE explicitly."""
     vocab = component_vocabulary()
     return _concat(vocab.denoisers, vocab.text_encoders, vocab.auxiliaries)
 

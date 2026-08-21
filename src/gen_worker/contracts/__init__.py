@@ -1,17 +1,4 @@
-"""Versioned cross-repo contract corpora shipped with this package.
-
-th#1947 §4.2. These corpora are the AUTHORITY for values that two repositories
-must agree on, and they ship IN THE PACKAGE: a consumer that pins
-``{authority, version, sha256}`` must be able to consume it without vendoring a
-byte copy fenced against a moving branch tip.
-
-Shipping them here makes the pin possible: a consumer installs a pinned version
-and reads the exact bytes it pinned. The accessor shape deliberately matches
-``torchcg.contracts`` so the two authorities read identically.
-
-Corpus CONTENT is owned by the issue that introduced each corpus; this package
-only makes the existing bytes importable.
-"""
+"""Versioned cross-repo contract corpora shipped with this package."""
 
 from importlib.resources import files
 from typing import Final

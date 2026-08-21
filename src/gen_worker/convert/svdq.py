@@ -1,18 +1,4 @@
-"""SVDQuant flavor trees — build + mirror.
-
-A ``#svdq-fp4-rN`` / ``#svdq-int4-rN`` flavor is the base checkpoint's
-diffusers tree with the denoiser's plain weights replaced by ONE
-nunchaku-format single-file checkpoint (self-describing safetensors
-``__metadata__``; see ``gen_worker.models.svdq``). CAS dedup makes the shared
-components (VAE / text encoders / scheduler / tokenizer) free — the flavor
-stores only the 4-bit denoiser.
-
-Two producers emit this shape:
-  - MIRROR: fetch an official nunchaku artifact (e.g.
-    ``nunchaku-ai/nunchaku-z-image-turbo``) and marry it to our mirrored base.
-  - PRODUCE: a deepcompressor SVDQuant run whose ``convert.py`` output is the
-    same single-file format.
-"""
+"""SVDQuant flavor trees — build + mirror."""
 
 from __future__ import annotations
 
@@ -29,16 +15,7 @@ from ..net import hf
 
 logger = logging.getLogger(__name__)
 
-# Aligned with the hub's real per-file ceiling: the checkpoint-commit grant
-# allows 64 GiB/file (tensorhub checkpointGrantMaxBytesPerFile), and uploads go
-# out as presigned MULTIPART parts (hub issues part_urls/part_size), so a large
-# single file is just more parts. The old 5 GB value cited an "R2 single-PUT
-# cap" that does not exist in this stack — it wrongly blocked every nunchaku
-# family except z-image (qwen-image 11.5-13.1 GB, flux.1 6.8-7.0 GB).
-# Sharding a nunchaku checkpoint WOULD strip the __metadata__ its loader needs,
-# which is why it must publish whole — and publishing whole is allowed. The
-# svdq lane never reaches clone.py's resharder: build_svdq_flavor_tree
-# hardlinks the file itself, and publish_flavors goes straight to the hub.
+# The hub's checkpoint-commit grant allows 64 GiB/file and uploads go out as presigned multipart parts, so a large single file is fine. Sharding a nunchaku checkpoint WOULD strip the __metadata__ its loader needs — it must publish whole, and publishing whole is allowed.
 MAX_SVDQ_FILE_BYTES = 64 * 1024**3
 
 
@@ -54,9 +31,7 @@ def build_svdq_flavor_tree(
     *,
     component: Optional[str] = None,
 ) -> tuple[Path, dict[str, str]]:
-    """Materialize one svdq flavor tree: the full base tree minus the
-    denoiser's weights, plus the nunchaku single-file checkpoint under the
-    denoiser directory. Returns ``(tree_root, attrs)``."""
+    """Materialize one svdq flavor tree: the full base tree minus the denoiser's weights, plus the nunchaku single-file checkpoint under the denoiser directory."""
     base_dir = Path(base_dir)
     svdq_file = Path(svdq_file)
     out_dir = Path(out_dir)

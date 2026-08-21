@@ -1,25 +1,4 @@
-"""The ``moderation`` manifest block: which payload paths are MEDIA, and
-which are PROMPTS (pgw#1418).
-
-The hub will not guess. ``inputassets``' package doc opens by refusing to treat
-arbitrary string fields as media URLs, so the ONLY way it learns that
-``extract_frame(payload.video)`` is a video is this block — decoded at
-``release/resolver.go`` into ``PayloadModerationMetadata`` and read by
-``input_asset_validation.go`` to build the stored-input manifest, and by the
-prompt-moderation pipeline for the ``prompts`` half.
-
-pgw#1373 deleted the v1 collector with the rest of ``discover.py``'s endpoint
-walk and the v2 row never grew a replacement, so every v2 release shipped a
-manifest with no ``moderation`` key at all: no typed media inputs, and no
-prompt-moderation field declarations either — the safety half nobody noticed.
-
-The path grammar is the hub's (``internal/jsonschema.NodeAtPath``): dotted
-segments, ``[]`` for array items, ``*`` for an open mapping's values. Paths are
-BARE (``video``, ``slots[].prompt``), rooted at the payload struct, because
-that is what ``validateModerationSchemaPath`` navigates the input schema with —
-and the hub REFUSES a path that does not resolve, so a wrong spelling here
-fails the publish rather than degrading quietly.
-"""
+"""The moderation manifest block: which payload paths are MEDIA and which are PROMPTS. The path grammar is the hub's (internal/jsonschema.NodeAtPath): dotted segments, [] for array items, * for an open mapping's values, rooted bare at the payload struct — the hub refuses a path that does not resolve, so a wrong spelling fails the publish."""
 
 from __future__ import annotations
 
@@ -44,8 +23,6 @@ def _is_msgspec_struct(t: Any) -> bool:
 
 
 def _media_kind(t: type) -> str:
-    """The hub's four-value ``kind`` vocabulary. A bare ``Asset``/``MediaAsset``
-    is ``media`` — the widest of the four, never a guess at a narrower one."""
     if issubclass(t, ImageAsset):
         return "image"
     if issubclass(t, VideoAsset):
@@ -57,16 +34,6 @@ def _media_kind(t: type) -> str:
 
 
 def _hints_or_refuse(struct: type, path: str) -> Any:
-    """Resolved type hints, or a BUILD ERROR naming the struct.
-
-    The v1 collector swallowed a resolution failure and fell back to
-    ``__annotations__`` — which, under ``from __future__ import annotations``
-    (every endpoint module in this repo), is a dict of STRINGS. A string is not
-    a type, so the walk below skips it and the function emits an EMPTY
-    moderation block: no media, no prompts, no error, and an endpoint that
-    cannot serve an asset. That is the exact silence pgw#1418 cost a rented pod
-    to find, one layer down. Refuse instead.
-    """
     try:
         return typing.get_type_hints(struct, include_extras=True)
     except Exception as exc:
@@ -79,7 +46,6 @@ def _hints_or_refuse(struct: type, path: str) -> Any:
 
 
 def _annotation_carries_asset(ann: Any, _seen: Optional[Set[type]] = None) -> bool:
-    """True when the annotation subtree can hold an input ``Asset``."""
     seen = _seen if _seen is not None else set()
     origin = typing.get_origin(ann)
     if origin is typing.Annotated:
@@ -116,14 +82,7 @@ def _annotation_carries_asset(ann: Any, _seen: Optional[Set[type]] = None) -> bo
 
 
 def payload_moderation(payload_type: type) -> Dict[str, List[Dict[str, str]]]:
-    """``{"prompts": [...], "media": [...]}`` for one entrypoint's payload —
-    keys omitted when empty, so a payload with neither emits ``{}`` and the
-    caller omits the block entirely.
-
-    Two shapes are BUILD ERRORS rather than silent omissions, both because the
-    input-asset manifest is ORDERED and an unordered container has no stable
-    occurrence order to match it against.
-    """
+    """``{"prompts": [...], "media": [...]}`` for one entrypoint's payload — keys omitted when empty, so a payload with neither emits ``{}`` and the caller omits the block entirely."""
     out: Dict[str, List[Dict[str, str]]] = {"prompts": [], "media": []}
     seen_structs: Set[type] = set()
 

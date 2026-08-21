@@ -1,7 +1,3 @@
-"""th#913/gw#596 lane vocabulary — twin of tensorhub's
-internal/orchestrator/precision/lane_test.go vectors (shared spec: ids and
-semantics must match byte-for-byte across repos)."""
-
 from __future__ import annotations
 
 import pytest
@@ -55,8 +51,4 @@ def test_parse_execution_lane_spec_dual_form() -> None:
     assert execution_lanes.parse_execution_lane_spec("").is_zero
     with pytest.raises(ValueError):
         execution_lanes.parse_execution_lane_spec("int8")
-
-
-# The `flavor` argument is GONE (§1.32(d)). A BINDING names a tag or
-# a digest and declares at most a CAST; it no longer asserts a stored quant.
 

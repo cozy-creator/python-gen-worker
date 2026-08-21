@@ -1,20 +1,3 @@
-"""C2PA sign+verify round trips (pgw#658 restores gw#518 coverage, th#714).
-
-EU AI Act Art. 50 legal-critical path: every generated media asset must leave
-``RequestContext.save_bytes/save_file`` carrying a signed Content-Credentials
-manifest when signing is configured. The pgw#609 test sweep deleted the
-original gw#518 suite; this is its greenfield replacement.
-
-the private key is HUB-SIDE. Every round trip below therefore signs
-through a real HTTP signing oracle (``fake_hub_signer``) that holds the key and
-answers ``POST /v1/worker/c2pa/sign`` exactly like the hub route does —
-base64 COSE fixed-width r||s. The worker only ever holds the public chain.
-
-Chain fixture mirrors the production cert profile: ES256, keyUsage
-digitalSignature, EKU emailProtection, key in PKCS#8 — generated with openssl
-so a cert Paul buys per the th#714 runbook exercises the exact same code path.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -34,16 +17,12 @@ import pytest
 from gen_worker import content_credentials as cc
 
 
-# ---------------------------------------------------------------------------
-# fixtures
-
-
 @pytest.fixture(scope="module")
 def es256_chain(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     """Self-signed ES256 signing cert + PKCS#8 key via openssl."""
     d = tmp_path_factory.mktemp("c2pa-chain")
     key_raw = d / "key-raw.pem"
-    key = d / "key.pem"  # PKCS#8
+    key = d / "key.pem"
     cert = d / "cert.pem"
     run = lambda *args: subprocess.run(  # noqa: E731
         args, check=True, capture_output=True
@@ -64,13 +43,7 @@ def es256_chain(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
 
 @pytest.fixture(scope="module")
 def fake_hub_signer(es256_chain):
-    """A stand-in for the hub's POST /v1/worker/c2pa/sign route.
-
-    Holds the private key (as the hub does), returns base64 COSE r||s (as
-    internal/orchestrator/c2pasign does), and refuses an unauthenticated
-    caller (as the worker-JWT gate does). This is the whole th#1307 contract
-    from the worker side.
-    """
+    """A stand-in for the hub's POST /v1/worker/c2pa/sign route."""
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec, utils as asym_utils
 
@@ -115,8 +88,7 @@ def fake_hub_signer(es256_chain):
 
 @pytest.fixture()
 def signer_configured(es256_chain, fake_hub_signer, monkeypatch):
-    """Configure the worker exactly as a pod is configured: PUBLIC cert only,
-    signatures from the hub. Resets module state afterwards."""
+    """Configure the worker exactly as a pod is configured: PUBLIC cert only, signatures from the hub."""
     settings = SimpleNamespace(
         c2pa_cert_pem="",
         c2pa_cert_path=str(es256_chain["cert"]),
@@ -126,12 +98,6 @@ def signer_configured(es256_chain, fake_hub_signer, monkeypatch):
     cc.configure(settings)
     cc.configure_remote_signer(fake_hub_signer["base_url"], lambda: "worker-jwt-test")
     yield settings
-    # Plain assignment, NOT monkeypatch (pgw#772 release lane): this runs during
-    # finalization, and `monkeypatch`'s own undo -- which recorded the globals
-    # AFTER cc.configure() above had already armed them -- would restore the armed
-    # values right back. That leaked a configured signer, pointed at this
-    # now-shutdown fake hub, into every later test in the session; th#1307 made
-    # signing failures fatal, so 7 downstream tests went JOB_STATUS_FATAL.
     cc._configured = False
     cc._config = None
     cc._remote = None
@@ -148,10 +114,6 @@ def _unconfigure(monkeypatch):
         SimpleNamespace(c2pa_cert_pem="", c2pa_cert_path="",
                         c2pa_alg="es256", c2pa_ta_url="")
     )
-
-
-# ---------------------------------------------------------------------------
-# sample media
 
 
 def _png() -> bytes:
@@ -206,20 +168,12 @@ def _mp4(tmp_path: Path) -> bytes:
 
 
 def _verify(mime: str, data: bytes) -> dict:
-    """Read the embedded manifest back with the library Reader."""
     import c2pa
 
     with c2pa.Reader(mime, io.BytesIO(data)) as reader:
         state = reader.get_validation_state()
-        # No trust list is configured in tests, so the self-signed issuer
-        # yields Valid or Trusted depending on library defaults — anything
-        # but Invalid means hard bindings + signature verified.
         assert str(state) in ("Valid", "Trusted"), state
         return json.loads(reader.json())
-
-
-# ---------------------------------------------------------------------------
-# round trips
 
 
 @pytest.mark.parametrize(
@@ -249,7 +203,6 @@ def test_sign_verify_round_trip(signer_configured, make, ref, mime):
     cozy = next(a for a in active["assertions"] if a["label"] == "com.cozy.generation")
     assert cozy["data"]["models"] == ["cozy/sdxl-base@v5"]
     assert cozy["data"]["request_sha256"] == hashlib.sha256(b"req-123").hexdigest()
-    # Privacy line (th#1047-consistent): no prompts, no user identity.
     blob = json.dumps(active)
     assert "prompt" not in blob
     assert "req-123" not in blob
@@ -269,19 +222,13 @@ def test_sign_media_file_round_trip(signer_configured, tmp_path):
     assert out_path is not None
     try:
         signed = Path(out_path).read_bytes()
-        assert src.read_bytes() == _webp()  # source untouched
+        assert src.read_bytes() == _webp()
         _verify("image/webp", signed)
     finally:
         os.unlink(out_path)
 
 
-# ---------------------------------------------------------------------------
-# config semantics
-
-
 def test_inline_pem_config_signs(es256_chain, fake_hub_signer, monkeypatch):
-    """GEN_WORKER_C2PA_CERT_PEM (hub-injected pod env, th#714) is sufficient —
-    the cert is the ONLY material a pod gets."""
     _reset(monkeypatch)
     cc.configure(
         SimpleNamespace(
@@ -347,10 +294,6 @@ def test_garbage_pem_refuses(monkeypatch):
             )
         )
     _reset(monkeypatch)
-
-
-# ---------------------------------------------------------------------------
-# format sniffing
 
 
 @pytest.mark.parametrize(

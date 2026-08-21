@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Build libcozy_kernels.so against THIS environment's torch (pgw#860).
-
-Run inside the pinned devel toolchain image via
-scripts/native/build_native_kernels.sh — never against a host toolkit.
-Fatbin targets exactly sm_100a + sm_120a (fp4 instructions are arch-'a'
-gated). Verifies arch coverage with cuobjdump and smokes op registration by
-loading the built library (no GPU needed for either).
-
-    python csrc/build.py <out_dir>
-"""
+"""Build libcozy_kernels.so inside the pinned devel toolchain image, never against a host toolkit. Fatbin targets exactly sm_100a + sm_120a: fp4 instructions are arch-'a' gated."""
 from __future__ import annotations
 
 import hashlib
@@ -27,7 +18,6 @@ def main() -> int:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "dist-native")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # "100a" -> "10.0a" (TORCH_CUDA_ARCH_LIST spelling for arch-'a' targets).
     os.environ["TORCH_CUDA_ARCH_LIST"] = ";".join(
         f"{int(a[:-1]) // 10}.{int(a[:-1]) % 10}a" for a in ARCHS)
     import torch
@@ -48,15 +38,12 @@ def main() -> int:
     so = build_dir / "cozy_kernels.so"
     assert so.exists(), f"build produced no {so}"
 
-    # Arch census — both 'a' targets must be in the fatbin.
     census = subprocess.run(
         ["cuobjdump", "--list-elf", str(so)], check=True,
         capture_output=True, text=True).stdout
     missing = [a for a in ARCHS if f"sm_{a}" not in census]
     assert not missing, f"fatbin missing archs {missing}:\n{census}"
 
-    # Registration smoke: load + schema + CPU-callable build_info.
-    # TORCH_VERSION is the base semver (no +cuXXX local tag).
     info = torch.ops.cozy_kernels.build_info()
     base_ver = str(torch.__version__).split("+", 1)[0]
     assert f"torch={base_ver}" in info, (

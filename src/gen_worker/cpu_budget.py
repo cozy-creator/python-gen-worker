@@ -1,41 +1,4 @@
-"""Per-group host-CPU budget.
-
-torch sizes its intra-op thread pool from the HOST's logical processors. It
-knows nothing about (a) the container's cpu quota or (b) how many execution
-groups share this process. On the measured 4xA40 pod that is FOUR 48-thread
-teams (from 96 host processors) against a 32.3-core quota — and the boot
-window really does get CFS-throttled under it (``nr_throttled`` 4,
-``throttled_usec`` 9.5 s in a 146-period window, before a single request).
-
-WHAT THIS DOES **NOT** FIX, measured (sdxl 1024^2/28 steps, 4xA40, width-4
-burst): 37.1 s with torch's 48-thread default vs 36.7 s pinned to 8 — within
-noise. This is NOT a throughput fix. The width-4 collapse is the shared
-interpreter, not thread oversubscription: at width 4 the process uses 2.3 of
-its 32.3 allowed cores, so CPU was never the scarce resource on that pod.
-
-It is kept because 192 threads on a 32.3-core quota is a misconfiguration on
-its own terms, it is de-escalation-only (so it can never slow anything down),
-and the pods where it WOULD bite are the narrow ones — a 4-GPU pod with 8
-vCPUs gets 192 threads on 8 cores, and the CPU-heavy tails (x264, image
-post-processing, hashing) are exactly where that lands.
-
-Three rules:
-
-* The **allowance is a fact**, read from the cgroup quota / affinity mask /
-  cpu count — never from ``/proc/cpuinfo`` alone, which is the host's and is
-  what torch already gets wrong.
-* The **divisor is the delivered topology's group count** — the number of
-  requests this process runs at once.
-* The imposition is **CODE**, never an env var: the env seal scrubs ``OMP_*``
-  and ``MKL_*`` wholesale precisely so that no base image and no operator
-  decides this, which otherwise leaves the decision to a library default
-  reading the wrong CPU count.
-
-De-escalation only: the imposed value is ``min(torch's own default, budget)``,
-so a pod whose allowance already exceeds torch's default is untouched and a
-single-group pod can only ever have oversubscription removed, never gain
-threads.
-"""
+"""Per-group host-CPU budget."""
 
 from __future__ import annotations
 
@@ -50,36 +13,17 @@ logger = logging.getLogger(__name__)
 
 
 def cpu_allowance() -> float:
-    """The narrowest true bound on this process's CPU, in fractional cores.
-
-    A projection of :func:`hostfacts.cpu_allowance` — the one reduction over
-    cgroup quota, affinity mask and host core count. This module's own copy
-    read a FIXED ``/sys/fs/cgroup/cpu.max`` (which reads ``max`` in a nested
-    cgroup that really is capped) while ``postmortem``'s copy walked the chain
-    and had no v1 fallback; the single reader has both.
-    """
+    """The narrowest true bound on this process's CPU, in fractional cores."""
     return hostfacts.cpu_allowance().cores
 
 
 def per_group_threads(allowance: float, groups: int) -> int:
-    """Intra-op threads one execution group may use. Floor of 1: a group
-    always gets a thread, even on a fractional-core pod."""
+    """Intra-op threads one execution group may use."""
     return max(1, int(math.floor(allowance / max(1, int(groups)))))
 
 
 def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
-    """Size torch's intra-op (and, when still settable, inter-op) pools for
-    ONE group's share of this process. Returns the recorded facts; never
-    raises — a host that will not answer keeps torch's default.
-
-    The divisor is the number of execution groups sharing this CPU cgroup,
-    which is ``groups`` (this process's own) TIMES the compute-child sibling
-    count. Under the process split each child rewrites its own
-    ``WORKER_EXECUTION_TOPOLOGY`` to a single local group, so ``groups`` reads 1
-    in every child — but G of them share one cgroup, and without the sibling
-    multiplier each would claim the whole allowance and reinstate a
-    192-threads-on-32-cores oversubscription. ``host_siblings()`` is 1 for every
-    pod that is not running the split, so this is byte-identical at G=1."""
+    """Size torch's intra-op (and, when still settable, inter-op) pools for ONE group's share of this process."""
 
     siblings = host_siblings()
     effective = max(1, int(groups)) * siblings
@@ -97,7 +41,6 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
     facts.update(allowance=round(allowance, 2), budget=budget,
                  torch_default=default, imposed=imposed)
     if imposed == default:
-        # Already at or under budget — nothing to de-escalate.
         return facts
     try:
         torch.set_num_threads(imposed)
@@ -105,8 +48,6 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         facts["intra_op_error"] = str(exc)[:200]
     try:
-        # Only settable before the inter-op pool is first used; a pod that
-        # already launched work keeps its pool and says so.
         torch.set_num_interop_threads(imposed)
         facts["inter_op"] = int(torch.get_num_interop_threads())
     except Exception as exc:  # noqa: BLE001

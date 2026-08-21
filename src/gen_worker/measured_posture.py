@@ -1,59 +1,4 @@
-"""The POSTURE a request was served under, typed (th#1871 P1, pgw#1225).
-
-DESIGN-RULINGS §1.36 stage 2: *"a benchmark measured through a silent
-degradation is not a benchmark"*. The deciding specimen is ie#707 — a family
-served on ``sdpa`` because flash-attn was absent from its image while its lane
-declared flash, and every number taken from those runs was filed as a
-measurement OF the flash lane. Nothing downstream could tell.
-
-The hub now keys its measurement relation on the posture
-(``endpoint_measurements``, tensorhub ``4f57e6e6``: ``(release, function,
-gpu_sku_id, execution_lane, posture_digest, source)``). Until this module
-existed, every ``source='serve'`` row got the UNREPORTED posture — the hub's
-reducer deliberately refuses to parse the prose we already emit into
-``worker_activity_events.detail``, because parsing prose to recover structure
-is the defect the relation exists to end.
-
-So this is a change of REPRESENTATION, not of instrumentation. Every field here
-is something the worker already knows and already says, in words, on a channel
-no decision reads.
-
-WHAT THIS MODULE DELIBERATELY DOES NOT DO
------------------------------------------
-**It does not digest.** The posture's identity is
-``measurement.Posture.Digest()`` on the hub and there is exactly one
-implementation of it. A worker-side digest would be a second one — two
-canonicalizations of the same object, each green against its own tests, free to
-disagree exactly like the two topology decoders did (pgw#1188). The worker
-reports the structure; the hub decides what it is identical to. What keeps the
-two sides honest is the byte-identical vector corpus
-(``tests/testdata/posture_wire_vectors.json``), not a duplicated hash.
-
-**It does not decide anything.** No refusal, no gate, no placement input.
-§1.35's second amendment stands: loudness is diagnostics.
-
-**It does not recommend a card.** The worker knows what it was short by; only
-the hub knows the catalog and the prices (§1.36 amendment, clause 3). ``recommended_vram_gb`` was the author's own declared hint handed back, and
-th#1867 deleted it from the wire outright rather than leaving it to be read as
-a measurement.
-
-THE THREE RULES THAT ARE THE HUB'S, RESTATED SO THE PRODUCER OBEYS THEM
-----------------------------------------------------------------------
-1. **``applied`` is ORDERED and never collapsed.** The order the worker reached
-   for levers is a fact about the run — ``group_offload`` AFTER ``model_offload``
-   failed is not ``group_offload`` instead of it. The retired ``FnDegraded.ran``
-   projected ``model_offload``/``group_offload``/``sequential`` onto the single
-   token ``offload``, so a 2.5x, a 3.0x and a 4.0x degradation were
-   indistinguishable to the hub, and tiling, slicing and attention fallback had
-   no representation at all.
-2. **``wanted`` and applied are two fields on every axis, never one reconciled
-   value.** "eager was chosen" and "compiled was asked for and eager happened"
-   are different facts with different owners. A schema holding only the resolved
-   value makes the second UNREPRESENTABLE at the moment it matters most.
-3. **Magnitudes are data, not identity.** Two runs short by 6.1 and 6.3 GiB that
-   reached for the same levers in the same order are one compiled graph with two samples.
-   Report the bytes; the hub excludes them from the key.
-"""
+"""The POSTURE a request was served under, typed; vocabulary wire-shared with tensorhub's measurement relation. This module deliberately does NOT digest: posture identity is the hub's measurement.Posture.Digest() alone — a worker-side digest would be a second canonicalization free to disagree, and the byte-identical vector corpus (tests/testdata/posture_wire_vectors.json) keeps the two sides honest. Rules: `applied` is ORDERED and never collapsed; `wanted` and `applied` stay two fields on every axis; magnitudes are data, never identity."""
 
 from __future__ import annotations
 
@@ -66,14 +11,6 @@ from .pb import worker_scheduler_pb2 as pb
 
 logger = logging.getLogger(__name__)
 
-# --- vocabularies -----------------------------------------------------------
-# Wire-shared with tensorhub (internal/orchestrator/measurement/posture.go).
-# A value not in these sets is not "unknown" to the hub, it is a THIRD
-# vocabulary — which is the defect th#1871 §1.3 measured: three writers keying
-# one relation three ways, so no two sources could ever collide or join.
-
-#: What actually ran the attention. `eager` here is the math fallback, NOT the
-#: compile axis — the two words collide across axes and must not be conflated.
 BACKEND_FA3 = "fa3"
 BACKEND_FA2 = "fa2"
 BACKEND_SDPA = "sdpa"
@@ -84,10 +21,6 @@ ATTENTION_BACKENDS: frozenset[str] = frozenset({
     BACKEND_FA3, BACKEND_FA2, BACKEND_SDPA, BACKEND_XFORMERS, BACKEND_EAGER,
 })
 
-#: Spellings the ecosystem uses for the same kernel. Normalized rather than
-#: rejected: an endpoint that reports `flash_attention_2` is being honest and
-#: precise, and refusing it is how `report_applied_attention` ended up with 23
-#: of 29 families reporting nothing at all.
 _BACKEND_ALIASES: Dict[str, str] = {
     "flash": BACKEND_FA2,
     "flash_attn": BACKEND_FA2,
@@ -96,9 +29,6 @@ _BACKEND_ALIASES: Dict[str, str] = {
     "flash_attention_2": BACKEND_FA2,
     "flash_attn_3": BACKEND_FA3,
     "flash_attention_3": BACKEND_FA3,
-    # The concatenated spellings the upstream projects actually print
-    # (`FlashAttention2`, `FlashAttention-3`). Separators are normalized to `_`
-    # before this lookup, so only the run-together forms need naming.
     "flashattention": BACKEND_FA2,
     "flashattention2": BACKEND_FA2,
     "flashattention3": BACKEND_FA3,
@@ -108,31 +38,22 @@ _BACKEND_ALIASES: Dict[str, str] = {
     "vanilla": BACKEND_EAGER,
 }
 
-#: The import a backend needs to exist at all. An absent package is the ie#707
-#: cause, and it is a fact the worker can state without being told.
 BACKEND_PACKAGE: Dict[str, str] = {
     BACKEND_FA3: "flash_attn",
     BACKEND_FA2: "flash_attn",
     BACKEND_XFORMERS: "xformers",
 }
 
-#: The compile axis. `eager` collides spelling-wise with BACKEND_EAGER and is a
-#: different axis; both are the hub's vocabulary and neither may be renamed here.
 COMPILE_COMPILED = "compiled"
 COMPILE_EAGER = "eager"
 
-#: Residency rungs. ALL_RESIDENT is the only undegraded one; an UNSTATED mode is
-#: unknown, and unknown must never render as fine.
 RESIDENCY_ALL_RESIDENT = "all_resident"
 
-#: Where a component's weights actually live.
 PLACEMENT_RESIDENT = "resident"
 PLACEMENT_OFFLOADED = "offloaded"
 PLACEMENT_CPU = "cpu"
 PLACEMENT_DISK = "disk"
 
-#: Technique names — the SDK's OWN rungs (`models/rung.py`) plus the levers that
-#: had no wire representation at all.
 TECHNIQUE_FP8_STORAGE = "fp8_storage"
 TECHNIQUE_PARTIAL_RESIDENT = "partial_resident"
 TECHNIQUE_MODEL_OFFLOAD = "model_offload"
@@ -145,34 +66,14 @@ TECHNIQUE_VAE_SLICING = "vae_slicing"
 TECHNIQUE_ATTENTION_SLICING = "attention_slicing"
 TECHNIQUE_ATTENTION_FALLBACK = "attention_fallback"
 
-#: Machine-readable causes. Prose belongs in the activity event, never here.
 REASON_VRAM_SHORTFALL = "vram_shortfall"
 REASON_CUDA_OOM = "cuda_oom"
 REASON_KERNEL_UNAVAILABLE = "kernel_unavailable"
 REASON_LANE_CAST_DROPPED = "lane_cast_dropped"
 REASON_NO_CUDA = "no_cuda"
-# pgw#1315: this machine is below a lane's DECLARED minimum and the request
-# serves anyway. It is a WARNING and never a refusal — a machine below a
-# declared minimum is the normal input to a degraded run, which is what the
-# minimum being advisory-at-EXECUTION means (the minimum gates one thing, a
-# config-WRITE, and that lives hub-side). Doubles as the `serve_degrade` phase
-# token (`memory.UNDER_MINIMUM_PHASE`) so the cause is countable hub-side under
-# one spelling rather than two.
 REASON_BELOW_DECLARED_MINIMUM = "below_declared_minimum"
-# pgw#1339 / th#2099: the invoked function declares a serving contract
-# (`objectives=` / `distilled=`) and the resolved checkpoint carries no
-# evidence on that axis — either the catalog classified nothing or nobody
-# stamped the wire. Same rule as the line above, on a different declaration:
-# a contract the worker cannot CHECK is not a contract the worker may REFUSE.
-# The hub gates checkpoint<->function compatibility at deploy (`bindingcheck`)
-# and at request time; this reader is a version-skew backstop, and a backstop
-# that fatals turns a hub-side stamping gap into a customer-visible outage —
-# which is exactly what it did to sd15 and anima on 0.120.0.
-# pgw#1425: its one reader (`memory.UNEVIDENCED_FACTS_PHASE`) went with the
-# catalog pgw#1373 deleted. Kept as the wire vocabulary's token, unused.
 REASON_SERVING_FACTS_UNEVIDENCED = "serving_facts_unevidenced"
 
-#: Shortfall resources.
 RESOURCE_VRAM = "vram"
 RESOURCE_HOST_RAM = "host_ram"
 RESOURCE_DISK = "disk"
@@ -181,18 +82,10 @@ _GIB = 1 << 30
 
 
 def normalize_backend(raw: str) -> str:
-    """Canonical attention-backend token, or ``""`` when nothing was stated.
-
-    Raises ``ValueError`` on a token that is neither canonical nor a known
-    alias: a value the hub does not share is not a measurement, it is a fourth
-    vocabulary, and the reporter is the last place it can be caught.
-    """
+    """Canonical attention-backend token, or ``""`` when nothing was stated."""
     tok = str(raw or "").strip().lower().replace("-", "_")
     if not tok:
         return ""
-    # Separators are noise on this axis: `FlashAttention-3`, `flash_attn_3` and
-    # `flashattention3` are one kernel written three ways, and an author who
-    # reports the one their own library prints is being precise, not sloppy.
     tok = _BACKEND_ALIASES.get(
         tok, _BACKEND_ALIASES.get(tok.replace("_", ""), tok))
     if tok not in ATTENTION_BACKENDS:
@@ -205,13 +98,7 @@ def normalize_backend(raw: str) -> str:
 
 @dataclass(frozen=True)
 class AppliedTechnique:
-    """One lever the worker reached for, with the reason it reached.
-
-    ``wanted`` empty means the lever was FORCED. A forced lever is a
-    degradation but NOT a mismatch — a mismatch means a *stated* expectation was
-    violated, and counting forced levers twice inflates the report whose whole
-    job is surfacing SILENT substitutions.
-    """
+    """One lever the worker reached for, with the reason it reached."""
 
     name: str
     component: str = ""
@@ -227,13 +114,7 @@ class AppliedTechnique:
 
 @dataclass(frozen=True)
 class ComponentPosture:
-    """What one component ended up as.
-
-    "The transformer is offloaded" is actionable; "the pipeline is degraded" is
-    not. ``applied_quant`` is what the weights were actually LOADED as, which is
-    not always what the lane BOUND — the live fleet reports
-    ``applied=fp8-w8a8-dynamic ... bound=bf16-w16a16`` today, in prose.
-    """
+    """What one component ended up as."""
 
     component: str
     applied_quant: str = ""
@@ -250,13 +131,7 @@ class ComponentPosture:
 
 @dataclass(frozen=True)
 class ResourceShortfall:
-    """The quantified WHY (§1.36 amendment part 2).
-
-    "Insufficient VRAM" is the old vocabulary; ``needed N, had M, short by N-M
-    for component X`` is the diagnostic. These numbers already exist as locals
-    inside the worker's own placement decision; this type is where they land
-    instead of being discarded.
-    """
+    """The quantified WHY (§1.36 amendment part 2)."""
 
     resource: str
     component: str = ""
@@ -265,7 +140,7 @@ class ResourceShortfall:
 
     @property
     def short_by_bytes(self) -> int:
-        """The deficit. A shortfall that is not short is not a shortfall."""
+        """The deficit."""
         return max(0, self.needed_bytes - self.available_bytes)
 
     @classmethod
@@ -273,9 +148,7 @@ class ResourceShortfall:
         cls, resource: str, needed_gb: float, available_gb: float, *,
         component: str = "",
     ) -> "ResourceShortfall":
-        """Bytes are the unit every consumer compares in; GB is what the
-        placement path happens to think in. Convert once, here — a GB/bytes
-        mixup is a silent factor of 2^30."""
+        """Bytes are the unit every consumer compares in; GB is what the placement path happens to think in."""
         return cls(
             resource=resource, component=component,
             needed_bytes=int(max(0.0, needed_gb) * _GIB),
@@ -290,12 +163,7 @@ class ResourceShortfall:
 
 @dataclass(frozen=True)
 class MeasuredPosture:
-    """The full set of conditions one measurement was taken under.
-
-    Two measurements may be compared if and only if their postures are equal.
-    The hub decides that (``Posture.Digest``); this type only has to be complete
-    and honest.
-    """
+    """The full set of conditions one measurement was taken under."""
 
     execution_lane: str = ""
     attention_backend: str = ""
@@ -309,20 +177,7 @@ class MeasuredPosture:
 
     @property
     def observed(self) -> bool:
-        """True when the worker actually OBSERVED this instance's posture.
-
-        Deliberately ignores lane and compile state: those two are known for
-        every request from the served identity alone, so including them would
-        make every posture "observed" and the flag would answer nothing.
-
-        This is the guard on the emit path, and the asymmetry it protects is the
-        point. An all-empty posture is NOT a clean posture — it is the absence
-        of a report, and the hub keys the two differently on purpose (the
-        unreported posture has its own digest, so it can never be mistaken for a
-        compiled graph measured on a known-clean one). Sending one would claim "measured,
-        nothing applied" on behalf of a worker that never looked: ie#707 with
-        the polarity flipped.
-        """
+        """True when the worker actually OBSERVED this instance's posture."""
         return bool(
             self.attention_backend or self.attention_backend_wanted
             or self.residency_mode or self.applied or self.components
@@ -330,9 +185,7 @@ class MeasuredPosture:
 
     @property
     def degraded(self) -> bool:
-        """Any lever applied, any stated axis unmet, or a residency rung that
-        had to move something off the card. Mirrors the hub's ``Degraded()`` so
-        the worker's own log line cannot disagree with the hub's reading."""
+        """Any lever applied, any stated axis unmet, or a residency rung that had to move something off the card."""
         if self.applied:
             return True
         if self.residency_mode and self.residency_mode != RESIDENCY_ALL_RESIDENT:
@@ -354,9 +207,6 @@ class MeasuredPosture:
             compile_state_wanted=self.compile_state_wanted,
             residency_mode=self.residency_mode,
         )
-        # Ordered on the wire because the order is the fact (rule 1). Components
-        # are NOT sorted here: the hub sorts before digesting, and a producer
-        # that pre-sorts hides a producer that does not.
         for technique in self.applied:
             msg.applied.append(technique.to_proto())
         for component in self.components:
@@ -366,15 +216,6 @@ class MeasuredPosture:
         return msg
 
 
-# ---------------------------------------------------------------------------
-# The ledger
-# ---------------------------------------------------------------------------
-
-#: `memory.low_vram_mode` placement modes -> (residency rung, technique).
-#: `off` and `vae_only` are BOTH fully resident (pgw#750: the vae_only
-#: refinement only toggles VAE slicing, it moves no weights), so they are the
-#: undegraded rung — and `vae_only` still contributes its slicing technique,
-#: because a sliced decode is a different traced graph and a different number.
 _PLACEMENT_RESIDENCY: Dict[str, str] = {
     "": "",
     "off": RESIDENCY_ALL_RESIDENT,
@@ -386,9 +227,6 @@ _PLACEMENT_RESIDENCY: Dict[str, str] = {
     "cpu": TECHNIQUE_CPU,
 }
 
-#: The honest price of each rung vs a resident run. Reported, never keyed: it is
-#: the worker's estimate OF the lever, not a property of the run, and two SDK
-#: versions estimating it differently must not fork one posture's identity.
 _TECHNIQUE_SLOWDOWN: Dict[str, float] = {
     TECHNIQUE_PARTIAL_RESIDENT: 1.3,
     TECHNIQUE_MODEL_OFFLOAD: 2.5,
@@ -399,12 +237,7 @@ _TECHNIQUE_SLOWDOWN: Dict[str, float] = {
 
 
 def residency_for_placement(mode: str) -> str:
-    """The residency rung a placement mode means, ``""`` when unprepped.
-
-    Unprepped stays EMPTY rather than defaulting to all-resident: a pipeline
-    nobody placed is unknown, and "unknown" rendering as "fine" is the exact
-    zero-vs-null defect §1.36's measurement columns are nullable to avoid.
-    """
+    """The residency rung a placement mode means, ``""`` when unprepped."""
     return _PLACEMENT_RESIDENCY.get(str(mode or "").strip().lower(), "")
 
 
@@ -424,14 +257,7 @@ def placement_for_residency(residency: str) -> str:
 
 @dataclass
 class PostureLedger:
-    """The per-instance accumulator, written at the ONE choke point every
-    degradation already passes through.
-
-    It is a ledger and not a set of flags for the reason ``applied`` is ordered:
-    the sequence of levers is the finding. Appends are idempotent per
-    (name, component) — the placement path can be re-entered on a retry, and a
-    lever recorded twice would read as a deeper descent than actually happened.
-    """
+    """The per-instance accumulator, written at the ONE choke point every degradation already passes through."""
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _applied: List[AppliedTechnique] = field(default_factory=list)
@@ -458,8 +284,7 @@ class PostureLedger:
             self._applied.append(entry)
 
     def shortfall(self, value: ResourceShortfall) -> None:
-        """Keep the DEEPEST shortfall seen. A descent that was short by 2 GiB
-        and then, one rung down, by 9 GiB is described by the 9."""
+        """Keep the DEEPEST shortfall seen."""
         with self._lock:
             if (self._shortfall is None
                     or value.short_by_bytes > self._shortfall.short_by_bytes):
@@ -488,26 +313,13 @@ class PostureLedger:
             )
 
     def attention(self, backend: str, *, wanted: str = "") -> None:
-        """Record the engaged kernel, and the fallback if one happened.
-
-        This is ie#707's whole shape: the fallback was SILENT, so the numbers
-        were filed under the lane that was declared rather than the one that
-        ran. When the wanted backend needs a package this image does not have,
-        the cause is stated rather than left to a reader's inference.
-        """
+        """Record the engaged kernel, and the fallback if one happened."""
         engaged = normalize_backend(backend)
         asked = normalize_backend(wanted)
         with self._lock:
             self._attention = engaged or self._attention
             self._attention_wanted = asked or self._attention_wanted
         if asked and engaged and asked != engaged:
-            # The lever is recorded WITHOUT a `wanted`, deliberately. The
-            # attention axis already carries wanted-vs-applied as first-class
-            # fields, and the hub derives a mismatch finding per technique by
-            # comparing `wanted` against the technique's own NAME — so a
-            # backend token there would both double-count the finding and render
-            # as `attention_fallback:fa2>attention_fallback`, which is not a
-            # sentence. One axis, one reading (ie#655's rule).
             self.technique(
                 TECHNIQUE_ATTENTION_FALLBACK,
                 reason=(REASON_KERNEL_UNAVAILABLE
@@ -517,11 +329,7 @@ class PostureLedger:
         self, *, execution_lane: str = "", compile_state: str = "",
         compile_state_wanted: str = "",
     ) -> MeasuredPosture:
-        """The record, as of now. The three per-REQUEST axes are arguments
-        rather than ledger state: they are decided at the terminal, from the
-        same ``ServedIdentity`` the rest of ``JobMetrics`` is stamped from, so
-        the posture cannot disagree with ``metrics.serving_mode`` about eager
-        (ie#655's rule, one axis one reading)."""
+        """The record, as of now."""
         with self._lock:
             residency = self._residency
             applied = tuple(self._applied)
@@ -548,8 +356,6 @@ class PostureLedger:
         )
 
     def clear(self) -> None:
-        """Forget everything — the instance was torn down and reloaded, so its
-        levers are no longer facts about what is serving."""
         with self._lock:
             self._applied.clear()
             self._components.clear()
@@ -560,11 +366,6 @@ class PostureLedger:
 
 
 def _package_missing(backend: str) -> bool:
-    """Whether the backend's kernel package is absent from THIS image.
-
-    Probed with ``find_spec`` and never by import: importing a kernel package to
-    ask whether it exists is how a probe becomes a side effect.
-    """
     package = BACKEND_PACKAGE.get(backend, "")
     if not package:
         return False
@@ -577,22 +378,12 @@ def _package_missing(backend: str) -> bool:
 
 
 def compile_axis(serving_mode: str) -> str:
-    """``compiled`` | ``eager`` from ``ServedIdentity.serving_mode``.
-
-    ``jit_graph`` and ``aot_graph`` are BOTH compiled — the artifact kind is a
-    different axis (``metrics.serving_mode`` carries it), and folding it in here
-    would split every compiled graph in two on a fact §1.30 ruled is a cache question.
-    """
+    """``compiled`` | ``eager`` from ``ServedIdentity.serving_mode``."""
     return COMPILE_EAGER if str(serving_mode or "") == "eager" else COMPILE_COMPILED
 
 
 def compile_axis_of_lane(lane: str) -> str:
-    """What a lane descriptor DECLARES on the compile axis, ``""`` when it
-    declares nothing. ``fp8-w8a8-dynamic+compiled`` -> ``compiled``.
-
-    Never split a compiled_graph KEY this way — this parses a LANE, whose
-    ``+`` separator is the platform's execution axis (§1.30).
-    """
+    """What a lane descriptor DECLARES on the compile axis, ``""`` when it declares nothing."""
     text = str(lane or "").strip().lower()
     if "+" not in text:
         return ""
@@ -603,13 +394,7 @@ def compile_axis_of_lane(lane: str) -> str:
 
 
 def technique_for_run_mode(run_mode: str, to_rung: str) -> str:
-    """The technique name a ladder transition means.
-
-    ``run_mode`` is the hub-wire projection (``serve_fit.RUN_*``) and is
-    deliberately COARSE — ``offload`` covers three rungs whose prices differ by
-    60%. So the named rung wins whenever there is one, which is the whole point
-    of item 5 of th#1871 §6.6: those three stop sharing one token.
-    """
+    """The technique name a ladder transition means."""
     rung = str(to_rung or "").strip().lower()
     named = _PLACEMENT_RESIDENCY.get(rung, "")
     if named and named != RESIDENCY_ALL_RESIDENT:
@@ -620,16 +405,12 @@ def technique_for_run_mode(run_mode: str, to_rung: str) -> str:
     if mode == "cpu":
         return TECHNIQUE_CPU
     if mode == "offload":
-        # An offload transition that named no rung: the token is all we have,
-        # and guessing which of the three it was would be a fabricated fact.
         return TECHNIQUE_MODEL_OFFLOAD
     return ""
 
 
 def summarize(posture: MeasuredPosture) -> str:
-    """One line for the human channel. The typed record is the contract; this
-    is for the operator reading pod logs, and it is derived FROM the record so
-    the two cannot say different things."""
+    """One line for the human channel."""
     parts: List[str] = []
     if posture.execution_lane:
         parts.append(f"lane={posture.execution_lane}")

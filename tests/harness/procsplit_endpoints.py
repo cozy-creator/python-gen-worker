@@ -1,9 +1,3 @@
-"""pgw#763 split-harness endpoints: real uncatchable deaths and hangs.
-
-Separate from toy_endpoints so the process-split suite owns its fixture file
-outright (shared-worktree etiquette).
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -23,11 +17,6 @@ class ProbeIn(msgspec.Struct):
 class ProbeOut(msgspec.Struct):
     response: str
 
-# pgw#1373: ported from the deleted `@endpoint` CLASS to module-level
-# `@entrypoint` functions. Every probe was already stateless, and the
-# weightless form (pgw#1392) is what they actually are. Bodies unchanged.
-
-
 @entrypoint
 def echo(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
     return ProbeOut(response=f"echo:{data.text}")
@@ -35,29 +24,15 @@ def echo(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def whoami(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """Report which execution GROUP this child is (pgw#783 G>1 routing
-    proof): the ordinal the parent stamped and the cards it was scoped to.
-    A single-group worker reports g0 with no CUDA_VISIBLE_DEVICES."""
     return ProbeOut(response=(
         f"g={os.environ.get('GEN_WORKER_GROUP_ORDINAL', '0')}"
         f" cvd={os.environ.get('CUDA_VISIBLE_DEVICES', '-')}"
         f" sib={os.environ.get('GEN_WORKER_HOST_SIBLINGS', '1')}"
     ))
 
-# ---- driver-3 probes: TENANT CODE going after platform credentials -----
-# These handlers do what the threat model says untrusted endpoint code can
-# do — it runs in this process, so every one of these is reachable. The
-# security suite asserts each comes back EMPTY.
-
-
 @entrypoint
 def steal_credentials(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """Sweep this process for the pod's signing identity.
-
-    Three routes, because closing one is not closing the class: the
-    environment (`WORKER_JWT` at pod-launch), the loaded Settings, and the
-    transport object the framework hands every handler's process.
-    """
+    """Sweep this process for the pod's signing identity."""
     found = []
     if str(os.environ.get("WORKER_JWT", "") or "").strip():
         found.append("env:WORKER_JWT")
@@ -84,11 +59,7 @@ def steal_credentials(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def forge_hub_call(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """Ask the control parent to make a call the allowlist does not name.
-
-    The IPC surface is the child's only route to worker authority, so it is
-    an authorization surface: an un-named path must be REFUSED, not proxied.
-    """
+    """Ask the control parent to make a call the allowlist does not name."""
     from gen_worker.procsplit import broker
 
     if not broker.active():
@@ -102,12 +73,7 @@ def forge_hub_call(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def c2pa_sign(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """Sign a claim through the REAL content_credentials path (delta 5).
-
-    The child has no worker JWT, so the ask must reach the hub through the
-    parent. `data.text` is the hub base the handler would use — it is
-    ignored under the split, which is itself the point.
-    """
+    """Sign a claim through the REAL content_credentials path (delta 5)."""
     from gen_worker import content_credentials as cc
 
     remote = cc._RemoteSigner(base_url=str(data.text or ""), worker_jwt=lambda: "")
@@ -120,15 +86,6 @@ def c2pa_sign(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def who_am_i(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """pgw#1122: resolve THIS POD's identity from inside the compute child.
-
-    The child holds no worker credential by construction, so this is the
-    exact shape that failed on three real pods: a gate in this process
-    asking who it is. It must come back with the endpoint and the org the
-    hub stamped on the PARENT's credential — relayed as claims, never as a
-    token — and it must never come back with two empty strings, which the
-    arm gate reads as "adopt platform-tier only".
-    """
     from gen_worker import worker_identity
 
     try:
@@ -141,11 +98,7 @@ def who_am_i(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 def forge_capability_renew(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """Renew a capability for a request this worker was never given.
-
-    The path IS allowlisted, so only the parent's own in-flight table can
-    refuse it — the check that needs parent state, not a path pattern.
-    """
+    """Renew a capability for a request this worker was never given."""
     from gen_worker.procsplit import broker
 
     if not broker.active():
@@ -183,13 +136,6 @@ def segfault(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 async def activity_die(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """pgw#937: open a worker ACTIVITY, publish it RUNNING, then SIGKILL
-    this process while it is still open.
-
-    The shape the fan-in gets wrong: the group's last frame says RUNNING
-    forever, so nothing the parent later merges can retire it. The parent
-    must emit the terminal on the group's behalf when it reaps the child.
-    """
     act = activity.begin(str(data.text or "g_hold"), phase="holding")
     act.heartbeat()
     await asyncio.sleep(0.2)
@@ -199,8 +145,7 @@ async def activity_die(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 async def activity_hold(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """Open the same activity kind and keep it open, beating, until
-    cancelled — the LIVE group whose fact must survive a sibling's death."""
+    """Open the same activity kind and keep it open, beating, until cancelled — the LIVE group whose fact must survive a sibling's death."""
     act = activity.begin(str(data.text or "g_hold"), phase="holding")
     for _ in range(600):
         ctx.raise_if_cancelled()
@@ -227,32 +172,18 @@ def freeze(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
 
 @entrypoint
 async def starve_loop(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """pgw#771: an inductor compile's shape — an ASYNC handler that burns
-    CPU without yielding, so the event loop (and every ping riding it) goes
-    silent while the process is demonstrably alive and working.
-
-    Wrapped in the real activity + evidence watchdog bracket, because that
-    is what a self-mint compile does and it is what the parent's hang
-    verdict is required to defer to.
-    """
     seconds = float(data.text or "8")
     with activity.running("self_mint_compile") as act:
         with activity.watchdog(act):
             deadline = time.monotonic() + seconds
             while time.monotonic() < deadline:
-                pow(7, 4001, 10**9 + 7)   # real CPU, no await, no yield
+                pow(7, 4001, 10**9 + 7)
     return ProbeOut(response=f"compiled:{seconds:.0f}")
 
 
 @entrypoint
 async def async_wait(ctx: RequestContext, data: ProbeIn) -> ProbeOut:
-    """A job that legitimately WAITS: real asyncio sleeps, so the process
-    burns no CPU and moves no disk while its loop keeps turning.
-
-    The shape that falsified the parent's first stall report — a healthy
-    15s marco-polo-slow was called stalled on the first real-stack run
-    because /proc evidence alone cannot tell waiting from wedged.
-    """
+    """A job that legitimately WAITS: real asyncio sleeps, so the process burns no CPU and moves no disk while its loop keeps turning."""
     for _ in range(int(float(data.text or "8") / 0.1)):
         await asyncio.sleep(0.1)
     return ProbeOut(response="waited")

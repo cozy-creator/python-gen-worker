@@ -1,12 +1,4 @@
-"""Registration hooks for ``convert/`` — the third registry, beside ``@family``
-(serving defaults) and ``Compile(inputs=...)`` (export inputs). Without it, ``convert/``
-family knowledge would have to live in the SDK.
-
-Two registries, one refusal doctrine: an unknown family is refused **by name**,
-listing what IS registered. Nothing here ever guesses, and nothing here falls
-back to a "close enough" family — that is precisely how an SDXL tree reached the
-SD1.5 converter.
-"""
+"""Registration hooks for ``convert/`` — the third registry, beside ``@family`` (serving defaults) and ``Compile(inputs=...)`` (export inputs)."""
 
 from __future__ import annotations
 
@@ -26,7 +18,7 @@ class UnknownFamilyError(LookupError):
 
 
 def register_repackage_family(spec: RepackageFamily, *, replace: bool = False) -> RepackageFamily:
-    """Register one family's repackage declaration. Idempotent for an identical spec."""
+    """Register one family's repackage declaration."""
     with _lock:
         existing = _repack.get(spec.family)
         if existing is not None and existing != spec and not replace:
@@ -45,12 +37,7 @@ def register_repackage_family(spec: RepackageFamily, *, replace: bool = False) -
 
 
 def register_layout(decl: LayoutDeclaration, *, replace: bool = False) -> LayoutDeclaration:
-    """Register one source-layout detection declaration.
-
-    Keyed by (family, variant, order): one variant legitimately needs more than
-    one rung — a broad rule that must sit BELOW a sibling variant's rule, which
-    is exactly what the hand-written ladder's line order used to express.
-    """
+    """Register one source-layout detection declaration."""
     key = f"{decl.family}/{decl.variant}/{decl.order}"
     with _lock:
         existing = _layouts.get(key)
@@ -74,12 +61,7 @@ def registered_layouts() -> tuple[LayoutDeclaration, ...]:
 
 
 def normalize_family(name: str | None) -> str:
-    """Collapse a family slug (incl. fine-tune lineages) onto its declared family.
-
-    Replaces the SDK's hand-written ``_normalize_family`` ladder: the lineages a
-    family absorbs (``sdxl-illustrious`` -> ``sdxl``) are declared by whoever owns
-    the family. Returns ``"unknown"`` when nothing claims the slug.
-    """
+    """Collapse a family slug (incl."""
     raw = str(name or "").strip().lower()
     if raw == "":
         return "unknown"
@@ -123,7 +105,7 @@ def require_repackage_family(name: str | None) -> RepackageFamily:
 
 
 def load_declaration_module(dotted: str) -> None:
-    """Import a module so its registrations run. Mirrors ``cli/families.py --module``."""
+    """Import a module so its registrations run."""
     name = str(dotted or "").strip()
     if not name:
         raise DeclarationError("empty declaration module")
@@ -131,7 +113,7 @@ def load_declaration_module(dotted: str) -> None:
 
 
 def reset_registries() -> None:
-    """Drop every registration. Tests only."""
+    """Drop every registration."""
     with _lock:
         _repack.clear()
         _layouts.clear()
