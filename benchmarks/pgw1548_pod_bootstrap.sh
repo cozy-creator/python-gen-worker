@@ -250,6 +250,38 @@ sdxl-matrix)
   "${PY:-python3}" /workspace/publish.py matrix /workspace/out/matrix.log /workspace/out/matrix/verdict.json || true
   [ $rc -ne 0 ] && { fail_out matrix "matrix exited $rc"; exit 95; }
   note matrix-ok '{"stage":"matrix","ok":true}'
+
+  # --- the LoRA amortization arm, on the SAME graph and one shape ------------
+  # A small public SDXL LoRA, downloaded ON THE POD (never through the box).
+  LORA=$($PY - <<'LORAEOF'
+from huggingface_hub import hf_hub_download
+print(hf_hub_download("nerijs/pixel-art-xl", "pixel-art-xl.safetensors"))
+LORAEOF
+)
+  LORA2=$($PY - <<'LORAEOF'
+try:
+    from huggingface_hub import hf_hub_download
+    print(hf_hub_download("ostris/ikea-instructions-lora-sdxl",
+                          "ikea_instructions_xl_v1_5.safetensors"))
+except Exception:
+    print("")
+LORAEOF
+)
+  ( cd /workspace/pgw && timeout 7200 $PY benchmarks/pgw1548_lora_amortization.py \
+      --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
+      --venv /workspace/venv --lock-cache /workspace/locks \
+      --latents '1:1=128x128' --arm static \
+      --modes base,fold,eager,sticky,multi \
+      --lora "$LORA" --lora-ref nerijs/pixel-art-xl \
+      ${LORA2:+--lora2 "$LORA2"} --sticky-n 3 \
+      --aspects 1:1 --cfg on --reps 3 --rounds 3 --steps 20 \
+      --sm "$SM" --substrate raw-pod \
+      --lane-note 'sdxl, euler/float32 timestep lane' \
+      --out /workspace/out/lora ) > /workspace/out/lora.log 2>&1
+  rc=$?
+  "${PY:-python3}" /workspace/publish.py lora /workspace/out/lora.log /workspace/out/lora/lora-verdict.json || true
+  [ $rc -ne 0 ] && { fail_out lora "lora arm exited $rc"; exit 96; }
+  note lora-ok '{"stage":"lora","ok":true}'
   ;;
 
 *)

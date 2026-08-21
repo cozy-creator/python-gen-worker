@@ -60,7 +60,7 @@ from dynamic_dims_pgw1548 import (  # noqa: E402
 )
 from pgw1548_endpoint_instrument import install_into  # noqa: E402
 
-MODES = ("base", "fold", "eager")
+MODES = ("base", "fold", "eager", "sticky", "multi")
 
 
 @dataclass
@@ -129,15 +129,38 @@ class LoraBench(Bench):
         install_into(packages[0], packages[0] / "main.py")
         return room
 
-    def set_mode(self, mode: str) -> None:
+    def set_mode(self, mode: str, *, phase: str = "each") -> None:
+        """Write the control file the endpoint instrument reads per request.
+
+        `phase` only means anything to the fold family:
+          each  -- fold, serve, restore, every request (the recurring tax)
+          open  -- fold and serve, LEAVE FOLDED
+          hold  -- serve on weights an earlier request folded
+          close -- restore only
+        """
+
         if mode not in MODES:
             raise SystemExit(f"unknown mode {mode!r}")
-        payload: dict[str, Any] = {"mode": "off" if mode == "base" else mode}
+        wire = {"base": "off", "sticky": "fold", "multi": "fold"}.get(mode, mode)
+        payload: dict[str, Any] = {"mode": wire, "phase": phase}
         if mode != "base":
+            primary = str(Path(self.args.lora).expanduser().resolve())
+            paths = [primary]
+            scales = [self.args.lora_scale]
+            if mode == "multi":
+                if not self.args.lora2:
+                    raise SystemExit(
+                        "the multi cell needs --lora2: stacking one adapter on "
+                        "itself would measure a doubled fold, not composition")
+                paths.append(str(Path(self.args.lora2).expanduser().resolve()))
+                scales.append(self.args.lora2_scale)
             payload.update({
-                "lora_path": str(Path(self.args.lora).expanduser().resolve()),
+                "lora_path": primary,
+                "lora_paths": paths,
+                "scales": scales,
+                "refs": [self.args.lora_ref or paths[0]] + paths[1:],
                 "scale": self.args.lora_scale,
-                "ref": self.args.lora_ref or str(self.args.lora),
+                "ref": self.args.lora_ref or primary,
             })
         self.control.write_text(json.dumps(payload))
 
@@ -195,7 +218,7 @@ class LoraBench(Bench):
         """Each mode has its OWN premise. Scoring them all by one rule is how a
         reference point gets mistaken for a failure."""
 
-        if mode in ("base", "fold"):
+        if mode in ("base", "fold", "sticky", "multi"):
             if sample.compiled_calls <= 0:
                 raise SystemExit(
                     f"[{mode}] ZERO compiled calls (eager={sample.eager_calls}, "
@@ -209,8 +232,9 @@ class LoraBench(Bench):
                     f"and {sample.eager_calls} eager. A part-compiled wall is not "
                     f"this arm's cost. Refusing."
                 )
-        if mode == "fold":
-            if sample.rearm_calls <= 0:
+        if mode in ("fold", "multi") or (
+                mode == "sticky" and sample.vram.get("_phase") != "hold"):
+            if sample.rearm_calls <= 0 and mode != "sticky":
                 raise SystemExit(
                     f"[fold] rearm_constants re-armed ZERO constant tables, so "
                     f"the fold never met a compiled artifact. Either nothing is "
@@ -232,6 +256,13 @@ class LoraBench(Bench):
     def _median(self, mode: str, attr: str) -> float | None:
         values = [getattr(s, attr) for s in self.samples if s.mode == mode]
         return statistics.median(values) if values else None
+
+    def _peak(self, mode: str, attr: str) -> float | None:
+        """The largest value of `attr` in this mode — for costs that are paid
+        ONCE inside a sequence and recorded as 0.0 on every other sample."""
+
+        values = [getattr(s, attr) for s in self.samples if s.mode == mode]
+        return max(values) if values else None
 
     def _spread(self, mode: str, attr: str) -> float | None:
         per_round = []
@@ -284,6 +315,51 @@ class LoraBench(Bench):
         if saving_ms > 0:
             crossover = (fold_fixed - eager_fixed) * 1000.0 / saving_ms
             out["crossover_steps"] = crossover
+        # THE STICKY PATTERN, priced per REQUEST — the number a LoRA-affine
+        # router would act on. Per-request folding pays (fold + restore) N
+        # times for N requests; sticky pays it ONCE and divides.
+        # NOT the median. In the sticky pattern only ONE request in the
+        # sequence folds and only one restores; every other sample carries
+        # 0.0 by construction, so a median over the sequence reports ZERO
+        # fixed cost and the amortization silently becomes free. The fixed
+        # cost is the wall of the request that actually paid it.
+        sticky_fold = self._peak("sticky", "fold_s")
+        sticky_restore = self._peak("sticky", "restore_s")
+        sticky_step = self._median("sticky", "per_step_ms")
+        if sticky_fold is not None and sticky_step is not None:
+            fixed_once = (sticky_fold or 0.0) + (sticky_restore or 0.0)
+            serve = sticky_step * int(self.args.steps) / 1000.0
+            out["sticky"] = {
+                "fold_once_s": sticky_fold,
+                "restore_once_s": sticky_restore,
+                "per_request_at_n": {
+                    str(n): fixed_once / n + serve for n in (1, 2, 3, 5, 10)
+                },
+                "per_request_folding_s": (
+                    fold_fixed + serve if fold_wall is not None else None),
+            }
+            if fold_wall is not None:
+                # Sticky is cheaper than per-request folding for ANY N > 1 by
+                # construction; the interesting number is where it beats the
+                # EAGER adapter path, which pays no fold but a worse per-step.
+                eager_total = ((eager_load or 0.0) + (eager_unload or 0.0)
+                               + (eager_step or 0.0) * int(self.args.steps) / 1000.0
+                               if eager_step is not None else None)
+                if eager_total:
+                    beats = [n for n in range(1, 51)
+                             if fixed_once / n + serve <= eager_total]
+                    out["sticky"]["breakeven_requests_vs_eager"] = (
+                        beats[0] if beats else None)
+
+        multi_fold = self._median("multi", "fold_s")
+        if multi_fold is not None and fold_wall:
+            out["multi_adapter"] = {
+                "fold_s_two_adapters": multi_fold,
+                "fold_s_one_adapter": fold_wall,
+                "incremental_fold_s_per_adapter": multi_fold - fold_wall,
+                "per_step_ms": self._median("multi", "per_step_ms"),
+            }
+
         for steps in sorted({int(self.args.steps), 28}):
             fold_total = fold_fixed + steps * fold_step / 1000.0
             eager_total = eager_fixed + steps * eager_step / 1000.0
@@ -303,6 +379,13 @@ class LoraBench(Bench):
         modes = [m for m in MODES if any(s.mode == m for s in self.samples)]
         lines = [
             f"_{SUBSTRATES[self.args.substrate]}; {self.args.lane_note}_",
+            "",
+            "**There is no per-LoRA graph specialization in this architecture, so a "
+            "\"LoRA-specialized\" arm and the FOLDED arm are the same measurement.** "
+            "Artifacts are weight-free (pgw#1567) and a LoRA is a constants delta, so "
+            "base and LoRA serving run the SAME `.so`; there is no LoRA axis in any "
+            "lock (pgw#1572). The whole axis is therefore fold TIMING and COST — which "
+            "is what these rows measure.",
             "",
             "| mode | RT s (median) | denoise s | per-step ms | fold s | restore s | "
             "rearm | compiled/eager calls | RT spread across rounds |",
@@ -483,6 +566,49 @@ def self_test() -> int:
     check("a 200% round-to-round spread is UNDECIDABLE",
           any("spread" in line for line in bench.report()["undecidable"]))
 
+    print("[self-test] the STICKY pattern amortizes over REQUESTS, not steps")
+    bench.samples = []
+    for r in (0, 1):
+        # one fold, three held requests, one restore — the shape the loop runs
+        bench.samples.append(LoraSample(mode="sticky", round=r, seconds=9.0,
+                                        denoise_s=8.0, steps=20, fold_s=0.6,
+                                        restore_s=0.0, rearm_calls=1,
+                                        compiled_calls=20))
+        for _ in range(2):
+            bench.samples.append(LoraSample(mode="sticky", round=r, seconds=8.5,
+                                            denoise_s=8.0, steps=20, fold_s=0.0,
+                                            restore_s=0.0, compiled_calls=20))
+        bench.samples.append(LoraSample(mode="sticky", round=r, seconds=0.4,
+                                        denoise_s=8.0, steps=20, fold_s=0.0,
+                                        restore_s=0.4, compiled_calls=20))
+        for _ in range(2):
+            bench.samples.append(LoraSample(mode="fold", round=r, seconds=10.0,
+                                            denoise_s=8.0, steps=20, fold_s=0.6,
+                                            restore_s=0.4, rearm_calls=1,
+                                            compiled_calls=20))
+            bench.samples.append(LoraSample(mode="eager", round=r, seconds=13.0,
+                                            denoise_s=11.0, steps=20, fold_s=0.2,
+                                            restore_s=0.05, compiled_calls=0,
+                                            eager_calls=20))
+    a = bench.amortization()
+    check("sticky is reported", "sticky" in a)
+    per = a["sticky"]["per_request_at_n"]
+    check("N=1 carries the whole fixed cost", per["1"] > per["2"] > per["3"])
+    check("and it converges on the serve wall",
+          abs(per["10"] - 8.0) < 0.11)
+    check("a break-even REQUEST count is stated",
+          a["sticky"].get("breakeven_requests_vs_eager") is not None)
+    check("per-request folding is reported beside it, so the two are comparable",
+          a["sticky"]["per_request_folding_s"] is not None
+          and a["sticky"]["per_request_folding_s"] > per["3"])
+
+    print("[self-test] the header states the specialization/folded equivalence")
+    rendered = bench.render()
+    check("no per-LoRA specialization is stated where the numbers land",
+          "no per-LoRA graph specialization" in rendered)
+    check("and it names WHY (weight-free artifacts, constants delta)",
+          "weight-free" in rendered and "constants delta" in rendered)
+
     print()
     print(f"{len(failures)} failure(s)")
     return 1 if failures else 0
@@ -495,6 +621,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--lora", default="", help="local .safetensors adapter")
     parser.add_argument("--lora-scale", type=float, default=1.0)
+    parser.add_argument("--lora2", default="",
+                        help="second adapter for the multi cell")
+    parser.add_argument("--lora2-scale", type=float, default=1.0)
+    parser.add_argument("--sticky-n", type=int, default=3,
+                        help="consecutive requests served on ONE fold")
     parser.add_argument("--lora-ref", default="",
                         help="the ref recorded in the trace (provenance only)")
     parser.add_argument("--out", default="benchmarks/pgw1548/lora")
@@ -580,6 +711,21 @@ def main(argv: list[str] | None = None) -> int:
             for mode in modes:
                 print(f"[round {round_index}] {mode} "
                       f"(load {os.getloadavg()[0]:.1f})")
+                if mode == "sticky":
+                    # ONE fold, N consecutive compiled requests, ONE restore.
+                    bench.set_mode("sticky", phase="open")
+                    first = bench.lora_request(room, mode, round_index)
+                    bench.assert_premise(mode, first)
+                    bench.samples.append(first)
+                    bench.set_mode("sticky", phase="hold")
+                    for _ in range(max(0, args.sticky_n - 1)):
+                        held = bench.lora_request(room, mode, round_index)
+                        bench.assert_premise(mode, held)
+                        bench.samples.append(held)
+                    bench.set_mode("sticky", phase="close")
+                    bench.samples.append(
+                        bench.lora_request(room, mode, round_index))
+                    continue
                 bench.set_mode(mode)
                 warm = bench.lora_request(room, mode, round_index)
                 bench.assert_premise(mode, warm)

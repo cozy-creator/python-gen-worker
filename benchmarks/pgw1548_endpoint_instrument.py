@@ -66,6 +66,10 @@ _TRACE = os.environ.get("PGW1548_BENCH_TRACE", "")
 #: one runs last (the adapter scope's exit, which is after the entrypoint).
 _pending: dict = {}
 
+#: A fold deliberately left OPEN across requests (the sticky pattern). Its
+#: lifetime is longer than any one request, so it cannot live in `_pending`.
+_sticky: dict = {}
+
 
 def _control() -> dict:
     """Read the mode FRESH per request. The daemon boots once per arm; an env
@@ -122,6 +126,19 @@ def install() -> None:
         control = _control()
         mode = str(control.get("mode", "off"))
         _pending["mode"] = mode
+        if str(control.get("phase", "")) == "close" and _sticky.get("scope") is not None:
+            # The sticky pattern's ONE restore, timed on its own so the
+            # amortization can divide it across the N requests it covered.
+            scope = _sticky.pop("scope")
+            _pending["fold_s"] = 0.0
+            started = time.perf_counter()
+            scope.__exit__(None, None, None)
+            _pending["restore_s"] = time.perf_counter() - started
+            _pending["rearm_calls"] = 0
+            _pending["sticky_phase"] = "close"
+            yield
+            _flush()
+            return
         if mode == "off" or not control.get("lora_path"):
             _pending["fold_s"] = 0.0
             _pending["rearm_calls"] = 0
@@ -131,13 +148,22 @@ def install() -> None:
             _flush()
             return
 
-        path = str(control["lora_path"])
-        ref = str(control.get("ref") or path)
-        scale = float(control.get("scale", 1.0))
-        key = (path, ref)
-        if key not in _state_cache:
-            _state_cache[key] = _adapter_bytes(path, ref)
-        state = _state_cache[key]
+        # ONE adapter or SEVERAL: the multi-LoRA cell stacks two, so the
+        # control file always speaks in lists and a single adapter is just a
+        # list of one. `lora_fold.folded` already takes a Sequence, so nothing
+        # downstream changes -- which is itself the finding that cell reports.
+        paths = control.get("lora_paths") or [control["lora_path"]]
+        scales = control.get("scales") or [control.get("scale", 1.0)]
+        refs = control.get("refs") or [control.get("ref") or p for p in paths]
+        adapters = []
+        for path, scale, ref in zip(paths, scales, refs):
+            key = (str(path), str(ref))
+            if key not in _state_cache:
+                _state_cache[key] = _adapter_bytes(str(path), str(ref))
+            adapters.append((_state_cache[key], float(scale), str(ref)))
+        path, scale, ref = str(paths[0]), float(scales[0]), str(refs[0])
+        state = adapters[0][0]
+        _pending["adapters"] = len(adapters)
 
         if mode == "eager":
             # The REFERENCE point: diffusers' own adapter ops. On a
@@ -175,14 +201,46 @@ def install() -> None:
         # EXIT. Both are per-request and recurring (Paul: "we need to fuse /
         # unfuse the weights after every request"), so they are timed
         # separately and never summed into one "adapter overhead".
+        # STICKY vs PER-REQUEST. The per-request pattern pays fold+restore on
+        # every request; the sticky pattern folds ONCE, serves N requests
+        # compiled, and restores ONCE -- which is what a LoRA-affine router
+        # would exploit fleet-side. The phase comes from the control file so
+        # one booted daemon can measure both without a reboot.
+        phase = str(control.get("phase", "each"))
+        if phase == "hold":
+            # The fold from an earlier request is STILL APPLIED. Nothing to do
+            # but serve -- and both walls are zero BY CONSTRUCTION, which is
+            # the whole point of the pattern.
+            if _sticky.get("scope") is None:
+                raise RuntimeError("phase=hold but no sticky fold is open")
+            _pending["fold_s"] = 0.0
+            _pending["restore_s"] = 0.0
+            _pending["rearm_calls"] = 0
+            _pending["sticky_phase"] = "hold"
+            yield
+            _flush()
+            return
+
         started = time.perf_counter()
-        scope = lora_fold.folded(self.pipe, [(state, scale, ref)], rebind=_rebind)
+        scope = lora_fold.folded(self.pipe, adapters, rebind=_rebind)
         stats = scope.__enter__()
         _pending["fold_s"] = time.perf_counter() - started
         _pending["fold_stats"] = dict(stats or {})
         # rearm fires on the way in AND on the way out; the entry count is what
         # says the fold met the compiled artifact at all.
         _pending["rearm_calls"] = sum(rearmed)
+        _pending["sticky_phase"] = phase
+
+        if phase == "open":
+            # Serve, and DO NOT restore: the next request inherits the folded
+            # weights. The scope is parked on a module global because the
+            # context manager's lifetime is a request and the pattern's is not.
+            _sticky["scope"] = scope
+            _pending["restore_s"] = 0.0
+            yield
+            _flush()
+            return
+
         try:
             yield
         finally:
