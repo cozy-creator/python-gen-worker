@@ -70,76 +70,37 @@ fail_out() {  # fail_out <stage> <message>
 }
 
 # --- 1. toolchain -----------------------------------------------------------
-apt-get update -y && apt-get install -y --no-install-recommends git curl ca-certificates
+timeout 600 apt-get update -y && timeout 600 apt-get install -y --no-install-recommends git curl ca-certificates
 curl -LsSf https://astral.sh/uv/install.sh | sh || true
 export PATH="$HOME/.local/bin:$PATH"
 
 # python-gen-worker is a PUBLIC repo, so this needs no credential. The
 # PRIVATE sibling is never cloned at all -- its endpoint arrives as bytes in
 # env (see 2b), which keeps a GitHub PAT off rented hardware entirely.
-git clone --filter=blob:none https://github.com/cozy-creator/python-gen-worker /workspace/pgw || exit 90
+timeout 900 git clone --filter=blob:none https://github.com/cozy-creator/python-gen-worker /workspace/pgw || exit 90
 git -C /workspace/pgw checkout "${PGW1548_SHA}" || exit 90
 
 
 # --- 2. venv ----------------------------------------------------------------
-uv venv --python 3.12 /workspace/venv || exit 91
+timeout 600 uv venv --python 3.12 /workspace/venv || exit 91
 export VIRTUAL_ENV=/workspace/venv
 PY=/workspace/venv/bin/python
 
-# --- 2a. THE BOOT HEARTBEAT, before the expensive install --------------------
-# GAP THIS CLOSES, found by living with it: everything below exits on bare
-# `|| exit 90/91` and publishes NOTHING, so a pod that dies in its venv build
-# is indistinguishable from a pod still building it. Measured: the SDXL leg sat
-# 40 minutes with zero published stages and the provider exposes no CPU or
-# network metrics (`GET /pods/{id}` returns none), so there was no way to tell
-# "working" from "dead" from outside. That is the same
-# degrades-to-SILENCE shape this lane keeps cataloguing -- and I had built it
-# into my own script.
+# --- 2a. WHY THERE IS NO PRE-INSTALL HEARTBEAT HERE ---------------------------
+# One was written, shipped, and RETRACTED. The idea was to publish a liveness
+# stage before the multi-GB torch install, using only `requests` + `msgspec`.
+# MEASURED, by blocking every third-party module except those two: importing
+# `HubClient` actually needs
+#   certifi chardet charset_normalizer google grpc grpc_health grpc_reflection
+#   grpc_tools idna msgspec psutil requests socks typing_extensions urllib3
+# -- grpcio-tools and psutil are not small wheels. So the heartbeat could never
+# fire, and because it was guarded by `|| true` it failed SILENTLY: a fix that
+# looks like observability and delivers none is worse than none at all.
 #
-# `requests` alone is seconds, and it is what HubClient needs to talk. The
-# heartbeat is BEST-EFFORT by design: if the import chain needs more than this,
-# the publish fails into `|| true` and the leg still proceeds -- a heartbeat
-# must never be able to kill the run it exists to observe.
-uv pip install --python $PY requests msgspec > /workspace/out/boot-deps.log 2>&1 || true
-PYTHONPATH=/workspace/pgw/src "$PY" - <<'BOOTEOF' > /workspace/out/boot.log 2>&1 || true
-import json, os, time
-from pathlib import Path
-Path("/workspace/out").mkdir(parents=True, exist_ok=True)
-Path("/workspace/out/boot.json").write_text(json.dumps({
-    "stage": "boot", "ok": True, "mode": os.environ.get("PGW1548_MODE"),
-    "sha": os.environ.get("PGW1548_SHA"), "at": time.strftime("%FT%TZ", time.gmtime()),
-    "note": "venv exists; the heavy install has NOT started yet",
-}))
-BOOTEOF
-PYTHONPATH=/workspace/pgw/src "$PY" /workspace/publish.py boot /workspace/out/boot.json || true
-uv pip install --python $PY -r /workspace/pgw/requirements.txt 2>/dev/null || true
-uv pip install --python $PY -e /workspace/pgw || exit 91
-# The ENDPOINT's own third-party imports, read off its `main.py` rather than
-# guessed -- a missing one is an ImportError at the smoke gate, i.e. after the
-# venv, after the multi-GB weight download, on a rented card.
-#   sdxl  -> diffusers, msgspec, torch, tensorfs
-#   anima -> diffsynth, msgspec, safetensors, torch, transformers
-uv pip install --python $PY diffusers==0.39.0 transformers safetensors \
-    accelerate huggingface_hub || exit 91
-if [ "$PGW1548_MODE" = "anima-derive" ]; then
-  # diffsynth IS on PyPI (checked: 200); torchvision is its hard requirement.
-  uv pip install --python $PY "diffsynth==2.0.17" torchvision || exit 91
-fi
-
-# `import tensorfs` (sdxl/main.py, top level) is satisfied WITHOUT shipping or
-# cloning anything: pgw VENDORS tensorfs at src/gen_worker/_vendor, and that
-# directory on PYTHONPATH makes the vendored copy importable under its own
-# top-level name. tensorfs is NOT on PyPI (checked: 404 -- pgw's own pyproject
-# says both projects are "permanently deleted"), and its source is 2.1 MB
-# base64, far over the env cliff, so the vendor path is the only free answer.
-export PYTHONPATH=/workspace/pgw/src:/workspace/pgw/src/gen_worker/_vendor
-# The CLI reads TENSORHUB_URL, not our PGW1548_HUB. Measured from a pod's
-# own published log: `gen-worker download: no tensorhub base URL: set
-# TENSORHUB_URL` — three anima rentals died on this in under a minute
-# each, and it was only legible because the failure PUBLISHED its log.
-export TENSORHUB_URL="$PGW1548_HUB"
-$PY -c "import tensorfs; print('tensorfs ok', tensorfs.__file__)" || exit 91
-
+# The blind window is closed the honest way instead: every long step below is
+# TIMEOUT-BOUNDED, so a hang becomes a non-zero exit and a published verdict
+# rather than infinite silence, and the first publish sits where it can
+# actually run -- after the install.
 
 # --- 2b. the endpoint source, from env --------------------------------------
 # MEASURED CEILING, 2026-08-20: RunPod's REST create takes a ~50 KB `env` and
