@@ -137,6 +137,28 @@ if [ -n "${PGW1548_LOCKS_B64:-}" ]; then
   ls -la /workspace/locks
 fi
 
+# --- 2c. the endpoint's uv.lock ---------------------------------------------
+# `gen-worker lock` REFUSES without one: "no uv.lock beside <dir>; a lock states
+# the compile stack it traced under, and there is no second source for it"
+# (measured, on a pod, after a successful 5.6 GB checkpoint download).
+#
+# The box's own uv.lock cannot ride here: with it the anima archive is 111 KB
+# base64 and the SDXL one 76 KB, against a MEASURED env ceiling between 80 KB
+# (creates) and 115 KB (HTTP 500). So it is GENERATED on the pod, which is also
+# the more honest artifact -- a lock is a statement about the stack that
+# actually traced, and that stack is this pod's venv, not the box's.
+if [ ! -f /workspace/endpoint/uv.lock ]; then
+  ( cd /workspace/endpoint && timeout 900 uv lock ) > /workspace/out/uvlock.log 2>&1
+  if [ ! -f /workspace/endpoint/uv.lock ]; then
+    # Fallback, recorded rather than silent: pgw's own lock. It states a real
+    # compile stack -- the one this pod's venv was built from -- but it is NOT
+    # the endpoint's own, and any artifact derived under it must say so.
+    cp /workspace/pgw/uv.lock /workspace/endpoint/uv.lock
+    echo "UVLOCK_FALLBACK=pgw" >> /workspace/out/uvlock.log
+  fi
+  "${PY:-python3}" /workspace/publish.py uvlock /workspace/out/uvlock.log || true
+fi
+
 note bootstrap "$(printf '{"stage":"bootstrap","ok":true,"mode":"%s","sha":"%s","python":"%s"}' \
   "$PGW1548_MODE" "$PGW1548_SHA" "$($PY -V 2>&1)")"
 

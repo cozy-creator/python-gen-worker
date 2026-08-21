@@ -188,6 +188,10 @@ def main(argv: list[str] | None = None) -> int:
                         choices=("anima-derive", "sdxl-matrix"))
     parser.add_argument("--endpoint", required=True, help="anima | sdxl")
     parser.add_argument("--gpu", default="", help="RunPod gpuTypeId; empty = CPU pod")
+    # MEASURED CEILING: RunPod refuses a container disk over the flavor's
+    # limit with `HTTP 500 ... Container Disk must be less than or equal
+    # to 240 / ... to 160` — a 500 again, not a 4xx, so it reads as an
+    # outage rather than as "too big". CPU flavors cap lower than GPU ones.
     parser.add_argument("--disk", type=int, default=120)
     parser.add_argument("--vcpu", type=int, default=8)
     parser.add_argument("--cpu-flavors", default="cpu5m,cpu3m",
