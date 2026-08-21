@@ -49,7 +49,7 @@ from .envelope import DecodedRequest, decode_envelope
 from .host import ServeDispatchError
 from .loader import LoadedEndpoint
 from .model import Model, lane_handle, model_type
-from .placement import warn_if_degraded
+from .placement import declared_vram_bytes, warn_if_degraded
 from .reserved_repos import (
     materialize_reserved_inputs,
     reserved_context_kwargs,
@@ -488,7 +488,7 @@ class ServeLoop:
             for slot_name in sorted(model_slots):
                 model_cls = model_slots[slot_name]
                 binding = self._resolver.resolve(model_cls, picks[slot_name])
-                _, lane_key = self._lane_of(model_cls)
+                lane_object, lane_key = self._lane_of(model_cls)
                 key = (model_cls, binding.checkpoint_ref, lane_key)
                 with self._backends_lock:
                     known = self._backends.get(key)
@@ -503,6 +503,15 @@ class ServeLoop:
                     binding.checkpoint_ref,
                     f"{model_cls.__name__}/{lane_key}",
                     factory,
+                    # pgw#1590: the lane's OWN statement of what it needs of a
+                    # card. This is the only caller that holds the model class,
+                    # so it is the only one that can read the declaration — the
+                    # sizer sees a `Class/lane@1` string and a tree, which is
+                    # how admission ended up charging minimax-h3's DiT lane for
+                    # the whole repo at its stored bf16 precision.
+                    declared_vram_bytes=declared_vram_bytes(
+                        model_cls, lane_object
+                    ),
                 )
                 leases.enter_context(lease)
                 backend = lease.backend
