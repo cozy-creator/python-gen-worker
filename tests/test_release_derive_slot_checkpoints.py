@@ -113,7 +113,9 @@ def test_a_slot_named_twice_refuses(
         tmp_path, str(primary_tree), f"aide={aide_tree}", f"aide={primary_tree}"
     )
     assert code == 2
-    assert "given twice for slot 'aide'" in capsys.readouterr().err
+    # pgw#1650: the key namespace is classes AND slots, so the message names
+    # the KEY rather than asserting which of the two it was.
+    assert "given twice for 'aide'" in capsys.readouterr().err
 
 
 def test_only_secondary_slots_named_refuses(
@@ -123,7 +125,9 @@ def test_only_secondary_slots_named_refuses(
 
     code, _out = _derive(tmp_path, f"aide={aide_tree}")
     assert code == 2
-    assert "the primary model's tree is the bare form" in capsys.readouterr().err
+    assert "the tree every other model loads from is the bare form" in (
+        capsys.readouterr().err
+    )
 
 
 def test_the_slot_spelling_never_eats_a_ref_or_a_path() -> None:
