@@ -43,7 +43,7 @@ import json
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING, Any, Dict, FrozenSet, Iterable, List, Mapping, Optional,
-    Sequence, Tuple,
+    Tuple,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -55,6 +55,27 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 #: verbatim and forwards it to workers (th#2281) without interpreting a word of
 #: torch semantics.
 CENSUS_KIND = "gen-worker.construction-census@1"
+
+#: The envelope version th#2281's `releasecensus.Decode` binds. It reads `v`,
+#: `pipeline_class` and `components` (a non-empty OBJECT) and treats everything
+#: inside a component as opaque. Changing `v` is a cross-repo cut.
+CENSUS_VERSION = 1
+
+#: What a wide-float tensor's dtype serializes as when the LANE governs it.
+#:
+#: The census is deliberately LANE-INVARIANT, and this is the field that makes
+#: it so. A lane's dtype is already stated exactly, twice over — by the lane
+#: contract the release declares and by ``engine._assert_lane_dtype``, which
+#: names the offending tensor and its dtype at load. Copying it into the census
+#: would make the document lane-dependent (N lanes, N censuses, and a hub key
+#: that has no lane in it) in order to carry a second copy of a fact that
+#: already has a precise owner. So a lane-governed wide float records that the
+#: LANE owns it, and everything the lane does not govern — integer and bool
+#: buffers, and every tensor a quant RULE owns — records its dtype exactly.
+#:
+#: The invariance is CHECKED, not assumed: the release build computes the census
+#: under every declared lane and refuses if two of them disagree.
+LANE_DTYPE = "lane"
 
 I1_TIES = "I1_TIES"
 I2_QUANTIZER = "I2_QUANTIZER"
@@ -108,12 +129,17 @@ class TensorRow:
     ``__init__`` computes from config and ``state_dict`` does not carry, so no
     container ever names it and no container-walking check can see it.
 
+    ``dtype`` is :data:`LANE_DTYPE` for a wide float the lane governs and the
+    exact dtype for everything else. That is what makes the census
+    lane-invariant: the lane's dtype already has a precise owner.
+
     ``rule_owned`` marks a tensor a quantizer's swapped module owns. Its dtype
-    is the RULE's, not the lane's, and ``finish_quantized``'s
-    ``postprocess_model`` may legitimately rewrite it after the fill (a
-    ``scale_fmt="ue8m0"`` tree turns F32 scale grids into the exponent dtype the
-    kernels read). So the dtype of a rule-owned row is RECORDED and not
-    asserted; its name and shape are asserted like every other row.
+    is the RULE's, not the lane's, so it is recorded exactly — but not
+    ASSERTED, because ``finish_quantized``'s ``postprocess_model`` legitimately
+    rewrites it after the fill (a ``scale_fmt="ue8m0"`` tree turns F32 scale
+    grids into the exponent dtype the kernels read). Its name and shape are
+    asserted like every other row; a blanket exemption is the hole pgw#1638
+    came through.
     """
 
     name: str
@@ -220,21 +246,48 @@ class ComponentCensus:
 
 @dataclass(frozen=True, slots=True)
 class Census:
-    """Every weight-bearing component of one tree, under one lane."""
+    """Every weight-bearing component of one tree, in one image.
+
+    ONE per release, not one per lane — see :data:`LANE_DTYPE`. The wire shape
+    is th#2281's envelope: ``v``, ``pipeline_class`` and ``components`` as an
+    OBJECT keyed by component name are what the hub binds; everything inside a
+    component is opaque to it, which is what lets these field names change here
+    without a cross-repo cut.
+
+    No digest field. The digest is a sha256 over this document's own canonical
+    re-encode, so a copy of it stored beside the document would be a second
+    carrier of one fact (th#2287's law); :attr:`digest` computes it on demand
+    and the hub computes the same number from the same bytes.
+    """
 
     components: Tuple[ComponentCensus, ...]
+    pipeline_class: str = ""
 
     def by_component(self) -> Dict[str, ComponentCensus]:
         return {row.component: row for row in self.components}
 
     def as_document(self) -> Dict[str, Any]:
-        return {
+        document: Dict[str, Any] = {
+            "v": CENSUS_VERSION,
             "kind": CENSUS_KIND,
-            "components": [row.as_document() for row in self.components],
+            "components": {
+                row.component: row.as_document() for row in self.components
+            },
         }
+        if self.pipeline_class:
+            document["pipeline_class"] = self.pipeline_class
+        return document
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> "Census":
+        version = document.get("v")
+        if version != CENSUS_VERSION:
+            raise CensusError(
+                f"census document states v={version!r}; this worker reads "
+                f"v={CENSUS_VERSION}. A census whose version this side does not "
+                f"know is refused rather than read: reading it would let the "
+                f"fence treat presence as proof of a document it cannot parse"
+            )
         kind = str(document.get("kind", ""))
         if kind != CENSUS_KIND:
             raise CensusError(
@@ -243,14 +296,18 @@ class Census:
                 f"does not know"
             )
         rows = document.get("components")
-        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        if not isinstance(rows, Mapping) or not rows:
             raise CensusError(
-                f"census document carries no component list ({rows!r})"
+                f"census document carries no component object ({rows!r}). A "
+                f"census is the module's tensor identity; one that identifies "
+                f"nothing is a broken emitter, not a module with no tensors"
             )
         return cls(
             components=tuple(
-                ComponentCensus.from_document(row) for row in rows
-            )
+                ComponentCensus.from_document(row)
+                for _name, row in sorted(rows.items())
+            ),
+            pipeline_class=str(document.get("pipeline_class", "")),
         )
 
     def canonical(self) -> bytes:
@@ -287,8 +344,15 @@ def _non_persistent(module: "torch.nn.Module") -> FrozenSet[str]:
     return frozenset(found)
 
 
-def _dtype_name(dtype: Any) -> str:
-    return str(dtype).rsplit(".", 1)[-1]
+_WIDE_FLOATS = ("float64", "float32", "float16", "bfloat16")
+
+
+def _dtype_name(dtype: Any, *, rule_owned: bool = False) -> str:
+    """How this tensor's dtype is RECORDED — see :data:`LANE_DTYPE`."""
+    spelled = str(dtype).rsplit(".", 1)[-1]
+    if not rule_owned and spelled in _WIDE_FLOATS:
+        return LANE_DTYPE
+    return spelled
 
 
 def _tie_groups(module: "torch.nn.Module") -> Tuple[Tuple[str, ...], ...]:
@@ -328,22 +392,24 @@ def take_component(
     volatile = _non_persistent(module)
     rows: List[TensorRow] = []
     for name, tensor in module.named_parameters(remove_duplicate=False):
+        owned = name in rule_owned
         rows.append(
             TensorRow(
                 name=name, kind=PARAMETER,
                 shape=tuple(int(dim) for dim in tensor.shape),
-                dtype=_dtype_name(tensor.dtype),
-                rule_owned=name in rule_owned,
+                dtype=_dtype_name(tensor.dtype, rule_owned=owned),
+                rule_owned=owned,
             )
         )
     for name, buffer in module.named_buffers(remove_duplicate=False):
+        owned = name in rule_owned
         rows.append(
             TensorRow(
                 name=name, kind=BUFFER,
                 shape=tuple(int(dim) for dim in buffer.shape),
-                dtype=_dtype_name(buffer.dtype),
+                dtype=_dtype_name(buffer.dtype, rule_owned=owned),
                 persistent=name not in volatile,
-                rule_owned=name in rule_owned,
+                rule_owned=owned,
             )
         )
     rows.sort(key=lambda row: (row.name, row.kind))
@@ -372,13 +438,16 @@ def take_component(
 def take(
     modules: Mapping[str, Any],
     quantized: Mapping[str, "Quantization"] = {},
+    *,
+    pipeline_class: str = "",
 ) -> Census:
     """The census of every weight-bearing component of one built tree."""
     return Census(
         components=tuple(
             take_component(name, modules[name], quantized.get(name))
             for name in sorted(modules)
-        )
+        ),
+        pipeline_class=pipeline_class,
     )
 
 
@@ -631,6 +700,24 @@ def _verify_row(
         # F32 scale grid into the exponent dtype the kernels read). Its name and
         # shape are asserted like everything else; its dtype is recorded.
         return
+    if LANE_DTYPE in (expected.dtype, actual.dtype):
+        # The LANE governs this one, and the lane's dtype has a precise owner
+        # already: `engine._assert_lane_dtype`, which names the tensor and the
+        # dtype it actually holds. Asserting it here too would only be a second
+        # carrier of one fact — and it is what would force a census per lane.
+        if expected.dtype != actual.dtype:
+            raise CensusMismatch(
+                I5_TOTALITY, component, expected.name, where=where,
+                message=(
+                    f"the census records this tensor's dtype as "
+                    f"{expected.dtype!r} and the built module's as "
+                    f"{actual.dtype!r} — one side says the LANE governs it and "
+                    f"the other names a concrete dtype, so the two sides "
+                    f"disagree about who owns this tensor, not merely about a "
+                    f"value"
+                ),
+            )
+        return
     if expected.dtype != actual.dtype:
         raise CensusMismatch(
             I5_TOTALITY, component, expected.name, where=where,
@@ -848,6 +935,7 @@ def fence(
 __all__ = [
     "BUFFER",
     "CENSUS_KIND",
+    "CENSUS_VERSION",
     "Census",
     "CensusError",
     "CensusMismatch",
@@ -857,6 +945,7 @@ __all__ = [
     "I3_SERVE_MODE",
     "I4_PLACEMENT",
     "I5_TOTALITY",
+    "LANE_DTYPE",
     "PARAMETER",
     "TensorRow",
     "fence",

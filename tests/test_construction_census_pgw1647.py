@@ -96,7 +96,9 @@ def test_every_fleet_class_censuses_and_round_trips_pgw1647(endpoint: str) -> No
     assert taken.tensor_count > 0, endpoint
 
     document = taken.as_document()
+    assert document["v"] == census.CENSUS_VERSION
     assert document["kind"] == census.CENSUS_KIND
+    assert isinstance(document["components"], dict) and document["components"]
     assert json.loads(json.dumps(document)) == document, "not JSON-clean"
 
     read_back = census.Census.from_document(json.loads(taken.canonical()))
@@ -114,6 +116,38 @@ def test_a_census_document_of_an_unknown_kind_is_refused_pgw1647() -> None:
     document["kind"] = "gen-worker.construction-census@99"
     with pytest.raises(census.CensusError, match="construction-census@99"):
         census.Census.from_document(document)
+
+
+def test_a_census_document_of_an_unknown_VERSION_is_refused_pgw1647() -> None:
+    """`v` is the envelope field th#2281's hub binds, so both sides check it."""
+    document = census.for_tree(_tree("sd15")).as_document()
+    document["v"] = 99
+    with pytest.raises(census.CensusError, match="v=99"):
+        census.Census.from_document(document)
+
+
+def test_a_census_that_names_no_component_is_refused_pgw1647() -> None:
+    """A census is the module's tensor identity; one that identifies nothing
+    is a broken emitter, not a module with no tensors. Same sentence the hub's
+    `release_construction_census_no_components` uses, on this side too."""
+    document = census.for_tree(_tree("sd15")).as_document()
+    document["components"] = {}
+    with pytest.raises(census.CensusError, match="no component object"):
+        census.Census.from_document(document)
+
+
+def test_the_census_records_the_pipeline_class_the_INDEX_names_pgw1647() -> None:
+    """Carried for refusal sentences and operator reads, never as authority.
+
+    Naming the class is `model_index.json`'s jurisdiction, so an empty string
+    is a fact and never a refusal — which is why `pipeline_class` is omitted
+    from the document rather than written as `""`.
+    """
+    assert census.for_tree(_tree("sd15")).pipeline_class == "StableDiffusionPipeline"
+    assert census.for_tree(_h3()).pipeline_class == "MiniMaxH3ModularPipeline"
+    bare = census.Census(census.for_tree(_tree("sd15")).components)
+    assert "pipeline_class" not in bare.as_document()
+    assert census.Census.from_document(bare.as_document()).pipeline_class == ""
 
 
 def test_the_census_states_the_whole_tensor_set_not_the_container_s_pgw1647() -> None:
@@ -593,6 +627,10 @@ def test_I5_a_rule_owned_dtype_may_move_but_its_NAME_may_not_pgw1647() -> None:
             quant_modules=row.quant_modules, eval_mode=row.eval_mode,
         )
 
+    assert scale.dtype != census.LANE_DTYPE, (
+        "a rule-owned tensor recorded its dtype as the lane's; the RULE owns "
+        "it, and recording it as the lane's would hide a rule change"
+    )
     recast = _swap(
         census.TensorRow(
             name=scale.name, kind=scale.kind, shape=scale.shape,

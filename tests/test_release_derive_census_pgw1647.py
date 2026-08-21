@@ -74,63 +74,86 @@ def _endpoint(name: str) -> ModuleType:
         sys.path.remove(str(FIXTURES))
 
 
-def test_the_release_document_carries_a_census_per_declared_lane_pgw1647(
+def test_the_release_document_carries_the_census_in_th2281_s_ENVELOPE_pgw1647(
     config_only_tree: Path, lockfile: Path
 ) -> None:
-    """Green: the derive states what module every declared lane builds."""
-    result = derive_release(
-        _endpoint("tiny_endpoint"),
-        checkpoint_dir=config_only_tree,
-        lockfile=lockfile,
-    )
-    document = json.loads(result.document)
-    rows = document["construction_census"]
-    assert rows, "the release names no construction census"
-    assert set(rows) == set(document["lane_contracts"]), (
-        "the census lanes and the lane contracts disagree; a lane that serves "
-        "and has no census is exactly what th#2281's door refuses"
-    )
+    """Green — and the envelope is the one the hub actually binds.
 
-    for handle, row in rows.items():
-        assert row["kind"] == census.CENSUS_KIND, handle
-        parsed = census.Census.from_document(row)
-        assert parsed.components, handle
-        assert {c.component for c in parsed.components} == {
-            "unet", "vae", "text_encoder",
-        }, sorted(c.component for c in parsed.components)
-        assert parsed.tensor_count > 0
-        assert row["digest"] == parsed.digest, "the digest is not of this document"
-        for component in parsed.components:
-            assert component.eval_mode is True, component.component
-
-    assert dict(result.census_digests) == {
-        handle: row["digest"] for handle, row in rows.items()
-    }
-
-
-def test_the_census_follows_the_LANE_dtype_pgw1647(
-    config_only_tree: Path, lockfile: Path
-) -> None:
-    """The lane's dtype is part of what the module IS, so it is per-lane.
-
-    The `tiny_endpoint` lane declares f32; a census that reported some other
-    dtype would be describing a module this release never serves.
+    th#2281's `releasecensus.Decode` reads `v`, `pipeline_class` and
+    `components` (a non-empty OBJECT) and treats everything inside a component
+    as opaque. Anything else here would be refused
+    `release_construction_census_unknown_version` at the door, which is a
+    cross-repo break that no pgw-side test would otherwise catch.
     """
     result = derive_release(
         _endpoint("tiny_endpoint"),
         checkpoint_dir=config_only_tree,
         lockfile=lockfile,
     )
-    rows = json.loads(result.document)["construction_census"]
-    (handle,) = list(rows)
-    assert handle.endswith("+plain.f32@1"), handle
-    parsed = census.Census.from_document(rows[handle])
+    document = json.loads(result.document)
+    row = document["construction_census"]
+    assert row["v"] == census.CENSUS_VERSION
+    assert row["kind"] == census.CENSUS_KIND
+    assert row["pipeline_class"] == "StableDiffusionPipeline"
+    assert isinstance(row["components"], dict) and row["components"]
+    assert "digest" not in row, (
+        "the census carries its own digest — a sha256 over the document it "
+        "sits in is a second carrier of one fact (th#2287's law), and the hub "
+        "computes it from the same bytes"
+    )
+
+    parsed = census.Census.from_document(row)
+    assert {c.component for c in parsed.components} == {
+        "unet", "vae", "text_encoder",
+    }, sorted(c.component for c in parsed.components)
+    assert parsed.tensor_count > 0
+    for component in parsed.components:
+        assert component.eval_mode is True, component.component
+    assert result.census_components == ("text_encoder", "unet", "vae")
+    assert result.census_absent == ""
+
+
+def test_the_census_is_LANE_INVARIANT_and_says_so_pgw1647(
+    config_only_tree: Path, lockfile: Path
+) -> None:
+    """ONE census per release, not one per lane — and the reason is in the row.
+
+    A lane's only effect on construction is the dtype it casts wide floats to,
+    and that fact already has a precise owner (the lane contract, and
+    `engine._assert_lane_dtype`, which names the tensor AND the dtype it holds).
+    Copying it in would make the document lane-dependent to carry a second copy
+    of an answer the code already gives exactly. So a lane-governed wide float
+    records `"lane"`, everything else records its dtype, and the census stops
+    moving when the lane does.
+    """
+    result = derive_release(
+        _endpoint("tiny_endpoint"),
+        checkpoint_dir=config_only_tree,
+        lockfile=lockfile,
+    )
+    document = json.loads(result.document)
+    parsed = census.Census.from_document(document["construction_census"])
     unet = parsed.by_component()["unet"]
-    floats = {
-        row.dtype for row in unet.tensors
-        if row.dtype.startswith("float") or row.dtype.startswith("bfloat")
-    }
-    assert floats == {"float32"}, floats
+
+    dtypes = {row.dtype for row in unet.tensors}
+    assert census.LANE_DTYPE in dtypes, dtypes
+    assert not (dtypes & {"float32", "float16", "bfloat16", "float64"}), (
+        f"a lane-governed wide float recorded a concrete dtype: {dtypes} — the "
+        f"census is lane-dependent again"
+    )
+
+    # The invariance is a MEASUREMENT, not a claim: the same tree censused at a
+    # different lane dtype is byte-identical.
+    import torch
+
+    from gen_worker.serving.streaming import skeleton
+
+    at_f32 = skeleton.build_modules(
+        config_only_tree, compute_dtype=torch.float32).census()
+    at_bf16 = skeleton.build_modules(
+        config_only_tree, compute_dtype=torch.bfloat16).census()
+    assert at_f32.canonical() == at_bf16.canonical()
+    assert at_f32.digest == parsed.digest
 
 
 def test_a_tree_that_is_not_a_pipeline_says_so_rather_than_guessing_pgw1647(
@@ -144,7 +167,7 @@ def test_a_tree_that_is_not_a_pipeline_says_so_rather_than_guessing_pgw1647(
     """
     from gen_worker.release import derive as derive_mod
 
-    row = derive_mod._construction_census(tmp_path, "lane@1", None)
+    row = derive_mod._construction_census(tmp_path, (("lane@1", None),))
     assert row == {"absent": NO_PIPELINE_INDEX}
 
 
@@ -215,12 +238,50 @@ def test_the_release_census_verifies_the_module_the_serve_path_builds_pgw1647(
         checkpoint_dir=config_only_tree,
         lockfile=lockfile,
     )
-    rows = json.loads(result.document)["construction_census"]
-    (handle,) = list(rows)
-    published = census.Census.from_document(rows[handle])
+    published = census.Census.from_document(
+        json.loads(result.document)["construction_census"])
 
     import torch
 
     served = skeleton.build_modules(
         config_only_tree, compute_dtype=torch.float32).census()
-    census.verify(published, served, where=handle)
+    census.verify(published, served, where="tiny_endpoint")
+
+
+def test_two_lanes_that_build_DIFFERENT_modules_fail_the_build_pgw1647(
+    config_only_tree: Path, lockfile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The invariance is CHECKED, not assumed.
+
+    One census for N lanes is only honest if every lane really does build the
+    same module. So the derive builds one per lane and refuses if two disagree —
+    a lane declares a dtype and a layout, not a different model, and publishing
+    one of two disagreeing censuses would make the release document describe a
+    module half of its lanes do not build.
+    """
+    from gen_worker.release import derive as derive_mod
+    from gen_worker.serving.streaming import census as census_mod
+
+    real = census_mod.for_tree
+    seen: list[object] = []
+
+    def _drifting(tree: object, *, compute_dtype: object = None) -> object:
+        taken = real(tree, compute_dtype=compute_dtype)
+        seen.append(compute_dtype)
+        if len(seen) == 1:
+            return taken
+        head = taken.components[0]
+        moved = census_mod.ComponentCensus(
+            component=head.component, module_class="SomethingElse",
+            tensors=head.tensors, ties=head.ties, quant_rule=head.quant_rule,
+            quant_modules=head.quant_modules, eval_mode=head.eval_mode,
+        )
+        return census_mod.Census(
+            (moved, *taken.components[1:]), pipeline_class=taken.pipeline_class)
+
+    monkeypatch.setattr(census_mod, "for_tree", _drifting)
+
+    with pytest.raises(DeriveError, match="build DIFFERENT"):
+        derive_mod._construction_census(
+            config_only_tree, (("a@1+plain.f32@1", None), ("b@1+plain.bf16@1", None)),
+        )

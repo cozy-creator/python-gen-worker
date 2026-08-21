@@ -107,6 +107,10 @@ class Skeleton:
     modules: Dict[str, Any]
     pipeline: Any = None
     passthrough: Tuple[str, ...] = ()
+    #: The `_class_name` the tree's index declares — carried so the census can
+    #: name it in a refusal. Naming the class is the INDEX's jurisdiction, not
+    #: the census's, so an empty string is a fact and never a refusal.
+    pipeline_class: str = ""
     #: component -> its :class:`Quantization`, for the components whose
     #: config declared one. Absent means "no quantizer ran", never "unknown".
     quantized: Dict[str, Quantization] = field(default_factory=dict)
@@ -115,7 +119,8 @@ class Skeleton:
         """This skeleton's :class:`~.census.Census` — what it IS, as data."""
         from . import census as _census_mod
 
-        return _census_mod.take(self.modules, self.quantized)
+        return _census_mod.take(
+            self.modules, self.quantized, pipeline_class=self.pipeline_class)
 
 
 def _resolve(library: str, class_name: str) -> type:
@@ -466,7 +471,10 @@ def build_modules(
             f"{index_path} declares no nn.Module component; there would be "
             f"no weights to stream"
         )
-    return Skeleton(modules=modules, quantized=quantized)
+    return Skeleton(
+        modules=modules, quantized=quantized,
+        pipeline_class=str(index.get("_class_name") or ""),
+    )
 
 
 def build(
@@ -566,7 +574,7 @@ def build(
     )
     return Skeleton(
         pipeline=pipeline, modules=modules, passthrough=tuple(passthrough),
-        quantized=quantized,
+        quantized=quantized, pipeline_class=str(index.get("_class_name") or ""),
     )
 
 

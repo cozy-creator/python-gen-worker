@@ -196,9 +196,13 @@ class ReleaseDeriveResult:
     unmarked_lanes: tuple[str, ...] = ()
     unenumerable_entrypoints: tuple[tuple[str, str], ...] = ()
     unservable_payloads: tuple[str, ...] = ()
-    #: lane handle -> the census digest, or ``NO_PIPELINE_INDEX`` for a tree
-    #: that is not a diffusers pipeline and is therefore not streaming-served.
-    census_digests: tuple[tuple[str, str], ...] = ()
+    #: The component names the construction census states, sorted.
+    census_components: tuple[str, ...] = ()
+    #: Why there is NO census — ``NO_PIPELINE_INDEX`` for a tree that is not a
+    #: diffusers pipeline and is therefore never streaming-served. Empty means
+    #: a census was emitted. There is no third value: a census that could not
+    #: be COMPUTED fails the build.
+    census_absent: str = ""
 
     @property
     def eager_permanent(self) -> bool:
@@ -870,16 +874,25 @@ NO_PIPELINE_INDEX = "no_model_index_json"
 
 
 def _construction_census(
-    checkpoint_dir: Path, lane_handle: str, dtype: Any
+    checkpoint_dir: Path, lanes: tuple[tuple[str, Any], ...]
 ) -> dict[str, Any]:
-    """The CONSTRUCTION CENSUS of one lane's tree (pgw#1647).
+    """The CONSTRUCTION CENSUS of this release's tree (pgw#1647, th#2281).
 
     Computed here because here is where the tree and the IMAGE meet. What a
     module IS — its tie groups, the classes its config's quantizer swaps in, the
-    buffers its ``__init__`` computes — is a code x config fact, decided by this
+    buffers its ``__init__`` computes — is a code x config fact decided by THIS
     image's transformers and diffusers, so it binds at RELEASE and not at the
     tree alone. The tensorfs stamp stays the BYTES' identity; this is the
     MODULE's.
+
+    **ONE census for the whole release, and the invariance is PROVEN here.**
+    A lane's only effect on construction is the dtype it casts wide floats to,
+    and the census records those as ``census.LANE_DTYPE`` because the lane
+    contract and ``engine._assert_lane_dtype`` already state that fact exactly.
+    So every declared lane must produce the SAME census — and rather than
+    assume it, this builds one per lane and refuses if two disagree. A
+    disagreement means a lane changes what the module IS, which is a fact worth
+    a refusal rather than a silently-picked winner.
 
     Config-only and allocation-free: parameters come up on meta and buffers are
     computed from config, so a 66 GiB DiT costs what a tiny one costs. It goes
@@ -902,19 +915,39 @@ def _construction_census(
         # (th#2281) is what decides whether a STREAMING-served release may ship
         # without a census; this side states the fact and never guesses.
         return {"absent": NO_PIPELINE_INDEX}
-    try:
-        taken = _census.for_tree(checkpoint_dir, compute_dtype=dtype)
-    except Exception as exc:
-        raise DeriveError(
-            f"lane {lane_handle!r}: the CONSTRUCTION CENSUS could not be "
-            f"computed from {checkpoint_dir} — {type(exc).__name__}: {exc}. A "
-            f"release states what module it builds or it is not a release: this "
-            f"is the meta-skeleton family (pgw#1626/#1638/#1644), and every one "
-            f"of those four walls was a construction question answered on a "
-            f"rented card because nothing asked it here first"
-        ) from exc
-    document = taken.as_document()
-    document["digest"] = taken.digest
+
+    agreed: Optional[Any] = None
+    agreed_handle = ""
+    for handle, dtype in lanes:
+        try:
+            taken = _census.for_tree(checkpoint_dir, compute_dtype=dtype)
+        except Exception as exc:
+            raise DeriveError(
+                f"lane {handle!r}: the CONSTRUCTION CENSUS could not be "
+                f"computed from {checkpoint_dir} — {type(exc).__name__}: {exc}. "
+                f"A release states what module it builds or it is not a "
+                f"release: this is the meta-skeleton family "
+                f"(pgw#1626/#1638/#1644), and every one of those four walls was "
+                f"a construction question answered on a rented card because "
+                f"nothing asked it here first"
+            ) from exc
+        if agreed is None:
+            agreed, agreed_handle = taken, handle
+            continue
+        if taken != agreed:
+            raise DeriveError(
+                f"lanes {agreed_handle!r} and {handle!r} build DIFFERENT "
+                f"modules from {checkpoint_dir}: their construction censuses "
+                f"disagree ({agreed.digest} vs {taken.digest}). A lane declares "
+                f"a dtype and a layout, not a different model — the census "
+                f"records lane-governed dtypes as {_census.LANE_DTYPE!r} "
+                f"precisely so that a lane cannot move it. Publishing one of "
+                f"the two would make the release document describe a module "
+                f"half of its lanes do not build"
+            )
+    if agreed is None:  # pragma: no cover — a class with no declared lane
+        return {"absent": NO_PIPELINE_INDEX}
+    document: dict[str, Any] = agreed.as_document()
     return document
 
 
@@ -1330,15 +1363,21 @@ def derive_release(
                     f"model class."
                 )
         requires = model_requires(cls)
+        # THE CONSTRUCTION CENSUS, before any tracing. Computed under EVERY
+        # declared lane and reconciled to ONE document — cheaper than the trace,
+        # and a tree that cannot be built from its own configs must not spend a
+        # trace first.
+        construction_census = _construction_census(
+            checkpoint_dir,
+            tuple(
+                (
+                    lane_contract_handle(f"class {cls.__name__!r}", lane),
+                    _torch_dtype(lane.dtype),
+                )
+                for lane in model_declared_lanes(cls)
+            ),
+        )
         for lane in model_declared_lanes(cls):
-            # THE CONSTRUCTION CENSUS, per lane and BEFORE the trace. Per lane
-            # because the lane's dtype is part of what the module IS; before the
-            # trace because it is the cheaper question — a tree that cannot even
-            # be built from its configs must not first spend the trace.
-            handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
-            construction_census[handle] = _construction_census(
-                checkpoint_dir, handle, _torch_dtype(lane.dtype)
-            )
             lane_graphs = _derive_lane(
                 torchcg, cls, lane, plans, checkpoint_dir, warnings,
                 program_sink=program_sink,
@@ -1454,10 +1493,10 @@ def derive_release(
             f"{r['entrypoint']}[{r['payload']}]: {r['error']} (at {r['frame']})"
             for r in unservable_payloads
         ),
-        census_digests=tuple(
-            (handle, str(row.get("digest") or row.get("absent") or ""))
-            for handle, row in sorted(construction_census.items())
+        census_components=tuple(
+            sorted(construction_census.get("components", {}))
         ),
+        census_absent=str(construction_census.get("absent", "")),
     )
 
 

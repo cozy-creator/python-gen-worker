@@ -20,9 +20,22 @@
   dtype; the tied alias groups by object identity; the module classes the
   config's quantizer swapped in and the tensors that swap owns; and eval mode.
   It is computed at RELEASE BUILD inside the endpoint image on the config-only
-  tree (the pgw#1370 derive seam), rides the release document
-  (`construction_census`, digest-addressed, forwarded by the hub verbatim —
-  th#2281), and is REPLAYED by the serve-time fence, which now walks the MODULE.
+  tree (the pgw#1370 derive seam), rides the release document under
+  `construction_census` in th#2281's envelope (`v` / `pipeline_class` /
+  `components` — the hub binds those three and treats everything inside a
+  component as opaque, so it never interprets a word of torch semantics), and is
+  REPLAYED by the serve-time fence, which now walks the MODULE.
+
+  **ONE census per release, not one per lane.** A lane's only effect on
+  construction is the dtype it casts wide floats to, and that fact already has a
+  precise owner — the lane contract, and `_assert_lane_dtype`, which names the
+  offending tensor AND the dtype it holds. So a lane-governed wide float records
+  `"lane"`, everything the lane does not govern records its dtype exactly, and
+  the census stops moving when the lane does. The invariance is CHECKED, not
+  assumed: the release build censuses under every declared lane and refuses if
+  two disagree, because a lane declares a dtype and a layout, not a different
+  model. The document carries no digest field either — a sha256 over the
+  document it sits in is a second carrier of one fact (th#2287's law).
 
   Five named invariants, each with a red arm that neuters one step of the
   prepare seam: **I1** ties (identity, not `_tied_weights_keys`), **I2** the
