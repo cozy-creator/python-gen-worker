@@ -942,6 +942,18 @@ class LoadContext(Generic[MT_co]):
                 pipeline,
                 mode="auto",
                 stream_budget_bytes=self._weight_budget_bytes,
+                # pgw#1627: COMPILE INTENT, for the regime-split headroom
+                # probe. A bound compile sink is what makes `ctx.compile`
+                # consult the graph store at all, so it IS "this load may
+                # serve compiled" — and it is the only signal available at
+                # admission: adopt arms dispatchers AFTER load, so there is
+                # nothing armed to interrogate yet (the forensics ordering
+                # proof). The compiled demand stamp (pgw#1601) is not wired
+                # yet; until it is, the compiled refusal is inert and the
+                # basis confession says which arithmetic ran.
+                regime=(
+                    "compiled" if self._compile_sink is not None else "eager"
+                ),
             )
         except HostRamMoveRefusedError:
             # The guard did its job: this host cannot hold what the rung wanted

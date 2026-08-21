@@ -538,6 +538,14 @@ def _install_residency_hooks(
 
     seen_parked = False
     released_confessed: List[bool] = []
+    # pgw#1627 follow-up: the gate below interrogates the DENOISER, resolved
+    # by name, NOT whichever module the release hook happens to ride. The hook
+    # sits on the first resident module after the parked chain — for SDXL that
+    # IS the unet, but only by execution-order coincidence: a family whose
+    # first post-parked resident is not the denoiser would have gated on a
+    # module no one compiles, and the release would silently never fire.
+    _gate_name = _denoiser_name(pipeline, list(order))
+    _gate_module = getattr(pipeline, _gate_name, None) if _gate_name else None
     for name in order:
         if name in parked:
             seen_parked = True
@@ -554,7 +562,7 @@ def _install_residency_hooks(
             # components' device blocks in the caching allocator (~1.3 GiB
             # measured on the 8 GiB death), where eager can spend them and
             # AOTI — which allocates its first-call pool OUTSIDE the torch
-            # allocator — cannot. So when THIS module's forward is about to
+            # allocator — cannot. So when the DENOISER's forward is about to
             # be a compiled call, hand the cache back to the driver first;
             # when it is eager, keep it (that cache is eager's activation
             # money, pgw#1586). The gate is read HERE, per request, and
@@ -562,7 +570,9 @@ def _install_residency_hooks(
             # AFTER these hooks are installed (death-log ordering), so an
             # install-time gate would always read "not compiled" and the
             # release would never fire — the pgw#1587 wrong-moment shape.
-            if compiled_dispatch_armed(_m):
+            if compiled_dispatch_armed(
+                _gate_module if _gate_module is not None else _m
+            ):
                 from .memory import release_cached_vram
 
                 release_cached_vram()
@@ -570,9 +580,12 @@ def _install_residency_hooks(
                     released_confessed.append(True)
                     log.info(
                         "partial_resident: released allocator cache after "
-                        "park — %s carries an armed compiled dispatcher, and "
-                        "AOTI spends driver_free, not cache (pgw#1627)",
-                        type(_m).__name__,
+                        "park — the denoiser (%s) carries an armed compiled "
+                        "dispatcher, and AOTI spends driver_free, not cache "
+                        "(pgw#1627)",
+                        type(
+                            _gate_module if _gate_module is not None else _m
+                        ).__name__,
                     )
 
         module.register_forward_pre_hook(_release)
@@ -793,6 +806,8 @@ def apply_component_residency(
     log: logging.Logger,
     free_bytes_now: Any = None,
     facts: Optional[Dict[str, Any]] = None,
+    regime: str = "eager",
+    demand_bytes: int = 0,
 ) -> bool:
     """Arm ``plan`` on ``pipeline``, PROBING it on the card first. Returns
     whether it armed.
@@ -800,6 +815,18 @@ def apply_component_residency(
     A False return means nothing was armed and the caller either asks for a
     more expensive plan or falls to the next rung — never that a partial
     arrangement was left behind.
+
+    ``regime`` is the caller's COMPILE INTENT — "will this load serve
+    compiled" — and reaches :func:`probe_plan`'s regime-split floor check
+    (pgw#1627 follow-up: the split shipped first as a parameter no production
+    caller passed, i.e. dead code on the exact path that produced the death
+    log). It is intent, deliberately not :func:`compiled_dispatch_armed`:
+    adopt arms the dispatcher AFTER load, so at admission time there is
+    nothing armed to interrogate. ``demand_bytes`` is the compiled artifact's
+    out-of-allocator first-call demand — pgw#1601's mint-time stamp once it
+    lands; until then it is 0 and the compiled refusal is INERT BY DESIGN
+    (the seam release in ``_install_residency_hooks`` is the active
+    protection meanwhile).
     """
     if not plan.fits:
         return False
@@ -840,7 +867,10 @@ def apply_component_residency(
             )
             return False
         if free_bytes_now is not None:
-            ok, free, basis = probe_plan(parked, free_bytes_now=free_bytes_now)
+            ok, free, basis = probe_plan(
+                parked, free_bytes_now=free_bytes_now,
+                regime=regime, demand_bytes=demand_bytes,
+            )
             # The probe's MEASUREMENT, handed back so the caller can put it on
             # the loud line. pgw#1595: success was `log.info` and inaudible at
             # the endpoint's WARNING level, which makes "probe passed" and
@@ -849,25 +879,31 @@ def apply_component_residency(
                 facts["probe_free_bytes"] = int(free)
                 # pgw#1627: WHICH budget the admit used (driver_free vs
                 # free+cache), so the regime split is visible from the
-                # confession rather than from the code.
+                # confession rather than from the code — and the demand it was
+                # checked against, so demand=0 reads as "split wired, stamp
+                # pending (pgw#1601)" rather than as protection.
                 facts["headroom_basis"] = str(basis)
+                facts["headroom_demand_bytes"] = int(demand_bytes)
                 facts.update(_placement_attribution(torch))
             if not ok:
                 log.warning(
-                    "partial_resident: PROBE REFUSED %s (budget basis: %s) — "
-                    "onloading the largest evicted component left %.2f GiB "
-                    "free, under the %.2f GiB floor. The plan's arithmetic "
-                    "said %.2f GiB peak of %.2f free; the card disagrees, and "
-                    "the card is right.",
-                    ",".join(plan.offloaded), basis, free / _GIB,
-                    _PROBE_FLOOR_BYTES / _GIB,
+                    "partial_resident: PROBE REFUSED %s (budget basis: %s, "
+                    "demand %.2f GiB) — onloading the largest evicted "
+                    "component left %.2f GiB free, under the %.2f GiB floor. "
+                    "The plan's arithmetic said %.2f GiB peak of %.2f free; "
+                    "the card disagrees, and the card is right.",
+                    ",".join(plan.offloaded), basis, demand_bytes / _GIB,
+                    free / _GIB, _PROBE_FLOOR_BYTES / _GIB,
                     plan.transient_peak_bytes / _GIB, plan.free_bytes / _GIB,
                 )
                 return False
             log.info(
-                "partial_resident: probe OK (budget basis: %s) — %.2f GiB "
-                "still free with %s onloaded",
-                basis, free / _GIB, ",".join(plan.offloaded),
+                "partial_resident: probe OK (budget basis: %s, demand %.2f "
+                "GiB%s) — %.2f GiB still free with %s onloaded",
+                basis, demand_bytes / _GIB,
+                (", INERT until pgw#1601's stamp lands"
+                 if regime == "compiled" and demand_bytes <= 0 else ""),
+                free / _GIB, ",".join(plan.offloaded),
             )
         _install_residency_hooks(
             pipeline, parked, _pipeline_component_names(pipeline), log

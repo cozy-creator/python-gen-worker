@@ -2421,8 +2421,21 @@ def apply_low_vram_config(
     offload_to_disk_path: Optional[str] = None,
     stream_budget_bytes: int = 0,
     stream_ram_budget_bytes: int = 0,
+    regime: str = "eager",
+    compiled_demand_bytes: int = 0,
 ) -> Dict[str, Any]:
     """Apply a low-VRAM configuration to a diffusers pipeline.
+
+    ``regime`` is the caller's COMPILE INTENT — "will this load serve
+    compiled" (``ctx.load`` derives it from whether a graph-adoption sink is
+    bound). It reaches the `partial_resident` probe's REGIME-SPLIT floor
+    (pgw#1627: compiled counts ``driver_free`` only; eager keeps
+    ``free + reusable cache``). ``compiled_demand_bytes`` is the compiled
+    artifact's out-of-allocator first-call demand — pgw#1601's mint-time
+    stamp once it lands. Until a caller has a stamp it is 0, which makes the
+    compiled REFUSAL inert by design; the park→compiled-seam cache release is
+    the active protection meanwhile, and the confession's
+    ``headroom_basis``/``headroom_demand_gb`` pair says so out loud.
 
     ``mode="auto"`` runs :func:`select_auto_mode` against free VRAM. Returns a
     dict describing what was applied. Idempotent per pipeline object.
@@ -2698,6 +2711,10 @@ def apply_low_vram_config(
                 pipeline, plan, device=_execution_device(), log=log,
                 free_bytes_now=lambda: int(get_available_vram_gb() * _GIB),
                 facts=probe_facts,
+                # pgw#1627 follow-up: the regime split shipped first as a
+                # probe_plan parameter THIS call never passed — dead code on
+                # the exact path that produced the death log's probe line.
+                regime=regime, demand_bytes=int(compiled_demand_bytes),
             )
             if armed:
                 break
@@ -2728,8 +2745,13 @@ def apply_low_vram_config(
             if "headroom_basis" in probe_facts:
                 # pgw#1627: the regime-split admit names its budget basis
                 # (driver_free vs free+cache) on the loud line, so the hub can
-                # see WHICH arithmetic admitted without the code in hand.
+                # see WHICH arithmetic admitted without the code in hand —
+                # plus the demand it was checked against, so `driver_free`
+                # with demand 0 reads as "split WIRED, stamp pending
+                # (pgw#1601), refusal inert" rather than as protection.
                 applied["headroom_basis"] = str(probe_facts["headroom_basis"])
+                applied["headroom_demand_gb"] = (
+                    float(probe_facts.get("headroom_demand_bytes", 0)) / _GIB)
             probe_free = probe_facts.get("probe_free_bytes")
             if probe_free is not None:
                 # Probe SUCCESS was `log.info` and therefore inaudible, which

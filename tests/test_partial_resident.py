@@ -706,9 +706,13 @@ def test_probe_plan_itself_refuses_a_compiled_leg_the_cache_would_admit():
     assert eager_ok, "the eager reading of the same card must stay admitted"
 
 
-def test_the_admit_confesses_which_budget_basis_it_used():
-    """Acceptance (c): the confession carries `headroom_basis`, so the hub can
-    see the split executing rather than trusting that it does."""
+def _admit_through_production_path(*, regime, free_bytes, cache_bytes,
+                                   demand_bytes=0):
+    """Arm through `apply_component_residency` — the ONLY production caller of
+    `probe_plan`, and the call the first #1627 PR left unpassed (dead code on
+    the exact path that produced the death log's probe line)."""
+    import gen_worker.models.partial_resident as pr
+
     pipe = _pipeline()
     plan = plan_for_pipeline(
         pipe, budget_bytes=1200, free_bytes=64 * _MIB,
@@ -716,13 +720,89 @@ def test_the_admit_confesses_which_budget_basis_it_used():
         sizer=lambda m: sum(p.numel() * p.element_size() for p in m.parameters()),
     )
     facts: dict = {}
-    armed = apply_component_residency(
-        pipe, plan, device="cpu", log=logging.getLogger("t"),
-        free_bytes_now=lambda: 4 * _GIB, facts=facts,
-    )
+    real_attr = pr._placement_attribution
+    pr._placement_attribution = (
+        lambda torch_mod: {"attr_cache_bytes": cache_bytes})
+    try:
+        armed = apply_component_residency(
+            pipe, plan, device="cpu", log=logging.getLogger("t"),
+            free_bytes_now=lambda: free_bytes, facts=facts,
+            regime=regime, demand_bytes=demand_bytes,
+        )
+    finally:
+        pr._placement_attribution = real_attr
+    return armed, facts
+
+
+def test_an_eager_load_admits_and_confesses_free_plus_cache():
+    """Acceptance (c), eager half — through the production path."""
+    armed, facts = _admit_through_production_path(
+        regime="eager", free_bytes=_DEATH_FREE, cache_bytes=_DEATH_CACHE)
     assert armed
     assert facts.get("headroom_basis") == "free+cache", (
         "the probe admitted and did not say which budget arithmetic it used"
+    )
+
+
+def test_a_compiled_load_refuses_the_death_shape_THROUGH_the_production_path():
+    """The wiring test the first #1627 PR was missing: `regime` existed on
+    `probe_plan` while its only production caller never passed it, so the
+    compiled branch was UNREACHABLE in production and `headroom_basis` was a
+    constant "free+cache" — a confession that could not go red. This drives
+    the death-shape numbers through `apply_component_residency` itself and
+    demands the driver_free basis AND the refusal."""
+    armed, facts = _admit_through_production_path(
+        regime="compiled", free_bytes=_DEATH_FREE, cache_bytes=_DEATH_CACHE,
+        demand_bytes=_AOTI_DEMAND)
+    assert facts.get("headroom_basis") == "driver_free", (
+        "a compiled load's probe still confesses the eager basis — the "
+        "regime never reached the predicate (the dead-plumbing finding)"
+    )
+    assert facts.get("headroom_demand_bytes") == _AOTI_DEMAND, (
+        "the demand the admit was checked against must be in the confession, "
+        "or demand=0 inertness is indistinguishable from a real guard"
+    )
+    assert not armed, (
+        "the death shape was admitted compiled through the production path — "
+        "1.02 GiB of allocator cache is not money AOTI can spend"
+    )
+
+
+def test_a_compiled_load_with_no_stamp_is_wired_but_inert():
+    """Honesty pin: until pgw#1601's mint-time demand stamp lands, production
+    passes demand_bytes=0 and the compiled refusal DOES NOT bite (1.18 GiB >=
+    0 + floor admits). The split is WIRED — the basis reads driver_free — and
+    the seam release is the only active protection. If this test fails on
+    `armed`, a demand source was wired in: move the death-shape refusal
+    expectation to that source's tests and delete this pin."""
+    armed, facts = _admit_through_production_path(
+        regime="compiled", free_bytes=_DEATH_FREE, cache_bytes=_DEATH_CACHE)
+    assert armed, "demand=0 admits — the refusal is inert until the stamp"
+    assert facts.get("headroom_basis") == "driver_free"
+    assert facts.get("headroom_demand_bytes") == 0
+
+
+def test_the_load_path_threads_compile_intent_into_the_probe():
+    """The chain above `apply_component_residency`, pinned at the source level
+    so the dead-plumbing class cannot re-open silently: `ctx.load`'s fit-rung
+    call derives `regime` from its compile sink (intent — adopt arms AFTER
+    load, so `compiled_dispatch_armed` is unusable at admission), and
+    `apply_low_vram_config` hands regime + demand to the probe call."""
+    import inspect
+
+    import gen_worker.models.memory as m
+    import gen_worker.serving.context as c
+
+    fit = inspect.getsource(c.LoadContext._fit_rung)
+    assert "_compile_sink" in fit and "regime=" in fit, (
+        "ctx.load no longer derives the probe regime from its compile intent"
+    )
+    low_vram = inspect.getsource(m.apply_low_vram_config)
+    idx = low_vram.index("apply_component_residency(")
+    call = low_vram[idx:idx + 600]  # the call site plus its kwargs window
+    assert "regime=regime" in call and "demand_bytes=" in call, (
+        "apply_low_vram_config's probe call dropped regime/demand — the "
+        "regime split is dead code in production again"
     )
 
 
@@ -816,6 +896,75 @@ def test_the_seam_keeps_the_cache_for_an_eager_denoiser():
         "the seam released the allocator cache under an EAGER denoiser — "
         "that cache is eager's activation money, and this empty_cache is a "
         "per-request tax the regime split exists to avoid"
+    )
+
+
+class _MidStagePipeline(DiffusionPipeline):
+    """A family whose first resident module AFTER the parked chain is NOT the
+    denoiser. On SDXL the two coincide (encoders park, the unet is next), so
+    a gate that interrogates the hook's own module is right there by
+    execution-order coincidence only — this shape is where that gate goes
+    silently blind."""
+
+    model_cpu_offload_seq = "text_encoder->mid->unet->vae"
+    text_encoder: Any
+    mid: Any
+    unet: Any
+    vae: Any
+
+    def __init__(self, text_encoder: Any, mid: Any, unet: Any, vae: Any) -> None:
+        super().__init__()
+        cast(Any, self).register_modules(
+            text_encoder=text_encoder, mid=mid, unet=unet, vae=vae
+        )
+
+
+def test_the_seam_gate_reads_the_DENOISER_not_whichever_module_holds_the_hook():
+    """pgw#1627 follow-up, finding 3: the release hook rides the first
+    resident module after the parked chain, and the gate must still ask the
+    DENOISER — the compile target — whether a compiled call is coming. Here
+    that first module is `mid` (never compiled) while the dispatcher sits on
+    `unet`: a gate keyed to the hook's own module never releases, and this
+    test goes red."""
+    import gen_worker.models.memory as m
+    import gen_worker.models.partial_resident as pr
+
+    events: List[str] = []
+    pipe = _MidStagePipeline(_Block(8), _Block(12), _Block(16), _Block(4))
+    sizer = lambda mod: sum(  # noqa: E731
+        p.numel() * p.element_size() for p in mod.parameters())
+    total = sum(sizer(c) for c in pipe.components.values())
+    plan = plan_for_pipeline(
+        pipe,
+        # Room for everything but the text encoder: the cheapest legal plan
+        # parks exactly `text_encoder`, so `mid` is the first post-parked
+        # resident and carries the release hook.
+        budget_bytes=total - sizer(pipe.text_encoder) + 8,
+        free_bytes=64 * _MIB,
+        transient_reserve_bytes=0,
+        sizer=sizer,
+    )
+    assert plan.fits and plan.offloaded == ("text_encoder",)
+    armed = apply_component_residency(
+        pipe, plan, device="cpu", log=logging.getLogger("t"))
+    assert armed
+
+    pipe.unet.forward = _FakeDispatcher(pipe.unet, events)
+    real_release = m.release_cached_vram
+    m.release_cached_vram = lambda: events.append("released")
+    try:
+        pipe.text_encoder(torch.randn(2, 8))
+        pipe.mid(torch.randn(2, 12))
+        pipe.unet(torch.randn(2, 16))
+    finally:
+        m.release_cached_vram = real_release
+
+    assert "released" in events, (
+        "no release before the compiled denoiser call — the gate asked the "
+        "hook's own module (mid) instead of resolving the denoiser"
+    )
+    assert events.index("released") < events.index("compiled_call"), (
+        f"the release must precede the compiled call: {events}"
     )
 
 
