@@ -3,7 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, Tuple
+from typing import Any, Optional, Protocol, Sequence, Tuple
+
+
+@dataclass(frozen=True, slots=True)
+class AddressSource:
+    """One contiguous source allocation, described without its owner type."""
+
+    pointer: int
+    capacity: int
+
+
+@dataclass(frozen=True, slots=True)
+class FileSource:
+    """One immutable file range, or a zero-filled hole when ``path`` is None."""
+
+    path: Optional[str]
+    offset: int
+    length: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +43,14 @@ class FillClient(Protocol):
 
     def fill(self, reader: Any, destination: Destination) -> Any: ...
 
+    def fill_address(
+        self, source: AddressSource, destination: Destination
+    ) -> Any: ...
+
+    def fill_files(
+        self, sources: Sequence[FileSource], destination: Destination
+    ) -> Any: ...
+
 
 class HostFillClient:
     """The host destination is its own staging allocation."""
@@ -37,6 +62,38 @@ class HostFillClient:
             destination.name,
             destination.pointer,
             destination.capacity,
+            layout=destination.layout,
+        )
+
+    @staticmethod
+    def _native() -> Any:
+        from tensorfs.native import HostFillClient as NativeHostFillClient
+
+        return NativeHostFillClient()
+
+    def fill_address(
+        self, source: AddressSource, destination: Destination
+    ) -> Any:
+        return self._native().fill_address(
+            source.pointer,
+            source.capacity,
+            destination.pointer,
+            destination.capacity,
+            destination.shape,
+            destination.element_bytes,
+            layout=destination.layout,
+        )
+
+    def fill_files(
+        self, sources: Sequence[FileSource], destination: Destination
+    ) -> Any:
+        records = [(source.path, source.offset, source.length) for source in sources]
+        return self._native().fill_files(
+            records,
+            destination.pointer,
+            destination.capacity,
+            destination.shape,
+            destination.element_bytes,
             layout=destination.layout,
         )
 
@@ -61,6 +118,32 @@ class CudaFillClient:
             layout=destination.layout,
         )
 
+    def fill_address(
+        self, source: AddressSource, destination: Destination
+    ) -> Any:
+        return self._client.fill_address(
+            source.pointer,
+            source.capacity,
+            destination.pointer,
+            destination.capacity,
+            destination.shape,
+            destination.element_bytes,
+            layout=destination.layout,
+        )
+
+    def fill_files(
+        self, sources: Sequence[FileSource], destination: Destination
+    ) -> Any:
+        records = [(source.path, source.offset, source.length) for source in sources]
+        return self._client.fill_files(
+            records,
+            destination.pointer,
+            destination.capacity,
+            destination.shape,
+            destination.element_bytes,
+            layout=destination.layout,
+        )
+
 
 def client_for(device_type: str, *, device_index: int, staging_bytes: int) -> FillClient:
     """Bind the one backend implied by the granted destination device."""
@@ -72,4 +155,10 @@ def client_for(device_type: str, *, device_index: int, staging_bytes: int) -> Fi
     raise ValueError(f"tensorfs fill has no destination backend for {device_type!r}")
 
 
-__all__ = ["Destination", "FillClient", "client_for"]
+__all__ = [
+    "AddressSource",
+    "Destination",
+    "FileSource",
+    "FillClient",
+    "client_for",
+]

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import struct
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -20,6 +22,7 @@ from gen_worker.models.arena_residency import (  # noqa: E402
 from gen_worker.models.checkpoint_juggle import (  # noqa: E402
     CheckpointCatalog,
     CheckpointImage,
+    CheckpointJuggler,
     JuggleRefusal,
     RegionInvalid,
     RegionValidity,
@@ -181,7 +184,7 @@ def build_image(
     layout = layout_for(template)
     manifest = read_manifest(checkpoint_dir(tmp_path, name, module, **kw))
     return layout, CheckpointImage(
-        name, layout, manifest, torch_mod=torch, varena_mod=None, engine=None
+        name, layout, manifest, torch_mod=torch, varena_mod=None
     )
 
 
@@ -323,3 +326,115 @@ def test_a_partial_switch_is_never_servable_under_either_identity(tmp_path: Path
     for identity in ("a", "b"):
         with pytest.raises(RegionInvalid):
             ledger.assert_servable(identity)
+
+
+class _FillCapture:
+    staging = "tensorfs-pinned"
+
+    def __init__(self) -> None:
+        self.addresses: List[Tuple[Any, Any]] = []
+        self.files: List[Tuple[Any, Any]] = []
+
+    def fill_address(self, source: Any, destination: Any) -> Any:
+        self.addresses.append((source, destination))
+        return SimpleNamespace(destination_bytes=destination.capacity)
+
+    def fill_files(self, sources: Any, destination: Any) -> Any:
+        self.files.append((tuple(sources), destination))
+        return SimpleNamespace(destination_bytes=destination.capacity)
+
+
+def _fake_residency(layout: Any, compile_calls: List[int]) -> Any:
+    fake_torch = SimpleNamespace(
+        no_grad=nullcontext,
+        cuda=SimpleNamespace(synchronize=lambda _device: None),
+        compile=lambda value: compile_calls.append(1) or value,
+    )
+    return SimpleNamespace(
+        adopted=True,
+        layout=layout,
+        _torch=fake_torch,
+        _varena=None,
+        device=SimpleNamespace(index=0),
+        reservation=SimpleNamespace(base_ptr=0x40000000),
+        ring=SimpleNamespace(drain=lambda: None),
+        is_resident=lambda _name: True,
+        _host={},
+        _triples={},
+        _roots=[],
+    )
+
+
+def test_warm_swaps_reuse_tensorfs_at_stable_addresses_without_recompile(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import gen_worker.models.checkpoint_juggle as checkpoint_juggle
+
+    template = Net(seed=0)
+    mem = {"available": 64 << 30}
+    layout, catalog = make_catalog(tmp_path, template, mem, floor=4 << 30)
+    manifests = {}
+    for seed, name in ((30, "a"), (31, "b")):
+        manifest = read_manifest(checkpoint_dir(tmp_path, name, Net(seed=seed)))
+        manifests[name] = manifest
+        catalog.admit(name, manifest)
+        assert catalog.ensure_warm(name) is not None
+
+    fills = _FillCapture()
+    monkeypatch.setattr(checkpoint_juggle, "CudaFillClient", lambda *_args: fills)
+    compile_calls: List[int] = []
+    juggler = CheckpointJuggler(
+        _fake_residency(layout, compile_calls),
+        "a",
+        manifests["a"],
+        catalog=catalog,
+    )
+
+    juggler.switch_to("b")
+    juggler.switch_to("a")
+
+    region_count = len(layout.regions)
+    first = [destination.pointer for _, destination in fills.addresses[:region_count]]
+    second = [destination.pointer for _, destination in fills.addresses[region_count:]]
+    assert first == second
+    assert first == [0x40000000 + region.offset for region in layout.regions]
+    assert compile_calls == []
+    assert all(isinstance(source.pointer, int) for source, _ in fills.addresses)
+    assert all(isinstance(destination.shape, tuple) for _, destination in fills.addresses)
+
+
+def test_cold_swap_is_file_records_through_the_same_tensorfs_client(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import gen_worker.models.checkpoint_juggle as checkpoint_juggle
+
+    template = Net(seed=0)
+    layout, catalog = make_catalog(
+        tmp_path, template, {"available": 0}, floor=4 << 30
+    )
+    manifests = {
+        name: read_manifest(checkpoint_dir(tmp_path, name, Net(seed=seed)))
+        for seed, name in ((40, "a"), (41, "b"))
+    }
+    catalog.admit("b", manifests["b"])
+
+    fills = _FillCapture()
+    monkeypatch.setattr(checkpoint_juggle, "CudaFillClient", lambda *_args: fills)
+    juggler = CheckpointJuggler(
+        _fake_residency(layout, []),
+        "a",
+        manifests["a"],
+        catalog=catalog,
+    )
+
+    report = juggler.switch_to("b")
+
+    assert fills.addresses == []
+    assert len(fills.files) == len(layout.regions)
+    for sources, destination in fills.files:
+        assert sum(source.length for source in sources) == destination.capacity
+        assert all(
+            source.path is None or isinstance(source.path, str) for source in sources
+        )
+    assert report.tier == "disk-cold"
+    assert report.bytes_moved == sum(region.span for region in layout.regions)

@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, get_args, get_origin, get_type_hints
 
-from gen_worker.serving.streaming.fill_client import Destination, HostFillClient
+from gen_worker.serving.streaming.fill_client import (
+    AddressSource,
+    Destination,
+    FileSource,
+    HostFillClient,
+)
 
 
 class _Reader:
@@ -52,6 +57,12 @@ def test_destination_map_crosses_as_plain_data_only() -> None:
         {"layout": "torch.contiguous@1"},
     )
     assert all(isinstance(value, (str, int, tuple, dict)) for value in reader.call)
+
+    for seam_type in (AddressSource, FileSource):
+        assert all(
+            "torch" not in str(annotation).lower()
+            for annotation in get_type_hints(seam_type).values()
+        )
 
 
 def test_the_replaced_pgw_byte_plane_is_deleted() -> None:

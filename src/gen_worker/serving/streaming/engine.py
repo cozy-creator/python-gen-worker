@@ -189,7 +189,14 @@ class StreamingLoader:
         """What the last load BUILT, as data — the fence's own answer."""
         return self._census
 
-    def build(self, pipeline_cls: type, *, checkpoint_dir: Path, lane: Any) -> Any:
+    def build(
+        self,
+        pipeline_cls: type,
+        *,
+        checkpoint_dir: Path,
+        lane: Any,
+        expected_census: Optional[_census.Census] = None,
+    ) -> Any:
         """Meta skeleton, then weights streamed into it."""
         import torch
 
@@ -205,7 +212,11 @@ class StreamingLoader:
         # release's census beside the resolved variant, `expected` is read from
         # it instead and the same predicate then also catches an image that
         # builds a different module than the one the release was derived from.
-        expected = self._expected_census(built)
+        expected = (
+            expected_census
+            if expected_census is not None
+            else self._expected_census(built)
+        )
         report = LoadReport(
             io=self._io,
             source=str(getattr(self._store, "KIND", type(self._store).__name__)),
