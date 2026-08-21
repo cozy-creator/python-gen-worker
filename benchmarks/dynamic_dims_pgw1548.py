@@ -628,7 +628,9 @@ class Bench:
         for selector in selectors:
             result = self._gen_worker(
                 room,
-                ["compile", str(room), "--first", selector, "--fill", "none"],
+                ["compile", str(room), "--first", selector, "--fill", "none"]
+                + (["--graph-store", str(self.args.graph_store)]
+                   if getattr(self.args, "graph_store", "") else []),
                 timeout=self.args.compile_timeout,
             )
             if result.returncode != 0:
@@ -661,6 +663,12 @@ class Bench:
         argv = ["up", str(room), "-d", "--checkpoint", str(self.args.checkpoint),
                 "--compile", "off",
                 "--idle-timeout", str(self.args.idle_timeout)]
+        # The CONFOUND leg (pgw#1586 rider) boots compiled-mode against an EMPTY
+        # store so ZERO graphs are armed. If the VRAM step appears there too,
+        # the cost is the mode PATH and not AOTI -- which is the attribution the
+        # residency lane's +1176 MiB single allocation currently sits on.
+        if getattr(self.args, "graph_store", ""):
+            argv += ["--graph-store", str(self.args.graph_store)]
         # The CFG/batch axis is a CHECKPOINT-DEFAULTS flag, not a request field
         # (sd15 main.py:367-373, and sdxl reads `config.cfg` the same way): the
         # request's `guidance_scale` is warned-and-ignored on a cfg-off serving.
@@ -768,7 +776,16 @@ class Bench:
         # refused with "names no specialization this endpoint has" — on the
         # pod, after the lock, inside the paid window.
         selectors = self.args.selectors or self.covering_selectors(name, records)
-        compile_s = self.compile(room, name, selectors)
+        if getattr(self.args, "skip_compile", False):
+            # The CONFOUND leg: compiled MODE, but nothing built, so ZERO graphs
+            # are armed. Building into the "empty" store would arm one and
+            # measure the opposite of what the leg asks.
+            print(f"[{name}] SKIPPING compile — the confound leg wants zero "
+                  f"armed graphs, not a freshly built one")
+            compile_s = 0.0
+            selectors = []
+        else:
+            compile_s = self.compile(room, name, selectors)
         self.mint[name] = {
             "lock_s": lock_s,
             "lock_cached": self._cached_lock(name) is not None,
@@ -829,6 +846,19 @@ class Bench:
         been — compiled calls happened, and none fell through.
         """
 
+        if getattr(self.args, "expect_eager", False):
+            # Inverted premise, and it must be just as strict: this leg is only
+            # meaningful if NOTHING was armed. A compiled call here means the
+            # store was not actually empty and the confound was not tested.
+            if sample.compiled_calls > 0:
+                raise SystemExit(
+                    f"[{arm}] --expect-eager but {sample.compiled_calls} "
+                    f"compiled call(s): the graph store was NOT empty, so this "
+                    f"measures an armed pod and answers nothing about the "
+                    f"mode path. Refusing.")
+            print(f"[{arm}] confound leg: {sample.eager_calls} eager call(s), "
+                  f"0 compiled — zero graphs armed, as intended")
+            return
         if sample.compiled_calls <= 0:
             raise SystemExit(
                 f"[{arm}] ZERO compiled calls on the warm-up request "
@@ -1235,6 +1265,15 @@ def main(argv: list[str] | None = None) -> int:
                              'e.g. \'{"cfg": false}\' for the batch-1 half of '
                              'the CFG axis. CFG is a per-checkpoint flag, so it '
                              'is a property of the BOOT, not of a request')
+    parser.add_argument("--skip-compile", action="store_true",
+                        help="lock but do NOT build — the confound leg needs "
+                             "compiled mode with zero graphs armed")
+    parser.add_argument("--expect-eager", action="store_true",
+                        help="invert the premise: this leg REQUIRES zero "
+                             "compiled calls, and refuses if any appear")
+    parser.add_argument("--graph-store", default="",
+                        help="graph CAS root; point at an EMPTY dir to boot "
+                             "compiled-mode with ZERO graphs armed (the pgw#1586 confound leg)")
     parser.add_argument("--venv", default="",
                         help="the environment the endpoint runs in. Default "
                              "<endpoint>/.venv — which on this box is CPU-only "

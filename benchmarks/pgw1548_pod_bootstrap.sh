@@ -307,6 +307,62 @@ sdxl-matrix)
   "${PY:-python3}" /workspace/publish.py smoke /workspace/out/smoke.log /workspace/out/smoke/verdict.json || true
   [ $rc -ne 0 ] && { fail_out smoke "smoke gate exited $rc"; exit 94; }
 
+  # --- FOLDING INSTRUMENTATION (pgw#1586 rider) -----------------------------
+  # Answers Paul's "why does compiled want so much more VRAM" with a MECHANISM
+  # rather than a number: does the first compiled request spike and RELEASE
+  # (folding -- AOTI materializing a second copy of the constants, then freeing
+  # it), or does it PERSIST across requests (a cudagraph pool that never
+  # returns)? The two have the same peak and opposite consequences for how a
+  # compiled ceiling should be priced.
+  #
+  # The sampler is OUT OF PROCESS on purpose: an in-process probe is
+  # GIL-blinded and the residency lane proved that wrong by 1.17 GB.
+  bash /workspace/pgw/benchmarks/pgw1548_vram_sampler.sh \
+      /workspace/out/vram-folding.tsv 0.09 &
+  SAMPLER=$!
+  sleep 2   # a few samples of the EMPTY card first: the analyzer's baseline
+
+  # TWO requests, deliberately: prediction (2) is first-excursion-releases vs
+  # persists, which is unanswerable from a single request.
+  ( cd /workspace/pgw && timeout 3600 $PY benchmarks/dynamic_dims_pgw1548.py \
+      --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
+      --venv /workspace/venv --lock-cache /workspace/locks \
+      --latents '1:1=128x128' --arms static --aspects 1:1 --cfg on \
+      --reps 2 --rounds 1 --sm "$SM" --substrate raw-pod --steps 20 \
+      --idle-timeout 1800 --lane-note 'sdxl folding probe' --dtype-lanes 2 \
+      --out /workspace/out/folding ) > /workspace/out/folding.log 2>&1
+  sleep 3; kill $SAMPLER 2>/dev/null
+  $PY /workspace/pgw/benchmarks/pgw1548_analyze_folding.py \
+      /workspace/out/vram-folding.tsv 5222 > /workspace/out/folding-verdict.txt 2>&1 || true
+  "${PY:-python3}" /workspace/publish.py folding \
+      /workspace/out/vram-folding.tsv /workspace/out/folding-verdict.txt \
+      /workspace/out/folding.log || true
+
+  # --- THE CONFOUND LEG: compiled mode, ZERO graphs armed -------------------
+  # The residency lane measured a +1176 MiB single allocation AND a death in
+  # this configuration locally, which sits confoundingly on the ">1218 MiB AOTI
+  # demand" attribution: if an EMPTY store shows the same step, the cost is the
+  # mode PATH, not AOTI. Same sampler, same shape, one request.
+  mkdir -p /workspace/empty-store
+  bash /workspace/pgw/benchmarks/pgw1548_vram_sampler.sh \
+      /workspace/out/vram-nograph.tsv 0.09 &
+  SAMPLER2=$!
+  sleep 2
+  ( cd /workspace/pgw && timeout 1800 $PY benchmarks/dynamic_dims_pgw1548.py \
+      --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
+      --venv /workspace/venv --lock-cache /workspace/locks \
+      --graph-store /workspace/empty-store --skip-compile --expect-eager \
+      --latents '1:1=128x128' --arms static --aspects 1:1 --cfg on \
+      --reps 1 --rounds 1 --sm "$SM" --substrate raw-pod --steps 20 \
+      --idle-timeout 900 --lane-note 'sdxl no-graph confound' --dtype-lanes 2 \
+      --out /workspace/out/nograph ) > /workspace/out/nograph.log 2>&1
+  sleep 3; kill $SAMPLER2 2>/dev/null
+  $PY /workspace/pgw/benchmarks/pgw1548_analyze_folding.py \
+      /workspace/out/vram-nograph.tsv 5222 > /workspace/out/nograph-verdict.txt 2>&1 || true
+  "${PY:-python3}" /workspace/publish.py nograph \
+      /workspace/out/vram-nograph.tsv /workspace/out/nograph-verdict.txt \
+      /workspace/out/nograph.log || true
+
   # MATRIX — ABBA arm order, per-shape, never averaged.
   ( cd /workspace/pgw && timeout 10800 $PY benchmarks/dynamic_dims_pgw1548.py \
       --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
