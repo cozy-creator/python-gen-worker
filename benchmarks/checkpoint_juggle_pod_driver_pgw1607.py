@@ -156,7 +156,7 @@ def main() -> int:
     parser.add_argument("--max-hours", type=float, default=2.0)
     parser.add_argument("--name", default="")
     parser.add_argument("--retries", type=int, default=3,
-                        help="new-host retries for HOST_DRIVER_TOO_OLD "
+                        help="new-host retries for RETRYABLE_HOST failures "
                              "(~$0.01 each, terminated with 404 proof)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -200,7 +200,7 @@ def main() -> int:
         try:
             return run_once(args, api, body, name, attempt)
         except RuntimeError as exc:
-            if "HOST_DRIVER_TOO_OLD" in str(exc) and attempt + 1 < args.retries:
+            if "RETRYABLE_HOST" in str(exc) and attempt + 1 < args.retries:
                 log(f"attempt {attempt + 1}: {exc}; retrying on a new host")
                 body["name"] = f"{name}-r{attempt + 1}"
                 continue
@@ -224,7 +224,9 @@ def run_once(args: argparse.Namespace, api: str, body: dict, name: str,
     try:
         log("waiting for SSH ...")
         tgt = None
-        deadline = time.time() + 900
+        # 25 min: va#5 measured healthy pods 12+ min into a big image pull —
+        # a 15-min bound tears down working hosts (try 3, $0.09).
+        deadline = time.time() + 1500
         while time.time() < deadline:
             tgt = ssh_target(api, lease)
             if tgt and pod_sh(tgt, "true", 45)[0] == 0:
@@ -232,7 +234,10 @@ def run_once(args: argparse.Namespace, api: str, body: dict, name: str,
             tgt = None
             time.sleep(15)
         if tgt is None:
-            raise RuntimeError("SSH never came up inside 15 min")
+            raise RuntimeError(
+                "RETRYABLE_HOST:ssh-never-up — no SSH inside 25 min; "
+                "terminating and retrying on a different host"
+            )
         log(f"ssh up at {tgt[0]}:{tgt[1]}")
 
         # DRIVER GATE, before any byte of setup: the host must speak CUDA 13
@@ -245,7 +250,7 @@ def run_once(args: argparse.Namespace, api: str, body: dict, name: str,
         log(f"host driver: {drv or 'unreadable'}")
         if major < 580:
             raise RuntimeError(
-                f"HOST_DRIVER_TOO_OLD:{drv} — cannot run the cu130 fleet line; "
+                f"RETRYABLE_HOST:driver-too-old:{drv} — cannot run the cu130 fleet line; "
                 f"terminating and retrying on a different host"
             )
 
