@@ -219,6 +219,23 @@ def main() -> int:
         if rc != 0:
             raise RuntimeError("bootstrap failed")
 
+        # EVIDENCE EGRESS IS PART OF THE SMOKE GATE (coordinator rider,
+        # 2026-08-20; pgw#1568 measured SSH egress dead on raw pods of a
+        # different shape). A full round trip with content verification runs
+        # BEFORE any download or arm — if this fails, abort at ~$0.05 and
+        # wire the publishes channel rather than losing verdicts at the end.
+        canary = f"pgw1607-egress-{pod_id}-{int(time.time())}"
+        rc, _ = pod_sh(tgt, f"mkdir -p /workspace/pgw1607-out && "
+                            f"echo -n {shlex.quote(canary)} "
+                            f"> /workspace/pgw1607-out/egress-canary.txt", 60)
+        if rc != 0 or not scp_from(tgt, "/workspace/pgw1607-out", out_dir):
+            raise RuntimeError("EGRESS UNPROVEN: canary round trip failed — "
+                               "no arm runs without a proven evidence path")
+        got_txt = (out_dir / "pgw1607-out" / "egress-canary.txt")
+        if not got_txt.exists() or got_txt.read_text() != canary:
+            raise RuntimeError("EGRESS UNPROVEN: canary content mismatch")
+        log("evidence egress PROVEN by round trip (canary content verified)")
+
         harness = (
             "cd /workspace && . venv/bin/activate && "
             "export GEN_WORKER_FLEET_LINE_FILE=/workspace/fleet-floors.toml && "

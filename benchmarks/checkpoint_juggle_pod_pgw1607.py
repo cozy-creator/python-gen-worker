@@ -84,11 +84,18 @@ def loud(msg: str) -> None:
 
 
 def bank(name: str, payload: Dict[str, Any]) -> None:
-    """Write the arm's verdict NOW — a later death keeps earlier arms."""
+    """Write the arm's verdict NOW — a later death keeps earlier arms.
+
+    The payload is ALSO printed inline: the driver captures this stream over
+    SSH, so even a dead scp path leaves every verdict in the box-side
+    transcript (the pgw#1568 lesson: an evidence path that can die must not
+    be the only one)."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"{name}.json"
-    path.write_text(json.dumps(payload, indent=2))
+    blob = json.dumps(payload, indent=2)
+    path.write_text(blob)
     loud(f"banked {path}")
+    print(f"[pgw1607-verdict:{name}] {json.dumps(payload)}", flush=True)
 
 
 def gpu_line() -> str:
