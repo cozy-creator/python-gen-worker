@@ -663,6 +663,11 @@ class SwitchReport:
     transfer_gbps: float
     residue_bytes: int  # managed by nobody, NOT swapped (non-leaf buffers)
     pinned_source: bool
+    #: True when every backed region's mapping was checked against the
+    #: DRIVER's truth after the swap (va#12 ``page_signatures(verify=True)``,
+    #: 0.15–0.17 ms/GiB — affordable every swap, so it runs every swap).
+    #: False means the installed varena predates va#12; confessed, not silent.
+    backing_verified: bool = False
 
     def loud(self) -> str:
         return (
@@ -670,7 +675,7 @@ class SwitchReport:
             f"wall={self.wall_s * 1000:.1f}ms bytes={self.bytes_moved} "
             f"({self.transfer_gbps:.2f} GB/s) refilled={self.regions_refilled} "
             f"free-swapped={self.regions_unbacked} residue_untouched={self.residue_bytes} "
-            f"pinned_source={self.pinned_source}"
+            f"pinned_source={self.pinned_source} backing_verified={self.backing_verified}"
         )
 
 
@@ -824,6 +829,7 @@ class CheckpointJuggler:
             }
             torch.cuda.current_stream(device).wait_stream(stream)
             torch.cuda.synchronize(device)
+            backing_verified = self._verify_backing(checkpoint_id)
 
         wall = time.perf_counter() - started
         self.serving_id = checkpoint_id
@@ -838,12 +844,40 @@ class CheckpointJuggler:
             transfer_gbps=(bytes_moved / wall / 1e9) if wall > 0 else 0.0,
             residue_bytes=self._residue_bytes,
             pinned_source=bool(image.pinned) if image is not None else False,
+            backing_verified=backing_verified,
         )
         self.reports.append(report)
         logger.info(report.loud())
         return report
 
     # -- byte movement ------------------------------------------------------
+
+    def _verify_backing(self, checkpoint_id: str) -> bool:
+        """va#12 driver-truth check over every backed region, every swap.
+
+        Priced at 0.15–0.17 ms/GiB (measured under load) — affordable per
+        swap, so it is not rationed. A zero chunk means the mapping is not
+        what this process believes: the region is poisoned and the swap
+        FAILS rather than serving over a lie. Returns False (confessed on
+        the loud line) when the installed varena predates ``page_signatures``.
+        """
+        res = self.residency.reservation
+        if not hasattr(res, "page_signatures"):
+            return False
+        for region in self.layout.regions:
+            if not self.residency.is_resident(region.name):
+                continue
+            sigs = res.page_signatures(region.offset, region.span, True)
+            dead = sum(1 for s in sigs if int(s) == 0)
+            if dead:
+                self.ledger.poison(region.name)
+                raise RegionInvalid(
+                    f"region {region.name!r}: driver disagrees on {dead} of "
+                    f"{len(sigs)} chunks after the swap to {checkpoint_id!r}; "
+                    f"the region is INVALID — residency was lost outside this "
+                    f"process (suspend/reset/external eviction)"
+                )
+        return True
 
     def _refill_backed(
         self,
