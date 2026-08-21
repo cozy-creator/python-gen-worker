@@ -55,13 +55,20 @@ cannot be.* ``select_auto_mode``'s *fit test is* ``needed <= avail - 2.0``; *the
 ``needed_gb`` *is 6.5, so residency wants **8.5 GiB free on a 7.62 GiB card**. There is no*
 ``off``/``native`` *row at any budget. The "ceiling" is already a degraded rung."*
 
-Finding 5 of the same curve is why the answer is to DELETE the constant rather than raise it:
-the same request peaks at **2603 MiB at a 6.0 GiB cap, 2218 at 2.5, 1962 at 2.0, and 494 once
-tiling engages** — the caching allocator hands cached blocks back under pressure without being
-asked. *"Any VRAM sizing rule derived from a high-water mark measured on a roomy card
-systematically overstates the requirement."* A reserve fitted to a roomy-card high-water mark
-is measuring the allocator's generosity, not the request's need, and every GiB it overstates
-is a GiB the card had and the request did not get.
+**But read finding 1 twice before concluding the constant is simply wrong.** SDXL bf16 is
+6617 MiB of weights and pgw#1604 measured its non-weight peak at ~2058 MiB. Fully resident
+that is 8675 MiB against 7803 MiB of usable card: **it genuinely does not fit here.** For SDXL
+the 2 GiB reserve was approximately RIGHT, and the decider was right to refuse. It was a guess
+that happened to be correct on SDXL and wrong on anima — and *a guess that is sometimes right
+is still a guess.* What was missing is not a smaller number; it is the per-endpoint
+MEASUREMENT that tells the two cases apart.
+
+Finding 5 says why the eventual replacement must be measured rather than re-fitted: the same
+request peaks at **2603 MiB at a 6.0 GiB cap, 2218 at 2.5, 1962 at 2.0, and 494 once tiling
+engages** — the caching allocator hands cached blocks back under pressure without being asked.
+*"Any VRAM sizing rule derived from a high-water mark measured on a roomy card systematically
+overstates the requirement."* A reserve fitted to a roomy-card high-water mark measures the
+allocator's generosity, not the request's need.
 
 It refused it on arithmetic, not on a measurement: ``select_auto_mode`` demands
 ``weights <= free - _DEFAULT_SAFETY_MARGIN_GB`` and ``_plan_partial_resident`` then demands
@@ -70,17 +77,23 @@ unknown (the per-request activation peak), with ``_TRANSIENT_RESERVE_BYTES`` a t
 for a fourth quantity inside the search. The constant carries its own confession:
 *"TEMPORARY. This is a constant standing in for a measurement."*
 
-So this module does not tune the guess. It **deletes** it:
+So this module does not tune the guess. It **replaces** it with a measurement, and — this is
+the correction that matters — **it does not spend a default in its place**:
 
-1. Full residency is the default posture. It is refused only by a MEASUREMENT — a banked
-   per-endpoint request peak that does not fit, or the on-card probe.
-2. The probe is that measurement, and it already exists. ``partial_resident.probe_plan``
-   does the worst onload once, reads free, and parks back; the fully-resident equivalent is
-   free, because the placement happens anyway. The arithmetic estimate was never trustworthy
-   on its own — on the campaign card it admitted a plan that then OOMed by 5 MiB — which is
-   exactly why the probe was built.
-3. A budget below card capacity with no co-tenant is self-harm. The deterministic 6102 MiB is
-   a neutral fact about a configuration, not a virtue.
+1. Full residency is the default posture **once the request arena is MEASURED**. With no
+   measurement it is not admitted at all, because nothing probes a resident placement:
+   ``partial_resident.probe_plan`` is reached only under ``partial_resident``. See
+   ``RequestArena.funds_resident`` for what an earlier version of this module got wrong here
+   and what it would have cost SDXL.
+2. A cold arena funds the STREAMED path, which really is probed — the worst onload is done
+   once, free is read, and the plan is parked back. The arithmetic estimate was never
+   trustworthy alone: on the campaign card it admitted a plan that then OOMed by 5 MiB, which
+   is exactly why the probe exists.
+3. A budget below card capacity with no co-tenant is self-harm — but "below card capacity" is
+   a claim about the request's real peak, and on SDXL that peak makes full residency
+   genuinely impossible on this card. anima and SDXL differ by MEASUREMENT, not by posture,
+   and only a per-endpoint number tells them apart. The deterministic 6102 MiB is a neutral
+   fact about a configuration, not a virtue; so is a resident placement that OOMs.
 
 ## What lives here and what does not
 
@@ -140,6 +153,32 @@ COMPILED = "compiled"
 #: rather than re-derived; it means the same thing in both places.
 PROBE_FLOOR_BYTES = 256 * _MIB
 
+#: What a COLD request arena asks for — no per-endpoint measurement exists yet.
+#:
+#: **Inherited from `partial_resident.PARTIAL_RESIDENT_RESERVE_GB`, not invented here, and
+#: deliberately NOT deleted by this module.** An earlier version of this file replaced it with
+#: :data:`PROBE_FLOOR_BYTES` on the argument that the probe would catch an over-admission. Two
+#: things were wrong with that, and both were found by arithmetic over banked numbers before
+#: any card time was spent:
+#:
+#: 1. **The probe floor is a different quantity.** It answers *"is anything still free after
+#:    the worst onload"*, not *"is there room for the request"*. Substituting one for the
+#:    other replaced a 2 GiB constant with a 256 MiB one — a smaller wrong number, which is
+#:    the more dangerous kind, because it fails toward OOM instead of toward slow.
+#: 2. **Nothing probes a resident placement at all** (see :attr:`RequestArena.funds_resident`).
+#:
+#: The measured basis is unchanged from where it came: pgw#1586's green arm, 7540 MiB peak
+#: over 5693 MiB of resident weights = **1847 MiB** of activations under the fully-resident
+#: allocator regime, rounded up. pgw#1604 independently measured ~2058 MiB for SDXL at this
+#: shape (7350 MiB peak over 5292 MiB resident).
+#:
+#: **It is still a constant standing in for a measurement, and this module does not pretend
+#: otherwise.** What changes here is that there is now ONE of it instead of three, its basis
+#: is a named field on every grant, and the thing that replaces it — a banked per-endpoint
+#: peak — has a defined seam to arrive through (``basis="measured"``). Deleting it is
+#: pgw#1586's `reserve_source=measured`, not this issue.
+COLD_REQUEST_BYTES = 2048 * _MIB
+
 
 @dataclass(frozen=True)
 class ComponentDecl:
@@ -174,9 +213,10 @@ class RequestArena:
     * ``declared``  — ``Resources.peak_vram_per_request_gb``. Zero of the 26 shipped
       endpoints set it, which is the honest reason the default path has never had a real
       number to use.
-    * ``probe``     — no prior number; the on-card probe decides, and until it runs the
-      arena asks only for :data:`PROBE_FLOOR_BYTES`. This is the cold-start case and it
-      means *try full residency*, not *reserve 2 GiB against a shape nobody measured*.
+    * ``prior``     — no per-endpoint measurement exists, so the arena carries the reserve
+      the tree already used (:data:`COLD_REQUEST_BYTES`). **Inherited, not invented, and not
+      deleted here.** See that constant for why an earlier version of this module was wrong
+      to replace it with the probe floor.
 
     ``compiled_extra_bytes`` is pgw#1601's mint-time demand stamp: what the compiled regime
     additionally spends OUTSIDE torch's allocator on its first call. ``None`` means no stamp
@@ -196,8 +236,12 @@ class RequestArena:
 
     @classmethod
     def cold(cls) -> "RequestArena":
-        """No prior measurement: ask for the probe floor and let the card answer."""
-        return cls(bytes=PROBE_FLOOR_BYTES, basis="probe")
+        """No per-endpoint measurement: carry the reserve the tree already used.
+
+        `basis="prior"` funds the STREAMED path (which is probed) and NOT a resident or
+        compiled admit. See :data:`COLD_REQUEST_BYTES` and :attr:`funds_resident`.
+        """
+        return cls(bytes=COLD_REQUEST_BYTES, basis="prior")
 
     def demand(self, regime: str) -> int:
         """Bytes the weight arena must leave unspent under ``regime``."""
@@ -207,9 +251,42 @@ class RequestArena:
         return int(self.bytes)
 
     @property
+    def funds_resident(self) -> bool:
+        """A FULLY-RESIDENT admit needs a real number, for the same reason a compiled one does.
+
+        ⚠️ **This gate was missing and it was a regression.** The first version of this module
+        let ``cold()`` — the 256 MiB probe floor — fund full residency, on the argument that
+        *"the probe is the measurement and it already exists"*. **On the resident path there
+        is no probe.** ``apply_component_residency`` (which owns ``probe_plan``) is reached
+        only under ``partial_resident``; a fully-resident placement is never probed. The claim
+        was load-bearing and unbacked.
+
+        The consequence, computed from banked numbers before any card time was spent: SDXL
+        bf16 is 6617 MiB of weights, and pgw#1604 measured its non-weight peak at ~2058 MiB
+        (7350 MiB peak alloc at the 7.3 GiB tier over 5292 MiB of resident weights). Fully
+        resident that is **8675 MiB against 7803 MiB of usable card** — it does not fit, by
+        872 MiB. With the probe floor funding it, tiers 7.45 / 7.3 / 7.0 would have been
+        admitted fully resident where the old walk chose ``partial_resident`` and served in
+        18.4-18.9 s. That is an OOM traded for a working placement.
+
+        So pgw#1604's finding 1 — *"SDXL is NEVER fully resident on this card, and cannot
+        be"* — is not the decider being broken. For SDXL the 2 GiB reserve was approximately
+        RIGHT. It was a guess that happened to be correct here and wrong on anima, and a guess
+        that is sometimes right is still a guess: what was actually missing is the
+        per-endpoint MEASUREMENT that tells the two cases apart.
+
+        Hence the symmetry with :attr:`funds_compiled`, and it is the same rule twice: **a
+        placement that cannot be caught in flight must be funded by a measurement, never by a
+        default.** Compiled cannot be caught because a mid-graph OOM is process death; full
+        residency cannot be caught because nothing probes it. ``cold()`` therefore funds the
+        STREAMED path — which really is probed — and nothing else.
+        """
+        return self.basis in ("measured", "declared")
+
+    @property
     def funds_compiled(self) -> bool:
         """A compiled admit needs a measurement on both halves, or it is not an admit."""
-        return self.basis in ("measured", "declared") and self.compiled_extra_bytes is not None
+        return self.funds_resident and self.compiled_extra_bytes is not None
 
 
 @dataclass(frozen=True)
@@ -358,7 +435,14 @@ def plan_grant(
     budget, basis = spendable.for_regime(EAGER)
     need = request.demand(EAGER)
 
-    if declared + need <= budget:
+    if not request.funds_resident:
+        # Nothing probes a fully-resident placement (see `RequestArena.funds_resident`), so a
+        # cold arena may not fund one. It funds the STREAMED path, which is probed.
+        notes += (
+            f"full residency not admitted: no measured request peak "
+            f"(basis={request.basis}); nothing probes a resident placement",
+        )
+    elif declared + need <= budget:
         return Grant(
             residency=_all_resident(components),
             regime=EAGER,

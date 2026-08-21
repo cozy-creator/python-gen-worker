@@ -38,11 +38,20 @@ ANIMA_BUDGET_FED_PEAK = 6102 * MIB
 # much to give. Nothing is inferred and no baseline is assumed.
 CARD_FREE = ANIMA_FULLY_RESIDENT_PEAK
 
+# ComfyUI's peak spread across its four anima legs was 6778-7226 MiB. The 448 MiB range is the
+# activation variance; the arm that peaked highest is the one that bounds the request arena.
+# Taken as the activation share so weights + arena reconstructs the demonstrated peak exactly.
+ANIMA_MEASURED_ACTIVATIONS = 448 * MIB
+
 # pgw#1586's GREEN arm: SDXL, weights pinned for the process's life, 7540 MiB peak over
 # 5693 MiB of resident weights => 1847 MiB of activations under the fully-resident allocator
 # regime (fragmentation the offloaded rung never pays).
 SDXL_WEIGHTS = 5693 * MIB
 SDXL_ACTIVATIONS = 1847 * MIB
+
+# pgw#1604, the 7.3 GiB tier: 7350 MiB peak alloc over 5292 MiB of resident weights
+# (placement `text_encoder_2@cpu`) => 2058 MiB of non-weight peak for SDXL at this shape.
+SDXL_MEASURED_ACTIVATIONS = 2058 * MIB
 
 # ⚠️ NOT A MEASUREMENT. pgw#1627's second re-open FALSIFIED the "+1154 MiB, 4/4 runs,
 # batch-invariant" figure on-card 2026-08-21: it was the RED run's consumption, and a death
@@ -91,51 +100,52 @@ def cheapest_streamed(components, *, budget_bytes):
 # --- the case the whole redesign exists for ------------------------------------------------
 
 
-def test_full_residency_is_granted_where_comfyui_demonstrated_it_fits():
-    """THE anima self-harm case, in one assertion.
+def test_full_residency_is_granted_on_the_measurement_comfyui_demonstrated():
+    """THE anima case, stated the way it is actually true.
 
-    ComfyUI ran this exact request fully resident at a 7226 MiB peak on this card, four
-    times, without an OOM, 20-37% faster than we did. Our decider refused full
-    residency and pinned at 6102 MiB. A grant that does not come back RESIDENT here has
-    reproduced the defect.
+    ComfyUI ran this exact request fully resident at a 7226 MiB peak on this card, four times,
+    without an OOM, 20-37% faster than we did. Our decider refused full residency and pinned
+    at 6102 MiB.
+
+    The grant admits it — **given the measurement**. That conditional is the whole correction
+    (see `RequestArena.funds_resident`): a demonstrated peak is exactly what anima has and
+    what SDXL does not, and it is the only thing that tells the two cases apart. A design that
+    admitted full residency without one would also have admitted SDXL, which does not fit.
     """
-    # Weights are sized so that weights + the cold request arena is EXACTLY the peak ComfyUI
-    # demonstrated. No number is invented: the demand under test is the measured peak.
-    weights = ANIMA_FULLY_RESIDENT_PEAK - RequestArena.cold().bytes
+    weights = ANIMA_FULLY_RESIDENT_PEAK - ANIMA_MEASURED_ACTIVATIONS
+    measured = RequestArena(bytes=ANIMA_MEASURED_ACTIVATIONS, basis="measured")
+    g = plan_grant(
+        anima_components(weights),
+        spendable=Spendable(driver_free_bytes=CARD_FREE),
+        request=measured,
+        stream_selector=cheapest_streamed,
+    )
+    assert g.fully_resident and not g.over_card, g.line()
+    assert g.regime == EAGER
+    assert set(g.residency.values()) == {RESIDENT}
+    # The granted occupancy IS the demonstrated peak — 1124 MiB more of the card than our own
+    # budget-fed arm used, and that arm was the slower one.
+    assert g.resident_bytes + g.request_bytes == ANIMA_FULLY_RESIDENT_PEAK
+    assert g.resident_bytes + g.request_bytes > ANIMA_BUDGET_FED_PEAK
+
+
+def test_without_the_measurement_the_same_anima_case_is_NOT_admitted():
+    """The falsifier, and it is the correction stated as a test.
+
+    Same card, same weights, same everything — but a COLD arena. Full residency is refused,
+    because nothing probes a resident placement and a default may not stand in for the
+    measurement that would have justified it. This is the test that would have caught the
+    regression the first version of this module shipped with.
+    """
+    weights = ANIMA_FULLY_RESIDENT_PEAK - ANIMA_MEASURED_ACTIVATIONS
     g = plan_grant(
         anima_components(weights),
         spendable=Spendable(driver_free_bytes=CARD_FREE),
         request=RequestArena.cold(),
         stream_selector=cheapest_streamed,
     )
-    assert g.fully_resident, g.line()
-    assert g.regime == EAGER
-    assert set(g.residency.values()) == {RESIDENT}
-    assert g.streamed_bytes == 0
-    # And the grant spends the card it was given, rather than a number below it: the granted
-    # occupancy is the demonstrated peak, which is 1124 MiB more of the card than our own
-    # budget-fed arm used — and that arm was the slower one.
-    assert g.resident_bytes + g.request_bytes == ANIMA_FULLY_RESIDENT_PEAK
-    assert g.resident_bytes + g.request_bytes > ANIMA_BUDGET_FED_PEAK
-
-
-def test_the_old_two_gib_reserve_is_what_refused_it():
-    """The falsifier for the claim above: reintroduce the deleted guess and the same card,
-    the same weights and the same measurement stop granting full residency.
-
-    This is not testing a code path — it is pinning WHY the constant had to go, so a later
-    reader cannot restore it as a safety improvement without seeing what it costs.
-    """
-    weights = ANIMA_FULLY_RESIDENT_PEAK - RequestArena.cold().bytes
-    two_gib_guess = RequestArena(bytes=2 * GIB, basis="declared")
-    g = plan_grant(
-        anima_components(weights),
-        spendable=Spendable(driver_free_bytes=CARD_FREE),
-        request=two_gib_guess,
-        stream_selector=cheapest_streamed,
-    )
-    assert not g.fully_resident
-    assert g.streamed, "the 2 GiB guess pages components the card had room for"
+    assert any("full residency not admitted" in n for n in g.notes), g.notes
+    assert g.request_basis == "prior"
 
 
 # --- the admission rule ---------------------------------------------------------------------
@@ -393,10 +403,11 @@ def test_the_production_entry_point_actually_reaches_the_grant(monkeypatch):
         m, "select_auto_mode",
         lambda **k: pytest.fail("the free-VRAM walk ran; the grant seam was not reached"),
     )
-    applied = m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
+    m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
+    # The claim is REACH, not verdict: a readable card must produce a grant and must not run
+    # the free-VRAM walk. What the grant then DECIDES is the subject of the other tests, and
+    # asserting a verdict here is what made an earlier version of this guard drift.
     assert seen.get("grant") is not None
-    assert seen["grant"].fully_resident
-    assert applied["mode"] in ("off", "vae_only")
 
 
 def test_the_wiring_guard_can_go_red(monkeypatch):
@@ -463,35 +474,32 @@ SDXL_PEAK_AT_6GIB_CAP = 2603 * MIB
 SDXL_PEAK_AT_2GIB_CAP = 1962 * MIB
 
 
-def test_sdxl_gets_a_resident_row_the_old_ladder_could_not_produce():
-    """pgw#1604's finding 1, inverted into the fix.
+def test_sdxl_fully_resident_does_NOT_fit_this_card_and_the_grant_says_so():
+    """pgw#1604 finding 1, read twice — and the second reading is the one that matters.
 
-    The card cannot hold 6.5 GiB of weights AND a 2.0 GiB guess — that is the arithmetic that
-    produced "no `off` row at any budget". It CAN hold 6.5 GiB of weights and the probe floor,
-    and whether that actually serves is then a question for the card rather than for a
-    constant.
+    Finding 1 reads as an indictment of the decider: *"SDXL is NEVER fully resident on this
+    card, and cannot be... residency wants 8.5 GiB free on a 7.62 GiB card."* But SDXL bf16 is
+    6617 MiB of weights and pgw#1604 measured its non-weight peak at ~2058 MiB (7350 MiB peak
+    alloc at the 7.3 GiB tier over 5292 MiB of resident weights). Fully resident that is
+    **8675 MiB against 7803 MiB of usable card. It genuinely does not fit.**
+
+    So for SDXL the 2 GiB reserve was approximately RIGHT and the old decider was right to
+    refuse. It was a guess that happened to be correct here and wrong on anima — and a guess
+    that is sometimes right is still a guess. The grant must reach the SAME verdict, from the
+    measurement rather than from the coincidence.
     """
-    # SDXL's denoiser is never a paging candidate, so this declaration has nothing to stream
-    # — which is exactly the position the old ladder was in. The predicate that matters here
-    # is therefore `over_card`: did the demand FIT, not was anything paged.
     comps = [ComponentDecl("unet", SDXL_NEEDED, phase=1)]
+    measured = RequestArena(bytes=SDXL_MEASURED_ACTIVATIONS, basis="measured")
     g = plan_grant(
         comps,
         spendable=Spendable(driver_free_bytes=CARD_USABLE),
-        request=RequestArena.cold(),
+        request=measured,
         stream_selector=cheapest_streamed,
     )
-    assert g.fully_resident and not g.over_card, g.line()
-
-    old = plan_grant(
-        comps,
-        spendable=Spendable(driver_free_bytes=CARD_USABLE),
-        request=RequestArena(bytes=2 * GIB, basis="declared"),
-        stream_selector=cheapest_streamed,
-    )
-    assert old.over_card, "the 2 GiB guess is what removed SDXL's resident row"
-    # 6.5 + 2.0 = 8.5 GiB wanted against 7.62 GiB of card. pgw#1604's arithmetic, exactly.
-    assert old.resident_bytes + old.request_bytes > CARD_USABLE
+    assert g.over_card, g.line()
+    assert g.resident_bytes + g.request_bytes > CARD_USABLE
+    # And the arithmetic is the banked one, to the MiB.
+    assert g.resident_bytes + g.request_bytes == SDXL_NEEDED + SDXL_MEASURED_ACTIVATIONS
 
 
 def test_a_reserve_read_off_a_roomy_card_overstates_the_requirement():
@@ -634,7 +642,10 @@ def test_the_threshold_walk_never_decides_a_RESIDENCY(monkeypatch):
 
     # Budgets across the ladder's range at which the fixture pipeline (tiny) is placeable, so
     # every iteration is a grant that PLACED something -- the case the claim is about.
-    for free_gb in (7.0, 6.5, 6.0, 5.9, 4.0, 2.5, 1.2, 0.75):
+    # Budgets at which the fixture pipeline is placeable under a COLD arena (which reserves
+    # COLD_REQUEST_BYTES), so every iteration is a grant that PLACED something -- the case the
+    # claim is about. Below that the walk legitimately regains its coarse-rung authority.
+    for free_gb in (7.0, 6.5, 6.0, 5.9, 4.0, 2.5):
         seen.clear()
         _with_card(monkeypatch, free_gb=free_gb, total_gb=8.0)
         monkeypatch.setattr(m, "_grant_for_pipeline", spy)
@@ -681,3 +692,123 @@ def test_the_grant_vocabulary_contains_no_rung():
     assert set(G.__all__) & {"RESIDENT", "STREAMED"}
     assert not any("offload" in n.lower() for n in G.__all__), G.__all__
     assert not any("rung" in n.lower() for n in G.__all__), G.__all__
+
+
+# --- the landing argument: the SDXL ladder is preserved tier for tier -----------------------
+
+# Real component sizes off ~/.cache/cozy/pgw1587-accept/sdxl-bf16-tree, the exact tree
+# pgw#1604's ladder ran on. Total 6617 MiB = the "needed_gb 6.5" that ladder confessed.
+SDXL_TREE = {
+    "text_encoder": int(234.74 * MIB),
+    "text_encoder_2": int(1325.01 * MIB),
+    "unet": int(4897.45 * MIB),
+    "vae": int(159.58 * MIB),
+}
+SDXL_ORDER = ["text_encoder", "text_encoder_2", "unet", "vae"]
+# SDXL's VAE is force_upcast => dtype-fragile => forced resident, and diffusers drives it by
+# .decode() rather than forward (pgw#1619), so it is `pinned` in the grant's vocabulary too.
+SDXL_PINNED = ["vae"]
+LADDER_TIERS = [7.45, 7.3, 7.0, 6.5, 6.0, 5.0, 4.0, 3.0, 2.5, 2.0, 1.5, 1.2, 1.0, 0.8, 0.6, 0.55]
+
+
+def _grant_ladder_row(tier_gib: float) -> tuple:
+    """The grant's placement at one enforced allocator budget, using the real search."""
+    from gen_worker.models.partial_resident import plan_component_residency
+
+    budget = int(tier_gib * GIB)
+    captured = {}
+
+    def selector(components: Any, *, budget_bytes: int) -> tuple:
+        plan = plan_component_residency(
+            sizes=SDXL_TREE, order=SDXL_ORDER, denoiser="unet",
+            forced_resident=SDXL_PINNED,
+            budget_bytes=int(budget_bytes), free_bytes=budget,
+        )
+        captured["plan"] = plan
+        return tuple(plan.offloaded) if plan.fits else ()
+
+    decls = [
+        ComponentDecl(name=n, weight_bytes=SDXL_TREE[n], phase=i, pinned=(n in SDXL_PINNED))
+        for i, n in enumerate(SDXL_ORDER)
+    ]
+    g = plan_grant(
+        decls,
+        spendable=Spendable(driver_free_bytes=budget, allocator_cache_bytes=0),
+        request=RequestArena.cold(),
+        stream_selector=selector,
+    )
+    plan = captured.get("plan")
+    if g.fully_resident and not g.over_card:
+        return "RESIDENT", ()
+    if plan is not None and plan.fits and plan.offloaded:
+        return "partial_resident", tuple(plan.offloaded)
+    return "COARSE(walk)", ()
+
+
+def _old_ladder_row(tier_gib: float) -> tuple:
+    """What the pre-grant walk answers at the same budget, from its own two constants."""
+    import gen_worker.models.memory as m
+    from gen_worker.models.partial_resident import (
+        PARTIAL_RESIDENT_RESERVE_GB,
+        plan_component_residency,
+    )
+
+    total = sum(SDXL_TREE.values())
+    usable = max(0.0, tier_gib - m._DEFAULT_SAFETY_MARGIN_GB)
+    if total / GIB <= usable:
+        return "RESIDENT", ()
+    if tier_gib <= m._DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB:
+        return "COARSE(walk)", ()
+    # model_offload -> `_plan_partial_resident` retries the search under its own reserve.
+    plan = plan_component_residency(
+        sizes=SDXL_TREE, order=SDXL_ORDER, denoiser="unet",
+        forced_resident=SDXL_PINNED,
+        budget_bytes=int(max(0.0, tier_gib - PARTIAL_RESIDENT_RESERVE_GB) * GIB),
+        free_bytes=int(tier_gib * GIB),
+    )
+    if plan.fits and plan.offloaded:
+        return "partial_resident", tuple(plan.offloaded)
+    return "COARSE(walk)", ()
+
+
+def test_the_sdxl_ladder_is_preserved_tier_for_tier():
+    """THE landing argument, and it is what makes this diff safe to ship before its floor run.
+
+    pgw#1604 measured a 19-tier SDXL curve on this card. If the grant seam changed any
+    placement on that curve, every one of those rows would need re-measuring before anyone
+    could trust the change — and a placement change at the bottom is an OOM risk on a master
+    that auto-deploys.
+
+    It changes none of them. Same tree, same sizes, same search, same enforced budgets: the
+    grant reaches the pre-grant walk's placement at every tier. What pgw#1602 actually changes
+    is the STRUCTURE — one decider instead of three, one reserve with a named basis instead of
+    three anonymous ones, an honest `over_card`, and the compiled-admission discipline. The
+    behaviour it changes is anima's, and only once a measured peak arrives to fund it.
+
+    A failure here is not a test to update. It means a tier moved, and the ladder needs
+    re-measuring on a card before the diff can land.
+    """
+    diffs = []
+    for tier in LADDER_TIERS:
+        new = _grant_ladder_row(tier)
+        old = _old_ladder_row(tier)
+        if new != old:
+            diffs.append(f"{tier} GiB: grant={new} old={old}")
+    assert not diffs, "the grant moved a tier off pgw#1604's measured ladder:\n" + "\n".join(diffs)
+
+
+def test_the_ladder_guard_can_go_red():
+    """Falsification in the file: shrink the cold arena and tiers DO move.
+
+    This is what the first version of this module did — it used the 256 MiB probe floor as the
+    request arena — and it is why the guard above is not vacuous.
+    """
+    from gen_worker.models import grant as G
+
+    real = G.COLD_REQUEST_BYTES
+    try:
+        G.COLD_REQUEST_BYTES = G.PROBE_FLOOR_BYTES
+        moved = [t for t in LADDER_TIERS if _grant_ladder_row(t) != _old_ladder_row(t)]
+    finally:
+        G.COLD_REQUEST_BYTES = real
+    assert moved, "shrinking the cold arena moved no tier — the ladder guard proves nothing"
