@@ -615,12 +615,18 @@ def test_the_probe_counts_the_reusable_allocator_pool_as_available():
 # pgw#1627 — the headroom split: allocator cache is EAGER-ONLY money
 # --------------------------------------------------------------------------
 
-# The 8 GiB death, as measured (arm-static-c51ba51f/up.log): driver_free at the
-# compiled first call, the dead cache parking stranded in the allocator, and
-# AOTI's out-of-allocator first-call demand (sdxl sm_89, 4/4, batch-invariant).
+# The 8 GiB death, as measured (arm-static-c51ba51f/up.log): driver_free at
+# the compiled first call and the dead cache parking stranded in the allocator.
 _DEATH_FREE = int(1.18 * _GIB)
 _DEATH_CACHE = int(1.02 * _GIB)
-_AOTI_DEMAND = int(1.15 * _GIB)
+# A HYPOTHETICAL stamp value exercising the predicate's arithmetic — NOT a
+# measured demand. The on-card discriminator FALSIFIED the original
+# "+1154 MiB demand" reading of the death log: with 1326 MiB more freed the
+# first call consumed ~2474 of 2506 available and died identically, so a death
+# only ever reports the free memory it consumed (greedy or weight-scaled). The
+# real sdxl sm_89 demand is UNKNOWN (> 2501 MiB) and a stamp may only come
+# from a SUCCESSFUL run (pgw#1601).
+_HYPOTHETICAL_STAMP = int(1.15 * _GIB)
 
 
 def test_the_death_shape_numbers_refuse_compiled_and_admit_eager():
@@ -633,7 +639,7 @@ def test_the_death_shape_numbers_refuse_compiled_and_admit_eager():
 
     ok, basis = headroom_admits(
         regime="compiled", free_bytes=_DEATH_FREE, cache_bytes=_DEATH_CACHE,
-        demand_bytes=_AOTI_DEMAND,
+        demand_bytes=_HYPOTHETICAL_STAMP,
     )
     assert not ok, (
         "the compiled predicate admitted the death shape — 1.18 GiB of "
@@ -653,23 +659,30 @@ def test_the_death_shape_numbers_refuse_compiled_and_admit_eager():
     assert basis == "free+cache"
 
 
-def test_post_release_driver_free_admits_compiled():
-    """The other half of the fix: `release_cached_vram()` hands the parked
-    cache back to the driver, and THEN the same card admits the compiled
-    call. 4782 weights + 371 ctx + 1154 AOTI pool + 450 activations = 6757 of
-    7808 MiB — fits with ~1 GiB spare, which is what the on-card TEST 1
-    validates against this predicate."""
+def test_post_release_driver_free_admits_compiled_when_a_stamp_fits():
+    """Predicate arithmetic only: once `release_cached_vram()` returns the
+    parked cache to the driver, driver_free covering stamp+floor ADMITS.
+    (The on-card run showed the REAL sm_89 first call takes more than even
+    post-release free on this card — >2501 MiB — so with a real stamp the
+    same card correctly REFUSES: 8 GiB is a measured NO for compiled SDXL
+    UNet-only. A split that refused a fitting stamp would be a cliff.)"""
     from gen_worker.models.partial_resident import headroom_admits
 
     ok, basis = headroom_admits(
         regime="compiled", free_bytes=_DEATH_FREE + _DEATH_CACHE,
-        cache_bytes=0, demand_bytes=_AOTI_DEMAND,
+        cache_bytes=0, demand_bytes=_HYPOTHETICAL_STAMP,
     )
     assert ok, (
-        "post-release driver_free (2.20 GiB) covers demand+floor (1.40 GiB) "
+        "post-release driver_free (2.20 GiB) covers stamp+floor (1.40 GiB) "
         "and must admit — a split that refuses this is a cliff, not a guard"
     )
     assert basis == "driver_free"
+    # And a stamp at the on-card LOWER BOUND refuses this card outright.
+    ok, _ = headroom_admits(
+        regime="compiled", free_bytes=_DEATH_FREE + _DEATH_CACHE,
+        cache_bytes=0, demand_bytes=int(2.45 * _GIB),
+    )
+    assert not ok, "a >2.4 GiB stamp must refuse 2.20 GiB of driver_free"
 
 
 def test_probe_plan_itself_refuses_a_compiled_leg_the_cache_would_admit():
@@ -690,7 +703,7 @@ def test_probe_plan_itself_refuses_a_compiled_leg_the_cache_would_admit():
     try:
         ok, reported, basis = pr.probe_plan(
             parked, free_bytes_now=lambda: _DEATH_FREE,
-            regime="compiled", demand_bytes=_AOTI_DEMAND,
+            regime="compiled", demand_bytes=_HYPOTHETICAL_STAMP,
         )
         eager_ok, _, _ = pr.probe_plan(
             parked, free_bytes_now=lambda: _DEATH_FREE,
@@ -753,12 +766,12 @@ def test_a_compiled_load_refuses_the_death_shape_THROUGH_the_production_path():
     demands the driver_free basis AND the refusal."""
     armed, facts = _admit_through_production_path(
         regime="compiled", free_bytes=_DEATH_FREE, cache_bytes=_DEATH_CACHE,
-        demand_bytes=_AOTI_DEMAND)
+        demand_bytes=_HYPOTHETICAL_STAMP)
     assert facts.get("headroom_basis") == "driver_free", (
         "a compiled load's probe still confesses the eager basis — the "
         "regime never reached the predicate (the dead-plumbing finding)"
     )
-    assert facts.get("headroom_demand_bytes") == _AOTI_DEMAND, (
+    assert facts.get("headroom_demand_bytes") == _HYPOTHETICAL_STAMP, (
         "the demand the admit was checked against must be in the confession, "
         "or demand=0 inertness is indistinguishable from a real guard"
     )
@@ -828,16 +841,24 @@ class _FakeDispatcher:
         return self.eager_forward(*args, **kwargs)
 
 
-def _seam_events(adopt: bool) -> List[str]:
+def _seam_events(adopt: bool, guard: bool = False) -> List[str]:
     """Arm the rung, THEN (optionally) adopt, then serve one request —
     recording park / release / compiled-call order.
 
     The adopt-AFTER-hook-install ordering is the death log's own
     (residency confession before `adopt: … armed`), and it is load-bearing:
     a gate evaluated at hook-install time reads "not compiled" forever and
-    this test's `released` event never appears."""
+    this test's `released` event never appears.
+
+    ``guard=True`` is THE PRODUCTION SHAPE: `host.py` runs
+    `adapter_guard.install()` after adopt on the same module, which rebinds
+    `module.forward` to its `guarded` closure. The first gate duck-typed
+    `forward.armed_graphs` directly and was proven INERT on-card against
+    exactly this shape (red_stub_calls=0 with 2 graphs armed) — a seam test
+    that arms a dispatcher without the guard stays green forever."""
     import gen_worker.models.memory as m
     import gen_worker.models.partial_resident as pr
+    import gen_worker.serving.adapter_guard as ag
 
     events: List[str] = []
     pipe = _pipeline()
@@ -846,6 +867,12 @@ def _seam_events(adopt: bool) -> List[str]:
 
     if adopt:
         pipe.unet.forward = _FakeDispatcher(pipe.unet, events)
+        if guard:
+            assert ag.install(pipe.unet), (
+                "the adapter guard refused the fake dispatcher — the fixture "
+                "no longer matches dispatcher_of's duck-type and this test "
+                "is not exercising the production forward shape"
+            )
 
     real_park = pr.ParkedComponent.park
     real_release = m.release_cached_vram
@@ -869,19 +896,39 @@ def _seam_events(adopt: bool) -> List[str]:
     return events
 
 
-def test_the_seam_releases_the_cache_between_park_and_the_compiled_call():
-    """Acceptance (b): parked → released → first compiled call, in that
-    order. The dispatcher is installed AFTER the hooks (adopt runs after the
-    rung arms, per the death log), so a release gated at install time — the
-    pgw#1587 wrong-moment shape — fails here by never firing."""
-    events = _seam_events(adopt=True)
+def test_the_seam_releases_the_cache_THROUGH_the_adapter_guard():
+    """THE PRODUCTION SHAPE, and the red test the first two PRs lacked:
+    dispatcher adopted, then `adapter_guard.install()` rebinds forward to its
+    guard closure — the gate must see the dispatcher THROUGH the wrapper
+    (via adapter_guard's own accessor) or it is inert on every compiled
+    endpoint, which is exactly what the on-card run measured against
+    790d0290. Order: parked → released → first compiled call."""
+    events = _seam_events(adopt=True, guard=True)
     assert "parked" in events, "the seam never parked — the instrument is blind"
     assert "released" in events, (
-        "the park→compiled seam never released the allocator cache; either "
-        "the gate was read at install time (before adopt) or it does not "
-        "recognise an armed dispatcher"
+        "the park→compiled seam never released the allocator cache WITH THE "
+        "ADAPTER GUARD INSTALLED — the gate is reading module.forward "
+        "directly instead of asking adapter_guard.dispatcher_of/armed_graphs "
+        "(the third gate-keyed-on-a-wrapped-signal instance)"
     )
     assert "compiled_call" in events
+    assert events.index("parked") < events.index("released") < events.index(
+        "compiled_call"
+    ), f"wrong order at the seam: {events}"
+
+
+def test_the_seam_releases_for_a_bare_dispatcher_too():
+    """The pre-guard shape (local runs, any host that skips the guard): a
+    dispatcher fronting forward directly must also release. The dispatcher
+    is installed AFTER the hooks (adopt runs after the rung arms, per the
+    death log), so a release gated at install time — the pgw#1587
+    wrong-moment shape — fails here by never firing."""
+    events = _seam_events(adopt=True, guard=False)
+    assert "parked" in events
+    assert "released" in events, (
+        "the seam released only through the guard wrapper — a bare armed "
+        "dispatcher must gate the release too"
+    )
     assert events.index("parked") < events.index("released") < events.index(
         "compiled_call"
     ), f"wrong order at the seam: {events}"
@@ -950,6 +997,9 @@ def test_the_seam_gate_reads_the_DENOISER_not_whichever_module_holds_the_hook():
     assert armed
 
     pipe.unet.forward = _FakeDispatcher(pipe.unet, events)
+    import gen_worker.serving.adapter_guard as ag
+
+    assert ag.install(pipe.unet)  # production shape: guard over the dispatcher
     real_release = m.release_cached_vram
     m.release_cached_vram = lambda: events.append("released")
     try:

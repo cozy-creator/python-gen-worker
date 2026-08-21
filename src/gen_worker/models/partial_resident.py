@@ -659,18 +659,25 @@ def headroom_admits(
       counting it is right (pgw#1586: the bug that term fixed was a SPURIOUS
       REFUSAL, and past the probe the failure mode is retries-and-serve).
     * ``compiled`` — the budget is ``driver_free`` ONLY, against
-      ``demand + floor``. AOTI's first-call pool (+1154 MiB measured on sdxl
-      sm_89, 4/4 runs, batch-invariant) allocates OUTSIDE the torch allocator
-      and cannot spend the cache. Counting cache here is the arithmetic that
-      killed every 8 GiB compiled-SDXL leg: admitted on ``free+cache`` =
-      2.2 GiB against a real budget of ``driver_free`` = 1.18 GiB, process
-      death at step 0, no traceback — and a mid-graph OOM on the compiled
-      path is uncatchable (pgw#1255 leg 2), so admission is the ONLY safety.
+      ``demand + floor``. AOTI's first-call allocation lands OUTSIDE the
+      torch allocator and cannot spend the cache. Counting cache here is the
+      arithmetic that killed every 8 GiB compiled-SDXL leg: admitted on
+      ``free+cache`` = 2.2 GiB against a real budget of ``driver_free`` =
+      1.18 GiB, process death at step 0, no traceback — and a mid-graph OOM
+      on the compiled path is uncatchable (pgw#1255 leg 2), so admission is
+      the ONLY safety.
 
     ``demand_bytes`` is the compiled artifact's out-of-allocator first-call
     demand — pgw#1601's mint-time stamp once it lands; 0 until a caller has
-    one. The basis string goes on the confession line so a reader of the
-    admit can see WHICH budget the split used without the code in hand.
+    one. ⚠️ THE STAMP MUST COME FROM A *SUCCESSFUL* RUN, NEVER A DEATH
+    TRACE: the on-card discriminator falsified the first "+1154 MiB" figure
+    — with 1326 MiB more freed, the first call consumed ~2474 of 2506
+    available and died identically, i.e. a death only ever reports the free
+    memory it consumed (greedy or weight-scaled allocation), so no death
+    yields a demand. sdxl sm_89's demand is UNKNOWN, lower-bounded
+    > 2501 MiB, and 8 GiB is a MEASURED NO for compiled SDXL UNet-only.
+    The basis string goes on the confession line so a reader of the admit
+    can see WHICH budget the split used without the code in hand.
     """
     if regime == "compiled":
         ok = int(free_bytes) >= int(demand_bytes) + int(floor_bytes)
@@ -751,20 +758,32 @@ def probe_plan(
 def compiled_dispatch_armed(module: Any) -> bool:
     """Is ``module``'s next forward a COMPILED call? (pgw#1627)
 
-    torchcg's adopt path installs its dispatcher as an INSTANCE attribute —
-    ``module.forward = dispatcher`` (adopt.py) — which is why the read goes
-    through ``__dict__`` rather than ``getattr``: a bare class ``forward``
-    means no dispatcher was ever installed. Duck-typed on the dispatcher's
-    ``armed_graphs()`` (its own arming signal) instead of an isinstance
-    against the vendored class, so a torchcg the release env pins itself
-    still answers. An armed dispatcher can still fall through to eager on a
-    shape miss, so this can over-release — one spare ``empty_cache`` — but
-    never under-protect the compiled call.
+    Answered by ``serving.adapter_guard.armed_graphs`` — the ONE accessor
+    that sees the dispatcher THROUGH whatever currently fronts
+    ``module.forward`` — and deliberately not by reading ``forward``
+    ourselves. The first version of this gate duck-typed
+    ``__dict__["forward"].armed_graphs`` directly, and the on-card run
+    proved it inert on every production compiled endpoint:
+    ``adapter_guard.install()`` runs AFTER adopt on the same module and
+    rebinds ``module.forward`` to its ``guarded`` closure, so the read
+    found the guard, not the dispatcher, and answered False with 2 graphs
+    armed (receipt: red_stub_calls=0, fwd_module=…adapter_guard,
+    submodules_with_dispatcher=0). Third instance of the same defect class
+    — a gate keyed on a WRAPPED signal instead of the signal's own accessor
+    (pgw#1587's rung token, the install-time gate the first #1627 test
+    caught, now the guard wrapper) — and ``dispatcher_of``'s docstring had
+    already named the rule: anything asking "is this module routing through
+    its dispatcher" must ask THERE, so a new wrapper is one change, not one
+    per reader.
+
+    An armed dispatcher can still fall through to eager on a shape miss (or
+    the guard can route eager for a live adapter), so this can over-release
+    — one spare ``empty_cache`` — but never under-protect the compiled call.
     """
     try:
-        fwd = getattr(module, "__dict__", {}).get("forward")
-        armed = getattr(fwd, "armed_graphs", None)
-        return bool(callable(armed) and armed())
+        from ..serving.adapter_guard import armed_graphs
+
+        return bool(armed_graphs(module))
     except Exception:  # noqa: BLE001 — a gate that raises would cost the request
         return False
 
