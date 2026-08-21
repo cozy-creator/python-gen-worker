@@ -444,6 +444,10 @@ def resolve_lane(
 
     # Pass one: the first candidate that clears floor, gate and bytes.
     derivable: list[_Candidate] = []
+    #: Cleared the card's floor AND the host's kernel gate — i.e. lanes this
+    #: machine could actually RUN if the bytes existed. Tracked separately
+    #: from `derivable` because a conversion must target a runnable lane.
+    runnable: list[_Candidate] = []
     winner: Optional[_Candidate] = None
     for cand in ranked:
         contract_id = str(getattr(cand.declared, "contract_id", "") or "")
@@ -469,6 +473,7 @@ def resolve_lane(
                 reason=REJECT_KERNEL_UNQUALIFIED, detail=detail,
             ))
             continue
+        runnable.append(cand)
         verdict = verdicts.verdict(contract_id)
         if verdict == VERDICT_SATISFIES:
             if winner is None:
@@ -506,7 +511,15 @@ def resolve_lane(
 
     # Nothing had bytes. Resolve to the best rung that CLEARS THE CARD and ask
     # for the conversion that would fill it. Degrade, never refuse.
-    target = derivable[0] if derivable else ranked[0]
+    # Convert TOWARDS a lane this card can run. `derivable` is already
+    # floor-and-gate-cleared, so it is the first choice; `runnable` catches the
+    # case where nothing was even derivable but some rung would work given
+    # bytes. Falling straight to `ranked[0]` — as the first version did —
+    # could ask for a conversion to a lane the card is floored out of, which
+    # spends money to arrive back at the same refusal.
+    target = (derivable[0] if derivable
+              else runnable[0] if runnable
+              else ranked[0])
     source = _conversion_source(ranked, verdicts)
     ask = ConversionAsk(
         from_contract=source,

@@ -291,6 +291,30 @@ def test_no_bytes_for_any_lane_yields_a_priced_conversion_never_a_refusal():
     assert "conversion=" in resolved.confession()
 
 
+def test_the_conversion_targets_a_lane_THIS_CARD_CAN_RUN():
+    """Nothing staged, and the card is floored out of fp8 and nvfp4. The ask
+    must name bf16 — converting towards a lane this card cannot run spends
+    money to arrive back at the same refusal."""
+    resolved = L.resolve_lane(
+        declared=ALL_THREE, card=AMPERE, verdicts=Verdicts(), gates=Gates(),
+    )
+    assert resolved.conversion is not None
+    assert resolved.conversion.to_contract == BF16.contract_id
+    assert resolved.body == "bf16-w16a16"
+
+
+def test_the_conversion_prefers_a_DERIVABLE_target_over_a_merely_runnable_one():
+    """On Ada both fp8 and bf16 are runnable. If the bind gate says the fp8
+    lane is derivable from what is on disk, that is the cheaper truth and the
+    ask should name it rather than the baseline."""
+    resolved = L.resolve_lane(
+        declared=ALL_THREE, card=ADA,
+        verdicts=Verdicts(derivable=[FP8.contract_id]), gates=Gates(),
+    )
+    assert resolved.conversion is not None
+    assert resolved.conversion.to_contract == FP8.contract_id
+
+
 def test_an_incompatible_lane_is_distinguished_from_an_absent_one():
     """tensorfs#123's tri-state is a tri-state here too: 'this checkpoint can
     never satisfy the lane' and 'nobody staged it' are different operator
