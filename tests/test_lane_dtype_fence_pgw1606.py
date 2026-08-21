@@ -38,24 +38,27 @@ FRAGMENTS = frozenset({
     "sdxl.clip-g-split-qkv",
 })
 
-#: Non-safetensors packagings whose dtype is carried in the container, not the
-#: contract (a GGUF quant type is per-tensor by construction).
-CONTAINER_TYPED = ("gguf",)
-
-#: Serve lanes KNOWINGLY vendored dtype-less, each against a named upstream
-#: issue. Same discipline as pgw#1599's `DTYPELESS_UPSTREAM_LANES`: a waiver is
-#: a fact about the vendored document, never a preference, so it cannot outlive
-#: its reason — `test_the_pending_dtype_waiver_deletes_itself` below FAILS the
-#: moment the document grows a dtype, and the entry must then be removed.
+#: ⛔ `CONTAINER_TYPED` and `PENDING_DTYPE` BOTH DELETED 2026-08-20 by
+#: tensorfs#130's follow-up (`51adc50`), and both deletions were FORCED by the
+#: tests below rather than remembered.
 #:
-#: `sdxl.diffusers-nvfp4-flat` — authored by tensorfs#130 with per-tensor
-#: `dtypes` and no top-level one. The coordinator sequenced pgw#1157 to merge
-#: AS IS (it unblocks nine other classes; nvfp4 was undeclarable either way)
-#: with the dtype fix riding a second mini-bump behind. This entry exists ONLY
-#: to keep that window from false-reddening a fence that is otherwise correct.
-#: It does NOT make the lane usable: pgw#1599 still refuses it at class
-#: definition and pgw#1606's ladder still answers `unknown_dtype`.
-PENDING_DTYPE = frozenset({"sdxl.diffusers-nvfp4-flat"})
+#: `PENDING_DTYPE` waived `sdxl.diffusers-nvfp4-flat` while it was dtype-less.
+#: The document now declares `float4_e2m1fn`, `test_the_pending_dtype_waiver_
+#: deletes_itself` went red naming the entry, and the entry is gone — which is
+#: the entire behaviour that waiver was built to have.
+#:
+#: `CONTAINER_TYPED` exempted GGUF on this lane's reasoning that a block-quant
+#: container "has no torch spelling and therefore no declarable dtype". **That
+#: reasoning was wrong**, and the tensorfs#130 lane priced it before diverging:
+#: dtype-less left `QwenMtpModel` UNDECLARABLE under the always-required
+#: `lanes=`, i.e. the same waiver-shaped failure this file exists to catch, one
+#: model over. The field never meant "a torch spelling" — it means THE LANE'S
+#: QUANTIZATION, which is why `sdxl.diffusers-fp8-rowwise@1` declares
+#: `float8_e4m3fn` over 257 declarations of which only 36 are fp8. `q4_k` is
+#: the ggml type name and is exactly as legitimate.
+#:
+#: There is now NO exemption of any kind here. If one is ever needed again it
+#: must arrive with a self-deleting test, as the last one did.
 
 _CONTRACTS = (
     Path(__file__).resolve().parents[1]
@@ -92,10 +95,7 @@ def test_every_serve_lane_declares_a_top_level_dtype() -> None:
     instead of in an endpoint author's class header, repeatedly."""
     missing = [
         name for name, doc in _documents()
-        if name not in FRAGMENTS
-        and name not in PENDING_DTYPE
-        and not any(tag in name for tag in CONTAINER_TYPED)
-        and doc.get("dtype") in (None, "")
+        if name not in FRAGMENTS and doc.get("dtype") in (None, "")
     ]
     assert not missing, (
         f"these vendored SERVE LANES declare no top-level `dtype`: {missing}. "
@@ -105,7 +105,9 @@ def test_every_serve_lane_declares_a_top_level_dtype() -> None:
         f"names the SERVE LANE'S QUANTIZATION, not a uniform tensor dtype — "
         f"`sdxl.diffusers-fp8-rowwise@1` is a mixed tree and declares "
         f"`float8_e4m3fn` anyway. If one of these is really a FRAGMENT, add it "
-        f"to FRAGMENTS above with the reason"
+        f"to FRAGMENTS above with the reason — and note that 'it is a "
+        f"block-quant container' is NOT a reason: `q4_k` is the ggml type name "
+        f"and names its lane's quantization exactly as `float8_e4m3fn` does"
     )
 
 
@@ -148,34 +150,68 @@ def test_the_quantized_lanes_derive_a_real_floor() -> None:
     assert all(f == 100 for f in four_bit.values()), four_bit
 
 
-def test_the_pending_dtype_waiver_deletes_itself() -> None:
-    """A waiver may not outlive its reason.
+def test_there_is_no_exemption_left_to_outlive_its_reason() -> None:
+    """Both exemptions this file once carried are gone, and neither was
+    removed because someone remembered.
 
-    pgw#1599 learned this the expensive way and wrote it down: it briefly held
-    `minimax.h3-dit-diffusers@1` while that document was dtype-less, tensorfs
-    gave it `bfloat16`, and the entry had to go. The mechanism that made that
-    automatic was a test exactly like this one. Without it a waiver becomes a
-    permanent exemption nobody re-reads, which is the same guard-goes-green-by
-    -construction shape this file exists to catch.
+    `PENDING_DTYPE` deleted itself: the test that watched it went red the hour
+    `sdxl.diffusers-nvfp4-flat` grew its dtype, named the entry, and the entry
+    was removed in the same change. `CONTAINER_TYPED` was deleted because its
+    premise was falsified upstream — a GGUF lane DOES declare its quantization.
+
+    This test is what is left of both: it asserts the module carries no
+    exemption set at all, so re-introducing one is a visible, deliberate act
+    rather than a name quietly added to a tuple nobody re-reads.
     """
-    # A waiver may be PRE-REGISTERED for a document that is not vendored yet:
-    # this one was written while pgw#1157 was still open, precisely so the
-    # sequenced window (bump merges as-is, dtype follows) does not false-red a
-    # fence that is otherwise correct. "Not present" is therefore legal and is
-    # NOT what this test guards.
-    #
-    # What it guards is the one state that must never persist: the document is
-    # here AND it has a dtype, so the waiver's reason is gone and the entry is
-    # now hiding a lane from `test_every_serve_lane_declares_a_top_level_dtype`.
-    fixed = sorted(
-        name for name, doc in _documents()
-        if name in PENDING_DTYPE and doc.get("dtype")
+    import tests.test_lane_dtype_fence_pgw1606 as mod
+
+    leftovers = [
+        name for name in ("PENDING_DTYPE", "CONTAINER_TYPED", "WAIVED", "SKIP")
+        if getattr(mod, name, None)
+    ]
+    assert not leftovers, (
+        f"this module grew an exemption set again: {leftovers}. That is "
+        f"allowed — but it must ship WITH a test that deletes it when its "
+        f"reason expires, the way PENDING_DTYPE did. An exemption that cannot "
+        f"expire is not a waiver, it is a permanent hole nobody re-reads"
     )
-    assert not fixed, (
-        f"upstream landed the top-level dtype for {fixed} — DELETE those "
-        f"entries from PENDING_DTYPE. The waiver's whole reason is gone, and "
-        f"`test_every_serve_lane_declares_a_top_level_dtype` should now be "
-        f"guarding these documents like every other serve lane"
+
+
+def test_a_floor_losing_spelling_is_refused_by_name_not_silently_priced() -> None:
+    """`torch.float4_e2m1fn_x2` EXISTS and `torch.float4_e2m1fn` does not, so
+    the wrong spelling is the one that looks right — and it resolves, and
+    `DTYPE_MIN_SM` does not know it, so the lane would silently lose its sm100
+    floor and be placed on Ampere.
+
+    The nvfp4 document asks in its own description not to be 'fixed' this way.
+    A comment cannot enforce that; this can. Note the choice: the spelling is
+    REFUSED rather than aliased to 100. Aliasing would also work, and would
+    make the wrong spelling spread.
+    """
+    from gen_worker.models.tensor_layout_contract import (
+        DTYPE_MIN_SM,
+        FLOOR_LOSING_SPELLINGS,
+        capability_floor_for_dtype,
+    )
+
+    assert "float4_e2m1fn_x2" in FLOOR_LOSING_SPELLINGS
+    # The trap is real: it prices at 0, which is Ampere-and-anything.
+    assert capability_floor_for_dtype("float4_e2m1fn_x2") == 0
+    assert "float4_e2m1fn_x2" not in DTYPE_MIN_SM, (
+        "aliasing the packed-pair spelling to 100 would hide the mistake "
+        "instead of refusing it, and would let the wrong spelling spread"
+    )
+    # ...and the spelling that must be used prices correctly.
+    assert capability_floor_for_dtype("float4_e2m1fn") == 100
+
+    offenders = sorted({
+        str(doc["dtype"]) for _, doc in _documents()
+        if str(doc.get("dtype") or "") in FLOOR_LOSING_SPELLINGS
+    })
+    assert not offenders, (
+        f"vendored documents declare FLOOR-LOSING spellings {offenders}: "
+        + "; ".join(f"{k} — {v}" for k, v in FLOOR_LOSING_SPELLINGS.items()
+                    if k in offenders)
     )
 
 
@@ -183,11 +219,10 @@ def test_the_pending_dtype_waiver_deletes_itself() -> None:
     not any(
         "nvfp4" in n and d.get("dtype") for n, d in _documents()
     ),
-    reason="sdxl.diffusers-nvfp4-flat@1 is not vendored WITH A DTYPE yet "
-           "(pgw#1157 merges as-is; the dtype rides a second mini-bump). When "
-           "it lands this runs and pins the floor the nvfp4 rung needs, and "
-           "`test_the_pending_dtype_waiver_deletes_itself` fails until the "
-           "waiver above is removed — so this cannot be forgotten",
+    reason="no nvfp4 document with a dtype is vendored (it landed in "
+           "tensorfs 51adc50; if this ever skips again, the document REGRESSED "
+           "and `test_every_serve_lane_declares_a_top_level_dtype` is the "
+           "test that will say so)",
 )
 def test_the_nvfp4_lane_is_declarable_and_floors_at_blackwell() -> None:
     """The re-proof this lane owes acceptance (a): once the real document is
