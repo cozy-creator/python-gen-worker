@@ -236,11 +236,17 @@ class ResidentEndpoint:
         self._booted_at = time.time()
 
     def _document(self, state: str) -> Dict[str, Any]:
+        from .. import settings_authority
+
         return {
             "protocol_version": PROTOCOL_VERSION,
             "gen_worker_version": gen_worker_version(),
             "state": state,
             "pid": os.getpid(),
+            # The SERVING process's own reading of the declared env — the
+            # allocator config a local floor/benchmark row was actually taken
+            # under, confessed rather than assumed (pgw#1640).
+            "declared_env": settings_authority.process_env_readback(),
             "endpoint_dir": str(self.spec.endpoint_dir),
             "module": self.booted.loaded.module_name,
             "socket": str(self.handle.socket_path),
@@ -464,8 +470,35 @@ def _send(conn: socket.socket, envelope: Dict[str, Any]) -> None:
     conn.sendall(line.encode("utf-8"))
 
 
+def seal_declared_env() -> Dict[str, str]:
+    """Refuse to serve on an allocator this platform did not declare, and CONFESS the one it got.
+
+    The pod (`python -m gen_worker.entrypoint`) has always imposed
+    `settings_authority.DECLARED_ENV`; `gen-worker up` did not, so the two front
+    doors ran different allocators and a tight-VRAM row that served on a pod
+    refused on the CLI (pgw#1639). The CLI package imposes it at import; this is
+    the read-back, taken from `os.environ` in the process that is about to
+    serve — the only place the answer is authoritative.
+    """
+    from .. import settings_authority
+
+    try:
+        settings_authority.verify_process_env()
+    except settings_authority.SettingsImpositionError as exc:
+        raise BootError(str(exc)) from exc
+    effective = settings_authority.process_env_readback()
+    sys.stderr.write(
+        "gen-worker up: declared env in effect — "
+        + " ".join(f"{k}={v}" for k, v in sorted(effective.items()))
+        + "\n"
+    )
+    sys.stderr.flush()
+    return effective
+
+
 def serve(spec: BootSpec, handle: EndpointHandle) -> int:
     """Boot and serve until SIGINT/SIGTERM."""
+    seal_declared_env()
     booted = boot(spec)
     resident = ResidentEndpoint(booted, spec, handle)
 
@@ -489,5 +522,6 @@ __all__ = [
     "Booted",
     "ResidentEndpoint",
     "boot",
+    "seal_declared_env",
     "serve",
 ]

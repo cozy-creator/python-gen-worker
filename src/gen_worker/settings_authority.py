@@ -99,6 +99,32 @@ def impose_process_env() -> None:
     os.environ.update(DECLARED_ENV)
 
 
+def process_env_diffs() -> List[str]:
+    """Where the LIVE ``os.environ`` disagrees with :data:`DECLARED_ENV` — read from the environment itself, never from a "did we call impose" flag, because the environment is what the allocator and every child process actually read."""
+    return [
+        f"{name}: declared {want!r} but this process has "
+        f"{os.environ.get(name)!r}"
+        for name, want in sorted(DECLARED_ENV.items())
+        if os.environ.get(name) != want
+    ]
+
+
+def verify_process_env() -> None:
+    """Fail-closed check that :data:`DECLARED_ENV` is in effect in THIS process."""
+    diffs = process_env_diffs()
+    if diffs:
+        raise SettingsImpositionError(
+            "declared process env is not in effect: " + "; ".join(diffs)
+            + " — impose it with settings_authority.impose_process_env() "
+            "BEFORE torch is imported (PYTORCH_CUDA_ALLOC_CONF is read once, "
+            "at CUDA allocator init, so a late imposition is a no-op)")
+
+
+def process_env_readback() -> Dict[str, str]:
+    """The live value of every declared env name (confession surface)."""
+    return {name: os.environ.get(name, "") for name in sorted(DECLARED_ENV)}
+
+
 def _interpreter_env_diffs() -> List[str]:
     diffs: List[str] = []
     want = DECLARED_ENV.get("PYTHONHASHSEED")
@@ -295,10 +321,13 @@ __all__ = [
     "impose_dynamo",
     "impose_process_env",
     "impose_torch",
+    "process_env_diffs",
+    "process_env_readback",
     "raise_dynamo_cache_limits",
     "read_in_fresh_thread",
     "set_compiler_cache_tag",
     "torch_readback",
     "validated_table",
     "verify_interpreter_env",
+    "verify_process_env",
 ]

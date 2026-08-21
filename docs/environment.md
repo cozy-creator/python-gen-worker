@@ -133,11 +133,17 @@ compile evidence.
 
 ## Internal plumbing (raw env)
 
-- `PYTORCH_CUDA_ALLOC_CONF` — `entrypoint.py` setdefaults it at import, but
-  `env_seal.scrub_env()` then DELETES every `PYTORCH*` var during
-  `establish()`, and `CANONICAL_CONFIG` does not re-impose it. Neither the
-  default nor an operator override survives to the allocator. Treat this as
-  vestigial, not as a knob.
+- `PYTORCH_CUDA_ALLOC_CONF` — **DECLARED, not a knob**:
+  `settings_authority.DECLARED_ENV` names it (`expandable_segments:True`) and
+  `impose_process_env()` writes it unconditionally, so an operator override
+  never survives — `env_seal.scrub_env()` erases every `PYTORCH*` var and
+  `establish()` re-imposes the declaration on the next line. Both front doors
+  impose it before torch: the pod at import of `entrypoint.py`, the CLI at
+  import of `gen_worker.cli` (pgw#1640 — the allocator reads this variable ONCE,
+  at CUDA init, so a late imposition is a silent no-op, and until pgw#1640 the
+  CLI imposed nothing at all: pgw#1639 measured a 0.55 GiB row serving in ~40 s
+  on a pod and refusing in ~6 s on the CLI). `gen-worker up` refuses to boot if the declared
+  env is not in effect and prints the effective values on its boot line.
 - `TORCHINDUCTOR_CACHE_DIR` / `TRITON_CACHE_DIR` — both READ and WRITTEN, and
   by more than one module: written by `compile_cache.py`, `entrypoint.py`
   (deliberately re-set after the env seal scrubs `TORCH*`),

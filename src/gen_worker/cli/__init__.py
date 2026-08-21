@@ -1,12 +1,16 @@
-"""gen-worker CLI — top-level argparse dispatcher."""
+"""gen-worker CLI — top-level argparse dispatcher. THE FIRST STATEMENT IS THE SETTINGS AUTHORITY, exactly as in `gen_worker/entrypoint.py`: this package is the OTHER front door (`gen-worker up` is what cozy-local and every local box boot), and `PYTORCH_CUDA_ALLOC_CONF` is read ONCE when the CUDA caching allocator initializes, so the declared env has to be in `os.environ` before anything that can reach torch is imported — a later imposition is a silent no-op (pgw#1640)."""
 
 from __future__ import annotations
 
-import argparse
-import sys
-from typing import List, Optional
+from ..settings_authority import impose_process_env  # noqa: E402
 
-from .. import config
+impose_process_env()
+
+import argparse  # noqa: E402
+import sys  # noqa: E402
+from typing import List, Optional  # noqa: E402
+
+from .. import config  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
