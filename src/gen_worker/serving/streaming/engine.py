@@ -257,6 +257,12 @@ class StreamingLoader:
             # no tie exists yet; the stream then rebinds the SOURCE parameter,
             # which is why the tie has to be (re-)made here, after the last
             # container and before the survivor check reads the module.
+            # pgw#1638: the quantizer's postprocess is the mirror half of
+            # the skeleton's swap and needs landed bytes, so it runs here —
+            # before the retie, which only re-points aliases.
+            quantization = built.quantized.get(component)
+            if quantization is not None:
+                _skeleton.finish_quantized(module, quantization)
             _skeleton.retie(module)
             survivors = _skeleton.meta_survivors(module)
             if survivors:
