@@ -33,8 +33,9 @@ number for an admission decision — see pgw#1600 acceptance (d) and
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import msgspec
 
@@ -49,6 +50,8 @@ __all__ = [
     "MiB",
     "RequestShape",
     "SHAPE_BOUNDS",
+    "Shape",
+    "ShapeDeclarationError",
     "TERM_VOCABULARY",
     "Term",
     "TermSpec",
@@ -239,6 +242,62 @@ class RequestShape(msgspec.Struct, frozen=True, kw_only=True):
                     f"SMALL number — the direction that buys too little card."
                 )
         return self
+
+
+class ShapeDeclarationError(TypeError):
+    """A `Shape(...)` annotation is not one the platform can read."""
+
+
+class Shape(msgspec.Struct, frozen=True):
+    """Payload-field annotation: this field DIMENSIONS the request.
+
+    Two arms, exactly one of which is used:
+
+    * ``Shape("width")`` — this numeric field IS that axis, under a name the
+      platform vocabulary does not carry.
+    * ``Shape(pixels=_BUCKETS)`` — this field's VALUES map to ``(width,
+      height)``. Pass the author's own table by reference; do not retype the
+      numbers, or the endpoint gains a second spelling of its own geometry.
+
+    Read via ``Annotated[...]``, the same way ``PromptRole`` and
+    ``ExpectedOutput`` are.
+    """
+
+    axis: str = ""
+    pixels: Optional[Mapping[Any, tuple[int, int]]] = None
+
+    def __post_init__(self) -> None:
+        named = bool(self.axis)
+        tabled = self.pixels is not None
+        if named == tabled:
+            raise ShapeDeclarationError(
+                "Shape(...) states EITHER an axis name "
+                "(`Shape('width')`) OR a value->(width, height) table "
+                "(`Shape(pixels=_BUCKETS)`) — never both and never neither"
+            )
+        if named and self.axis not in SHAPE_BOUNDS:
+            raise ShapeDeclarationError(
+                f"Shape({self.axis!r}): the shape axes are CLOSED and are "
+                f"{sorted(SHAPE_BOUNDS)}"
+            )
+        if tabled:
+            table = dict(self.pixels or {})
+            if not table:
+                raise ShapeDeclarationError(
+                    "Shape(pixels=): the table is empty; a field that "
+                    "dimensions nothing is not a shape field"
+                )
+            for key, value in table.items():
+                if (
+                    not isinstance(value, Sequence)
+                    or isinstance(value, (str, bytes))
+                    or len(value) != 2
+                    or not all(isinstance(n, int) and n > 0 for n in value)
+                ):
+                    raise ShapeDeclarationError(
+                        f"Shape(pixels=): {key!r} maps to {value!r}; each "
+                        f"value is a (width, height) pair of positive ints"
+                    )
 
 
 def term_value(name: str, shape: RequestShape) -> int:

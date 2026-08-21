@@ -30,8 +30,7 @@ import torch
 from diffusers import StableDiffusionPipeline
 
 from gen_worker import STATIC, LoadContext, Model, RequestContext, entrypoint, lane
-from gen_worker.demand import Basis, MiB, const, per_mp_batch
-from gen_worker.demand_envelope import Shape
+from gen_worker.demand import Basis, MiB, Shape, const, per_mp_batch
 from gen_worker.models import SDXL
 
 SDXL_DIFFUSERS_BF16 = ("sdxl.diffusers@1", "plain.bf16@1")

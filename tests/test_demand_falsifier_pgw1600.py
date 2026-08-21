@@ -17,8 +17,15 @@ from gen_worker import activity as activity_mod
 from gen_worker import demand_falsifier as falsifier
 import msgspec
 
-from gen_worker.demand import Basis, GiB, MiB, RequestShape, const, per_mp_batch
-from gen_worker.demand_envelope import Shape
+from gen_worker.demand import (
+    Basis,
+    GiB,
+    MiB,
+    RequestShape,
+    Shape,
+    const,
+    per_mp_batch,
+)
 
 SHAPE = RequestShape(width=1024, height=1024, batch=2)
 FORMULA = const(GiB(1.2)) + per_mp_batch(MiB(220))

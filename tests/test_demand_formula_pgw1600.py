@@ -31,6 +31,8 @@ from gen_worker.demand import (
     MiB,
     RequestShape,
     SHAPE_BOUNDS,
+    Shape,
+    ShapeDeclarationError,
     TERM_VOCABULARY,
     VOCABULARY_VERSION,
     const,
@@ -44,8 +46,6 @@ from gen_worker.demand import (
     vocabulary_document,
 )
 from gen_worker.demand_envelope import (
-    Shape,
-    ShapeDeclarationError,
     advertised_envelope,
     demand_document,
     request_shape,
