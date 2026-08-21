@@ -1,0 +1,19 @@
+{
+  "_class_name": "UMT5EncoderModel",
+  "architectures": [
+    "UMT5EncoderModel"
+  ],
+  "model_type": "umt5",
+  "d_model": 4096,
+  "d_ff": 10240,
+  "d_kv": 64,
+  "num_heads": 64,
+  "num_layers": 24,
+  "relative_attention_num_buckets": 32,
+  "relative_attention_max_distance": 128,
+  "vocab_size": 256384,
+  "tie_word_embeddings": false,
+  "is_encoder_decoder": false,
+  "layer_norm_epsilon": 1e-06,
+  "torch_dtype": "bfloat16"
+}

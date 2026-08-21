@@ -171,19 +171,26 @@ def _build_on_meta(
     )
 
 
-def build(
-    pipeline_cls: type,
-    checkpoint_dir: Path,
-    *,
-    extra_kwargs: Optional[Mapping[str, Any]] = None,
-    compute_dtype: Any = None,
-) -> Skeleton:
-    """Build ``pipeline_cls`` from configs only. Reads no tensor bytes.
+@dataclass(frozen=True, slots=True)
+class ComponentSpec:
+    """One ``model_index.json`` component declaration, already validated.
 
-    ``compute_dtype`` is the lane's declared dtype; every module component is
-    built at it (pgw#1623). ``None`` keeps each config's own, which is the
-    laneless case (a fixture, a derive) and nothing else.
+    ``library`` and ``class_name`` are ``None`` for a declared-but-absent
+    optional component — the ``[null, null]`` spelling, which is the ONE way
+    an index says "this pipeline accepts None here".
     """
+
+    name: str
+    library: Optional[str]
+    class_name: Optional[str]
+
+    @property
+    def absent(self) -> bool:
+        return self.library is None or self.class_name is None
+
+
+def read_index(checkpoint_dir: Path) -> Tuple[Path, Dict[str, Any]]:
+    """The tree's ``model_index.json``, parsed. Reads no tensor bytes."""
     index_path = Path(checkpoint_dir) / MODEL_INDEX
     if not index_path.is_file():
         raise SkeletonError(
@@ -195,11 +202,20 @@ def build(
         index = json.loads(index_path.read_text())
     except ValueError as exc:
         raise SkeletonError(f"{index_path} is not readable JSON: {exc}") from exc
+    return index_path, index
 
-    components: Dict[str, Any] = {}
-    modules: Dict[str, Any] = {}
-    passthrough: List[str] = []
 
+def component_specs(index_path: Path, index: Mapping[str, Any]) -> List[ComponentSpec]:
+    """Every component a parsed index declares, in name order.
+
+    This walk — and every refusal in it — is shared by :func:`build` and
+    :func:`build_modules`, so the two cannot disagree about what an index
+    says. That is the whole reason it is a function: the conformance suite
+    and the release-build fence read the index through the SAME reader the
+    production loader does, or they are proving something about a second
+    parser nobody serves with.
+    """
+    specs: List[ComponentSpec] = []
     for name, spec in sorted(index.items()):
         if name.startswith("_"):
             continue
@@ -263,7 +279,84 @@ def build(
                         f"{field}={meta[field]!r}. The projected tree carries one "
                         f"cut of this component and cannot honour that pin."
                     )
-        if library is None or class_name is None:
+        specs.append(
+            ComponentSpec(
+                name=name,
+                library=None if library is None else str(library),
+                class_name=None if class_name is None else str(class_name),
+            )
+        )
+    return specs
+
+
+def build_modules(
+    checkpoint_dir: Path, *, compute_dtype: Any = None,
+) -> Dict[str, Any]:
+    """Every WEIGHT-BEARING component of a tree, built on meta. No pipeline.
+
+    :func:`build` is the production path and stays the production path: it
+    also constructs the passthrough components and the pipeline object, which
+    is what serving needs. This is the half that answers "do the modules this
+    tree declares come up on meta, and does anything stay there" — and it is
+    separate because the passthrough half needs files a CONFIG-ONLY tree does
+    not carry (a tokenizer's `vocab.json` is megabytes of real bytes that
+    every checkpoint-config fixture on the fleet deliberately omits) and
+    optional third-party backends a pipeline's scheduler may import.
+
+    Neither of those is the question. A tokenizer has no parameters, so it
+    cannot leave one on meta; making the meta/tie check depend on a
+    sentencepiece model would mean the check simply does not run for half the
+    fleet, which is worse than any answer it could give.
+    """
+    index_path, index = read_index(checkpoint_dir)
+    modules: Dict[str, Any] = {}
+    for spec in component_specs(index_path, index):
+        if spec.absent:
+            continue
+        # The class is resolved BEFORE the directory is required — the reverse
+        # of `build`'s order, and deliberately. A component this function will
+        # not construct needs no files, so a tree missing a tokenizer's bytes
+        # must not stop the modules beside it from being answered for.
+        cls = _resolve(str(spec.library), str(spec.class_name))
+        if not _is_module(cls):
+            continue
+        directory = Path(checkpoint_dir) / spec.name
+        if not directory.is_dir():
+            raise SkeletonError(
+                f"{MODEL_INDEX} declares component {spec.name!r} but "
+                f"{directory} is not in the projected tree"
+            )
+        modules[spec.name] = _build_on_meta(cls, directory, spec.name, compute_dtype)
+    if not modules:
+        raise SkeletonError(
+            f"{index_path} declares no nn.Module component; there would be "
+            f"no weights to stream"
+        )
+    return modules
+
+
+def build(
+    pipeline_cls: type,
+    checkpoint_dir: Path,
+    *,
+    extra_kwargs: Optional[Mapping[str, Any]] = None,
+    compute_dtype: Any = None,
+) -> Skeleton:
+    """Build ``pipeline_cls`` from configs only. Reads no tensor bytes.
+
+    ``compute_dtype`` is the lane's declared dtype; every module component is
+    built at it (pgw#1623). ``None`` keeps each config's own, which is the
+    laneless case (a fixture, a derive) and nothing else.
+    """
+    index_path, index = read_index(checkpoint_dir)
+
+    components: Dict[str, Any] = {}
+    modules: Dict[str, Any] = {}
+    passthrough: List[str] = []
+
+    for spec in component_specs(index_path, index):
+        name, library, class_name = spec.name, spec.library, spec.class_name
+        if spec.absent:
             # A declared-but-absent optional component (safety checker and
             # friends). The pipeline takes None and says so itself.
             components[name] = None

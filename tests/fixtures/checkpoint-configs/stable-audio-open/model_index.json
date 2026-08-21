@@ -1,0 +1,28 @@
+{
+  "_class_name": "StableAudioPipeline",
+  "_diffusers_version": "0.30.0.dev0",
+  "projection_model": [
+    "stable_audio",
+    "StableAudioProjectionModel"
+  ],
+  "scheduler": [
+    "diffusers",
+    "CosineDPMSolverMultistepScheduler"
+  ],
+  "text_encoder": [
+    "transformers",
+    "T5EncoderModel"
+  ],
+  "tokenizer": [
+    "transformers",
+    "T5TokenizerFast"
+  ],
+  "transformer": [
+    "diffusers",
+    "StableAudioDiTModel"
+  ],
+  "vae": [
+    "diffusers",
+    "AutoencoderOobleck"
+  ]
+}
