@@ -69,6 +69,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
+from . import activity
 from . import boot_phases
 from . import weight_position
 from .models.refs import WireRef
@@ -259,9 +260,43 @@ class CheckpointMaterialization:
         Order is the config's own order: a pod that fetched the 22 MB
         interpolator before the 134 GB checkpoint would finish the cheap half
         first and still not be able to serve.
+
+        pgw#1613: THE FETCH RUNS UNDER AN OPEN ACTIVITY, and that is load-
+        bearing, not bookkeeping. A cold multi-hundred-GB fill saturates the
+        container's cores and holds this process's event loop quiet for
+        minutes. The compute-child watchdog arms on that silence and then asks
+        what is OPEN (`procsplit/parent.py` `_hang_verdict`): with nothing
+        declared it returns `loop_wedged_no_activity` and SIGKILLs a child that
+        is provably burning CPU. Its `held` branch — "the child's event loop is
+        starved by accounted work, not hung" — exists for exactly this case and
+        can only fire when an activity is open. Measured twice on minimax-h3
+        (~105 GB), at two different pins, killed at 356 s and 687 s.
+
+        Scoped to the FETCH ONLY, so a later boot-warm pass keeps its own
+        `warmup` activity and never nests inside this one.
         """
+        with activity.running(activity.KIND_BOOT_MATERIALIZE) as fetch:
+            if not await self._fetch_refs(config, fetch):
+                await self._announce()
+                return
+
+        self.state = STATE_READY
+        self.failure = ""
+        logger.info(
+            "checkpoint config version=%d MATERIALIZED (%d ref(s)); this "
+            "worker is now ready and routable",
+            config.version, len(config.refs),
+        )
+        await self._announce()
+
+    async def _fetch_refs(
+        self, config: CheckpointConfig, fetch: "activity.Activity",
+    ) -> bool:
+        """Put every configured ref on disk. ``False`` when one of them did not
+        land, with `state`/`failure` already set by the caller's contract."""
         for ref in config.refs:
             snapshot = config.snapshots.get(ref)
+            fetch.note(f"ref={ref}")
             try:
                 # pgw#1555: TIMED, because a `resident` verdict deletes the
                 # only other row this ref would have produced. The check is a
@@ -296,18 +331,13 @@ class CheckpointMaterialization:
                     "and not routable; nothing retries this in the background.",
                     ref, type(exc).__name__, exc,
                 )
-                await self._announce()
-                return
+                # The activity's terminal is FAILED, not COMPLETED: a silent
+                # death is a bug by this module's own contract. `failed()` and
+                # the `running` exit are both idempotent through `_done`.
+                fetch.failed(exc)
+                return False
             logger.info("checkpoint %s materialized at %s", ref, path)
-
-        self.state = STATE_READY
-        self.failure = ""
-        logger.info(
-            "checkpoint config version=%d MATERIALIZED (%d ref(s)); this "
-            "worker is now ready and routable",
-            config.version, len(config.refs),
-        )
-        await self._announce()
+        return True
 
     # ---- readiness announcement -------------------------------------------
 
