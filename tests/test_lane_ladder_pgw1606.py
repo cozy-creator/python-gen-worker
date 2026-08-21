@@ -14,6 +14,8 @@ arithmetic instead of the platform's.
 
 from __future__ import annotations
 
+from typing import Mapping, Sequence
+
 import msgspec
 import pytest
 
@@ -63,7 +65,13 @@ CPU_ONLY = L.CardFacts(sm=0, name="no-cuda")
 class Verdicts:
     """What is staged, and what the bind gate said about what is not."""
 
-    def __init__(self, staged=(), derivable=(), incompatible=(), sizes=None):
+    def __init__(
+        self,
+        staged: Sequence[str] = (),
+        derivable: Sequence[str] = (),
+        incompatible: Sequence[str] = (),
+        sizes: Mapping[str, int] | None = None,
+    ) -> None:
         self._staged = set(staged)
         self._derivable = set(derivable)
         self._incompatible = set(incompatible)
@@ -83,7 +91,8 @@ class Verdicts:
 
 
 class Gates:
-    def __init__(self, w8a8="rowwise", w4a4="blockwise"):
+    def __init__(self, w8a8: str = "rowwise",
+                 w4a4: str = "blockwise") -> None:
         self._w8a8, self._w4a4 = w8a8, w4a4
 
     def w8a8_mode(self) -> str:
@@ -96,7 +105,7 @@ class Gates:
 ALL_THREE = (BF16, FP8, NVFP4)
 
 
-def _reasons(resolved) -> list[tuple[str, str]]:
+def _reasons(resolved: L.ResolvedLane) -> list[tuple[str, str]]:
     return [(r.body, r.reason) for r in resolved.rejected]
 
 

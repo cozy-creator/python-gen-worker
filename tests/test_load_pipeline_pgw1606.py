@@ -14,6 +14,7 @@ Both refusals are exercised, in both directions.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,21 +46,22 @@ def _resolved(body: str, contract_id: str = "t.lane@1") -> L.ResolvedLane:
     )
 
 
-def _tiny_unet():
+def _tiny_unet() -> Any:
     from diffusers import UNet2DModel
 
-    return UNet2DModel(
+    unet: Any = UNet2DModel(
         sample_size=8, in_channels=3, out_channels=3,
         block_out_channels=(32, 32), layers_per_block=1,
         down_block_types=("DownBlock2D", "AttnDownBlock2D"),
         up_block_types=("AttnUpBlock2D", "UpBlock2D"), norm_num_groups=8,
-    ).to(torch.bfloat16).eval()
+    )
+    return unet.to(torch.bfloat16).eval()
 
 
 class _Pipe:
     """A pipeline shaped the way `_denoisers` looks for one."""
 
-    def __init__(self, unet) -> None:
+    def __init__(self, unet: Any) -> None:
         self.unet = unet
 
 
@@ -130,7 +132,9 @@ def test_a_baseline_lane_over_a_clean_pipeline_passes():
     M._assert_lane(_Pipe(_tiny_unet()), _resolved(BF16_BODY), swapped=0)
 
 
-def test_the_fp8_arm_refuses_a_tree_that_carries_no_fp8_artifact(tmp_path: Path):
+def test_the_fp8_arm_refuses_a_tree_that_carries_no_fp8_artifact(
+    tmp_path: Path,
+) -> None:
     """The ladder resolved fp8 because the deploy said the bytes were staged.
     Detection reads the safetensors HEADERS, so an empty result means the tree
     on disk is not the one the contract names — and the honest move is to
@@ -159,13 +163,14 @@ def tiny_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     from diffusers import DDPMPipeline, DDPMScheduler
 
     root = tmp_path_factory.mktemp("lp") / "src"
-    DDPMPipeline(unet=_tiny_unet().to(torch.float32),
-                 scheduler=DDPMScheduler(num_train_timesteps=10)).save_pretrained(root)
+    pipe: Any = DDPMPipeline(unet=_tiny_unet().to(torch.float32),
+                             scheduler=DDPMScheduler(num_train_timesteps=10))
+    pipe.save_pretrained(root)
     return root
 
 
 def test_load_pipeline_materializes_the_baseline_lane_and_confesses(
-    tiny_tree: Path, caplog
+    tiny_tree: Path, caplog: Any
 ) -> None:
     """End to end on the eager bridge: a resolved baseline lane, a real tree,
     a real pipeline — and the confession on the log naming the lane, the
@@ -188,7 +193,7 @@ def test_load_pipeline_materializes_the_baseline_lane_and_confesses(
         resolved=resolved,
     )
     with caplog.at_level(logging.INFO, logger="gen_worker.serving.context"):
-        pipe = ctx.load_pipeline(DDPMPipeline)
+        pipe: Any = ctx.load_pipeline(DDPMPipeline)
     assert pipe is not None
     assert M.lane_of(_Pipe(pipe.unet)) == BF16_BODY
     line = next(r.message for r in caplog.records if "LANE=" in r.message)
@@ -196,7 +201,9 @@ def test_load_pipeline_materializes_the_baseline_lane_and_confesses(
     assert "rejected=fp8-w8a8-dynamic(sm_floor: needs sm89, card is sm86)" in line
 
 
-def test_load_pipeline_without_a_resolved_lane_degrades_to_load(tiny_tree: Path):
+def test_load_pipeline_without_a_resolved_lane_degrades_to_load(
+    tiny_tree: Path,
+) -> None:
     """A fixture, a derive and the local CLI all build a context with no
     ladder behind it. No silent default lane — the call just builds."""
     from diffusers import DDPMPipeline

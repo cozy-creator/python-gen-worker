@@ -15,7 +15,7 @@ ones, so the class under test is one the fleet could actually write.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -57,12 +57,12 @@ class TwoLaneModel(Model[SDXL], lanes={BF16: "vram7g", FP8: "vram5g"}):
     """One Model class, two REAL lanes — the shape Paul's multi-lane example
     ratified and the shape that could not boot before this issue."""
 
-    def load(self, ctx) -> None:  # pragma: no cover — never run here
+    def load(self, ctx: Any) -> None:  # pragma: no cover — never run here
         self.pipe = ctx.load_pipeline(object)
 
 
 class OneLaneModel(Model[SDXL], lanes={BF16: "vram7g"}):
-    def load(self, ctx) -> None:  # pragma: no cover
+    def load(self, ctx: Any) -> None:  # pragma: no cover
         self.pipe = ctx.load_pipeline(object)
 
 
