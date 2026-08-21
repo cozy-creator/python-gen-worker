@@ -114,8 +114,16 @@ class LoraBench(Bench):
 
     def _gen_worker(self, room: Path, argv: list[str],
                     timeout: float) -> subprocess.CompletedProcess:
+        # BOTH src AND the vendor dir: sdxl/main.py imports `tensorfs`, which
+        # is not on PyPI and is satisfied only by pgw's vendored copy at
+        # src/gen_worker/_vendor. Naming src alone overrides the bootstrap's
+        # correct PYTHONPATH and kills every lock with ModuleNotFoundError --
+        # the same defect as dynamic_dims_pgw1548._gen_worker, which the LoRA
+        # arm would have hit the moment the matrix arm stopped shielding it.
+        _src = Path(__file__).resolve().parents[1] / "src"
         env = {
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+            "PYTHONPATH": os.pathsep.join(
+                (str(_src), str(_src / "gen_worker" / "_vendor"))),
             "PGW1548_BENCH_CONTROL": str(self.control),
             "PGW1548_BENCH_TRACE": str(self.trace),
         }

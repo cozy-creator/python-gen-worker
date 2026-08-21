@@ -285,17 +285,30 @@ def published_stages(cred: dict, pod: str) -> tuple[list[str], list[str]]:
         return [], []
     stages: list[str] = []
     others: list[str] = []
-    for variant in sorted(release.get("variants") or [],
-                          key=lambda v: v.get("added_seq", 0)):
-        cid = variant.get("checkpoint_id")
-        if not cid:
-            continue
+    variants = sorted(release.get("variants") or [],
+                      key=lambda v: v.get("added_seq", 0))
+    # ONLY THE NEWEST VARIANT, VIA `resolve`. Both halves are load-bearing:
+    #
+    # * `resolve?digest=` returns FULL paths; `tree?checkpoint_id=` returns
+    #   only TOP-LEVEL names (`boot`, `bootstrap`, `pods`, ...). That
+    #   difference silently blinded this driver the moment stages moved under
+    #   `pods/<nonce>/...`: every path collapsed to the single entry `pods`,
+    #   no stage ever matched, and a pod that had FAILED at smoke two hours
+    #   earlier still read as "boot heartbeat still absent -- HOLDING".
+    #   The pod-unique-path fix and the progress reader were coupled, and
+    #   changing one without the other cost ~176 min of billed silence.
+    # * a merge publish is a UNION, so the newest variant already resolves to
+    #   the cumulative set. Walking all 48 variants bought nothing and cost 48
+    #   round trips per poll.
+    if variants:
+        cid = variants[-1].get("checkpoint_id")
         try:
-            tree = _get(cred, f"/api/v1/repos/{cred['org']}/{cred['repo']}"
-                              f"/tree?checkpoint_id={cid}")
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-            continue
-        for entry in tree.get("entries") or []:
+            body = _get(cred, f"/api/v1/repos/{cred['org']}/{cred['repo']}"
+                              f"/resolve?digest={cid}") if cid else {}
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            print(f"[poll] resolve failed ({exc}); progress UNKNOWN this tick")
+            return [], []
+        for entry in body.get("files") or []:
             parts = str(entry.get("path") or "").split("/")
             # pods/<nonce>/<stage>/<file> is the only shape this lane writes.
             if len(parts) < 4 or parts[0] != "pods":

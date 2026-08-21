@@ -95,6 +95,9 @@ def require_window() -> None:
         )
 
 
+_SRC = Path(__file__).resolve().parents[1] / "src"
+
+
 def _run(cmd: list[str], *, cwd: Path | None = None, env: dict | None = None,
          timeout: float | None = None) -> subprocess.CompletedProcess:
     full = ["nice", "-n", "19", *cmd]
@@ -480,7 +483,20 @@ class Bench:
             [self._python(), "-m", "gen_worker.cli", *argv],
             cwd=room,
             env={
-                "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+                # BOTH entries, and the second one is not optional. sdxl/main.py
+                # imports `tensorfs` at top level; tensorfs is NOT on PyPI, and
+                # pgw satisfies it by VENDORING the package at
+                # src/gen_worker/_vendor, which is importable under its own
+                # top-level name only when that directory is on PYTHONPATH.
+                # The bootstrap exports exactly that pair -- but `_run` merges
+                # os.environ and then this explicit key OVERRIDES it, so
+                # naming only `src` here silently dropped the vendor half and
+                # every lock died with `ModuleNotFoundError: No module named
+                # 'tensorfs'`. It stayed hidden for the whole campaign because
+                # the lock was always a CACHE HIT and never actually ran; the
+                # first real derive found it immediately.
+                "PYTHONPATH": os.pathsep.join((
+                    str(_SRC), str(_SRC / "gen_worker" / "_vendor"))),
                 # Fragmentation is a real term on a card this small: an SDXL
                 # boot leaves the allocator holding segments the request's
                 # activations cannot reuse. Held CONSTANT across every arm, so
