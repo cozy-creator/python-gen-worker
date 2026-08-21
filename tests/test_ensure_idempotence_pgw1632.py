@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-import re
+import textwrap
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -286,8 +286,9 @@ def test_the_harness_is_red_against_the_pre_pgw1596_gate(
     which is what killed a 105 GB pull 157 MB from the end on a real H200.
 
     A harness that cannot go red proves nothing, so the pre-fix behaviour is
-    reconstructed exactly (`resident = 0`) and the resume is asserted to
-    REFUSE.
+    reconstructed exactly — a plan whose every object reads as MISSING, which
+    is what a gate priced off the request rather than the delta computes — and
+    the resume is asserted to REFUSE.
     """
 
     _no_retry(monkeypatch)
@@ -308,7 +309,16 @@ def test_the_harness_is_red_against_the_pre_pgw1596_gate(
     assert origin.wire_bytes == total - banked
 
     # Now the pre-fix gate, on the same state: it demands the whole tree free.
-    monkeypatch.setattr(ModelStore, "_already_resident_bytes", lambda self, files: 0)
+    from gen_worker.models import fill_plan as fill_plan_mod
+
+    real_plan = fill_plan_mod.plan_for_snapshot
+
+    def _price_the_request(cache_dir: object, files: list[object]) -> object:
+        """The pre-pgw#1596 shape: every object of the manifest is 'missing'."""
+        whole = real_plan(cache_dir, files)
+        return fill_plan_mod.FillPlan(missing=whole.present + whole.missing)
+
+    monkeypatch.setattr(fill_plan_mod, "plan_for_snapshot", _price_the_request)
     fresh = _ctx(tmp_path, tree, origin, budget=one_tree_budget)
     with pytest.raises(InsufficientDiskError) as caught:
         run_fill(fresh, FILL_OPS[0])
@@ -360,12 +370,13 @@ def test_the_gate_and_the_fill_agree_about_what_is_missing(
     snapshot = tree.snapshot()
     import asyncio
 
+    from gen_worker.models.fill_plan import plan_for_snapshot
+
+    plan = plan_for_snapshot(ctx.cache_dir, list(snapshot.files))
     with pytest.raises(InsufficientDiskError) as caught:
         asyncio.run(
             starved.store()._ensure_disk_headroom(
-                WireRef("acme/harness-model"),
-                total,
-                files=list(snapshot.files),
+                WireRef("acme/harness-model"), plan,
             )
         )
     gate_says = caught.value.required_bytes
@@ -384,8 +395,8 @@ def test_the_gate_and_the_fill_agree_about_what_is_missing(
 
 
 def _gate_source() -> ast.FunctionDef:
-    source = inspect.getsource(ModelStore._ensure_disk_headroom)
-    tree_ = ast.parse(re.sub(r"^\s{4}", "", source, flags=re.MULTILINE))
+    source = textwrap.dedent(inspect.getsource(ModelStore._ensure_disk_headroom))
+    tree_ = ast.parse(source)
     node = tree_.body[0]
     assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     return node  # type: ignore[return-value]
@@ -421,9 +432,15 @@ def test_the_gate_derives_its_cost_from_the_one_predicate() -> None:
         isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "sum"
         for n in ast.walk(node)
     ), "the gate must be HANDED its cost, never sum one"
-    assert {"_already_resident_bytes", "_missing_bytes", "plan"} & names, (
-        "the gate must consume the fill's own skip predicate (or the plan it "
-        "produced); nothing else can be proven to agree with it"
+    assert "plan" in names, (
+        "the gate must consume the fill's own plan; nothing else can be proven "
+        "to agree with what the fill will skip"
+    )
+    # pgw#1631: and the plan is the ONLY size input. A manifest or a total in
+    # the signature is a thing the gate could price differently.
+    params = [a.arg for a in node.args.args + node.args.kwonlyargs]
+    assert "files" not in params and "needed_bytes" not in params, (
+        f"the gate's signature still admits a manifest to re-price: {params}"
     )
 
 
