@@ -5,11 +5,13 @@ from typing import Final
 
 CONTRACT_FILES: Final = (
     "COZY_RUNTIME_ENV_DIGEST",
+    "DEMAND_VECTORS_DIGEST",
     "FORMULA_VECTORS_DIGEST",
     "HUB_WORKER_BOUNDARY_CONTRACTS_DIGEST",
     "REF_GRAMMAR_DIGEST",
     "WORKER_VALUE_CONTRACTS_DIGEST",
     "cozy_runtime_env_vectors.json",
+    "demand_vectors.json",
     "formula_vectors.json",
     "hub_worker_boundary_contracts.json",
     "posture_wire_vectors.json",

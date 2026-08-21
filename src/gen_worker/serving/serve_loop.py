@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, T
 import msgspec
 
 from .. import activity, boot_phases
+from ..demand_envelope import request_shape
+from ..demand_falsifier import measure_request_arena
 from ..warm_payload import neutral_payload
 from ..input_assets import (
     InputManifestEntry,
@@ -25,7 +27,7 @@ from .context import DeployBinding, LoadContext, LoaderEngine, RequestContext
 from .envelope import DecodedRequest, decode_envelope
 from .host import ServeDispatchError
 from .loader import EndpointLoadError, LoadedEndpoint
-from .model import Model, lane_handle, model_type
+from .model import Model, lane_handle, model_declared_lanes, model_type
 from .placement import warn_if_degraded
 from .reserved_repos import (
     materialize_reserved_inputs,
@@ -46,6 +48,26 @@ class BindingResolver(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PendingDemand:
+    """pgw#1600's predicted-vs-measured pair, MINUS the regime.
+
+    Deliberately incomplete when it leaves here. This layer knows the lane's
+    declared formula, the request's shape and what the handler cost; it does
+    NOT know whether the forwards ran compiled or eager — the dispatch counter
+    that answers that is per-worker and per-request, one level up. Handing up
+    a half-filled record beats guessing the half we cannot see, because a
+    sample banked under the wrong regime is worse than one not banked at all
+    (pgw#1586: eager samples leaking into the compiled regime is the pgw#1548
+    daemon death, delivered by a number that looks measured).
+    """
+
+    lane: str
+    demand: Any
+    shape: Any
+    measured: Any
+
+
+@dataclass(frozen=True, slots=True)
 class InvokeOutcome:
     """One served request: the entrypoint's result + the request facts the envelope reply carries (``ctx.warn`` rows, adjustments, stage timings)."""
 
@@ -53,6 +75,9 @@ class InvokeOutcome:
     warnings: Tuple[str, ...]
     adjustments: Tuple[Dict[str, str], ...]
     stages: Optional[StageTimer] = None
+    #: pgw#1600. None when the lane declares no formula, when nothing could be
+    #: measured (no card), or when the request was not solo.
+    demand: Optional[PendingDemand] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,10 +450,16 @@ class ServeLoop:
                         self.resolved_lane_for(primary_cls, primary_binding))
 
             ctx._stages.handler_open()
+            # pgw#1600. The falsifier's measurement window is exactly the
+            # handler: the weight arena is already placed by here, so what
+            # this reads is the REQUEST arena and nothing else — the same
+            # basis the formula is written in. It banks nothing on its own
+            # (no card, no sample) and it decides nothing at all.
             try:
-                result = spec.fn(ctx, decoded.payload, *arguments)
-                if inspect.iscoroutine(result):
-                    result = asyncio.run(result)
+                with measure_request_arena() as arena:
+                    result = spec.fn(ctx, decoded.payload, *arguments)
+                    if inspect.iscoroutine(result):
+                        result = asyncio.run(result)
             finally:
                 ctx._stages.handler_close()
         return InvokeOutcome(
@@ -436,7 +467,41 @@ class ServeLoop:
             warnings=ctx.warnings,
             adjustments=ctx.adjustments,
             stages=ctx._stages,
+            demand=self._pending_demand(spec, decoded.payload, arena[0]),
         )
+
+    def _pending_demand(
+        self, spec: Any, payload: Any, measured: Any
+    ) -> Optional[PendingDemand]:
+        """The lane's declared formula + this request's shape + what it cost.
+
+        Reads the formula through ``model_declared_lanes`` — pgw#1599's ONE
+        read surface — so nothing here re-derives a lane or re-parses a stamp.
+        """
+
+        if not spec.model_params or not getattr(measured, "measured", False):
+            return None
+        try:
+            primary_cls = spec.model_params[0][1]
+            _, handle = self._lane_of(primary_cls)
+            declared = next(
+                (
+                    row for row in model_declared_lanes(primary_cls)
+                    if row.contract_id == handle
+                ),
+                None,
+            )
+            if declared is None:
+                return None
+            return PendingDemand(
+                lane=handle,
+                demand=declared.request,
+                shape=request_shape(payload),
+                measured=measured,
+            )
+        except Exception:  # noqa: BLE001 — a falsifier never fails a request
+            logger.debug("demand falsifier: no pending record", exc_info=True)
+            return None
 
     def boot_warmup(
         self, *, prepare: Optional[Callable[[str], str]] = None
@@ -569,6 +634,7 @@ def manifest_sizer(
 __all__ = [
     "BindingResolver",
     "InvokeOutcome",
+    "PendingDemand",
     "ServeLoop",
     "WARM_FAILED",
     "WARM_OK",
