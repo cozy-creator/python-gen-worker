@@ -25,6 +25,12 @@ export PATH="$HOME/.local/bin:$PATH"
 mkdir -p /workspace/out
 cd /workspace
 
+# The pod's own publish namespace. The driver mints this and injects it, so it
+# is known box-side BEFORE the rental exists; the fallback exists only so a
+# hand-run bootstrap still publishes somewhere legible rather than colliding
+# on a shared path.
+export PGW1548_POD="${PGW1548_POD:-nonce-missing-${RUNPOD_POD_ID:-$(hostname)}}"
+
 STAGE_RC=0
 
 # --- the evidence channel, defined before anything can fail ------------------
@@ -41,7 +47,17 @@ paths = [Path(p) for p in sys.argv[2:] if Path(p).exists()]
 if not paths:
     print(f"[publish] {stage}: nothing to publish"); raise SystemExit(0)
 c = HubClient(base_url=os.environ["PGW1548_HUB"], token=os.environ["PGW1548_TOKEN"])
-files = [CommitFile(path=f"{stage}/{p.name}", local_path=p) for p in paths]
+# POD-UNIQUE PATH. This segment is the fix the failed campaign's harvest named.
+# `mode="merge"` makes a publish a UNION over the whole release, so a bare
+# `<stage>/<file>` path is LAST-WRITER-WINS ACROSS PODS: two pods alive at once
+# silently overwrite each other's verdicts, and the campaign's fatal symptom
+# was exactly that -- a DEAD pod read as healthy because a CONCURRENT pod's
+# stages had landed on the paths the driver was polling. The segment is a
+# driver-minted launch nonce (`PGW1548_POD`), not RUNPOD_POD_ID: the driver
+# must know the value BEFORE the pod exists in order to poll only its own
+# rows, and env is fixed at create time whereas the provider id is not.
+pod = os.environ.get("PGW1548_POD") or "unknown-pod"
+files = [CommitFile(path=f"pods/{pod}/{stage}/{p.name}", local_path=p) for p in paths]
 try:
     res = c.publish_v2(
         destination_repo=os.environ["PGW1548_REPO"],
@@ -150,8 +166,9 @@ timeout 900 uv pip install --python $PY requests msgspec psutil \
     protobuf PySocks typing_extensions certifi charset-normalizer idna urllib3 \
     > /workspace/out/pubdeps.log 2>&1 || true
 if PYTHONPATH=/workspace/pgw/src "$PY" -c "from gen_worker.hubio.client import HubClient" 2>/dev/null; then
-  printf '{"stage":"boot","ok":true,"mode":"%s","sha":"%s","note":"publish deps in; torch install starting"}\n' \
-    "$PGW1548_MODE" "$PGW1548_SHA" > /workspace/out/boot.json
+  printf '{"stage":"boot","ok":true,"mode":"%s","sha":"%s","pod":"%s","runpod_pod_id":"%s","note":"publish deps in; torch install starting"}\n' \
+    "$PGW1548_MODE" "$PGW1548_SHA" "$PGW1548_POD" "${RUNPOD_POD_ID:-}" \
+    > /workspace/out/boot.json
   PYTHONPATH=/workspace/pgw/src "$PY" /workspace/publish.py boot /workspace/out/boot.json || true
 fi
 

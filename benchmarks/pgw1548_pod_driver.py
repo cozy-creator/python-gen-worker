@@ -17,6 +17,7 @@ import argparse
 import base64
 import gzip
 import json
+import secrets
 import subprocess
 import sys
 import time
@@ -135,8 +136,25 @@ def _get(cred: dict, path: str, *, _retried: bool = False):
         raise
 
 
-def published_stages(cred: dict) -> list[str]:
-    """Which stages have landed. The hub is the progress signal, not a clock.
+def published_stages(cred: dict, pod: str) -> tuple[list[str], list[str]]:
+    """Which stages THIS POD has landed. The hub is the progress signal, not a clock.
+
+    Returns ``(my_stages, other_pods)``.
+
+    **Scoped to one pod, and that scoping is the campaign's central fix.**
+    Publishes use ``mode="merge"``, i.e. a UNION over the release, so before
+    pgw#1548's post-mortem every pod wrote the same ``<stage>/<file>`` paths
+    and the last writer won. Five pods died with zero measurement stages run,
+    and the harvest named this as the reason the deaths were invisible: a pod
+    that had never started read as HEALTHY because a *different*, concurrent
+    pod's stages were sitting on the paths this poller reads. Progress for pod
+    A was being inferred from evidence produced by pod B.
+
+    Now every publish lands under ``pods/<nonce>/<stage>/<file>`` and this
+    function counts ONLY its own nonce. Rows from any other pod are returned
+    separately, to be reported and never counted -- a neighbour's progress is
+    not this rental's progress, and the whole point is that it can no longer
+    masquerade as it.
 
     **Read PER VARIANT, and that detail is load-bearing.** Each per-stage
     publish creates its OWN variant, so once more than one has landed:
@@ -163,8 +181,9 @@ def published_stages(cred: dict) -> list[str]:
         # UNKNOWN, never "no progress" — treating a blip as absence is how a
         # working pod gets killed.
         print(f"[poll] release read failed ({exc}); progress UNKNOWN this tick")
-        return []
+        return [], []
     stages: list[str] = []
+    others: list[str] = []
     for variant in sorted(release.get("variants") or [],
                           key=lambda v: v.get("added_seq", 0)):
         cid = variant.get("checkpoint_id")
@@ -176,11 +195,17 @@ def published_stages(cred: dict) -> list[str]:
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
             continue
         for entry in tree.get("entries") or []:
-            path = str(entry.get("path") or "")
-            head = path.split("/", 1)[0] if "/" in path else path.removesuffix(".json")
-            if head and head not in stages:
-                stages.append(head)
-    return stages
+            parts = str(entry.get("path") or "").split("/")
+            # pods/<nonce>/<stage>/<file> is the only shape this lane writes.
+            if len(parts) < 4 or parts[0] != "pods":
+                continue
+            if parts[1] != pod:
+                if parts[1] not in others:
+                    others.append(parts[1])
+                continue
+            if parts[2] and parts[2] not in stages:
+                stages.append(parts[2])
+    return stages, others
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -200,6 +225,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ram", type=int, default=64)
     parser.add_argument("--budget-usd", type=float, default=4.0)
     parser.add_argument("--max-minutes", type=float, default=180.0)
+    parser.add_argument("--boot-deadline", type=float, default=6.0,
+                        help="minutes to wait for the boot heartbeat before "
+                             "declaring the container never started (the "
+                             "heartbeat lands ~17 s in on a healthy pod)")
     parser.add_argument("--expect", default="",
                         help="comma-separated stages that mean SUCCESS")
     parser.add_argument("--lock-cache", default="",
@@ -226,7 +255,15 @@ def main(argv: list[str] | None = None) -> int:
                          cwd=Path.home() / "cozy/python-gen-worker",
                          capture_output=True, text=True, check=True).stdout.strip()
 
+    # THE PUBLISH NAMESPACE, minted before the rental exists. It has to be
+    # known box-side up front, because it is what the poller below filters on;
+    # the provider's own pod id is not available until after create, and env is
+    # fixed at create. A nonce also survives the case a pod is recreated under
+    # a reused id.
+    pod_nonce = "pod-" + secrets.token_hex(4)
+
     env = {
+        "PGW1548_POD": pod_nonce,
         "PGW1548_MODE": args.mode,
         "PGW1548_HUB": cred["hub_public"],
         "PGW1548_TOKEN": cred["machine_token"],
@@ -311,22 +348,44 @@ def main(argv: list[str] | None = None) -> int:
     # BEFORE the first wait, per the coordinator's rider.
     bank(lease.pod_id, args.mode,
          {"rate_per_hr": lease.rate_per_hr, "image": IMAGE,
-          "endpoint": args.endpoint, "gpu": args.gpu or "cpu"})
+          "endpoint": args.endpoint, "gpu": args.gpu or "cpu",
+          "pod_nonce": pod_nonce})
+    print(f"*** PUBLISH NAMESPACE: pods/{pod_nonce}/  "
+          f"(harvest with --pod {pod_nonce})\n", flush=True)
 
     expect = [s for s in args.expect.split(",") if s]
     deadline_cost = args.budget_usd
     started = time.time()
     seen: list[str] = []
+    warned_others = False
     try:
         while True:
             elapsed_h = (time.time() - started) / 3600.0
             spent = elapsed_h * (lease.rate_per_hr or 0.0)
-            stages = published_stages(cred)
+            stages, others = published_stages(cred, pod_nonce)
+            if others and not warned_others:
+                warned_others = True
+                print(f"[poll] NOTE other pods are publishing to this release "
+                      f"({others}); their rows are NOT counted as this pod's "
+                      f"progress.", flush=True)
             new = [s for s in stages if s not in seen]
             if new:
                 seen = stages
                 print(f"[stage] +{new}  (all: {stages})  "
                       f"${spent:.2f} / {elapsed_h * 60:.0f} min", flush=True)
+            # BOOT HEARTBEAT DEADLINE (pgw#1548 post-mortem lesson 2). The v3
+            # heartbeat publishes ~17 s after launch on a pod that starts at
+            # all, so silence at T+`--boot-deadline` is not a slow boot, it is
+            # a container that NEVER STARTED. The failed campaign waited 40+
+            # minutes on exactly this signature; the rule now costs one nonce
+            # and a rotation instead of an hour of billed silence.
+            if "boot" not in stages and \
+                    (time.time() - started) / 60.0 >= args.boot_deadline:
+                print(f"[stop] NO BOOT HEARTBEAT at T+{args.boot_deadline} min "
+                      f"-- the container never started. Killing and rotating "
+                      f"rather than waiting. (namespace pods/{pod_nonce}/ is "
+                      f"empty; other publishers seen: {others or 'none'})")
+                return 3
             if expect and all(s in stages for s in expect):
                 print(f"[done] every expected stage landed: {expect}")
                 return 0
