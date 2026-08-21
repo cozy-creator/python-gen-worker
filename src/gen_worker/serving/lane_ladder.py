@@ -27,11 +27,12 @@ fabricated cards, which is where it gets tested.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Optional, Protocol, Sequence
 
 import msgspec
 
 from ..models import execution_lanes as el
+from .lane_spec import DeclaredLane as LaneDeclaredLane
 
 
 # --------------------------------------------------------------------------
@@ -39,29 +40,15 @@ from ..models import execution_lanes as el
 # --------------------------------------------------------------------------
 
 
-@runtime_checkable
-class DeclaredLane(Protocol):
-    """One lane as pgw#1599's declaration surface computed it.
-
-    Structural, deliberately. pgw#1599 owns the concrete value object and its
-    spelling; this module reads six fields off it and re-derives none of them.
-    In particular `min_sm` has exactly ONE producer —
-    `capability_floor_for_dtype` at declaration time — and the resolver carries
-    the object through rather than recomputing a floor of its own.
-    """
-
-    @property
-    def contract(self) -> Any: ...
-    @property
-    def contract_id(self) -> str: ...
-    @property
-    def dtype(self) -> Any: ...
-    @property
-    def min_sm(self) -> int: ...
-    @property
-    def request(self) -> Any: ...
-    @property
-    def resident(self) -> Any: ...
+#: pgw#1599's value object, READ at class-definition time and carried through
+#: this module verbatim. Imported rather than restated: while this issue was
+#: being built ahead of that surface it held a structural Protocol here, and a
+#: Protocol that outlives the type it stood in for becomes a second opinion
+#: about what a lane is. The ladder reads `contract_id`, `dtype` and `min_sm`
+#: and re-derives none of them — in particular `min_sm` keeps its single
+#: producer (`capability_floor_for_dtype`, applied at declaration), because one
+#: hand-written floor could never be right for a bf16/fp8/nvfp4 class at once.
+DeclaredLane = LaneDeclaredLane
 
 
 # --------------------------------------------------------------------------
@@ -85,16 +72,27 @@ VERDICTS = (
 class LaneVerdict(Protocol):
     """The derivability verdict, per lane contract.
 
-    pgw#1606's audit: the real verdict is `tensorfs/verdict.go:177
-    Contract.Verdict`, and it is GO-ONLY — the pyo3 surface exposes
-    `contract_info` and `ContractRegistry` and no verdict, so its only caller
-    today is the hub's bind gate. The coordinator ruled tensorfs grows the
-    binding (option b), assigned to the tensorfs#130 lane. This port carries
-    the Go semantics exactly so that landing is a one-line swap here and not a
-    redesign.
+    **THE HUB IS AUTHORITATIVE, AND THIS PORT IS NOT A SECOND OPINION.**
 
-    It is a PORT and not a hub call on purpose: a pod's boot must not depend on
-    a hub round-trip for a fact computable from two local documents.
+    pgw#1606's audit asked for a pyo3 binding so a pod could compute the
+    tri-state (`Satisfies | DerivableVia | Incompatible`, tensorfs#123)
+    locally. That was the wrong ask and the pgw#1599 lane was right to decline
+    it: the verdict is an ADMIT DECISION, it already runs at BIND time in the
+    hub's bind gate (`th internal/bindgate`) against `tensorfs/verdict.go`, and
+    a worker-side implementation of an admit decision is a second
+    implementation that can disagree with the gate that let the deployment
+    exist. The tree already counts three copies of the pattern matcher
+    (tensorfs#129); this is not the fourth.
+
+    So the authoritative answer TRAVELS rather than being recomputed:
+    `lane_host.BindingVerdicts` reads it off the `DeployBinding` the hub sent.
+    No round-trip at boot, no rival matcher, one producer.
+
+    The port stays because the ladder must be provable without a hub and
+    without a card — every test in `test_lane_ladder_pgw1606` fabricates one.
+    What it must never become is a place where pgw decides admissibility for
+    itself: an implementation here answers `absent` for what it was not told,
+    which degrades to a conversion ask, never to a silent admit.
     """
 
     def verdict(self, contract_id: str) -> str:

@@ -29,19 +29,22 @@ BF16_BODY = "bf16-w16a16"
 FP8_BODY = "fp8-w8a8-dynamic"
 
 
-class _Lane:
-    def __init__(self, contract_id: str, dtype: str) -> None:
-        self.contract_id = contract_id
-        self.dtype = dtype
-        self.contract = contract_id
-        self.request = None
-        self.resident = ()
-        self.min_sm = 0
+def _lane(contract_id: str, dtype: str = "bfloat16") -> L.DeclaredLane:
+    """A REAL pgw#1599 `DeclaredLane` — the ladder's own value object."""
+    from gen_worker.demand import GiB, const
+    from gen_worker.models.tensor_layout_contract import capability_floor_for_dtype
+    from gen_worker.serving.lane_spec import lane
+
+    return L.DeclaredLane(
+        contract=contract_id, contract_id=contract_id, dtype=dtype,
+        min_sm=int(capability_floor_for_dtype(dtype) or 0),
+        spec=lane(request=const(GiB(1.0))),
+    )
 
 
 def _resolved(body: str, contract_id: str = "t.lane@1") -> L.ResolvedLane:
     return L.ResolvedLane(
-        declared=_Lane(contract_id, "bfloat16"), body=body,
+        declared=_lane(contract_id), body=body,
         reason=L.CHOSE_BASELINE, card=L.CardFacts(sm=89, name="fixture"),
     )
 
@@ -197,7 +200,7 @@ def test_load_pipeline_materializes_the_baseline_lane_and_confesses(
     from gen_worker.serving.context import DeployBinding, LoadContext
 
     resolved = L.ResolvedLane(
-        declared=_Lane("t.bf16@1", "bfloat16"), body=BF16_BODY,
+        declared=_lane("t.bf16@1"), body=BF16_BODY,
         reason=L.CHOSE_BASELINE, card=L.CardFacts(sm=89, name="fixture"),
         rejected=(L.RejectedRung(body=FP8_BODY, contract_id="t.fp8@1",
                                  reason=L.REJECT_SM_FLOOR,
@@ -246,14 +249,14 @@ def test_the_resolved_lane_selects_its_own_tree_out_of_a_multi_lane_binding(
     )
     plain: LoadContext = LoadContext(
         binding=binding,
-        resolved=L.ResolvedLane(declared=_Lane("t.bf16@1", "bfloat16"),
+        resolved=L.ResolvedLane(declared=_lane("t.bf16@1"),
                                 body=BF16_BODY, reason=L.CHOSE_BASELINE),
     )
     assert plain.checkpoint_dir == Path("/trees/bf16")
 
     upcast: LoadContext = LoadContext(
         binding=binding,
-        resolved=L.ResolvedLane(declared=_Lane("t.bf16@1", "bfloat16"),
+        resolved=L.ResolvedLane(declared=_lane("t.bf16@1"),
                                 body=BF16_BODY, reason=L.CHOSE_UPCAST,
                                 fetch_contract="t.fp8@1",
                                 transfer_saved_bytes=3_400_000_000),

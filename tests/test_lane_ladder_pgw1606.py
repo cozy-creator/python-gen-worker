@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Mapping, Sequence
 
-import msgspec
 import pytest
 
 from gen_worker.serving import lane_ladder as L
@@ -27,32 +26,31 @@ from gen_worker.serving import lane_ladder as L
 # --------------------------------------------------------------------------
 
 
-class FakeLane(msgspec.Struct, frozen=True, kw_only=True):
-    """A `DeclaredLane`, structurally. `min_sm` is DERIVED here exactly as
-    pgw#1599 derives it, so a test can never disagree with the platform about
-    a floor."""
+def declared(contract_id: str, dtype: str) -> L.DeclaredLane:
+    """A REAL pgw#1599 `DeclaredLane`, not a stand-in.
 
-    contract_id: str
-    dtype: str
-    request: object = None
-    resident: tuple = ()
+    `min_sm` is DERIVED here exactly as the declaration surface derives it —
+    one producer, `capability_floor_for_dtype` — so a test can never disagree
+    with the platform about a floor. `contract` is the id itself for the
+    fabricated rows; the tests that need a real tensorfs Contract object build
+    one through a real `Model` header (see test_multilane_boot_pgw1606).
+    """
+    from gen_worker.demand import GiB, const
+    from gen_worker.models.tensor_layout_contract import capability_floor_for_dtype
+    from gen_worker.serving.lane_spec import lane
 
-    @property
-    def contract(self) -> object:
-        return self.contract_id
-
-    @property
-    def min_sm(self) -> int:
-        from gen_worker.models.tensor_layout_contract import (
-            capability_floor_for_dtype,
-        )
-
-        return int(capability_floor_for_dtype(self.dtype) or 0)
+    return L.DeclaredLane(
+        contract=contract_id,
+        contract_id=contract_id,
+        dtype=dtype,
+        min_sm=int(capability_floor_for_dtype(dtype) or 0),
+        spec=lane(request=const(GiB(1.0))),
+    )
 
 
-BF16 = FakeLane(contract_id="sdxl.diffusers-bf16@1", dtype="bfloat16")
-FP8 = FakeLane(contract_id="sdxl.diffusers-fp8-rowwise@1", dtype="float8_e4m3fn")
-NVFP4 = FakeLane(contract_id="sdxl.diffusers-nvfp4@1", dtype="float4_e2m1fn")
+BF16 = declared("sdxl.diffusers-bf16@1", "bfloat16")
+FP8 = declared("sdxl.diffusers-fp8-rowwise@1", "float8_e4m3fn")
+NVFP4 = declared("sdxl.diffusers-nvfp4-flat@1", "float4_e2m1fn")
 
 #: Real cards. sm = major*10 + minor, the fleet's own integer form.
 ADA = L.CardFacts(sm=89, vram_gb=8.0, name="RTX 4070 Laptop")
@@ -208,7 +206,7 @@ def test_an_unqualified_fp8_gemm_rejects_fp8_even_on_hopper_with_bytes():
 
 
 def test_an_unknown_dtype_is_a_named_rejection_not_a_crash():
-    weird = FakeLane(contract_id="x.int8@1", dtype="int8")
+    weird = declared("x.int8@1", "int8")
     resolved = L.resolve_lane(
         declared=(weird, BF16), card=ADA,
         verdicts=Verdicts(staged=[BF16.contract_id, "x.int8@1"]),

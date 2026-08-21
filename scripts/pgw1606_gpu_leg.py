@@ -76,7 +76,16 @@ def main() -> int:
     BF16 = contracts.SDXL_DIFFUSERS_BF16
     FP8 = contracts.SDXL_DIFFUSERS_FP8_ROWWISE
 
-    class TwoLane(Model[SDXL], lanes={BF16: "vram7g", FP8: "vram5g"}):
+    from gen_worker.demand import GiB, MiB, const, per_mp_batch
+    from gen_worker.serving.lane_spec import lane
+
+    class TwoLane(
+        Model[SDXL],
+        lanes={
+            BF16: lane(request=const(GiB(1.2)) + per_mp_batch(MiB(220))),
+            FP8: lane(request=const(GiB(0.7)) + per_mp_batch(MiB(140))),
+        },
+    ):
         def load(self, ctx) -> None:  # pragma: no cover
             self.pipe = ctx.load_pipeline(object)
 

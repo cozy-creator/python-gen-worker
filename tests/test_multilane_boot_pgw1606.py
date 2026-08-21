@@ -24,6 +24,8 @@ from gen_worker.serving import lane_ladder as L
 from gen_worker.serving.loader import EndpointLoadError, LoadedEndpoint
 from gen_worker.serving.model import Model
 from gen_worker.models import SDXL
+from gen_worker.demand import GiB, MiB, const, per_mp_batch
+from gen_worker.serving.lane_spec import lane
 
 BF16 = contracts.SDXL_DIFFUSERS_BF16
 FP8 = contracts.SDXL_DIFFUSERS_FP8_ROWWISE
@@ -53,7 +55,17 @@ class _Gates:
         return self._b
 
 
-class TwoLaneModel(Model[SDXL], lanes={BF16: "vram7g", FP8: "vram5g"}):
+class TwoLaneModel(
+    Model[SDXL],
+    # Two REAL lanes with REAL per-lane demand formulas. Per-lane and not
+    # per-model is the point (pgw#1599/se#816): fp8 halves the weight bytes
+    # AND shrinks the activation coefficients, so one formula would be
+    # wrong for one of these two.
+    lanes={
+        BF16: lane(request=const(GiB(1.2)) + per_mp_batch(MiB(220))),
+        FP8: lane(request=const(GiB(0.7)) + per_mp_batch(MiB(140))),
+    },
+):
     """One Model class, two REAL lanes — the shape Paul's multi-lane example
     ratified and the shape that could not boot before this issue."""
 
@@ -61,7 +73,10 @@ class TwoLaneModel(Model[SDXL], lanes={BF16: "vram7g", FP8: "vram5g"}):
         self.pipe = ctx.load_pipeline(object)
 
 
-class OneLaneModel(Model[SDXL], lanes={BF16: "vram7g"}):
+class OneLaneModel(
+    Model[SDXL],
+    lanes={BF16: lane(request=const(GiB(1.2)) + per_mp_batch(MiB(220)))},
+):
     def load(self, ctx: Any) -> None:  # pragma: no cover
         self.pipe = ctx.load_pipeline(object)
 

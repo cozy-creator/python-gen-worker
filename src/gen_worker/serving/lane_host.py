@@ -101,10 +101,19 @@ class BindingVerdicts:
     This is not the hub round-trip the coordinator ruled out: nothing here
     calls the hub. It reads a fact the binding already carries.
 
-    When the pyo3 `Verdict` binding lands (tensorfs#130's second item), a lane
-    the binding says nothing about stops being `absent` and gets computed
-    locally from the two documents. That is a one-method change here and no
-    change at all in `lane_ladder`.
+    **SETTLED 2026-08-20, and the earlier plan here was WRONG.** This docstring
+    used to promise that a pyo3 `Verdict` binding would land and a lane the
+    binding said nothing about would then be "computed locally from the two
+    documents". The pgw#1599 lane declined to vendor `Contract.verdict` into
+    pgw, and that decision is correct: the verdict is an ADMIT decision, not a
+    lookup. Computing it here would make the worker a second author of
+    admissibility, free to admit a binding the gate would have refused — the
+    failure that is invisible precisely because both sides believe they agree.
+
+    So there is no local-computation arm and there will not be one. A contract
+    the binding says nothing about stays `absent`, which the ladder degrades
+    into a priced conversion ask. That is the safe direction: pgw can ask for
+    bytes it was not given, and cannot admit bytes it was not told about.
     """
 
     def __init__(

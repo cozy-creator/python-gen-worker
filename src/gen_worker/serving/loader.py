@@ -20,76 +20,17 @@ from types import ModuleType
 from typing import Any, Dict, Tuple
 
 from .entrypoints import ENTRYPOINT_ATTR, EntrypointSpec
-from .model import ModelDeclarationError, lane_handle, model_lanes, model_type
+from .model import (
+    ModelDeclarationError,
+    lane_handle,
+    model_declared_lanes,
+    model_lanes,
+    model_type,
+)
 
 
 class EndpointLoadError(RuntimeError):
     """The endpoint module does not state a loadable serve surface."""
-
-
-class _BridgedLane:
-    """A `lane_ladder.DeclaredLane` built from a raw tensorfs contract.
-
-    ⚠️ **DELETED ON REBASE ONTO pgw#1599.** That issue ships
-    `model_declared_lanes(cls) -> tuple[DeclaredLane, ...]`, computed once at
-    class-definition time, which is where these three reads belong: it can
-    refuse a dtype-less lane and a hand-written floor at DECLARATION rather
-    than at boot. This bridge exists only so the ladder is provable before
-    that surface lands; `_declared_lanes` below prefers the real function the
-    moment it exists, and this class then has no callers and goes.
-
-    It deliberately derives `min_sm` the same single way pgw#1599 does —
-    `capability_floor_for_dtype` — so the two can never disagree about a
-    floor while both exist.
-    """
-
-    __slots__ = ("_lane",)
-
-    def __init__(self, lane: Any) -> None:
-        self._lane = lane
-
-    @property
-    def contract(self) -> Any:
-        return self._lane
-
-    @property
-    def contract_id(self) -> str:
-        return lane_handle(self._lane)
-
-    @property
-    def dtype(self) -> Any:
-        from .model import lane_dtype
-
-        try:
-            return lane_dtype(self._lane, where="lane ladder")
-        except Exception:  # noqa: BLE001 — a dtype-less lane is a NAMED
-            # rejection in the ladder ("unknown_dtype"), not a boot crash.
-            return None
-
-    @property
-    def min_sm(self) -> int:
-        from ..models.tensor_layout_contract import capability_floor_for_dtype
-
-        return int(capability_floor_for_dtype(self.dtype) or 0)
-
-    @property
-    def request(self) -> Any:
-        return None
-
-    @property
-    def resident(self) -> Any:
-        return ()
-
-
-def _declared_lanes(model_cls: type, lanes: Tuple[Any, ...]) -> Tuple[Any, ...]:
-    """pgw#1599's declared lanes, or the pre-#1599 bridge above."""
-    try:
-        from .model import model_declared_lanes  # type: ignore[attr-defined]
-    except ImportError:
-        return tuple(_BridgedLane(lane) for lane in lanes)
-    declared = tuple(model_declared_lanes(model_cls))
-    handles = {lane_handle(lane) for lane in lanes}
-    return tuple(d for d in declared if d.contract_id in handles) or declared
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,9 +119,17 @@ class LoadedEndpoint:
                     f"{contract!r} to pin (declared: "
                     f"{sorted(lane_handle(l) for l in self.lanes_of(model_cls))})"
                 )
+        # pgw#1599's DeclaredLane rows, filtered to the (possibly pinned)
+        # candidate set. Read, never rebuilt: the stamp is not re-parsed and
+        # `min_sm` is not re-derived, so this consumer cannot disagree with
+        # the declaration about a floor.
+        handles = {lane_handle(lane) for lane in lanes}
+        declared = tuple(
+            row for row in model_declared_lanes(model_cls)
+            if row.contract_id in handles
+        )
         return lane_ladder.resolve_lane(
-            declared=_declared_lanes(model_cls, lanes),
-            card=card, verdicts=verdicts, gates=gates,
+            declared=declared, card=card, verdicts=verdicts, gates=gates,
         )
 
 
