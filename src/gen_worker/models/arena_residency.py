@@ -972,6 +972,13 @@ class ArenaResidency:
     def _capture_host(self, region: RegionSpec, *, from_live: bool) -> None:
         """Mirror a region into pinned host RAM, unless the RAM half says no."""
         torch = self._torch
+        if self._host.get(region.name) is not None:
+            # A mirror already exists (a prior capture, or the checkpoint
+            # juggle's normalized image, pgw#1607). Weights are immutable so
+            # it cannot be stale: demote is unmap-only, never copy-out (the
+            # va#11 write-back invariant).
+            self._rebind_off_device(region)
+            return
         if not self._host_mirror:
             missing = [
                 self._triple_key(s)

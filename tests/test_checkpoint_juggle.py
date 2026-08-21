@@ -1,0 +1,380 @@
+"""The checkpoint juggle's card-free half: admission, images, validity.
+
+Everything here is decidable without a GPU: the shape-identity admission
+proof, the normalized-image build (bytes, casts, digests), the adaptive
+catalog (pressure eviction, protection, hysteresis) and the serving-validity
+ledger. What is left for the card — the in-place refill, the zero-re-arm
+proof, the mid-refill kill — runs in ``benchmarks/checkpoint_juggle_pgw1607.py``
+under a granted GPU window.
+
+Real ``nn.Module`` trees and real safetensors files throughout — no mocks
+(the test-suite convention): a mocked header would agree with whatever the
+admission check believes about it, which is the one thing worth checking.
+
+# pgw#1607: the checkpoint juggle (implements pgw#1602's multi-checkpoint scope).
+"""
+
+from __future__ import annotations
+
+import json
+import struct
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import pytest
+
+torch = pytest.importorskip("torch")
+import torch.nn as nn  # noqa: E402
+
+from gen_worker.models.arena_residency import (  # noqa: E402
+    DEFAULT_GRANULARITY,
+    dlpack_dtype,
+    plan_layout,
+)
+from gen_worker.models.checkpoint_juggle import (  # noqa: E402
+    CheckpointCatalog,
+    CheckpointImage,
+    JuggleRefusal,
+    RegionInvalid,
+    RegionValidity,
+    ValidityLedger,
+    admission_refusal,
+    read_manifest,
+)
+from gen_worker.models.stream_residency import (  # noqa: E402
+    discover_leaves,
+    own_tensors,
+    tensor_bytes,
+)
+
+GRAN = DEFAULT_GRANULARITY
+MIB = 1 << 20
+
+_SAFETENSORS_SPELLING = {
+    torch.float32: "F32",
+    torch.float16: "F16",
+    torch.bfloat16: "BF16",
+    torch.int64: "I64",
+}
+
+
+# ---------------------------------------------------------------------------
+# Real trees, real files
+# ---------------------------------------------------------------------------
+
+
+class Net(nn.Module):
+    """A lane template: one streaming-sized leaf, small leaves, a buffer."""
+
+    def __init__(self, seed: int = 0) -> None:
+        super().__init__()
+        g = torch.Generator().manual_seed(seed)
+        self.big = nn.Linear(1024, 1024, bias=False)  # 4 MiB fp32: streams
+        self.small = nn.Linear(16, 16, bias=False)  # core
+        self.norm = nn.LayerNorm(16)  # core
+        with torch.no_grad():
+            for p in self.parameters():
+                p.copy_(torch.randn(p.shape, generator=g))
+
+    def forward(self, x: Any) -> Any:  # pragma: no cover
+        return self.norm(self.small(self.big(x)))
+
+
+def write_safetensors(path: Path, tensors: Dict[str, Any]) -> None:
+    """A real safetensors file, written the way the format states it.
+
+    Deliberately NOT the library writer: the admission check reads headers,
+    so the fixture states its own header and the two implementations must
+    agree from opposite sides.
+    """
+    header: Dict[str, Any] = {}
+    blobs: List[bytes] = []
+    offset = 0
+    for key in sorted(tensors):
+        t = tensors[key].detach().contiguous()
+        raw = t.view(torch.uint8).numpy().tobytes() if t.dtype is torch.bfloat16 else t.numpy().tobytes()
+        header[key] = {
+            "dtype": _SAFETENSORS_SPELLING[t.dtype],
+            "shape": list(t.shape),
+            "data_offsets": [offset, offset + len(raw)],
+        }
+        blobs.append(raw)
+        offset += len(raw)
+    encoded = json.dumps(header).encode()
+    with path.open("wb") as fh:
+        fh.write(struct.pack("<Q", len(encoded)))
+        fh.write(encoded)
+        for blob in blobs:
+            fh.write(blob)
+
+
+def checkpoint_dir(tmp_path: Path, name: str, module: nn.Module, *, dtype: Any = None) -> Path:
+    """One component directory holding the module's weights as a checkpoint."""
+    directory = tmp_path / name
+    directory.mkdir(parents=True, exist_ok=True)
+    tensors = {}
+    for key, tensor in module.state_dict().items():
+        tensors[key] = tensor.to(dtype) if dtype is not None else tensor
+    write_safetensors(directory / "weights.safetensors", tensors)
+    return directory
+
+
+def specs_for(module: nn.Module, name: str = "root") -> List[Tuple[str, List[Any]]]:
+    leaves, _costs, _adapters = discover_leaves([(name, module)])
+    out = []
+    for leaf_name, leaf in leaves.items():
+        slots = []
+        for attr, is_param, tensor in own_tensors(leaf):
+            code, bits = dlpack_dtype(torch, tensor.dtype)
+            slots.append((attr, is_param, tensor_bytes(tensor), tuple(tensor.shape), code, bits))
+        out.append((leaf_name, slots))
+    return out
+
+
+def layout_for(module: nn.Module) -> Any:
+    return plan_layout(specs_for(module), granularity=GRAN, min_stream_bytes=MIB)
+
+
+# ---------------------------------------------------------------------------
+# D1 — admission
+# ---------------------------------------------------------------------------
+
+
+def test_a_checkpoint_of_the_same_architecture_is_admitted(tmp_path: Path) -> None:
+    template = Net(seed=0)
+    other = Net(seed=1)  # a distinct fine-tune, same architecture
+    manifest = read_manifest(checkpoint_dir(tmp_path, "b", other))
+    assert admission_refusal(layout_for(template), manifest) is None
+
+
+def test_a_shape_divergence_is_refused_and_names_the_key(tmp_path: Path) -> None:
+    template = Net(seed=0)
+
+    class Wider(Net):
+        def __init__(self) -> None:
+            super().__init__()
+            self.big = nn.Linear(1024, 2048, bias=False)
+
+    manifest = read_manifest(checkpoint_dir(tmp_path, "wide", Wider()))
+    refusal = admission_refusal(layout_for(template), manifest)
+    assert refusal is not None
+    assert "big.weight" in refusal and "cross-lane" in refusal
+
+
+def test_a_missing_tensor_is_refused(tmp_path: Path) -> None:
+    template = Net(seed=0)
+    directory = checkpoint_dir(tmp_path, "partial", Net(seed=2))
+    manifest = read_manifest(directory)
+    del manifest["norm.bias"]
+    refusal = admission_refusal(layout_for(template), manifest)
+    assert refusal is not None and "norm.bias" in refusal
+
+
+def test_a_float_cast_is_a_representation_choice_not_a_refusal(tmp_path: Path) -> None:
+    """fp16-on-disk in an fp32 lane: admitted; ingest casts once."""
+    template = Net(seed=0)
+    manifest = read_manifest(
+        checkpoint_dir(tmp_path, "half", Net(seed=3), dtype=torch.float16)
+    )
+    assert admission_refusal(layout_for(template), manifest) is None
+
+
+def test_an_integer_dtype_divergence_is_a_different_artifact(tmp_path: Path) -> None:
+    template = Net(seed=0)
+    directory = tmp_path / "intly"
+    directory.mkdir()
+    tensors = {k: t for k, t in Net(seed=4).state_dict().items()}
+    tensors["norm.bias"] = torch.arange(16, dtype=torch.int64)
+    write_safetensors(directory / "weights.safetensors", tensors)
+    refusal = admission_refusal(layout_for(template), read_manifest(directory))
+    assert refusal is not None and "different artifact" in refusal
+
+
+def test_manifest_refuses_unknown_dtype_spellings(tmp_path: Path) -> None:
+    directory = tmp_path / "exotic"
+    directory.mkdir()
+    header = json.dumps(
+        {"x": {"dtype": "F8_E4M3", "shape": [4], "data_offsets": [0, 4]}}
+    ).encode()
+    with (directory / "weights.safetensors").open("wb") as fh:
+        fh.write(struct.pack("<Q", len(header)))
+        fh.write(header)
+        fh.write(b"\x00" * 4)
+    with pytest.raises(JuggleRefusal, match="F8_E4M3"):
+        read_manifest(directory)
+
+
+# ---------------------------------------------------------------------------
+# D5 — the normalized image
+# ---------------------------------------------------------------------------
+
+
+def build_image(
+    tmp_path: Path, name: str, template: nn.Module, module: nn.Module, **kw: Any
+) -> Tuple[Any, CheckpointImage]:
+    layout = layout_for(template)
+    manifest = read_manifest(checkpoint_dir(tmp_path, name, module, **kw))
+    return layout, CheckpointImage(
+        name, layout, manifest, torch_mod=torch, varena_mod=None, engine=None
+    )
+
+
+def test_image_slots_are_bit_exact_with_the_source_tree(tmp_path: Path) -> None:
+    template, other = Net(seed=0), Net(seed=5)
+    layout, image = build_image(tmp_path, "b", template, other)
+    state = other.state_dict()
+    checked = 0
+    for region in layout.regions:
+        for slot in region.slots:
+            key = f"{slot.leaf.partition('.')[2]}.{slot.attr}" if "." in slot.leaf else slot.attr
+            assert torch.equal(image.slot_view(slot), state[key])
+            checked += 1
+    assert checked == len(list(template.state_dict()))
+
+
+def test_image_digests_are_deterministic_and_checkpoint_distinct(tmp_path: Path) -> None:
+    template = Net(seed=0)
+    _, image_b1 = build_image(tmp_path, "b1", template, Net(seed=6))
+    _, image_b2 = build_image(tmp_path, "b2", template, Net(seed=6))
+    _, image_c = build_image(tmp_path, "c", template, Net(seed=7))
+    assert image_b1.region_digests == image_b2.region_digests
+    assert image_b1.region_digests != image_c.region_digests
+
+
+def test_ingest_casts_once_and_values_match(tmp_path: Path) -> None:
+    template = Net(seed=0)
+    other = Net(seed=8)
+    layout, image = build_image(tmp_path, "half", template, other, dtype=torch.float16)
+    assert image.casts == len(list(other.state_dict()))
+    state = other.state_dict()
+    for region in layout.regions:
+        for slot in region.slots:
+            key = f"{slot.leaf.partition('.')[2]}.{slot.attr}" if "." in slot.leaf else slot.attr
+            expected = state[key].to(torch.float16).to(torch.float32)
+            assert torch.equal(image.slot_view(slot), expected)
+
+
+def test_the_image_pays_the_layouts_virtual_bytes(tmp_path: Path) -> None:
+    """The image is the ARENA's shape, alignment tax included — that is what
+    makes the swap one contiguous copy per region."""
+    template = Net(seed=0)
+    layout, image = build_image(tmp_path, "b", template, Net(seed=9))
+    assert image.nbytes == layout.virtual_bytes
+
+
+# ---------------------------------------------------------------------------
+# The catalog — adaptive, protected, hysteretic
+# ---------------------------------------------------------------------------
+
+
+def make_catalog(
+    tmp_path: Path, template: nn.Module, mem: Dict[str, int], floor: int
+) -> Tuple[Any, CheckpointCatalog]:
+    layout = layout_for(template)
+    catalog = CheckpointCatalog(
+        layout,
+        torch_mod=torch,
+        varena_mod=None,
+        host_floor_bytes=floor,
+        mem_available=lambda: mem["available"],
+    )
+    return layout, catalog
+
+
+def admit_real(catalog: CheckpointCatalog, tmp_path: Path, name: str, seed: int) -> None:
+    catalog.admit(name, read_manifest(checkpoint_dir(tmp_path, name, Net(seed=seed))))
+
+
+def test_pressure_evicts_lru_first_and_never_the_protected(tmp_path: Path) -> None:
+    template = Net(seed=0)
+    mem = {"available": 10 << 30}
+    layout, catalog = make_catalog(tmp_path, template, mem, floor=4 << 30)
+    for i, name in enumerate(("a", "b", "c")):
+        admit_real(catalog, tmp_path, name, seed=10 + i)
+        assert catalog.ensure_warm(name) is not None
+    catalog.protected.add("a")
+    # Starve RAM: the next ingest must evict — b (oldest unprotected), not a.
+    mem["available"] = (4 << 30) + layout.virtual_bytes // 2
+    admit_real(catalog, tmp_path, "d", seed=13)
+    catalog.ensure_warm("d")
+    assert catalog.warm("a") is not None
+    assert catalog.images.get("b") is None
+    assert catalog.evictions >= 1
+
+
+def test_hysteresis_a_pressure_evicted_image_stays_cold_this_epoch(tmp_path: Path) -> None:
+    template = Net(seed=0)
+    mem = {"available": 2 << 30}
+    _layout, catalog = make_catalog(tmp_path, template, mem, floor=4 << 30)
+    admit_real(catalog, tmp_path, "a", seed=20)
+    # RAM refuses: disk-direct, a pressure epoch opens, and the SAME id does
+    # not rebuild within it even when RAM returns.
+    assert catalog.ensure_warm("a") is None
+    epoch = catalog.pressure_epoch
+    mem["available"] = 64 << 30
+    assert catalog.ensure_warm("a") is None
+    assert catalog.pressure_epoch == epoch
+    # A different id is not under the epoch's hysteresis.
+    admit_real(catalog, tmp_path, "b", seed=21)
+    assert catalog.ensure_warm("b") is not None
+    # The next epoch releases it.
+    catalog.pressure_epoch += 1
+    assert catalog.ensure_warm("a") is not None
+
+
+def test_an_unadmitted_checkpoint_cannot_be_warmed(tmp_path: Path) -> None:
+    template = Net(seed=0)
+    _layout, catalog = make_catalog(
+        tmp_path, template, {"available": 64 << 30}, floor=4 << 30
+    )
+    with pytest.raises(JuggleRefusal, match="never admitted"):
+        catalog.ensure_warm("ghost")
+
+
+# ---------------------------------------------------------------------------
+# D7 — the serving-validity ledger (the franken-weights fence)
+# ---------------------------------------------------------------------------
+
+
+def test_ledger_happy_path_and_all_three_red_arms(tmp_path: Path) -> None:
+    layout = layout_for(Net(seed=0))
+    ledger = ValidityLedger(layout, "a")
+    ledger.assert_servable("a")
+
+    first = layout.regions[0].name
+    # RED 1: mid-refill is not servable.
+    ledger.begin(first, "b")
+    with pytest.raises(RegionInvalid, match="refilling"):
+        ledger.assert_servable("a")
+    # RED 2: a poisoned region refuses loudly, and names recovery.
+    ledger.poison(first)
+    with pytest.raises(RegionInvalid, match="idempotent"):
+        ledger.assert_servable("a")
+    assert ledger.of(first) == (RegionValidity.INVALID, "b")
+    # Recovery: a completed re-refill serves again.
+    ledger.begin(first, "b")
+    ledger.complete(first)
+    # RED 3: mixed checkpoints — region 0 holds b, the rest hold a.
+    if len(layout.regions) > 1:
+        with pytest.raises(RegionInvalid, match="mixed"):
+            ledger.assert_servable("b")
+    for region in layout.regions[1:]:
+        ledger.begin(region.name, "b")
+        ledger.complete(region.name)
+    ledger.assert_servable("b")
+
+
+def test_a_partial_switch_is_never_servable_under_either_identity(tmp_path: Path) -> None:
+    """The exact franken state the coordinator's requirement names: some
+    regions swapped to B, one died mid-refill. Neither A nor B may serve."""
+    layout = layout_for(Net(seed=0))
+    if len(layout.regions) < 2:
+        pytest.skip("needs two regions to interleave")
+    ledger = ValidityLedger(layout, "a")
+    ledger.begin(layout.regions[0].name, "b")
+    ledger.complete(layout.regions[0].name)
+    ledger.begin(layout.regions[1].name, "b")
+    ledger.poison(layout.regions[1].name)
+    for identity in ("a", "b"):
+        with pytest.raises(RegionInvalid):
+            ledger.assert_servable(identity)
