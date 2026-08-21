@@ -124,6 +124,17 @@ class Knob(msgspec.Struct, Generic[Number], frozen=True):
 #
 # What remains here is the INGEST fingerprint below (`ModelType.contracts`),
 # which maps a recorded stamp to a model name and never gates anything.
+#
+# SEVERAL `ModelType` DOCSTRINGS BELOW STILL NAME THE SENTINEL, AND THAT IS
+# DELIBERATE. They are the ratified reasoning for why a family declares no lane
+# at all — MusicGen, Hunyuan3d, Rife, Ltx2Upsampler, Krea2 — and the reasoning
+# outlives the class: *when a family genuinely has no lane, declare NOTHING
+# rather than a placeholder, because a placeholder's own refusal text instructs
+# the reader to author a document that will never exist, which is a standing lie
+# with a to-do attached.* Under v2 that argument is stronger, not weaker: there
+# is no per-lane document left to be late, so "absent" is the only honest state
+# and the sentinel has nothing left to stand in for. Read those mentions as
+# history, not as a live type.
 
 #: stabilityai/stable-diffusion-xl-base-1.0 scheduler_config.json — SDXL's
 #: training-time noise schedule (scaled_linear 0.00085/0.012, epsilon).
@@ -366,11 +377,6 @@ INTERNVL_U_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "use_lu_lambdas": False,
     "variance_type": None,
 }
-
-
-#: REAL as of tensorfs#124's second half (tensorfs#136). It was a
-#: ``MissingContract`` sentinel until this document was vendored, and clearing
-#: it took NO code change — the property the sentinel shape exists to have.
 
 
 #: stabilityai/stable-audio-open-1.0 ``scheduler/scheduler_config.json``, read
