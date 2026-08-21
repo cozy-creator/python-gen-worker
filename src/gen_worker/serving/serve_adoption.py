@@ -60,9 +60,30 @@ class ServeAdoption:
         self.contract: str = ""
 
     def sink_for(self, model_cls: type, lane: Any) -> Optional[Callable[..., Any]]:
-        """``ctx.compile``'s sink for one model class — the adopt arm."""
+        """``ctx.compile``'s sink for one model class — the adopt arm.
+
+        pgw#1650: a release derives EVERY compile-marking class, so this is
+        called once per class. Classes that share a lane share this session —
+        the document under that stamp carries all of their graphs and a mark
+        claims one by STRUCTURE. A class on a DIFFERENT lane gets no sink and
+        serves eager, LOUDLY: this session was built for one lane, and handing
+        it back for another silently adopts the wrong lane's graphs. Per-lane
+        sessions in one boot are owed (pgw#1650, serving half).
+        """
         with self._lock:
             if self._settled:
+                from .model import lane_handle
+
+                contract = lane_handle(lane) if lane is not None else ""
+                if self.contract and contract and contract != self.contract:
+                    logger.warning(
+                        "adopt: %s declares lane %s, but this boot adopted "
+                        "lane %s — %s serves EAGER. One boot holds one lane "
+                        "document.",
+                        model_cls.__name__, contract, self.contract,
+                        model_cls.__name__,
+                    )
+                    return None
                 return self._sink()
             self._settled = True
             try:
