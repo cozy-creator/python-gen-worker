@@ -7,8 +7,8 @@ than invented: `tensorhub/wai-illustrious@prod-fp16vae`, the checkpoint sdxl
     component_dtypes {text_encoder: fp16, text_encoder_2: fp16,
                       unet: fp16, vae: fp32}   (source: safetensors-headers)
 
-on a lane (`sdxl.diffusers-bf16@1`) that declares **bfloat16**. Three dtypes,
-one pipeline. The eager `from_pretrained(torch_dtype=…)` bridge flattens that
+on a lane (`sdxl.diffusers@1+plain.bf16@1`) whose QUANT RULE declares
+**bfloat16**. Three dtypes, one pipeline. The eager `from_pretrained(torch_dtype=…)` bridge flattens that
 to the lane's dtype and always has; the streaming engine passed it through, and
 the result died `Input type (c10::Half) and bias type (float) should be the
 same` in the VAE's first conv — a real request, burned on a rented card.

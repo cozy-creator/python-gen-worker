@@ -10,7 +10,7 @@ pgw#1590, filed from a real H100 pod: ``NeverFits`` refused
 earlier. The 180 GB is the WHOLE minimax-h3 repo at its stored bf16 precision
 plus 25%; the lane loads one part of it and `quantize_()`s that part to w8a8
 inside ``setup()``. pgw#1590 corrected it with the endpoint's hand-written
-``lanes={contracts.MINIMAX_H3_DIT_DIFFUSERS: "vram78g"}`` floor, capping the
+``lanes={h3_dit_lane: "vram78g"}`` floor, capping the
 charge downward.
 
 pgw#1599 deletes every hand-written floor (Paul, 2026-08-20: *"there is no
@@ -37,9 +37,9 @@ undeclared runtime numerics change pgw#1605 exclusion 1 bans — *"Quantization
 is a MINT-time, declared, measured decision — never an admission-time
 reflex."* pgw#1590's hand-written 78 was load-bearing precisely because it
 encoded that violation's consequence. **The close is h3 serving a real
-``minimax.h3-dit-fp8-rowwise@1`` lane** (it exists in the library,
-`dtype=float8_e4m3fn`), which needs tensorfs#128's converted artifact and
-pgw#1606's loader — not a cleverer sizer.
+``minimax-h3.diffusers@1+cozy.fp8-rowwise@1`` lane** (both halves are ratified
+in the v2 corpus and the rule declares `float8_e4m3fn`), which needs
+tensorfs#128's converted artifact and pgw#1606's loader — not a cleverer sizer.
 
 The regression is LATENT, not immediate: endpoints pin gen-worker from PyPI
 and this code reaches h3 only at a version cut it adopts.
@@ -66,7 +66,6 @@ from gen_worker._vendor.tensorfs import (
     LocalCAS,
     RepositoryManifest,
 )
-from gen_worker._vendor.tensorfs import contracts
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR
 from gen_worker.serving.residency import (
     NeverFits,
@@ -100,8 +99,13 @@ H3_FLOOR_BYTES = 78 * GIB
 H3_LANE_BF16_BYTES = 133_006_919_280   # the DiT at the contract's own dtype
 H3_ACTUALLY_HELD = 66_503_459_640      # after the setup()-time quantize_()
 
-H3_LANE = contracts.MINIMAX_H3_DIT_DIFFUSERS
-H3_KEY = ("tensorhub/minimax-h3@serve-narrowed", "H3Model/minimax.h3-dit-diffusers@1")
+#: pgw#1621: the lane is the v2 stamp pair, rendered `<topology>+<quant>`.
+#: The v1 Contract OBJECT this file used to import is deleted with the v1
+#: corpus; the h3 DiT lane is `minimax-h3.diffusers@1` composed with
+#: `plain.bf16@1`, which is the bf16 tree the 180 GB refusal was charged on.
+H3_LANE = ("minimax-h3.diffusers@1", "plain.bf16@1")
+H3_LANE_ID = "minimax-h3.diffusers@1+plain.bf16@1"
+H3_KEY = ("tensorhub/minimax-h3@serve-narrowed", f"H3Model/{H3_LANE_ID}")
 
 
 # ── a real projected snapshot, without 144 GB of disk ────────────────────────
@@ -214,7 +218,7 @@ def test_the_h3_dit_lane_is_refused_on_an_h100_and_this_is_the_KNOWN_cost(
     stops being true, this test says so instead of a pod.
 
     Its close is NOT here: h3 must serve a lane whose contract states the
-    precision its weights land at (`minimax.h3-dit-fp8-rowwise@1`,
+    precision its weights land at (`minimax-h3.diffusers@1+cozy.fp8-rowwise@1`,
     float8_e4m3fn), which needs tensorfs#128's converted artifact and
     pgw#1606's loader. The runtime `quantize_()` that opened the gap is itself
     the standing-rule violation pgw#1605 exclusion 1 names.

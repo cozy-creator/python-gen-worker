@@ -18,17 +18,22 @@ from __future__ import annotations
 from typing import Any, cast
 
 import msgspec
-import torch
 from diffusers import DiffusionPipeline
 
 from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
-from gen_worker._vendor.torchcg import LaneRef
 from gen_worker.demand import MiB, const
 
 #: bf16, because that is what the fixture writes to disk and the engine's whole
 #: contract is that bytes land verbatim in the container's own dtype. A lane
 #: naming something else here would make a dtype assertion below vacuous.
-STREAM_LANE = LaneRef("fixture.diffusers-bf16@1", dtype=torch.bfloat16)
+#:
+#: pgw#1621: the lane is the `(topology, quant)` stamp pair and the dtype is
+#: NOT the fixture's to choose — it is `declared_dtype` on the ratified
+#: `plain.bf16@1` rule. The `LaneRef("fixture.diffusers-bf16@1",
+#: dtype=torch.bfloat16)` stand-in this replaced could name a topology nobody
+#: had banked AND pick its own dtype; both are now refused at class definition.
+STREAM_LANE = ("sd15.diffusers@1", "plain.bf16@1")
+STREAM_LANE_ID = "sd15.diffusers@1+plain.bf16@1"
 
 
 class TinyPipeline(DiffusionPipeline):

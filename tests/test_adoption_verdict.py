@@ -34,7 +34,7 @@ from gen_worker.cli import daemon as daemon_mod
 from gen_worker.serving import DeployBinding, EndpointHost, load_endpoint
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
-LANE = "sdxl.diffusers-bf16@1"
+LANE = "sdxl.diffusers@1+plain.bf16@1"
 SM = "sm_89"
 STACK: tuple[tuple[str, str], ...] = (("torch", torch.__version__),)
 ENV = EnvIdentity(stack=STACK, sm=SM)

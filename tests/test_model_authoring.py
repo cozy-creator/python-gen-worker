@@ -53,7 +53,10 @@ from gen_worker.serving import (
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
 RT_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_rt_endpoint"
-LANE = "sdxl.diffusers-bf16@1"
+#: The deploy's lane pin, in the WIRE spelling `"<topology>+<quant>"`
+#: (pgw#1621) — what a `DeployBinding` carries and what `loader.lane()`
+#: matches on.
+LANE = "sdxl.diffusers@1+plain.bf16@1"
 
 
 def make_checkpoint(tmp_path: Path, **config: object) -> Path:
@@ -108,8 +111,9 @@ def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
     # generic, lanes via the class kwarg — read, not executed.
     assert model_type(SdxlModel) is SDXL
     lanes = model_lanes(SdxlModel)
-    assert [lane.contract for lane in lanes] == [
-        "sdxl.diffusers-bf16@1", "cozy.sdxl-fp8-rowwise@1",
+    assert [row.render() for row in lanes] == [
+        "sdxl.diffusers@1+plain.bf16@1",
+        "sdxl.diffusers@1+cozy.fp8-rowwise@1",
     ]
     assert len(lanes) == 2
 
@@ -123,21 +127,39 @@ def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
         for row in model_declared_lanes(SdxlModel)
     }
     assert per_lane == {
-        "sdxl.diffusers-bf16@1": {"const": MiB(96), "mp_batch": MiB(24)},
-        "cozy.sdxl-fp8-rowwise@1": {"const": MiB(48), "mp_batch": MiB(12)},
+        "sdxl.diffusers@1+plain.bf16@1": {"const": MiB(96), "mp_batch": MiB(24)},
+        "sdxl.diffusers@1+cozy.fp8-rowwise@1": {
+            "const": MiB(48), "mp_batch": MiB(12),
+        },
     }
-    # The placement row carries ONLY the floor DERIVED from the contract
-    # dtype, and is ABSENT for a lane that derives none — both fixture
-    # stand-ins declare float32, which has no capability floor, so the honest
-    # answer is no row at all rather than an empty one (an empty row reads to
-    # the resolver as "runs anywhere", which is th#1754's shape).
-    assert model_requires(SdxlModel) == {}
+    # The placement row carries ONLY the floor DERIVED from the lane's QUANT
+    # RULE (`capability_floor_sm`, read off the ratified document), and is
+    # ABSENT for a lane whose rule states none.
+    #
+    # This assertion CHANGED with pgw#1621 and the change is a fact, not a
+    # relaxation: the fixture's lanes used to be `LaneRef(handle,
+    # dtype=torch.float32)` stand-ins — a handle plus a dtype the fixture
+    # PICKED — so both derived 0 and the honest answer was no row at all. A v2
+    # lane cannot pick its dtype: it names a ratified rule and the rule states
+    # 80 for bf16 and 89 for fp8-rowwise. The "no row rather than an empty
+    # row" property (an empty row reads to the resolver as "runs anywhere",
+    # th#1754's shape) is asserted on `plain.f32@1` in the release fixtures,
+    # which is the one ratified rule whose floor really is 0.
+    assert {h: r.render() for h, r in model_requires(SdxlModel).items()} == {
+        "sdxl.diffusers@1+plain.bf16@1": "sm80+",
+        "sdxl.diffusers@1+cozy.fp8-rowwise@1": "sm89+",
+    }
+
+
+#: pgw#1621: a lane is the `(topology, quant)` STAMP PAIR, both halves
+#: ratified documents in the vendored `spec/v2` corpus. The v1 `Contract`
+#: OBJECT this helper used to import is deleted with the v1 vocabulary.
+_SDXL_BF16 = ("sdxl.diffusers@1", "plain.bf16@1")
+_SDXL_BF16_ID = "sdxl.diffusers@1+plain.bf16@1"
 
 
 def _sdxl_contract() -> Any:
-    from gen_worker._vendor.tensorfs import contracts
-
-    return contracts.SDXL_DIFFUSERS_BF16
+    return _SDXL_BF16
 
 
 def _engine_marks(ctx: Any) -> None:
@@ -185,12 +207,38 @@ def test_model_header_declarations_and_refusals() -> None:
         ):
             pass
 
-    with pytest.raises(ModelDeclarationError, match="MAPPING of tensorfs"):
+    with pytest.raises(ModelDeclarationError, match="MAPPING of"):
         class BadLanes(Model[SDXL], lanes=["not-a-mapping"]):  # type: ignore[arg-type]
             pass
 
-    with pytest.raises(ModelDeclarationError, match="not a layout contract"):
+    # A BARE handle is not a lane: a lane is named by a PAIR, and the refusal
+    # says so rather than guessing which axis was meant. An OLD v1 spelling
+    # gets the display-name hint and still has to be rewritten as the pair —
+    # there is no alias resolution, deliberately (a spelling that resolves is
+    # a spelling that spreads, and the hub's bridge for the un-re-keyed fleet
+    # exists to be deleted).
+    with pytest.raises(ModelDeclarationError, match="a lane is named by a"):
         class StringLane(Model[SDXL], lanes={"sdxl.diffusers-bf16@1": _lane()}):
+            pass
+
+    with pytest.raises(ModelDeclarationError,
+                       match="used to name 'sdxl.diffusers@1\\+plain.bf16@1'"):
+        class OldSpelling(Model[SDXL], lanes={"sdxl.diffusers-bf16@1": _lane()}):
+            pass
+
+    # Both halves are REQUIRED and both are checked against the corpus.
+    with pytest.raises(ModelDeclarationError,
+                       match="topology 'nope.nothing@1' is not in the vendored"):
+        class UnknownTopology(
+            Model[SDXL], lanes={("nope.nothing@1", "plain.bf16@1"): _lane()}
+        ):
+            pass
+
+    with pytest.raises(ModelDeclarationError,
+                       match="quant 'nope.q9@1' is not in the vendored"):
+        class UnknownRule(
+            Model[SDXL], lanes={("sdxl.diffusers@1", "nope.q9@1"): _lane()}
+        ):
             pass
 
     # DELETED (2/5): the canonical-contract BORROW. An omitted `lanes=` used
@@ -249,9 +297,13 @@ def test_model_header_declarations_and_refusals() -> None:
 
     assert model_type(SdxlLike) is SDXL
     (declared,) = model_declared_lanes(SdxlLike)
-    assert declared.contract_id == "sdxl.diffusers-bf16@1"
+    assert declared.contract_id == _SDXL_BF16_ID
+    assert (declared.topology, declared.quant) == _SDXL_BF16
     assert declared.dtype == "bfloat16"
-    # DERIVED from the contract dtype, never hand-written — and per LANE,
+    # The v1 spelling survives as a DISPLAY name — carried for refusal
+    # messages, never parsed and gating nothing.
+    assert declared.display_name == "sdxl.diffusers-bf16@1"
+    # DERIVED from the lane's QUANT RULE, never hand-written — and per LANE,
     # which is why one hand-written floor could not serve a multi-lane class.
     assert declared.min_sm == 80
     assert declared.request.coefficients() == {
@@ -270,7 +322,7 @@ def test_model_header_declarations_and_refusals() -> None:
     # half went with the strings, and what replaces it is COMPUTED from the
     # formula (pgw#1600), never annotated.
     assert {h: r.render() for h, r in model_requires(SdxlLike).items()} == {
-        "sdxl.diffusers-bf16@1": "sm80+",
+        _SDXL_BF16_ID: "sm80+",
     }
 
     # A hand-written sm floor is still a refusal — two producers of one fact
@@ -290,7 +342,10 @@ def test_model_header_declarations_and_refusals() -> None:
             """No ctx.compile(): torch.compile measured no win here."""
 
     assert model_marks_compile(EagerModel) is False
-    assert model_lanes(EagerModel) == (_sdxl_contract(),)
+    # `model_lanes` answers the PARSED pair (a `LayoutId`), not the author's
+    # tuple: the stamp is read once, at class definition, and every consumer
+    # shares that read rather than re-parsing the header's spelling.
+    assert [row.render() for row in model_lanes(EagerModel)] == [_SDXL_BF16_ID]
     # ...and the words in that DOCSTRING are not a mark. A class that
     # documents "no ctx.compile here" is the best-behaved one on the fleet and
     # a substring check would refuse exactly it.
@@ -369,36 +424,34 @@ def test_model_header_declarations_and_refusals() -> None:
         ):
             pass
 
-    # --- the lane handle's wire shape (unchanged by this issue) ----------
+    # --- the lane handle's wire shape ------------------------------------
 
-    # The SHIPPED tensorfs Contract's attribute shape: `stamp` + `digest`,
-    # and NO `contract` (tensorfs#111). Reading the bare 64-hex `digest` as
-    # the handle put `f1455f56…` where `sdxl.diffusers-bf16@1` belonged and
-    # made torchcg refuse the lane. This is the producer half of a cross-repo
-    # wire agreement, so the shape is pinned here.
-    class ShippedContract:
-        __slots__ = ("digest", "dtype", "name", "stamp", "version")
+    # ONE rendering, `"<topology>+<quant>"` — th#1809's spelling, shared with
+    # the hub's `tensorfs.LayoutID.String` and with the derived-artifact CAS
+    # address, so a drift here is a fork rather than a cosmetic bug.
+    #
+    # pgw#1621 deleted the four-fallback ladder this used to be, along with the
+    # ambiguity that needed it: a v1 `Contract` spelled its handle four ways,
+    # one of which was a BARE 64-hex `digest` that read as a handle and was not
+    # one — it once put `f1455f56…` where `sdxl.diffusers-bf16@1` belonged and
+    # made torchcg refuse the lane. A pair has exactly one rendering, so every
+    # spelling that reaches this repo answers the same string.
+    from gen_worker.models.tensor_layout_contract import LayoutId
 
-        def __init__(self) -> None:
-            self.name = "sdxl.diffusers-bf16"
-            self.version = 1
-            self.stamp = "sdxl.diffusers-bf16@1"
-            self.digest = "f1455f56321d1f268772912c223170f015564ac0" + "0" * 24
-            self.dtype = None
+    (row,) = model_declared_lanes(SdxlLike)
+    for spelling in (
+        row,                                    # the DeclaredLane
+        row.layout,                             # the LayoutId
+        _SDXL_BF16,                             # the author's two-tuple
+        _SDXL_BF16_ID,                          # the wire string, read back
+        LayoutId(topology="sdxl.diffusers@1", quant="plain.bf16@1"),
+    ):
+        assert lane_handle(spelling) == _SDXL_BF16_ID
 
-    assert lane_handle(ShippedContract()) == "sdxl.diffusers-bf16@1"
-
-    # A digest-only object still yields a STAMP, never a bare hex string:
-    # an anonymous custom contract's digest IS its stamp (tensorfs#112's third
-    # Stamp arm), and that spelling carries the `sha256:` prefix.
-    class AnonymousContract:
-        __slots__ = ("digest", "dtype")
-
-        def __init__(self) -> None:
-            self.digest = "a" * 64
-            self.dtype = None
-
-    assert lane_handle(AnonymousContract()) == "sha256:" + "a" * 64
+    # A 64-hex digest is NOT a lane handle and can no longer masquerade as
+    # one: it is not a pair, so it refuses by name where it used to render.
+    with pytest.raises(ModelDeclarationError):
+        lane_handle("a" * 64)
 
     # Cheap __init__: constructing a model does not load anything.
     assert not vars(EagerModel())

@@ -28,9 +28,22 @@ governs; the checkpoint speaks only for a DERIVED lane, which has no contract
 to read a dtype from. The trace dtype is a property of the contract-template,
 never of the bytes that happen to be mounted.
 
-These tests use the REAL library contracts on purpose. pgw#1512's fixture
-invented `unet.conv_out.weight`, and that invention is what let every check
-pass while the fleet's actual spelling did the opposite.
+These tests use REAL RATIFIED lanes on purpose. pgw#1512's fixture invented
+`unet.conv_out.weight`, and that invention is what let every check pass while
+the fleet's actual spelling did the opposite.
+
+**pgw#1621 made the mistake pgw#1512 made INEXPRESSIBLE, which is why two of
+these tests are gone rather than re-keyed.** They enumerated every v1 contract
+document's `tensors[].pattern` list and refused a pattern whose first dotted
+segment was a COMPONENT WORD (`unet.`, `vae.`), because a v1 document had one
+flat pattern list and nothing else to say which component a pattern belonged
+to — so "is this a directory name or a parameter name?" had to be INFERRED from
+the spelling, and pgw#1512 inferred it wrong for the entire fleet. A v2
+TOPOLOGY carries `components[]` as a first-class field, each with its own
+`{key -> shape}` map, so the component is DECLARED and there is no inference to
+get wrong. `test_a_v2_topology_declares_its_components_so_the_pgw1512_
+inference_cannot_recur` is what replaces both, and it states the same two facts
+positively: components are named, and one layout really does cover several.
 """
 
 from __future__ import annotations
@@ -45,23 +58,41 @@ pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 import torch  # noqa: E402
 
-from gen_worker._vendor import tensorfs as _vendored_tensorfs  # noqa: E402
 from gen_worker.release.trace_context import TraceLoadContext  # noqa: E402
-
-#: The shipped contracts, from the VENDORED tensorfs that ships in this wheel
-#: — not a path outside the repo. An earlier draft read
-#: `~/cozy/tensorfs/spec/...` and `~/cozy/serverless-endpoints/sd15/...`, which
-#: made every assertion here SKIP in CI: the tests that prove this fix would
-#: not have run in the gate that is supposed to catch its regression.
-CONTRACTS = Path(_vendored_tensorfs.__file__).resolve().parent / "_contracts"
 
 FIXTURES = Path(__file__).resolve().parent / "release_fixtures"
 
+#: sd15's REAL lane, from the VENDORED v2 corpus that ships in this wheel —
+#: not a path outside the repo. An earlier draft read `~/cozy/tensorfs/spec/...`
+#: and `~/cozy/serverless-endpoints/sd15/...`, which made every assertion here
+#: SKIP in CI: the tests that prove this fix would not have run in the gate
+#: that is supposed to catch its regression.
+SD15_BF16 = ("sd15.diffusers@1", "plain.bf16@1")
 
-def _contract(name: str) -> Any:
-    from gen_worker._vendor.tensorfs.contract import Contract
 
-    return Contract.from_document((CONTRACTS / name).read_text())
+def _contract(pair: Any = SD15_BF16) -> Any:
+    """The lane as the trace sees it: a READ `DeclaredLane`.
+
+    pgw#1621: the trace's dtype source is `DeclaredLane.dtype`, which is the
+    ratified QUANT RULE's `declared_dtype` — so this helper builds the lane the
+    way `Model.__init_subclass__` does rather than parsing a document, and a
+    test can never disagree with the platform about a lane's precision.
+    """
+    from gen_worker.demand import GiB, const
+    from gen_worker.models.tensor_layout_contract import (
+        LayoutId,
+        capability_floor_for_rule,
+        rule_dtype,
+    )
+    from gen_worker.serving.lane_spec import DeclaredLane, lane
+
+    topology, quant = pair
+    return DeclaredLane(
+        layout=LayoutId(topology=topology, quant=quant),
+        topology=topology, quant=quant,
+        dtype=rule_dtype(quant), min_sm=capability_floor_for_rule(quant),
+        spec=lane(request=const(GiB(1))),
+    )
 
 
 def _ctx(tree: Path, lane: Any) -> TraceLoadContext:
@@ -93,101 +124,82 @@ def sd15_shaped_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tree
 
 
-def test_EVERY_shipped_contract_names_the_DENOISERS_OWN_parameters() -> None:
-    """The fact that falsified pgw#1512, pinned so it cannot be re-assumed.
+def test_a_v2_topology_declares_its_components_so_pgw1512_cannot_recur() -> None:
+    """The two fences this file used to carry, made one POSITIVE statement.
 
-    If a contract ever DID lead with a component name this would go red, and
-    whoever wrote it would find this test explaining why that matters.
+    **What they were.** `test_EVERY_shipped_contract_names_the_DENOISERS_OWN_
+    parameters` enumerated every v1 document's flat `tensors[].pattern` list
+    and refused a pattern whose first dotted segment was a component word
+    (`unet.`, `vae.`) — because a v1 document had ONE flat list and no way to
+    say which component a pattern belonged to, so "directory name or parameter
+    name?" had to be INFERRED from the spelling. pgw#1512 inferred it wrong for
+    the whole fleet: it read the first segment as a component roster, matched
+    nothing on any endpoint, never applied the lane's dtype anywhere, and
+    traced sd15's UNet at float32 under a bfloat16 lane. The fence even needed
+    an EXEMPTION — `musicgen.transformers-fp16`, a single-file checkpoint whose
+    tensors genuinely ARE named `text_encoder.*` / `audio_encoder.*` — which is
+    the tell that the inference was never sound, only usually right.
+    `test_a_contract_can_cover_SEVERAL_components` was the companion: sdxl's
+    one document covered UNet, VAE and text encoder, which falsified pgw#1512's
+    premise that a denoiser contract says nothing about the VAE beside it.
+
+    **Why neither can be re-keyed.** A v2 TOPOLOGY carries `components[]` as a
+    first-class field, each with its own `{key -> shape}` map. The component is
+    DECLARED, not spelled into a prefix, so there is no inference to get wrong
+    and no exemption to grant — a single-file checkpoint is simply a topology
+    with ONE unnamed component, which is what `musicgen.transformers@1` is.
+    Refusing a pattern by its first segment is not a check that got weaker; it
+    is a check with nothing left to check.
+
+    **What survives is both facts, stated positively**, because they are still
+    what makes the dtype policy below correct: the components are named, and
+    one layout really does govern several of them.
     """
+    from gen_worker.models.tensor_layout_contract import topologies
 
-    # True COMPONENT names as `model_index.json` spells them. `encoder` and
-    # `decoder` are deliberately absent: they are the VAE's own submodules,
-    # and sdxl's contract leads with them — which is itself the point of the
-    # next assertion.
-    component_words = {"unet", "vae", "transformer", "text_encoder", "tokenizer"}
+    corpus = topologies()
 
-    # NARROWED at tensorfs rev 1da68d58, by a case that FALSIFIES the fence's
-    # premise rather than merely inconveniencing it.
-    #
-    # The premise: a component word in the first dotted segment means the
-    # contract is naming a DIRECTORY in a diffusers component tree
-    # (`unet/diffusion_pytorch_model.safetensors`) instead of the denoiser's
-    # own parameters. That inference holds for a component TREE and fails flat
-    # for a SINGLE-FILE checkpoint, where several submodules live in ONE file
-    # and their real tensor names carry the submodule prefix.
-    #
-    # `musicgen.transformers-fp16` is that case: `MusicgenForConditionalGeneration`
-    # is one file holding a T5 text encoder, an EnCodec audio codec and the LM
-    # decoder, and its state dict genuinely spells them `text_encoder.*`,
-    # `audio_encoder.*` and `decoder.*`. Those ARE the denoiser tree's own
-    # parameter names — there is no directory anywhere to have confused them
-    # with. Refusing it would be the fence enforcing a tree SHAPE it was never
-    # about.
-    #
-    # Exempted by FORMAT, not by filename: the contract's format segment says
-    # `transformers`, which IS the single-file shape. A `diffusers` contract
-    # leading with a component word is still an offender, which is the whole
-    # fence, and it still catches the case pgw#1512 was about.
-    offenders = []
-    for path in sorted(CONTRACTS.glob("*.json")):
-        document = json.loads(path.read_text())
-        heads = {
-            t["pattern"].split(".", 1)[0]
-            for t in document.get("tensors", [])
-        }
-        if not heads & component_words:
-            continue
-        name = str(document.get("name", path.stem))
-        fmt = name.split(".", 1)[1] if "." in name else ""
-        if fmt.split("-", 1)[0] == "transformers":
-            continue  # a single-file tree: the prefix IS the tensor's name
-        offenders.append(path.name)
-    assert offenders == []
+    # sd15: ONE component, the denoiser, addressed by its own parameter names.
+    # No `unet.` prefix anywhere in the keys — the component is the KEY of the
+    # map, which is exactly the distinction pgw#1512 could not draw.
+    (sd15_component,) = corpus["sd15.diffusers@1"]
+    assert sd15_component == "unet"
+    sd15_keys = corpus["sd15.diffusers@1"]["unet"]
+    assert "conv_in.weight" in sd15_keys
+    assert not [k for k in sd15_keys if k.startswith("unet.")]
 
-    # The exemption is NARROW and stays narrow: exactly one shipped contract
-    # uses it today. If a second appears, read the reasoning above and decide
-    # deliberately rather than widening a set.
-    exempt = [
-        path.name
-        for path in sorted(CONTRACTS.glob("*.json"))
-        if str(json.loads(path.read_text()).get("name", "")).split(".", 1)[-1]
-        .split("-", 1)[0] == "transformers"
-        and {t["pattern"].split(".", 1)[0]
-             for t in json.loads(path.read_text()).get("tensors", [])}
-        & component_words
-    ]
-    assert exempt == ["musicgen.transformers-fp16.v1.json"]
+    # sdxl: FOUR components under ONE layout — the fact that falsified
+    # pgw#1512's premise, now readable instead of inferred from a pattern list.
+    sdxl = corpus["sdxl.diffusers@1"]
+    assert set(sdxl) == {"unet", "vae", "text_encoder", "text_encoder_2"}
+    assert "conv_in.weight" in sdxl["unet"], "the denoiser's own parameters"
+    assert "decoder.conv_in.weight" in sdxl["vae"], "the VAE's"
+    # ...and the VAE's `decoder.*` keys live under the VAE component, so the
+    # v1 collision between "a submodule named decoder" and "a component named
+    # decoder" cannot be constructed at all.
+    assert not [k for k in sdxl["unet"] if k.startswith("decoder.")]
 
+    # musicgen: the SINGLE-FILE shape that needed a v1 exemption. It is one
+    # component with no name, and its keys carry the submodule prefixes that
+    # used to look like component words. No exemption; nothing to exempt.
+    (musicgen_component,) = corpus["musicgen.transformers@1"]
+    assert musicgen_component == ""
+    assert [k for k in corpus["musicgen.transformers@1"][""]
+            if k.startswith("audio_encoder.")]
 
-def test_a_contract_can_cover_SEVERAL_components_which_settles_the_question() -> None:
-    """sdxl's contract enumerates the UNet, the VAE **and** the text encoder.
-
-    `down_blocks`/`conv_in` (denoiser), `encoder`/`decoder`/`quant_conv`
-    (VAE), `text_model`/`text_projection` (text encoder) — all at one
-    `dtype: bfloat16`, none of them component-prefixed.
-
-    So "a denoiser contract says nothing about the VAE beside it" — pgw#1512's
-    premise, and mine — is not merely unprovable, it is contradicted by a
-    shipped contract. A lane's dtype is the precision of the TREE the store
-    converts, which is why it is the right answer for every component that has
-    no bytes of its own to speak with.
-    """
-
-    heads = {
-        t["pattern"].split(".", 1)[0]
-        for t in json.loads(
-            (CONTRACTS / "sdxl.diffusers-bf16.v1.json").read_text()
-        )["tensors"]
-    }
-    assert {"down_blocks", "conv_in"} & heads, "the denoiser's own parameters"
-    assert {"encoder", "decoder", "quant_conv"} & heads, "the VAE's"
-    assert {"text_model", "text_projection"} & heads, "the text encoder's"
+    # A topology carries NO dtype — the precision half is the quant rule's,
+    # which is why the lane and not the topology answers the dtype question
+    # below.
+    for handle, components in corpus.items():
+        for component, keys in components.items():
+            for shape in list(keys.values())[:1]:
+                assert all(isinstance(d, int) for d in shape), (handle, component)
 
 
 def test_sd15s_UNET_traces_at_the_LANES_dtype_not_at_float32(sd15_shaped_tree: Path) -> None:
     """The regression, at the seam. Was float32 under a bfloat16 lane."""
 
-    ctx = _ctx(sd15_shaped_tree, _contract("sd15.diffusers-bf16.v1.json"))
+    ctx = _ctx(sd15_shaped_tree, _contract())
     assert ctx.component_dtype(sd15_shaped_tree, "unet") is torch.bfloat16
 
 
@@ -201,7 +213,7 @@ def test_the_WHOLE_sd15_pipeline_agrees_so_no_activation_crosses_a_boundary(
     `prompt_embeds` can reach the UNet.
     """
 
-    ctx = _ctx(sd15_shaped_tree, _contract("sd15.diffusers-bf16.v1.json"))
+    ctx = _ctx(sd15_shaped_tree, _contract())
     seen = {
         name: ctx.component_dtype(sd15_shaped_tree, name)
         for name in ("unet", "vae", "text_encoder")
@@ -239,7 +251,7 @@ def test_the_LANE_outranks_the_mounted_checkpoints_own_bytes(tmp_path: Path) -> 
     """
 
     tree = _tree_at(tmp_path / "tree", torch.float16)
-    ctx = _ctx(tree, _contract("sd15.diffusers-bf16.v1.json"))
+    ctx = _ctx(tree, _contract())
     assert ctx.component_dtype(tree, "vae") is torch.bfloat16
     assert ctx.component_dtype(tree, "unet") is torch.bfloat16
 
@@ -258,7 +270,7 @@ def test_FLIPPING_the_checkpoints_dtype_does_not_move_the_traced_precision(
     mounted.
     """
 
-    lane = _contract("sd15.diffusers-bf16.v1.json")
+    lane = _contract()
     answers = []
     for name, dtype in (("fp16", torch.float16), ("fp32", torch.float32)):
         tree = _tree_at(tmp_path / name, dtype)
@@ -282,7 +294,7 @@ def test_a_checkpoint_that_disagrees_with_the_lane_is_NAMED(
     import logging
 
     tree = _tree_at(tmp_path / "tree", torch.float16)
-    ctx = _ctx(tree, _contract("sd15.diffusers-bf16.v1.json"))
+    ctx = _ctx(tree, _contract())
     with caplog.at_level(logging.WARNING, logger="gen_worker.release.trace"):
         assert ctx.component_dtype(tree, "unet") is torch.bfloat16
         assert ctx.component_dtype(tree, "unet") is torch.bfloat16
@@ -299,7 +311,7 @@ def test_a_checkpoint_that_AGREES_with_the_lane_says_nothing(
     import logging
 
     tree = _tree_at(tmp_path / "tree", torch.bfloat16)
-    ctx = _ctx(tree, _contract("sd15.diffusers-bf16.v1.json"))
+    ctx = _ctx(tree, _contract())
     with caplog.at_level(logging.WARNING, logger="gen_worker.release.trace"):
         assert ctx.component_dtype(tree, "unet") is torch.bfloat16
     assert not [r for r in caplog.records if "TRACE FOLLOWS THE LANE" in r.getMessage()]
@@ -319,7 +331,7 @@ def test_a_stale_component_CONFIG_does_not_outrank_the_lane(
     )
     assert declared.get("torch_dtype") == "float32", "premise: the config says fp32"
 
-    ctx = _ctx(sd15_shaped_tree, _contract("sd15.diffusers-bf16.v1.json"))
+    ctx = _ctx(sd15_shaped_tree, _contract())
     assert ctx.component_dtype(sd15_shaped_tree, "text_encoder") is torch.bfloat16
 
 
@@ -350,7 +362,7 @@ def test_a_component_directory_passed_WITHOUT_a_subfolder_still_resolves(
 ) -> None:
     """diffusers hands the directory over: `from_pretrained(<tree>/vae)`."""
 
-    ctx = _ctx(sd15_shaped_tree, _contract("sd15.diffusers-bf16.v1.json"))
+    ctx = _ctx(sd15_shaped_tree, _contract())
     assert ctx.component_dtype(sd15_shaped_tree / "unet", None) is torch.bfloat16
     assert (
         ctx.component_dtype(sd15_shaped_tree / "text_encoder", None) is torch.bfloat16

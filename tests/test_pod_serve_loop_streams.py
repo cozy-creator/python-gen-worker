@@ -55,7 +55,7 @@ from streaming_fixture import build_source  # noqa: E402
 FIXTURE = Path(__file__).parent / "fixtures" / "serving_projected_endpoint"
 GB = 1024**3
 REF = "fixture/streamer@1"
-LANE = "fixture.diffusers-bf16@1"
+LANE = "sd15.diffusers@1+plain.bf16@1"
 KEY = "e5" * 32
 
 

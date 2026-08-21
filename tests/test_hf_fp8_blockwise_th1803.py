@@ -15,9 +15,9 @@ What is proven:
    by ~1e5, not by 4%);
 3. a forward pass produces finite logits (decode, at unit scale);
 4. a ``cozy.fp8-rowwise@1`` tree is REFUSED by name, never adapted — the
-   silent-wrong-numbers defect the contract exists to prevent;
+   silent-wrong-numbers defect the rule exists to prevent;
 5. a transposed scale grid is refused;
-6. the image's derived declaration carries the contract, so the hub's
+6. the image's derived declaration carries the QUANT RULE, so the hub's
    `Satisfies` comparison can succeed for the first time.
 """
 
@@ -42,9 +42,14 @@ from gen_worker.models.hf_fp8_blockwise import (  # noqa: E402
     load_hf_fp8_blockwise,
 )
 from gen_worker.models.tensor_layout_contract import (  # noqa: E402
-    CONTRACT_HF_FP8_BLOCKWISE,
-    contract_decoders_of,
+    quant_rule_decoders_of,
 )
+
+#: pgw#1621: the ratified v2 quant-rule handle, which is now the WHOLE
+#: declaration — a rule's conventions (128x128 block scales in
+#: `weight_scale_inv`) are its identity, so there is no `decodes=` axis beside
+#: it any more. `CONTRACT_HF_FP8_BLOCKWISE` is deleted with the v1 vocabulary.
+HF_FP8_BLOCKWISE = "hf.fp8-blockwise@1"
 
 BLOCK = (128, 128)
 FP8_MAX = 448.0
@@ -175,17 +180,17 @@ def test_a_dense_tree_is_not_this_contract(tmp_path: Path):
     assert "plain.bf16@1" in str(excinfo.value)
 
 
-def test_the_image_declares_the_contract():
+def test_the_image_declares_the_quant_rule():
     """The declaration is a property of the decoder, and the build derivation
     harvests it — this is what the hub's gate reads."""
     from gen_worker.discovery.execution_lanes import derive_execution_lanes
 
-    decls = contract_decoders_of(load_hf_fp8_blockwise)
-    assert [d.contract for d in decls] == [CONTRACT_HF_FP8_BLOCKWISE]
+    decls = quant_rule_decoders_of(load_hf_fp8_blockwise)
+    assert [d.rule for d in decls] == [HF_FP8_BLOCKWISE]
     assert decls[0].composes_lora is False
 
     derived = derive_execution_lanes()
-    mine = [c for c in derived.contracts if c.contract == CONTRACT_HF_FP8_BLOCKWISE]
-    assert mine, [c.contract for c in derived.contracts]
+    mine = [c for c in derived.contracts if c.rule == HF_FP8_BLOCKWISE]
+    assert mine, [c.rule for c in derived.contracts]
     assert mine[0].decoder.endswith(":load_hf_fp8_blockwise")
     assert "fp8-w8a8-dynamic+compiled" in mine[0].execution_lanes

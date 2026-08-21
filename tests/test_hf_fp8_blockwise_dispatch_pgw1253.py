@@ -2,8 +2,9 @@
 
 An EXECUTION assertion, not a registration one. Asserting that a decoder is
 registered proves nothing about whether it runs, and that was literally the
-defect: ``load_hf_fp8_blockwise`` carried ``@implements_contract``, so the
-image's derived ``[decode_set]`` told the hub it decodes
+defect: ``load_hf_fp8_blockwise`` carried the decode marker
+(``@implements_quant_rule`` since pgw#1621, ``@implements_contract`` then), so
+the image's derived ``[decode_set]`` told the hub it decodes
 ``hf.fp8-blockwise@1`` — and no production call site reached it. transformers
 reads ``quantization_config`` out of ``config.json`` by itself, so the tree
 loaded anyway, through the GENERIC arm that declares ``plain.bf16@1``, and
@@ -13,7 +14,7 @@ Measured on the pre-fix tree by driving :func:`load_component` with a real
 blockwise fixture: ``LlamaForCausalLM.from_pretrained`` ran,
 ``load_hf_fp8_blockwise`` did not, the conditioner materialized at **float32**
 (the declaration's compute dtype is bf16), and a TRANSPOSED scale grid — the
-grid this contract's verifier exists to refuse — loaded without complaint.
+grid this rule's verifier exists to refuse — loaded without complaint.
 
 So these tests drive the production dispatch and name the function that ran.
 """

@@ -41,7 +41,7 @@ from gen_worker.serving import (
 from gen_worker.serving.hub_store import HubGraphStore
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
-LANE = "sdxl.diffusers-bf16@1"
+LANE = "sdxl.diffusers@1+plain.bf16@1"
 SM = "sm_89"
 STACK: tuple[tuple[str, str], ...] = (("torch", torch.__version__),)
 ENV = EnvIdentity(stack=STACK, sm=SM)

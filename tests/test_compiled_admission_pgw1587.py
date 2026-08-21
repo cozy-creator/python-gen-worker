@@ -317,6 +317,6 @@ def test_the_declared_requirement_never_refuses_a_load() -> None:
     assert shortfalls(_NoLanes, None, facts=facts) == (), (
         "an eager-permanent model declares no lane and so no requirement"
     )
-    message = Shortfall("min_vram_gb", "sdxl.diffusers-bf16@1", 7.0, 4.0, "tiny").message
+    message = Shortfall("min_vram_gb", "sdxl.diffusers@1+plain.bf16@1", 7.0, 4.0, "tiny").message
     assert "Running anyway" in message
     assert "never permission" in message

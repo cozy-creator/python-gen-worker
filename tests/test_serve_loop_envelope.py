@@ -92,7 +92,7 @@ def make_loop(
         residency=manager,
         resolver=resolver,
         # The deploy's lane pick (multi-lane models refuse an unnamed lane).
-        lane_contract="sdxl.diffusers-bf16@1" if fixture is FIXTURE_DIR else "",
+        lane_contract="sdxl.diffusers@1+plain.bf16@1" if fixture is FIXTURE_DIR else "",
         output_dir=tmp_path / "outputs",
     )
     return loop, resolver, manager
@@ -112,7 +112,7 @@ def test_the_envelope_serves_end_to_end_with_fake_tensors(tmp_path: Path) -> Non
     saved = tmp_path / "outputs" / result.image.ref
     assert saved.is_file() and saved.stat().st_size > 0
     # The instance is resident under its reservation (weights + headroom).
-    assert manager.tier_of(DREAM, "SdxlModel/sdxl.diffusers-bf16@1") is Tier.VRAM
+    assert manager.tier_of(DREAM, "SdxlModel/sdxl.diffusers@1+plain.bf16@1") is Tier.VRAM
 
     # pgw#1404 degraded mode, end to end on the REAL serve path — and pgw#1599
     # narrowed WHAT can trigger it, which is asserted here rather than left to
@@ -143,31 +143,33 @@ def test_the_degraded_placement_warning_can_still_go_red(tmp_path: Path) -> None
 
     Its VRAM arm lost its input with the floor strings and gets it back as a
     COMPUTED number in pgw#1600. Its `min_sm` arm is untouched and still
-    derived from the lane contract's own dtype — so a real bf16 lane on a
-    machine with no CUDA device still warns, loudly, and still serves.
+    DERIVED — pgw#1621 only moved where from: it is `capability_floor_sm` on
+    the lane's ratified QUANT RULE now, rather than a lookup on the contract's
+    dtype spelling. A real bf16 lane on a machine with no CUDA device still
+    warns, loudly, and still serves.
 
     Written as its own test on purpose: "the warning did not fire" is only
     honest evidence when something else proves it CAN.
     """
-    from gen_worker._vendor.tensorfs import contracts
     from gen_worker.serving.placement import DeviceFacts, shortfalls
     from gen_worker.serving.model import Model, model_requires
     from gen_worker import lane
     from gen_worker.demand import GiB, const
     from gen_worker.models import SDXL
 
-    real_lane = contracts.SDXL_DIFFUSERS_BF16
+    real_lane = ("sdxl.diffusers@1", "plain.bf16@1")
+    real_lane_id = "sdxl.diffusers@1+plain.bf16@1"
 
     class RealLaneModel(Model[SDXL], lanes={real_lane: lane(request=const(GiB(1)))}):
         pass
 
-    # The floor is DERIVED from the contract's bf16 dtype, never written.
-    assert model_requires(RealLaneModel)[real_lane.stamp].min_terms().min_sm == 80
+    # The floor is DERIVED from the QUANT RULE's own document, never written.
+    assert model_requires(RealLaneModel)[real_lane_id].min_terms().min_sm == 80
 
     cpu_only = DeviceFacts(sm=0, vram_gib=0.0, name="cpu (no CUDA device)")
     (shortfall,) = shortfalls(RealLaneModel, real_lane, facts=cpu_only)
     assert shortfall.term == "min_sm"
-    assert "sdxl.diffusers-bf16@1" in shortfall.message
+    assert "sdxl.diffusers@1+plain.bf16@1" in shortfall.message
     assert "Running anyway" in shortfall.message  # degrade, never refuse
 
     # ...and a machine that MEETS the derived floor reports nothing.
@@ -255,7 +257,7 @@ def test_step_distilled_checkpoint_ignores_turbo_and_warns(tmp_path: Path) -> No
 
 def test_residency_wraps_the_loop_lru_and_never_fits(tmp_path: Path) -> None:
     loop, _, manager = make_loop(tmp_path, vram_gb=5)  # fits ONE 3G+1G instance
-    lane = "SdxlModel/sdxl.diffusers-bf16@1"
+    lane = "SdxlModel/sdxl.diffusers@1+plain.bf16@1"
     loop.invoke("generate", {"model": DREAM, "input": {"prompt": "a"}}, request_id="r1")
     assert manager.tier_of(DREAM, lane) is Tier.VRAM
     # The second checkpoint evicts the first BETWEEN requests (no host tier:
@@ -317,7 +319,7 @@ def test_multi_model_slots_lease_in_stable_slot_name_order(tmp_path: Path) -> No
     # unchanged; the handles are asserted so a future re-keying is visible
     # here rather than only in a store miss.
     assert lease_order == [
-        "OtherModel/sdxl.diffusers-bf16@1", "SlowModel/sdxl.diffusers-bf16@1"
+        "OtherModel/sdxl.diffusers@1+plain.bf16@1", "SlowModel/sdxl.diffusers@1+plain.bf16@1"
     ]
 
 

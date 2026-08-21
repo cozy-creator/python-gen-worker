@@ -64,7 +64,7 @@ FUSED = [f"transformer_blocks.{i}.attn.qkv_proj.weight" for i in range(3)]
 
 def test_a_conforming_tree_passes(tmp_path: Path) -> None:
     tree = _tree(tmp_path, {"unet": ("BF16", SPLIT), "vae": ("BF16", ["conv.weight"])})
-    lines = assert_conforms(survey(tree), "sdxl.diffusers-bf16@1", "bfloat16")
+    lines = assert_conforms(survey(tree), "sdxl.diffusers@1+plain.bf16@1", "bfloat16")
     assert any("split=6 fused=0" in line for line in lines)
 
 
@@ -73,7 +73,7 @@ def test_an_fp16_tree_under_a_bf16_lane_is_REFUSED(tmp_path: Path) -> None:
 
     tree = _tree(tmp_path, {"unet": ("F16", SPLIT)})
     with pytest.raises(Nonconforming, match="declares bfloat16"):
-        assert_conforms(survey(tree), "sdxl.diffusers-bf16@1", "bfloat16")
+        assert_conforms(survey(tree), "sdxl.diffusers@1+plain.bf16@1", "bfloat16")
 
 
 def test_integer_containers_do_not_count_as_a_dtype_violation(tmp_path: Path) -> None:
@@ -91,7 +91,7 @@ def test_integer_containers_do_not_count_as_a_dtype_violation(tmp_path: Path) ->
         handle.write(struct.pack("<Q", len(body)))
         handle.write(body)
         handle.write(b"\0" * 16)
-    assert_conforms(survey(tree), "sdxl.diffusers-bf16@1", "bfloat16")
+    assert_conforms(survey(tree), "sdxl.diffusers@1+plain.bf16@1", "bfloat16")
 
 
 def test_a_FUSED_qkv_tree_is_REFUSED_even_at_the_right_dtype(tmp_path: Path) -> None:
@@ -103,7 +103,7 @@ def test_a_FUSED_qkv_tree_is_REFUSED_even_at_the_right_dtype(tmp_path: Path) -> 
 
     tree = _tree(tmp_path, {"unet": ("BF16", FUSED)})
     with pytest.raises(Nonconforming, match="FUSED attention key"):
-        assert_conforms(survey(tree), "sdxl.diffusers-bf16@1", "bfloat16")
+        assert_conforms(survey(tree), "sdxl.diffusers@1+plain.bf16@1", "bfloat16")
 
 
 def test_a_tree_carrying_NEITHER_convention_is_REFUSED_not_passed(tmp_path: Path) -> None:
@@ -116,7 +116,7 @@ def test_a_tree_carrying_NEITHER_convention_is_REFUSED_not_passed(tmp_path: Path
 
     tree = _tree(tmp_path, {"unet": ("BF16", ["some.mlp.fc1.weight"])})
     with pytest.raises(Nonconforming, match="ZERO split attention keys"):
-        assert_conforms(survey(tree), "sdxl.diffusers-bf16@1", "bfloat16")
+        assert_conforms(survey(tree), "sdxl.diffusers@1+plain.bf16@1", "bfloat16")
 
 
 def test_a_projection_STUB_is_refused_by_name(tmp_path: Path) -> None:
@@ -145,7 +145,7 @@ def test_the_cli_exits_91_on_a_nonconforming_tree(tmp_path: Path) -> None:
 
     tree = _tree(tmp_path, {"unet": ("F16", SPLIT)})
     code = main([
-        "--skip-fleet-line", "--tree", str(tree), "--lane", "sdxl.diffusers-bf16@1",
+        "--skip-fleet-line", "--tree", str(tree), "--lane", "sdxl.diffusers@1+plain.bf16@1",
     ])
     assert code == EXIT_NONCONFORMING
 
@@ -153,5 +153,5 @@ def test_the_cli_exits_91_on_a_nonconforming_tree(tmp_path: Path) -> None:
 def test_the_cli_exits_0_on_a_conforming_tree(tmp_path: Path) -> None:
     tree = _tree(tmp_path, {"unet": ("BF16", SPLIT)})
     assert main([
-        "--skip-fleet-line", "--tree", str(tree), "--lane", "sdxl.diffusers-bf16@1",
+        "--skip-fleet-line", "--tree", str(tree), "--lane", "sdxl.diffusers@1+plain.bf16@1",
     ]) == 0

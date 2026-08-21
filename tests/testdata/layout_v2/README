@@ -1,0 +1,41 @@
+Computed tensor-layout v2 expected headers — `quant(topology)`, Go-produced.
+
+These are NOT hand-written and MUST NOT be hand-edited. `quant(topology)` is
+evaluated by the Go engine in ~/cozy/tensorfs and by nothing else: there is
+deliberately no pyo3 binding for the evaluator, because v1 shipped three copies
+of one matching rule and the copies were free to disagree about an admit. A
+Python fixture generator here would be a fourth copy. Same posture tensorfs
+itself takes at `python/tests/data/layout-*.json`.
+
+Regenerate (from `~/cozy/tensorfs`, pgw#1621):
+
+    go run ./scripts/compute_layout 'ltx2-upsampler.diffusers@1+plain.bf16@1' \
+      > <pgw>/tests/testdata/layout_v2/'ltx2-upsampler.diffusers@1+plain.bf16@1.json'
+
+    go run ./scripts/compute_layout 'flux2-klein.diffusers@1+cozy.nvfp4-flat@1' \
+      | gzip -9 > <pgw>/tests/testdata/layout_v2/'flux2-klein.diffusers@1+cozy.nvfp4-flat@1.json.gz'
+
+`go run ./scripts/compute_layout --list` prints every ratified pair with its
+tensor count.
+
+Why these two, and why not sdxl:
+
+  ltx2-upsampler.diffusers@1+plain.bf16@1        9.8 KB, 1 component, 72 tensors
+      The smallest pair in the corpus and the plain green/red case: one dtype
+      (BF16), no optional keys, no reference tolerance. It is all conv/norm, so
+      it is also the one pair a quant rule transforms nothing in.
+
+  flux2-klein.diffusers@1+cozy.nvfp4-flat@1      5.6 KB gzipped (176 KB raw),
+                                                 3 components, 1218 tensors
+      The only SMALL pair that carries all three of the things the arm has to
+      get right: multiple components with roles (text_encoder / denoiser / vae,
+      so the manifest is prefixed), 200 `optional: true` keys (`input_scale`,
+      `pre_quant_scale` — a calibration may not have produced them), and a
+      REFERENCE-TOLERANT key, `vae.bn.num_batches_tracked`, whose dtypes are
+      ["BF16", "I64"]. That last one is why acceptance is list membership and
+      not equality: the reference packaging really did ship it as I64, and
+      refusing it would refuse the checkpoint the topology was extracted from.
+
+sdxl's headers are 300 KB and prove nothing these two do not.
+
+Assertions live in tests/test_juggle_expected_header_pgw1621.py.

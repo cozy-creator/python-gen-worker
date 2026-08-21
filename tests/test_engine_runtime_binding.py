@@ -35,7 +35,6 @@ from gen_worker.discovery.entrypoints_v2 import (
     lift_engine_runtimes,
 )
 from gen_worker import LlamaServer, lane
-from gen_worker._vendor.tensorfs import contracts as _tfs_contracts
 from gen_worker.demand import GiB, const
 from gen_worker.models import SDXL
 from gen_worker.serving import (
@@ -46,6 +45,10 @@ from gen_worker.serving import (
     load_endpoint,
 )
 from gen_worker.serving.engine_runtime import ENGINE_SPEC_RUNTIMES
+
+#: pgw#1621: a lane is the `(topology, quant)` stamp pair. The v1 Contract
+#: object (`contracts.SDXL_DIFFUSERS_BF16`) is deleted with the v1 corpus.
+_SDXL_BF16 = ("sdxl.diffusers@1", "plain.bf16@1")
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_engine_endpoint"
 HOST_FIXTURE_DIR = (
@@ -171,7 +174,7 @@ def test_the_lock_census_names_the_engine_runtime(declarations: Any) -> None:
 
 class UnmarkedGgufModel(
     Model[SDXL],
-    lanes={_tfs_contracts.SDXL_DIFFUSERS_BF16: lane(request=const(GiB(1)))},
+    lanes={_SDXL_BF16: lane(request=const(GiB(1)))},
 ):
     """Engine-hosted and NOT marked — the mistake a migrating author makes.
 

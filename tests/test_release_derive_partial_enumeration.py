@@ -112,7 +112,7 @@ def test_the_enumerable_entrypoint_derives_while_two_others_cannot(
     assert entrypoints["generate"]["traced_passes"] == 2
     assert "unenumerable" not in entrypoints["generate"]
     (lane,) = document["graphs"]["lanes"]
-    assert lane["contract"] == "tiny.diffusers-fp32@1"
+    assert lane["contract"] == "sd15.diffusers@1+plain.f32@1"
     assert len(lane["graphs"]) == 2
     assert lane["unobserved_targets"] == []
 

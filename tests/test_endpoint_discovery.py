@@ -185,15 +185,21 @@ def test_an_adapter_slot_is_still_exempt() -> None:
 
 
 from gen_worker import lane  # noqa: E402
-from gen_worker._vendor.tensorfs import contracts as _tfs_contracts  # noqa: E402
 from gen_worker.demand import GiB, const  # noqa: E402
 from gen_worker.models import Trellis2  # noqa: E402
 from gen_worker.serving.model import Model  # noqa: E402
 
 #: pgw#1599: `lanes=` is REQUIRED on every model class, so every specimen in
-#: this file names Trellis2's real document. That is orthogonal to what these
-#: tests are about (`self_loading=`), which is the point of the last test here.
-_TRELLIS_LANES = {_tfs_contracts.TRELLIS2_DIT_BF16: lane(request=const(GiB(1)))}
+#: this file names a real lane. pgw#1621: a lane is the `(topology, quant)`
+#: stamp pair and BOTH halves must be in the vendored `spec/v2` corpus — which
+#: carries no `trellis2.*` topology, so `trellis2.dit-bf16@1` (a v1 document,
+#: deleted with the v1 corpus) has no successor to name. These specimens keep
+#: `Model[Trellis2]` and declare a ratified pair: the model TYPE and the lane
+#: are independent declarations, which is exactly what the last test in this
+#: file asserts, and what these tests are about is `self_loading=`.
+_SPECIMEN_LANE = ("sd15.diffusers@1", "plain.bf16@1")
+_SPECIMEN_LANE_ID = "sd15.diffusers@1+plain.bf16@1"
+_TRELLIS_LANES = {_SPECIMEN_LANE: lane(request=const(GiB(1)))}
 
 
 class PlainWithLoad(Model[Trellis2], lanes=_TRELLIS_LANES):
@@ -303,24 +309,21 @@ def test_the_marker_is_ORTHOGONAL_to_lanes() -> None:
     pgw#1599: the VRAM FLOOR half of this test is gone with the strings — a
     lane's memory statement is now its demand FORMULA, and the placement row
     carries only the floor DERIVED from the contract dtype."""
-    from gen_worker._vendor.tensorfs import contracts
-
     from gen_worker.models import Trellis2
     from gen_worker.serving.model import Model, model_declared_lanes
 
     namespace = {
-        "Model": Model, "Trellis2": Trellis2, "contracts": contracts,
+        "Model": Model, "Trellis2": Trellis2, "LANE": _SPECIMEN_LANE,
         "lane": lane, "const": const, "GiB": GiB,
     }
     exec(  # noqa: S102
         "class Both(Model[Trellis2],\n"
-        "           lanes={contracts.TRELLIS2_DIT_BF16: lane(\n"
-        "               request=const(GiB(2)))},\n"
+        "           lanes={LANE: lane(request=const(GiB(2)))},\n"
         "           self_loading='bespoke loader'):\n"
         "    pass",
         namespace,
     )
     (declared,) = model_declared_lanes(namespace["Both"])
-    assert declared.contract_id == "trellis2.dit-bf16@1"
+    assert declared.contract_id == _SPECIMEN_LANE_ID
     assert declared.request.coefficients() == {"const": GiB(2)}
     assert namespace["Both"].__cozy_self_loading__ == "bespoke loader"

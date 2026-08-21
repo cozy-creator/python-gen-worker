@@ -49,7 +49,7 @@ SM = "sm_89"
 STACK: Tuple[Tuple[str, str], ...] = (("torch", "2.13.0"), ("triton", "3.6.0"))
 ENV = EnvIdentity(stack=STACK, sm=SM)
 MODULE = "sd15.main"
-LANE = "sd15.diffusers-bf16@1"
+LANE = "sd15.diffusers@1+plain.bf16@1"
 TARGET = "unet"
 
 #: Three graphs, because "all of them", "some of them" and "the ONE the caller
