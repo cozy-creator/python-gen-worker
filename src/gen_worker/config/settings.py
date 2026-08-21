@@ -34,6 +34,14 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     worker_image_digest: str = ""
 
     boot_record_path: str = ""
+    # pgw#1630: the FLOOR under the compute-child flatness window, in seconds.
+    # The window itself is derived from that child's own observed
+    # inter-progress gaps (procsplit/liveness.py); this only bounds it from
+    # below, and the ladder needs FOUR consecutive windows of provably-zero
+    # kernel work before anything is killed. 0 = the derived default. A knob
+    # because a fleet meeting a legitimately slower shape must be able to widen
+    # the window without a release.
+    watchdog_flatness_floor_s: float = 0.0
 
     tensorhub_url: str = ""
     tensorhub_token: str = ""

@@ -33,14 +33,15 @@ from . import (
     ENV_LIVENESS_FD,
     ENV_SESSION_ID,
     ENV_SOCKET,
-    ENV_WATCHDOG_PING_S,
     EXIT_JOB_RECYCLE,
     actions,
     attest,
     capability,
     frames,
+    liveness,
     merge,
     privdrop,
+    procdiag,
 )
 from .group import ChildGroup, GroupPlan
 from .seam import SeamAccountant
@@ -52,6 +53,10 @@ DEATH_LABEL = "ComputeProcessDied"
 _DEFAULT_START_LIMIT_BURST = 3
 _DEFAULT_START_LIMIT_INTERVAL_S = 600.0
 _DEFAULT_BOOT_DEATH_LIMIT = 3
+# pgw#1630: A SAMPLING CADENCE, NOT A VERDICT INPUT. Nothing decides a child's
+# life from it; the watchdog loop divides it by four to choose how often to read
+# /proc. The flatness window that DOES decide is derived per child from that
+# child's own observed inter-progress gaps (procsplit/liveness.py).
 _DEFAULT_WATCHDOG_BUDGET_S = 60.0
 _DEFAULT_RESPAWN_BACKOFF_BASE_S = 1.0
 _DEFAULT_RESPAWN_BACKOFF_CAP_S = 60.0
@@ -193,14 +198,23 @@ class _ChildSlot:
         self.last_frame_at = time.monotonic()
         self.relaying = False
         self.watchdog_fired = False
+        # pgw#1630: THE ONE INPUT to the kill decision. Kernel-accounted
+        # evidence, its observation-derived flatness window, and this child's
+        # position on the report -> diagnose -> TERM -> KILL ladder.
+        self.evidence = liveness.EvidenceTrack(
+            floor_s=parent._liveness_floor_s, eps=_EVIDENCE_EPS,
+        )
+        # Liveness (thread-sourced, loop-independent), per child. Everything
+        # below is TELEMETRY since pgw#1630: it labels a stall report and
+        # decides nothing. `liveness_evidence*` mirror `self.evidence` for the
+        # existing readers.
         self.liveness_task: Optional[asyncio.Task] = None
         self.last_liveness_at = 0.0
         self.liveness_evidence: Optional[float] = None
         self.liveness_evidence_at = 0.0
         self.liveness_activity = ""
-        self.hang_armed_at: Optional[float] = None
-        self.hang_hold_reported = False
-        self.stall_reported = False
+        # This group's freshest published StateDelta; the worker-level beat
+        # re-sends the merge of all groups'.
         self.last_state_delta: Optional[pb.WorkerMessage] = None
         self.last_state_delta_at = 0.0
         self.generation = 0
@@ -492,9 +506,12 @@ class _ChildSlot:
             self.watchdog_fired = False
             self.child_saw_hello = False
             self.boot_fatal = None
-            self.hang_armed_at = None
-            self.hang_hold_reported = False
-            self.stall_reported = False
+            # A RESPAWN is a new process: its predecessor's high-water evidence,
+            # its demonstrated gaps and its ladder position all describe a pid
+            # that no longer exists.
+            self.evidence = liveness.EvidenceTrack(
+                floor_s=p._liveness_floor_s, eps=_EVIDENCE_EPS,
+            )
             oom_before = postmortem.oom_kill_count()
             started = time.monotonic()
             self.last_frame_at = started
@@ -766,7 +783,16 @@ class _ChildSlot:
         return cause
 
     async def watchdog_loop(self) -> None:
-        """Missed beats ARM the verdict; the open activity DECIDES it."""
+        """KERNEL EVIDENCE DECIDES, and nothing else is an input (pgw#1630).
+
+        The parent witnesses THIS child's /proc, because a child starved of the
+        GIL cannot witness for itself. Evidence advancing means HELD,
+        unconditionally: the parent kills only what is provably NOT RUNNING, and
+        a child that runs but serves nothing is the hub's stall clock to reap.
+        Loop pings and declared activities are REPORTING ONLY — they label a
+        stall, they do not decide one. Ladder in procsplit/liveness.py. One
+        child's kill never touches a sibling.
+        """
         p = self.p
         interval = max(0.25, p._watchdog_budget / 4.0)
         while not p._stopping.is_set():
@@ -778,91 +804,138 @@ class _ChildSlot:
                 continue
             now = time.monotonic()
             self._sample_child_evidence(proc.pid, now)
-            silent_for = now - self.last_frame_at
-            if silent_for <= p._watchdog_budget:
-                self.hang_armed_at = None
-                continue
-            if self.hang_armed_at is None:
-                self.hang_armed_at = now
-            await self._report_stall_if_any(now)
-            verdict = self._hang_verdict(now)
-            if verdict is None:
-                continue
-            if verdict == "held":
-                if not self.hang_hold_reported:
-                    self.hang_hold_reported = True
-                    logger.warning(
-                        "compute child %s loop silent for %.1fs but activity %r "
-                        "is alive (evidence advanced %.1fs ago) — hang HELD",
-                        self.label, silent_for, self.liveness_activity,
-                        now - self.liveness_evidence_at,
-                    )
-                    await p._dial_detail(
-                        f"phase=compute_hang_verdict_held group={self.ordinal} "
-                        f"loop_silent_s={silent_for:.0f} "
-                        f"activity={self.liveness_activity} "
-                        f"evidence_age_s={now - self.liveness_evidence_at:.1f} "
-                        f"evidence={self.liveness_evidence:.1f} "
-                        f"ping_age_s={now - self.last_liveness_at:.1f} "
-                        f"budget_s={p._watchdog_budget:.0f} — the child's event "
-                        "loop is starved by accounted work, not hung; not killing"
-                    )
-                continue
-            logger.error(
-                "compute child %s silent for %.1fs (budget %.1fs, verdict=%s) — "
-                "killing the wedged child (WatchdogSec analog)",
-                self.label, silent_for, p._watchdog_budget, verdict,
-            )
-            self.watchdog_fired = True
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            await self._walk_liveness_ladder(proc, now)
 
     def _child_evidence(self, pid: int) -> Optional[float]:
         return proc_evidence.tree_evidence(pid)
 
     def _sample_child_evidence(self, pid: int, now: float) -> None:
-        evidence = self._child_evidence(pid)
-        if evidence is None:
-            return
-        previous = self.liveness_evidence
-        if previous is None or evidence - previous >= _EVIDENCE_EPS:
-            self.liveness_evidence = evidence
-            self.liveness_evidence_at = now
-            self.stall_reported = False
+        """One sample into the ladder. A `None` reading is an instrument
+        failure, never a flat reading — `EvidenceTrack.observe` keeps the two
+        apart, which is what stops an unreadable `/proc` accruing flatness
+        against a healthy child."""
+        self.evidence.observe(self._child_evidence(pid), now)
+        # Mirrored for the reporters and for every existing reader; the ladder
+        # itself reads only `self.evidence`.
+        self.liveness_evidence = self.evidence.value
+        self.liveness_evidence_at = self.evidence.advanced_at
 
-    async def _report_stall_if_any(self, now: float) -> None:
-        if self.liveness_evidence is None or self.stall_reported:
+    async def _walk_liveness_ladder(self, proc: Any, now: float) -> None:
+        """report -> diagnose -> SIGTERM -> SIGKILL, one window apart.
+
+        Every rung requires flatness to have CONTINUED: the rung is recomputed
+        from `flat_for(now)` on every sample and any evidence advance clears the
+        fired set, so a wedge that un-wedges mid-ladder was never a wedge and
+        starts again from zero if it re-wedges.
+        """
+        rung = self.evidence.verdict(now)
+        if rung == liveness.RUNG_ALIVE:
             return
-        if not self.in_flight and not self.liveness_activity:
+        if rung == liveness.RUNG_UNMEASURABLE:
+            # Absence of instrument is not guilt. This branch REPLACES
+            # `no_evidence_source -> KILL`.
+            if self.evidence.claim(rung):
+                logger.warning(
+                    "compute child %s: cannot read kernel evidence (%s) — "
+                    "HOLDING and reporting; failure to measure is never a kill",
+                    self.label, self.evidence.describe(now),
+                )
+                await self.p._dial_detail(
+                    f"phase=compute_liveness_unmeasurable group={self.ordinal} "
+                    f"{self.evidence.describe(now)} {self._liveness_labels(now)} "
+                    "— the parent cannot measure this child; holding, never killing"
+                )
             return
-        age = now - self.liveness_evidence_at
-        if age <= self.p._evidence_hold_window:
+
+        if rung == liveness.RUNG_REPORT:
+            if self.evidence.claim(rung):
+                logger.warning(
+                    "compute child %s has accrued NO kernel-accounted work for "
+                    "%.1fs (window %.1fs) — reporting the stall (stream, beat and "
+                    "process all kept)",
+                    self.label, self.evidence.flat_for(now), self.evidence.window_s,
+                )
+                await self.p._dial_detail(
+                    f"phase=compute_child_stalled group={self.ordinal} "
+                    f"{self.evidence.describe(now)} {self._liveness_labels(now)} "
+                    "— measured by the parent from /proc, not self-reported by "
+                    "the child; the labels are TELEMETRY and decided nothing"
+                )
             return
-        self.stall_reported = True
-        logger.warning(
-            "compute child %s has accrued no CPU/IO for %.1fs while %d job(s) and "
-            "activity %r are open — reporting the stall (stream and beat kept)",
-            self.label, age, len(self.in_flight), self.liveness_activity,
+
+        if rung == liveness.RUNG_DIAGNOSE:
+            if self.evidence.claim(rung):
+                report = await asyncio.to_thread(
+                    procdiag.capture, int(proc.pid), self.p._postmortem_dir,
+                )
+                logger.error(
+                    "compute child %s flat for %.1fs (2x window) — captured a "
+                    "diagnosis before anything is signalled:\n%s",
+                    self.label, self.evidence.flat_for(now), report,
+                )
+                await self.p._dial_detail(
+                    f"phase=compute_liveness_diagnosis group={self.ordinal} "
+                    f"{self.evidence.describe(now)} {self._liveness_labels(now)}\n"
+                    f"{report}"
+                )
+            return
+
+        if rung == liveness.RUNG_TERM:
+            if self.evidence.claim(rung):
+                logger.error(
+                    "compute child %s flat for %.1fs (3x window %.1fs) — SIGTERM; "
+                    "it gets one more window to unwind before SIGKILL",
+                    self.label, self.evidence.flat_for(now), self.evidence.window_s,
+                )
+                await self.p._dial_detail(
+                    f"phase=compute_liveness_term group={self.ordinal} "
+                    f"{self.evidence.describe(now)} {self._liveness_labels(now)} "
+                    "— evidence has been flat for three consecutive windows; "
+                    "asking the child to exit"
+                )
+                self.watchdog_fired = True
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+            return
+
+        # RUNG_KILL — four windows flat, and the SIGTERM went unanswered.
+        if not self.evidence.claim(rung):
+            return
+        logger.error(
+            "compute child %s flat for %.1fs (4x window %.1fs) and unresponsive "
+            "to SIGTERM — SIGKILL. %s",
+            self.label, self.evidence.flat_for(now), self.evidence.window_s,
+            self.evidence.describe(now),
         )
         await self.p._dial_detail(
-            f"phase=compute_child_stalled group={self.ordinal} "
-            f"evidence_age_s={age:.1f} activity={self.liveness_activity or 'none'} "
-            f"in_flight={sorted(f'{r}#{a}' for (r, a) in self.in_flight)} "
-            f"loop_silent_s={now - self.last_frame_at:.1f} "
-            f"window_s={self.p._evidence_hold_window:.0f} — measured by the parent "
-            "from /proc, not self-reported by the child"
+            f"phase=compute_liveness_kill group={self.ordinal} "
+            f"{self.evidence.describe(now)} {self._liveness_labels(now)} "
+            "— provably NOT RUNNING: no CPU second and no byte of I/O across "
+            "four consecutive observation-derived windows"
         )
+        self.watchdog_fired = True
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
-    def _hang_verdict(self, now: float) -> Optional[str]:
-        if self.liveness_evidence is None:
-            return "no_evidence_source"
-        if now - self.liveness_evidence_at > self.p._evidence_hold_window:
-            return "no_work_accrued"
-        if not self.liveness_activity:
-            return "loop_wedged_no_activity"
-        return "held"
+    def _liveness_labels(self, now: float) -> str:
+        """The cooperative signals, as LABELS on a report.
+
+        pgw#1630 demoted every one of these. They make a stall report and the
+        hub's attribution honest — "flat while `boot_materialize` was open, with
+        two jobs in flight" is a far better bug than "flat" — and they decide
+        nothing. A path that forgets to declare an activity loses a label, not a
+        process.
+        """
+        return (
+            f"label_activity={self.liveness_activity or 'none'} "
+            f"label_in_flight={sorted(f'{r}#{a}' for (r, a) in self.in_flight)} "
+            f"label_loop_silent_s={now - self.last_frame_at:.1f} "
+            f"label_ping_age_s={now - self.last_liveness_at:.1f}"
+        )
 
 
 class ParentControl:
@@ -883,6 +956,13 @@ class ParentControl:
         start_limit_interval_s: float = _DEFAULT_START_LIMIT_INTERVAL_S,
         boot_death_limit: int = _DEFAULT_BOOT_DEATH_LIMIT,
         watchdog_budget_s: float = _DEFAULT_WATCHDOG_BUDGET_S,
+        # pgw#1630: the flatness FLOOR, in seconds. 0 = read `Settings`, then
+        # the module default. Deliberately SEPARATE from `watchdog_budget_s`,
+        # which is now only a /proc sampling cadence: narrowing how often the
+        # parent LOOKS must not silently narrow how long a child may be flat,
+        # because those are answers to different questions and conflating them
+        # is how the old single-budget cliff worked.
+        liveness_floor_s: float = 0.0,
         stop_timeout_s: float = _DEFAULT_STOP_TIMEOUT_S,
         stop_flush_timeout_s: float = _STOP_FLUSH_TIMEOUT_S,
         beat_interval_s: float = 0.0,
@@ -925,6 +1005,26 @@ class ParentControl:
 
         self._drop_plan = self._prepare_privilege_drop()
 
+        # pgw#1630: the FLOOR under each child's flatness window. The window
+        # itself is derived from that child's own observed inter-progress gaps
+        # (`procsplit/liveness.py`); this is only the lower bound, and it is a
+        # Settings knob because pgw#1613 proved the operator lever must exist.
+        # Resolved BEFORE the slots, because each slot builds its own track.
+        #
+        # The old `_evidence_hold_window = 3 x the child's PING CADENCE` is
+        # DELETED with the rung that read it: a ping is a self-report, and how
+        # often a child says "still here" says nothing about how long real work
+        # can legitimately go without touching the kernel.
+        # Precedence: an explicit constructor argument (a harness or an
+        # embedder that KNOWS its child's shape), then the operator's Settings,
+        # then the derived default.
+        floor = float(liveness_floor_s or 0.0)
+        if floor <= 0:
+            floor = float(getattr(settings, "watchdog_flatness_floor_s", 0.0) or 0.0)
+        self._liveness_floor_s = (
+            floor if floor > 0 else liveness.DEFAULT_FLATNESS_FLOOR_S
+        )
+
         self._slots: List[_ChildSlot] = [
             _ChildSlot(self, group) for group in self._plan.children
         ]
@@ -934,16 +1034,8 @@ class ParentControl:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stopping = asyncio.Event()
         self._beat_interval = beat_interval_s
-        raw_ping = (
-            self._child_env.get(ENV_WATCHDOG_PING_S)
-            or os.environ.get(ENV_WATCHDOG_PING_S)
-            or ""
-        )
-        try:
-            ping_s = float(raw_ping) or 5.0
-        except ValueError:
-            ping_s = 5.0
-        self._evidence_hold_window = max(3.0 * ping_s, 2.0)
+        # Worker-level beat state: the last (merged) StateDelta and when any
+        # group last published, so the beat re-sends the worker's freshest truth.
         self._last_state_delta: Optional[pb.WorkerMessage] = None
         self._last_state_delta_at = 0.0
         self.parent_beats_sent = 0

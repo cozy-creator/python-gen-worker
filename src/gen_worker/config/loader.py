@@ -30,6 +30,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "WORKER_CONFIG_GENERATION": "boot_config_generation",
     "WORKER_IMAGE_DIGEST": "worker_image_digest",
     "GEN_WORKER_BOOT_RECORD": "boot_record_path",
+    "GEN_WORKER_WATCHDOG_FLATNESS_FLOOR_S": "watchdog_flatness_floor_s",
     "TENSORHUB_URL": "tensorhub_url",
     "TENSORHUB_TOKEN": "tensorhub_token",
     "TENSORHUB_CACHE_DIR": "tensorhub_cache_dir",

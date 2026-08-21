@@ -156,7 +156,21 @@ def test_boot_hardware_fatal_is_terminal_reported_and_exits_1(
 
 
 def test_wedged_child_is_killed_by_watchdog_and_pod_recovers(tmp_path, captured_dials):
-    h = SplitHarness(tmp_path, watchdog_budget_s=3.0)
+    """A genuinely dead-stopped child is still reaped — through the pgw#1630 ladder.
+
+    SIGSTOP is the honest wedge: a stopped process accrues no CPU second and no
+    byte of I/O, so `tree_evidence` is flat by the kernel's own accounting
+    rather than by a missing label. That is exactly the case the reaper exists
+    for, and it must still end.
+
+    `liveness_floor_s` is set explicitly because pgw#1630 separated the two
+    numbers this test used to conflate: `watchdog_budget_s` is now only how
+    often the parent LOOKS at /proc, and the FLOOR is how long flat has to last
+    before anything happens. Production's floor is a derived 120 s and the
+    ladder walks four of them; a row that wants to observe the kill has to say
+    so, which is precisely what the operator lever is for.
+    """
+    h = SplitHarness(tmp_path, watchdog_budget_s=1.0, liveness_floor_s=1.0)
     try:
         conn0 = h.scheduler.wait_connection(0)
         conn0.wait_for(is_ready)
@@ -484,6 +498,27 @@ def test_signal_death_consumes_the_inflight_marker_and_records_the_streak(
 def test_a_starving_handler_no_longer_starves_the_worker_loop_pgw1373(
     tmp_path, captured_dials,
 ):
+    """pgw#771's hazard is GONE under pgw#1373, so its verdict cannot fire.
+
+    The original case asserted `compute_hang_verdict_held`: an async handler
+    that burns CPU without yielding starved the worker's OWN event loop, the
+    parent's watchdog ARMED on the resulting silence, and the open activity
+    then HELD the verdict instead of killing a live pod.
+
+    The v2 serve path runs author code on a worker thread
+    (`asyncio.to_thread` -> `ServeLoop.invoke`), so a starving handler cannot
+    reach the loop that answers pings. Nothing arms, so nothing can be held —
+    asserting the hold would be asserting a verdict that no longer has a
+    trigger. What this now measures is the property that REPLACED it: the same
+    9-second non-yielding handler completes, the child is never killed, and no
+    hang verdict is reached at all.
+
+    pgw#1630 then removed the hold machinery's REASON to exist: the verdict is
+    kernel evidence only, so a busy handler is held because it is provably
+    accruing CPU, not because something was open. The property asserted below is
+    unchanged and is now true for a stronger reason —
+    `test_watchdog_evidence_pgw1630.py` drives the ladder directly.
+    """
     h = SplitHarness(tmp_path, watchdog_budget_s=3.0)
     try:
         conn = h.scheduler.wait_connection(0)
@@ -531,7 +566,21 @@ def test_wedged_child_keeps_the_stream_alive_and_is_reported_not_hidden(
 ):
     h = SplitHarness(
         tmp_path,
-        watchdog_budget_s=8.0,
+        # pgw#1630: the stall report is now the FIRST RUNG of the liveness
+        # ladder — flat kernel evidence past one window — and it is reached long
+        # before anything is signalled (SIGTERM is three windows further on). So
+        # the two numbers below mean different things and both are needed:
+        # `watchdog_budget_s` is how often the parent reads /proc, and
+        # `liveness_floor_s` is how long flat has to last before it says so.
+        # Production's floor is a derived 120 s; a row that wants to OBSERVE the
+        # report has to shorten it, which is what the operator lever is for.
+        #
+        # The floor is what this row's OTHER assertion is really about: the
+        # parent's beats have to accumulate WHILE the child is frozen, so the
+        # window before the first rung is the interval in which those beats are
+        # the only thing keeping the pod reachable. Six beat-intervals of it.
+        watchdog_budget_s=4.0,
+        liveness_floor_s=6.0,
         beat_interval_s=1.0,
     )
     try:

@@ -163,7 +163,7 @@ class CheckpointMaterialization:
         )
 
     async def _materialize(self, config: CheckpointConfig) -> None:
-        """Put every configured ref on disk (in config order), then open the readiness gate. The fetch runs under an OPEN activity on purpose: the compute-child watchdog SIGKILLs a silent event loop with nothing open, and a cold multi-hundred-GB fill starves the loop for minutes. Scoped to the fetch only — _warm() opens its own activity and must not nest inside this one."""
+        """Put every configured ref on disk (in config order), then open the readiness gate. Order matters: a pod that fetched the 22 MB interpolator before the 134 GB checkpoint would finish the cheap half and still not serve. The fetch runs under an OPEN activity, which pgw#1630 demoted to TELEMETRY — the watchdog verdict is kernel evidence only, so forgetting it costs the stall report its label, not the process. Scoped to the fetch only: _warm() opens its own activity and must not nest inside this one."""
         with activity.running(activity.KIND_BOOT_MATERIALIZE) as fetch:
             if not await self._fetch_refs(config, fetch):
                 if self._current(config):

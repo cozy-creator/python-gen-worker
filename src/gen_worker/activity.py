@@ -75,7 +75,12 @@ KIND_SNAPSHOT_CENSUS = "snapshot_census"
 KIND_BOOT_STAGES = "boot_stages"
 KIND_ENGINE_BOOT = "engine_boot"
 KIND_WEIGHT_FETCH = "weight_fetch"
-# The boot materialization span is load-bearing, not telemetry: the compute-child watchdog (procsplit/parent.py _hang_verdict) decides by what activity is OPEN, so a long fill that declares nothing gets SIGKILLed while genuinely working.
+# pgw#1630: the boot materialization span is TELEMETRY. The watchdog verdict is
+# kernel evidence only (procsplit/liveness.py), so a fill that declares nothing
+# loses a LABEL, not a process. Its OWN kind, deliberately NOT `weight_fetch`:
+# that kind's rows are the closed-vocabulary BYTE POSITIONS
+# (`weight_position._emit`), and a span with an empty phase mixed into them
+# would corrupt the one signal th#2191 reads.
 KIND_BOOT_MATERIALIZE = "boot_materialize"
 PHASE_MINTED = "minted"
 
