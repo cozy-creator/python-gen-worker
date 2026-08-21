@@ -593,7 +593,7 @@ def test_the_probe_counts_the_reusable_allocator_pool_as_available():
     real_attr = pr._placement_attribution
     pr._placement_attribution = lambda torch_mod: {"attr_cache_bytes": cache}
     try:
-        ok, reported = pr.probe_plan(
+        ok, reported, basis = pr.probe_plan(
             parked, free_bytes_now=lambda: driver_free, floor_bytes=floor)
     finally:
         pr._placement_attribution = real_attr
@@ -605,6 +605,217 @@ def test_the_probe_counts_the_reusable_allocator_pool_as_available():
     assert reported == driver_free, (
         "the reported number must stay the DRIVER-free figure — the soft cache "
         "term belongs in the decision, not in what the log claims is free"
+    )
+    assert basis == "free+cache", (
+        "an eager admit must confess the free+cache basis (pgw#1627)"
+    )
+
+
+# --------------------------------------------------------------------------
+# pgw#1627 — the headroom split: allocator cache is EAGER-ONLY money
+# --------------------------------------------------------------------------
+
+# The 8 GiB death, as measured (arm-static-c51ba51f/up.log): driver_free at the
+# compiled first call, the dead cache parking stranded in the allocator, and
+# AOTI's out-of-allocator first-call demand (sdxl sm_89, 4/4, batch-invariant).
+_DEATH_FREE = int(1.18 * _GIB)
+_DEATH_CACHE = int(1.02 * _GIB)
+_AOTI_DEMAND = int(1.15 * _GIB)
+
+
+def test_the_death_shape_numbers_refuse_compiled_and_admit_eager():
+    """pgw#1627, the RED arm of the regime split, on the exact numbers that
+    killed the process. Counting cache for a compiled admit said 2.2 GiB
+    against a real budget of 1.18 — AOTI allocates outside the torch
+    allocator, so the cache was money the compiled call could not spend, and
+    the process died at step 0 with no traceback."""
+    from gen_worker.models.partial_resident import headroom_admits
+
+    ok, basis = headroom_admits(
+        regime="compiled", free_bytes=_DEATH_FREE, cache_bytes=_DEATH_CACHE,
+        demand_bytes=_AOTI_DEMAND,
+    )
+    assert not ok, (
+        "the compiled predicate admitted the death shape — 1.18 GiB of "
+        "driver_free cannot cover a 1.15 GiB out-of-allocator demand plus "
+        "the floor, and the 1.02 GiB of cache is not compiled money"
+    )
+    assert basis == "driver_free"
+
+    ok, basis = headroom_admits(
+        regime="eager", free_bytes=_DEATH_FREE, cache_bytes=_DEATH_CACHE,
+    )
+    assert ok, (
+        "the same numbers must ADMIT eager — the cache is spendable by the "
+        "torch allocator, and refusing here would be the pgw#1586 spurious "
+        "refusal all over again"
+    )
+    assert basis == "free+cache"
+
+
+def test_post_release_driver_free_admits_compiled():
+    """The other half of the fix: `release_cached_vram()` hands the parked
+    cache back to the driver, and THEN the same card admits the compiled
+    call. 4782 weights + 371 ctx + 1154 AOTI pool + 450 activations = 6757 of
+    7808 MiB — fits with ~1 GiB spare, which is what the on-card TEST 1
+    validates against this predicate."""
+    from gen_worker.models.partial_resident import headroom_admits
+
+    ok, basis = headroom_admits(
+        regime="compiled", free_bytes=_DEATH_FREE + _DEATH_CACHE,
+        cache_bytes=0, demand_bytes=_AOTI_DEMAND,
+    )
+    assert ok, (
+        "post-release driver_free (2.20 GiB) covers demand+floor (1.40 GiB) "
+        "and must admit — a split that refuses this is a cliff, not a guard"
+    )
+    assert basis == "driver_free"
+
+
+def test_probe_plan_itself_refuses_a_compiled_leg_the_cache_would_admit():
+    """The split through `probe_plan`'s real code path — the mirror image of
+    `test_the_probe_counts_the_reusable_allocator_pool_as_available` above:
+    the SAME reusable-pool term that rightly rescues an eager admit must be
+    invisible to a compiled one."""
+    import gen_worker.models.partial_resident as pr
+
+    pipe = _pipeline()
+    _, armed = _arm(pipe)
+    assert armed
+    parked = getattr(pipe, PARKED_COMPONENTS_ATTR)
+
+    real_attr = pr._placement_attribution
+    pr._placement_attribution = (
+        lambda torch_mod: {"attr_cache_bytes": _DEATH_CACHE})
+    try:
+        ok, reported, basis = pr.probe_plan(
+            parked, free_bytes_now=lambda: _DEATH_FREE,
+            regime="compiled", demand_bytes=_AOTI_DEMAND,
+        )
+        eager_ok, _, _ = pr.probe_plan(
+            parked, free_bytes_now=lambda: _DEATH_FREE,
+        )
+    finally:
+        pr._placement_attribution = real_attr
+
+    assert not ok and basis == "driver_free", (
+        "probe_plan admitted a compiled leg on cache the compiled call "
+        "cannot spend — the exact death arithmetic"
+    )
+    assert reported == _DEATH_FREE
+    assert eager_ok, "the eager reading of the same card must stay admitted"
+
+
+def test_the_admit_confesses_which_budget_basis_it_used():
+    """Acceptance (c): the confession carries `headroom_basis`, so the hub can
+    see the split executing rather than trusting that it does."""
+    pipe = _pipeline()
+    plan = plan_for_pipeline(
+        pipe, budget_bytes=1200, free_bytes=64 * _MIB,
+        transient_reserve_bytes=0,
+        sizer=lambda m: sum(p.numel() * p.element_size() for p in m.parameters()),
+    )
+    facts: dict = {}
+    armed = apply_component_residency(
+        pipe, plan, device="cpu", log=logging.getLogger("t"),
+        free_bytes_now=lambda: 4 * _GIB, facts=facts,
+    )
+    assert armed
+    assert facts.get("headroom_basis") == "free+cache", (
+        "the probe admitted and did not say which budget arithmetic it used"
+    )
+
+
+# --------------------------------------------------------------------------
+# pgw#1627 — the park→compiled seam releases the cache, and ONLY for compiled
+# --------------------------------------------------------------------------
+
+
+class _FakeDispatcher:
+    """torchcg's adopt shape (adopt.py:551): an INSTANCE `forward` shadowing
+    the class one, exposing `armed_graphs()`. Duck-typed exactly like the real
+    `_ForwardDispatcher` so the seam's gate reads it the same way."""
+
+    def __init__(self, module: Any, events: List[str]) -> None:
+        self.eager_forward = module.forward
+        self._events = events
+
+    def armed_graphs(self) -> tuple:
+        return ("graph-1",)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self._events.append("compiled_call")
+        return self.eager_forward(*args, **kwargs)
+
+
+def _seam_events(adopt: bool) -> List[str]:
+    """Arm the rung, THEN (optionally) adopt, then serve one request —
+    recording park / release / compiled-call order.
+
+    The adopt-AFTER-hook-install ordering is the death log's own
+    (residency confession before `adopt: … armed`), and it is load-bearing:
+    a gate evaluated at hook-install time reads "not compiled" forever and
+    this test's `released` event never appears."""
+    import gen_worker.models.memory as m
+    import gen_worker.models.partial_resident as pr
+
+    events: List[str] = []
+    pipe = _pipeline()
+    _, armed = _arm(pipe)
+    assert armed
+
+    if adopt:
+        pipe.unet.forward = _FakeDispatcher(pipe.unet, events)
+
+    real_park = pr.ParkedComponent.park
+    real_release = m.release_cached_vram
+
+    def counted_park(self: Any) -> None:
+        if self.on_device:
+            events.append("parked")
+        real_park(self)
+
+    pr.ParkedComponent.park = counted_park  # type: ignore[method-assign]
+    m.release_cached_vram = lambda: events.append("released")
+    try:
+        # One request, the pipeline's own call order: the parked encoder
+        # onloads via its pre-hook; the resident unet's pre-hook parks it and
+        # sits exactly at the park→compiled seam.
+        pipe.text_encoder(torch.randn(2, 8))
+        pipe.unet(torch.randn(2, 16))
+    finally:
+        pr.ParkedComponent.park = real_park  # type: ignore[method-assign]
+        m.release_cached_vram = real_release
+    return events
+
+
+def test_the_seam_releases_the_cache_between_park_and_the_compiled_call():
+    """Acceptance (b): parked → released → first compiled call, in that
+    order. The dispatcher is installed AFTER the hooks (adopt runs after the
+    rung arms, per the death log), so a release gated at install time — the
+    pgw#1587 wrong-moment shape — fails here by never firing."""
+    events = _seam_events(adopt=True)
+    assert "parked" in events, "the seam never parked — the instrument is blind"
+    assert "released" in events, (
+        "the park→compiled seam never released the allocator cache; either "
+        "the gate was read at install time (before adopt) or it does not "
+        "recognise an armed dispatcher"
+    )
+    assert "compiled_call" in events
+    assert events.index("parked") < events.index("released") < events.index(
+        "compiled_call"
+    ), f"wrong order at the seam: {events}"
+
+
+def test_the_seam_keeps_the_cache_for_an_eager_denoiser():
+    """The split's other half: no armed dispatcher means the cache is the
+    eager regime's activation money (pgw#1586) and must NOT be released."""
+    events = _seam_events(adopt=False)
+    assert "parked" in events
+    assert "released" not in events, (
+        "the seam released the allocator cache under an EAGER denoiser — "
+        "that cache is eager's activation money, and this empty_cache is a "
+        "per-request tax the regime split exists to avoid"
     )
 
 
