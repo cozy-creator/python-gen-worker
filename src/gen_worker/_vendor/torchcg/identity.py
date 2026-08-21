@@ -7,7 +7,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-KEY_SCHEME = "cg-key-v1"
+#: v2 (tcg#80): the COMPILE POLICY joined the axes. v1 keyed (graph, sm,
+#: toolchain) and was therefore blind to the compiler options the mint
+#: actually ran under -- two mints differing only in
+#: `use_runtime_constant_folding` produced one key and collided in the CAS,
+#: measured. The scheme moves because the derivation moved; the GRAMMAR does
+#: not (`contracts/compiled_graph_key_vectors.json` already admits an unseen
+#: scheme by shape, th#1183).
+KEY_SCHEME = "cg-key-v2"
 MAX_KEY_LENGTH = 96
 _DIGEST_HEX = 56
 _TOOLCHAIN_DIGEST_HEX = 16
@@ -16,7 +23,15 @@ _TOOLCHAIN_DIGEST_HEX = 16
 #: re-declare it and fence the copy; a duplicate that drifts is how a correctly
 #: named module computes wrong keys with nothing raising.
 #:
-#: These three are the whole canonical fingerprint: the toolchain block's
+#: `compile_policy` (tcg#80) is the digest of the codegen-relevant compile
+#: options the mint ran under (`compiler.compile_policy`). It is not a fourth
+#: kind of fact: DESIGN-RULINGS addendum 4 as corrected says the key is "the
+#: compiler's actual input signature", and the options ARE that signature's
+#: other half -- the compile stack says which compiler, the policy says what
+#: it was told to do. Leaving it out is what let a fold-on and a fold-off
+#: artifact share one address.
+#:
+#: These are the whole canonical fingerprint: the toolchain block's
 #: MEMBERS are the caller's to choose, not this package's. The measured
 #: rationale — a 2026-08-16 pod matrix, 10 conclusive rows, 3 hosts — lives in
 #: `benchmarks/host_fingerprint/README.md`. It found os_release/glibc/
@@ -25,7 +40,7 @@ _TOOLCHAIN_DIGEST_HEX = 16
 #: for the same wheel. Every one of those is a caller-supplied member; the
 #: facts this package does own (`machine`, `host_isa_*`) went unmeasured and
 #: stay fail-closed.
-REQUIRED_AXES: tuple[str, ...] = ("graph", "sm", "toolchain")
+REQUIRED_AXES: tuple[str, ...] = ("compile_policy", "graph", "sm", "toolchain")
 
 #: The artifact-metadata block carrying graph-specialization facts. Public for the same
 #: reason: a consumer reading a block this package no longer writes fails at
@@ -139,6 +154,25 @@ def toolchain_axis_digest(block: Mapping[str, Any]) -> str:
     return _facts_digest(facts)[:_TOOLCHAIN_DIGEST_HEX]
 
 
+def policy_axis_digest(policy: Mapping[str, Any]) -> str:
+    """Restate the compile-policy axis from one stated options block.
+
+    The values keep their JSON types -- a policy is booleans, not the strings
+    a toolchain block carries -- so `False` and `"False"` cannot digest alike.
+    """
+
+    if not policy or any(
+        not isinstance(name, str) or not name or name != name.strip() for name in policy
+    ):
+        raise IdentityError("a compile policy is a non-empty block of named options")
+    for name, value in policy.items():
+        if not isinstance(value, (bool, int, str)) or isinstance(value, float):
+            raise IdentityError(
+                f"compile policy option {name!r} must be a bool, int or string"
+            )
+    return _facts_digest(policy)[:_TOOLCHAIN_DIGEST_HEX]
+
+
 def from_artifact_metadata(metadata: Mapping[str, Any]) -> CompiledGraphKey:
     if metadata.get("kind") != ARTIFACT_KIND:
         raise IdentityError(
@@ -168,4 +202,18 @@ def from_artifact_metadata(metadata: Mapping[str, Any]) -> CompiledGraphKey:
         )
     ):
         raise IdentityError("artifact records no toolchain object")
-    return from_axes({"graph": graph, "sm": sm, "toolchain": toolchain_axis_digest(toolchain)})
+    policy = metadata.get("compile_policy")
+    if not isinstance(policy, Mapping):
+        raise IdentityError(
+            "artifact records no compile_policy block; the compile options are "
+            "half the compiler's input signature and a key without them "
+            "collides across configurations (tcg#80)"
+        )
+    return from_axes(
+        {
+            "compile_policy": policy_axis_digest(policy),
+            "graph": graph,
+            "sm": sm,
+            "toolchain": toolchain_axis_digest(toolchain),
+        }
+    )

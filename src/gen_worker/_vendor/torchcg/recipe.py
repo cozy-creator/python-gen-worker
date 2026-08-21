@@ -8,8 +8,9 @@ definition, not vocabulary extensions.
 
 The document is machine-independent on purpose: it pins each specialization by its
 16-hex specialization hash and its exact ``CallIngress`` v1 declaration, never by a
-``cg-key-v1`` value.  The key is folded at adopt time from the pod's own
-``sm``/``toolchain`` facts, so one recipe digest is valid on every SKU.
+``cg-key-v2`` value.  The key is folded at adopt time from the pod's own
+``sm``/``toolchain`` facts and its compile policy (tcg#80), so one recipe
+digest is valid on every SKU.
 
 It is CLASS-LEVEL and therefore checkpoint-free, exactly as the key is: weight
 sets, checkpoint refs, tuned values, and per-request defaults are
@@ -460,8 +461,15 @@ class GraphSpecializationVariant:
     def key(self, runtime: RuntimeAxes) -> CompiledGraphKey:
         """Fold this pinned specialization with the pod's own axes into the exact key."""
 
+        # tcg#80. `compiler` imports no torch at module scope, so reading the
+        # compile policy here keeps this module's no-Torch property intact --
+        # and the policy is a pod axis exactly as sm and toolchain are: the
+        # recipe pins the graph, the pod states what its compiler was told.
+        from .compiler import compile_policy_digest
+
         return from_axes(
             {
+                "compile_policy": compile_policy_digest(),
                 "graph": str(self.specialization_hash),
                 "sm": runtime.sm,
                 "toolchain": toolchain_axis_digest(runtime.toolchain),

@@ -62,14 +62,17 @@ about the WEIGHTS, not about the compiled program:
   classification derives from `state_dict` membership at trace time: the author
   configures the compiler by how the code is written, never out of band.
   **Its DYNAMIC half has a named enforcement point since pgw#1097**: mints
-  compile under `aot_mint.CONSTANT_BINDING_CONFIGS`
-  (`aot_inductor.use_runtime_constant_folding=True`, which defers the fold to
-  load so inductor cannot inline a 0-dim or `<=8`-element tensor's values into
-  the kernel). ⚠️ **The per-entry PROOF arm is not in this repo.** This
-  paragraph named `aot_package.folded_weights` and a `constant_folding_fenced`
-  declared axis; pgw#1270 deleted `aot_package`, and neither name exists in
-  `src/` today — only the deferral flag above is verifiable here. Do not cite
-  the refusal until it is re-pointed at whatever enforces it (pgw#1304).
+  compile under the sealed compile policy in
+  `gen_worker._vendor.torchcg.compiler`, which sets
+  `always_keep_tensor_constants=True` so inductor cannot inline a 0-dim or
+  `<=8`-element tensor's values into the kernel. tcg#80 moved it off
+  `aot_inductor.use_runtime_constant_folding=True`, which bought the same
+  property and a second full constant set on the first call. The per-entry
+  PROOF arm is `torchcg.engine._admit_constant_table`; `constant_folding_fenced`
+  and `package_constants_in_so` are declared axes DERIVED from that policy, and
+  the policy itself is a key axis. (This paragraph used to say neither name
+  existed after pgw#1270 deleted `aot_package` — the enforcement moved into the
+  vendored library, so pgw#1304 can close on it.)
   Authoring rules in `docs/endpoint-authoring.md`. (pgw#857; was
   "weight-binding".)
 
