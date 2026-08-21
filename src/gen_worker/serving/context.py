@@ -96,12 +96,19 @@ def _lane_torch_dtype(lane: Any, *, checkpoint_dir: Any = None) -> Any:
     (``serving.checkpoint_dtype``). Both bridges pass their tree, so the trace
     and the serve resolve the SAME precision for the same lane.
 
-    Prefers ``Contract.torch_dtype`` (the object) over ``Contract.dtype`` (the
-    spelling). Every non-AttributeError read is treated as "this contract
-    declares no top-level dtype", which is a LEGAL state tensorfs signals by
-    RAISING (``MissingDtype``) rather than answering None — the pgw#1386
-    protective arm, kept identical and applied to BOTH spellings, since a
-    dtype-less document raises the same way whichever attribute is asked for.
+    Prefers a ``torch_dtype`` attribute (a real object) over ``dtype`` (the
+    SPELLING), and resolves a spelling through ``_torch_dtype_from_name``.
+    pgw#1448 is why the order matters: diffusers REFUSES a string
+    ``torch_dtype`` with a scroll-past warning and falls back to fp32, so a
+    spelling handed straight to a kwargs-accepting pipeline loaded every model
+    at the wrong precision, silently.
+
+    pgw#1621: a DECLARED lane now carries the quant RULE's ``declared_dtype``
+    (``"bfloat16"``, ``"float8_e4m3fn"``) and cannot be dtype-less — the rule
+    schema requires the field and there are eight rules for the fleet. The
+    protective arms below are kept anyway, because the OTHER caller is a
+    DERIVED lane, which by construction has no rule to read a dtype from and
+    falls through to the checkpoint's own precision.
     """
     from .checkpoint_dtype import checkpoint_dtype
 
@@ -975,37 +982,25 @@ class LoadContext(Generic[MT_co]):
         return mode
 
     def _lane_dtype(self) -> Any:
-        """The lane's load dtype, or None when the contract declares none.
+        """The lane's load dtype as a real ``torch.dtype``, or None.
 
-        pgw#1386, measured on se#754's minimax-h3: tensorfs' ``Contract.dtype``
-        RAISES (``MissingDtype``) for a document with no top-level ``dtype``
-        rather than answering None — a deliberate "never guess" refusal on
-        tensorfs' side. That is a LEGAL state for a lane
-        (``minimax.h3-dit-diffusers@1`` declares per-tensor dtypes only, while
-        ``sdxl.diffusers-bf16@1`` declares ``"dtype": "bfloat16"``), and this
-        bridge already HAS a no-dtype arm — so the read must not be able to
-        kill the load before reaching it. ``getattr(lane, "dtype", None)`` does
-        NOT swallow a non-AttributeError, which is why the plain read did.
-        Any other error still propagates.
-
-        pgw#1448 — AND IT MUST RETURN A ``torch.dtype``, NOT A STRING. This
-        read used to answer ``Contract.dtype``, which is the contract's
-        SPELLING (``'bfloat16'``), while the sibling attribute
-        ``Contract.torch_dtype`` is the real object (``torch.bfloat16``)::
-
-            contracts.MINIMAX_H3_DIT_DIFFUSERS.dtype        -> 'bfloat16'  (str)
-            contracts.MINIMAX_H3_DIT_DIFFUSERS.torch_dtype  -> torch.bfloat16
-
-        diffusers REFUSES a string ``torch_dtype`` with a warning and falls
-        back to **fp32**, so every kwargs-accepting pipeline loaded through the
-        eager bridge was loading at the wrong precision — silently. Measured by
-        the local lane on a 4070: sd1.5 at **13 s/it**, ~20-40x off, because
-        fp32 doubles the weights on a 7.63 GiB card. **The precision bug IS the
-        performance bug**, and it is invisible: a scroll-past warning, then a
-        model that works and is slow.
+        pgw#1448 — IT MUST RETURN A ``torch.dtype``, NOT A STRING. A lane's
+        dtype is a SPELLING (``'bfloat16'``); diffusers REFUSES a string
+        ``torch_dtype`` with a warning and falls back to **fp32**, so every
+        kwargs-accepting pipeline loaded through the eager bridge was loading
+        at the wrong precision — silently. Measured by the local lane on a
+        4070: sd1.5 at **13 s/it**, ~20-40x off, because fp32 doubles the
+        weights on a 7.63 GiB card. **The precision bug IS the performance
+        bug**, and it is invisible: a scroll-past warning, then a model that
+        works and is slow.
 
         FLEET CONSEQUENCE: any timing ever taken through this bridge was fp32
         timing and must be re-baselined, not compared.
+
+        pgw#1386's no-dtype arm survives in ``_lane_torch_dtype`` for the
+        DERIVED-lane caller. It no longer has a declared-lane case to protect:
+        under tensor-layout v2 a lane's dtype is the quant rule's
+        ``declared_dtype``, which the rule schema requires.
         """
         return _lane_torch_dtype(self._lane, checkpoint_dir=self.checkpoint_dir)
 

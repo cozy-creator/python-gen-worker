@@ -34,7 +34,12 @@ from gen_worker._vendor.torchcg.graph_identity import EnvIdentity
 from gen_worker.serving import adapter_guard
 from gen_worker.serving.mint_store import graph_store
 
-LANE = "toy.bf16@1"
+#: The v2 stamp PAIR (pgw#1621). `toy.bf16@1` was ONE handle, and torchcg
+#: refuses a lone handle rather than coercing it. A REAL corpus pair is used
+#: rather than a synthetic one — SDXL's bf16 lane, because a LoRA on a
+#: compiled denoiser is exactly what this file measures and SDXL is the lane
+#: that case ships on.
+LANE = "sdxl.diffusers@1+plain.bf16@1"
 SM = "sm_89"
 STACK: tuple[tuple[str, str], ...] = (("torch", torch.__version__),)
 ENV = EnvIdentity(stack=STACK, sm=SM)

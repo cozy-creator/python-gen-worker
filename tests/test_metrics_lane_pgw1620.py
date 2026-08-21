@@ -47,8 +47,11 @@ from test_pod_serve_loop_streams import projected as _projected  # noqa: E402
 projected = _projected
 bound_store = _bound_store
 
-#: `sdxl.diffusers-bf16@1` and the fixture's `fixture.diffusers-bf16@1` both
-#: declare bfloat16, and `lane_ladder.dtype_body` maps that to ONE ranked body.
+#: `sdxl.diffusers@1+plain.bf16@1` and the fixture's `sd15.diffusers@1+plain.bf16@1`
+#: both resolve to `plain.bf16@1`, and `lane_ladder.rule_body` maps that RULE to
+#: ONE ranked body (pgw#1621: keyed on the rule, not on the dtype spelling —
+#: `cozy.fp8-storage@1` and `cozy.fp8-rowwise@1` share a dtype and do not share
+#: a body).
 #: This is the hub's own vocabulary (proto 13: "fp8-w8a8-dynamic+compiled"),
 #: which is what old-surface endpoints report today — so old and new surfaces
 #: stay comparable in the measurement relation instead of forking by spelling.

@@ -41,18 +41,7 @@ from ..component_vocab import denoiser_components
 from .materialized_view import third_party_dir
 from .safetensors_header import read_header
 from .tensor_source import load_state_dict, open_tensor_source
-from .file_layout import MULTI_FILE, SINGLE_FILE
-from .tensor_layout_contract import (
-    CONTRACT_COZY_FP8_ROWWISE,
-    ELEMENT_BF16,
-    ELEMENT_FP8_E4M3,
-    KEYS_DIFFUSERS_SPLIT_QKV,
-    KEYS_TRANSFORMERS_SPLIT_QKV,
-    SCALE_PER_CHANNEL_OUT,
-    SCALE_STATIC_ACTIVATION,
-    DecodeDimensions,
-    implements_contract,
-)
+from .tensor_layout_contract import implements_quant_rule
 from typing import Any, Dict, List, Optional
 import shutil
 from ..hostfacts import cuda_ready
@@ -596,26 +585,23 @@ def _denoiser_class(root: Path, component: str) -> Any:
     return cls
 
 
-@implements_contract(
-    contract=CONTRACT_COZY_FP8_ROWWISE,
+# `cozy.fp8-rowwise@1` carries the per-output-row F32 `weight_scale` and the
+# BF16 passthrough as its own conventions, so the element/scale axes that used
+# to be declared here are the HANDLE now.
+#
+# ONE convention it states that this decoder does NOT hold to: the rule's
+# `activation_scale` is "dynamic (no stored input_scale)", and its description
+# calls a tree carrying `input_scale` "a different, statically calibrated
+# layout". This loader DECODES that leaf — `Fp8ScaledLinear` registers the
+# buffer and the GEMM reads it — so the statically-calibrated variant is
+# readable here and NAMEABLE NOWHERE: no ratified rule describes it, and the
+# side axis that used to say so (`SCALE_STATIC_ACTIVATION`) is gone with the
+# v1 vocabulary. Closing that needs its own `spec/v2/rules/` document, not a
+# widening of this one.
+@implements_quant_rule(
+    rule="cozy.fp8-rowwise@1",
     serves=("fp8-w8a8-dynamic",),
     composes_lora=True,
-    decodes=DecodeDimensions(
-        elements=(ELEMENT_FP8_E4M3, ELEMENT_BF16),
-        # The optional `input_scale` leaf is DECODED, not ignored:
-        # `Fp8ScaledLinear` registers the buffer and the GEMM reads it
-        # (:489, :517), so a statically-calibrated tree is in the set.
-        scales=(SCALE_PER_CHANNEL_OUT, SCALE_STATIC_ACTIVATION),
-        # It rebuilds the tree's own class from its config and assigns by
-        # NAME, so the key convention it can ingest is whichever one that
-        # class declares — the diffusers repackaging or a transformers tree.
-        key_topologies=(KEYS_DIFFUSERS_SPLIT_QKV, KEYS_TRANSFORMERS_SPLIT_QKV),
-        # BOTH: `detect_w8a8_artifacts` scans the denoiser component dirs of a
-        # `model_index.json` tree, and otherwise the ROOT weight set — the
-        # singlefile / sharded-transformers layouts, per its own docstring.
-        file_layouts=(MULTI_FILE, SINGLE_FILE),
-        bakes=(),
-    ),
     why="gw#547: Fp8ScaledLinear reads lora_a/lora_b non-persistent buffers "
         "in its own forward, so the w8a8 lane composes runtime adapters "
         "natively.",

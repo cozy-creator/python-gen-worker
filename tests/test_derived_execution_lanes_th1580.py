@@ -4,12 +4,20 @@ decoders in the image, not hand-listed.
 Proven here against a FAKE image package (two real decoders, one that cannot
 import) plus the real gen_worker.models tree:
 
-  1. two decoders declare exactly their two contracts and no others;
+  1. two decoders declare exactly their two QUANT RULES and no others;
   2. a decoder module that fails to import is EXCLUDED WITH ITS REASON;
   3. the execution axis comes from the runtime lane table, never the decoder;
   4. exclusions are DERIVED from a function's declared traits (A4 corollary:
      no exclusion marker exists to test);
-  5. an unregistered contract handle fails the BUILD (A2).
+  5. an unratified quant-rule handle fails the BUILD (A2).
+
+**pgw#1621 re-keyed what a decoder declares.** It named a v1 CONTRACT plus five
+`DecodeDimensions` axes — elements, scales, key topologies, file layouts, bakes
+— because a v1 handle named a byte FORMAT and said nothing about which of that
+format's legal shapes the decoder read. A v2 QUANT RULE carries its conventions
+as IDENTITY, so naming the rule is the whole declaration and `decodes=` is
+deleted rather than made optional. The properties above are unchanged; only the
+vocabulary they are stated in moved.
 """
 
 from __future__ import annotations
@@ -26,45 +34,34 @@ from gen_worker.discovery.execution_lanes import (
     execution_lanes_for_function,
     manifest_block,
 )
-from gen_worker.models.tensor_layout_contract import (
-    CONTRACT_COZY_FP8_ROWWISE,
-    CONTRACT_NUNCHAKU_V1,
-    DecodeDimensions,
-    implements_contract,
-)
+from gen_worker.models.tensor_layout_contract import implements_quant_rule
 
-_DIMS = DecodeDimensions(
-    elements=("bf16",), scales=("none",),
-    key_topologies=("diffusers.split-qkv@1",), file_layouts=(), bakes=())
+#: Two RATIFIED rules the real image does NOT declare, so the fake image's set
+#: cannot be confused with the real one. Chosen for their lane bodies:
+#: `bf16-w16a16` is the one body the runtime table offers BOTH execution
+#: options for, and `fp8-w8a8-dynamic` is compiled-only — which is what makes
+#: test (3) below a real statement about the cross rather than an identity.
+FAKE_A_RULE = "plain.f16@1"
+FAKE_B_RULE = "hf.fp8-blockwise@1"
 
 _GOOD_A = '''
-from gen_worker.models.tensor_layout_contract import (
-    DecodeDimensions, implements_contract,
-)
+from gen_worker.models.tensor_layout_contract import implements_quant_rule
 
-@implements_contract(
-    contract="nunchaku.v1@1", serves=("svdq-fp4-w4a4",), composes_lora=False,
-    decodes=DecodeDimensions(
-        elements=("nvfp4",), scales=("group_16",), key_topologies=(),
-        file_layouts=(), bakes=()),
-    why="fake svdq decoder",
+@implements_quant_rule(
+    rule="plain.f16@1", serves=("bf16-w16a16",), composes_lora=True,
+    why="fake fp16 dense decoder",
 )
-def decode_svdq(tensors):
+def decode_dense(tensors):
     return tensors
 '''
 
 _GOOD_B = '''
-from gen_worker.models.tensor_layout_contract import (
-    DecodeDimensions, implements_contract,
-)
+from gen_worker.models.tensor_layout_contract import implements_quant_rule
 
-@implements_contract(
-    contract="cozy.fp8-rowwise@1", serves=("fp8-w8a8-dynamic",),
-    composes_lora=True,
-    decodes=DecodeDimensions(
-        elements=("fp8_e4m3",), scales=("per_channel_out",),
-        key_topologies=("diffusers.split-qkv@1",), file_layouts=(), bakes=()),
-    why="fake fp8 decoder",
+@implements_quant_rule(
+    rule="hf.fp8-blockwise@1", serves=("fp8-w8a8-dynamic",),
+    composes_lora=False,
+    why="fake blockwise fp8 decoder",
 )
 def decode_fp8(tensors):
     return tensors
@@ -75,16 +72,11 @@ def decode_fp8(tensors):
 _BROKEN = '''
 import a_dependency_this_image_does_not_have  # noqa: F401
 
-from gen_worker.models.tensor_layout_contract import (
-    DecodeDimensions, implements_contract,
-)
+from gen_worker.models.tensor_layout_contract import implements_quant_rule
 
-@implements_contract(
-    contract="bfl.nvfp4-preswizzled@1", serves=("nvfp4-w4a4-static",),
+@implements_quant_rule(
+    rule="bfl.nvfp4-preswizzled@1", serves=("nvfp4-w4a4-static",),
     composes_lora=False,
-    decodes=DecodeDimensions(
-        elements=("nvfp4",), scales=("per_tensor",), key_topologies=(),
-        file_layouts=(), bakes=()),
     why="never reached",
 )
 def decode_nvfp4(tensors):
@@ -99,7 +91,7 @@ def fake_image(tmp_path: pytest.TempPathFactory, monkeypatch):
     pkg = root / "fake_decoders"
     pkg.mkdir()
     (pkg / "__init__.py").write_text("", "utf-8")
-    (pkg / "svdq_decoder.py").write_text(textwrap.dedent(_GOOD_A), "utf-8")
+    (pkg / "dense_decoder.py").write_text(textwrap.dedent(_GOOD_A), "utf-8")
     (pkg / "fp8_decoder.py").write_text(textwrap.dedent(_GOOD_B), "utf-8")
     (pkg / "broken_decoder.py").write_text(textwrap.dedent(_BROKEN), "utf-8")
     monkeypatch.syspath_prepend(str(root))
@@ -112,18 +104,17 @@ def fake_image(tmp_path: pytest.TempPathFactory, monkeypatch):
             del sys.modules[name]
 
 
-def test_two_decoders_declare_exactly_their_contracts(fake_image):
+def test_two_decoders_declare_exactly_their_quant_rules(fake_image):
     derived = derive_execution_lanes(packages=(fake_image,))
 
-    assert [c.contract for c in derived.contracts] == [
-        CONTRACT_COZY_FP8_ROWWISE,
-        CONTRACT_NUNCHAKU_V1,
-    ]
-    # And NOTHING else: the third registered contract the broken module would
-    # have claimed is absent, and the two contracts no decoder mentions are
-    # absent. "Supports everything" is not a reachable answer here.
-    assert "bfl.nvfp4-preswizzled@1" not in {c.contract for c in derived.contracts}
-    assert "plain.bf16@1" not in {c.contract for c in derived.contracts}
+    assert [c.rule for c in derived.contracts] == [FAKE_B_RULE, FAKE_A_RULE]
+    # And NOTHING else: the third ratified rule the broken module would have
+    # claimed is absent, and the rules no decoder mentions are absent.
+    # "Supports everything" is not a reachable answer here.
+    declared = {c.rule for c in derived.contracts}
+    assert "bfl.nvfp4-preswizzled@1" not in declared
+    assert "plain.bf16@1" not in declared
+    assert "cozy.fp8-rowwise@1" not in declared
     assert derived.derivation == DERIVATION
 
 
@@ -146,13 +137,21 @@ def test_import_failure_is_excluded_with_a_reason(fake_image):
 
 
 def test_execution_axis_comes_from_the_runtime_table(fake_image):
-    """The decoder declares a lane BODY; eager/compiled is the platform's."""
+    """The decoder declares a lane BODY; eager/compiled is the platform's.
+
+    Neither fake decoder said a word about execution, and the two bodies they
+    DID name expand differently: the runtime table offers `bf16-w16a16` both
+    ways and `fp8-w8a8-dynamic` compiled-only, so two declarations become
+    three lanes. A decoder that could name the execution axis would be able to
+    contradict that table; it cannot, because it has nowhere to write it.
+    """
     derived = derive_execution_lanes(packages=(fake_image,))
 
-    lanes = set(derived.execution_lanes)
-    # svdq is eager-only and w8a8 compiled-only in the lane table, and neither
-    # decoder said so — the cross produced it.
-    assert lanes == {"fp8-w8a8-dynamic+compiled", "svdq-fp4-w4a4+eager"}
+    assert set(derived.execution_lanes) == {
+        "fp8-w8a8-dynamic+compiled",
+        "bf16-w16a16+compiled",
+        "bf16-w16a16+eager",
+    }
 
 
 def test_the_function_lane_set_is_the_image_set_ranked(fake_image):
@@ -170,7 +169,7 @@ def test_the_function_lane_set_is_the_image_set_ranked(fake_image):
     derived = derive_execution_lanes(packages=(fake_image,))
 
     lanes = execution_lanes_for_function(derived)
-    assert set(lanes) == {"fp8-w8a8-dynamic+compiled", "svdq-fp4-w4a4+eager"}
+    assert set(lanes) == set(derived.execution_lanes)
     # RANKED, deterministically — the one thing this function still does.
     assert list(lanes) == sorted(lanes, key=list(lanes).index)
 
@@ -182,35 +181,48 @@ def test_the_function_lane_set_is_the_image_set_ranked(fake_image):
     ).parameters
 
 
-def test_unregistered_contract_fails_the_build():
-    """A2: contracts are code. A decoder cannot mint one at the marker."""
-    with pytest.raises(ValueError, match="is not registered"):
-        @implements_contract(
-            contract="acme.secret-format@1",
+def test_an_unratified_quant_rule_fails_the_build():
+    """A2: quant rules are RATIFIED DOCUMENTS. A decoder cannot mint one at
+    the marker, and there is no longer a side axis to mint one WITH.
+
+    pgw#1621 sharpened this: under v1 the refusal read "not registered" against
+    a table transcribed in this repo. It now reads against the VENDORED
+    `spec/v2/rules/` corpus, so the remedy the message names — author the
+    document upstream and re-vendor — is the only one there is.
+    """
+    with pytest.raises(ValueError, match="not in the vendored v2 corpus"):
+        @implements_quant_rule(
+            rule="acme.secret-format@1",
             serves=("bf16-w16a16",),
             composes_lora=False,
-            decodes=_DIMS,
         )
         def _decode(x):
             return x
 
-    with pytest.raises(ValueError, match="not a contract handle"):
-        @implements_contract(
-            contract="nvfp4", serves=("bf16-w16a16",), composes_lora=False,
-            decodes=_DIMS,
+    with pytest.raises(ValueError, match="not a quant-rule handle"):
+        @implements_quant_rule(
+            rule="nvfp4", serves=("bf16-w16a16",), composes_lora=False,
         )
         def _decode2(x):
             return x
 
     with pytest.raises(ValueError, match="not a known lane body"):
-        @implements_contract(
-            contract=CONTRACT_NUNCHAKU_V1,
-            serves=("svdq-fp4-w4a4+eager",),  # execution axis is not a body
+        @implements_quant_rule(
+            rule="cozy.nvfp4-flat@1",
+            serves=("nvfp4-w4a4-static+compiled",),  # execution axis, not a body
             composes_lora=False,
-            decodes=_DIMS,
         )
         def _decode3(x):
             return x
+
+    # And the `decodes=` axis is GONE from the signature rather than defaulted:
+    # a declaration that still passed one would be silently ignored, which is
+    # the shape this whole re-key removed.
+    with pytest.raises(TypeError):
+        implements_quant_rule(  # type: ignore[call-arg]
+            rule="plain.bf16@1", serves=("bf16-w16a16",),
+            composes_lora=False, decodes=("bf16",),
+        )
 
 
 def test_real_image_tree_derives_its_own_set():
@@ -220,17 +232,26 @@ def test_real_image_tree_derives_its_own_set():
     with stub_missing_heavy_deps():
         derived = derive_execution_lanes()
 
-    by_contract = {c.contract: c for c in derived.contracts}
-    assert CONTRACT_NUNCHAKU_V1 in by_contract
-    assert CONTRACT_COZY_FP8_ROWWISE in by_contract
-    assert "plain.bf16@1" in by_contract
-    # Our own flat-nvfp4 w4a4 decoder claims nothing: the registry has no
-    # entry for it yet (ours is LOW-nibble + unswizzled scales, which is NOT
-    # bfl.nvfp4-preswizzled@1 — te#151 measured what conflating them costs).
-    # An unclaimed decoder contributes no lane, which is the honest answer.
-    assert "bfl.nvfp4-preswizzled@1" not in by_contract
-    assert "nvfp4-w4a4-static+compiled" not in set(derived.execution_lanes)
-    # svdq has no adapter branch; the three branch-capable lanes do.
-    assert by_contract[CONTRACT_NUNCHAKU_V1].composes_lora is False
-    assert by_contract[CONTRACT_COZY_FP8_ROWWISE].composes_lora is True
-    assert by_contract["plain.bf16@1"].composes_lora is True
+    by_rule = {c.rule: c for c in derived.contracts}
+    assert "cozy.fp8-rowwise@1" in by_rule
+    assert "cozy.nvfp4-flat@1" in by_rule
+    assert "hf.fp8-blockwise@1" in by_rule
+    assert "plain.bf16@1" in by_rule
+    # The BFL pre-swizzled packaging is a different rule and a different
+    # digest, and nothing in this image reads it — te#151 measured what
+    # conflating it with our LOW-nibble flat packaging costs (LPIPS 1.11).
+    assert "bfl.nvfp4-preswizzled@1" not in by_rule
+    # `nunchaku.v1@1` was a v1 CONTRACT and has no v2 successor: no ratified
+    # rule names nunchaku's SVDQ packaging. So the svdq decoder declares an
+    # UNREGISTERED DECODE PATH rather than inventing a handle, which is the
+    # honest answer and is visible in the census instead of in a comment.
+    decoders = {u.decoder for u in derived.decode_set.unregistered}
+    assert "gen_worker.models.svdq_layout:decode_linear" in decoders
+    assert "gen_worker.models.loading:load_gguf_pipeline" in decoders
+    assert not any(r.startswith("nunchaku.") for r in by_rule)
+    # An unregistered decoder contributes NO lane — the honest answer.
+    assert "svdq-fp4-w4a4+eager" not in set(derived.execution_lanes)
+    # ...and the three branch-capable lanes carry the adapter trait.
+    assert by_rule["cozy.fp8-rowwise@1"].composes_lora is True
+    assert by_rule["plain.bf16@1"].composes_lora is True
+    assert by_rule["cozy.nvfp4-flat@1"].composes_lora is False

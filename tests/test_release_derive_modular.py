@@ -86,7 +86,7 @@ def test_a_modular_endpoint_derives_its_marked_denoiser(
     assert document["endpoint"].endswith(":ModularModel")
 
     (lane,) = document["graphs"]["lanes"]
-    assert lane["contract"] == "tiny.diffusers-fp32@1"
+    assert lane["contract"] == "sd15.diffusers@1+plain.f32@1"
     assert lane["unobserved_targets"] == []
     # One specialization per enumerated payload arm: Size.SMALL/LARGE change
     # the denoiser's latent side, which is what the enumerator is for.

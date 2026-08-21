@@ -233,16 +233,14 @@ class TinyPipeline:
 
 class SdxlModel(
     Model[SDXL],
-    # A lane IS a tensorfs layout contract — an imported object carrying the
-    # actual layout — and its VALUE is that lane's own DEMAND FORMULA, never a
-    # VRAM string (pgw#1599: there is no single number, because a 4 MP image is
-    # not a 1 MP image). Per-lane and not per-model for the reason visible
-    # here: fp8 halves the weight bytes AND shrinks the activation
-    # coefficient, so one formula would be wrong for one of these two. The
-    # compute-capability floor is DERIVED from each contract's own load dtype
-    # and is not written here — it reads 0 for both of these because the
-    # stand-ins declare float32 (this fixture serves on CPU with fake
-    # weights), which is exactly the derivation being honest.
+    # A lane IS a tensor-layout v2 STAMP PAIR — `(topology, quant)`, both
+    # halves ratified documents — and its VALUE is that lane's own DEMAND
+    # FORMULA, never a VRAM string (pgw#1599: there is no single number,
+    # because a 4 MP image is not a 1 MP image). Per-lane and not per-model for
+    # the reason visible here: fp8 halves the weight bytes AND shrinks the
+    # activation coefficient, so one formula would be wrong for one of these
+    # two. The compute-capability floor is DERIVED from each lane's QUANT RULE
+    # (`capability_floor_sm`, 80 and 89 here) and is never written on a header.
     lanes={
         contracts.SDXL_DIFFUSERS_BF16: lane(
             request=const(MiB(96)) + per_mp_batch(MiB(24)),

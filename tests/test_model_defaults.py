@@ -623,14 +623,32 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
 #: fleet migration. Delete a row when its document is vendored; the
 #: assertions below go red if you delete one that is not there yet, or leave
 #: one that is.
-TENSORFS_130_OWED: frozenset[str] = frozenset()  # tensorfs#130 SHIPPED all nine
+TENSORFS_130_OWED: frozenset[str] = frozenset()
+# pgw#1621 REOPENED this list with one row and then CLOSED it again in the same
+# change, which is the behaviour the row exists to have rather than a tidy-up.
+#
+# The row was `trellis2.dit`: v1's `trellis2.dit-bf16@1` (tensorfs#132) had no
+# v2 counterpart, so `trellis-3d` was refused at import again — the exact
+# blocking state tensorfs#130 had closed, one family over. tensorfs#152
+# (`ac9c9d4`) banked the headers, `trellis2.dit@1` exists, and the assertion
+# below went red on the vendor bump naming the stale row. It also closed
+# `flux1`, `stable-audio`, `qwen-image`, `internvl-u`, `krea-2` and `rife`,
+# none of which ever reached this list.
+#
+# `trellis2` is worth remembering for a different reason: its upstream
+# `ckpts/` is one flat directory holding three DIFFERENT 640-key DiTs that
+# separate only on `input_layer.weight` ([1536,8]/[1536,32]/[1536,64]).
+# Directory-based grouping could not express that at all, so tensorfs#152 had
+# to group by shard-family name and key disjointness — and all 21 pre-existing
+# topology digests came out byte-identical, which is what says the regrouping
+# changed the expressible set and not the existing answers.
 
 #: hunyuan3d-2.1 is NOT on that list and never will be by this route: its repo
 #: is PICKLE-only, so no safetensors-shaped document can describe it. The
 #: answer is a repack-to-safetensors at ingest, pod-side (weights-locality) —
 #: never teaching tensorfs to describe pickles. Until then its class carries a
 #: typed refusal, which is honest, rather than a guess.
-PICKLE_ONLY: frozenset[str] = frozenset({"hunyuan3d.dit-bf16"})
+PICKLE_ONLY: frozenset[str] = frozenset({"hunyuan3d.dit"})
 
 
 def _library_lacks(name: str) -> bool:
@@ -640,7 +658,7 @@ def _library_lacks(name: str) -> bool:
     as the same is how a vendor bump silently strands an endpoint."""
 
     assert name in TENSORFS_130_OWED or name in PICKLE_ONLY, (
-        f"{name!r} is absent from the vendored contract library and is on "
+        f"{name!r} is absent from the vendored v2 topology corpus and is on "
         f"NEITHER the tensorfs#130 work list nor the pickle-only list. Either "
         f"a document was removed, or this list is stale."
     )
@@ -648,23 +666,27 @@ def _library_lacks(name: str) -> bool:
 
 
 def _library_has(name: str) -> bool:
-    """Whether the VENDORED tensorfs library ships a lane document ``name``.
+    """Whether the VENDORED tensorfs corpus carries a TOPOLOGY ``name``.
 
     pgw#1599 deleted ``ModelType.canonical_contract`` — a model TYPE cannot
     own a layout, because a layout is a property of a CHECKPOINT and the
     serving class's ``lanes=`` is what commits to one. The underlying fact
     these tests were really asserting survives, and this is where it lives
     now: does tensorfs publish a document for this family at all? An endpoint
-    that cannot name one cannot declare ``lanes=`` and is refused at import,
-    which is tensorfs#130's whole work list.
-    """
-    from gen_worker._vendor.tensorfs import contracts
+    that cannot name one cannot declare ``lanes=`` and is refused at import.
 
-    try:
-        contracts.get(name)
-    except KeyError:
-        return False
-    return True
+    pgw#1621 moved WHICH document answers that. v1 published one document per
+    LANE (`ltx-2.diffusers-bf16@1`) and this helper asked
+    `contracts.get(<name>)`. v2 splits the lane in two: a TOPOLOGY (which
+    tensors, at what shapes — extracted mechanically from banked headers) and
+    a QUANT RULE (eight of them, for the whole fleet). The family question is
+    the TOPOLOGY question, so that is what is asked here — and the `-bf16`
+    suffix these callers used to pass is not part of a topology handle,
+    because a topology carries no dtype at all.
+    """
+    from gen_worker.models.tensor_layout_contract import known_topologies
+
+    return f"{name}@1" in known_topologies()
 
 
 def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
@@ -716,10 +738,20 @@ def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None
     assert model_type_by_name("foundation-1") is None
     assert model_type_by_name("musicgen") is MusicGen
 
-    # tensorfs#130: musicgen HAS a lane document now, and its name is
-    # `musicgen.transformers-fp16` — the checkpoint is a single-file
-    # transformers tree, not a diffusers one, so the format segment says so.
-    assert _library_has("musicgen.transformers-fp16")
+    # tensorfs#130: musicgen HAS a document, and pgw#1621's split shows why
+    # the v1 name was two facts glued together. The TOPOLOGY is
+    # `musicgen.transformers@1` — the checkpoint is a single-file transformers
+    # tree, not a diffusers one, so the format segment says so — and the
+    # precision half is the separate ratified rule `plain.f16@1`.
+    #
+    # ⚠️ Its DISPLAY name is `musicgen.transformers-fp16@1`: **`fp16` in the
+    # display name, `f16` in the rule handle.** Never derive one from the
+    # other by string surgery (pinned in test_lane_contracts.py).
+    assert _library_has("musicgen.transformers")
+    from gen_worker.models.tensor_layout_contract import display_names
+
+    assert display_names()["musicgen.transformers@1+plain.f16@1"] == (
+        "musicgen.transformers-fp16@1")
     assert MusicGen.canonical_scheduler_config == {}
     # StableAudio DOES carry both, and the scheduler config is real (read from
     # the served manifest, identical on both checkpoints) rather than {}.
@@ -733,22 +765,25 @@ def test_the_two_3d_roots_declare_their_lanes_by_evidence() -> None:
     """pgw#1424. The point is that the two 3D families declare OPPOSITE lane
     facts, and each is falsifiable here rather than in prose."""
     from gen_worker.models import Hunyuan3d, Trellis2
-    from gen_worker.models.model_types import MissingContract, Rife
+    from gen_worker.models.model_types import Rife
 
-    # TRELLIS.2 HAS a real lane document (tensorfs#132), so `trellis-3d` can
-    # name it in `lanes=`.
-    from gen_worker.models.model_types import TRELLIS2_DIT_BF16
+    # TRELLIS.2 briefly lost its document in the v2 cut and got it back in the
+    # same change. v1 shipped `trellis2.dit-bf16@1` (tensorfs#132); the first
+    # v2 corpus banked no trellis2 HEADERS, so `trellis-3d` could not declare
+    # `lanes=` — the blocking state tensorfs#130 had closed, one family over.
+    # It was recorded on `TENSORFS_130_OWED` rather than tolerated, the
+    # assertion here was written to go RED the day the headers landed, and
+    # tensorfs#152 (`ac9c9d4`) landed them. This is the other side of that
+    # assertion: `trellis2.dit@1` EXISTS, so the family is declarable.
+    assert _library_has("trellis2.dit")
 
-    assert _library_has("trellis2.dit-bf16")
-    assert not isinstance(TRELLIS2_DIT_BF16, MissingContract)
-
-    # Hunyuan3D has NO lane document AND NO MissingContract sentinel. Its
+    # Hunyuan3D has NO document and never had one. Its
     # checkpoint is a PICKLE, so no safetensors-shaped document can describe
     # it; a sentinel would assert a document is OWED, which would be a
     # standing lie with a to-do attached. Absent is honest — and under
     # pgw#1599 it is also LOUD: its Model class cannot declare `lanes=` and
     # is refused at import until the repack-to-safetensors job runs pod-side.
-    assert _library_lacks("hunyuan3d.dit-bf16")
+    assert _library_lacks("hunyuan3d.dit")
 
     # Rife WAS the precedent Hunyuan3D followed. tensorfs#130 ends that: one
     # shared `rife.flownet-fp32@1` document now covers the three classes that
@@ -787,14 +822,37 @@ def test_the_3d_fingerprints_do_not_claim_the_shared_dit_fragment() -> None:
 
 
 def test_contract_stamps_classify_through_the_fingerprint() -> None:
-    # A real registered stamp from tensorfs's built-in contracts.
-    assert model_type_for_contract("sdxl.clip-g-fused-qkv@1") is SDXL
-    assert model_type_for_contract("sd15.diffusers-bf16@1") is SD15
-    # Both packaged H3 layouts classify to the one H3 vocabulary.
+    """pgw#1621: the fingerprint matches the TOPOLOGY HALF of a v2 stamp pair.
+
+    Which architecture a checkpoint IS, is a fact about which tensors it has —
+    never about how they are quantized — so the same topology must classify
+    identically under every quant rule, and it does (asserted below and in
+    test_lane_contracts.py). Under v1 the patterns saw a whole lane handle,
+    which meant a rule named after a family would have started matching.
+    """
     from gen_worker.models import MiniMaxH3, Rife
 
-    assert model_type_for_contract("minimax.h3-dit-native@1") is MiniMaxH3
-    assert model_type_for_contract("minimax.h3-dit-diffusers@1") is MiniMaxH3
+    # Real vendored v2 topologies.
+    assert model_type_for_contract("sdxl.clip-g-fused@1") is SDXL
+    assert model_type_for_contract("sd15.diffusers@1") is SD15
+    # v1 could not tell inpainting from base SDXL at all; v2 banks it as its
+    # own topology, and it classifies to the one SDXL vocabulary.
+    assert model_type_for_contract("sdxl-inpainting.diffusers@1") is SDXL
+    # Both packaged H3 layouts classify to the one H3 vocabulary — a split
+    # to_q/to_k/to_v tree and a fused qkv_proj one are two topologies related
+    # by a ratified morphism, not one handle with a side note.
+    assert model_type_for_contract("minimax-h3.native@1") is MiniMaxH3
+    assert model_type_for_contract("minimax-h3.diffusers@1") is MiniMaxH3
+
+    # The QUANT half is never read: the render classifies as the bare
+    # topology does, for every rule.
+    for quant in ("plain.bf16@1", "cozy.fp8-rowwise@1", "cozy.nvfp4-flat@1"):
+        assert model_type_for_contract(f"sdxl.diffusers@1+{quant}") is SDXL
+
+    # The NAME seam still classifies a family with no vendored topology at
+    # all — `rife.*` has no v2 document (its headers are not banked), and a
+    # recorded stamp still maps to the vocabulary. Unclassified is legal;
+    # so is classified-without-a-document.
     assert model_type_for_contract("rife.flownet@1") is Rife
 
 
@@ -907,9 +965,20 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     assert klein["use_dynamic_shifting"] is True
     assert (klein["base_image_seq_len"], klein["max_image_seq_len"]) == (256, 4096)
     assert klein["num_train_timesteps"] == 1000
-    # h3's DiT names a real document; Rife is the auxiliary interpolator that
-    # tensorfs#130 finally gives one shared document to.
-    assert _library_has("minimax.h3-dit-diffusers")
+    # h3's DiT names a real document. pgw#1621 re-key: the TOPOLOGY handle is
+    # `minimax-h3.diffusers@1` (v1 spelled it `minimax.h3-dit-diffusers@1`,
+    # with the family split across the `.` and the precision glued on).
+    assert _library_has("minimax-h3.diffusers")
+    assert _library_has("minimax-h3.native")
+    # Rife HAS a v2 topology, and it arrived by an unusual route worth naming.
+    # v1's shared `rife.flownet-fp32@1` had no counterpart in the first v2
+    # corpus, and the recorded reason was "no upstream header to extract from,
+    # re-derive from the producing module's state_dict" — which was FALSE:
+    # tensorhub SERVES the produced checkpoint, so tensorfs#152 banked the
+    # headers off the hub tree itself. `rife.flownet@1` therefore describes
+    # exactly what the fleet binds rather than an upstream packaging nobody
+    # ships. Its pair is `rife.flownet@1+plain.f32@1`.
+    assert _library_has("rife.flownet")
 
 
 # ── the flux family (pgw#1393) ───────────────────────────────────────────────
@@ -1158,17 +1227,35 @@ def test_the_root_is_the_registered_family_name_not_the_endpoint_slug() -> None:
     assert model_type_by_name("ltx-video-2.3") is None
 
 
-def test_the_lane_document_resolves_and_is_not_a_sentinel() -> None:
-    from gen_worker.models.model_types import (
-        LTX2_DIFFUSERS_BF16 as contract,
-        MissingContract,
+def test_the_lane_resolves_and_the_SENTINEL_shape_is_gone() -> None:
+    """pgw#1621 replaced the sentinel with an impossibility.
+
+    v1 exported a module constant per lane (`LTX2_DIFFUSERS_BF16`) which was
+    either a real `Contract` or a `MissingContract` sentinel that refused every
+    read — the shape existed so a ModelType could precede its per-lane
+    document. v2 has no per-lane document to precede: a lane is composed at
+    the declaration site from a topology and a rule, both of which must
+    already be in the corpus or `parse_lane_stamp` refuses. So the sentinel is
+    not merely unused, it is unwritable, and this asserts BOTH halves — the
+    constants are gone AND the lane they stood for resolves.
+    """
+    from gen_worker.models import model_types as mt
+    from gen_worker.models.tensor_layout_contract import (
+        capability_floor_for_rule,
+        parse_lane_stamp,
+        rule_dtype,
     )
 
-    assert not isinstance(contract, MissingContract)
-    assert contract.stamp == "ltx-2.diffusers-bf16@1"
-    # A `MissingContract` refuses every one of these; a real one answers.
-    assert contract.dtype == "bfloat16"
-    assert len(contract.digest) == 64
+    for dead in ("MissingContract", "MissingContractError",
+                 "LTX2_DIFFUSERS_BF16", "TRELLIS2_DIT_BF16",
+                 "SDXL_DIFFUSERS_BF16", "SD15_DIFFUSERS_BF16"):
+        assert not hasattr(mt, dead), f"{dead} is back in model_types"
+
+    stamp = parse_lane_stamp(("ltx2.diffusers@1", "plain.bf16@1"), where="test")
+    assert stamp.render() == "ltx2.diffusers@1+plain.bf16@1"
+    # The facts the old sentinel refused to answer come off the RULE now.
+    assert rule_dtype(stamp.quant) == "bfloat16"
+    assert capability_floor_for_rule(stamp.quant) == 80
 
 
 def test_the_upsampler_now_HAS_its_lane_document() -> None:
@@ -1183,9 +1270,13 @@ def test_the_upsampler_now_HAS_its_lane_document() -> None:
     name a real document.
 
     That sequence is the whole design in miniature: refuse the implicit, and
-    the refusal becomes the work list."""
+    the refusal becomes the work list.
 
-    assert _library_has("ltx-2-upsampler.diffusers-bf16")
+    pgw#1621 re-key: the document is a TOPOLOGY now — `ltx2-upsampler.diffusers@1`,
+    with no dtype in the handle, because the precision half is a separate
+    ratified rule."""
+
+    assert _library_has("ltx2-upsampler.diffusers")
 
 
 def test_the_scheduler_config_is_ltx_s_own_and_not_klein_s() -> None:
@@ -1212,10 +1303,15 @@ def test_the_ltx_2_fingerprint_does_not_capture_the_upsampler() -> None:
     would classify as the DiT — a wrong `model` column on every upsampler
     artifact, silently."""
 
-    assert model_type_for_contract("ltx-2.diffusers-bf16@1") is Ltx2
-    assert model_type_for_contract("ltx-2-upsampler.anything@1") is Ltx2Upsampler
+    assert model_type_for_contract("ltx2.diffusers@1") is Ltx2
+    assert model_type_for_contract("ltx2-upsampler.diffusers@1") is Ltx2Upsampler
     # and the reverse direction must not hold either
-    assert model_type_for_contract("ltx-2-upsampler.anything@1") is not Ltx2
+    assert model_type_for_contract("ltx2-upsampler.diffusers@1") is not Ltx2
+    # ...and it holds through the full stamp pair too, where the topology is
+    # the PREFIX of the render — which is why `model_type_for_contract` splits
+    # on `+` FIRST rather than globbing the whole string.
+    assert model_type_for_contract(
+        "ltx2-upsampler.diffusers@1+plain.bf16@1") is Ltx2Upsampler
 
 
 # ── hazard 2: the clamp direction, RED and GREEN ─────────────────────────────

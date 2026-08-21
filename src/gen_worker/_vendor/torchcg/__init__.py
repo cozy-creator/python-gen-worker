@@ -73,9 +73,11 @@ from .ingress import (
     exported_input_name,
 )
 from .lane import (
+    LANE_JOIN,
     LaneError,
     LaneRef,
-    require_contract_ref,
+    parse_lane_id,
+    require_lane_id,
     require_pass_ref,
     require_passes,
     require_targets,
@@ -239,7 +241,9 @@ __all__ = [
     "STACK_PREFIXES",
     "is_graph_hash",
     "rank",
-    "require_contract_ref",
+    "LANE_JOIN",
+    "parse_lane_id",
+    "require_lane_id",
     "require_targets",
     "resolve_target",
     "CompiledGraphKey",

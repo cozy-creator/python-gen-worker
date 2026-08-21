@@ -41,7 +41,12 @@ from gen_worker.models import oom_ladder
 
 SM = "sm_89"
 STACK: Tuple[Tuple[str, str], ...] = (("torch", "2.13.0"),)
-LANE = "tiny.plain-bf16@1"
+#: The v2 stamp PAIR (pgw#1621). `tiny.plain-bf16@1` was ONE handle and
+#: `LaneGraphs` refuses one now. The pair is a REAL corpus lane rather than a
+#: fixture invention, and it is sd1.5's on purpose: `PARAMETERS` below is the
+#: real sd1.5 unet's ingress, so the lane and the signature under test name
+#: the same denoiser.
+LANE = "sd15.diffusers@1+plain.bf16@1"
 TARGET = "unet"
 GRAPH = "cg-graph-v1-" + "c" * 56
 

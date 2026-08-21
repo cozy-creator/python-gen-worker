@@ -209,21 +209,39 @@ def test_the_cli_emits_the_document(
 def test_the_cli_classifies_contract_stamps(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert cli_main(["models", "classify", "sdxl.clip-g-fused-qkv@1"]) == 0
+    # A bare TOPOLOGY handle classifies (pgw#1621: the fingerprints are v2
+    # topology spellings now — `sdxl.clip-g-fused@1`, not the v1
+    # `sdxl.clip-g-fused-qkv@1`).
+    assert cli_main(["models", "classify", "sdxl.clip-g-fused@1"]) == 0
     assert capsys.readouterr().out.strip() == "sdxl"
-    # Both packaged H3 layouts classify to the one H3 vocabulary — its
-    # fingerprint is `minimax.h3-*`, which `test_model_defaults.py` has
+    # ...and so does the whole v2 STAMP PAIR, because `model_type_for_contract`
+    # matches the TOPOLOGY HALF only: which architecture a checkpoint is, is a
+    # fact about which tensors it has and never about how they are quantized.
+    # One topology, three quants, one answer.
+    for quant in ("plain.bf16@1", "cozy.fp8-rowwise@1", "cozy.nvfp4-flat@1"):
+        assert cli_main(["models", "classify", f"sdxl.diffusers@1+{quant}"]) == 0
+        assert capsys.readouterr().out.strip() == "sdxl"
+    # Both packaged H3 topologies classify to the one H3 vocabulary — its
+    # fingerprint is `minimax-h3.*`, which `test_model_defaults.py` has
     # asserted since pgw#1386. This file still expected the pre-#1386
     # "unclassified" answer, so the two contradicted each other and this
     # assertion was red on master; corrected in passing (pgw#1393).
-    assert cli_main(["models", "classify", "minimax.h3-dit-native@1"]) == 0
+    assert cli_main(["models", "classify", "minimax-h3.native@1"]) == 0
+    assert capsys.readouterr().out.strip() == "minimax-h3"
+    assert cli_main(["models", "classify", "minimax-h3.diffusers@1+plain.bf16@1"]) == 0
     assert capsys.readouterr().out.strip() == "minimax-h3"
     # Unrecognized = unclassified, visibly — the row stays NULL. The SHARED
     # flux/timm block-spelling fragment is deliberately one of these: it
     # names no single family, so it classifies nothing (pgw#1393).
     assert cli_main(["models", "classify", "dit.blocks-fused-qkv@1"]) == 1
     assert capsys.readouterr().out.strip() == "unclassified"
-    assert cli_main(["models", "classify", "flux1.diffusers-bf16@1"]) == 0
+    # And the RETIRED v1 handle is the other kind: v2 moved `h3-dit` out of the
+    # format half and into the PRODUCER (`minimax` -> `minimax-h3`), so
+    # `minimax.h3-dit-native@1` matches no fingerprint. It says so rather than
+    # being coerced back — a display name names no topology (pgw#1621).
+    assert cli_main(["models", "classify", "minimax.h3-dit-native@1"]) == 1
+    assert capsys.readouterr().out.strip() == "unclassified"
+    assert cli_main(["models", "classify", "flux1.diffusers@1"]) == 0
     assert capsys.readouterr().out.strip() == "flux1"
 
 

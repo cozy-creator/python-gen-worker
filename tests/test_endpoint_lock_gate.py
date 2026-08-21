@@ -40,8 +40,12 @@ from __future__ import annotations
 import msgspec
 
 from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
-from gen_worker._vendor.tensorfs import contracts
 from gen_worker.demand import GiB, const
+
+#: pgw#1621: a lane is the `(topology, quant)` STAMP PAIR, both halves
+#: ratified in the vendored `spec/v2` corpus. `contracts.SDXL_DIFFUSERS_BF16`
+#: is deleted with the v1 vocabulary.
+SDXL_BF16 = ("sdxl.diffusers@1", "plain.bf16@1")
 
 
 class Unlaned(msgspec.Struct):
@@ -61,7 +65,7 @@ class Out(msgspec.Struct):
 
 class UnlanedModel(
     Model[Unlaned],
-    lanes={contracts.SDXL_DIFFUSERS_BF16: lane(request=const(GiB(1)))},
+    lanes={SDXL_BF16: lane(request=const(GiB(1)))},
     self_loading="a lock/--check gate fixture: there is no pipeline at all",
 ):
     """A real lane, no ctx.compile mark — and it locks."""
@@ -81,7 +85,7 @@ def _write_endpoint(root: Path, *, extra_field: str = "") -> None:
     package.mkdir(parents=True, exist_ok=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     # `.replace`, not `.format`: the source now contains real dict braces
-    # (`lanes={contracts.…: lane(…)}`) and `str.format` would read them as
+    # (`lanes={SDXL_BF16: lane(…)}`) and `str.format` would read them as
     # fields.
     (package / "main.py").write_text(
         MAIN.replace("{extra_field}", extra_field), encoding="utf-8"

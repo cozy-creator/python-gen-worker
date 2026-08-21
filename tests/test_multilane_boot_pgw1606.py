@@ -8,9 +8,12 @@ the daemon and `serving/__main__` — `entrypoint.py` builds `Worker(...)` with
 no `lane=` at all. So on a pod, "declare two lanes" meant "do not boot", and
 that is why no endpoint in the fleet has ever declared two.
 
-These use the REAL sdxl contract documents that ship in tensorfs today
-(`sdxl.diffusers-bf16@1` and `sdxl.diffusers-fp8-rowwise@1`), not fabricated
-ones, so the class under test is one the fleet could actually write.
+These use REAL tensor-layout v2 stamp pairs — one topology
+(`sdxl.diffusers@1`) crossed with two ratified quant rules (`plain.bf16@1` and
+`cozy.fp8-rowwise@1`) — not fabricated ones, so the class under test is one the
+fleet could actually write. pgw#1621 re-keyed what a lane is NAMED BY; the
+v1 spellings these used to import (`sdxl.diffusers-bf16@1`) survive only as
+DISPLAY names and resolve to nothing.
 """
 
 from __future__ import annotations
@@ -19,7 +22,6 @@ from typing import Any
 
 import pytest
 
-from gen_worker._vendor.tensorfs import contracts
 from gen_worker.serving import lane_ladder as L
 from gen_worker.serving.loader import EndpointLoadError, LoadedEndpoint
 from gen_worker.serving.model import Model
@@ -27,8 +29,11 @@ from gen_worker.models import SDXL
 from gen_worker.demand import GiB, MiB, const, per_mp_batch
 from gen_worker.serving.lane_spec import lane
 
-BF16 = contracts.SDXL_DIFFUSERS_BF16
-FP8 = contracts.SDXL_DIFFUSERS_FP8_ROWWISE
+#: The two lanes, as the author writes them and as the wire renders them.
+BF16 = ("sdxl.diffusers@1", "plain.bf16@1")
+FP8 = ("sdxl.diffusers@1", "cozy.fp8-rowwise@1")
+BF16_ID = "sdxl.diffusers@1+plain.bf16@1"
+FP8_ID = "sdxl.diffusers@1+cozy.fp8-rowwise@1"
 
 
 class _Verdicts:
@@ -93,8 +98,8 @@ AMPERE = L.CardFacts(sm=86, vram_gb=24.0, name="RTX 3090")
 def test_the_declaration_itself_is_accepted_with_two_lanes():
     from gen_worker.serving.model import model_lanes
 
-    handles = {lane.stamp for lane in model_lanes(TwoLaneModel)}
-    assert handles == {"sdxl.diffusers-bf16@1", "sdxl.diffusers-fp8-rowwise@1"}
+    handles = {row.render() for row in model_lanes(TwoLaneModel)}
+    assert handles == {BF16_ID, FP8_ID}
 
 
 def test_lane_still_refuses_to_GUESS_but_now_points_at_the_ladder():
@@ -108,21 +113,23 @@ def test_lane_still_refuses_to_GUESS_but_now_points_at_the_ladder():
 def test_resolve_picks_fp8_on_ada_and_names_the_rejected_rung():
     resolved = _loaded(TwoLaneModel).resolve(
         TwoLaneModel, card=ADA,
-        verdicts=_Verdicts(staged=[BF16.stamp, FP8.stamp]), gates=_Gates(),
+        verdicts=_Verdicts(staged=[BF16_ID, FP8_ID]), gates=_Gates(),
     )
     assert resolved.body == "fp8-w8a8-dynamic"
-    assert resolved.contract_id == "sdxl.diffusers-fp8-rowwise@1"
+    assert resolved.contract_id == FP8_ID
     assert [r.reason for r in resolved.rejected] == [L.REJECT_OUTRANKED]
     assert "LANE=fp8-w8a8-dynamic" in resolved.confession()
 
 
 def test_resolve_falls_to_bf16_on_ampere_using_the_DERIVED_floor():
     """No `min_sm` is written anywhere in `TwoLaneModel`'s header. The 89 comes
-    from `capability_floor_for_dtype(float8_e4m3fn)`, which is the single
-    producer pgw#1599 keeps."""
+    from `capability_floor_for_rule("cozy.fp8-rowwise@1")` — read off the
+    ratified rule document, which is the single producer pgw#1621 keeps (the
+    dtype-keyed table it replaced could not tell fp8-rowwise from fp8-storage,
+    which declare the same dtype and execute in different lanes)."""
     resolved = _loaded(TwoLaneModel).resolve(
         TwoLaneModel, card=AMPERE,
-        verdicts=_Verdicts(staged=[BF16.stamp, FP8.stamp]), gates=_Gates(),
+        verdicts=_Verdicts(staged=[BF16_ID, FP8_ID]), gates=_Gates(),
     )
     assert resolved.body == "bf16-w16a16"
     (rung,) = resolved.rejected
@@ -135,13 +142,13 @@ def test_the_upcast_rung_on_a_real_two_lane_sdxl_class():
     upcast at load, serve full precision — and report the saving."""
     resolved = _loaded(TwoLaneModel).resolve(
         TwoLaneModel, card=AMPERE,
-        verdicts=_Verdicts(staged=[BF16.stamp, FP8.stamp],
-                           sizes={BF16.stamp: 6_900_000_000,
-                                  FP8.stamp: 3_500_000_000}),
+        verdicts=_Verdicts(staged=[BF16_ID, FP8_ID],
+                           sizes={BF16_ID: 6_900_000_000,
+                                  FP8_ID: 3_500_000_000}),
         gates=_Gates(),
     )
     assert resolved.reason == L.CHOSE_UPCAST
-    assert resolved.fetch_contract == "sdxl.diffusers-fp8-rowwise@1"
+    assert resolved.fetch_contract == FP8_ID
     assert resolved.transfer_saved_bytes == 3_400_000_000
 
 
@@ -150,8 +157,8 @@ def test_an_operator_pin_narrows_the_candidate_set_and_still_walks_the_ladder():
     says WHY, here rather than deeper in the load."""
     resolved = _loaded(TwoLaneModel).resolve(
         TwoLaneModel, card=AMPERE,
-        verdicts=_Verdicts(staged=[FP8.stamp]), gates=_Gates(),
-        contract="sdxl.diffusers-fp8-rowwise@1",
+        verdicts=_Verdicts(staged=[FP8_ID]), gates=_Gates(),
+        contract=FP8_ID,
     )
     # The only candidate is floored out, so nothing has runnable bytes — and
     # the answer is a conversion ask, never a refusal.
@@ -163,19 +170,19 @@ def test_pinning_a_lane_the_model_does_not_declare_refuses_by_name():
     with pytest.raises(EndpointLoadError, match="no lane .* to pin"):
         _loaded(TwoLaneModel).resolve(
             TwoLaneModel, card=ADA, verdicts=_Verdicts(), gates=_Gates(),
-            contract="flux1.diffusers-bf16@1")
+            contract="flux2-klein.diffusers@1+plain.bf16@1")
 
 
 def test_the_single_lane_fleet_path_is_unchanged():
     """Every endpoint in the fleet is single-lane today. `lane()` must still
     answer directly, and `resolve()` must agree with it."""
     loaded = _loaded(OneLaneModel)
-    assert loaded.lane(OneLaneModel, "").stamp == "sdxl.diffusers-bf16@1"
+    assert loaded.lane(OneLaneModel, "").render() == BF16_ID
     resolved = loaded.resolve(
-        OneLaneModel, card=ADA, verdicts=_Verdicts(staged=[BF16.stamp]),
+        OneLaneModel, card=ADA, verdicts=_Verdicts(staged=[BF16_ID]),
         gates=_Gates(),
     )
-    assert resolved.contract_id == "sdxl.diffusers-bf16@1"
+    assert resolved.contract_id == BF16_ID
     assert resolved.rejected == ()
 
 
@@ -184,10 +191,13 @@ def test_the_declared_lane_object_is_carried_not_rebuilt():
     and `min_sm` must keep one producer, so the resolver carries the declared
     lane rather than re-deriving anything off the Contract."""
     resolved = _loaded(TwoLaneModel).resolve(
-        TwoLaneModel, card=ADA, verdicts=_Verdicts(staged=[FP8.stamp]),
+        TwoLaneModel, card=ADA, verdicts=_Verdicts(staged=[FP8_ID]),
         gates=_Gates(),
     )
     declared = resolved.declared
-    assert declared.contract is FP8, "the Contract object itself, not a copy"
-    assert declared.contract_id == FP8.stamp
+    # The DeclaredLane read at class definition, carried through — its stamp
+    # pair, not a re-parse of it.
+    assert (declared.topology, declared.quant) == FP8
+    assert declared.contract_id == FP8_ID
+    assert declared.dtype == "float8_e4m3fn"
     assert declared.min_sm == 89

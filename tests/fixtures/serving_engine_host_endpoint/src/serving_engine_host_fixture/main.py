@@ -18,7 +18,10 @@ import msgspec
 from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
 from gen_worker.demand import MiB, const
 from gen_worker.models import SDXL
-from gen_worker.models.model_types import SDXL_DIFFUSERS_BF16
+#: THE REAL RATIFIED PAIR (pgw#1621). A lane is `(topology, quant)`; both
+#: halves are documents in the vendored `spec/v2` corpus, so this fixture
+#: cannot invent one. The v1 constant it replaces is deleted.
+SDXL_DIFFUSERS_BF16 = ("sdxl.diffusers@1", "plain.bf16@1")
 from gen_worker.serving.engine_runtime import EngineCommand, EngineSpec
 
 #: Set by the test before boot — the stand-in engine script.

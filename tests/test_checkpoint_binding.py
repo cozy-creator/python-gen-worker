@@ -203,7 +203,7 @@ def test_the_row_reaches_what_an_entrypoint_actually_receives(
             64 * GB, manifest_sizer({DREAM: 3 * GB}, headroom_bytes=1 * GB)
         ),
         resolver=resolver,
-        lane_contract="sdxl.diffusers-bf16@1",
+        lane_contract="sdxl.diffusers@1+plain.bf16@1",
         output_dir=tmp_path / "outputs",
     )
     outcome = loop.invoke(

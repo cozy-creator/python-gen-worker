@@ -92,7 +92,7 @@ def make_loop(
         residency=manager,
         resolver=resolver,
         # The deploy's lane pick (multi-lane models refuse an unnamed lane).
-        lane_contract="sdxl.diffusers-bf16@1" if fixture is FIXTURE_DIR else "",
+        lane_contract="sdxl.diffusers@1+plain.bf16@1" if fixture is FIXTURE_DIR else "",
         output_dir=tmp_path / "outputs",
     )
     return loop, resolver, manager
@@ -112,7 +112,7 @@ def test_the_envelope_serves_end_to_end_with_fake_tensors(tmp_path: Path) -> Non
     saved = tmp_path / "outputs" / result.image.ref
     assert saved.is_file() and saved.stat().st_size > 0
     # The instance is resident under its reservation (weights + headroom).
-    assert manager.tier_of(DREAM, "SdxlModel/sdxl.diffusers-bf16@1") is Tier.VRAM
+    assert manager.tier_of(DREAM, "SdxlModel/sdxl.diffusers@1+plain.bf16@1") is Tier.VRAM
 
     # pgw#1404 degraded mode, end to end on the REAL serve path — and pgw#1599
     # narrowed WHAT can trigger it, which is asserted here rather than left to
@@ -124,18 +124,42 @@ def test_the_envelope_serves_end_to_end_with_fake_tensors(tmp_path: Path) -> Non
     # is intact and is everything above this line: THE REQUEST SUCCEEDED on a
     # host with no CUDA device at all.
     #
-    # The warning half has ONE input now instead of two. This fixture's lanes
-    # are float32 stand-ins (CPU, fake weights), so `capability_floor_for_dtype`
-    # derives NO floor for them and there is no VRAM floor left to be under:
-    # the string that used to say `vram12g` is deleted, and the number that
-    # replaces it is COMPUTED from the lane's demand formula over the
-    # advertised shape envelope (pgw#1600), which is not wired yet.
+    # The warning half has ONE input now instead of two. The VRAM arm lost its
+    # input with the floor STRINGS (Paul: "there is no required VRAM"); the
+    # number that replaces it is COMPUTED from the lane's demand formula over
+    # the advertised shape envelope (pgw#1600) and is not wired yet.
     #
-    # So this asserts the honest present state — no floor declared, no
-    # shortfall reported — and the test below proves the surviving `min_sm`
-    # arm can still go RED, so a silently-dead instrument cannot hide here.
-    assert outcome.warnings == ()
-    assert not [row for row in outcome.adjustments if row["field"] == ""]
+    # The `min_sm` arm, though, now FIRES here — and it is right to.
+    # pgw#1621: this fixture used to declare `LaneRef("sdxl.diffusers-bf16@1",
+    # dtype=torch.float32)` — a lane NAMED bf16 carrying an author-typed
+    # float32 — and the old `warnings == ()` was bought by exactly that
+    # incoherence, not by the endpoint genuinely being an fp32 one. Under v2
+    # the dtype is not the fixture's to pick: it is `declared_dtype` on the
+    # ratified quant rule, and `spec/v2/rules/plain.bf16.v1.json` states
+    # `capability_floor_sm: 80`. So a real bf16 lane on a host with no CUDA
+    # device is a real shortfall, and the warning is the system working.
+    #
+    # THE HALF THAT MATTERS IS STILL EVERYTHING ABOVE THIS LINE: the request
+    # SUCCEEDED. This is the whole degrade-never-refuse ruling measured on the
+    # real serve path — it warns loudly, and it serves.
+    (warned,) = outcome.warnings
+    assert warned.startswith("DEGRADED PLACEMENT: cpu (no CUDA device)")
+    assert "sdxl.diffusers@1+plain.bf16@1 needs sm_80+" in warned
+    assert "Running anyway" in warned
+    # ONE row, not two: the unpack above is the assertion that the VRAM arm
+    # stayed quiet, and it is quiet for a stated reason rather than because the
+    # instrument is dead — `min_vram_gb` is deleted and pgw#1600 has not landed
+    # its computed replacement. `test_the_degraded_placement_warning_can_still
+    # _go_red` holds the other polarity: an h100 that MEETS the floor reports
+    # nothing, so an always-warning instrument cannot hide here either.
+    #
+    # And it reaches the caller through the ADJUSTMENT LEDGER — the field-less
+    # row `ctx.warn` writes — rather than a second channel beside it. That was
+    # asserted here as an absence while this fixture warned about nothing; it
+    # is asserted as the row itself now, which is the stronger form.
+    (placement,) = [row for row in outcome.adjustments if row["field"] == ""]
+    assert placement["reason"] == warned
+    assert (placement["requested"], placement["applied"]) == ("", "")
 
 
 def test_the_degraded_placement_warning_can_still_go_red(tmp_path: Path) -> None:
@@ -143,31 +167,33 @@ def test_the_degraded_placement_warning_can_still_go_red(tmp_path: Path) -> None
 
     Its VRAM arm lost its input with the floor strings and gets it back as a
     COMPUTED number in pgw#1600. Its `min_sm` arm is untouched and still
-    derived from the lane contract's own dtype — so a real bf16 lane on a
-    machine with no CUDA device still warns, loudly, and still serves.
+    DERIVED — pgw#1621 only moved where from: it is `capability_floor_sm` on
+    the lane's ratified QUANT RULE now, rather than a lookup on the contract's
+    dtype spelling. A real bf16 lane on a machine with no CUDA device still
+    warns, loudly, and still serves.
 
     Written as its own test on purpose: "the warning did not fire" is only
     honest evidence when something else proves it CAN.
     """
-    from gen_worker._vendor.tensorfs import contracts
     from gen_worker.serving.placement import DeviceFacts, shortfalls
     from gen_worker.serving.model import Model, model_requires
     from gen_worker import lane
     from gen_worker.demand import GiB, const
     from gen_worker.models import SDXL
 
-    real_lane = contracts.SDXL_DIFFUSERS_BF16
+    real_lane = ("sdxl.diffusers@1", "plain.bf16@1")
+    real_lane_id = "sdxl.diffusers@1+plain.bf16@1"
 
     class RealLaneModel(Model[SDXL], lanes={real_lane: lane(request=const(GiB(1)))}):
         pass
 
-    # The floor is DERIVED from the contract's bf16 dtype, never written.
-    assert model_requires(RealLaneModel)[real_lane.stamp].min_terms().min_sm == 80
+    # The floor is DERIVED from the QUANT RULE's own document, never written.
+    assert model_requires(RealLaneModel)[real_lane_id].min_terms().min_sm == 80
 
     cpu_only = DeviceFacts(sm=0, vram_gib=0.0, name="cpu (no CUDA device)")
     (shortfall,) = shortfalls(RealLaneModel, real_lane, facts=cpu_only)
     assert shortfall.term == "min_sm"
-    assert "sdxl.diffusers-bf16@1" in shortfall.message
+    assert "sdxl.diffusers@1+plain.bf16@1" in shortfall.message
     assert "Running anyway" in shortfall.message  # degrade, never refuse
 
     # ...and a machine that MEETS the derived floor reports nothing.
@@ -255,7 +281,7 @@ def test_step_distilled_checkpoint_ignores_turbo_and_warns(tmp_path: Path) -> No
 
 def test_residency_wraps_the_loop_lru_and_never_fits(tmp_path: Path) -> None:
     loop, _, manager = make_loop(tmp_path, vram_gb=5)  # fits ONE 3G+1G instance
-    lane = "SdxlModel/sdxl.diffusers-bf16@1"
+    lane = "SdxlModel/sdxl.diffusers@1+plain.bf16@1"
     loop.invoke("generate", {"model": DREAM, "input": {"prompt": "a"}}, request_id="r1")
     assert manager.tier_of(DREAM, lane) is Tier.VRAM
     # The second checkpoint evicts the first BETWEEN requests (no host tier:
@@ -317,7 +343,7 @@ def test_multi_model_slots_lease_in_stable_slot_name_order(tmp_path: Path) -> No
     # unchanged; the handles are asserted so a future re-keying is visible
     # here rather than only in a store miss.
     assert lease_order == [
-        "OtherModel/sdxl.diffusers-bf16@1", "SlowModel/sdxl.diffusers-bf16@1"
+        "OtherModel/sdxl.diffusers@1+plain.bf16@1", "SlowModel/sdxl.diffusers@1+plain.bf16@1"
     ]
 
 

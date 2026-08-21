@@ -1113,14 +1113,14 @@ def test_the_PRODUCTION_dispatcher_hands_its_loads_NO_ENGINE(
         loaded,
         residency=ResidencyManager(1 << 30, _Sizer()),
         resolver=_Resolver(),
-        lane_contract="sd15.diffusers-bf16@1",
+        lane_contract="sd15.diffusers@1+plain.bf16@1",
     )
     model_cls = next(iter(loaded.models))
     binding = DeployBinding(
         checkpoint_ref="tensorhub/sd15-base@prod",
         checkpoint_dir=tmp_path / "tree",
     )
-    key = (model_cls, "tensorhub/sd15-base@prod", "sd15.diffusers-bf16@1")
+    key = (model_cls, "tensorhub/sd15-base@prod", "sd15.diffusers@1+plain.bf16@1")
     backend = loop._backend_factory(model_cls, binding, key)()
 
     assert backend.load_context._engine is None, (

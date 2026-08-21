@@ -29,22 +29,42 @@ BF16_BODY = "bf16-w16a16"
 FP8_BODY = "fp8-w8a8-dynamic"
 
 
-def _lane(contract_id: str, dtype: str = "bfloat16") -> L.DeclaredLane:
-    """A REAL pgw#1599 `DeclaredLane` — the ladder's own value object."""
+#: The lanes these tests resolve, as pgw#1621 stamp pairs. Both halves are
+#: ratified documents in the vendored `spec/v2` corpus, so the dtype and the
+#: floor below are READ rather than chosen — a lane whose dtype a test picked
+#: could not prove anything about the loader that must honour it.
+BF16_LANE = ("sdxl.diffusers@1", "plain.bf16@1")
+FP8_LANE = ("sdxl.diffusers@1", "cozy.fp8-rowwise@1")
+
+
+def _lane(pair: Any = BF16_LANE) -> L.DeclaredLane:
+    """A REAL pgw#1599/pgw#1621 `DeclaredLane` — the ladder's own value object.
+
+    `dtype` and `min_sm` come off the ratified QUANT RULE through the same two
+    producers the declaration surface uses (`rule_dtype`,
+    `capability_floor_for_rule`), so this fixture cannot disagree with the
+    platform about either.
+    """
     from gen_worker.demand import GiB, const
-    from gen_worker.models.tensor_layout_contract import capability_floor_for_dtype
+    from gen_worker.models.tensor_layout_contract import (
+        LayoutId,
+        capability_floor_for_rule,
+        rule_dtype,
+    )
     from gen_worker.serving.lane_spec import lane
 
+    topology, quant = pair
     return L.DeclaredLane(
-        contract=contract_id, contract_id=contract_id, dtype=dtype,
-        min_sm=int(capability_floor_for_dtype(dtype) or 0),
+        layout=LayoutId(topology=topology, quant=quant),
+        topology=topology, quant=quant,
+        dtype=rule_dtype(quant), min_sm=capability_floor_for_rule(quant),
         spec=lane(request=const(GiB(1.0))),
     )
 
 
-def _resolved(body: str, contract_id: str = "t.lane@1") -> L.ResolvedLane:
+def _resolved(body: str, pair: Any = BF16_LANE) -> L.ResolvedLane:
     return L.ResolvedLane(
-        declared=_lane(contract_id), body=body,
+        declared=_lane(pair), body=body,
         reason=L.CHOSE_BASELINE, card=L.CardFacts(sm=89, name="fixture"),
     )
 
@@ -200,9 +220,9 @@ def test_load_pipeline_materializes_the_baseline_lane_and_confesses(
     from gen_worker.serving.context import DeployBinding, LoadContext
 
     resolved = L.ResolvedLane(
-        declared=_lane("t.bf16@1"), body=BF16_BODY,
+        declared=_lane(BF16_LANE), body=BF16_BODY,
         reason=L.CHOSE_BASELINE, card=L.CardFacts(sm=89, name="fixture"),
-        rejected=(L.RejectedRung(body=FP8_BODY, contract_id="t.fp8@1",
+        rejected=(L.RejectedRung(body=FP8_BODY, contract_id="sdxl.diffusers@1+cozy.fp8-rowwise@1",
                                  reason=L.REJECT_SM_FLOOR,
                                  detail="needs sm89, card is sm86"),),
     )
@@ -244,21 +264,21 @@ def test_the_resolved_lane_selects_its_own_tree_out_of_a_multi_lane_binding(
 
     binding = DeployBinding(
         checkpoint_ref="t@1", checkpoint_dir=Path("/nonexistent/default"),
-        lane_trees={"t.bf16@1": Path("/trees/bf16"),
-                    "t.fp8@1": tiny_tree},
+        lane_trees={"sdxl.diffusers@1+plain.bf16@1": Path("/trees/bf16"),
+                    "sdxl.diffusers@1+cozy.fp8-rowwise@1": tiny_tree},
     )
     plain: LoadContext = LoadContext(
         binding=binding,
-        resolved=L.ResolvedLane(declared=_lane("t.bf16@1"),
+        resolved=L.ResolvedLane(declared=_lane(BF16_LANE),
                                 body=BF16_BODY, reason=L.CHOSE_BASELINE),
     )
     assert plain.checkpoint_dir == Path("/trees/bf16")
 
     upcast: LoadContext = LoadContext(
         binding=binding,
-        resolved=L.ResolvedLane(declared=_lane("t.bf16@1"),
+        resolved=L.ResolvedLane(declared=_lane(BF16_LANE),
                                 body=BF16_BODY, reason=L.CHOSE_UPCAST,
-                                fetch_contract="t.fp8@1",
+                                fetch_contract="sdxl.diffusers@1+cozy.fp8-rowwise@1",
                                 transfer_saved_bytes=3_400_000_000),
     )
     assert upcast.checkpoint_dir == tiny_tree, (

@@ -89,7 +89,7 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
     assert document["endpoint"].endswith(":TinyModel")
 
     (lane,) = document["graphs"]["lanes"]
-    assert lane["contract"] == "tiny.diffusers-fp32@1"
+    assert lane["contract"] == "sd15.diffusers@1+plain.f32@1"
     assert lane["unobserved_targets"] == []
     # 2 Size values x {CFG batch-2 generate, batch-1 turbo} = 4 graph specializations.
     assert len(lane["graphs"]) == 4
@@ -233,20 +233,33 @@ def test_graph_identity_does_not_come_from_the_declaring_MODULE(
     document = json.loads(twin.read_bytes())
     (twin_lane,) = document["graphs"]["lanes"]
 
-    assert contract_lane["contract"] == "tiny.diffusers-fp32@1"
-    assert twin_lane["contract"] == "tiny.diffusers-fp32@1"
+    assert contract_lane["contract"] == "sd15.diffusers@1+plain.f32@1"
+    assert twin_lane["contract"] == "sd15.diffusers@1+plain.f32@1"
     assert [record["graph"] for record in twin_lane["graphs"]] == [
         record["graph"] for record in contract_lane["graphs"]
     ]
     assert len(twin_lane["graphs"]) == 4
 
-    # Every lane row now carries a REAL document. The `derived: true` marker
-    # is gone with the identity it flagged — there is no second kind of lane
-    # left for a reader to have to tell apart.
-    row = document["lane_contracts"]["tiny.diffusers-fp32@1"]
-    assert row["stamp"] == "tiny.diffusers-fp32@1"
-    assert isinstance(row["document"], dict) and row["document"]
+    # Every lane row names a REAL stamp pair. The `derived: true` marker is
+    # gone with the identity it flagged — there is no second kind of lane left
+    # for a reader to have to tell apart.
+    #
+    # ⚠️ THE INLINE `document` IS DELETED (pgw#1621), and this assertion says
+    # so rather than being dropped. v1 inlined the lane's whole tensorfs
+    # contract document plus its digest into every release, because a v1 lane
+    # WAS a stored document. A v2 layout is `quant(topology)` and is COMPUTED
+    # by the Go engine, never stored, so there is nothing to inline: the stamp
+    # pair IS the identity, and both halves are ratified documents the hub
+    # already holds. Re-adding a `document` key here would be a second copy of
+    # a layout that has one producer.
+    row = document["lane_contracts"]["sd15.diffusers@1+plain.f32@1"]
+    assert row["stamp"] == "sd15.diffusers@1+plain.f32@1"
+    assert "document" not in row and "digest" not in row
     assert "derived" not in row
+    # The map KEY and the row's own `stamp` are ONE expression in the derive
+    # (`lane_contract_handle`), because the hub REFUSES the release
+    # (`release_compiled_graphs_invalid_lane`) when they disagree.
+    assert set(document["lane_contracts"]) == {twin_lane["contract"]}
 
 
 def test_an_unmarked_endpoint_traces_and_reports_nothing_to_compile(

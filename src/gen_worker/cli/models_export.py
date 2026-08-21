@@ -60,7 +60,7 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
         "classify",
         help="Map a recorded tensorfs contract stamp (<name>@<version>) to a model name.",
     )
-    classify.add_argument("stamp", help="Contract stamp, e.g. sdxl.diffusers-bf16@1.")
+    classify.add_argument("stamp", help="Layout stamp, e.g. sdxl.diffusers@1+plain.bf16@1 (the topology half is what classifies).")
     classify.set_defaults(_handler=_handle_classify)
 
     decode = models_sub.add_parser(

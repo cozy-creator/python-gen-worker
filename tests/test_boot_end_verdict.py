@@ -150,7 +150,7 @@ def test_a_mint_that_NEVER_STARTED_is_terminal_and_FIRES(
     from a healthy background mint."""
 
     adoption.adoption = FakeSession(adopted=0, holes=2)
-    adoption.contract = "sdxl.diffusers-bf16@1"
+    adoption.contract = "sdxl.diffusers@1+plain.bf16@1"
     adoption._on_adopted = lambda _self: FakeMintStatus(running=False)
     adoption.loaded()
 
@@ -194,7 +194,7 @@ def test_a_boot_that_ARMS_a_specialization_stays_SILENT(
     partially-armed pod is a token operators learn to ignore."""
 
     adoption.adoption = FakeSession(adopted=1, holes=4)
-    adoption.contract = "sdxl.diffusers-bf16@1"
+    adoption.contract = "sdxl.diffusers@1+plain.bf16@1"
     adoption._on_adopted = lambda _self: FakeMintStatus(running=True)
     adoption.loaded()
 

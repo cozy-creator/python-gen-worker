@@ -21,7 +21,7 @@ and the route answers something else::
 
     {"object": "release_compiled_graphs", "release_id": "...",
      "binding_generation": 0, "env_compile_stack": [["torch", "2.13.0"], ...],
-     "lane": "sdxl.diffusers-bf16@1", "lane_stamped": true,
+     "lane": "sdxl.diffusers@1+plain.bf16@1", "lane_stamped": true,
      "lane_contract": {"stamp": ..., "contract_digest": ..., "document": {...},
                        "requires": ...},
      "sm": "sm_89", "empty": false, "hits": 30, "misses": 6,

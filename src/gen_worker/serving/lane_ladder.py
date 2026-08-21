@@ -46,7 +46,7 @@ from .lane_spec import DeclaredLane as LaneDeclaredLane
 #: Protocol that outlives the type it stood in for becomes a second opinion
 #: about what a lane is. The ladder reads `contract_id`, `dtype` and `min_sm`
 #: and re-derives none of them — in particular `min_sm` keeps its single
-#: producer (`capability_floor_for_dtype`, applied at declaration), because one
+#: producer (`capability_floor_for_rule`, applied at declaration), because one
 #: hand-written floor could never be right for a bf16/fp8/nvfp4 class at once.
 DeclaredLane = LaneDeclaredLane
 
@@ -149,12 +149,12 @@ REJECT_KERNEL_UNQUALIFIED = "kernel_unqualified"
 REJECT_NO_ARTIFACT = "no_artifact"
 REJECT_INCOMPATIBLE = "incompatible"
 REJECT_CONVERTIBLE = "convertible_not_staged"
-REJECT_UNKNOWN_DTYPE = "unknown_dtype"
+REJECT_UNKNOWN_RULE = "unknown_quant_rule"
 REJECT_OUTRANKED = "outranked"
 
 REJECTIONS = (
     REJECT_SM_FLOOR, REJECT_KERNEL_UNQUALIFIED, REJECT_NO_ARTIFACT,
-    REJECT_INCOMPATIBLE, REJECT_CONVERTIBLE, REJECT_UNKNOWN_DTYPE,
+    REJECT_INCOMPATIBLE, REJECT_CONVERTIBLE, REJECT_UNKNOWN_RULE,
     REJECT_OUTRANKED,
 )
 
@@ -275,45 +275,60 @@ class ResolvedLane(msgspec.Struct, frozen=True, kw_only=True):
 
 
 # --------------------------------------------------------------------------
-# dtype -> lane body. ONE producer.
+# quant RULE -> lane body. ONE producer.
 # --------------------------------------------------------------------------
 
-#: The serving body a contract dtype implies. Keyed on the safetensors/torch
-#: spellings a tensorfs document actually carries.
+#: The serving body a lane's QUANT RULE implies. Keyed on the ratified rule
+#: handle, one row per rule in the vendored v2 corpus, and there are eight.
 #:
-#: fp8 maps to the w8a8 GEMM body and NOT to `fp8-w8a16`: fp8 is the canonical
-#: quantization (Paul), and w8a16 is fp8-STORAGE-with-bf16-compute, which is a
-#: fit mechanism on the placement ladder rather than a declared serving lane.
-#: The upcast rung below is how fp8 BYTES reach a bf16 GEMM, and it is a
-#: property of the resolution, not a fourth body.
-_DTYPE_BODY: dict[str, str] = {
-    "bfloat16": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
-    "bf16": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
-    "float16": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
-    "fp16": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
-    "half": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
-    "float32": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
-    "fp32": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
-    "float8_e4m3fn": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
-    "float8_e4m3fnuz": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
-    "fp8_e4m3": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
-    "fp8": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
-    "float4_e2m1fn": el.WEIGHTS_NVFP4 + "-" + el.ACT_W4A4 + "-" + el.SCALE_STATIC,
-    "nvfp4": el.WEIGHTS_NVFP4 + "-" + el.ACT_W4A4 + "-" + el.SCALE_STATIC,
-    "fp4": el.WEIGHTS_NVFP4 + "-" + el.ACT_W4A4 + "-" + el.SCALE_STATIC,
+#: ⚠️ THIS WAS KEYED ON THE DTYPE SPELLING AND THAT WAS A REAL DEFECT, found by
+#: the pgw#1621 re-key rather than by a failure in production. `cozy.fp8-
+#: storage@1` and `cozy.fp8-rowwise@1` BOTH declare `float8_e4m3fn`, and they
+#: execute in DIFFERENT LANES:
+#:
+#:   * `cozy.fp8-rowwise@1` stores an F32 `[out]` `weight_scale` beside each
+#:     weight and is consumed by the w8a8 GEMM — `fp8-w8a8-dynamic`.
+#:   * `cozy.fp8-storage@1` is SCALE-FREE (`"scale": "none"`) and its own
+#:     conventions say `"consumption": "diffusers layerwise cast to bf16"` —
+#:     fp8 bytes resident, **bf16 compute**. Its body is `bf16-w16a16`.
+#:
+#: A dtype-keyed table cannot tell those apart, so it answered `fp8-w8a8-
+#: dynamic` for both — which would have offered a scale-free tree to a GEMM
+#: that multiplies by scales that do not exist, and floored the lane at sm89
+#: for arithmetic it never performs. The dtype names the ELEMENT; the rule
+#: names the EXECUTOR, and only one of those is what a lane body is.
+#:
+#: fp8-rowwise maps to the w8a8 GEMM body and NOT to `fp8-w8a16`: fp8 is the
+#: canonical quantization (Paul), and w8a16 is fp8-storage-with-bf16-compute —
+#: which is exactly what `cozy.fp8-storage@1` IS, and it is expressed as the
+#: bf16 body because that is the arithmetic that runs. The upcast rung below is
+#: how fp8 GEMM bytes reach a bf16 GEMM, and it is a property of the
+#: resolution, not a fourth body.
+_RULE_BODY: dict[str, str] = {
+    "plain.f32@1": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
+    "plain.f16@1": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
+    "plain.bf16@1": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
+    "cozy.fp8-storage@1": el.WEIGHTS_BF16 + "-" + el.ACT_W16A16,
+    "cozy.fp8-rowwise@1": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
+    "hf.fp8-blockwise@1": el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC,
+    "cozy.nvfp4-flat@1": el.WEIGHTS_NVFP4 + "-" + el.ACT_W4A4 + "-" + el.SCALE_STATIC,
+    "bfl.nvfp4-preswizzled@1": el.WEIGHTS_NVFP4 + "-" + el.ACT_W4A4 + "-" + el.SCALE_STATIC,
 }
 
 
-def dtype_body(dtype: Any) -> str:
-    """The ranked lane body a contract dtype serves as, or `""` if unknown.
+def rule_body(quant: Any) -> str:
+    """The ranked lane body a quant rule serves as, or `""` if this table has
+    no row for it.
 
     `""` is not an error here — it becomes a NAMED rejection
-    (`unknown_dtype`) so a document declaring something the fleet has no
-    executor for is passed over loudly rather than crashing a boot.
+    (`unknown_quant_rule`) so a rule the fleet has no executor for is passed
+    over loudly rather than crashing a boot. Unlike the dtype table this
+    replaced, a missing row is a REAL gap rather than a spelling accident:
+    there are eight rules, they are enumerated above, and
+    `test_every_ratified_rule_has_a_serving_body` fails the moment tensorfs
+    ratifies a ninth.
     """
-    name = getattr(dtype, "name", None) or dtype
-    key = str(name or "").strip().lower().removeprefix("torch.")
-    return _DTYPE_BODY.get(key, "")
+    return _RULE_BODY.get(str(quant or "").strip(), "")
 
 
 def _rank(body: str) -> int:
@@ -368,13 +383,13 @@ def _candidates(declared: Sequence[Any]) -> tuple[list[_Candidate], list[Rejecte
     ranked: list[_Candidate] = []
     unknown: list[RejectedRung] = []
     for lane in declared:
-        body = dtype_body(getattr(lane, "dtype", None))
+        body = rule_body(getattr(lane, "quant", None))
         contract_id = str(getattr(lane, "contract_id", "") or "")
         if not body:
             unknown.append(RejectedRung(
-                body="?", contract_id=contract_id, reason=REJECT_UNKNOWN_DTYPE,
-                detail=f"dtype {getattr(lane, 'dtype', None)!r} maps to no "
-                       f"serving body in the fleet's lane table",
+                body="?", contract_id=contract_id, reason=REJECT_UNKNOWN_RULE,
+                detail=f"quant rule {getattr(lane, 'quant', None)!r} maps "
+                       f"to no serving body in the fleet's lane table",
             ))
             continue
         ranked.append(_Candidate(declared=lane, body=body, rank=_rank(body)))
@@ -450,7 +465,7 @@ def resolve_lane(
     for cand in ranked:
         contract_id = str(getattr(cand.declared, "contract_id", "") or "")
         min_sm = int(getattr(cand.declared, "min_sm", 0) or 0)
-        # THE BASELINE RUNG IS NEVER FLOORED OUT. `capability_floor_for_dtype`
+        # THE BASELINE RUNG IS NEVER FLOORED OUT. `capability_floor_for_rule`
         # answers 80 for bf16, which is a statement about tensor cores and not
         # about whether the model runs — bf16 runs on Ampere, on Pascal and on
         # a CPU, at some speed. Flooring it out would leave a host with no CUDA
@@ -619,7 +634,7 @@ __all__ = [
     "REJECT_NO_ARTIFACT",
     "REJECT_OUTRANKED",
     "REJECT_SM_FLOOR",
-    "REJECT_UNKNOWN_DTYPE",
+    "REJECT_UNKNOWN_RULE",
     "RejectedRung",
     "ResolvedLane",
     "VERDICTS",
@@ -627,7 +642,7 @@ __all__ = [
     "VERDICT_DERIVABLE",
     "VERDICT_INCOMPATIBLE",
     "VERDICT_SATISFIES",
-    "dtype_body",
+    "rule_body",
     "is_baseline",
     "resolve_lane",
 ]

@@ -451,10 +451,15 @@ class Generate:
   checked, an undeclared one is not evaluated, and there is no "no floor"
   value to write.
 
-  Handles must be registered
-  (`KNOWN_CONTRACTS`, transcribed from tensorhub's `internal/tensorlayout`)
-  and written as LITERALS or as constants imported from that module, so an
-  AST sweep can read them. Declaring a handle no decoder in the image backs is NOT an error: it
+  Handles must name a RATIFIED QUANT RULE — one of the eight documents in the
+  vendored tensor-layout v2 corpus (`_vendor/tensorfs/spec/v2/rules/`;
+  `known_quant_rules()` enumerates them) — and be written as LITERALS or as
+  constants imported from `models/tensor_layout_contract`, so an AST sweep can
+  read them. A slot's demand is a KERNEL question — what can this code execute
+  — which is exactly what a quant rule answers, so it declares the quant handle
+  alone; the topology half is a fact about which tensors a checkpoint has, and
+  a slot does not constrain it. The full `(topology, quant)` pair belongs in
+  `lanes=`. Declaring a handle no decoder in the image backs is NOT an error: it
   lands in the build log as `layouts_census_unbacked`, because plenty of
   layouts are decoded natively by `transformers`/`diffusers` with no cozy
   marker.
@@ -862,9 +867,9 @@ performs no pytorch streaming load and compiles nothing, so `ctx.lane` has
 nothing to answer and raises by design.
 
 **It is the ONLY way to say that (pgw#1488).** An absent lane declaration —
-`lanes=()`, or no `lanes=` at all — means "this class states no layout
-contract", and a class that states none still TRACES, under a lane identity
-derived from the model type. Contract documents are fleet metadata that
+`lanes=()`, or no `lanes=` at all — means "this class states no layout stamp",
+and a class that states none still TRACES, under a lane identity derived from
+the model type. Contract documents are fleet metadata that
 attaches to the produced artifacts; they are never a precondition for
 producing them. The reason is mandatory for the same reason `self_loading=`'s
 is: eager-forever costs throughput and the class should say why.

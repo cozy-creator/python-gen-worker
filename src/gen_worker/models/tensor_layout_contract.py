@@ -1,21 +1,39 @@
-"""§1.30 declaration 2+3: a decoder declares WHICH TENSOR-LAYOUT CONTRACT it
-implements, beside the code that implements it.
+"""§1.30 declaration 2+3, on the tensor-layout contract **v2** vocabulary: a
+decoder declares WHICH QUANT RULE it decodes, beside the code that decodes it.
 
-The tensor-layout contract is how tensors exist ON DISK — byte packing, scale
-layout, swizzle, key-naming convention, file topology — named by a descriptor
-handle ``<producer>.<format>@<major>``. Its sibling, the tensor-binding contract
-(``docs/endpoint-authoring.md``), is how a tensor is ADDRESSED at load: bound by
-name, or baked as a literal.
+A v2 LAYOUT is ``quant(topology)`` — a TOPOLOGY (a finite ``{key -> logical
+shape}`` map, dtype-free, extracted mechanically from a reference checkpoint's
+headers) composed with a QUANT RULE (a per-tensor transformation whose
+convention facts — nibble order, swizzle, scale rank and span — ARE its
+identity). Identity is the digest pair; the wire rendering is th#1809's
+``"<topology>+<quant>"`` (:meth:`LayoutId.render`, shared with the hub's
+``tensorfs.LayoutID.String`` — a spelling drift is a CAS-address fork).
 
-The endpoint half of §1.30's compatibility intersection is DERIVED at image
-build (``gen_worker.discovery.execution_lanes``) from these markers. A
-hand-maintained capability list would be a second trusted string, so there is no
-list: the declaration is a property of the decoder function, and it ships or
-fails to ship with it.
+**pgw#1621 deleted the v1 vocabulary this module used to carry.** The six
+``KNOWN_CONTRACTS`` handle strings and the five DECODE DIMENSIONS
+(``elements``/``scales``/``key_topologies``/``file_layouts``/``bakes``) are
+gone, because the axes they enumerated are exactly the convention facts a v2
+quant rule carries as identity. A decoder now names the RULE and the axes come
+with it — one fact, one producer, and the ``q4_k`` / ``float4_e2m1fn_x2``
+spelling traps become inexpressible rather than guarded.
 
-The vocabulary lives in tensorhub's ``internal/tensorlayout`` (A2: contracts
-are CODE). This module carries only the handles a decoder may name and refuses
-anything else; it does not re-specify the descriptors.
+**THE SM FLOOR IS A PROPERTY OF THE RULE** (Paul, 2026-08-18: "the sm_x compute
+floor should fall out of the contract itself"). ``DTYPE_MIN_SM`` and
+``capability_floor_for_dtype`` are deleted with the rest: a table keyed on a
+dtype's SPELLING silently loses the floor when a lane is spelled differently,
+and the two zeros it returned — "measured: no floor" and "never heard of it" —
+were indistinguishable. :func:`capability_floor_for_rule` reads
+``capability_floor_sm`` off the vendored rule document, which is the ONE
+producer of that number in this repo.
+
+**NOTHING HERE COMPUTES A LAYOUT AND NOTHING HERE DECIDES AN ADMIT.**
+``quant(topology)`` is evaluated by the Go engine and by nothing else — there is
+deliberately no pyo3 binding for the evaluator or the decision (tensorfs
+``spec/v2/README.md``), and the v2 cut deleted ``Verdict``/``Conversion``/
+``Mismatch`` from the Rust extension's typed surface. v1 shipped three copies of
+one matching rule and the copies were free to disagree about an admit. This
+module READS identity facts out of the vendored corpus; the verdict is the
+hub's and arrives binding-carried.
 
 **No exclusion marker exists, deliberately** (A4 corollary).
 Exclusions are DERIVED from declared traits — ``composes_lora`` crossed with a
@@ -24,252 +42,206 @@ function's ``lora_bucket`` is computable at build — or they do not exist.
 
 from __future__ import annotations
 
+import functools
+import json
 import re
-from typing import Any, Callable, Iterable, TypeVar
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Callable, Iterable, Mapping, TypeVar
 
 import msgspec
 
+from .._vendor.tensorfs import layout2
 from .execution_lanes import known_execution_lane_bodies
-from .file_layout import KNOWN_FILE_LAYOUTS
 
-# The registered handles, transcribed from tensorhub's seeded registry. A
-# decoder naming anything else fails the BUILD: an unregistered contract is
-# OPAQUE (A2), and a decoder cannot unilaterally register one.
-CONTRACT_PLAIN_BF16 = "plain.bf16@1"
-CONTRACT_COZY_FP8_ROWWISE = "cozy.fp8-rowwise@1"
-CONTRACT_NUNCHAKU_V1 = "nunchaku.v1@1"
-CONTRACT_COZY_SVDQ_NVFP4_LR8 = "cozy.svdq-nvfp4-lr8@1"
-CONTRACT_BFL_NVFP4_PRESWIZZLED = "bfl.nvfp4-preswizzled@1"
-# transformers' FineGrainedFP8 / DeepSeek-style 128x128 block scales.
-# NOT cozy.fp8-rowwise@1 — same element type and activation scheme, different
-# scale leaf, rank and span (`models/hf_fp8_blockwise.py`).
-CONTRACT_HF_FP8_BLOCKWISE = "hf.fp8-blockwise@1"
-
-KNOWN_CONTRACTS: tuple[str, ...] = (
-    CONTRACT_PLAIN_BF16,
-    CONTRACT_COZY_FP8_ROWWISE,
-    CONTRACT_NUNCHAKU_V1,
-    CONTRACT_COZY_SVDQ_NVFP4_LR8,
-    CONTRACT_BFL_NVFP4_PRESWIZZLED,
-    CONTRACT_HF_FP8_BLOCKWISE,
-)
-
-_HANDLE_RE = re.compile(r"^([a-z0-9]+)\.([a-z0-9][a-z0-9._-]*)@([1-9][0-9]*)$")
-
-# ── The DECODE DIMENSIONS (pgw#1245; th#1937 ratifies the vocabulary) ────────
+# ── The VENDORED v2 CORPUS ───────────────────────────────────────────────────
 #
-# A handle names a byte FORMAT. It does not say which of that format's legal
-# shapes a given decoder reads, and the shapes are exactly where decoders
-# branch: `cozy.fp8-rowwise@1` is one handle whether or not the tree carries
-# the optional `input_scale` leaf, and a decoder that ignores it serves
-# different bytes than one that consumes it. So a declaration carries five
-# axes, and th#1938's `resolve()` intersects a variant's derived contract
-# against them rather than against the handle alone.
+# `layout2` resolves the corpus by walking its own parents for a `spec/v2`
+# directory, and the vendored package carries one at
+# `_vendor/tensorfs/spec/v2`. The root is named here anyway rather than left to
+# that walk: an unreadable corpus must REFUSE (it does — `_root` raises
+# `FileNotFoundError`), and naming the path makes the refusal say which tree it
+# looked in. The three readers below are `lru_cache`d because the corpus is
+# 2.6 MB of JSON and every lane declaration in the image would otherwise re-read
+# it at class-definition time. They hand back a `MappingProxyType` because a
+# `lru_cache` over a mutable result is one caller's `.pop()` away from a corpus
+# that silently disagrees with the files on disk for the rest of the process.
+
+_SPEC_V2 = Path(layout2.__file__).resolve().parent / "spec" / "v2"
+
+
+@functools.lru_cache(maxsize=1)
+def quant_rules() -> Mapping[str, layout2.Quant]:
+    """handle -> the rule's IDENTITY FACTS, from the vendored corpus.
+
+    Identity only: declared dtype, capability floor, conventions, lossiness,
+    the dequant identity and Go's canonical digest. The eligibility predicate
+    and the emission shapes each rule document also carries belong to the
+    EVALUATOR, which is Go's, and reading them here would be the first half of
+    growing a second one.
+    """
+    return MappingProxyType(dict(layout2.rules(_SPEC_V2)))
+
+
+@functools.lru_cache(maxsize=1)
+def topologies() -> Mapping[str, Mapping[str, Mapping[str, tuple[int, ...]]]]:
+    """handle -> component -> key -> logical shape. SHAPES ONLY — a topology
+    carries no dtype, because the dtype is the quant rule's half of the pair."""
+    return MappingProxyType(dict(layout2.topologies(_SPEC_V2)))
+
+
+@functools.lru_cache(maxsize=1)
+def display_names() -> Mapping[str, str]:
+    """``"<topology>+<quant>"`` -> the v1 lane-handle spelling it used to be
+    known by (``sdxl.diffusers-bf16@1``).
+
+    **A DISPLAY NAME IS NEVER PARSED AND GATES NOTHING.** It exists so an
+    operator reading a refusal recognises the lane they declared last week, and
+    so this cut's re-key had a mechanical source. Deriving a quant handle by
+    string surgery on one of these is a defect waiting to happen — `musicgen`'s
+    pair is `plain.f16@1` while its display name says `-fp16@1`.
+    """
+    raw = json.loads((_SPEC_V2 / "display-names.json").read_text(encoding="utf-8"))
+    return MappingProxyType(dict(raw.get("names") or {}))
+
+
+def known_quant_rules() -> tuple[str, ...]:
+    """Every quant-rule handle the vendored corpus carries, sorted."""
+    return tuple(sorted(quant_rules()))
+
+
+def known_topologies() -> tuple[str, ...]:
+    """Every v2 topology handle the vendored corpus carries, sorted."""
+    return tuple(sorted(topologies()))
+
+
+def capability_floor_for_rule(quant: object) -> int:
+    """The ``min_sm`` a lane's QUANT RULE implies.
+
+    ``0`` means the rule states no floor (fp32 runs anywhere) — and it is a
+    MEASURED zero, written in the rule document, not the "never heard of it"
+    zero the deleted dtype table could not distinguish from it. A handle the
+    corpus does not carry REFUSES rather than answering 0: a floor invented for
+    a rule nobody shipped is a placement claim with nothing behind it, and the
+    permissive direction is the one that puts an nvfp4 lane on Ampere.
+    """
+    handle = str(quant or "").strip()
+    rule = quant_rules().get(handle)
+    if rule is None:
+        raise LayoutDeclarationError(
+            f"quant rule {handle!r} is not in the vendored v2 corpus, so its "
+            f"capability floor is unknowable. Known: "
+            f"{', '.join(known_quant_rules())}. A floor answered for an "
+            f"unknown rule would be a placement claim with nothing behind it."
+        )
+    return int(rule.capability_floor_sm)
+
+
+def rule_dtype(quant: object) -> str:
+    """The torch spelling the rule DECLARES (``float8_e4m3fn``) — what a loader
+    wants, and what the lane SERVES. Refuses an unknown handle, same reason."""
+    handle = str(quant or "").strip()
+    rule = quant_rules().get(handle)
+    if rule is None:
+        raise LayoutDeclarationError(
+            f"quant rule {handle!r} is not in the vendored v2 corpus. Known: "
+            f"{', '.join(known_quant_rules())}"
+        )
+    return str(rule.declared_dtype)
+
+#: The handle grammar, transcribed from tensorfs' `isTFM1ContractName`
+#: (`tfm1.go:217`) + `ParseHandle` (`v2doc.go:72`), which is the one authority.
+#:
+#: THE PRODUCER SEGMENT ADMITS A HYPHEN, AND THIS REGEX DID NOT. It was
+#: `^([a-z0-9]+)\.…$`, which is correct for every v1 QUANT handle the fleet ever
+#: had (`plain.bf16`, `cozy.fp8-rowwise` — hyphens only ever fell in the FORMAT
+#: segment) and wrong for half the v2 TOPOLOGY corpus: `flux2-klein.diffusers@1`,
+#: `hidream-o1.diffusers@1`, `minimax-h3.diffusers@1`, `z-image.diffusers@1`,
+#: `ltx2-upsampler.diffusers@1`, `sdxl-inpainting.diffusers@1` and
+#: `qwen3-6-35b-a3b.transformers@1` all refused as "not a handle". Five migrated
+#: endpoints could not have declared a lane at all.
+#:
+#: This is the SAME relaxation tensorfs#121 made and the vendored v1 port had to
+#: follow ("the port refused `hidream-o1.diffusers-bf16` until it did"); the
+#: tensorlayout-side regex simply never had a hyphenated producer to trip over
+#: until the topology axis carried real model names. A LEADING hyphen still
+#: refuses, on both segments, exactly as upstream's does.
+_HANDLE_RE = re.compile(
+    r"^([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9._-]*)@([1-9][0-9]*)$")
+
+# ── The five DECODE DIMENSIONS are DELETED (pgw#1621) ────────────────────────
 #
-# Registered tokens only, on every axis. An unregistered token fails the
-# BUILD for the same reason an unregistered handle does: a decoder that can
-# mint its own vocabulary is back to being a trusted string.
-
-# Element encoding of the quantized weights the decoder reads.
-ELEMENT_BF16 = "bf16"
-ELEMENT_FP16 = "fp16"
-ELEMENT_FP32 = "fp32"
-ELEMENT_FP8_E4M3 = "fp8_e4m3"
-ELEMENT_NVFP4 = "nvfp4"
-ELEMENT_INT4 = "int4"
-KNOWN_ELEMENTS: tuple[str, ...] = (
-    ELEMENT_BF16, ELEMENT_FP16, ELEMENT_FP32,
-    ELEMENT_FP8_E4M3, ELEMENT_NVFP4, ELEMENT_INT4,
-)
-
-# Scale granularity. `none` is EXPLICIT: a dense decoder states that it reads
-# no scale tensors, which is a fact, where an empty axis would be a silence.
-SCALE_NONE = "none"
-SCALE_PER_TENSOR = "per_tensor"
-SCALE_PER_CHANNEL_OUT = "per_channel_out"
-SCALE_STATIC_ACTIVATION = "static_activation"
-SCALE_BLOCK_128X128 = "block_128x128"
-SCALE_GROUP_16 = "group_16"
-KNOWN_SCALES: tuple[str, ...] = (
-    SCALE_NONE, SCALE_PER_TENSOR, SCALE_PER_CHANNEL_OUT,
-    SCALE_STATIC_ACTIVATION, SCALE_BLOCK_128X128, SCALE_GROUP_16,
-)
-
-# FILE LAYOUT — which on-disk shape the decoder's ENTRY POINT can read.
-# The tokens are th#1937's ruling and are IMPORTED from `models/file_layout.py`
-# (pgw#1252), never transcribed: that module is the same one `convert/` publishes
-# through, so the load side and the publish side cannot drift into two
-# spellings of one axis. `KNOWN_FILE_LAYOUTS` is `multi-file` | `single-file`.
+# `elements`, `scales`, `key_topologies`, `file_layouts` and `bakes` enumerated
+# "which of a byte format's legal shapes does this decoder read". Every one of
+# them is a CONVENTION FACT, and a v2 quant rule carries its convention facts as
+# IDENTITY: `cozy.nvfp4-flat@1` and `bfl.nvfp4-preswizzled@1` are two rules and
+# two digests precisely because one is LOW-nibble with flat scales and the other
+# is HIGH-nibble pre-swizzled (reading one as the other measured LPIPS 1.11).
+# Under v1 that difference had to be spelled out on a side axis beside a shared
+# handle; under v2 it IS the handle.
 #
-# `pre_sharded` / `shard_axis` are likewise publish-side dimensions. No decoder
-# in this image branches on an SP-sharded tree and none can detect one, so the
-# decode-set states nothing about them rather than carrying a claim no code
-# backs: a pre-sharded variant must be refused by th#1938 against th#1937's
-# derived `pre_sharded`, not by a declaration here.
-
-# Structural bakes the decoder CONSUMES — tensor-set membership facts, not
-# element facts. RULED tensor-set names (th#1937): a bake token is a registered
-# tensor set, so this axis and the publish side name one thing once.
+# So a decoder names the rule, and the axes come with it. Two consequences worth
+# writing down because they were live defects:
 #
-# `modulation_table` / `modulation_baked` are deliberately ABSENT: th#1937
-# keeps that rule UNREGISTERED until te#195's file format exists, because
-# "inventing a pattern that matches nothing is the failure mode, not the fix".
-BAKE_ADALN_PROJECTIONS = "adaln_projections"
-BAKE_LOW_RANK_BRANCH = "low_rank_branch"
-KNOWN_BAKES: tuple[str, ...] = (
-    BAKE_ADALN_PROJECTIONS,
-    BAKE_LOW_RANK_BRANCH,
-)
-
-# KEY TOPOLOGY — which tensor-KEY convention the decoder's model class can
-# ingest. **RULED VOCABULARY (th#1937 lane, 2026-08-14): these exact strings,
-# no aliases.**
+#   * the `q4_k` trap (tensorfs#130) is gone — a GGUF lane's floor is whatever
+#     its rule document says, not whatever a dtype-spelling table happened to
+#     know;
+#   * the `float4_e2m1fn_x2` FLOOR-LOSING spelling is gone with it. There is no
+#     dtype string to mis-spell any more: `capability_floor_for_rule` takes a
+#     rule handle, and a handle the corpus does not carry REFUSES.
 #
-# This axis exists because of a measured failure (te#185 second stop):
-# DiffSynth's MiniMaxH3DiT accepts the MINIMAX-NATIVE key set (535 keys, fused
-# `blocks.N.attn.qkv_proj`) and every minimax-h3 artifact we hold is the
-# DIFFUSERS repackaging (638 keys, split `transformer_blocks.N.attn.to_q/
-# to_k/to_v`) — ONE key in common. It surfaced as `Cannot detect the model
-# type` from an md5-over-key:shape lookup deep inside a detection helper,
-# after a 71 GB fetch onto a rented 4xH100.
-#
-# **File topology cannot see it**: both are multi-file safetensors trees, so
-# `file_layout` classifies them identically. Nor can the quant contract: both
-# would be `plain.bf16@1`. The key convention is a third fact and it needs its
-# own axis or the decode-set is a lie that dies at load.
-#: `…attn.to_q|to_k|to_v` — the diffusers repackaging.
-KEYS_DIFFUSERS_SPLIT_QKV = "diffusers.split-qkv@1"
-#: `…attn.qkv_proj|to_qkv` — the upstream/native fused set.
-KEYS_NATIVE_FUSED_QKV = "native.fused-qkv@1"
-#: `*layers.N.self_attn.q_proj` / `*layers.N.attention.self.query`. RENAMED
-#: from the provisional `transformers.native` by th#1937: the FILE-topology
-#: registry already spends `transformers.native@1` on a different axis, and
-#: one string meaning two things on two dimensions is the confusion this ends.
-KEYS_TRANSFORMERS_SPLIT_QKV = "transformers.split-qkv@1"
-KNOWN_KEY_TOPOLOGIES: tuple[str, ...] = (
-    KEYS_DIFFUSERS_SPLIT_QKV,
-    KEYS_NATIVE_FUSED_QKV,
-    KEYS_TRANSFORMERS_SPLIT_QKV,
-)
-# The provisional `contract.native` is DECLINED (th#1937): "the descriptor
-# fixes the keys, no repackaging exists" is a fact about the QUANT CONTRACT,
-# and the `quant` dimension already carries it BY HANDLE. A decoder whose
-# handle fixes its keys declares `key_topologies=()` — an axis it does not
-# constrain, rather than a synonym for its own handle.
-
-DECODE_AXES: tuple[str, ...] = (
-    "elements", "scales", "key_topologies", "file_layouts", "bakes",
-)
+# The `key_topologies` axis in particular is now the TOPOLOGY half of the pair,
+# which is where it belonged: `minimax-h3.diffusers@1` (638 keys, split
+# to_q/to_k/to_v) and `minimax-h3.native@1` (fused qkv_proj) are two topologies
+# related by a ratified morphism, not one handle with a side note.
 
 
-class DecodeDimensions(msgspec.Struct, frozen=True, kw_only=True):
-    """What one decoder reads WITHIN a contract handle.
+class QuantRuleDecoder(msgspec.Struct, frozen=True, kw_only=True):
+    """One decoder's declaration: the QUANT RULE whose bytes it reads, and the
+    lane BODIES the decoded units execute as.
 
-    Every axis is REQUIRED — there is no default, so a declaration cannot be
-    written by omission. `elements` and `scales` must be non-empty: a decoder
-    that states nothing there has declared nothing. `key_topologies`,
-    `file_layouts` and `bakes` MAY be empty, and empty is a statement rather
-    than a silence —
-    "this decoder does not constrain the axis" (the tri-state's UNDECLARED
-    rung), which is the honest answer for a decoder whose quant handle already
-    fixes its keys, and the answer that makes a baked variant refuse.
+    The execution axis (eager/compiled) is NOT declared here — the platform
+    owns it, and the derivation crosses these bodies with the lane table's own
+    execution support.
+
+    There is no `decodes=` any more. What a decoder reads WITHIN a format was
+    the v1 question; a v2 rule has no "within" — its conventions are its
+    identity, so naming the rule is the whole declaration.
     """
 
-    elements: tuple[str, ...]
-    scales: tuple[str, ...]
-    key_topologies: tuple[str, ...]
-    file_layouts: tuple[str, ...]
-    bakes: tuple[str, ...]
-
-
-def _axis(values: object, *, known: tuple[str, ...], axis: str,
-          where: str, allow_empty: bool = False) -> tuple[str, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(
-            values, (tuple, list)):
-        raise ValueError(
-            f"{where}: decodes.{axis} must be a tuple of tokens, got "
-            f"{type(values).__name__}")
-    out: list[str] = []
-    for item in values:
-        if not isinstance(item, str) or item.strip() not in known:
-            raise ValueError(
-                f"{where}: decodes.{axis} token {item!r} is not registered; "
-                f"valid: {', '.join(known)}")
-        token = item.strip()
-        if token in out:
-            raise ValueError(
-                f"{where}: decodes.{axis} repeats {token!r}; a set states "
-                "each member once")
-        out.append(token)
-    if not out and not allow_empty:
-        raise ValueError(
-            f"{where}: decodes.{axis} is empty. A decoder that states nothing "
-            f"on {axis} has declared nothing — the handle alone is what this "
-            "mechanism replaces.")
-    # Canonical order: the declaration is a SET, and two authors writing the
-    # same set in different orders must produce the same derived bytes or the
-    # image's decode-set digest is not deterministic.
-    return tuple(sorted(out))
-
-
-def _validate_dimensions(dims: object, *, where: str) -> DecodeDimensions:
-    if not isinstance(dims, DecodeDimensions):
-        raise ValueError(
-            f"{where}: decodes= must be a DecodeDimensions, got "
-            f"{type(dims).__name__}")
-    return DecodeDimensions(
-        elements=_axis(dims.elements, known=KNOWN_ELEMENTS,
-                       axis="elements", where=where),
-        scales=_axis(dims.scales, known=KNOWN_SCALES,
-                     axis="scales", where=where),
-        key_topologies=_axis(dims.key_topologies,
-                             known=KNOWN_KEY_TOPOLOGIES,
-                             axis="key_topologies", where=where,
-                             allow_empty=True),
-        file_layouts=_axis(dims.file_layouts,
-                           known=tuple(sorted(KNOWN_FILE_LAYOUTS)),
-                           axis="file_layouts", where=where,
-                           allow_empty=True),
-        bakes=_axis(dims.bakes, known=KNOWN_BAKES, axis="bakes",
-                    where=where, allow_empty=True),
-    )
-
-
-class ContractDecoder(msgspec.Struct, frozen=True, kw_only=True):
-    """One decoder's declaration: the contract it decodes, WHICH SHAPES of it
-    it decodes, and the lane BODIES the decoded units execute as. The
-    execution axis (eager/compiled) is NOT declared here — the platform owns
-    it, and the derivation crosses these bodies with the lane table's own
-    execution support."""
-
-    contract: str
+    rule: str
     decoder: str  # "module:qualname" — the function carrying the marker
     serves: tuple[str, ...]  # lane body tokens, e.g. "svdq-fp4-w4a4"
     composes_lora: bool
-    decodes: DecodeDimensions
     why: str = ""
 
 
 # The declaration lives ON THE DECODER OBJECT, not in a module-level registry.
 # That is the point: it cannot be present without the decoder, cannot survive
 # the decoder being removed, and cannot be assembled anywhere else.
-MARKER = "__cozy_tensor_layout_contracts__"
+MARKER = "__cozy_tensor_layout_quant_rules__"
 
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-def _validate(dec: ContractDecoder) -> None:
-    if not _HANDLE_RE.match(dec.contract):
+def _validate(dec: QuantRuleDecoder) -> None:
+    if not _HANDLE_RE.match(dec.rule):
         raise ValueError(
-            f"{dec.decoder}: {dec.contract!r} is not a contract handle "
+            f"{dec.decoder}: {dec.rule!r} is not a quant-rule handle "
             "(want ns.name@N)"
         )
-    if dec.contract not in KNOWN_CONTRACTS:
+    if dec.rule not in quant_rules():
         raise ValueError(
-            f"{dec.decoder}: contract {dec.contract!r} is not registered. "
-            "Contracts are CODE (th#1580 A2): register it in tensorhub's "
-            "internal/tensorlayout with a descriptor and a probe set "
-            "before a decoder may claim it."
+            f"{dec.decoder}: quant rule {dec.rule!r} is not in the vendored v2 "
+            f"corpus. Rules are RATIFIED DOCUMENTS, one per byte FORMAT ever: "
+            f"author it in tensorfs `spec/v2/rules/` — eligibility predicate, "
+            f"emission shapes, conventions, the dequant identity — and "
+            f"re-vendor per `_vendor/VENDORED.toml`. Known: "
+            f"{', '.join(known_quant_rules())}. If this decoder reads real "
+            f"bytes no ratified rule names, say so with "
+            f"`@unregistered_decode_path(reason=...)` rather than inventing a "
+            f"handle: a rule that matches nothing is the failure mode, not the "
+            f"fix."
         )
     if not dec.serves:
         raise ValueError(
@@ -287,40 +259,41 @@ def _validate(dec: ContractDecoder) -> None:
         raise ValueError(f"{dec.decoder}: serves= repeats a lane body")
 
 
-def implements_contract(
+def implements_quant_rule(
     *,
-    contract: str,
+    rule: str,
     serves: Iterable[str],
     composes_lora: bool,
-    decodes: DecodeDimensions,
     why: str = "",
 ) -> Callable[[F], F]:
-    """Mark a decode entrypoint as implementing ``contract``.
+    """Mark a decode entrypoint as reading the bytes of ``rule``.
 
-    ``decodes`` is REQUIRED and has no default: a declaration that names a
-    handle and stops is the incomplete declaration pgw#1245 exists to remove,
-    and a default would let one be written by omission.
+    ``decodes=`` is GONE (pgw#1621) rather than made optional. It existed
+    because a v1 handle named a byte FORMAT and said nothing about which of
+    that format's legal shapes a decoder read — so a declaration that named a
+    handle and stopped was incomplete. A v2 rule has no legal shapes to choose
+    between: its conventions ARE its identity, so naming the rule is the whole
+    declaration and there is nothing left to write by omission.
 
-    Stackable: one function may implement several contracts (``decode_linear``
-    implements both the nunchaku layout and the quantized-branch major).
+    Stackable: one function may read several rules (``decode_linear`` reads
+    both the flat and the pre-swizzled nvfp4 packagings).
     """
 
     def deco(fn: F) -> F:
         where = f"{fn.__module__}:{fn.__qualname__}"
-        dec = ContractDecoder(
-            contract=contract,
+        dec = QuantRuleDecoder(
+            rule=rule,
             decoder=where,
             serves=tuple(serves),
             composes_lora=bool(composes_lora),
-            decodes=_validate_dimensions(decodes, where=where),
             why=why,
         )
         _validate(dec)
-        prior: tuple[ContractDecoder, ...] = getattr(fn, MARKER, ())
+        prior: tuple[QuantRuleDecoder, ...] = getattr(fn, MARKER, ())
         for existing in prior:
-            if existing.contract == dec.contract and existing != dec:
+            if existing.rule == dec.rule and existing != dec:
                 raise ValueError(
-                    f"{dec.decoder}: conflicting declarations for {dec.contract}"
+                    f"{dec.decoder}: conflicting declarations for {dec.rule}"
                 )
         setattr(fn, MARKER, prior + (dec,))
         return fn
@@ -328,16 +301,16 @@ def implements_contract(
     return deco
 
 
-def contract_decoders_of(obj: Any) -> tuple[ContractDecoder, ...]:
+def quant_rule_decoders_of(obj: Any) -> tuple[QuantRuleDecoder, ...]:
     """The declarations carried by one object, or ``()``."""
     marked = getattr(obj, MARKER, ())
     if not isinstance(marked, tuple):
         return ()
-    return tuple(d for d in marked if isinstance(d, ContractDecoder))
+    return tuple(d for d in marked if isinstance(d, QuantRuleDecoder))
 
 
 class UnregisteredDecodePath(msgspec.Struct, frozen=True, kw_only=True):
-    """A decoder that reads real bytes NO registered contract covers.
+    """A decoder that reads real bytes NO ratified quant rule covers.
 
     It satisfies no gate and is never intersected with anything — a decode-set
     entry needs a handle, and a handle needs a hub-side descriptor (A2). It is
@@ -385,12 +358,13 @@ def unregistered_decode_path_of(obj: Any) -> tuple[UnregisteredDecodePath, ...]:
 # so the handle grammar and the registration refusal are shared verbatim rather
 # than transcribed twice.
 #
-# The SDK emits HANDLES and never digests: descriptors are Go, in tensorhub
-# (A2). The hub resolves handle -> `Contract.Digest()` at MANIFEST
-# INGEST against its own registry and stores both; a handle its registry does
-# not know fails the manifest there, not at rebind. So `KNOWN_CONTRACTS` is
-# honestly what it is — a transcription that is allowed to be stale and is
-# CHECKED, never authoritative.
+# The SDK emits HANDLES and never digests. The hub resolves a handle to its
+# descriptor digest at MANIFEST INGEST against its own registry and stores
+# both; a handle its registry does not know fails the manifest there, not at
+# rebind. The QUANT half of that vocabulary is no longer a transcription: it is
+# the vendored v2 rule corpus, shipped with this code and digest-pinned, so
+# "allowed to be stale" no longer applies to it. The LOADER-SHAPE topology half
+# below still is a transcription, and still says so.
 
 #: The every-component key: this slot's demand for every component that has no
 #: more specific declaration. The map is one level deep, keyed by component.
@@ -416,11 +390,44 @@ LAYOUT_AXES: tuple[str, ...] = (AXIS_TOPOLOGY, AXIS_QUANT)
 #: evaluated, which is a different fact.
 LAYOUT_AXIS_ANY = "any"
 
-# The topology axis, transcribed from code we already run: tensorhub's
-# `catalog/layout_contract.go` (library_name x file_layout) and
-# training-endpoints' `conversion/comfyui.py`
-# `_SPLIT_COMPONENT_MAP`. Same transcription posture as KNOWN_CONTRACTS above —
-# allowed to be stale, CHECKED at the hub's manifest ingest, never authoritative.
+# ⚠️ THIS IS THE LOADER-SHAPE AXIS, NOT THE v2 TOPOLOGY AXIS. Two different
+# questions share the word "topology" and confusing them is a production
+# outage, so read this before touching anything below. The wording mirrors
+# tensorhub's own `internal/tensorlayout/topology_th1809.go` warning block
+# (th#2250) deliberately — one hazard, one sentence, on both sides of the wire.
+#
+#   HERE (`KNOWN_TOPOLOGY_CONTRACTS`)   "which LOADER entry point reads this
+#                                       tree?" Derived from the manifest's PATH
+#                                       SET. Values: `diffusers.multifile@1`,
+#                                       `gguf.native@1`, `comfy.splitfiles@1`.
+#                                       Hub-side it projects onto
+#                                       `checkpoints.file_layout`, a LIVE
+#                                       SERVING INPUT (th#2094 took
+#                                       `tensorhub/sdxl` off the air through
+#                                       it) and the vocabulary
+#                                       `endpoint_release_slot_layout_demand`
+#                                       rows are declared in.
+#   v2 TOPOLOGY (`known_topologies()`)  "WHAT TENSORS, at what SHAPES?" A finite
+#                                       map extracted mechanically from a
+#                                       reference checkpoint's HEADERS. Values:
+#                                       `sdxl.diffusers@1`, `anima.net@1`. It is
+#                                       what BIND ADMISSION matches on, and it is
+#                                       the first half of a `lanes=` key.
+#
+# th#2250 measured this and took SEPARATE COLUMNS rather than widening one
+# (`checkpoints.layout_topology` beside `checkpoints.tensor_topology_contract`),
+# because writing v2 handles into the older column would blank every
+# `file_layout` projection on the next publish and refuse every release whose
+# declared demand names a loader-shape handle. Retiring the loader-shape
+# registry is a SEPARATE cut with its own blast radius — `file_layout` gets its
+# own path-set derivation and the demand rows are re-keyed — and pgw#1621
+# UNBLOCKS it (nothing here decides an admission any more) rather than
+# performing it.
+#
+# Transcribed from code we already run: tensorhub's
+# `catalog/layout_contract.go` (library_name x file_layout) and jobs'
+# `conversion/comfyui.py` `_SPLIT_COMPONENT_MAP`. Allowed to be stale, CHECKED
+# at the hub's manifest ingest, never authoritative.
 TOPOLOGY_DIFFUSERS_MULTIFILE = "diffusers.multifile@1"
 TOPOLOGY_DIFFUSERS_SINGLEFILE = "diffusers.singlefile@1"
 TOPOLOGY_TRANSFORMERS_NATIVE = "transformers.native@1"
@@ -443,10 +450,17 @@ class LayoutDeclarationError(ValueError):
 
 
 def known_contracts(axis: str) -> tuple[str, ...]:
-    """The transcribed handles of ONE axis. Unknown axis is a refusal, not an
-    empty tuple — an empty answer would read as "nothing is registered"."""
+    """The handles of ONE axis. Unknown axis is a refusal, not an empty tuple —
+    an empty answer would read as "nothing is registered".
+
+    The QUANT axis is now the vendored v2 RULE corpus (authoritative, shipped
+    with the code) rather than a transcription of the hub's registry. The
+    TOPOLOGY axis here is still the LOADER-SHAPE vocabulary — see the warning
+    block above; `known_topologies()` is the v2 one and they are not
+    interchangeable.
+    """
     if axis == AXIS_QUANT:
-        return KNOWN_CONTRACTS
+        return known_quant_rules()
     if axis == AXIS_TOPOLOGY:
         return KNOWN_TOPOLOGY_CONTRACTS
     raise LayoutDeclarationError(
@@ -458,12 +472,15 @@ def validate_layout_handle(
 ) -> str:
     """One declared handle on ONE axis, normalized, or a refusal.
 
-    `Slot(layouts=...)` declares the QUANT axis alone: §1.33's rendered
-    `"<topology>+<quant>"` pair needs the hub's topology REGISTRY to resolve
-    against, and until that exists a composite in the manifest is half a pair
-    stored as if it were exact. The SDK-internal converter registry names the
-    topology axis explicitly (`axis=AXIS_TOPOLOGY`) — that vocabulary is real
-    here and inert hub-side.
+    `Slot(layouts=...)` declares the QUANT axis alone, and still does after
+    the v2 cut. A slot's demand is "what can my code EXECUTE" — a kernel
+    question, which is exactly what a quant rule answers; the topology half is
+    a fact about which tensors a checkpoint has, which the slot does not
+    constrain. The SDK-internal converter registry names the topology axis
+    explicitly (`axis=AXIS_TOPOLOGY`), on the LOADER-SHAPE vocabulary.
+
+    A LANE key is the other thing entirely: it is the full `(topology, quant)`
+    stamp pair and is parsed by :func:`parse_lane_stamp`.
     """
     if not isinstance(handle, str):
         raise LayoutDeclarationError(
@@ -474,21 +491,29 @@ def validate_layout_handle(
     known = known_contracts(axis)
     if "+" in text:
         raise LayoutDeclarationError(
-            f"{where}: {text!r} names a <topology>+<quant> pair. The topology "
-            "axis has no registry yet (th#1809 T3) — declare the quant handle "
-            "alone until it does; a pair the hub cannot resolve field-wise is "
-            "not exact."
+            f"{where}: {text!r} names a <topology>+<quant> STAMP PAIR, which is "
+            "what a LANE is keyed by. A slot's demand is a kernel question — "
+            "what can this code execute — so it declares the quant handle "
+            "alone. Write the pair in `lanes=`, not here."
         )
     if not _HANDLE_RE.match(text):
         raise LayoutDeclarationError(
             f"{where}: {text!r} is not a contract handle (want ns.name@N)"
         )
     if text not in known:
+        if axis == AXIS_QUANT:
+            raise LayoutDeclarationError(
+                f"{where}: quant rule {text!r} is not in the vendored v2 "
+                f"corpus. A rule is a RATIFIED DOCUMENT — author it in "
+                f"tensorfs `spec/v2/rules/` and re-vendor per "
+                f"`_vendor/VENDORED.toml`; a slot cannot demand a rule no "
+                f"document describes. Known: {', '.join(known)}"
+            )
         raise LayoutDeclarationError(
             f"{where}: {axis} contract {text!r} is not registered. "
-            "Contracts are CODE (th#1580 A2): register it in tensorhub's "
-            "internal/tensorlayout with a descriptor and a probe set "
-            f"before a slot may demand it. Known: {', '.join(known)}"
+            "The loader-shape topology vocabulary is CODE (th#1580 A2): "
+            "register it in tensorhub's internal/tensorlayout with a "
+            f"descriptor and a probe set first. Known: {', '.join(known)}"
         )
     return text
 
@@ -639,6 +664,110 @@ def _axis_member(text: str, *, axis: str, where: str) -> str | None:
     return value
 
 
+# ── The LANE key: a v2 STAMP PAIR ────────────────────────────────────────────
+#
+# `lanes = {(topology, quant): lane(request=…)}`. Both halves are handles into
+# the vendored v2 corpus, both are REQUIRED, and neither is inferred from the
+# other. This is the whole of pgw#1621's re-key on the declaration surface.
+#
+# WHY A PAIR AND NOT ONE STRING. A whole-string compare cannot express
+# "topology differs, quant matches", which is the DERIVABLE rung the hub's
+# admission is built on. `LayoutId` is compared FIELD-WISE for exactly that
+# reason and the rendered form exists only to travel.
+#
+# WHY NOT THE OLD SPELLING. `sdxl.diffusers-bf16@1` survives as a DISPLAY name
+# and nothing else — see :func:`display_names`. There is no alias resolution
+# here on purpose: a spelling that resolves is a spelling that spreads, and the
+# hub's own bridge for the un-re-keyed fleet (`tensorstamp.LaneID`'s second arm)
+# exists to be DELETED once this re-key has reached every release. A worker that
+# also accepted the old spelling would keep that arm alive forever.
+
+
+def parse_lane_stamp(key: object, *, where: str) -> "LayoutId":
+    """One `lanes=` key -> the `(topology, quant)` stamp pair, or a refusal.
+
+    Accepts the author's spelling — a two-tuple ``("sdxl.diffusers@1",
+    "plain.bf16@1")`` — and the rendered wire form ``"sdxl.diffusers@1+
+    plain.bf16@1"``, because that is what a document read back off the wire
+    carries. Both produce the same :class:`LayoutId`; there is one identity.
+
+    Every refusal names the corpus, because "not registered" with no list is
+    the message that sends an author to grep.
+    """
+    if isinstance(key, LayoutId):
+        topology_raw: object = key.topology
+        quant_raw: object = key.quant
+    elif isinstance(key, str):
+        text = key.strip()
+        if "+" not in text:
+            raise LayoutDeclarationError(
+                f"{where}: {text!r} is a bare handle, and a lane is named by a "
+                f"PAIR. Write the tuple — `lanes={{(\"<topology>@N\", "
+                f"\"<quant>@N\"): lane(request=…)}}`. If this is an old v1 lane "
+                f"handle, it is a DISPLAY name now and names no pair: "
+                f"{_display_hint(text)}"
+            )
+        topology_raw, _, quant_raw = text.partition("+")
+    elif isinstance(key, (tuple, list)):
+        if len(key) != 2:
+            raise LayoutDeclarationError(
+                f"{where}: a lane key is exactly (topology, quant); got "
+                f"{len(key)} element(s)")
+        topology_raw, quant_raw = key[0], key[1]
+    else:
+        raise LayoutDeclarationError(
+            f"{where}: a lane key is a (topology, quant) pair of handles, got "
+            f"{type(key).__name__}. The tensorfs Contract OBJECT that used to "
+            f"key this mapping is deleted with the v1 corpus (pgw#1621)."
+        )
+
+    topology = _stamp_half(topology_raw, axis=AXIS_TOPOLOGY, where=where)
+    quant = _stamp_half(quant_raw, axis=AXIS_QUANT, where=where)
+    return LayoutId(topology=topology, quant=quant)
+
+
+def _stamp_half(value: object, *, axis: str, where: str) -> str:
+    if not isinstance(value, str):
+        raise LayoutDeclarationError(
+            f"{where}: the {axis} half of a lane stamp must be a handle "
+            f"string, got {type(value).__name__}")
+    text = value.strip()
+    if not text:
+        raise LayoutDeclarationError(
+            f"{where}: the {axis} half of a lane stamp is empty. Both halves "
+            f"are REQUIRED — a pair with a blank half is not a stamp, and "
+            f"there is no 'any' rung on a lane declaration.")
+    if not _HANDLE_RE.match(text):
+        raise LayoutDeclarationError(
+            f"{where}: {text!r} is not a handle (want ns.name@N)")
+    known = known_topologies() if axis == AXIS_TOPOLOGY else known_quant_rules()
+    if text not in known:
+        extra = ""
+        if axis == AXIS_TOPOLOGY:
+            extra = (
+                " A v2 topology is EXTRACTED MECHANICALLY from a reference "
+                "checkpoint's headers — it is never hand-authored — so the fix "
+                "is to bank the headers in tensorfs `spec/v2/headers/`, add the "
+                "`CORPUS.tsv` row, rebuild, and re-vendor.")
+        raise LayoutDeclarationError(
+            f"{where}: {axis} {text!r} is not in the vendored v2 corpus. "
+            f"Known {axis}: {', '.join(known)}.{extra}")
+    return text
+
+
+def _display_hint(text: str) -> str:
+    """The reverse display-name lookup, for a refusal message ONLY.
+
+    This is the one place an old v1 spelling is looked at, it produces PROSE,
+    and it can only ever appear inside an exception. It resolves nothing: the
+    author still has to write the pair.
+    """
+    for pair, name in display_names().items():
+        if name == text:
+            return f"{text!r} used to name {pair!r} — declare that pair"
+    return f"{text!r} matches no ratified display name either"
+
+
 # ── A19: the declaration is MANDATORY, and absence is not the tri-state ──────
 #
 # `layouts=None` is NOT an UNDECLARED third rung. Measured fleet-wide, that
@@ -682,13 +811,13 @@ def undeclared_slot_refusal(*, function: str, slot: str) -> str:
         "tensor-layout contract. Every model slot states what its code can "
         "execute — A19 is a hard cut, so ABSENT is a refusal, never the "
         "UNDECLARED tri-state:\n"
-        f"    Slot(Pipe, layouts={{\"*\": (\"{CONTRACT_PLAIN_BF16}\",)}})\n"
-        f"Registered quant handles: {', '.join(KNOWN_CONTRACTS)}.\n"
-        "If no registered handle names this slot's bytes (a tokenizer tree "
-        "with no tensors, a GGUF quant axis, a compressed-tensors checkpoint), "
-        "declare that explicitly and say why:\n"
-        "    Slot(Pipe, layouts_undeclarable=\"gguf: the quant axis has no "
-        "registered handle (th#1809 T3)\")"
+        "    Slot(Pipe, layouts={\"*\": (\"plain.bf16@1\",)})\n"
+        f"Ratified quant rules: {', '.join(known_quant_rules())}.\n"
+        "If no ratified rule names this slot's bytes (a tokenizer tree with no "
+        "tensors, a GGUF block quant, a compressed-tensors checkpoint), declare "
+        "that explicitly and say why:\n"
+        "    Slot(Pipe, layouts_undeclarable=\"gguf: no ratified v2 quant rule "
+        "describes this block-quant packaging\")"
     )
 
 
@@ -822,102 +951,45 @@ class RequirementTerms(msgspec.Struct, frozen=True, kw_only=True,
         return ", ".join(parts)
 
 
-# ── The compute-capability floor a LOAD DTYPE implies ────────────────────────
+# ── The compute-capability floor: DELETED HERE, READ FROM THE RULE ───────────
+#
+# `DTYPE_MIN_SM`, `FLOOR_LOSING_SPELLINGS` and `capability_floor_for_dtype`
+# stood here. All three are gone (pgw#1621), and this note is what replaces
+# them, because the reasoning was right and only the KEY was wrong.
 #
 # Paul, 2026-08-18, verbatim: *"the sm_x compute floor should fall out of the
 # contract itself, rather than being a separate annotation. Only the VRAM
-# requirement needs a separate annotation, because it's not clear, based on
-# the contract, how much VRAM is needed."*
+# requirement needs a separate annotation, because it's not clear, based on the
+# contract, how much VRAM is needed."* That ruling is unchanged and now holds
+# LITERALLY: `capability_floor_sm` is a field ON the ratified rule document,
+# and :func:`capability_floor_for_rule` is the one reader.
 #
-# So an 8-bit lane's need for 8-bit kernels is DERIVED here — one producer,
-# beside the element vocabulary and the requirement grammar it bridges — and
-# is NOT author-writable. The `lanes=` annotation carries VRAM only, because
-# VRAM is the one floor the contract cannot imply. A lane that genuinely needs
-# a floor its dtype does not imply is a change to THIS TABLE (or to the
-# contract's dtype), never a new annotation term: two producers for one fact
-# is exactly the drift this derivation exists to prevent.
+# What the dtype-keyed table could not do, and why it had to go:
 #
-# The numbers are the capability at which the arithmetic exists in hardware,
-# in tensorhub's bare spelling (sm_89 -> 89):
-#   sm70  fp16 tensor cores (Volta)
-#   sm75  int8 tensor cores (Turing)
-#   sm80  bf16 + int4 tensor cores (Ampere)
-#   sm89  fp8 e4m3/e5m2 tensor cores (Ada)
-#   sm100 nvfp4 / mx-fp4 tensor cores (Blackwell)
+#   * IT COULD NOT TELL ITS OWN TWO ZEROS APART. "measured: this needs no
+#     special silicon" and "never heard of this spelling" were the same return
+#     value, and the second is silent and permissive — it prices a lane by
+#     ACCIDENT. `capability_floor_for_rule` REFUSES an unknown handle instead.
+#   * IT WAS KEYED ON A SPELLING, so it needed a `FLOOR_LOSING_SPELLINGS` guard
+#     to stop `float4_e2m1fn_x2` (the packed-pair container type, which EXISTS
+#     in torch where `float4_e2m1fn` does not) from resolving to floor 0 and
+#     putting an nvfp4 lane on Ampere. There is no dtype string to mis-spell any
+#     more; the handle is `cozy.nvfp4-flat@1` and it carries 100.
+#   * IT NEEDED A ROW PER ggml BLOCK QUANT (`q4_k`, `q5_k`, …) whose honest
+#     answer was 0, written out explicitly only so an absent row could not be
+#     mistaken for a measured one. A GGUF rule states its own 0.
 #
-# NOT a kernel list, and it must never grow into one (Paul, same ruling):
+# The numbers still mean what they meant — the capability at which the
+# arithmetic exists in hardware, in tensorhub's bare spelling (sm_89 -> 89):
+# sm70 fp16 tensor cores (Volta), sm75 int8 (Turing), sm80 bf16 + int4
+# (Ampere), sm89 fp8 e4m3/e5m2 (Ada), sm100 nvfp4 / mx-fp4 (Blackwell). They
+# now live in tensorfs `spec/v2/rules/*.json`, one per rule, and this repo has
+# no second copy.
+#
+# STILL NOT A KERNEL LIST, and it must never grow into one (Paul, same ruling):
 # a specific attention kernel (sage2, flash-*) is a SERVE-RECIPE fallback arm
-# with its own degrade path, not a placement floor. This table answers exactly
-# one question — can this card do this dtype's arithmetic at all.
-DTYPE_MIN_SM: dict[str, int] = {
-    "float32": 0, "float": 0, "fp32": 0, "tf32": 80,
-    "float16": 70, "half": 70, "fp16": 70,
-    "bfloat16": 80, "bf16": 80,
-    "int8": 75, "uint8": 75,
-    "int4": 80, "uint4": 80,
-    "float8_e4m3fn": 89, "float8_e4m3fnuz": 89, "float8_e5m2": 89,
-    "float8_e5m2fnuz": 89, "fp8_e4m3": 89, "fp8_e5m2": 89, "fp8": 89,
-    "float4_e2m1fn": 100, "nvfp4": 100, "fp4": 100, "mxfp4": 100,
-    # BLOCK-QUANT CONTAINER TYPES — ggml/GGUF spellings. Floor 0 and that is
-    # CORRECT: a GGUF block quant is dequantized on the way to the compute
-    # dtype, so it demands no special silicon. The reason it is written here
-    # rather than left to the unknown-default (which also answers 0) is that
-    # the two zeros mean opposite things — "measured: no floor" versus "never
-    # heard of it". Only the first is a fact, and `capability_floor_for_dtype`
-    # cannot tell them apart, so an absent entry prices a lane by ACCIDENT.
-    # tensorfs#130 follow-up (`51adc50`) made this the live case: the GGUF
-    # document now declares `q4_k`, which is what its lane actually serves.
-    "q4_k": 0, "q4_0": 0, "q4_1": 0, "q5_k": 0, "q5_0": 0, "q5_1": 0,
-    "q6_k": 0, "q8_0": 0, "q2_k": 0, "q3_k": 0, "iq4_nl": 0, "iq4_xs": 0,
-}
+# with its own degrade path, not a placement floor.
 
-#: Spellings that RESOLVE somewhere else and would silently lose their floor.
-#:
-#: `torch.float4_e2m1fn_x2` EXISTS (it is the packed-pair container torch
-#: actually ships; `torch.float4_e2m1fn` does not), so it reads as the more
-#: correct spelling and someone will eventually "fix" a document to use it.
-#: `DTYPE_MIN_SM` does not know it, `capability_floor_for_dtype` would answer
-#: 0, and an nvfp4 lane would be placed on Ampere. The nvfp4 document says so
-#: in its own description and asks not to be corrected.
-#:
-#: **A dtype that resolves through torch and drops the floor is worse than one
-#: that refuses through torch and keeps it** — so these REFUSE by name instead
-#: of being quietly aliased to the right number. Aliasing would work and would
-#: also make the wrong spelling spread.
-FLOOR_LOSING_SPELLINGS: dict[str, str] = {
-    "float4_e2m1fn_x2": (
-        "the PACKED-PAIR container type, not the lane's quantization. Declare "
-        "`float4_e2m1fn` (min_sm 100): the packing is how two elements share a "
-        "byte, while the dtype field names what the lane SERVES"
-    ),
-}
-
-
-def capability_floor_for_dtype(dtype: object) -> int:
-    """The ``min_sm`` a lane's load dtype implies, or ``0`` for none.
-
-    ``0`` is "this dtype implies no floor" — fp32 runs anywhere — and is also
-    what an UNKNOWN dtype answers. Unknown is deliberately silent rather than
-    a refusal: a floor invented for a dtype this table has never seen would be
-    a placement claim with nothing behind it. Teaching this table the dtype is
-    the fix, because it is the only producer of this axis.
-
-    ⚠️ **THE TWO ZEROS MEAN OPPOSITE THINGS AND THIS FUNCTION CANNOT TELL YOU
-    WHICH ONE YOU GOT** — "measured: needs no special silicon" and "never heard
-    of it" are the same return value. That is why every dtype a vendored
-    document can declare belongs in the table EXPLICITLY, including the ones
-    whose honest answer is 0 (the ggml block quants). An absent entry prices a
-    lane by accident, and the accident is silent and in the permissive
-    direction. `tests/test_lane_dtype_fence_pgw1606.py` is the guard: it
-    refuses any vendored document declaring a dtype this table has never seen,
-    which is how `q4_k` was caught the day it landed rather than the day a
-    GGUF lane was mis-placed.
-    """
-    if dtype is None:
-        return 0
-    name = str(getattr(dtype, "name", None) or dtype).strip().lower()
-    name = name.removeprefix("torch.")
-    return DTYPE_MIN_SM.get(name, 0)
 
 
 class LayoutRequirements(msgspec.Struct, frozen=True, kw_only=True,

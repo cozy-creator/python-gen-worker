@@ -18,11 +18,16 @@ from diffusers import StableDiffusionPipeline
 from gen_worker import STATIC, LoadContext, Model, RequestContext, entrypoint, lane
 from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
-from gen_worker.models.model_types import SD15_DIFFUSERS_BF16
+#: THE REAL RATIFIED PAIR (pgw#1621): a lane is `(topology, quant)`, both
+#: halves documents in the vendored `spec/v2` corpus. `SD15_DIFFUSERS_BF16`
+#: was a v1 Contract OBJECT and is deleted with the v1 vocabulary; the
+#: spelling it used to carry survives only as a display name.
+SD15_DIFFUSERS_BF16 = ("sd15.diffusers@1", "plain.bf16@1")
 
-#: THE REAL SHIPPED CONTRACT, imported — not a path outside the repo and not a
-#: hand-written stand-in. pgw#1530 happened because a fixture invented a
-#: pattern spelling the fleet does not use, so this fixture takes the object.
+#: THE REAL RATIFIED PAIR, not a hand-written stand-in. pgw#1530 happened
+#: because a fixture invented a spelling the fleet does not use; under v2 a
+#: fixture CANNOT invent one — both halves must be in the vendored corpus or
+#: `parse_lane_stamp` refuses at class definition.
 SD15_BF16 = SD15_DIFFUSERS_BF16
 
 

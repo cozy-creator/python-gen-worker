@@ -84,7 +84,7 @@ def factory(name: str, journal: List[str]) -> "Callable[[], Backend]":
     return make
 
 
-LANE = "sdxl.diffusers-bf16@1"
+LANE = "sdxl.diffusers@1+plain.bf16@1"
 
 
 def test_admission_refuses_a_never_fitting_model_before_any_allocation() -> None:

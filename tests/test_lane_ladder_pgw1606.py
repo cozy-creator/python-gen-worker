@@ -7,9 +7,13 @@ so these run on a CPU box — the thing under test is the DECISION, and a
 decision does not need a GPU to be wrong.
 
 What is deliberately NOT mocked: the ranked lane table
-(`models.execution_lanes`), the dtype->body map, and the sm floors, which come
-from `capability_floor_for_dtype`. Faking those would prove the test's own
-arithmetic instead of the platform's.
+(`models.execution_lanes`), the RULE->body map (`lane_ladder._RULE_BODY`), and
+the sm floors, which come from `capability_floor_for_rule` reading the ratified
+quant-rule documents. Faking those would prove the test's own arithmetic
+instead of the platform's.
+
+pgw#1621: the rows below are keyed on the v2 `(topology, quant)` stamp pair and
+the floor falls out of the QUANT RULE, not out of a dtype spelling.
 """
 
 from __future__ import annotations
@@ -26,31 +30,35 @@ from gen_worker.serving import lane_ladder as L
 # --------------------------------------------------------------------------
 
 
-def declared(contract_id: str, dtype: str) -> L.DeclaredLane:
-    """A REAL pgw#1599 `DeclaredLane`, not a stand-in.
+def declared(topology: str, quant: str) -> L.DeclaredLane:
+    """A REAL pgw#1599/pgw#1621 `DeclaredLane`, not a stand-in.
 
-    `min_sm` is DERIVED here exactly as the declaration surface derives it —
-    one producer, `capability_floor_for_dtype` — so a test can never disagree
-    with the platform about a floor. `contract` is the id itself for the
-    fabricated rows; the tests that need a real tensorfs Contract object build
-    one through a real `Model` header (see test_multilane_boot_pgw1606).
+    `dtype` and `min_sm` are DERIVED here exactly as the declaration surface
+    derives them — one producer each, `rule_dtype` and
+    `capability_floor_for_rule`, both reading the ratified quant-rule document
+    — so a test can never disagree with the platform about a floor.
     """
     from gen_worker.demand import GiB, const
-    from gen_worker.models.tensor_layout_contract import capability_floor_for_dtype
+    from gen_worker.models.tensor_layout_contract import (
+        LayoutId,
+        capability_floor_for_rule,
+        rule_dtype,
+    )
     from gen_worker.serving.lane_spec import lane
 
     return L.DeclaredLane(
-        contract=contract_id,
-        contract_id=contract_id,
-        dtype=dtype,
-        min_sm=int(capability_floor_for_dtype(dtype) or 0),
+        layout=LayoutId(topology=topology, quant=quant),
+        topology=topology,
+        quant=quant,
+        dtype=rule_dtype(quant),
+        min_sm=capability_floor_for_rule(quant),
         spec=lane(request=const(GiB(1.0))),
     )
 
 
-BF16 = declared("sdxl.diffusers-bf16@1", "bfloat16")
-FP8 = declared("sdxl.diffusers-fp8-rowwise@1", "float8_e4m3fn")
-NVFP4 = declared("sdxl.diffusers-nvfp4-flat@1", "float4_e2m1fn")
+BF16 = declared("sdxl.diffusers@1", "plain.bf16@1")
+FP8 = declared("sdxl.diffusers@1", "cozy.fp8-rowwise@1")
+NVFP4 = declared("sdxl.diffusers@1", "cozy.nvfp4-flat@1")
 
 #: Real cards. sm = major*10 + minor, the fleet's own integer form.
 ADA = L.CardFacts(sm=89, vram_gb=8.0, name="RTX 4070 Laptop")
@@ -159,9 +167,10 @@ def test_blackwell_takes_nvfp4_when_fp8_has_no_bytes():
 
 def test_ampere_falls_to_bf16_on_the_derived_sm_floor():
     """sm_86 has no fp8 tensor cores. The floor comes from
-    `capability_floor_for_dtype` (fp8 -> 89), never from a hand-written
-    number, which is the whole point of pgw#1599 deleting hand-written
-    floors."""
+    `capability_floor_for_rule` (`cozy.fp8-rowwise@1` -> 89), read off the
+    rule document, never from a hand-written number — which is the whole point
+    of pgw#1599 deleting hand-written floors and of pgw#1621 moving the number
+    onto the rule."""
     resolved = L.resolve_lane(
         declared=ALL_THREE, card=AMPERE,
         verdicts=Verdicts(staged=[l.contract_id for l in ALL_THREE]),
@@ -205,15 +214,35 @@ def test_an_unqualified_fp8_gemm_rejects_fp8_even_on_hopper_with_bytes():
     assert "w8a8_gemm_mode()" in rung.detail
 
 
-def test_an_unknown_dtype_is_a_named_rejection_not_a_crash():
-    weird = declared("x.int8@1", "int8")
+def test_an_unknown_quant_rule_is_a_named_rejection_not_a_crash():
+    """A rule the fleet has no executor for is passed over LOUDLY.
+
+    Built by hand rather than through `declared()`: `capability_floor_for_rule`
+    REFUSES a handle the corpus does not carry (that refusal is proven in
+    `test_lane_dtype_fence_pgw1606`), so an unratified rule cannot reach a
+    header at all. What is under test here is the ladder's own arm — a row that
+    somehow arrives carrying a rule `_RULE_BODY` has no row for must be a named
+    rejection, not a KeyError on a booting pod.
+    """
+    from gen_worker.demand import GiB, const
+    from gen_worker.models.tensor_layout_contract import LayoutId
+    from gen_worker.serving.lane_spec import lane
+
+    weird = L.DeclaredLane(
+        layout=LayoutId(topology="sdxl.diffusers@1", quant="x.int8@1"),
+        topology="sdxl.diffusers@1",
+        quant="x.int8@1",
+        dtype="int8",
+        min_sm=0,
+        spec=lane(request=const(GiB(1.0))),
+    )
     resolved = L.resolve_lane(
         declared=(weird, BF16), card=ADA,
-        verdicts=Verdicts(staged=[BF16.contract_id, "x.int8@1"]),
+        verdicts=Verdicts(staged=[BF16.contract_id, weird.contract_id]),
         gates=Gates(),
     )
     assert resolved.body == "bf16-w16a16"
-    assert ("?", L.REJECT_UNKNOWN_DTYPE) in _reasons(resolved)
+    assert ("?", L.REJECT_UNKNOWN_RULE) in _reasons(resolved)
 
 
 # --------------------------------------------------------------------------

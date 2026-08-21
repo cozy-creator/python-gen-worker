@@ -68,7 +68,7 @@ RELEASE_FIXTURES = Path(__file__).resolve().parent / "release_fixtures"
 
 GB = 1024**3
 DREAM = "org/dreamshaper@2"
-LANE = "sdxl.diffusers-bf16@1"
+LANE = "sdxl.diffusers@1+plain.bf16@1"
 
 
 class LocalResolver:

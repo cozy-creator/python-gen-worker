@@ -97,7 +97,6 @@ from .lane_spec import (
     lane,
 )
 from .model import (
-    LaneContract,
     Model,
     ModelDeclarationError,
     lane_handle,
@@ -156,7 +155,6 @@ __all__ = [
     "EndpointLoadError",
     "EntrypointDeclarationError",
     "EntrypointSpec",
-    "LaneContract",
     "LoadContext",
     "LoadedEndpoint",
     "LoaderEngine",

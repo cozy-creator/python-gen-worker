@@ -24,18 +24,13 @@ from gen_worker.demand import GiB, MiB, const, per_frame, per_frame_squared
 from gen_worker.models.tensor_layout_contract import LayoutRequirements
 
 
-class _Lane:
-    """A tensorfs layout contract stand-in: a stamp and a load dtype."""
-
-    def __init__(self, stamp: str) -> None:
-        self.stamp = stamp
-
-    @property
-    def dtype(self) -> str:
-        return "bfloat16"
-
-
-H3_LANE = _Lane("minimax.h3-dit-diffusers@1")
+#: H3's packaged diffusers lane, as the v2 stamp PAIR (pgw#1621). The stand-in
+#: `_Lane` object that used to sit here — a handle plus a hand-written
+#: `dtype = "bfloat16"` — is inexpressible now and was always a second
+#: producer of the load dtype: `plain.bf16@1` DECLARES bfloat16 and declares
+#: the `capability_floor_sm` of 80 the tests below read, so the fixture types
+#: neither. `minimax.h3-dit-diffusers@1` was this pair's v1 display name.
+H3_LANE = ("minimax-h3.diffusers@1", "plain.bf16@1")
 
 
 class MiniMaxH3:
@@ -70,7 +65,7 @@ class H3Model(
     # `"vram78g"` claimed one number for every request H3 would ever serve, and
     # H3 is the case that proves there is no such number — a longer video costs
     # linearly in frames and QUADRATICALLY in the attention term. Fixture-scale
-    # coefficients; the sm floor is still derived from the contract dtype.
+    # coefficients; the sm floor is still derived — from the QUANT RULE now.
     lanes={H3_LANE: lane(
         request=const(GiB(1)) + per_frame(MiB(8)) + per_frame_squared(MiB(1)),
     )},

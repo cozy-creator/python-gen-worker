@@ -1,57 +1,27 @@
-"""The release fixtures' lane contract — a REAL tensorfs contract document.
+"""The release fixtures' lane — a REAL tensor-layout **v2** stamp pair.
 
-A lane IS a tensorfs layout contract: an imported OBJECT carrying the layout,
-its stamp and its load dtype; never a bare string, and never a handle-shaped
-stand-in (Paul's contract-objects ruling).
+pgw#1621: a lane is no longer an imported tensorfs v1 ``Contract`` OBJECT. It
+is the ``(topology, quant)`` PAIR, both halves ratified documents in the
+vendored ``spec/v2`` corpus, rendered ``"<topology>+<quant>"``.
 
-pgw#1391 REPLACED THE STAND-IN THIS FILE USED TO BE. It was
-``LaneRef("tiny.diffusers-fp32@1", dtype=torch.float32)`` — a handle plus a
-dtype and NO LAYOUT, which is the exact shape the release path now refuses:
-the whole point of contract objects is that the layout TRAVELS in the release
-metadata, and a stamp with nothing behind it is a claim the hub cannot intern.
-The fixture asserted the release document's lane rows, so it was asserting the
-bug.
+This file used to author its OWN document — a hand-written
+``tiny.diffusers-fp32@1`` contract, because v1 let anyone mint one from a JSON
+string. **That is deliberately impossible now**, and the impossibility is the
+point of the cut: a topology is EXTRACTED MECHANICALLY from a reference
+checkpoint's headers and a quant rule is a RATIFIED DOCUMENT, so a fixture
+cannot invent either. It names a real pair instead.
 
-It is a NAMED document rather than an anonymous custom because these tests pin
-the ``"contract": "tiny.diffusers-fp32@1"`` spelling in the derive document —
-the named-stamp path is what they exist to cover. The name is not in the
-curated library and makes no promise; the digest is real either way.
+``plain.f32@1`` is the honest rule for these fixtures — the tiny pipeline
+really is fp32 on CPU — and it is the one ratified rule whose
+``capability_floor_sm`` is 0, so a fixture lane still derives NO placement row
+(``model_requires() == {}``), which several release tests assert.
 """
 
 from __future__ import annotations
 
-import json
+#: The pair, in the author's spelling. `parse_lane_stamp` accepts the tuple and
+#: the rendered string alike; the tuple is what a real header writes.
+TINY_DIFFUSERS_FP32 = ("sd15.diffusers@1", "plain.f32@1")
 
-from gen_worker._vendor.tensorfs.contract import Contract
-
-#: A minimal but HONEST layout for the tiny fixture pipeline: real roles, real
-#: patterns, a real declared load dtype.
-TINY_DIFFUSERS_FP32 = Contract.from_document(
-    json.dumps(
-        {
-            "format": "tensorfs-contract-v1",
-            "name": "tiny.diffusers-fp32",
-            "version": 1,
-            "description": "release-fixture layout: the tiny diffusers pipeline in fp32",
-            "dtype": "float32",
-            "tensors": [
-                {
-                    "role": "unet.down_blocks.{i}.resnets.{i}.conv1",
-                    "pattern": "unet.down_blocks.{i}.resnets.{i}.conv1.weight",
-                    "rank": 4,
-                },
-                {
-                    "role": "unet.conv_out",
-                    "pattern": "unet.conv_out.weight",
-                    "rank": 4,
-                },
-                {
-                    "role": "vae.decoder.conv_out",
-                    "pattern": "vae.decoder.conv_out.weight",
-                    "rank": 4,
-                    "required": False,
-                },
-            ],
-        }
-    )
-)
+#: The wire rendering, for tests that assert the derived document's lane key.
+TINY_DIFFUSERS_FP32_ID = "sd15.diffusers@1+plain.f32@1"

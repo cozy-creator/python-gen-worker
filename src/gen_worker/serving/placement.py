@@ -24,7 +24,8 @@ operator is told what it is about to cost.
 
 What this is NOT: a kernel check. Which attention kernel a serving picks
 (sage2, flash-*) is a serve-recipe fallback arm with its own degrade path, not
-a placement floor — see ``DTYPE_MIN_SM``'s header.
+a placement floor — see `capability_floor_for_rule`, and the note beside it
+recording why the dtype-keyed table it replaced could not answer this.
 """
 
 from __future__ import annotations

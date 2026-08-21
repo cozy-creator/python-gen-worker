@@ -1,21 +1,36 @@
-"""pgw#1252: the decode-set's `file_layouts` axis — IMPORTED, and enforced.
+"""pgw#1252's `file_layouts` axis — what survived pgw#1621, and what did not.
 
-Two claims, each tested rather than asserted in prose.
+**READ THIS BEFORE ASSUMING THIS FILE STILL GUARDS WHAT ITS NAME SAYS.**
 
-**One home.** The tokens come from `models/file_layout.py`, the same module
-`convert/` publishes through. The `models -> convert` direction the issue
-proposed is a HARD CYCLE (`convert/__init__` reaches `api.slot` and back into
-`models`), so the vocabulary moved rather than being copied — a transcription
-here would have been the fourth spelling of one axis.
+pgw#1252 gave the decode-set a `file_layouts` DECODE AXIS: each decoder declared
+which on-disk shapes it could read, `require_decodable` intersected the
+observed shape against it, and a single-file svdq snapshot was refused BY
+LAYOUT before the CUDA gate. pgw#1621 deleted the five decode dimensions
+wholesale, because four of them (elements, scales, key topologies, bakes) became
+part of a v2 quant rule's IDENTITY. `file_layouts` is the one that did not:
+`src/gen_worker/discovery/decode_set.py` says so in its own words — *"the
+file-layout question has no successor in this image at all"*.
 
-**A declaration nothing enforces is a declaration nothing can be wrong about.**
-The svdq decoders declare `multi-file` ONLY, and that is measured, not
-inherited from the checkpoint's shape: the nunchaku-FORMAT file is one flat
-namespace, but the engine refuses an artifact that is only that file
-(`load_svdq_native_pipeline`, `not art.component`). Before this axis that fact
-lived only in a `raise` reached AFTER the CUDA gate, so a GPU-less host
-reported "svdq artifacts require a CUDA GPU" for an artifact no GPU would have
-helped. (pgw#1298 deleted the second engine; the axis is unchanged.)
+So the two claims this file used to make now split:
+
+**One home — STILL TRUE, still tested.** The tokens come from
+`models/file_layout.py`, the same module `convert/publish.py` validates
+through. A transcription would be the fourth spelling of one axis. That is
+asserted below, on the module OBJECT.
+
+**A declaration nothing enforces — GONE, and the loss is pinned below.** No
+decoder declares a file layout any more, so there is nothing to enforce and
+nothing to be wrong about. `test_a_single_file_svdq_snapshot_no_longer_refuses_
+by_layout` is the record: it asserts the CURRENT behaviour, which is the
+pgw#1252 defect exactly — a bare svdq file reaches the hardware gate and reports
+"needs Blackwell fp4 tensor cores" for an artifact no GPU would have helped.
+**That test is written to go RED the day a successor lands**, so the hole is
+visible in the suite instead of only in this docstring.
+
+What is NOT lost: `observed_file_layout` still classifies, `validate_file_layout`
+still refuses the dead pre-th#1937 spellings at the publish boundary, and svdq
+artifact DETECTION (component vs. bare file) is unchanged. Those are tested
+here because they are what the successor would have to be built on.
 """
 
 from __future__ import annotations
@@ -30,19 +45,10 @@ torch = pytest.importorskip("torch")
 
 from safetensors.torch import save_file  # noqa: E402
 
-from gen_worker.discovery.decode_set import (  # noqa: E402
-    REFUSAL_FILE_LAYOUT_UNSUPPORTED,
-    FileLayoutUnsupportedError,
-    accepted_file_layouts,
-    runtime_decode_set,
-)
+from gen_worker.discovery.decode_set import runtime_decode_set  # noqa: E402
 from gen_worker.models import file_layout as fl  # noqa: E402
 from gen_worker.models.loading import load_from_pretrained  # noqa: E402
 from gen_worker.models.svdq import detect_svdq_artifact  # noqa: E402
-from gen_worker.models.tensor_layout_contract import (  # noqa: E402
-    CONTRACT_NUNCHAKU_V1,
-    KNOWN_ELEMENTS,
-)
 
 SVDQ_META = {
     "model_class": "NunchakuFluxTransformer2dModel",
@@ -60,7 +66,7 @@ class _Pipe:
 
     @staticmethod
     def from_pretrained(*a: Any, **kw: Any) -> Any:  # pragma: no cover
-        raise AssertionError("the layout gate should have refused first")
+        raise AssertionError("nothing here should reach the real loader")
 
 
 def _svdq_file(path: Path) -> None:
@@ -72,56 +78,56 @@ def _svdq_file(path: Path) -> None:
 # ── one home, imported ───────────────────────────────────────────────────────
 
 def test_the_axis_is_the_imported_vocabulary_not_a_transcription() -> None:
-    """Every declared token is a member of the ONE ruled set, and the publish
-    side validates through the same module object — not a same-looking copy."""
+    """The publish side validates through the same module OBJECT — not a
+    same-looking copy. This half of pgw#1252 is untouched by the v2 cut."""
     from gen_worker.convert import publish
 
+    # `getattr`, not attribute syntax: `publish` IMPORTS this name to use it
+    # and does not re-export it, so strict mypy is right to refuse
+    # `publish.validate_file_layout`. Putting it in `publish.__all__` to
+    # satisfy the checker would make the module claim a public export it does
+    # not have — the identity below is the claim, and it is unchanged.
     assert getattr(publish, "validate_file_layout") is fl.validate_file_layout
-
-    declared = {
-        token
-        for entry in runtime_decode_set().entries
-        for token in entry.decodes.file_layouts
-    }
-    assert declared, "no decoder declares a file layout"
-    assert declared <= fl.KNOWN_FILE_LAYOUTS
-    # and the axis is not silently borrowing another axis's tokens
-    assert not (declared & set(KNOWN_ELEMENTS))
+    assert fl.KNOWN_FILE_LAYOUTS == {fl.MULTI_FILE, fl.SINGLE_FILE}
 
 
-def test_a_dead_spelling_cannot_be_declared() -> None:
-    """No aliases: the pre-th#1937 spellings fail the BUILD where they are
-    written, which is what stops a fourth one appearing."""
-    from gen_worker.models.tensor_layout_contract import (
-        CONTRACT_PLAIN_BF16,
-        DecodeDimensions,
-        implements_contract,
-    )
+def test_a_dead_spelling_cannot_be_published() -> None:
+    """No aliases: the pre-th#1937 spellings fail where they are written,
+    which is what stops a fourth one appearing.
 
-    for dead in ("singlefile", "diffusers", "single_file"):
-        with pytest.raises(ValueError, match="is not registered"):
-            @implements_contract(
-                contract=CONTRACT_PLAIN_BF16, serves=("bf16-w16a16",),
-                composes_lora=False,
-                decodes=DecodeDimensions(
-                    elements=("bf16",), scales=("none",), key_topologies=(),
-                    file_layouts=(dead,), bakes=()),
-            )
-            def _dead(x: Any) -> Any:
-                return x
+    This used to be asserted at the `@implements_contract` marker, because a
+    decoder declared the axis there. It has no decoder-side declaration site
+    any more, so it is asserted at the one boundary that still validates the
+    token — the publish path — which is where the vocabulary is actually
+    consumed.
+    """
+    for dead in ("singlefile", "diffusers", "single_file", "multifile"):
+        with pytest.raises(ValueError):
+            fl.validate_file_layout(dead)
 
-    with pytest.raises(TypeError):
-        DecodeDimensions(  # type: ignore[call-arg]
-            elements=("bf16",), scales=("none",), key_topologies=(), bakes=())
+    # ...and the live spellings survive round-tripping, so this is a refusal
+    # of the DEAD tokens rather than of everything.
+    for live in (fl.MULTI_FILE, fl.SINGLE_FILE, fl.NOT_APPLICABLE):
+        assert fl.validate_file_layout(live) == live
 
 
-def test_every_decoder_declares_the_axis() -> None:
-    missing = [e.decoder for e in runtime_decode_set().entries
-               if not e.decodes.file_layouts]
-    assert missing == [], f"decoders with no file_layouts declaration: {missing}"
+def test_no_decoder_declares_a_file_layout_any_more() -> None:
+    """The axis is GONE from the decode-set entry, not merely empty.
+
+    An empty tuple would be a declaration nobody wrote; an absent FIELD cannot
+    be silently ignored. This is the assertion that fails if someone
+    reintroduces the axis on the decoder side without reconnecting the
+    intersection — which would be pgw#1252's original "a declaration nothing
+    enforces" defect rebuilt.
+    """
+    entries = runtime_decode_set().entries
+    assert entries, "no decoder declared anything — every assertion below is vacuous"
+    for entry in entries:
+        assert not hasattr(entry, "decodes"), entry.decoder
+        assert not hasattr(entry, "file_layouts"), entry.decoder
 
 
-# ── the observation agrees with what publish stamps ──────────────────────────
+# ── the observation still classifies ─────────────────────────────────────────
 
 def test_observed_layout_matches_the_publish_side_shapes(tmp_path: Path) -> None:
     pipeline = tmp_path / "pipeline"
@@ -141,29 +147,56 @@ def test_observed_layout_matches_the_publish_side_shapes(tmp_path: Path) -> None
     assert fl.observed_file_layout(bare) == fl.NOT_APPLICABLE
 
 
-# ── the refusal, through the production dispatch ─────────────────────────────
+# ── the refusal that is GONE ─────────────────────────────────────────────────
 
-def test_single_file_svdq_snapshot_refuses_by_layout(tmp_path: Path) -> None:
-    """RED before pgw#1252: this reached the svdq lane and died on the CUDA
-    gate — `svdq artifacts require a CUDA GPU`, which is not the reason."""
+def test_a_single_file_svdq_snapshot_no_longer_refuses_by_layout(
+    tmp_path: Path,
+) -> None:
+    """⚠️ THIS TEST PINS A HOLE, NOT A GUARANTEE. It is expected to go RED.
+
+    pgw#1252's whole point: this snapshot is a bare nunchaku-FORMAT file with
+    no component subdirectory, and `load_svdq_native_pipeline` refuses an
+    artifact that is only that file (`not art.component`). Before pgw#1252 the
+    refusal happened AFTER the hardware gate, so the operator was told
+    `svdq artifacts require a CUDA GPU` for an artifact no GPU would have
+    helped. pgw#1252 moved the refusal in front of the gate by intersecting the
+    OBSERVED layout against the decoder's declared `file_layouts`.
+
+    pgw#1621 deleted that axis with no successor, so the refusal moved back.
+    What is asserted here is that it really did: the observation is still
+    `single-file`, the artifact is still detected with no component, and the
+    exception that arrives is NOT about the layout.
+
+    **When a successor lands** — a layout intersection rebuilt on the v2
+    vocabulary, or the engine simply checking `art.component` before the
+    hardware gate — this assertion goes red and the reader is sent here. That
+    is the intent: the assertion below is the RECORD of a regression, and a
+    regression nobody can see is the thing this file was written about.
+    """
     snapshot = tmp_path / "bare-svdq"
     _svdq_file(snapshot / "svdq-fp4_r32-flux.safetensors")
-    # The artifact really is detected as svdq, so the arm under test is reached.
+
+    # The two facts the deleted gate was built out of are both still true.
     art = detect_svdq_artifact(snapshot)
     assert art is not None and art.component == ""
+    assert fl.observed_file_layout(snapshot) == fl.SINGLE_FILE
 
-    with pytest.raises(FileLayoutUnsupportedError) as excinfo:
+    with pytest.raises(Exception) as excinfo:
         load_from_pretrained(_Pipe, snapshot)
-    err = excinfo.value
-    assert err.code == REFUSAL_FILE_LAYOUT_UNSUPPORTED
-    assert err.observed == fl.SINGLE_FILE
-    assert err.accepted == (fl.MULTI_FILE,)
-    assert CONTRACT_NUNCHAKU_V1 in str(err)
+    message = str(excinfo.value)
+    # The refusal that used to be here is gone: nothing names the LAYOUT.
+    assert "single-file" not in message and "multi-file" not in message, (
+        "a layout-shaped refusal is back — pgw#1252's guard has a successor "
+        "again. Delete this test and restore the real one above it."
+    )
 
 
-def test_multi_file_svdq_tree_passes_the_layout_gate(tmp_path: Path) -> None:
-    """The shape `convert/svdq.py` actually builds is admitted — the guard has
-    to let the real artifact through or it is just a refusal."""
+def test_a_multi_file_svdq_tree_is_detected_with_its_component(
+    tmp_path: Path,
+) -> None:
+    """The shape `convert/svdq.py` actually builds. Its component is read, so
+    a successor gate has the fact it needs to distinguish the two arms — which
+    is why this survives the deletion of the gate itself."""
     snapshot = tmp_path / "flavor"
     _svdq_file(snapshot / "transformer" / "svdq-fp4_r32-flux.safetensors")
     (snapshot / "model_index.json").write_text(
@@ -172,18 +205,18 @@ def test_multi_file_svdq_tree_passes_the_layout_gate(tmp_path: Path) -> None:
 
     art = detect_svdq_artifact(snapshot)
     assert art is not None and art.component == "transformer"
-    # It gets past the layout gate and fails later, on the engine — which is
-    # the honest cause on a host with no CUDA.
-    with pytest.raises(Exception) as excinfo:
-        load_from_pretrained(_Pipe, snapshot)
-    assert not isinstance(excinfo.value, FileLayoutUnsupportedError)
 
 
-def test_an_unconstrained_contract_is_not_evaluated() -> None:
-    """`accepted_file_layouts` on a contract nothing declares returns (), and
-    an empty accepted set is the UNDECLARED rung — not a refusal of every
-    artifact."""
-    ds = runtime_decode_set()
-    assert accepted_file_layouts("plain.bf16@1", ds) == (
-        fl.MULTI_FILE, fl.SINGLE_FILE)
-    assert accepted_file_layouts("nope.nothing@9", ds) == ()
+def test_the_svdq_decode_path_declares_itself_UNREGISTERED() -> None:
+    """The v2 answer to "which bytes can this image read" for svdq.
+
+    `nunchaku.v1@1` was a v1 CONTRACT and has no ratified v2 quant rule, so
+    the decoder records an UNREGISTERED DECODE PATH with a reason rather than
+    inventing a handle. That record is what a refusal can read; a source
+    comment is not. It is also why the file-layout intersection has nothing to
+    hang off any more — there is no declared rule for svdq to carry an axis.
+    """
+    unregistered = {u.decoder: u.reason
+                    for u in runtime_decode_set().unregistered}
+    assert "gen_worker.models.svdq_layout:decode_linear" in unregistered
+    assert unregistered["gen_worker.models.svdq_layout:decode_linear"].strip()

@@ -92,21 +92,39 @@ def test_the_discard_itself_is_announced_and_names_what_went_away(
 def test_the_shape_actually_found_on_disk_is_the_version_mismatch(
     tmp_path, caplog
 ):
-    """The document that blocked va#3's arm 2 was v=2 with a VALID field set.
+    """A document whose ONLY defect is its version, with a VALID field set.
 
     Worth its own case because the fixture above fails on the field set and
     would pass a reader that only rejected unknown fields. This one can only
     fail on the version, which is the shape a re-vendor actually produces.
+
+    The version used is one AHEAD of this build's, not behind it (pgw#1621 —
+    the shape va#3 hit was `v=2` against a `v=3` reader, and tcg#79 bumped the
+    reader to 4). Forward is the direction a rolling fleet actually produces:
+    a pod on the older image reading the document a newer pod already wrote.
+    And "one ahead" is a RELATION a format bump cannot silently satisfy,
+    whereas a pinned historical number drifts further from the fence with
+    every bump until it is red for archaeological reasons rather than this
+    one. The relation is asserted below so the drift is what goes red.
     """
     import logging
 
     from gen_worker._vendor.tensorfs import LocalCAS
+    from gen_worker._vendor.torchcg.document import DOCUMENT_FORMAT
     from gen_worker._vendor.torchcg.store import _document_ref
+
+    AHEAD = 5
+    assert AHEAD == DOCUMENT_FORMAT + 1, (
+        "this fixture must stay exactly ONE format ahead of the reader. A "
+        "re-vendor that leaves it level makes the document READABLE and this "
+        "case degenerates into the empty-store case above — passing while "
+        "measuring nothing."
+    )
 
     store = tmp_path / "graph-cas"
     store.mkdir(parents=True)
     cas = LocalCAS(store)
-    ref = cas.put_bytes(b'{"lanes":[],"stack":[],"v":2}')
+    ref = cas.put_bytes(b'{"lanes":[],"stack":[],"v":%d}' % AHEAD)
     cas.compare_and_swap_ref(_document_ref("toy.main"), ref, expected=None)
 
     spec = BootSpec(endpoint_dir=tmp_path, graph_store=store, sm="sm_89")
@@ -117,7 +135,7 @@ def test_the_shape_actually_found_on_disk_is_the_version_mismatch(
 
     assert document is None
     said = "\n".join(r.getMessage() for r in caplog.records)
-    assert "document v must be 3" in said
+    assert f"document v must be {DOCUMENT_FORMAT}" in said
     assert cas.read_ref(_document_ref("toy.main")) is None
 
 

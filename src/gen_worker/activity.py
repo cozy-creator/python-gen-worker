@@ -152,8 +152,13 @@ KIND_RESIDENCY_FAULT = "residency_fault"
 # that DECIDED the lane, not from an endpoint remembering to say so.
 #
 # `phase` is the ranked lane BODY (`bf16-w16a16`), a closed fleet vocabulary
-# and therefore countable hub-side; `family` carries the tensorfs contract id
-# (`sdxl.diffusers-bf16@1`); `detail` is the ladder's whole confession — card,
+# and therefore countable hub-side; `family` carries the LAYOUT STAMP, which
+# under tensor-layout v2 is the pair rendering `sdxl.diffusers@1+plain.bf16@1`
+# (pgw#1621 — it used to be the v1 lane handle `sdxl.diffusers-bf16@1`, which
+# survives only as a display name). The pair is the spelling the hub already
+# stores in `checkpoints.layout_topology`/`layout_quant` and renders back with
+# the same `+`, so the two sides join without anything parsing prose; `detail`
+# is the ladder's whole confession — card,
 # reason, and every rejected rung with its numbers. That last part is the point:
 # a ladder that reports only its winner cannot be audited, and its confession
 # was a `logger.info` on a pod with no logs API, which is to say nowhere.

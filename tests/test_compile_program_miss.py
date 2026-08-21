@@ -36,7 +36,7 @@ GRAPH = "cg-graph-v1-" + "a" * 56
 
 
 def spec() -> Spec:
-    return Spec(contract="sd15.diffusers-bf16@1", graph=GRAPH, target="unet", ingress=None)
+    return Spec(contract="sd15.diffusers@1+plain.bf16@1", graph=GRAPH, target="unet", ingress=None)
 
 
 class _Store:

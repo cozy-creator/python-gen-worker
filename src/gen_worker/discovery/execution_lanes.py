@@ -53,7 +53,11 @@ __all__ = [
 
 
 class DerivedContract(msgspec.Struct, frozen=True, kw_only=True):
-    contract: str
+    #: The QUANT RULE handle this decoder reads (pgw#1621). The field and the
+    #: wire key below still say `contract` because that is what tensorhub's
+    #: `manifestExecutionLanesBlock` reads and validates with
+    #: `tensorlayout.Lookup`; the rename is the hub-side follow-up.
+    rule: str
     decoder: str
     execution_lanes: tuple[str, ...]
     composes_lora: bool
@@ -91,7 +95,7 @@ def _derived_contract(entry: Any) -> DerivedContract:
                 lanes.append(lane)
     lanes.sort(key=lambda lane: rank[lane])
     return DerivedContract(
-        contract=entry.contract,
+        rule=entry.rule,
         decoder=entry.decoder,
         execution_lanes=tuple(lanes),
         composes_lora=entry.composes_lora,
@@ -160,7 +164,7 @@ def manifest_block(derived: DerivedExecutionLanes) -> Dict[str, Any]:
         "lanes": list(derived.execution_lanes),
         "contracts": [
             {
-                "contract": c.contract,
+                "contract": c.rule,
                 "decoder": c.decoder,
                 "lanes": list(c.execution_lanes),
                 "composes_lora": c.composes_lora,

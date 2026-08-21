@@ -25,9 +25,22 @@ from .graph_identity import (
     require_stack,
 )
 from .ingress import CallIngress, IngressError
-from .lane import LaneError, require_contract_ref, require_passes, require_targets
+from .lane import LaneError, require_lane_id, require_passes, require_targets
 
-DOCUMENT_FORMAT = 3
+# tcg#79 bumped 3 -> 4: the lane row key changed grammar, from the v1 contract
+# handle `sdxl.diffusers-bf16@1` to the v2 (topology, quant) stamp
+# `sdxl.diffusers@1+plain.bf16@1`. A `v: 3` document's lane keys resolve
+# against no v2 stamp, so it must refuse as a document THIS BUILD CANNOT READ
+# ("document v must be 4") rather than as a lane-grammar error that reads like
+# a producer bug. The cost is exactly one re-derive per release, which is the
+# posture `store.py` already states: a document is derived, a format bump
+# costs one re-mint, and `get_graphs` treats an unreadable document as absent.
+#
+# NO cg-graph-v1 HASH MOVES. The lane contract is not a `graph_hash` input --
+# that is (canonical trace, ingress, passes, literals) -- so every graph in an
+# old document keeps its identity and every already-minted artifact stays
+# addressable. Only the row KEY the graphs hang off is respelled.
+DOCUMENT_FORMAT = 4
 _DOCUMENT_FIELDS = frozenset(("v", "stack", "lanes"))
 _LANE_FIELDS = frozenset(
     ("contract", "targets", "graphs", "unobserved_targets", "passes")
@@ -107,7 +120,7 @@ class LaneGraphs:
 
     def __post_init__(self) -> None:
         try:
-            require_contract_ref(self.contract)
+            require_lane_id(self.contract)
             require_targets(self.targets)
             object.__setattr__(self, "passes", require_passes(self.passes))
         except LaneError as exc:
