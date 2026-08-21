@@ -598,27 +598,32 @@ def test_the_declaration_totals_what_the_sizer_totals():
 # --- the group-offload threshold, and what the grant path does to it ------------------------
 
 
-def test_the_group_offload_threshold_is_never_READ_on_the_grant_path(monkeypatch):
+def test_the_threshold_walk_never_decides_a_RESIDENCY(monkeypatch):
     """`_DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB = 6.0` is a hard boundary that drops TWO rungs at
     once, and the ComfyUI floor ladder measured the cost: at a 6144 MiB budget our run peaks
     at 3494 MiB, leaves 5.8 GiB unspent, and takes 37.4-41.4 s against ComfyUI's 24.2 s
-    (1.55-1.71x) — ComfyUI spends 5553 MiB and never leaves its normal path.
+    (1.55-1.71x) while ComfyUI spends 5553 MiB and never leaves its normal path.
 
-    All three uses of the two threshold constants are inside `select_auto_mode`. This asserts
-    the consequence across the whole budget range the ladder covered: with a readable card, a
-    grant is produced and `select_auto_mode` is never CALLED, so the cliff cannot occur.
+    Both threshold constants are used only inside `select_auto_mode`. The claim under test is
+    the exact one the design makes: **whenever the grant places anything on the card, the walk
+    is not consulted**, so the cliff cannot touch a placement the grant made.
 
-    The assertion is deliberately "the walk did not run" rather than "the mode was not
-    group_offload". On a cardless test box every offload rung ends as the `cpu` rung
-    downstream (`cuda_ok` is False), so a mode assertion here would pass for the wrong reason
-    — vacuously green, which is the failure class this file exists to avoid. Each iteration
-    also asserts a grant was actually produced, so the guard cannot pass by never reaching
-    the seam either.
+    It is deliberately NOT "the walk never runs at all". Below the grant's reach — nothing
+    resident, no streamed set — the remaining question is WHICH COARSE RUNG, and the grant's
+    `resident | streamed` vocabulary does not answer it. That case is handed back to the walk
+    on purpose (see the sibling test), because hardcoding a coarse rung there would delete
+    `group_offload` on no measurement at all.
+
+    The assertion is "the walk did not run", NOT "the mode was not group_offload". On a
+    cardless box every offload rung ends as the `cpu` rung downstream (`cuda_ok` is False), so
+    a mode assertion would pass for the wrong reason -- my first version did exactly that.
+    Each iteration also asserts a grant was really produced, so the guard cannot pass by never
+    reaching the seam either.
     """
     import gen_worker.models.memory as m
 
     # Captured ONCE. Re-reading the attribute inside the loop picks up the previous
-    # iteration's spy — monkeypatch does not undo between iterations — and recurses.
+    # iteration's spy -- monkeypatch does not undo between iterations -- and recurses.
     real = m._grant_for_pipeline
     seen: dict = {}
 
@@ -627,6 +632,8 @@ def test_the_group_offload_threshold_is_never_READ_on_the_grant_path(monkeypatch
         seen["grant"] = g
         return g, p
 
+    # Budgets across the ladder's range at which the fixture pipeline (tiny) is placeable, so
+    # every iteration is a grant that PLACED something -- the case the claim is about.
     for free_gb in (7.0, 6.5, 6.0, 5.9, 4.0, 2.5, 1.2, 0.75):
         seen.clear()
         _with_card(monkeypatch, free_gb=free_gb, total_gb=8.0)
@@ -636,22 +643,39 @@ def test_the_group_offload_threshold_is_never_READ_on_the_grant_path(monkeypatch
             lambda **k: pytest.fail(f"the threshold walk ran at {free_gb} GiB free"),
         )
         m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
-        assert seen.get("grant") is not None, f"no grant at {free_gb} GiB — guard is vacuous"
+        g = seen.get("grant")
+        assert g is not None, f"no grant at {free_gb} GiB -- guard is vacuous"
+        assert not g.over_card, f"{free_gb} GiB placed nothing; wrong case for this guard"
 
 
-def test_group_offload_becoming_unreachable_is_an_UNMEASURED_change():
-    """The honest other half, pinned so the test above is not read as a win.
+def test_below_the_grants_reach_the_coarse_rung_is_still_the_walks_call(monkeypatch):
+    """The safety property that lets this land before the floor leg runs.
 
-    `group_offload` is the aggressive per-block rung and the grant path can no longer select
-    it: the streamed-set search fall-through lands on `model_offload`. pgw#1604 measured the
-    6.0 cliff costing 2.1x, so removing it SHOULD help mid-band — but the bottom of the curve
-    now serves on a rung it did not use before, and **nothing here has run on a card**.
+    An earlier version of this seam hardcoded `model_offload` when the grant placed nothing,
+    which made `group_offload` UNREACHABLE on the grant path -- a behaviour change at the
+    bottom of the curve supported by no measurement, inside a change whose whole argument is
+    that unmeasured constants should not decide placements. Deleting a cliff and silently
+    deleting a rung are not the same act.
 
-    There is no assertion to make about speed from a cardless box. What IS assertable is that
-    the grant vocabulary contains no rung at all, which is why the rung question moved out of
-    the decider and into the projection — and why it is the floor-preservation leg, not this
-    file, that decides whether the bottom held.
+    So below the grant's reach the walk still answers, and today's behaviour is preserved.
+    `group_offload` stays reachable; pgw#1636 derives it from the grant's paging DEPTH later.
     """
+    import gen_worker.models.memory as m
+
+    _with_card(monkeypatch, free_gb=0.000_5, total_gb=8.0)
+    asked = []
+
+    def _walk(**k: Any) -> str:
+        asked.append(1)
+        return "group_offload"
+
+    monkeypatch.setattr(m, "select_auto_mode", _walk)
+    m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
+    assert asked, "the coarse rung was decided without consulting the walk"
+
+
+def test_the_grant_vocabulary_contains_no_rung():
+    """Why the coarse-rung question is not the grant's to answer: it has no word for it."""
     from gen_worker.models import grant as G
 
     assert set(G.__all__) & {"RESIDENT", "STREAMED"}

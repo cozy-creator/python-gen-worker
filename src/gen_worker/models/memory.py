@@ -1639,7 +1639,14 @@ def _grant_for_pipeline(
                     + list(method_driven_components(pipeline))
                 ),
             )
-            captured["plan"] = plan
+            # Carried out ONLY when it is a plan the probe loop can actually be
+            # handed, which is `_plan_partial_resident`'s contract exactly:
+            # `fits` AND something to evict. Capturing unconditionally passed a
+            # `fits=False` plan downstream and, worse, made the caller's
+            # "no plan" fall-through unreachable — the arena was asked to arm a
+            # residency the search had already refused.
+            if plan.fits and plan.offloaded:
+                captured["plan"] = plan
             return tuple(plan.offloaded) if plan.fits else ()
 
         grant = plan_grant(
@@ -2813,15 +2820,38 @@ def apply_low_vram_config(
         if partial_resident_plan is not None:
             effective_mode = "partial_resident"
     if effective_mode == "partial_resident" and partial_resident_plan is None:
-        # The grant said stream but the search could not name a set the card
-        # accepts. The coarse rung is the honest answer, not a resident
-        # placement — and it is a fall-through, not a refusal: varena always
-        # says yes, so what changes here is HOW the bytes move, never whether
-        # the load proceeds.
+        # The grant asked to stream and the search could not name a set the card
+        # accepts, so NOTHING is being placed resident. That makes the remaining
+        # question a different one — WHICH COARSE RUNG — and the grant has no
+        # opinion on it: its vocabulary is `resident | streamed`, and neither
+        # word answers "model_offload or group_offload".
+        #
+        # So it is handed back to the walk that already answers it, rather than
+        # hardcoded. Hardcoding `model_offload` here made `group_offload`
+        # UNREACHABLE on the grant path — a behaviour change at the bottom of
+        # the curve that no measurement supported, in a change whose entire
+        # argument is that unmeasured constants should not decide placements.
+        # Deleting a cliff and silently deleting a rung are not the same act.
+        #
+        # The division is exact and is what makes this safe to land before the
+        # floor leg runs: the grant decides RESIDENCY and the threshold walk is
+        # never consulted for it, so the two-rungs-at-once cliff cannot touch a
+        # placement the grant made. Below the grant's reach, today's behaviour
+        # is preserved byte-for-byte. Deriving the coarse rung from the grant's
+        # paging DEPTH instead is pgw#1636.
+        effective_mode = select_auto_mode(
+            pipeline=pipeline, model_size_gb=model_size_gb,
+            peak_vram_gb=peak_vram_gb,
+        )
+        if effective_mode in ("off", "vae_only"):
+            # The walk's resident flavours cannot apply: the grant just said the
+            # card holds nothing resident, and pgw#1315 measured the cost of
+            # stamping a resident flavor over a placement that was not taken —
+            # the ladder then reads the pipeline two rungs above where it is.
+            effective_mode = "model_offload"
         log.info(
-            "low_vram: the grant asked for a streamed set the search could not "
-            "produce; falling to model_offload")
-        effective_mode = "model_offload"
+            "low_vram: the grant placed nothing resident and the search named "
+            "no streamed set; the coarse rung is %s", effective_mode)
 
     applied: Dict[str, Any] = {
         "mode": effective_mode,
