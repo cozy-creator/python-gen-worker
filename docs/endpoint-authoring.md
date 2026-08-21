@@ -563,14 +563,31 @@ lands on (or, on a function with no selectable slot, to the slots that declared
 a `family`), so auxiliary slots — interpolators, upscalers — are never asked
 for evidence they cannot carry.
 
-The boot WARM PLAN is DERIVED
-— defaulted fields keep their schema defaults, `CompileAxis` fields
-cross-product their classes' `warm=` representatives, required fields
-synthesize neutral values — so there is no `warmup=` payload dict to
-write or to drift. Cheapen non-graph work on `ctx.boot_warmup`
-(`steps = 1 if ctx.boot_warmup else steps`). A per-function
-`@worker_function(warm={...}, warm_reason=...)` override exists only for
-a non-axis field that genuinely changes tracing. When the serve path
+The boot WARM PASS is DERIVED and default-on (pgw#1584). After the pod's
+weights land and *before* it advertises a single function, the worker runs
+one synthetic invocation per inference entrypoint through the ordinary
+dispatch path, so the first-call tax — allocator pool growth to the
+activation peak, cuBLAS/cuDNN heuristic selection — is paid by the boot
+instead of by a paying request. The payload is your own schema at its
+neutral defaults: defaulted fields keep their defaults, a required `str`
+fills `"warmup"`, a required `ImageAsset`/`AudioAsset` gets a tiny
+generated PNG/WAV. There is no `warmup=` payload dict to write or to
+drift, and no opt-out declaration — a schema that cannot synthesize
+honestly (a required `VideoAsset`) is skipped with a logged reason.
+
+**Cheapen it from inside the body**, on `ctx.boot_warmup`:
+
+```python
+steps = 1 if ctx.boot_warmup else payload.num_inference_steps
+```
+
+The flag is `True` only on that pass; the output is discarded, nothing is
+uploaded and nothing banks, and the output-integrity floor exempts it (a
+degenerate output from a degenerate input is the expected result there).
+Cheapen non-graph work freely — the allocator peak is shape-driven, not
+step-driven, so dropping steps still warms what matters. A warm pass that
+raises does **not** brick the pod: it emits a `serve_degrade` event and
+the first real request takes the cold cost. When the serve path
 modifies a requested value (clamps, substitutions), record it with
 `ctx.adjusted(field, requested, applied, reason)` / `ctx.clamp(...)` —
 the rows ride the result envelope to the caller.
@@ -905,7 +922,8 @@ The members you will actually reach for (the class has ~27 public members;
 | `request_id` | unique id for this request |
 | `models` | resolved model refs by slot |
 | `defaults` | the catalog-resolved recipe, typed as `RequestContext[D]` |
-| `for_request(pipeline, sampler=, seed=)` | per-request view (own scheduler over shared weights) |
+| `for_request(pipeline, sampler=, seed=)` | per-request view (own scheduler over shared weights); carries NO objective — pass one to `gen_worker.view.for_request` (pgw#1583) |
+| `boot_warmup` | `True` only on the boot warm pass; cheapen the run off it |
 | `device` | the torch device to run on |
 | `generator(seed)` | seeded `torch.Generator` on `device` |
 | `deadline` | absolute deadline |

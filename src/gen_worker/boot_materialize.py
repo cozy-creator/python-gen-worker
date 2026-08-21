@@ -156,12 +156,21 @@ class CheckpointMaterialization:
         store: ModelStore,
         *,
         announce: Optional[Callable[[], Awaitable[None]]] = None,
+        warm: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self._store = store
         #: Pushes a StateDelta the moment readiness changes, so the hub learns
         #: this worker is routable at materialization time and not up to one
         #: heartbeat later.
         self._announce_cb = announce
+        #: pgw#1584: the BOOT WARM PASS, run between the last byte landing and
+        #: this worker calling itself ready. The placement is the whole point:
+        #: `ready` is still False while it runs, so the heartbeat still reports
+        #: `loading_functions`, `first_request_servable` cannot be stamped, and
+        #: the hub cannot route here — which turns that milestone from "the
+        #: process is up" into "a real forward has completed on this pod"
+        #: (th#2233's false-servable gets an actual readiness probe).
+        self._warm_cb = warm
         self._task: Optional["asyncio.Task[None]"] = None
         self._applied: Optional[CheckpointConfig] = None
         self.state: str = STATE_PENDING
@@ -225,6 +234,17 @@ class CheckpointMaterialization:
             # A weightless release, or a release whose config names nothing.
             # There is nothing to wait for, so readiness is immediate — the
             # gate must never be able to strand a pod that has no weights.
+            #
+            # NO WARM PASS HERE, and the reason is th#2233 rather than this
+            # branch. A config naming zero refs also names zero checkpoint
+            # BINDINGS, so `boot_picks` has nothing to bind and every function
+            # would skip with "no boot-time checkpoint binding" — a warm call
+            # placed here would do nothing but say so. th#2233 measured that
+            # the hub sends zero `disk_refs` for `fixed` bindings FLEET-WIDE
+            # (the only HelloAck seeder covers dynamic slots, of which the hub
+            # has none), so today every pod lands in this branch and the warm
+            # pass rides that fix — which is the same fix that makes
+            # `first_request_servable` mean anything at all.
             self.state = STATE_READY
             self.failure = ""
             logger.info(
@@ -300,6 +320,12 @@ class CheckpointMaterialization:
                 return
             logger.info("checkpoint %s materialized at %s", ref, path)
 
+        # pgw#1584: WEIGHTS ARE DOWN, NOTHING IS SERVABLE YET. The warm pass
+        # goes exactly here — after the last byte and before the state flips —
+        # so the first synthetic forward happens while this worker is still
+        # advertising `loading_functions`. It never raises (see `_warm`).
+        await self._warm()
+
         self.state = STATE_READY
         self.failure = ""
         logger.info(
@@ -308,6 +334,30 @@ class CheckpointMaterialization:
             config.version, len(config.refs),
         )
         await self._announce()
+
+    # ---- the boot warm pass ------------------------------------------------
+
+    async def _warm(self) -> None:
+        """Run the boot warm pass, if one is wired. NEVER raises.
+
+        The posture is pgw#1584's ruling: a warm-pass failure degrades LOUDLY
+        and does not brick the pod. `ServeLoop.boot_warmup` already confesses
+        per entrypoint with a `serve_degrade` event and returns rather than
+        raising; this is the second belt, because a pod that refuses to become
+        ready over a failed OPTIMIZATION is strictly worse than one that serves
+        and pays the first-call tax it would have paid anyway.
+        """
+        if self._warm_cb is None:
+            return
+        try:
+            await self._warm_cb()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — an optimization never costs a boot
+            logger.warning(
+                "boot warm pass raised; this worker becomes ready anyway and "
+                "the first real request pays the cold cost", exc_info=True,
+            )
 
     # ---- readiness announcement -------------------------------------------
 

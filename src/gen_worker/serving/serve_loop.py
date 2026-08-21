@@ -17,6 +17,12 @@ The wire-facing serving path over the pgw#1382 primitives:
    order)``; release the leases; return the result with the request's
    accumulated ``ctx.warn`` rows.
 
+:meth:`ServeLoop.boot_warmup` (pgw#1584) runs that same walk once per
+entrypoint AT BOOT, on a payload synthesized from the entrypoint's own schema
+at its neutral defaults and a context carrying ``boot_warmup=True`` — so the
+first-call tax is paid by the pod's boot rather than by a paying request. It
+is not a second serving path; it is this one, called earlier.
+
 Instances are keyed by (model class, checkpoint ref, lane): one resident
 author object per key, built inside the lease's admission window via
 ``Model()`` + ``model.load(LoadContext)`` and dropped via the author's
@@ -30,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import tempfile
 import threading
 import time
 from contextlib import ExitStack
@@ -37,7 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 
-from .. import boot_phases
+import msgspec
+
+from .. import activity, boot_phases
+from ..warm_payload import neutral_payload
 from ..input_assets import (
     InputManifestEntry,
     cleanup_input_assets,
@@ -91,6 +101,36 @@ class InvokeOutcome:
     #: breakdown against ``runtime_ms``, and the dispatch — not the loop — is
     #: what measures that.
     stages: Optional[StageTimer] = None
+
+
+@dataclass(frozen=True, slots=True)
+class WarmPass:
+    """What the boot warm pass did about ONE entrypoint.
+
+    Three outcomes and they are deliberately distinguishable: ``warmed`` (a
+    real forward ran and its cost is off the first paying request),
+    ``skipped`` (nothing could honestly be warmed — the reason says what) and
+    ``failed`` (the pass ran and raised; the pod SERVES and the first real
+    request pays the cold cost). "Nobody warmed" and "warming was free" are
+    different answers, so a skip never renders as a success.
+    """
+
+    function: str
+    outcome: str
+    reason: str = ""
+    duration_ms: int = 0
+
+    @property
+    def warmed(self) -> bool:
+        return self.outcome == WARM_OK
+
+
+#: A real synthetic forward ran under ``boot_warmup=True``.
+WARM_OK = "warmed"
+#: Nothing was warmed and nothing went wrong — the reason names which.
+WARM_SKIPPED = "skipped"
+#: The warm pass raised. LOUD (``serve_degrade``), never fatal.
+WARM_FAILED = "failed"
 
 
 class _InstanceBackend:
@@ -437,23 +477,34 @@ class ServeLoop:
 
         per_request = dict(context or {})
         input_fetch_t0 = time.monotonic()
-        try:
-            materialize_input_assets(
-                decoded.payload,
-                request_id,
-                attempt=int(attempt),
-                manifest=tuple(input_assets),
-                file_base_url=str(per_request.get("file_api_base_url") or ""),
-                capability_token=str(
-                    per_request.get("worker_capability_token") or ""
-                ),
-            )
-        except BaseException:
-            # `materialize_input_assets` already cleared its own attempt
-            # directory; this only guarantees it for anything that raised
-            # around it. The refusal itself is typed and propagates.
-            cleanup_input_assets(request_id, int(attempt))
-            raise
+        # pgw#1584: THE BOOT WARM PASS CARRIES NO FETCHABLE INPUT. Its payload
+        # is the platform's own synthesis (`warm_payload`) and any asset in it
+        # is a file this process just wrote, referenced by `local_path` — there
+        # is no dispatch, no manifest, no capability token and nothing hub-side
+        # to resolve a ref against. `materialize_input_assets` NULLS every
+        # `local_path` first, on the correct reasoning that a path in RunJob
+        # input is caller-controlled wire data; a boot warm payload is the one
+        # input on this path that is not caller-controlled, and `boot_warmup`
+        # is the same authority `output_integrity.judged` reads to decide the
+        # blank-render exemption. Skipped, never faked with a stub manifest.
+        if not ctx.boot_warmup:
+            try:
+                materialize_input_assets(
+                    decoded.payload,
+                    request_id,
+                    attempt=int(attempt),
+                    manifest=tuple(input_assets),
+                    file_base_url=str(per_request.get("file_api_base_url") or ""),
+                    capability_token=str(
+                        per_request.get("worker_capability_token") or ""
+                    ),
+                )
+            except BaseException:
+                # `materialize_input_assets` already cleared its own attempt
+                # directory; this only guarantees it for anything that raised
+                # around it. The refusal itself is typed and propagates.
+                cleanup_input_assets(request_id, int(attempt))
+                raise
         # A PRE-handler stage: input fetch is not the author's runtime, and
         # folding it in makes every asset-taking endpoint look slow.
         ctx._stages.record_pre("input_fetch", time.monotonic() - input_fetch_t0)
@@ -574,6 +625,155 @@ class ServeLoop:
             stages=ctx._stages,
         )
 
+    # -- the boot warm pass (pgw#1584) --------------------------------------
+
+    def boot_warmup(
+        self, *, prepare: Optional[Callable[[str], str]] = None
+    ) -> Tuple[WarmPass, ...]:
+        """One synthetic invocation per entrypoint, at boot, before servable.
+
+        **What it is.** The worker's first-call tax is EAGER cost — allocator
+        pool growth to the activation peak plus cuBLAS/cuDNN heuristic
+        selection — and today a PAYING request pays it. This runs that forward
+        once at boot instead, through :meth:`invoke`: the real envelope decode,
+        the real residency lease, the real author body. Not a second serving
+        path; the same one, called earlier.
+
+        **The context carries ``boot_warmup=True``, and that is load-bearing
+        in two directions.** An endpoint cheapens the run off it (musicgen: one
+        second of tokens; the qwens: one token) — the surface
+        ``RequestContext.boot_warmup``'s docstring has advertised since v1 and
+        which had no writer at all between the v2 hardcut and pgw#1584. And
+        :func:`gen_worker.output_integrity.judged` reads the SAME object to
+        exempt this pass from the blank-render floor: a degenerate output from
+        a degenerate input is the expected result here, and without the flag
+        reaching the reader the warm pass would fail on its own discarded
+        output.
+
+        **The payload is the schema's neutral defaults** (:mod:`.warm_payload`)
+        — v1's warm plan shape, *"a single run at the schema's neutral
+        defaults, at BOOT, before any request exists"*. Not the largest preset,
+        not an author declaration (``NoWarmup`` is tombstoned): one run at the
+        point every request is measured against.
+
+        **FAILURE DEGRADES, IT DOES NOT BRICK.** A warm pass that raises emits
+        a ``serve_degrade`` event naming the function and the exception, and
+        the boot CONTINUES — the pod serves, and the first real request simply
+        takes the cold cost it would have taken anyway. The alternative, v1's
+        posture of failing the load, turns a warm-pass defect into an
+        unservable pod, which is strictly worse than the tax this exists to
+        remove.
+
+        ``prepare(function)`` is the caller's per-entrypoint hook, called just
+        before each warm invocation: it returns ``""`` to proceed, or a SKIP
+        REASON to decline this one. It is where the worker binds the deploy's
+        checkpoint picks for the function — boot has no dispatch to read them
+        off, and a release the hub seeded no per-function bindings for is a
+        skip with a reason, never a guess about which bytes to serve.
+
+        Returns one :class:`WarmPass` per entrypoint, in route-name order.
+
+        Never raises (except a `KeyboardInterrupt`/`SystemExit` tearing the
+        process down, which is not a warm-pass failure). The caller places it
+        after weights materialize and
+        before ``first_request_servable`` is stamped, which is what makes it a
+        REAL readiness probe rather than a stamp asserting the process is up
+        (th#2233).
+        """
+        results: list[WarmPass] = []
+        with tempfile.TemporaryDirectory(prefix="gw-boot-warmup-") as scratch:
+            for name in sorted(self.loaded.entrypoints):
+                results.append(self._warm_one(name, scratch, prepare))
+        warmed = [row for row in results if row.warmed]
+        logger.info(
+            "boot warmup: %d/%d entrypoint(s) warmed (%s)",
+            len(warmed), len(results),
+            ", ".join(f"{row.function}={row.outcome}" for row in results) or "none",
+        )
+        return tuple(results)
+
+    def _warm_one(
+        self,
+        function: str,
+        scratch: str,
+        prepare: Optional[Callable[[str], str]] = None,
+    ) -> WarmPass:
+        spec = self.loaded.entrypoints[function]
+        # A WEIGHTLESS entrypoint takes no lease, loads nothing and allocates
+        # no activation peak (pgw#1392) — there is no cold cost to move, so
+        # warming it would spend a boot second to save nothing.
+        if not spec.model_params:
+            return WarmPass(function, WARM_SKIPPED,
+                            "weightless: nothing is resident to warm")
+        kind = str(getattr(spec, "kind", "") or "inference")
+        if kind != "inference":
+            # A producer's cost is its own job's, and its payload names
+            # reserved repos the platform materializes per REQUEST — there is
+            # no boot-time answer for what `ctx.source_path` would point at.
+            return WarmPass(function, WARM_SKIPPED,
+                            f"kind={kind!r}: only inference pays a first-call tax")
+        payload, reason = neutral_payload(spec.payload_type, scratch)
+        if payload is None:
+            # Stated rather than faked. A required VideoAsset has no honest
+            # 2 KB stand-in, and inventing one warms a path with bytes no
+            # request will ever carry.
+            return WarmPass(function, WARM_SKIPPED, reason)
+        if prepare is not None:
+            declined = str(prepare(function) or "")
+            if declined:
+                return WarmPass(function, WARM_SKIPPED, declined)
+        envelope = {"input": msgspec.to_builtins(payload)}
+        started = time.monotonic()
+        try:
+            # SPANNED, and this is the phase's first producer: `PHASE_WARMUP`
+            # has been in `boot_phases`' vocabulary — with the module's own
+            # rule that "a declared phase with no producer is a default read as
+            # a fact" printed above it — and nothing in `src/` has emitted one
+            # since the hardcut.
+            with boot_phases.span(boot_phases.PHASE_WARMUP, function=function):
+                self.invoke(
+                    function,
+                    envelope,
+                    request_id=f"boot-warmup-{function}",
+                    context={
+                        "boot_warmup": True,
+                        # Discarded by construction: whatever the body saves
+                        # lands in the scratch directory this pass owns and
+                        # dies with it. Nothing is uploaded and nothing banks.
+                        "local_output_dir": scratch,
+                    },
+                )
+        except (KeyboardInterrupt, SystemExit):
+            # NOT a warm-pass failure — the process is being torn down, and
+            # swallowing that would make a boot un-interruptible.
+            raise
+        except BaseException as exc:  # noqa: BLE001 — a warm pass never bricks
+            duration_ms = int((time.monotonic() - started) * 1000)
+            detail = (
+                f"function={function} payload=schema-defaults "
+                f"{type(exc).__name__}: {exc}"
+            )
+            logger.warning(
+                "boot warmup FAILED for %s (%s: %s); this pod SERVES and the "
+                "first real request pays the cold cost",
+                function, type(exc).__name__, exc, exc_info=True,
+            )
+            # pgw#760: a fail-soft outcome that changes what this worker
+            # serves rides a TYPED event, never only a log line — a hub-spawned
+            # worker exposes no stdout, so a warning here is invisible.
+            try:
+                activity.emit_event(
+                    activity.KIND_SERVE_DEGRADE, detail,
+                    phase="boot_warmup_failed", duration_ms=duration_ms,
+                )
+            except Exception:  # noqa: BLE001 — the confession never fails boot
+                logger.debug("serve_degrade emit failed", exc_info=True)
+            return WarmPass(function, WARM_FAILED,
+                            f"{type(exc).__name__}: {exc}", duration_ms)
+        return WarmPass(
+            function, WARM_OK, "", int((time.monotonic() - started) * 1000)
+        )
+
     def _make_context(
         self,
         request_id: str,
@@ -659,5 +859,9 @@ __all__ = [
     "BindingResolver",
     "InvokeOutcome",
     "ServeLoop",
+    "WARM_FAILED",
+    "WARM_OK",
+    "WARM_SKIPPED",
+    "WarmPass",
     "manifest_sizer",
 ]
