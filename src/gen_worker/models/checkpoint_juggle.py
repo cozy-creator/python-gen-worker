@@ -306,7 +306,9 @@ class CheckpointImage:
                 buffer = torch_mod.frombuffer(
                     self._slab.memoryview(), dtype=torch_mod.uint8
                 )
-                self.pinned = bool(self._slab.is_pinned())
+                # pyo3 #[getter]: a property, not a method. The memoryview
+                # does NOT keep the slab alive — self._slab held above does.
+                self.pinned = bool(self._slab.is_pinned)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "checkpoint juggle: pinned image for %s refused (%s: %s); "
@@ -314,6 +316,10 @@ class CheckpointImage:
                     "slower, counted in the switch report",
                     checkpoint_id, type(exc).__name__, exc,
                 )
+                # A buffer built over a slab we are about to drop would be a
+                # view of unmapped memory (measured: EFAULT from the refill
+                # engine) — discard it WITH the slab.
+                buffer = None
                 self._slab = None
                 self._pool = None
         if buffer is None:

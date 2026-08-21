@@ -64,10 +64,15 @@ def loud(msg: str) -> None:
     print(f"[pgw1607] {msg}", flush=True)
 
 
-def load_gate() -> None:
+def load_gate(limit: float = 24.0) -> None:
+    """Refuse above the limit. A raised limit is DELIBERATE and printed —
+    only the load-insensitive correctness arms may run over it (the
+    coordinator's window grant, 2026-08-20); arm F stays behind 24."""
     load1 = os.getloadavg()[0]
-    if load1 > 24:
-        raise SystemExit(f"load gate: 1-min load {load1:.1f} > 24; refusing to start")
+    if load1 > limit:
+        raise SystemExit(f"load gate: 1-min load {load1:.1f} > {limit}; refusing to start")
+    if limit > 24:
+        loud(f"load gate RAISED to {limit} for correctness arms (1-min {load1:.1f})")
     loud(f"load gate ok (1-min {load1:.1f}); uptime: "
          f"{subprocess.run(['uptime'], capture_output=True, text=True).stdout.strip()}")
 
@@ -264,13 +269,20 @@ def leg_d_franken_fence(torch: Any, juggler: Any, template: Any) -> Dict[str, An
     from gen_worker.models.checkpoint_juggle import RegionInvalid
 
     real = juggler._refill_backed
+    residency = juggler.residency
+    backed_count = sum(
+        1 for r in residency.layout.regions if residency.is_resident(r.name)
+    )
+    assert backed_count >= 1, "no backed regions; nothing to kill"
+    # Die on the LAST backed refill: everything before it (and every unbacked
+    # free-swap) has already moved to the target — the franken shape — while
+    # this region dies with some bytes possibly moved.
+    kill_at = backed_count
     calls = {"n": 0}
 
     def dying_refill(region: Any, image: Any, manifest: Any, stream: Any) -> int:
         calls["n"] += 1
-        if calls["n"] == 2:
-            # First region lands (state: valid@target); the second dies with
-            # SOME of its bytes possibly moved — the franken shape.
+        if calls["n"] == kill_at:
             raise RuntimeError("injected: H2D died mid-transfer")
         return real(region, image, manifest, stream)
 
@@ -317,6 +329,10 @@ def leg_d_franken_fence(torch: Any, juggler: Any, template: Any) -> Dict[str, An
 def leg_e_teardown(torch: Any, residency: Any) -> Dict[str, Any]:
     stats_before = residency.stats()
     residency.release()
+    # release() unbacks everything; the chunks land in the recycled-idle pool,
+    # still COMMITTED against the budget. Zeroing the budget is the caller's
+    # half of the va#3 teardown discipline — budget-fed to the end.
+    residency.arena.set_budget(0)
     stats = dict(residency.arena.stats())
     committed, mapped = int(stats["committed_bytes"]), int(stats["mapped_bytes"])
     assert committed == 0 and mapped == 0, (
@@ -457,12 +473,18 @@ def main() -> int:
                         help="arena VRAM budget; the whole rig stays under the "
                              "micro-rig 4 GiB device bound")
     parser.add_argument("--out", default=str(SCRATCH / "verdict.json"))
+    parser.add_argument("--load-gate-max", type=float, default=24.0,
+                        help="raise ONLY for the correctness arms (A-E) under "
+                             "an explicit coordinator window grant; arm F "
+                             "refuses above 24 regardless")
     args = parser.parse_args()
+    if "F" in args.arms and args.load_gate_max > 24.0 and os.getloadavg()[0] > 24.0:
+        raise SystemExit("arm F is load-sensitive: run it under a load-24 gate")
 
     from gen_worker.rigcheck import assert_fleet_line
 
     assert_fleet_line("pgw#1607 checkpoint-juggle rig")
-    load_gate()
+    load_gate(args.load_gate_max)
     guard = os.environ.get("GEN_WORKER_HOST_MOVE_GUARD", "1")
     if guard == "0":
         raise SystemExit("GEN_WORKER_HOST_MOVE_GUARD=0: refusing to run")
