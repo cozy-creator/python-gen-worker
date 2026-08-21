@@ -46,6 +46,7 @@ import functools
 import json
 import re
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, TypeVar
 
 import msgspec
@@ -62,7 +63,9 @@ from .execution_lanes import known_execution_lane_bodies
 # `FileNotFoundError`), and naming the path makes the refusal say which tree it
 # looked in. The three readers below are `lru_cache`d because the corpus is
 # 2.6 MB of JSON and every lane declaration in the image would otherwise re-read
-# it at class-definition time.
+# it at class-definition time. They hand back a `MappingProxyType` because a
+# `lru_cache` over a mutable result is one caller's `.pop()` away from a corpus
+# that silently disagrees with the files on disk for the rest of the process.
 
 _SPEC_V2 = Path(layout2.__file__).resolve().parent / "spec" / "v2"
 
@@ -77,14 +80,14 @@ def quant_rules() -> Mapping[str, layout2.Quant]:
     EVALUATOR, which is Go's, and reading them here would be the first half of
     growing a second one.
     """
-    return dict(layout2.rules(_SPEC_V2))
+    return MappingProxyType(dict(layout2.rules(_SPEC_V2)))
 
 
 @functools.lru_cache(maxsize=1)
 def topologies() -> Mapping[str, Mapping[str, Mapping[str, tuple[int, ...]]]]:
     """handle -> component -> key -> logical shape. SHAPES ONLY — a topology
     carries no dtype, because the dtype is the quant rule's half of the pair."""
-    return dict(layout2.topologies(_SPEC_V2))
+    return MappingProxyType(dict(layout2.topologies(_SPEC_V2)))
 
 
 @functools.lru_cache(maxsize=1)
@@ -99,7 +102,7 @@ def display_names() -> Mapping[str, str]:
     pair is `plain.f16@1` while its display name says `-fp16@1`.
     """
     raw = json.loads((_SPEC_V2 / "display-names.json").read_text(encoding="utf-8"))
-    return dict(raw.get("names") or {})
+    return MappingProxyType(dict(raw.get("names") or {}))
 
 
 def known_quant_rules() -> tuple[str, ...]:
