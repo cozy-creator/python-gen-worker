@@ -38,6 +38,20 @@ across four legs without an OOM, and ran the same 1024x1024/20-step/CFG request 
 faster**. The card had ~7284 MiB free. Full residency FIT, by a demonstrated margin, and our
 decider refused it.
 
+**And pgw#1604 measured the same defect independently, on SDXL, and stated its arithmetic.**
+Finding 1 of the VRAM-limbo curve, verbatim: *"SDXL is NEVER fully resident on this card, and
+cannot be.* ``select_auto_mode``'s *fit test is* ``needed <= avail - 2.0``; *the confessed*
+``needed_gb`` *is 6.5, so residency wants **8.5 GiB free on a 7.62 GiB card**. There is no*
+``off``/``native`` *row at any budget. The "ceiling" is already a degraded rung."*
+
+Finding 5 of the same curve is why the answer is to DELETE the constant rather than raise it:
+the same request peaks at **2603 MiB at a 6.0 GiB cap, 2218 at 2.5, 1962 at 2.0, and 494 once
+tiling engages** — the caching allocator hands cached blocks back under pressure without being
+asked. *"Any VRAM sizing rule derived from a high-water mark measured on a roomy card
+systematically overstates the requirement."* A reserve fitted to a roomy-card high-water mark
+is measuring the allocator's generosity, not the request's need, and every GiB it overstates
+is a GiB the card had and the request did not get.
+
 It refused it on arithmetic, not on a measurement: ``select_auto_mode`` demands
 ``weights <= free - _DEFAULT_SAFETY_MARGIN_GB`` and ``_plan_partial_resident`` then demands
 ``weights <= free - PARTIAL_RESIDENT_RESERVE_GB`` — two independent 2 GiB guesses at one

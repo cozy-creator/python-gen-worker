@@ -436,3 +436,76 @@ def test_the_declaration_marks_a_dtype_fragile_vae_pinned(monkeypatch):
     assert not by_name["unet"].pinned
     # And the phase order is diffusers' own published sequence, not an invention.
     assert by_name["text_encoder"].phase < by_name["unet"].phase < by_name["vae"].phase
+
+
+# --- the SDXL case, measured independently by pgw#1604 --------------------------------------
+
+# pgw#1604 finding 1, the VRAM-limbo curve on the same 4070: SDXL's confessed `needed_gb` is
+# 6.5, so `select_auto_mode`'s `needed <= avail - 2.0` wants 8.5 GiB free on a 7.62 GiB card.
+# There is no `off`/`native` row AT ANY BUDGET. "The ceiling is already a degraded rung."
+SDXL_NEEDED = int(6.5 * GIB)
+CARD_USABLE = 7803 * MIB
+
+# pgw#1604 finding 5: the SAME request peaks at 2603 MiB under a 6.0 GiB cap, 2218 at 2.5,
+# 1962 at 2.0, and 494 once tiling engages. The allocator hands cached blocks back under
+# pressure without being asked, so a reserve fitted to a roomy-card high-water mark measures
+# the allocator's generosity, not the request's need.
+SDXL_PEAK_AT_6GIB_CAP = 2603 * MIB
+SDXL_PEAK_AT_2GIB_CAP = 1962 * MIB
+
+
+def test_sdxl_gets_a_resident_row_the_old_ladder_could_not_produce():
+    """pgw#1604's finding 1, inverted into the fix.
+
+    The card cannot hold 6.5 GiB of weights AND a 2.0 GiB guess — that is the arithmetic that
+    produced "no `off` row at any budget". It CAN hold 6.5 GiB of weights and the probe floor,
+    and whether that actually serves is then a question for the card rather than for a
+    constant.
+    """
+    # SDXL's denoiser is never a paging candidate, so this declaration has nothing to stream
+    # — which is exactly the position the old ladder was in. The predicate that matters here
+    # is therefore `over_card`: did the demand FIT, not was anything paged.
+    comps = [ComponentDecl("unet", SDXL_NEEDED, phase=1)]
+    g = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=CARD_USABLE),
+        request=RequestArena.cold(),
+        stream_selector=cheapest_streamed,
+    )
+    assert g.fully_resident and not g.over_card, g.line()
+
+    old = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=CARD_USABLE),
+        request=RequestArena(bytes=2 * GIB, basis="declared"),
+        stream_selector=cheapest_streamed,
+    )
+    assert old.over_card, "the 2 GiB guess is what removed SDXL's resident row"
+    # 6.5 + 2.0 = 8.5 GiB wanted against 7.62 GiB of card. pgw#1604's arithmetic, exactly.
+    assert old.resident_bytes + old.request_bytes > CARD_USABLE
+
+
+def test_a_reserve_read_off_a_roomy_card_overstates_the_requirement():
+    """pgw#1604 finding 5, as an admission consequence rather than an observation.
+
+    Sizing the request arena from the 6.0 GiB-cap high-water mark costs SDXL its resident row;
+    sizing it from what the same request actually needed under pressure does not. The measured
+    spread between the two is the cost of measuring a peak on a roomy card.
+    """
+    # pgw#1586's measured resident weights, so both sides of the comparison are banked
+    # numbers and nothing is fitted to make the assertion land.
+    comps = [ComponentDecl("unet", SDXL_WEIGHTS, phase=1)]
+    spend = Spendable(driver_free_bytes=CARD_USABLE)
+
+    roomy = plan_grant(
+        comps, spendable=spend,
+        request=RequestArena(bytes=SDXL_PEAK_AT_6GIB_CAP, basis="measured"),
+        stream_selector=cheapest_streamed,
+    )
+    pressured = plan_grant(
+        comps, spendable=spend,
+        request=RequestArena(bytes=SDXL_PEAK_AT_2GIB_CAP, basis="measured"),
+        stream_selector=cheapest_streamed,
+    )
+    assert roomy.over_card, "a roomy-card peak overstates the requirement past the card"
+    assert not pressured.over_card, pressured.line()
