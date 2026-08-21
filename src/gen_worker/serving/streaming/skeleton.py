@@ -17,6 +17,18 @@ after ``from_pretrained``, minus the weights, which arrive next.
 Symmetry with the publish moment (pgw#1370): the SAME construction on meta,
 with nothing streamed into it, is what the derive traces. One surface, two
 moments — the ``ctx.compile`` duality, for weights.
+
+pgw#1623: THE SKELETON IS BUILT AT THE LANE'S DTYPE. A config-built module
+lands at whatever ``torch.get_default_dtype()`` and its own config say —
+float32 for a diffusers ``from_config``, the config's ``torch_dtype`` for some
+transformers classes — and NOTHING here used to name a dtype at all. Every
+tensor a container carries is then overwritten by the stream, so the skeleton's
+dtype survives only on what the container does NOT name: real (non-meta)
+buffers, non-persistent buffers, and any optional component. That residue is
+enough to kill a request: measured on a rented A4500, sdxl reached
+``RuntimeError: Input type (c10::Half) and bias type (float)`` inside a conv.
+The eager ``from_pretrained`` bridge has always applied ``torch_dtype=`` the
+lane declares; this is the same rule, on the other loader.
 """
 
 from __future__ import annotations
@@ -119,24 +131,37 @@ def _is_module(cls: type) -> bool:
     return issubclass(cls, torch.nn.Module)
 
 
-def _build_on_meta(cls: type, directory: Path, component: str) -> Any:
-    """Construct one nn.Module component from its config, on meta."""
+def _build_on_meta(
+    cls: type, directory: Path, component: str, compute_dtype: Any = None,
+) -> Any:
+    """Construct one nn.Module component from its config, on meta.
+
+    ``compute_dtype`` is the LANE's declared dtype. Applied after construction
+    with ``Module.to(dtype)`` — which casts floating parameters and buffers and
+    leaves ints and bools alone, exactly what ``from_pretrained(torch_dtype=)``
+    does on the eager bridge — rather than by setting a default dtype around
+    the constructor, because a class that reads ``config.torch_dtype`` itself
+    would ignore the default and land somewhere else again.
+    """
     load_config = getattr(cls, "load_config", None)
     from_config = getattr(cls, "from_config", None)
+    built: Any = None
     if callable(load_config) and callable(from_config):
         # diffusers ConfigMixin: the config is a plain dict on disk.
         config = load_config(str(directory))
         if isinstance(config, tuple):
             config = config[0]
         with init_empty_weights():
-            return from_config(config)
-
-    config_class = getattr(cls, "config_class", None)
-    if config_class is not None and hasattr(config_class, "from_pretrained"):
-        # transformers PreTrainedModel: the config is a typed object.
-        config = config_class.from_pretrained(str(directory))
-        with init_empty_weights():
-            return cls(config)
+            built = from_config(config)
+    else:
+        config_class = getattr(cls, "config_class", None)
+        if config_class is not None and hasattr(config_class, "from_pretrained"):
+            # transformers PreTrainedModel: the config is a typed object.
+            config = config_class.from_pretrained(str(directory))
+            with init_empty_weights():
+                built = cls(config)
+    if built is not None:
+        return built if compute_dtype is None else built.to(compute_dtype)
 
     raise SkeletonError(
         f"component {component!r} ({cls.__module__}.{cls.__name__}) exposes "
@@ -151,8 +176,14 @@ def build(
     checkpoint_dir: Path,
     *,
     extra_kwargs: Optional[Mapping[str, Any]] = None,
+    compute_dtype: Any = None,
 ) -> Skeleton:
-    """Build ``pipeline_cls`` from configs only. Reads no tensor bytes."""
+    """Build ``pipeline_cls`` from configs only. Reads no tensor bytes.
+
+    ``compute_dtype`` is the lane's declared dtype; every module component is
+    built at it (pgw#1623). ``None`` keeps each config's own, which is the
+    laneless case (a fixture, a derive) and nothing else.
+    """
     index_path = Path(checkpoint_dir) / MODEL_INDEX
     if not index_path.is_file():
         raise SkeletonError(
@@ -245,7 +276,7 @@ def build(
             )
         cls = _resolve(str(library), str(class_name))
         if _is_module(cls):
-            components[name] = _build_on_meta(cls, directory, name)
+            components[name] = _build_on_meta(cls, directory, name, compute_dtype)
             modules[name] = components[name]
         else:
             # PASSTHROUGH: a non-`nn.Module` component (tokenizer, scheduler,

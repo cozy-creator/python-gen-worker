@@ -19,11 +19,23 @@ Four properties, each load-bearing:
    consecutive file bytes; the tensors that overlap it are scattered out of
    it. Small tensors coalesce into one read for free (SDXL has ~2.5k of
    them), and a tensor larger than the window simply spans several.
-3. **dtype passthrough.** Bytes land verbatim in the container's own dtype —
-   bf16 stays bf16, fp8 stays fp8 with its scale tensors beside it. Any
-   conversion is the STORE's contract-negotiation job (the lane IS a tensorfs
-   layout contract), never load time. A container that disagrees with the
-   active lane is reported, not silently repaired.
+3. **One pipeline, one dtype: the LANE's** (pgw#1623). Bytes land verbatim —
+   the read is always a byte copy, fp8 stays fp8 with its scale tensors beside
+   it, ints and bools are never touched. But a WIDE FLOAT container whose
+   stored dtype is not the lane's declared one is cast to it after it lands,
+   which is the identical rule the eager ``from_pretrained(torch_dtype=…)``
+   bridge has applied since pgw#1447. Two loaders in one platform disagreeing
+   about the dtype of the same lane is not a passthrough property, it is a
+   fork: measured on a rented A4500, the `wai-illustrious@prod-fp16vae`
+   checkpoint (unet/text encoders fp16, VAE fp32 — the hub's own catalog says
+   so, from safetensors headers) came back as a HETEROGENEOUS pipeline and
+   died `Input type (c10::Half) and bias type (float)` inside the VAE's first
+   conv, on a lane declaring bfloat16. A tree whose containers disagree with
+   its lane is still a STORE defect and is still reported — but it is reported
+   AND served, never passed through into a pipeline that cannot run a forward.
+   :meth:`StreamingLoader._assert_lane_dtype` then proves the result, because
+   the sibling bug on the eager bridge is silent (20-40x slow, correct images)
+   and only this one crashed.
 4. **Nothing survives on meta.** Every parameter and buffer is accounted for
    by name. A missing name would serve uninitialized memory on the first
    request, so it is a typed refusal naming the names.
@@ -65,8 +77,30 @@ _TORCH_DTYPE: Mapping[str, str] = {
 }
 
 
+#: The dtypes a lane cast is defined over. A quantized or sub-byte container
+#: is the lane's OWN bytes when the lane is quantized (`lane_materialize` owns
+#: those modules), so nothing here ever touches one; integer and bool tensors
+#: are not precision at all. Same set `Module.to(dtype)` moves.
+_WIDE_FLOATS = ("float64", "float32", "float16", "bfloat16")
+
+
+def _is_wide_float(dtype: Any) -> bool:
+    import torch
+
+    return any(dtype is getattr(torch, name, None) for name in _WIDE_FLOATS)
+
+
 class LoadError(RuntimeError):
     """A streamed load could not be completed as specified."""
+
+
+class LaneDtypeUnmet(LoadError):
+    """The loaded pipeline is not the dtype its lane declares.
+
+    A structural refusal, not a numerics opinion: it can only fire when the
+    cast above missed something, which means a tensor reached the card by a
+    path this engine does not know about.
+    """
 
 
 class NameMismatch(LoadError):
@@ -89,6 +123,9 @@ class LoadReport:
     windows: int = 0
     seconds: float = 0.0
     dtypes: Tuple[str, ...] = ()
+    #: Tensors whose stored wide-float dtype was not the lane's and were cast
+    #: to it at install (pgw#1623). 0 means the tree WAS the contract's bytes.
+    cast_to_lane: int = 0
 
     def attributes(self) -> Dict[str, object]:
         return {
@@ -99,6 +136,7 @@ class LoadReport:
             "io": self.io,
             "containers": self.containers,
             "tensors": self.tensors,
+            "cast_to_lane": self.cast_to_lane,
         }
 
 
@@ -228,11 +266,18 @@ class StreamingLoader:
 
         started = time.perf_counter()
         device = torch.device(self._device)
-        built = _skeleton.build(pipeline_cls, Path(checkpoint_dir))
+        compute_dtype = _lane_compute_dtype(lane)
+        built = _skeleton.build(
+            pipeline_cls, Path(checkpoint_dir), compute_dtype=compute_dtype)
         report = LoadReport(
             io=self._io,
             source=str(getattr(self._store, "KIND", type(self._store).__name__)),
         )
+        #: (slot, name, stored dtype) for every tensor the lane cast covers.
+        #: Collected during the walk, applied AFTER the pool has finished, so a
+        #: cast never reads a buffer whose copy is still in flight on the
+        #: staging stream.
+        recasts: List[Tuple[_Slot, str, Any]] = []
 
         with StagingPool(
             device,
@@ -248,8 +293,11 @@ class StreamingLoader:
                     pool=pool,
                     device=device,
                     report=report,
+                    compute_dtype=compute_dtype,
+                    recasts=recasts,
                 )
             report.containers = len(self._planned)
+        self._cast_to_lane(recasts, compute_dtype, report)
 
         for component, module in built.modules.items():
             survivors = _skeleton.meta_survivors(module)
@@ -269,7 +317,7 @@ class StreamingLoader:
             )
         self.last_report = report
         self._place_uninstalled(built.pipeline, device)
-        self._warn_on_lane(lane, report)
+        self._assert_lane_dtype(built.modules, compute_dtype)
         logger.info(
             "ctx.load: %s resident on %s — %.2f GiB streamed in %.2fs "
             "(%.2f GB/s, staging=%s io=%s, %d tensors over %d windows)",
@@ -372,6 +420,8 @@ class StreamingLoader:
         pool: StagingPool,
         device: Any,
         report: LoadReport,
+        compute_dtype: Any = None,
+        recasts: Optional[List[Tuple[_Slot, str, Any]]] = None,
     ) -> None:
         import torch
 
@@ -417,6 +467,9 @@ class StreamingLoader:
                 )
             pool.track(destination)
             _install(slot, destination)
+            if (recasts is not None and compute_dtype is not None
+                    and dtype is not compute_dtype and _is_wide_float(dtype)):
+                recasts.append((slot, f"{component}/{entry.name}", dtype))
             seen.add(entry.name)
             placements.append(
                 _Placement(
@@ -510,37 +563,115 @@ class StreamingLoader:
     # -- the lane contract -------------------------------------------------
 
     @staticmethod
-    def _warn_on_lane(lane: Any, report: LoadReport) -> None:
-        """The lane IS the dtype (there is no ``torch_dtype=`` to pass).
+    def _cast_to_lane(
+        recasts: List[Tuple[_Slot, str, Any]],
+        compute_dtype: Any,
+        report: LoadReport,
+    ) -> None:
+        """Land every off-lane wide-float tensor at the lane's dtype, and SAY
+        SO — the tree not being the contract's bytes is a store defect that
+        this repair must not erase (pgw#1623).
 
-        A container whose floating dtype is not the lane's means the tree was
-        not converted through the active contract before it reached this pod.
-        That is a STORE defect — reported here, never repaired here, because
-        a load-time conversion is exactly the byte-rewriting this whole
-        design deleted.
+        One tensor at a time, replacing in place: the pre-cast tensor's only
+        remaining holder is the slot being overwritten, so the peak cost of
+        the whole pass is one tensor, not a second copy of the checkpoint.
         """
-        declared = getattr(lane, "dtype", None)
-        if declared is None or not report.dtypes:
+        if not recasts:
             return
-        spelling = str(declared).rsplit(".", 1)[-1].upper()
-        floating = {
-            name for name in report.dtypes if name.startswith(("F", "BF"))
-        }
-        aliases = {spelling, {"BFLOAT16": "BF16", "FLOAT16": "F16",
-                              "FLOAT32": "F32"}.get(spelling, spelling)}
-        if floating and not (floating & aliases):
-            logger.warning(
-                "ctx.load: the active lane declares dtype %s but this "
-                "checkpoint's containers carry %s — the tree was not "
-                "converted through the lane's layout contract before it "
-                "reached this pod; loading verbatim (conversion is the "
-                "store's job, never the loader's)",
-                declared,
-                ", ".join(sorted(floating)),
+        counts: Dict[str, int] = {}
+        # Reverse order so the list can be truncated as it drains: the tuple
+        # holds no tensor, but the caller's list would otherwise pin nothing
+        # and the ordering keeps the trace readable (last container first).
+        while recasts:
+            slot, name, stored = recasts.pop()
+            held = (
+                slot.owner._parameters.get(slot.leaf) if slot.parameter
+                else slot.owner._buffers.get(slot.leaf)
+            )
+            if held is None:  # pragma: no cover — defensive
+                continue
+            _install(slot, held.to(compute_dtype))
+            key = str(stored).rsplit(".", 1)[-1]
+            counts[key] = counts.get(key, 0) + 1
+            report.cast_to_lane += 1
+        rendered = ", ".join(
+            f"{count} {dtype}" for dtype, count in sorted(counts.items()))
+        sentence = (
+            f"{report.cast_to_lane} tensor(s) were stored off-lane "
+            f"({rendered}) and were cast to the lane's "
+            f"{str(compute_dtype).rsplit('.', 1)[-1]} at load; the tree was "
+            f"not converted through the lane's layout contract before it "
+            f"reached this pod"
+        )
+        logger.warning("ctx.load: %s", sentence)
+        # A pod's stdout does not survive the pod (RunPod has no logs API), and
+        # "which deployments are serving bytes their own lane does not name" is
+        # a fleet question. Typed, so it is one query hub-side.
+        try:
+            from ... import activity
+
+            activity.emit_event(
+                activity.KIND_SERVE_DEGRADE, sentence,
+                phase="container_dtype_off_lane", step=report.cast_to_lane,
+            )
+        except Exception:  # noqa: BLE001 — a confession never fails a load
+            logger.debug("ctx.load: could not emit the off-lane dtype event",
+                         exc_info=True)
+
+    @staticmethod
+    def _assert_lane_dtype(modules: Mapping[str, Any], compute_dtype: Any) -> None:
+        """Every wide-float tensor in the loaded modules IS the lane's dtype.
+
+        The instrument the eager sibling never had. pgw#1447 fixed the same
+        class on `from_pretrained` and could only fix it by inspection, because
+        a pipeline that is half fp16 and half fp32 there does not crash — it
+        upcasts per op and serves correct images 20-40x slow. This one crashed,
+        which is luck, not design; so the invariant is asserted rather than
+        left to whichever component happens to hold a conv.
+        """
+        if compute_dtype is None:
+            return
+        offenders: List[str] = []
+        for component, module in modules.items():
+            held = list(module.named_parameters(remove_duplicate=False))
+            held += list(module.named_buffers(remove_duplicate=False))
+            for name, tensor in held:
+                if tensor is None or not _is_wide_float(tensor.dtype):
+                    continue
+                if tensor.dtype is not compute_dtype:
+                    offenders.append(f"{component}/{name}={tensor.dtype}")
+                    if len(offenders) >= 8:
+                        break
+            if len(offenders) >= 8:
+                break
+        if offenders:
+            raise LaneDtypeUnmet(
+                f"the loaded pipeline is not the lane's {compute_dtype}: "
+                f"{', '.join(offenders)}. A tensor reached the module by a "
+                f"path this engine did not install and so was never cast — "
+                f"serving it would mix dtypes inside one forward"
             )
 
 
+def _lane_compute_dtype(lane: Any) -> Any:
+    """The lane's declared dtype, when it is one this cast is defined over.
+
+    Reads the lane through the SAME resolver both eager bridges use, so the
+    streaming loader cannot come to a different conclusion about the same
+    contract than `from_pretrained(torch_dtype=…)` does. A quantized lane
+    (fp8/fp4) answers a narrow dtype and is returned as ``None``: its bytes ARE
+    the lane, and `serving.lane_materialize` owns those modules.
+    """
+    if lane is None:
+        return None
+    from ..context import _lane_torch_dtype
+
+    dtype = _lane_torch_dtype(lane)
+    return dtype if _is_wide_float(dtype) else None
+
+
 __all__ = [
+    "LaneDtypeUnmet",
     "LoadError",
     "LoadReport",
     "NameMismatch",
