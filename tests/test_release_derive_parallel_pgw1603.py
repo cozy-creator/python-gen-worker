@@ -93,10 +93,9 @@ def test_items_are_structural_variants_never_buckets(
 
     prime_sys_path(FIXTURES)
     module = importlib.import_module("static_axes_endpoint")
-    cls = module.StaticFanShaped
-    items = derive_items(cls)
-    # One lane, no Defaults-cfg twin, no structural= axes: ONE item covers
-    # the whole 3-aspect x 2-guidance payload fan.
+    items = derive_items(module)
+    # One class, one lane, no Defaults-cfg twin, no structural= axes: ONE
+    # item covers the whole 3-aspect x 2-guidance payload fan.
     assert len(items) == 1
 
 

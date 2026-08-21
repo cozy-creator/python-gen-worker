@@ -39,20 +39,22 @@ def add_subparser(sub: Any) -> None:
         "--checkpoint-ref",
         action="append",
         default=[],
-        metavar="[SLOT=]OWNER/NAME@REV",
+        metavar="[CLASS=]OWNER/NAME@REV",
         help="owner/name@revision to trace against. Required for an endpoint "
              "that declares a model slot; a weightless endpoint needs none. "
-             "Repeat with `slot=ref` to give a SECONDARY model slot its own "
-             "checkpoint; the bare form is the primary model's.",
+             "Repeat with `ModelClass=ref` to give one model class its own "
+             "checkpoint — a release derives EVERY compile-marking class "
+             "(pgw#1650); an entrypoint slot name keys a tree too, and the "
+             "bare form is every model that names neither.",
     )
     parser.add_argument(
         "--checkpoint",
         action="append",
         default=[],
-        metavar="[SLOT=]PATH",
+        metavar="[CLASS=]PATH",
         help="a local checkpoint tree, INSTEAD of resolving --checkpoint-ref "
              "through the weight CAS (for a tree the store does not hold). "
-             "Repeatable as `slot=path`, same rule as --checkpoint-ref.",
+             "Repeatable as `ModelClass=path`, same rule as --checkpoint-ref.",
     )
     parser.add_argument(
         "--graph-cas",
@@ -403,7 +405,7 @@ def _trace(
             checkpoint_dir=tree if tree is not None else root,
             lockfile=lockfile if lockfile is not None else lockfile_beside(root),
             graph_cas=graph_cas_root,
-            slot_checkpoints=slot_trees or {},
+            checkpoint_trees=slot_trees or {},
             trace_workers=trace_workers,
         )
     except DeriveError as exc:

@@ -249,3 +249,48 @@ def test_a_smaller_card_is_still_refused_typed_before_any_byte_moves(
     with pytest.raises(NeverFits):
         manager.lease(*H3_KEY, lambda: Backend(journal))
     assert journal == []
+
+
+# --- pgw#1649: ONE OWNER for the 25%, and the confession names it -----------
+
+
+def test_the_25_percent_has_exactly_ONE_producer() -> None:
+    """pgw#1649. `worker.SnapshotSizer` and `serving/__main__.py`'s local
+    envelope path each spelled `weight // 4` as a bare literal, with the
+    reasoning written at neither — two producers of one policy, which is how
+    the two drift. Both import `residency.HEADROOM_DIVISOR` now.
+
+    The red arm is real: re-introduce a literal at either site and the two
+    numbers below stop being the same object.
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    import gen_worker
+    from gen_worker.serving.residency import HEADROOM_DIVISOR
+
+    src = _Path(gen_worker.__file__).resolve().parent
+    for relative in ("worker.py", "serving/__main__.py"):
+        tree = ast.parse((src / relative).read_text(encoding="utf-8"))
+        names = {
+            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        }
+        assert "HEADROOM_DIVISOR" in names, (
+            f"{relative} no longer charges through the owner"
+        )
+    assert HEADROOM_DIVISOR == 4
+
+
+def test_the_admission_confession_names_the_policy_and_its_DEATH_condition(
+    h3_manager: Any,
+) -> None:
+    """An operator reading a `NeverFits` must be able to tell an unmeasured
+    author-declared fraction from a measurement. The basis says which it is,
+    and what deletes it (pgw#1601's stamp) — so nobody re-tunes it instead."""
+    sizer, _ = h3_manager
+    charge = admission_charge(
+        sizer.resident_bytes(*H3_KEY), sizer.activation_headroom_bytes(*H3_KEY)
+    )
+    assert "UNMEASURED" in charge.basis
+    assert "pgw#1601" in charge.basis
+    assert "25% of the stored tree" in charge.basis

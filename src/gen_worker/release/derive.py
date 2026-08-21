@@ -8,6 +8,21 @@ instrumented discovery, and stamp the observed graph set -- plus the lane
 contracts and the model type's checkpoint-defaults schema -- as the static
 release metadata document.
 
+**A RELEASE DERIVES EVERY COMPILE-MARKING MODEL CLASS** (Paul's ruling,
+2026-08-21; pgw#1650): *"Of course both qwen image and qwen image edit can
+exist in the same endpoint. Why wouldn't they be able to? Just compile each
+component and swap them in and out of the pipeline."* Each subject class
+traces its OWN entrypoints against its OWN checkpoint tree
+(``checkpoint_trees``, keyed by class name) and states its own graph set; the
+document carries them in ``classes[]``, keyed by (class x lane), and
+``graphs``/``lane_contracts`` are the release-wide UNION over those rows (every
+merge rule is stated in :func:`_merge_lanes`). Two classes CAN declare the same
+lane — the two qwen arms do, because their checkpoints are byte-layout
+identical — which is why the union is a merge and not a concatenation. The
+serving side already routes per class: ``serving/serve_loop.py`` keys backends
+``(model_cls, checkpoint_ref, lane)`` and resolves a ``DeployBinding`` per
+class, so swapping the arms in and out is existing machinery, not new.
+
 **pgw#1621 re-keyed every lane spelling in this document onto the tensor-layout
 v2 STAMP PAIR** — ``"<topology>@N+<quant>@N"``, th#1809's ``LayoutId.render()``,
 byte-shared with the hub's ``tensorfs.LayoutID.String``. Three fields carry it
@@ -72,7 +87,7 @@ import json
 import types
 import traceback
 import typing
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType, ModuleType
@@ -225,6 +240,20 @@ class ReleaseDeriveResult:
     unmarked_lanes: tuple[str, ...] = ()
     unenumerable_entrypoints: tuple[tuple[str, str], ...] = ()
     unservable_payloads: tuple[str, ...] = ()
+    #: Every subject class this release derived (pgw#1650) — a release derives
+    #: EVERY compile-marking class, not one.
+    classes: tuple[str, ...] = ()
+    #: ``(class, lane stamp, graph identities)`` — the per-class graph sets
+    #: BEFORE the release-wide union, which is what a pipeline log wants to
+    #: read when two classes share a lane.
+    class_lane_graphs: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+    #: The component names the construction census states, sorted.
+    census_components: tuple[str, ...] = ()
+    #: Why there is NO census — ``NO_PIPELINE_INDEX`` for a tree that is not a
+    #: diffusers pipeline and is therefore never streaming-served. Empty means
+    #: a census was emitted. There is no third value: a census that could not
+    #: be COMPUTED fails the build.
+    census_absent: str = ""
 
     @property
     def eager_permanent(self) -> bool:
@@ -303,9 +332,9 @@ def _assert_weights_free(torch: Any, program: Any) -> None:
         )
 
 
-def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
+def _module_model_classes(module: ModuleType) -> tuple[list[type], list[type]]:
 
-    found: list[type] = []
+    marked: list[type] = []
     unmarked: list[type] = []
     for value in vars(module).values():
         if not (
@@ -324,31 +353,69 @@ def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
             # were fully read at class definition — dtype and sm floor off the
             # ratified quant rule — so there is nothing left here to re-read.
             model_declared_lanes(value)
-            marked = model_marks_compile(value)
+            marks = model_marks_compile(value)
         except ModelDeclarationError as exc:
             raise DeriveError(str(exc)) from exc
-        (found if marked else unmarked).append(value)
-    if len(found) > 1:
-        raise DeriveError(
-            f"module {module.__name__!r} has more than one COMPILE-MARKING "
-            f"model class ({[cls.__name__ for cls in found]!r}); a release "
-            f"derives ONE. An auxiliary model that another slot drives simply "
-            f"calls no `ctx.compile()` in its `load()` — that is the entire "
-            f"eager declaration (Paul, 2026-08-20), and there is no keyword "
-            f"for it."
-        )
-    if found:
-        return (found[0], "")
+        (marked if marks else unmarked).append(value)
+    return (
+        sorted(marked, key=lambda cls: cls.__name__),
+        sorted(unmarked, key=lambda cls: cls.__name__),
+    )
+
+
+def _subject_classes(module: ModuleType) -> tuple[type, ...]:
+    """The classes this release DERIVES — every compile-marking one (pgw#1650).
+
+    Paul, 2026-08-21: *"Of course both qwen image and qwen image edit can exist
+    in the same endpoint. Why wouldn't they be able to? Just compile each
+    component and swap them in and out of the pipeline."* Each subject traces
+    its own entrypoints against its own checkpoint tree and states its own
+    graph set; the document carries them keyed by (class x lane).
+
+    THE ONE REFUSAL LEFT is the case that is still genuinely unreadable:
+    several classes and NOT ONE of them marks a compile target. Subjecthood is
+    read off the MARK (pgw#1597/#1599: "compilation participation is the
+    MARK"), so with no mark anywhere there is nothing to distinguish a release
+    subject from an auxiliary model another slot drives.
+    """
+
+    marked, unmarked = _module_model_classes(module)
+    if marked:
+        return tuple(marked)
     if len(unmarked) > 1:
         raise DeriveError(
             f"module {module.__name__!r} has more than one model class "
             f"({[cls.__name__ for cls in unmarked]!r}) and NONE of them marks "
             f"a compile target, so which one the release is ABOUT cannot be "
-            f"read. Mark the compiled one via `ctx.compile()` in its `load()`; "
-            f"an auxiliary model that another slot drives marks nothing and is "
-            f"then unambiguous."
+            f"read. A release derives every COMPILE-MARKING class (pgw#1650), "
+            f"and there are none here. Mark each compiled one via "
+            f"`ctx.compile()` in its `load()`; an auxiliary model that another "
+            f"slot drives marks nothing and is then unambiguous."
         )
-    return (unmarked[0] if unmarked else None, "")
+    return tuple(unmarked)
+
+
+def _checkpoint_tree(
+    trees: Mapping[str, Path],
+    primary: Path,
+    cls: Optional[type],
+    slot_name: str = "",
+) -> Path:
+    """The tree ONE model class loads from: its class name, then its slot name.
+
+    pgw#1650: a release has several subject classes, and two of them can hold
+    the same slot NAME in their own entrypoints (both qwen arms take
+    ``model:``) while binding different checkpoints. The class is the thing
+    that owns a checkpoint, so the class name is the key; the slot name stays
+    readable for an auxiliary model, which is how se#794's second tree is
+    spelled today.
+    """
+
+    if cls is not None and cls.__name__ in trees:
+        return trees[cls.__name__]
+    if slot_name and slot_name in trees:
+        return trees[slot_name]
+    return primary
 
 
 @dataclass(frozen=True)
@@ -906,6 +973,95 @@ def _compile_stack_from_lockfile(lockfile: Path) -> tuple[tuple[str, str], ...]:
         raise DeriveError(str(exc)) from exc
 
 
+#: Why a lane carries no census. There is no third value and no soft row: a
+#: tree that HAS a `model_index.json` and cannot be censused fails the build.
+NO_PIPELINE_INDEX = "no_model_index_json"
+
+
+def _construction_census(
+    checkpoint_dir: Path, lanes: tuple[tuple[str, Any], ...]
+) -> dict[str, Any]:
+    """The CONSTRUCTION CENSUS of this run's tree (pgw#1647, th#2281/th#2287).
+
+    Computed here because here is where the tree and the IMAGE meet. What a
+    module IS — its tie groups, the classes its config's quantizer swaps in, the
+    buffers its ``__init__`` computes — is a code x config fact decided by THIS
+    image's transformers and diffusers. The tensorfs stamp stays the BYTES'
+    identity; this is the MODULE's.
+
+    **ITS KEY IS IMAGE x CONFIG TREE** (th#2287's adjudication, 2026-08-21), not
+    source x image like the rest of the release contract — and this function is
+    already at that key, because it is the BIND-TIME
+    ``release derive --checkpoint`` run that censuses, and that run has exactly
+    one primary tree. The hub re-keys the emitted document onto the bind
+    (release x image digest x config digest) and never asks this side to.
+
+    **ONE census for the whole release, and the invariance is PROVEN here.**
+    A lane's only effect on construction is the dtype it casts wide floats to,
+    and the census records those as ``census.LANE_DTYPE`` because the lane
+    contract and ``engine._assert_lane_dtype`` already state that fact exactly.
+    So every declared lane must produce the SAME census — and rather than
+    assume it, this builds one per lane and refuses if two disagree. A
+    disagreement means a lane changes what the module IS, which is a fact worth
+    a refusal rather than a silently-picked winner.
+
+    Config-only and allocation-free: parameters come up on meta and buffers are
+    computed from config, so a 66 GiB DiT costs what a tiny one costs. It goes
+    through :func:`~gen_worker.serving.streaming.skeleton.build_modules`, which
+    is the reader production serves with — a census taken by a second parser
+    would be a statement about the second parser.
+
+    **REFUSE ON TRACEBACK** (Paul's derive ruling). A tree that carries a
+    ``model_index.json`` and cannot be censused FAILS the build, named. There is
+    no soft row-marking and no green release with the reason in a log, because
+    the entire point of moving this question to publish time is that a release
+    which cannot say what module it builds must never reach a card.
+    """
+    from ..serving.streaming import census as _census
+    from ..serving.streaming.skeleton import MODEL_INDEX
+
+    if not (Path(checkpoint_dir) / MODEL_INDEX).is_file():
+        # Not a refusal: a tree with no component index is not a diffusers
+        # pipeline and the streaming loader never binds to one. The hub's door
+        # (th#2281) is what decides whether a STREAMING-served release may ship
+        # without a census; this side states the fact and never guesses.
+        return {"absent": NO_PIPELINE_INDEX}
+
+    agreed: Optional[Any] = None
+    agreed_handle = ""
+    for handle, dtype in lanes:
+        try:
+            taken = _census.for_tree(checkpoint_dir, compute_dtype=dtype)
+        except Exception as exc:
+            raise DeriveError(
+                f"lane {handle!r}: the CONSTRUCTION CENSUS could not be "
+                f"computed from {checkpoint_dir} — {type(exc).__name__}: {exc}. "
+                f"A release states what module it builds or it is not a "
+                f"release: this is the meta-skeleton family "
+                f"(pgw#1626/#1638/#1644), and every one of those four walls was "
+                f"a construction question answered on a rented card because "
+                f"nothing asked it here first"
+            ) from exc
+        if agreed is None:
+            agreed, agreed_handle = taken, handle
+            continue
+        if taken != agreed:
+            raise DeriveError(
+                f"lanes {agreed_handle!r} and {handle!r} build DIFFERENT "
+                f"modules from {checkpoint_dir}: their construction censuses "
+                f"disagree ({agreed.digest} vs {taken.digest}). A lane declares "
+                f"a dtype and a layout, not a different model — the census "
+                f"records lane-governed dtypes as {_census.LANE_DTYPE!r} "
+                f"precisely so that a lane cannot move it. Publishing one of "
+                f"the two would make the release document describe a module "
+                f"half of its lanes do not build"
+            )
+    if agreed is None:  # pragma: no cover — a class with no declared lane
+        return {"absent": NO_PIPELINE_INDEX}
+    document: dict[str, Any] = agreed.as_document()
+    return document
+
+
 def _defaults_schema(model_type: Optional[type]) -> Optional[dict[str, Any]]:
 
     if model_type is None:
@@ -1038,17 +1194,20 @@ def deepest_endpoint_frame(
 
 @dataclass(frozen=True)
 class DeriveItem:
-    """One trace unit: (lane × defaults-variant × structural-class combo).
+    """One trace unit: (class × lane × defaults-variant × structural combo).
 
     pgw#1603: the item enumeration IS Paul's trace-count directive. Items
     are the structural variants — each runs ONE author-code drive over its
     shape fan and pays ONE symbolic export per observed group — and they are
     independent, so they run in parallel processes. Shape buckets never
     become items; they are covered inside an item's drive and stamped by
-    static bind when the serving declaration is STATIC.
+    static bind when the serving declaration is STATIC. Subject classes
+    (pgw#1650) are the outermost axis, so a multi-class release parallelizes
+    across its classes too.
     """
 
     index: int
+    class_index: int
     lane_index: int
     defaults_index: int
     pinned: tuple[tuple[str, str], ...]
@@ -1068,19 +1227,23 @@ def _structural_combos(
     return [tuple(combo) for combo in itertools.product(*choices)]
 
 
-def derive_items(cls: type) -> list[DeriveItem]:
+def derive_items(module: ModuleType) -> list[DeriveItem]:
     """The item enumeration, deterministic and shared by parent and workers."""
 
-    lanes = model_declared_lanes(cls)
-    defaults_count = len(_defaults_variants(model_model_type(cls)))
-    combos = _structural_combos(model_structural(cls))
     items: list[DeriveItem] = []
-    for lane_index in range(len(lanes)):
-        for defaults_index in range(defaults_count):
-            for combo in combos:
-                items.append(
-                    DeriveItem(len(items), lane_index, defaults_index, combo)
-                )
+    for class_index, cls in enumerate(_subject_classes(module)):
+        lanes = model_declared_lanes(cls)
+        defaults_count = len(_defaults_variants(model_model_type(cls)))
+        combos = _structural_combos(model_structural(cls))
+        for lane_index in range(len(lanes)):
+            for defaults_index in range(defaults_count):
+                for combo in combos:
+                    items.append(
+                        DeriveItem(
+                            len(items), class_index, lane_index,
+                            defaults_index, combo,
+                        )
+                    )
     return items
 
 
@@ -1103,7 +1266,7 @@ def _item_plans(
         ]
         if any(pinned[axis] != first[axis] for axis in absent):
             # A plan that cannot spell a pinned axis rides that axis's FIRST
-            # class only — once per (lane × defaults variant), never per class.
+            # class only — once per (class × lane × defaults), never per pin.
             continue
         try:
             payloads, _capped = _auto_payloads(
@@ -1137,6 +1300,7 @@ def _derive_lane_item(
 
     hollow = _hollow()
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
+    said = f"class {cls.__name__} lane {handle!r}"
     resolved = _resolve_lane(torchcg, lane)
     model_type = model_model_type(cls)
     refused = 0
@@ -1161,14 +1325,14 @@ def _derive_lane_item(
             try:
                 model.load(load_ctx)
             except hollow.HollowError as exc:
-                raise DeriveError(f"lane {handle!r}: {exc}") from exc
+                raise DeriveError(f"{said}: {exc}") from exc
             except Exception as exc:
                 raise DeriveError(
-                    f"lane {handle!r}: load() failed under the trace "
+                    f"{said}: load() failed under the trace "
                     f"session: {type(exc).__name__}: {exc}"
                 ) from exc
             if not load_ctx.marked_modules:
-                return None, 0, 0
+                return None
             modules = _named_marked_modules(model, load_ctx.marked_modules)
 
             aides: dict[str, Any] = {}
@@ -1176,7 +1340,9 @@ def _derive_lane_item(
                 for slot_name, slot_cls in plan.model_slots:
                     if slot_cls is cls or slot_name in aides:
                         continue
-                    slot_tree = slot_checkpoints.get(slot_name, checkpoint_dir)
+                    slot_tree = _checkpoint_tree(
+                        slot_checkpoints, checkpoint_dir, slot_cls, slot_name
+                    )
                     aide = slot_cls()
                     try:
                         aide.load(
@@ -1188,16 +1354,20 @@ def _derive_lane_item(
                             )
                         )
                     except Exception as exc:
+                        named = (
+                            slot_cls.__name__ in slot_checkpoints
+                            or slot_name in slot_checkpoints
+                        )
                         shared = (
-                            " (the PRIMARY checkpoint — this slot has no "
-                            "--checkpoint-ref of its own; an auxiliary model "
-                            "with a separate checkpoint needs "
-                            f"`--checkpoint-ref {slot_name}=<ref>`)"
-                            if slot_name not in slot_checkpoints
+                            " (the PRIMARY checkpoint — this class has no "
+                            "--checkpoint-ref of its own; a model with a "
+                            "separate checkpoint needs "
+                            f"`--checkpoint-ref {slot_cls.__name__}=<ref>`)"
+                            if not named
                             else ""
                         )
                         raise DeriveError(
-                            f"lane {handle!r}: entrypoint {plan.name!r} slot "
+                            f"{said}: entrypoint {plan.name!r} slot "
                             f"{slot_name!r} ({slot_cls.__name__}) failed to "
                             f"load from {slot_tree}{shared} under the trace "
                             f"session: "
@@ -1233,7 +1403,7 @@ def _derive_lane_item(
                                 frame = deepest_endpoint_frame(exc, endpoint_root)
                                 if frame is None or unservable is None:
                                     raise DeriveError(
-                                        f"lane {handle!r}: entrypoint "
+                                        f"{said}: entrypoint "
                                         f"{plan.name!r} failed on auto-enumerated "
                                         f"payload {index} ({payload!r}) with "
                                         f"binding {dict(binding)!r} under the "
@@ -1275,7 +1445,7 @@ def _derive_lane_item(
             except DeriveError:
                 raise
             except torchcg.DiscoveryError as exc:
-                raise DeriveError(f"lane {handle!r}: {exc}") from exc
+                raise DeriveError(f"{said}: {exc}") from exc
             # pgw#1603 acceptance (c): an axis that dropped to per-bucket
             # tracing is said in the LOCK, never only in a logger.
             warnings.extend(dict.fromkeys(notes))
@@ -1285,12 +1455,15 @@ def _derive_lane_item(
 
 def _merge_lane_items(
     torchcg: ModuleType,
-    handle: str,
+    cls: type,
+    lane: Any,
     outcomes: list[tuple[Optional[Any], int, int]],
     warnings: list[str],
 ) -> Optional[Any]:
-    """Merge one lane's item outcomes into its final ``LaneGraphs``."""
+    """Merge one (class × lane)'s item outcomes into its final ``LaneGraphs``."""
 
+    handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
+    said = f"class {cls.__name__} lane {handle!r}"
     if all(outcome[0] is None for outcome in outcomes):
         return None
     merged: dict[str, Any] = {}
@@ -1310,26 +1483,55 @@ def _merge_lane_items(
 
     if refused:
         warnings.append(
-            f"lane {handle}: {refused}/{total_combos} enumerated "
+            f"{said}: {refused}/{total_combos} enumerated "
             f"combination(s) refused by the author's own validation "
             f"(impossible servings; skipped)"
         )
     unobserved = tuple(sorted(all_targets - observed_targets))
-    if unobserved:
+    if unobserved and total_combos:
         raise DeriveError(
-            f"lane {handle!r}: marked module(s) {list(unobserved)!r} were "
+            f"{said}: marked module(s) {list(unobserved)!r} were "
             f"never CALLED while driving {total_combos} auto-enumerated "
             f"combination(s). ctx.compile must mark the module the code "
             f"actually CALLS (e.g. the vae's .decoder, not the vae, when "
             f"only .decode() runs) -- silent zero-graph discovery is not an "
             f"outcome."
         )
+    if unobserved:
+        # ZERO combinations is a DIFFERENT fact from a mark that survived real
+        # driving, and reading them as one refusal is what pgw#1650 found:
+        # every entrypoint this class owns refused enumeration (a required
+        # payload field the derive cannot synthesize — an input image, say), so
+        # nothing was ever called and the mark could not be observed. That is
+        # the outcome this module already states for an unenumerable
+        # entrypoint: no traced coverage, eager serving, mint on first
+        # encounter. The lane is DECLARED with its targets stated UNOBSERVED,
+        # which is exactly what `LaneGraphs.unobserved_targets` is for; killing
+        # the whole release's derive over it would take the OTHER classes'
+        # graphs down with it.
+        warnings.append(
+            f"{said}: marked module(s) {list(unobserved)!r} were never driven "
+            f"— this class's entrypoint(s) enumerate NOTHING, so the lane is "
+            f"declared with its targets UNOBSERVED. They serve eager and mint "
+            f"on first encounter; every other class is unaffected."
+        )
     return torchcg.LaneGraphs(
         contract=handle,
         targets=tuple(sorted(all_targets)),
         graphs=tuple(merged.values()),
-        unobserved_targets=(),
+        unobserved_targets=unobserved,
     )
+
+
+@dataclass(frozen=True)
+class _ItemOutcome:
+    """One item's picklable report."""
+
+    lane_graphs: Optional[Any]
+    refused: int
+    total: int
+    warnings: tuple[str, ...]
+    unservable: tuple[dict[str, Any], ...]
 
 
 def _trace_worker_count(requested: Optional[int], items: int) -> int:
@@ -1337,8 +1539,8 @@ def _trace_worker_count(requested: Optional[int], items: int) -> int:
 
     Config with a derivation, never a magic number (pgw#1603): the natural
     width is one process per derive item, a builder pays no more than its
-    core count, and an explicit ``--trace-workers`` (a constrained shared
-    box, a CI runner) caps it below that.
+    core count, and an explicit ``--trace-workers`` (or the
+    ``GEN_WORKER_TRACE_WORKERS`` config) caps it below that.
     """
 
     if items <= 1:
@@ -1357,34 +1559,42 @@ def _trace_worker_count(requested: Optional[int], items: int) -> int:
 
 def _run_item_in_process(
     module: ModuleType,
-    cls: type,
     item: DeriveItem,
     *,
     checkpoint_dir: Path,
+    checkpoint_trees: Mapping[str, Path],
     program_sink: Optional[Any],
-    slot_checkpoints: Mapping[str, Path],
-    warnings: list[str],
-    unservable: list[dict[str, Any]],
-) -> tuple[Optional[Any], int, int]:
+) -> _ItemOutcome:
 
+    cls = _subject_classes(module)[item.class_index]
     lane = model_declared_lanes(cls)[item.lane_index]
     defaults_instance = _defaults_variants(model_model_type(cls))[
         item.defaults_index
     ]
     shapes = model_shapes(cls)
-    return _derive_lane_item(
+    warnings: list[str] = []
+    unservable: list[dict[str, Any]] = []
+    lane_graphs, refused, total = _derive_lane_item(
         _torchcg(), cls, lane, _item_plans(module, cls, item),
-        checkpoint_dir, warnings, defaults_instance,
+        _checkpoint_tree(checkpoint_trees, checkpoint_dir, cls),
+        warnings, defaults_instance,
         program_sink=program_sink,
-        slot_checkpoints=slot_checkpoints,
+        slot_checkpoints=checkpoint_trees,
         endpoint_root=endpoint_source_root(module),
         unservable=unservable,
         dynamic_dims=dynamic_dim_policy(shapes),
         static_bind=static_bind_declared(shapes),
     )
+    return _ItemOutcome(
+        lane_graphs=lane_graphs,
+        refused=refused,
+        total=total,
+        warnings=tuple(warnings),
+        unservable=tuple(unservable),
+    )
 
 
-def _derive_item_task(spec: Mapping[str, Any]) -> dict[str, Any]:
+def _derive_item_task(spec: Mapping[str, Any]) -> _ItemOutcome:
     """One derive item, in a spawned worker: re-import, run, report picklable."""
 
     import importlib
@@ -1396,50 +1606,29 @@ def _derive_item_task(spec: Mapping[str, Any]) -> dict[str, Any]:
     global TRACE_STEP_BUDGET
     TRACE_STEP_BUDGET = spec["step_budget"]
     module = importlib.import_module(str(spec["module"]))
-    cls, _ = _lane_model_class(module)
-    if cls is None:
-        raise DeriveError(
-            f"a derive worker re-imported {spec['module']!r} and found no "
-            f"model class — the module the parent enumerated is not the "
-            f"module this interpreter resolves"
-        )
-    item = derive_items(cls)[int(spec["item_index"])]
-    warnings: list[str] = []
-    unservable: list[dict[str, Any]] = []
+    item = derive_items(module)[int(spec["item_index"])]
     raw_cas = str(spec["graph_cas"])
-    lane_graphs, refused, total = _run_item_in_process(
-        module, cls, item,
+    return _run_item_in_process(
+        module, item,
         checkpoint_dir=Path(str(spec["checkpoint_dir"])),
-        program_sink=_program_sink(Path(raw_cas) if raw_cas else None),
-        slot_checkpoints={
+        checkpoint_trees={
             name: Path(value)
-            for name, value in dict(spec["slot_checkpoints"]).items()
+            for name, value in dict(spec["checkpoint_trees"]).items()
         },
-        warnings=warnings,
-        unservable=unservable,
+        program_sink=_program_sink(Path(raw_cas) if raw_cas else None),
     )
-    return {
-        "lane_graphs": lane_graphs,
-        "refused": refused,
-        "total": total,
-        "warnings": warnings,
-        "unservable": unservable,
-    }
 
 
 def _run_items(
     module: ModuleType,
-    cls: type,
     items: list[DeriveItem],
     *,
     checkpoint_dir: Path,
     graph_cas: Optional[Path],
     program_sink: Optional[Any],
-    slot_checkpoints: Mapping[str, Path],
-    warnings: list[str],
-    unservable: list[dict[str, Any]],
+    checkpoint_trees: Mapping[str, Path],
     trace_workers: Optional[int],
-) -> list[tuple[Optional[Any], int, int]]:
+) -> list[_ItemOutcome]:
     """All derive items, in parallel processes when the host has the width.
 
     Item order is the merge order either way, so the document does not
@@ -1452,12 +1641,10 @@ def _run_items(
     if workers <= 1:
         return [
             _run_item_in_process(
-                module, cls, item,
+                module, item,
                 checkpoint_dir=checkpoint_dir,
+                checkpoint_trees=checkpoint_trees,
                 program_sink=program_sink,
-                slot_checkpoints=slot_checkpoints,
-                warnings=warnings,
-                unservable=unservable,
             )
             for item in items
         ]
@@ -1473,8 +1660,8 @@ def _run_items(
             "item_index": item.index,
             "checkpoint_dir": str(checkpoint_dir),
             "graph_cas": str(graph_cas) if graph_cas is not None else "",
-            "slot_checkpoints": {
-                name: str(value) for name, value in slot_checkpoints.items()
+            "checkpoint_trees": {
+                name: str(value) for name, value in checkpoint_trees.items()
             },
             "step_budget": TRACE_STEP_BUDGET,
         }
@@ -1484,64 +1671,68 @@ def _run_items(
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=workers, mp_context=context
     ) as pool:
-        results = list(pool.map(_derive_item_task, specs))
-
-    outcomes: list[tuple[Optional[Any], int, int]] = []
-    for result in results:
-        warnings.extend(result["warnings"])
-        for row in result["unservable"]:
-            if row not in unservable:
-                unservable.append(row)
-        outcomes.append(
-            (result["lane_graphs"], result["refused"], result["total"])
-        )
-    return outcomes
+        return list(pool.map(_derive_item_task, specs))
 
 
-def derive_release(
+@dataclass(frozen=True)
+class _ClassDerivation:
+    """One subject class's whole view of the release (pgw#1650)."""
+
+    name: str
+    model_type: Optional[str]
+    defaults_schema: Optional[dict[str, Any]]
+    lanes: tuple[Any, ...]
+    lane_contracts: dict[str, Any]
+    entrypoints: dict[str, Any]
+    fork_axes: dict[str, Any]
+    unmarked_lanes: tuple[str, ...]
+    unenumerable: tuple[tuple[str, str], ...]
+    unservable: tuple[dict[str, Any], ...]
+    traced_entrypoints: int
+
+    def as_document(self, stack: tuple[tuple[str, str], ...]) -> dict[str, Any]:
+        return {
+            "class": self.name,
+            "model_type": self.model_type,
+            "checkpoint_defaults_schema": self.defaults_schema,
+            "graphs": _torchcg().GraphSetDocument(
+                stack=stack, lanes=self.lanes
+            ).as_dict(),
+            "lane_contracts": self.lane_contracts,
+            "entrypoints": self.entrypoints,
+            "fork_axes": self.fork_axes,
+        }
+
+
+def _derive_class(
+    torchcg: ModuleType,
     module: ModuleType,
+    cls: Optional[type],
     *,
-    checkpoint_dir: Path,
-    lockfile: Optional[Path] = None,
-    graph_cas: Optional[Path] = None,
-    slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
-    trace_workers: Optional[int] = None,
-) -> ReleaseDeriveResult:
-    """Derive the release metadata document for one endpoint module.
+    warnings: list[str],
+    lane_outcomes: Mapping[int, list[_ItemOutcome]],
+) -> _ClassDerivation:
+    """Assemble ONE subject class's derivation from its items' outcomes.
 
-    ``trace_workers`` (pgw#1603) is the parallel degree over derive ITEMS —
-    the (lane × defaults-variant × structural-class) trace units. ``None``
-    derives it from this host: ``min(item count, cores)``. ``1`` runs the
-    items sequentially in-process (also the shape every single-item endpoint
-    takes). Anything else spawns that many worker processes.
+    pgw#1603: the TRACING happened in `_run_items` — per (class × lane ×
+    defaults × structural combo), in parallel; this consumes the outcomes in
+    item order and states the class's document rows exactly as the serial
+    derive did.
     """
 
-    torchcg = _torchcg()
-    program_sink = _program_sink(graph_cas)
-
-    if lockfile is None:
-        raise DeriveError(
-            "a derive states the compile stack it traced under, and that is "
-            "read from the endpoint's uv.lock: pass `lockfile=`. Restating "
-            "the installed set instead is what pgw#1489 deleted — it is a "
-            "second representation of the environment the lock already pins"
-        )
-    stack = _compile_stack_from_lockfile(lockfile)
-
-    cls, _ = _lane_model_class(module)
-    endpoint_name = f"{module.__name__}:{cls.__name__ if cls else ''}".rstrip(":")
-
+    said = f"class {cls.__name__!r}: " if cls is not None else ""
     lanes: list[Any] = []
     unmarked_lanes: list[str] = []
     lane_contracts: dict[str, Any] = {}
     entrypoints: dict[str, Any] = {}
-    warnings: list[str] = []
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
     unenumerable: list[tuple[str, str]] = []
     unservable_payloads: list[dict[str, Any]] = []
+
     for plan in _entrypoints(module, cls):
         owner = f"@entrypoint {plan.name}"
         refusal: Optional[PayloadEnumerationRefused] = None
+        capped = False
         if cls is None:
             payloads: tuple[Any, ...] = ()
         else:
@@ -1552,10 +1743,9 @@ def derive_release(
             except PayloadEnumerationRefused as exc:
                 refusal = exc
                 payloads = ()
-                capped = False
             if capped:
                 warnings.append(
-                    f"{owner}: enum cross-product exceeds the cap "
+                    f"{said}{owner}: enum cross-product exceeds the cap "
                     f"({ENUM_CAP}); tracing the deterministic prefix -- the "
                     f"rest is first-encounter discovery (eager + background "
                     f"mint)"
@@ -1578,7 +1768,7 @@ def derive_release(
             }
             unenumerable.append((plan.name, str(refusal)))
             warnings.append(
-                f"{owner}: NOT enumerated — {refusal.field!r} "
+                f"{said}{owner}: NOT enumerated — {refusal.field!r} "
                 f"({refusal.annotation}) cannot be synthesized. This "
                 f"entrypoint has no traced coverage; it serves eager and "
                 f"mints on first encounter. Every other entrypoint is "
@@ -1601,26 +1791,19 @@ def derive_release(
                     f"model class."
                 )
         requires = model_requires(cls)
-        declared_lanes = model_declared_lanes(cls)
-        items = derive_items(cls)
-        outcomes = _run_items(
-            module, cls, items,
-            checkpoint_dir=checkpoint_dir,
-            graph_cas=graph_cas,
-            program_sink=program_sink,
-            slot_checkpoints=slot_checkpoints,
-            warnings=warnings,
-            unservable=unservable_payloads,
-            trace_workers=trace_workers,
-        )
-        for lane_index, lane in enumerate(declared_lanes):
-            handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
+        for lane_index, lane in enumerate(model_declared_lanes(cls)):
+            outcomes = lane_outcomes.get(lane_index, [])
+            for outcome in outcomes:
+                warnings.extend(outcome.warnings)
+                for raw in outcome.unservable:
+                    row = dict(raw)
+                    if row not in unservable_payloads:
+                        unservable_payloads.append(row)
             lane_graphs = _merge_lane_items(
-                torchcg, handle,
+                torchcg, cls, lane,
                 [
-                    outcomes[item.index]
-                    for item in items
-                    if item.lane_index == lane_index
+                    (outcome.lane_graphs, outcome.refused, outcome.total)
+                    for outcome in outcomes
                 ],
                 warnings,
             )
@@ -1648,9 +1831,9 @@ def derive_release(
             # term list plus the closed vocabulary it is written against, so
             # tensorhub (Go) evaluates `worst_case = manifest weight bytes +
             # demand(advertised envelope)` at pod-buy time without running any
-            # of ours. The envelope is taken over EVERY entrypoint this
-            # release serves, because the pod must hold the worst case of the
-            # whole advertised surface, not of one function.
+            # of ours. The envelope is taken over EVERY entrypoint THIS CLASS
+            # serves, because the pod must hold the worst case of the whole
+            # advertised surface, not of one function.
             entry["demand"] = demand_document(
                 lane.request,
                 advertised_envelope(*(plan.payload_type for plan, _ in plans)),
@@ -1668,13 +1851,310 @@ def derive_release(
         skipped.append({k: v for k, v in row.items() if k != "entrypoint"})
     for row in unservable_payloads:
         warnings.append(
-            f"@entrypoint {row['entrypoint']}: payload {row['payload']} is "
-            f"UNSERVABLE and was skipped — {row['error']} (at {row['frame']}). "
-            f"Its graphs are not in this document; every other payload is "
-            f"unaffected."
+            f"{said}@entrypoint {row['entrypoint']}: payload {row['payload']} "
+            f"is UNSERVABLE and was skipped — {row['error']} (at "
+            f"{row['frame']}). Its graphs are not in this document; every "
+            f"other payload is unaffected."
         )
 
-    graphs_document = torchcg.GraphSetDocument(stack=stack, lanes=tuple(lanes))
+    model_type_cls = model_model_type(cls) if cls is not None else None
+    return _ClassDerivation(
+        name=cls.__name__ if cls is not None else "",
+        model_type=getattr(model_type_cls, "__name__", None),
+        defaults_schema=_defaults_schema(model_type_cls),
+        lanes=tuple(lanes),
+        lane_contracts=lane_contracts,
+        entrypoints=entrypoints,
+        fork_axes={
+            "structural": [
+                declaration.as_document(axis)
+                for axis, declaration in (
+                    model_structural(cls) if cls is not None else {}
+                ).items()
+            ],
+            "shapes": model_shapes(cls) if cls is not None else {},
+        },
+        unmarked_lanes=tuple(unmarked_lanes),
+        unenumerable=tuple(unenumerable),
+        unservable=tuple(unservable_payloads),
+        traced_entrypoints=len(plans),
+    )
+
+
+def _merge_lanes(
+    torchcg: ModuleType,
+    derivations: Sequence[_ClassDerivation],
+    warnings: list[str],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """The RELEASE-WIDE view of a per-class graph set (pgw#1650).
+
+    Two subject classes legitimately declare the SAME lane — both qwen arms
+    are ``qwen-image.diffusers@1+plain.bf16@1``, because the two checkpoints
+    are byte-layout identical. The hub keys
+    ``release_compiled_graph_documents.lanes`` by the STAMP ALONE and refuses a
+    ``lane_contracts`` key that is not its own entry's stamp
+    (``release_compiled_graphs_invalid_lane``), and ``GraphSetDocument`` itself
+    refuses a repeated lane contract — so one row per stamp is not a choice.
+    Every merge rule is stated here rather than implied:
+
+    * ``targets`` and ``graphs`` UNION (a graph identity is the whole trace, so
+      two classes that produce the same identity produced the same graph);
+    * ``requires`` must AGREE — it is derived from the contract's own dtype,
+      never hand-written, so a disagreement is a producer bug and refuses;
+    * ``demand`` keeps the block with the largest ``worst_case_request_bytes``
+      and NAMES the class it came from (``worst_case_class``). A pod running
+      this lane must hold the worst case of what it serves, which is exactly
+      the rule the block already applies across entrypoints.
+
+    Per-class fidelity is never lost: ``classes[]`` carries each class's own
+    lanes, contracts and demand verbatim. The union exists so today's hub
+    decodes an accurate superset with no hub change (th#2277 owns the
+    release-doc shape; a per-class lane row is theirs to add).
+    """
+
+    targets: dict[str, set[str]] = {}
+    unobserved: dict[str, set[str]] = {}
+    graphs: dict[str, dict[str, Any]] = {}
+    passes: dict[str, tuple[str, ...]] = {}
+    entries: dict[str, dict[str, Any]] = {}
+    owners: dict[str, list[str]] = {}
+    for derivation in derivations:
+        for lane in derivation.lanes:
+            stamp = lane.contract
+            owners.setdefault(stamp, []).append(derivation.name)
+            targets.setdefault(stamp, set()).update(lane.targets)
+            unobserved.setdefault(stamp, set()).update(lane.unobserved_targets)
+            for record in lane.graphs:
+                graphs.setdefault(stamp, {}).setdefault(record.graph, record)
+            seen_passes = passes.setdefault(stamp, tuple(lane.passes))
+            if tuple(lane.passes) != seen_passes:
+                raise DeriveError(
+                    f"lane {stamp!r} is declared by "
+                    f"{owners[stamp]!r} with DIFFERENT transform passes "
+                    f"({list(seen_passes)!r} vs {list(lane.passes)!r}). A "
+                    f"serving boot adopts one lane document, and a graph "
+                    f"derived under a different pass set is a graph for a "
+                    f"module the boot does not have."
+                )
+            entry = dict(derivation.lane_contracts.get(stamp) or {})
+            if not entry:
+                continue
+            merged = entries.get(stamp)
+            if merged is None:
+                entries[stamp] = entry
+                continue
+            if merged.get("requires") != entry.get("requires"):
+                raise DeriveError(
+                    f"lane {stamp!r} is declared by {owners[stamp]!r} with "
+                    f"DIFFERENT capability floors ({merged.get('requires')!r} "
+                    f"vs {entry.get('requires')!r}). A floor is derived from "
+                    f"the contract's own dtype and is never written by hand, "
+                    f"so this cannot be an authoring difference."
+                )
+            if _worst_case(entry) > _worst_case(merged):
+                entries[stamp] = entry
+                merged = entry
+    for stamp, names in owners.items():
+        if len(names) < 2 or stamp not in entries:
+            continue
+        winner = max(
+            names,
+            key=lambda name: _worst_case(
+                next(
+                    (
+                        d.lane_contracts.get(stamp) or {}
+                        for d in derivations
+                        if d.name == name
+                    ),
+                    {},
+                )
+            ),
+        )
+        entries[stamp]["worst_case_class"] = winner
+        warnings.append(
+            f"lane {stamp}: declared by {len(names)} model classes "
+            f"({', '.join(sorted(names))}); the release-wide `demand` row is "
+            f"{winner}'s (the largest worst case). Each class's own row is in "
+            f"`classes[]`."
+        )
+    lanes = tuple(
+        torchcg.LaneGraphs(
+            contract=stamp,
+            targets=tuple(sorted(targets[stamp])),
+            graphs=tuple(graphs.get(stamp, {}).values()),
+            # A target another class OBSERVED is observed for the lane: the
+            # release-wide row states unobserved only what NO class reached.
+            unobserved_targets=tuple(sorted(
+                unobserved[stamp]
+                - {record.target for record in graphs.get(stamp, {}).values()}
+            )),
+            passes=passes[stamp],
+        )
+        for stamp in sorted(owners)
+    )
+    return lanes, entries
+
+
+def _worst_case(entry: Mapping[str, Any]) -> int:
+
+    demand = entry.get("demand")
+    if not isinstance(demand, Mapping):
+        return -1
+    value = demand.get("worst_case_request_bytes")
+    return int(value) if isinstance(value, int) else -1
+
+
+def _agreed(values: Sequence[Any]) -> Optional[Any]:
+    """The one value every subject class states, or None when they differ."""
+
+    distinct = [value for index, value in enumerate(values)
+                if value not in values[:index]]
+    return distinct[0] if len(distinct) == 1 else None
+
+
+def derive_release(
+    module: ModuleType,
+    *,
+    checkpoint_dir: Path,
+    lockfile: Optional[Path] = None,
+    graph_cas: Optional[Path] = None,
+    checkpoint_trees: Mapping[str, Path] = MappingProxyType({}),
+    trace_workers: Optional[int] = None,
+) -> ReleaseDeriveResult:
+    """Derive the release metadata document for one endpoint module.
+
+    ``checkpoint_trees`` names the tree ONE model needs when it is not the
+    primary one — keyed by MODEL CLASS, or by entrypoint slot name.
+
+    ``trace_workers`` (pgw#1603) is the parallel degree over derive ITEMS —
+    the (class × lane × defaults-variant × structural-class) trace units.
+    ``None`` derives it from this host: ``min(item count, cores)``, with
+    ``GEN_WORKER_TRACE_WORKERS`` as the config override. ``1`` runs the
+    items sequentially in-process.
+    """
+
+    torchcg = _torchcg()
+    program_sink = _program_sink(graph_cas)
+
+    if lockfile is None:
+        raise DeriveError(
+            "a derive states the compile stack it traced under, and that is "
+            "read from the endpoint's uv.lock: pass `lockfile=`. Restating "
+            "the installed set instead is what pgw#1489 deleted — it is a "
+            "second representation of the environment the lock already pins"
+        )
+    stack = _compile_stack_from_lockfile(lockfile)
+
+    subjects = _subject_classes(module)
+    marked, unmarked = _module_model_classes(module)
+    known = {cls.__name__ for cls in marked + unmarked}
+    slots = {
+        slot_name
+        for cls in (subjects or (None,))
+        for plan in _entrypoints(module, cls)
+        for slot_name, _slot_cls in plan.model_slots
+    }
+    unknown = sorted(set(checkpoint_trees) - known - slots)
+    if unknown:
+        raise DeriveError(
+            f"--checkpoint/--checkpoint-ref names {unknown!r}, which is "
+            f"neither a model class of {module.__name__!r} "
+            f"({sorted(known)!r}) nor an entrypoint model slot "
+            f"({sorted(slots)!r}). A tree nothing loads from is a typo, not a "
+            f"spare."
+        )
+
+    endpoint_name = (
+        f"{module.__name__}:{'+'.join(cls.__name__ for cls in subjects)}"
+    ).rstrip(":")
+
+    warnings: list[str] = []
+
+    # THE CONSTRUCTION CENSUS (pgw#1647), before any tracing — it is the cheaper
+    # question, and a tree that cannot be built from its own configs must not
+    # spend a trace first. ONE per release, over the PRIMARY tree, under the
+    # union of every declared lane of every subject class: the census is
+    # lane-invariant by construction and that invariance is checked here.
+    construction_census = _construction_census(
+        checkpoint_dir,
+        tuple(
+            (
+                lane_contract_handle(f"class {cls.__name__!r}", lane),
+                _torch_dtype(lane.dtype),
+            )
+            for cls in subjects
+            for lane in model_declared_lanes(cls)
+        ),
+    )
+    for cls in subjects:
+        owner = _checkpoint_tree(checkpoint_trees, checkpoint_dir, cls)
+        if owner != checkpoint_dir:
+            # LOUD, not silent, and not a refusal. The census describes the tree
+            # it was taken from, and th#2281 keys its storage by CONFIG DIGEST —
+            # so a class loading its own tree needs its own census row, which
+            # this document has no field for yet. Saying so is the honest
+            # answer; emitting the primary tree's census as if it described this
+            # class's would be the "second carrier" defect one level up.
+            warnings.append(
+                f"class {cls.__name__!r} loads its own checkpoint tree "
+                f"({owner}), and the construction census in this document is "
+                f"the PRIMARY tree's ({checkpoint_dir}). Nothing is MIS-KEYED: "
+                f"the census's key is image x config tree (th#2287), this run "
+                f"binds the primary tree, and the hub files the document under "
+                f"that bind. It is INCOMPLETE — no published census describes "
+                f"the auxiliary tree, so its serve-time fence replays only the "
+                f"census it builds itself. A per-tree census belongs to the "
+                f"BIND CONTRACT (th#2287 slice 2b), not to this document"
+            )
+
+    items = derive_items(module)
+    outcomes = _run_items(
+        module, items,
+        checkpoint_dir=checkpoint_dir,
+        graph_cas=graph_cas,
+        program_sink=program_sink,
+        checkpoint_trees=checkpoint_trees,
+        trace_workers=trace_workers,
+    )
+    by_class: dict[int, dict[int, list[_ItemOutcome]]] = {}
+    for item, outcome in zip(items, outcomes, strict=True):
+        by_class.setdefault(item.class_index, {}).setdefault(
+            item.lane_index, []
+        ).append(outcome)
+
+    derivations = [
+        _derive_class(
+            torchcg, module, cls,
+            warnings=warnings,
+            lane_outcomes=by_class.get(class_index, {}),
+        )
+        for class_index, cls in enumerate(subjects or (None,))
+    ]
+
+    lanes, lane_contracts = _merge_lanes(torchcg, derivations, warnings)
+    graphs_document = torchcg.GraphSetDocument(stack=stack, lanes=lanes)
+
+    entrypoints: dict[str, Any] = {}
+    for derivation in derivations:
+        for name, block in derivation.entrypoints.items():
+            entrypoints.setdefault(name, block)
+
+    defaults_schema = _agreed([d.defaults_schema for d in derivations])
+    model_type_name = _agreed([d.model_type for d in derivations])
+    if len(derivations) > 1 and model_type_name is None:
+        # NOT silently overloaded: the release is about several model TYPES
+        # (wan-2.2 is the live case), the hub's release document holds ONE
+        # defaults schema, and `classes[]` holds each class's own. th#2277
+        # owns the release-doc shape and the per-class field is theirs.
+        warnings.append(
+            "this release's subject classes declare DIFFERENT model types "
+            f"({sorted(str(d.model_type) for d in derivations)}), so the "
+            "release-wide `model_type` and `checkpoint_defaults_schema` are "
+            "null — one release document holds one of each. Every class's own "
+            "type and schema are in `classes[]` (th#2277 owns the per-class "
+            "hub field)."
+        )
+
     payload_dict: dict[str, Any] = {
         "v": 1,
         "kind": DOCUMENT_KIND,
@@ -1687,24 +2167,38 @@ def derive_release(
         # that makes the lockstep matter more than the refusal does.
         "graphs": graphs_document.as_dict(),
         "lane_contracts": lane_contracts,
+        # pgw#1647 / th#2281. What the module IS, per declared lane — the
+        # complete tensor set incl. computed non-persistent buffers, the tied
+        # alias groups, the quantizer's swapped classes, eval mode. The hub
+        # stores it and forwards it; it interprets no torch semantics. The
+        # serve-time fence REPLAYS this instead of re-deriving trust.
+        "construction_census": construction_census,
         "entrypoints": entrypoints,
+        # pgw#1650: THE PER-CLASS BREAKDOWN, and the authoritative one. A
+        # release derives EVERY compile-marking class (Paul, 2026-08-21), each
+        # against its own checkpoint tree, so `graphs`/`lane_contracts` above
+        # are the UNION over these rows — see `_merge_lanes` for every merge
+        # rule. `fork_axes`, `model_type` and the defaults schema are class
+        # facts and live here undiluted.
+        "classes": [
+            derivation.as_document(stack)
+            for derivation in derivations
+            if derivation.name
+        ],
         "fork_axes": {
             "structural": [
-                declaration.as_document(axis)
-                for axis, declaration in (
-                    model_structural(cls) if cls is not None else {}
-                ).items()
+                row
+                for derivation in derivations
+                for row in derivation.fork_axes["structural"]
             ],
-            "shapes": model_shapes(cls) if cls is not None else {},
+            "shapes": {
+                axis: value
+                for derivation in derivations
+                for axis, value in derivation.fork_axes["shapes"].items()
+            },
         },
-        "checkpoint_defaults_schema": _defaults_schema(
-            model_model_type(cls) if cls is not None else None
-        ),
-        "model_type": (
-            getattr(model_model_type(cls), "__name__", None)
-            if cls is not None
-            else None
-        ),
+        "checkpoint_defaults_schema": defaults_schema,
+        "model_type": model_type_name,
     }
     document = json.dumps(
         payload_dict, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -1718,13 +2212,26 @@ def derive_release(
             for lane in graphs_document.lanes
         },
         warnings=tuple(warnings),
-        weightless=cls is None and bool(plans),
-        unmarked_lanes=tuple(unmarked_lanes),
-        unenumerable_entrypoints=tuple(unenumerable),
+        weightless=not subjects and any(d.traced_entrypoints for d in derivations),
+        unmarked_lanes=tuple(
+            name for d in derivations for name in d.unmarked_lanes
+        ),
+        unenumerable_entrypoints=tuple(
+            row for d in derivations for row in d.unenumerable
+        ),
         unservable_payloads=tuple(
             f"{r['entrypoint']}[{r['payload']}]: {r['error']} (at {r['frame']})"
-            for r in unservable_payloads
+            for d in derivations for r in d.unservable
         ),
+        classes=tuple(d.name for d in derivations if d.name),
+        class_lane_graphs=tuple(
+            (d.name, lane.contract, tuple(record.graph for record in lane.graphs))
+            for d in derivations for lane in d.lanes
+        ),
+        census_components=tuple(
+            sorted(construction_census.get("components", {}))
+        ),
+        census_absent=str(construction_census.get("absent", "")),
     )
 
 

@@ -16,7 +16,8 @@ pytest.importorskip("safetensors")
 from gen_worker._vendor.tensorfs import LocalCAS, project_snapshot  # noqa: E402
 from cas_fixture import ingest_repository  # noqa: E402
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR  # noqa: E402
-from gen_worker.serving.streaming import NameMismatch, engine_for  # noqa: E402
+from gen_worker.serving.streaming import engine_for  # noqa: E402
+from gen_worker.serving.streaming import census as census_mod  # noqa: E402
 from gen_worker.serving.streaming import skeleton as skeleton_mod  # noqa: E402
 from streaming_fixture import (  # noqa: E402
     Lane,
@@ -81,13 +82,13 @@ def test_a_tied_t5_checkpoint_loads_clean(article: Dict[str, Any]) -> None:
     )
 
     text_encoder = pipeline.text_encoder
-    assert skeleton_mod.meta_survivors(text_encoder) == ()
+    assert census_mod.on_meta(text_encoder) == ()
     assert text_encoder.encoder.embed_tokens.weight is text_encoder.shared.weight, (
         "the alias holds its own tensor — the weights were duplicated in "
         "memory rather than tied, which doubles the embedding's VRAM"
     )
     for component in ("unet", "vae"):
-        assert skeleton_mod.meta_survivors(getattr(pipeline, component)) == ()
+        assert census_mod.on_meta(getattr(pipeline, component)) == ()
     assert assert_byte_equal(pipeline, article["source"]) > 50
 
 
@@ -102,11 +103,13 @@ def test_an_absent_tensor_under_a_tied_name_is_still_refused(
 
     engine = engine_for(tree, device="cpu")
     assert engine is not None
-    with pytest.raises(NameMismatch) as caught:
+    with pytest.raises(census_mod.CensusMismatch) as caught:
         engine.build(article["pipeline_cls"], checkpoint_dir=tree, lane=Lane())
 
+    assert caught.value.invariant == census_mod.I4_PLACEMENT
+    assert caught.value.component == "text_encoder"
     message = str(caught.value)
-    assert "still on meta" in message, message
+    assert "STILL ON META" in message, message
     assert SOURCE in message and ALIAS in message, message
     assert "the checkpoint does not carry" not in message, message
     assert "T5EncoderModel" in message, message
@@ -121,10 +124,12 @@ def test_without_the_retie_the_incident_reproduces(
 
     engine = engine_for(article["tree"], device="cpu")
     assert engine is not None
-    with pytest.raises(NameMismatch) as caught:
+    with pytest.raises(census_mod.CensusMismatch) as caught:
         engine.build(
             article["pipeline_cls"], checkpoint_dir=article["tree"], lane=Lane()
         )
+    assert caught.value.invariant == census_mod.I4_PLACEMENT
+    assert caught.value.tensor == ALIAS
     message = str(caught.value)
     assert "text_encoder" in message and ALIAS in message, message
 

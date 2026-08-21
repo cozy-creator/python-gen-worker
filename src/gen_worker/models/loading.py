@@ -40,11 +40,13 @@ RULE_HF_FP8_BLOCKWISE = "hf.fp8-blockwise@1"
 from .fp8_storage import restructure_fp8_storage
 from .rung import touches_host_ram
 from .memory import (
+    effective_ram_floor_gb,
     flush_memory,
     get_available_vram_gb,
     meta_tensors,
     probe_host_ram,
 )
+from .grant import COLD_REQUEST_BYTES
 from .hf_fp8_blockwise import detect_hf_fp8_blockwise, load_hf_fp8_blockwise
 from .safetensors_header import header_len_ok, read_header
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
@@ -63,6 +65,8 @@ from .w8a8 import (
 )
 
 logger = logging.getLogger(__name__)
+
+_GIB = 1024 ** 3
 
 _DTYPE_MAP = {
     "float16": "float16",
@@ -697,7 +701,11 @@ def pipeline_weight_lane(pipeline: Any) -> str:
     return ""
 
 
-_EMERGENCY_MARGIN_GB = 2.0
+#: The VRAM the fp8 emergency rung leaves for the request when it sizes its
+#: budget. pgw#1649 rung (a): a bare `2.0` with no comment, the FIFTH producer
+#: of `grant.COLD_REQUEST_BYTES` (measured: pgw#1586's 1847 MiB, pgw#1604's
+#: ~2058 MiB). Same value, one owner, changeable only by evidence.
+_EMERGENCY_MARGIN_GB = COLD_REQUEST_BYTES / _GIB
 
 
 def runtime_fp8_storage_supported() -> bool:
@@ -1148,16 +1156,21 @@ def _weightless_model_dir(src: Path) -> bool:
     return next(src.rglob("*.safetensors"), None) is None
 
 
-_GIB = 1024 ** 3
-_STAGING_FLOOR_GB = 8.0
-_STAGING_FLOOR_FRACTION = 0.2
-
 
 def _staging_floor_bytes(total_bytes: int) -> int:
-    if total_bytes <= 0:
-        return int(_STAGING_FLOOR_GB * _GIB)
-    return int(min(_STAGING_FLOOR_GB * _GIB,
-                   max(_GIB, total_bytes * _STAGING_FLOOR_FRACTION)))
+    """Host RAM this staging path must leave alone, in bytes.
+
+    pgw#1649 rung (a). This module declared its own `_STAGING_FLOOR_GB = 8.0` /
+    `_STAGING_FLOOR_FRACTION = 0.2` and re-derived `min(8, max(1, total*0.2))`
+    byte-identically — the FOURTH producer of a quantity pgw#973 gave a sole
+    owner, and the exact broken-promise shape `memory.py`'s own comment above
+    `effective_ram_floor_gb` warns about, one file over. It imports the owner
+    now; the threat model (gw#407 reclaim-thrash stalling the gRPC keepalive)
+    and the adaptive-below-40-GiB reasoning live there, once.
+    """
+    return int(effective_ram_floor_gb(
+        float(total_bytes) / _GIB if total_bytes > 0 else 0.0
+    ) * _GIB)
 
 
 def _admit_component_staging(component: str, nbytes: int) -> None:
@@ -1217,7 +1230,10 @@ def modular_staging_units(base: Path) -> Dict[str, int]:
     return units
 
 
-_STREAMED_HYDRATION_VRAM_MARGIN_GB = 2.0
+#: The VRAM streamed hydration leaves for the request on top of the tree.
+#: pgw#1649 rung (a): the SIXTH producer of `grant.COLD_REQUEST_BYTES`, and the
+#: second one in this file alone. Same value, one owner.
+_STREAMED_HYDRATION_VRAM_MARGIN_GB = COLD_REQUEST_BYTES / _GIB
 
 
 @dataclass(frozen=True)

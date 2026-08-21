@@ -146,15 +146,35 @@ class EndpointHost:
                     "declared lanes; an eager-permanent endpoint has nothing "
                     "to adopt"
                 )
-            if len(lane_bearing) > 1:
-                raise RuntimeError(
-                    "setup(): release metadata offered for a multi-model "
-                    "endpoint; per-slot adoption sessions are not designed "
-                    "yet (one lane-bearing model class per endpoint for now)"
-                )
             from .model import lane_handle
 
-            lane_contract = lane_handle(self.lanes[lane_bearing[0]])
+            # pgw#1650: SEVERAL lane-bearing classes are supported when they
+            # resolve to the SAME lane. That is the qwen shape — both arms
+            # declare `qwen-image.diffusers@1+plain.bf16@1` because the two
+            # checkpoints are byte-layout identical — and one AdoptSession
+            # serves them: the derive's document carries both classes' graphs
+            # under that stamp, and a mark claims a graph by STRUCTURE, so
+            # each class arms its own. What is still undesigned is one boot
+            # holding TWO lanes, because a boot fetches ONE lane document.
+            contracts = {
+                cls: lane_handle(self.lanes[cls]) for cls in lane_bearing
+            }
+            distinct = sorted(set(contracts.values()))
+            if len(distinct) > 1:
+                raise RuntimeError(
+                    "setup(): this endpoint's model classes resolve DIFFERENT "
+                    "lanes ("
+                    + ", ".join(
+                        f"{cls.__name__}={contract}"
+                        for cls, contract in sorted(
+                            contracts.items(), key=lambda row: row[0].__name__
+                        )
+                    )
+                    + "); one boot fetches ONE lane document, so the second "
+                    "lane has nothing to adopt from. Several classes on ONE "
+                    "lane are supported (pgw#1650)."
+                )
+            lane_contract = distinct[0]
             stack_rows = dict(stack) if stack is not None else dict(document.stack)
             for row in installed_stack_drift(dict(document.stack)):
                 logger.warning("adopt: compile-stack drift vs this venv: %s", row)

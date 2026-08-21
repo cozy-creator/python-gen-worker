@@ -20,10 +20,14 @@ from gen_worker.serving.streaming import (  # noqa: E402
     StreamingLoader,
     engine_for,
 )
+from gen_worker.serving.streaming.census import (  # noqa: E402
+    I4_PLACEMENT,
+    CensusMismatch,
+    on_meta,
+)
 from gen_worker.serving.streaming.skeleton import (  # noqa: E402
     SkeletonError,
     _resolve,
-    meta_survivors,
 )
 from streaming_fixture import (  # noqa: E402
     Lane,
@@ -109,7 +113,7 @@ def test_ctx_load_streams_store_to_memory_writing_nothing(
     assert assert_byte_equal(pipeline, source) > 100
 
     for component in ("unet", "vae", "text_encoder", "text_encoder_2"):
-        assert meta_survivors(getattr(pipeline, component)) == ()
+        assert on_meta(getattr(pipeline, component)) == ()
 
     windows = store.assert_file_order()
     assert windows > 20, (
@@ -152,7 +156,7 @@ def test_the_engine_binds_off_the_projected_tree_alone(article: dict[str, Any]) 
     pipeline = engine.build(
         article["pipeline_cls"], checkpoint_dir=article["tree"], lane=Lane()
     )
-    assert meta_survivors(pipeline.unet) == ()
+    assert on_meta(pipeline.unet) == ()
 
     from gen_worker.models import materialized_view
 
@@ -195,9 +199,11 @@ def test_a_missing_name_refuses_rather_than_serving_meta(
 
     engine = engine_for(tree, device="cpu")
     assert engine is not None
-    with pytest.raises(NameMismatch) as caught:
+    with pytest.raises(CensusMismatch) as caught:
         engine.build(article["pipeline_cls"], checkpoint_dir=tree, lane=Lane())
-    assert "still on meta" in str(caught.value)
+    assert caught.value.invariant == I4_PLACEMENT
+    assert caught.value.component == "vae"
+    assert "STILL ON META" in str(caught.value)
     assert victim in str(caught.value)
 
 
@@ -211,7 +217,7 @@ def test_a_load_reads_no_tensor_bytes_to_build_the_skeleton(
     assert set(built.modules) == {"unet", "vae", "text_encoder", "text_encoder_2"}
     assert built.passthrough == ("scheduler",)
     for module in built.modules.values():
-        assert meta_survivors(module), "a config-only build must hold NO weights"
+        assert on_meta(module), "a config-only build must hold NO weights"
         assert all(
             parameter.device.type == "meta" for parameter in module.parameters()
         )

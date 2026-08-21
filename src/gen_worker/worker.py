@@ -53,7 +53,12 @@ from .serving.envelope import EnvelopeError
 from .serving.host import ServeDispatchError
 from .serving.loader import EndpointLoadError, LoadedEndpoint
 from .serving.model import ModelDeclarationError, lane_handle, model_lanes, model_type
-from .serving.residency import NeverFits, ResidencyError, ResidencyManager
+from .serving.residency import (
+    HEADROOM_DIVISOR,
+    NeverFits,
+    ResidencyError,
+    ResidencyManager,
+)
 from .serving.serve_loop import ServeLoop
 from .transport import (
     DEFAULT_QUEUE_MAXSIZE as _DEFAULT_QUEUE_MAXSIZE,
@@ -69,8 +74,6 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_MS = 10_000
 
 _SIGNAL_DRAIN_DEADLINE_MS = 30_000
-
-_HEADROOM_DIVISOR = 4
 
 EVENT_CONTENT_TYPE = "application/x-request-event+json"
 
@@ -386,7 +389,22 @@ class _Admission:
 
 
 class SnapshotSizer:
-    """Weight bytes from the materialized tree's manifest — the WHOLE tree."""
+    """Weight bytes from the materialized tree's manifest — the WHOLE tree.
+
+    The ACTIVATION half is `residency.HEADROOM_DIVISOR`, and pgw#1649 leaves it
+    standing DELIBERATELY. The obvious replacement — evaluate the lane's
+    declared `request=` demand at the advertised envelope, the identical
+    `weight bytes + demand(envelope)` expression tensorhub evaluates to BUY
+    this pod (pgw#1598 §2, pgw#1600) — is REFUSED BY A RATIFIED POSTURE, not by
+    difficulty: pgw#1600 acceptance (d) ships the demand number with provably
+    zero admission consumers, because a formula that has never been falsified
+    is a guess, and the fleet's formulas still say "⚠️ UNFITTED PRIOR" of
+    themselves. Wiring one in would swap a documented over-charge for an
+    under-charge, which is the direction that OOMs a rented card instead of
+    refusing it (pgw#1590's own finding). The enforcer is pgw#1601's measured
+    stamp; `tests/test_demand_no_enforcement_pgw1600.py` is the guard that says
+    so, and it is edited in the same commit as that wiring, not before.
+    """
 
     def __init__(self, resolver: HubBindingResolver) -> None:
         self._resolver = resolver
@@ -405,7 +423,7 @@ class SnapshotSizer:
         return self._bytes(checkpoint_ref)
 
     def activation_headroom_bytes(self, checkpoint_ref: str, lane: str) -> int:
-        return max(self._bytes(checkpoint_ref) // _HEADROOM_DIVISOR, 1)
+        return max(self._bytes(checkpoint_ref) // HEADROOM_DIVISOR, 1)
 
 
 class Worker:

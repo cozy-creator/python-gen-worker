@@ -57,6 +57,16 @@ _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
 _MISSING_SNAPSHOT_WAIT_S = 60.0
 
+#: Free DISK the GC drives toward, on top of what the pending pull still needs.
+#:
+#: (d) AUTHOR-DECLARED, **UNMEASURED** (pgw#1649). It is NOT the 2 GiB VRAM
+#: margin — `grant.COLD_REQUEST_BYTES` owns that one and every VRAM producer
+#: now imports it. This is a DIFFERENT PHYSICAL QUANTITY that happens to carry
+#: the same number, and the two must never be collapsed on the strength of
+#: that coincidence: slack against the loader's own scratch (a partial shard,
+#: a `.incomplete` file, a projection's hardlink churn) while a multi-hundred-GB
+#: tree lands, not against an allocator. A disk that fills mid-pull fails the
+#: pull; it does not OOM a card.
 _DISK_GC_MARGIN_BYTES = 2 * _GiB
 _DISK_GC_GRACE_S = 300.0
 

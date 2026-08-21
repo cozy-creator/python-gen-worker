@@ -60,6 +60,7 @@ from gen_worker.models.hf_fp8_blockwise import (  # noqa: E402
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR  # noqa: E402
 from gen_worker.serving.streaming import NameMismatch, engine_for  # noqa: E402
 from gen_worker.serving.streaming import engine as engine_mod  # noqa: E402
+from gen_worker.serving.streaming import census as census_mod  # noqa: E402
 from gen_worker.serving.streaming import skeleton as skeleton_mod  # noqa: E402
 from streaming_fixture import Lane, scramble_offsets  # noqa: E402
 
@@ -277,9 +278,9 @@ def test_a_blockwise_fp8_checkpoint_loads_clean(article: Dict[str, Any]) -> None
         article["pipeline_cls"], checkpoint_dir=article["tree"], lane=Lane())
 
     text_encoder = pipeline.text_encoder
-    assert skeleton_mod.meta_survivors(text_encoder) == ()
+    assert census_mod.on_meta(text_encoder) == ()
     for component in ("unet", "vae"):
-        assert skeleton_mod.meta_survivors(getattr(pipeline, component)) == ()
+        assert census_mod.on_meta(getattr(pipeline, component)) == ()
 
     q_proj = text_encoder.model.layers[0].self_attn.q_proj
     assert type(q_proj).__name__ == "FP8Linear", type(q_proj).__name__
@@ -402,10 +403,12 @@ def test_an_absent_scale_tensor_is_still_refused(
     tree = _project(tmp_path, source, key="b" * 64)
 
     engine = _engine(tree)
-    with pytest.raises(NameMismatch) as caught:
+    with pytest.raises(census_mod.CensusMismatch) as caught:
         engine.build(article["pipeline_cls"], checkpoint_dir=tree, lane=Lane())
+    assert caught.value.invariant == census_mod.I4_PLACEMENT
+    assert caught.value.tensor == victim
     message = str(caught.value)
-    assert "still on meta" in message, message
+    assert "STILL ON META" in message, message
     assert victim in message, message
 
 

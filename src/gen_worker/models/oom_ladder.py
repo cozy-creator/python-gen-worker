@@ -20,10 +20,55 @@ ATTENTION_SLICED_RETRY_PHASE = "attention_sliced_retry"
 
 _INSTALLED = "_cozy_oom_ladder"
 
+#: The buffer count in the per-latent decode estimate:
+#: `ACTIVATION_BUFFERS x block_out_channels[0] x spatial^2 x temporal x
+#: dtype_bytes`. DERIVED, not picked — pgw#1499 restored here after the
+#: pgw#1628 comment purge left the site bare (pgw#1649).
+#:
+#: ComfyUI hand-measures a coefficient per VAE class; this formula derives one,
+#: and reproduces their sd15/SDXL number (`2178 x 64 x dtype`) to 0.1% and
+#: Wan-2.1's to ~1.5x. It is a FIRST GUESS by construction and that is the
+#: point: every rung below rung 0 is chosen by a REAL OOM, never by the
+#: estimate, which is what makes the formula's error survivable.
 ACTIVATION_BUFFERS = 17
 
+#: The share of free VRAM the tile solver may plan a decode into.
+#:
+#: (d) AUTHOR-DECLARED, **UNMEASURED** (pgw#1649, census §1.3). The 20% held
+#: back is not a measured allocator reserve — it is slack against the same
+#: estimate `ACTIVATION_BUFFERS` admits is a first guess, taken on the ONE
+#: input the solver reads (`get_available_vram_gb`) at the moment an OOM has
+#: already proven the previous plan wrong.
+#:
+#: Deriving it was considered and REFUSED: the honest expression is
+#: `free - transient_reserve`, and `partial_resident._TRANSIENT_RESERVE_BYTES`
+#: (512 MiB, measured twice on-card including a falsified 256 MiB arm) is the
+#: only measured member of that family — but it prices an ONLOAD transient, a
+#: different physical quantity from a tiled decode's activation slack, and
+#: importing it would launder one measurement into a claim about another.
+#: A fraction that is honest about being a fraction beats a subtraction that
+#: is not. The falsifier is the ladder itself: a rung that OOMs anyway is
+#: this number being wrong, and the descent is already driven by that OOM.
 BUDGET_FRACTION = 0.8
 
+#: The tile overlap, as a fraction of the tile edge — ONE producer (pgw#1649).
+#: `TilePlan.overlap` computed `edge // 4` while `apply_tile_plan` set a
+#: literal `tile_overlap_factor=0.25` sixty lines away: the same policy, two
+#: spellings, and only one of them would move if the blend ever changed.
+#:
+#: (d) AUTHOR-DECLARED: 25% is the diffusers default `tile_overlap_factor`
+#: this code SETS on VAEs that expose it, so the solver's own overlap agrees
+#: with the knob it hands the VAE instead of contradicting it.
+TILE_OVERLAP_FRACTION = 0.25
+
+#: Two slice rungs, then a hard RuntimeError on a paid request.
+#:
+#: (d) AUTHOR-DECLARED: these are torch/diffusers' OWN attention-slicing
+#: settings, not a tuned pair — `"auto"` slices by head count and `"max"` is
+#: one head at a time, which is the smallest slice the API can express. There
+#: is no third rung to add; below `"max"` the next lever is a different
+#: mechanism (tiling, offload), which is why the ladder ENDS rather than
+#: continuing with a smaller number.
 ATTENTION_LADDER: Tuple[str, ...] = ("auto", "max")
 
 
@@ -36,7 +81,7 @@ class TilePlan:
 
     @property
     def overlap(self) -> int:
-        return max(1, self.edge // 4)
+        return max(1, int(self.edge * TILE_OVERLAP_FRACTION))
 
     def __str__(self) -> str:
         t = f"x{self.frames}f" if self.frames else ""
@@ -64,7 +109,27 @@ def solve_tile_ladder(
     min_frames: int = 1,
     max_rungs: int = 5,
 ) -> Tuple[TilePlan, ...]:
-    """The tile ladder for one decode, largest tile first."""
+    """The tile ladder for one decode, largest tile first.
+
+    THE GEOMETRY, stated (pgw#1649 rung (d) — these three decided how many OOM
+    retries a paid request gets before it dies, with zero comment):
+
+    * `base_edge=32` latents = a 256 px tile at the sd/SDXL spatial ratio of 8,
+      and 512 px at a video VAE's 16 — diffusers' own `tile_latent_min_size`
+      for AutoencoderKL is 32, so rung 0 is the upstream default rather than a
+      number of ours. Rung 0 is additionally shrunk once whenever it still
+      covers the WHOLE latent, because a tile the size of the frame that just
+      OOMed is not a retry (pgw#1499).
+    * `min_edge=8` latents = a 64 px tile: below this the per-tile constant
+      cost and the seam count dominate, and the next lever is a different
+      mechanism, not a smaller tile.
+    * `max_rungs=5` is the ARITHMETIC of the two above, not an independent
+      budget: halving 32 -> 16 -> 8 is two edge rungs, and the frame axis
+      halves first on a video VAE, so five rungs reaches `min_edge` with slack
+      for the frame halvings and the rung-0 shrink. It is a TERMINATION bound
+      (the walk also breaks when neither axis can halve), which is why it is
+      safe for it to be generous rather than exact.
+    """
     latent_h = max(1, int(latent_h))
     latent_w = max(1, int(latent_w))
     latent_frames = max(0, int(latent_frames))
@@ -109,6 +174,13 @@ def solve_tile_ladder(
 def decode_bytes_per_latent(vae: Any, *, dtype_bytes: int = 2) -> float:
     """Estimated peak decode bytes per LATENT element for this VAE."""
     cfg = getattr(vae, "config", None)
+    # DERIVED whenever the config is readable (`block_out_channels[0]`, and the
+    # spatial ratio from the block count). The two fallbacks below are (d)
+    # AUTHOR-DECLARED for the case where it is not: 128 channels and a spatial
+    # ratio of 8 are the SD-family values, generalized — an over-estimate for
+    # sd15/SDXL's own 128/8 (exact) and for anything narrower, which is the
+    # safe direction for a decode budget. pgw#1649: the generalization used to
+    # be silent.
     channels = 128
     blocks = getattr(cfg, "block_out_channels", None) if cfg is not None else None
     if blocks:
@@ -154,7 +226,7 @@ def apply_tile_plan(vae: Any, plan: TilePlan) -> Dict[str, Any]:
         attrs: Tuple[Tuple[str, Any], ...] = (
             ("tile_sample_min_size", sample_edge),
             ("tile_latent_min_size", plan.edge),
-            ("tile_overlap_factor", 0.25),
+            ("tile_overlap_factor", TILE_OVERLAP_FRACTION),
         )
         for attr, attr_value in attrs:
             if hasattr(vae, attr):

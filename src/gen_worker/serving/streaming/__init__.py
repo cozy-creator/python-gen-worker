@@ -4,6 +4,14 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
+from .census import (
+    CENSUS_KIND,
+    Census,
+    CensusError,
+    CensusMismatch,
+    ComponentCensus,
+    TensorRow,
+)
 from .engine import LoadError, LoadReport, NameMismatch, StreamingLoader
 from .skeleton import Skeleton, SkeletonError
 from .source import (
@@ -50,6 +58,12 @@ def engine_for(
 __all__ = [
     "engine_for",
     "BridgeWeightStore",
+    "CENSUS_KIND",
+    "Census",
+    "CensusError",
+    "CensusMismatch",
+    "ComponentCensus",
+    "TensorRow",
     "LoadError",
     "LoadReport",
     "NameMismatch",

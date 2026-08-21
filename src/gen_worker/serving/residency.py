@@ -33,6 +33,50 @@ class Charge:
         return self.weight_bytes + self.headroom_bytes
 
 
+#: THE activation headroom every admission charges: stored tree bytes // this.
+#: ONE OWNER (pgw#1649) — `worker.SnapshotSizer` and `serving/__main__.py`'s
+#: local envelope path both used to spell `weight // 4` as a bare literal, two
+#: producers of one policy with the reasoning written at neither.
+#:
+#: ⚠️ AUTHOR-DECLARED, **UNMEASURED**, and with a KNOWN CASUALTY (census §4.2
+#: row 2). 25% of the STORED tree is not a statement about activations at all —
+#: it is a fraction of a number that measures something else, and it scales
+#: with the wrong quantity. minimax-h3's DiT lane was refused as needing
+#: 180,063,706,300 bytes on an 84 GB H100 that had been serving it
+#: (`tests/test_admission_lane_declaration_pgw1590.py` reproduces the refusal
+#: byte for byte): 133 GB of stored bf16 becomes ~66 GB of w8a8 inside `load`,
+#: the charge cannot see a `setup()`-time `quantize_()`, and this divisor then
+#: charges a THIRD of that phantom again — 36 GB of the 180.
+#:
+#: WHY IT IS STILL HERE, which is a posture and not an oversight. The obvious
+#: replacement is the lane's own declared `request=` demand at the advertised
+#: envelope — the identical `weight bytes + demand(envelope)` expression
+#: tensorhub already evaluates to BUY the pod (pgw#1598 §2, pgw#1600), so one
+#: producer would mean the pod could not refuse what the hub bought. pgw#1600
+#: acceptance (d) FORBIDS wiring it: the number ships with provably zero
+#: admission consumers because a formula that has never been falsified is a
+#: guess, and the fleet's formulas still label themselves "⚠️ UNFITTED PRIOR".
+#: Swapping a documented over-charge for an unfalsified under-charge is the
+#: direction that OOMs a rented card instead of refusing it — which is
+#: pgw#1590's own finding. The enforcer is pgw#1601's measured stamp, and
+#: `tests/test_demand_no_enforcement_pgw1600.py` is the guard that holds the
+#: line until it exists.
+#:
+#: THE FALSIFIER, already built and already firing: pgw#1600's `demand_miss`
+#: counts every serve whose measured arena exceeded the prediction. When the
+#: stamps land, this constant is DELETED — not re-tuned.
+HEADROOM_DIVISOR = 4
+
+#: What the admission confession calls this number, so an operator reading a
+#: `NeverFits` sees a policy with a name rather than an unexplained fraction.
+HEADROOM_BASIS = (
+    f"{100 // HEADROOM_DIVISOR}% of the stored tree — an UNMEASURED "
+    f"author-declared fraction of the WEIGHTS standing in for an activation "
+    f"nobody has measured on this lane; it dies with pgw#1601's stamp "
+    f"(pgw#1649)"
+)
+
+
 def admission_charge(weight_bytes: int, headroom_bytes: int) -> Charge:
     """The bytes to reserve for one instance: the tree's weights + headroom."""
 
@@ -41,12 +85,13 @@ def admission_charge(weight_bytes: int, headroom_bytes: int) -> Charge:
         weights,
         headroom,
         f"charged from the STORED TREE: {weights} weight bytes at the "
-        f"checkpoint's on-disk precision + {headroom} activation headroom. "
-        f"This is an UPPER BOUND (pgw#1599): a lane that holds less resident "
-        f"— a setup()-time quantize, an offloaded or unused component — is "
-        f"charged for bytes it never puts on the card, and the fix is a lane "
-        f"whose CONTRACT states the precision the weights land at, never a "
-        f"hand-written floor",
+        f"checkpoint's on-disk precision + {headroom} activation headroom "
+        f"({HEADROOM_BASIS}). "
+        f"The WEIGHT half is an UPPER BOUND (pgw#1599): a lane that holds less "
+        f"resident — a setup()-time quantize, an offloaded or unused component "
+        f"— is charged for bytes it never puts on the card, and the fix is a "
+        f"lane whose CONTRACT states the precision the weights land at, never "
+        f"a hand-written floor",
     )
 
 
@@ -79,6 +124,7 @@ class InstanceSizer(Protocol):
     def activation_headroom_bytes(self, checkpoint_ref: str, lane: str) -> int:
         """The serving-time activation estimate (per model type / resolution class) reserved alongside the weights."""
         ...
+
 
 
 class Tier(StrEnum):

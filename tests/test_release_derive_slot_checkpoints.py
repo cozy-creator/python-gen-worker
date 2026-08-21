@@ -86,7 +86,10 @@ def test_the_aide_pointed_at_the_PRIMARY_tree_refuses_naming_slot_and_tree(
     assert "slot 'aide'" in message
     assert str(primary_tree) in message
     assert "the PRIMARY checkpoint" in message
-    assert "--checkpoint-ref aide=<ref>" in message
+    # pgw#1650: the remedy names the CLASS, which is what owns a checkpoint —
+    # two entrypoints can hold the same slot NAME over different classes (both
+    # qwen arms take `model:`). The slot name still keys a tree.
+    assert "--checkpoint-ref AideModel=<ref>" in message
 
 
 def test_an_eager_only_slot_STILL_hydrates(
@@ -110,7 +113,9 @@ def test_a_slot_named_twice_refuses(
         tmp_path, str(primary_tree), f"aide={aide_tree}", f"aide={primary_tree}"
     )
     assert code == 2
-    assert "given twice for slot 'aide'" in capsys.readouterr().err
+    # pgw#1650: the key namespace is classes AND slots, so the message names
+    # the KEY rather than asserting which of the two it was.
+    assert "given twice for 'aide'" in capsys.readouterr().err
 
 
 def test_only_secondary_slots_named_refuses(
@@ -120,7 +125,9 @@ def test_only_secondary_slots_named_refuses(
 
     code, _out = _derive(tmp_path, f"aide={aide_tree}")
     assert code == 2
-    assert "the primary model's tree is the bare form" in capsys.readouterr().err
+    assert "the tree every other model loads from is the bare form" in (
+        capsys.readouterr().err
+    )
 
 
 def test_the_slot_spelling_never_eats_a_ref_or_a_path() -> None:

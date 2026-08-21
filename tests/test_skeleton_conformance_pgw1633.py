@@ -3,7 +3,7 @@
 pgw#1626 was found by a rented pod. `skeleton.build` never ran `tie_weights()`,
 so every tied-encoder pipeline failed 100% of its invokes on a CORRECT
 checkpoint — the tie a checkpoint relies on to omit an alias was broken by the
-meta build and never re-established, and `meta_survivors` (rightly) refused.
+meta build and never re-established, and the survivor check (rightly) refused.
 It was fixed for the two classes that had already been hit (T5, Qwen3).
 
 The class is not "T5 and Qwen3". It is "a checkpoint omits a parameter because
@@ -21,9 +21,16 @@ So this suite asks. For every fleet pipeline tree in
    `save_pretrained` drops;
 3. fill those, and only those, the way `StreamingLoader._install` does — a
    rebind of `_parameters[leaf]`, not a `copy_`;
-4. `retie()`;
-5. assert `meta_survivors == ()` and that every alias IS its source by
-   IDENTITY (a copy would double the VRAM and serve stale bytes).
+4. run the prepare seam's trailing half (`skeleton.finish`: postprocess, retie,
+   eval, device sweep);
+5. REPLAY THE CENSUS the build stated (`census.fence`, pgw#1647) — all five
+   invariants at once — and assert that every alias IS its source by IDENTITY
+   (a copy would double the VRAM and serve stale bytes).
+
+Step 5 is moment TWO of the census's three (release build / this suite /
+serve). What it catches that the other two cannot: an IMAGE BUMP between
+releases, where the same tree in a newer transformers builds a different module
+than the release was derived from.
 
 Step 2 derives the tie structure from the MODEL, never from the
 `_tied_weights_keys` class attribute. That attribute lists names a class MIGHT
@@ -49,7 +56,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 pytest.importorskip("transformers")
 
-from gen_worker.serving.streaming import skeleton  # noqa: E402
+from gen_worker.serving.streaming import census, skeleton  # noqa: E402
 
 CORPUS = Path(__file__).parent / "fixtures" / "checkpoint-configs"
 
@@ -181,22 +188,32 @@ def test_the_index_names_a_pipeline_class_this_image_can_build_pgw1633(endpoint:
 
 @pytest.mark.parametrize("endpoint", sorted(FLEET))
 def test_every_declared_module_comes_off_meta_pgw1633(endpoint: str) -> None:
-    """Fill by the checkpoint's key set, retie, and leave nothing on meta."""
-    tree = _tree(endpoint)
-    ties = {name: _alias_map(module) for name, module in skeleton.build_modules(tree).items()}
+    """Fill by the checkpoint's key set, finish the seam, replay the census.
 
-    modules = skeleton.build_modules(tree)
-    assert modules, f"{endpoint} declares no weight-bearing component"
-    for name, module in modules.items():
+    THE WHOLE PREDICATE, at moment two of three (pgw#1647): the census the
+    build stated, replayed against the module after a checkpoint-shaped fill.
+    All five invariants at once, per fleet class, from configs, at $0 — which
+    is what makes an image bump that changes what a class BUILDS a red CI run
+    instead of the next rental.
+    """
+    tree = _tree(endpoint)
+    ties = {
+        name: _alias_map(module)
+        for name, module in skeleton.build_modules(tree).modules.items()
+    }
+
+    built = skeleton.build_modules(tree)
+    assert built.modules, f"{endpoint} declares no weight-bearing component"
+    expected = built.census()
+    for name, module in built.modules.items():
         aliases = ties[name]
         assert _fill(module, aliases) > 0, f"{endpoint}/{name} has no parameters to fill"
-        skeleton.retie(module)
-        survivors = skeleton.meta_survivors(module)
-        assert survivors == (), (
-            f"{endpoint}/{name} ({type(module).__name__}): {len(survivors)} parameter(s) "
-            f"stay on meta after a checkpoint-shaped fill and retie: {survivors[:8]}"
-        )
-        for alias, source in aliases.items():
+        skeleton.finish(module, target="cpu")
+
+    census.fence(built.modules, {}, expected, target="cpu", where=endpoint)
+
+    for name, module in built.modules.items():
+        for alias, source in ties[name].items():
             assert module.get_parameter(alias) is module.get_parameter(source), (
                 f"{endpoint}/{name}: {alias} is a COPY of {source}, not a tie — "
                 f"that doubles the resident bytes and serves whichever one the "
@@ -216,21 +233,25 @@ def test_the_retie_is_what_closes_it_pgw1633(
     reproduced at $0.
     """
     tree = _tree(endpoint)
-    ties = {name: _alias_map(module) for name, module in skeleton.build_modules(tree).items()}
+    ties = {name: _alias_map(module) for name, module in skeleton.build_modules(tree).modules.items()}
     tied = {name: aliases for name, aliases in ties.items() if aliases}
     assert tied, f"{endpoint} was listed as a tie exposure but declares no tie"
 
     monkeypatch.setattr(skeleton, "retie", lambda module: False)
-    modules = skeleton.build_modules(tree)
+    modules = skeleton.build_modules(tree).modules
     for name, aliases in tied.items():
         module = modules[name]
         _fill(module, aliases)
-        survivors = skeleton.meta_survivors(module)
+        survivors = census.on_meta(module)
         assert set(survivors) == set(aliases), (
             f"{endpoint}/{name}: with retie disabled the survivors are {survivors}, "
             f"expected exactly the aliases {sorted(aliases)} — this arm no longer "
             f"proves the assertion has teeth"
         )
+        with pytest.raises(census.CensusMismatch) as caught:
+            census.verify_placement(name, module, "cpu", where=endpoint)
+        assert caught.value.invariant == census.I4_PLACEMENT
+        assert caught.value.tensor in set(aliases), caught.value.tensor
 
 
 def test_the_tie_exposures_are_the_ones_recorded_pgw1633() -> None:
@@ -243,7 +264,7 @@ def test_the_tie_exposures_are_the_ones_recorded_pgw1633() -> None:
     """
     found: Dict[Tuple[str, str], str] = {}
     for endpoint in sorted(FLEET):
-        for name, module in skeleton.build_modules(_tree(endpoint)).items():
+        for name, module in skeleton.build_modules(_tree(endpoint)).modules.items():
             if _alias_map(module):
                 found[(endpoint, name)] = type(module).__name__
     assert found == dict(EXPECTED_TIES), (
@@ -270,7 +291,7 @@ def test_a_component_the_index_declares_but_the_tree_lacks_is_refused_pgw1633(
     (tmp_path / "unet").mkdir()
     (tmp_path / "unet" / "config.json").write_text((src / "unet" / "config.json").read_text())
     (tmp_path / skeleton.MODEL_INDEX).write_text(json.dumps(index))
-    assert skeleton.build_modules(tmp_path)
+    assert skeleton.build_modules(tmp_path).modules
 
     index["vae"] = ["diffusers", "AutoencoderKL"]
     (tmp_path / skeleton.MODEL_INDEX).write_text(json.dumps(index))
@@ -300,7 +321,7 @@ def test_a_passthrough_component_needs_no_files_to_answer_the_modules_pgw1633(
     (tmp_path / "vae" / "config.json").write_text((src / "vae" / "config.json").read_text())
     (tmp_path / skeleton.MODEL_INDEX).write_text(json.dumps(index))
 
-    modules = skeleton.build_modules(tmp_path)
+    modules = skeleton.build_modules(tmp_path).modules
     assert sorted(modules) == ["vae"]
 
 
@@ -315,7 +336,7 @@ def test_build_and_build_modules_read_one_index_pgw1633() -> None:
 
     tree = _tree("sdxl")
     full = skeleton.build(getattr(diffusers, FLEET["sdxl"]), tree)
-    modules_only = skeleton.build_modules(tree)
+    modules_only = skeleton.build_modules(tree).modules
     assert sorted(full.modules) == sorted(modules_only)
 
 
@@ -383,7 +404,7 @@ def test_the_meta_build_runs_the_declared_quantizer_pgw1638(endpoint: str) -> No
     compared by identity.
     """
     component, expected_scales, swapped_class = QUANTIZED_FLEET[endpoint]
-    module = skeleton.build_modules(_quantized_tree(endpoint))[component]
+    module = skeleton.build_modules(_quantized_tree(endpoint)).modules[component]
 
     scales = _scale_names(module)
     assert len(scales) == expected_scales, (
@@ -407,13 +428,13 @@ def test_the_declared_key_set_leaves_nothing_on_meta_pgw1638(endpoint: str) -> N
     scale tensors CONSUMED rather than orphaned."""
     component, expected_scales, _ = QUANTIZED_FLEET[endpoint]
     tree = _quantized_tree(endpoint)
-    aliases = _alias_map(skeleton.build_modules(tree)[component])
+    aliases = _alias_map(skeleton.build_modules(tree).modules[component])
 
-    module = skeleton.build_modules(tree)[component]
+    module = skeleton.build_modules(tree).modules[component]
     filled = _fill(module, aliases)
     assert filled > expected_scales, filled
     skeleton.retie(module)
-    survivors = skeleton.meta_survivors(module)
+    survivors = census.on_meta(module)
     assert survivors == (), (
         f"{endpoint}/{component}: {len(survivors)} parameter(s) stay on meta "
         f"after a checkpoint-shaped fill and retie: {survivors[:8]}"
@@ -434,14 +455,14 @@ def test_without_the_quantizer_step_the_incident_reproduces_pgw1638(
     """
     component, expected_scales, _ = QUANTIZED_FLEET[endpoint]
     tree = _quantized_tree(endpoint)
-    carried = set(_scale_names(skeleton.build_modules(tree)[component]))
+    carried = set(_scale_names(skeleton.build_modules(tree).modules[component]))
     assert len(carried) == expected_scales
 
     monkeypatch.setattr(
         skeleton, "_prepare_quantized",
         lambda *args, **kwargs: None,
     )
-    plain = skeleton.build_modules(tree)[component]
+    plain = skeleton.build_modules(tree).modules[component]
     homes = {name for name, _ in plain.named_parameters(remove_duplicate=False)}
     homes |= {name for name, _ in plain.named_buffers(remove_duplicate=False)}
     orphans = carried - homes
@@ -494,7 +515,7 @@ def test_every_declared_module_comes_off_meta_in_eval_mode_pgw1638(
     deactivate Dropout modules by default". A config-built module is in TRAIN
     mode, and nothing on the streaming path ever changed it.
     """
-    for name, module in skeleton.build_modules(_tree(endpoint)).items():
+    for name, module in skeleton.build_modules(_tree(endpoint)).modules.items():
         assert not module.training, (
             f"{endpoint}/{name} ({type(module).__name__}) comes off the meta "
             f"skeleton in TRAIN mode; `from_pretrained` would have returned it "
@@ -516,7 +537,7 @@ def test_the_live_dropout_exposure_is_the_one_recorded_pgw1638() -> None:
     """
     found: Dict[Tuple[str, str], str] = {}
     for endpoint in sorted(FLEET):
-        for name, module in skeleton.build_modules(_tree(endpoint)).items():
+        for name, module in skeleton.build_modules(_tree(endpoint)).modules.items():
             if _live_dropouts(module):
                 found[(endpoint, name)] = type(module).__name__
     assert found == dict(LIVE_DROPOUT), (
@@ -535,7 +556,7 @@ def test_the_quantizer_s_replacement_modules_are_in_eval_mode_too_pgw1638(
     quantizer built — replacement modules are constructed in train mode like
     any other, so the order is the assertion."""
     component, _, swapped_class = QUANTIZED_FLEET[endpoint]
-    module = skeleton.build_modules(_quantized_tree(endpoint))[component]
+    module = skeleton.build_modules(_quantized_tree(endpoint)).modules[component]
     swapped = [
         sub for sub in module.modules() if type(sub).__name__ == swapped_class
     ]

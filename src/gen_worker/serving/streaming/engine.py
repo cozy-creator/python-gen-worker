@@ -1,4 +1,19 @@
-"""``ctx.load``'s engine: chunk store -> pinned staging -> device, no files."""
+"""``ctx.load``'s engine: chunk store -> pinned staging -> device, no files.
+
+The load's postcondition is not asserted here. It is stated by the CONSTRUCTION
+CENSUS (:mod:`.census`, pgw#1647) and this engine REPLAYS it: after the fill and
+the prepare seam's trailing half, the module — parameters and buffers,
+persistent and non-persistent — must be exactly what construction said it would
+be, on the target device, with its ties intact and its dropout off.
+
+The check that stood here walked the checkpoint CONTAINER, and that is why four
+members of one defect family had to be found on rented hardware: a container
+names the tensors a checkpoint carries and can never name a tensor the CODE
+creates. pgw#1626 (a tie), pgw#1638 (a quantizer's scale grid, and eval mode),
+pgw#1644 (a computed RoPE buffer, on the CPU under an all-CUDA model) are one
+sentence with three endings. A module walk decides all of them, and the census
+makes the answer data instead of a re-derivation.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +25,7 @@ from typing import (
     TYPE_CHECKING, Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
 )
 
+from . import census as _census
 from . import keymap as _keymap
 from . import skeleton as _skeleton
 from .source import StreamedTensor, TensorStream, WeightStore, component_of
@@ -182,6 +198,13 @@ class StreamingLoader:
         self._buffers = int(buffers)
         self._planned: List[Tuple[str, str]] = []
         self.last_report: Optional[LoadReport] = None
+        #: The census the last load actually produced and the fence accepted.
+        self._census: Optional["_census.Census"] = None
+
+    @property
+    def last_census(self) -> Optional["_census.Census"]:
+        """What the last load BUILT, as data — the fence's own answer."""
+        return self._census
 
     def build(self, pipeline_cls: type, *, checkpoint_dir: Path, lane: Any) -> Any:
         """Meta skeleton, then weights streamed into it."""
@@ -192,6 +215,14 @@ class StreamingLoader:
         compute_dtype = _lane_compute_dtype(lane)
         built = _skeleton.build(
             pipeline_cls, Path(checkpoint_dir), compute_dtype=compute_dtype)
+        # THE CENSUS THIS LOAD MUST PRODUCE (pgw#1647). Taken from the prepare
+        # seam's own answer BEFORE a byte moves, so what follows is a REPLAY:
+        # the fence below decides nothing about what the module should be, it
+        # only asks whether the thing it has is that. When th#2281 delivers the
+        # release's census beside the resolved variant, `expected` is read from
+        # it instead and the same predicate then also catches an image that
+        # builds a different module than the one the release was derived from.
+        expected = self._expected_census(built)
         report = LoadReport(
             io=self._io,
             source=str(getattr(self._store, "KIND", type(self._store).__name__)),
@@ -219,33 +250,27 @@ class StreamingLoader:
             report.containers = len(self._planned)
         self._cast_to_lane(recasts, compute_dtype, report)
 
+        # The prepare seam's TRAILING half, once per component and in one
+        # place: postprocess, retie, eval, device sweep (`skeleton.PREPARE_STEPS`).
+        moved = 0
         for component, module in built.modules.items():
-            quantization = built.quantized.get(component)
-            if quantization is not None:
-                _skeleton.finish_quantized(module, quantization)
-            _skeleton.retie(module)
-            survivors = _skeleton.meta_survivors(module)
-            if survivors:
-                aliases = [
-                    name for name in survivors
-                    if name in set(_skeleton.tied_names(module))
-                ]
-                raise NameMismatch(
-                    f"component {component!r} ({type(module).__name__}): "
-                    f"{len(survivors)} tensor(s) were never filled and are "
-                    f"still on meta after every container was streamed — "
-                    f"{', '.join(survivors[:8])}"
-                    + (" …" if len(survivors) > 8 else "")
-                    + ". Weight tying was re-established first (pgw#1626), so "
-                    "an untied alias is not the cause"
-                    + (
-                        f"; {', '.join(aliases[:4])} "
-                        f"{'is a name' if len(aliases) == 1 else 'are names'} "
-                        f"{type(module).__name__} TIES to another parameter, "
-                        f"so the parameter it aliases went unfilled too"
-                        if aliases else ""
-                    )
-                )
+            moved += _skeleton.finish(
+                module, built.quantized.get(component), target=device)
+        if moved:
+            logger.info(
+                "ctx.load: the placement sweep moved %d tensor(s) the container "
+                "never named onto %s (pgw#1644)", moved, device,
+            )
+
+        # THE FENCE, REPLAYED (pgw#1647). It walks the MODULE — parameters and
+        # buffers, persistent and not — and it walks it against the census this
+        # load's own construction stated. The container-walking check that stood
+        # here could not see a tensor no container names, which is every one of
+        # pgw#1626, pgw#1638 and pgw#1644.
+        self._census = _census.fence(
+            built.modules, built.quantized, expected,
+            target=device, where=f"serve {pipeline_cls.__name__}",
+        )
 
         report.seconds = time.perf_counter() - started
         if report.seconds > 0:
@@ -253,7 +278,6 @@ class StreamingLoader:
                 report.weights_streamed_bytes / report.seconds / 1e9
             )
         self.last_report = report
-        self._place_uninstalled(built.pipeline, device)
         self._assert_lane_dtype(built.modules, compute_dtype, built)
         logger.info(
             "ctx.load: %s resident on %s — %.2f GiB streamed in %.2fs "
@@ -270,33 +294,22 @@ class StreamingLoader:
         )
         return built.pipeline
 
-    def _place_uninstalled(self, pipeline: Any, device: Any) -> None:
-        import torch
+    def _expected_census(self, built: "_skeleton.Skeleton") -> "_census.Census":
+        """The census this load must produce.
 
-        target = torch.device(device)
-        if target.type == "meta":
-            return
-        moved = 0
-        seen: set[int] = set()
-        components = getattr(pipeline, "components", None) or {}
-        roots = [m for m in components.values() if isinstance(m, torch.nn.Module)]
-        if not roots and isinstance(pipeline, torch.nn.Module):
-            roots = [pipeline]
-        for root in roots:
-            for module in root.modules():
-                if id(module) in seen:
-                    continue
-                seen.add(id(module))
-                for leaf, held in list(module._buffers.items()):
-                    if (held is not None and held.device != target
-                            and held.device.type != "meta"):
-                        module._buffers[leaf] = held.to(target)
-                        moved += 1
-        if moved:
-            logger.info(
-                "ctx.load: placed %d tensor(s) the container did not carry "
-                "onto %s (pgw#1454)", moved, target,
-            )
+        Today: the skeleton's own, taken before the fill. That is the moment
+        whose jurisdiction serve cannot delegate — only serve has seen the
+        bytes, so only serve can catch a fill defect or a corrupt store, and it
+        catches them by comparing the module AFTER the fill to what construction
+        said it was BEFORE.
+
+        When th#2281 lands, the release's census rides the resolved variant and
+        is read here instead. The predicate below does not change; what changes
+        is that the comparison then ALSO spans the image, so an endpoint image
+        whose transformers builds a different module than the one the release
+        was derived from is a refusal rather than a silent difference.
+        """
+        return built.census()
 
     def _plan(self, modules: Mapping[str, Any]) -> List[Tuple[str, str]]:
         planned: List[Tuple[str, str]] = []
