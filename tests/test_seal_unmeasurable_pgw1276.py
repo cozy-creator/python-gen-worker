@@ -1,13 +1,3 @@
-"""pgw#1276: an UNMEASURABLE loader map must not score as "unchanged".
-
-`assert_seal_unchanged`'s library half is the only surface that can see a
-native library substituted after boot — the seal's own toolchain axis comes
-from the DISK manifest, which cannot see an LD_PRELOADed object. The live
-comparison reads `/proc/self/maps`. When that map cannot be read, the check
-measured nothing; folding that into the passing verdict disarms the tripwire
-silently. These tests drive the REAL establish -> assert_seal_unchanged path.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -53,23 +43,17 @@ def _maps(tmp_path: Path, name: str, mapped: Tuple[Path, ...]) -> Path:
 
 
 def _arm(monkeypatch: pytest.MonkeyPatch, disk: Path, maps: Path) -> None:
-    """Point the seal at a controlled env: `disk` is what the env ships,
-    `maps` is what the loader mapped. The boot read-back is adopted first
-    (the manifest freezes here), so the next call runs the library check."""
     monkeypatch.setattr(env_seal, "_TOOLCHAIN_LIB_DIRS_OVERRIDE", (disk,))
     monkeypatch.setattr(env_seal, "_LIB_SNAPSHOT", None)
     monkeypatch.setattr(env_seal, "_MAPS_PATH", maps)
     monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
-    env_seal.assert_seal_unchanged("adopt")  # first call adopts, checks nothing
+    env_seal.assert_seal_unchanged("adopt")
     assert dict(env_seal.frozen_library_digests()), "manifest must be armed"
 
 
 def test_unreadable_loader_map_refuses_instead_of_scoring_unchanged(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """The pgw#1276 red test: the env ships libraries to check and the map
-    that says what is loaded cannot be read. Nothing was measured, so the
-    verdict cannot be "unchanged"."""
     disk = _toolchain_dir(tmp_path, "disk")
     _arm(monkeypatch, disk, _maps(tmp_path, "maps", tuple(disk.iterdir())))
     monkeypatch.setattr(env_seal, "_MAPS_PATH", tmp_path / "no-such-maps")
@@ -79,14 +63,13 @@ def test_unreadable_loader_map_refuses_instead_of_scoring_unchanged(
     message = str(excinfo.value)
     assert "no-such-maps" in message
     assert "mint" in message
-    assert "2" in message  # the libraries left unchecked are counted
+    assert "2" in message
 
 
 def test_readable_map_matching_the_manifest_passes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """The green control: the same arming, a map that CAN be read, contents
-    that match — no refusal. Unmeasurable and unchanged are different."""
+    """The green control: the same arming, a map that CAN be read, contents that match — no refusal."""
     disk = _toolchain_dir(tmp_path, "disk")
     _arm(monkeypatch, disk, _maps(tmp_path, "maps", tuple(disk.iterdir())))
     env_seal.assert_seal_unchanged("mint")
@@ -95,9 +78,7 @@ def test_readable_map_matching_the_manifest_passes(
 def test_shipped_but_never_mapped_library_is_not_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """The deliberate skip stays: a library the loader never mapped cannot
-    have been substituted in this process — no fact to measure, as opposed
-    to a fact we failed to measure."""
+    """The deliberate skip stays: a library the loader never mapped cannot have been substituted in this process — no fact to measure, as opposed to a fact we failed to measure."""
     disk = _toolchain_dir(tmp_path, "disk")
     _arm(monkeypatch, disk, _maps(tmp_path, "maps",
                                   (disk / "libtorch_cuda.so",)))
@@ -107,9 +88,7 @@ def test_shipped_but_never_mapped_library_is_not_drift(
 def test_mapped_library_whose_file_cannot_be_read_is_named_unverified(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """A mapped library the process cannot stat digests to `<unreadable>` on
-    BOTH sides once the manifest hits the same file — equal strings that are
-    not a comparison. The refusal says unverified, not "substituted"."""
+    """A mapped library the process cannot stat digests to `<unreadable>` on BOTH sides once the manifest hits the same file — equal strings that are not a comparison."""
     disk = _toolchain_dir(tmp_path, "disk")
     _arm(monkeypatch, disk, _maps(tmp_path, "maps", tuple(disk.iterdir())))
     gone = tmp_path / "gone"
@@ -129,9 +108,7 @@ def test_mapped_library_whose_file_cannot_be_read_is_named_unverified(
 def test_substituted_mapped_library_still_refuses_by_name(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """The arm itself works under this fixture: swap the bytes of a mapped
-    library and the same call names it. Without this the unreadable-map test
-    could pass against a check that was never armed."""
+    """The arm itself works under this fixture: swap the bytes of a mapped library and the same call names it."""
     disk = _toolchain_dir(tmp_path, "disk")
     _arm(monkeypatch, disk, _maps(tmp_path, "maps", tuple(disk.iterdir())))
     preload = tmp_path / "preload"

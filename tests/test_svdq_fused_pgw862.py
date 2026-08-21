@@ -1,11 +1,3 @@
-"""pgw#862 B0 — fused svdq lane, box-side proofs (no GPU).
-
-GPU numerics (bit-identity of the quant path, GEMM tolerance, per-shape
-divergence vs the baseline lane) run on the pgw#865 harness; here we prove
-what is provable without silicon: the reference contracts agree with the
-pgw#685 chain, and the kernels COMPILE to native block-scaled MMA for both
-fatbin archs (the same PTX census that made B0 a go)."""
-
 from __future__ import annotations
 
 import re
@@ -27,12 +19,8 @@ def _require_triton():
     return pytest.importorskip("triton")
 
 
-# --- CPU contract proofs ---------------------------------------------------
-
-
 def test_reference_flat_scales_agree_with_pgw685_chain() -> None:
-    """The fused lane's FLAT scales are the same numbers the proven chain
-    swizzles into the cuBLAS blocked layout — one quantization, two layouts."""
+    """The fused lane's FLAT scales are the same numbers the proven chain swizzles into the cuBLAS blocked layout — one quantization, two layouts."""
     torch.manual_seed(0)
     for m, k in ((32, 256), (77, 512)):
         xs = torch.randn(m, k, dtype=torch.bfloat16)
@@ -45,9 +33,7 @@ def test_reference_flat_scales_agree_with_pgw685_chain() -> None:
 
 
 def test_dyn_s2_matches_baseline_formula() -> None:
-    """Column-amax-then-divide == divide-then-global-amax under bf16 rounding
-    (monotone, sign-symmetric) — the fused lane's s2 is the baseline lane's
-    s2, bit for bit."""
+    """Column-amax-then-divide == divide-then-global-amax under bf16 rounding (monotone, sign-symmetric) — the fused lane's s2 is the baseline lane's s2, bit for bit."""
     torch.manual_seed(1)
     for m, k in ((64, 256), (333, 1024)):
         x = torch.randn(m, k, dtype=torch.bfloat16) * 3
@@ -61,9 +47,6 @@ def test_dyn_s2_matches_baseline_formula() -> None:
         assert torch.equal(svdq_fused._dyn_s2(x, None), want_ns)
 
 
-# --- AOT compile census ----------------------------------------------------
-
-
 def _get_jit_fns() -> dict:
     import gc
 
@@ -74,9 +57,6 @@ def _get_jit_fns() -> dict:
     out = {}
     for obj in gc.get_objects():
         try:
-            # gc.get_objects() can hand back weakproxies whose referent died
-            # (anything the suite ran earlier in this process); touching them
-            # raises ReferenceError. They can't be our kernels — skip.
             fn = obj.fn if isinstance(obj, Autotuner) else (
                 obj if isinstance(obj, JITFunction) else None)
             if fn is not None and getattr(fn, "__name__", "") in (
@@ -136,4 +116,4 @@ def test_fused_quant_kernel_compiles(cap: int) -> None:
         constexprs={"HAS_SMOOTH": True, "BLOCKED": True, "BPP": 128},
     )
     ptx = tt_compile(src, target=GPUTarget("cuda", cap, 32)).asm["ptx"]
-    assert "e4m3" in ptx  # the block-scale cast made it to silicon code
+    assert "e4m3" in ptx

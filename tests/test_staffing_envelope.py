@@ -1,20 +1,4 @@
-"""The STAFFING ENVELOPE an entrypoint declares: which machine it is placed on.
-
-# se#755 / pgw#1396: the v2 surface can state the machine it needs.
-
-`Resources` has carried `vcpus`, `max_gpu_count`,
-`max_gpus_per_execution_group` and `parallel` all along, and tensorhub has
-read every one of them at FUNCTION scope all along
-(`internal/builder/function_requirements.go` -> `payload["min_vcpus"]`, and
-`staffing_envelope.go` for the other three). What was missing was any syntax
-for reaching them from the pgw#1382 author surface: `@entrypoint` took no
-kwargs, and `entrypoints_v2._resources()` hand-built `{gpu, requires}` from
-the model slots alone, so five of `Resources`' eight fields could never
-appear in a v2 manifest.
-
-These tests pin the emission. The hub-side READ is pinned in tensorhub
-th#2166 against the exact rows this file produces.
-"""
+"""The STAFFING ENVELOPE an entrypoint declares: which machine it is placed on."""
 
 from __future__ import annotations
 
@@ -49,15 +33,11 @@ def rows(staffing: ModuleType) -> dict[str, dict]:
     return {row["name"]: row for row in discover_entrypoints(MODULE)}
 
 
-# -- declaration ------------------------------------------------------------
-
-
 def test_the_declaration_reaches_the_spec(staffing: ModuleType) -> None:
     """`@entrypoint(resources=...)` and bare `@entrypoint` both work."""
 
     assert getattr(staffing.generate, ENTRYPOINT_ATTR).resources is staffing.H3_STAFFING
     assert getattr(staffing.analyze, ENTRYPOINT_ATTR).resources == Resources(vcpus=4)
-    # The bare form is untouched: absence is None, not an empty Resources.
     assert getattr(staffing.control, ENTRYPOINT_ATTR).resources is None
 
 
@@ -85,8 +65,7 @@ def test_resources_must_be_a_resources() -> None:
 
 
 def test_the_envelope_refusals_fire_at_declaration_time() -> None:
-    """`Resources.__post_init__` mirrors the hub's `extractStaffingEnvelope`
-    ingest refusals, so a contradiction costs a ValueError and not a build."""
+    """`Resources.__post_init__` mirrors the hub's `extractStaffingEnvelope` ingest refusals, so a contradiction costs a ValueError and not a build."""
 
     with pytest.raises(ValueError, match="below gpu_count"):
         Resources(gpu_count=4, max_gpu_count=2)
@@ -94,23 +73,13 @@ def test_the_envelope_refusals_fire_at_declaration_time() -> None:
         Resources(vcpus=0)
 
 
-# -- emission ---------------------------------------------------------------
-
-
 def test_all_five_facts_reach_the_manifest(rows: dict[str, dict]) -> None:
-    """The five facts se#755 measured as having "no home"."""
 
     block = rows["generate"]["resources"]
-    assert block["vcpus"] == 16                          # the CPU floor
-    assert block["max_gpu_count"] == 4                   # the SHAPE (ceiling)
-    assert block["max_gpus_per_execution_group"] == 4    # the degree axis
-    # A tuple in memory, a JSON array on the wire — `normalizeParallelMechanisms`
-    # decodes `[]any`. Asserted through `json` so the WIRE shape is the claim.
+    assert block["vcpus"] == 16
+    assert block["max_gpu_count"] == 4
+    assert block["max_gpus_per_execution_group"] == 4
     assert json.loads(json.dumps(block))["parallel"] == ["sequence"]
-    # Host RAM: a RECOMMENDATION, nested, and NEVER a minimum. Paul,
-    # 2026-07-11: a RunPod GPU pod can neither select nor guarantee it, so a
-    # declared floor was unenforceable theater (tensorhub
-    # `TermDef.MinimumDeclarable` is false for this term alone).
     assert block["requires"]["recommended"] == {"min_host_ram_gb": 96.0}
     assert "min_host_ram_gb" not in block["requires"]
 
@@ -123,10 +92,7 @@ def test_host_ram_cannot_be_declared_as_a_minimum() -> None:
 
 
 def test_vcpus_is_not_a_requires_term() -> None:
-    """ONE axis, ONE spelling. `resources.vcpus` is already the declared
-    surface and the hub already normalizes it to `min_vcpus` itself; a
-    `requires.min_vcpus` term would land in one payload key from two
-    directions."""
+    """ONE axis, ONE spelling."""
 
     from gen_worker.models.tensor_layout_contract import KNOWN_REQUIREMENT_TERMS
 
@@ -137,55 +103,24 @@ def test_vcpus_is_not_a_requires_term() -> None:
 
 
 def test_a_weightless_function_can_state_its_cpu_floor(rows: dict[str, dict]) -> None:
-    """se#757 blocker C cleared the SIGNATURE; this clears the MACHINE.
-
-    `dj-utils` (vcpus=4) and `music-analysis` (2/8/8 across three functions)
-    are the shipped shape, and it is why this declaration is per-FUNCTION: a
-    single endpoint- or model-scoped number cannot express three values, and
-    a weightless function has no `Model` class to hang one on.
-    """
 
     row = rows["analyze"]
     assert row["slots"] == []
     assert row["resources"] == {"vcpus": 4}
-    # No accelerator is manufactured for a function that declared none.
     assert "gpu" not in row["resources"]
 
 
 def test_both_requires_scopes_fold_rather_than_shadow(rows: dict[str, dict]) -> None:
-    """The model header's lane-derived floor and the function's own
-    `Resources(requires=)` both target `functions[].resources.requires`, and
-    they FOLD by `term_meets` — the strictest of everything declared for this
-    function. Either one shadowing the other is a silent under-declaration
-    the buy path cannot detect.
-
-    pgw#1599 changed WHAT the class header contributes, not that it folds.
-    The lane's VRAM floor STRING is deleted (Paul: *"there is no required
-    VRAM"* — demand varies per request), so what the header contributes is
-    `min_sm`, DERIVED from the lane contract's own load dtype. The VRAM half
-    is replaced by a COMPUTED number, not by another annotation: pgw#1600
-    evaluates the lane's demand formula over the advertised shape envelope
-    and serializes `weights + demand(envelope)` into the release document,
-    which is what the hub shops on (se#810).
-    """
+    """The model header's lane-derived floor and the function's own `Resources(requires=)` both target `functions[].resources.requires`, and they FOLD by `term_meets` — the strictest of everything declare..."""
 
     requires = rows["generate"]["resources"]["requires"]
-    assert "min_vram_gb" not in requires                         # pgw#1599
-    assert requires["min_sm"] == 80                              # from the CONTRACT
-    assert requires["recommended"]["min_host_ram_gb"] == 96.0    # from the function
+    assert "min_vram_gb" not in requires
+    assert requires["min_sm"] == 80
+    assert requires["recommended"]["min_host_ram_gb"] == 96.0
 
 
 def test_the_undeclared_control_is_unchanged(rows: dict[str, dict]) -> None:
-    """An entrypoint with no `resources=` emits the class header's floor and
-    nothing of its own — the sdxl deploy pins this shape.
-
-    pgw#1404 added `min_sm`, DERIVED from the lane contract's own load dtype
-    (H3_LANE is bf16 -> sm80) rather than hand-annotated. pgw#1599 finished
-    the thought: the hand-written VRAM half is gone too, so EVERY term in
-    this block is now derived from the contract and none is typed by an
-    author. One producer per fact, and the capability floor can never drift
-    from the weights it describes because it is computed from them.
-    """
+    """An entrypoint with no `resources=` emits the class header's floor and nothing of its own — the sdxl deploy pins this shape."""
 
     assert rows["control"]["resources"] == {
         "gpu": True, "requires": {"min_sm": 80},
@@ -193,15 +128,7 @@ def test_the_undeclared_control_is_unchanged(rows: dict[str, dict]) -> None:
 
 
 def test_the_block_reaches_the_real_manifest(tmp_path: Path) -> None:
-    """The whole `cozy build` discovery path, not just `discover_entrypoints`.
-
-    `discover_manifest` is what writes `endpoint.lock`; the two lines between
-    it and this block (`manifest["entrypoints"] = entrypoints_block(rows)`)
-    transform nothing, but "transforms nothing" is a claim worth a test when
-    the whole issue is a fact that was declarable and unreachable.
-
-    The rows this produces are the ones tensorhub th#2166 parses verbatim.
-    """
+    """The whole `cozy build` discovery path, not just `discover_entrypoints`."""
     from gen_worker.discovery.discover import discover_manifest
 
     root = tmp_path / "staffing_e2e"
@@ -231,18 +158,13 @@ def test_the_block_reaches_the_real_manifest(tmp_path: Path) -> None:
     assert list(blocks["generate"]["parallel"]) == ["sequence"]
     assert blocks["generate"]["requires"]["recommended"]["min_host_ram_gb"] == 96.0
     assert blocks["analyze"] == {"vcpus": 4}
-    # pgw#1404: the DERIVED capability floor reaches the real manifest too —
-    # `min_sm` beside `min_vram_gb`, in the term the hub already reads.
     assert blocks["control"] == {
         "gpu": True, "requires": {"min_sm": 80},
     }
 
 
 def test_absent_stays_absent(staffing: ModuleType) -> None:
-    """No model slot AND no `resources=` means no claim: the key is omitted
-    entirely and the hub falls back to release-level resolution. A
-    present-but-EMPTY block is the hub's explicit CPU declaration, which is a
-    different statement and must not be made by accident."""
+    """No model slot AND no `resources=` means no claim: the key is omitted entirely and the hub falls back to release-level resolution."""
 
     sys.path.insert(0, str(FIXTURES))
     try:

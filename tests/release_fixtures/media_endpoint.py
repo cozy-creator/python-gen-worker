@@ -1,14 +1,3 @@
-"""An ASSET-TAKING endpoint — the pgw#1418 shape, verbatim.
-
-`dj-utils.extract_frame` and all three of `music-analysis`'s functions take a
-mandatory typed media input, and on the v2 surface every one of them failed
-`asset not materialized` because nothing on the serve path materialized the
-payload. This fixture is that signature with the endpoint's own raise site
-kept: the refusal comes from the AUTHOR's code, exactly as it did in
-production, so a test that passes proves the PLATFORM filled `local_path` and
-not that the check was removed.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,8 +16,7 @@ from gen_worker import (
 
 
 class Cue(msgspec.Struct, forbid_unknown_fields=True):
-    """A NESTED asset, reached through a list — the shape whose field path is
-    `cues[].clip` and the one a flat walk gets wrong."""
+    """A NESTED asset, reached through a list — the shape whose field path is `cues[].clip` and the one a flat walk gets wrong."""
 
     clip: VideoAsset
     note: Annotated[str, PromptRole("negative")] = ""
@@ -57,8 +45,6 @@ class AnalyzeOutput(msgspec.Struct):
 
 
 def _local_path(asset: object, what: str) -> str:
-    """`dj_utils.main._local_path`, carried over unchanged — THE raise site the
-    production failure came from."""
     path = getattr(asset, "local_path", None)
     if not path:
         raise ValidationError(f"{what} asset not materialized")

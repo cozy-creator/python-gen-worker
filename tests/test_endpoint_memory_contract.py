@@ -1,16 +1,3 @@
-"""pgw#1558 — the memory MECHANISM surface an endpoint can call.
-
-`minimax-h3` hand-rolled a large fraction of this module in raw torch because
-none of it was reachable: the move-and-prove walk was a private method on the
-worker-level `Residency` registry, the storage-aware byte census existed only
-inside the endpoint, and `free + allocated` was a formula nobody had named. The
-tests here pin the surface that ends that duplication.
-
-Everything runs on CPU. The device axis exercised is `cpu` -> `meta`, which is
-a real torch device move on any machine, so the escalation and the completeness
-walk are tested through their production code paths rather than around them.
-"""
-
 from __future__ import annotations
 
 import torch
@@ -19,16 +6,7 @@ from gen_worker import hostfacts
 from gen_worker.models import memory, residency
 
 
-# --------------------------------------------------------------------------
-# Storage-priced bytes: a quantized subclass is not its emulated dtype.
-# --------------------------------------------------------------------------
-
-
 class _EmulatedFp8(torch.Tensor):
-    """A tensor subclass that PRESENTS bf16 and STORES one byte per element —
-    the shape torchao's per-row float8 weights have. `__tensor_flatten__` is
-    torch's own contract for naming the real inner tensors, so this is the
-    same interface a production quantizer exposes, not a stand-in for it."""
 
     @staticmethod
     def __new__(cls, inner: torch.Tensor) -> "_EmulatedFp8":
@@ -49,8 +27,6 @@ class _EmulatedFp8(torch.Tensor):
     def __torch_dispatch__(  # type: ignore[override]  # noqa: D105
         cls, func: object, types: object, args: tuple = (), kwargs: dict | None = None,
     ) -> object:
-        # The census walks and `nn.Parameter` only ever alias/detach/move a
-        # weight; real arithmetic is not this fixture's job.
         if func in (
             torch.ops.aten.detach.default,
             torch.ops.aten.alias.default,
@@ -67,7 +43,6 @@ def test_tensor_storage_bytes_prices_the_storage_not_the_logical_dtype() -> None
     inner = torch.zeros(64, 32, dtype=torch.uint8)
     quantized = _EmulatedFp8(inner)
 
-    # What the plain formula says, and what it costs.
     assert quantized.dtype is torch.bfloat16
     assert quantized.numel() * quantized.element_size() == 64 * 32 * 2
 
@@ -79,8 +54,7 @@ def test_tensor_storage_bytes_prices_the_storage_not_the_logical_dtype() -> None
 
 
 def test_size_estimates_follow_the_storage() -> None:
-    """The census the offload ladder reads must not book an fp8 component at
-    the bf16 checkpoint's bytes."""
+    """The census the offload ladder reads must not book an fp8 component at the bf16 checkpoint's bytes."""
 
     class Quantized(torch.nn.Module):
         def __init__(self) -> None:
@@ -95,7 +69,7 @@ def test_size_estimates_follow_the_storage() -> None:
             self.transformer = Quantized()
 
     gb = memory.estimate_pipeline_size_gb(Holder())
-    assert abs(gb - 1024 * 1024 / float(1024**3)) < 1e-9  # 1 MiB, not 2
+    assert abs(gb - 1024 * 1024 / float(1024**3)) < 1e-9
 
 
 def test_resident_census_is_empty_off_gpu() -> None:
@@ -106,20 +80,7 @@ def test_resident_census_is_empty_off_gpu() -> None:
     assert memory.resident_census(Holder()) == []
 
 
-# --------------------------------------------------------------------------
-# The move that PROVES it landed, and the escalation behind it.
-# --------------------------------------------------------------------------
-
-
 class _StuckModule(torch.nn.Module):
-    """A module whose `.to()` is a silent no-op.
-
-    Not a contrivance: this is what a quantized/hooked component does in
-    production (`minimax-h3` found a text encoder holding 27 GiB on the card
-    *after* an evict-to-cpu, and the denoise that followed OOM'd). `_apply` is
-    the single funnel every `.to()`/`.cuda()`/`.cpu()` goes through, so
-    declining it reproduces the failure exactly.
-    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -140,8 +101,6 @@ def test_repair_escalates_past_a_no_op_to() -> None:
             self.transformer = _StuckModule()
 
     holder = Holder()
-    # The premise: `.to()` genuinely does nothing here, so the retry pass that
-    # `repair_device_placement` used to end at cannot possibly succeed.
     holder.transformer.to("meta")
     assert _devices(holder.transformer) == {"cpu"}
     assert memory.device_mismatches(holder, "meta")
@@ -161,8 +120,6 @@ def test_repair_still_moves_a_cooperative_component() -> None:
 
 
 def test_move_verified_is_a_free_function_and_proves_the_landing() -> None:
-    """The whole point of pgw#1558: an endpoint holds a component, not a model
-    ref, and can now call the same mechanism the registry calls."""
     module = torch.nn.Linear(4, 4)
     assert residency.move_verified(module, "meta", label="transformer") is True
     assert _devices(module) == {"meta"}
@@ -188,18 +145,11 @@ def test_registry_move_delegates_to_the_free_function() -> None:
     assert seen == [("Linear", "meta")]
 
 
-# --------------------------------------------------------------------------
-# The fourth named VRAM formula, and the zero it refuses to lie about.
-# --------------------------------------------------------------------------
-
-
 def test_process_ceiling_is_a_named_formula() -> None:
     ceiling = hostfacts.process_ceiling_bytes()
     if hostfacts.cuda_ready():
         assert ceiling is None or ceiling >= 0
     else:
-        # `None` = no reading. It is NOT zero, and the distinction is the whole
-        # reason this lives in hostfacts (pgw#896).
         assert ceiling is None
 
 
@@ -207,10 +157,6 @@ def test_process_ceiling_vram_names_its_zero_cause() -> None:
     reading = memory.process_ceiling_vram()
     if hostfacts.cuda_ready():
         return
-    # The defect this replaces: `minimax-h3` computed `free + allocated`
-    # itself, got 0.0 on a CPU host, and reported "no CUDA device answered
-    # this pod — usable VRAM is UNREADABLE, not merely unmeasured". A machine
-    # with no card is not a wedged card.
     assert reading.gb == 0.0
     assert reading.measured is False
     assert reading.reason == memory.VRAM_NO_CUDA
@@ -218,36 +164,22 @@ def test_process_ceiling_vram_names_its_zero_cause() -> None:
 
 
 def test_release_cached_vram_does_not_reset_the_peak() -> None:
-    """The stage-boundary flush an activation measurement can survive.
-
-    `flush_memory` resets the peak counters, which is exactly what an endpoint
-    measuring activation across a stage boundary must not do — so the two are
-    different names.
-    """
+    """The stage-boundary flush an activation measurement can survive."""
     import inspect
 
     source = inspect.getsource(memory.release_cached_vram)
     assert "empty_cache" in source
     assert "reset_peak_memory_stats" not in source
     assert "gc.collect" not in source
-    memory.release_cached_vram()  # always safe, CUDA or not
-
-
-# --------------------------------------------------------------------------
-# One component's own bytes — the question a stage schedule asks.
-# --------------------------------------------------------------------------
+    memory.release_cached_vram()
 
 
 def test_module_storage_bytes_asks_the_module_itself() -> None:
-    """`estimate_pipeline_size_gb` enumerates the COMPONENTS OF what it is
-    handed, so a bare denoiser loses every parameter held on its root. A
-    residency schedule sizing one stage resident needs the module's own
-    bytes."""
+    """`estimate_pipeline_size_gb` enumerates the COMPONENTS OF what it is handed, so a bare denoiser loses every parameter held on its root."""
 
     class Denoiser(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            # On the ROOT — invisible to a components-of walk.
             self.pos_embed = torch.nn.Parameter(
                 torch.zeros(1000, dtype=torch.float32), requires_grad=False
             )
@@ -256,7 +188,6 @@ def test_module_storage_bytes_asks_the_module_itself() -> None:
     module = Denoiser()
     expected = 1000 * 4 + 10 * 10 * 4
     assert memory.module_storage_bytes(module) == expected
-    # The old tool, on the same object, and the gap it leaves.
     assert memory.estimate_pipeline_size_gb(module) * float(1024**3) < expected
 
 

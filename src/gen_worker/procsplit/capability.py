@@ -1,34 +1,4 @@
-"""Parent-side policy on the per-job capability token.
-
-A per-job, short-TTL, least-authority grant is the ONE credential shape the
-compute child is allowed to hold, and the child genuinely needs it: inputs it
-fetches and outputs it uploads go child -> object store directly, which is what
-keeps the data plane out of the parent's interpreter.
-
-Relaying ``RunJob.worker_capability_token`` verbatim would hand tenant code
-whatever arrived on the stream, unexamined.
-
-The parent cannot mint or re-mint — the hub holds the key — so "downscope"
-here means the narrowest thing a relay CAN do: forward, or withhold. What it
-checks is that the grant it is about to hand to tenant code is scoped to THIS
-job on THIS worker and is still alive:
-
-* ``cap_kind`` is a worker capability at all;
-* ``request_id`` / ``attempt`` / ``function_name`` name this dispatch;
-* ``worker_id`` names this worker (the parent's JWT identity);
-* ``exp`` is in the future.
-
-A token that fails any of these is WITHHELD — stripped from the relay and the
-job refused typed — rather than forwarded for the child to discover mid-upload.
-A confused-deputy grant (one job's token delivered with another job's work) is
-the case that matters: it is exactly the shape a hub-side mix-up would take,
-and forwarding it would have tenant code acting under authority derived from
-somebody else's request.
-
-TTL longer than policy is REPORTED, not refused: only the hub can shorten it,
-and refusing legitimate work over it would trade a real outage for a
-theoretical exposure. The observation is what lets the hub-side TTL be tuned.
-"""
+"""Parent-side policy on the per-job capability token."""
 
 from __future__ import annotations
 
@@ -37,11 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from ..request_context._helpers import _decode_unverified_jwt_claims
 
-# A per-job grant living longer than this is worth naming. Not a refusal: the
-# minter chooses the TTL (runtimestore.WorkerCapabilityTokenTTL) and only it
-# can shorten one.
 MAX_EXPECTED_TTL_S = 6 * 3600
-# Clock skew between the hub that minted and the pod that received.
 EXPIRY_SKEW_S = 30.0
 
 
@@ -52,7 +18,7 @@ class Decision:
     forward: bool
     reason: str = ""
     retryable: bool = False
-    note: str = ""          # forwarded, but worth recording
+    note: str = ""
 
 
 FORWARD = Decision(forward=True)
@@ -83,17 +49,10 @@ def decide(
     worker_id: str = "",
     now: Optional[float] = None,
 ) -> Decision:
-    """Forward, or withhold, one per-job grant.
-
-    Claims are read UNVERIFIED on purpose: the parent has no signing key and
-    does not need one. It is not deciding whether the hub minted the token —
-    the hub re-checks its own signature on every use. It is deciding whether
-    the grant in front of it belongs to the job it is about to attach it to,
-    which is a question the signature cannot answer.
-    """
+    """Forward, or withhold, one per-job grant."""
     token = (token or "").strip()
     if not token:
-        return FORWARD          # jobs with no file authority legitimately exist
+        return FORWARD
     claims = _claims(token)
     if not claims:
         return Decision(

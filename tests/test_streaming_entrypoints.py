@@ -1,24 +1,3 @@
-"""Incremental output, end to end (pgw#1576).
-
-The v1 hardcut deleted token streaming and shipped no successor: three
-endpoints (`qwen3.6-35b-a3b`, `qwen3.6-27b-mtp-gguf`, `joycaption`) could not
-be ported at all. The successor is NOT the v1 async generator — Python forbids
-`return <value>` inside one, so that shape can express only the DROPPABLE half
-of the wire. A streaming entrypoint declares its chunk type, emits chunks, and
-still RETURNS its terminal struct.
-
-This drives the real path on CPU with no weights and no GPU:
-
-1. the declaration — `streams=` lands on the spec; a generator is refused with
-   the migration line;
-2. the serve loop — chunks reach a sink in order, the terminal is the return;
-3. **the worker** — `Worker._run_one` with a capturing transport: N ordered
-   `JobProgress` frames (including the ctx-event lane that was dead) followed
-   by exactly one `JobResult` carrying the whole output;
-4. the manifest — `incremental_output` + `delta_output_schema`, read off the
-   spec without executing author code.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -56,14 +35,10 @@ def streaming() -> Iterator[ModuleType]:
         sys.path.remove(str(FIXTURES))
 
 
-# -- 1. the declaration ------------------------------------------------------
-
-
 def test_the_chunk_type_lands_on_the_spec(streaming: ModuleType) -> None:
     """`streams=` is a STATIC fact: publish reads it, no body runs."""
     spec = getattr(streaming.complete, ENTRYPOINT_ATTR)
     assert spec.delta_type is TokenDelta and spec.delta_arms == (TokenDelta,)
-    # ...and the return contract is UNCHANGED — the terminal is still a struct.
     assert spec.return_type is streaming.Completion
 
     assert getattr(streaming.caption, ENTRYPOINT_ATTR).delta_type is ItemDelta
@@ -71,8 +46,6 @@ def test_the_chunk_type_lands_on_the_spec(streaming: ModuleType) -> None:
 
 
 def _declare(source: str) -> None:
-    """A REAL module-level declaration — @entrypoint refuses nested functions
-    first, so an in-function probe would measure the wrong wall."""
     preamble = (
         "import msgspec\n"
         "from typing import AsyncIterator, Iterator\n"
@@ -91,24 +64,19 @@ def _declare(source: str) -> None:
 @pytest.mark.parametrize(
     "source",
     [
-        # the v1 shape, verbatim (qwen3.6-35b-a3b's `complete`)
         "@entrypoint\n"
         "async def f(ctx: RequestContext, payload: In) -> AsyncIterator[TokenDelta]:\n"
         "    yield TokenDelta(text='x')\n",
-        # ...and the sync one (joycaption's `caption_images`)
         "@entrypoint\n"
         "def f(ctx: RequestContext, payload: In) -> Iterator[TokenDelta]:\n"
         "    yield TokenDelta(text='x')\n",
-        # a generator BODY whose annotation lies about it
         "@entrypoint\n"
         "def f(ctx: RequestContext, payload: In) -> Out:\n"
         "    yield Out(text='x')\n",
     ],
 )
 def test_a_generator_entrypoint_is_refused_with_the_migration(source: str) -> None:
-    """The refusal IS the design, so it has to say what to write instead —
-    'return type must be a msgspec.Struct' would send the author hunting for a
-    schema defect that is not there."""
+    """The refusal IS the design, so it has to say what to write instead — 'return type must be a msgspec.Struct' would send the author hunting for a schema defect that is not there."""
     with pytest.raises(EntrypointDeclarationError) as excinfo:
         _declare(source)
     message = str(excinfo.value)
@@ -126,8 +94,7 @@ def test_streams_takes_a_struct_type_and_says_so() -> None:
 
 
 def test_a_multi_shape_declaration_must_be_discriminable() -> None:
-    """Several untagged arms cannot be told apart in ONE published schema, so
-    the ambiguity is refused at import rather than shipped to clients."""
+    """Several untagged arms cannot be told apart in ONE published schema, so the ambiguity is refused at import rather than shipped to clients."""
     with pytest.raises(EntrypointDeclarationError, match="carry no msgspec tag"):
         _declare(
             "class D1(msgspec.Struct): a: str = ''\n"
@@ -137,12 +104,8 @@ def test_a_multi_shape_declaration_must_be_discriminable() -> None:
         )
 
 
-# -- 2. framing --------------------------------------------------------------
-
-
 def test_a_token_delta_frames_as_concatenable_text() -> None:
-    """The hub renders every non-audio chunk as `payload["delta"] = string(data)`
-    inside a JSON SSE envelope, so a token stream must BE text on the wire."""
+    """The hub renders every non-audio chunk as `payload["delta"] = string(data)` inside a JSON SSE envelope, so a token stream must BE text on the wire."""
     assert frame_of(TokenDelta(text="hello ")) == (b"hello ", "text/plain")
 
 
@@ -150,9 +113,6 @@ def test_an_item_delta_frames_as_json_because_its_metadata_is_the_point() -> Non
     data, content_type = frame_of(ItemDelta(index=2, total=5, text="a cat"))
     assert content_type == "application/json"
     assert msgspec.json.decode(data)["index"] == 2
-
-
-# -- 3. the serve loop -------------------------------------------------------
 
 
 class _NoModels:
@@ -193,10 +153,8 @@ def test_the_serve_loop_streams_the_chunks_and_returns_the_terminal(
         context={"chunk_sink": lambda data, ct: chunks.append((data, ct))},
     )
 
-    # The DROPPABLE half: three ordered text frames.
     assert [data for data, _ in chunks] == [b"hi-0 ", b"hi-1 ", b"hi-2 "]
     assert {ct for _, ct in chunks} == {"text/plain"}
-    # The AUTHORITATIVE half: the whole completion, typed, as the return value.
     assert isinstance(outcome.result, streaming.Completion)
     assert outcome.result.text == "hi-0 hi-1 hi-2 "
     assert outcome.result.tokens == 3
@@ -216,14 +174,13 @@ def test_a_sync_entrypoint_streams_with_the_identical_call(
 
     rows = [msgspec.json.decode(data) for data, _ in chunks]
     assert [row["index"] for row in rows] == [0, 1, 2]
-    assert rows[1]["error"] == "blank item"          # one ITEM failed...
-    assert outcome.result.failed == 1                # ...and the request did not
+    assert rows[1]["error"] == "blank item"
+    assert outcome.result.failed == 1
     assert outcome.result.captions[2] == "a photo of a dog"
 
 
 def test_one_handler_streams_two_shapes(streaming: ModuleType) -> None:
-    """joycaption's case: tokens WHILE an item decodes, an item frame when it
-    finishes. Both arms are declared, so both are publishable and emittable."""
+    """joycaption's case: tokens WHILE an item decodes, an item frame when it finishes."""
     chunks: List[Tuple[bytes, str]] = []
     _loop().invoke(
         "narrate",
@@ -236,14 +193,11 @@ def test_one_handler_streams_two_shapes(streaming: ModuleType) -> None:
         (b"a ", "text/plain"), (b"cat ", "text/plain"),
     ]
     terminal = msgspec.json.decode(chunks[-1][0])
-    # The JSON arm carries its own discriminator, so a consumer reading one
-    # stream of mixed frames never has to guess which shape it holds.
     assert terminal["type"] == "ItemDelta" and terminal["finished"] is True
 
 
 def test_emit_refuses_a_function_that_declared_no_chunk_type() -> None:
-    """An undeclared emitter would stream past a manifest saying
-    `incremental_output: false` — one fact, two enforcers."""
+    """An undeclared emitter would stream past a manifest saying `incremental_output: false` — one fact, two enforcers."""
     with pytest.raises(RuntimeError, match="declared no chunk type"):
         _loop().invoke(
             "silent",
@@ -263,16 +217,7 @@ def test_emit_refuses_a_chunk_of_another_type() -> None:
         ctx.emit(ItemDelta(index=0))
 
 
-# -- 4. the worker: the actual wire -----------------------------------------
-
-
 class _CapturedWorker:
-    """`Worker._run_one` over a REAL `ServeLoop`, with only the socket faked.
-
-    The dispatch, the `to_thread` hop the body really runs on, the per-request
-    JobProgress channel, the seq counter and the terminal `JobResult` are all
-    the production ones; `_send` collects instead of writing to gRPC.
-    """
 
     def __init__(self) -> None:
         self.sent: List[pb.WorkerMessage] = []
@@ -318,8 +263,6 @@ def test_the_wire_carries_ordered_chunks_then_one_terminal_result(
     captured.run("complete", {"prompt": "tok", "max_tokens": 3})
 
     frames = captured.progress
-    # `seq` is "strictly increasing per (request_id, attempt)" and is stamped on
-    # the loop, so send order and seq order cannot disagree.
     assert [f.seq for f in frames] == list(range(1, len(frames) + 1))
     assert {f.request_id for f in frames} == {"pgw1576"}
 
@@ -333,9 +276,6 @@ def test_the_wire_carries_ordered_chunks_then_one_terminal_result(
 
 
 def test_the_ctx_event_lane_is_alive_on_the_same_seam(streaming: ModuleType) -> None:
-    """The adjacent pgw#1576 finding: the v2 worker wired NO emitter, so
-    `ctx.progress` hit `_emit_event`'s "no emitter configured" branch on every
-    pod and the hub's liveness sweep read positions nobody sent."""
     captured = _CapturedWorker()
     captured.run("complete", {"prompt": "p", "max_tokens": 2})
 
@@ -348,9 +288,6 @@ def test_the_ctx_event_lane_is_alive_on_the_same_seam(streaming: ModuleType) -> 
     assert [e["payload"]["step"] for e in progress] == [1, 2]
     assert progress[-1]["payload"]["stage"] == "decode"
     assert progress[-1]["payload"]["progress"] == 1.0
-
-
-# -- 5. the manifest ---------------------------------------------------------
 
 
 def _rows() -> dict:
@@ -368,14 +305,9 @@ def test_publish_reports_the_stream_without_running_the_body() -> None:
 
     streamed = rows["complete"]
     assert streamed["incremental_output"] is True
-    # The hub decodes `delta_output_schema` on the SAME `manifestFunction` an
-    # `entrypoints[]` row lands in, so this reaches
-    # `endpoint_function_schemas.delta_output_schema` with no hub change.
     delta = streamed["delta_output_schema"]
     assert delta["$ref"] == "#/$defs/TokenDelta"
     assert delta["$defs"]["TokenDelta"]["properties"]["text"]["type"] == "string"
-    # ...and the terminal schema is untouched: a non-streaming caller still
-    # reads one struct.
     assert set(
         streamed["output_schema"]["$defs"]["Completion"]["properties"]
     ) == {"text", "tokens"}
@@ -383,8 +315,6 @@ def test_publish_reports_the_stream_without_running_the_body() -> None:
     caption_delta = rows["caption"]["delta_output_schema"]
     assert "finished" in caption_delta["$defs"]["ItemDelta"]["properties"]
 
-    # Two shapes, one handler: a DISCRIMINATED anyOf, so a client reading the
-    # manifest knows both frames and how to tell them apart.
     union = rows["narrate"]["delta_output_schema"]
     assert union["discriminator"]["propertyName"] == "type"
     assert set(union["discriminator"]["mapping"]) == {"TokenDelta", "ItemDelta"}
@@ -392,9 +322,6 @@ def test_publish_reports_the_stream_without_running_the_body() -> None:
     plain = rows["silent"]
     assert plain["incremental_output"] is False
     assert "delta_output_schema" not in plain
-
-
-# -- 6. the tombstone --------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -405,8 +332,6 @@ def test_publish_reports_the_stream_without_running_the_body() -> None:
     ],
 )
 def test_the_deleted_names_now_name_their_successor(name: str, successor: str) -> None:
-    """They were deleted BY OMISSION — no successor line, so an author got a
-    bare ImportError and the gap read as an oversight instead of a ruling."""
     import gen_worker
     from gen_worker.v1_deleted import V1SdkDeleted
 
@@ -416,8 +341,7 @@ def test_the_deleted_names_now_name_their_successor(name: str, successor: str) -
 
 
 def test_the_transformers_helper_imports_instead_of_refusing() -> None:
-    """`iter_transformers_text_deltas` came back verbatim — same name, same
-    signature — so joycaption's call site ports unchanged."""
+    """`iter_transformers_text_deltas` came back verbatim — same name, same signature — so joycaption's call site ports unchanged."""
     import gen_worker
 
     assert callable(gen_worker.iter_transformers_text_deltas)

@@ -59,48 +59,32 @@ from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
-#: Subtrees not ours to judge: generated protobuf, byte-identical vendored snapshots.
 UNOWNED_DIRS = ("pb", "_vendor")
 
 
 def is_unowned(path: Path, root: Path) -> bool:
     return any(name in path.relative_to(root).parts for name in UNOWNED_DIRS)
 
-# Calls whose result is a length taken from bytes the process did not compute.
 LENGTH_SOURCES = {"unpack", "unpack_from", "from_bytes"}
 
-# Names that, called on the length, count as bounding it. A project adds to this
-# set when it grows another validator — it is deliberately explicit.
 SANCTIONED_VALIDATORS = {"header_len_ok"}
 
-# Call/expression shapes that turn a length into memory or IO.
 SIZING_METHODS = {"read", "readinto", "recv", "pread"}
 
 JUSTIFICATION = "bound-justified:"
 
-# How far above the read line a justification comment may sit.
 JUSTIFICATION_LOOKBACK = 8
 
-# ---------------------------------------------------------------------------
-# Rule 2: the streaming-copy loop
-# ---------------------------------------------------------------------------
-
-# Iterators that yield a remote body a block at a time.
 STREAM_ITERATORS = {"iter_content", "iter_bytes", "iter_chunks", "iter_raw"}
 
-# Blocking block reads that, inside a `while`, form the same loop by hand.
 STREAM_READERS = {"read", "read1", "recv", "recv_into", "readinto"}
 
-# Calls that put the block somewhere it accumulates: a file, a list, a buffer.
 SINK_METHODS = {"write", "writelines", "append", "extend", "send", "put"}
 
-# Free functions that write a block through to storage. Named explicitly rather
-# than matched by shape — a bare call is not evidence of a sink.
 SINK_FUNCTIONS = {"_pwrite_all", "pwrite"}
 
 
 def _iter_targets(node: ast.AST):
-    """Names bound by an assignment target, including tuple unpacking."""
     if isinstance(node, ast.Name):
         yield node.id
     elif isinstance(node, (ast.Tuple, ast.List)):
@@ -118,7 +102,6 @@ def _call_func_name(call: ast.Call) -> str:
 
 
 def _is_length_source(value: ast.AST) -> bool:
-    """struct.unpack(...)  /  int.from_bytes(...)  possibly subscripted."""
     node = value
     if isinstance(node, ast.Subscript):
         node = node.value
@@ -129,7 +112,7 @@ class FunctionScan(ast.NodeVisitor):
     def __init__(self) -> None:
         self.tainted: set[str] = set()
         self.validated: set[str] = set()
-        self.sized: list[tuple[str, int]] = []  # (name, lineno)
+        self.sized: list[tuple[str, int]] = []
 
     def visit_Assign(self, node: ast.Assign) -> None:
         if _is_length_source(node.value):
@@ -139,12 +122,10 @@ class FunctionScan(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         name = _call_func_name(node)
-        # A sanctioned validator applied to a tainted name bounds it.
         if name in SANCTIONED_VALIDATORS:
             for a in node.args:
                 if isinstance(a, ast.Name):
                     self.validated.add(a.id)
-        # A read/alloc sized by a tainted name is the site we care about.
         if name in SIZING_METHODS:
             for a in node.args:
                 if isinstance(a, ast.Name):
@@ -156,14 +137,6 @@ ORDERING_OPS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
 
 
 def _local_file_handles(fn: ast.AST) -> set[str]:
-    """Names this function bound to a file IT opened.
-
-    A handle the function opened itself is local IO, not an external stream:
-    every upload path in this repo reads its own artifact back in blocks, and
-    those loops are the bulk of what a `.read()`-shaped rule would flag. The
-    remote sources are the ones the function was HANDED (a socket parameter, a
-    guarded-stream context manager).
-    """
     handles: set[str] = set()
 
     def _opens(value: ast.AST) -> bool:
@@ -180,7 +153,6 @@ def _local_file_handles(fn: ast.AST) -> set[str]:
 
 
 def _walk_scope(node: ast.AST):
-    """`ast.walk` that stops at a nested function — one scope's own statements."""
     stack = list(ast.iter_child_nodes(node))
     while stack:
         cur = stack.pop()
@@ -191,11 +163,6 @@ def _walk_scope(node: ast.AST):
 
 
 def _stream_block_name(node: ast.AST, local_handles: set[str]) -> "str | None":
-    """The name each iteration binds to the block of external bytes, or None.
-
-    None means "not an external stream loop" — either the loop is not one of
-    the two shapes, or it reads a handle this function opened itself.
-    """
     if isinstance(node, ast.For):
         it = node.iter
         if (
@@ -212,7 +179,7 @@ def _stream_block_name(node: ast.AST, local_handles: set[str]) -> "str | None":
                 and isinstance(sub.value, ast.Call)
                 and isinstance(sub.value.func, ast.Attribute)
                 and sub.value.func.attr in STREAM_READERS
-                and sub.value.args  # a sized block read, not a slurp
+                and sub.value.args
             ):
                 continue
             src = sub.value.func.value
@@ -224,13 +191,6 @@ def _stream_block_name(node: ast.AST, local_handles: set[str]) -> "str | None":
 
 
 def _loop_condition_bounds_it(node: ast.AST) -> bool:
-    """`while remaining > 0` / `while len(buf) < n` — the test IS the bound.
-
-    A loop whose own condition is an ordering comparison stops on a size, and
-    reading its body for a second bound would flag the budget shape that is
-    already correct. `while True`, `while b"\\n" not in buf` and
-    `while terminal is None` bound nothing and are not covered by this.
-    """
     if not isinstance(node, ast.While):
         return False
     test = node.test
@@ -240,14 +200,6 @@ def _loop_condition_bounds_it(node: ast.AST) -> bool:
 
 
 def _sink_names(body: list[ast.stmt], block: str) -> set[str]:
-    """The things the loop puts THAT BLOCK into, if any.
-
-    The block itself must be the argument. `chunks.append(ChunkPlan(...))`
-    accumulates plans derived from the bytes and drops the bytes; `f.write(
-    chunk)`, `buf.extend(chunk)` and `_pwrite_all(fd, b, pos)` accumulate the
-    bytes themselves, and only the second kind can run away. An empty result
-    means the loop does not accumulate and needs no bound.
-    """
     sinks: set[str] = set()
     for stmt in body:
         for sub in ast.walk(stmt):
@@ -257,7 +209,6 @@ def _sink_names(body: list[ast.stmt], block: str) -> set[str]:
                     if any(isinstance(a, ast.Name) and a.id == block for a in sub.args):
                         target = sub.func.value if isinstance(sub.func, ast.Attribute) else None
                         sinks.add(target.id if isinstance(target, ast.Name) else name)
-            # `buf += chunk` — the quadratic accumulate the frame reader had.
             if (
                 isinstance(sub, ast.AugAssign)
                 and isinstance(sub.op, ast.Add)
@@ -270,7 +221,6 @@ def _sink_names(body: list[ast.stmt], block: str) -> set[str]:
 
 
 def _byte_counters(body: list[ast.stmt]) -> set[str]:
-    """Names accumulated with `n += len(...)` — the running byte count."""
     counters: set[str] = set()
     for stmt in body:
         for sub in ast.walk(stmt):
@@ -286,21 +236,10 @@ def _byte_counters(body: list[ast.stmt]) -> set[str]:
 
 
 def _is_trivial_limit(node: ast.AST) -> bool:
-    """`> 0` / `>= 1` is an emptiness test, never a bound."""
     return isinstance(node, ast.Constant) and node.value in (0, 1, None, True, False)
 
 
 def _measures_growth(node: ast.AST, counters: set[str], sinks: set[str]) -> bool:
-    """Does this side of a comparison hold how much has arrived so far?
-
-    Two spellings, because the repo legitimately uses both. An accumulated
-    counter (`total += len(chunk)`) must be a DIRECT operand — a counter buried
-    in a sub-expression is a progress log (`downloaded - last_log >=
-    log_every`), not a bound. A `len(sink)` reading may sit inside an
-    expression (`len(buf) + len(chunk) > cap`), because the `len()` call is
-    itself the unambiguous measurement, and a buffer that is DRAINED as it goes
-    cannot be tracked by an accumulator at all.
-    """
     if isinstance(node, ast.Name) and node.id in counters:
         return True
     for sub in ast.walk(node):
@@ -316,7 +255,6 @@ def _measures_growth(node: ast.AST, counters: set[str], sinks: set[str]) -> bool
 
 
 def _counter_is_bounded(body: list[ast.stmt], counters: set[str], sinks: set[str]) -> bool:
-    """Is the arrived-so-far quantity compared against a real limit in-loop?"""
     for stmt in body:
         for sub in ast.walk(stmt):
             if not isinstance(sub, ast.Compare):
@@ -339,10 +277,6 @@ def _justified_near(lines: list[str], lineno: int) -> bool:
 
 
 def _scan_stream_loops(path: Path, tree: ast.AST, lines: list[str]) -> list[str]:
-    # Handles are collected per scope and unioned DOWN the enclosing chain: a
-    # `with open(...)` in an enclosing function still names local IO inside a
-    # closure it defines, and a name opened in an unrelated function must not
-    # silence a socket that happens to share it.
     parents: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
@@ -380,12 +314,11 @@ def _scan_one_loop(
     body = node.body  # type: ignore[union-attr]
     sinks = _sink_names(body, block)
     if not sinks:
-        return []  # counts, hashes or discards; the bytes do not pile up
+        return []
     if _loop_condition_bounds_it(node):
-        return []  # the loop's own test is the bound
+        return []
     if _justified_near(lines, node.lineno):
         return []
-    # A justification may also sit inside the loop, next to the write.
     end = getattr(node, "end_lineno", node.lineno) or node.lineno
     if any(JUSTIFICATION in ln for ln in lines[node.lineno - 1 : end]):
         return []
@@ -428,10 +361,6 @@ def scan_file(path: Path, src: str) -> list[str]:
                 continue
             if name in scan.validated:
                 continue
-            # The justification may sit on the read line or in the comment
-            # block immediately above it. A one-line-only rule would push a
-            # real reason into a cramped trailing comment, which is how
-            # justifications become noise nobody reads.
             start = max(0, lineno - 1 - JUSTIFICATION_LOOKBACK)
             window = lines[start:lineno]
             if any(JUSTIFICATION in ln for ln in window):

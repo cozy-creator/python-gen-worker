@@ -1,75 +1,18 @@
-"""The v1 SDK tombstone (pgw#1373).
-
-Paul's hardcut ruling, 2026-08-18: *"you should hardcut the old SDK system
-everywhere. no legacy support, no supporting both. It's fine if everything
-breaks in the interim. Hardcut."*
-
-The v1 author surface — ``@endpoint``, ``@job``, ``Slot``/``ResolvedSlot``,
-``ConfigParam``, ``variant_of``, ``worker_function``, the 26-family model
-catalog and its ``ModelSpec``/``GraphModelSpec`` declaration architecture, the
-v1 ``functions[]``/``jobs[]`` manifest vocabulary and the boot-time keyset
-ladder — is DELETED. ``Model[T]`` + ``@entrypoint`` is the only surface.
-
-A deletion must not create a SILENT-ABSENT state (the tracker's typed-refusal
-rule). A bare ``ImportError: cannot import name 'endpoint'`` across 27
-unmigrated endpoint packages says nothing about what happened or where to go,
-so every deleted name raises :class:`V1SdkDeleted` NAMING the migration —
-here, at import, at the exact spelling the author wrote.
-
-THE RULE THIS TABLE ENFORCES, and it is a rule about MANIFEST FIELDS too
-(pgw#1580's enumeration audit). Every field the hub DECODES may only be dropped
-from the author surface together with a row here naming its successor. The
-audit checked ``manifestFunction`` field by field against what
-``discovery/entrypoints_v2.py`` emits and the partition was exact:
-
-* every field with a row here — ``compile``/``compile_axes``, ``variant_of``,
-  ``objectives``, ``runtime_formula``, ``config_params``,
-  ``accepts_references`` — was a DECISION, and the successor holds;
-* every field WITHOUT one was an ACCIDENT. There were three, all P0, all found
-  by an endpoint breaking on them rather than by anything failing at publish:
-  ``child_calls`` (pgw#1579 — the hub mints ``invoke_child`` only when it is
-  set, so a workflow endpoint failed at its FIRST child call),
-  ``incremental_output``/``delta_output_schema`` (pgw#1576 — emitted, but
-  hardcoded ``False``), and ``expected_outputs`` (pgw#1580 — LIVE in
-  production: every endpoint promoted to v2 silently stopped telling the
-  platform what it was about to produce). ``handles`` was the fourth, ruled
-  RESTORED rather than retired on the principle that capabilities and
-  behavioral divergence are DECLARED, never inferred from code shape.
-
-So: a hardcut that removes an author-side spelling owes either a row in
-:data:`REPLACEMENTS` or a hub change that stops reading the field. Silence is
-the one option that is not available, and
-``tests/test_manifest_declarations_pgw1579_1580.py`` is the fence that says so.
-"""
-
 from __future__ import annotations
 
 from typing import Final
 
-#: The one migration pointer. Every refusal in this module ends with it.
 MIGRATION: Final[str] = (
     "v1 SDK deleted, migrate to Model/@entrypoint, see se#757"
 )
 
 
 class V1SdkDeleted(ImportError):
-    """A deleted v1 SDK name was imported or discovered.
-
-    An ``ImportError`` subclass deliberately: the failure IS an import
-    failure, so ``except ImportError`` in a build wrapper still catches it,
-    and the message it prints now names the migration instead of a symbol.
-    """
+    """A deleted v1 SDK name was imported or discovered."""
 
 
-#: Deleted name -> what replaces it. The whole v1 author surface, so a
-#: refusal can be specific about the ONE name the author actually wrote.
 REPLACEMENTS: Final[dict[str, str]] = {
     "endpoint": "@entrypoint on a module-level function (gen_worker.entrypoint)",
-    # pgw#1406 built the successor this line said did not exist. The three
-    # `@job` kwargs the producer plane actually uses carry over VERBATIM, and
-    # the one RequestContext carries the publisher surface, so the port is a
-    # re-decoration — which is what the 27 conversion producers in
-    # `cozy-creator/jobs` need to hear at the refusal (th#2173, jobs#297).
     "job": (
         "@entrypoint(publishes=…, env=…, emits_media=…) — the same kwargs, "
         "and ctx: RequestContext carries mktemp/source/save_checkpoint; "
@@ -105,11 +48,6 @@ REPLACEMENTS: Final[dict[str, str]] = {
     "class_set_delta": "the publish-time instrumented derive",
     "contract_delta": "the publish-time instrumented derive",
     "override_delta": "the publish-time instrumented derive",
-    # pgw#1576: these three were deleted BY OMISSION — no successor line, so an
-    # author hit a bare ImportError and the gap read as an oversight rather
-    # than a ruling. It was an oversight, and the successor exists now. The
-    # third name is NOT here: `iter_transformers_text_deltas` came back
-    # verbatim, same spelling, so it imports instead of refusing.
     "IncrementalTokenDelta": (
         "gen_worker.TokenDelta with @entrypoint(streams=TokenDelta) and "
         "ctx.emit(...) — the entrypoint still RETURNS its terminal struct "
@@ -158,12 +96,7 @@ def refuse(name: str, *, context: str = "") -> V1SdkDeleted:
 
 
 def refuse_module(module: str, attribute: str) -> V1SdkDeleted:
-    """The typed refusal for a module that carried a v1 declaration.
-
-    Raised by discovery when it finds a v1 decorator's stamped attribute on
-    an imported author module: the package still declares the old surface,
-    which is a BUILD failure with a name attached, never an empty manifest.
-    """
+    """The typed refusal for a module that carried a v1 declaration."""
     return V1SdkDeleted(
         f"{module} carries {attribute!r} — a v1 @endpoint/@job declaration. "
         f"{MIGRATION}."

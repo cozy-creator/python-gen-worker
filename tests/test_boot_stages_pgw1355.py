@@ -1,18 +1,3 @@
-"""pgw#1355: a cold boot states its own decomposition, once, on the channel
-everything else is read from.
-
-Integration-style: the ladder tests drive the REAL
-:mod:`gen_worker.boot_phases` recorder — opening real spans and marking real
-milestones — and then assert the stage table `collect()` folds out of it, so
-nothing here passes against a boot shape production cannot produce. The
-emission tests drain the REAL activity sink the worker transport installs, so
-the assertions read exactly the ActivityUpdates a hub would receive.
-
-The load-bearing property, and the one every red proof is aimed at: **the
-total is a UNION and never a sum.** A boot whose stages overlap must not report
-more time than it took.
-"""
-
 from __future__ import annotations
 
 import time
@@ -44,13 +29,12 @@ def _clean_recorders() -> Iterator[None]:
 
 
 class _Events:
-    """The real sink the transport binds, drained after the fact."""
 
     def __init__(self) -> None:
         self.updates: List[pb.ActivityUpdate] = []
 
     def install(self) -> None:
-        activity_mod._sink = self.updates.append  # the bound-sink contract
+        activity_mod._sink = self.updates.append
 
     def of_kind(self, kind: str) -> List[pb.ActivityUpdate]:
         return [u for u in self.updates if u.kind == kind]
@@ -61,22 +45,13 @@ def _table(*spans: StageSpan, wall_ms: int, servable_ms: int = 0) -> BootStageTa
         spans=tuple(spans), wall_ms=wall_ms, servable_ms=servable_ms)
 
 
-# ---------------------------------------------------------------------------
-# The closed vocabulary
-# ---------------------------------------------------------------------------
-
-
 def test_every_boot_phase_has_a_stage_or_a_documented_exemption() -> None:
-    """A boot phase with no home here silently drops its seconds out of the
-    table. Adding one to `boot_phases` without deciding where it belongs is
-    red HERE rather than invisible in production."""
+    """A boot phase with no home here silently drops its seconds out of the table."""
     assert boot_stages.unmapped_phases() == ()
 
 
 def test_an_unknown_stage_refuses_at_the_call_site() -> None:
-    """The vocabulary is closed because a renderer in another repository binds
-    to these tokens. A stage invented at a call site is a column that appears
-    in production and in no reader."""
+    """The vocabulary is closed because a renderer in another repository binds to these tokens."""
     with pytest.raises(UnknownStageError):
         StageSpan(stage="teleportation", t0_ms=0, t1_ms=1)  # type: ignore[arg-type]
     with pytest.raises(UnknownStageError):
@@ -84,11 +59,7 @@ def test_an_unknown_stage_refuses_at_the_call_site() -> None:
 
 
 def test_a_reader_refuses_a_fleet_it_does_not_understand() -> None:
-    """A packed run naming an unknown stage RAISES rather than being skipped.
-
-    Skipping would under-report a boot — quietly, and in the direction that
-    looks healthy. Refusing says "this reader does not understand the fleet
-    that emitted this", which is the sentence an operator can act on."""
+    """A packed run naming an unknown stage RAISES rather than being skipped."""
     with pytest.raises(UnknownStageError):
         boot_stages.parse_runs("process_boot:0-10,warp_core:10-20")
 
@@ -98,29 +69,13 @@ def test_a_span_that_ends_before_it_starts_refuses() -> None:
         StageSpan(stage=Stage.MODEL_LOAD, t0_ms=900, t1_ms=100)
 
 
-# ---------------------------------------------------------------------------
-# THE red proof: overlap is honest, and stages never sum past wall
-# ---------------------------------------------------------------------------
-
-
 def test_concurrent_stages_do_not_sum_past_wall() -> None:
-    """A snapshot pull overlapping a model load must not report more time than
-    the boot took.
-
-    This is the defect `boot_phases`' own header records paying for: a summing
-    reconciliation once "explained" 3,338 ms of a 909 ms fetch. A sum that
-    exceeds wall is not a rounding problem — it is a report that has stopped
-    describing time.
-
-    RED PROOF: make `critical_path_ms` return `span_sum_ms` and this fails on
-    both assertions below.
-    """
+    """A snapshot pull overlapping a model load must not report more time than the boot took."""
     table = _table(
         StageSpan(stage=Stage.SNAPSHOT_PULL, t0_ms=1_000, t1_ms=5_000),
         StageSpan(stage=Stage.MODEL_LOAD, t0_ms=3_000, t1_ms=7_000),
         wall_ms=8_000,
     )
-    # The two spans are 4 s each and share 2 s of wall.
     assert table.span_sum_ms == 8_000
     assert table.critical_path_ms == 6_000, "1000..7000 covered, overlap once"
     assert table.critical_path_ms < table.span_sum_ms, (
@@ -133,11 +88,7 @@ def test_concurrent_stages_do_not_sum_past_wall() -> None:
 
 
 def test_overlap_is_reported_and_not_smeared_away() -> None:
-    """Two stages that ran ENTIRELY concurrently cost one stage's wall.
-
-    Shortening a stage that ran inside another stage's window buys nothing,
-    and only a union can say so — which is the whole reason a cold-start
-    budget is spent against `critical_path_ms` and not against a sum."""
+    """Two stages that ran ENTIRELY concurrently cost one stage's wall."""
     table = _table(
         StageSpan(stage=Stage.SNAPSHOT_PULL, t0_ms=0, t1_ms=10_000),
         StageSpan(stage=Stage.MODEL_LOAD, t0_ms=2_000, t1_ms=8_000),
@@ -161,8 +112,7 @@ def test_sequential_stages_have_no_overlap() -> None:
 
 
 def test_a_stage_that_ran_twice_keeps_its_gap() -> None:
-    """Merged per stage, not globally: a stage that ran twice with a gap is a
-    different fact from one that ran once across both."""
+    """Merged per stage, not globally: a stage that ran twice with a gap is a different fact from one that ran once across both."""
     table = _table(
         StageSpan(stage=Stage.SNAPSHOT_PULL, t0_ms=0, t1_ms=1_000),
         StageSpan(stage=Stage.SNAPSHOT_PULL, t0_ms=4_000, t1_ms=5_000),
@@ -178,8 +128,7 @@ def test_a_stage_that_ran_twice_keeps_its_gap() -> None:
 
 
 def test_unmeasured_is_named_never_smeared_across_the_stages() -> None:
-    """"unmeasured" and "zero" are different answers, and the hole is the hint
-    about where the next instrument belongs."""
+    """"unmeasured" and "zero" are different answers, and the hole is the hint about where the next instrument belongs."""
     table = _table(
         StageSpan(stage=Stage.MODEL_LOAD, t0_ms=0, t1_ms=1_000),
         wall_ms=100_000,
@@ -191,14 +140,8 @@ def test_unmeasured_is_named_never_smeared_across_the_stages() -> None:
     assert table.accounted_pct == 1
 
 
-# ---------------------------------------------------------------------------
-# The wire codec
-# ---------------------------------------------------------------------------
-
-
 def test_the_packed_table_round_trips() -> None:
-    """The renderer in another repo parses this token. The round trip is the
-    contract, asserted here rather than assumed."""
+    """The renderer in another repo parses this token."""
     table = _table(
         StageSpan(stage=Stage.PROCESS_BOOT, t0_ms=0, t1_ms=800),
         StageSpan(stage=Stage.SNAPSHOT_PULL, t0_ms=1_000, t1_ms=5_000),
@@ -215,12 +158,7 @@ def test_the_packed_table_round_trips() -> None:
 
 
 def test_the_detail_grammar_is_the_one_the_renderer_already_parses() -> None:
-    """Space-separated `k=v`, values never containing whitespace — the grammar
-    `(\\w+)=(\\S+)` parses entirely, which e2e's `detailKV` already implements.
-    A value with a space splits one pair into two and means something else."""
-    # `family` rather than `keys_from`: cd46c957 (pgw#1373) deleted the keyset
-    # ladder and with it the axis, so the roll-up promotes `classes`/`family`.
-    # The GRAMMAR is this test's subject and it is unchanged.
+    """Space-separated `k=v`, values never containing whitespace — the grammar `(\\w+)=(\\S+)` parses entirely, which e2e's `detailKV` already implements."""
     table = _table(
         StageSpan(stage=Stage.ADOPT_PULL, t0_ms=100, t1_ms=805_000,
                   label="adopt.pull",
@@ -246,8 +184,7 @@ def test_the_detail_grammar_is_the_one_the_renderer_already_parses() -> None:
 
 
 def test_an_empty_value_can_never_reach_the_wire() -> None:
-    """An empty value ends the token at the `=` and silently merges the next
-    pair into it. Every attribute goes through the same guard."""
+    """An empty value ends the token at the `=` and silently merges the next pair into it."""
     boot_stages.record(
         Stage.KEYSET, t0_ms=0, t1_ms=10, keys_from="", family="sd xl")
     span = boot_stages.recorded()[0]
@@ -256,8 +193,6 @@ def test_an_empty_value_can_never_reach_the_wire() -> None:
 
 
 def test_a_truncated_pack_says_so() -> None:
-    """A table that dropped runs is a table whose union no longer closes, and a
-    reader must be able to tell that from a boot that had fewer stages."""
     spans = [
         StageSpan(stage=Stage.SNAPSHOT_PULL, t0_ms=i * 100, t1_ms=i * 100 + 10)
         for i in range(boot_stages.MAX_PACKED_RUNS + 5)
@@ -269,18 +204,7 @@ def test_a_truncated_pack_says_so() -> None:
     assert "runs_truncated=1" in boot_stages.rollup_detail(table)
 
 
-# ---------------------------------------------------------------------------
-# Folding a REAL boot_phases ladder
-# ---------------------------------------------------------------------------
-
-
 def _drive_a_real_boot() -> None:
-    """Drive the real recorder through the shape a cold pod boots in.
-
-    Concurrency is real here — the two component fetches are open at the same
-    time — so the folded table has to survive genuine overlap rather than a
-    fixture's arithmetic.
-    """
     boot_phases.mark_once(boot_phases.PHASE_SDK_READY, detail="endpoints=1")
     boot_phases.mark_once(boot_phases.PHASE_HELLO, since_process_start=True)
     weights = boot_phases.open_span(boot_phases.PHASE_WEIGHTS_FETCH, ref="r")
@@ -321,9 +245,7 @@ def test_a_real_ladder_folds_into_the_closed_vocabulary() -> None:
 
 
 def test_the_two_concurrent_component_fetches_are_visible_as_overlap() -> None:
-    """Four components inside one pull that each measure 180 s were OVERLAPPED,
-    and that is a different finding from four sequential 50 s ones. Only an
-    interval can tell them apart, which is why spans carry offsets."""
+    """Four components inside one pull that each measure 180 s were OVERLAPPED, and that is a different finding from four sequential 50 s ones."""
     _drive_a_real_boot()
     table = boot_stages.collect()
     pull_spans = [s for s in table.spans if s.stage is Stage.SNAPSHOT_PULL]
@@ -337,9 +259,7 @@ def test_the_two_concurrent_component_fetches_are_visible_as_overlap() -> None:
 
 
 def test_a_boot_that_never_reached_ready_still_reports_what_happened() -> None:
-    """An operator looking at a STUCK pod wants exactly this table. The wall
-    falls back to the furthest span end, so the reconciliation describes what
-    has happened rather than dividing by zero."""
+    """An operator looking at a STUCK pod wants exactly this table."""
     boot_phases.mark_once(boot_phases.PHASE_SDK_READY)
     with boot_phases.span(boot_phases.PHASE_PIPELINE_LOAD, function="generate"):
         time.sleep(0.01)
@@ -349,17 +269,7 @@ def test_a_boot_that_never_reached_ready_still_reports_what_happened() -> None:
 
 
 def test_a_directly_recorded_stage_promotes_its_facts_to_the_rollup() -> None:
-    """A stage with no `boot_phases` span of its own still reaches the roll-up,
-    and the facts it carries are promoted onto the terminal line.
-
-    This replaces `test_the_keyset_stage_carries_where_the_keys_CAME_FROM`.
-    That test's subject was `keys_from`, pgw#1353's axis on the KEYSET ladder,
-    and cd46c957 (pgw#1373) deleted the ladder and stopped promoting the key —
-    deliberately: "a roll-up that keeps ASKING for a key nothing produces reads
-    as 'the boot had no key source' rather than 'that question no longer
-    exists'". What survives, and is worth a row, is the PROMOTION mechanism the
-    old test rode on.
-    """
+    """A stage with no `boot_phases` span of its own still reaches the roll-up, and the facts it carries are promoted onto the terminal line."""
     _drive_a_real_boot()
     boot_stages.record(
         Stage.ADOPT_PULL, t0_ms=1, t1_ms=804_701, label="adopt.pull",
@@ -372,9 +282,6 @@ def test_a_directly_recorded_stage_promotes_its_facts_to_the_rollup() -> None:
 
 
 def test_the_derive_stage_covers_a_window_the_ladder_structurally_cannot() -> None:
-    """pgw#1353: the derive runs during a REQUEST, after the boot window
-    closed, so `boot_phases.in_boot()` is already False and no ladder row can
-    cover it. `record_ending_now` is the minimal instrument that joins it."""
     _drive_a_real_boot()
     assert not boot_phases.in_boot(), "the boot window is closed"
     boot_stages.record_ending_now(
@@ -389,14 +296,7 @@ def test_the_derive_stage_covers_a_window_the_ladder_structurally_cannot() -> No
 
 
 def test_a_span_longer_than_the_process_CONFESSES_instead_of_shrinking() -> None:
-    """A duration longer than the process has existed came from a different
-    clock. The span is clamped — a negative offset is not representable — but
-    the clamp is stated, because a silently shortened span is a wrong
-    measurement that reads as a right one.
-
-    RED PROOF: drop the `clamped_ms` attr and this passes while production
-    quietly under-reports its dominant stage.
-    """
+    """A duration longer than the process has existed came from a different clock."""
     requested = boot_phases.process_uptime_ms() + 900_000
     boot_stages.record_ending_now(
         Stage.KEYSET, duration_ms=requested, label="impossible")
@@ -405,23 +305,10 @@ def test_a_span_longer_than_the_process_CONFESSES_instead_of_shrinking() -> None
 
     assert span.t0_ms == 0, "a negative offset is not representable"
     assert lost > 0, "nothing was clamped, so this case never exercised"
-    # The ACCOUNTING IDENTITY, not a tolerance: what the span ended up
-    # covering plus what it confessed losing is exactly what was asked for.
-    # Deliberately an equality rather than `lost >= 900_000 - slop` — the
-    # earlier spelling compared a measured value against a constant with a
-    # second of slack for the runner, which is the gw#666 defect: it passes on
-    # a fast box, flakes on a loaded one, and never actually checks that the
-    # confession is COMPLETE. This does, and it holds under any clock drift
-    # between reading the uptime and recording the span.
     assert span.t1_ms + lost == requested, (
         "the confessed loss does not account for the difference between the "
         "duration asked for and the interval that could be represented — a "
         "PARTIAL confession is just a quieter version of the silent truncation")
-
-
-# ---------------------------------------------------------------------------
-# Emission
-# ---------------------------------------------------------------------------
 
 
 def test_emission_is_a_series_with_the_rollup_LAST() -> None:
@@ -443,9 +330,7 @@ def test_emission_is_a_series_with_the_rollup_LAST() -> None:
 
 
 def test_the_rollup_duration_is_wall_to_ready() -> None:
-    """`duration_ms` lands in a numeric hub column, so the cold-boot number can
-    be grouped and percentiled — which a number interpolated into `detail`
-    cannot."""
+    """`duration_ms` lands in a numeric hub column, so the cold-boot number can be grouped and percentiled — which a number interpolated into `detail` cannot."""
     events = _Events()
     events.install()
     _drive_a_real_boot()
@@ -458,8 +343,7 @@ def test_the_rollup_duration_is_wall_to_ready() -> None:
 
 
 def test_emit_is_once_per_process() -> None:
-    """The caller sits on a `mark_once` boundary; a double report would put two
-    walls for one boot in the table."""
+    """The caller sits on a `mark_once` boundary; a double report would put two walls for one boot in the table."""
     events = _Events()
     events.install()
     _drive_a_real_boot()
@@ -476,12 +360,11 @@ def test_emission_never_breaks_the_boot_it_measures() -> None:
 
     activity_mod._sink = explode
     _drive_a_real_boot()
-    boot_stages.emit()  # must not raise
+    boot_stages.emit()
 
 
 def test_the_emitted_rows_reconstruct_the_table() -> None:
-    """The whole point: reading a boot's shape is a ONE-ROW query, and the row
-    that answers it must agree with the series beside it."""
+    """The whole point: reading a boot's shape is a ONE-ROW query, and the row that answers it must agree with the series beside it."""
     events = _Events()
     events.install()
     _drive_a_real_boot()
@@ -514,17 +397,7 @@ def test_the_render_is_pasteable_and_states_its_own_totals() -> None:
 
 
 def test_the_report_can_never_cost_more_than_the_boot_it_reports_on() -> None:
-    """A pathological boot must not become a two-thousand-message burst on the
-    worker->hub stream at the exact moment the pod is trying to start serving.
-
-    `boot_phases` buffers up to 2048 rows, so this bound is a real one, not a
-    stylistic cap. The ROLL-UP survives truncation — it carries the packed
-    table and is what the question is actually asked of — and the drop is
-    stated rather than left for a reader to infer from a short series.
-
-    RED PROOF: emit every span unconditionally and the row count blows past the
-    bound.
-    """
+    """A pathological boot must not become a two-thousand-message burst on the worker->hub stream at the exact moment the pod is trying to start serving."""
     events = _Events()
     events.install()
     spans = [
@@ -547,9 +420,7 @@ def test_the_report_can_never_cost_more_than_the_boot_it_reports_on() -> None:
 
 
 def test_truncation_keeps_the_spans_worth_reading() -> None:
-    """Longest first. Dropping an arbitrary tail would be as likely to discard
-    an 805 s derive as a 2 ms fold, and the whole point of the report is that
-    the expensive stage is the one you can see."""
+    """Longest first."""
     events = _Events()
     events.install()
     spans = [
@@ -570,17 +441,7 @@ def test_truncation_keeps_the_spans_worth_reading() -> None:
 
 
 def test_the_emitter_proves_its_own_packing_parses_back() -> None:
-    """The renderer that consumes `runs=` lives in another repository, on a
-    release cadence this worker knows nothing about.
-
-    If a packing bug ships, the symptom over there is a parse error on an
-    otherwise healthy pod — days later, in somebody else's lane, with no way to
-    tell a broken emitter from a broken reader. So the emitter checks its own
-    output against its own parser before shipping it, and a token that does not
-    round-trip is DROPPED and confessed rather than shipped hopefully.
-
-    RED PROOF: skip the round-trip check and a corrupt token ships silently.
-    """
+    """The renderer that consumes `runs=` lives in another repository, on a release cadence this worker knows nothing about."""
     table = _table(
         StageSpan(stage=Stage.KEYSET, t0_ms=0, t1_ms=805_000),
         wall_ms=830_000)
@@ -588,7 +449,6 @@ def test_the_emitter_proves_its_own_packing_parses_back() -> None:
     assert "runs_unpackable" not in good
     assert "runs=keyset:0-805000" in good
 
-    # A packer that emits a stage token this vocabulary does not admit.
     original = boot_stages.pack_runs
     try:
         boot_stages.pack_runs = lambda _t: ("warp_core:0-1", False)  # type: ignore[assignment]
@@ -600,8 +460,6 @@ def test_the_emitter_proves_its_own_packing_parses_back() -> None:
         "a table that does not parse back was shipped anyway — the reader in "
         "the other repo would fail on it with no way to place the blame")
     assert "runs=-" in degraded, "the corrupt token must be DROPPED, not shipped"
-    # And the report still serves: every scalar total is stated independently
-    # of the packed table, so losing it costs detail and never the answer.
     for key in ("wall_ms", "critical_path_ms", "overlap_ms", "unmeasured_ms"):
         assert f"{key}=" in degraded, (
             f"{key} went missing with the packed table — the degradation took "
@@ -609,16 +467,7 @@ def test_the_emitter_proves_its_own_packing_parses_back() -> None:
 
 
 def test_the_table_reads_as_a_timeline_not_as_the_enum() -> None:
-    """Rows are chronological.
-
-    Enum order looks right until a stage runs out of position. On a real cold
-    sdxl boot `model_load` happens THIRTEEN MINUTES after `keyset` starts, and
-    printing it above `keyset` — because `model_load` sits earlier in the
-    vocabulary — makes the reader distrust the column they came for.
-
-    RED PROOF: drop the chronological sort and `model_load` precedes `keyset`
-    in a table where it happened 804 seconds later.
-    """
+    """Rows are chronological."""
     table = _table(
         StageSpan(stage=Stage.MODEL_LOAD, t0_ms=823_400, t1_ms=824_500),
         StageSpan(stage=Stage.KEYSET, t0_ms=18_700, t1_ms=823_400),
@@ -632,8 +481,5 @@ def test_the_table_reads_as_a_timeline_not_as_the_enum() -> None:
     starts = [start for _stage, start, _end in table.runs()]
     assert starts == sorted(starts), "rows must ascend in time"
 
-    # The packed table the renderer parses carries the same order, so an
-    # operator reading the hub and an operator reading a pod shell see the
-    # same sequence.
     packed, _ = boot_stages.pack_runs(table)
     assert packed.startswith("snapshot_pull:17600-18700,keyset:18700-823400")

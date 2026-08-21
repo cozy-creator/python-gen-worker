@@ -30,9 +30,6 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-# A run's checkout IS the commit it names only for these events. Anything else
-# is inadmissible BY DEFAULT: a new event type has to be classified here before
-# it can prove a release, which is the safe direction for this gate to fail.
 ADMISSIBLE_EVENTS = frozenset({"workflow_dispatch", "push"})
 
 PROOF_FOUND = "proof_found"
@@ -71,12 +68,7 @@ TreeResolver = Callable[[str], str | None]
 
 
 def assess(tag_tree: str, runs: Iterable[Run], tree_of: TreeResolver) -> Verdict:
-    """Decide whether any run PROVES `tag_tree`.
-
-    Two passes on purpose: the happy path resolves trees only for admissible
-    runs, and the second pass exists solely to tell a releaser whose only
-    evidence is a PR run what is actually wrong.
-    """
+    """Decide whether any run PROVES `tag_tree`."""
     successes = [r for r in runs if r.conclusion == "success" and r.head_sha]
 
     seen: set[str] = set()
@@ -133,7 +125,7 @@ def _api_tree_resolver(repo: str) -> TreeResolver:
                 commit = (payload or {}).get("commit", {}) if isinstance(payload, dict) else {}
                 cache[sha] = str(commit.get("tree", {}).get("sha") or "") or None
             except (subprocess.CalledProcessError, json.JSONDecodeError):
-                cache[sha] = None  # a commit the API cannot resolve proves nothing
+                cache[sha] = None
         return cache[sha]
 
     return resolve

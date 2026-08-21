@@ -1,12 +1,3 @@
-"""pgw#1421 host fixture: ONE engine-hosted model, whose engine really boots.
-
-Separate from `serving_engine_endpoint` on purpose. `EndpointHost.setup()`
-loads EVERY model class the endpoint references, so a fixture that also
-declared the llama.cpp and vLLM arms would try to exec `llama-server` and
-`vllm` on this box — the declaration arms and the supervision arm cannot
-share a package.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -24,10 +15,7 @@ from gen_worker.models import SDXL
 SDXL_DIFFUSERS_BF16 = ("sdxl.diffusers@1", "plain.bf16@1")
 from gen_worker.serving.engine_runtime import EngineCommand, EngineSpec
 
-#: Set by the test before boot — the stand-in engine script.
 STAND_IN_SCRIPT = ""
-#: Appended by `unload`, so ordering (author unload FIRST, then the
-#: structural engine stop) is observable.
 ORDER: List[str] = []
 
 
@@ -40,8 +28,7 @@ class Out(msgspec.Struct):
 
 
 class StandInSpec(EngineSpec, frozen=True, kw_only=True):
-    """A spec whose engine really runs, so the host supervises a real process
-    rather than a stub of one."""
+    """A spec whose engine really runs, so the host supervises a real process rather than a stub of one."""
 
     runtime = "stand-in"
 
@@ -55,9 +42,6 @@ class StandInSpec(EngineSpec, frozen=True, kw_only=True):
 
 class StandInModel(
     Model[SDXL],
-    # An external engine process owns the weights and the graph, so `load`
-    # marks nothing and there is no `shapes=` to declare. The lane is still the
-    # checkpoint's own identity.
     lanes={SDXL_DIFFUSERS_BF16: lane(request=const(MiB(64)))},
     self_loading="served by an external engine process over HTTP",
 ):
@@ -66,7 +50,6 @@ class StandInModel(
 
     def unload(self, ctx: LoadContext[SDXL]) -> None:
         ORDER.append("author_unload")
-        # An author bug, deliberately: the engine must be reaped anyway.
         raise RuntimeError("author unload bug — must not strand the engine")
 
 

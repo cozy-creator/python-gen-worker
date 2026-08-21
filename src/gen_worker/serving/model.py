@@ -1,27 +1,3 @@
-"""``Model[MT]`` — the stateful half of the pgw#1382 split.
-
-A model class owns EVERYTHING persistent: weights, compile-marked modules,
-defaults, kv-caches/sessions, and the request-scoped mutation SCOPES (context
-managers the author writes on the class — "leave it as you found it": at
-entrypoint return, serving configuration equals the post-load baseline;
-caches may grow, configuration may not drift). Entrypoints are STATELESS
-module-level functions (:mod:`.entrypoints`) that declare their model by
-parameter annotation.
-
-One instance per (checkpoint x lane), LRU-resident, SINGLE-FLIGHT — the
-concurrency contract attaches to the object that has the state (the host
-owns the admission; see :mod:`.host`).
-
-The class header is the single statically-extractable declaration surface:
-the model type is the generic parameter (read from ``__orig_bases__``), the
-weight-format lanes are the ``lanes=`` class kwarg — both readable at
-publish with no author code executed beyond import.
-
-HARD GUARDRAIL: framework capabilities arrive via ctx ONLY (``LoadContext``
-in ``load``/``unload``, ``RequestContext`` in entrypoints). This base is a
-typed skeleton, not a toolbox; nothing else goes on it without a Paul ruling.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -42,29 +18,17 @@ from .lane_spec import (
     parse_structural,
 )
 
-if TYPE_CHECKING:  # keep the base import-weightless
+if TYPE_CHECKING:
     from .context import LoadContext
 
 MT = TypeVar("MT")
 
-#: Class attributes the header declaration lands on — the publish extractor's
-#: read surface.
 MODEL_TYPE_ATTR = "__cozy_model_type__"
 LANES_ATTR = "__cozy_lanes__"
 REQUIRES_ATTR = "__cozy_requires__"
-#: pgw#1599: the fully READ lanes — ``(DeclaredLane, …)``, contract object +
-#: handle + dtype + derived ``min_sm`` + the lane's demand formula. The one
-#: read surface every consumer shares (pgw#1606's selection ladder, derive,
-#: placement), so nothing re-parses a stamp and nothing re-derives a floor.
 DECLARED_LANES_ATTR = "__cozy_declared_lanes__"
-#: pgw#1599: the class-level STRUCTURAL fork axes, ``{axis: Structural}``.
 STRUCTURAL_ATTR = "__cozy_structural__"
-#: pgw#1599: the per-shape-axis static/dynamic choice, ``{axis: "static"}``.
 SHAPES_ATTR = "__cozy_shapes__"
-#: pgw#1431 fix (b). The author's REASON that this model's pipeline has no
-#: class `ctx.load` can drive — the v2 successor to v1's `Slot(str)` escape
-#: hatch, and the pipeline-level twin of `Slot(layouts_undeclarable=)`, which
-#: says the same thing one level down about the BYTES.
 SELF_LOADING_ATTR = "__cozy_self_loading__"
 
 
@@ -141,23 +105,10 @@ def lane_dtype(lane: Any, *, where: str) -> str:
 
 
 def _calls_ctx_compile(fn: Any) -> bool:
-    """Whether ``load`` calls ``ctx.compile(...)`` — statically, by AST.
-
-    pgw#1599: this IS the compilation declaration. Paul, verbatim: *"If you
-    do not want the model compiled, simply do not include any ctx.compile()
-    invocations in your model's 'load' method."* There is no keyword to
-    contradict it and nothing to cross-check it against, so the class of
-    silent contradiction pgw#1469 measured cannot be constructed any more.
-
-    Parsed rather than grepped — the string ``ctx.compile`` appears in comments
-    and docstrings that say a model deliberately does NOT compile, and a
-    substring check would refuse exactly the classes that documented
-    themselves best.
-    """
 
     try:
         source = textwrap.dedent(inspect.getsource(fn))
-    except (OSError, TypeError):  # exec'd/builtin source is not readable
+    except (OSError, TypeError):
         return False
     try:
         tree = ast.parse(source)
@@ -170,33 +121,10 @@ def _calls_ctx_compile(fn: Any) -> bool:
 
 
 def load_marks_compile(definition: Any) -> bool:
-    """Whether this ``load`` DEFINITION marks a compile target — the AST half
-    of :func:`_calls_ctx_compile`, taking the parsed node instead of a live
-    function.
-
-    PUBLIC, and split out for exactly one reason (se#809): a reader that can
-    only be reached through :func:`inspect.getsource` can only be used by code
-    that has already IMPORTED the endpoint, and an endpoint module imports
-    torch. Every repo-side gate over the fleet is therefore torch-free and
-    AST-based, so before this split the only way for one to ask "does this
-    model compile?" was to write a SECOND walker — which is how
-    `serverless-endpoints`' AUTHOR-CI gate ended up still counting the v1
-    `@endpoint(compile=...)` spelling and reporting 2 compiling endpoints
-    where the fleet had 13.
-
-    One reader, two entry points: this takes a parsed
-    ``FunctionDef``/``AsyncFunctionDef``, and ``_calls_ctx_compile`` is the
-    thin wrapper that gets there from a live function object.
-
-    Parsed rather than grepped — the string ``ctx.compile`` appears in comments
-    and docstrings that say a model deliberately does NOT compile, and a
-    substring check would refuse exactly the classes that documented
-    themselves best.
-    """
+    """Whether this ``load`` DEFINITION marks a compile target — the AST half of :func:`_calls_ctx_compile`, taking the parsed node instead of a live function."""
 
     if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return False
-    # The ctx parameter: `load(self, ctx)`, the ruled signature (pgw#1382).
     names = {argument.arg for argument in definition.args.args[1:2]}
     for node in ast.walk(definition):
         if (
@@ -362,8 +290,6 @@ def lane_requirements(declared: DeclaredLane) -> Any:
 
 
 def _declared_model_type(cls: type) -> type | None:
-    """The ``X`` in ``class C(Model[X])`` — from ``__orig_bases__``, no
-    author code executed. ``None`` for a still-generic intermediate."""
 
     for base in cls.__dict__.get("__orig_bases__", ()):
         origin = typing.get_origin(base)
@@ -374,7 +300,7 @@ def _declared_model_type(cls: type) -> type | None:
             continue
         candidate = args[0]
         if isinstance(candidate, TypeVar):
-            return None  # generic intermediate: class Diffusion(Model[MT])
+            return None
         if not isinstance(candidate, type):
             raise ModelDeclarationError(
                 f"{cls.__qualname__}: Model[...] takes a model TYPE class "
@@ -462,11 +388,6 @@ class Model(Generic[MT]):
                 kwargs.pop(dead)
                 raise ModelDeclarationError(f"{cls.__qualname__}: {replacement}")
         if self_loading is not None:
-            # pgw#1431 fix (b). A REASON IS MANDATORY, verbatim the rule
-            # `Slot(layouts_undeclarable=)` already enforces one level down: an
-            # escape hatch with no stated reason is the silence the rung exists
-            # to replace, and it is the only thing standing between this marker
-            # and a way to quietly silence a class discovery could have read.
             if not isinstance(self_loading, str):
                 raise ModelDeclarationError(
                     f"{cls.__qualname__}: self_loading= must be a string "
@@ -498,9 +419,6 @@ class Model(Generic[MT]):
         if declared_type is not None:
             cls.__cozy_model_type__ = declared_type
 
-        # A still-generic intermediate (`class Diffusion(Model[MT])`) declares
-        # nothing and is refused nothing: it is not a servable model, and the
-        # concrete subclass that IS one carries the header.
         concrete = getattr(cls, MODEL_TYPE_ATTR, None) is not None
         marks_compile = _calls_ctx_compile(cls.__dict__.get("load"))
 
@@ -516,8 +434,6 @@ class Model(Generic[MT]):
                 if requirements is not None
             }
         elif concrete and not getattr(cls, DECLARED_LANES_ATTR, ()):
-            # THE OMISSION REFUSAL (pgw#1597 ruling pair). Named, at
-            # class-definition time, before any author code runs.
             raise ModelDeclarationError(
                 f"{cls.__qualname__}: lanes= is REQUIRED and is missing. A "
                 f"lane is a real layout STAMP — the (topology, quant) pair — "
@@ -544,21 +460,11 @@ class Model(Generic[MT]):
                 f"concrete subclass's."
             )
 
-    # -- lifecycle hooks (the load/unload contract, pgw#1382) ---------------
-
     def load(self, ctx: "LoadContext[MT]") -> None:
-        """Once per instance at residency-admit: build the pipeline
-        (``ctx.load``), mark compile targets (``ctx.compile``), decode
-        defaults (``ctx.defaults``). No-op by default."""
+        """Once per instance at residency-admit: build the pipeline (``ctx.load``), mark compile targets (``ctx.compile``), decode defaults (``ctx.defaults``)."""
 
     def unload(self, ctx: "LoadContext[MT]") -> None:
-        """On LRU eviction, AFTER in-flight requests drain and BEFORE the
-        framework drops references. No-op default — the common case is
-        framework-generic (drop refs + allocator reclaim); override only for
-        the exceptional (external server processes, temp sockets, kv-cache
-        persistence). BEST-EFFORT TIDINESS, NEVER CORRECTNESS: crash/kill -9
-        calls nothing, and a failing or slow unload cannot pin VRAM —
-        exceptions are logged and eviction proceeds."""
+        """On LRU eviction, AFTER in-flight requests drain and BEFORE the framework drops references."""
 
 
 def model_type(cls: type) -> type:
@@ -579,29 +485,16 @@ def model_type(cls: type) -> type:
 
 
 def model_lanes(cls: type) -> tuple[Any, ...]:
-    """The model class's lane CONTRACT objects, in declaration order.
+    """The model class's lane CONTRACT objects, in declaration order."""
 
-    Never empty: `lanes=` is required, `lanes=()` is deleted, and there is no
-    implicit, canonical or derived lane to fall through to. Declaration order
-    is the author's writing order and carries NO priority — choosing among
-    lanes is platform machinery (pgw#1606), never endpoint code.
-    """
-
-    model_type(cls)  # validates cls
+    model_type(cls)
     return tuple(getattr(cls, LANES_ATTR, None) or ())
 
 
 def model_declared_lanes(cls: type) -> tuple[DeclaredLane, ...]:
-    """The class's lanes, fully READ — the shared consumer surface.
+    """The class's lanes, fully READ — the shared consumer surface."""
 
-    One :class:`~gen_worker.serving.lane_spec.DeclaredLane` per declared lane:
-    the contract object, its handle, its dtype, its DERIVED ``min_sm``, and
-    its demand formula + residency override. Everything a boot-time
-    selection ladder, a derive or a placement check needs, with no stamp
-    re-parsed and no floor re-derived.
-    """
-
-    model_type(cls)  # validates cls
+    model_type(cls)
     return tuple(getattr(cls, DECLARED_LANES_ATTR, ()) or ())
 
 
@@ -618,53 +511,30 @@ def model_lane_spec(cls: type, handle: str) -> LaneSpec:
 
 
 def model_structural(cls: type) -> dict[str, Structural]:
-    """The class's declared STRUCTURAL fork axes, ``{axis: Structural}``.
+    """The class's declared STRUCTURAL fork axes, ``{axis: Structural}``."""
 
-    Same contract, different traced PROGRAM. Empty means the author declares
-    that this model's program does not fork — a CLAIM the loud-eager leak
-    detector falsifies in production if it is wrong (pgw#1597), never a
-    default the platform guessed.
-    """
-
-    model_type(cls)  # validates cls
+    model_type(cls)
     return dict(getattr(cls, STRUCTURAL_ATTR, None) or {})
 
 
 def model_shapes(cls: type) -> dict[str, str]:
-    """The class's per-shape-axis choice, ``{axis: "static"|"dynamic"}``.
+    """The class's per-shape-axis choice, ``{axis: "static"|"dynamic"}``."""
 
-    Replaces derive's global ``DYNAMIC_AXES`` flag (pgw#1599): which axis is
-    worth collapsing is a MEASURED, per-model question (pgw#1548), so it is
-    declared on the model that measured it — never passed on a command line
-    where it silently re-keys every graph in the fleet at once.
-    """
-
-    model_type(cls)  # validates cls
+    model_type(cls)
     return dict(getattr(cls, SHAPES_ATTR, None) or {})
 
 
 def model_requires(cls: type) -> dict[str, Any]:
-    """Per-lane placement rows, ``{contract handle: LayoutRequirements}``.
+    """Per-lane placement rows, ``{contract handle: LayoutRequirements}``."""
 
-    The DERIVED capability floor and nothing else — the VRAM half died with
-    the floor strings (pgw#1599). What the hub shops on is the demand
-    formula's serialized worst case (pgw#1600), which is computed, not
-    annotated.
-    """
-
-    model_type(cls)  # validates cls
+    model_type(cls)
     return dict(getattr(cls, REQUIRES_ATTR, None) or {})
 
 
 def model_marks_compile(cls: type) -> bool:
-    """Whether this class's own ``load()`` marks a compile target.
+    """Whether this class's own ``load()`` marks a compile target."""
 
-    THE eager/compiled declaration, and the only one there is (Paul's ruling
-    pair): no keyword, no lane shape, no inference from an absent contract —
-    the MARK, read by AST with no author code executed.
-    """
-
-    model_type(cls)  # validates cls
+    model_type(cls)
     return _calls_ctx_compile(cls.__dict__.get("load")) or any(
         _calls_ctx_compile(base.__dict__.get("load"))
         for base in cls.__mro__[1:]
@@ -672,9 +542,6 @@ def model_marks_compile(cls: type) -> bool:
     )
 
 
-#: Class kwargs that are DELETED, each with the message that says what
-#: replaced it. A header written against the old vocabulary refuses at
-#: class-definition time naming the new spelling — never silently ignored.
 _DELETED_KWARGS: dict[str, str] = {
     "requires": (
         "`requires=` is DELETED — a lane's needs are its own declaration. "

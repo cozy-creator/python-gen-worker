@@ -1,25 +1,3 @@
-"""pgw#1499: reactive OOM ladders — the retry is REAL, and it confesses.
-
-Three mechanisms, all of them the CATCHABLE eager cases:
-
-* a VAE decode that exhausts the card is retried TILED, shrinking a rung per
-  further OOM;
-* a denoise step that exhausts the card is retried with a finer attention
-  slice, to a cap;
-* an ASYNCHRONOUS out-of-memory (``AcceleratorError`` code 2) is recognised as
-  an OOM at all, and the poisoned context is flushed before the retry.
-
-Seam. The VAE half runs a REAL ``diffusers.AutoencoderKL`` — real
-``decode``/``_decode``/``tiled_decode``, real blending — armed through the REAL
-``memory.apply_low_vram_config`` install seam, with the OOM injected where a
-real one lands: inside the decoder, on a tensor that is too big. Nothing about
-the ladder is stubbed; only the card is. The events are drained through the
-real activity sink, so the assertions read the ActivityUpdates a hub banks.
-
-Every fixed arm below has a RED arm that flips a CONDITION (the ladder is not
-armed, the cap is exhausted) rather than cutting lines.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +13,6 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 
 class _Events:
-    """The REAL activity sink the worker transport installs."""
 
     def __init__(self) -> None:
         self.sent: List[pb.WorkerMessage] = []
@@ -62,23 +39,14 @@ class _Events:
         ]
 
 
-# ---------------------------------------------------------------------------
-# 1. The tile solver — pure arithmetic, no card
-# ---------------------------------------------------------------------------
-
-
 def test_temporal_halves_first_then_spatial_doubles() -> None:
     """The ComfyUI solve: shrink time until one tile fits, then grow space."""
-    # 16 latent frames, 128x128 latent, 1 byte per latent element.
-    # A 32-edge tile costs 1024 per frame; the budget takes 4 frames of it.
     ladder = oom_ladder.solve_tile_ladder(
         latent_h=128, latent_w=128, latent_frames=16,
         bytes_per_latent=1.0, budget_bytes=32 * 32 * 4,
     )
     assert ladder[0] == oom_ladder.TilePlan(edge=32, frames=4)
 
-    # Quadruple the budget and the SPATIAL tile doubles instead — the temporal
-    # halving stops as soon as one tile fits, and the leftover goes to space.
     wide = oom_ladder.solve_tile_ladder(
         latent_h=128, latent_w=128, latent_frames=16,
         bytes_per_latent=1.0, budget_bytes=64 * 64 * 16,
@@ -87,17 +55,14 @@ def test_temporal_halves_first_then_spatial_doubles() -> None:
 
 
 def test_a_tile_the_size_of_the_frame_is_not_a_retry() -> None:
-    """A latent no bigger than the base tile still gets a SMALLER rung 0 —
-    retrying the exact shape that just OOMed is not a retry."""
+    """A latent no bigger than the base tile still gets a SMALLER rung 0 — retrying the exact shape that just OOMed is not a retry."""
     ladder = oom_ladder.solve_tile_ladder(
         latent_h=24, latent_w=24, latent_frames=0,
         bytes_per_latent=1.0, budget_bytes=0.0,
     )
     assert ladder[0].edge < 24
-    assert ladder[0].edge == 8  # min_edge
+    assert ladder[0].edge == 8
 
-    # And when the BUDGET says the whole frame fits, the allocator has just
-    # said otherwise — the estimate loses.
     generous = oom_ladder.solve_tile_ladder(
         latent_h=24, latent_w=24, latent_frames=0,
         bytes_per_latent=1.0, budget_bytes=1e12,
@@ -111,7 +76,6 @@ def test_the_ladder_descends_and_terminates() -> None:
         bytes_per_latent=1.0, budget_bytes=32 * 32 * 8, max_rungs=8,
     )
     assert len(ladder) <= 8
-    # Time first, then space, and never sideways.
     for prev, nxt in zip(ladder, ladder[1:]):
         assert (nxt.frames, nxt.edge) <= (prev.frames, prev.edge)
         assert (nxt.frames, nxt.edge) != (prev.frames, prev.edge)
@@ -120,9 +84,7 @@ def test_the_ladder_descends_and_terminates() -> None:
 
 
 def test_bytes_per_latent_matches_the_measured_sd_family_coefficient() -> None:
-    """ComfyUI's hand-measured sd15/SDXL decode coefficient is
-    ``2178 * 64 * dtype_size`` bytes per latent element. The formula must land
-    on it, or the first rung is guesswork dressed as arithmetic."""
+    """ComfyUI's hand-measured sd15/SDXL decode coefficient is ``2178 * 64 * dtype_size`` bytes per latent element."""
 
     class _Cfg:
         block_out_channels = (128, 256, 512, 512)
@@ -134,13 +96,7 @@ def test_bytes_per_latent_matches_the_measured_sd_family_coefficient() -> None:
     assert 0.9 <= got / (2178 * 64 * 2) <= 1.1
 
 
-# ---------------------------------------------------------------------------
-# 2. The VAE ladder against a REAL diffusers AutoencoderKL
-# ---------------------------------------------------------------------------
-
-
 def _tiny_vae() -> Any:
-    """A real AutoencoderKL with an 8x spatial compression and 8 channels."""
     vae: Any = AutoencoderKL(
         in_channels=3,
         out_channels=3,
@@ -157,9 +113,6 @@ def _tiny_vae() -> Any:
 
 
 class _CardTooSmall(torch.nn.Module):
-    """The card. Any decoder call over ``limit`` latent elements raises the
-    allocator's real exception — which is exactly what a full-frame decode on a
-    card that cannot hold it does. Everything below that limit really decodes."""
 
     def __init__(self, decoder: torch.nn.Module, limit: int) -> None:
         super().__init__()
@@ -177,7 +130,6 @@ class _CardTooSmall(torch.nn.Module):
 
 
 class _Pipeline:
-    """A diffusers pipeline reduced to the surface the ladder installs on."""
 
     def __init__(self, vae: Any) -> None:
         self.vae = vae
@@ -194,13 +146,10 @@ def test_a_vae_oom_retries_tiled_and_confesses() -> None:
     latent = torch.randn(1, 4, 24, 24)
 
     with _Events() as events:
-        # THE REAL SEAM: placement arms the ladder. `off` is the rung that
-        # pre-applies nothing, so tiling here can only be reactive.
         memory.apply_low_vram_config(pipe, mode="off")
         out = pipe.vae.decode(latent).sample
 
     assert out.shape == (1, 3, 192, 192)
-    # The full frame was tried first and failed; the tiles that followed fit.
     assert vae.decoder.calls[0] == 24 * 24
     assert max(vae.decoder.calls[1:]) <= 12 * 12
     assert vae.use_tiling is True
@@ -221,8 +170,7 @@ def test_red_arm_without_the_ladder_the_same_decode_raises() -> None:
 
 
 def test_the_ladder_is_armed_once_per_pipeline() -> None:
-    """`apply_low_vram_config` runs again on every rung of a placement descent;
-    a second wrapper around the first would double every retry."""
+    """`apply_low_vram_config` runs again on every rung of a placement descent; a second wrapper around the first would double every retry."""
     pipe = _Pipeline(_tiny_vae())
     memory.apply_low_vram_config(pipe, mode="off")
     first = pipe.vae.decode
@@ -243,11 +191,7 @@ def test_a_vae_that_can_never_fit_says_so_instead_of_looping() -> None:
 
 
 def test_the_one_condition_under_which_tiling_cannot_help_is_named() -> None:
-    """MEASURED on a real card (sd1.5 VAE, 320² latent, RTX 4070): with grad
-    enabled every tile's activations are retained for backward, the retry
-    accumulates instead of bounding, and all four rungs fail. Under `no_grad`
-    the SAME decode succeeds on the first tiled rung. An operator reading four
-    identical OOMs must not have to infer that."""
+    """MEASURED on a real card (sd1.5 VAE, 320² latent, RTX 4070): with grad enabled every tile's activations are retained for backward, the retry accumulates instead of bounding, and all four rungs fail."""
     vae = _tiny_vae()
     vae.decoder = _CardTooSmall(vae.decoder, limit=0)
     pipe = _Pipeline(vae)
@@ -260,14 +204,7 @@ def test_the_one_condition_under_which_tiling_cannot_help_is_named() -> None:
     assert "torch.no_grad()" in str(caught.value)
 
 
-# ---------------------------------------------------------------------------
-# 3. The attention ladder on the denoise step
-# ---------------------------------------------------------------------------
-
-
 class _Denoiser(torch.nn.Module):
-    """A real nn.Module — the point of the seam is that `module(...)` resolves
-    `self.forward` as an INSTANCE attribute, so the wrapper is reached."""
 
     def __init__(self, ooms: int) -> None:
         super().__init__()
@@ -325,14 +262,8 @@ def test_red_arm_without_the_ladder_the_step_raises() -> None:
         unet(torch.ones(2, 2))
 
 
-# ---------------------------------------------------------------------------
-# 4. The asynchronous OOM shape
-# ---------------------------------------------------------------------------
-
-
 def test_an_async_accelerator_oom_is_an_oom() -> None:
-    """Before this issue an AcceleratorError read as an unclassified crash, so
-    no ladder ran on the ASYNCHRONOUS shape of the same exhaustion."""
+    """Before this issue an AcceleratorError read as an unclassified crash, so no ladder ran on the ASYNCHRONOUS shape of the same exhaustion."""
     by_code = torch.AcceleratorError("CUDA error: unspecified launch failure")
     by_code.error_code = 2  # type: ignore[attr-defined]
     assert memory.is_cuda_oom(by_code) is True
@@ -346,14 +277,12 @@ def test_an_async_accelerator_oom_is_an_oom() -> None:
 
 
 def test_discarding_the_async_error_is_safe_without_a_card() -> None:
-    """It runs on every OOM classification, so it may never raise — including
-    on the cardless box where most of this code is exercised."""
+    """It runs on every OOM classification, so it may never raise — including on the cardless box where most of this code is exercised."""
     memory.discard_cuda_async_error()
 
 
 def test_the_ladder_ignores_a_non_oom_failure() -> None:
-    """A ValueError inside the decode is a defect, not a card size: it must
-    reach the caller untouched, with its traceback."""
+    """A ValueError inside the decode is a defect, not a card size: it must reach the caller untouched, with its traceback."""
     class _Broken(torch.nn.Module):
         def forward(self, *_a: Any, **_k: Any) -> Any:
             raise ValueError("bad latent")

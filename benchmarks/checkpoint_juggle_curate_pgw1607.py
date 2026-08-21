@@ -1,12 +1,3 @@
-"""pgw#1607 phase-4 $0 preflight: curate juggle-compatible SDXL fine-tunes.
-
-Header-only: for each candidate HF repo, fetch the safetensors header of its
-UNet (8-byte length prefix + JSON) via a ranged GET — kilobytes, never a
-weight byte — and prove (key -> shape) identity against the SDXL base UNet.
-Emits the compatible list with per-repo dtype and total unet bytes, so the
-pod matrix rents nothing to discover a layout mismatch.
-"""
-
 from __future__ import annotations
 
 import json
@@ -16,7 +7,6 @@ import urllib.request
 
 BASE = "stabilityai/stable-diffusion-xl-base-1.0"
 CANDIDATES = [
-    # well-known public SDXL fine-tunes in diffusers layout
     "stabilityai/stable-diffusion-xl-base-1.0",
     "playgroundai/playground-v2-1024px-aesthetic",
     "playgroundai/playground-v2.5-1024px-aesthetic",
@@ -38,7 +28,7 @@ CANDIDATES = [
     "John6666/copycat-photo-sdxl-v1-sdxl",
     "dataautogpt3/ProteusV0.4",
     "dataautogpt3/OpenDalleV1.1",
-    "segmind/SSD-1B",  # expected REFUSAL: distilled, different architecture
+    "segmind/SSD-1B",
 ]
 
 

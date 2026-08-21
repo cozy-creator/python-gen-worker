@@ -1,17 +1,4 @@
-"""Three entrypoints; two carry a payload field the enumerator cannot reach.
-
-minimax-h3's exact shape (pgw#1449): `generate` enumerates, while
-`generate_long.slots: list[LongVideoSlot]` and
-`reference_to_video.references: list[ReferenceInput]` are required
-list-of-struct fields with no default and no axes. Under fail-the-module,
-ONE of those cost the whole derive — and this endpoint has two, so the
-"drop the other decorator" workaround was iterative.
-
-The enumerable entrypoint carries a real enum axis so the document has
-specializations to show, and every entrypoint drives the SAME marked module:
-the point is that a refused signature costs the module nothing, not that the
-survivors are trivial.
-"""
+"""Three entrypoints; two carry a payload field the enumerator cannot reach."""
 
 from __future__ import annotations
 
@@ -49,13 +36,11 @@ class GenerateInput(msgspec.Struct, forbid_unknown_fields=True):
 
 
 class LongInput(msgspec.Struct, forbid_unknown_fields=True):
-    #: REQUIRED, no default, no axes — h3's `generate_long.slots`.
     slots: list[Slot]
     size: Size = Size.SMALL
 
 
 class ReferenceInput(msgspec.Struct, forbid_unknown_fields=True):
-    #: The second one, so the fixture proves the fix is not "skip the first".
     references: list[Slot]
 
 

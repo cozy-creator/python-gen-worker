@@ -1,40 +1,4 @@
-"""W4A4 nvfp4 loader mode — the W8A8 pattern one tier down.
-
-A ``#nvfp4-w4a4`` flavor is a normal diffusers tree whose denoiser holds
-calibrated nvfp4 weights WITH two-level scales — the tensor-layout contract,
-consumed verbatim by the conversion side:
-
-- per quantized Linear ``L`` (modelopt export_hf_checkpoint shapes):
-  ``L.weight`` (uint8 [out, in/2]: packed e2m1 nibble pairs, element 2j in
-  the LOW nibble — torch.float4_e2m1fn_x2 convention), ``L.weight_scale``
-  (float8_e4m3fn [out, in/16]: per-16-block scales, FLAT row-major),
-  ``L.weight_scale_2`` (float32 scalar per-tensor second-level scale),
-  optional ``L.input_scale`` (float32 scalar static activation second-level
-  scale — nvfp4 calibrates unconditionally), optional
-  ``L.pre_quant_scale`` (float [in], AWQ-lite smoothing: x *= it before
-  activation quant), ``L.bias`` unquantized;
-- excluded layers carry NO scale tensors — detection is per-layer by the
-  (uint8 weight + e4m3 weight_scale + weight_scale_2) triple, never by name
-  lists. The triple also disambiguates from w8a8 (whose weight IS e4m3).
-
-Dequant: W ≈ e2m1(weight) * weight_scale.float() * weight_scale_2.
-
-Execution: quantized Linears become :class:`W4A4Linear` — blockwise
-``torch._scaled_mm`` over RESIDENT packed fp4 weights (Blackwell fp4 tensor
-cores, ~2x the fp8 rate: 4378 TFLOPS / 3.07x bf16 measured on B200).
-Activations are quantized per call: static per-tensor second-level scale from
-calibration (dynamic amax fallback), per-16-block e4m3 scales computed
-dynamically. That per-call chain is ONE fused triton kernel
-(``nvfp4_quant``) which also writes the block scales straight into the
-cuBLAS 2-D tiled ("blocked") layout torch's blockwise scaled_mm consumes;
-weight scales are swizzled once at load. The fused kernel arms only when it
-is bit-identical to the pure-torch chain, which otherwise serves unchanged.
-SM >= 100 only (sm_100/103 datacenter + sm_120/121 consumer
-Blackwell); the hub never schedules the flavor below that. Hosts of a
-qualifying arch whose kernel probe, micro-benchmark, or numerics self-check
-fails DEQUANT once at load into plain bf16-resident weights — same
-numerics, no speed win, never a refusal.
-"""
+"""W4A4 nvfp4 loader mode — the tensor-layout contract, consumed verbatim by the conversion side. Per quantized Linear L (modelopt export_hf_checkpoint shapes): L.weight uint8 [out, in/2] packed e2m1 nibble pairs, element 2j in the LOW nibble (torch.float4_e2m1fn_x2 convention); L.weight_scale float8_e4m3fn [out, in/16] per-16-block scales, FLAT row-major; L.weight_scale_2 float32 scalar second-level scale; optional input_scale (float32 scalar static activation scale) and pre_quant_scale (float [in], AWQ-lite smoothing: x *= it before activation quant); bias unquantized. Excluded layers carry NO scale tensors — detection is per-layer by the (uint8 weight + e4m3 weight_scale + weight_scale_2) triple, never by name lists; the triple also disambiguates from w8a8, whose weight IS e4m3. Dequant: W ≈ e2m1(weight) * weight_scale.float() * weight_scale_2. SM >= 100 only; a qualifying host that fails the kernel probe, micro-benchmark or numerics self-check DEQUANTS once at load into plain bf16-resident weights — same numerics, never a refusal."""
 
 from __future__ import annotations
 
@@ -71,10 +35,7 @@ from .nvfp4_quant import (
 logger = logging.getLogger(__name__)
 
 W4A4_FLAVOR = "nvfp4-w4a4"
-# Blackwell fp4 tensor cores: sm_100/103 (B200/B300) + sm_120/121 (RTX 50xx).
 W4A4_MIN_SM = 100
-# torch fp4 scaled_mm operand checks: packed K/2 % 16 == 0 and both mat2
-# dims % 16 == 0 => in_features % 32 == 0, out_features % 16 == 0.
 _K_ALIGN = 32
 _N_ALIGN = 16
 _AUX_SUFFIXES = (".weight_scale", ".weight_scale_2", ".input_scale",
@@ -91,11 +52,9 @@ class W4a4SnapshotError(W4a4Error):
 
 @dataclass(frozen=True)
 class W4a4Artifact:
-    # Denoiser dir name ("transformer"/"unet") for diffusers trees; "" for a
-    # root-layout snapshot whose weight set IS the denoiser.
     component: str
     files: tuple[Path, ...]
-    quantized: tuple[str, ...]  # module names with the contract triple
+    quantized: tuple[str, ...]
     static_input_scales: bool
 
 
@@ -110,7 +69,6 @@ _HEADER_WHY = (
 
 
 def _read_header(path: Path) -> dict:
-    """One shared, stub-aware reader — see `safetensors_header.read_header`."""
 
     return read_header(path, why=_HEADER_WHY)
 
@@ -148,9 +106,7 @@ def _root_weight_files(d: Path) -> tuple[Path, ...]:
 
 
 def detect_w4a4_artifact(model_path: Path) -> Optional[W4a4Artifact]:
-    """Header-sniff a snapshot for the w4a4 contract triple. A w8a8 tree
-    (e4m3 weights) or a scale-free tree never matches. Cheap: header reads
-    only."""
+    """Header-sniff a snapshot for the w4a4 contract triple."""
     root = Path(model_path)
     if not root.is_dir():
         return None
@@ -181,17 +137,8 @@ def detect_w4a4_artifact(model_path: Path) -> Optional[W4a4Artifact]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Weight quantize/dequantize. The e2m1 cast, nibble pack and blocked-scale
-# swizzle primitives live in nvfp4_quant (shared with the fused activation
-# quantizer) and are re-exported from here for the producer + dequant lane.
-# ---------------------------------------------------------------------------
-
-
 def quantize_nvfp4_tensor(w: Any) -> tuple[Any, Any, Any]:
-    """Quantize a 2-D float tensor to the contract triple:
-    (packed uint8 [out, in/2], weight_scale e4m3 [out, in/16],
-    weight_scale_2 fp32 scalar). modelopt-identical math."""
+    """Quantize a 2-D float tensor to the contract triple: (packed uint8 [out, in/2], weight_scale e4m3 [out, in/16], weight_scale_2 fp32 scalar)."""
     import torch
 
     wf = w.float()
@@ -209,18 +156,12 @@ def quantize_nvfp4_tensor(w: Any) -> tuple[Any, Any, Any]:
 
 def dequantize_nvfp4_tensor(packed: Any, weight_scale: Any,
                             weight_scale_2: Any) -> Any:
-    """Contract triple -> float32 [out, in]. The dequant-lane inverse of
-    :func:`quantize_nvfp4_tensor` (and of the modelopt export)."""
+    """Contract triple -> float32 [out, in]."""
     vals = unpack_e2m1(packed)
     out_f, in_f = vals.shape
     scales = weight_scale.float().reshape(out_f, in_f // _BLOCK, 1)
     return (vals.reshape(out_f, in_f // _BLOCK, _BLOCK)
             * scales * weight_scale_2.float()).reshape(out_f, in_f)
-
-
-# ---------------------------------------------------------------------------
-# Device qualification: kernel probe + numerics self-check + micro-benchmark.
-# ---------------------------------------------------------------------------
 
 
 def _fp4_dtype() -> Any:
@@ -240,10 +181,6 @@ def _gemm_w4a4(xq: Any, wq: Any, sa_blocked: Any, sb_blocked: Any,
 
 
 def _numerics_ok() -> bool:
-    """Quantize a real probe pair, run the blocked-layout scaled_mm, and
-    compare against the dequant fp32 reference. torch 2.13's operator
-    validates only scale NUMEL — a wrong layout returns silent garbage, so
-    the lane arms only when the kernel's numerics match our swizzle."""
     import torch
 
     m, k, n = 128, 256, 128
@@ -262,7 +199,7 @@ def _numerics_ok() -> bool:
     ref = dequantize_nvfp4_tensor(xq, xs, xs2) @ dequantize_nvfp4_tensor(
         wq, ws, ws2).t()
     rel = ((y - ref).norm() / ref.norm().clamp(min=1e-9)).item()
-    ok = rel < 2e-2  # identical quantized operands; bf16 accumulation only
+    ok = rel < 2e-2
     if not ok:
         logger.warning(
             "w4a4: scaled_mm numerics self-check failed (rel err %.4f) — "
@@ -273,8 +210,6 @@ def _numerics_ok() -> bool:
 _BENCH_DIM = 4096
 _BENCH_WARMUP = 3
 _BENCH_ITERS = 10
-# fp4 must beat the bf16 GEMM by a real margin to arm (B200 measured 3.07x;
-# a fallback/emulated path measures well under 1).
 _BENCH_MIN_SPEEDUP = 1.10
 
 
@@ -326,11 +261,7 @@ def _gemm_profitable() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def w4a4_gemm_mode() -> str:
-    """The fp4 GEMM dispatch for THIS device, chosen once per process:
-    ``"blockwise"`` or ``""`` (dequant lane). Arms only when the arch
-    qualifies (sm >= 100), the fp4 dtype + kernel exist, the numerics
-    self-check passes (scale-layout truth), and the micro-benchmark beats
-    bf16 — probe-pass != profitable."""
+    """The fp4 GEMM dispatch for THIS device, chosen once per process: ``"blockwise"`` or ``""`` (dequant lane)."""
     try:
         import torch
     except ImportError:
@@ -350,15 +281,8 @@ def w4a4_gemm_mode() -> str:
     except Exception as exc:  # noqa: BLE001 — bench failure => dequant lane
         logger.warning("w4a4: qualification failed (%s); dequant lane", exc)
         return ""
-    # Decide the activation quantizer HERE, at load: registering the fused
-    # kernel's custom op must never happen mid-trace under torch.compile.
     nvfp4_quantizer_mode()
     return "blockwise"
-
-
-# ---------------------------------------------------------------------------
-# The module.
-# ---------------------------------------------------------------------------
 
 
 def _build_module_class() -> type:
@@ -366,21 +290,10 @@ def _build_module_class() -> type:
     import torch.nn as nn
 
     class _W4A4Linear(nn.Module):
-        """Packed nvfp4 weights RESIDENT; y = blockwise scaled_mm + epilogue.
 
-        Per call: optional AWQ-lite smoothing (``x *= pre_quant_scale``),
-        per-tensor activation second-level scale (static ``input_scale``
-        from calibration, else dynamic amax/(6*448)), then ONE fused pass
-        (:func:`~.nvfp4_quant.quantize_activation`) for the per-16-block e4m3
-        scales + e2m1 cast + nibble pack + blocked-layout scale store,
-        blockwise ``torch._scaled_mm`` (weight scales pre-swizzled at load),
-        then the fp32 second-level epilogue ``y *= s2_act * s2_w`` and bias.
-        NOTE: never ``.to(dtype=...)`` this module (device moves are fine)."""
-
-        weight: Any        # uint8 [out, in/2] packed e2m1 pairs
-        weight_scale: Any  # e4m3 1-D, cuBLAS blocked layout (swizzled at load)
-        weight_scale_2: Any  # fp32 [1, 1]
-        # Structural marker consumed by compile_cache.execution_contract.
+        weight: Any
+        weight_scale: Any
+        weight_scale_2: Any
         _cozy_w4a4_linear = True
 
         def __init__(self, in_features: int, out_features: int, *,
@@ -388,9 +301,6 @@ def _build_module_class() -> type:
                      static_input_scale: bool,
                      pre_quant_scale: bool = False) -> None:
             super().__init__()
-            # A quantized leaf is the ONLY thing that knows its compute dtype —
-            # the weight is uint8 and the bias is optional, so bias-free
-            # instances leave no trace of it. Record it.
             self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
@@ -433,9 +343,6 @@ def _build_module_class() -> type:
             else:
                 s2 = (x2.abs().amax().float()
                       / (_E2M1_MAX * _FP8_MAX)).clamp(min=1e-12)
-            # One fused triton pass (amax -> e4m3 scale -> e2m1 cast -> nibble
-            # pack -> blocked-layout scale store) when it armed for this
-            # device, else the bit-identical pure-torch chain.
             xq, sa_blocked = quantize_activation(x2, s2)
             y = _gemm_w4a4(
                 xq, self.weight, sa_blocked, self.weight_scale, x.dtype)
@@ -459,11 +366,6 @@ def w4a4_linear_class() -> type:
     return _build_module_class()
 
 
-# ---------------------------------------------------------------------------
-# Loaders.
-# ---------------------------------------------------------------------------
-
-
 def _denoiser_class(root: Path, component: str) -> Any:
     index = json.loads((root / "model_index.json").read_text("utf-8"))
     entry = index.get(component)
@@ -482,10 +384,6 @@ def _denoiser_class(root: Path, component: str) -> Any:
 
 
 def _dequant_into(sd: Dict[str, Any], name: str, compute: Any) -> None:
-    """Replace one quantized layer's tensors with a dequantized weight.
-    AWQ-lite smoothing folds BACK into the weight: serve-time applies
-    ``x *= pre_quant_scale``, so the stored weight carries its inverse —
-    an unfolded dequant would silently mis-scale every in-channel."""
     w = dequantize_nvfp4_tensor(
         sd[f"{name}.weight"], sd[f"{name}.weight_scale"],
         sd[f"{name}.weight_scale_2"])
@@ -522,13 +420,7 @@ def _dequant_into(sd: Dict[str, Any], name: str, compute: Any) -> None:
 def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
                        compute_dtype: Any = None, mode: str = "",
                        cls: Any = None) -> Any:
-    """Materialize the quantized denoiser: skeleton on meta, quantized
-    Linears swapped for W4A4Linear, tensors assigned from the shards.
-    ``mode`` "blockwise" | "dequant" (default: probe). Layers whose dims
-    break fp4 scaled_mm alignment are dequantized individually (AWQ-lite
-    ``pre_quant_scale`` folds back into the dequantized weight).
-    ``cls`` pins the module class (the component path already resolved it
-    from the BASE composition's model_index); default: this tree's own."""
+    """Materialize the quantized denoiser: skeleton on meta, quantized Linears swapped for W4A4Linear, tensors assigned from the shards."""
     import torch
     import torch.nn as nn
     from accelerate import init_empty_weights
@@ -609,10 +501,7 @@ def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
 def load_w4a4_pipeline(cls: Any, path: Path, art: W4a4Artifact, *,
                        compute_dtype: Any = None,
                        components: Optional[Dict[str, Any]] = None) -> Any:
-    """Build the pipeline with the w4a4 denoiser wired in (svdq-style
-    component injection). Stamps ``_cozy_weight_lane`` ("w4a4" on the fp4
-    scaled_mm lane, "bf16-resident" on the dequant lane), which the
-    compile-cache graph key reads."""
+    """Build the pipeline with the w4a4 denoiser wired in (svdq-style component injection)."""
     import torch
 
     compute = compute_dtype or torch.bfloat16
@@ -634,10 +523,7 @@ def load_w4a4_pipeline(cls: Any, path: Path, art: W4a4Artifact, *,
 def sanitize_w4a4_state_dict(
     state_dict: Dict[str, Any], compute_dtype: Any = None,
 ) -> Dict[str, Any]:
-    """Dequantize w4a4 tensors in a raw state dict: contract triples become
-    compute-dtype weights, aux tensors drop. A non-matching dict passes
-    through unchanged, so manual snapshot loaders can call it
-    unconditionally."""
+    """Dequantize w4a4 tensors in a raw state dict: contract triples become compute-dtype weights, aux tensors drop."""
     import torch
 
     compute = compute_dtype or torch.bfloat16
@@ -677,10 +563,7 @@ def swap_w4a4_linears(
     compute_dtype: Any = None,
     key_map: Optional[Any] = None,
 ) -> int:
-    """Swap the artifact's quantized Linears in an ALREADY-CONSTRUCTED model
-    onto :class:`W4A4Linear`, assigning packed weights + scales from the
-    shards (the root-layout lane). Misaligned or non-Linear layers keep their
-    dequantized weights. Returns swapped count."""
+    """Swap the artifact's quantized Linears in an ALREADY-CONSTRUCTED model onto :class:`W4A4Linear`, assigning packed weights + scales from the shards (the root-layout lane)."""
     import torch
     import torch.nn as nn
 
@@ -691,9 +574,6 @@ def swap_w4a4_linears(
         for name in _read_header(f):
             if name != "__metadata__":
                 where[name] = f
-    # pgw#1330: one seam for both sources. On a projected tree `src` is a
-    # ~128 B stub and the tensors come from CAS objects; the lazy per-shard
-    # open and the caching are unchanged.
     stack = ExitStack()
     handles: Dict[Path, Any] = {}
 
@@ -709,8 +589,6 @@ def swap_w4a4_linears(
         return fh.get_tensor(name)
 
     swapped = 0
-    # A skipped layer stays dequantized at full precision inside a pipeline
-    # that reports the w4a4 lane. Counted by class, confessed once.
     skipped: Dict[str, int] = {}
     samples: List[str] = []
 
@@ -803,9 +681,7 @@ def _root_denoiser(pipe: Any) -> Any:
 def load_w4a4_root_pipeline(
     cls: Any, path: Path, art: W4a4Artifact, *, compute_dtype: Any = None,
 ) -> Any:
-    """Serve a root-layout w4a4 snapshot through the pipeline class's own
-    ``from_pretrained`` (whose loader must run sanitize_w4a4_state_dict),
-    then swap the denoiser's quantized Linears when the host qualifies."""
+    """Serve a root-layout w4a4 snapshot through the pipeline class's own ``from_pretrained`` (whose loader must run sanitize_w4a4_state_dict), then swap the denoiser's quantized Linears when the host qua..."""
     import torch
 
     compute = compute_dtype or torch.bfloat16
@@ -830,23 +706,13 @@ def load_w4a4_root_pipeline(
     return pipe
 
 
-# ---------------------------------------------------------------------------
-# Data-free producer — contract round-trips in tests + the parity harness.
-# Production calibrated artifacts come from the conversion side (modelopt;
-# nvfp4 calibrates unconditionally); this writes the identical on-disk
-# contract with dynamic per-tensor activation scales.
-# ---------------------------------------------------------------------------
-
-
 def quantize_tree_w4a4(
     src_tree: Path,
     out_tree: Path,
     *,
     exclude: tuple[str, ...] = ("embed", "norm"),
 ) -> Path:
-    """Copy a diffusers tree, rewriting the denoiser's eligible 2D weights
-    to the contract triple. Eligible: ``*.weight``, 2D, float,
-    in %% 32 == 0, out %% 16 == 0, name not matching ``exclude``."""
+    """Copy a diffusers tree, rewriting the denoiser's eligible 2D weights to the contract triple."""
 
     import torch
     from safetensors.torch import save_file
@@ -867,12 +733,6 @@ def quantize_tree_w4a4(
         if rel.parts[0] != comp:
             shutil.copy2(f, dst)
             continue
-    # pgw#1549: `safetensors.torch.load_file` is the ONE shape a projected
-    # tree cannot serve — it reads the ~128 B TFSSTUB1 pointer stub's first
-    # eight bytes as a header length. `tensor_source.load_state_dict` is its
-    # drop-in replacement and reads the CAS when the path holds a stub, so
-    # this producer is correct on a projected source tree instead of failing
-    # with a lie about the checkpoint.
         tensors = load_state_dict(f, why="the w4a4 data-free producer reads a source shard")
         out: Dict[str, Any] = {}
         quantized = 0
@@ -897,9 +757,6 @@ def quantize_tree_w4a4(
         total_quantized += quantized
         logger.info("w4a4 producer: %s — %d layers quantized", rel, quantized)
     if not total_quantized:
-        # A pickle-only tree (no denoiser safetensors) or one with zero
-        # eligible Linears must refuse: writing quantization_config onto an
-        # unquantized copy poisons every downstream loader.
         shutil.rmtree(out_tree)
         raise W4a4SnapshotError(
             f"{src_tree} has no quantizable denoiser safetensors weights")

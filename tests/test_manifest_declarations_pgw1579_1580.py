@@ -1,36 +1,3 @@
-"""THE DECLARATION LEDGER FENCE — every author-side declaration, and the
-manifest key it owes (pgw#1579 / pgw#1580).
-
-WHY THIS FILE EXISTS AND WHY IT IS GENERAL. The pgw#1373 v1 hardcut deleted
-four author-side declarations while the hub kept decoding and ACTING on them,
-and not one test failed. Each was found later by an endpoint breaking on it:
-``child_calls`` at a workflow endpoint's first child call (pgw#1579),
-``incremental_output`` at a streaming port (pgw#1576), ``expected_outputs``
-LIVE IN PRODUCTION on five promoted endpoints (pgw#1580), and ``handles`` by
-the enumeration audit that went looking for the third.
-
-A test per field would have caught none of them, because the fields were gone
-before anyone wrote the test. So the fences below are keyed on the SHAPE of the
-mistake rather than on the field:
-
-* :func:`test_every_entrypoint_kwarg_is_classified` reads
-  ``inspect.signature(entrypoint)`` and requires every kwarg to appear in
-  :data:`KWARG_DECLARATIONS`. A kwarg ADDED without wiring an emission fails
-  here; a kwarg DELETED leaves an orphan row and fails here too.
-* :func:`test_the_fully_declaring_row_carries_every_declaration` requires each
-  ledger entry with a manifest key to appear on a row that declared it.
-  Deleting an emission while keeping the kwarg fails here — the exact pgw#1579
-  shape.
-* :func:`test_the_declared_row_key_set_is_pinned` and its undeclared twin pin
-  both ends of the manifest row, so a key that appears or vanishes must be
-  argued for in this file.
-
-The rule they encode is written down in ``gen_worker/v1_deleted.py``: a field
-the platform decodes may only be dropped WITH a tombstone row naming its
-successor. Every field that had one was a decision; every field that did not
-was an accident.
-"""
-
 from __future__ import annotations
 
 import importlib
@@ -57,59 +24,26 @@ FIXTURES = Path(__file__).resolve().parent / "release_fixtures"
 MODULE = "declaring_endpoint"
 
 
-#: THE LEDGER: every ``@entrypoint`` kwarg -> the ``functions[]`` key it must
-#: produce on a row that declares it, or ``None`` for one deliberately kept
-#: SDK-side. Adding a kwarg without a row here fails
-#: :func:`test_every_entrypoint_kwarg_is_classified`; a ``None`` must carry its
-#: reason in the comment beside it, because "the hub does not read it" is a
-#: measurement, not an assumption.
 KWARG_DECLARATIONS: dict[str, str | None] = {
     "resources": "resources",
     "kind": "kind",
     "publishes": "publishes",
     "env": "env",
-    # TRI-STATE and JOB-KIND ONLY (th#2177): on the REQUEST path the hub grants
-    # `upload_media` unconditionally and has no column to store it in, so an
-    # inference row emits nothing. Keyed here because a JOB-kind row does carry
-    # it — `test_producer_declarations.py` owns that pair.
     "emits_media": "emits_media",
-    # pgw#1579: `scheduler_dispatch.go` mints the `invoke_child` grant only
-    # `if subj.ChildCallsDeclared`.
     "child_calls": "child_calls",
-    # pgw#1580: `normalizeManifestHandles` validates it and the resolver
-    # hydrates `FunctionMetadata.Handles` for selection.
     "handles": "handles",
-    # pgw#1576: `manifestFunction.DeltaOutputSchema`, emitted off
-    # `EntrypointSpec.delta_type`. It also flips `incremental_output`, which is
-    # emitted UNCONDITIONALLY (the cardinality fact is stated, never omitted),
-    # so the droppable-channel key is the one that proves the declaration
-    # travelled. `tests/test_streaming_entrypoints.py` owns its
-    # semantics; this row is here so the LEDGER stays complete — an
-    # unclassified kwarg is the whole failure mode.
     "streams": "delta_output_schema",
 }
 
-#: Declarations that are NOT kwargs — read off the author's TYPES instead.
-#: They need the same fence for the same reason: `ExpectedOutput` survived the
-#: hardcut as an exported, documented, still-written annotation whose emission
-#: was gone, which is why nothing complained for five promoted endpoints.
 ANNOTATION_DECLARATIONS: dict[str, str] = {
-    # `Annotated[..., ExpectedOutput(...)]` on the RETURN struct.
     "ExpectedOutput": "expected_outputs",
-    # `Annotated[str, PromptRole(...)]` / typed Asset fields on the PAYLOAD.
     "PromptRole": "moderation",
 }
 
-#: ``release.ExpectedOutputPlan`` / ``builder.ExpectedOutputPlan``, field for
-#: field. Read off the Go structs, not guessed. Anything outside this set is a
-#: key the hub silently drops — a mirror with no reader, which is what th#2087
-#: fences against and why ``duration_s`` is validated but never emitted.
 EXPECTED_OUTPUT_PLAN_KEYS = frozenset(
     {"field", "type", "mime_type", "count", "width", "height", "aspect_ratio"}
 )
 
-#: ``normalizeExpectedOutputType``'s whole vocabulary; anything else becomes
-#: ``other`` hub-side, so emitting a sixth word would be a silent downgrade.
 EXPECTED_OUTPUT_TYPES = frozenset({"image", "video", "audio", "file", "other"})
 
 
@@ -142,19 +76,8 @@ def _probe(source: str, name: str) -> None:
         sys.modules.pop(name, None)
 
 
-# -- the general fences ------------------------------------------------------
-
-
 def test_every_entrypoint_kwarg_is_classified() -> None:
-    """THE FENCE THAT WOULD HAVE CAUGHT ALL FOUR.
-
-    Read off the decorator's own signature, so it cannot go stale: every kwarg
-    must be classified in :data:`KWARG_DECLARATIONS` as either producing a
-    manifest key or deliberately not. A hardcut that deletes a kwarg orphans a
-    row here; a lane that adds one without wiring the emission has nowhere to
-    put it. Either way the next reader is stopped in this file, next to the
-    rule, instead of by a pod nine months later.
-    """
+    """THE FENCE THAT WOULD HAVE CAUGHT ALL FOUR."""
     parameters = set(inspect.signature(entrypoint).parameters) - {"fn"}
     missing = sorted(parameters - set(KWARG_DECLARATIONS))
     orphaned = sorted(set(KWARG_DECLARATIONS) - parameters)
@@ -173,12 +96,7 @@ def test_every_entrypoint_kwarg_is_classified() -> None:
 def test_the_fully_declaring_row_carries_every_declaration(
     rows: dict[str, dict],
 ) -> None:
-    """Every ledger entry with a manifest key reaches a row that declared it.
-
-    This is the assertion the three P0s failed. It is written over the LEDGER
-    rather than over a list of fields, so a future field is covered by adding
-    one line above rather than by remembering to write a test.
-    """
+    """Every ledger entry with a manifest key reaches a row that declared it."""
     row = rows["everything"]
     for declaration, key in KWARG_DECLARATIONS.items():
         if key is None:
@@ -191,13 +109,12 @@ def test_the_fully_declaring_row_carries_every_declaration(
         )
     for marker, key in ANNOTATION_DECLARATIONS.items():
         if marker == "PromptRole":
-            continue  # `everything`'s payload declares no prompt/media field
+            continue
         assert key in row, f"{marker} annotations reached no {key!r} key"
 
 
 def test_the_declared_row_key_set_is_pinned(rows: dict[str, dict]) -> None:
-    """Both directions. A DROPPED emission fails here even if someone deletes
-    the ledger row with it; a NEW key has to be argued for in this file."""
+    """Both directions."""
     assert set(rows["everything"]) == {
         "name", "python_name", "module", "declared_module", "class_name",
         "kind", "input_schema", "payload_schema_sha256", "output_schema",
@@ -209,9 +126,7 @@ def test_the_declared_row_key_set_is_pinned(rows: dict[str, dict]) -> None:
 
 
 def test_the_undeclared_row_stays_byte_identical(rows: dict[str, dict]) -> None:
-    """The other end of the pin: conditional emission, so a row that declares
-    nothing is unchanged by any of this. The hub's own struct tags are
-    ``omitempty`` and absent IS undeclared."""
+    """The other end of the pin: conditional emission, so a row that declares nothing is unchanged by any of this."""
     assert set(rows["describe"]) == {
         "name", "python_name", "module", "declared_module", "class_name",
         "kind", "input_schema", "payload_schema_sha256", "output_schema",
@@ -219,14 +134,10 @@ def test_the_undeclared_row_stays_byte_identical(rows: dict[str, dict]) -> None:
     }
 
 
-# -- child_calls (pgw#1579) --------------------------------------------------
-
-
 def test_child_calls_reaches_the_spec_and_the_row(
     declaring: ModuleType, rows: dict[str, dict]
 ) -> None:
-    """The dj-pipeline blocker. Weightless and slotless, because a workflow
-    endpoint has no weights — the declaration must not depend on a model."""
+    """The dj-pipeline blocker."""
     assert spec(declaring.make_video).child_calls is True
     assert rows["make_video"]["child_calls"] is True
     assert rows["make_video"]["slots"] == []
@@ -248,11 +159,7 @@ def test_child_calls_must_be_a_bool() -> None:
 
 
 def test_an_undeclared_body_is_refused_the_child_call_surface() -> None:
-    """The SDK half of one-fact-two-enforcers, and the CODE is the hub's own.
-
-    Without this the refusal arrived from the hub as a 403 mid-request, after
-    the child request had already been attempted, quoting a decorator the SDK
-    had deleted."""
+    """The SDK half of one-fact-two-enforcers, and the CODE is the hub's own."""
     ctx: RequestContext = RequestContext("req-undeclared")
     with pytest.raises(ChildCallRefusedError) as excinfo:
         ctx._callout_client()
@@ -260,8 +167,7 @@ def test_an_undeclared_body_is_refused_the_child_call_surface() -> None:
 
 
 def test_a_declared_body_reaches_the_child_call_surface() -> None:
-    """Past the declaration gate it fails on the PLATFORM fact instead — proof
-    the gate is the declaration and not the environment."""
+    """Past the declaration gate it fails on the PLATFORM fact instead — proof the gate is the declaration and not the environment."""
     from gen_worker.api.errors import ChildCallError
 
     ctx: RequestContext = RequestContext("req-declared", child_calls=True)
@@ -270,15 +176,10 @@ def test_a_declared_body_reaches_the_child_call_surface() -> None:
 
 
 def test_the_callout_refusals_name_the_successor_decorator() -> None:
-    """pgw#1579's third layer: the remedy text pointed at ``@endpoint``, which
-    the hardcut deleted. An unfollowable remedy is worse than none."""
     from gen_worker import callout
 
     source = Path(callout.__file__).read_text()
     assert "@endpoint(" not in source
-
-
-# -- handles (pgw#1580) ------------------------------------------------------
 
 
 def test_handles_reaches_the_spec_and_the_row(
@@ -290,9 +191,7 @@ def test_handles_reaches_the_spec_and_the_row(
 
 
 def test_handles_tokens_come_from_the_hubs_own_table(rows: dict[str, dict]) -> None:
-    """Not a second vocabulary: ``known_execution_lane_bodies`` is the SDK twin
-    of ``precision.KnownExecutionLaneBodies``, which is what
-    ``normalizeManifestHandles`` validates against."""
+    """Not a second vocabulary: ``known_execution_lane_bodies`` is the SDK twin of ``precision.KnownExecutionLaneBodies``, which is what ``normalizeManifestHandles`` validates against."""
     known = set(known_execution_lane_bodies())
     for name in ("render", "everything"):
         assert set(rows[name]["handles"]) <= known
@@ -308,9 +207,7 @@ def test_handles_tokens_come_from_the_hubs_own_table(rows: dict[str, dict]) -> N
     ],
 )
 def test_a_bad_handles_declaration_is_refused(declared: str, match: str) -> None:
-    """Every one of these is a refusal the HUB would raise instead — after the
-    image bake and the registry push. Raising at decoration names the author's
-    own line."""
+    """Every one of these is a refusal the HUB would raise instead — after the image bake and the registry push."""
     with pytest.raises(EntrypointDeclarationError, match=match):
         _probe(
             "import msgspec\n"
@@ -324,9 +221,6 @@ def test_a_bad_handles_declaration_is_refused(declared: str, match: str) -> None
 
 
 def test_an_undeclared_body_is_refused_the_executing_lane() -> None:
-    """The asymmetry pgw#1580 asked about, CLOSED: reading the lane IS the
-    divergence, so an undeclared read is refused rather than handed a plausible
-    default nobody checked."""
     ctx: RequestContext = RequestContext("req-undeclared")
     with pytest.raises(LaneNotDeclaredError):
         ctx.execution_lane
@@ -340,32 +234,17 @@ def test_a_declared_body_reads_the_executing_lane() -> None:
 
 
 def test_ctx_lane_inside_load_is_not_gated() -> None:
-    """The scope line, stated as a test so it is not re-litigated by guess.
-
-    ``LoadContext.lane`` is the deploy's PICK and ``ctx.lane.dtype`` is how
-    every model loads at all — the ordinary path, not a divergence — and it is
-    MODEL scope while ``handles=`` is FUNCTION scope, so one model serving two
-    entrypoints could not be gated coherently. Only the request-time read is
-    the declared branch."""
+    """The scope line, stated as a test so it is not re-litigated by guess."""
     from gen_worker.serving.context import LoadContext
 
     assert not hasattr(LoadContext, "_require_lane_declaration")
     assert "handles" not in inspect.signature(LoadContext.__init__).parameters
 
 
-# -- expected_outputs (pgw#1580) ---------------------------------------------
-
-
 def test_expected_outputs_reproduces_the_measured_anima_row(
     rows: dict[str, dict],
 ) -> None:
-    """THE PRODUCTION REGRESSION, pinned to the bytes that were measured.
-
-    ``GET /api/v1/endpoints/tensorhub/anima`` served
-    ``[{"type":"image","count":1,"field":"image",
-    "aspect_ratio":"input.aspect_ratio"}]`` on v1 ``0.3.28`` and ``null`` on v2
-    ``0.4.3``. The fixture's ``image`` field carries anima's annotation
-    character for character, so this asserts the v1 row is back."""
+    """THE PRODUCTION REGRESSION, pinned to the bytes that were measured."""
     plan = rows["render"]["expected_outputs"]
     assert plan[0] == {
         "field": "image",
@@ -376,13 +255,7 @@ def test_expected_outputs_reproduces_the_measured_anima_row(
 
 
 def test_expected_outputs_carries_refs_and_lists(rows: dict[str, dict]) -> None:
-    """The multi-output shape: the hub resolves each expression against the
-    real request payload, so a ref must survive as a ref.
-
-    The marker sits on the LIST, and the path is the annotated field's own —
-    ``thumbnails``, not ``thumbnails[]``. v1's walk stopped at the ``Annotated``
-    node without descending, and the cardinality is ``count`` rather than the
-    container anyway."""
+    """The multi-output shape: the hub resolves each expression against the real request payload, so a ref must survive as a ref."""
     plan = {item["field"]: item for item in rows["render"]["expected_outputs"]}
     assert plan["thumbnails"] == {
         "field": "thumbnails",
@@ -395,9 +268,7 @@ def test_expected_outputs_carries_refs_and_lists(rows: dict[str, dict]) -> None:
 
 
 def test_expected_outputs_matches_the_hubs_plan_struct(rows: dict[str, dict]) -> None:
-    """Shape parity with ``ExpectedOutputPlan``, both directions. A key outside
-    the struct is silently dropped by the hub's decoder — a mirror with no
-    reader — and a ``type`` outside the vocabulary becomes ``other``."""
+    """Shape parity with ``ExpectedOutputPlan``, both directions."""
     for name in ("make_video", "render", "everything"):
         for item in rows[name]["expected_outputs"]:
             assert set(item) <= EXPECTED_OUTPUT_PLAN_KEYS, set(item)
@@ -406,11 +277,7 @@ def test_expected_outputs_matches_the_hubs_plan_struct(rows: dict[str, dict]) ->
 
 
 def test_duration_s_is_validated_but_never_emitted(rows: dict[str, dict]) -> None:
-    """v1 emitted it and no hub reader has ever decoded it — it is absent from
-    both ``ExpectedOutputPlan`` structs and from ``expectedOutputsFromPlans``.
-    So it is checked (a wrong ref still fails the build) and dropped. The
-    marker's own docstring already routes settlement at the probed
-    ``VideoAsset.duration_s``."""
+    """v1 emitted it and no hub reader has ever decoded it — it is absent from both ``ExpectedOutputPlan`` structs and from ``expectedOutputsFromPlans``."""
     plan = rows["make_video"]["expected_outputs"]
     assert plan == [{
         "field": "video",
@@ -439,10 +306,6 @@ def test_duration_s_is_validated_but_never_emitted(rows: dict[str, dict]) -> Non
 
 
 def test_an_unresolvable_output_struct_refuses_instead_of_emptying() -> None:
-    """The pgw#1418 lesson, one field over. v1 swallowed a hint-resolution
-    failure and fell back to ``__annotations__`` — strings, under ``from
-    __future__ import annotations`` — so the walk found no markers and the plan
-    came out EMPTY, indistinguishable from an endpoint that declared none."""
     from gen_worker.discovery.expected_outputs import expected_outputs
 
     module = type(sys)("pgw1580_unresolvable")
@@ -466,13 +329,8 @@ def test_a_row_with_no_markers_omits_the_key(rows: dict[str, dict]) -> None:
     assert "expected_outputs" not in rows["describe"]
 
 
-# -- the declarations reach the RUNNING body ---------------------------------
-
-
 def test_the_serve_loop_stamps_both_declarations(declaring: ModuleType) -> None:
-    """A declaration the running body never sees is a declaration that does
-    nothing. This is the wire from the spec to ``ctx``, and it is the same wire
-    ``publishes`` already had."""
+    """A declaration the running body never sees is a declaration that does nothing."""
     from gen_worker.serving.serve_loop import ServeLoop
 
     host = object.__new__(ServeLoop)
@@ -487,7 +345,7 @@ def test_the_serve_loop_stamps_both_declarations(declaring: ModuleType) -> None:
     brancher = host._make_context("r2", None, spec(declaring.render))
     assert brancher.child_calls is False
     assert brancher.handles == ("fp8-w8a8-dynamic", "bf16-w16a16")
-    assert brancher.execution_lane  # does not raise
+    assert brancher.execution_lane
 
     plain = host._make_context("r3", None, spec(declaring.describe))
     assert plain.child_calls is False
@@ -496,21 +354,14 @@ def test_the_serve_loop_stamps_both_declarations(declaring: ModuleType) -> None:
 
 
 def test_the_local_host_stamps_them_too(declaring: ModuleType) -> None:
-    """The CLI and the daemon build a context BEFORE they know the function, so
-    they stamp at dispatch. A declaration only the serverless dispatcher
-    honours is one an author cannot test."""
+    """The CLI and the daemon build a context BEFORE they know the function, so they stamp at dispatch."""
     ctx: RequestContext = RequestContext("req-local")
     ctx._declare_from_spec(spec(declaring.everything))
     assert ctx.child_calls is True
     assert ctx.handles == ("fp8-w8a8-dynamic",)
 
 
-# -- the row is still publishable -------------------------------------------
-
-
 def test_every_fixture_row_survives_discovery(rows: dict[str, dict]) -> None:
-    """``discover_entrypoints`` runs the pipeline-class refusal and the
-    duplicate-name check over these rows, so reaching here at all is the
-    publish path accepting every declaration above."""
+    """``discover_entrypoints`` runs the pipeline-class refusal and the duplicate-name check over these rows, so reaching here at all is the publish path accepting every declaration above."""
     assert set(rows) == {"describe", "everything", "make_video", "render"}
     assert all(row["module"] == MODULE for row in rows.values())

@@ -1,25 +1,3 @@
-"""pgw#1626: the streaming loader RE-TIES tied weights, then asserts.
-
-The incident: `foundation-1` 0.3.2 (release `92f321be4311e817ff5a6d11`, pod
-`ba5i8ybz8oyg4y`, 2026-08-21) died on every invoke with
-
-    NameMismatch: component 'text_encoder': 1 tensor(s) are still on meta …
-    the checkpoint does not carry encoder.embed_tokens.weight
-
-against a checkpoint that was CORRECT. `T5EncoderModel` ties
-`encoder.embed_tokens.weight` to `shared.weight`, so a T5 checkpoint stores the
-source alone. The meta skeleton is built from configs without `post_init()`, so
-the tie had never been established, and `meta_survivors(remove_duplicate=False)`
-— written to stop a tied weight HIDING behind an alias — reported the alias as
-absent. Every T5-bearing pipeline on this loader (StableAudio, every FLUX.1
-`text_encoder_2`) failed 100% of its requests.
-
-No mocks: a real T5-bearing pipeline is `save_pretrained` to real safetensors,
-ingested into a real chunked `LocalCAS`, projected to a stub-only tree, and
-streamed by the real engine — the same article shape as
-``test_weight_streaming.py``.
-"""
-
 from __future__ import annotations
 
 import json
@@ -84,12 +62,8 @@ def _keys(path: Path) -> Tuple[str, ...]:
     return tuple(sorted(key for key in header if key != "__metadata__"))
 
 
-# -- the fixture's own claim ------------------------------------------------
-
-
 def test_the_article_really_is_a_tied_checkpoint(article: Dict[str, Any]) -> None:
-    """The guard on the guard: a T5 container that happened to carry BOTH
-    names would make every assertion below pass on a lie."""
+    """The guard on the guard: a T5 container that happened to carry BOTH names would make every assertion below pass on a lie."""
     keys = _keys(_container(article["source"]))
     assert SOURCE in keys, keys
     assert ALIAS not in keys, (
@@ -98,12 +72,8 @@ def test_the_article_really_is_a_tied_checkpoint(article: Dict[str, Any]) -> Non
     )
 
 
-# -- 1. the fix -------------------------------------------------------------
-
-
 def test_a_tied_t5_checkpoint_loads_clean(article: Dict[str, Any]) -> None:
-    """The incident's exact shape, green: zero survivors, and the alias is the
-    SAME TENSOR as its source — a tie, not a copy."""
+    """The incident's exact shape, green: zero survivors, and the alias is the SAME TENSOR as its source — a tie, not a copy."""
     engine = engine_for(article["tree"], device="cpu")
     assert engine is not None
     pipeline = engine.build(
@@ -121,16 +91,10 @@ def test_a_tied_t5_checkpoint_loads_clean(article: Dict[str, Any]) -> None:
     assert assert_byte_equal(pipeline, article["source"]) > 50
 
 
-# -- 2. the assertion keeps its teeth ---------------------------------------
-
-
 def test_an_absent_tensor_under_a_tied_name_is_still_refused(
     article: Dict[str, Any], tmp_path: Path
 ) -> None:
-    """Dropping `shared.weight` leaves BOTH tied names unfilled. Re-tying makes
-    the alias point at a meta tensor, and the refusal must still fire — the
-    broad fix (exempting `_tied_weights_keys` from the scan) would have served
-    an uninitialised embedding here."""
+    """Dropping `shared.weight` leaves BOTH tied names unfilled."""
     source = tmp_path / "source-model"
     shutil.copytree(article["source"], source)
     _drop_named_tensor(_container(source), SOURCE)
@@ -144,20 +108,15 @@ def test_an_absent_tensor_under_a_tied_name_is_still_refused(
     message = str(caught.value)
     assert "still on meta" in message, message
     assert SOURCE in message and ALIAS in message, message
-    # The message must describe the LOADER's state, not accuse the artifact.
     assert "the checkpoint does not carry" not in message, message
     assert "T5EncoderModel" in message, message
     assert "TIES to another parameter" in message, message
 
 
-# -- 3. the red arm ---------------------------------------------------------
-
-
 def test_without_the_retie_the_incident_reproduces(
     article: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Delete the fix and test 1 dies exactly as the pod did. Without this the
-    fix could be removed and the suite would stay green only by luck."""
+    """Delete the fix and test 1 dies exactly as the pod did."""
     monkeypatch.setattr(skeleton_mod, "retie", lambda module: False)
 
     engine = engine_for(article["tree"], device="cpu")
@@ -173,8 +132,7 @@ def test_without_the_retie_the_incident_reproduces(
 def test_retie_is_a_no_op_on_a_component_that_cannot_tie(
     article: Dict[str, Any]
 ) -> None:
-    """A diffusers `ModelMixin` exposes no `tie_weights` and needs none; the
-    hasattr guard must report that rather than raise."""
+    """A diffusers `ModelMixin` exposes no `tie_weights` and needs none; the hasattr guard must report that rather than raise."""
     built = skeleton_mod.build(article["pipeline_cls"], article["tree"])
     assert skeleton_mod.retie(built.modules["unet"]) is False
     assert skeleton_mod.retie(built.modules["text_encoder"]) is True
@@ -182,16 +140,7 @@ def test_retie_is_a_no_op_on_a_component_that_cannot_tie(
     assert skeleton_mod.tied_names(built.modules["unet"]) == ()
 
 
-# -- fixture surgery --------------------------------------------------------
-
-
 def _drop_named_tensor(path: Path, victim: str) -> None:
-    """Rewrite the container WITHOUT ``victim``, reindexing every survivor.
-
-    Popping the header key alone would leave orphaned bytes in the body, which
-    the native reader refuses as a corrupt container — that would test the
-    store's tolerance, not the engine's refusal to serve meta.
-    """
     raw = path.read_bytes()
     (size,) = struct.unpack("<Q", raw[:8])
     header = json.loads(raw[8 : 8 + size])

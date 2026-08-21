@@ -1,14 +1,4 @@
-"""Endpoint project config: ``[tool.gen_worker]`` in pyproject.toml.
-
-The one meaningful config value is ``main`` — the module that declares the
-``@endpoint`` objects. Resources and model bindings live in Python only.
-
-    [tool.gen_worker]
-    main = "my_endpoint.main"
-    # optional: EXTRA heavy import roots discovery stubs when missing
-    # (merged with gen_worker.discovery.heavy_deps.DEFAULT_HEAVY_ROOTS)
-    discovery_heavy_deps = ["nunchaku"]
-"""
+"""Endpoint project config: ``[tool.gen_worker]`` in pyproject.toml."""
 
 from __future__ import annotations
 
@@ -20,19 +10,13 @@ from pathlib import Path
 @dataclass(frozen=True)
 class ProjectConfig:
     root: Path
-    name: str   # [project].name (may be empty)
-    main: str   # [tool.gen_worker].main
-    # [tool.gen_worker].discovery_heavy_deps — extra heavy import roots to
-    # stub during build-time discovery when not installed.
+    name: str
+    main: str
     discovery_heavy_deps: tuple[str, ...] = ()
 
 
 def load_project_config(path: str | Path | None = None) -> ProjectConfig:
-    """Load the endpoint project config from ``pyproject.toml``.
-
-    ``path`` may be a project root, a pyproject.toml path, or None (cwd).
-    Raises ``FileNotFoundError`` / ``ValueError`` with actionable messages.
-    """
+    """Load the endpoint project config from ``pyproject.toml``."""
     p = Path(path).expanduser().resolve() if path else Path.cwd().resolve()
     pyproject = p if p.name == "pyproject.toml" else p / "pyproject.toml"
     root = pyproject.parent

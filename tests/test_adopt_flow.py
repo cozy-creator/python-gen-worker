@@ -1,38 +1,3 @@
-"""pgw#1573: the canonical adopt flow — four branches, ONE load path.
-
-Paul's spec, 2026-08-20, verbatim:
-
-    startup on my box -> check local and remote hub; if not present -> serve
-    eager, compile in the background -> store local (maybe upload to hub too)
-    + replace eager when done
-    startup on my box -> check local and remote hub; if present -> serve
-    compiled
-
-This file is that flow, driven end to end on CPU through the production
-objects: the real fixture endpoint, the real publish-time derive, the real
-``graph_store`` every entry point builds, the real ``AdoptSession``, the real
-``BackgroundMint``, and — for the remote leg — the real ``HubGraphStore`` over
-a real HTTP server speaking the real th#2133 answer shape.
-
-**THE ONE STUB, AND WHERE IT STOPS.** Turning a verified artifact into a
-callable is AOTInductor's job on a real GPU. So the loader here does the whole
-production load EXCEPT the final ``aoti_load_package``: it calls
-``torchcg.serve.materialize`` — the exact function ``aoti_loader`` calls, the
-one that opens the envelope and verifies it against its own metadata — and only
-then returns a stand-in callable. That is deliberate and it is the difference
-between this file and every adoption test that came before it: pgw#1561 shipped
-fourteen unloadable blobs past a suite whose loader stub never opened its
-argument, so a stub that does not materialize proves nothing about bytes.
-
-**WHY THE LEGS ARE THESE THREE.** Warm-remote is the leg that had never been
-exercised at all — the mint armed the compiler's own directory (pgw#1573's map,
-row C2) and the box `compile` path had no hub tier (row B2), so no test and no
-field run had ever taken a set of bytes from a remote store into a live
-dispatcher. Its red arm is the last test in the file: a hub answering a bare
-`.pt2` ZIP must produce a TYPED refusal that names the skew, not a quiet eager
-serve.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -50,9 +15,6 @@ from gen_worker._vendor.torchcg.serve import materialize
 from gen_worker.serving import DeployBinding
 from gen_worker.serving.mint_store import graph_store
 
-# The fixture ecosystem is `test_serving_adopt_first`'s — the same endpoint,
-# the same publish-time derive, the same lane. Re-typing it here would be a
-# second answer to "what does this endpoint compile to".
 from test_serving_adopt_first import (  # noqa: E402
     ENV,
     LANE,
@@ -64,11 +26,6 @@ from test_serving_adopt_first import (  # noqa: E402
 )
 
 RELEASE = "rel-pgw1573"
-
-
-# --------------------------------------------------------------------------
-# the harness
-# --------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -92,14 +49,7 @@ def document(binding: DeployBinding, tmp_path: Path) -> Any:
 
 
 def opening_loader(calls: List[str]) -> "Callable[[Path, Any, Any], Callable[..., Any]]":
-    """The production load, minus only the AOTI handle.
-
-    ``materialize`` is called for real on the exact bytes the store handed
-    over — it opens the envelope, verifies the package and any literal payload
-    against ``metadata.json``, and raises ``ArtifactFormatSkew`` on a bare
-    package. Everything this file claims about bytes rests on that call being
-    here rather than on the path merely existing.
-    """
+    """The production load, minus only the AOTI handle."""
 
     def load(path: Path, record: Any, module: Any) -> "Callable[..., Any]":
         assert isinstance(module, torch.nn.Module), (
@@ -116,12 +66,7 @@ def opening_loader(calls: List[str]) -> "Callable[[Path, Any, Any], Callable[...
 
 
 def real_compiler(built: List[str]) -> "Callable[[Path, Any, Path], Path]":
-    """The compile seam: a REAL unpacked artifact directory, no inductor.
-
-    Exactly the shape ``Engine.compile`` leaves at its destination, which is
-    what makes the mint's publish -> fetch -> arm round trip real: the publish
-    repacks this directory into the envelope and the arm opens that envelope.
-    """
+    """The compile seam: a REAL unpacked artifact directory, no inductor."""
 
     def build(blob: Path, record: Any, destination: Path) -> Path:
         built.append(record.graph)
@@ -162,18 +107,6 @@ def mint_the_holes(host: Any, store: Any, tmp_path: Path,
 
 
 def dispatch_counts(host: Any) -> Any:
-    """THE DAEMON'S OWN WITNESS, which this file used not to build (pgw#1591).
-
-    `cli/daemon.py` installs a `DispatchCounter` right after `host.setup` and
-    prints its verdict after every request; this file asserted on a loader
-    stub's call list instead. So the daemon could report the dispatcher
-    DISPLACED on 12/12 requests of a real sd15 benchmark while these legs
-    stayed green — the two booths were not measuring the same thing, and the
-    difference was the instrument, not the arm.
-
-    Every leg now takes the daemon's reading. Install AFTER setup, exactly as
-    `daemon.py` does, because the order is part of what broke.
-    """
     from gen_worker.serving.dispatch_counter import DispatchCounter
 
     return DispatchCounter().install(host)
@@ -202,22 +135,10 @@ def bank_both(store: Any, document: Any, tmp_path: Path) -> None:
         publish_compiled(store, record.graph, ENV, unpacked)
 
 
-# --------------------------------------------------------------------------
-# LEG (a) — COLD: eager first, mint in the background, compiled after
-# --------------------------------------------------------------------------
-
-
 def test_cold_boot_serves_EAGER_then_mints_then_serves_COMPILED(
     binding: DeployBinding, document: Any, tmp_path: Path
 ) -> None:
-    """Paul's branch ③, end to end, on one live host.
-
-    Empty local store, no hub. The first request must be served IMMEDIATELY
-    and eagerly; the mint then fills the holes off the request path; a later
-    request on the same live host goes through the compiled graph without a
-    reboot. That last step is the hot swap, and it is what
-    ``AdoptSession.arm`` exists for.
-    """
+    """Paul's branch ③, end to end, on one live host."""
     cas = tmp_path / "cas"
     store = graph_store(cas, None, tmp_path / "no-baked")
     calls: List[str] = []
@@ -226,8 +147,6 @@ def test_cold_boot_serves_EAGER_then_mints_then_serves_COMPILED(
                loader=opening_loader(calls),
                artifacts_dir=tmp_path / "artifacts", stack=STACK)
 
-    # BRANCH ③: nothing present, so every claimed graph is a hole and the
-    # endpoint is servable RIGHT NOW.
     assert len(host.adoption.adopted) == 0
     assert len(host.holes) == 2
     first, second = ratios(document)
@@ -235,7 +154,6 @@ def test_cold_boot_serves_EAGER_then_mints_then_serves_COMPILED(
                   request_id="cold-1")
     assert calls == [], "a cold boot must serve EAGER, not wait for a compile"
 
-    # The background mint: compile -> publish -> fetch back -> arm.
     built: List[str] = []
     outcome = mint_the_holes(host, store, tmp_path, built)
     assert outcome.landed == 2 and not outcome.failed, outcome.failed
@@ -244,7 +162,6 @@ def test_cold_boot_serves_EAGER_then_mints_then_serves_COMPILED(
     assert all(entry.armed for entry in outcome.entries), (
         "a minted graph that did not arm leaves this host eager forever")
 
-    # THE HOT SWAP: same host, same instance, no reboot — now compiled.
     counter = dispatch_counts(host)
     host.dispatch("generate", {"prompt": "x", "aspect_ratio": first},
                   request_id="cold-2")
@@ -253,26 +170,17 @@ def test_cold_boot_serves_EAGER_then_mints_then_serves_COMPILED(
     armed = {record.graph for record in document.lanes[0].graphs}
     assert set(calls) == armed, (
         f"the eager forward is still serving after a landed mint: {calls}")
-    # ...and the DAEMON's own witness agrees. This is the half that was
-    # missing: without it these legs stayed green while `gen-worker up`
-    # reported the dispatcher DISPLACED on 12/12 requests (pgw#1591).
     assert_served_compiled(counter, at_least=2)
 
-    # And the bytes are in the LOCAL CAS, at the band adoption reads.
     for record in document.lanes[0].graphs:
         assert store.has_artifact(record.graph, ENV)
         assert store.artifact_skew(record.graph, ENV) is None
 
 
-# --------------------------------------------------------------------------
-# LEG (b) — WARM-LOCAL: reboot arms from the local store, nothing recompiles
-# --------------------------------------------------------------------------
-
-
 def test_warm_local_reboot_arms_from_the_store_and_compiles_NOTHING(
     binding: DeployBinding, document: Any, tmp_path: Path
 ) -> None:
-    """Paul's branch ①. The store is asked, the store answers, done."""
+    """Paul's branch ①."""
     cas = tmp_path / "cas"
     store = graph_store(cas, None, tmp_path / "no-baked")
     bank_both(store, document, tmp_path)
@@ -291,8 +199,6 @@ def test_warm_local_reboot_arms_from_the_store_and_compiles_NOTHING(
     assert calls, "a warm boot served eager over a full store"
     assert_served_compiled(counter)
 
-    # Nothing to mint, and the mint says so as a NAMED state rather than a
-    # zero count (pgw#1371's `nothing_to_mint`).
     from gen_worker.serving.self_mint import NOTHING_TO_MINT, SelfMint
 
     built: List[str] = []
@@ -303,18 +209,12 @@ def test_warm_local_reboot_arms_from_the_store_and_compiles_NOTHING(
     assert built == [], "a warm boot recompiled a graph it already had"
 
 
-# --------------------------------------------------------------------------
-# LEG (c) — WARM-REMOTE: the leg that had never been exercised
-# --------------------------------------------------------------------------
-
-
 class _Hub(http.server.BaseHTTPRequestHandler):
-    """The th#2133 adopt route and its presigned blobs, for real, over HTTP."""
 
     answer: dict = {}
     blobs: dict = {}
 
-    def log_message(self, *_args: Any) -> None:  # keep pytest output clean
+    def log_message(self, *_args: Any) -> None:
         return
 
     def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler's spelling
@@ -350,7 +250,6 @@ def _serve_hub(answer: dict, blobs: dict) -> Tuple[str, Any]:
 
 def _fleet_answer(document: Any, base_url: str, blobs: dict,
                   artifacts: List[Path]) -> dict:
-    """The hub's real answer shape, filled from real artifact bytes."""
     rows = []
     for record, artifact in zip(document.lanes[0].graphs, artifacts):
         payload = Path(artifact).read_bytes()
@@ -397,18 +296,7 @@ def _remote_store(cas: Path, base_url: str) -> Any:
 def test_warm_remote_fetches_verifies_arms_serves_and_BANKS_locally(
     binding: DeployBinding, document: Any, tmp_path: Path
 ) -> None:
-    """Paul's branch ②, over a real HTTP hub, into a live dispatcher.
-
-    THIS IS THE LEG THAT WAS NEVER EXERCISED. It asserts four things in
-    order, and every one of them was unproven before pgw#1573:
-
-    1. an empty local store falls through to the fleet pool;
-    2. the fetched bytes pass the hub store's own digest verification;
-    3. they arm through the SAME loader a local hit arms through, and a
-       request is served through the compiled graph;
-    4. they are BANKED into the local CAS on the way past — so the next boot
-       is a local hit and a hub outage does not turn a warm box cold.
-    """
+    """Paul's branch ②, over a real HTTP hub, into a live dispatcher."""
     artifacts = []
     for index, record in enumerate(document.lanes[0].graphs):
         artifacts.append(tcg_artifacts.build(
@@ -439,7 +327,6 @@ def test_warm_remote_fetches_verifies_arms_serves_and_BANKS_locally(
         assert calls, "adopted from the hub and still served eager"
         assert_served_compiled(counter)
 
-        # (4) BANKED. Without this the pod re-downloads every boot.
         for record in document.lanes[0].graphs:
             assert store.local.has_artifact(record.graph, ENV), (
                 f"{record.graph[-12:]} was fetched from the fleet pool and not "
@@ -448,8 +335,6 @@ def test_warm_remote_fetches_verifies_arms_serves_and_BANKS_locally(
     finally:
         server.shutdown()
 
-    # The hub is GONE now. A local hit must still arm — the proof that (4)
-    # was a cache and not a coincidence.
     offline: List[str] = []
     rebooted = fresh_host(binding, tmp_path / "second")
     rebooted.setup(
@@ -462,24 +347,8 @@ def test_warm_remote_fetches_verifies_arms_serves_and_BANKS_locally(
 def test_a_SKEWED_remote_artifact_refuses_BY_TYPE_and_never_arms(
     binding: DeployBinding, document: Any, tmp_path: Path
 ) -> None:
-    """THE RED ARM of the remote leg, and the shape pgw#1561 shipped.
-
-    The hub answers a hit whose bytes are a bare AOTI ``.pt2`` package — the
-    exact thing every publisher banked from pgw#1471 until PR #1121, digest
-    and all, so nothing upstream of the loader can tell. The store hands them
-    over; the loader must refuse them BY TYPE.
-
-    What this test forbids is not the eager serve — eager is the correct
-    answer to bytes that will not load, and correctness is untouched. What it
-    forbids is the SILENCE: a hole with no reason, or a reason that reads like
-    corruption when the remedy is a re-publish. If this file's loader stopped
-    materializing, or the skew stopped being its own exception type, this goes
-    red instead of quietly passing over unloadable bytes.
-    """
     artifacts = []
     for index, record in enumerate(document.lanes[0].graphs):
-        # A REAL package, published where an envelope belongs. Not garbage —
-        # garbage would be caught by anything; this is the defect's own shape.
         artifacts.append(tcg_artifacts.aoti_package(
             tmp_path / "fleet" / f"{index}.pt2",
             graph_specialization=record.graph))
@@ -504,7 +373,6 @@ def test_a_SKEWED_remote_artifact_refuses_BY_TYPE_and_never_arms(
             f"and not 'scrub the disk': {hole.reason}")
         assert "bare AOTI .pt2 package" in hole.reason
 
-    # And the endpoint still SERVES — eagerly, correctly, loudly.
     first, _second = ratios(document)
     host.dispatch("generate", {"prompt": "x", "aspect_ratio": first},
                   request_id="skew-1")
@@ -514,13 +382,7 @@ def test_a_SKEWED_remote_artifact_refuses_BY_TYPE_and_never_arms(
 def test_a_TRUNCATED_remote_artifact_is_refused_before_it_is_ever_stored(
     binding: DeployBinding, document: Any, tmp_path: Path
 ) -> None:
-    """Corruption in transit is the hub store's own digest gate, not the
-    loader's — and a refused fetch must never leave bytes in the local CAS.
-
-    The distinction from the test above is the whole reason pgw#1561 gave the
-    skew its own exception type: this one's remedy is a re-fetch, that one's
-    is a re-publish.
-    """
+    """Corruption in transit is the hub store's own digest gate, not the loader's — and a refused fetch must never leave bytes in the local CAS."""
     artifacts = []
     for index, record in enumerate(document.lanes[0].graphs):
         artifacts.append(tcg_artifacts.build(
@@ -529,7 +391,6 @@ def test_a_TRUNCATED_remote_artifact_is_refused_before_it_is_ever_stored(
     blobs: dict = {}
     base_url, server = _serve_hub({}, blobs)
     answer = _fleet_answer(document, base_url, blobs, artifacts)
-    # The digest stays honest; the BYTES rot. That is what the gate is for.
     for name in list(blobs):
         blobs[name] = blobs[name][:-64]
     _Hub.answer = answer
@@ -555,15 +416,6 @@ def test_a_TRUNCATED_remote_artifact_is_refused_before_it_is_ever_stored(
 def test_the_flow_has_ONE_arming_path_for_local_remote_and_self_minted(
     binding: DeployBinding, document: Any, tmp_path: Path
 ) -> None:
-    """The invariant the three legs above exist to protect (pgw#1573).
-
-    A self-minted artifact, a locally-cached one and a hub-fetched one must
-    all reach the dispatcher as the SAME shape through the SAME call. Asserted
-    on the bytes: whatever produced them, what the loader receives is a FILE
-    carrying the gzip envelope magic, at the position boot adoption fetches
-    to. Before this issue the self-minted case handed over a DIRECTORY, and
-    that single difference is what let a broken publish hide for weeks.
-    """
     seen: List[Path] = []
 
     def recording_loader(path: Path, record: Any, module: Any) -> Any:
@@ -576,7 +428,7 @@ def test_the_flow_has_ONE_arming_path_for_local_remote_and_self_minted(
     host.setup(store=store, document=document, sm=SM, loader=recording_loader,
                artifacts_dir=tmp_path / "artifacts", stack=STACK)
     assert len(host.holes) == 2
-    mint_the_holes(host, store, tmp_path, [])          # self-minted arms
+    mint_the_holes(host, store, tmp_path, [])
     minted = list(seen)
 
     seen.clear()
@@ -591,17 +443,10 @@ def test_the_flow_has_ONE_arming_path_for_local_remote_and_self_minted(
         assert path.is_file(), f"{path} is not a file — a directory reached the loader"
         with path.open("rb") as handle:
             assert handle.read(2) == b"\x1f\x8b", f"{path} is not an envelope"
-    # Same position, both times: the mint fetches to where the boot fetches.
     assert sorted(p.name for p in minted) == sorted(p.name for p in adopted)
 
 
 def test_a_mint_with_no_store_is_unrepresentable(tmp_path: Path) -> None:
-    """The deleted branch, as a fence (pgw#1573).
-
-    A storeless mint had exactly one thing to arm — the compiler's own output
-    — which is the second load path this issue exists to remove. It refuses at
-    construction rather than eleven minutes of inductor later.
-    """
     from gen_worker.serving import mint as mint_mod
 
     with pytest.raises(ValueError, match="needs the store"):
@@ -611,13 +456,6 @@ def test_a_mint_with_no_store_is_unrepresentable(tmp_path: Path) -> None:
 
 
 def test_every_entry_point_builds_the_SAME_store(tmp_path: Path) -> None:
-    """One constructor, checked at the call sites (pgw#1573's row B).
-
-    Five constructions with three different answers to "do I have this graph"
-    is how `gen-worker compile` came to document a hub consult it did not
-    have. This reads the source rather than the behaviour, because the failure
-    mode is a NEW call site, not a wrong one.
-    """
     import gen_worker
 
     root = Path(gen_worker.__file__).parent

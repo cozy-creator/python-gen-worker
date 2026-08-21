@@ -1,21 +1,4 @@
-"""ie681: `streaming_w8a8_snapshot` forwards the module-path skip patterns.
-
-`streaming_w8a8_cast` has taken `skip_patterns` since gw#557, but the
-SNAPSHOT-level entry point the conversion endpoint actually invokes did not
-forward them, so every produce run was locked to the architecture-agnostic
-default set. That default knows `adaln_single` and not MiniMax-H3's
-`adaln_proj`, so a bare `cast-dtype dtypes=["w8a8"]` on H3 quantizes 50
-modulation projections (26.01 GB, 39% of the DiT) that H3's own serve recipe
-keeps bf16 and that te#171's AdaLN-skip precompute consumes as bf16.
-
-Model-specific selection is INVOKE data (the `weight_set_patterns`
-precedent), never a name added to the shared default — so the fix is the
-parameter, not a wider default. RED before it: the `adaln_proj` weight comes
-back F8_E4M3 with a `weight_scale` twin.
-
-No mocks: the real producer over real safetensors, headers read back off
-disk.
-"""
+"""ie681: `streaming_w8a8_snapshot` forwards the module-path skip patterns."""
 
 from __future__ import annotations
 
@@ -39,9 +22,6 @@ def _header(path: Path) -> dict:
 
 
 def _h3_shaped_denoiser(tmp_path: Path) -> Path:
-    """A diffusers tree whose `transformer` carries H3's module names: an
-    attention projection (must quantize) and an `adaln_proj.linear`
-    (modulation — must be skippable by invoke data)."""
     root = tmp_path / "src"
     (root / "transformer").mkdir(parents=True)
     save_file(
@@ -70,8 +50,7 @@ def _produce(tmp_path: Path, name: str, **kw) -> dict:
 
 
 def test_default_patterns_quantize_the_modulation_projection(tmp_path: Path) -> None:
-    """The premise, measured rather than asserted: the shared default set does
-    NOT protect `adaln_proj`. This is why the parameter has to exist."""
+    """The premise, measured rather than asserted: the shared default set does NOT protect `adaln_proj`."""
     header = _produce(tmp_path, "default")
     assert header["transformer_blocks.0.attn.to_q.weight"]["dtype"] == "F8_E4M3"
     assert header["transformer_blocks.0.adaln_proj.linear.weight"]["dtype"] == "F8_E4M3"
@@ -82,12 +61,9 @@ def test_invoke_supplied_pattern_keeps_the_modulation_projection_bf16(tmp_path: 
     header = _produce(
         tmp_path, "skipped",
         skip_patterns=W8A8_SKIP_TENSOR_PATTERNS + ("adaln",))
-    # The attention projection still quantizes...
     assert header["transformer_blocks.0.attn.to_q.weight"]["dtype"] == "F8_E4M3"
     assert "transformer_blocks.0.attn.to_q.weight_scale" in header
-    # ...and the modulation projection is untouched, with NO orphan scale.
     assert header["transformer_blocks.0.adaln_proj.linear.weight"]["dtype"] == "BF16"
     assert "transformer_blocks.0.adaln_proj.linear.weight_scale" not in header
-    # Passthrough tensors keep source precision either way.
     assert header["transformer_blocks.0.norm1.weight"]["dtype"] == "BF16"
     assert header["transformer_blocks.0.adaln_proj.linear.bias"]["dtype"] == "BF16"

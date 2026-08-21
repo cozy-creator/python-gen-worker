@@ -1,10 +1,4 @@
-"""Model residency: admission before allocation, LRU two-tier moves, gates.
-
-Integration-shaped: real ResidencyManager, real threads, recording backends —
-the byte arithmetic, ordering and blocking behavior under test are the real
-production objects; only the CUDA moves are recorders (this engine never
-touches tensors — the pgw#1382 Model wrapper does, behind ModelBackend).
-"""
+"""Model residency: admission before allocation, LRU two-tier moves, gates."""
 
 from __future__ import annotations
 
@@ -49,7 +43,7 @@ class Backend:
         Backend.active_loads += 1
         if Backend.active_loads > 1:
             Backend.load_overlap = True
-        time.sleep(0.02)  # widen the window a racing load would need
+        time.sleep(0.02)
         self.journal.append(f"load:{self.name}")
         Backend.active_loads -= 1
 
@@ -92,12 +86,10 @@ def test_admission_refuses_a_never_fitting_model_before_any_allocation() -> None
     m = manager(10, {"huge": 12 * GB, "ok": 4 * GB})
     with pytest.raises(NeverFits) as excinfo:
         m.lease("huge", LANE, factory("huge", journal))
-    # The refusal is at ADMISSION: nothing was constructed, no byte moved.
     assert journal == []
     message = str(excinfo.value)
     assert "13958643712" in message and "10737418240" in message
     assert "refuse at admission" in message
-    # The card is untouched and still serves what fits.
     with m.lease("ok", LANE, factory("ok", journal)):
         pass
     assert journal == ["construct:ok", "load:ok"]
@@ -110,13 +102,12 @@ def test_lru_eviction_makes_room_and_demotes_to_host_in_order() -> None:
         pass
     with m.lease("b", LANE, factory("b", journal)):
         pass
-    # a(4) + b(4) reserved incl. headroom; c needs 4 -> evict LRU = a.
     with m.lease("c", LANE, factory("c", journal)):
         pass
     assert journal == [
         "construct:a", "load:a",
         "construct:b", "load:b",
-        "demote:a",  # eviction happened BEFORE c's construction/load
+        "demote:a",
         "construct:c", "load:c",
     ]
     assert m.tier_of("a", LANE) is Tier.HOST
@@ -127,11 +118,11 @@ def test_lru_eviction_makes_room_and_demotes_to_host_in_order() -> None:
 def test_repromotion_is_an_h2d_copy_never_a_reload() -> None:
     journal: List[str] = []
     m = manager(10, {"a": 3 * GB, "b": 3 * GB, "c": 3 * GB}, host_gb=8)
-    for name in ("a", "b", "c"):  # c evicts a to host
+    for name in ("a", "b", "c"):
         with m.lease(name, LANE, factory(name, journal)):
             pass
     journal.clear()
-    with m.lease("a", LANE, factory("a", journal)):  # b is LRU now
+    with m.lease("a", LANE, factory("a", journal)):
         pass
     assert "promote:a" in journal
     assert "construct:a" not in journal and "load:a" not in journal
@@ -140,12 +131,11 @@ def test_repromotion_is_an_h2d_copy_never_a_reload() -> None:
 
 def test_host_tier_overflow_drops_the_oldest_host_resident() -> None:
     journal: List[str] = []
-    # Host tier holds ONE 3 GB body only: the second demotion drops the first.
     m = manager(10, {"a": 3 * GB, "b": 3 * GB, "c": 3 * GB, "d": 3 * GB}, host_gb=5)
     for name in ("a", "b", "c", "d"):
         with m.lease(name, LANE, factory(name, journal)):
             pass
-    assert m.tier_of("a", LANE) is Tier.ABSENT  # dropped when b demoted
+    assert m.tier_of("a", LANE) is Tier.ABSENT
     assert m.tier_of("b", LANE) is Tier.HOST
     assert journal.index("demote:a") < journal.index("drop:a") < journal.index("demote:b")
 
@@ -201,8 +191,6 @@ def test_single_flight_per_instance_and_no_tier_moves_in_flight() -> None:
 
     def evictor() -> None:
         first_in.wait(30)
-        # b needs the room a holds; a is IN FLIGHT, so this must BLOCK until
-        # a's requests drain — never move a mid-request.
         with m.lease("b", LANE, factory("b", journal)):
             order.append("evictor-in")
 
@@ -210,8 +198,6 @@ def test_single_flight_per_instance_and_no_tier_moves_in_flight() -> None:
     for t in threads:
         t.start()
     time.sleep(0.15)
-    # Nobody got in while the first request held the instance, and a was not
-    # demoted underneath it.
     assert order == ["first-in"]
     assert "demote:a" not in journal and "drop:a" not in journal
     release_first.set()
@@ -220,7 +206,6 @@ def test_single_flight_per_instance_and_no_tier_moves_in_flight() -> None:
     assert order[0] == "first-in" and set(order) == {
         "first-in", "first-out", "second-in", "evictor-in",
     }
-    # The eviction happened only once a was idle.
     assert "demote:a" in journal
 
 
@@ -245,8 +230,8 @@ def test_a_fits_after_drain_admission_blocks_instead_of_ooming() -> None:
     for t in threads:
         t.start()
     time.sleep(0.1)
-    assert landed == []  # blocked on the drain, not refused, not loaded
-    assert "construct:b" not in journal  # admission-before-allocation held
+    assert landed == []
+    assert "construct:b" not in journal
     release.set()
     for t in threads:
         t.join(timeout=30)
@@ -258,24 +243,9 @@ def test_reservation_accounting_includes_headroom_and_reads_back() -> None:
     m = manager(10, {"a": 3 * GB})
     with m.lease("a", LANE, factory("a", journal)):
         vram, host = m.reserved_bytes()
-        assert vram == 4 * GB  # 3 weights + 1 headroom
+        assert vram == 4 * GB
         assert host == 0
 
-
-# -- the BUDGET the manager admits against (pgw#1411) ------------------------
-#
-# `Worker.__init__` chose it inline, so which arm ran was a property of the
-# machine running the suite — and the arms disagree about whether a host can
-# serve at all. Measured on this workspace's dev box and on CI, they cover the
-# decision between them like this:
-#
-#     dev box   cuda_ready() True,  headroom 7.7 GiB  -> the headroom arm
-#     CI        cuda_ready() False, headroom None     -> the host-RAM arm
-#     NOWHERE   cuda_ready() True,  headroom None     -> THE REFUSAL
-#
-# The refusal shipped having never executed anywhere, because no environment
-# could reach it. So the arms are chosen here by naming the two readings rather
-# than by hoping for a machine.
 
 import pytest as _pytest_budget
 
@@ -294,8 +264,7 @@ def _readings(
 def test_a_stated_budget_wins_over_every_reading(
     monkeypatch: _pytest_budget.MonkeyPatch,
 ) -> None:
-    """The caller owns it: a stated budget is a CONFIG, so it is not
-    second-guessed by a card that happens to be readable."""
+    """The caller owns it: a stated budget is a CONFIG, so it is not second-guessed by a card that happens to be readable."""
     _readings(monkeypatch, headroom=99, cuda=True)
     assert _residency_budget(4096) == 4096
 
@@ -310,10 +279,7 @@ def test_the_cards_headroom_is_the_budget_when_it_reads(
 def test_no_cuda_at_all_sizes_from_host_ram(
     monkeypatch: _pytest_budget.MonkeyPatch,
 ) -> None:
-    """cozy-local, CI and every fake-weights drive are this arm. Refusing here
-    made the worker unbootable on all three while `python -m gen_worker.serving`
-    served happily beside it — two paths in one repo disagreeing about whether
-    a host can serve."""
+    """cozy-local, CI and every fake-weights drive are this arm."""
     _readings(monkeypatch, headroom=None, cuda=False)
     monkeypatch.setattr(
         "gen_worker.models.memory.get_available_ram_gb", lambda: 32.0
@@ -324,12 +290,7 @@ def test_no_cuda_at_all_sizes_from_host_ram(
 def test_a_card_we_can_SEE_but_not_MEASURE_refuses(
     monkeypatch: _pytest_budget.MonkeyPatch,
 ) -> None:
-    """THE ARM NO ENVIRONMENT REACHES, which is why it is written down here.
-
-    A visible card whose memory cannot be read is the one genuinely unknown
-    case: sizing from host RAM would hand the residency manager a budget in
-    the wrong memory entirely, and admission happens BEFORE allocation, so the
-    error would surface as an OOM on a rented pod rather than as a refusal."""
+    """THE ARM NO ENVIRONMENT REACHES, which is why it is written down here."""
     _readings(monkeypatch, headroom=None, cuda=True)
     with _pytest_budget.raises(_WorkerBootError) as caught:
         _residency_budget()
@@ -341,8 +302,7 @@ def test_a_card_we_can_SEE_but_not_MEASURE_refuses(
 def test_an_unreadable_host_refuses_rather_than_admitting_against_zero(
     monkeypatch: _pytest_budget.MonkeyPatch,
 ) -> None:
-    """A zero budget admits nothing and would read as "this model never fits",
-    which is a lie about the model rather than about the reading."""
+    """A zero budget admits nothing and would read as "this model never fits", which is a lie about the model rather than about the reading."""
     _readings(monkeypatch, headroom=None, cuda=False)
     monkeypatch.setattr(
         "gen_worker.models.memory.get_available_ram_gb", lambda: 0.0

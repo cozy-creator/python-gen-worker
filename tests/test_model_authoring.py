@@ -1,12 +1,3 @@
-"""The Model/Endpoint split (pgw#1382) — the model-authoring acceptance suite.
-
-Integration, no mocks, no GPU: the main_v2-shaped fixture imports clean and
-extracts statically; a fake-checkpoint load+serve drives the ONE merged
-entrypoint end-to-end through a real Model instance under single-flight;
-mutation-scope discipline holds (the scheduler-leak class of bug is the red
-arm); the unload contract is drain-then-call, best-effort-never-correctness.
-"""
-
 from __future__ import annotations
 
 import json
@@ -78,37 +69,25 @@ def make_binding(tmp_path: Path, **kwargs: object) -> DeployBinding:
     return DeployBinding(**kwargs)  # type: ignore[arg-type]
 
 
-# --- static extraction: import clean, read the whole surface ----------------
-
-
 def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
     loaded = load_endpoint(FIXTURE_DIR)
     from serving_v2_fixture.main import ImageOutput, SdxlModel, TextToImageInput
 
-    # One merged entrypoint (Paul's merge ruling): the deployment decides
-    # turbo vs CFG; the caller sees one function.
     assert sorted(loaded.entrypoints) == ["generate"]
     spec = loaded.entrypoints["generate"]
     assert spec.payload_type is TextToImageInput
     assert spec.return_type is ImageOutput
 
-    # Slots, in declaration order: model slot + optional adapter slot + the
-    # request's adapter-list slot; the PARAM NAME is the slot name.
     assert [(s.name, s.kind, s.required) for s in spec.slots] == [
         ("model", "model", True),
         ("turbo", "adapter", False),
         ("loras", "adapters", False),
     ]
-    # The annotation records the slot KIND (Paul's structural guard): the
-    # turbo slot takes only distillation-marked adapters; the request list
-    # takes any Adapter.
     assert spec.slots[1].annotation is DistillationAdapter
     assert spec.slots[2].annotation is Adapter
     assert spec.model_classes == (SdxlModel,)
     assert loaded.models == (SdxlModel,)
 
-    # The class header is the single declaration source: model type via the
-    # generic, lanes via the class kwarg — read, not executed.
     assert model_type(SdxlModel) is SDXL
     lanes = model_lanes(SdxlModel)
     assert [row.render() for row in lanes] == [
@@ -117,11 +96,6 @@ def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
     ]
     assert len(lanes) == 2
 
-    # pgw#1599: what each lane declares is its own DEMAND FORMULA — read
-    # statically, so a deployment is sized without running author code. The
-    # formulas DIFFER per lane and that is the point: the fp8 lane's weights
-    # and activations are both smaller, so one per-model number would have
-    # been wrong for one of the two.
     per_lane = {
         row.contract_id: row.request.coefficients()
         for row in model_declared_lanes(SdxlModel)
@@ -163,26 +137,19 @@ def _sdxl_contract() -> Any:
 
 
 def _engine_marks(ctx: Any) -> None:
-    """A DELEGATED compile mark: real, and invisible to the AST reader."""
 
     ctx.compile(object())
 
 
 def _lane() -> Any:
-    """A minimal but REAL lane declaration for a specimen class."""
 
     return lane(request=const(GiB(1)))
 
 
 def test_model_header_declarations_and_refusals() -> None:
-    """pgw#1599's acceptance (a) and (b): every header either declares REAL
-    lanes with a demand formula, or is REFUSED at class-definition time with
-    a message naming what is missing. Five vocabularies die here."""
 
     with pytest.raises(ModelDeclarationError, match=r"Model\[SDXL\]"):
         type("Bare", (Model,), {})
-
-    # --- lanes= is REQUIRED, real contracts only (Paul's ruling pair) ------
 
     with pytest.raises(ModelDeclarationError, match="lanes= is REQUIRED"):
         class NoLanes(Model[SDXL]):
@@ -192,10 +159,6 @@ def test_model_header_declarations_and_refusals() -> None:
         class EmptyLanes(Model[SDXL], lanes={}):
             pass
 
-    # DELETED (1/5): `lanes=()` and the whole DerivedLane machinery. It was
-    # the "I state no layout contract" spelling, and a derived lane names no
-    # layout document — so it could answer neither checkpoint compatibility
-    # nor lane selection, which is what a lane is FOR.
     with pytest.raises(ModelDeclarationError, match="tuple form is deleted"):
         class TupleLanes(Model[SDXL], lanes=()):  # type: ignore[arg-type]
             pass
@@ -241,15 +204,8 @@ def test_model_header_declarations_and_refusals() -> None:
         ):
             pass
 
-    # DELETED (2/5): the canonical-contract BORROW. An omitted `lanes=` used
-    # to silently adopt `ModelType.canonical_contract`; the attribute is gone
-    # from every model type, so the omission is a refusal (above) rather than
-    # a layout claim the author never made.
     assert not hasattr(SDXL, "canonical_contract")
 
-    # DELETED (3/5): the floor STRING. Paul, 2026-08-20: "there is no
-    # required VRAM" — demand varies per request, so a lane declares a
-    # FORMULA, not a number.
     with pytest.raises(ModelDeclarationError, match="machine-floor STRING"):
         class FloorString(Model[SDXL], lanes={_sdxl_contract(): "vram7g"}):
             pass
@@ -258,8 +214,6 @@ def test_model_header_declarations_and_refusals() -> None:
         class NoSpec(Model[SDXL], lanes={_sdxl_contract(): None}):
             pass
 
-    # DELETED (4/5): `eager_only=`. Compilation participation IS the presence
-    # of `ctx.compile` marks — no keyword, and none accepted.
     with pytest.raises(ModelDeclarationError, match="eager_only.*is DELETED"):
         class EagerOnly(
             Model[SDXL],
@@ -268,7 +222,6 @@ def test_model_header_declarations_and_refusals() -> None:
         ):
             pass
 
-    # `requires=` (deleted earlier, pgw#1404) still refuses by name.
     with pytest.raises(ModelDeclarationError, match="requires.*is DELETED"):
         class StrayFloor(
             Model[SDXL],
@@ -276,8 +229,6 @@ def test_model_header_declarations_and_refusals() -> None:
             requires={"sdxl.other@1": "vram8g"},
         ):
             pass
-
-    # --- the GREEN header, and everything it makes readable ---------------
 
     class SdxlLike(
         Model[SDXL],
@@ -318,25 +269,16 @@ def test_model_header_declarations_and_refusals() -> None:
         "representatives": ["dpmpp_2m_karras", "euler"],
         "measured": "pgw#1572, CPU: set_timesteps(20) on each served scheduler",
     }]
-    # The placement row carries the DERIVED floor and nothing else: the VRAM
-    # half went with the strings, and what replaces it is COMPUTED from the
-    # formula (pgw#1600), never annotated.
     assert {h: r.render() for h, r in model_requires(SdxlLike).items()} == {
         _SDXL_BF16_ID: "sm80+",
     }
 
-    # A hand-written sm floor is still a refusal — two producers of one fact
-    # is how they drift apart (Paul, 2026-08-18).
     with pytest.raises(ModelDeclarationError, match="lane\\(request="):
         class HandWrittenSm(Model[SDXL], lanes={_sdxl_contract(): "sm90+"}):
             pass
 
-    # --- compilation participation is the MARK, and nothing else ----------
-
     assert model_marks_compile(SdxlLike) is True
 
-    # An EAGER model under the new rules: real lanes like everyone else, zero
-    # `ctx.compile` calls, no keyword anywhere. This is the whole declaration.
     class EagerModel(Model[SDXL], lanes={_sdxl_contract(): _lane()}):
         def load(self, ctx: object) -> None:
             """No ctx.compile(): torch.compile measured no win here."""
@@ -346,15 +288,7 @@ def test_model_header_declarations_and_refusals() -> None:
     # tuple: the stamp is read once, at class definition, and every consumer
     # shares that read rather than re-parsing the header's spelling.
     assert [row.render() for row in model_lanes(EagerModel)] == [_SDXL_BF16_ID]
-    # ...and the words in that DOCSTRING are not a mark. A class that
-    # documents "no ctx.compile here" is the best-behaved one on the fleet and
-    # a substring check would refuse exactly it.
 
-    # --- fork axes: declared, or refused --------------------------------
-
-    # DELETED (5/5): derive's global DYNAMIC_AXES flag. The choice is per
-    # MODEL now, and a compiling class that states none is refused rather
-    # than defaulted.
     from gen_worker.release import derive as _derive
     assert not hasattr(_derive, "DYNAMIC_AXES")
 
@@ -363,8 +297,6 @@ def test_model_header_declarations_and_refusals() -> None:
             def load(self, ctx: object) -> None:
                 ctx.compile(object())  # type: ignore[attr-defined]
 
-    # CFG/batch is a PERMANENTLY STATIC shape fork (Paul, 2026-08-20) — not
-    # declarable at all, in either direction.
     with pytest.raises(LaneDeclarationError, match="PERMANENTLY STATIC"):
         class BatchDynamic(
             Model[SDXL],
@@ -374,8 +306,6 @@ def test_model_header_declarations_and_refusals() -> None:
             def load(self, ctx: object) -> None:
                 ctx.compile(object())  # type: ignore[attr-defined]
 
-    # BOTH shape declarations are expressible and NEITHER is presumed
-    # (acceptance (d)): the same model, declared the other way.
     class DynamicAspect(
         Model[SDXL],
         lanes={_sdxl_contract(): _lane()},
@@ -386,10 +316,6 @@ def test_model_header_declarations_and_refusals() -> None:
 
     assert model_shapes(DynamicAspect) == {"aspect": DYNAMIC}
 
-    # A DELEGATED mark (`self.engine.compile_dit(ctx)`) is invisible to the
-    # AST reader but produces real graphs, so shapes= is PERMITTED — never
-    # refused — on a class the reader calls unmarked. Refusing would make a
-    # correct endpoint undeclarable to buy a tidiness check.
     class DelegatedMark(
         Model[SDXL],
         lanes={_sdxl_contract(): _lane()},
@@ -398,11 +324,9 @@ def test_model_header_declarations_and_refusals() -> None:
         def load(self, ctx: object) -> None:
             _engine_marks(ctx)
 
-    assert model_marks_compile(DelegatedMark) is False  # the reader's limit
-    assert model_shapes(DelegatedMark) == {"aspect": STATIC}  # declared anyway
+    assert model_marks_compile(DelegatedMark) is False
+    assert model_shapes(DelegatedMark) == {"aspect": STATIC}
 
-    # A structural axis with one variant class is not a fork; a declared fork
-    # with no measurement behind it is a guess wearing a declaration.
     with pytest.raises(LaneDeclarationError, match="at least TWO variant"):
         class OneVariant(
             Model[SDXL],
@@ -453,13 +377,7 @@ def test_model_header_declarations_and_refusals() -> None:
     with pytest.raises(ModelDeclarationError):
         lane_handle("a" * 64)
 
-    # Cheap __init__: constructing a model does not load anything.
     assert not vars(EagerModel())
-
-
-# Malformed-signature specimens: defined at module level (the contract is
-# module-level functions), decorated inside the test so the refusal is
-# observable rather than an import-time explosion.
 
 
 class _In(msgspec.Struct):
@@ -508,7 +426,6 @@ def _too_few(ctx: RequestContext) -> _Out:
 
 
 def _weightless(ctx: RequestContext, payload: _In) -> _Out:
-    """pgw#1392: the shipped `(ctx, payload) -> Out` workflow-helper shape."""
     return _Out()
 
 
@@ -527,7 +444,7 @@ class _Grouping:
 
 def test_malformed_entrypoint_signatures_refuse_typed() -> None:
     cases: list[tuple[Callable[..., Any], str]] = [
-        (_payload_first, "ctx comes FIRST"),   # old payload-first order
+        (_payload_first, "ctx comes FIRST"),
         (_bad_payload, "payload"),
         (_bare_model, "bare Model base"),
         (_optional_model, r"`Adapter \| None`"),
@@ -543,12 +460,6 @@ def test_malformed_entrypoint_signatures_refuse_typed() -> None:
 
 
 def test_zero_model_slots_is_legal_pgw1392() -> None:
-    """pgw#1392: model-less entrypoints are LEGAL (se#757 blocker C).
-
-    `_no_model` used to be a refusal case here ("declares no model slot").
-    Ten shipped production functions have that signature, so the floor
-    dropped to zero. Junk slots did NOT become legal -- the loop above
-    still pins every other refusal, `_junk_slot` included."""
 
     spec = getattr(entrypoint(_no_model), "__cozy_entrypoint__")
     assert [slot.kind for slot in spec.slots] == ["adapter"]
@@ -560,9 +471,6 @@ def test_zero_model_slots_is_legal_pgw1392() -> None:
 
     with pytest.raises(EntrypointDeclarationError, match="must be a model slot"):
         entrypoint(_junk_slot)
-
-
-# --- the ctx split ----------------------------------------------------------
 
 
 def test_load_context_defaults_decode_matrix(tmp_path: Path) -> None:
@@ -577,14 +485,10 @@ def test_load_context_defaults_decode_matrix(tmp_path: Path) -> None:
             model_type=SDXL,
         )
 
-    # Row absent -> the platform fallbacks (zero-arg struct = trace fixture).
     fallback = ctx_for({}).defaults()
     assert fallback == SDXL.Defaults()
     assert fallback.cfg is True and fallback.steps.default == 28
 
-    # Partial row -> field-level overlay; untouched fields keep fallbacks.
-    # (No scheduler field: checkpoints carry no scheduler metadata — the
-    # tree IS their choice; scheduler demands are ADAPTER metadata.)
     decoded = ctx_for(
         {"cfg": False, "step_distilled": True, "timesteps": [8, 6, 4, 2]}
     ).defaults()
@@ -593,7 +497,6 @@ def test_load_context_defaults_decode_matrix(tmp_path: Path) -> None:
     assert decoded.timesteps == (8, 6, 4, 2)
     assert decoded.guidance == SDXL.Defaults().guidance
 
-    # Ill-typed value -> typed refusal naming the checkpoint, never coercion.
     with pytest.raises(DefaultsError, match="ckpt:x@1"):
         ctx_for({"cfg": "definitely"}).defaults()
 
@@ -602,8 +505,6 @@ def test_request_context_facts() -> None:
     bare: RequestContext[Any] = RequestContext("req-1")
     with pytest.raises(RuntimeError, match="no deploy binding"):
         _ = bare.checkpoint_ref
-    # There is deliberately NO trace flag on ctx (Paul ruling): author code
-    # is trace-oblivious by construction.
     assert not hasattr(bare, "is_trace")
 
     bound: RequestContext[Any] = RequestContext(
@@ -611,18 +512,12 @@ def test_request_context_facts() -> None:
         binding=DeployBinding(checkpoint_ref="ckpt:y@2", checkpoint_dir=Path(".")),
     )
     assert bound.checkpoint_ref == "ckpt:y@2"
-    # The salvaged base surface rides along (clamp records caller-visibly).
     assert bound.clamp("x", 5.0, hi=2.0) == 2.0
     assert bound.adjustments and bound.adjustments[0]["field"] == "x"
-    # ctx.warn: the caller-visible warning channel — same delivery path as
-    # clamp notes (the adjustment ledger), accumulated per-request.
     bound.warn("first")
     bound.warn("second")
     assert bound.warnings == ("first", "second")
-    assert len(bound.adjustments) == 3  # clamp row + two warn rows, one ledger
-
-
-# --- end-to-end: fake-checkpoint load + serve, mutation scopes, turbo -------
+    assert len(bound.adjustments) == 3
 
 
 @pytest.fixture()
@@ -644,10 +539,7 @@ def fixture_model(host: EndpointHost) -> Any:
 def test_scheduler_and_adapter_scopes_restore_after_a_turbo_request(
     host: EndpointHost, tmp_path: Path
 ) -> None:
-    """THE leak bug as a test: the pre-split file swapped
-    ``self.pipe.scheduler`` for a turbo request and never restored it, so one
-    turbo request poisoned every later CFG request on the persistent
-    instance. Model-owned scopes make the restore structural."""
+    """THE leak bug as a test: the pre-split file swapped ``self.pipe.scheduler`` for a turbo request and never restored it, so one turbo request poisoned every later CFG request on the persistent instance."""
     from diffusers import EulerDiscreteScheduler
 
     model = fixture_model(host)
@@ -671,13 +563,9 @@ def test_scheduler_and_adapter_scopes_restore_after_a_turbo_request(
     out = host.dispatch("generate", {"prompt": "turbo"}, request_id="turbo-1")
     assert [used.ref for used in out.loras] == ["cozy/lcm-lora@1"]
 
-    # Leave it as you found it: the SAME scheduler object is back, and the
-    # adapter is unloaded — configuration equals the post-load baseline.
     assert model.pipe.scheduler is baseline
     assert model.pipe.loaded_loras == []
 
-    # The next CFG request runs on the baseline scheduler (the leaked
-    # LCM/trailing scheduler is the unrepresentable state).
     host.rebind(binding)
     out = host.dispatch("generate", {"prompt": "cfg"}, request_id="cfg-1")
     assert out.model == binding.checkpoint_ref and out.loras == []
@@ -701,8 +589,6 @@ def test_scopes_restore_even_when_the_request_raises(
             ),
         )
     )
-    # The pipeline raises INSIDE both scopes (adapter loaded, scheduler
-    # swapped): the `finally` restores on the way out.
     with pytest.raises(RuntimeError, match="exploded mid-request"):
         host.dispatch("generate", {"prompt": "explode"}, request_id="r")
     assert model.pipe.scheduler is baseline
@@ -712,9 +598,7 @@ def test_scopes_restore_even_when_the_request_raises(
 def test_stacking_on_a_step_distilled_checkpoint_warns_and_ignores(
     tmp_path: Path,
 ) -> None:
-    """Paul's either-or ruling, warn-shaped: a step-distillation adapter on a
-    step-distilled checkpoint is IGNORED caller-visibly — the checkpoint
-    serves as deployed, never a fried render and never an aborted request."""
+    """Paul's either-or ruling, warn-shaped: a step-distillation adapter on a step-distilled checkpoint is IGNORED caller-visibly — the checkpoint serves as deployed, never a fried render and never an abo..."""
     loaded = load_endpoint(FIXTURE_DIR)
     stacked = EndpointHost(
         loaded,
@@ -763,9 +647,6 @@ def test_distilled_checkpoint_serves_turbo_without_an_adapter(
     assert out.model == "ckpt:distilled@1" and out.loras == []
 
 
-# --- the concurrency + lifecycle contract (runtime fixture) -----------------
-
-
 @pytest.fixture()
 def rt_host(tmp_path: Path) -> Iterator[EndpointHost]:
     loaded = load_endpoint(RT_FIXTURE_DIR)
@@ -775,7 +656,7 @@ def rt_host(tmp_path: Path) -> Iterator[EndpointHost]:
     booted = EndpointHost(loaded, make_binding(tmp_path, defaults={}))
     booted.setup()
     yield booted
-    rt.RELEASE.set()  # never leave a held request stuck on teardown
+    rt.RELEASE.set()
 
 
 def test_single_flight_per_model_instance(rt_host: EndpointHost) -> None:
@@ -788,7 +669,7 @@ def test_single_flight_per_model_instance(rt_host: EndpointHost) -> None:
         daemon=True,
     )
     a.start()
-    assert rt.ENTERED.acquire(timeout=30)  # A is inside the model
+    assert rt.ENTERED.acquire(timeout=30)
 
     b = threading.Thread(
         target=lambda: results.append(
@@ -796,9 +677,6 @@ def test_single_flight_per_model_instance(rt_host: EndpointHost) -> None:
         daemon=True,
     )
     b.start()
-    # Single-flight: B must NOT enter the model while A holds the admission.
-    # (Negative probe: in a broken build B enters immediately and this
-    # acquire succeeds — the red arm.)
     assert not rt.ENTERED.acquire(timeout=0.4)
 
     rt.RELEASE.set()
@@ -830,7 +708,6 @@ def test_eviction_drains_in_flight_requests_before_unload(
     evictor.join(timeout=30)
     assert not request.is_alive() and not evictor.is_alive()
 
-    # Drain-then-call: the request finished BEFORE unload ran.
     assert rt.ORDER.index("request_done") < rt.ORDER.index("unload:SlowModel")
     assert SlowModel not in rt_host.instances
 
@@ -845,8 +722,6 @@ def test_failing_unload_is_logged_and_eviction_proceeds(
     assert out.value == 10
     with caplog.at_level(logging.ERROR):
         rt_host.evict(BrokenUnloadModel)
-    # Best-effort, never correctness: the exception is logged, the instance
-    # is gone — a failing unload cannot pin residency.
     assert BrokenUnloadModel not in rt_host.instances
     assert "unload:BrokenUnloadModel" in rt.ORDER
     assert any("eviction proceeds" in r.message for r in caplog.records)
@@ -863,8 +738,7 @@ def test_multi_model_entrypoint_fills_slots_in_declaration_order(
 def test_per_request_loras_ride_the_list_slot_and_restore(
     host: EndpointHost, tmp_path: Path
 ) -> None:
-    """Paul's per-request LoRA-list promotion: `loras: list[Adapter]` is the
-    request's picks; scales apply via the plural model scope; full restore."""
+    """Paul's per-request LoRA-list promotion: `loras: list[Adapter]` is the request's picks; scales apply via the plural model scope; full restore."""
     model = fixture_model(host)
     picks = [
         Adapter(name="style-ink", path=tmp_path / "ink",
@@ -875,17 +749,13 @@ def test_per_request_loras_ride_the_list_slot_and_restore(
 
     out = host.dispatch(
         "generate", {"prompt": "styled"}, request_id="r", loras=picks)
-    # Structured output evidence: pinned refs + applied scales, in
-    # application order — fields, never string grammar (Paul/ie#731).
     assert out.model == "ckpt:tiny@1"
     assert [(used.ref, used.scale) for used in out.loras] == [
         ("me/style-ink@3", 0.7), ("me/char-fox@1", 1.2),
     ]
-    # The envelope scales were applied through the plural scope...
     assert model.pipe.adapter_history == [
         [("style-ink", 0.7), ("char-fox", 1.2)],
     ]
-    # ...and nothing stays loaded or active after the request (full restore).
     assert model.pipe.loaded_loras == []
     assert model.pipe.active_adapters == []
 
@@ -896,20 +766,16 @@ def test_scheduler_precedence_and_the_distillation_slot_kind_guard(
     model = fixture_model(host)
     baseline = model.pipe.scheduler
 
-    # Layer 1: the request's pick swaps the scheduler for the call, restored.
     out = host.dispatch(
         "generate", {"prompt": "x", "scheduler": "lcm"}, request_id="r1")
     assert out.model == "ckpt:tiny@1"
-    assert model.pipe.scheduler is baseline  # restored after the request
+    assert model.pipe.scheduler is baseline
 
-    # Unsupported REQUEST scheduler: typed 400 at the API boundary.
     with pytest.raises(msgspec.ValidationError):
         host.dispatch(
             "generate", {"prompt": "x", "scheduler": "not-a-scheduler"},
             request_id="r2")
 
-    # Layer 2: the applied distillation adapter's DEMAND — and a demand this
-    # endpoint does not serve warns and falls through to the checkpoint's.
     binding = host.binding
     demanding = EndpointHost(
         host.loaded,
@@ -931,14 +797,9 @@ def test_scheduler_precedence_and_the_distillation_slot_kind_guard(
     ctx = demanding.make_context("r3")
     demanding.dispatch("generate", {"prompt": "x"}, request_id="r3", ctx=ctx)
     assert [w for w in ctx.warnings if "does not serve" in w]
-    # Relay check: the adapter's decoded overlay is SDXL.Lora.Defaults,
-    # reached through the DistillationAdapter subclass.
     assert isinstance(demanding.binding.adapter, DistillationAdapter)
     assert isinstance(demanding.binding.adapter.defaults, SDXL.Lora.Defaults)
 
-    # THE SLOT-KIND GUARD: a plain (style) Adapter bound where the
-    # entrypoint declares a DistillationAdapter slot is a typed refusal
-    # BEFORE author code runs — takeover power is typed, not positional.
     misdeployed = EndpointHost(
         host.loaded,
         DeployBinding(

@@ -1,71 +1,4 @@
-"""Guard-closure ADVISORY audit + boundary canonicalization.
-
-Dynamo's guard set for a compiled graph IS the exhaustive list of everything
-that graph depends on, so closure against the declared compile contract is
-machine-checkable. Three pieces, all SDK-generic (parameterized ONLY by the
-declared ``CompileContract`` contract — never per-endpoint or per-family code):
-
-1. **Extraction** (:func:`extract`): post-mint, walk every compiled graph's live
-   guard tree. The robust torch 2.13 surface:
-   ``torch._dynamo.eval_frame._debug_get_cache_entry_list(code)`` ->
-   ``entry.guard_manager.root`` -> recursive ``get_child_managers()`` (each
-   carries ``get_source()``) + ``get_leaf_guards()``. A repr parse of the
-   ``TREE_GUARD_MANAGER`` dump is the fallback when the structured walk is
-   unavailable. An entry whose guards cannot be read records an
-   :data:`UNPROVEN` row, never a silent pass.
-
-2. **Closure classifier** (:func:`classify`): the RelationalGuard family
-   (aliasing, symbolic shapes) is judged by TYPE first — torch attaches it to
-   input managers, never predictably to one root. Every other guard is
-   classified by its SOURCE ROOT: module-rooted (``L['self']…``) guards are the
-   weights/structure identity (covered by the family + graph_signature +
-   weight_contract key axes) and global-rooted (``G[…]``) guards are the code
-   identity (covered by the gen_worker/diffusers/transformers/image_digest
-   axes); neither can vary per request. Cross-request variance enters ONLY
-   through call inputs and ambient process state, so those two roots form a
-   CLOSED WORLD: every input/ambient guard type must be explicitly covered by
-   the contract or canonicalized away at the ingress — anything else is a LEAK.
-
-   **The classifier has NO VETO** (Paul's ruling). It protects against WASTED
-   REUSE, not incorrectness: dynamo re-evaluates its own guards on every call at
-   the consumer, so a compiled graph depending on unpinned state fails its guards THERE —
-   and with fail-on-recompile armed that raises, serves eager, and reports a
-   countable ``guard_miss``. So :func:`closure_manifest` classifies,
-   records, emits a typed ``guard_leak`` event, and CONTINUES the mint. Hard
-   refusals survive only where a defect is PROVEN rather than inferred: zero
-   compiled graphs, and posture drift (:func:`assert_posture`).
-
-   **Never rebuild this classifier.** torch's own ``guard_filter_fn`` /
-   ``GuardFilterEntry`` is the supported structured hook (typed entries, no C++
-   manager walk and no repr parsing), and upstream maintains a versioned
-   ``UNSUPPORTED_SERIALIZATION_GUARD_TYPES``
-   classification. torch.export / AOTI removes the question entirely, and this
-   module is DELETED when the last family migrates to AOT. If a JIT-resident
-   family ever needs the check, implement it as a thin call into
-   ``guard_filter_fn`` plus upstream's serializability list.
-
-3. **Boundary canonicalization** (:func:`canonical_ingress`): one wrapper at the
-   single compiled-graph ingress (installed by ``compile_cache.apply`` for every
-   target, mint and consumer alike, so traced guards and serving inputs see the
-   SAME canonical form). Tensor strides are pinned to the canonical contiguous
-   layout — ``.contiguous()`` alone is NOT the pin: a size-1 dim makes
-   ``is_contiguous()`` true under an arbitrary stride and ``.contiguous()`` a
-   no-op while TENSOR_MATCH still guards the exact stride tuple, so the residue
-   case rebuilds via ``as_strided``. Tensor dtypes are memo-asserted per
-   argument path — a drift raises a NAMED :class:`GuardBoundaryError` instead of
-   a silent recompile. Scalar policy is REPORTED by the classifier; the ingress
-   never rewrites scalar values.
-
-The full guard dump rides the compiled graph as ``metadata.json``'s ``guard_manifest``
-block (deterministic: comments stripped, ASLR ids scrubbed, rows sorted). The
-audit surface (:func:`audit_armed`, :func:`consolidate` + ``python -m
-gen_worker.guard_closure``) is the N-cold-pod zero-miss closure check: exit 0 =
-closed and consistent, 2 = leaks, 3 = cross-pod divergence.
-
-Note: ``_debug_get_cache_entry_list`` keys on the class-shared ``__code__``, so
-a warm process's dump can include same-family sibling entries; classification is
-source-based, so siblings classify identically.
-"""
+"""Guard-closure ADVISORY audit + boundary canonicalization."""
 
 from __future__ import annotations
 
@@ -81,62 +14,35 @@ from . import torch_capability
 
 logger = logging.getLogger(__name__)
 
-# pgw#958 (§1.27(g)): restarted at 1 alongside KEY_SCHEME / SEAL_VERSION,
-# with the pre-existing compiled graph corpus purged in the same cut. The manifest
-# shape is the one the old v3 reached (posture process-seal block, advisory
-# gate, "unproven" rows).
 MANIFEST_VERSION = 1
 GATE_KEY = "gate"
 GATE_ADVISORY = "advisory"
 
-# Verdicts. LEAK and UNPROVEN are REPORTED, never fatal.
 LEAK = "LEAK"
-UNPROVEN = "unproven"                    # guards unreadable on this torch build
-RUNTIME_STATE = "runtime-state"          # ambient process state (compiled graph-key runtime axes)
-CODE_IDENTITY = "code-identity"          # G[...] roots (version/image axes)
-MODULE_STRUCTURE = "module-structure"    # L['self'] roots (family/graph/weight axes)
-CONTRACT_SHAPE = "contract-shape"        # input tensor shape/stride/dtype/device
-CONTRACT_SCALAR = "contract-scalar"      # input scalar pinned by the contract
-STRUCTURAL = "structural"                # type/len/None/bool topology of the call
-CODE_CONSTANT = "code-constant"          # string constants from the call path
-CANONICALIZED = "canonicalized-stride"   # stride axes the ingress pins
+UNPROVEN = "unproven"
+RUNTIME_STATE = "runtime-state"
+CODE_IDENTITY = "code-identity"
+MODULE_STRUCTURE = "module-structure"
+CONTRACT_SHAPE = "contract-shape"
+CONTRACT_SCALAR = "contract-scalar"
+STRUCTURAL = "structural"
+CODE_CONSTANT = "code-constant"
+CANONICALIZED = "canonicalized-stride"
 
 _COVERED = (
     RUNTIME_STATE, CODE_IDENTITY, MODULE_STRUCTURE, CONTRACT_SHAPE,
     CONTRACT_SCALAR, STRUCTURAL, CODE_CONSTANT, CANONICALIZED,
 )
 
-# The vocabulary below is built on the C++ leaf CLASS names the structured
-# walk yields (`type(leaf).__name__` over the 31 concrete LeafGuard
-# subclasses in torch._C._dynamo.guards on 2.13.0 — the repr-parse fallback
-# prints the same names). Python GuardBuilder create_fn names survive only
-# where they harmlessly alias a covered fact; they never reach the walk
-# (pgw#691 audit).
-
-# RelationalGuard family (C++): torch attaches these to the INPUT guard
-# managers — one row per participating value, never the root — so they are
-# judged by TYPE before any root dispatch. Root-first dispatch made
-# NO_TENSOR_ALIASING an unconditional LEAK on every graph with >=2 tensor
-# inputs (pgw#691 P0). Cross-input (non-)aliasing/overlap is fixed by the
-# endpoint call topology: the compiled target receives freshly materialized,
-# distinct tensors each request, so the relation cannot vary per call.
 _RELATIONAL_ALIASING = frozenset({
     "NO_TENSOR_ALIASING", "OBJECT_ALIASING", "STORAGE_OVERLAPPING",
-    "DUPLICATE_INPUT",  # python GuardBuilder alias of OBJECT_ALIASING
+    "DUPLICATE_INPUT",
 })
-# Ambient (root-attached) guard types covered by process/runtime identity.
-# DETERMINISTIC_ALGORITHMS/GRAD_MODE/TORCH_FUNCTION_STATE/FUNCTORCH_STACK_
-# MATCH/DUAL_LEVEL are python-side aliases whose facts GLOBAL_STATE and
-# DUAL_LEVEL_MATCH (the C++ names) carry on 2.13.
 _AMBIENT_COVERED = frozenset({
     "GLOBAL_STATE", "TORCH_FUNCTION_MODE_STACK", "DEFAULT_DEVICE",
     "DUAL_LEVEL_MATCH", "DETERMINISTIC_ALGORITHMS", "GRAD_MODE",
     "TORCH_FUNCTION_STATE", "FUNCTORCH_STACK_MATCH", "DUAL_LEVEL",
 })
-# Input-rooted guard types that assert call TOPOLOGY (types, lengths,
-# presence), which the endpoint call path fixes deterministically.
-# FAKE_SCRIPT_TYPE_MATCH asserts a torchscript-facing input type — same
-# topology fact as TYPE_MATCH.
 _STRUCTURAL_TYPES = frozenset({
     "TYPE_MATCH", "DIMENSION_DYNAMIC_MARKING_GUARD", "HASATTR", "NO_HASATTR",
     "LENGTH_CHECK", "DICT_LENGTH", "DICT_CONTAINS", "SET_CONTAINS",
@@ -145,50 +51,28 @@ _STRUCTURAL_TYPES = frozenset({
     "TRUE_MATCH", "FALSE_MATCH", "DISPATCH_KEY_SET_MATCH", "FLOAT_IS_NAN",
     "COMPLEX_IS_NAN", "SEQUENCE_LENGTH",
 })
-# Input-rooted object-identity guard types: an object-valued argument whose
-# identity dynamo guards (enum member, callable, config dict) can only be
-# bound by the endpoint's fixed call path, so it cannot vary per request;
-# across processes an identity mismatch is a MISS (the pgw#680 guard-miss
-# path recompiles), never wrongness — CODE_CONSTANT, not a leak.
 _IDENTITY_CONSTANT_TYPES = frozenset({"ID_MATCH", "DICT_VERSION"})
 
 _CANONICAL_DEPTH = 4
 
-# `___check_obj_id(x, 129760138209744)` / `___check_type_id(x, 21008688)`
-# embed process memory addresses (ASLR) — scrub for cross-pod determinism.
 _ID_SCRUB_RE = re.compile(r"(___check_(?:obj|type)_id\(.*?,\s*)\d+(\))")
 _COMMENT_RE = re.compile(r"\s{2,}#.*$", re.DOTALL)
 _TENSOR_MATCH_RE = re.compile(r"size=\[([^\]]*)\], stride=\[([^\]]*)\]")
 _SOURCE_LOCAL_RE = re.compile(r"^L\['([^']+)'\]")
-# torch 2.13 emits DERIVED guard sources that CONTAIN a local root
-# without starting with it — `dict(type(L['self']).__mro__[1].__dict__)` for a
-# base-class @property (diffusers ConfigMixin.config, read in every model's
-# forward) and `type(L['self']._modules['x']).__dict__['forward'].__defaults__`
-# for a submodule forward with a default argument. Prefix-matching alone sent
-# both to the "other" root, which LEAKS before the type dispatch that already
-# covers them — refusing every self-mint fleet-wide.
 _SOURCE_EMBEDDED_RE = re.compile(r"L\['([^']+)'\]")
 _SOURCE_EMBEDDED_GLOBAL_RE = re.compile(r"\bG[\['.]")
 
 
 class GuardClosureError(RuntimeError):
-    """The mint produced no readable compiled graphs, or a stored manifest
-    is unreadable. NOTE: a classification LEAK no longer raises —
-    it is recorded in the manifest and emitted as a ``guard_leak`` event."""
+    """The mint produced no readable compiled graphs, or a stored manifest is unreadable."""
 
 
 class GuardBoundaryError(RuntimeError):
-    """An input crossed the compiled-graph ingress outside the canonical
-    boundary (dtype drift). Named — never a silent recompile. Consumer
-    guards catch it into the pgw#672 explicit-eager degrade; mint arms
-    (``guard=False``) let it fail the mint red."""
+    """An input crossed the compiled-graph ingress outside the canonical boundary (dtype drift)."""
 
 
 class PostureError(GuardClosureError):
-    """The process posture differs from the canonical serving posture or
-    from a compiled graph's sealed posture. Named per fact — a posture
-    drift refuses the mint/arm loudly instead of surfacing later as an
-    undiagnosable ambient guard miss."""
+    """The process posture differs from the canonical serving posture or from a compiled graph's sealed posture."""
 
 
 @dataclass(frozen=True)
@@ -196,10 +80,10 @@ class GuardRecord:
     """One classified dynamo guard."""
 
     guard_type: str
-    source: str  # "" for root/ambient guards
-    expr: str    # comment-stripped, id-scrubbed
+    source: str
+    expr: str
     verdict: str
-    axis: str    # covering contract/runtime axis, or the leak reason
+    axis: str
 
     def row(self) -> Dict[str, str]:
         return {
@@ -237,9 +121,7 @@ class ClosureReport:
 
     @property
     def unproven(self) -> Tuple[str, ...]:
-        """Entries whose guards could not be read. Reported, never
-        fatal: this is a fact about the torch build's guard debug surface,
-        not about the mint."""
+        """Entries whose guards could not be read."""
         return tuple(
             f"target={g.target} entry={g.entry}: {r.expr}"
             for g in self.graphs for r in g.guards if r.verdict == UNPROVEN)
@@ -286,23 +168,13 @@ class ClosureReport:
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Contract pins
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class ContractPins:
-    """The scalar/dynamic vocabulary one declared contract admits into
-    guards. 0/1 are torch's own free specializations; everything else must
-    be a declared axis value."""
+    """The scalar/dynamic vocabulary one declared contract admits into guards."""
 
     ints: frozenset
     floats: frozenset
     has_dynamic: bool
-    # Names the traced callable CLOSES OVER. A freevar renders exactly like a
-    # call input in a guard source, so the classifier needs the
-    # callable's own vocabulary to tell them apart.
     freevars: frozenset = frozenset()
 
 
@@ -325,11 +197,6 @@ def contract_pins(
     return ContractPins(
         ints=frozenset(ints), floats=frozenset(floats),
         has_dynamic=bool(dynamic), freevars=frozenset(freevars))
-
-
-# ---------------------------------------------------------------------------
-# Extraction
-# ---------------------------------------------------------------------------
 
 
 def _normalize(expr: str) -> str:
@@ -356,8 +223,6 @@ _TREE_MGR_RE = re.compile(r"^\|(?: \|)* \+- \w*GuardManager: source=([^,]+),")
 
 
 def _parse_tree_repr(dump: str) -> List[Tuple[str, str, str]]:
-    """Fallback: parse the ``TREE_GUARD_MANAGER`` repr into (type, source,
-    raw expr) rows. Depth-tracked so leaves attach to the nearest manager."""
     out: List[Tuple[str, str, str]] = []
     source_by_depth: Dict[int, str] = {}
     for line in dump.splitlines():
@@ -420,9 +285,6 @@ def extract_target_guards(
         try:
             rows = _entry_guard_rows(entry)
         except Exception as exc:  # noqa: BLE001 — recorded, never fatal
-            # The guards of a LIVE compiled graph were unreadable.
-            # That is a torch-surface fact, not a mint defect, so it is
-            # recorded as an UNPROVEN row and the mint continues.
             logger.warning(
                 "guard-closure: %s entry %d guards unreadable (%s: %s) — "
                 "recorded UNPROVEN, mint continues",
@@ -446,22 +308,7 @@ def extract_target_guards(
     return graphs
 
 
-# ---------------------------------------------------------------------------
-# Classification
-# ---------------------------------------------------------------------------
-
-
 def _source_root(source: str, freevars: frozenset = frozenset()) -> str:
-    """The ROOT a guard source is rooted at: self / input / freevar / global /
-    ambient, or "other" when nothing recognizable is embedded.
-
-    resolves the root EMBEDDED anywhere in a derived source, not just
-    a prefix. torch 2.13 wraps class/code-structure facts in expressions like
-    ``dict(type(L['self']).__mro__[1].__dict__)`` — semantically self-rooted,
-    and covered by the type dispatch — but a prefix match sees "other" and
-    LEAKS. The closed world is unchanged: a source with no recognizable root is
-    still "other", still a leak.
-    """
     s = str(source or "").strip()
     if not s:
         return "ambient"
@@ -469,9 +316,6 @@ def _source_root(source: str, freevars: frozenset = frozenset()) -> str:
         return "global"
     m = _SOURCE_LOCAL_RE.match(s)
     if m is None:
-        # Derived source: find the root it is DERIVED FROM. `self` wins when
-        # present — a fact about self's class/code structure stays a
-        # module-structure fact however it is spelled.
         names = _SOURCE_EMBEDDED_RE.findall(s)
         if "self" in names:
             return "self"
@@ -483,11 +327,6 @@ def _source_root(source: str, freevars: frozenset = frozenset()) -> str:
     name = m.group(1)
     if name == "self":
         return "self"
-    # a closure FREEVAR renders exactly
-    # like a call input, so `L['outer_scale'] == 0.3` was judged an input and
-    # leaked with the wrong name. Production roots are bound `forward` methods
-    # with no freevars; naming it correctly keeps the check and fixes the
-    # diagnosis.
     return "freevar" if name in freevars else "input"
 
 
@@ -507,7 +346,6 @@ def _classify_tensor_match(expr: str) -> Tuple[str, str]:
     size_txt = [v.strip() for v in m.group(1).split(",") if v.strip()]
     stride_txt = [v.strip() for v in m.group(2).split(",") if v.strip()]
     if any(v == "None" for v in size_txt):
-        # Declared-dynamic dims record None; dependent strides follow suit.
         return CONTRACT_SHAPE, "declared dynamic dims"
     try:
         size = [int(v) for v in size_txt]
@@ -548,21 +386,11 @@ def _scalar_verdict(value: Any, pins: ContractPins) -> Tuple[str, str]:
     return LEAK, f"unclassifiable literal {type(value).__name__}"
 
 
-# `L['dt'] == torch.float32` / `L['mf'] == torch.contiguous_format` — the
-# RHS a torch singleton renders in verbose parts. `device(type='cuda',
-# index=0)` is how a torch.device literal renders.
 _TORCH_ATTR_RE = re.compile(r"^torch\.([A-Za-z_][A-Za-z0-9_]*)$")
 _TORCH_DEVICE_RE = re.compile(r"^(?:torch\.)?device\(type=")
 
 
 def _torch_object_verdict(rhs: str) -> Optional[Tuple[str, str]]:
-    """Verdict for an EQUALS_MATCH RHS that is a torch singleton rather than
-    a python literal (pgw#691 P1: diffusers compares dtypes constantly, and
-    ``ast.literal_eval`` reported them as false-positive LEAKs). Dtype at the
-    compiled boundary is already pinned twice over — the ``weight_lane`` key
-    axis and :func:`canonical_ingress`'s per-path dtype memo (which raises a
-    NAMED :class:`GuardBoundaryError` on drift); layout/memory_format ride
-    the same canonical-form pin, device rides the runtime key axes."""
     if _TORCH_DEVICE_RE.match(rhs):
         return CONTRACT_SHAPE, "runtime device axes (sm/cuda/torch)"
     m = _TORCH_ATTR_RE.match(rhs)
@@ -570,7 +398,7 @@ def _torch_object_verdict(rhs: str) -> Optional[Tuple[str, str]]:
         return None
     try:
         import torch
-    except ImportError:  # classification without torch: stay conservative
+    except ImportError:
         return None
     obj = getattr(torch, m.group(1), None)
     if isinstance(obj, (torch.dtype, torch.layout, torch.memory_format)):
@@ -582,9 +410,6 @@ def _classify_equals(expr: str, pins: ContractPins) -> Tuple[str, str]:
     _lhs, sep, rhs = expr.partition(" == ")
     if not sep:
         return LEAK, "unparseable EQUALS_MATCH expression"
-    # classify() receives the RAW verbose part; python literals survive the
-    # trailing "  # file:line" comment (the tokenizer eats it) but the
-    # torch-object regex must see a clean RHS.
     rhs = _COMMENT_RE.sub("", rhs).strip()
     try:
         value = ast.literal_eval(rhs)
@@ -599,22 +424,10 @@ def _classify_equals(expr: str, pins: ContractPins) -> Tuple[str, str]:
 def classify(
     guard_type: str, source: str, expr: str, pins: ContractPins,
 ) -> Tuple[str, str]:
-    """(verdict, covering axis / leak reason) for one guard.
-
-    The RelationalGuard family is judged by TYPE first — torch attaches it
-    to the input managers (and SYMBOLIC_SHAPE_GUARD to synthetic tuple
-    sources), never predictably to one root. Everything else dispatches on
-    the source root: module- and global-rooted guards are covered by
-    construction (weights + code identity, pinned by the compiled graph-key axes);
-    input-rooted and ambient guards are the closed world — unknown types are
-    LEAKS, never waved on.
-    """
+    """(verdict, covering axis / leak reason) for one guard."""
     if guard_type in _RELATIONAL_ALIASING:
         return STRUCTURAL, "cross-input aliasing fixed by call topology"
     if guard_type == "SYMBOLIC_SHAPE_GUARD":
-        # torch 2.13's shape-env relations (install_symbolic_shape_guard,
-        # enable_cpp_symbolic_shape_guards) — also a RelationalGuard,
-        # observed with synthetic sources like "(0, L['x'].size()[0])".
         if pins.has_dynamic:
             return CONTRACT_SHAPE, "declared dynamic-dim range"
         return LEAK, "shape-env relation without declared dynamic dims"
@@ -637,12 +450,6 @@ def classify(
         return LEAK, f"unclassified ambient guard {guard_type}"
     if root == "other":
         return LEAK, f"unrecognized guard source {source!r}"
-    # input- and freevar-rooted share ONE dispatch: a wrapper's
-    # captured code object is code (its identity/structure is pinned by
-    # code_closure + toolchain), while a captured runtime SCALAR is not — and
-    # _scalar_verdict already draws exactly that line. What the freevar root
-    # adds is the DIAGNOSIS: a leaking freevar must not be reported as a call
-    # input, because the fix is a declaration, not a different request.
     verdict, axis = _classify_input_rooted(guard_type, expr, pins)
     if verdict == LEAK and root == "freevar":
         return LEAK, (
@@ -678,16 +485,6 @@ def _classify_row(
         expr=_normalize(raw_expr), verdict=verdict, axis=axis)
 
 
-# ---------------------------------------------------------------------------
-# Process-posture seal
-# ---------------------------------------------------------------------------
-
-# The ONE canonical serving posture. Every fact is ambient process state a
-# dynamo guard observes (GLOBAL_STATE, TORCH_FUNCTION_MODE_STACK,
-# DEFAULT_DEVICE): mint and consumer must present the SAME posture or the
-# minted guards can never HIT — and a drift must refuse the arm with a
-# named reason, never surface as a downstream guard miss. String-valued
-# for JSON determinism.
 CANONICAL_POSTURE: Dict[str, str] = {
     "grad_enabled": "True",
     "inference_mode": "False",
@@ -701,8 +498,7 @@ CANONICAL_POSTURE: Dict[str, str] = {
 
 
 def posture_snapshot() -> Dict[str, str]:
-    """The live process posture in canonical string form. On a torchless
-    worker the only honest fact is the absence itself."""
+    """The live process posture in canonical string form."""
     torch = torch_capability.torch_or_none()
     if torch is None:
         return {"torch": torch_capability.ABSENT}
@@ -732,14 +528,7 @@ def _posture_diff(sealed: Mapping[str, Any], live: Mapping[str, str]) -> List[st
 
 
 def establish_posture() -> Dict[str, str]:
-    """Set the canonical posture explicitly (boot entry). Settable facts are
-    SET (grad mode, deterministic algos); ambient contexts that library code
-    must not pop from under the embedding process (an active autocast, a
-    foreign torch-function mode, a moved default device) REFUSE with a named
-    :class:`PostureError` instead.
-
-    a torchless worker has no grad mode, no autocast stack and no
-    default device to set or refuse. It seals the absence and boots."""
+    """Set the canonical posture explicitly (boot entry)."""
     torch = torch_capability.torch_or_none()
     if torch is None:
         return {"torch": torch_capability.ABSENT}
@@ -754,16 +543,6 @@ def establish_posture() -> Dict[str, str]:
     return dict(CANONICAL_POSTURE)
 
 
-# ---------------------------------------------------------------------------
-# The advisory closure audit (pgw#756: no veto) + armed-compiled graph audit
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Boundary canonicalization (the single compiled-graph ingress)
-# ---------------------------------------------------------------------------
-
-
 def canonical_strides(shape: Sequence) -> Tuple[int, ...]:
     """The canonical contiguous stride tuple torch mints for fresh tensors."""
     return _contiguous_strides(shape)
@@ -774,10 +553,6 @@ def _canonical_tensor(t: Any, path: str, label: str, dtypes: Dict[str, str]) -> 
     if tuple(t.stride()) != want:
         t = t.contiguous()
         if tuple(t.stride()) != want:
-            # a size-1 dim keeps is_contiguous() true under an
-            # arbitrary stride, making .contiguous() a no-op while
-            # TENSOR_MATCH guards the exact stride tuple. The layout is
-            # already contiguous, so restating the strides is safe.
             t = t.as_strided(tuple(int(v) for v in t.shape), want)
     seen = dtypes.setdefault(path, str(t.dtype))
     if seen != str(t.dtype):
@@ -812,11 +587,7 @@ def _canonical_value(
 
 
 def canonical_ingress(fn: Callable[..., Any], label: str) -> Callable[..., Any]:
-    """Wrap the compiled callable so every entry crosses one canonical
-    boundary: contiguous-canonical strides (stride-perturbed inputs HIT the
-    minted graph instead of recompiling) and per-path dtype asserts.
-    Installed symmetrically for mint capture and consumer serving, so the
-    traced guards describe exactly the form serving presents."""
+    """Wrap the compiled callable so every entry crosses one canonical boundary: contiguous-canonical strides (stride-perturbed inputs HIT the minted graph instead of recompiling) and per-path dtype asserts."""
     dtypes: Dict[str, str] = {}
 
     @functools.wraps(fn)

@@ -1,30 +1,4 @@
-"""Calibration-policy metadata + enforcement helper.
-
-Training functions that quantize weights fall into three buckets:
-
-- ``"required"`` — the recipe produces broken-but-not-erroring weights
-  without a calibration forward pass (activation-scale PTQ recipes).
-  No dataset → refuse the job up-front (unless the caller explicitly
-  opts into a tiny smoke-test pool via ``allow_dummy``).
-
-- ``"beneficial"`` — the recipe works without calibration but quality
-  suffers measurably when skipped. Example: modelopt ``fp8`` — activation
-  scales default to per-tensor max without a forward pass. Default behavior is "use calibration"; callers who value
-  speed over quality can set ``skip_calibration=True`` on their spec.
-
-- ``"unsupported"`` — the recipe is weight-only and never consumes
-  calibration data. Example: the fp8-E4M3 storage cast.
-  If the caller passes a dataset it's a
-  mistake (wasted generation + wrong expectations about output quality);
-  fail loudly rather than silently discard.
-
-At runtime, the tenant calls ``resolve_calibration_action(policy, ...)``
-once per spec entry to decide whether to calibrate, skip, or run dummy
-(or raise on invalid combos).
-
-The worker library only decides whether calibration is required, optional, or
-unsupported for a requested scheme; callers own how datasets are selected.
-"""
+"""Calibration-policy metadata + enforcement helper."""
 
 from __future__ import annotations
 
@@ -55,35 +29,7 @@ def resolve_calibration_action(
     allow_dummy: bool = False,
     scheme: str = "",
 ) -> CalibrationAction:
-    """Decide whether to calibrate, skip, or use a dummy pool for one scheme.
-
-    The 3×2×2×2 truth table boils down to:
-
-    ============== =========== =================== =========== =================
-    policy         has_dataset skip_calibration    allow_dummy result
-    ============== =========== =================== =========== =================
-    required       yes         any                 any         calibrate
-    required       no          any                 yes         dummy (warn)
-    required       no          any                 no          ValueError
-    beneficial     yes         true                any         skip (warn)
-    beneficial     yes         false               any         calibrate
-    beneficial     no          any                 yes         dummy (warn)
-    beneficial     no          true                no          skip (warn)
-    beneficial     no          false               no          ValueError
-    unsupported    yes         any                 any         ValueError
-    unsupported    no          any                 any         skip
-    ============== =========== =================== =========== =================
-
-    The ``beneficial + no dataset + skip_calibration=False`` row HARD-FAILS:
-    the invoker asked for a scheme whose policy declares calibration *helpful*
-    but supplied no dataset and did not explicitly opt out, and falling through
-    would ship uncalibrated weights to an invoker who did not realize the
-    difference. Force the choice by supplying a calibration dataset, or set
-    ``skip_calibration=True`` on the spec.
-
-    Tenants typically take the returned action + any ``WARN-``-tagged notes
-    they want to surface. A raise means the caller must fix the request.
-    """
+    """Decide whether to calibrate, skip, or use a dummy pool for one scheme."""
 
     _log = logging.getLogger(__name__)
     label = f"[{scheme}]" if scheme else ""

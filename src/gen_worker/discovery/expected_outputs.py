@@ -1,44 +1,4 @@
-"""The ``expected_outputs`` manifest block: what this function is ABOUT to
-produce, before it produces it (pgw#1580).
-
-Read off the RETURN struct's ``Annotated[..., ExpectedOutput(...)]`` markers —
-not a decorator kwarg, because the fact belongs to the output field it
-describes. ``ExpectedOutput`` is still exported from ``gen_worker`` and
-endpoints still write it; pgw#1373 deleted the v1 collector with the rest of
-``discover.py`` and the v2 row never grew a replacement, so every endpoint
-promoted to v2 silently stopped telling the platform what it would return.
-Measured on the live hub: ``ltx-video-2.3`` (v1) 4/4 functions carried it,
-``anima``/``sd15``/``sdxl``/``dj-utils``/``music-analysis`` (v2) 0/10.
-
-**What is lost is per-REQUEST.** ``expectedOutputsForRelease``
-(``internal/orchestrator/http/expected_outputs.go``) resolves each plan against
-the actual input payload and stamps ``ExpectedOutputsJSON`` onto the request
-row — the count, the type and the resolved aspect ratio of what is coming — so
-a consumer that renders output placeholders before generation finishes has
-something to render. ``len(fn.ExpectedOutputs) == 0`` returns ``nil`` and the
-whole path goes quiet.
-
-THE SHAPE IS THE HUB'S, read off ``release.ExpectedOutputPlan`` /
-``builder.ExpectedOutputPlan`` rather than guessed::
-
-    {"field": str, "type": str, "mime_type"?: str,
-     "count"?: int|str, "width"?: int|str, "height"?: int|str,
-     "aspect_ratio"?: int|str}
-
-``type`` is the hub's five-value vocabulary (``normalizeExpectedOutputType``:
-image | video | audio | file | other — anything else becomes ``other``), which
-is exactly :class:`~gen_worker.api.types.ExpectedOutput`'s ``media_type``
-Literal. Expression values are a positive int literal or an ``input.<field>``
-ref the hub resolves against the request payload.
-
-**``duration_s`` IS DELIBERATELY NOT EMITTED.** v1 emitted it and no hub reader
-has ever decoded it — it is absent from both ``ExpectedOutputPlan`` structs and
-from ``expectedOutputsFromPlans`` — so a key here would be the
-mirror-with-no-reader shape th#2087's fence exists to catch. The marker's own
-docstring already routes settlement at the probed ``VideoAsset.duration_s``
-instead. It is validated like every other expression so a wrong spelling is
-still refused; it just does not travel.
-"""
+"""The expected_outputs manifest block, read off the return struct's Annotated[..., ExpectedOutput(...)] markers. The row shape is the hub's (release.ExpectedOutputPlan): {field, type, mime_type?, count?, width?, height?, aspect_ratio?}, type in image|video|audio|file|other, expression values a positive int literal or an input.<field> ref. duration_s is validated but deliberately never emitted — no hub reader decodes it."""
 
 from __future__ import annotations
 
@@ -71,8 +31,6 @@ def _unwrap_optional(ann: Any) -> Any:
 
 
 def _media_kind(ann: Any) -> str:
-    """The hub's ``normalizeExpectedOutputType`` vocabulary, inferred from the
-    annotated field when the author did not name a ``media_type``."""
     ann = _unwrap_optional(ann)
     origin = typing.get_origin(ann)
     if origin in (list, tuple, set, frozenset):
@@ -91,15 +49,6 @@ def _media_kind(ann: Any) -> str:
 
 
 def _hints_or_refuse(struct: type, path: str) -> Any:
-    """Resolved type hints, or a BUILD ERROR naming the struct.
-
-    The v1 collector swallowed a resolution failure and fell back to
-    ``__annotations__`` — which, under ``from __future__ import annotations``
-    (every endpoint module in this repo), is a dict of STRINGS. A string is not
-    a type, so the walk below skips it and the function emits an EMPTY plan:
-    the pgw#1418 silence one field over, and indistinguishable from an endpoint
-    that declared nothing. Refuse instead.
-    """
     try:
         return typing.get_type_hints(struct, include_extras=True)
     except Exception as exc:
@@ -112,10 +61,6 @@ def _hints_or_refuse(struct: type, path: str) -> Any:
 
 
 def _payload_has_field_path(payload_type: type, ref: str) -> bool:
-    """Does ``input.<path>`` name a real payload field? The hub resolves the
-    ref against the request payload at submit time and silently drops a plan it
-    cannot resolve, so a typo here would cost the whole row, at request time,
-    with no error anywhere."""
     if not ref.startswith("input."):
         return True
     path = ref.removeprefix("input.")
@@ -141,8 +86,6 @@ def _payload_has_field_path(payload_type: type, ref: str) -> bool:
 
 
 def _expression(value: Any, *, payload_type: type, field: str, key: str) -> Any:
-    """One plan expression: a positive int literal, an ``input.<field>`` ref,
-    or ``None`` for undeclared. Anything else is a build error."""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -164,15 +107,12 @@ def _expression(value: Any, *, payload_type: type, field: str, key: str) -> Any:
     raise TypeError(f"{field}: ExpectedOutput.{key} must be int, str, or None")
 
 
-#: Marker attribute -> manifest key, in the hub's field order. ``duration_s``
-#: is absent on purpose (module docstring); it is still validated below.
 _EXPRESSIONS = (("count", "count"), ("width", "width"), ("height", "height"),
                 ("aspect_ratio", "aspect_ratio"))
 
 
 def expected_outputs(payload_type: type, return_type: type) -> List[Dict[str, Any]]:
-    """The ``expected_outputs`` rows for one entrypoint — an empty list when
-    the return struct carries no marker, and the caller omits the key then."""
+    """The ``expected_outputs`` rows for one entrypoint — an empty list when the return struct carries no marker, and the caller omits the key then."""
     out: List[Dict[str, Any]] = []
     seen_structs: Set[type] = set()
 
@@ -200,7 +140,6 @@ def expected_outputs(payload_type: type, return_type: type) -> List[Dict[str, An
                 )
                 if value is not None:
                     item[key] = value
-            # Validated, never emitted — see the module docstring.
             _expression(
                 marker.duration_s,
                 payload_type=payload_type, field=path, key="duration_s",

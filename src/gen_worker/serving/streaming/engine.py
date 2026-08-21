@@ -1,45 +1,4 @@
-"""``ctx.load``'s engine: chunk store -> pinned staging -> device, no files.
-
-Paul's 2026-08-19 ruling: filling tensor bytes into a real safetensors file so
-``from_pretrained`` can mmap it is *"the completely wrong design"*. This is the
-replacement. A serving pytorch endpoint reads its weights out of the CAS
-objects it already holds and lands them on the device; nothing is written, and
-``materialized_view`` is not on this path at all.
-
-Four properties, each load-bearing:
-
-1. **File order, never module order.** ``load_state_dict`` iterates the
-   MODULE, which walks the checkpoint's bytes in whatever order the module
-   tree happens to have — the scrambled access pattern the load-order ruling
-   measured at ~10x worse. This engine walks the container's byte range
-   forward, once, and assigns by NAME as it goes. Canonical packaging is
-   load-order-optimal, so sequential streaming preserves that win by
-   construction rather than by luck.
-2. **Windows, not tensors.** A window is a staging buffer's worth of
-   consecutive file bytes; the tensors that overlap it are scattered out of
-   it. Small tensors coalesce into one read for free (SDXL has ~2.5k of
-   them), and a tensor larger than the window simply spans several.
-3. **One pipeline, one dtype: the LANE's** (pgw#1623). Bytes land verbatim —
-   the read is always a byte copy, fp8 stays fp8 with its scale tensors beside
-   it, ints and bools are never touched. But a WIDE FLOAT container whose
-   stored dtype is not the lane's declared one is cast to it after it lands,
-   which is the identical rule the eager ``from_pretrained(torch_dtype=…)``
-   bridge has applied since pgw#1447. Two loaders in one platform disagreeing
-   about the dtype of the same lane is not a passthrough property, it is a
-   fork: measured on a rented A4500, the `wai-illustrious@prod-fp16vae`
-   checkpoint (unet/text encoders fp16, VAE fp32 — the hub's own catalog says
-   so, from safetensors headers) came back as a HETEROGENEOUS pipeline and
-   died `Input type (c10::Half) and bias type (float)` inside the VAE's first
-   conv, on a lane declaring bfloat16. A tree whose containers disagree with
-   its lane is still a STORE defect and is still reported — but it is reported
-   AND served, never passed through into a pipeline that cannot run a forward.
-   :meth:`StreamingLoader._assert_lane_dtype` then proves the result, because
-   the sibling bug on the eager bridge is silent (20-40x slow, correct images)
-   and only this one crashed.
-4. **Nothing survives on meta.** Every parameter and buffer is accounted for
-   by name. A missing name would serve uninitialized memory on the first
-   request, so it is a typed refusal naming the names.
-"""
+"""``ctx.load``'s engine: chunk store -> pinned staging -> device, no files."""
 
 from __future__ import annotations
 
@@ -59,8 +18,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-#: safetensors' own dtype spellings -> torch dtypes. Passthrough only: this
-#: table exists to ALLOCATE the destination, never to convert anything.
 _TORCH_DTYPE: Mapping[str, str] = {
     "F64": "float64",
     "F32": "float32",
@@ -77,10 +34,6 @@ _TORCH_DTYPE: Mapping[str, str] = {
 }
 
 
-#: The dtypes a lane cast is defined over. A quantized or sub-byte container
-#: is the lane's OWN bytes when the lane is quantized (`lane_materialize` owns
-#: those modules), so nothing here ever touches one; integer and bool tensors
-#: are not precision at all. Same set `Module.to(dtype)` moves.
 _WIDE_FLOATS = ("float64", "float32", "float16", "bfloat16")
 
 
@@ -95,12 +48,7 @@ class LoadError(RuntimeError):
 
 
 class LaneDtypeUnmet(LoadError):
-    """The loaded pipeline is not the dtype its lane declares.
-
-    A structural refusal, not a numerics opinion: it can only fire when the
-    cast above missed something, which means a tensor reached the card by a
-    path this engine does not know about.
-    """
+    """The loaded pipeline is not the dtype its lane declares."""
 
 
 class NameMismatch(LoadError):
@@ -113,8 +61,6 @@ class LoadReport:
 
     weights_streamed_bytes: int = 0
     weights_stream_gbps: float = 0.0
-    #: Which byte source produced the number above — ``native`` or ``bridge``.
-    #: Unlabelled, the two differ by ~10x and read as the same measurement.
     source: str = "bridge"
     staging: str = "pageable"
     io: str = "buffered"
@@ -123,8 +69,6 @@ class LoadReport:
     windows: int = 0
     seconds: float = 0.0
     dtypes: Tuple[str, ...] = ()
-    #: Tensors whose stored wide-float dtype was not the lane's and were cast
-    #: to it at install (pgw#1623). 0 means the tree WAS the contract's bytes.
     cast_to_lane: int = 0
 
     def attributes(self) -> Dict[str, object]:
@@ -142,7 +86,6 @@ class LoadReport:
 
 @dataclass(slots=True)
 class _Placement:
-    """One tensor's byte span in the file and the memory it lands in."""
 
     name: str
     offset: int
@@ -156,7 +99,6 @@ class _Placement:
 
 @dataclass(slots=True)
 class _Slot:
-    """Where one name lives in the skeleton."""
 
     owner: Any
     leaf: str
@@ -185,9 +127,6 @@ def _torch_dtype(spelling: str, name: str) -> "torch.dtype":
 
 
 def _slots(module: "torch.nn.Module") -> Dict[str, _Slot]:
-    """name -> where it lives. Built once per component, off the MODULE — so
-    assignment is a dict lookup during a forward byte walk, never a tree walk
-    per tensor."""
     found: Dict[str, _Slot] = {}
     for name, _ in module.named_parameters(remove_duplicate=False):
         owner, leaf = _owner_of(module, name)
@@ -205,13 +144,6 @@ def _owner_of(root: "torch.nn.Module", qualified: str) -> Tuple[Any, str]:
 
 
 def _install(slot: _Slot, tensor: "torch.Tensor") -> None:
-    """Replace the meta placeholder with real memory.
-
-    Assignment rather than ``copy_``: the placeholder has no storage to copy
-    into, and this is the same move ``load_state_dict(assign=True)`` makes.
-    ``requires_grad`` stays False — a serving pipeline never backpropagates,
-    and an autograd-tracking parameter would silently hold a graph.
-    """
     import torch
 
     if slot.parameter:
@@ -223,20 +155,12 @@ def _install(slot: _Slot, tensor: "torch.Tensor") -> None:
 
 
 def _flat_bytes(tensor: "torch.Tensor") -> "torch.Tensor":
-    """A flat uint8 view of a freshly allocated contiguous tensor."""
     import torch
 
     return tensor.view(-1).view(torch.uint8)
 
 
 class StreamingLoader:
-    """The engine behind ``ctx.load`` — the pgw#1382 ``LoaderEngine`` seam.
-
-    Constructed by the WORKER, which supplies the byte source and the device:
-    placement is a worker decision (pgw#1372's residency manager admits the
-    exact weight byte size before a single allocation), and author code names
-    no device anywhere. ``build`` is the whole surface.
-    """
 
     def __init__(
         self,
@@ -257,11 +181,8 @@ class StreamingLoader:
         self._planned: List[Tuple[str, str]] = []
         self.last_report: Optional[LoadReport] = None
 
-    # -- the LoaderEngine protocol -----------------------------------------
-
     def build(self, pipeline_cls: type, *, checkpoint_dir: Path, lane: Any) -> Any:
-        """Meta skeleton, then weights streamed into it. Returns a genuine
-        ``pipeline_cls`` with everything resident on the worker's device."""
+        """Meta skeleton, then weights streamed into it."""
         import torch
 
         started = time.perf_counter()
@@ -273,10 +194,6 @@ class StreamingLoader:
             io=self._io,
             source=str(getattr(self._store, "KIND", type(self._store).__name__)),
         )
-        #: (slot, name, stored dtype) for every tensor the lane cast covers.
-        #: Collected during the walk, applied AFTER the pool has finished, so a
-        #: cast never reads a buffer whose copy is still in flight on the
-        #: staging stream.
         recasts: List[Tuple[_Slot, str, Any]] = []
 
         with StagingPool(
@@ -300,11 +217,6 @@ class StreamingLoader:
         self._cast_to_lane(recasts, compute_dtype, report)
 
         for component, module in built.modules.items():
-            # pgw#1626: RE-TIE, THEN ASSERT — in that order, and never instead.
-            # The skeleton was built weight-free, so `post_init()` never ran and
-            # no tie exists yet; the stream then rebinds the SOURCE parameter,
-            # which is why the tie has to be (re-)made here, after the last
-            # container and before the survivor check reads the module.
             _skeleton.retie(module)
             survivors = _skeleton.meta_survivors(module)
             if survivors:
@@ -353,27 +265,6 @@ class StreamingLoader:
         return built.pipeline
 
     def _place_uninstalled(self, pipeline: Any, device: Any) -> None:
-        """Place tensors the CONTAINER did not carry (pgw#1454).
-
-        This engine installs each tensor the container names, straight onto the
-        device. A tensor that is NOT in the container is never visited, so it
-        materialises wherever `__init__` put it — the host — and nothing moved
-        it. `from_pretrained` cannot have this bug: it builds on CPU and then
-        `.to(device)` moves parameters and buffers together, whatever their
-        provenance.
-
-        Measured: CLIP's `embeddings.position_ids` is a NON-PERSISTENT buffer,
-        so a modern `state_dict()` omits it by design (sd1.5's raw mirror
-        carries 197 keys, the reconverted tree 196). The engine then served a
-        text encoder whose weights were all on CUDA and whose position ids were
-        on the CPU, and the first `nn.Embedding` forward died on the mismatch.
-        A conversion step that is individually correct produced a tree this
-        loader could not serve.
-
-        Deliberately NOT `pipeline.to(device)`: that would walk and re-copy
-        everything this engine just streamed, throwing away the whole point.
-        Only what is still off-target moves, and only once.
-        """
         import torch
 
         target = torch.device(device)
@@ -391,10 +282,6 @@ class StreamingLoader:
                     continue
                 seen.add(id(module))
                 for leaf, held in list(module._buffers.items()):
-                    # `meta` is left ALONE on purpose: a tensor still on meta
-                    # was never installed, and moving it would fabricate
-                    # uninitialised memory and hide the very mismatch the
-                    # survivors check above exists to raise.
                     if (held is not None and held.device != target
                             and held.device.type != "meta"):
                         module._buffers[leaf] = held.to(target)
@@ -405,15 +292,7 @@ class StreamingLoader:
                 "onto %s (pgw#1454)", moved, target,
             )
 
-    # -- planning ----------------------------------------------------------
-
     def _plan(self, modules: Mapping[str, Any]) -> List[Tuple[str, str]]:
-        """(component, container) in MANIFEST order.
-
-        Manifest order is the packaging order, which for a canonical snapshot
-        is contract memory order. Reading containers in it keeps the whole
-        load sequential across component boundaries too, not just inside one.
-        """
         planned: List[Tuple[str, str]] = []
         for container in self._store.containers():
             component = component_of(container)
@@ -427,8 +306,6 @@ class StreamingLoader:
             )
         self._planned = planned
         return planned
-
-    # -- the file-order walk -----------------------------------------------
 
     def _stream_container(
         self,
@@ -452,11 +329,6 @@ class StreamingLoader:
             return
 
         slots = _slots(module)
-        # pgw#1453: the checkpoint's names may predate the installed library.
-        # `from_pretrained` absorbs that difference; this engine installs by
-        # EXACT name, so it asks the SAME library for the SAME migration rather
-        # than matching nothing (sd1.5's text_encoder: 0 of 197). Empty for
-        # every checkpoint the installed version already spells.
         renames = _keymap.migration(module, (entry.name for entry in entries))
         placements: List[_Placement] = []
         unexpected: List[str] = []
@@ -518,10 +390,6 @@ class StreamingLoader:
             )
 
         report.dtypes = tuple(sorted(dtypes))
-        # `tensors` is ascending file offset BY CONTRACT (tensorfs#115). The
-        # sort is belt-and-braces against a source that forgets: without it a
-        # scrambled walk would still be CORRECT and merely slow, which is the
-        # regression that hides forever.
         placements.sort(key=lambda placement: placement.offset)
         report.tensors += len(placements)
         report.windows += self._walk(stream, placements, pool=pool, report=report)
@@ -534,13 +402,6 @@ class StreamingLoader:
         pool: StagingPool,
         report: LoadReport,
     ) -> int:
-        """Read the container's data range forward once, scattering as we go.
-
-        Everything between the first tensor's offset and the last tensor's end
-        is read, including any alignment padding between tensors: a window is
-        a byte range, not a tensor list, and skipping a few padding bytes
-        would cost a seek to save a memcpy.
-        """
         position = placements[0].offset
         finish = placements[-1].end
         window = pool.buffer_bytes
@@ -579,28 +440,15 @@ class StreamingLoader:
 
         return windows
 
-    # -- the lane contract -------------------------------------------------
-
     @staticmethod
     def _cast_to_lane(
         recasts: List[Tuple[_Slot, str, Any]],
         compute_dtype: Any,
         report: LoadReport,
     ) -> None:
-        """Land every off-lane wide-float tensor at the lane's dtype, and SAY
-        SO — the tree not being the contract's bytes is a store defect that
-        this repair must not erase (pgw#1623).
-
-        One tensor at a time, replacing in place: the pre-cast tensor's only
-        remaining holder is the slot being overwritten, so the peak cost of
-        the whole pass is one tensor, not a second copy of the checkpoint.
-        """
         if not recasts:
             return
         counts: Dict[str, int] = {}
-        # Reverse order so the list can be truncated as it drains: the tuple
-        # holds no tensor, but the caller's list would otherwise pin nothing
-        # and the ordering keeps the trace readable (last container first).
         while recasts:
             slot, name, stored = recasts.pop()
             held = (
@@ -623,9 +471,6 @@ class StreamingLoader:
             f"reached this pod"
         )
         logger.warning("ctx.load: %s", sentence)
-        # A pod's stdout does not survive the pod (RunPod has no logs API), and
-        # "which deployments are serving bytes their own lane does not name" is
-        # a fleet question. Typed, so it is one query hub-side.
         try:
             from ... import activity
 
@@ -639,15 +484,6 @@ class StreamingLoader:
 
     @staticmethod
     def _assert_lane_dtype(modules: Mapping[str, Any], compute_dtype: Any) -> None:
-        """Every wide-float tensor in the loaded modules IS the lane's dtype.
-
-        The instrument the eager sibling never had. pgw#1447 fixed the same
-        class on `from_pretrained` and could only fix it by inspection, because
-        a pipeline that is half fp16 and half fp32 there does not crash — it
-        upcasts per op and serves correct images 20-40x slow. This one crashed,
-        which is luck, not design; so the invariant is asserted rather than
-        left to whichever component happens to hold a conv.
-        """
         if compute_dtype is None:
             return
         offenders: List[str] = []
@@ -673,14 +509,6 @@ class StreamingLoader:
 
 
 def _lane_compute_dtype(lane: Any) -> Any:
-    """The lane's declared dtype, when it is one this cast is defined over.
-
-    Reads the lane through the SAME resolver both eager bridges use, so the
-    streaming loader cannot come to a different conclusion about the same
-    contract than `from_pretrained(torch_dtype=…)` does. A quantized lane
-    (fp8/fp4) answers a narrow dtype and is returned as ``None``: its bytes ARE
-    the lane, and `serving.lane_materialize` owns those modules.
-    """
     if lane is None:
         return None
     from ..context import _lane_torch_dtype

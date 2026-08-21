@@ -1,22 +1,3 @@
-"""pgw#1226: a cut MARKS fragments consumed; attribution comes from the tags.
-
-Driven against a REAL git repository built in a tmpdir -- real commits, real
-`v*` tags, the real script as a subprocess -- because every claim here is a
-claim about what `git tag --contains` answers. A filesystem mock would assert
-the fixture rather than the mechanism.
-
-The narrative is the one that actually happened. 0.114.3 was tagged with
-pgw#1244's code in the tree and `changelog.d/pgw1244.md` never assembled; under
-the old tooling the next cut swept that fragment into ITS section, so the
-release note pointed at a wheel that did not contain the change. Here the same
-fragment is attributed back to 0.114.3 with no cutter intervention, while a
-fragment that landed after the tag rides the version being cut.
-
-The fixture repo inherits NO git config (`GIT_CONFIG_GLOBAL`/`SYSTEM` are
-/dev/null), so it needs no signing bypass flag and cannot write to the real
-box's configuration.
-"""
-
 from __future__ import annotations
 
 import os
@@ -87,12 +68,7 @@ def section(text: str, version: str) -> str:
 
 @pytest.fixture
 def cut_repo(tmp_path: Path) -> Path:
-    """Two releases tagged; three fragments none of them consumed.
-
-    pgw1200 is in BOTH tags' trees, pgw1244 only in v0.114.3's, and pgw1250 in
-    neither -- one fixture that exercises earliest-tag, single-tag and no-tag
-    attribution in a single run.
-    """
+    """Two releases tagged; three fragments none of them consumed."""
     root = tmp_path / "pgw"
     (root / "changelog.d").mkdir(parents=True)
     (root / "CHANGELOG.md").write_text(CHANGELOG)
@@ -115,11 +91,6 @@ def cut_repo(tmp_path: Path) -> Path:
     return root
 
 
-# --------------------------------------------------------------------------
-# the defect: a fragment that shipped inside a tag, re-dated by the next cut
-# --------------------------------------------------------------------------
-
-
 def test_tagged_fragments_are_attributed_back_and_nothing_is_deleted(
     cut_repo: Path,
 ) -> None:
@@ -128,21 +99,17 @@ def test_tagged_fragments_are_attributed_back_and_nothing_is_deleted(
 
     text = (cut_repo / "CHANGELOG.md").read_text()
 
-    # each fragment landed under the version whose TREE contains it
     assert "pgw1200" in section(text, "0.114.2")
     assert "pgw1244" in section(text, "0.114.3")
     assert "pgw1250" in section(text, "0.115.0")
 
-    # ... and NOT under the version being cut, which is the whole defect
     assert "pgw1244" not in section(text, "0.115.0")
     assert "pgw1200" not in section(text, "0.115.0")
 
-    # a late attribution says so in the section it edits
     assert LATE in section(text, "0.114.3")
     assert LATE in section(text, "0.114.2")
     assert LATE not in section(text, "0.115.0")
 
-    # the cut deleted nothing -- pgw#1226's hardcut
     for stem in ("pgw1200", "pgw1244", "pgw1250"):
         assert (cut_repo / "changelog.d" / f"{stem}.md").exists()
 
@@ -162,12 +129,7 @@ def test_a_consumed_fragment_is_never_assembled_twice(cut_repo: Path) -> None:
 
 
 def test_the_ledger_is_what_stops_the_second_write(cut_repo: Path) -> None:
-    """Severance: the tag rule fixes the VERSION, the ledger fixes the COUNT.
-
-    Without the ledger, attribution is still correct -- and pgw#1244's bullet is
-    written into 0.114.3 a second time. Two mechanisms, two jobs; this proves
-    neither is carrying the other's weight.
-    """
+    """Severance: the tag rule fixes the VERSION, the ledger fixes the COUNT."""
     assert assemble(cut_repo, "--version", "0.115.0").returncode == 0
     (cut_repo / LEDGER).unlink()
 
@@ -191,14 +153,10 @@ def test_consumed_fragments_are_pruned_one_release_later(cut_repo: Path) -> None
     assert done.returncode == 0, done.stderr
 
     frags = cut_repo / "changelog.d"
-    # 0.115.0 is the previous release, so its fragment is still on disk; the
-    # two older ones are not. Nothing an open branch could carry is pending.
     assert (frags / "pgw1250.md").exists()
     assert not (frags / "pgw1200.md").exists()
     assert not (frags / "pgw1244.md").exists()
 
-    # the ledger keeps the rows for the pruned files: the attribution record
-    # outlives the fragment, so a re-added file cannot be re-consumed.
     rows = [
         ln for ln in (cut_repo / LEDGER).read_text().splitlines()
         if not ln.startswith("#")
@@ -210,11 +168,6 @@ def test_consumed_fragments_are_pruned_one_release_later(cut_repo: Path) -> None
         "0.116.0\tpgw1260",
     ]
     assert "pgw1260" in section((cut_repo / "CHANGELOG.md").read_text(), "0.116.0")
-
-
-# --------------------------------------------------------------------------
-# the refusals
-# --------------------------------------------------------------------------
 
 
 def test_attribution_refuses_without_release_tags(cut_repo: Path) -> None:
@@ -245,8 +198,6 @@ def test_check_needs_no_git_and_reports_both_states(tmp_path: Path) -> None:
     [
         ("0.114.3 pgw1244\n", "want '<version>"),
         ("0.114\tpgw1244\n", "is not an X.Y.Z version"),
-        # pgw#1339: `pgw868-a4` is now a LEGAL per-lane name; an underscore
-        # is not, and neither is a stem with no issue number.
         ("0.114.3\tpgw868_a4\n", "is not a <prefix><number>"),
         ("0.114.3\tpgw-a4\n", "is not a <prefix><number>"),
         ("0.114.3\tpgw1244\n0.115.0\tpgw1244\n", "recorded twice"),
@@ -264,6 +215,5 @@ def test_check_refuses_a_malformed_ledger(
 
 
 def test_the_repos_own_pending_fragments_parse() -> None:
-    """The pgw#968 guard `fast gates` runs, against the real tree."""
     done = assemble(REPO, "--check")
     assert done.returncode == 0, done.stderr

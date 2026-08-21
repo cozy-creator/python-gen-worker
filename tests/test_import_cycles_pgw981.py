@@ -1,17 +1,4 @@
-"""Every module must import when it is the FIRST module imported.
-
-An import cycle is invisible to any harness that imports the package once and
-then walks it in a single process: the first entry order pre-warms the package,
-and every later import is a cache hit. Only one fresh interpreter PER MODULE
-sees them, so that is what this does.
-
-The repair for a cycle is to move the shared name DOWN to a leaf module, never
-to defer the import: a deferred import keeps the cycle and hides it again.
-
-A module that cannot import because an OPTIONAL EXTRA is absent is not a cycle
-and is reported as such — 429 of this package's function-body imports exist
-precisely so `import gen_worker` works without torch.
-"""
+"""Every module must import when it is the FIRST module imported."""
 
 from __future__ import annotations
 
@@ -23,8 +10,6 @@ from typing import List, NamedTuple, Optional, Tuple
 
 import pytest
 
-# Subtrees a guard may not judge: generated protobuf and byte-identical
-# vendored snapshots (fixed upstream and re-vendored, never edited here).
 UNOWNED_DIRS = ("pb", "_vendor")
 
 
@@ -35,9 +20,6 @@ def is_unowned(path: Path, root: Path) -> bool:
 SRC = Path(__file__).resolve().parents[1] / "src"
 PKG = SRC / "gen_worker"
 
-# Substrings that identify a partially-initialized-module failure. CPython
-# phrases it two ways depending on whether the name or the module was the
-# unresolved half.
 CYCLE_MARKERS = ("partially initialized module", "circular import")
 
 
@@ -80,7 +62,6 @@ def _modules() -> List[str]:
 
 
 def _import_alone(module: str) -> Outcome:
-    """One fresh interpreter, this module as the very first import."""
     proc = subprocess.run(
         [sys.executable, "-c", f"import {module}"],
         cwd=str(SRC),
@@ -115,11 +96,7 @@ def test_no_module_is_unimportable_as_a_first_import(outcomes: List[Outcome]) ->
 
 
 def test_no_module_fails_to_import_for_any_other_reason(outcomes: List[Outcome]) -> None:
-    """Anything non-zero that is not a cycle and not an absent optional extra.
-
-    Kept separate from the cycle assertion so a missing `[dev]` extra in some
-    future environment reads as what it is instead of as a cycle regression.
-    """
+    """Anything non-zero that is not a cycle and not an absent optional extra."""
     broken: List[Tuple[str, str]] = [
         (o.module, o.stderr.strip())
         for o in outcomes
@@ -131,20 +108,6 @@ def test_no_module_fails_to_import_for_any_other_reason(outcomes: List[Outcome])
 
 
 def _cli_entry_orders() -> List[str]:
-    """Every entry order into the cli package, DERIVED from the package.
-
-    pgw#1440 found this parametrization naming `cli.serve`, `cli.run` and
-    `cli.invoke` — all three deleted by pgw#1373 (`cd46c957`) — so three of the
-    four rows had been failing on master ever since, and the one surviving name
-    (`gen_worker.cli`) is the one that proves the least. The `cli.run` row is
-    the same stale reference that left `cli/release.py` importing a deleted
-    symbol; this was that fallout, in the test half.
-
-    pgw#1438 makes it derived rather than re-listed. A LIST is what went stale,
-    and the replacement list was already incomplete on the day it landed — it
-    omits `cli.sockaddr`. The package's own contents cannot go stale, and a
-    module added tomorrow is covered without anyone remembering to add it.
-    """
     mods = sorted(
         f"gen_worker.cli.{p.stem}"
         for p in (PKG / "cli").glob("*.py")
@@ -155,11 +118,6 @@ def _cli_entry_orders() -> List[str]:
 
 @pytest.mark.parametrize("module", _cli_entry_orders())
 def test_cli_entry_orders(module: str) -> None:
-    """Every entry order into the cli package, named individually.
-
-    `cli/__init__` reaching one submodule before another is what masked the
-    original defect, so "the CLI works" was never evidence about any particular
-    submodule.
-    """
+    """Every entry order into the cli package, named individually."""
     outcome = _import_alone(module)
     assert outcome.returncode == 0, f"{module} as a first import:\n{outcome.stderr}"

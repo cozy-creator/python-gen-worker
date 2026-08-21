@@ -56,7 +56,6 @@ FP8_MAX = 448.0
 
 
 def _quantize_block(w, block=BLOCK):
-    """Producer side, test-only: what a conversion endpoint emits."""
     out_f, in_f = w.shape
     srows, scols = math.ceil(out_f / block[0]), math.ceil(in_f / block[1])
     scale = torch.zeros(srows, scols, dtype=torch.float32)
@@ -82,8 +81,6 @@ def _tiny_llama():
 
 
 def _write_tree(d: Path, *, rowwise: bool = False, transpose_scale: bool = False):
-    """A real fp8 component tree. ``rowwise`` writes cozy.fp8-rowwise@1's
-    per-row ``weight_scale`` instead — the layout that must be refused."""
     cfg, model = _tiny_llama()
     sd = model.state_dict()
     out, quantized = {}, []
@@ -133,7 +130,6 @@ def test_a_blockwise_tree_verifies_and_decodes(tmp_path: Path):
     model = load_hf_fp8_blockwise(
         tmp_path, cls=AutoModelForCausalLM, resident=False)
 
-    # The dequantized weights ARE the contract's reference dequant, exactly.
     from safetensors.torch import load_file
     raw = load_file(str(tmp_path / "model.safetensors"))
     for name in ("model.layers.0.self_attn.q_proj",
@@ -143,8 +139,6 @@ def test_a_blockwise_tree_verifies_and_decodes(tmp_path: Path):
             raw[f"{name}.weight"], raw[f"{name}.weight_scale_inv"],
             out_dtype=torch.bfloat16)
         assert torch.equal(got.float(), want.float()), name
-        # …and within fp8 error of the pre-quantization weights. A reciprocal
-        # reading of the scale would be five orders of magnitude out.
         ref = original[f"{name}.weight"].float()
         assert (got.float() - ref).abs().max() <= 0.08 * ref.abs().max()
 
@@ -160,7 +154,7 @@ def test_a_rowwise_tree_is_refused_by_name(tmp_path: Path):
     message = str(excinfo.value)
     assert "cozy.fp8-rowwise@1" in message
     assert "weight_scale" in message
-    assert "PRODUCIBLE" in message  # §1.33: not silently convertible
+    assert "PRODUCIBLE" in message
 
 
 def test_a_transposed_scale_grid_is_refused(tmp_path: Path):
@@ -181,8 +175,7 @@ def test_a_dense_tree_is_not_this_contract(tmp_path: Path):
 
 
 def test_the_image_declares_the_quant_rule():
-    """The declaration is a property of the decoder, and the build derivation
-    harvests it — this is what the hub's gate reads."""
+    """The declaration is a property of the decoder, and the build derivation harvests it — this is what the hub's gate reads."""
     from gen_worker.discovery.execution_lanes import derive_execution_lanes
 
     decls = quant_rule_decoders_of(load_hf_fp8_blockwise)

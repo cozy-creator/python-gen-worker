@@ -1,26 +1,3 @@
-"""The ship-code-as-is serving layer (pgw#1382 split; program pgw#1367).
-
-Authors ship code AS-IS, split along state (pgw#1382):
-
-* ``Model[MT]`` — the STATEFUL class (weights, lanes, defaults, caches,
-  lifecycle, single-flight). The class header is the declaration surface:
-  model type via the generic parameter, weight-format lanes via ``lanes=``.
-* ``@entrypoint`` functions — STATELESS module-level request handlers
-  declaring their models (and adapters) by parameter annotation
-  (ctx-first: ``(ctx, payload, model, ...)``).
-* "endpoint" survives as the deployable-unit NOUN: the module named by
-  ``endpoint.toml``'s ``main =`` — its entrypoints plus the Model classes
-  they reference. No catalog, no ModelSpec, no codegen.
-
-The ctx splits with the state: ``LoadContext`` (checkpoint tree, lane,
-``load``/``compile``/``defaults`` seams) rides ``Model.load``/``unload``;
-``RequestContext`` (request facts + the salvaged base surface) rides
-entrypoints. The EAGER path works standalone and first; adoption of
-compiled graphs swaps module forwards on the author's own objects (torchcg
-``AdoptSession`` behind ``ctx.compile``) and hands the ordered hole list to
-the background mint (pgw#1371).
-"""
-
 from .context import (
     Adapter,
     DefaultsError,

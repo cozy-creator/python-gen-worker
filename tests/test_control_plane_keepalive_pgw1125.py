@@ -1,21 +1,4 @@
-"""The hub CONTROL plane keeps its connection across saves; the R2 DATA plane
-still does not.
-
-A `requests.Session` that dies with the save pays a fresh TCP+TLS handshake
-through the tunnel on EVERY save (109-155 ms), which is most of the ~584 ms of
-pure control-plane network in a 589 ms `upload.create` against a 4.5 ms hub
-handler.
-
-The two planes are asserted TOGETHER on purpose, because the boundary is the
-safety property: the per-save scoping of the R2 pool comes from a real
-production incident (`SSLV3_ALERT_BAD_RECORD_MAC`) and does not move. A change
-that "fixes" the tail by widening the data plane too would pass half of this
-file and fail the other half.
-
-Connections are counted where they are actually made — the accept loop of two
-separate real servers — not through a mock. Over TLS one accepted TCP
-connection is one handshake, which is the thing being paid for.
-"""
+"""The hub CONTROL plane keeps its connection across saves; the R2 DATA plane still does not."""
 
 from __future__ import annotations
 
@@ -33,7 +16,6 @@ from gen_worker.presigned_upload import presigned_upload_file, reset_control_pla
 
 
 class _CountingServer(ThreadingHTTPServer):
-    """Counts ACCEPTED TCP connections — one per handshake a pod would pay."""
 
     daemon_threads = True
 
@@ -43,7 +25,6 @@ class _CountingServer(ThreadingHTTPServer):
         self.requests_seen: List[str] = []
         self.cookie_headers: List[Optional[str]] = []
         self.lock = threading.Lock()
-        # Test-controlled fault injection, read by the handlers below.
         self.poison_after_response = False
         self.drop_create_requests = 0
         self.set_cookie = False
@@ -56,7 +37,6 @@ class _CountingServer(ThreadingHTTPServer):
 
 
 class _HubHandler(BaseHTTPRequestHandler):
-    """The three-leg control plane. The PUT leg lives on the other server."""
 
     protocol_version = "HTTP/1.1"
 
@@ -88,10 +68,6 @@ class _HubHandler(BaseHTTPRequestHandler):
             if drop:
                 self.hub.drop_create_requests -= 1
         if drop:
-            # The request was READ and then the peer vanished: exactly what a
-            # keepalive socket that died between urllib3's dropped-connection
-            # check and the write looks like from the client (RemoteDisconnected
-            # -> requests.ConnectionError).
             self.close_connection = True
             return
         if leg == "complete":
@@ -110,13 +86,10 @@ class _HubHandler(BaseHTTPRequestHandler):
                 "put_headers": {"x-amz-checksum-sha256": "AAA="},
             })
         if self.hub.poison_after_response:
-            # Answer normally (no `Connection: close`, so the client pools the
-            # socket) and then hang up: the socket is dead before its next use.
             self.close_connection = True
 
 
 class _R2Handler(BaseHTTPRequestHandler):
-    """The data plane. A separate server so its connections are counted apart."""
 
     protocol_version = "HTTP/1.1"
 
@@ -168,12 +141,7 @@ def stack(tmp_path):
 
 
 def test_saves_share_one_hub_connection_and_never_share_the_r2_pool(stack) -> None:
-    """The whole point, and its guardrail, in one assertion pair.
-
-    RED before this change: a fresh `requests.Session()` per save made the hub
-    count 3 connections for 3 saves — one TCP+TLS handshake per image, 109-155
-    ms of the measured 589 ms `upload.create` on the tunnelled stack.
-    """
+    """The whole point, and its guardrail, in one assertion pair."""
     hub, r2, _base, save = stack
     for _ in range(3):
         assert save().dedup is False
@@ -191,34 +159,19 @@ def test_saves_share_one_hub_connection_and_never_share_the_r2_pool(stack) -> No
 
 
 def test_a_dead_keepalive_socket_retries_once_instead_of_failing_the_save(stack) -> None:
-    """The failure mode reuse buys: the money path must survive it.
-
-    The hub reads the second save's create and hangs up without answering —
-    a pooled socket that passed urllib3's dropped-connection check and died
-    anyway (that check is check-then-use, not a guarantee). Without the
-    retry this raises `ArtifactTransferError(phase="create")` and the whole
-    generated image is thrown away after the GPU work is already paid for.
-    """
+    """The failure mode reuse buys: the money path must survive it."""
     hub, _r2, _base, save = stack
-    assert save().dedup is False  # save 1 establishes the keepalive socket
+    assert save().dedup is False
 
     hub.drop_create_requests = 1
-    assert save().dedup is False  # save 2 survives it
+    assert save().dedup is False
 
-    assert hub.requests_seen.count("create") == 3  # 1 + (dropped + retried)
-    assert hub.connections == 2  # the poisoned one, then the replacement
+    assert hub.requests_seen.count("create") == 3
+    assert hub.connections == 2
 
 
 def test_a_hub_that_hangs_up_after_answering_costs_one_reconnect_not_a_failure(stack) -> None:
-    """The realistic shape of staleness: the peer FINs an idle socket while
-    the pod denoises. Every save must still succeed.
-
-    Honest about what this proves: it passes WITHOUT the retry too, because
-    urllib3 selects on a pooled socket before reusing it and quietly replaces
-    a FINed one. That is why the retry above is scoped to the case urllib3
-    cannot see — the socket that dies after that check. This test is the
-    regression guard on the common case, not the RED one.
-    """
+    """The realistic shape of staleness: the peer FINs an idle socket while the pod denoises."""
     hub, _r2, _base, save = stack
     hub.poison_after_response = True
     for _ in range(3):
@@ -228,14 +181,9 @@ def test_a_hub_that_hangs_up_after_answering_costs_one_reconnect_not_a_failure(s
 
 
 def test_a_fresh_session_does_not_invent_a_retry_create_never_had(stack) -> None:
-    """The retry is scoped to STALENESS, not to "the hub is down".
-
-    A session this call just built has no pooled socket, so a connection
-    failure on it is the hub — and create's pre-keepalive behaviour (raise,
-    no retry) is preserved exactly. Only the reused case retries.
-    """
+    """The retry is scoped to STALENESS, not to "the hub is down"."""
     hub, _r2, _base, save = stack
-    hub.drop_create_requests = 99  # every create dies unanswered
+    hub.drop_create_requests = 99
 
     with pytest.raises(ArtifactTransferError) as first:
         save()
@@ -248,9 +196,7 @@ def test_a_fresh_session_does_not_invent_a_retry_create_never_had(stack) -> None
 
 
 def test_the_keepalive_session_carries_sockets_only_never_server_state(stack) -> None:
-    """A process-scoped session that accumulated cookies would leak one
-    save's server state into the next request's identity. Auth is the
-    per-request header and nothing else persists."""
+    """A process-scoped session that accumulated cookies would leak one save's server state into the next request's identity."""
     hub, _r2, _base, save = stack
     hub.set_cookie = True
     save()
@@ -259,9 +205,7 @@ def test_the_keepalive_session_carries_sockets_only_never_server_state(stack) ->
 
 
 def test_eviction_is_by_identity_so_a_sibling_replacement_survives() -> None:
-    """Two threads can fail on the same socket at once. Whoever evicts second
-    must not throw away the replacement the first one already installed —
-    that would make the next save pay a handshake for nothing."""
+    """Two threads can fail on the same socket at once."""
     reset_control_plane_sessions()
     try:
         first, fresh = presigned_upload.control_plane_session("http://127.0.0.1:9/x")
@@ -273,7 +217,7 @@ def test_eviction_is_by_identity_so_a_sibling_replacement_survives() -> None:
         replacement, _ = presigned_upload.control_plane_session("http://127.0.0.1:9/x")
         assert replacement is not first
 
-        presigned_upload._evict_control_session("http://127.0.0.1:9/x", first)  # late, stale
+        presigned_upload._evict_control_session("http://127.0.0.1:9/x", first)
         still, _ = presigned_upload.control_plane_session("http://127.0.0.1:9/x")
         assert still is replacement
     finally:
@@ -293,10 +237,7 @@ def test_sessions_are_per_origin_so_one_dead_hub_does_not_evict_another() -> Non
 
 
 def test_reuse_does_not_slow_the_second_save(stack) -> None:
-    """Sanity, not a benchmark: the reused-socket save must not be SLOWER
-    than the first. On a pod the difference is a real handshake; on loopback
-    it is microseconds, so this only catches a reuse path that accidentally
-    reconnects (or worse, serializes)."""
+    """Sanity, not a benchmark: the reused-socket save must not be SLOWER than the first."""
     _hub, _r2, _base, save = stack
     t0 = time.monotonic()
     save()

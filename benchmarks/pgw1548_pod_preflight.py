@@ -1,49 +1,13 @@
-"""pgw#1548 pod preflight: does the MOUNTED tree satisfy the lane? (FIRST act)
+"""Pod preflight: does the MOUNTED tree satisfy the lane? (FIRST act)
 
-Runs on the pod, immediately after mount and **before anything expensive** —
-before a derive, before a compile, before a single benchmarked request. The
-coordinator's GO condition, 2026-08-20, verbatim in shape: *"the histogram +
-key-convention assert is the FIRST act after mount, before anything expensive;
-a divergence is a typed abort with the readings banked to the hub's durable
-rows, not a retry."*
+Runs on the pod immediately after mount and before anything expensive — before
+a derive, a compile, or a benchmarked request. A divergence is a typed abort
+with the readings banked to the hub's durable rows, not a retry.
 
-## Why this exists at all
-
-`artifact_contract` answers ONE of three axes. `plain.bf16@1` is
-`CONTRACT_PLAIN_BF16` (`models/tensor_layout_contract.py:38`) — the
-quant/element-layout axis. The lane `sdxl.diffusers-bf16@1`
-(`models/model_types.py:486`) is family + key topology + dtype. That file's own
-comment (lines 124-139) states why the stamp cannot answer the question, with
-the measured failure: two trees can both stamp `plain.bf16@1` and differ on KEY
-CONVENTION — te#185's fused `qkv_proj` vs split `to_q/to_k/to_v`, **one key in
-common**, discovered after a 71 GB fetch onto a rented 4xH100.
-
-So the stamp is not evidence of lane conformance, and neither is the hub's
-`checkpoints.dtype`: `model_types.py:613-618` records the stable-audio case
-where the inherited `plain.bf16@1` string disagreed with every checkpoint the
-fleet actually shipped, and **the bytes won**.
-
-## What a failure here saves
-
-pgw#1567's shape, arriving on the serve side: a tree whose containers are fp16
-under a lane whose graphs key bf16 gives **armed N, entered 0** — every request
-silently eager. An A/B benchmark on that pod measures eager in BOTH arms and
-reports a beautiful 0% delta, which is the most expensive possible way to learn
-nothing. This costs seconds and runs before the money does.
-
-## Discipline
-
-* `assert_fleet_line` is the FIRST statement (RIG-ENV, binding; Paul
-  2026-08-11) and its printed table belongs in the report.
-* Header bytes only. The safetensors header is a length prefix plus JSON at the
-  head of each file; nothing here reads a weight byte, so a 7 GB tree costs
-  kilobytes.
-* A divergence **ABORTS** with `exit 91` and banks the readings. It is not
-  retried and not downgraded: a rig that measures under a configuration
-  production forbids is worse than no rig.
-
-    python3 benchmarks/pgw1548_pod_preflight.py \\
-        --tree /workspace/checkpoint --lane sdxl.diffusers-bf16@1
+The layout stamp (quant/element axis) cannot answer this: two trees can both
+stamp ``plain.bf16@1`` and differ on KEY CONVENTION (fused ``qkv_proj`` vs
+split ``to_q/to_k/to_v``), so conformance is checked against the actual header
+key histogram.
 """
 
 from __future__ import annotations
@@ -56,13 +20,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-#: Exit codes. 90 is rigcheck's own fleet-line abort (RIG-ENV §1); 91 is this
-#: file's, so a caller can tell "wrong torch" from "wrong tree" without parsing
-#: prose.
+# Exit codes: 90 is rigcheck's own fleet-line abort, 91 is this file's, so a caller can tell "wrong torch" from "wrong tree" without parsing prose.
 EXIT_FLEET_LINE = 90
 EXIT_NONCONFORMING = 91
 
-#: The lane's dtype spelling -> the safetensors header spelling.
 DTYPE_SPELLINGS = {
     "bfloat16": "BF16",
     "float16": "F16",
@@ -70,23 +31,16 @@ DTYPE_SPELLINGS = {
     "float8_e4m3fn": "F8_E4M3",
 }
 
-#: `…attn*.to_q|to_k|to_v` — the diffusers repackaging
-#: (`KEYS_DIFFUSERS_SPLIT_QKV`). SDXL renders it
-#: `down_blocks.N.attentions.M.transformer_blocks.K.attn1.to_q.weight`; a DiT
-#: renders it `transformer_blocks.N.attn.to_q.weight`. Same axis, different
-#: family spelling — match on the ATTENTION SEGMENT, not on the prefix, or the
-#: check silently passes on the wrong family.
 SPLIT_MARKERS = (".to_q.weight", ".to_k.weight", ".to_v.weight")
-#: `…attn.qkv_proj|to_qkv` — the upstream/native fused set. te#185's tree.
 FUSED_MARKERS = ("qkv_proj", "to_qkv")
 
 
 class Nonconforming(RuntimeError):
-    """The mounted tree does not satisfy the declared lane. Typed, not a retry."""
+    """The mounted tree does not satisfy the declared lane."""
 
 
 def read_header(path: Path) -> dict[str, Any]:
-    """The safetensors header of ONE file. Header bytes only, never a weight."""
+    """The safetensors header of ONE file."""
 
     with path.open("rb") as handle:
         raw = handle.read(8)
@@ -162,7 +116,6 @@ def assert_conforms(
                 f"{component}: {stray} — lane {lane} declares {dtype} ({want})"
             )
 
-    # FACT 2 — the key convention, asserted where attention actually lives.
     split_total = sum(sum(row["split"].values()) for row in report.values())
     fused_total = sum(row["fused"] for row in report.values())
     lines.append(f"  {'key convention':<16} split={split_total} fused={fused_total}")
@@ -188,12 +141,7 @@ def assert_conforms(
 
 
 def bank(kind: str, detail: str, phase: str) -> None:
-    """Bank the reading in the hub's durable rows — best effort, never fatal.
-
-    A preflight that takes down its own abort message is worse than one that
-    prints it: the ABORT is the product, the row is how the next lane reads it
-    without SSH (pgw#1568 — the pod's logs are not retrievable).
-    """
+    """Bank the reading in the hub's durable rows — best effort, never fatal."""
 
     try:
         from gen_worker.activity import emit_event
@@ -215,8 +163,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.skip_fleet_line:
-        # RIG-ENV §1, binding: FIRST statement, no override, and the printed
-        # table goes in the report.
         try:
             from gen_worker.rigcheck import assert_fleet_line
 

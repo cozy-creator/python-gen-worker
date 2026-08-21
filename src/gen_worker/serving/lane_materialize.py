@@ -1,19 +1,3 @@
-"""Materialize a built pipeline's modules per the RESOLVED lane (pgw#1606).
-
-`ctx.load` puts weights in memory. This puts them in the right MODULES: for a
-baseline lane that is a no-op, for the fp8 lane the fused scaled-mm linears,
-for the nvfp4 lane the block-scaled fp4 linears.
-
-**Then it proves it.** The last step is a census that refuses a pipeline whose
-modules do not match the lane it is about to serve under. That refusal is
-borrowed straight from `torchcg.quantize.RecipeQuantize.apply`, which already
-learned the lesson: a converter that matched nothing and a converter that
-matched some are both silent, and serving a bf16 model under an fp8 name
-corrupts pricing, the compiled-graph key, and every executed-lane claim
-downstream. The audit found this exact class four times over; the fix is that
-the loader is never allowed to be the only witness of what it did.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -31,14 +15,6 @@ class LaneMaterializationError(RuntimeError):
 
 
 def _denoisers(pipeline: Any) -> list[tuple[str, Any]]:
-    """The weight-bearing modules a quant lane targets.
-
-    Named rather than walked: a lane converts the DENOISER, and casting a VAE
-    or a text encoder to fp8 GEMM modules is a different (and mostly wrong)
-    decision. `transformer`/`unet` is the fleet's whole denoiser vocabulary;
-    `models/component_vocab` owns the general list and this is the subset a
-    linear-quant lane may touch.
-    """
     found: list[tuple[str, Any]] = []
     for name in ("transformer", "unet", "denoiser", "dit"):
         mod = getattr(pipeline, name, None)
@@ -50,15 +26,7 @@ def _denoisers(pipeline: Any) -> list[tuple[str, Any]]:
 
 
 def lane_census(pipeline: Any) -> dict[str, int]:
-    """Count the quantized leaves actually present, by marker.
-
-    Reads the structural markers the executors set on their own module classes
-    (`_cozy_w8a8_linear` at `models/w8a8.py:481`, `_cozy_w4a4_linear` at
-    `models/w4a4.py:384`) rather than inferring from a dtype — a torchao-style
-    tensor subclass reports the LOGICAL dtype it emulates, so a dtype census
-    reads per-row fp8 as bf16 and answers "no fp8 here" about a fully
-    quantized model.
-    """
+    """Count the quantized leaves actually present, by marker."""
     counts = {"w8a8": 0, "w4a4": 0, "plain": 0}
     for _, root in _denoisers(pipeline):
         for _, mod in root.named_modules():
@@ -122,17 +90,9 @@ def materialize(
     tree: Path,
     compute_dtype: Any = None,
 ) -> Any:
-    """Put `pipeline`'s modules on `resolved`'s lane, then prove they are.
-
-    The author's `load()` contains no branch; this function IS the branch, and
-    it lives on the platform side where the resolved lane is known.
-    """
+    """Put `pipeline`'s modules on `resolved`'s lane, then prove they are."""
     body = resolved.body
     if is_baseline(body):
-        # Including the upcast rung: the bytes on the wire were fp8, and the
-        # loader's own per-layer dequant already put bf16 in the modules
-        # (`models/w8a8.py:680-696`). There is nothing to swap, and asserting
-        # "no quantized leaves" below is exactly the right check for it.
         swapped = 0
     elif body.startswith(el.WEIGHTS_FP8 + "-" + el.ACT_W8A8):
         swapped = _swap_fp8(pipeline, tree, compute_dtype)
@@ -150,12 +110,6 @@ def materialize(
 
 
 def _assert_lane(pipeline: Any, resolved: ResolvedLane, *, swapped: int) -> None:
-    """Refuse a pipeline whose modules are not the lane it resolved to.
-
-    Two refusals, because the failure is otherwise invisible in both
-    directions: a quant lane that converted NOTHING, and a baseline lane
-    carrying quantized leaves it never asked for.
-    """
     counts = lane_census(pipeline)
     body = resolved.body
     if is_baseline(body):
@@ -190,12 +144,7 @@ def _assert_lane(pipeline: Any, resolved: ResolvedLane, *, swapped: int) -> None
 
 
 def lane_of(pipeline: Any) -> str:
-    """The lane body a built pipeline's modules ACTUALLY execute.
-
-    An observation, never a plan — the distinction `execution_lanes.
-    observed_execution_lane` already draws, and for the same reason: a report
-    coerced into the choosable set over-claims in the flattering direction.
-    """
+    """The lane body a built pipeline's modules ACTUALLY execute."""
     counts = lane_census(pipeline)
     if counts["w8a8"]:
         return el.WEIGHTS_FP8 + "-" + el.ACT_W8A8 + "-" + el.SCALE_DYNAMIC

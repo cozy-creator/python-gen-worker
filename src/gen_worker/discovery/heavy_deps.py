@@ -1,50 +1,4 @@
-"""Fail-loud lazy-import stubs for heavy deps during build-time discovery.
-
-Discovery imports every endpoint module to read its ``@endpoint`` metadata
-(live ``typing.get_type_hints`` on payload structs requires real imports).
-That metadata is torch-free by design, but discovery may run in environments
-where torch/CUDA isn't installed (manifest builds, CI). Instead of forcing
-authors to defer ``import torch`` into handler bodies,
-``stub_missing_heavy_deps`` wraps ``builtins.__import__``: an ``import``
-statement targeting an allowlisted heavy root that is genuinely ABSENT from
-the environment resolves to a stub whose EVERY attribute access raises
-:class:`HeavyDepStubError` naming the real dependency and the fix.
-
-* Root INSTALLED → nothing changes; the real module is used.
-* Root MISSING → ``import torch`` / ``import torch.nn.functional`` /
-  ``from torch import nn`` all succeed with stubs; schemas still build; any
-  code that actually EXECUTES the dep at import time (``DTYPE =
-  torch.bfloat16``, ``torch.cuda.is_available()``) fails fast, actionably.
-
-Injection point rationale: a permanently-armed ``sys.meta_path`` finder
-would make ``importlib.util.find_spec("torchvision")`` return a spec for a
-missing package, fooling the availability probes third-party libraries gate
-their optional surfaces on (e.g. transformers' ``is_torchvision_available``
-is find_spec-only — a stubbed answer crashes its module-scope torchvision
-use). Wrapping ``__import__`` serves only real ``import`` statements; the
-helper finder is armed transiently inside the retry, so probe results stay
-honest. ``HeavyDepStubError`` subclasses ``AttributeError`` so defaulted
-``getattr(mod, "__version__", ...)`` probes on a stub degrade gracefully.
-
-**THE SAME RULE BINDS THE OTHER PROBE IDIOM.** ``find_spec`` has a twin:
-libraries also probe with ``try: import X / except ImportError``, and a stub
-satisfies THAT probe too. A root nothing imports at module scope but everything
-probes must therefore not be stubbed at all — see :data:`NEVER_STUB`. Stubbing
-it buys nothing and turns "absent" into "present but landmined".
-
-Changing the exception type is NOT the fix, twice over. (1)
-``HeavyDepStubError`` cannot be both an ``AttributeError`` and an
-``ImportError``: CPython refuses the dual base with *"multiple bases have
-instance lay-out conflict"*. (2) Dropping the ``AttributeError`` base to gain
-the ``ImportError`` one **breaks ``from torch import nn``** — the import
-machinery's submodule fallback catches ``AttributeError`` on ``torch.__path__``,
-so an ``ImportError`` there kills the very import this module exists to make
-free.
-
-Extension point: the allowlist is ``DEFAULT_HEAVY_ROOTS`` plus per-project
-``[tool.gen_worker] discovery_heavy_deps = ["my_heavy_lib"]`` entries
-(merged, never replacing the defaults).
-"""
+"""Fail-loud lazy-import stubs for heavy deps during discovery: an allowlisted root genuinely absent from the environment imports as a stub whose every attribute access raises HeavyDepStubError. The stub finder is armed only transiently inside the __import__ retry — left on sys.meta_path it fools find_spec availability probes, and roots libraries probe via try/import must not be stubbed at all (NEVER_STUB). HeavyDepStubError must stay an AttributeError and cannot also subclass ImportError: CPython refuses the dual base, and the import machinery's submodule fallback catches AttributeError on torch.__path__ — an ImportError there breaks `from torch import nn`."""
 
 from __future__ import annotations
 
@@ -57,30 +11,12 @@ import types
 from contextlib import contextmanager
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-# Known-heavy import roots: importing any of these pays seconds of load time
-# (torch/CUDA init, kernel registration) that endpoint METADATA never needs.
-# Deliberately small; diffusers/transformers are NOT here — they import
-# cheaply without torch and their classes must be real for slot annotations.
 DEFAULT_HEAVY_ROOTS: tuple[str, ...] = (
     "torch",
     "torchvision",
     "torchaudio",
 )
 
-#: Roots that must NEVER be stubbed, with the reason attached.
-#:
-#: These are OPTIONAL ACCELERATORS. No endpoint imports them at module scope —
-#: they are reached inside kernels and handlers — but every major library
-#: PROBES them, and the probe idiom is ``try: import X / except ImportError``.
-#: A stub satisfies that probe, so the library concludes the accelerator is
-#: PRESENT and goes on to use it. Stubbing them therefore buys nothing and
-#: converts a clean "absent" into "present but landmined".
-#:
-#: MEASURED (torch 2.13.0, triton genuinely absent):
-#: ``torch.utils._triton.has_triton_package()`` is exactly that idiom, so it
-#: answers **True** with triton absent; ``torch/_dynamo/utils.py`` then runs
-#: ``common_constant_types.add(triton.language.dtype)`` — which is NOT inside
-#: any ``try`` — and every module reaching ``torch._dynamo`` dies.
 NEVER_STUB: dict[str, str] = {
     "triton": "torch.utils._triton.has_triton_package() probes it by import; "
               "a stub makes torch._dynamo touch triton.language and die",
@@ -92,16 +28,10 @@ NEVER_STUB: dict[str, str] = {
 
 
 class HeavyDepStubError(AttributeError):
-    """A discovery stub for a missing heavy dependency was actually USED.
-
-    Subclasses ``AttributeError`` so ``hasattr``/defaulted-``getattr`` probes
-    and the ``from torch import nn`` submodule fallback in the import
-    machinery keep working; any other attribute touch surfaces this loudly.
-    """
+    """A discovery stub for a missing heavy dependency was actually USED."""
 
 
 class _HeavyDepStub(types.ModuleType):
-    """Module whose every (missing-)attribute access raises HeavyDepStubError."""
 
     def __getattr__(self, attr: str) -> Any:
         root = self.__name__.split(".", 1)[0]
@@ -118,11 +48,6 @@ class _HeavyDepStub(types.ModuleType):
 
 
 class _HeavyDepStubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    """Serves stub modules for missing heavy roots (and their submodules).
-
-    Only ever armed transiently, inside the ``__import__`` retry — never left
-    on ``sys.meta_path`` where ``find_spec`` probes would see it.
-    """
 
     def __init__(self, missing_roots: frozenset[str]) -> None:
         self.missing_roots = missing_roots
@@ -134,8 +59,6 @@ class _HeavyDepStubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         target: types.ModuleType | None = None,
     ) -> importlib.machinery.ModuleSpec | None:
         if fullname.split(".", 1)[0] in self.missing_roots:
-            # is_package=True so `import torch.nn.functional` resolves
-            # through this same finder instead of "'torch' is not a package".
             return importlib.util.spec_from_loader(fullname, self, is_package=True)
         return None
 
@@ -157,20 +80,8 @@ def _root_installed(root: str) -> bool:
 
 @contextmanager
 def stub_missing_heavy_deps(extra: Iterable[str] = ()) -> Iterator[frozenset[str]]:
-    """Arm fail-loud import stubs for every allowlisted heavy root NOT installed.
-
-    Yields the set of absent roots eligible for stubbing (empty when
-    everything is installed — the normal in-image case, where imports behave
-    exactly as without this context). On exit the ``__import__`` wrapper and
-    every stub placed in ``sys.modules`` are removed; endpoint modules
-    imported meanwhile keep their references, so later real USE of a stub
-    still fails loudly.
-    """
+    """Arm fail-loud import stubs for every allowlisted heavy root NOT installed."""
     roots = dict.fromkeys((*DEFAULT_HEAVY_ROOTS, *extra))
-    # The extension point may not re-arm the landmine. A project
-    # listing a probed root in `[tool.gen_worker] discovery_heavy_deps` gets it
-    # dropped, loudly — silently honouring it would reintroduce the defect
-    # with no trace in the build log.
     for root in [r for r in roots if r in NEVER_STUB]:
         del roots[root]
         print(
@@ -194,12 +105,6 @@ def stub_missing_heavy_deps(extra: Iterable[str] = ()) -> Iterator[frozenset[str
         fromlist: Sequence[str] | None = (),
         level: int = 0,
     ) -> types.ModuleType:
-        # Arm the stub finder ONLY while importing an absent heavy root (or a
-        # submodule of one) — this one __import__ call covers `import torch`,
-        # `import torch.nn.functional`, and the `from torch import nn`
-        # submodule fallback. Every other import (including a genuinely
-        # missing non-heavy dep, a SyntaxError, a relative import) runs the
-        # untouched machinery.
         root = name.split(".", 1)[0] if level == 0 else ""
         if root not in missing:
             return original_import(name, globals, locals, fromlist, level)
@@ -211,9 +116,6 @@ def stub_missing_heavy_deps(extra: Iterable[str] = ()) -> Iterator[frozenset[str
                 sys.meta_path.remove(finder)
             except ValueError:
                 pass
-            # Keep later optional-dependency probes honest. A retained stub
-            # makes find_spec(root) report installed even though package
-            # metadata correctly has no matching distribution.
             for module_name in [
                 n
                 for n, module in sys.modules.items()

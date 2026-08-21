@@ -1,9 +1,4 @@
-"""Tensorhub policy for retaining an expensive produced tree.
-
-tensorfs owns transfer sessions and their durable journal.  The worker adds
-only the product fact tensorfs cannot know: which completed producer output may
-be reused instead of paying for the cast again.
-"""
+"""Tensorhub policy for retaining an expensive produced tree."""
 
 from __future__ import annotations
 
@@ -111,8 +106,6 @@ class ProducerRecovery:
                 temporary.unlink(missing_ok=True)
                 raise
         except OSError:
-            # Producer recovery is an optimization. The authoritative transfer
-            # and its journal remain valid when this sidecar cannot be written.
             logger.warning("could not write producer recovery %s", self.path)
 
     def record(

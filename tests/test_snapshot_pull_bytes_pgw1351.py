@@ -1,27 +1,3 @@
-"""pgw#1351: what a pod DOWNLOADED has to reach the hub, not a pod log.
-
-e2e#1892's full journey set out to measure warm-boot dedup across three pods and
-reported the absence instead of a number: ``worker_activity_events`` carried no
-per-pod downloaded-bytes counter, and all three pods reported the same ``tree on
-disk 12.93 GiB`` — a figure identical on a pod that fetched everything and a pod
-that fetched nothing.
-
-Everything here drives the REAL pull. Objects are served over a real HTTP origin
-by the real ``gen_worker.transfer.grants.download``, through the real
-``ensure_snapshot_async``, and the events are read back off a bound activity
-sink as ``ActivityUpdate`` envelopes — the same wire the th#1839 route serves.
-Nothing is mocked, because the numbers under test are exactly the ones a mock
-would have to invent.
-
-The dedup case is the CORRECTED step-3 shape. Pod-local CAS is pod-local: two
-pods share nothing, so "pod A pulls, pod B measures its warm fraction" is not a
-measurement any store can make. ONE pod pulling model A and then an OVERLAPPING
-model B is, and it is the shape the corpus memo's F1 finding describes for real
-— Wan2.2-TI2V-5B and Wan2.2-T2V-A14B ship byte-identical UMT5-XXL text encoder
-shards (~11.4 GB), so a pod warm on one Wan endpoint already holds 11.4 GB of
-the other.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -65,8 +41,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 class _Origin:
-    """A real HTTP origin. `wire_bytes` is what actually left it, which is the
-    independent check on what the event claims was fetched."""
 
     def __init__(self) -> None:
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -98,7 +72,6 @@ class _Origin:
 
 
 class _Wire:
-    """A bound activity sink, collecting the envelopes a real pull emits."""
 
     def __init__(self) -> None:
         self.updates: list[pb.ActivityUpdate] = []
@@ -114,9 +87,6 @@ class _Wire:
 
 
 def _detail(update: pb.ActivityUpdate) -> dict[str, str]:
-    """The harness's own read of the wire grammar — the same `(\\w+)=(\\S+)`
-    the pgw#1232 legs use, and the same one `privatedeploy/nocompile.go` ships
-    as `detailKV`."""
     return dict(re.findall(r"(\w+)=(\S+)", update.detail))
 
 
@@ -135,11 +105,9 @@ def _ref(repo: str) -> TensorhubRef:
 
 
 def _resolved(files: list[tuple[str, bytes, str]]) -> WorkerResolvedRepo:
-    """One snapshot. The digest is over the (path, object) set, so two
-    snapshots that share an object still have distinct snapshot ids."""
     fingerprint = hashlib.sha256(
         b"|".join(f"{path}:{_sha(body)}".encode() for path, body, _url in files)
-    ).hexdigest()  # a snapshot id over the (path, object) set
+    ).hexdigest()
     return WorkerResolvedRepo(
         snapshot_digest="sha256:" + fingerprint,
         files=[
@@ -157,8 +125,6 @@ def _pull(
     *,
     fill_source_dir: Path | None = None,
 ) -> pb.ActivityUpdate:
-    """One real snapshot pull with the activity wire bound, returning the ONE
-    completion event it emitted."""
 
     async def run() -> None:
         activity.bind_sink(wire.send, asyncio.get_running_loop())
@@ -169,8 +135,6 @@ def _pull(
             progress=None,
             fill_source_dir=fill_source_dir,
         )
-        # The sink ships through `create_task`; give those tasks their turn
-        # rather than assuming the emission raced ahead of the return.
         for _ in range(4):
             await asyncio.sleep(0)
 
@@ -189,10 +153,7 @@ def _clean_sink() -> Any:
 
 
 def test_a_cold_pull_reports_the_bytes_that_crossed_the_wire(tmp_path: Path) -> None:
-    """The number that did not exist. A cold pull fetches everything, and the
-    event's `fetched_bytes` is checked against what the ORIGIN actually served
-    — not against the manifest, which is the figure that was already available
-    and already useless."""
+    """The number that did not exist."""
     origin = _Origin()
     try:
         te = b"text-encoder-" + b"t" * 4000
@@ -213,9 +174,7 @@ def test_a_cold_pull_reports_the_bytes_that_crossed_the_wire(tmp_path: Path) -> 
         assert got["fetched_objects"] == 2
         assert got["resident_objects"] == 0
         assert got["tree_bytes"] == len(te) + len(unet)
-        # The independent check: the origin's own byte counter.
         assert got["fetched_bytes"] == origin.wire_bytes == len(te) + len(unet)
-        # And the snapshot the bytes are attributable to.
         assert _detail(event)["snapshot"] == resolved.snapshot_digest
     finally:
         origin.close()
@@ -224,18 +183,6 @@ def test_a_cold_pull_reports_the_bytes_that_crossed_the_wire(tmp_path: Path) -> 
 def test_warm_boot_dedup_is_a_query_over_two_overlapping_models(
     tmp_path: Path,
 ) -> None:
-    """THE MEASUREMENT e2e#1892 could not make, in its corrected shape.
-
-    One pod, one CAS. Model A and model B share a large component byte for byte
-    (the corpus memo's F1: two Wan endpoints ship the identical ~11.4 GB
-    UMT5-XXL text encoder). B's pull must fetch only what is genuinely new, and
-    the event must SAY so — `fetched_bytes` far under `tree_bytes`, with
-    `resident_objects` naming the reason.
-
-    Two pods could never show this: a pod-local store is pod-local, so B on a
-    second pod is a second cold boot. Reading the old plan's "pod B measures
-    warm dedup" off two pods would have measured nothing at all.
-    """
     origin = _Origin()
     try:
         shared = b"shared-text-encoder-" + b"s" * 20000
@@ -263,29 +210,23 @@ def test_warm_boot_dedup_is_a_query_over_two_overlapping_models(
         warm_event = _pull(wire, pod, "model-b", model_b)
         warm = _ints(warm_event)
 
-        # Cold: everything came over the wire.
         assert cold["fetched_objects"] == 2
         assert cold["resident_objects"] == 0
         assert cold["fetched_bytes"] == len(shared) + len(unet_a)
 
-        # Warm: the shared component was already resident and is NOT refetched.
         assert warm["requested_objects"] == 2
         assert warm["fetched_objects"] == 1
         assert warm["resident_objects"] == 1
         assert warm["resident_bytes"] == len(shared)
         assert warm["tree_bytes"] == len(shared) + len(unet_b)
         assert warm["fetched_bytes"] == len(unet_b) == origin.wire_bytes
-        # The claim the acceptance actually wants, stated as the assertion:
-        # B's wire cost is a small fraction of B's weight.
         assert warm["fetched_bytes"] * 4 < warm["tree_bytes"]
     finally:
         origin.close()
 
 
 def test_a_fully_resident_snapshot_reports_a_zero_wire(tmp_path: Path) -> None:
-    """The boundary. Re-pulling a snapshot under a second ref fetches nothing,
-    and a `fetched_bytes=0` row is the strongest dedup evidence there is — so
-    it must be EMITTED rather than skipped as "nothing happened"."""
+    """The boundary."""
     origin = _Origin()
     try:
         blob = b"weights-" + b"w" * 5000
@@ -294,8 +235,6 @@ def test_a_fully_resident_snapshot_reports_a_zero_wire(tmp_path: Path) -> None:
         wire = _Wire()
         _pull(wire, pod, "model-a", _resolved(files))
         origin.reset()
-        # A DIFFERENT snapshot id over the same object: the tree key differs, so
-        # the pull runs rather than short-circuiting on the trusted-tree path.
         again = _resolved(files + [("README.md", b"x", origin.put(b"x"))])
         warm = _ints(_pull(wire, pod, "model-a2", again))
 
@@ -309,9 +248,7 @@ def test_a_fully_resident_snapshot_reports_a_zero_wire(tmp_path: Path) -> None:
 
 
 def test_every_requested_object_is_accounted_for(tmp_path: Path) -> None:
-    """A count that does not add up is a count nobody can query against. The
-    event carries `accounted_objects` so a reader can check the identity on the
-    row itself rather than trusting this test forever."""
+    """A count that does not add up is a count nobody can query against."""
     origin = _Origin()
     try:
         blobs = [bytes([65 + i]) * (300 + i) for i in range(5)]
@@ -332,14 +269,7 @@ def test_every_requested_object_is_accounted_for(tmp_path: Path) -> None:
 
 
 def test_an_endpoint_volume_fill_is_not_pod_local_dedup(tmp_path: Path) -> None:
-    """The number that would flatter itself.
-
-    An endpoint volume supplying an object and the pod's own CAS already
-    holding it are both "not fetched", and folding them makes the warm-boot
-    fraction a property of the VOLUME rather than of the pod. They answer
-    different questions, so they are counted apart — and this is the test that
-    fails if a later simplification reaches for `len(grants) - len(missing)`.
-    """
+    """The number that would flatter itself."""
     origin = _Origin()
     try:
         from gen_worker.models.cache_paths import open_worker_cas
@@ -366,7 +296,6 @@ def test_an_endpoint_volume_fill_is_not_pod_local_dedup(tmp_path: Path) -> None:
         )
         assert got["filled_objects"] == 1
         assert got["filled_bytes"] == len(on_volume)
-        # THE POINT: the volume's contribution is NOT this pod's warm fraction.
         assert got["resident_objects"] == 0
         assert got["resident_bytes"] == 0
         assert got["fetched_objects"] == 1
@@ -377,10 +306,7 @@ def test_an_endpoint_volume_fill_is_not_pod_local_dedup(tmp_path: Path) -> None:
 
 
 def test_the_detail_grammar_survives_a_reader(tmp_path: Path) -> None:
-    """The row is only worth emitting if the harness that reads it can parse
-    it. Values must never contain a space and never be empty — either one
-    silently merges or splits a pair, producing a line that parses cleanly and
-    means something else."""
+    """The row is only worth emitting if the harness that reads it can parse it."""
     stats = SnapshotPullStats(
         requested_objects=9,
         tree_bytes=1234,
@@ -397,8 +323,6 @@ def test_the_detail_grammar_survives_a_reader(tmp_path: Path) -> None:
     assert int(parsed["resident_objects"]) == 7
     assert len(detail.split()) == len(parsed), "a token in `detail` is not a k=v pair"
 
-    # An absent snapshot id becomes a placeholder, never an empty value: the
-    # empty form would swallow the next pair into `snapshot=`.
     blank = stats.detail(snapshot="", key="a b", components=0)
     assert dict(re.findall(r"(\w+)=(\S+)", blank))["snapshot"] == "-"
     assert dict(re.findall(r"(\w+)=(\S+)", blank))["key"] == "ab"
@@ -408,10 +332,7 @@ def test_the_detail_grammar_survives_a_reader(tmp_path: Path) -> None:
 def test_the_pull_event_is_an_event_and_never_a_running_activity(
     tmp_path: Path,
 ) -> None:
-    """It is a self-contained roll-up of finished work. Admitted as a RUNNING
-    activity it would join the hub's serving-blocked predicates, where "a
-    message arrived recently" is not the same statement as "work is
-    advancing" — the trap `warmup` documents and `aot_mint_phases` resolves."""
+    """It is a self-contained roll-up of finished work."""
     origin = _Origin()
     try:
         blob = b"z" * 900
@@ -425,9 +346,6 @@ def test_the_pull_event_is_an_event_and_never_a_running_activity(
         assert event.state == pb.ActivityState.ACTIVITY_STATE_COMPLETED
         assert event.counter == "" and event.counter_total == 0
         assert not event.self_stalled
-        # A timed span: the compile-duration route's `timed_only` filter drops
-        # untimed rows, and a pull that reported no span would be invisible to
-        # every p50/p95 read.
         assert event.duration_ms >= 0
     finally:
         origin.close()

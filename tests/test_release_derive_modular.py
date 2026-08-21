@@ -1,17 +1,3 @@
-"""pgw#1450: a MODULAR pipeline's components must reach the derive.
-
-``gen-worker release derive`` over a modular-pipeline endpoint, through the
-actual CLI codepath. Before tcg#65 this refused --
-
-    minimax-h3 serve recipe: no DiT resolves on this pipeline -- arming nothing
-    derive error: lane 'minimax.h3-dit-diffusers@1': load() marked nothing via
-    ctx.compile()
-
--- because ``ModularPipeline.from_pretrained`` builds component SPECS and
-leaves every attribute ``None``, deferring the build to whoever holds the
-object. At serve that holder is the streaming engine; a derive has none.
-"""
-
 from __future__ import annotations
 
 import json
@@ -72,11 +58,7 @@ def _derive(tree: Path, out: Path) -> int:
 def test_a_modular_endpoint_derives_its_marked_denoiser(
     modular_config_tree: Path, tmp_path: Path
 ) -> None:
-    """The whole issue in one assertion: the lane carries graphs.
-
-    ``load() marked nothing via ctx.compile()`` is a DeriveError, so a red run
-    does not reach the document at all -- the exit code is the first signal.
-    """
+    """The whole issue in one assertion: the lane carries graphs."""
 
     out = tmp_path / "release.json"
     assert _derive(modular_config_tree, out) == 0
@@ -88,8 +70,6 @@ def test_a_modular_endpoint_derives_its_marked_denoiser(
     (lane,) = document["graphs"]["lanes"]
     assert lane["contract"] == "sd15.diffusers@1+plain.f32@1"
     assert lane["unobserved_targets"] == []
-    # One specialization per enumerated payload arm: Size.SMALL/LARGE change
-    # the denoiser's latent side, which is what the enumerator is for.
     assert len(lane["graphs"]) == 2
     assert {record["target"] for record in lane["graphs"]} == {"unet"}
     sides = sorted(record["ingress"]["inputs"][0]["shape"][-1] for record in lane["graphs"])
@@ -99,11 +79,7 @@ def test_a_modular_endpoint_derives_its_marked_denoiser(
 def test_the_pipeline_the_author_marked_carries_every_declared_component(
     modular_config_tree: Path,
 ) -> None:
-    """The mechanism, at the seam, without the CLI in the way.
-
-    pgw#1450 measured the opposite on the real H3 tree: ``pipe.components``
-    naming eleven and every attribute ``None``.
-    """
+    """The mechanism, at the seam, without the CLI in the way."""
 
     sys.path.insert(0, str(FIXTURES))
     try:

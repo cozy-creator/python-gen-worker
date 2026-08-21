@@ -1,18 +1,3 @@
-"""minimax-h3's STAFFING ENVELOPE, v2-spelled (se#755 / pgw#1396).
-
-The five facts H3's retired v1 ``Resources(...)`` carried and the v2 surface
-had no syntax for: a vCPU floor, a host-RAM RECOMMENDATION, a GPU-count
-ceiling, an execution-group width, and the sequence-parallel capability.
-
-Three entrypoints, deliberately different:
-
-* ``generate`` — the full envelope, model-bearing;
-* ``analyze`` — WEIGHTLESS with ``vcpus=4``, the ``dj-utils`` /
-  ``music-analysis`` shape that se#755 blocks;
-* ``control`` — model-bearing with NO ``resources=``, which must emit exactly
-  what it emitted before pgw#1396.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -69,26 +54,16 @@ class H3Model(
     lanes={H3_LANE: lane(
         request=const(GiB(1)) + per_frame(MiB(8)) + per_frame_squared(MiB(1)),
     )},
-    # No `shapes=`: `load` marks no compile target.
 ):
     def load(self, ctx: Any) -> None:
         self.pipe = ctx.load(H3Pipeline)
 
 
-#: Hoisted so the three DiT entrypoints share one declaration rather than
-#: three copies that can drift.
 H3_STAFFING = Resources(
-    # The CPU floor. H3's serve path is host-heavy by construction: the
-    # residency sequencer parks and lands components between stages.
     vcpus=16,
-    # The SHAPE the hub may staff — a ceiling, not a floor.
     max_gpu_count=4,
     max_gpus_per_execution_group=4,
-    # The CAPABILITY: the vendored DiT declares `_cp_plan` and
-    # `cp_attention.py` carries the exact-arm attention.
     parallel=("sequence",),
-    # Host RAM is a RECOMMENDATION and can never be a minimum (Paul,
-    # 2026-07-11: a RunPod GPU pod can neither select nor guarantee it).
     requires=LayoutRequirements(recommended="ram96g"),
 )
 

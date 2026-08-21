@@ -1,31 +1,4 @@
-"""The SEAM that makes :mod:`gen_worker.models.gguf_torch` reachable — a
-diffusers denoiser built from its CONFIG and filled with GGML block bytes.
-
-pgw#1498's core module was correct and unreachable: nothing on the serving path
-constructed it, because ``loading.load_gguf_pipeline`` handed the whole decode
-to diffusers' ``GGUFQuantizationConfig``. That path works and is not ours: it
-puns ``nn.Linear`` ONLY (a quantized conv or embedding lands as a byte-shaped
-tensor in a dense parameter), it has no adapter story, no budget dial, and its
-``GGUFParameter`` reports the DEQUANTIZED shape — so every residency walk in the
-worker over-reports a 4-bit denoiser by the compression ratio, which is the one
-number this lane exists to move.
-
-**The bytes come from a SOURCE and nothing else about this module changes with
-them.** Two exist:
-
-* :class:`SingleFileGguf` — the community ``.gguf`` edge. A container names its
-  tensors whatever its packer chose, so this source (and only this source)
-  borrows diffusers' single-file key mapping to reach our key layout.
-* :class:`NormalizedTensors` — the SERVED path (Paul's storage ruling,
-  2026-08-19): per-tensor block bytes straight out of the CAS, already under our
-  key layout, no container involved. It is one constructor away and is live the
-  moment the ingest half lands (``gguf_torch.quantized_tensors_from_views``).
-
-Both hand :func:`build_denoiser` the same ``{state-dict key: QuantizedTensor |
-dense tensor}`` mapping, which is exactly what ``install_quantized_weights``
-takes. The seam is the point: swapping the edge for the store is a change of
-one constructor at the call site, not a rewrite of the loader.
-"""
+"""The SEAM that makes :mod:`gen_worker.models.gguf_torch` reachable — a diffusers denoiser built from its CONFIG and filled with GGML block bytes."""
 
 from __future__ import annotations
 
@@ -40,12 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class GgufTensorSource(Protocol):
-    """Where a GGML-quantized denoiser's tensors come from.
-
-    ``model`` is the config-built (weightless) denoiser: a source may consult
-    its state-dict keys to decide whether a key translation is needed, and must
-    return values keyed the way the MODEL names them.
-    """
+    """Where a GGML-quantized denoiser's tensors come from."""
 
     def tensors(self, model: Any, config: Mapping[str, Any]) -> Dict[str, Any]:
         ...
@@ -53,23 +21,7 @@ class GgufTensorSource(Protocol):
 
 @dataclass(frozen=True)
 class SingleFileGguf:
-    """The community-ingest edge: one ``.gguf`` container on disk.
-
-    OUR reader answers first (:func:`gen_worker.models.gguf_torch.read_gguf`).
-    When the container already names its tensors the way the model does — the
-    normalized case, and plenty of community packs — that is the whole job, and
-    it is the better reader for it: it honours ``comfy.gguf.orig_shape.*``, so a
-    conv or 5-D weight keeps its true shape instead of the ``[out, in*kh*kw]``
-    that block geometry alone can derive.
-
-    Only a container whose names are its PACKER's needs a translation, and that
-    is the one thing we borrow: diffusers' ``checkpoint_mapping_fn``, applied to
-    diffusers' ``GGUFParameter`` values (whose ``__torch_function__`` carries the
-    GGML type through the splits and concatenations those converters do). We take
-    the mapping and drop the quantizer — the values become
-    :class:`~gen_worker.models.gguf_torch.QuantizedTensor` and are decoded by OUR
-    kernels, on OUR leaves.
-    """
+    """The community-ingest edge: one ``.gguf`` container on disk."""
 
     path: Path
 
@@ -109,12 +61,7 @@ class SingleFileGguf:
 
 @dataclass(frozen=True)
 class NormalizedTensors:
-    """The SERVED path: ``tensorfs`` ``TensorView``s out of a ``LocalCAS``.
-
-    Already under our key layout, already cut per tensor, block bytes verbatim —
-    no container is read and none is composed. Nothing here needs the model,
-    which is the whole difference from the edge source above.
-    """
+    """The SERVED path: ``tensorfs`` ``TensorView``s out of a ``LocalCAS``."""
 
     views: Mapping[str, Any]
     pin_memory: bool = False
@@ -125,13 +72,6 @@ class NormalizedTensors:
 
 
 def _installable(value: Any) -> Any:
-    """One diffusers checkpoint value as ``install_quantized_weights`` takes it.
-
-    A ``GGUFParameter`` carries the two facts a dense tensor cannot: the GGML
-    type, and ``quant_shape`` — the shape the flat block stream expands to,
-    recomputed by the subclass after every converter op. Everything else is
-    already dense and passes through.
-    """
     import torch
 
     quant_type = getattr(value, "quant_type", None)
@@ -143,20 +83,6 @@ def _installable(value: Any) -> Any:
 
 
 def _conform_shapes(model: Any, tensors: Dict[str, Any]) -> Dict[str, Any]:
-    """Re-state every tensor's LOGICAL shape from the model, not the container.
-
-    A GGML row is the flattened per-output row, so a quantized conv weight's
-    block stream carries no memory of its kernel dims — the container records
-    ``[out, in*kh*kw]`` and that is all a reader can derive from block geometry.
-    (The reference packer works around this with a ``comfy.gguf.orig_shape.*``
-    metadata key that no other producer is obliged to write, and that diffusers'
-    reader ignores.) The model built from its own config knows the true shape
-    for every key it owns; the container knows the bytes. Take each fact from
-    the side that holds it.
-
-    A count mismatch is not reshaped away — it means these bytes are not this
-    weight, and it refuses by name.
-    """
     reference = model.state_dict()
     out: Dict[str, Any] = {}
     for key, value in tensors.items():
@@ -201,21 +127,7 @@ def build_denoiser(
     device: Any = None,
     dequant_dtype: Any = None,
 ) -> Any:
-    """A denoiser built from its config alone, then filled with block bytes.
-
-    CONFIG-ONLY construction is why this lane needs no lying tensor subclass:
-    the reference wraps every tensor so a shape-sniffing model detector keeps
-    working on a quantized state dict, and we never sniff — the config states
-    the architecture and the block bytes are just storage.
-
-    Parameters are allocated on ``meta`` and REPLACED by
-    :func:`~gen_worker.models.gguf_torch.install_quantized_weights`; buffers are
-    allocated for real, because a model's computed buffers (rotary tables,
-    position grids) are never in a checkpoint and would otherwise be left on
-    meta to die at the first forward. Any parameter the source did not cover is
-    a LOUD refusal here — a meta weight is a pipeline that builds, loads,
-    advertises and then fails the first request.
-    """
+    """A denoiser built from its config alone, then filled with block bytes."""
     from accelerate import init_empty_weights
 
     config = denoiser_cls.load_config(str(config_dir))
@@ -226,8 +138,6 @@ def build_denoiser(
     expected = set(model.state_dict())
     unexpected = sorted(set(tensors) - expected)
     if unexpected:
-        # Not fatal — a container routinely carries tensors a diffusers config
-        # has no module for — but it is never silent.
         logger.info("gguf: %d tensor(s) name no module and are dropped "
                     "(first: %s)", len(unexpected), unexpected[0])
         tensors = {k: v for k, v in tensors.items() if k not in set(unexpected)}

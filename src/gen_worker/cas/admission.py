@@ -1,18 +1,4 @@
-"""Admission: bytes on disk become CAS objects and a v1 manifest entry.
-
-FIRST-PARTY (pgw#1575), and it is where this always belonged. Upstream ported
-admission to Rust (`ObjectStore.admit_file`, `Plan`/`HashedPlan`/
-`AdmittedObject`) and pgw#1310 rules a compiled extension out of a
-source-vendored wheel, so pgw cannot call it. The argument for holding a dead
-`8bafdfbb` `local.py` was that admission is "the store's identity contract" and
-must not be forked — but the identity contract is the OBJECT GRID, and pgw#1365
-already forked that into `planner.py`, where it is asserted against upstream's
-released `spec/v1/planner-vectors` corpus. What was left in `local.py` was the
-forty lines below: plan, put, hash, and refuse a file that moved underneath us.
-
-They take a `LocalCAS` rather than living on it, because `LocalCAS` is
-upstream's and this is not.
-"""
+"""Admission: bytes on disk become CAS objects and a v1 manifest entry."""
 
 from __future__ import annotations
 
@@ -32,14 +18,7 @@ def ingest_file(
     *,
     manifest_path: str | None = None,
 ) -> FileEntry:
-    """Admit one file on the planner grid and return its manifest entry.
-
-    The whole-file sha256 is computed over the SAME bytes that were written to
-    objects, in one pass, so a manifest can never describe a reconstruction
-    that differs from what was admitted. The stat comparison around the read is
-    the concurrent-mutation refusal: a file that grew, shrank or was rewritten
-    while it was being read produces no entry at all.
-    """
+    """Admit one file on the planner grid and return its manifest entry."""
 
     path = Path(source)
     initial = path.stat()

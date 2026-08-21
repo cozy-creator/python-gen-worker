@@ -1,17 +1,4 @@
-"""Endpoint-to-endpoint call-out client — the workflow primitive.
-
-The SDK half of the platform's call-out primitive: a function declared with
-``@entrypoint(child_calls=True)`` receives an ``invoke_child`` grant on its
-per-job capability token; this module submits/polls/cancels child requests
-and reads/writes the invocation's workflow checkpoints through the ordinary
-platform HTTP API using that token as the bearer.
-
-Depth caps, cycle detection, tree budgets, tier inheritance, payer
-attribution, and tree cancellation are all enforced HUB-side (the token is
-proof of possession only) — this client just surfaces the typed refusals.
-
-Wire contract: tensorhub docs/callout.md.
-"""
+"""Endpoint-to-endpoint call-out client — the workflow primitive."""
 from __future__ import annotations
 
 import json
@@ -42,29 +29,13 @@ _REFUSAL_CODES = frozenset(
     }
 )
 
-# Route-scope denials for a capability token WITHOUT the invoke_child grant —
-# the function didn't declare child_calls=True (pgw#1579: the declaration is
-# `@entrypoint(child_calls=True)`; `ctx._callout_client` refuses an undeclared
-# body before a socket opens, so reaching here means the grant was declined).
 _NOT_DECLARED_CODES = frozenset({"forbidden", "insufficient_scope", "unauthorized"})
 
 DEFAULT_POLL_INTERVAL_S = 2.0
-# Per-CALL socket budget for the child-request control plane.
-# Same shape as `receipts._HTTP_TIMEOUT_S` and deliberately double it: these
-# calls ADMIT a child request hub-side, which can queue, whereas a JWKS fetch
-# cannot. Long-running child work is polled (`DEFAULT_POLL_INTERVAL_S`), so
-# this bounds a single unanswered socket and never the child's own runtime.
 _HTTP_TIMEOUT_S = 60.0
 
 
 def semver_major_segment(semver_major: int) -> str:
-    """The ``vN`` path segment of a Route-1 address (th#2044/th#2045).
-
-    Endpoint tags are dead: a call names an exact semver-major, there is no
-    default and no ``latest``. Anything that is not a non-negative int raises
-    HERE, before a socket opens — the retired `tag` arm defaulted a `None` to
-    `prod` and silently routed somewhere.
-    """
     if isinstance(semver_major, bool) or not isinstance(semver_major, int):
         raise TypeError(
             "semver_major must be an int naming the endpoint's semver-major "
@@ -76,20 +47,12 @@ def semver_major_segment(semver_major: int) -> str:
 
 
 def _parse_error_body(text: str) -> tuple[str, str]:
-    """Best-effort (code, message) from a platform error response body.
-
-    pgw#1229: one parser for the hub envelope, in ``hub_error``.
-    """
     err = parse_hub_error(text)
     return err.code, err.message
 
 
 class CalloutClient:
-    """HTTP client for one invocation's child calls + checkpoints.
-
-    Constructed by :class:`~gen_worker.request_context.RequestContext` —
-    tenant code uses ``ctx.call_endpoint`` / ``ctx.workflow_checkpoint``.
-    """
+    """HTTP client for one invocation's child calls + checkpoints."""
 
     def __init__(
         self,
@@ -103,8 +66,6 @@ class CalloutClient:
         self._parent_request_id = parent_request_id
         self._get_token = get_token
         self._cancel_event = cancel_event
-
-    # -- low-level ---------------------------------------------------------
 
     def _headers(self) -> Dict[str, str]:
         token = self._get_token()
@@ -132,8 +93,6 @@ class CalloutClient:
             f"{message or text[:256]}"
         )
 
-    # -- submit / poll / cancel --------------------------------------------
-
     def submit(
         self,
         endpoint: str,
@@ -144,7 +103,7 @@ class CalloutClient:
         tier: Optional[str] = None,
     ) -> str:
         """Submit one child request; returns its request id."""
-        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
+        import requests
 
         version = semver_major_segment(semver_major)
         endpoint = (endpoint or "").strip().strip("/")
@@ -169,7 +128,7 @@ class CalloutClient:
         return request_id
 
     def get(self, request_id: str) -> Dict[str, Any]:
-        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
+        import requests
 
         resp = requests.get(
             f"{self._base_url}/v1/requests/{quote(request_id, safe='')}",
@@ -185,7 +144,7 @@ class CalloutClient:
 
     def cancel(self, request_id: str) -> None:
         """Cancel a child (idempotent: an already-terminal child is a no-op)."""
-        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
+        import requests
 
         resp = requests.post(
             f"{self._base_url}/v1/requests/{quote(request_id, safe='')}/cancel",
@@ -203,12 +162,7 @@ class CalloutClient:
         timeout_s: Optional[float],
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
     ) -> List[Any]:
-        """Poll to a terminal state; return the child's output items.
-
-        Cooperative with parent cancellation: when this invocation is
-        cancelled (the hub is cascading to the children anyway), the wait
-        raises :class:`CanceledError` promptly.
-        """
+        """Poll to a terminal state; return the child's output items."""
         deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
         while True:
             doc = self.get(request_id)
@@ -235,21 +189,13 @@ class CalloutClient:
             else:
                 time.sleep(poll_interval_s)
 
-    # -- checkpoints ---------------------------------------------------------
-
     def checkpoint_get(self, key: str) -> tuple[Any, bool]:
-        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
+        import requests
 
         resp = requests.get(
             self._checkpoint_url(key), headers=self._headers(), timeout=_HTTP_TIMEOUT_S
         )
         if resp.status_code == 404:
-            # "The hub has no checkpoint under this key" and
-            # "a proxy answered because the hub is restarting" are both 404,
-            # and this is the worse of the two conflations — reporting
-            # (None, False) for an outage is a SILENT WRONG ANSWER that reads
-            # as "no saved progress", so a resumable job quietly restarts from
-            # scratch instead of erroring and retrying.
             from .http_origin import is_proxy_outage
 
             if is_proxy_outage(resp):
@@ -260,7 +206,7 @@ class CalloutClient:
         return resp.json(), True
 
     def checkpoint_put(self, key: str, value: Any) -> None:
-        import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
+        import requests
 
         body = json.dumps(value).encode("utf-8")
         resp = requests.put(
@@ -283,16 +229,7 @@ class CalloutClient:
 
 
 class ChildRequest:
-    """Handle for one submitted child request (``wait=False`` variant).
-
-    ``wait_guard`` (worker-internal): a context manager factory the
-    :meth:`result` wait runs under. The executor's ``RequestContext`` passes
-    its child-call slot guard here so a handler parked on ``.result()`` yields
-    its GPU permit exactly like ``ctx.call_endpoint(wait=True)`` — the yield
-    must not depend on which of the two waiting styles tenant code picked.
-    Single status reads (:meth:`status`) stay unguarded: one bounded HTTP GET
-    is not a park, and bouncing the permit per poll would thrash it.
-    """
+    """Handle for one submitted child request (wait=False variant). wait_guard: result() waits run under the executor's child-call slot guard so a parked handler yields its GPU permit exactly like ctx.call_endpoint(wait=True); single status() reads stay unguarded — one bounded HTTP GET is not a park."""
 
     def __init__(
         self,

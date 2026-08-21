@@ -1,7 +1,4 @@
-"""What the compute child may touch on the host: its uid, its OOM rank, its RAM.
-
-Sections keep their incident id; the full narratives live in the tracker.
-"""
+"""What the compute child may touch on the host: its uid, its OOM rank, its RAM."""
 
 from __future__ import annotations
 
@@ -38,11 +35,6 @@ from gen_worker.procsplit import (
     privdrop,  # noqa: E402
 )
 
-# ============================================================================
-# pgw#858 — pgw#858 / th#1380: the compute child runs as an unprivileged
-#   uid.
-# ============================================================================
-
 TESTS_DIR = Path(__file__).resolve().parent
 
 
@@ -66,7 +58,6 @@ _TOO_BROAD = {Path("/"), Path("/usr"), Path("/usr/local"), Path("/etc"),
 
 
 def _interpreter_mounts() -> list[Path]:
-    """pgw#858: Every prefix the container must see in order to exec THIS interpreter."""
     roots = {Path(sys.prefix), Path(sys.prefix).resolve(),
              Path(sys.base_prefix), Path(sys.base_prefix).resolve()}
     base_exe = getattr(sys, "_base_executable", None)
@@ -79,16 +70,15 @@ def _interpreter_mounts() -> list[Path]:
         if root in _TOO_BROAD:
             continue
         if root == REPO or REPO in root.parents:
-            continue          # inside the worktree mount already
+            continue
         if any(parent in roots for parent in root.parents):
-            continue          # a broader mount in this same set covers it
+            continue
         keep.append(root)
     return keep
 
 
 @pytest.mark.skipif(IS_ROOT, reason="already root — the rows below run directly")
 def test_privilege_isolation_rows_under_a_real_root_parent():
-    """pgw#858: Run every row below inside a container whose PID 1 is root and carries the RunPod key, which is ..."""
     if shutil.which("docker") is None:
         pytest.skip(
             "docker is required: pgw#858 is a uid boundary and a non-root "
@@ -97,9 +87,6 @@ def test_privilege_isolation_rows_under_a_real_root_parent():
     mounts = _interpreter_mounts()
     cmd = [
         "docker", "run", "--rm", "--init",
-        # This suite kills compute children on purpose. Without this the
-        # container's core_pattern drops a multi-GB root-owned core into the
-        # bind-mounted worktree, which no non-root developer can then delete.
         "--ulimit", "core=0",
         "-e", f"RUNPOD_API_KEY={RUNPOD_KEY}",
         "-e", f"PUBLIC_KEY={PUBLIC_KEY}",
@@ -115,25 +102,11 @@ def test_privilege_isolation_rows_under_a_real_root_parent():
         "-q", "-p", "no:cacheprovider", "--no-header",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    # pgw#966, the third-party half: `ubuntu:24.04` comes from Docker Hub, which
-    # has a rate limiter and outages of its own. Exit 125 is the docker CLI/daemon
-    # refusing before anything ran — a pull failure, not a uid-boundary failure —
-    # and a third party may never turn a required check red. Its own reason, so
-    # the census counts it apart from the exec case below, which IS ours to fix.
     if proc.returncode == 125:
         pytest.skip(
             "docker could not start the container, so no row ran (image pull or "
             f"daemon): {proc.stderr.strip().splitlines()[-1][:200] if proc.stderr.strip() else '(no stderr)'}"
         )
-    # The container failing to START is not the rows failing, and conflating
-    # them is how this test read as a pgw#858 regression on GitHub CI while
-    # passing on every developer box. It is also, until pgw#966, how this row
-    # read as GREEN COVERAGE on GitHub CI while never once executing: exit 127
-    # with `[FATAL tini (7)] exec .../.venv/bin/python failed: No such file or
-    # directory`, skipped by name, indistinguishable in a green log from a row
-    # that passed. `_interpreter_mounts()` above is the fix for the cause; this
-    # branch stays for anything it does not cover, and now carries the facts
-    # needed to diagnose it from a log rather than from a developer box.
     if proc.returncode == 127 and "exec" in proc.stderr and "failed" in proc.stderr:
         pytest.skip(
             "the container cannot exec this interpreter, so no row ran: "
@@ -148,8 +121,6 @@ def test_privilege_isolation_rows_under_a_real_root_parent():
         "the pgw#858 rows failed under a real root parent:\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
-    # The inner run must actually have RUN the rows — a skip that reports 0 is
-    # the failure mode this whole file exists to avoid.
     assert " passed" in proc.stdout, (
         f"the inner run executed no rows:\n{proc.stdout}\n{proc.stderr}"
     )
@@ -182,7 +153,6 @@ def pod_shaped_env(monkeypatch):
 
 def _split(tmp_path: Path, *, drop: bool,
            monkeypatch: Optional[pytest.MonkeyPatch] = None) -> SplitHarness:
-    """A real split whose child imports the pgw#858 probe handlers."""
     if not drop:
         assert monkeypatch is not None
         monkeypatch.setattr(privdrop, "plan_drop", lambda home: None)
@@ -218,7 +188,6 @@ def dropped(tmp_path, captured_dials, pod_shaped_env):
 
 @pytest.fixture()
 def undropped(tmp_path, captured_dials, monkeypatch, pod_shaped_env):
-    """The pre-pgw#858 tree, alive in the same run, so every denial below is measured against a control that pro..."""
     h = _split(tmp_path / "red", drop=False, monkeypatch=monkeypatch)
     try:
         yield h
@@ -264,8 +233,6 @@ def test_the_child_cannot_climb_back_through_a_setuid_binary(dropped, undropped)
 
 @root_only
 def test_child_cannot_read_pid1_environ_where_the_runpod_key_lives(dropped, undropped):
-    """th#1380 D1: RunPod injects an account-authority key into every pod and the create call cannot suppress it."""
-    # Positive control on the FIXTURE: there is genuinely something to steal.
     pid1 = Path("/proc/1/environ").read_bytes().decode("utf-8", "replace")
     assert RUNPOD_KEY in pid1, (
         "this container's PID 1 does not carry the RunPod key, so the row "
@@ -287,7 +254,6 @@ def test_child_cannot_read_pid1_environ_where_the_runpod_key_lives(dropped, undr
 
 @root_only
 def test_child_cannot_read_the_control_parents_environ(dropped, undropped):
-    """th#1380 D2: the delta-1 strip deletes WORKER_JWT from the child's env, and at a shared uid tenant code re..."""
     got = _json_probe(dropped, "steal-parent-environ")
     assert got["outcome"] == "denied", (
         f"tenant code read the control parent's environment: {got} — the "
@@ -307,7 +273,6 @@ def test_the_childs_own_env_carries_neither_credential(dropped):
     keys = set(_json_probe(dropped, "own-environ-keys"))
     for name in ("WORKER_JWT", "RUNPOD_API_KEY", "PUBLIC_KEY"):
         assert name not in keys, f"{name} survived into the compute child"
-    # ...and the parent still has all three: they moved, they did not vanish.
     for name in ("WORKER_JWT", "RUNPOD_API_KEY", "PUBLIC_KEY"):
         assert name in os.environ
 
@@ -327,7 +292,6 @@ def test_child_cannot_read_root_home(dropped, undropped):
 
 @root_only
 def test_the_dropped_child_still_boots_reaches_hello_and_serves(dropped):
-    """pgw#858: Reaching Hello and answering a dispatch IS the positive control: the child imported torch, wired..."""
     got = _json_probe(dropped, "report-identity")
     assert got["uid"] != 0
     home = _json_probe(dropped, "home-probe")
@@ -336,7 +300,6 @@ def test_the_dropped_child_still_boots_reaches_hello_and_serves(dropped):
 
 @root_only
 def test_the_dropped_child_can_write_every_path_it_was_granted(dropped, tmp_path):
-    """pgw#858: The grant list, checked from inside the child rather than asserted from the parent's side of the..."""
     home = _json_probe(dropped, "home-probe")
     assert home["home"].startswith("/var/lib/gen-worker"), home
     assert home["user"] and home["user"] != "root", home
@@ -349,7 +312,6 @@ def test_the_dropped_child_can_write_every_path_it_was_granted(dropped, tmp_path
 
 @root_only
 def test_the_dropped_child_can_still_write_the_config_snapshot(dropped):
-    """pgw#858: The one child-side writer that RAISES rather than degrades, and the only thing the child writes ..."""
     got = _probe(dropped, "config-snapshot-probe")
     assert got.startswith("ok:"), (
         f"the compute child cannot rewrite the th#1087 config snapshot: {got} "
@@ -358,34 +320,30 @@ def test_the_dropped_child_can_still_write_the_config_snapshot(dropped):
 
 
 def _reap_state(proc: Any, pid: int, *, parent_alive: bool) -> str:
-    """pgw#858: ``running`` -> ``reaped``, with THIS process doing the collecting once nothing else can."""
     if proc.returncode is not None:
         return "reaped"
     if parent_alive:
         try:
             info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
-            return "reaped"      # no longer our child: somebody here reaped it
+            return "reaped"
         return "running" if info is None else "exited"
     try:
         collected, _status = os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
-        return "reaped"          # the watcher won the race; equally collected
+        return "reaped"
     return "reaped" if collected == pid else "running"
 
 
 class _UndeliveredExit:
-    """An asyncio Process whose exit was never delivered — pgw#956's drop."""
 
     returncode = None
 
 
 def test_a_zombie_no_loop_can_report_is_collected_here_rather_than_waited_on():
-    """pgw#1024's mechanism and its fix, without having to lose the coin flip."""
     proc = _UndeliveredExit()
     pid = os.posix_spawn("/bin/sleep", ["sleep", "600"], {})
     try:
-        # While a parent could still deliver, the helper LOOKS and does not take.
         assert _reap_state(proc, pid, parent_alive=True) == "running"
         os.kill(pid, 9)
         await_progress(
@@ -394,10 +352,8 @@ def test_a_zombie_no_loop_can_report_is_collected_here_rather_than_waited_on():
             what="the unwatched child to become a zombie nobody collects",
             cadence=Cadence(),
         )
-        # ...and it STAYS there: no watcher, no loop, no later reader recovers it.
         assert _reap_state(proc, pid, parent_alive=True) == "exited"
 
-        # The parent is gone. This process is the only reaper there is.
         assert _reap_state(proc, pid, parent_alive=False) == "reaped"
         assert _reap_state(proc, pid, parent_alive=False) == "reaped"
         assert _reap_state(proc, pid, parent_alive=True) == "reaped"
@@ -410,21 +366,13 @@ def test_a_zombie_no_loop_can_report_is_collected_here_rather_than_waited_on():
 
 @root_only
 def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
-    """pgw#845's bounded shutdown across the new uid boundary: root can signal any uid, and that direction is th..."""
-    _probe(dropped, "report-identity")           # a live, serving child
+    _probe(dropped, "report-identity")
     proc = dropped.pc._proc
     assert proc is not None and proc.returncode is None
     pid = proc.pid
-    # NO `assert time.monotonic() - started < 120.0` here, and
-    #  no single read after `close()` either — returning from `close()`
-    # is not proof the reap completed. The property is that the parent exited
-    # and the child was reaped, so wait on THAT advancing; a hang fails by never
-    # reaping, which is the actual defect.
     dropped.close()
 
     def observe() -> tuple:
-        # One read of the parent's liveness for both halves: the answer to
-        # "may the loop still deliver?" decides whether we look or collect.
         alive = dropped.alive
         return alive, _reap_state(proc, pid, parent_alive=alive)
 
@@ -439,7 +387,6 @@ def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
 
 @root_only
 def test_a_drop_that_did_not_take_refuses_rather_than_execs_tenant_code():
-    """pgw#858: The assertion inside the preexec hook is the last line of defence: if setuid silently no-ops on ..."""
     lying = privdrop.DropPlan(
         uid=os.getuid() + 1, gid=os.getgid(), groups=(), user="x", home="/tmp")
     with pytest.raises(RuntimeError, match="privilege drop did not take"):
@@ -454,18 +401,12 @@ def test_the_uid_selector_refuses_zero():
 
 @root_only
 def test_a_shared_system_directory_is_never_granted(tmp_path):
-    """pgw#858: The post-mortem marker dir defaults to /tmp when TENSORHUB_CACHE_DIR is unset; a recursive chown..."""
     plan = privdrop.plan_drop(str(tmp_path / "home"))
     assert plan is not None
     granted = privdrop.grant_paths(plan, ["/tmp", "/", str(tmp_path / "ok")])
     assert granted == [str(tmp_path / "ok")], granted
     assert os.stat("/tmp").st_uid == 0
 
-
-# ============================================================================
-# pgw#975 — pgw#975: the pgw#763 split's OOM victim order, declared instead
-#   of emergent.
-# ============================================================================
 
 GIB = 1024 ** 3
 
@@ -490,7 +431,6 @@ def split(tmp_path, captured_dials):  # noqa: F811
 
 @linux_only
 def test_a_real_compute_child_outranks_the_control_parent(split):
-    """pgw#975: RED before this issue: the child inherited the parent's value exactly, so the reporter's surviva..."""
     split.scheduler.wait_connection(0).wait_for(is_ready)
     proc = split.pc._proc
     assert proc is not None, "no compute child was spawned"
@@ -513,7 +453,6 @@ def test_a_real_compute_child_outranks_the_control_parent(split):
 
 @linux_only
 def test_the_whole_compute_subtree_inherits_it(tmp_path):
-    """pgw#975: The mint child and the AOT pool's entry children are spawned BELOW a compute child and get no ca..."""
     child = tmp_path / "child.py"
     child.write_text(
         "import subprocess, sys\n"
@@ -546,7 +485,6 @@ def test_the_whole_compute_subtree_inherits_it(tmp_path):
 
 
 def test_the_parent_ceiling_still_matches_the_constants_it_was_derived_from():
-    """pgw#975: `oom_rank` writes the reship buffer out literally so it can run before grpc exists in the child."""
     from gen_worker.procsplit.seam import CONTROL_FRAME_CEILING_BYTES
     from gen_worker.transport import RESHIP_WINDOW
 
@@ -565,7 +503,6 @@ def test_the_parent_ceiling_still_matches_the_constants_it_was_derived_from():
     ],
 )
 def test_the_value_is_derived_from_the_domain_not_picked(domain_gib, expected, shape):
-    """pgw#975: §4.24: the number has to be re-derivable."""
     got = oom_rank.score_adj_delta_for_domain(
         int(domain_gib * GIB), oom_rank.parent_ceiling_bytes()
     )
@@ -573,7 +510,6 @@ def test_the_value_is_derived_from_the_domain_not_picked(domain_gib, expected, s
 
 
 def test_the_margin_always_covers_the_parents_whole_ceiling_twice():
-    """pgw#975: The property the table is an instance of: one point is 0.1% of the domain, so `adj` points must ..."""
     ceiling = oom_rank.parent_ceiling_bytes()
     for domain in (1 * GIB, 8 * GIB, 15 * GIB, 64 * GIB, 125 * GIB, 755 * GIB):
         adj = oom_rank.score_adj_delta_for_domain(domain, ceiling)
@@ -585,7 +521,6 @@ def test_the_margin_always_covers_the_parents_whole_ceiling_twice():
 
 
 def test_an_unreadable_domain_degrades_toward_protecting_the_reporter():
-    """pgw#975: Guessing the roomiest host would silently produce adj=1 on a tight container."""
     tight = oom_rank.score_adj_delta_for_domain(0, oom_rank.parent_ceiling_bytes())
     assert tight == oom_rank.score_adj_delta_for_domain(
         oom_rank._TIGHTEST_OBSERVED_DOMAIN_BYTES, oom_rank.parent_ceiling_bytes()
@@ -598,7 +533,6 @@ def test_an_unreadable_domain_degrades_toward_protecting_the_reporter():
 def test_a_failed_set_is_a_named_degradation_never_a_silent_pass(
     monkeypatch, tmp_path, caplog,
 ):
-    """pgw#975: A hardened container with a read-only /proc must not leave us believing the guarantee holds."""
     unwritable = tmp_path / "nonexistent-dir" / "oom_score_adj"
     monkeypatch.setattr(oom_rank, "_SELF_OOM_SCORE_ADJ", unwritable)
 
@@ -615,7 +549,6 @@ def test_a_failed_set_is_a_named_degradation_never_a_silent_pass(
 
 @linux_only
 def test_the_gap_is_cut_over_whatever_baseline_was_inherited(monkeypatch, tmp_path):
-    """pgw#975: The bug a real spawn caught: `oom_score_adj` is INHERITED, so the value the child reads is the p..."""
     fake = tmp_path / "oom_score_adj"
     fake.write_text("200\n")
     monkeypatch.setattr(oom_rank, "_SELF_OOM_SCORE_ADJ", fake)
@@ -634,7 +567,6 @@ def test_the_gap_is_cut_over_whatever_baseline_was_inherited(monkeypatch, tmp_pa
 def test_a_baseline_already_at_the_kernel_maximum_is_reported_unprotected(
     monkeypatch, tmp_path, caplog,
 ):
-    """pgw#975: At 1000 the parent is already maximally killable and no child can be ranked above it."""
     fake = tmp_path / "oom_score_adj"
     fake.write_text("1000\n")
     monkeypatch.setattr(oom_rank, "_SELF_OOM_SCORE_ADJ", fake)
@@ -651,7 +583,6 @@ def test_a_baseline_already_at_the_kernel_maximum_is_reported_unprotected(
 
 
 def test_the_container_facts_now_carry_memory_oom_group():
-    """pgw#975: Read off this box's real cgroup chain."""
     facts = postmortem.container_limits()
     assert "memory_oom_group" in facts
     assert facts["memory_oom_group"] in (0, 1, None)
@@ -677,7 +608,6 @@ def test_a_group_kill_is_called_out_in_the_death_dial():
 
 
 def test_the_entrypoint_ranks_the_child_before_its_heavy_imports():
-    """pgw#975: The harness enters one layer below `entrypoint`, so the placement itself is asserted on the sour..."""
     src = (
         Path(__file__).resolve().parent.parent
         / "src" / "gen_worker" / "entrypoint.py"
@@ -689,11 +619,6 @@ def test_the_entrypoint_ranks_the_child_before_its_heavy_imports():
             f"the OOM rank is declared after {heavy!r}"
         )
 
-
-# ============================================================================
-# pgw#763 — pgw#763: an oversized ``.to("cpu")`` is refused typed, not
-#   cgroup-killed.
-# ============================================================================
 
 _GIB = 1 << 30
 
@@ -713,7 +638,6 @@ def _cgroup(tmp_path: Path, *, limit: int, current: int) -> tuple[Path, Path]:
 
 @pytest.fixture()
 def guard(tmp_path, monkeypatch):
-    """Arm the real guard against a synthetic 8GiB cgroup with 6GiB held (te#138's proportions: the resident pip..."""
     monkeypatch.delenv("GEN_WORKER_HOST_MOVE_GUARD", raising=False)
     root, proc = _cgroup(tmp_path, limit=8 * _GIB, current=6 * _GIB)
     monkeypatch.setattr(host_move_guard, "_probe_root", root)
@@ -723,42 +647,33 @@ def guard(tmp_path, monkeypatch):
 
 
 def _big_meta_module() -> torch.nn.Module:
-    # ~3.2GiB of fp32 weights that exist only as metadata: device.type="meta"
-    # counts as incoming (not CPU-resident), and no RAM is ever allocated.
     with torch.device("meta"):
         return torch.nn.Linear(20480, 41984, bias=False)
 
 
 def test_oversized_cpu_move_is_refused_typed(guard: Any) -> None:
-    """te#138's ``_free()``: a module bigger than the remaining budget asks for CPU."""
     module = _big_meta_module()
     with pytest.raises(HostRamMoveRefusedError) as exc:
         module.to("cpu")
     msg = str(exc.value)
     assert "host-RAM move refused" in msg
     assert exc.value.incoming_bytes >= 3 * _GIB
-    # ~2GiB available (8 limit - 6 held), floored — the numbers are named.
     assert exc.value.available_bytes <= 3 * _GIB
 
-    # .cpu() is the same door.
     with pytest.raises(HostRamMoveRefusedError):
         _big_meta_module().cpu()
 
 
 def test_small_and_non_cpu_moves_pass_through(guard: Any) -> None:
-    """pgw#763: The guard must not tax or break ordinary moves: under-threshold modules skip the probe entirely,..."""
-    small = torch.nn.Linear(64, 64)  # CPU-resident already, tiny
+    small = torch.nn.Linear(64, 64)
     out = small.to("cpu")
     assert out is small
-    # dtype-only .to() on a big meta module: not a CPU landing, no refusal.
     _big_meta_module().to(dtype=torch.bfloat16)
 
 
 def test_kill_switch_disables(guard: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEN_WORKER_HOST_MOVE_GUARD", "0")
     module = _big_meta_module()
-    # Guard steps aside; torch itself then refuses to materialize meta
-    # tensors via .to() — any non-HostRamMoveRefusedError shape is fine.
     try:
         module.to("cpu")
     except HostRamMoveRefusedError:  # pragma: no cover

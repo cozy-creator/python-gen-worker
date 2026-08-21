@@ -1,22 +1,3 @@
-"""The PRODUCER plane, v2-spelled (pgw#1406 / th#2173).
-
-pgw#983 deleted ``@job``, and every one of the 27 conversion producers in
-``cozy-creator/jobs`` is a ``@job``. Their whole declaration set is three
-kwargs — ``publishes=`` (22 of 27), ``env=`` (3), ``emits_media=`` (4) — so
-this fixture is those three shapes, spelled on ``@entrypoint``:
-
-* ``cast_dtype`` — ``publishes=True``, weightless, CPU. The real
-  ``transform.py:137`` shape: it reads the reserved ``source`` contract and
-  writes a checkpoint.
-* ``clone_repo`` — ``publishes=True`` + ``env=("HF_TOKEN",
-  "CIVITAI_API_KEY")``. The ``mirror.py`` shape.
-* ``quality_matrix`` — ``publishes=True, emits_media=True``, GPU.
-* ``score_bench`` — ``emits_media=True`` and NO ``publishes``: an eval that
-  writes a report and no repo. It must be REFUSED at the publisher surface.
-* ``describe`` — declares NOTHING. Byte-identical to a pre-pgw#1406 row, and
-  refused at the publisher surface.
-"""
-
 from __future__ import annotations
 
 import msgspec

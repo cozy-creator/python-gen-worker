@@ -1,33 +1,4 @@
-"""USER-GLOBAL hub credentials, shared by every endpoint venv on the machine.
-
-pgw#1491. Paul's ruling: ``login`` writes credentials user-global "so one login
-serves every endpoint venv on this machine". Each endpoint has its own venv
-with its own pinned torch, so a credential stored per-venv would mean logging
-in once per endpoint — and N copies of one secret is how they diverge.
-
-## This is the store cozy-local already uses, deliberately
-
-``~/.cozy/credentials.d/<name>.<profile>.json``, mode 0600. Not a new location:
-cl#85 requires cozy-local to read the SAME store gen-worker writes, and that
-store is where cozy-local's already is. Choosing a different path would create
-a second home for one secret, which is the exact defect this module's shape
-exists to prevent.
-
-## Machine tokens only — nothing here rotates
-
-The stored credential is a MACHINE TOKEN (``cozy_st_``): long-lived, scoped,
-and carrying no refresh token. That is a deliberate correction, not a
-convenience. On 2026-08-11 eight profiles on one box shared a single rotating
-refresh token; every use invalidated the copy the others held, and 737 of 740
-refresh sessions were revoked server-side. The same mechanism is what kills a
-session token in the middle of a long ``cozy build``. A credential with nothing
-to rotate cannot reproduce either failure — and this module writes a credential
-back exactly never, which is a structural absence rather than a flag.
-
-Precedence, and it matters for pods: ``TENSORHUB_TOKEN`` in the environment
-WINS over the file store, and its presence makes a missing store a non-error.
-A container with the env var and no ``~/.cozy`` at all is a working install.
-"""
+"""USER-GLOBAL hub credentials, shared by every endpoint venv on the machine."""
 
 from __future__ import annotations
 
@@ -40,8 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-#: Marker every machine token carries. Lets a client tell a static credential
-#: from a session token without asking the server.
 MACHINE_TOKEN_MARKER = "cozy_st_"
 
 DEFAULT_HUB_NAME = "tensorhub"
@@ -55,23 +24,13 @@ class CredentialError(RuntimeError):
 
 
 def _settings() -> Any:
-    """Installed Settings, or a zero-config default.
-
-    §1.18: config is loaded ONCE by the pipeline and PASSED; a module reading
-    `os.environ` itself is a second loader that can disagree with the first.
-    `current_or` takes the fallback AS A VALUE so the zero-config case is
-    visible here rather than hidden in an env read — this module is imported
-    both by the CLI (which installs Settings at process entry) and by scripts
-    that never bring a worker up.
-    """
     from .. import config
 
     return config.current_or(config.Settings())
 
 
 def cozy_home() -> Path:
-    """``~/.cozy``, or whatever ``COZY_HOME`` configured. The same root
-    cozy-local resolves, so one login serves both tools."""
+    """``~/.cozy``, or whatever ``COZY_HOME`` configured."""
     return Path(_settings().cozy_home or (Path.home() / ".cozy"))
 
 
@@ -80,14 +39,7 @@ def credentials_dir() -> Path:
 
 
 def current_selection() -> tuple[str, str]:
-    """``(name, profile)`` from the SHARED ``~/.cozy/config.json`` pointer.
-
-    Read rather than defaulted, because the store is shared: cozy-local writes
-    ``current_name``/``current_profile`` there when a user switches profiles,
-    and a gen-worker that ignored it would authenticate as a different identity
-    than the tool the user just ran — with both of them reading files out of
-    the same directory. Absent config falls back to the plain defaults.
-    """
+    """``(name, profile)`` from the SHARED ``~/.cozy/config.json`` pointer."""
     try:
         document = json.loads((cozy_home() / "config.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -110,11 +62,6 @@ def current_hub_url() -> str:
 
 
 def _encode(component: str) -> str:
-    """Percent-encode a path component.
-
-    Without this, ``a/b`` + ``c`` and ``a`` + ``b/c`` collide on one filename
-    and ``..`` escapes the directory — both real, both cheap to prevent here.
-    """
     return _UNSAFE.sub(lambda m: f"%{ord(m.group()):02X}", component)
 
 
@@ -136,16 +83,7 @@ class Credential:
 def load(
     name: str = "", profile: str = ""
 ) -> Optional[Credential]:
-    """The stored credential, or the environment's, or ``None``.
-
-    A CONFIGURED token wins over the file store: a pod is configured by its
-    environment and must not depend on a home directory it does not have. It
-    arrives through `Settings.tensorhub_token` rather than an `os.environ` read
-    here — same precedence, but the value now also comes from `.env`, yaml and
-    `/run/secrets` like every other setting, instead of only from the one
-    source this module happened to look at. Empty ``name``/``profile`` take the
-    shared pointer (:func:`current_selection`), not a local default.
-    """
+    """The stored credential, or the environment's, or None. A configured token (Settings.tensorhub_token) WINS over the file store — a pod is configured by its environment and must not depend on a home directory it does not have."""
     settings = _settings()
     configured_token = (settings.tensorhub_token or "").strip()
     if configured_token:
@@ -182,12 +120,7 @@ def save(
     name: str = "",
     profile: str = "",
 ) -> Path:
-    """Write the credential 0600, atomically. Never merges — a login replaces.
-
-    The temp file is created INSIDE the destination directory with 0600 from
-    birth, so the secret is never briefly world-readable and never briefly on a
-    different filesystem where the rename would degrade to a copy.
-    """
+    """Write the credential 0600, atomically."""
     selected_name, selected_profile = current_selection()
     name = name or selected_name
     profile = profile or selected_profile
@@ -216,8 +149,7 @@ def save(
 
 
 def clear(name: str = "", profile: str = "") -> bool:
-    """Delete the credential. A logout is a DELETION, never an empty file —
-    an empty file reads as "logged in with nothing" to the next reader."""
+    """Delete the credential."""
     selected_name, selected_profile = current_selection()
     name = name or selected_name
     profile = profile or selected_profile

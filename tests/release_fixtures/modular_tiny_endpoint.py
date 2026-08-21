@@ -1,17 +1,3 @@
-"""A main_v2-shaped endpoint over a MODULAR pipeline (pgw#1450 fixture).
-
-Same surface as ``tiny_endpoint``: contract-object ``lanes=``, an imperative
-``ctx.compile`` mark inside ``load``, free ctx-first entrypoints whose payload
-schema is what the derive enumerates. The one difference is the pipeline
-class -- a ``ModularPipeline`` subclass that attaches the components it is
-constructed with, which is what every modular endpoint in the fleet ships.
-
-The entrypoint calls the marked denoiser directly rather than a full modular
-``__call__``: the subject is whether the pipeline CARRIES the module at all,
-and a fixture that also had to be a working modular workflow would put a lot
-of diffusers between the defect and the assertion.
-"""
-
 from __future__ import annotations
 
 from enum import StrEnum
@@ -62,9 +48,6 @@ class ModularModel(
 
     def load(self, ctx: LoadContext[SDXL]) -> None:
         self.pipe = ctx.load(TinyStreamingPipeline)
-        # The author's line, unchanged from the classic endpoint's. It reads
-        # the component off the pipeline -- which is exactly the read that
-        # found `None` before the loader finished the build.
         self.pipe.unet = ctx.compile(self.pipe.unet)
 
 

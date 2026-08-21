@@ -1,20 +1,3 @@
-"""te#148 — quantized low-rank branch decode (LoRaQ arXiv 2604.18117).
-
-The rank-128 branch pair is bf16 today; te#148 lets the producer store it
-int8 / fp8_e4m3 with per-block-32 scales along each factor's contraction dim
-(LoRaQ quantizes by MX blocks of 32; at 8 bits MXFP8e4 edges MXINT8, Table 3).
-Runtime v1 dequantizes ON LOAD — DecodedLinear stays bf16 logical, so
-SvdqLinear / fold_to_dense / split_decoded are untouched downstream.
-
-Accounting behind the "worth it?" call (qwen-image 20B, 60 blocks x 8 fused
-W4A4 units, rank 128): branch params = 128 * sum(in+out) = 755M -> 1.51 GB
-bf16, 11.5% of the 13.08 GB artifact. 8-bit + fp32 block-32 scales = 0.85 GB
--> saves ~0.66 GB of ARTIFACT/disk. v1 (dequant-on-load) saves ZERO VRAM;
-even quantized-resident would save ~0.85 GB against a 65 GB bf16 pipeline
-peak (~1.3%) — the honest VRAM story is "marginal", the artifact-size story
-and the LoRaQ higher-rank-at-equal-memory lever are the real value.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -43,25 +26,21 @@ from gen_worker.models.svdq_layout import (  # noqa: E402
 
 E2M1_MAX, FP8_MAX = 6.0, 448.0
 
-# (norm-relative) roundtrip bounds per scheme: int8 block-32 absmax on
-# gaussian data lands ~0.007; e4m3's 3 mantissa bits land ~0.03-0.04.
 _BOUNDS = {"int8": 0.02, "fp8_e4m3": 0.08}
 
 
 def _factors(out_f: int, in_f: int, rank: int, seed: int = 0):
     gen = torch.Generator().manual_seed(seed)
     down = (torch.randn(in_f, rank, generator=gen)
-            * (in_f ** -0.5)).to(torch.bfloat16)     # logical [in, rank]
+            * (in_f ** -0.5)).to(torch.bfloat16)
     up = (torch.randn(out_f, rank, generator=gen)
-          * (rank ** -0.5)).to(torch.bfloat16)       # logical [out, rank]
+          * (rank ** -0.5)).to(torch.bfloat16)
     return down, up
 
 
 def _synth_entry(out_f: int, in_f: int, *, second_key: str = "wtscale",
                  rank: int = 128, lowrank: str = "bf16", seed: int = 0,
                  smooth: bool = True) -> tuple[dict, Any, Any]:
-    """A checkpoint entry (nunchaku layout, branch per ``lowrank``) plus the
-    logical bf16 branch factors it was built from."""
     gen = torch.Generator().manual_seed(seed)
     w = torch.randn(out_f, in_f, generator=gen)
 
@@ -108,14 +87,10 @@ def _rel(a: Any, b: Any) -> float:
     return ((a.float() - b.float()).norm() / b.float().norm()).item()
 
 
-# --- quantize -> dequantize roundtrip --------------------------------------
-
-
 @pytest.mark.parametrize("scheme", LOWRANK_QUANT_SCHEMES)
 @pytest.mark.parametrize("shape,block_dim", [((3072, 128), 0), ((9216, 128), 1)])
 def test_roundtrip_error_is_bounded(scheme: str, shape: tuple, block_dim: int) -> None:
-    """quantize -> dequantize on real factor shapes stays inside the scheme's
-    error budget, and the scale tensor is exactly per-block-32 fp32."""
+    """quantize -> dequantize on real factor shapes stays inside the scheme's error budget, and the scale tensor is exactly per-block-32 fp32."""
     w = (torch.randn(*shape, generator=torch.Generator().manual_seed(2))
          * (shape[0] ** -0.5)).to(torch.bfloat16)
     q, scale = quantize_lowrank(w, scheme=scheme, block_dim=block_dim)
@@ -147,14 +122,9 @@ def test_quantize_and_dequantize_refuse_bad_inputs() -> None:
         dequantize_lowrank(w, scale, block_dim=0)
 
 
-# --- decode equivalence vs the bf16 branch ---------------------------------
-
-
 @pytest.mark.parametrize("scheme", LOWRANK_QUANT_SCHEMES)
 def test_decode_quantized_branch_matches_bf16_branch(scheme: str) -> None:
-    """Same residual, same factors, two on-disk branch schemes: the decoded
-    logical branch and its forward must agree within the quant budget, and
-    everything OUTSIDE the branch must be bit-identical."""
+    """Same residual, same factors, two on-disk branch schemes: the decoded logical branch and its forward must agree within the quant budget, and everything OUTSIDE the branch must be bit-identical."""
     out_f, in_f, rank = 3072, 3072, 128
     ref_t, down, up = _synth_entry(out_f, in_f, lowrank="bf16", seed=3)
     q_t, _, _ = _synth_entry(out_f, in_f, lowrank=scheme, seed=3)
@@ -165,12 +135,10 @@ def test_decode_quantized_branch_matches_bf16_branch(scheme: str) -> None:
     assert dec.lowrank_quant == scheme
     assert dec.rank == rank
 
-    # bf16 lane is bijective — its decode IS the factors.
     assert torch.equal(ref.proj_down, down)
     assert torch.equal(ref.proj_up, up)
     assert _rel(dec.proj_down, down) < _BOUNDS[scheme]
     assert _rel(dec.proj_up, up) < _BOUNDS[scheme]
-    # The 4-bit residual is untouched by the branch scheme.
     assert torch.equal(dec.codes, ref.codes)
     assert torch.equal(dequantize_decoded(dec), dequantize_decoded(ref))
 
@@ -183,8 +151,7 @@ def test_decode_quantized_branch_matches_bf16_branch(scheme: str) -> None:
 
 @pytest.mark.parametrize("scheme", LOWRANK_QUANT_SCHEMES)
 def test_fold_to_dense_parity(scheme: str) -> None:
-    """The any-hardware fold of a quantized-branch linear differs from the
-    bf16-branch fold ONLY by the branch quantization error."""
+    """The any-hardware fold of a quantized-branch linear differs from the bf16-branch fold ONLY by the branch quantization error."""
     out_f, in_f = 3072, 3072
     ref_t, down, up = _synth_entry(out_f, in_f, lowrank="bf16", seed=5)
     q_t, _, _ = _synth_entry(out_f, in_f, lowrank=scheme, seed=5)
@@ -206,13 +173,10 @@ def test_split_fused_qkv_carries_the_quantized_branch() -> None:
     parts = split_decoded(dec, (3072, 3072, 3072))
     for i, part in enumerate(parts):
         assert part.lowrank_quant == "int8"
-        assert part.proj_down is dec.proj_down          # shared, decoded once
+        assert part.proj_down is dec.proj_down
         assert torch.equal(part.proj_up,
                            dec.proj_up[i * 3072:(i + 1) * 3072])
     assert _rel(dec.proj_down, down) < _BOUNDS["int8"]
-
-
-# --- refusals --------------------------------------------------------------
 
 
 def test_decode_refuses_malformed_quantized_branches() -> None:
@@ -242,8 +206,7 @@ def test_decode_refuses_malformed_quantized_branches() -> None:
 
 
 def test_declaration_and_bytes_must_agree() -> None:
-    """The __metadata__ flag is the contract: bytes in any other scheme
-    refuse, in BOTH directions — no silent fallback."""
+    """The __metadata__ flag is the contract: bytes in any other scheme refuse, in BOTH directions — no silent fallback."""
     out_f, in_f = 3072, 3072
     q_t, _, _ = _synth_entry(out_f, in_f, lowrank="int8", seed=8)
     bf16_t, _, _ = _synth_entry(out_f, in_f, lowrank="bf16", seed=8)
@@ -257,7 +220,6 @@ def test_declaration_and_bytes_must_agree() -> None:
         decode_linear(q_t, out_f, in_f, lowrank_quant="fp8_e4m3")
     with pytest.raises(SvdqLayoutError, match="unknown lowrank_quant"):
         decode_linear(q_t, out_f, in_f, lowrank_quant="int4")
-    # Matching declarations decode.
     assert decode_linear(q_t, out_f, in_f,
                          lowrank_quant="int8").lowrank_quant == "int8"
     assert decode_linear(bf16_t, out_f, in_f,
@@ -265,8 +227,6 @@ def test_declaration_and_bytes_must_agree() -> None:
 
 
 def test_bf16_execution_lane_is_byte_identical_to_before() -> None:
-    """Backward compatibility: a bf16-branch checkpoint decodes exactly as it
-    did before te#148, with or without the declaration."""
     out_f, in_f = 3072, 3072
     t, down, up = _synth_entry(out_f, in_f, lowrank="bf16", seed=9)
     a = decode_linear(t, out_f, in_f)
@@ -281,9 +241,6 @@ def test_bf16_execution_lane_is_byte_identical_to_before() -> None:
     assert torch.equal(a.proj_up, up)
 
 
-# --- whole-file loader (integration, tiny REAL qwen) -----------------------
-
-
 def _tiny_qwen():
     diffusers = pytest.importorskip("diffusers")
     return diffusers.QwenImageTransformer2DModel(
@@ -293,8 +250,6 @@ def _tiny_qwen():
 
 
 def _write_checkpoint(tmp_path, *, lowrank: str, flag: bool):
-    """A full tiny-qwen checkpoint: to_qkv svdq-encoded (branch per
-    ``lowrank``), every other tensor verbatim bf16."""
     import json
 
     from safetensors.torch import save_file
@@ -333,9 +288,7 @@ class _Art:
 
 @pytest.mark.parametrize("scheme", LOWRANK_QUANT_SCHEMES)
 def test_loader_decodes_a_quantized_branch_file(tmp_path, scheme: str) -> None:
-    """load_svdq_native_denoiser end to end: metadata flag read, branch
-    dequantized on load, folded weights match the bf16-branch file within the
-    quant budget."""
+    """load_svdq_native_denoiser end to end: metadata flag read, branch dequantized on load, folded weights match the bf16-branch file within the quant budget."""
     ref_path, _, _ = _write_checkpoint(tmp_path, lowrank="bf16", flag=False)
     q_path, _, _ = _write_checkpoint(tmp_path, lowrank=scheme, flag=True)
 
@@ -349,8 +302,7 @@ def test_loader_decodes_a_quantized_branch_file(tmp_path, scheme: str) -> None:
 
 
 def test_loader_refuses_quantized_bytes_without_the_flag(tmp_path) -> None:
-    """A quantized branch with no __metadata__ declaration is a malformed
-    artifact, not a guessing opportunity."""
+    """A quantized branch with no __metadata__ declaration is a malformed artifact, not a guessing opportunity."""
     path, _, _ = _write_checkpoint(tmp_path, lowrank="int8", flag=False)
     with pytest.raises(SvdqLayoutError, match="declares lowrank_quant='bf16'"):
         native.load_svdq_native_denoiser(_Art(path), mode="dense")

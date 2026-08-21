@@ -76,28 +76,17 @@ from gen_worker.worker import SnapshotSizer
 
 GIB = 1024 ** 3
 
-# ── the measured article ─────────────────────────────────────────────────────
-#
-# Every number here was READ, not chosen: the two DiT component_fetch shards
-# and the whole-repo total come from the pgw#1590 refusal on pod
-# `ys9d2mu6opwb3a` (request 68eace0e-a9ba-4df6-ad1f-ada73f40c79a), and the
-# budget is that H100's own `mem_get_info` headroom.
 H3_DIT_SHARD_A = 66_726_413_676
 H3_DIT_SHARD_B = 66_280_505_604
 H3_TREE_BYTES = 144_050_965_040
 H3_REST = H3_TREE_BYTES - H3_DIT_SHARD_A - H3_DIT_SHARD_B
 H100_BUDGET = 84_368_556_032
 
-#: What the refusal charged: the whole tree + the /4 activation estimate.
 H3_TREE_CHARGE = H3_TREE_BYTES + H3_TREE_BYTES // 4
 
-#: What the endpoint used to DECLARE, and what h3 actually holds. Neither is
-#: reachable from a manifest, a header or a contract — see the module
-#: docstring. Kept as CONSTANTS rather than deleted because they are the
-#: measurement that says how big the standing over-charge is.
 H3_FLOOR_BYTES = 78 * GIB
-H3_LANE_BF16_BYTES = 133_006_919_280   # the DiT at the contract's own dtype
-H3_ACTUALLY_HELD = 66_503_459_640      # after the setup()-time quantize_()
+H3_LANE_BF16_BYTES = 133_006_919_280
+H3_ACTUALLY_HELD = 66_503_459_640
 
 #: pgw#1621: the lane is the v2 stamp pair, rendered `<topology>+<quant>`.
 #: The v1 Contract OBJECT this file used to import is deleted with the v1
@@ -108,23 +97,12 @@ H3_LANE_ID = "minimax-h3.diffusers@1+plain.bf16@1"
 H3_KEY = ("tensorhub/minimax-h3@serve-narrowed", f"H3Model/{H3_LANE_ID}")
 
 
-# ── a real projected snapshot, without 144 GB of disk ────────────────────────
-
-
 def _digest(name: str) -> CASRef:
     return CASRef.parse("sha256:" + hashlib.sha256(name.encode()).hexdigest())
 
 
 def project(base: Path, name: str, files: Dict[str, int]) -> Path:
-    """A REAL tensorfs projection: a real ``LocalCAS``, a real manifest stored
-    and pinned under the real ref name, and the tree at the path
-    ``resolve_projection`` looks for.
-
-    The manifest is the article — ``disk_gc.tree_bytes`` sizes a projected
-    tree from its manifest and never from the files, which is precisely why a
-    stubbed 144 GB repo can be sized on a laptop and precisely how the
-    production sizer got its 144,050,965,040.
-    """
+    """A REAL tensorfs projection: a real ``LocalCAS``, a real manifest stored and pinned under the real ref name, and the tree at the path ``resolve_projection`` looks for."""
 
     cas = LocalCAS(base)
     manifest = RepositoryManifest(
@@ -142,11 +120,8 @@ def project(base: Path, name: str, files: Dict[str, int]) -> Path:
 
 
 H3_TREE_LAYOUT = {
-    # The DiT lane's own bytes: the two component_fetch shards.
     "transformer/diffusion_pytorch_model-00001-of-00002.safetensors": H3_DIT_SHARD_A,
     "transformer/diffusion_pytorch_model-00002-of-00002.safetensors": H3_DIT_SHARD_B,
-    # Everything the DiT lane is NOT: vae, text encoder, audio vae, the
-    # tokenizer/scheduler/processor configs. Charged to the card today.
     "text_encoder/model.safetensors": H3_REST - 2_000_000_000,
     "vae/diffusion_pytorch_model.safetensors": 1_500_000_000,
     "audio_vae/diffusion_pytorch_model.safetensors": 500_000_000,
@@ -154,8 +129,6 @@ H3_TREE_LAYOUT = {
 
 
 class _Resolver:
-    """The resolver SEAM — which tree, never how big. Shaped like
-    ``HubBindingResolver`` for ``SnapshotSizer``'s one call."""
 
     def __init__(self, trees: Dict[str, Path]) -> None:
         self._trees = trees
@@ -190,15 +163,10 @@ def h3_manager(tmp_path: Path) -> Any:
     return sizer, lambda budget: ResidencyManager(budget, sizer)
 
 
-# ── the sizer still tells the truth about the tree ───────────────────────────
-
-
 def test_the_production_sizer_reads_the_measured_tree_from_a_real_manifest(
     h3_manager: Any,
 ) -> None:
-    """Non-vacuity: the tree number this file is about is the one the pod
-    computed, produced by the same code, from a manifest — not a constant
-    typed into the test."""
+    """Non-vacuity: the tree number this file is about is the one the pod computed, produced by the same code, from a manifest — not a constant typed into the test."""
     sizer, _ = h3_manager
     assert sizer.resident_bytes(*H3_KEY) == H3_TREE_BYTES
     assert sizer.resident_bytes(*H3_KEY) + sizer.activation_headroom_bytes(
@@ -232,10 +200,7 @@ def test_the_h3_dit_lane_is_refused_on_an_h100_and_this_is_the_KNOWN_cost(
     assert "needs 180063706300 bytes resident" in message
     assert "144050965040 weights + 36012741260 activation headroom" in message
     assert "the whole VRAM budget is 84368556032" in message
-    assert journal == []  # refused at admission: no byte moved
-    # ...and the CONFESSION says it is an upper bound, so the reader of a pod
-    # log is not left to work out why a card that served this shape refused
-    # it. `admission_charge`'s basis is what the manager confesses.
+    assert journal == []
     sizer, _ = h3_manager
     basis = admission_charge(
         sizer.resident_bytes(*H3_KEY), sizer.activation_headroom_bytes(*H3_KEY)
@@ -244,38 +209,21 @@ def test_the_h3_dit_lane_is_refused_on_an_h100_and_this_is_the_KNOWN_cost(
 
 
 def test_the_gap_the_close_has_to_shut_is_MEASURED_not_asserted() -> None:
-    """How big the over-charge is, in one place, so the fp8-lane close has a
-    number to be judged against rather than a feeling.
-
-    Three numbers, each from a different source: the tree walk (this file's
-    real manifest), the DiT at its contract's OWN dtype (bf16, so no
-    quantization is assumed), and what the endpoint actually holds after
-    `setup()`. The last one is the only one no producer in this repo can
-    compute, and that is exactly the defect.
-    """
-    # What admission charges today.
+    """How big the over-charge is, in one place, so the fp8-lane close has a number to be judged against rather than a feeling."""
     assert H3_TREE_BYTES == 144_050_965_040
-    # What a perfect lane-scoped, correct-dtype sizer would charge — still
-    # refused on an 84 GB card once the /4 headroom is added.
     assert H3_LANE_BF16_BYTES + H3_LANE_BF16_BYTES // 4 > H100_BUDGET
-    # What the card actually holds. Roughly half, because of a runtime
-    # quantize no declaration describes.
     assert H3_ACTUALLY_HELD * 2 == pytest.approx(H3_LANE_BF16_BYTES, rel=1e-6)
     assert H3_ACTUALLY_HELD < H3_FLOOR_BYTES < H100_BUDGET
 
 
 def test_the_charge_is_the_sizer_s_two_numbers_and_nothing_else() -> None:
-    """No cap, no floor, no third input. The whole point of pgw#1599's
-    deletion is that there is exactly ONE producer of this number again — and
-    an over-charging single producer is strictly better than two that
-    disagree, because only one of them can be silently wrong."""
+    """No cap, no floor, no third input."""
     charge = admission_charge(H3_TREE_BYTES, H3_TREE_BYTES // 4)
     assert charge.weight_bytes == H3_TREE_BYTES
     assert charge.headroom_bytes == H3_TREE_BYTES // 4
     assert charge.total == H3_TREE_CHARGE
     assert "STORED TREE" in charge.basis
     assert "UPPER BOUND" in charge.basis
-    # The refusal names what actually fixes it, not what to hand-write.
     assert "never a hand-written floor" in charge.basis
 
 
@@ -283,11 +231,7 @@ def test_the_charge_is_the_sizer_s_two_numbers_and_nothing_else() -> None:
 def test_the_charge_is_monotone_in_the_tree_and_never_optimistic(
     tree_gb: float,
 ) -> None:
-    """THE SAFETY PROPERTY that survived the deletion: the charge is a
-    function of the tree alone and is never smaller than it. Every rejected
-    replacement failed exactly here — each could return a number BELOW what
-    the lane holds resident, and an under-charge is an OOM on a rented card
-    while an over-charge is a typed refusal."""
+    """THE SAFETY PROPERTY that survived the deletion: the charge is a function of the tree alone and is never smaller than it."""
     weights = int(tree_gb * GIB)
     headroom = weights // 4
     charge = admission_charge(weights, headroom)
@@ -298,9 +242,7 @@ def test_the_charge_is_monotone_in_the_tree_and_never_optimistic(
 def test_a_smaller_card_is_still_refused_typed_before_any_byte_moves(
     h3_manager: Any,
 ) -> None:
-    """The gate itself is intact. An L40S/A6000-class 48 GiB card cannot hold
-    this lane under any of the numbers above, and is refused TYPED at
-    admission — before the factory runs, before a byte moves."""
+    """The gate itself is intact."""
     _, manager_for = h3_manager
     manager = manager_for(48 * GIB)
     journal: List[str] = []

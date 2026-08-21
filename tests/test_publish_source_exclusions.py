@@ -1,7 +1,4 @@
-"""What a source publish must never upload.
-
-Subject-named, not incident-named (pgw#1362 / 4.34b); lineage in comments.
-"""
+"""What a source publish must never upload."""
 
 from __future__ import annotations
 
@@ -18,14 +15,6 @@ def _tree(root: Path, files: dict[str, str]) -> None:
 
 
 def test_credential_directories_never_ship(tmp_path):
-    """# pgw#1529: a secret-leak vector, not bloat.
-
-    `publish` packages the WHOLE TREE when the endpoint is not a git work tree
-    (no commit to take a manifest from). A private key sitting beside an
-    endpoint would then go to the hub with it. cozy-local's archiver has
-    excluded these since it was written and asserts it; this client did not,
-    and both publish the same trees.
-    """
     _tree(tmp_path, {
         "endpoint.toml": "main = 'x.main'",
         ".ssh/id_ed25519": "PRIVATE KEY",
@@ -43,12 +32,6 @@ def test_credential_directories_never_ship(tmp_path):
 
 
 def test_a_local_runs_output_never_ships(tmp_path):
-    """# pgw#1529 / cl#88: cwd-relative defaults leave these in the tree.
-
-    Asserted as DIRECTORIES: the artifact store holds `<graph>.so.unpacked/`
-    trees whose bytes are mostly model.pt2 and metadata, so a `.so` suffix
-    filter would ship the bulk and look fixed.
-    """
     _tree(tmp_path, {
         "endpoint.toml": "main = 'x.main'",
         ".compiled-graphs/env/g.so.unpacked/model.pt2": "aoti",
@@ -74,11 +57,7 @@ def test_tool_caches_never_ship(tmp_path):
 
 
 def test_the_endpoints_own_source_still_ships(tmp_path):
-    """The exclusions must not be so broad they eat the endpoint.
-
-    A guard that ships nothing is as broken as one that ships everything, and
-    the failure looks like success right up to the hub's build.
-    """
+    """The exclusions must not be so broad they eat the endpoint."""
     _tree(tmp_path, {
         "endpoint.toml": "main = 'x.main'",
         "pyproject.toml": "[project]",

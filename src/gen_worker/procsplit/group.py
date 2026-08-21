@@ -1,40 +1,4 @@
-"""The execution GROUP as an OS process — the child plan.
-
-Measured: four execution groups in ONE interpreter serve 0.94x of serial (21%
-on every card); four PROCESSES with one group each serve **4.00x** at 91-93%
-util, same pod, same weights. So the child of the process split is not one
-process — it is one process PER EXECUTION GROUP.
-
-This module is the pure half of that: given the delivered topology, what
-children exist and what env does each one get. No spawning, no I/O, no torch.
-
-**The design decision that makes N children cheap: every child is a
-SINGLE-GROUP worker over its own cards.** Child ``g`` is handed
-``CUDA_VISIBLE_DEVICES`` naming only its group's physical devices and a
-topology rewritten to ``D x D`` (locally ``G == 1``), so inside the child:
-
-* ``current_device_group()`` is 0 and ``group_cuda_device()`` is plain
-  ``"cuda"`` — the placement path every single-group pod has always used;
-* ``Executor._gpu_slots`` is 1, so "the slot semaphore is a count, not a
-  per-group permit" dissolves: the count IS the permit when the process is the
-  group;
-* the multi-group hazards (thread device pinning, the group ordinal in
-  ``instance_key``, the refusal to serve async handlers on a wide worker) have
-  nothing left to be about;
-* the process-global compile plane stops having G concurrent users, and the
-  mint delegate works per child by construction.
-
-**At G == 1 the env delta is EMPTY** — no ``CUDA_VISIBLE_DEVICES``, no topology
-rewrite, no per-group anything — so a one-child worker is byte-identical to the
-unsplit shape.
-
-A ``D > 1`` group stays ONE process. Its devices are one logical accelerator —
-the model's own arrangement (``parallel="internal"``) or a platform collective
-(``sequence``/``cfg``) — and both need a single Python driver holding the ranks.
-Splitting one would need a real distributed launcher, and nothing measured says
-a D>1 group is GIL-bound the way G independent D=1 groups are: inside it there
-is ONE launch loop feeding a collective, not D competing ones.
-"""
+"""The execution GROUP as an OS process — the child plan."""
 
 from __future__ import annotations
 
@@ -80,22 +44,8 @@ class GroupPlan:
     def child(self, ordinal: int) -> ChildGroup:
         return self.children[int(ordinal)]
 
-    # ---- routing ---------------------------------------------------------
-
     def route(self, gpu_index: Optional[int]) -> int:
-        """Which child serves a dispatch naming ``gpu_index``.
-
-        ``ResolvedCompute.gpu_index`` names the group's RANK-0 PHYSICAL device
-        (0, D, 2D, ...), so this is exactly ``Executor._dispatch_group``'s
-        derivation moved one process earlier — the parent ROUTES, it never
-        schedules; the hub already picked the slot.
-
-        Single-group pods keep the historical behaviour exactly (there is only
-        one group to mean). At G>1 a non-rank-0 or missing index is the same
-        typed refusal the executor raises: flooring a hub/worker packing
-        disagreement onto group 0 is the silent
-        bug that piles every mis-dispatch onto the busiest card.
-        """
+        """Which child serves a dispatch naming ``gpu_index``."""
         if self.topology.execution_groups <= 1:
             return 0
         if gpu_index is None:
@@ -106,16 +56,9 @@ class GroupPlan:
         return self.topology.group_ordinal_exact(int(gpu_index))
 
     def local_gpu_index(self, ordinal: int) -> int:
-        """The ``gpu_index`` the CHILD must see.
-
-        Under ``CUDA_VISIBLE_DEVICES`` the child's world starts at 0, so a
-        physical rank-0 of ``g*D`` becomes local 0. One field, rewritten as the
-        RunJob is routed; at G == 1 it is the identity (0 -> 0).
-        """
+        """The ``gpu_index`` the CHILD must see."""
         del ordinal
         return 0
-
-    # ---- construction ----------------------------------------------------
 
     @classmethod
     def for_topology(
@@ -138,7 +81,6 @@ class GroupPlan:
 
 
 def _socket_for(base: str, ordinal: int, groups: int) -> str:
-    """Stage 1's exact path at G == 1; one socket per child beyond that."""
     if groups <= 1:
         return base
     if base.endswith(".sock"):
@@ -149,14 +91,6 @@ def _socket_for(base: str, ordinal: int, groups: int) -> str:
 def _child_env(
     topology: ExecutionTopology, ordinal: int, devices: Tuple[int, ...],
 ) -> Dict[str, str]:
-    """The env DELTA applied on top of the parent's own environment.
-
-    Empty at G == 1 — deliberately, and asserted by the identity test. The
-    per-group compile/inductor cache dirs and the host-RAM divisor named in the
-    design note are 783-C's wiring (they need consumers in ``cpu_budget`` /
-    ``probe_host_ram``); what this stage fixes is the CONTRACT, so the child
-    already carries the sibling count it will be budgeted against.
-    """
     if topology.execution_groups <= 1:
         return {}
     local = ExecutionTopology(
@@ -165,21 +99,8 @@ def _child_env(
         parallel=topology.parallel,
     )
     return {
-        # The child's local cuda:0..D-1 ARE its group. It cannot see, let alone
-        # allocate on, a sibling's card — the strongest VRAM isolation
-        # available, and it costs nothing.
         "CUDA_VISIBLE_DEVICES": ",".join(str(d) for d in devices),
-        # Locally G == 1: the child is the most-tested shape in the worker.
         ENV_TOPOLOGY: json.dumps(local.as_dict(), separators=(",", ":")),
-        # Filesystem/process identity only (logs, dials, per-group dirs). It
-        # never selects serving behaviour.
         ENV_GROUP_ORDINAL: str(ordinal),
-        # The ONE thing a child must know about its siblings: how many
-        # processes share this pod's cgroup. Without it the cpu_budget divisor
-        # (the delivered group count, rewritten to 1 here) lets every child
-        # take the whole CPU quota — a 192-threads-on-32-cores
-        # oversubscription — and the host-RAM probe tells each child the whole
-        # pod's RAM is its own, making the move guard G-times too permissive on
-        # precisely the pods most likely to OOM.
         ENV_HOST_SIBLINGS: str(int(topology.execution_groups)),
     }

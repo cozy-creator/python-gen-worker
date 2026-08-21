@@ -32,15 +32,6 @@ from gen_worker.models.store import _snapshot_to_resolved
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 
-#: pgw#1316: SPAWN, never fork. These tests need two real OS processes racing
-#: on one CAS tree; they do not need the parent's address space. Under
-#: `-n 4 --dist loadfile` an xdist worker that already ran a grpc.aio file
-#: still has gRPC's event-engine threads live, and gRPC skips its
-#: `pthread_atfork` handlers whenever another thread is inside gRPC
-#: (`fork_posix.cc:71`) — the child then inherits a poller in an inconsistent
-#: state and dies on `ev_epoll1_linux.cc: Check failed: next_worker->state ==
-#: KICKED`. Spawn shares no such state. Everything crossing the boundary must
-#: stay picklable.
 _MP = multiprocessing.get_context("spawn")
 
 
@@ -120,17 +111,6 @@ def test_grpc_adapter_keeps_ordered_lengths_and_drops_fixed_layout_scalar() -> N
 def _publish_process(
     root: str, target: str, digest: str, size: int, barrier: Any, results: Any
 ) -> None:
-    """One process publishing the snapshot, released with the other.
-
-    The barrier is OUTSIDE `_publish_snapshot`, not inside it: the publish
-    holds an exclusive flock on the target, so a barrier inside would hold the
-    lock while waiting for a process the lock is keeping out, and the test
-    would deadlock rather than race.
-
-    Both arms report what they READ back through the tree, so a loser that
-    converged on the winner's tree is distinguishable from a loser that got a
-    path with nothing behind it.
-    """
 
     cas = LocalCAS(Path(root))
     manifest = RepositoryManifest(
@@ -268,16 +248,7 @@ def test_two_processes_converge_on_the_same_projected_tree(tmp_path: Path) -> No
 
 
 def test_publish_keeps_a_preflip_materialized_tree_it_finds(tmp_path: Path) -> None:
-    """A pod that upgrades ACROSS the flip meets its own old tree.
-
-    Under the same snapshot key, because the key is the snapshot digest. That
-    tree holds exactly the bytes the manifest names, so the publish converges
-    on it rather than deleting and re-projecting: `_entry_matches` hashes a
-    path that carries real bytes and checks a projection artifact structurally.
-    Deleting it would be safe but pointless; deleting it while another process
-    reads it would not be, which is why this path never removes a tree it has
-    just found to be correct.
-    """
+    """A pod that upgrades ACROSS the flip meets its own old tree."""
 
     body = b"published-before-the-flip"
     cas = LocalCAS(tmp_path)
@@ -301,12 +272,7 @@ def test_publish_keeps_a_preflip_materialized_tree_it_finds(tmp_path: Path) -> N
 
 
 def test_publish_replaces_a_tree_that_is_not_this_manifest(tmp_path: Path) -> None:
-    """A tree under this key that does not match is replaced by a projection.
-
-    The flock is held across the check and the replacement, so the decision to
-    remove cannot be taken against a tree someone else has since rebuilt (the
-    stale-validation defect below).
-    """
+    """A tree under this key that does not match is replaced by a projection."""
 
     body = b"the-real-bytes"
     cas = LocalCAS(tmp_path)
@@ -454,12 +420,6 @@ def test_chunked_file_uses_manifest_recorded_variable_lengths(tmp_path: Path) ->
             ensure_snapshot_async(base_dir=tmp_path, ref=_ref(), resolved=resolved)
         )
         output = path / "weights.safetensors"
-        # A tensor container is a POINTER STUB after the chokepoint flip
-        # (pgw#1308 step ⑥). Its own `st_size` is the stub's, so the size the
-        # manifest recorded is read from what the stub DECLARES, and the bytes
-        # are reassembled out of the CAS at the recorded variable lengths --
-        # which is this test's actual subject, and is now asserted where the
-        # bytes really are instead of at a path that no longer holds them.
         assert projection.stub_at(output) is not None
         assert projection.logical_size(output) == len(first) + len(second)
         snapshot = projection.require_projection(path, why="pgw#781 chunk test")

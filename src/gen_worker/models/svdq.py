@@ -1,37 +1,4 @@
-"""SVDQuant 4-bit loader mode.
-
-A ``#svdq-fp4-*`` / ``#svdq-int4-*`` flavor is a normal diffusers tree whose
-denoiser directory holds ONE nunchaku-FORMAT single-file checkpoint instead of
-plain safetensors shards. The file self-describes in its safetensors
-``__metadata__``: ``model_class`` names the transformer class and
-``quantization_config`` carries ``{"method": "svdquant", "weight": {"dtype":
-"fp4_e2m1_all" | "int4"}, "rank": N}``. Loading swaps the decoded denoiser
-into the standard pipeline — same pipeline class, same handler, no new
-endpoint.
-
-"nunchaku" here is a FORMAT LINEAGE, not a runtime. pgw#1298 deleted the
-nunchaku engine: it was slower than our own decoder (843 vs 785 ms/step on a
-5090, same seeds, equal peak VRAM), covered strictly less silicon (sm_120/121
-against native's sm_100/103/120/121), and was UNREACHABLE — the only caller
-(``models/loading.py``) never passed an engine pin, and for fp4 the ladder put
-native first on every card nunchaku could serve. Every svdq load now runs
-through :mod:`gen_worker.models.svdq_native`, which reads the same bytes
-bit-exactly.
-
-ONE fleet image still installs the nunchaku WHEEL — ``inference-endpoints/
-qwen-image-svdq-bench`` (a benchmark fixture pending teardown). pgw#1298 had to
-keep it: the hub admitted an svdq-fp4 row only when the worker reported
-``nunchaku`` in ``installed_libs``, so dropping the wheel or the probe stopped
-that endpoint BINDING a flavor it serves fine on native. **th#2055 deleted that
-gate** (``precision/ladder.go``'s ``admitted()`` and ``AdmitLiteral``'s engine
-arm), pgw#1300 dropped the probe, and the wheel is now free to go — it gates
-nothing.
-
-fp4 serves; int4 is a typed refusal (:class:`SvdqInt4Unsupported`) — the
-native module is nvfp4 block-scaled ``_scaled_mm`` and int4 svdq is a
-different (single-level, group-64) scale path. Nothing produces int4
-(``convert/svdq_produce.py`` pins ``nvfp4``), so this is the honest spelling
-of a refusal that already happened."""
+"""SVDQuant 4-bit loader mode."""
 
 from __future__ import annotations
 
@@ -46,9 +13,6 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 SVDQ_METHOD = "svdquant"
-# pgw#1300: nunchaku's `SVDQ_FP4_SMS` / `SVDQ_INT4_SMS` kernel windows are
-# DELETED with both their consumers. The only SM window this stack serves by is
-# the native engine's own `svdq_native.SVDQ_NATIVE_FP4_SMS`.
 
 
 class SvdqError(RuntimeError):
@@ -73,27 +37,16 @@ SVDQ_INT4_REFUSAL = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Artifact detection — safetensors __metadata__ sniff
-# ---------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class SvdqArtifact:
-    component: str      # denoiser dir name inside the tree ("transformer"/"unet")
-    file: Path          # the nunchaku single-file checkpoint
-    model_class: str    # e.g. "NunchakuZImageTransformer2DModel"
-    precision: str      # "fp4" | "int4"
+    component: str
+    file: Path
+    model_class: str
+    precision: str
     rank: int
 
 
 def _read_safetensors_metadata(path: Path) -> dict:
-    """One shared, stub-aware reader — see `safetensors_header.read_metadata`.
-
-    Fail-open here is the loudest of the three: this metadata is what makes an
-    svdq checkpoint AN SVDQ CHECKPOINT. `{}` means `_svdq_from_file` returns
-    None, the artifact is not detected, and a W4A4 model is loaded down the
-    plain lane.
-    """
 
     return read_metadata(
         path,
@@ -132,9 +85,7 @@ def _svdq_from_file(component: str, path: Path) -> Optional[SvdqArtifact]:
 
 
 def detect_svdq_artifact(model_path: Path) -> Optional[SvdqArtifact]:
-    """Find the nunchaku single-file checkpoint inside a snapshot: the
-    denoiser dir's (or, for a bare artifact, the root's) sole svdq-tagged
-    safetensors. Cheap — header reads only."""
+    """Find the nunchaku single-file checkpoint inside a snapshot: the denoiser dir's (or, for a bare artifact, the root's) sole svdq-tagged safetensors."""
     root = Path(model_path)
     if root.is_file():
         return _svdq_from_file("", root) if root.suffix == ".safetensors" else None
@@ -155,22 +106,11 @@ def detect_svdq_artifact(model_path: Path) -> Optional[SvdqArtifact]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Loading — the native decoder wired into the standard pipeline
-# ---------------------------------------------------------------------------
-
 def check_svdq_servable(art: SvdqArtifact, path: Any = "") -> None:
-    """Every typed refusal for ``art``, raised on the DETECTED artifact.
-
-    Called before a single weight byte is read, so an unservable flavor is
-    refused by name rather than dying inside a load. int4 is refused on the
-    artifact's own precision — no probing, no environment, no engine ladder,
-    because there is nothing to probe: the refusal is a property of the
-    checkpoint."""
+    """Every typed refusal for ``art``, raised on the DETECTED artifact."""
     if str(art.precision) == "int4":
         raise SvdqInt4Unsupported(
             SVDQ_INT4_REFUSAL.format(path=path or art.file))
-    # Deferred: svdq_native adds +2 modules to the `import gen_worker` path.
     from .svdq_native import svdq_native_reason
 
     reason = svdq_native_reason()
@@ -180,11 +120,7 @@ def check_svdq_servable(art: SvdqArtifact, path: Any = "") -> None:
 
 
 def load_svdq_pipeline(cls: Any, path: Path, art: SvdqArtifact) -> Any:
-    """Serve an svdq artifact on the native engine.
-
-    The single entry point the loading layer uses. There is one engine, so
-    there is nothing to select: the artifact is either servable here or it is
-    a typed refusal."""
+    """Serve an svdq artifact on the native engine."""
     check_svdq_servable(art, path)
     from .svdq_native import load_svdq_native_pipeline
 

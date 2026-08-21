@@ -1,18 +1,4 @@
-"""The ONE streaming safetensors writer.
-
-  - IncrementalSafetensorsWriter: header first, then tensor bytes — O(1) memory
-  - tensor iteration over single and sharded safetensors sources
-  - streaming_dtype_cast / streaming_fp8_storage_cast: read one tensor,
-    transform, write into the component's ONE output file (peak RAM ~ largest
-    tensor)
-  - streaming_cast_snapshot / streaming_fp8_snapshot: whole-tree variants
-  - merge_safetensors_by_offset: raw byte-range de-shard, zero decode
-
-There is no re-shard planner: every producer here emits exactly one file per
-component; reading a sharded input stays supported forever.
-
-torch/safetensors imports are deferred so importing gen_worker.convert stays cheap.
-"""
+"""The ONE streaming safetensors writer."""
 
 from __future__ import annotations
 
@@ -58,7 +44,6 @@ class ConversionImplementationError(RuntimeError):
 
 _PICKLE_EXTS = (".ckpt", ".pt", ".pth", ".bin")
 
-# safetensors dtype name -> bytes per element
 _ST_DTYPE_SIZES = {
     "BOOL": 1, "U8": 1, "I8": 1, "F8_E4M3": 1, "F8_E5M2": 1,
     "U16": 2, "I16": 2, "F16": 2, "BF16": 2,
@@ -81,10 +66,6 @@ def torch_dtype_to_st(dtype: Any) -> str:
     return _TORCH_TO_ST[key]
 
 
-# ---------------------------------------------------------------------------
-# Shard planning
-# ---------------------------------------------------------------------------
-
 def list_shard_files_from_index(index_path: Path) -> list[Path]:
     """Shard file paths in weight-map order (deduped, first appearance)."""
     try:
@@ -106,25 +87,13 @@ def list_shard_files_from_index(index_path: Path) -> list[Path]:
     return ordered
 
 
-# ---------------------------------------------------------------------------
-# Incremental writer — header first, tensors streamed in order
-# ---------------------------------------------------------------------------
-
 class IncrementalSafetensorsWriter:
-    """Write a safetensors file one tensor at a time (no full dict in memory).
-
-    ``metadata`` (string-valued) is emitted as the header's ``__metadata__``.
-
-    Bytes go to a same-directory temp and reach ``output_path`` only via
-    fsync -> os.replace -> fsync(dir), so a hard-killed pod leaves no
-    truncated output under the real name — it exists whole or not at all. An
-    incomplete tensor set is never committed either.
-    """
+    """Write a safetensors file one tensor at a time (no full dict in memory)."""
 
     def __init__(self, output_path: Path, *, metadata: Mapping[str, str] | None = None) -> None:
         self._output_path = Path(output_path)
         self._temp_path = self._output_path.with_name(f".{self._output_path.name}.partial")
-        self._meta: list[tuple[str, str, list[int]]] = []  # (name, st_dtype, shape)
+        self._meta: list[tuple[str, str, list[int]]] = []
         self._metadata = {str(k): str(v) for k, v in (metadata or {}).items()}
         self._header_written = False
         self._fh: Any = None
@@ -135,8 +104,6 @@ class IncrementalSafetensorsWriter:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        # A body that raised produced a partial file: discard it rather than
-        # publish a truncated artifact under the real name.
         self.close(commit=exc_type is None)
 
     def add_tensor_metadata(self, name: str, *, dtype: str, shape: list[int]) -> None:
@@ -151,8 +118,6 @@ class IncrementalSafetensorsWriter:
         self._fh = open(self._temp_path, "wb")
         header: dict[str, Any] = {}
         if self._metadata:
-            # Sorted for byte-determinism: safe_open().metadata() iterates in
-            # randomized (Rust HashMap) order.
             header["__metadata__"] = dict(sorted(self._metadata.items()))
         offset = 0
         for name, dtype, shape in self._meta:
@@ -190,11 +155,7 @@ class IncrementalSafetensorsWriter:
         self._written.add(name)
 
     def close(self, *, commit: bool = True) -> None:
-        """Durably finalize (or discard) the output.
-
-        ``commit=False`` — or a tensor set that never completed — drops the
-        temp and leaves ``output_path`` absent.
-        """
+        """Durably finalize (or discard) the output."""
         if self._fh is None:
             self._discard()
             return
@@ -223,22 +184,17 @@ class IncrementalSafetensorsWriter:
 
 
 def _tensor_to_bytes(t: "torch.Tensor") -> Any:
-    """Contiguous little-endian raw byte buffer (zero-copy numpy view)."""
     import torch
 
     return t.contiguous().flatten().view(torch.uint8).numpy()
 
 
-# ---------------------------------------------------------------------------
 from ..models.file_layout import MULTI_FILE, SINGLE_FILE
 from ..component_vocab import (
     denoiser_components,
     text_encoder_components,
     weight_components,
 )
-
-# Tensor iteration (single / sharded safetensors inputs)
-# ---------------------------------------------------------------------------
 
 def _weight_component_dirs() -> frozenset[str]:
     return frozenset(weight_components())
@@ -251,11 +207,7 @@ def _resolve_input_shards(input_path: Path) -> list[Path]:
 
 
 def iter_component_tensors(component_dir: Path) -> Iterator[tuple[str, "torch.Tensor"]]:
-    """Yield (name, tensor) for every weight in one component directory.
-
-    Preference: sharded index > single safetensors. A component that offers
-    only a pickle is REFUSED -- pickles are banned platform-wide.
-    """
+    """Yield (name, tensor) for every weight in one component directory."""
     from safetensors import safe_open
 
     entry: Optional[Path] = None
@@ -304,10 +256,6 @@ def iter_source_tensors(
             yield entry.name, name, tensor
 
 
-# ---------------------------------------------------------------------------
-# Streaming per-tensor re-encode — one tensor in memory at a time
-# ---------------------------------------------------------------------------
-
 _ST_FLOAT_DTYPES: frozenset[str] = frozenset(
     {"F64", "F32", "F16", "BF16", "F8_E4M3", "F8_E5M2"})
 
@@ -316,25 +264,18 @@ def stream_reencode(
     input_path: Path,
     out_dir: Path,
     *,
-    out_st_dtype_for: Any,   # (name, src_st_dtype, shape) -> output st dtype
-    transform: Any,          # (name, tensor, out_st_dtype) -> tensor
+    out_st_dtype_for: Any,
+    transform: Any,
     output_stem: str,
 ) -> dict[str, Any]:
-    """Two-pass streaming re-encode over safetensors input(s).
-
-    Pass 1 reads only the shard headers (``get_slice`` — no tensor data) to
-    plan output shards; pass 2 reads one tensor at a time, applies
-    ``transform``, and appends it to its output shard. Peak anonymous memory
-    ≈ the largest single tensor. Source ``__metadata__`` is preserved.
-    """
+    """Two-pass streaming re-encode over safetensors input(s)."""
     from safetensors import safe_open
 
     shards_in = _resolve_input_shards(Path(input_path))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pass 1: header-only walk — output dtype + byte size per tensor.
-    metas: list[tuple[str, str, list[int], Path]] = []  # name, out_dtype, shape, src_shard
+    metas: list[tuple[str, str, list[int], Path]] = []
     size_map: dict[str, int] = {}
     source_metadata: dict[str, str] = {}
     for shard_path in shards_in:
@@ -352,9 +293,6 @@ def stream_reencode(
                 metas.append((name, out_dtype, shape, shard_path))
                 size_map[name] = numel * _ST_DTYPE_SIZES[out_dtype]
 
-    # ONE file per component. Tensor order is sorted-name, which is
-    # what the planner produced for a single-shard plan, so nothing about the
-    # output changed except that there is now always exactly one of them.
     metas.sort(key=lambda row: row[0])
     out_path = out_dir / f"{output_stem}.safetensors"
 
@@ -404,12 +342,7 @@ def streaming_dtype_cast(
     target_dtype: "torch.dtype",
     output_stem: str = "model",
 ) -> dict[str, Any]:
-    """Cast float tensors to ``target_dtype``, streaming directly into N shards.
-
-    Non-float tensors keep their source dtype. Returns ``output_paths``
-    (list of shard files), ``index_path`` (None for a single shard),
-    ``tensor_count`` / ``converted_count`` / ``shard_sizes`` / ``metadata``.
-    """
+    """Cast float tensors to ``target_dtype``, streaming directly into N shards."""
     target_st = torch_dtype_to_st(target_dtype)
 
     def out_st_dtype_for(_name: str, src_st: str, _shape: list[int]) -> str:
@@ -427,16 +360,8 @@ def streaming_dtype_cast(
     )
 
 
-# fp8-E4M3 storage cast (the `#fp8` flavor): matches the consumption side —
-# diffusers layerwise casting (gen_worker.models.loading.apply_fp8_storage)
-# casts only Linear/Conv modules whose qualified name misses the skip
-# patterns, and upcasts them per-layer at compute time. The producer casts
-# strictly LESS than any consumer would: only >=2-D `.weight` tensors whose
-# module path misses the union of diffusers' skip patterns (defaults + every
-# per-class `_skip_layerwise_casting_patterns`). Anything skipped here that a
-# consumer does cast merely stores bigger — never a baked-in quality loss.
 FP8_SKIP_TENSOR_PATTERNS: tuple[str, ...] = (
-    "embed",            # pos_embed / patch_embed(ding|der) / *_embedder / embed_tokens / time_embedding
+    "embed",
     "norm",
     "pooler",
     "adaln_single",
@@ -447,7 +372,7 @@ FP8_SKIP_TENSOR_PATTERNS: tuple[str, ...] = (
     r"^proj_in$", r"^proj_out$", r"^proj$",
 )
 
-_FP8_E4M3_MAX = 448.0  # torch float8_e4m3fn cast does NOT saturate; clamp first
+_FP8_E4M3_MAX = 448.0
 
 
 def fp8_cast_eligible(
@@ -464,12 +389,6 @@ def fp8_cast_eligible(
     return not any(re.search(p, module_path) for p in skip_patterns)
 
 
-# ``.<block-list>.<idx>.`` segment — a param living under a repeated-block
-# container (nn.ModuleList child). The transformers-backbone fp8 lane casts
-# ONLY these, mirroring the runtime block-window walk
-# (gen_worker.models.loading._fp8_block_windows): params outside repeated
-# blocks (embeddings, final norms, heads) stay at source precision, so the
-# stored flavor is a strict subset of what any consumer re-arms.
 _FP8_BLOCK_SCOPE_RE = r"\.\d+\."
 
 
@@ -486,17 +405,7 @@ def streaming_fp8_storage_cast(
     skip_patterns: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS,
     block_scope: bool = False,
 ) -> dict[str, Any]:
-    """Produce the fp8-E4M3 storage flavor of one weight set, streaming.
-
-    Eligible weights are clamped to ±448 and stored as F8_E4M3; everything
-    else keeps its source dtype. Scale-free by design: consumption is
-    diffusers layerwise casting (fp8 bytes resident, bf16/fp16 compute).
-
-    ``block_scope=True`` (the transformers-backbone lane) additionally
-    requires an eligible weight to live under a repeated-block container
-    (``.<idx>.`` path segment) — the stored set stays a strict subset of the
-    runtime block-window walk.
-    """
+    """Produce the fp8-E4M3 storage flavor of one weight set, streaming."""
     import torch
 
     def out_st_dtype_for(name: str, src_st: str, shape: list[int]) -> str:
@@ -518,26 +427,13 @@ def streaming_fp8_storage_cast(
     )
 
 
-# ---------------------------------------------------------------------------
-# W8A8 per-channel-scaled fp8 producer — data-free requant
-# from the bf16 source, streaming. The tensor-layout contract is gw#534's
-# ``#fp8-w8a8`` (consumed by gen_worker.models.w8a8): per quantized Linear a
-# F8_E4M3 ``weight`` plus a F32 [out] ``weight_scale`` DEQUANT twin; excluded
-# layers stay at source precision with NO scale tensor. Activation scales are
-# DYNAMIC at serve time (Paul's settled design — no static calibration), so
-# the producer emits no input_scale.
-# ---------------------------------------------------------------------------
+W8A8_QUANT_SCHEME = "fp8-w8a8"
 
-W8A8_QUANT_SCHEME = "fp8-w8a8"  # == gen_worker.models.w8a8.W8A8_FLAVOR (test-guarded)
-
-# The ie#494 probe spec: quantize ONLY repeated-block Linears; MoE-style
-# gate-logit projections stay full precision even when 16-aligned (the probe
-# skipped LTX's 288 ``to_gate_logits`` explicitly).
 W8A8_SKIP_TENSOR_PATTERNS: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS + (
     "gate_logits",
 )
 
-_W8A8_DIM_ALIGN = 16  # torch._scaled_mm alignment (models.w8a8._DIM_ALIGN)
+_W8A8_DIM_ALIGN = 16
 _SCALE_SUFFIX = ".weight_scale"
 
 
@@ -545,11 +441,7 @@ def w8a8_cast_eligible(
     name: str, src_st_dtype: str, shape: list[int],
     *, skip_patterns: tuple[str, ...] = W8A8_SKIP_TENSOR_PATTERNS,
 ) -> bool:
-    """True when a stored tensor becomes a quantized w8a8 Linear weight:
-    a 2-D float ``.weight`` under a repeated-block container, both dims
-    16-aligned, missing every skip pattern. Everything else (embeddings,
-    norms, projections outside blocks, misaligned or conv weights) stays at
-    source precision — mirroring the ie#494 probe's flip/skip list."""
+    """True when a stored tensor becomes a quantized w8a8 Linear weight: a 2-D float ``.weight`` under a repeated-block container, both dims 16-aligned, missing every skip pattern."""
     if src_st_dtype not in {"F64", "F32", "F16", "BF16"}:
         return False
     if len(shape) != 2 or not name.endswith(".weight"):
@@ -569,16 +461,7 @@ def streaming_w8a8_cast(
     output_stem: str = "model",
     skip_patterns: tuple[str, ...] = W8A8_SKIP_TENSOR_PATTERNS,
 ) -> dict[str, Any]:
-    """Per-channel-scaled fp8 requant of one weight set, streaming.
-
-    Two passes like :func:`stream_reencode`, but eligible weights emit TWO
-    output tensors — the fp8 ``weight`` and its F32 [out] ``weight_scale``
-    (``scale = amax(row)/448``, ``q = round(w/scale)`` in fp32; the probe's
-    exact recipe). Peak anonymous memory ~ the largest single tensor.
-    ``.weight`` sorts immediately before ``.weight_scale``, so a weight is
-    always quantized before its scale is due — the scale is cached (tiny)
-    across a shard boundary if the plan splits the pair.
-    """
+    """Per-channel-scaled fp8 requant of one weight set, streaming."""
     import torch
     from safetensors import safe_open
 
@@ -586,7 +469,6 @@ def streaming_w8a8_cast(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pass 1: header-only walk.
     metas: list[tuple[str, str, list[int], Optional[Path]]] = []
     size_map: dict[str, int] = {}
     source_metadata: dict[str, str] = {}
@@ -639,7 +521,7 @@ def streaming_w8a8_cast(
                 w.add_tensor_metadata(name, dtype=out_dtype, shape=shape)
             w.write_header()
             for name, _out_dtype, _shape, src in metas:
-                if src is None:  # synthesized weight_scale
+                if src is None:
                     w.write_tensor(
                         name, _tensor_to_bytes(pending_scales.pop(name)))
                     continue
@@ -683,25 +565,13 @@ def streaming_w8a8_cast(
     }
 
 
-# ---------------------------------------------------------------------------
-# Snapshot-level streaming conversion (whole source tree, per weight group)
-# ---------------------------------------------------------------------------
-
-# Components fp8 storage targets by default: the denoiser dominates VRAM and
-# is what apply_fp8_storage consumes (QUANTIZATION-POLICY.md order of
-# sacrifice; TEs join via gw#392's component-wise ladder, explicitly).
 def fp8_default_components() -> tuple[str, ...]:
     """Components fp8 storage targets by default: the denoisers."""
     return denoiser_components()
 
 
 def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Path]]:
-    """(component, entry_path) per weight set. entry is the index.json for
-    sharded sets, else the safetensors file. A singlefile-layout source can
-    still carry several root weight files (civitai bundles ship the
-    diffusion model + text encoder + VAE side by side) — every one is its
-    own group, or a dtype pass would convert only the first and the tree
-    copy would silently drop the rest."""
+    """(component, entry_path) per weight set."""
     groups: list[tuple[str, Path]] = []
 
     def _entries_for(d: Path) -> list[Path]:
@@ -735,36 +605,20 @@ def _link_or_copy(src: Path, dst: Path) -> None:
     if dst.exists():
         return
     try:
-        # Resolve first: HF-cache snapshots are relative-symlink farms and a
-        # hardlink to the SYMLINK breaks the moment the tree is moved
-        # (gw#415 live: model_index.json -> ../../blobs/... dangling).
         os.link(src.resolve(), dst)
     except OSError:
         shutil.copy2(src, dst)
 
 
 def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: set[str]) -> None:
-    """Materialize the PASSTHROUGH half of a produced tree: hardlink every file
-    the caller is not writing itself. Weight files and sharded indexes of the
-    components named in ``skip_components`` are skipped — the caller writes
-    those.
-
-    A passthrough component that arrives as an HF shard set is COLLAPSED here
-. This is the only door untouched weights enter a tree we produce,
-    and every caller is one of our producers, so the one-file-per-component
-    invariant is satisfied at the door rather than at each of the callers. The
-    source is untouched: what is unlinked is this tree's hardlink, and the
-    merge verifies the bytes against the index it consumed, so a klein-4b-class
-    index/shard disagreement fails the produce instead of publishing an
-    unloadable component.
-    """
+    """Materialize the PASSTHROUGH half of a produced tree: hardlink every file the caller is not writing itself."""
     copied_indexes: list[Path] = []
     for f in sorted(source_dir.rglob("*")):
         if not f.is_file():
             continue
         rel = f.relative_to(source_dir)
         if rel.parts[:2] == (".cache", "huggingface"):
-            continue  # hf local-dir download metadata, not repo content
+            continue
         comp = rel.parts[0] if len(rel.parts) > 1 else ""
         name = f.name
         is_weightish = f.suffix == ".safetensors" or name.endswith(".safetensors.index.json")
@@ -780,9 +634,6 @@ def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: s
             deshard_indexed_safetensors(index_path)
 
 
-# scheduler config overrides per checkpoint objective/distilled
-# fact. v_prediction needs zero-terminal-SNR v-prediction sampling;
-# distilled needs trailing timestep spacing (few-step, near-zero CFG).
 _OBJECTIVE_SCHEDULER_OVERRIDES: dict[str, dict[str, Any]] = {
     "v_prediction": {"prediction_type": "v_prediction", "rescale_betas_zero_snr": True},
 }
@@ -792,10 +643,7 @@ _DISTILLED_SCHEDULER_OVERRIDES: dict[str, Any] = {"timestep_spacing": "trailing"
 def apply_objective_scheduler_config(
     out_dir: Path, objective: str, distilled: bool = False,
 ) -> None:
-    """Stamp the checkpoint's objective/distilled scheduler overrides into a
-    produced diffusers snapshot's ``scheduler/config.json``. No-op for an
-    epsilon/unstamped non-distilled checkpoint or a tree with no scheduler
-    component (e.g. singlefile output)."""
+    """Stamp the checkpoint's objective/distilled scheduler overrides into a produced diffusers snapshot's ``scheduler/config.json``."""
     overrides: dict[str, Any] = dict(
         _OBJECTIVE_SCHEDULER_OVERRIDES.get(str(objective or ""), {}))
     if distilled:
@@ -825,9 +673,7 @@ def streaming_cast_snapshot(
     file_layout: str,
     target_dtype: "torch.dtype",
 ) -> dict[str, Any]:
-    """Streaming dtype cast of a whole snapshot: every weight group is cast
-    per-tensor (peak anon RAM ≈ largest tensor); configs/tokenizers hardlink
-    through. Output is a complete loadable tree."""
+    """Streaming dtype cast of a whole snapshot: every weight group is cast per-tensor (peak anon RAM ≈ largest tensor); configs/tokenizers hardlink through."""
     source_dir, out_dir = Path(source_dir), Path(out_dir)
     groups = snapshot_weight_groups(source_dir, file_layout)
     if not groups:
@@ -848,10 +694,6 @@ def streaming_cast_snapshot(
             "components": sorted(done), "output_dir": out_dir}
 
 
-# Text-encoder components the ``fp8+te`` rung casts. This USED to be a
-# hand-maintained mirror of loading's copy with a drift guard in
-# tests/test_fp8_te_writer.py; pgw#740 B5 removed the drift by removing the
-# copy (component_vocab is stdlib-only, so importing it stays cheap).
 def fp8_te_components() -> tuple[str, ...]:
     return text_encoder_components()
 
@@ -876,11 +718,6 @@ def component_stored_tensor_names(component_dir: Path) -> frozenset[str]:
 
 
 def _loader_key_translator(model: Any) -> Any:
-    """Checkpoint-key -> module-graph-key translation using transformers' OWN
-    load-path machinery (WeightRenaming rules + base-model-prefix
-    reconciliation) — the same code ``from_pretrained`` runs, so old-layout
-    checkpoints (e.g. Gemma3 ``language_model.model.*`` vs the 4.52+
-    ``model.language_model.*`` graph) resolve exactly like the loader."""
     try:
         from transformers.conversion_mapping import get_model_conversion_mapping
         from transformers.core_model_loading import (
@@ -888,8 +725,6 @@ def _loader_key_translator(model: Any) -> Any:
             rename_source_key,
         )
     except ImportError:
-        # transformers 4.x: the mapping is a class attr of regex->replacement
-        # pairs, applied by from_pretrained via re.sub in order.
         import re as _re
 
         mapping = getattr(type(model), "_checkpoint_conversion_mapping", None)
@@ -922,19 +757,7 @@ def _loader_key_translator(model: Any) -> Any:
 
 
 def te_fp8_castable_keys(component_dir: Path) -> frozenset[str]:
-    """STORED tensor names the ``fp8+te`` LOADER casts for a transformers
-    text encoder — derived by meta-instantiating the checkpoint's
-    architecture and running the SAME block-window selection the runtime
-    applies (:func:`gen_worker.models.loading._fp8_block_windows`, gw#460),
-    then mapping the component's stored key names onto the module graph with
-    transformers' own checkpoint-conversion machinery. Using the loader's
-    graph walk + the loader's key translation is the zero-drift contract:
-    the stored artifact is byte-identical to what cast-at-load produces.
-
-    Block-window rules: castable = Linear/conv WEIGHTS inside the
-    children of top-level ``nn.ModuleList`` containers, excluding params
-    shared with modules outside a block (tied lm_head / embeddings).
-    Embeddings, norms, biases, poolers stay at source precision."""
+    """STORED tensor names the ``fp8+te`` LOADER casts for a transformers text encoder — derived by meta-instantiating the checkpoint's architecture and running the SAME block-window selection the runtime..."""
     import torch
     import transformers
 
@@ -977,10 +800,7 @@ def streaming_fp8_te_cast(
     castable_keys: frozenset[str],
     output_stem: str = "model",
 ) -> dict[str, Any]:
-    """fp8-E4M3 storage cast of one transformers weight set: exactly the
-    ``castable_keys`` (the loader's block-window weight set) become
-    F8_E4M3 (clamp ±448 first — torch's cast does not saturate); every
-    other tensor keeps its source dtype byte-identically."""
+    """fp8-E4M3 storage cast of one transformers weight set: exactly the ``castable_keys`` (the loader's block-window weight set) become F8_E4M3 (clamp ±448 first — torch's cast does not saturate); every ..."""
     import torch
 
     def out_st_dtype_for(name: str, src_st: str, shape: list[int]) -> str:
@@ -1008,21 +828,7 @@ def streaming_fp8_snapshot(
     components: tuple[str, ...] | None = None,
     te_components: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Produce the ``#fp8`` flavor of a diffusers snapshot, streaming.
-
-    ``components`` (default: the denoiser) get the name-pattern fp8 cast;
-    ``te_components`` (the ``fp8+te`` rung, gw#460 — pass
-    :func:`fp8_te_components`) get the transformers block-window cast whose
-    eligible set is derived from the loader itself. Every other component
-    passes through untouched.
-
-    Non-diffusers layouts are supported for exactly ONE shape: a single
-    root weight set (sharded-transformers backbone — the whole checkpoint
-    IS the denoiser, e.g. a UiT like HiDream-O1). That set gets the
-    block-scoped fp8 cast; multi-set singlefile bundles still refuse
-    (component identity is ambiguous there)."""
-    # Resolved at call time, never as a default argument: a default is
-    # evaluated at def time and would freeze the pre-declaration vocabulary.
+    """Produce the ``#fp8`` flavor of a diffusers snapshot, streaming."""
     if components is None:
         components = fp8_default_components()
     source_dir, out_dir = Path(source_dir), Path(out_dir)
@@ -1078,11 +884,6 @@ def streaming_fp8_snapshot(
 
 
 def _nested_weight_sets(d: Path) -> list[tuple[str, Path, tuple[Path, ...]]]:
-    """(rel entry, entry path, member files) per weight set, at the root
-    and under nested dirs (split-checkpoint layouts). entry is the shard
-    index for sharded sets, else the safetensors file; members are the
-    set's on-disk files (index + shards, or the single file). Hidden dirs
-    (``.cache`` download metadata) are skipped."""
     sets: list[tuple[str, Path, tuple[Path, ...]]] = []
     dirs = [d] + sorted(
         p for p in d.rglob("*")
@@ -1116,35 +917,7 @@ def streaming_w8a8_snapshot(
     weight_set_patterns: tuple[str, ...] = (),
     skip_patterns: tuple[str, ...] = W8A8_SKIP_TENSOR_PATTERNS,
 ) -> dict[str, Any]:
-    """Produce the ``#fp8-w8a8`` flavor of a diffusers snapshot, streaming.
-
-    The denoiser (``components``) gets the per-channel-scaled w8a8 requant
-    (:func:`streaming_w8a8_cast`); ``te_components`` ride the SAME fp8+te
-    block-window storage cast the ``#fp8`` flavor uses (scale-free — text
-    encoders serve W8-storage, only the denoiser runs fp8 GEMMs). Every
-    other component passes through untouched. The denoiser's config gains
-    the gw#534 corroborating ``quantization_config`` (the safetensors
-    headers stay authoritative for detection).
-
-    Non-diffusers layouts scan the WHOLE tree for weight sets
-    (root and nested — split-checkpoint layouts keep component files under
-    subdirs). Exactly the denoiser set(s) get the requant: a single
-    discovered set is unambiguous; with several, ``weight_set_patterns``
-    (globs over each set's rel entry path) must select — other sets pass
-    through byte-identical, so text encoders/VAEs never grow scale twins
-    (their quantized keys could never resolve in the denoiser at swap
-    time). No component config exists; the headers alone carry
-    detection.
-
-    ``skip_patterns`` overrides the module-path skip regexes. The default set
-    is architecture-agnostic and therefore INCOMPLETE for any given denoiser:
-    it knows ``adaln_single`` but not MiniMax-H3's ``adaln_proj``, so a bare
-    produce run quantizes 50 modulation projections (26.01 GB, 39% of the
-    DiT) that the model's own serve recipe keeps bf16 (ie#681, measured from
-    headers). Model-specific selection is INVOKE data, like
-    ``weight_set_patterns`` — never a name added to the shared default."""
-    # Resolved at call time, never as a default argument: a default is
-    # evaluated at def time and would freeze the pre-declaration vocabulary.
+    """Produce the ``#fp8-w8a8`` flavor of a diffusers snapshot, streaming."""
     if components is None:
         components = fp8_default_components()
 
@@ -1189,8 +962,6 @@ def streaming_w8a8_snapshot(
                 "no w8a8-eligible weights in the selected weight set(s) "
                 "(nothing 2-D/16-aligned under a repeated-block container "
                 "missed the skip patterns)")
-        # Passthrough: every other file hardlinks byte-identical (unselected
-        # weight sets dedup against the source mirror in CAS).
         for f in sorted(source_dir.rglob("*")):
             if not f.is_file():
                 continue
@@ -1247,7 +1018,7 @@ def streaming_w8a8_snapshot(
             "quant_method": "modelopt", "quant_algo": "FP8"}
         dst_cfg = out_dir / comp / "config.json"
         if dst_cfg.exists():
-            dst_cfg.unlink()  # hardlinked to the source — never write through
+            dst_cfg.unlink()
         dst_cfg.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     return {"tensor_count": tensor_count, "converted_count": converted,
             "components": sorted(done), "output_dir": out_dir}
@@ -1261,22 +1032,7 @@ def verify_w8a8_snapshot(
     seed: int = 0,
     source_compute_dtype: str = "storage",
 ) -> dict[str, Any]:
-    """Byte-gate a produced w8a8 tree against its source.
-
-    Detection runs through the CONSUMER's own sniffer
-    (:func:`gen_worker.models.w8a8.detect_w8a8_artifact`), then for a
-    deterministic sample of quantized layers: (a) recomputing the FP8 weight
-    with the artifact's recorded scale must reproduce its bytes EXACTLY,
-    (b) that scale must be the source-derived per-row amax/448 value within
-    one FP32 ULP (CUDA and CPU division legitimately choose adjacent FP32
-    values), and (c) ``dequant(w_fp8 x scale)`` must sit within fp8-e4m3
-    format error of the source (max row-relative error <= 2**-4 + subnormal
-    floor).
-    Raises :class:`ConversionImplementationError` on any failure; returns a
-    report dict for produce logs. ``source_compute_dtype`` names the exact
-    producer-side quantization input view. For example, an immutable FP16
-    checkpoint loaded as production BF16 is cast to BF16 before exact
-    recomputation; storage and compute dtypes are both reported."""
+    """Byte-gate a produced w8a8 tree against its source."""
 
     import torch
     from safetensors import safe_open
@@ -1319,8 +1075,6 @@ def verify_w8a8_snapshot(
             p for p in (source_dir / art.component).glob("*.safetensors")
             if p.is_file())
     else:
-        # Root layout: nested split-checkpoint trees carry the weight sets
-        # under subdirs — reuse the detector's own file discovery.
         from gen_worker.models.w8a8 import _root_weight_files
 
         src_files = [p for p in _root_weight_files(source_dir) if p.is_file()]
@@ -1367,11 +1121,7 @@ def verify_w8a8_snapshot(
             raise ConversionImplementationError(
                 f"byte-gate: {sname} contains non-finite/non-positive values")
 
-        # ModelOpt derives the scale on CUDA while this portable verifier reads
-        # the immutable source on CPU.  FP32 division by 448 differs by one ULP
-        # for some rows across those devices.  Compare the positive FP32 bit
-        # patterns directly: this admits only the two valid adjacent results,
-        # rather than an arbitrary numerical epsilon.
+        # ModelOpt derives the scale on CUDA; this verifier recomputes on CPU, and FP32 division by 448 legitimately differs by one ULP across devices. Compare positive FP32 bit patterns directly — admits only the two valid adjacent results, not an arbitrary epsilon.
         expected_bits = expected_scale.contiguous().view(torch.int32).to(torch.int64)
         artifact_bits = artifact_scale.contiguous().view(torch.int32).to(torch.int64)
         scale_ulp = (expected_bits - artifact_bits).abs()
@@ -1392,8 +1142,6 @@ def verify_w8a8_snapshot(
         if not math.isfinite(rel):
             raise ConversionImplementationError(
                 f"byte-gate: {wname} dequant error is non-finite")
-        # e4m3 half-ulp relative error at worst 2**-4 for normals, plus the
-        # subnormal quantization floor for near-zero elements.
         if rel > 2 ** -4 + 2 ** -9:
             raise ConversionImplementationError(
                 f"byte-gate: {wname} dequant error {rel:.5f} exceeds the "
@@ -1411,10 +1159,6 @@ def verify_w8a8_snapshot(
         "source_compute_dtype": canonical_compute_dtype,
     }
 
-
-# ---------------------------------------------------------------------------
-# Raw byte-offset re-shard (no tensor decode)
-# ---------------------------------------------------------------------------
 
 _HEADER_LEN_PREFIX = 8
 _RAW_COPY_CHUNK = 8 * 1024 * 1024
@@ -1477,16 +1221,7 @@ def shard_payload_digests(path: Path) -> dict[str, str]:
 
 
 def shard_content_digest(path: Path) -> str:
-    """CONTENT identity of one shard: its tensors' (name, dtype, shape, payload)
-    and its ``__metadata__``, digested in a canonical order.
-
-    Deliberately NOT the file's bytes: tensor ORDER inside the file, header key
-    order and JSON separators are not content, and a rewrite that preserves
-    every tensor exactly must compare equal even when it lays them out
-    differently. That is what makes this digest usable as the round-trip
-    obligation in ``layout_converters`` — it refuses lost information, not
-    reordering.
-    """
+    """CONTENT identity of one shard: its tensors' (name, dtype, shape, payload) and its ``__metadata__``, digested in a canonical order."""
     rows = []
     with open(path, "rb") as fh:
         header, base = read_safetensors_header(fh.fileno())
@@ -1514,12 +1249,7 @@ def write_safetensors_shard(
     *,
     metadata: Optional[Mapping[str, str]] = None,
 ) -> Path:
-    """Write ONE safetensors file from raw ``(dtype, shape, payload)`` triples.
-
-    Torch-free on purpose: the layout-converter corpus materializes real
-    HEADERS with synthetic payloads, and pulling torch in to do that would make
-    a declaration-time proof cost a framework import.
-    """
+    """Write ONE safetensors file from raw ``(dtype, shape, payload)`` triples."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     header: dict[str, Any] = {}
@@ -1554,18 +1284,7 @@ def rewrite_safetensors_keys(
     *,
     extra_metadata: Optional[Mapping[str, str]] = None,
 ) -> Path:
-    """Rename tensors by RAW BYTE-RANGE COPY — no tensor ever enters Python.
-
-    This is the whole topology-axis engine (§1.33: topology is "essentially
-    just different keys"). Because the payloads are copied as opaque ranges,
-    bit-losslessness on that axis is a property of THIS FUNCTION rather than a
-    claim each converter makes about itself.
-
-    ``key_map`` must be total over the shard's tensors — an unmapped key is a
-    refusal, never a silent passthrough — and injective. ``source`` may equal
-    ``target`` (used to stamp provenance in place); the write goes through a
-    temp file and an atomic rename either way.
-    """
+    """Rename tensors by RAW BYTE-RANGE COPY — no tensor ever enters Python."""
     source, target = Path(source), Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     entries = shard_tensor_entries(source)
@@ -1629,27 +1348,13 @@ def rewrite_safetensors_keys(
     return target
 
 
-# ---------------------------------------------------------------------------
-# Producer invariant (th#1362 item 4)
-# ---------------------------------------------------------------------------
-
-# HF's save_pretrained shards at its own default (5-10 GB) and takes no "never"
-# sentinel, so producers that go through it pass this instead. Our producers do
-# not emit shards; the assertion below is what makes that true rather than
-# hoped-for.
 NEVER_SHARD_MAX_SIZE = "1024GB"
 
 _SHARD_MEMBER_NAME_RE = re.compile(r"^.+-\d{5}-of-\d{5}\.(safetensors|bin|pt|ckpt)$")
 
 
 def find_producer_shards(tree: Path) -> list[str]:
-    """Tree-relative paths that make this output a SHARD SET.
-
-    Deliberately narrow: an HF shard index, or a member named by the
-    ``-NNNNN-of-MMMMM`` convention. Two unrelated weight files in one component
-    (dtype variants, say) are not sharding and are none of this check's
-    business.
-    """
+    """Tree-relative paths that make this output a SHARD SET."""
     root = Path(tree)
     if root.is_file():
         return ([root.name] if _SHARD_MEMBER_NAME_RE.match(root.name)
@@ -1665,16 +1370,6 @@ def find_producer_shards(tree: Path) -> list[str]:
 
 
 def assert_one_file_per_component(tree: Path, *, producer: str) -> None:
-    """th#1362: OUR producers never emit shards — assert it on our own output.
-
-    This is not a publish gate and never applies to somebody else's artifact: a
-    user uploading a sharded checkpoint is accepted as given, because
-    de-sharding would change its checkpoint id. It applies where WE own the
-    bytes, and it fails CLOSED — save_pretrained will happily shard on its own,
-    so this must be checked rather than assumed. A format that genuinely cannot
-    be written as one file per component is a named, justified exception, never
-    a silent fallback.
-    """
     shards = find_producer_shards(Path(tree))
     if shards:
         raise ConversionImplementationError(
@@ -1687,17 +1382,7 @@ def merge_safetensors_by_offset(
     shard_paths: Sequence[Path],
     out_path: Path,
 ) -> Path:
-    """Concatenate an HF shard set into ONE safetensors file by raw byte-range
-    copy — the input never enters Python as a tensor.
-
-    The inverse of the shard planner, and the only direction th#1362 keeps:
-    chunked CAS already solves resumable/parallel transfer BELOW the file, so a
-    shard set buys nothing and costs an index that can disagree with the bytes
-    it describes (the klein-4b unloadable publish).
-
-    Tensor order is preserved — shard order, then data order within a shard —
-    so the merged file is the natural concatenation of what upstream shipped.
-    """
+    """Concatenate an HF shard set into ONE safetensors file by raw byte-range copy — the input never enters Python as a tensor."""
     if not shard_paths:
         raise ValueError("merge_safetensors_by_offset: no shards")
     out_path = Path(out_path)
@@ -1735,7 +1420,7 @@ def merge_safetensors_by_offset(
                         f"({seen[name].name} and {shard.name})")
                 seen[name] = shard
                 rows.append((name, meta, fd, data_base, int(offs[0]), int(offs[1])))
-            rows.sort(key=lambda r: r[4])  # sequential source reads
+            rows.sort(key=lambda r: r[4])
             entries.extend(rows)
 
         new_header: dict[str, Any] = {}
@@ -1777,18 +1462,7 @@ def merge_safetensors_by_offset(
 
 
 def deshard_indexed_safetensors(index_path: Path) -> Path:
-    """Collapse ONE HF shard set into a single ``<prefix>.safetensors``.
-
-    bytes WE own are normalised to one file per component — mirrors we
-    ingest AND the passthrough components of the flavors we produce, which are
-    the same bytes one step later. Chunked CAS already gives resumable,
-    parallel, partial-failure-tolerant transfer BELOW the file, so the shard set
-    buys nothing and costs an index that can disagree with the bytes it names —
-    the bug that made klein-4b publish an unloadable text_encoder.
-
-    Provenance is unaffected: upstream per-file digests are recorded by the
-    provenance layer regardless of the layout we store.
-    """
+    """Collapse ONE HF shard set into a single ``<prefix>.safetensors``."""
     payload = json.loads(index_path.read_text(encoding="utf-8"))
     weight_map = payload.get("weight_map")
     if not isinstance(weight_map, dict) or not weight_map:
@@ -1812,9 +1486,6 @@ def deshard_indexed_safetensors(index_path: Path) -> Path:
         raise ValueError(f"deshard destination already exists: {merged}")
     merge_safetensors_by_offset(members, merged)
 
-    # The merged header must name exactly the tensors the index claimed — the
-    # index-vs-bytes disagreement this whole change exists to kill is caught
-    # here, at ingest, instead of at load time on a GPU pod.
     with open(merged, "rb") as f:
         header_len = int.from_bytes(f.read(8), "little")
         # bound-justified: `merged` was written by merge_safetensors_by_offset in
@@ -1847,22 +1518,13 @@ def tree_has_sharded_safetensors(tree: Path) -> bool:
 
 
 def deshard_mirror_tree(tree: Path) -> int:
-    """De-shard every HF shard set in a tree, in place.
-
-    One component at a time, unlinking each set's members as soon as its merged
-    file is verified, so the peak extra disk is the LARGEST component and not
-    the whole tree.
-    """
+    """De-shard every HF shard set in a tree, in place."""
     n = 0
     for index_path in sorted(Path(tree).rglob("*.safetensors.index.json")):
         deshard_indexed_safetensors(index_path)
         n += 1
     return n
 
-
-# ---------------------------------------------------------------------------
-# Canonical published filenames
-# ---------------------------------------------------------------------------
 
 CAST_NORMALIZE_DTYPES = {"fp16", "bf16", "fp32", "f16", "f32"}
 
@@ -1877,19 +1539,7 @@ VARIANT_INDEX_NAME_RE = re.compile(
 
 
 def normalize_variant_filenames(tree: Path) -> None:
-    """Strip dtype-variant tokens from published weight filenames — the ONE
-    canonical-naming pass every publish path runs (gw#466, unified by gw#522).
-
-    dtype is a checkpoint axis in repo-cas — one dtype per checkpoint — so
-    HF variant suffixes are redundant, and the resharder composes an index
-    name diffusers cannot find (live twice: J23 juggernaut-xl, gw#522
-    sdxl-base — "diffusion_pytorch_model.fp16.safetensors.index.json" where
-    diffusers' _add_variant expects
-    "diffusion_pytorch_model.safetensors.index.fp16.json"; loads died).
-    Canonical names sidestep the class. A directory whose canonical twin
-    already exists is left untouched (dual-dtype upstream trees must not
-    collide). Quant flavors (fp8/int4/…) are never normalized — their names
-    carry loader semantics. Idempotent."""
+    """Strip dtype-variant tokens from published weight filenames — the ONE canonical-naming pass every publish path runs (gw#466, unified by gw#522)."""
     dirs = sorted({p.parent for p in Path(tree).rglob("*.safetensors*") if p.is_file()})
     for d in dirs:
         renames: dict[str, str] = {}

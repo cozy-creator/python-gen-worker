@@ -1,17 +1,3 @@
-"""pgw#1372: the ship-code-as-is serving layer — eager-first, ctx.compile adopt.
-
-Integration, no mocks: the fixture endpoint under
-``tests/fixtures/serving_v2_endpoint`` is shaped exactly like the
-serverless-endpoints sdxl ``main_v2.py`` under the pgw#1382 split
-(``SdxlModel(Model[SDXL], lanes=…)``, one stateless ``@entrypoint``,
-imperative ``self.pipe.unet = ctx.compile(self.pipe.unet)`` marking). It
-boots from a CONFIG-ONLY checkpoint (fake weights), serves real requests
-end-to-end on CPU, and the adopt path runs real publish-time discovery
-output through a real ``LocalGraphStore`` — only the artifact loader is a
-stub, because bytes-to-callable is the AOTInductor runtime's job on the
-target GPU.
-"""
-
 from __future__ import annotations
 
 import json
@@ -46,13 +32,7 @@ SM = "sm_89"
 STACK: tuple[tuple[str, str], ...] = (("torch", torch.__version__),)
 ENV = EnvIdentity(stack=STACK, sm=SM)
 
-#: Hub per-checkpoint overrides — mutable deploy state, decoded by
-#: ``LoadContext.defaults()`` against ``SDXL.Defaults``. Small step knob so
-#: the CPU loop stays tiny.
 OVERRIDES: dict[str, Any] = {
-    # A hub row narrows [lo, hi] and moves the default; it can NEVER rename
-    # the knob (pgw#1377: `name` is stamped by the struct, never wire input),
-    # so the caller-visible adjustment row names the KNOB — `guidance`.
     "steps": {"default": 2, "lo": 1, "hi": 8},
     "guidance": {"default": 6.0, "lo": 1.5, "hi": 8.0},
 }
@@ -104,18 +84,11 @@ def fixture_model(host: EndpointHost) -> Any:
     return instance.model
 
 
-# --- the eager path: standalone, first --------------------------------------
-
-
 def test_eager_boot_serves_a_request_end_to_end(host: EndpointHost, tmp_path: Path) -> None:
-    # load() ran the author's ctx.load against the checkpoint tree under the
-    # active lane's dtype, and ctx.defaults() typed the hub overrides.
     model = fixture_model(host)
     assert model.pipe.dtype is torch.float32
-    assert model.defaults.steps.default == 2  # hub override beat the platform value
-    assert model.defaults.cfg is True  # platform default survived
-    # ctx.compile with no adoption source is a transparent pass-through: the
-    # marked module carries no swapped forward.
+    assert model.defaults.steps.default == 2
+    assert model.defaults.cfg is True
     assert "forward" not in model.pipe.unet.__dict__
 
     ctx = host.make_context("req-1")
@@ -129,12 +102,9 @@ def test_eager_boot_serves_a_request_end_to_end(host: EndpointHost, tmp_path: Pa
     saved = tmp_path / "outputs" / out.image.ref
     assert saved.is_file() and saved.stat().st_size > 0
 
-    # The Knob clamp recorded the caller-visible adjustment (12 -> 8).
     rows = [row for row in ctx.adjustments if row["field"] == "guidance"]
     assert rows and rows[0]["requested"] == "12.0" and rows[0]["applied"] == "8.0"
 
-    # The boot recorded a model_load span for the author's load, and no
-    # adopt_pull span — nothing was offered to adopt.
     stages = [span.stage.value for span in boot_stages.recorded()]
     assert "model_load" in stages
     assert "adopt_pull" not in stages
@@ -153,7 +123,6 @@ def test_the_deployment_decides_the_mode(
     host: EndpointHost, binding: DeployBinding, tmp_path: Path
 ) -> None:
     """Paul's merge ruling: one entrypoint; adapter bound -> turbo branch."""
-    # A bound distillation adapter serves turbo and stamps the recipe name.
     from gen_worker.models import SDXL
 
     host.rebind(
@@ -171,9 +140,6 @@ def test_the_deployment_decides_the_mode(
     out = host.dispatch("generate", {"prompt": "x"}, request_id="r2")
     assert out.model == "ckpt:tiny@1"
     assert [(used.ref, used.scale) for used in out.loras] == [("cozy/lightning-4step@1", 1.0)]
-    # Explicit guidance/negatives on a cfg-free serving are IGNORED
-    # caller-visibly — ctx.warn rows in the response envelope, never a
-    # silent drop and never an aborted request (Paul's warn ruling).
     ctx = host.make_context("r3")
     out = host.dispatch(
         "generate",
@@ -200,11 +166,6 @@ def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
     assert lane.render() == LANE
     assert (lane.topology, lane.quant) == ("sdxl.diffusers@1", "plain.bf16@1")
     assert rule_dtype(lane.quant) == "bfloat16"
-    # Two declared lanes: `lane()` still refuses to GUESS one — a silent
-    # default lane is exactly what must not exist. pgw#1606 changed only what
-    # the refusal points AT: picking among declared lanes is platform work and
-    # now has a home (`resolve()`), where before it was a dead end that made
-    # multi-lane endpoints unbootable on a pod.
     with pytest.raises(EndpointLoadError, match=r"ask `resolve\(\)`"):
         loaded.lane(model_cls)
     with pytest.raises(EndpointLoadError,
@@ -221,20 +182,13 @@ def test_unload_runs_through_drain_then_call(host: EndpointHost) -> None:
     assert host.instances == {}
 
 
-# --- the adopt path: publish-time discovery, store pull, ctx.compile --------
-
-
 def publish_document(host: EndpointHost) -> GraphSetDocument:
-    """The publish-time derive, run for real: discovery hooks the marked
-    module on the author's live pipeline and drives the author's own
-    entrypoint with schema-enumerated payloads (both aspect-ratio buckets)."""
+    """The publish-time derive, run for real: discovery hooks the marked module on the author's live pipeline and drives the author's own entrypoint with schema-enumerated payloads (both aspect-ratio buck..."""
     from serving_v2_fixture.main import AspectRatio
 
     model = fixture_model(host)
 
     def drive() -> None:
-        # Author code is trace-oblivious (Paul ruling): the derive varies
-        # BINDINGS/inputs; it never asks the entrypoint to cooperate.
         for index, ratio in enumerate(AspectRatio):
             host.dispatch(
                 "generate", {"prompt": "trace", "aspect_ratio": str(ratio)},
@@ -252,14 +206,7 @@ def manifest() -> RequirementsManifest:
 def counting_loader(
     calls: "list[str]",
 ) -> "Callable[[Path, Any, Any], Callable[..., Any]]":
-    """The ONE stub: bytes-to-callable needs a real AOTI package and a GPU.
-
-    THREE arguments since pgw#1460/tcg#58, and the third is asserted rather
-    than ignored: the production loader binds the compiled graph's constants
-    to the LIVE MODULE that claimed the record, so a double that drops the
-    module models a loader that cannot exist. That omission is the whole
-    reason this stub stayed green over two raw, unservable loaders.
-    """
+    """The ONE stub: bytes-to-callable needs a real AOTI package and a GPU."""
 
     def load(path: Path, record: Any, module: Any) -> "Callable[..., Any]":
         assert isinstance(module, torch.nn.Module), (
@@ -279,7 +226,7 @@ def test_adopt_first_boot_swaps_via_ctx_compile_and_hands_ordered_holes(
 ) -> None:
     document = publish_document(host)
     lane_graphs = document.lanes[0]
-    assert len(lane_graphs.graphs) == 2  # two buckets -> two graph specializations
+    assert len(lane_graphs.graphs) == 2
     hit, hole = lane_graphs.graphs
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
     artifact = tmp_path / "minted.so"
@@ -295,13 +242,10 @@ def test_adopt_first_boot_swaps_via_ctx_compile_and_hands_ordered_holes(
         stack=STACK,
     )
 
-    # THE handoff for pgw#1371: ordered holes carrying full GraphRecords.
     assert [h.record.graph for h in adopted_host.holes] == [hole.graph]
     assert adopted_host.holes[0].reason == "miss"
     assert adopted_host.holes[0].record.ingress == hole.ingress
 
-    # The armed bucket serves THROUGH the ctx.compile swap (module-forward
-    # verified called); the hole bucket stays on the author's eager forward.
     hit_shape = tuple(d for d in hit.ingress.inputs[0].shape)
     hit_ratio = "1:1" if hit_shape == (16, 16) else "3:4"
     hole_ratio = "3:4" if hit_ratio == "1:1" else "1:1"
@@ -311,9 +255,8 @@ def test_adopt_first_boot_swaps_via_ctx_compile_and_hands_ordered_holes(
     swapped = len(calls)
     adopted_host.dispatch(
         "generate", {"prompt": "x", "aspect_ratio": hole_ratio}, request_id="r2")
-    assert len(calls) == swapped  # the hole ran eager
+    assert len(calls) == swapped
 
-    # A late mint arms without a reboot and leaves the hole list empty.
     minted = tmp_path / "late.so"
     minted.write_bytes(b"late")
     adopted_host.adoption.arm(hole, minted)
@@ -322,7 +265,6 @@ def test_adopt_first_boot_swaps_via_ctx_compile_and_hands_ordered_holes(
     assert hole.graph in calls
     assert adopted_host.holes == ()
 
-    # Telemetry: the adopt_pull span replaced the keyset span in this flow.
     spans = [s for s in boot_stages.recorded() if s.stage.value == "adopt_pull"]
     assert len(spans) == 1
     assert spans[0].attrs["graphs_from"] == "release"
@@ -344,7 +286,6 @@ def test_exact_env_mismatch_refuses_loudly_before_author_code(
             artifacts_dir=tmp_path / "adopted",
             stack={"torch": "0.0.0-divergent"},
         )
-    # The audit fired BEFORE any author model was even instantiated.
     assert refused.instances == {}
     spans = [s for s in boot_stages.recorded() if s.stage.value == "adopt_pull"]
     assert spans and spans[-1].attrs["refusal"] == "environment_mismatch"
@@ -360,7 +301,6 @@ def test_eager_permanent_metadata_is_a_clean_noop(
     assert booted.holes == ()
     spans = [s for s in boot_stages.recorded() if s.stage.value == "adopt_pull"]
     assert [s.attrs["graphs_from"] for s in spans] == ["eager_permanent"]
-    # The endpoint still serves — the eager bridge is unconditional.
     out = booted.dispatch("generate", {"prompt": "still serving"}, request_id="r")
     assert out.model == "ckpt:tiny@1"
 
@@ -374,25 +314,12 @@ def test_a_store_less_boot_still_forms_the_full_mint_worklist(
         document=document, sm=SM, loader=counting_loader([]),
         artifacts_dir=tmp_path / "adopted", stack=STACK,
     )
-    # Metadata known, artifacts unreachable: everything is stated mint work.
     assert [h.reason for h in booted.holes] == ["miss", "miss"]
     out = booted.dispatch("generate", {"prompt": "eager"}, request_id="r")
     assert out.model == "ckpt:tiny@1"
 
 
-# --- the hub-backed store: th#2133's REAL answer shape ----------------------
-#
-# This block used to can a `{document, artifacts, misses}` payload that the
-# route never emitted — it was written before th#2133 landed, and it made the
-# store look tested while `hub_store` could not have parsed one real answer.
-# What is canned below is the shape a live hub actually returned on
-# `GET /v1/worker/releases/<id>/compiled-graphs?lane=&sm=`: per-graph rows with
-# a `status`, the observed `ingress` CONTRACT (not just its digest — torchcg
-# dispatches on the rows), and a presigned snapshot manifest under `transport`.
-
-
 class StubTransport:
-    """The th#2133 route answer, canned in the shape the route emits."""
 
     def __init__(self, answer: Mapping[str, Any], blobs: Mapping[str, bytes]) -> None:
         self.answer = answer
@@ -415,7 +342,6 @@ def _adopt_answer(
     hole: GraphRecord,
     payload: bytes,
 ) -> dict[str, Any]:
-    """One th#2133 answer: `hit` minted for this env, `hole` not."""
     import hashlib
 
     lane = document.lanes[0]
@@ -426,8 +352,6 @@ def _adopt_answer(
             "graph_specialization": "",
             "module_path": record.target,
             "ingress_digest": record.ingress.digest(),
-            # THE CONTRACT ITSELF. Without it the lane document cannot be
-            # rebuilt and no artifact can legally arm (th#2134's migration).
             "ingress": record.ingress.as_dict(),
             "status": status,
             "found": status == "hit",
@@ -483,15 +407,9 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     transport = StubTransport(answer, {"https://presigned.example/hit": payload})
     store = HubGraphStore(transport, "release-1", LANE, SM)
 
-    # The document is REBUILT from the answer — the hub stores the derive's
-    # rows, not the derive's bytes.
     rebuilt = store.get_graphs("release-1")
     assert rebuilt is not None and rebuilt.stack == document.stack
-    # pgw#1384: graph order is SEMANTIC, not canonical — the producer states
-    # it (default-parameter classes first) and the miner mints holes in that
-    # order, so the rebuild preserves the answer's order rather than sorting.
     assert [r.graph for r in rebuilt.lanes[0].graphs] == [hit.graph, hole.graph]
-    # The ORDERED hole list pgw#1371's background mint consumes.
     assert store.misses == (hole.graph,)
 
     calls: list = []
@@ -502,15 +420,13 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
         artifacts_dir=tmp_path / "adopted",
         stack=STACK,
     )
-    assert transport.asks == 1  # ONE ask per boot, cached thereafter
+    assert transport.asks == 1
     assert [h.record.graph for h in adopted_host.holes] == [hole.graph]
     fetched = tmp_path / "adopted" / ENV.value / f"{hit.graph}.so"
     assert fetched.read_bytes() == payload
     hit_manifest = store.get_manifest(hit.graph, ENV)
     assert hit_manifest is not None and hit_manifest.sm_compiled == SM
 
-    # A lying digest is a StoreError -> a HOLE with the reason stated, never
-    # an adopted artifact and never a boot failure (partial-hit everywhere).
     transport.blobs["https://presigned.example/hit"] = b"tampered"
     tampered_store = HubGraphStore(transport, "release-1", LANE, SM)
     tampered_host = fresh_host(binding, tmp_path)
@@ -524,19 +440,12 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     assert reasons[hit.graph].startswith("store_error:")
     assert "digest verification" in reasons[hit.graph]
 
-    # The boot-side store is read-only by construction.
     with pytest.raises(StoreError, match="read-only"):
         store.publish_artifact(hit.graph, ENV, tmp_path / "x.so", manifest())
 
 
 def test_the_adopt_route_is_allowlisted_in_procsplit_pgw1372() -> None:
-    """WITHOUT THIS ENTRY THE WHOLE ADOPT BOOT IS DEAD ON EVERY FLEET POD.
-
-    The split parent refuses any path not in the table, `hub_store` treats a
-    refusal as a miss (correctly — it must never block a boot), and every pod
-    serves eager forever while every test that patches `broker.request` stays
-    green. pgw#1353's keyset tier, exactly. So the assertion is on the TABLE.
-    """
+    """WITHOUT THIS ENTRY THE WHOLE ADOPT BOOT IS DEAD ON EVERY FLEET POD."""
     from gen_worker.procsplit import actions
 
     action, query, _ = actions.authorize({
@@ -547,7 +456,6 @@ def test_the_adopt_route_is_allowlisted_in_procsplit_pgw1372() -> None:
     assert action.name == "release.compiled_graphs"
     assert query == {"lane": LANE, "sm": SM}
 
-    # An unlisted query key is a refusal, not an ignored field.
     with pytest.raises(actions.ActionRefused, match="org_id"):
         actions.authorize({
             "method": "GET",
@@ -555,7 +463,6 @@ def test_the_adopt_route_is_allowlisted_in_procsplit_pgw1372() -> None:
             "query": {"lane": LANE, "sm": SM, "org_id": "someone-elses"},
         })
 
-    # The path grammar is pinned: a release id is an identifier, never a path.
     with pytest.raises(actions.ActionRefused, match="not an allowlisted"):
         actions.authorize({
             "method": "GET",

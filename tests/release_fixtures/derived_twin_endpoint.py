@@ -1,28 +1,3 @@
-"""tiny_endpoint's TWIN — the graph-hash CONTROL (pgw#1488, re-based pgw#1599).
-
-What this fixture used to be: `tiny_endpoint.py` with `lanes=()`, so the derive
-INVENTED a lane name (`derived.sdxl@1`) and the two modules differed only in
-what the lane was CALLED. That measured the wire-compatibility claim —
-`cg-graph-v1` is a content hash of the canonical trace plus its ingress and
-passes and `cg-key-v1` is (graph, sm, toolchain), so the contract handle is in
-NEITHER, and a lane could be left undeclared without rekeying a single existing
-artifact.
-
-pgw#1599 DELETED the premise: `lanes=` is required, `lanes=()` is refused, and
-there is no derived lane to compare a declared one against. So this module now
-declares `TINY_DIFFUSERS_FP32` exactly as `tiny_endpoint.py` does, and what it
-still exercises is the OTHER half of the same measurement — two independently
-declared modules, identical code, identical demand formula and identical shape
-declaration, must derive byte-identical graph hashes. Nothing in the key comes
-from the module, and this is the control that says so.
-
-NOTE: with the derived lane gone this file is now byte-for-byte
-`tiny_endpoint.py` apart from this docstring. If the graph-hash control is not
-worth a second copy of the fixture, delete the module rather than inventing a
-new difference for it to carry.
-"""
-
-
 from __future__ import annotations
 
 from enum import StrEnum
@@ -59,8 +34,6 @@ _BUCKETS: dict[Size, int] = {Size.SMALL: 32, Size.LARGE: 64}
 
 class GenerateInput(msgspec.Struct, forbid_unknown_fields=True):
     prompt: str
-    # LARGE deliberately: the payload DEFAULT differs from enum declaration
-    # order, so pgw#1384's default-first document ordering is observable.
     size: Size = Size.LARGE
     guidance_scale: float | None = None
     num_inference_steps: int | None = None
@@ -110,12 +83,7 @@ def _run(model: TinyModel, ctx: Any, *, steps: int, guidance: float,
 def generate(ctx: RequestContext, payload: GenerateInput, model: TinyModel,
              turbo: DistillationAdapter | None,
              loras: list[Adapter]) -> ImageOutput:
-    """Contract-file shape: ctx-first order, platform-injected adapter slots.
-
-    A riding distillation adapter (or a cfg-off checkpoint) serves the
-    guidance-free batch-1 arm -- the derive's binding enumeration reaches it
-    without any real adapter bytes.
-    """
+    """Contract-file shape: ctx-first order, platform-injected adapter slots."""
     ctx.raise_if_cancelled()
     d = model.defaults
     if turbo is not None and not d.cfg:

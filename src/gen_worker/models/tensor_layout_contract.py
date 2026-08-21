@@ -210,15 +210,12 @@ class QuantRuleDecoder(msgspec.Struct, frozen=True, kw_only=True):
     """
 
     rule: str
-    decoder: str  # "module:qualname" — the function carrying the marker
-    serves: tuple[str, ...]  # lane body tokens, e.g. "svdq-fp4-w4a4"
+    decoder: str
+    serves: tuple[str, ...]
     composes_lora: bool
     why: str = ""
 
 
-# The declaration lives ON THE DECODER OBJECT, not in a module-level registry.
-# That is the point: it cannot be present without the decoder, cannot survive
-# the decoder being removed, and cannot be assembled anywhere else.
 MARKER = "__cozy_tensor_layout_quant_rules__"
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -366,28 +363,12 @@ def unregistered_decode_path_of(obj: Any) -> tuple[UnregisteredDecodePath, ...]:
 # "allowed to be stale" no longer applies to it. The LOADER-SHAPE topology half
 # below still is a transcription, and still says so.
 
-#: The every-component key: this slot's demand for every component that has no
-#: more specific declaration. The map is one level deep, keyed by component.
 LAYOUT_KEY_ANY_COMPONENT = "*"
 
-# ── The TWO AXES (§1.33) ─────────────────────────────────────────────────────
-#
-# TOPOLOGY is SHALLOW — keys/nesting/file layout, "essentially just different
-# keys". It constrains the LOADER, and a conversion between two topologies is
-# pure renaming, bit-lossless. QUANT is DEEP — "what the weights ARE, which
-# requires different runtime code/kernels". It constrains the endpoint's
-# KERNELS.
-#
-# They are two registries with two digests, compared FIELD-WISE and never as
-# one string: a composite handle cannot express "topology differs, quant
-# matches ⇒ CONVERTIBLE", which is the whole ladder.
 AXIS_TOPOLOGY = "topology"
 AXIS_QUANT = "quant"
 LAYOUT_AXES: tuple[str, ...] = (AXIS_TOPOLOGY, AXIS_QUANT)
 
-#: An axis a demand declares itself AGNOSTIC on. A declaration, never an
-#: inference: an axis nobody stated is UNDECLARED (``None``) and is not
-#: evaluated, which is a different fact.
 LAYOUT_AXIS_ANY = "any"
 
 # ⚠️ THIS IS THE LOADER-SHAPE AXIS, NOT THE v2 TOPOLOGY AXIS. Two different
@@ -521,21 +502,7 @@ def validate_layout_handle(
 def normalize_layout_demand(
     layouts: object, *, where: str,
 ) -> dict[str, tuple[str, ...]]:
-    """`Slot(layouts=...)` -> `{component_path: accepted handle SET}`.
-
-    **The set is a compatibility FILTER; its order carries NO preference**
-    (§1.33 point 2). Preference has exactly ONE authority — the author-configured
-    ordered ladder of (GPU, lane) pairs — and "one filter, one order, never two
-    orderings that can disagree" is the property that keeps it that way. So the
-    handles are returned in CANONICAL order, not as written: two authors who
-    declare the same set in different orders state the SAME demand, and no
-    downstream reader can recover a preference from a position that never
-    carried one.
-
-    Component-path keys are validated against the DERIVED component tree
-    separately, at decoration time, by the registry — this function owns only
-    the shape and the vocabulary.
-    """
+    """`Slot(layouts=...)` -> `{component_path: accepted handle SET}`."""
     if not isinstance(layouts, dict):
         raise LayoutDeclarationError(
             f"{where}: layouts= must be a mapping of component path -> ordered "
@@ -585,16 +552,7 @@ def normalize_layout_demand(
 
 
 class LayoutId(msgspec.Struct, frozen=True, kw_only=True):
-    """One side of the two-sided vocabulary, as a PAIR of axes.
-
-    Rendered `"<topology>+<quant>"` and compared FIELD-WISE — never as one
-    string, because a whole-string compare cannot express "topology differs,
-    quant matches", which is the CONVERTIBLE rung.
-
-    Each axis is tri-state: a handle (declared), :data:`LAYOUT_AXIS_ANY`
-    (declared agnostic), or ``None`` (UNDECLARED — not evaluated, and the
-    verdict says so rather than guessing).
-    """
+    """One side of the two-sided vocabulary, as a PAIR of axes."""
 
     topology: str | None = None
     quant: str | None = None
@@ -620,12 +578,7 @@ class LayoutId(msgspec.Struct, frozen=True, kw_only=True):
 
 
 def parse_layout_id(text: object, *, where: str) -> LayoutId:
-    """`"<topology>+<quant>"`, or a bare handle meaning the QUANT axis alone.
-
-    A bare handle is quant because that is what `Slot(layouts=...)` publishes
-    (there is no topology registry yet), so one spelling has one meaning across
-    the wire and this parser.
-    """
+    """`"<topology>+<quant>"`, or a bare handle meaning the QUANT axis alone."""
     if isinstance(text, LayoutId):
         return text
     if not isinstance(text, str) or not text.strip():
@@ -643,7 +596,6 @@ def parse_layout_id(text: object, *, where: str) -> LayoutId:
 
 
 def _axis_member(text: str, *, axis: str, where: str) -> str | None:
-    """One axis of a layout id: a handle, the explicit agnostic, or UNDECLARED."""
     value = text.strip()
     if not value:
         return None
@@ -768,23 +720,6 @@ def _display_hint(text: str) -> str:
     return f"{text!r} matches no ratified display name either"
 
 
-# ── A19: the declaration is MANDATORY, and absence is not the tri-state ──────
-#
-# `layouts=None` is NOT an UNDECLARED third rung. Measured fleet-wide, that
-# rung was never a considered choice: it was the default, so "this slot has no
-# opinion" and "nobody wrote the line" were one state no refusal could split.
-#
-# A19 (Paul, 2026-08-15) cuts the default away. A model slot states what it
-# consumes, or it states — with a reason — that no registered handle describes
-# its bytes. Both are DECLARATIONS. What no longer exists is silence.
-#
-# The escape is not a loophole and not a default: it carries a reason string,
-# it is refused when blank, and it is mutually exclusive with `layouts=`. It
-# exists because real slots hold bytes the registry genuinely does not name —
-# a tokenizer tree with no tensors at all, a GGUF quant axis th#1809 T3 has
-# not registered, a vLLM compressed-tensors checkpoint with no descriptor.
-# Inventing a handle for those would be the failure mode, not the fix.
-
 class UndeclaredSlotLayoutError(LayoutDeclarationError):
     """A model slot that declares neither a consumed contract nor a reason."""
 
@@ -821,67 +756,11 @@ def undeclared_slot_refusal(*, function: str, slot: str) -> str:
     )
 
 
-# ── The REQUIREMENTS axis (Paul, 2026-08-15) ────────────────────────────────
-#
-# "Certain contracts can only be executed efficiently if their
-# hardware-requirements are met... other requirements might be kernels or torch
-# versions."
-#
-# A contract handle describes BYTES AT REST. Executing those bytes is a
-# separate fact, and it belongs to the code that executes them rather than to
-# the artifact — which is exactly where tensorhub already put it:
-# `contractspec.DecodeEntry.MinSM`, "the card floor this loader's kernels
-# need. 0 = no floor. It is an EXECUTION fact and lives here rather than on the
-# artifact contract, which describes bytes at rest only." So this axis speaks
-# that field's name and semantics verbatim; it does not invent a second
-# vocabulary for one fact.
-#
-# The requirement is PER (slot, handle), not per handle globally: one contract
-# has different floors in different code. `cozy.fp8-rowwise@1` is sm89 through
-# `_scaled_mm` per-tensor and sm90 rowwise (`models/w8a8.py`), and the 4-bit
-# contracts need sm100 (`models/w4a4.py: W4A4_MIN_SM = 100`). A global table
-# would have to pick one and be wrong for the other.
-#
-# NO DEFAULTS, and the same rule as every other axis: a declared requirement is
-# checked, an undeclared one is not evaluated at all. `0`/absent is not "no
-# floor asserted by the author" dressed as "runs anywhere" — it is the axis
-# nobody answered.
-#
-# EXTENSIBLE, NOT BUILT: the compact grammar is a comma-separated term list so
-# a kernel term can be added without re-spelling every declaration. An unknown
-# term is REFUSED by name rather than ignored — an ignored requirement is a
-# requirement that silently does not hold.
-#
-# pgw#1313 — ONE VOCABULARY AT TWO LEVELS. A requirement term and the machine
-# fact it is compared against carry the SAME NAME, so evaluating a requirement
-# is a name lookup and never a bespoke comparator per term (the fact half is
-# `hostfacts.HostFacts`; pgw#1314). `LayoutRequirements` is now the PAIR
-# {minimum, recommended} over one term bag (`RequirementTerms`).
-#
-#   * the COMPACT form is the MINIMUM, unchanged — the fleet's `"sm89+"` /
-#     `"sm100+"` declarations keep their meaning byte-for-byte and their
-#     manifest row byte-for-byte. `recommended` is purely additive.
-#   * a declared MINIMUM gates ADMISSION (a config-write check on a pick a
-#     human is making) and NEVER execution. A declared RECOMMENDED gates
-#     nothing, ever: `recommended_vram_gb` was deleted (th#1867) because the
-#     hub learned a monotone buy floor from it (th#1720), and preference has
-#     exactly one authority — the author's ladder ORDER.
-#   * `recommended` >= `minimum` on every declared term, refused here: a
-#     recommendation below the floor is a contradiction, not a preference.
-#   * `kernels` is NAMED AND REFUSED, NOT BUILT: there is no runtime
-#     kernel-capability probe in this worker, so a `kernels` floor would be a
-#     requirement with no fact behind it.
-
-#: The requirement terms this SDK understands. Growing this tuple is the whole
-#: cost of adding an axis; nothing else parses a term.
 KNOWN_REQUIREMENT_TERMS: tuple[str, ...] = (
     "min_sm", "min_vram_gb", "min_host_ram_gb", "min_cuda", "min_torch")
 
-#: The two levels of the same vocabulary.
 REQUIREMENT_LEVELS: tuple[str, ...] = ("minimum", "recommended")
 
-#: Terms named in the ruling with no runtime fact to compare against. Refused
-#: BY NAME with this reason rather than accepted and never evaluated.
 _UNBUILT_TERMS: tuple[str, ...] = ("kernels",)
 
 _SM_TERM_RE = re.compile(r"^sm([1-9][0-9]{1,2})\+$")
@@ -903,19 +782,7 @@ _COMPACT_EXAMPLES = "'sm100+', 'vram80g', 'ram64g', 'cuda12.8+', 'torch2.9+'"
 
 class RequirementTerms(msgspec.Struct, frozen=True, kw_only=True,
                        omit_defaults=True):
-    """The term bag — ONE machine axis per field, at ONE level.
-
-    ``min_sm`` is the compute-capability floor in tensorhub's own
-    two-or-three digit spelling (``sm_89`` -> 89, ``sm_100`` -> 100), the
-    value `contractspec.DecodeEntry.MinSM` compares a card against. That bare
-    spelling is THE wire spelling for this axis on both sides (pgw#1314):
-    dotted ``8.9`` is a normalization at whatever boundary produces it, never
-    a second stored form.
-
-    ``min_cuda`` / ``min_torch`` are dotted version strings compared
-    component-wise. Every field's zero/empty is UNDECLARED and unevaluated —
-    never "no floor asserted" dressed as "runs anywhere".
-    """
+    """The term bag — ONE machine axis per field, at ONE level."""
 
     min_sm: int = 0
     min_vram_gb: float = 0.0
@@ -994,20 +861,7 @@ class RequirementTerms(msgspec.Struct, frozen=True, kw_only=True,
 
 class LayoutRequirements(msgspec.Struct, frozen=True, kw_only=True,
                          omit_defaults=True):
-    """What EXECUTING one declared contract needs of the machine, at both
-    levels of one vocabulary.
-
-    The compact form IS the minimum::
-
-        "sm100+, vram24g"
-        LayoutRequirements(minimum="sm80+, vram48g",
-                           recommended="sm90+, vram80g")
-
-    Both levels accept the compact string, a mapping of terms, or a
-    :class:`RequirementTerms`; :func:`parse_layout_requirements` normalizes
-    them. A directly-constructed instance is UNVALIDATED — the parser is the
-    one validator, so the refusal can name the declaration site.
-    """
+    """What EXECUTING one declared contract needs of the machine, at both levels of one vocabulary."""
 
     minimum: Any = None
     recommended: Any = None
@@ -1025,25 +879,11 @@ class LayoutRequirements(msgspec.Struct, frozen=True, kw_only=True,
             self.recommended, RequirementTerms) else RequirementTerms()
 
     def render(self) -> str:
-        """The MINIMUM's compact spelling.
-
-        A round trip through :func:`parse_layout_requirements` is stable
-        exactly when nothing but the minimum is declared — `recommended` has
-        no single-string form and is not invented one.
-        """
+        """The MINIMUM's compact spelling."""
         return self.min_terms().render()
 
     def manifest_row(self) -> dict[str, Any]:
-        """Only DECLARED axes reach the manifest, per term AND per level — an
-        undeclared axis must not arrive at the hub as a zero it could read as
-        a floor of none.
-
-        The MINIMUM's terms sit flat, which is where th#2030's ingest already
-        reads `min_sm`: an existing `"sm100+"` declaration emits exactly the
-        `{"min_sm": 100}` it emits today, so repinning this wheel can never
-        silently drop a floor the hub is already enforcing. `recommended`
-        nests under its own key and is additive — th#2072 grows the reader.
-        """
+        """Only DECLARED axes reach the manifest, per term AND per level — an undeclared axis must not arrive at the hub as a zero it could read as a floor of none."""
         row: dict[str, Any] = dict(self.min_terms().declared_terms())
         recommended = self.recommended_terms().declared_terms()
         if recommended:
@@ -1060,15 +900,7 @@ def _version_tuple(value: str) -> tuple[int, ...]:
 
 
 def term_meets(term: str, candidate: Any, floor: Any) -> bool:
-    """Is `candidate` at least `floor` for this term? One comparator per
-    KIND, chosen by name — never one per term.
-
-    PUBLIC because it is THE evaluator for this vocabulary at BOTH ends: the
-    declaration check below (recommended >= minimum) and the runtime check of
-    a measured machine FACT against a declared floor (`models.machine_fit`)
-    are the same comparison, and a second implementation of it is how the two
-    ends start disagreeing about what "meets" means.
-    """
+    """Is `candidate` at least `floor` for this term? One comparator per KIND, chosen by name — never one per term."""
     if term in ("min_cuda", "min_torch"):
         return _version_tuple(str(candidate)) >= _version_tuple(str(floor))
     return float(candidate) >= float(floor)
@@ -1140,11 +972,7 @@ def _unknown_term_refusal(named: list[str], *, where: str) -> str:
 def parse_requirement_terms(
     value: object, *, where: str,
 ) -> RequirementTerms:
-    """One LEVEL's term bag, from the compact list, a mapping, or the struct.
-
-    ``"sm100+, vram80g"``, ``{"min_sm": 100, "min_vram_gb": 80}`` and
-    ``RequirementTerms(min_sm=100, min_vram_gb=80)`` are one declaration.
-    """
+    """One LEVEL's term bag, from the compact list, a mapping, or the struct."""
     if isinstance(value, RequirementTerms):
         value = value.declared_terms()
     if isinstance(value, dict):
@@ -1196,13 +1024,7 @@ def parse_requirement_terms(
 def parse_layout_requirements(
     value: object, *, where: str,
 ) -> LayoutRequirements:
-    """Dual form at two levels: the compact term list IS the minimum.
-
-    ``"sm100+"``, ``{"min_sm": 100}`` and
-    ``LayoutRequirements(minimum="sm100+")`` are the same declaration, and
-    :meth:`LayoutRequirements.render` puts the compact form back, so a
-    minimum-only round trip is stable.
-    """
+    """Dual form at two levels: the compact term list IS the minimum."""
     minimum: object = None
     recommended: object = None
     if isinstance(value, LayoutRequirements):
@@ -1235,11 +1057,6 @@ def parse_layout_requirements(
             f"{where}: the requirement declares no axis at either level; omit "
             "the entry rather than declaring an empty one.")
 
-    # Host RAM is declarable at RECOMMENDED only. Paul 2026-07-11: RunPod GPU
-    # pods cannot select or guarantee host RAM, so a declared minimum was
-    # unenforceable theater and the standing instruction is not to rebuild a
-    # boot-time RAM gate. It survives as a shopping preference (vast CAN
-    # filter on RAM) and a degrade warning when unmet.
     if min_terms.min_host_ram_gb:
         raise LayoutDeclarationError(
             f"{where}: min_host_ram_gb is declarable as RECOMMENDED only "
@@ -1262,16 +1079,7 @@ def parse_layout_requirements(
 def normalize_layout_requirements(
     requirements: object, *, where: str, accepted: Iterable[str],
 ) -> dict[str, LayoutRequirements]:
-    """`Slot(layout_requirements=...)` -> `{handle: LayoutRequirements}`.
-
-    Keyed by HANDLE, not by component path: the floor is a property of the
-    code that decodes that contract, and the same decoder serves every
-    component the slot accepts it for.
-
-    A key naming a handle this slot does not accept is a REFUSAL rather than a
-    dead entry — it is a requirement guarding nothing, and the shapes that
-    guard nothing are the ones this whole row exists to remove.
-    """
+    """`Slot(layout_requirements=...)` -> `{handle: LayoutRequirements}`."""
     if not isinstance(requirements, dict):
         raise LayoutDeclarationError(
             f"{where}: layout_requirements= must be a mapping of contract "

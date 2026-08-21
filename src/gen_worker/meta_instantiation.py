@@ -1,37 +1,4 @@
-"""The META-INSTANTIATION GATE.
-
-The zero-download forge instantiates a model's STRUCTURE on the meta device and
-exports it there — no checkpoint values ever enter the process that traces and
-compiles. That property is invisible when it breaks: a module that does real
-tensor work at construction, or (worse) lazily at CALL time under an explicit
-device pin, silently materializes real tensors and the forge quietly starts
-needing weights again. Nothing downstream notices, because the export still
-succeeds.
-
-**So the property is GATED, not hoped for.** Run the instantiation AND the
-trace inside :func:`guard`, and any tensor that lands on a real device is a
-typed refusal naming the site that allocated it.
-
-WHY THE SCOPE IS "INSTANTIATION *OR* TRACE." An ``__init__``-inspecting gate is
-not enough: an upstream rope embedder that is not an ``nn.Module`` at all, holds
-``self.freqs_cis = None``, and builds its tables on FIRST CALL inside
-``with torch.device("cpu")`` — a pin that overrides any ambient meta context —
-does nothing at ``__init__`` and violates mid-trace.
-
-WHY A ``TorchFunctionMode`` AND NOT A DEVICE CONTEXT.
-``with torch.device("meta")`` is a DEFAULT, and a default is exactly what model
-code overrides — explicitly (``torch.device("cpu")``) or implicitly
-(``device=`` / ``.to("cuda")`` / ``.cpu()``). A mode sits above the factory
-functions themselves, so it observes the tensor that was actually produced
-rather than the default that was requested, and an override is therefore
-visible instead of authoritative.
-
-WHAT IS DELIBERATELY *NOT* REFUSED: fake tensors. ``FakeTensorMode`` produces tensors whose ``.device`` reads as a
-real device by design (that is what makes them faithful to trace against) while
-allocating nothing. Refusing them would refuse the very mechanism this gate
-protects, so :func:`is_virtual` treats a fake tensor as virtual regardless of
-what its device says.
-"""
+"""The META-INSTANTIATION GATE."""
 
 from __future__ import annotations
 
@@ -42,18 +9,11 @@ from typing import Any, Iterator, List, Optional, Tuple
 
 from .api.errors import WorkerError
 
-#: Devices a virtual tensor may claim. Anything else is real allocation.
 VIRTUAL_DEVICES: Tuple[str, ...] = ("meta",)
 
 
 class MetaMaterializationError(WorkerError):
-    """A real-device tensor was materialized under the meta-instantiation gate.
-
-    Named-axis refusal: the message carries WHAT was
-    allocated (op, shape, dtype, device), WHERE in the endpoint's own code it
-    happened, and the authoring rule that was broken — because the fix is
-    always an authoring change, never a knob.
-    """
+    """A real-device tensor was materialized under the meta-instantiation gate."""
 
     def __init__(
         self, *, phase: str, op: str, device: str, shape: str, dtype: str,
@@ -93,7 +53,7 @@ class Materialization:
 
 @dataclass
 class Census:
-    """What the gate saw. Empty ``events`` is the property holding."""
+    """What the gate saw."""
 
     phase: str = ""
     events: List[Materialization] = field(default_factory=list)
@@ -104,24 +64,7 @@ class Census:
 
 
 def is_virtual(tensor: Any, _depth: int = 0) -> bool:
-    """Whether this tensor allocated nothing.
-
-    Meta tensors by device; fake tensors by TYPE, because a fake tensor
-    deliberately reports a real device while backing it with no storage.
-
-    AND WRAPPER SUBCLASSES BY THEIR CONTENTS, which is the whole reason this is
-    a function and not an ``isinstance``. A quantizer run inside ``setup()``
-    (torchao's ``quantize_``) replaces a parameter with a traceable wrapper
-    subclass (``Float8Tensor``) whose inner ``qdata``/``scale`` are the original
-    FAKE tensors and whose OUTER dtype stays bf16. That object is not a
-    ``FakeTensor``, reports ``cuda:0``, and answers ``numel * element_size`` at
-    the high-precision dtype — so a type-only test reads a structure holding
-    nothing as an entire bf16 checkpoint.
-
-    Every inner tensor must be virtual, never any: a subclass over real data,
-    or over a mix (fake ``qdata``, real ``scale``), is REAL here. Widening the
-    answer is the fence getting more accurate, not weaker.
-    """
+    """Whether this tensor allocated nothing."""
     fake_cls: Optional[type] = None
     try:
         from torch._subclasses.fake_tensor import FakeTensor
@@ -140,21 +83,10 @@ def is_virtual(tensor: Any, _depth: int = 0) -> bool:
     return str(getattr(device, "type", device)) in VIRTUAL_DEVICES
 
 
-#: How far :func:`is_virtual` unwraps nested wrapper subclasses. A subclass
-#: over a subclass is real (torchao stacks them), a cycle is not; a bound that
-#: cannot be reached by real code costs nothing and makes the walk total.
 _WRAPPER_DEPTH = 4
 
 
 def _wrapped_tensors(tensor: Any) -> Tuple[Any, ...]:
-    """The tensors a traceable wrapper subclass is made OF, if it is one.
-
-    ``__tensor_flatten__`` is torch's own contract for exactly this question —
-    the one ``torch.compile`` and ``torch.export`` use to see inside a subclass
-    — so this asks the object rather than knowing a vocabulary of quantizer
-    types. An empty result means "not a wrapper subclass", and the caller falls
-    back to the device test.
-    """
     try:
         from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
@@ -166,27 +98,15 @@ def _wrapped_tensors(tensor: Any) -> Tuple[Any, ...]:
     held = tuple(
         value for value in (getattr(tensor, str(name), None) for name in names)
         if value is not None)
-    # A subclass that flattens to nothing tells us nothing, so it must not
-    # answer `all([]) is True` and pass as virtual.
     return held
 
 
 def _endpoint_site(skip: int = 0) -> str:
-    """The innermost stack frame OUTSIDE this SDK — i.e. the endpoint's own
-    code, which is where the authoring fix has to be made.
-
-    Reporting an SDK frame would name the observer instead of the cause; the
-    whole value of this refusal is the `file:line` an author can go and edit.
-    """
     for frame in reversed(traceback.extract_stack()[:-(1 + skip)]):
         path = frame.filename.replace("\\", "/")
         if "/gen_worker/" in path or "/torch/" in path:
             continue
         if path.startswith("<"):
-            # `<frozen runpy>`, `<frozen importlib._bootstrap>`, `<string>`:
-            # interpreter scaffolding, not a line anyone can edit. Treating one
-            # as the cause is how a torch-internal allocation gets reported as
-            # an authoring violation.
             continue
         return f"{frame.filename}:{frame.lineno} in {frame.name}"
     return ""
@@ -194,11 +114,7 @@ def _endpoint_site(skip: int = 0) -> str:
 
 @contextlib.contextmanager
 def observe(phase: str, census: Optional[Census] = None) -> Iterator[Census]:
-    """Record every real-device tensor produced inside the block.
-
-    Observation only — it never raises, so a caller can census a phase and
-    decide separately. :func:`guard` is the refusing wrapper.
-    """
+    """Record every real-device tensor produced inside the block."""
     import torch
     from torch.overrides import TorchFunctionMode
 
@@ -226,22 +142,7 @@ def observe(phase: str, census: Optional[Census] = None) -> Iterator[Census]:
 
 @contextlib.contextmanager
 def guard(phase: str, *, actionable_only: bool = False) -> Iterator[Census]:
-    """Refuse the FIRST real-device materialization in this block, typed.
-
-    First rather than all: the census is for reporting, but a mint that has
-    already allocated real weights has lost the property this gate exists to
-    keep, and continuing would only produce a longer list of the same fact.
-
-    ``actionable_only`` refuses only an allocation this gate can NAME a
-    file:line for — i.e. one made by the endpoint's own code. It exists for
-    the TRACE window, where ``torch.export`` legitimately allocates small real
-    tensors of its own inside the fake mode (measured: a 380-byte ``empty``
-    with no endpoint frame anywhere on the stack).
-    Refusing that would fail every mint for something no author can fix,
-    while the class the gate exists for — a device pin inside model code —
-    always has a frame. Unattributable events stay in the census, so they are
-    reported rather than dropped.
-    """
+    """Refuse the FIRST real-device materialization in this block, typed."""
     with observe(phase) as census:
         yield census
     events = [e for e in census.events if e.site] if actionable_only \
@@ -255,11 +156,7 @@ def guard(phase: str, *, actionable_only: bool = False) -> Iterator[Census]:
 
 @contextlib.contextmanager
 def meta_device() -> Iterator[None]:
-    """Instantiate structure on meta.
-
-    A DEFAULT, deliberately paired with :func:`guard` rather than trusted on
-    its own — see the module docstring on why a default is not a property.
-    """
+    """Instantiate structure on meta."""
     import torch
 
     with torch.device("meta"):

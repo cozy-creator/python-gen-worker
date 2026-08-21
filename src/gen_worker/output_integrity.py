@@ -1,50 +1,4 @@
-"""The serve-path output-integrity floor: nothing is uploaded unlooked-at.
-
-Container metadata is not pixels: this module is the one place on the worker
-that looks at the PIXELS before an output can be banked as a success.
-
-WHAT IT IS. Two numbers over the frames the endpoint already holds in memory:
-
-* ``adjacent_frame_corr`` — the MEDIAN Pearson correlation of a handful of
-  adjacent grey frame pairs spread across the clip. Real video is highly
-  self-similar frame to frame even through motion and cuts; independently
-  sampled noise correlates with nothing. The floor is MEASURED, not guessed:
-  production noise 0.29, real renders 0.92-0.99, so :data:`NOISE_CORR_FLOOR`
-  = 0.6 sits in an empty middle. Taking the MEDIAN over a spread of pairs is
-  what makes a hard CUT safe — a cut drives one pair to ~0 while the rest
-  stay high.
-* ``frame_std_min`` — the smallest per-frame grey standard deviation over the
-  sampled frames. Zero is a constant-fill frame: blank/black output, which
-  correlates with nothing and must not be reported as a correlation failure.
-
-A non-finite pixel (NaN/Inf reaching the decoder's output) is its own verdict:
-it is the observable, save-path-side form of the latent NaN the tracker asked
-about, at the one seam that sees every endpoint.
-
-WHAT IT COSTS. Single-digit milliseconds on a full 121-frame 1344x768 clip,
-because only ~2*``pairs`` frames are ever touched and each is decimated to
-~96 rows BEFORE the float conversion (the expensive pass then runs on ~1/s^2
-of the pixels; naive full-resolution was 555 ms). The decimation is free in
-ACCURACY because the statistic is a coarse whole-frame correlation — cheap and
-blind are one fact (see the scope note).
-
-SCOPE. This floor catches NOISE and BLANK. It is NOT a quality gate, and it is
-specifically blind to the melt class: smearing REMOVES high-frequency temporal
-variation, so a melted/over-smoothed render scores HIGHER here than a clean one
-(0.956 melted vs 0.916 clean). ``tests/test_media_transport.py`` pins
-that inversion as an executable assertion so nobody re-reads this gate as a
-quality verdict.
-
-WHO IT JUDGES. SERVED outputs, and only those — see :func:`judged`.
-A boot-warmup / mint warm forward uploads nothing and banks nothing, and its
-input is the derived warm payload (``WARMUP_TEXT`` + a flat mid-gray 128px
-PNG), so a flat output there is the expected answer to a flat question.
-
-The numbers, floors and decimation are shared deliberately with
-``cozy_eval.integrity`` / ``cozy_eval.metrics.temporal``: the eval half judges
-candidates offline, this half refuses them online, and a disagreement between
-the two would be a bug in one of them.
-"""
+"""The serve-path output-integrity floor: nothing is uploaded unlooked-at."""
 
 from __future__ import annotations
 
@@ -53,26 +7,14 @@ from typing import Any, List, Optional, Sequence
 
 import msgspec
 
-#: Adjacent ``(t, t+1)`` pairs sampled across a buffered clip.
 INTEGRITY_PAIRS = 5
 
-#: Median adjacent-frame grey correlation below this reads as NOISE. MEASURED
-#:: VAE-decoded noise 0.29, real renders 0.92-0.99.
 NOISE_CORR_FLOOR = 0.6
 
-#: Per-frame grey standard deviation (on [0, 1] greys) below this reads as
-#: BLANK — a constant-fill frame.
 BLANK_STD_FLOOR = 0.01
 
-#: Working HEIGHT the statistic is computed at, reached by integer decimation.
-#: MEASURED to cost nothing in accuracy: on a 1344x768 clip panning 1 px/frame
-#: the median correlation is 0.9755 at full resolution and 0.9789 at 96 rows,
-#: while noise stays ~0.00 either way.
 INTEGRITY_TARGET_H = 96
 
-#: Streaming budget: how many adjacent pairs the chunk collector may compute
-#: before it halves what it kept and doubles its chunk stride. Keeps the gate
-#: bounded on a clip whose length is not known until the producer is done.
 STREAM_PAIR_BUDGET = 2 * INTEGRITY_PAIRS
 
 PASS = "pass"
@@ -81,8 +23,6 @@ BLANK = "blank"
 NONFINITE = "nonfinite"
 UNMEASURED = "unmeasured"
 
-#: Appended to every PASS. A green integrity line can never be read as a
-#: quality pass — the melt class scores HIGHER here than a clean render.
 SCOPE_NOTE = (
     "SCOPE: this floor catches NOISE and BLANK output only. It is not a "
     "quality gate — a melted/over-smoothed render scores HIGHER on "
@@ -105,7 +45,7 @@ class OutputIntegrity(msgspec.Struct, frozen=True, kw_only=True):
 
     @property
     def ok(self) -> bool:
-        """True only on an explicit PASS. UNMEASURED is not a pass."""
+        """True only on an explicit PASS."""
         return self.verdict == PASS
 
     @property
@@ -123,11 +63,6 @@ class OutputIntegrity(msgspec.Struct, frozen=True, kw_only=True):
         )
 
 
-# ---------------------------------------------------------------------------
-# the numeric core — decimated grey planes, one pass
-# ---------------------------------------------------------------------------
-
-
 def _frame_count(source: Any) -> int:
     import numpy as np
 
@@ -137,7 +72,6 @@ def _frame_count(source: Any) -> int:
 
 
 def _pair_starts(total: int, count: int) -> List[int]:
-    """Uniformly spread start indices ``k`` for consecutive ``(k, k+1)`` pairs."""
     if total < 2:
         return []
     last = total - 2
@@ -150,12 +84,6 @@ def _pair_starts(total: int, count: int) -> List[int]:
 
 
 def _grey(frame: Any, target_h: int) -> Any:
-    """One frame -> a decimated grey plane in [0, 1], float32.
-
-    Decimation happens BEFORE the float conversion, on a numpy VIEW, so the
-    expensive pass runs on ~1/stride^2 of the pixels. This is the whole reason
-    the gate is affordable on the serve path.
-    """
     import numpy as np
 
     a = np.asarray(frame.convert("RGB") if hasattr(frame, "convert") else frame)
@@ -176,20 +104,19 @@ def _grey(frame: Any, target_h: int) -> Any:
 
 
 def _grey_planes(source: Any, indices: Sequence[int], target_h: int) -> List[Any]:
-    """Decimated grey planes for JUST ``indices`` — nothing else is touched."""
     import numpy as np
 
     if isinstance(source, (list, tuple)):
         picked: List[Any] = [source[i] for i in indices]
     else:
-        arr = np.asarray(source)  # a view for an ndarray; nothing is copied
+        arr = np.asarray(source)
         picked = [arr[i] for i in indices]
     return [_grey(p, target_h) for p in picked]
 
 
 def _corr(a: Any, b: Any, sa: float, sb: float) -> float:
     if sa < 1e-6 or sb < 1e-6:
-        return 0.0  # a flat frame correlates with nothing
+        return 0.0
     x, y = a.ravel(), b.ravel()
     return float(((x - x.mean()) * (y - y.mean())).mean() / (sa * sb))
 
@@ -251,20 +178,13 @@ def check_frames(
     std_floor: float = BLANK_STD_FLOOR,
     target_h: int = INTEGRITY_TARGET_H,
 ) -> OutputIntegrity:
-    """Judge a buffered clip (or a single frame). Milliseconds, no reference.
-
-    ``frames`` is anything the encode path already holds: a ``(F, H, W, 3)``
-    numpy array, a ``(H, W, 3)`` single frame, a list of PIL images or arrays,
-    or a CPU torch tensor. A clip too short to have an adjacent pair is judged
-    on the BLANK/NONFINITE half alone — that half is fully measured there, so
-    it is an honest verdict, not an unmeasured one.
-    """
+    """Judge a buffered clip (or a single frame)."""
     t0 = time.monotonic()
     try:
         import numpy as np
 
         arr = frames
-        if hasattr(arr, "detach"):  # a CPU torch tensor
+        if hasattr(arr, "detach"):
             arr = arr.detach().cpu().numpy()
         if not isinstance(arr, (list, tuple)):
             arr = np.asarray(arr)
@@ -287,7 +207,7 @@ def check_frames(
             nonfinite=nonfinite, corr_floor=corr_floor, std_floor=std_floor,
             t0=t0, detail=detail,
         )
-    except Exception as exc:  # an unjudgeable output is UNMEASURED, never a pass
+    except Exception as exc:
         return _unmeasured(f"{type(exc).__name__}: {exc}", t0)
 
 
@@ -297,31 +217,12 @@ def check_image(
     std_floor: float = BLANK_STD_FLOOR,
     target_h: int = INTEGRITY_TARGET_H,
 ) -> OutputIntegrity:
-    """Judge a single image: BLANK and NONFINITE only.
-
-    The correlation half needs two frames and there is only one, so it is not
-    reported — the same floor applies to images trivially, and this is what
-    "trivially" means. It is fully measured, so a flat image REJECTS here.
-    """
+    """Judge a single image: BLANK and NONFINITE only."""
     return check_frames(image, std_floor=std_floor, target_h=target_h)
 
 
 class StreamCollector:
-    """Judge a clip that arrives in CHUNKS, without ever rebuffering it.
-
-    The streaming encode seam hands the encoder one decoded chunk at
-    a time and the total length is unknown until the producer is done, so the
-    buffered "spread five pairs over the clip" sampling cannot be used. This
-    collector instead takes the full buffered spread from the FIRST chunk
-    (so a single-chunk stream is bit-identical to :func:`check_frames`) and
-    one adjacent pair from each chunk after it — thinned by halving the kept
-    series and doubling the chunk stride whenever the computed count reaches
-    :data:`STREAM_PAIR_BUDGET`. The pairs therefore stay spread across the
-    whole clip and the cost stays bounded no matter how long it is.
-
-    Each chunk MUST be judged inside the producer loop: the staged host buffer
-    a chunk borrows is only valid until the next iteration step.
-    """
+    """Judge a clip that arrives in CHUNKS, without ever rebuffering it."""
 
     def __init__(
         self,
@@ -386,7 +287,7 @@ class StreamCollector:
         for k in starts:
             self._corrs.append(_corr(greys[k], greys[k + 1], stds[k], stds[k + 1]))
         if len(self._corrs) >= STREAM_PAIR_BUDGET:
-            del self._corrs[1::2]  # keep every other — the spread survives
+            del self._corrs[1::2]
             self._stride *= 2
 
     def verdict(self) -> OutputIntegrity:
@@ -406,29 +307,10 @@ class StreamCollector:
         )
 
 
-# ---------------------------------------------------------------------------
-# enforcement — the one place a verdict becomes a refusal
-# ---------------------------------------------------------------------------
-
-
 def enforce(result: OutputIntegrity, *, ref: str, kind: str) -> None:
-    """Bank the verdict and refuse the output if the pixels failed.
-
-    ``kind`` is ``"video"`` / ``"image"`` — it rides the event detail so a
-    reject is countable per output kind hub-side.
-
-    REJECT raises :class:`~gen_worker.api.errors.OutputIntegrityError`, which
-    maps FATAL: the request never reaches ``succeeded`` and nothing is
-    uploaded. UNMEASURED serves — a screen that could not run is a confession,
-    not a verdict — but it still emits its event, because a fail-soft outcome
-    that a hub decision may depend on must never be only a log line.
-    PASS is silent: one event per served request would be a row per render for
-    no decision.
-    """
+    """Bank the verdict and refuse the output if the pixels failed."""
     if result.ok:
         return
-    # Deferred: `activity` pulls protobuf + psutil, and the io/save modules on
-    # the `import gen_worker` path must not.
     from . import activity
     from .api.errors import OutputIntegrityError
 
@@ -444,40 +326,9 @@ def enforce(result: OutputIntegrity, *, ref: str, kind: str) -> None:
 
 
 def judged(ctx: Any) -> bool:
-    """Whether this context's outputs are subject to the floor.
-
-    this is the SERVE-path floor — its whole contract is that nothing
-    is UPLOADED unlooked-at and that a bad render cannot BANK as a success. A
-    boot-warmup / mint warm forward uploads nothing and banks nothing: its
-    output is discarded by construction, and its INPUT is the derived warm
-    payload — `WARMUP_TEXT` and a flat mid-gray 128px PNG. A degenerate output
-    from a degenerate input is the expected result there, not a defect, and
-    refusing it turned a valid warm into a FATAL on the paying request that
-    happened to wake the pod (minimax-h3 `reference-to-video`, measured).
-
-    **A TRACE is the same shape, and pgw#1522 is the same lesson twice.** The
-    publish derive runs the author's handler under a HOLLOW session: every
-    parameter is a fake tensor carrying no bytes, so every frame it renders is
-    exactly blank — `adjacent_frame_corr` and `frame_std_min` are
-    mathematically ZERO, the signature of virtualized weights rather than a
-    marginal render. Its output is discarded by construction too: `ctx.save_*`
-    is a stub that returns `trace://…` and uploads nothing, banks nothing.
-    Degenerate output from a degenerate input, again.
-
-    So the floor is NOT weakened here and its threshold is untouched — this
-    says WHOSE outputs it judges, which is the question this predicate exists
-    to answer. It is the one place that answers it, so the module-level
-    `gw_io.write_*` writers and the `ctx.save_*` path cannot disagree about it
-    the way they did (the writers enforced it under a trace that `ctx.save_*`
-    had already stubbed, which is why every `ctx.save_*` endpoint derived and
-    the first `gw_io` one could not).
-    """
+    """Whether this context's outputs are subject to the floor."""
     if bool(getattr(ctx, "boot_warmup", False)):
         return False
-    # Duck-typed and PRIVATE on purpose. The trace context sets it; nothing on
-    # the author surface exposes "am I a trace" (Paul deleted that spelling —
-    # author code branching on it corrupts compilation coverage), and this is
-    # a platform fact about where the output GOES, not an author input.
     return not bool(getattr(ctx, "_outputs_discarded", False))
 
 

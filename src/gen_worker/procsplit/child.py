@@ -1,12 +1,4 @@
-"""Child (compute-plane) side of the process split: a Transport-shaped object
-that speaks frames to the control parent instead of gRPC to the hub.
-
-Lifecycle/Executor are wired to this exactly as they are to the real
-Transport — the residency protocol (CONFIG_APPLY / MATERIALIZE /
-FUNCTION_READY, receipts), ctx, cancellation and job execution all run
-in-process here, unchanged. Durable result queueing lives in the PARENT's real
-SendQueue; this side writes through.
-"""
+"""Child (compute-plane) side of the process split: a Transport-shaped object that speaks frames to the control parent instead of gRPC to the hub."""
 
 from __future__ import annotations
 
@@ -27,26 +19,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WATCHDOG_PING_S = 5.0
 _BOOT_FATAL_SEND_TIMEOUT_S = 5.0
-# How long the dying child waits for the parent to CONFIRM it has recorded the
-# verdict. Bounded — a wedged parent must not hold a doomed child alive — and
-# losing the ack only degrades to fire-and-forget.
 _BOOT_FATAL_ACK_TIMEOUT_S = 10.0
 
 
 def send_boot_fatal(report: Dict[str, Any], *, kind: str = "hardware_unsuitable") -> bool:
-    """Hand the parent a TERMINAL typed boot verdict before exiting.
-
-    Runs pre-transport (the CUDA probe fails before ChildTransport exists), so
-    it opens its own short-lived socket. The parent propagates the report on
-    its credential and exits 1 instead of respawning — a hardware verdict is
-    not a transient fault.
-
-    After sending it WAITS (bounded) for the parent's T_BOOT_FATAL_ACK: a child
-    that exits immediately can be reaped before the parent reads the frame off
-    the socket buffer, downgrading the typed verdict to a crash-to-retry. The
-    ack is written only after the parent has recorded the verdict, so surviving
-    this call means the respawn decision will see it.
-    """
+    """Hand the parent a TERMINAL typed boot verdict before exiting."""
     path = os.environ.get(ENV_SOCKET, "").strip()
     if not path:
         return False
@@ -72,26 +49,9 @@ def send_boot_fatal(report: Dict[str, Any], *, kind: str = "hardware_unsuitable"
 
 
 def _wait_boot_fatal_ack(sock: socket.socket) -> None:
-    """Blocking read until T_BOOT_FATAL_ACK arrives.
-
-    The transient boot-fatal connection becomes the slot's link parent-side,
-    so unrelated parent->child frames (e.g. a T_HELLO_REQ from a concurrently
-    connecting hub stream) may precede the ack — skip them. Bounded by the
-    socket timeout the caller set.
-    """
     while True:
         header = _recv_exact(sock, 5)
         ftype, length = header[0], int.from_bytes(header[1:5], "big")
-        # `length` is 4 attacker-supplied bytes
-        # off the control socket, so it may declare up to 4 GiB. The bound
-        # already exists — frames.MAX_FRAME_BYTES, enforced by BOTH ends of the
-        # normal path (frames.read_frame and FrameWriter.frame). This reader is
-        # hand-rolled for the boot-fatal ack and skipped it, so one route into
-        # the child had no ceiling while its siblings did.
-        #
-        # The docstring's claim that this is "bounded by the socket timeout"
-        # was wrong in a way worth naming: settimeout bounds each recv, not the
-        # accumulation, so a peer that dribbles bytes resets the clock forever.
         if length > frames.MAX_FRAME_BYTES:
             raise ValueError(
                 f"frame of {length} bytes exceeds {frames.MAX_FRAME_BYTES}")
@@ -102,10 +62,6 @@ def _wait_boot_fatal_ack(sock: socket.socket) -> None:
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    # accumulate into a bytearray, not `buf += chunk`. The old form
-    # reallocated and copied the whole buffer per chunk, so a large frame cost
-    # O(n^2) — the length bound above caps n, but quadratic copying at 128 MiB
-    # is still a stall, and there is no reason to pay it.
     buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
@@ -123,19 +79,7 @@ def _ping_interval() -> float:
 
 
 def start_liveness_thread() -> Optional[threading.Thread]:
-    """Report WHAT IS OPEN on a thread, not on the event loop.
-
-    The frame ping in ``ChildTransport`` is an asyncio task, so an inductor
-    compile that starves the loop silences it — and a parent that kills on that
-    silence SIGKILLs a live compile and labels it ``watchdog_hang``. Loop
-    silence may only ARM the verdict; the open activity DECIDES it.
-
-    This thread carries only that one fact — which activity is open — over a
-    dedicated pipe with one atomic ``os.write``. Deliberately NOT the evidence:
-    a CPU-bound Python phase (dynamo tracing) can starve a thread of the GIL
-    for seconds, so nothing the child says about its own liveness can be the
-    decider. The parent measures the evidence from /proc instead.
-    """
+    """Report WHAT IS OPEN on a thread, not on the event loop."""
     raw = os.environ.get(ENV_LIVENESS_FD, "").strip()
     if not raw:
         return None
@@ -155,7 +99,7 @@ def start_liveness_thread() -> Optional[threading.Thread]:
                     "kind": getattr(act, "kind", "") or "",
                 })))
             except OSError:
-                return          # parent gone; the parent's waitpid is the truth
+                return
             except Exception:
                 logger.debug("liveness ping sample failed", exc_info=True)
             time.sleep(interval)
@@ -166,9 +110,6 @@ def start_liveness_thread() -> Optional[threading.Thread]:
 
 
 class _QueueShim:
-    """Lifecycle.build_hello reads ``transport.queue.pending_result_keys``.
-    The child holds no durable results (the parent's SendQueue does, and the
-    parent merges its pending keys into every Hello it relays)."""
 
     @property
     def pending_result_keys(self) -> List[Tuple[str, int]]:
@@ -176,11 +117,7 @@ class _QueueShim:
 
 
 class ChildTransport:
-    """The compute child's stand-in for ``Transport``.
-
-    handlers is the Lifecycle: build_hello / on_hello_ack / on_message /
-    on_message_shipped / on_disconnect, same contract as Transport.
-    """
+    """The compute child's stand-in for ``Transport``."""
 
     def __init__(self, settings: Settings, handlers: Any) -> None:
         self._settings = settings
@@ -193,28 +130,13 @@ class ChildTransport:
         self._flush_waiter: Optional[asyncio.Future] = None
         self._reported_handler_failures: set = set()
 
-    # ---- Transport surface used by Lifecycle / Executor / Worker ---------
-
     @property
     def connected(self) -> bool:
         return self._connected
 
     @property
     def current_worker_jwt(self) -> str:
-        """Always empty in the compute child (delta 1).
-
-        The worker JWT is the pod's signing identity — the stream credential,
-        the capability minter, the authority behind the platform C2PA oracle.
-        This process imports tenant endpoint code, so anything it holds, that
-        code holds. The parent strips ``WORKER_JWT`` from this process's
-        environment and no frame carries it, so there is nothing here to
-        return; identity-bearing calls go through ``procsplit.broker`` and the
-        parent decides.
-
-        Kept as a property (rather than deleted) because it is the Transport
-        surface Lifecycle/Executor bind at boot, and an empty string is the
-        honest answer: this process has no credential.
-        """
+        """Always empty in the compute child (delta 1)."""
         return ""
 
     async def send(self, msg: pb.WorkerMessage) -> None:
@@ -253,8 +175,6 @@ class ChildTransport:
     def stop(self) -> None:
         self._stopping.set()
 
-    # ---- run loop --------------------------------------------------------
-
     async def run(self) -> None:
         path = os.environ.get(ENV_SOCKET, "").strip()
         if not path:
@@ -264,7 +184,6 @@ class ChildTransport:
         except OSError as exc:
             raise FatalTransportError(f"cannot reach control parent at {path}: {exc}") from exc
         self._writer = frames.FrameWriter(writer)
-        # delta 1: the child's only route to an identity-bearing hub call.
         from .broker import ChildBroker, install as install_broker
 
         self._broker = ChildBroker(asyncio.get_running_loop(), self._frame)
@@ -301,9 +220,6 @@ class ChildTransport:
         await writer.frame(ftype, payload)
 
     async def _watchdog_ping(self) -> None:
-        """EVENT-LOOP liveness: this proves the loop is turning, and
-        nothing more. Its silence ARMS the parent's hang verdict; the
-        thread-sourced liveness pipe is what decides it."""
         interval = _ping_interval()
         payload = frames.pack_meta({})
         while not self._stopping.is_set():
@@ -322,8 +238,6 @@ class ChildTransport:
             except (asyncio.IncompleteReadError, ConnectionError, OSError):
                 if self._stopping.is_set():
                     return
-                # The control parent is the container: without it there is no
-                # stream, no identity, and no reason to compute.
                 raise FatalTransportError("control parent link lost")
             await self._dispatch(ftype, payload)
 
@@ -360,10 +274,6 @@ class ChildTransport:
         except (FatalTransportError, asyncio.CancelledError):
             raise
         except Exception:
-            # Same doctrine as Transport.HandlerError: a handler bug
-            # must never masquerade as a dropped link. Log as itself; the
-            # parent's gRPC transport already dials handler failures when they
-            # occur there — here the process stays alive and keeps serving.
             key = (ftype, "handler")
             if key not in self._reported_handler_failures:
                 self._reported_handler_failures.add(key)

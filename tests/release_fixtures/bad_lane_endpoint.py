@@ -1,9 +1,4 @@
-"""Red fixture: ctx.compile of an attribute that does not exist.
-
-The imperative marking is typed by construction -- a typo is a real
-AttributeError at the author's own line, surfaced by the derive with the
-failing name in the message.
-"""
+"""Red fixture: ctx.compile of an attribute that does not exist."""
 
 from __future__ import annotations
 

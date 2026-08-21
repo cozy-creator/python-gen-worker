@@ -1,10 +1,3 @@
-"""A STREAMING module (pgw#1576): declared chunk types, returned terminals.
-
-The qwen/joycaption shape, weightless so the whole path runs on CPU: an async
-entrypoint streaming tokens, a plain `def` one streaming per-item batch
-progress, and an undeclared one that must be refused when it tries to emit.
-"""
-
 from __future__ import annotations
 
 import msgspec
@@ -71,8 +64,7 @@ def caption(ctx: RequestContext, payload: CaptionInput) -> CaptionOutput:
 
 @entrypoint(streams=(TokenDelta, ItemDelta))
 def narrate(ctx: RequestContext, payload: CaptionInput) -> CaptionOutput:
-    """ONE handler, BOTH shapes: tokens while an item decodes, an item frame
-    when it finishes."""
+    """ONE handler, BOTH shapes: tokens while an item decodes, an item frame when it finishes."""
     total = len(payload.items)
     captions: list[str] = []
     for index, item in enumerate(payload.items):
@@ -86,7 +78,6 @@ def narrate(ctx: RequestContext, payload: CaptionInput) -> CaptionOutput:
 
 @entrypoint
 def silent(ctx: RequestContext, payload: CaptionInput) -> SilentOutput:
-    """Declares no chunk type; `emit` here must refuse rather than stream past
-    a manifest that says `incremental_output: false`."""
+    """Declares no chunk type; `emit` here must refuse rather than stream past a manifest that says `incremental_output: false`."""
     ctx.emit(TokenDelta(text="never"))
     return SilentOutput(ok=True)

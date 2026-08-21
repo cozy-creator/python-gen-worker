@@ -1,4 +1,4 @@
-"""``gen-worker release`` -- publish-time commands (pgw#1370).
+"""``gen-worker release`` -- publish-time commands.
 
 ``release derive`` runs the instrumented derive INSIDE the release env:
 weights-free (config-only checkpoint tree), CPU-only, byte-reproducible.
@@ -50,11 +50,6 @@ def add_subparser(sub: Any) -> None:
         "`slot=path` to give a SECONDARY model slot its own tree (pgw#1508); "
         "the bare form is the primary model's.",
     )
-    # pgw#1489: a derive STATES the compile stack it traced under, and reads it
-    # from the endpoint's own `uv.lock` — the one file the derive, the mint and
-    # every serving pod share by construction. This is not a flag that switches
-    # the source of an identity (the defect pgw#1472 named): there IS no other
-    # source any more, and a derive without a lock refuses by name.
     derive.add_argument(
         "--lockfile",
         default=None,
@@ -74,11 +69,6 @@ def add_subparser(sub: Any) -> None:
         default=None,
         help="write the document bytes here (default: stdout)",
     )
-    # pgw#1599: `--dynamic-axes` is DELETED. Which axis is worth collapsing is
-    # a MEASURED, per-model question (pgw#1548), so it is declared on the model
-    # class that measured it (`shapes={"aspect": DYNAMIC}`) — a CLI flag
-    # re-keyed every graph in the fleet from one word and left no record on the
-    # model of what was chosen or why.
     derive.set_defaults(_handler=_run_derive)
 
 
@@ -145,20 +135,11 @@ def _run_derive(args: argparse.Namespace) -> int:
 
     for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
-    # pgw#1449: named, and named SEPARATELY from the warnings — an entrypoint
-    # with no traced coverage is a property of the document a reader has to
-    # be able to see without parsing prose.
     for name, reason in result.unenumerable_entrypoints:
         print(f"entrypoint {name}: NOT enumerated -- {reason}", file=sys.stderr)
-    # pgw#1527: named separately from the warnings for the same reason — a
-    # payload with no graphs is a property of the document, not prose.
     for skipped in result.unservable_payloads:
         print(f"payload SKIPPED (unservable): {skipped}", file=sys.stderr)
     if result.eager_permanent:
-        # pgw#1392: two different reasons reach "no graphs" and the log must
-        # not conflate them — a model that MARKS nothing (it declares real
-        # lanes like every model does; the absent `ctx.compile` mark is the
-        # whole statement), or NO MODEL AT ALL (a weightless endpoint).
         why = (
             "no model class -- weightless endpoint, nothing to compile"
             if result.weightless

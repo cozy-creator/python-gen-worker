@@ -10,22 +10,9 @@ from .refs import TensorhubRef
 import requests
 
 
-# In-memory shape of a resolved cozy: ref. PRODUCTION workers never resolve
-# these themselves — the orchestrator pre-resolves every cozy ref a job needs
-# and ships the manifest + presigned URLs via
-# JobExecutionRequest.resolved_repos_by_id over gRPC. STANDALONE clients
-# (gen-worker run/serve/prefetch under cozy, #379) resolve the same shape over
-# HTTP via ``resolve_repo`` against tensorhub's public resolve route.
-
-
 @dataclass(frozen=True)
 class WorkerResolvedChunk:
-    """One CAS object of a chunked file (manifest v2).
-
-    ``sha256`` is bare lowercase hex; ``length`` comes from the manifest so a
-    chunk's cumulative offset is arithmetic, not an assumption about the
-    chunking policy.
-    """
+    """One CAS object of a chunked file (manifest v2)."""
 
     sha256: str
     url: str
@@ -37,20 +24,11 @@ class WorkerResolvedRepoFile:
     path: str
     size_bytes: int
     url: Optional[str]
-    #: Algorithm-tagged whole-file digest ("sha256:<hex>"). Every resolved
-    #: entry carries one; an entry that does not is refused, not skipped.
     digest: str = ""
-    #: Present whenever the manifest stores an ordered object list; file size
-    #: does not determine whether tensor-aligned chunks exist.
     chunks: tuple["WorkerResolvedChunk", ...] = ()
 
     def cas_ref(self) -> str:
-        """The algorithm-tagged digest of this entry.
-
-        Raises rather than returning a bare or empty string, because every
-        caller of this is an integrity check and an unreadable digest must
-        fail closed, never degrade into "no check".
-        """
+        """The algorithm-tagged digest of this entry."""
         return resolved_entry_digest(
             {"digest": self.digest},
             what=f"resolved file {self.path!r}",
@@ -60,19 +38,7 @@ class WorkerResolvedRepoFile:
 def resolved_entry_digest(
     ent: Mapping[str, Any], *, what: str = "manifest entry"
 ) -> str:
-    """The algorithm-tagged digest of one RAW resolve-manifest entry.
-
-    Callers that never build a ``WorkerResolvedRepoFile`` — anything reading
-    ``/resolve`` JSON directly, e.g. compiled graph discovery — must go through here
-    rather than reaching for a field name. Raises on an absent or untagged
-    digest: an integrity check with no digest is a REFUSAL, never a skip.
-
-    the legacy ``blake3`` mirror is no longer read. Before the
-    repoint an entry could carry bare blake3 hex and nothing else; after it,
-    an entry with no ``digest`` is a stale pointer, and the only safe answer
-    is to refuse it. Reinstating the mirror arm here re-opens the vacuous
-    guard this whole program exists to close.
-    """
+    """The algorithm-tagged digest of one RAW resolve-manifest entry."""
     d = str(ent.get("digest") or "").strip().lower()
     if not d:
         raise ValueError(f"{what} carries no digest")
@@ -88,17 +54,7 @@ def resolved_entry_digest(
 class WorkerResolvedRepo:
     snapshot_digest: str
     files: List[WorkerResolvedRepoFile]
-    # Total checkpoint size. There is deliberately no `sibling_flavors`: the
-    # hub emits `tag_members` (checkpoint rows) and no flavor row exists to
-    # parse. Selection within a release is contract compatibility (§1.33).
     size_bytes: int = 0
-    # The resolved checkpoint's architecture family ("sdxl-pony",
-    # ...) — drives the local family lane policy. "" on hubs not sending it.
-    # resolved objective and distillation value plus the
-    # evidence status that distinguishes explicit false from unknown. Empty
-    # status is NOT an old hub: the hub stamps the key only when the stored
-    # column is non-empty, so "" means nothing measured the axis — and only
-    # "classified" is evidence (`modelfamily.StoredCheckpointFacts`).
     objective: str = ""
     distilled: bool = False
     distilled_status: str = ""
@@ -109,8 +65,7 @@ class HubResolveError(RuntimeError):
 
 
 class HubRepoNotFoundError(HubResolveError):
-    """404: unknown repo/release OR a private repo the caller may not see
-    (the route deliberately never distinguishes these)."""
+    """404: unknown repo/release OR a private repo the caller may not see (the route deliberately never distinguishes these)."""
 
 
 class HubAuthError(HubResolveError):
@@ -124,32 +79,7 @@ def hub_base_url(base_url: Optional[str] = None) -> str:
 def parse_chunk_list(
     what: str, path: str, raw: Any, urls: Any = None
 ) -> tuple[WorkerResolvedChunk, ...]:
-    """Parse a v2 entry's ordered chunk list. Order is the file's byte order.
-
-    THE WIRE SHAPE, read off the hub's serializer rather than assumed:
-    `catalog.SnapshotManifestFile` carries `chunks: [{digest, len}]` — the
-    canonical manifest bytes, which cannot contain URLs because they are part of
-    the content-addressed identity — plus a SEPARATE, INDEX-ALIGNED
-    `chunk_urls: [...]` that exists only at resolve time. The URL is therefore
-    NOT nested inside each chunk on the REST path, though a nested `url` is
-    accepted when present.
-
-    This parser is REST-ONLY — `resolve_repo` is its single caller. The gRPC
-    dispatch path never reaches here: its `ChunkRef` (`sha256`/`url`/`len`) is
-    read off the typed proto message in `models.store`, so its field names are
-    not this function's vocabulary and must not be mirrored into these key
-    lookups (pgw#1307).
-
-    Getting this wrong is not cosmetic: requiring a nested `url` made every real
-    chunked checkpoint unparseable, which is how a v2 publish looks fine on the
-    hub and is unreachable to every standalone client.
-
-    A malformed chunk list is a HARD failure, never a silent empty list: an
-    empty list is indistinguishable from "stored whole", and reading a chunked
-    file as whole is how a 40 GiB shard becomes a 0-byte one. A URL list of the
-    WRONG LENGTH is equally fatal — index alignment is the only thing tying a
-    URL to its digest, so a short list must never mean "fetch fewer chunks".
-    """
+    """Parse a v2 entry's ordered chunk list; order is the file's byte order. The wire shape (read off the hub's serializer): chunks: [{digest, len}] — canonical manifest bytes, which cannot carry URLs — plus a SEPARATE, INDEX-ALIGNED chunk_urls list that exists only at resolve time (a nested url is accepted when present). A malformed chunk list is a HARD failure, never a silent empty list: empty is indistinguishable from "stored whole", and a URL list of the WRONG LENGTH is equally fatal — index alignment is the only thing tying a URL to its digest. REST-only; the gRPC path reads typed ChunkRef and must not be mirrored here."""
     if not raw:
         return ()
     if not isinstance(raw, list):
@@ -175,10 +105,6 @@ def parse_chunk_list(
             raise HubResolveError(
                 f"{what}: {path!r} chunk[{i}] is not an object"
             )
-        # `digest`/`len` are the ONLY spellings this route has ever emitted
-        # (`catalog.SnapshotChunk`). The mirror arms this parser used to carry
-        # were not retired spellings — they never existed here, and accepting
-        # them re-opened the vacuous guard `resolved_entry_digest` refuses.
         digest = str(c.get("digest") or "").strip().lower()
         digest = digest.removeprefix("sha256:")
         url = str(c.get("url") or "").strip() or (url_list[i] if i < len(url_list) else "")
@@ -199,12 +125,7 @@ def resolve_repo(
     token: Optional[str] = None,
     timeout: float = 60.0,
 ) -> WorkerResolvedRepo:
-    """Resolve a Hub ref against ``GET /api/v1/repos/:tenant/:name/resolve``.
-
-    Anonymous for public repos; bearer ``token`` (default ``TENSORHUB_TOKEN``)
-    for private. Returns the manifest + presigned GET URLs ready for
-    ``cozy_snapshot.ensure_snapshot_async``.
-    """
+    """Resolve a Hub ref against ``GET /api/v1/repos/:tenant/:name/resolve``."""
 
     base = hub_base_url(base_url)
     if not base:
@@ -226,10 +147,6 @@ def resolve_repo(
         raise HubResolveError(f"tensorhub resolve failed for {ref.canonical()}: {e}") from e
 
     if resp.status_code == 404:
-        # Only the HUB's own 404 means "no such repo". A proxy
-        # answering 404 means the hub is unreachable (restarting), and calling
-        # that "repo not found" sends the operator hunting a catalog problem
-        # that does not exist.
         from ..http_origin import is_proxy_outage
 
         if is_proxy_outage(resp):
@@ -270,9 +187,6 @@ def resolve_repo(
         chunks = parse_chunk_list(
             f"tensorhub resolve for {ref.canonical()}", path,
             ent.get("chunks"), ent.get("chunk_urls"))
-        # A chunked entry has NO whole-file url — its bytes only exist as
-        # chunks. Requiring `url` here is what would classify every v2
-        # snapshot as unresolvable.
         if not path or not tagged or (not u and not chunks):
             raise HubResolveError(
                 f"tensorhub resolve for {ref.canonical()}: manifest entry "

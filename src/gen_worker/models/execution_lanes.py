@@ -1,12 +1,4 @@
-"""Lane vocabulary — the SHARED SPEC twin of tensorhub's
-``internal/orchestrator/precision/lane.go``. Ids and semantics must stay
-byte-identical across repos.
-
-A lane is the FULL execution-strategy descriptor:
-``<weights>-<activation>[-<scale>]+<execution>``, e.g.
-``fp8-w8a8-dynamic+compiled``. Dual-form input: a coarse FAMILY
-(``bf16 | fp8 | 4bit``) or a full descriptor.
-"""
+"""Lane vocabulary — the SHARED SPEC twin of tensorhub's ``internal/orchestrator/precision/lane.go``."""
 
 from __future__ import annotations
 
@@ -27,9 +19,9 @@ WEIGHTS_SVDQ_FP4 = "svdq-fp4"
 WEIGHTS_SVDQ_INT4 = "svdq-int4"
 WEIGHTS_NVFP4 = "nvfp4"
 
-ACT_W16A16 = "w16a16"  # upcast-ahead (weights already at compute dtype)
-ACT_W8A16 = "w8a16"  # fp8 storage, per-layer upcast at inference
-ACT_W8A8 = "w8a8"  # fp8 GEMM with activation scales (torch scaled_mm)
+ACT_W16A16 = "w16a16"
+ACT_W8A16 = "w8a16"
+ACT_W8A8 = "w8a8"
 ACT_W4A4 = "w4a4"
 
 SCALE_STATIC = "static"
@@ -42,7 +34,7 @@ EXEC_COMPILED = "compiled"
 class ExecutionLane(msgspec.Struct, frozen=True, kw_only=True):
     weights: str
     activation: str
-    scale: str = ""  # "" when the lane has no scale axis
+    scale: str = ""
     execution: str
 
 
@@ -73,18 +65,9 @@ class _ExecutionLaneBody(msgspec.Struct, frozen=True, kw_only=True):
     scale: str = ""
 
 
-# THE lane table's rows, ranked best-first. Execution support is authoritative
-# for what the platform CHOOSES: lane enumeration, validation, and binding
-# resolution all read this one field. It is NOT a claim about what can be
-# OBSERVED — a compiled-only body serves eager whenever a serve-time recipe
-# quantizes and the self-mint then declines, and a report of that state must
-# name it (``observed_execution_lane``) rather than be coerced into the
-# choosable set.
 _KNOWN_BODIES: tuple[_ExecutionLaneBody, ...] = (
-    # Eager w8a8 has not been measured; keep Tensorhub's compiled-only answer.
     _ExecutionLaneBody(weights=WEIGHTS_FP8, activation=ACT_W8A8,
               scale=SCALE_DYNAMIC, execution_support=EXEC_COMPILED),
-    # Eager nvfp4 has not been measured; keep Tensorhub's compiled-only answer.
     _ExecutionLaneBody(weights=WEIGHTS_NVFP4, activation=ACT_W4A4,
               scale=SCALE_STATIC, execution_support=EXEC_COMPILED),
     _ExecutionLaneBody(weights=WEIGHTS_SVDQ_FP4, activation=ACT_W4A4,
@@ -142,9 +125,7 @@ def execution_lane_body_id(execution_lane: ExecutionLane) -> str:
 
 
 def known_execution_lane_bodies() -> list[str]:
-    """Every concrete lane BODY token, ranked (table order). These are the
-    valid `handles=` declaration tokens — execution axis excluded:
-    author kernels declare the quant scheme, the platform owns eager/compiled."""
+    """Every concrete lane BODY token, ranked (table order)."""
     return [
         execution_lane_body_id(_execution_lane_for_body(body, EXEC_EAGER))
         for body in _KNOWN_BODIES
@@ -166,16 +147,7 @@ def valid_execution_lane_body(token: str) -> bool:
 
 
 def observed_execution_lane(token: str, compiled: bool) -> ExecutionLane:
-    """REPORT: the lane weights of body ``token`` are OBSERVED executing as.
-
-    the table's execution support says which lanes the platform
-    PLANS, and an observation is not a plan. ``_planned_execution`` therefore
-    must not touch this path: wan-2.2 served w8a8 weights EAGER on an H100
-    (its self-mint declined for `insufficient_vram`) and the compiled-only
-    coercion rewrote the honest `+eager` into `+compiled` — an over-claim on
-    the key that feeds pricing, verdicts, floors and compiled graph identity, in the
-    flattering direction. The body stays table-validated (the weights half is
-    still vocabulary); the execution axis is whatever actually happened."""
+    """REPORT: the lane weights of body ``token`` are OBSERVED executing as."""
     body = _body_for_token(token)
     if body is None:
         raise ValueError(
@@ -186,9 +158,7 @@ def observed_execution_lane(token: str, compiled: bool) -> ExecutionLane:
 
 
 def most_quantized_body(tokens: Iterable[str]) -> str:
-    """The most-quantized BODY among ``tokens`` (a bf16 VAE riding a w8a8
-    pipeline is still the w8a8 lane), ties by table rank. Unknown tokens are
-    dropped; an empty selection is the plain bf16 body."""
+    """The most-quantized BODY among ``tokens`` (a bf16 VAE riding a w8a8 pipeline is still the w8a8 lane), ties by table rank."""
     ranked = {body: i for i, body in enumerate(known_execution_lane_bodies())}
     best, best_key = "", (2, len(ranked) + 1)
     for token in tokens:
@@ -203,15 +173,7 @@ def most_quantized_body(tokens: Iterable[str]) -> str:
 
 
 class AppliedLane(msgspec.Struct, frozen=True, kw_only=True):
-    """What a SERVE-TIME recipe actually did to the weights.
-
-    The lane a request reports must be the lane its weights execute. A
-    binding names the CHECKPOINT the hub resolved; an endpoint that quantizes
-    inside ``setup()`` (torchao ``quantize_``, wan-2.2's ``_quantize_fp8``,
-    minimax-h3's ``serve_recipe.quantize_dit``) moves the executed lane away
-    from it, and only the code that did the conversion can say so provably.
-    ``body`` is a ``known_execution_lane_bodies()`` token — the same vocabulary
-    ``handles=`` uses; eager/compiled stays the platform's axis."""
+    """What a SERVE-TIME recipe actually did to the weights."""
 
     component: str
     body: str
@@ -232,7 +194,7 @@ def valid_execution_lane(execution_lane: ExecutionLane) -> bool:
 
 
 def parse_execution_lane(s: str) -> ExecutionLane:
-    """Parse a FULL descriptor id. Raises ValueError on anything else."""
+    """Parse a FULL descriptor id."""
     raw = str(s or "").strip().lower()
     parts = raw.split("+")
     if len(parts) != 2:
@@ -287,18 +249,7 @@ def parse_execution_lane_spec(s: str) -> ExecutionLaneSpec:
 
 
 def execution_lane_body_of_binding(storage_dtype: str) -> str:
-    """The lane BODY a binding's declared CAST names — the WEIGHTS half, with
-    no execution axis. Split out of ``execution_lane_of_binding`` so
-    the reporting path can stamp an observed execution onto it instead of a
-    planned one.
-
-    There is deliberately no ``flavor`` argument (§1.32(d)): a binding does not
-    NAME a stored precision, it names a tag (or a digest), and what the bytes are
-    is the checkpoint's tensor-layout contract. The stored half reaches the lane
-    id through the two channels that carry evidence rather than an assertion —
-    the hub-resolved execution lane, and setup()'s APPLIED report
-    (``report_applied_lane``) — both of which outrank this derivation at every
-    call site."""
+    """The lane BODY a binding's declared CAST names — the WEIGHTS half, with no execution axis."""
     if str(storage_dtype or "").strip().lower() in ("fp8", "fp8+te"):
         execution_lane = ExecutionLane(weights=WEIGHTS_FP8, activation=ACT_W8A16, execution="")
     else:
@@ -308,8 +259,7 @@ def execution_lane_body_of_binding(storage_dtype: str) -> str:
 
 
 class ExecutionLaneUnavailableError(ValueError):
-    """Typed refusal: the instructed lane cannot be served on this worker.
-    Always names the lane — never a silent fallback."""
+    """Typed refusal: the instructed lane cannot be served on this worker."""
 
     def __init__(self, execution_lane: str, detail: str) -> None:
         self.execution_lane = execution_lane
@@ -318,16 +268,7 @@ class ExecutionLaneUnavailableError(ValueError):
 
 
 def execution_lane_bucket(execution_lane: str) -> Tuple[str, int]:
-    """(base lane, rank bucket) for a weight lane in stamp OR label-token form.
-
-    ``"w8a8-lora128"`` -> ``("w8a8", 128)``, ``"lora32"`` -> ``("", 32)``,
-    ``"w8a8"`` -> ``("w8a8", 0)``. Sparse stamps (eager-only, never compiled)
-    do not parse as bucketed — they pass through as their whole string.
-
-    pgw#1573 moved this out of ``compile_cache`` (the v1 arming brain, deleted)
-    and beside the lane vocabulary it belongs to. ``models/loading.py``'s BASE
-    lane set already cited it by this name.
-    """
+    """(base lane, rank bucket) for a weight lane in stamp OR label-token form."""
 
 
     match = re.search(r"(?:^|-)lora(\d+)$", str(execution_lane or ""))
@@ -337,15 +278,7 @@ def execution_lane_bucket(execution_lane: str) -> Tuple[str, int]:
 
 
 def execution_lane_token(weight_lane: str) -> str:
-    """Label token for a traced weight lane (gw#534).
-
-    Compiled graphs of different lanes are DIFFERENT graphs and must not
-    collide on one flavor label. ``""`` (plain resident, incl. bf16-resident)
-    stays unsuffixed. LoRA-branch lanes (gw#547/gw#561) keep their base lane's
-    token plus the bucket suffix: ``w8a8-lora128`` -> ``w8a8-lora128``,
-    ``fp8-hooks-lora32`` -> ``w8a16-lora32``, ``lora32`` -> ``lora32`` — one
-    graph family per (base lane, rank bucket).
-    """
+    """Label token for a traced weight lane (gw#534)."""
     base, bucket = execution_lane_bucket(str(weight_lane or ""))
     token = {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8",
              "w4a4": "w4a4"}.get(base, base)

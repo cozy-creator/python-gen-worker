@@ -1,28 +1,3 @@
-"""pgw#1507: the four card-side legs of the varena facade.
-
-Run inside a coordinator-arbitrated GPU window on the box's RTX 4070.
-
-    .venv/bin/python benchmarks/arena_facade_pgw1507.py --arms ABCD
-
-* **A — identity.** sd1.5 through the facade vs eager resident, same seed, same
-  config: the latents must be BITWISE identical. Moving bytes must not change
-  them, and a tolerance would hide exactly the class of bug worth finding.
-* **B — cycles.** demote_to_host / promote_to_device BETWEEN requests, three
-  times, signature-checked, with the output still bitwise identical after
-  re-promotion.
-* **C — the number varena exists for.** pgw#1497's pricing arms re-run with
-  arena backing: resident-equivalent + 50/25/5 % of the same byte basis,
-  against the software rung's measured 1.91x / 3.16x / 3.56x. One config,
-  warmup, best of two.
-* **D — cold load.** Meta-init tree + RefillEngine (disk -> arena, no torch
-  allocation on the way) against `from_pretrained(...).to("cuda")`.
-
-Discipline, stated so the numbers can be read: ONE config, a warmup before
-every timed set, best-of-2, `uptime` recorded, and both the torch-allocator
-peak and the DEVICE peak reported — the arena's bytes are invisible to
-`torch.cuda.max_memory_allocated` by construction.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -49,19 +24,8 @@ MIB = 1 << 20
 GIB = 1 << 30
 
 
-# ---------------------------------------------------------------------------
-# Instruments
-# ---------------------------------------------------------------------------
-
-
 class DevicePeak:
-    """Device-level peak bytes, sampled. The arena is outside torch's allocator.
-
-    `torch.cuda.max_memory_allocated` reports what TORCH allocated and is blind
-    to `cuMemMap`-ed chunks by construction, so a facade run measured that way
-    would report a peak that is missing the weights. This samples the driver's
-    own free/total, which is the number pgw#1497's table reports.
-    """
+    """Device-level peak bytes, sampled."""
 
     def __init__(self, torch: Any, device: Any, hz: int = 50) -> None:
         self._torch = torch
@@ -101,11 +65,6 @@ def settle(torch: Any) -> None:
     torch.cuda.reset_peak_memory_stats()
 
 
-# ---------------------------------------------------------------------------
-# The pipeline
-# ---------------------------------------------------------------------------
-
-
 def build_pipeline(torch: Any) -> Any:
     from diffusers import StableDiffusionPipeline
 
@@ -121,7 +80,7 @@ def build_pipeline(torch: Any) -> Any:
 
 
 def generate(torch: Any, pipe: Any) -> Any:
-    """One request. Latent output, so the comparison is of the model's own bytes."""
+    """One request."""
     generator = torch.Generator(device="cuda").manual_seed(SEED)
     with torch.no_grad():
         out = pipe(
@@ -139,7 +98,7 @@ def generate(torch: Any, pipe: Any) -> Any:
 
 def timed(torch: Any, pipe: Any, runs: int = 2) -> Tuple[float, int, Any]:
     """Best-of-``runs`` wall time after one warmup, plus the device peak."""
-    latent = generate(torch, pipe)  # warmup
+    latent = generate(torch, pipe)
     times: List[float] = []
     peak = 0
     for _ in range(runs):
@@ -152,11 +111,6 @@ def timed(torch: Any, pipe: Any, runs: int = 2) -> Tuple[float, int, Any]:
     return min(times), peak, latent
 
 
-# ---------------------------------------------------------------------------
-# The facade
-# ---------------------------------------------------------------------------
-
-
 def arena_over(torch: Any, pipe: Any, budget_bytes: int, **kwargs: Any) -> Any:
     """The facade's own production entry point — the caller states a budget."""
     from gen_worker.models.arena_residency import ArenaResidency
@@ -165,13 +119,7 @@ def arena_over(torch: Any, pipe: Any, budget_bytes: int, **kwargs: Any) -> Any:
 
 
 def weight_basis(torch: Any, pipe: Any) -> Tuple[int, List[Tuple[str, Any]]]:
-    """The byte basis the budget percentages are taken of.
-
-    pgw#1497's arms are percentages of the RAW weight bytes of the hooked
-    tree, so this lane takes its percentages of the same number — otherwise
-    "50 %" would mean two different budgets in the two tables and the
-    comparison would be of nothing.
-    """
+    """The byte basis the budget percentages are taken of."""
     from gen_worker.models.memory import _named_components, unhookable_components
     from gen_worker.models.stream_residency import discover_leaves
 
@@ -183,11 +131,6 @@ def weight_basis(torch: Any, pipe: Any) -> Tuple[int, List[Tuple[str, Any]]]:
     ]
     _leaves, costs, _adapters = discover_leaves(roots)
     return sum(c.resident_bytes for c in costs), roots
-
-
-# ---------------------------------------------------------------------------
-# Arms
-# ---------------------------------------------------------------------------
 
 
 def arm_a_and_b(torch: Any, report: Dict[str, Any], cycles: int = 3) -> None:
@@ -246,7 +189,6 @@ def arm_a_and_b(torch: Any, report: Dict[str, Any], cycles: int = 3) -> None:
         f"BITWISE IDENTICAL = {identical}"
     )
 
-    # -- B: demote / promote between requests ------------------------------
     cycle_report: List[Dict[str, Any]] = []
     for index in range(cycles):
         before_sig = int(residency.reservation.signature())
@@ -259,8 +201,6 @@ def arm_a_and_b(torch: Any, report: Dict[str, Any], cycles: int = 3) -> None:
         promote_sig = int(residency.reservation.signature())
         again = generate(torch, pipe)
         same = bool(torch.equal(eager_latent, again))
-        # Every region the plan calls resident must really be mapped, asked of
-        # the driver and not of our own bookkeeping.
         backed = all(
             residency.reservation.is_backed(r.offset, r.span)
             for r in residency.layout.regions
@@ -331,13 +271,7 @@ def arm_c(
 
 
 def evict_page_cache(path: Path) -> bool:
-    """Drop ``path`` from the page cache. No root needed, and it is the point.
-
-    A "cold load" measured with the checkpoint already in RAM is measuring
-    memcpy, not loading — and it is exactly the arm where a loader that mmaps
-    the file looks fastest, for a reason that will not hold on a fresh pod.
-    ``fadvise DONTNEED`` gives the honest arm without touching ``drop_caches``.
-    """
+    """Drop ``path`` from the page cache."""
     try:
         fd = os.open(str(path), os.O_RDONLY)
     except OSError:
@@ -350,10 +284,7 @@ def evict_page_cache(path: Path) -> bool:
 
 
 def arm_d(torch: Any, report: Dict[str, Any]) -> None:
-    """Cold load: RefillEngine (disk -> arena) vs `from_pretrained().to(cuda)`.
-
-    Both arms twice: with the checkpoint in the page cache, and with it evicted.
-    """
+    """Cold load: RefillEngine (disk -> arena) vs `from_pretrained().to(cuda)`."""
     from diffusers import UNet2DConditionModel
 
     from gen_worker.models.arena_residency import ArenaResidency, safetensors_triples
@@ -435,9 +366,6 @@ def arm_d(torch: Any, report: Dict[str, Any]) -> None:
         f"[D] byte-exactness: {len(bad_warm)} mismatched warm, "
         f"{len(bad_cold)} mismatched evicted (of {len(reference)} tensors)"
     )
-
-
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:

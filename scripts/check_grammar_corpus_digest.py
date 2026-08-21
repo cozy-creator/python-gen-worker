@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""th#1897 layer 1: the shared grammar corpus matches the digest both repos commit.
-
-Runs in `fast gates` so a one-sided edit of the cross-repo contract is red in
-seconds, offline, in the tree where it happened — rather than 45 minutes into a
-mint at the publish gate, which is the failure th#1897 was filed for. The Go
-twin is compilecache.TestCompiledGraphKeyVectorDigest_TH1897 over the same
-bytes and the same digest file.
-
-Layer 2 (scripts/grammar-vector-drift.sh) proves the PEER holds those bytes and
-runs from tensorhub; see that script's header for why the direction is fixed.
-"""
+"""The shared grammar corpus must match the digest both repos commit; tensorhub's compilecache.TestCompiledGraphKeyVectorDigest checks the same bytes and digest file from its side."""
 
 from __future__ import annotations
 

@@ -1,25 +1,4 @@
-"""An unset limit is a REFUSAL.
-
-A silence window built as::
-
-    window = SilenceWindow(stall_timeout if stall_timeout > 0 else math.inf)
-
-defeats itself: `SilenceWindow.__init__` raises
-``ValueError("window_s must be positive")`` precisely so a zero cannot delete
-the watchdog, and that expression catches the refusal and substitutes an
-infinite window — a download with *no stall detection at all*, reached through
-the very guard written to prevent the unbounded DOWNLOADING_MODELS hang.
-
-Absence must never collapse to "unlimited". Both production call sites
-(``download.py`` HF snapshot, ``convert/ingest.py``) pass
-``_HF_DOWNLOAD_STALL_TIMEOUT_S``; what this pins is that a future caller that
-forgets is told, at the call, instead of silently running unbounded.
-
-No sleeps, no fixed durations: the stall assertion below drives the watchdog's
-own progress signal to a standstill and reads its verdict.
-
-Run: pytest tests/test_absent_stall_window_refuses_pgw973.py -v
-"""
+"""An unset limit is a REFUSAL."""
 
 from __future__ import annotations
 
@@ -33,7 +12,6 @@ from gen_worker.models.download import DownloadStalledError, _run_with_stall_wat
 
 
 def _watchdog(byte_totals: Iterator[int], *, stall_timeout: float) -> str:
-    """Drive the real watchdog with a scripted bytes-on-disk signal."""
     done = threading.Event()
     last = [0]
 
@@ -66,7 +44,6 @@ def _watchdog(byte_totals: Iterator[int], *, stall_timeout: float) -> str:
 
 @pytest.mark.parametrize("absent", [0, 0.0, -1.0])
 def test_an_absent_stall_window_is_refused_not_silently_infinite(absent: float) -> None:
-    """The bug: 0 used to mean math.inf — the limit stopped existing."""
     with pytest.raises(ValueError) as exc:
         _watchdog(iter([1, 2, 3]), stall_timeout=absent)
     assert "window_s must be positive" in str(exc.value), (
@@ -76,9 +53,7 @@ def test_an_absent_stall_window_is_refused_not_silently_infinite(absent: float) 
 
 
 def test_the_watchdog_still_catches_the_runaway_it_exists_for() -> None:
-    """The surviving bound, unchanged: a trickle below the progress floor is a
-    stall however long it keeps dribbling. Deleting the math.inf escape hatch
-    must not have weakened this."""
+    """The surviving bound, unchanged: a trickle below the progress floor is a stall however long it keeps dribbling."""
     trickle = (n for n in range(1, 10_000))
     with pytest.raises(DownloadStalledError) as exc:
         _watchdog(trickle, stall_timeout=0.2)
@@ -86,7 +61,6 @@ def test_the_watchdog_still_catches_the_runaway_it_exists_for() -> None:
 
 
 def test_a_healthy_transfer_is_still_admitted() -> None:
-    """And a transfer clearing the floor every window runs to completion —
-    the refusal above is on absence, not on slow-but-advancing work."""
+    """And a transfer clearing the floor every window runs to completion — the refusal above is on absence, not on slow-but-advancing work."""
     healthy = iter([2048 * n for n in range(1, 6)])
     assert _watchdog(healthy, stall_timeout=5.0) == "/tmp/pgw973-done"

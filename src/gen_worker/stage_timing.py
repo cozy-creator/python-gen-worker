@@ -1,26 +1,4 @@
-"""Per-stage timing for one served request.
-
-Without it ``runtime_ms`` is one opaque number covering input fetch, text
-encode, denoise, VAE decode, image encode, credential stamp and upload, with
-the GPU-permit wait appearing in no metric at all. This module is the
-measurement spine: framework hooks (``io.write_image``, the output stream's
-finalize, the credential stamp, the executor's permit acquire) and endpoint
-brackets (``with ctx.stage("text_encode")``) all land here, and
-:meth:`StageTimer.snapshot` renders them as ``JobMetrics.stage_ms``.
-
-Two properties the design is built around:
-
-* **It reconciles.** Stage totals are EXCLUSIVE (a nested stage's time is
-  charged to the child, never twice), so measured stages + ``resid.*`` sum to
-  ``total.handler``, which equals ``runtime_ms``.
-* **It classifies.** Every stage is GPU-BUSY, SMALL-GPU or GPU-IDLE, which is
-  what makes ``class.gpu_busy / total.handler`` the per-request hot-fraction
-  metric — how much of a request's wall clock the device was computing.
-
-Derived from the same intervals: ``total.prep`` (handler start -> first
-denoise step) and ``total.tail`` (last denoise step -> handler end), the two
-numbers pipelining is sized against.
-"""
+"""Per-stage timing for one served request."""
 
 from __future__ import annotations
 
@@ -29,39 +7,28 @@ import time
 from contextlib import contextmanager
 from typing import Dict, Iterator, List, Mapping, Optional, Tuple
 
-# Stage classification. GPU_BUSY stages are the device actually computing;
-# SMALL_GPU are short device ops that leave most SMs free (overlap candidates);
-# GPU_IDLE are CPU/network stages where the device is idle unless another
-# request is pipelined into it.
 GPU_BUSY = "gpu_busy"
 SMALL_GPU = "small_gpu"
 GPU_IDLE = "gpu_idle"
 
 _CLASS_BY_STAGE: Dict[str, str] = {
-    # device compute
     "denoise": GPU_BUSY,
     "refine": GPU_BUSY,
     "upsample": GPU_BUSY,
     "vae_decode": GPU_BUSY,
     "vae_encode": GPU_BUSY,
     "compute": GPU_BUSY,
-    # short device ops
     "text_encode": SMALL_GPU,
     "text_encode_2": SMALL_GPU,
     "scheduler_setup": SMALL_GPU,
     "latent_prepare": SMALL_GPU,
     "adapter_activate": SMALL_GPU,
-    # CPU / network
     "gpu_permit_wait": GPU_IDLE,
-    # parked on a child request's result — slot yielded when safe.
     "child_call_wait": GPU_IDLE,
     "input_fetch": GPU_IDLE,
     "setup_wait": GPU_IDLE,
     "image_encode": GPU_IDLE,
     "video_encode": GPU_IDLE,
-    # The output-integrity floor. CPU numpy over a handful of
-    # decimated frames — single-digit ms, and it must be ATTRIBUTED rather than
-    # appear as unexplained residual on every render.
     "output_integrity": GPU_IDLE,
     "audio_encode": GPU_IDLE,
     "credential_stamp": GPU_IDLE,
@@ -69,27 +36,18 @@ _CLASS_BY_STAGE: Dict[str, str] = {
     "output_serialize": GPU_IDLE,
 }
 
-#: Stages whose window defines "denoise" for prep/tail derivation.
 _DENOISE_STAGES = frozenset({"denoise", "refine", "upsample"})
 
-#: Hard cap on recorded intervals so a pathological handler (a stage inside a
-#: per-step loop) cannot grow unbounded.
 _MAX_INTERVALS = 512
 
 
 def stage_class(name: str) -> str:
-    """Classification for ``name``; unknown stages are GPU_IDLE-neutral and
-    reported under ``class.unattributed`` instead of being guessed."""
+    """Classification for ``name``; unknown stages are GPU_IDLE-neutral and reported under ``class.unattributed`` instead of being guessed."""
     return _CLASS_BY_STAGE.get(name, "")
 
 
 class StageTimer:
-    """Thread-safe stage recorder for ONE request.
-
-    The handler runs on a worker thread while uploads may fan out to more
-    threads, so open-stage stacks are per-thread; totals and the interval log
-    are shared under one lock.
-    """
+    """Thread-safe stage recorder for ONE request."""
 
     __slots__ = (
         "_lock", "_local", "_totals", "_intervals", "_pre", "_phases",
@@ -102,21 +60,12 @@ class StageTimer:
         self._totals: Dict[str, float] = {}
         self._intervals: List[Tuple[str, float, float]] = []
         self._pre: Dict[str, float] = {}
-        # (stage, phase) -> seconds. Reported as `stage.phase`, NEVER part of
-        # the exclusive-accounting sum — see :meth:`record_phase`.
         self._phases: Dict[Tuple[str, str], float] = {}
-        # stage name -> [(step_index, monotonic_at_step_end), ...]
         self._steps: Dict[str, List[Tuple[int, float]]] = {}
-        # stage name -> step indices already marked. Two producers can mark the
-        # same step (the diffusers callback marks, then calls ctx.progress,
-        # which marks too); a duplicate index would inflate the mark count and
-        # halve the derived per-step mean.
         self._step_seen: Dict[str, set] = {}
         self._handler_start: Optional[float] = None
         self._handler_end: Optional[float] = None
         self._truncated = False
-
-    # -- recording ---------------------------------------------------------
 
     def handler_open(self) -> None:
         with self._lock:
@@ -128,31 +77,14 @@ class StageTimer:
             self._handler_end = time.monotonic()
 
     def record_pre(self, name: str, seconds: float) -> None:
-        """Record a stage that ran BEFORE the handler window (the GPU-permit
-        wait, input fetch): reported, but never part of the ``runtime_ms``
-        reconciliation."""
+        """Record a stage that ran BEFORE the handler window (the GPU-permit wait, input fetch): reported, but never part of the ``runtime_ms`` reconciliation."""
         if seconds <= 0:
             return
         with self._lock:
             self._pre[name] = self._pre.get(name, 0.0) + float(seconds)
 
     def record_phase(self, stage: str, phase: str, seconds: float) -> None:
-        """Record a SUB-PHASE of ``stage``, reported as ``stage.phase``.
-
-        ``upload`` is one bracket around a three-leg
-        protocol (create session -> PUT parts to the object store -> complete),
-        and it is the largest measured term in a fast request's round trip
-        (2587 ms of a 2623 ms finalize tail). Which leg owns it decides which
-        fix is worth building, and today that split is inference.
-
-        Sub-phases are reported in the DOTTED namespace deliberately. Stage
-        totals are exclusive and reconcile against ``total.handler``; nesting
-        real stages inside ``upload`` would keep that invariant but would also
-        redefine ``upload`` itself to mean "upload minus its legs", silently
-        breaking continuity with every number already measured against it.
-        A dotted key is a rollup like ``denoise.step_mean``: reported, never
-        summed, and skipped by :func:`reconciliation`.
-        """
+        """Record a SUB-PHASE of ``stage``, reported as ``stage.phase``."""
         stage = _stage_name(stage)
         phase = _stage_name(phase)
         if not stage or not phase or seconds <= 0:
@@ -163,8 +95,7 @@ class StageTimer:
 
     @contextmanager
     def stage(self, name: str) -> Iterator[None]:
-        """Bracket a stage. Nested stages are charged exclusively: the parent
-        keeps only the time not spent inside its children."""
+        """Bracket a stage."""
         name = _stage_name(name)
         if not name:
             yield
@@ -174,7 +105,7 @@ class StageTimer:
             stack = []
             self._local.stack = stack
         start = time.monotonic()
-        frame = [start, 0.0]  # [start, children_total]
+        frame = [start, 0.0]
         stack.append(frame)
         try:
             yield
@@ -193,14 +124,7 @@ class StageTimer:
                     self._truncated = True
 
     def mark_step(self, stage: str, index: int) -> None:
-        """Record the END of denoise step ``index`` (1-based) for ``stage``.
-
-        Wired from ``diffusers_step_callback`` AND from ``ctx.progress`` when
-        it carries a step counter, so an endpoint driving its own
-        step loop gets denoise timing with no code change either. First mark
-        for an index wins: the callback's is un-throttled and therefore the
-        better clock, and ``ctx.progress`` only fills in the endpoints the
-        callback does not cover."""
+        """Record the END of denoise step ``index`` (1-based) for ``stage``."""
         stage = str(stage or "denoise").strip() or "denoise"
         index = int(index)
         now = time.monotonic()
@@ -213,16 +137,12 @@ class StageTimer:
                 seen.add(index)
                 marks.append((index, now))
 
-    # -- rendering ---------------------------------------------------------
-
     def snapshot(
         self,
         handler_start: Optional[float] = None,
         handler_end: Optional[float] = None,
     ) -> Dict[str, int]:
-        """Render ``stage_ms``. ``handler_start``/``handler_end`` override the
-        recorded window so the executor can anchor the map to the exact
-        interval ``runtime_ms`` measures."""
+        """Render ``stage_ms``."""
         with self._lock:
             totals = dict(self._totals)
             intervals = list(self._intervals)
@@ -244,8 +164,6 @@ class StageTimer:
             end = time.monotonic()
         handler_total = max(0.0, end - start)
 
-        # Denoise window, explicit brackets first, else derived from the
-        # per-step marks (the shared diffusers callback).
         denoise_start: Optional[float] = None
         denoise_end: Optional[float] = None
         estimated = False
@@ -265,9 +183,6 @@ class StageTimer:
             step_mean = max(step_mean, mean)
             if explicit_window:
                 continue
-            # The callback fires AFTER each step, so step 1's start is one
-            # mean step before its mark. With a single step the start is
-            # unknowable from marks alone — clamp to the mark itself.
             estimated = True
             ds = max(start, first - mean)
             denoise_start = ds if denoise_start is None else min(denoise_start, ds)
@@ -296,9 +211,6 @@ class StageTimer:
             out["total.denoise"] = _ms(
                 sum(v for k, v in totals.items() if k in _DENOISE_STAGES)
             )
-            # What the prep/tail windows did NOT explain — for images the tail
-            # residual is essentially the VAE decode, the single biggest
-            # un-bracketed stage in the fleet.
             out["resid.prep"] = _ms(
                 prep - _clipped(intervals, start, denoise_start))
             out["resid.tail"] = _ms(
@@ -307,8 +219,6 @@ class StageTimer:
         residual = handler_total - measured
         out["resid.unattributed"] = _ms(max(0.0, residual))
         if residual < 0:
-            # Concurrent stages (parallel uploads) can sum past wall clock;
-            # say so rather than silently clamping.
             out["resid.overlap"] = _ms(-residual)
 
         classes: Dict[str, float] = {GPU_BUSY: 0.0, SMALL_GPU: 0.0, GPU_IDLE: 0.0}
@@ -328,8 +238,6 @@ class StageTimer:
 def _clipped(
     intervals: List[Tuple[str, float, float]], lo: float, hi: float
 ) -> float:
-    """Seconds of ``intervals`` falling inside ``[lo, hi]``. Overlapping
-    intervals are unioned so a parallel fan-out cannot over-explain a window."""
     if hi <= lo:
         return 0.0
     spans = sorted(
@@ -352,24 +260,13 @@ def _clipped(
     return total
 
 
-#: Stages recorded OUTSIDE the handler window: reported, never part of the
-#: ``runtime_ms`` reconciliation. ``instance_gate_wait`` is time queued behind
-#: the per-instance gate (typically a background mint/compile turn),
-#: deliberately outside ``runtime_ms``. ``gpu_idle_before`` is not a wait this
-#: request served at all — it is the gap BEFORE it, charged to no request's
-#: runtime. Reported, never summed.
 PRE_HANDLER_STAGES = frozenset(
     {"gpu_permit_wait", "input_fetch", "setup_wait", "instance_gate_wait",
      "gpu_idle_before"})
 
 
 def reconciliation(stage_ms: Mapping[str, int]) -> Tuple[int, int]:
-    """``(attributed_ms, runtime_ms)`` for a ``stage_ms`` map.
-
-    Attributed = every in-handler stage plus ``resid.unattributed``. The two
-    are equal by construction; a divergence means a hook double-counts, which
-    is the one failure mode that would make the instrument lie.
-    """
+    """``(attributed_ms, runtime_ms)`` for a ``stage_ms`` map."""
     total = int(stage_ms.get("total.runtime", stage_ms.get("total.handler", 0)))
     attributed = int(stage_ms.get("resid.unattributed", 0))
     for key, value in stage_ms.items():
@@ -380,16 +277,7 @@ def reconciliation(stage_ms: Mapping[str, int]) -> Tuple[int, int]:
 
 
 def stage_ms_for_metrics(timer: Optional[StageTimer], runtime_ms: int) -> Dict[str, int]:
-    """Render ``timer`` for ``JobMetrics.stage_ms``, closed against
-    ``runtime_ms``.
-
-    The handler window opens a hair after ``runtime_ms`` starts — the executor
-    validates the compile fence, pins refs and activates per-request adapters
-    in between. That prologue is sub-millisecond for adapter-free requests and
-    is real (adapter activation) when LoRAs ride the request, so it is
-    reported as ``slot_prologue`` rather than smeared, which keeps the exact
-    invariant: every emitted stage + ``resid.unattributed`` == ``runtime_ms``.
-    """
+    """Render ``timer`` for ``JobMetrics.stage_ms``, closed against ``runtime_ms``."""
     if timer is None:
         return {}
     out = timer.snapshot()
@@ -406,8 +294,7 @@ def stage_ms_for_metrics(timer: Optional[StageTimer], runtime_ms: int) -> Dict[s
 
 @contextmanager
 def stage_of(ctx: object, name: str) -> Iterator[None]:
-    """Bracket a stage on ``ctx``'s timer; a no-op for contexts that carry
-    none (CLI dispatch, endpoint unit tests with a stub context)."""
+    """Bracket a stage on ``ctx``'s timer; a no-op for contexts that carry none (CLI dispatch, endpoint unit tests with a stub context)."""
     timer = getattr(ctx, "_stages", None)
     if not isinstance(timer, StageTimer):
         yield
@@ -417,8 +304,7 @@ def stage_of(ctx: object, name: str) -> Iterator[None]:
 
 
 def record_phase_of(ctx: object, stage: str, phase: str, seconds: float) -> None:
-    """Record a sub-phase on ``ctx``'s timer; a no-op for contexts that carry
-    none (CLI dispatch, endpoint unit tests with a stub context)."""
+    """Record a sub-phase on ``ctx``'s timer; a no-op for contexts that carry none (CLI dispatch, endpoint unit tests with a stub context)."""
     timer = getattr(ctx, "_stages", None)
     if not isinstance(timer, StageTimer):
         return
@@ -426,26 +312,11 @@ def record_phase_of(ctx: object, stage: str, phase: str, seconds: float) -> None
 
 
 def _stage_name(name: str) -> str:
-    """Endpoint-supplied stage names share one flat map with the derived
-    rollups, so ``.`` (the namespace separator for ``total.``/``class.``/
-    ``resid.``/``flag.``) is folded away."""
     return str(name or "").strip().replace(".", "_")
 
 
 def ms_from_seconds(seconds: float) -> int:
-    """THE quantizer for every millisecond a request reports.
-
-    pgw#1349: it is public because ``JobMetrics``'s own top-level terms
-    (``runtime_ms``, ``queue_ms``, ``slot_held_ms``, ``finalize_wall_ms``) are
-    compared against these stages — by ``procsplit.attest``, by the hub, and by
-    the suite — and they used to TRUNCATE while every stage here ROUNDS. Two
-    quantizers over nested spans breaks the one relation the numbers exist to
-    express: an inner span can out-round its container by 1 ms, so
-    ``finalize_wall_ms >= stage_ms["image_encode"]`` — true of the intervals by
-    construction — reported ``87 >= 88`` and turned master red. Rounding is
-    monotone, so one shared quantizer makes containment survive quantization
-    instead of surviving it most of the time.
-    """
+    """THE quantizer for every millisecond a request reports."""
     return int(round(max(0.0, float(seconds)) * 1000.0))
 
 

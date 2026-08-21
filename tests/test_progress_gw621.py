@@ -1,10 +1,4 @@
-"""gw#621 progress registry + beat: named monotonic counters, per-family
-self-diagnosis windows, counter-carrying beats on the app heartbeat, and
-the end-to-end confession path over the hub double.
-
-Revert-turns-red guards for the ie#522 false-positive class: a CPU-quiet
-but byte-advancing download is visibly ALIVE on the wire (counter beats,
-never self_stalled); a genuinely frozen counter still confesses."""
+"""gw#621 progress registry + beat: named monotonic counters, per-family self-diagnosis windows, counter-carrying beats on the app heartbeat, and the end-to-end confession path over the hub double."""
 
 from __future__ import annotations
 
@@ -42,18 +36,13 @@ def _updates(sent: List[pb.WorkerMessage]) -> List[pb.ActivityUpdate]:
             if m.WhichOneof("msg") == "activity_update"]
 
 
-# ---------------------------------------------------------------------------
-# registry
-# ---------------------------------------------------------------------------
-
-
 def test_counter_monotonic_freshest_and_windows(monkeypatch):
     clk = _Clock()
     monkeypatch.setattr(progress, "_now", clk)
     c = progress.counter("download:a", progress.UNIT_BYTES, total=100.0)
     c.set_done(10.0)
     clk.t += 5
-    c.set_done(5.0)  # backwards: ignored — monotonic, age keeps growing
+    c.set_done(5.0)
     s = progress.freshest()
     assert s is not None
     assert s.done == 10.0 and s.total == 100.0 and s.age_s == 5.0
@@ -64,7 +53,6 @@ def test_counter_monotonic_freshest_and_windows(monkeypatch):
     diag = progress.self_diagnosis()
     assert diag is not None and diag.name == "download:a"
 
-    # ANY other advancing counter proves the process alive again.
     progress.counter("upload:bytes", progress.UNIT_BYTES).add(1.0)
     assert progress.self_diagnosis() is None
 
@@ -82,7 +70,7 @@ def test_rate_computation(monkeypatch):
     clk = _Clock()
     monkeypatch.setattr(progress, "_now", clk)
     c = progress.counter("download:r", progress.UNIT_BYTES)
-    progress.snapshot()  # anchor
+    progress.snapshot()
     c.add(100.0)
     clk.t += 10
     (s,) = progress.snapshot()
@@ -94,8 +82,6 @@ def test_activity_owned_counters_finish_at_end():
     act.counter("warmup:jobs", progress.UNIT_STEPS, total=3).set_done(1)
     assert progress.freshest() is not None
     act.completed()
-    # ended activity finishes its counters: a reused name never carries a
-    # stale age into the next activity
     assert progress.freshest() is None
 
 
@@ -104,11 +90,6 @@ def test_tracking_context_manager():
         c.add(4.0)
         assert progress.freshest() is not None
     assert progress.freshest() is None
-
-
-# ---------------------------------------------------------------------------
-# beat emission
-# ---------------------------------------------------------------------------
 
 
 def test_on_beat_emits_counter_then_confession(monkeypatch):
@@ -126,11 +107,11 @@ def test_on_beat_emits_counter_then_confession(monkeypatch):
         act = activity.begin(activity.KIND_SELF_MINT_COMPILE, activity.PHASE_LOAD)
         ctr = act.counter("download:m", progress.UNIT_BYTES, total=50.0)
         ctr.set_done(20.0)
-        activity.on_beat()  # advancing counter -> plain progress beat
+        activity.on_beat()
         for _ in range(5):
             await asyncio.sleep(0)
         clk.t += progress.STALL_WINDOW_S["download"] + 1
-        activity.on_beat()  # frozen past its window -> typed confession
+        activity.on_beat()
         for _ in range(5):
             await asyncio.sleep(0)
         act.completed()
@@ -146,25 +127,15 @@ def test_on_beat_emits_counter_then_confession(monkeypatch):
     assert beats[1].self_stalled
     assert beats[1].stalled_for_ms >= int(
         progress.STALL_WINDOW_S["download"] * 1000)
-    # seq stays monotonic across phase reports and beats
     seqs = [u.seq for u in _updates(sent)]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
 
 def test_on_beat_noop_without_activity_or_counters():
-    activity.on_beat()  # no activity: nothing to do, never raises
+    activity.on_beat()
     act = activity.begin(activity.KIND_WARMUP, activity.PHASE_LOAD)
-    activity.on_beat()  # activity but no counters: no beat
+    activity.on_beat()
     act.completed()
     progress.counter("download:orphan", progress.UNIT_BYTES).add(1)
-    activity.on_beat()  # counters but no activity: no beat, no crash
-
-
-# ---------------------------------------------------------------------------
-# end-to-end over the hub double (real Worker, real gRPC socket)
-# ---------------------------------------------------------------------------
-
-
-# pgw#1373: case deleted with the module it drove (lifecycle).
-
+    activity.on_beat()
 

@@ -1,43 +1,4 @@
-"""Hub-signed compiled graph receipt verification.
-
-A ``compiled_graph_store`` row (compiled_graph_key -> artifact) is a Nix *realisation*: fetch
-verifies the BYTES against the hub's recorded digest, but nothing signs the
-RECORD binding the key to those bytes. Under "bucket is truth, DB is a
-rebuildable index" that makes bucket write access equivalent to arbitrary compiled graph
-delivery after any index rebuild.
-
-The hub signs a ``compiled-graph-receipt-v1`` compact JWS at publish-finalize binding:
-compiled_graph_key + owning endpoint + the publisher-trust rung + the snapshot digest
-(the derivation binding Nix's fingerprint omits) + the packed tarball's
-ALGORITHM-TAGGED digest AND integral size (Bazel REv2: size is part of the
-digest). This module is the WORKER half: before arming any hub-delivered
-artifact the worker fetches the receipt, verifies the signature against
-the hub's public artifact-signing JWKS, checks every binding against the
-local bytes, and re-checks the operator revocation list — the targeted
-recall, and the ONLY recall lever.
-
-Refusal semantics: a failed receipt DISCARDS the delivered artifact with a
-loud typed ``compiled_graph_receipt_refused`` activity event and falls through to
-the ordinary miss policy (fleet workers self-mint their own replacement —
-their own bytes need no receipt; the copy they publish gets one from the
-publish gate). A receipt failure never kills serving.
-
-SHA-256 ONLY. The receipt's canonical binding is
-``artifact.digest``, always tagged (``sha256:<hex>``), and verification
-dispatches on that tag. An untagged bare-hex digest is REFUSED rather than
-read as some assumed algorithm, and a receipt with no usable digest at all is
-REFUSED rather than compared against nothing. There is no bare-hex
-``artifact.blake3`` arm: a worker meeting one refuses it, self-mints, and
-publishes a replacement whose receipt is sha256-bound — the designed miss
-policy, not a new failure.
-
-Configuration happens at the HelloAck site in :mod:`gen_worker.worker` (the
-same moment ``file_base_url`` arrives). cozy-local and the CLI call
-``trust_local_store(reason)`` instead — user-controlled stores keep their
-local trust model, but they must SAY SO. A process that says neither refuses:
-pgw#1425 measured the alternative, where the v2 serve path called neither and
-every fleet worker armed hub-delivered native code with nothing checked.
-"""
+"""Hub-signed compiled graph receipt verification."""
 
 from __future__ import annotations
 
@@ -63,42 +24,20 @@ from .procsplit import broker
 
 logger = logging.getLogger(__name__)
 
-# `publisher_tier` and `publisher_org_id` are LOAD-BEARING at the arm gate
-# below, so an older receipt must never be read as a v2 one with the trust
-# fields missing: the version check refuses outright rather than defaulting.
 RECEIPT_VERSION = "compiled-graph-receipt-v1"
 
-# Publisher tiers. `platform` means the platform vouches for the
-# publishing org's endpoint code, so the compiled graph is adoptable fleet-wide within its
-# family. Anything else — including an absent or unrecognised value — is `org`,
-# and an org-scoped compiled graph is adoptable only by pods of the endpoint that minted
-# it. There is deliberately no third value and no "unknown" branch: every
-# unparseable tier must land on the NARROWER rule.
 COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM = "platform"
 COMPILED_GRAPH_PUBLISHER_TIER_ORG = "org"
-# The algorithm this worker can actually recompute from local bytes. A receipt
-# naming anything else is refused, never assumed.
-# There is deliberately no multi-algorithm ceremony for a second algorithm
-# that does not exist. The tag stays on the wire (a bare hex string silently
-# acquires whatever algorithm the reader assumed), so adding an algorithm
-# later is still a local change — it is just not pre-paid here.
 ARTIFACT_DIGEST_ALGORITHM = "sha256"
 JWKS_PATH = "/api/v1/artifacts/.well-known/jwks.json"
 RECEIPT_PATH = "/v1/worker/compiled-graphs/receipt"
 REVOCATIONS_PATH = "/v1/worker/compiled-graphs/revocations"
 
-# Per-CALL socket budget on the three small control-plane round trips this
-# module makes (JWKS, receipt, revocations). Not a kill — none of them can be
-# "making progress" in any observable sense and expiry ends no work — but
-# without it a hub that accepts a connection and says nothing wedges the arm
-# gate every compiled graph adoption waits behind. Shorter than `callout`'s 60 s because
-# these are constant-size answers, not a child request the hub may
-# legitimately take time to admit.
 _HTTP_TIMEOUT_S = 30
 
 
 class ReceiptError(RuntimeError):
-    """Typed receipt refusal. ``reason`` is the stable, greppable class."""
+    """Typed receipt refusal."""
 
     def __init__(self, reason: str, detail: str = "") -> None:
         self.reason = reason
@@ -107,36 +46,15 @@ class ReceiptError(RuntimeError):
 
 @dataclass(frozen=True)
 class Receipt:
-    """Decoded, signature-verified compiled graph receipt claims — the ones something
-    CHECKS.
-
-    Decoded: ``axes``, ``publisher``, ``artifact_path``, ``manifest_digest``,
-    ``fingerprint_digest`` and ``issued_at_unix``. The signature still covers the whole payload, so a
-    claim this worker does not decode is neither trusted nor forgeable — it is
-    simply not a promise anyone here relies on. Two notes worth keeping:
-
-    * ``manifest_digest``/``fingerprint_digest`` are additive ``omitempty``
-      claims the hub hashes in (``api/compiled_graph_receipts.go``); the content they
-      cover is already bound by ``snapshot_digest``, and removing an additive
-      claim does not move ``RECEIPT_VERSION``.
-    * ``issued_at_unix`` had NO freshness check anywhere, and adding one would
-      be a fixed-duration condemn — the thing the no-magic-timeouts rule
-      forbids. Receipt currency is the REVOCATION list (:data:`REVOCATIONS_PATH`,
-      fail-closed when unreadable), which is an authority answering, not a
-      clock guessing.
-
-    A claim added back must arrive with the code that refuses on it.
-    """
+    """Decoded, signature-verified compiled graph receipt claims — the ones something CHECKS."""
 
     version: str
     family: str
     compiled_graph_key: str
     owning_endpoint_id: str
-    # The publisher-trust boundary, inside the signature.
     publisher_tier: str
     publisher_org_id: str
     snapshot_digest: str
-    # Canonical, ALGORITHM-TAGGED ("<algo>:<hex>"). Never bare hex.
     artifact_digest: str
     artifact_size_bytes: int
 
@@ -144,39 +62,21 @@ class Receipt:
 @dataclass
 class _Config:
     base_url: str
-    #: A BEARER, and nothing else. Under the split the parent supplies the real
-    #: credential and ignores this one; it is used only by the single-process
-    #: path's direct fetches. WHO THIS POD IS comes from ``worker_identity``,
-    #: never from decoding this.
     worker_jwt: Callable[[], str]
-    # kid -> RSA public key, lazily fetched from the hub JWKS.
     jwks: Dict[str, rsa.RSAPublicKey] = field(default_factory=dict)
 
 
 _LOCK = threading.Lock()
 _CONFIG: Optional[_Config] = None
-#: Why this process is allowed to arm UNVERIFIED bytes. Empty = nobody said.
 _LOCAL_TRUST: str = ""
 
-#: The three postures. There is no fourth, and no default that means "probably
-#: fine": pgw#1425 measured what the missing one cost. `UNSET` is what a fleet
-#: worker holds until its HelloAck arrives, and it REFUSES — the gate cannot
-#: tell "nobody wired me" from "there is no hub here" by itself, so somebody
-#: has to say which, and the side that says nothing gets the safe answer.
 POSTURE_ARMED = "armed"
 POSTURE_LOCAL = "local"
 POSTURE_UNSET = "unset"
 
 
 def configure(base_url: str, worker_jwt: Callable[[], str]) -> None:
-    """Arm the receipt gate against the hub. Called from the HelloAck site;
-    idempotent (re-configuration replaces the base URL and drops the JWKS
-    cache so a hub bounce with rotated keys re-fetches).
-
-    An empty ``base_url`` RAISES. It used to return silently, which made a
-    HelloAck carrying no file API indistinguishable from one that was never
-    delivered — both left the gate unarmed and said nothing.
-    """
+    """Arm the receipt gate against the hub."""
     global _CONFIG, _LOCAL_TRUST
     base = str(base_url or "").strip().rstrip("/")
     if not base:
@@ -192,15 +92,7 @@ def configure(base_url: str, worker_jwt: Callable[[], str]) -> None:
 
 
 def trust_local_store(reason: str) -> None:
-    """Declare that this process's compiled-graph store is USER-CONTROLLED,
-    so hub-signed receipts do not apply to it.
-
-    The cozy-local / CLI / unit-rig half of the posture, and the ONLY thing
-    that turns the unconfigured gate from a refusal into a pass. It takes a
-    ``reason`` because the whole defect this replaces was an unattributed
-    silence: an operator reading a pod that armed unverified bytes must be
-    able to see WHO said that was allowed.
-    """
+    """Declare that this process's compiled-graph store is USER-CONTROLLED, so hub-signed receipts do not apply to it."""
     global _LOCAL_TRUST, _CONFIG
     why = str(reason or "").strip()
     if not why:
@@ -218,14 +110,7 @@ def trust_local_store(reason: str) -> None:
 
 
 def posture() -> str:
-    """:data:`POSTURE_ARMED` / :data:`POSTURE_LOCAL` / :data:`POSTURE_UNSET`.
-
-    THE question about this gate. It replaced the boolean ``configured()``,
-    which is deleted rather than kept beside it: two spellings of one state is
-    how a caller ends up asking the question that has only two answers when the
-    state has three — and "not configured" collapsing `local` into `unset` is
-    exactly the fail-open pgw#1425 closed.
-    """
+    """:data:`POSTURE_ARMED` / :data:`POSTURE_LOCAL` / :data:`POSTURE_UNSET`."""
     with _LOCK:
         if _CONFIG is not None:
             return POSTURE_ARMED
@@ -233,14 +118,11 @@ def posture() -> str:
 
 
 def reset() -> None:
-    """Back to the DEFAULT posture — unset, i.e. refusing (test seam)."""
+    """Back to the DEFAULT posture — unset, i.e."""
     global _CONFIG, _LOCAL_TRUST
     with _LOCK:
         _CONFIG = None
         _LOCAL_TRUST = ""
-
-
-# -- crypto -----------------------------------------------------------------
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -251,72 +133,25 @@ def _b64url_decode(segment: str) -> bytes:
         raise ReceiptError("receipt_malformed", f"base64url decode failed: {exc}") from exc
 
 
-# -- publisher trust --------------------------------------------------------
-
-
 def _normalize_publisher_tier(raw: object) -> str:
-    """Anything that is not exactly ``platform`` is ``org``.
-
-    No error return and no third value on purpose: a caller forced to branch on
-    an error eventually gets the branch wrong, and every wrong branch here ends
-    in ``dlopen``.
-    """
     if str(raw or "").strip() == COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM:
         return COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM
     return COMPILED_GRAPH_PUBLISHER_TIER_ORG
 
 
 def _self_viewer() -> "worker_identity.ViewerIdentity":
-    """WHO THIS POD IS, from the one resolver that can answer.
-
-    Never decode ``graph_read_endpoint_id``/``graph_read_org_id`` out of
-    ``cfg.worker_jwt()`` — *this process's* credential. The gate is armed at
-    HelloAck inside the COMPUTE CHILD, which holds no credential by
-    construction, so both claims are ``""`` on every real serving pod and
-    every org-tier compiled graph would be refused ``publisher_untrusted``.
-
-    ``worker_identity.viewer`` asks this process's own credential when it has
-    one and the control PARENT when it does not — the same seam the resolve
-    itself uses. Its refusal is typed, so "the hub stamped no claims" (a legal
-    narrowing) never wears the same face as "nobody could be asked".
-    """
     return worker_identity.viewer()
 
 
 def needs_viewer_identity(receipt: Receipt) -> bool:
-    """Whether the trust rule will consult WHO THIS POD IS.
-
-    One spelling, two readers: :func:`refuse_untrusted_publisher` opens with
-    it, and the caller asks it BEFORE resolving an identity — a platform-tier
-    compiled graph is adoptable by any pod, so demanding an identity to arm one would
-    turn a resolver outage into a refusal of the one compiled graph specialization that never
-    needed a resolver.
-    """
+    """Whether the trust rule will consult WHO THIS POD IS."""
     return receipt.publisher_tier != COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM
 
 
 def refuse_untrusted_publisher(
     receipt: Receipt, self_endpoint_id: str, self_org_id: str = "",
 ) -> None:
-    """Raise unless this pod may adopt ``receipt``'s compiled graph.
-
-    THE RULE: a compiled graph must have come from THIS endpoint, from THIS pod's OWN ORG,
-    or from a publisher the platform vouches for.
-
-    Paul's ruling is literally endpoint-scoped (*"must have come from endpoint-A
-    itself, or from a publisher that is us or a trusted party"*); the ORG arm
-    matches the rule the hub's listing applies (``authz.CompiledGraphAdoptable``), so
-    the two layers agree instead of the listing showing an org its own compiled graph
-    from a sibling endpoint and this function refusing it.
-
-    THREAT: cross-tenant native-code execution. The artifact is a ``.so`` this
-    process is about to ``dlopen``. Nothing else prevents it — the digest
-    proves the bytes are the ones the hub signed, not that the hub meant them
-    for US; the compiled graph key proves nothing at all, because the hub cannot verify
-    artifact-to-graph correspondence without recompiling; and the hub's own
-    listing filter only covers the ONE path that goes through a listing. This
-    runs on every path, and it is the last check before the load.
-    """
+    """Raise unless this pod may adopt ``receipt``'s compiled graph."""
     if not needs_viewer_identity(receipt):
         return
     owner = str(receipt.owning_endpoint_id or "").strip()
@@ -324,12 +159,8 @@ def refuse_untrusted_publisher(
     owner_org = str(receipt.publisher_org_id or "").strip()
     my_org = str(self_org_id or "").strip()
 
-    # Same endpoint: the narrowest match.
     if owner and mine and owner == mine:
         return
-    # Same org. BOTH sides must be non-empty: an empty-equals-empty match is a
-    # vacuous guard — two compiled graphs neither of which can be attributed must not
-    # match each other.
     if owner_org and my_org and owner_org == my_org:
         return
 
@@ -350,12 +181,6 @@ def refuse_untrusted_publisher(
         f"{mine or '<unnamed>'} (org {my_org or '<unnamed>'})")
 
 
-#: THREAT: the JWKS `n` is base64url off the network with no
-#: declared length, so a multi-MB modulus makes EVERY later receipt
-#: verification super-linear for the life of the cached key — and nothing
-#: downstream refuses it, because the signatures still check out. Real keys are
-#: 2048-4096 bits. Bounded here because this is the only place the bytes become
-#: a key.
 MAX_RSA_MODULUS_BITS = 8192
 
 
@@ -366,10 +191,6 @@ def _rsa_key_from_jwk(jwk: Mapping[str, object]) -> Optional[rsa.RSAPublicKey]:
     if not n_raw or not e_raw:
         return None
     n_bytes, e_bytes = _b64url_decode(n_raw), _b64url_decode(e_raw)
-    # RSA requires 1 < e < n, so ONE bound covers both operands of the modexp
-    # whose cost is the threat. A key this big is refused, not skipped: the hub
-    # publishing one is a fact about the hub, and quietly dropping it would
-    # leave a pod verifying against whichever key happened to parse.
     oversized = max(len(n_bytes), len(e_bytes)) * 8
     if oversized > MAX_RSA_MODULUS_BITS:
         raise ReceiptError(
@@ -383,14 +204,7 @@ def _rsa_key_from_jwk(jwk: Mapping[str, object]) -> Optional[rsa.RSAPublicKey]:
 
 
 def canonical_artifact_digest(digest: str) -> str:
-    """Resolve the receipt's algorithm-tagged artifact digest.
-
-    Every route to "nothing to compare against" is a typed REFUSAL, because
-    that is the shape this whole migration keeps producing: an absent field
-    makes a guard vacuously true and the integrity check silently disappears.
-    A bare hex string is refused for the same reason a bare CAS ref is —
-    it silently acquires whatever algorithm the reader assumed.
-    """
+    """Resolve the receipt's algorithm-tagged artifact digest."""
     d = str(digest or "").strip().lower()
     if not d:
         raise ReceiptError("receipt_no_artifact_digest", "receipt binds no artifact digest")
@@ -413,10 +227,7 @@ def _is_hex64(value: str) -> bool:
 
 
 def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receipt:
-    """Verify a compact JWS against ``keys`` (kid -> RSA public key) and
-    return the decoded claims. Raises :class:`ReceiptError` with a named
-    reason on ANY failure — malformed, unknown kid, alg downgrade, bad
-    signature, wrong version."""
+    """Verify a compact JWS against ``keys`` (kid -> RSA public key) and return the decoded claims."""
     parts = str(jws or "").strip().split(".")
     if len(parts) != 3 or not all(parts[:2]):
         raise ReceiptError("receipt_malformed", "not a compact JWS")
@@ -429,7 +240,6 @@ def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receip
     alg = str(header.get("alg") or "")
     kid = str(header.get("kid") or "").strip()
     if alg != "RS256":
-        # Fail closed on every non-RS256 alg, including "none".
         raise ReceiptError("receipt_alg_unsupported", f"alg={alg!r}")
     key = keys.get(kid)
     if key is None:
@@ -469,9 +279,6 @@ def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receip
     )
 
 
-# -- hub fetches ------------------------------------------------------------
-
-
 def _fetch_jwks(cfg: _Config) -> Dict[str, rsa.RSAPublicKey]:
     resp = requests.get(cfg.base_url + JWKS_PATH, timeout=_HTTP_TIMEOUT_S)
     if resp.status_code != 200:
@@ -496,7 +303,6 @@ def _fetch_jwks(cfg: _Config) -> Dict[str, rsa.RSAPublicKey]:
 
 
 def _jwks_for(cfg: _Config, kid_hint: str) -> Dict[str, rsa.RSAPublicKey]:
-    """The cached JWKS; refetched when the hinted kid is unknown (rotation)."""
     with _LOCK:
         cached = dict(cfg.jwks)
     if cached and (not kid_hint or kid_hint in cached):
@@ -519,17 +325,6 @@ def _kid_of(jws: str) -> str:
 
 
 def _fetch_receipt_jws(cfg: _Config, digest: str, compiled_graph_key: str) -> str:
-    """Fetch the signed receipt for one artifact.
-
-    The lookup key is the ALGORITHM-TAGGED digest — never bare hex, which
-    silently acquires whatever algorithm the reader assumed. There is no
-    per-algorithm 404-and-retry chain: a silent downgrade would make "which
-    digest armed this compiled graph?" unanswerable, and a 404 from a proxy is not a 404
-    from the hub.
-
-    Parent-mediated when the split is on (the child holds no worker JWT); the
-    identical GET otherwise.
-    """
     params: Dict[str, Any] = {
         "compiled_graph_key": compiled_graph_key,
         "artifact_digest": digest,
@@ -568,9 +363,6 @@ def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
         timeout=_HTTP_TIMEOUT_S,
     )
     if resp.status_code != 200:
-        # Fail closed: an unreadable revocation list means the recall
-        # channel is down — refusing costs one self-mint, trusting could
-        # arm a recalled compiled graph.
         raise ReceiptError("revocations_unavailable", f"{REVOCATIONS_PATH} -> {resp.status_code}")
     try:
         body = resp.json()
@@ -586,9 +378,6 @@ def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
     return out
 
 
-# -- local bindings ---------------------------------------------------------
-
-
 def artifact_digest(path: Path) -> str:
     """This worker's ALGORITHM-TAGGED digest of ``path`` (``sha256:<hex>``)."""
     hasher = hashlib.sha256()
@@ -599,8 +388,6 @@ def artifact_digest(path: Path) -> str:
 
 
 def _embedded_meta(artifact: Path) -> Dict[str, object]:
-    """The artifact's packed ``metadata.json``, through the one stdlib-only
-    reader — so this module still never imports the compile stack."""
     try:
         return dict(artifact_meta.read_metadata(artifact))
     except artifact_meta.ArtifactMetadataError as exc:
@@ -608,21 +395,7 @@ def _embedded_meta(artifact: Path) -> Dict[str, object]:
 
 
 def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
-    """Full verification of one hub-delivered artifact. Raises
-    :class:`ReceiptError` (named reason) on any failure; returns the
-    verified receipt on success.
-
-    Chain of trust: receipt signature (hub key via JWKS) -> local bytes
-    (the receipt's OWN algorithm + integral size) -> embedded metadata
-    (inside the digested bytes) -> ``meta.compiled_graph_key == receipt.compiled_graph_key`` ->
-    **the PUBLISHER** (platform tier, or this pod's own endpoint/org) ->
-    the runtime's own computed key (enforced downstream by the selection
-    brain).
-
-    The publisher link is last because it is the only one that asks a question
-    about US rather than about the bytes: every other link proves the artifact
-    is the one the hub signed, none asks whether it was signed for this pod.
-    """
+    """Full verification of one hub-delivered artifact."""
     with _LOCK:
         cfg = _CONFIG
     if cfg is None:
@@ -643,10 +416,6 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     jws = _fetch_receipt_jws(cfg, local, meta_key)
     receipt = verify_receipt_jws(jws, _jwks_for(cfg, _kid_of(jws)))
 
-    # Both sides are ALGORITHM-TAGGED and `canonical_artifact_digest` has
-    # already refused any tag this worker cannot recompute, so this is one
-    # comparison with no untagged branch to fall into and nothing compared
-    # against an empty string.
     if local != receipt.artifact_digest:
         raise ReceiptError(
             "receipt_digest_mismatch",
@@ -676,28 +445,12 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
             "compiled_graph_revoked",
             f"key={receipt.compiled_graph_key} snapshot={receipt.snapshot_digest} is recalled")
 
-    # LAST: who published this, and may we run it. Deliberately after the
-    # signature — the tier is only meaningful once the claims are proven — and
-    # deliberately before the return, because the caller's next act is to arm
-    # the compiled graph and dlopen it.
     if not needs_viewer_identity(receipt):
-        # A platform-tier compiled graph is adoptable by every pod, so nothing here has
-        # to know who we are — and asking anyway would make a seam hiccup
-        # refuse the one class that never needed an identity.
-        #
-        # pgw#1271: what clears this tier is the SIGNATURE, and it ran above. Do NOT
-        # add a `refuse_untrusted_publisher(receipt, "", "")` call here: it lands
-        # inside that callee's own early return and executes zero checks immediately
-        # before the caller dlopens the artifact. A call that reads as the last gate
-        # before native-code execution and cannot refuse is worse than no call.
+        # A platform-tier compiled graph is adoptable by every pod; what clears this tier is the SIGNATURE, which already ran above. Do NOT add a refuse_untrusted_publisher(receipt, "", "") call here: it lands inside that callee's own early return and executes ZERO checks immediately before the caller dlopens the artifact — a call that reads as the last gate before native-code execution and cannot refuse is worse than no call.
         return receipt
     try:
         viewer = _self_viewer()
     except worker_identity.IdentityUnavailable as exc:
-        # Fail CLOSED, and say WHICH failure this is: `identity_unavailable`
-        # (nobody could be asked) is a wiring defect on our side, while
-        # `publisher_untrusted` (we asked and the answer refuses) is a trust
-        # decision. They must never share a reason string.
         raise ReceiptError(
             "identity_unavailable",
             f"this pod cannot be named by anything in reach ({exc}), so no "
@@ -708,28 +461,7 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
 
 
 def gate_delivered_artifact(artifact: Path, family: str) -> bool:
-    """The one arming hook (called from ``models.provision.enable_compiled``
-    for every non-None delivered artifact). True = arm may proceed.
-
-    Three postures, and the DEFAULT one refuses (pgw#1425):
-
-    * :data:`POSTURE_LOCAL` — somebody called :func:`trust_local_store`
-      (cozy-local, the CLI, unit rigs): pass, no verification, reason on the
-      record.
-    * :data:`POSTURE_ARMED` — :func:`configure` ran at HelloAck: full
-      verification.
-    * :data:`POSTURE_UNSET` — nobody said either. REFUSE, with the same typed
-      ``compiled_graph_receipt_refused`` event carrying reason
-      ``gate_unconfigured``. This is the arm that used to return True: the v2
-      serve path never called :func:`configure`, so every fleet worker sat in
-      this posture and armed hub-delivered native code with no receipt checked
-      at all, silently.
-
-    ANY failure emits the typed ``compiled_graph_receipt_refused`` wire event
-    and returns False — the caller drops the delivered artifact and the
-    ordinary miss policy (self-mint) takes over. Refusing here therefore costs
-    a compile, never a served request. Never raises; never kills serving.
-    """
+    """The one arming hook (called from ``models.provision.enable_compiled`` for every non-None delivered artifact)."""
     if posture() == POSTURE_LOCAL:
         return True
     try:

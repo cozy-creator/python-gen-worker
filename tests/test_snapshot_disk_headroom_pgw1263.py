@@ -1,22 +1,4 @@
-"""The snapshot headroom gate must size WHAT IT WRITES — no more, no less.
-
-This arithmetic has now been wrong in both directions, which is the reason it
-gets its own file:
-
-*   pgw#1263: it sized only the objects still to be FETCHED, and skipped itself
-    entirely when none were missing — exactly the case where the publish is the
-    sole writer. A pod passed the gate and then ENOSPC'd mid-publish.
-*   pgw#1308 step ⑥: the correction charged one whole extra model, because
-    publishing meant materializing a complete second copy. A projected tree
-    does not, so charging it now would refuse boots that comfortably fit.
-
-What a projection actually writes is three near-free arms and one real one: a
-tensor container is a ~128 B pointer stub, an empty file is empty, a
-single-object non-tensor file is a symlink — and a CHUNKED non-tensor file is
-reassembled, costing its whole size, because it has no single object to point
-at and no tensor reader to serve it. Every arm below is chosen to make one of
-those visible.
-"""
+"""The snapshot headroom gate must size WHAT IT WRITES — no more, no less."""
 
 from __future__ import annotations
 
@@ -62,14 +44,7 @@ def _stub_cost(digest: CASRef, size: int) -> int:
 def test_a_fully_resident_snapshot_is_still_sized_before_it_is_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing to fetch is not nothing to write.
-
-    Every object is already in the CAS, so `missing` is empty and the
-    pgw#1263 `if missing and ...` guard never evaluated the comparison at all.
-    The publish still writes — three stubs here rather than three shards, but
-    the gate that skips itself skips them too, and that guard staying gone is
-    the property this arm holds.
-    """
+    """Nothing to fetch is not nothing to write."""
 
     bodies = [b"weights-" + bytes([index]) * 64 for index in range(3)]
     store = LocalCAS(tmp_path)
@@ -92,7 +67,6 @@ def test_a_fully_resident_snapshot_is_still_sized_before_it_is_published(
         ],
     )
 
-    # Enough for the reserve and every byte but one of what is written.
     _pin_free(monkeypatch, _HEADROOM + stubs - 1)
 
     with pytest.raises(InsufficientDiskError) as refusal:
@@ -106,14 +80,7 @@ def test_a_fully_resident_snapshot_is_still_sized_before_it_is_published(
 def test_the_gate_counts_the_projection_on_top_of_the_fetch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A pod with room for the download alone still runs out publishing it.
-
-    The publish half is a CHUNKED non-tensor file — the one arm of a
-    projection that genuinely writes its whole size, because there is no
-    single object to symlink and no tensor reader to serve it. Free space
-    covers the reserve plus the fetch exactly, and is short by that file. The
-    refusal must name both halves.
-    """
+    """A pod with room for the download alone still runs out publishing it."""
 
     remote = b"remote-" + b"m" * 200
     first, second = b"clip-header" + b"h" * 40, b"clip-body" + b"b" * 90
@@ -163,14 +130,6 @@ def test_the_gate_counts_the_projection_on_top_of_the_fetch(
 def test_the_gate_does_not_charge_a_whole_second_copy_of_the_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The pgw#1308 step ⑥ half, and the arm the other two cannot see.
-
-    Every arm above passes under the pre-flip arithmetic too — over-reserving
-    only makes a refusal arrive sooner. This one fails under it: the model is
-    resident, the projection costs one stub, and free space is nowhere near a
-    second copy. A gate still sizing `sum(entry.size_bytes)` refuses a boot
-    that fits with room to spare, on every pod, for every model.
-    """
 
     body = b"a-model-that-fits-" + b"w" * 4096
     store = LocalCAS(tmp_path)
@@ -189,7 +148,7 @@ def test_the_gate_does_not_charge_a_whole_second_copy_of_the_model(
     )
 
     stub = _stub_cost(digest, len(body))
-    assert stub < len(body)  # or the arm proves nothing
+    assert stub < len(body)
     _pin_free(monkeypatch, _HEADROOM + stub)
 
     path = asyncio.run(
@@ -201,11 +160,7 @@ def test_the_gate_does_not_charge_a_whole_second_copy_of_the_model(
 def test_a_snapshot_that_fits_still_publishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The gate must leave the ordinary path alone.
-
-    A gate that always refuses would pass both refusal arms above and ship an
-    outage.
-    """
+    """The gate must leave the ordinary path alone."""
 
     body = b"small-model-" + b"s" * 32
     store = LocalCAS(tmp_path)

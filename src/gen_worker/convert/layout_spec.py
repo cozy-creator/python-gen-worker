@@ -1,13 +1,4 @@
-"""The source-layout detection schema — declarative matchers the engine runs.
-
-Hand-written family ladders that must agree do not: ``z_image``/``zimage``/
-``z-image``, ``flux``/``flux1``/``flux2``, ``wan``/``wan21``/``wan22``. So the
-matchers are DECLARED here and evaluated generically.
-
-A detection declaration says what a family LOOKS like, in four independent
-channels the engine evaluates in a fixed order. Adding a family means adding
-one :class:`LayoutDeclaration` in its endpoint repo.
-"""
+"""The source-layout detection schema — declarative matchers the engine runs."""
 
 from __future__ import annotations
 
@@ -19,18 +10,13 @@ from .repack_spec import DeclarationError
 
 
 def normalize_letters_digits(raw: str) -> str:
-    """``FLUX.2-klein-9B`` -> ``flux2klein9b``. Punctuation-insensitive matching."""
+    """``FLUX.2-klein-9B`` -> ``flux2klein9b``."""
     return "".join(ch for ch in str(raw or "").strip().lower() if ch.isalnum())
 
 
 @dataclass(frozen=True)
 class HintMatch:
-    """A match against a free-text hint (repo name, ``_name_or_path``, a filename).
-
-    ``all_tokens``/``any_tokens`` match the punctuation-stripped form, so
-    ``ltx-2``, ``ltx2`` and ``LTX_2`` are one rule. ``raw_substrings``/
-    ``raw_patterns`` match the lowercased original when punctuation is load-bearing.
-    """
+    """A match against a free-text hint (repo name, ``_name_or_path``, a filename)."""
 
     all_tokens: tuple[str, ...] = ()
     any_tokens: tuple[str, ...] = ()
@@ -83,17 +69,7 @@ class DirMatch:
 
 @dataclass(frozen=True)
 class LayoutDeclaration:
-    """How one family variant is recognized from a downloaded repo.
-
-    ``variant`` is the fine-grained slug stamped on the destination checkpoint
-    (``wan22``, ``flux1``); ``family`` is the canonical family it rolls up to
-    (``wan``, ``flux``). A declaration with an empty ``variant`` contributes
-    family-level hints only — the SD1.x/2.x free-text ladder is the case.
-
-    ``order`` breaks ties within a channel; lower runs first. Declarations that
-    are strictly more specific than another (``flux2`` vs ``flux``) MUST order
-    ahead of it.
-    """
+    """How one family variant is recognized from a downloaded repo."""
 
     variant: str
     family: str
@@ -130,8 +106,6 @@ class LayoutDeclaration:
 class LayoutSignals:
     """Generic, family-free evidence that a directory is a diffusers tree at all."""
 
-    # default_factory (not a literal default) so the vocabulary is read when a
-    # LayoutSignals is constructed, after endpoint declarations.
     component_dirs: frozenset[str] = field(
         default_factory=lambda: frozenset(pipeline_component_dirs())
     )

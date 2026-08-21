@@ -1,35 +1,5 @@
 #!/usr/bin/env python3
-"""HARDCUT E5: nothing in this tree deserializes a pickle.
-
-Pickles are banned platform-wide (pgw#498/#884/#1273/#1275) — reading one IS
-the banned act, so a `weights_only=True` site is refused exactly like a bare
-one. The remedy for a legacy source is to mirror it without the pickle.
-
-WHY THIS IS A LINT AND NOT A TEST. Two scans already existed inside
-`tests/test_untrusted_pickle_and_secret_sources_pgw498_pgw884.py`, and pgw#1264
-took the `tests` job off the merge path — so the fence CI actually runs was the
-narrower one, and only over `src/`. This runs in `fast gates`, over every Python
-tree in the repo, and the two pytest copies are gone.
-
-WHAT IT LOOKS FOR is the SHAPE of a deserialization, because that is what stops
-one coming back: a new site is silently safe on today's torch, silently unsafe
-under `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`, and no test of the surrounding
-feature notices. Writing a pickle is not scanned — writing one executes
-nothing.
-
-THERE IS NO PATH ALLOWLIST, deliberately: a path exemption lets a real gadget
-hide behind a filename. A site is permitted only where it is PROVEN REFUSED —
-the line carries the marker below AND the same file both raises and asserts one
-of the platform's pickle refusals. Delete the proof and the line goes red.
-
-Usage:
-
-    python scripts/lint_pickle_readers.py [PATH ...]
-    python scripts/lint_pickle_readers.py --selftest
-
-Defaults to `src/`, `tests/`, `tests_v2/`, `scripts/`, `examples/` and
-`benchmarks/`.
-"""
+"""HARDCUT E5: nothing in this tree deserializes a pickle."""
 
 from __future__ import annotations
 
@@ -46,9 +16,6 @@ DEFAULT_ROOTS = (
     REPO / "examples", REPO / "benchmarks",
 )
 
-#: Every shape that hands bytes to a class-naming decoder. The patterns are
-#: written so this file does not match itself — no self-exemption exists, and
-#: none is needed.
 DESERIALIZERS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     ("torch", re.compile(r"\btorch\.load\(|\btorch_mod\.load\(")),
     ("pickle", re.compile(r"\bpickle\.loads?\b|\bUnpickle[r]\b")),
@@ -59,11 +26,8 @@ DESERIALIZERS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     ("pandas", re.compile(r"\bread_pickle\(")),
 )
 
-#: The line-level statement that this call is an INPUT to a proof of the ban.
 PROOF_MARKER = "# pickle-ban: proves-the-refusal"
 
-#: ...honoured only in a file that really does raise and assert a refusal. Both
-#: names below are refusals this platform raises on a pickle by name.
 _REFUSAL_TOKENS = ("PickleWeightRefused", "pickle_only")
 _RAISES = "pytest.raises("
 
@@ -107,7 +71,6 @@ def scan(roots: Tuple[Path, ...]) -> List[str]:
 
 
 def _selftest() -> int:
-    """RED on a planted call in every tree; GREEN only on a proven refusal."""
     planted = {
         "src": 'import torch\nstate = torch.' 'load("x.bin")\n',
         "tests": 'import joblib\nm = joblib.' 'load("x.joblib")\n',
@@ -124,8 +87,6 @@ def _selftest() -> int:
                       file=sys.stderr)
                 return 1
 
-        # A marker without a proof is still refused — that is what makes the
-        # exemption a proof rather than an allowlist.
         (root / "unproven.py").write_text(
             'import torch\nx = torch.' f'load("x.bin")  {PROOF_MARKER}\n')
         if not scan((root / "unproven.py",)):
@@ -140,7 +101,6 @@ def _selftest() -> int:
             print("SELFTEST FAILED: a proven refusal was flagged", file=sys.stderr)
             return 1
 
-        # numpy's default is `allow_pickle=False`; only the opt-in is a reader.
         (root / "clean.py").write_text(
             'import numpy as np\nimport pickle\n'
             'a = np.load("x.npy")\nblob = pickle.dumps(a)\n')

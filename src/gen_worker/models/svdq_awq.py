@@ -1,40 +1,4 @@
-"""AWQ W4A16 modulation layers in an svdq checkpoint.
-
-An svdq artifact does not quantize everything the same way. The DiT's Linears are
-W4A4 nvfp4 with a low-rank branch (``svdq_layout``), but the adaLN MODULATION
-layers — ``img_mod``/``txt_mod``, which consume the timestep embedding rather
-than the token stream — are AWQ **W4A16**: 4-bit weights, 16-bit activations,
-group-64 scales. They are ~33% of a 20B artifact's parameters but a negligible
-share of its FLOPs, so serving them dequantized to bf16 costs speed nothing and
-keeps the native engine simple.
-
-Layout is NOT the nvfp4 one and NOT a guess — it is the inverse of
-deepcompressor's ``convert_to_nunchaku_w4x16_linear_weight`` ->
-``convert_to_tinychat_w4x16y16_linear_weight`` -> ``pack_w4`` chain, and the test
-suite inverts that upstream forward code bit-exactly:
-
-  qweight  I32  [oc/4, ic/2]   TinyChat pack_w4: int16 pairs viewed as int32
-  wscales  BF16 [ng, oc]       plain transpose of [oc, ng], zero-padded to
-                               ``ceil_num_groups``
-  wzeros   BF16 [ng, oc]       same, PRE-SCALED and PRE-NEGATED
-  bias     BF16 [oc]
-
-Dequant is therefore an ADD, not a subtract::
-
-    W = codes * wscales + wzeros
-
-``pack_w4``'s two stages, both inverted here: within each run of 32 input
-elements, output nibble ``j`` packs elements ``{j, 8+j, 16+j, 24+j}``; then the
-int16 grid is shuffled ``[oc/4, 4, ic/64, 16] -> permute(0, 2, 1, 3)``.
-
-THE TRAP (``adanorm_splits``): for modulation layers the exporter also
-(1) INTERLEAVES output channels — stored row ``j*splits + s`` is original row
-``s*(oc/splits) + j`` — and (2) ADDS 1 to the bias of splits ``1`` and
-``splits-2`` (adaLN's ``1 + scale`` folded into the artifact). A decoder that
-skips either produces a plausible-looking weight and silently wrong images, so
-:func:`decode_awq_linear` requires the split count explicitly and defaults to 1
-(a plain W4A16 layer, no adaLN transform) rather than inferring it.
-"""
+"""AWQ W4A16 modulation layers in an svdq checkpoint (img_mod/txt_mod — timestep-embedding consumers; group-64 asymmetric int4). Layout (inverse of deepcompressor's pack_w4 chain): qweight I32 [oc/4, ic/2] TinyChat nibble pack; wscales BF16 [ng, oc]; wzeros BF16 [ng, oc] PRE-SCALED and PRE-NEGATED — dequant is therefore an ADD: W = codes * wscales + wzeros. THE TRAP (adanorm_splits): for modulation layers the exporter also INTERLEAVES output channels (stored row j*splits+s is original row s*(oc/splits)+j) and ADDS 1 to the bias of splits 1 and splits-2 (adaLN's 1+scale folded into the artifact); a decoder that skips either produces a plausible-looking weight and silently wrong images, so decode_awq_linear requires the split count explicitly and never infers it."""
 
 from __future__ import annotations
 
@@ -45,10 +9,8 @@ from .svdq_layout import SvdqLayoutError
 
 logger = logging.getLogger(__name__)
 
-# deepcompressor tinychat ceil_num_groups: pack_size = 32/4 = 8 int32-packed
-# groups, and group_size 64 forces the pack count to be even.
 _PACK_SIZE = 8
-_NUM_PACKS_FACTOR = {32: 4, 64: 2}  # >=128 -> 1
+_NUM_PACKS_FACTOR = {32: 4, 64: 2}
 
 
 def num_scale_rows(in_features: int, group_size: int) -> int:
@@ -64,8 +26,7 @@ def num_scale_rows(in_features: int, group_size: int) -> int:
 
 
 def unpack_w4x16(qweight: Any, out_features: int, in_features: int) -> Any:
-    """TinyChat ``pack_w4`` inverse: packed int32 [oc/4, ic/2] -> 4-bit codes
-    uint8 [oc, ic] (values 0-15)."""
+    """TinyChat ``pack_w4`` inverse: packed int32 [oc/4, ic/2] -> 4-bit codes uint8 [oc, ic] (values 0-15)."""
     import torch
 
     oc, ic = int(out_features), int(in_features)
@@ -77,7 +38,6 @@ def unpack_w4x16(qweight: Any, out_features: int, in_features: int) -> Any:
         raise SvdqLayoutError(
             f"AWQ qweight shape {tuple(qweight.shape)} != expected {expected} "
             f"for [{oc}, {ic}]")
-    # int32 storage is really pairs of int16 lanes; take them unsigned.
     x = qweight.contiguous().view(torch.int16).to(torch.int32) & 0xFFFF
     x = x.view(oc // 4, ic // 64, 4, 16).permute(0, 2, 1, 3).reshape(-1, 8)
     nib = torch.stack([(x >> (4 * t)) & 0xF for t in range(4)], dim=1)
@@ -86,10 +46,6 @@ def unpack_w4x16(qweight: Any, out_features: int, in_features: int) -> Any:
 
 def _scales_and_zeros(wscales: Any, wzeros: Any, out_features: int,
                       in_features: int) -> tuple[Any, Any, int]:
-    """Stored [ng, oc] scale/zero grids -> [oc, ng_eff] plus the group size.
-
-    Trailing rows can be ``ceil_num_groups`` PADDING (all zero). A real scale is
-    never zero — the exporter divides by it — so the zero rows are the pad."""
     import torch
 
     oc, ic = int(out_features), int(in_features)
@@ -117,10 +73,7 @@ def _scales_and_zeros(wscales: Any, wzeros: Any, out_features: int,
 
 def dequantize_w4x16(qweight: Any, wscales: Any, wzeros: Any,
                      out_features: int, in_features: int) -> Any:
-    """AWQ W4A16 tensors -> float32 weight [oc, ic].
-
-    ``W = codes * wscales + wzeros`` — an ADD, because the exporter stored the
-    zero point already scaled AND negated."""
+    """AWQ W4A16 tensors -> float32 weight [oc, ic]."""
     codes = unpack_w4x16(qweight, out_features, in_features)
     scale, zero, gs = _scales_and_zeros(wscales, wzeros, out_features,
                                         in_features)
@@ -131,11 +84,7 @@ def dequantize_w4x16(qweight: Any, wscales: Any, wzeros: Any,
 
 def undo_adanorm_splits(weight: Any, bias: Optional[Any], splits: int,
                         ) -> tuple[Any, Optional[Any]]:
-    """Undo the exporter's adaLN transform.
-
-    Forward was ``w.view(splits, oc//splits, ic).transpose(0, 1)`` on the rows
-    plus ``+1`` on the bias of splits ``1`` and ``splits-2``. Both are inverted
-    so the result matches the ORIGINAL diffusers module."""
+    """Undo the exporter's adaLN transform."""
     import torch
 
     if splits <= 1:
@@ -159,11 +108,7 @@ def undo_adanorm_splits(weight: Any, bias: Optional[Any], splits: int,
 def decode_awq_linear(tensors: dict[str, Any], out_features: int,
                       in_features: int, *, adanorm_splits: int = 1,
                       compute_dtype: Any = None, device: Any = None) -> Any:
-    """One AWQ W4A16 layer -> a plain ``nn.Linear`` for the diffusers module.
-
-    ``adanorm_splits`` MUST be given for a modulation layer (qwen ``img_mod``/
-    ``txt_mod``: 6). It is never inferred — a wrong split count yields a
-    plausible weight and silently wrong output."""
+    """One AWQ W4A16 layer -> a plain ``nn.Linear`` for the diffusers module."""
     import torch
     import torch.nn as nn
 
@@ -192,17 +137,8 @@ def is_awq_linear(tensors: dict[str, Any]) -> bool:
     return "wzeros" in tensors and "qweight" in tensors
 
 
-# ---------------------------------------------------------------------------
-# Forward encode. Adapted from deepcompressor
-# (Apache-2.0, mit-han-lab): backend/tinychat/utils.py pack_w4 +
-# convert_to_tinychat_w4x16y16, backend/nunchaku/utils.py adanorm transform —
-# the same upstream code the tests above invert bit-exactly.
-# ---------------------------------------------------------------------------
-
-
 def pack_w4x16(codes: Any) -> Any:
-    """4-bit codes uint8/int [oc, ic] (values 0-15) -> TinyChat packed int32
-    [oc/4, ic/2]. Exact inverse of :func:`unpack_w4x16`."""
+    """4-bit codes uint8/int [oc, ic] (values 0-15) -> TinyChat packed int32 [oc/4, ic/2]."""
     import torch
 
     oc, ic = int(codes.shape[0]), int(codes.shape[1])
@@ -216,8 +152,7 @@ def pack_w4x16(codes: Any) -> Any:
 
 
 def apply_adanorm_splits(weight: Any, bias: Any, splits: int) -> tuple[Any, Any]:
-    """The exporter's adaLN transform (inverse of :func:`undo_adanorm_splits`):
-    row interleave + ``+1`` on the bias of splits ``1`` and ``splits-2``."""
+    """The exporter's adaLN transform (inverse of :func:`undo_adanorm_splits`): row interleave + ``+1`` on the bias of splits ``1`` and ``splits-2``."""
     import torch
 
     if splits <= 1:
@@ -244,13 +179,7 @@ def encode_awq_linear(
     group_size: int = 64,
     adanorm_splits: int = 1,
 ) -> dict[str, Any]:
-    """One Linear -> the exporter-layout AWQ W4A16 tensors our decoder (and
-    nunchaku) read: asymmetric per-group minmax int4, zeros stored pre-scaled
-    AND pre-negated, scale grids zero-padded to ``ceil_num_groups``.
-
-    Follows the upstream dtype path exactly (fp32 quantize, bf16 storage) so
-    ``decode_awq_linear(encode_awq_linear(w)) == w`` up to bf16-grid rounding
-    and the tests can assert bit-exactness against the vendored upstream."""
+    """One Linear -> the exporter-layout AWQ W4A16 tensors our decoder (and nunchaku) read: asymmetric per-group minmax int4, zeros stored pre-scaled AND pre-negated, scale grids zero-padded to ``ceil_num..."""
     import torch
 
     w = weight.detach().to(torch.float32)
@@ -264,8 +193,6 @@ def encode_awq_linear(
     g = w.reshape(oc, ng, group_size)
     lo, hi = g.amin(dim=-1), g.amax(dim=-1)
     scale = ((hi - lo) / 15.0).clamp(min=1e-6)
-    # Upstream passes the zero in CODE units (-lo/scale) and multiplies back
-    # (zero_pre_scaled=True); the double rounding is part of the byte contract.
     zero_scaled = (-lo / scale) * scale
     q = g.add(zero_scaled.unsqueeze(-1)).div(scale.unsqueeze(-1)).round()
     q = q.clamp(0.0, 15.0).view(oc, ic)

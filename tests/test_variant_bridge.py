@@ -1,14 +1,3 @@
-"""pgw#1473: a VARIANT-ONLY tree must load through the eager bridge.
-
-⚠️ **Every case here builds a tree with ONLY variant-named files, because the
-absence of the plain name IS the defect.** A fixture that writes both names —
-which is what every existing fixture does, since the test that reads a tree is
-also the test that wrote it — passes with or without the fix and proves
-nothing. That is the same property that hid pgw#1460's loader and pgw#1472's
-closure: the double was simpler than production in exactly the dimension under
-test.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -40,9 +29,7 @@ def test_a_variant_only_tree_names_its_variant(tmp_path: Path) -> None:
 
 
 def test_a_SHARDED_variant_only_tree_names_its_variant(tmp_path: Path) -> None:
-    """The sdxl shape: the variant is glued to the shard suffix, and the tree
-    carries BOTH index spellings at once — `_add_variant` writes one and older
-    diffusers wrote the other. Measured on a real mirror, not invented."""
+    """The sdxl shape: the variant is glued to the shard suffix, and the tree carries BOTH index spellings at once — `_add_variant` writes one and older diffusers wrote the other."""
 
     tree = _tree(
         tmp_path / "sdxl",
@@ -59,8 +46,7 @@ def test_a_SHARDED_variant_only_tree_names_its_variant(tmp_path: Path) -> None:
 
 
 def test_a_PLAIN_tree_is_left_alone(tmp_path: Path) -> None:
-    """Every published/converted checkpoint. `None` is what makes running this
-    unconditionally safe."""
+    """Every published/converted checkpoint."""
 
     tree = _tree(
         tmp_path / "converted",
@@ -72,9 +58,7 @@ def test_a_PLAIN_tree_is_left_alone(tmp_path: Path) -> None:
 
 
 def test_a_tree_carrying_BOTH_names_is_left_alone(tmp_path: Path) -> None:
-    """diffusers' ordinary ladder already resolves this one, so the variant is
-    an extra rather than the only way in — and choosing it would silently
-    change which bytes serve."""
+    """diffusers' ordinary ladder already resolves this one, so the variant is an extra rather than the only way in — and choosing it would silently change which bytes serve."""
 
     tree = _tree(
         tmp_path / "both",
@@ -85,8 +69,7 @@ def test_a_tree_carrying_BOTH_names_is_left_alone(tmp_path: Path) -> None:
 
 
 def test_TWO_variants_and_no_plain_name_REFUSES_by_name(tmp_path: Path) -> None:
-    """Picking would be the worker guessing about PRECISION on bytes the
-    publisher already labelled."""
+    """Picking would be the worker guessing about PRECISION on bytes the publisher already labelled."""
 
     tree = _tree(
         tmp_path / "ambiguous",
@@ -99,8 +82,7 @@ def test_TWO_variants_and_no_plain_name_REFUSES_by_name(tmp_path: Path) -> None:
 
 
 def test_an_index_json_is_not_mistaken_for_a_variant(tmp_path: Path) -> None:
-    """A greedy pattern reads `model.safetensors.index.json` as variant
-    `index`, silently, and then asks diffusers for files that do not exist."""
+    """A greedy pattern reads `model.safetensors.index.json` as variant `index`, silently, and then asks diffusers for files that do not exist."""
 
     tree = _tree(
         tmp_path / "sharded-plain",
@@ -120,12 +102,6 @@ def test_a_missing_or_empty_tree_answers_None_rather_than_raising(
 
 
 def test_the_bridge_PASSES_the_variant_it_detected(tmp_path: Path) -> None:
-    """The wiring, not just the detector — pgw#1460's lesson applied here.
-
-    A probe that is correct in isolation and dead at its call site is the exact
-    shape this session has already paid for twice, so the assertion is on what
-    `from_pretrained` actually RECEIVES.
-    """
 
     from gen_worker.serving.context import DeployBinding, LoadContext
 

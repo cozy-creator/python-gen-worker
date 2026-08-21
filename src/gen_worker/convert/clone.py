@@ -1,13 +1,4 @@
-"""Clone: mirror an external checkpoint into Tensorhub, optionally converting.
-
-download → (repackage) → (cast / quant / gguf) → ONE finalize:
-each requested output flavor becomes one local file tree and one Tensorhub
-commit (``POST /commits`` + part PUTs + finalize). ``overwrite_repo`` maps to
-``mode="replace"`` — no enumerate-prior-and-delete.
-
-Entry points: :func:`from_huggingface` / :func:`from_civitai` (payload-shaped)
-and :func:`run_clone` (keyword-explicit).
-"""
+"""Clone: mirror an external checkpoint into Tensorhub, optionally converting."""
 
 from __future__ import annotations
 
@@ -67,17 +58,13 @@ from ..scratchrepo import PREFIX as SCRATCH_PREFIX, is_scratch_name
 logger = logging.getLogger(__name__)
 
 _PUBLIC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
-# An HF shard member; `group` is dir + prefix, i.e. the set it belongs to.
 _SHARD_MEMBER_RE = re.compile(
     r"^(?P<group>.*?[^/]+)-\d{5}-of-\d{5}\.safetensors$")
 
 _KNOWN_DTYPES = {
-    # "source" = publish the source's own weights untouched (pure mirror);
-    # the flavor's recorded dtype is the detected on-disk dtype.
     "source",
     "fp32", "fp16", "bf16", "fp8", "nvfp4",
     "int4", "int4:nf4", "int4:fp4", "nf4", "fp4",
-    # GGUF encodings ride the dtype axis with file_type="gguf".
     "f16", "f32", "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q4_k_m", "q4_k_s",
     "q4_0", "q4_1", "q3_k_m", "q3_k_s", "q2_k",
 }
@@ -88,7 +75,7 @@ _KNOWN_FILE_LAYOUTS = set(KNOWN_FILE_LAYOUTS)
 _KNOWN_FILE_TYPES = {"safetensors", "gguf"}
 
 _default_quant_components = quant_candidate_components
-_MIN_CONVERT_BYTES = 100 * 1024 * 1024  # leave tiny weights (embeddings) untouched
+_MIN_CONVERT_BYTES = 100 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -113,13 +100,7 @@ class CloneResult:
     metadata: dict[str, str] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Normalization
-# ---------------------------------------------------------------------------
-
 def _payload_destination_release(payload: Any) -> str:
-    """The release the invoke named: the reserved ``destination`` struct's
-    ``release`` (the shape the hub validates), else the flat scalar."""
     dest = getattr(payload, "destination", None)
     if dest is not None:
         get = dest.get if isinstance(dest, dict) else (lambda k: getattr(dest, k, None))
@@ -130,10 +111,6 @@ def _payload_destination_release(payload: Any) -> str:
 
 
 def _valid_repo_name(name: str) -> bool:
-    """The repo half of a destination ref: the public grammar, plus the hub's
-    ONE reserved scratch prefix. Twin of ``normalizeSchedulerRepoName`` — strip
-    the known prefix, validate the REST against the public charset, re-attach.
-    Never a widened charset: a user-authored ``_anything`` still refuses."""
     if is_scratch_name(name):
         return bool(_PUBLIC_NAME_RE.match(name[len(SCRATCH_PREFIX):]))
     return bool(_PUBLIC_NAME_RE.match(name))
@@ -147,21 +124,13 @@ def normalize_destination_ref(value: str) -> str:
         if ref.startswith(p):
             raise ValueError("destination_repo must be bare owner/repo (no provider prefix)")
     parts = ref.split("/", 1)
-    # The owner half stays strictly public — only the repo half may be scratch,
-    # exactly as the hub's own normalizer splits it.
     if len(parts) != 2 or not _PUBLIC_NAME_RE.match(parts[0]) or not _valid_repo_name(parts[1]):
         raise ValueError("destination_repo must be '<owner>/<repo>'")
     return ref
 
 
 def normalize_source_include(value: Any) -> tuple[str, ...]:
-    """Dual-form clone-request field disambiguating a multi-checkpoint-bundle
-    source repo: compact form is a single glob string, structured form is a
-    list of globs. Both mean an explicit allowlist matched against
-    repo-relative paths, applied before classification (see
-    :func:`gen_worker.convert.classifier.apply_source_include`).
-    ``None``/empty means the unrestricted heuristic.
-    """
+    """Dual-form clone-request field disambiguating a multi-checkpoint-bundle source repo: compact form is a single glob string, structured form is a list of globs."""
     if value is None:
         return ()
     if isinstance(value, str):
@@ -187,7 +156,6 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = MULTI_
         if item is None:
             continue
         get = (lambda k: item.get(k)) if isinstance(item, dict) else (lambda k: getattr(item, k, None))
-        # fp8 spellings collapse onto the flavor name: e4m3 is THE fp8 format.
         dtype = str(get("dtype") or "").strip().lower()
         dtype = {"fp8-e4m3": "fp8", "fp8:e4m3": "fp8"}.get(dtype, dtype)
         layout = str(get("file_layout") or "").strip().lower() or layout_hint
@@ -210,10 +178,6 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = MULTI_
     return out
 
 
-# ---------------------------------------------------------------------------
-# Flavor tree construction
-# ---------------------------------------------------------------------------
-
 def build_flavor_tree(
     source: IngestedSource,
     spec: OutputSpec,
@@ -223,20 +187,7 @@ def build_flavor_tree(
     objective: str = "",
     distilled: bool = False,
 ) -> tuple[Path, dict[str, str]]:
-    """Materialize one output flavor as a local file tree.
-
-    Passthrough (dtype/layout/container match the source) hardlinks the
-    snapshot. Otherwise: optional layout repackage, then per-weight-set
-    cast / quant / gguf via :mod:`gen_worker.convert.convert`.
-
-    ``objective``/``distilled`` stamp objective-correct scheduler
-    config into the produced tree's ``scheduler/config.json`` (no-op for an
-    epsilon/unstamped non-distilled checkpoint or a layout with no
-    scheduler component).
-
-    Returns ``(tree_root, attrs)``. Raises ``InlineConversionNotPossible``
-    for calibrated dtypes.
-    """
+    """Materialize one output flavor as a local file tree."""
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -247,9 +198,6 @@ def build_flavor_tree(
     source_layout = source.layout if source.layout in _KNOWN_FILE_LAYOUTS else SINGLE_FILE
     source_dtype = str(source.attrs.get("dtype") or "").strip().lower()
 
-    # dtype="source": pure mirror — publish the source weights untouched and
-    # record the detected on-disk dtype. Refuses combos that would still
-    # rewrite tensors (layout/container changes) or an undetectable source.
     if spec.dtype == "source":
         if spec.file_type != "safetensors":
             raise ValueError('dtype="source" requires file_type="safetensors"')
@@ -268,7 +216,6 @@ def build_flavor_tree(
         apply_objective_scheduler_config(out_dir, objective, distilled)
         return out_dir, attrs
 
-    # GGUF: single-artifact container.
     if spec.file_type == "gguf":
         groups = snapshot_weight_groups(source_dir, source_layout)
         if not groups:
@@ -280,17 +227,12 @@ def build_flavor_tree(
         )
         attrs.update(result.attributes)
         return out_dir, attrs
-    # Layout repackage (singlefile <-> diffusers) when requested + supported.
     work_root = source_dir
     work_layout = source_layout
     if spec.file_layout != source_layout:
         from .repackage import diffusers_to_singlefile, singlefile_to_diffusers
 
         family = str(source.model_family or "").strip().lower()
-        # Capability is registry membership, not a hand-synced allowlist. The
-        # declaration also states the DIRECTION it supports, so a family that
-        # can only go singlefile->diffusers is refused for the reverse instead
-        # of failing deep inside the converter.
         declared = repackage_family(family)
         if declared is None or not (
             declared.supports_singlefile_to_diffusers if source_layout == SINGLE_FILE
@@ -315,7 +257,6 @@ def build_flavor_tree(
         work_layout = spec.file_layout
         attrs["repackage_toolchain"] = f"{source_layout}_to_{spec.file_layout}:v1"
 
-    # Passthrough: dtype already matches (or repackage output is final).
     needs_dtype_pass = spec.dtype != source_dtype or work_root is not source_dir
     if spec.dtype == source_dtype and work_root is source_dir:
         copy_non_weight_files(source_dir, out_dir, skip_components=set())
@@ -325,15 +266,10 @@ def build_flavor_tree(
         apply_objective_scheduler_config(out_dir, objective, distilled)
         return out_dir, attrs
 
-    # Dtype conversion per weight set.
     groups = snapshot_weight_groups(work_root, work_layout)
     is_fp8 = spec.dtype == "fp8"
     fp8_block_scope = False
     if is_fp8 and work_layout != MULTI_FILE:
-        # One root weight set = a transformers backbone (the whole checkpoint
-        # IS the denoiser, e.g. HiDream-O1's UiT): block-scoped fp8 cast.
-        # Multi-set singlefile bundles still refuse — component identity is
-        # ambiguous there.
         if len(groups) != 1 or groups[0][0] != "":
             raise ValueError(
                 "fp8 storage flavors need component identity: a diffusers "
@@ -343,16 +279,10 @@ def build_flavor_tree(
     if quantize_components:
         target_names = set(quantize_components)
     elif is_fp8:
-        # Denoiser-only by default: matches apply_fp8_storage's consumption
-        # scope; TEs join explicitly via the component-wise ladder.
         target_names = set(fp8_default_components())
     else:
         target_names = set(_default_quant_components())
     is_quant = spec.dtype not in {"bf16", "fp16", "fp32", "f16", "f32"}
-    # A cast is TREE-wide, a precision pin is PER-COMPONENT. The tree's own
-    # model_index.json classes decide, via families.facts — the same table the
-    # loader honours. An EXPLICIT request to convert a pinned component is
-    # refused by name; a tree-wide cast skips it and says so.
     check_explicit_pin_conflict(
         work_root, spec.dtype, quantize_components if is_quant else None)
     pin_exempt = cast_exempt_components(work_root, spec.dtype)
@@ -361,15 +291,10 @@ def build_flavor_tree(
     for comp, entry in groups:
         comp_dir = (work_root / comp) if comp else work_root
         size = sum(f.stat().st_size for f in comp_dir.glob("*.safetensors") if f.is_file())
-        # Quant targets only the requested components; casts apply everywhere.
         if is_quant and comp and comp not in target_names:
             continue
         if size < _MIN_CONVERT_BYTES and is_quant:
             continue
-        # ...EXCEPT a component whose class pins a wider load dtype: it passes
-        # through at source precision (copy_non_weight_files carries it).
-        # Checked here, after the scope rules, so the report names only the
-        # components this conversion would ACTUALLY have narrowed.
         fact = pin_exempt.get(comp)
         if fact is not None:
             skipped_pins[comp] = fact.dtype
@@ -398,8 +323,6 @@ def build_flavor_tree(
         _normalize_variant_filenames(out_dir)
     apply_objective_scheduler_config(out_dir, objective, distilled)
     if skipped_pins:
-        # Reported, never silent: the flavor says bf16 and one component is
-        # not, so the checkpoint carries WHICH and WHY.
         attrs["dtype_pinned_components"] = ",".join(
             f"{c}:{d}" for c, d in sorted(skipped_pins.items()))
     if work_root is not source_dir:
@@ -407,13 +330,8 @@ def build_flavor_tree(
     return out_dir, attrs
 
 
-# ---------------------------------------------------------------------------
-# run_clone — ingest, convert, ONE finalize path
-# ---------------------------------------------------------------------------
-
 class CloneDiskSpaceError(RuntimeError):
-    """Preflight found too little free disk for the clone — fail fast and
-    actionably instead of ENOSPC minutes into a 40GB download."""
+    """Preflight found too little free disk for the clone — fail fast and actionably instead of ENOSPC minutes into a 40GB download."""
 
 
 _DISK_MARGIN_BYTES = 2 * 1024**3
@@ -421,43 +339,15 @@ _PUBLISH_AS_IS_STRATEGIES = frozenset({
     "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
     "pipeline_tree", "diffusers_component",
 })
-# publish_as_is strategies whose weight set is an ordinary dense
-# safetensors tree (not a binary quant container like gguf, and not a
-# mixed-dtype multi-checkpoint bundle like pipeline_tree) — a genuinely
-# mismatched requested dtype is real, in-line-castable work via
-# build_flavor_tree, not something to silently swallow or unconditionally
-# refuse.
 _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES = frozenset({
     "transformers", "peft", "sentence_transformers", "native_lora",
     "diffusers_component",
 })
 _DIRECT_GGUF_ENCODINGS = frozenset({"f32", "f16", "bf16", "q8_0"})
-# Storage widths live in dtype_pins.DTYPE_BITS — one table, one fact.
-# The source's dtype is READ at plan time from the safetensors headers
-# (`ingest.stamp_plan_source_dtype`), so this fallback fires only when no
-# header could be read at all. It is 32 — the widest DENSE width — because
-# the two ways to be wrong do not cost the same:
-#
-#   * too NARROW makes the estimate 4-8x the truth and REFUSES the job at plan
-#     time, before a byte moves. Nothing recovers that: the conversion surface
-#     has one pod shape. It also fires on essentially every real source, since
-#     a genuinely packed 4-bit tree is always tagged, gguf, or routed through a
-#     quant strategy — never an unreadable dense header.
-#   * too WIDE under-estimates the output and can hit ENOSPC mid-clone, which
-#     costs one pod-hour, says what happened, and is retryable on a bigger disk.
 _UNRESOLVED_SOURCE_BITS = 32
 
 
 def _plan_has_no_repackager(plan: Any) -> bool:
-    """Pre-download capability probe, mirroring run_clone's post-download check.
-
-    Uses ONLY the file-listing paths ``plan_huggingface`` already has (no bytes
-    fetched yet): a checkpoint filename carrying a family token resolves the
-    family through the same declared hint matchers ``detect_huggingface_source_layout``
-    uses post-download.
-
-    A source whose family declares no singlefile->diffusers converter has no
-    repackager and publishes as-is; no family is named here."""
 
     for p in getattr(plan, "paths", None) or ():
         variant = infer_model_family_variant_from_hint(str(p))
@@ -471,13 +361,8 @@ def _plan_has_no_repackager(plan: Any) -> bool:
 def _output_tree_bytes(
     spec: OutputSpec, source_bytes: int, source_bits: int, measured_bits: int,
 ) -> int:
-    """How big one materialized output tree will be, in bytes.
-
-    A NARROWING cast is only known to shrink when the source width was
-    measured; on a guessed width the old, deliberately loose bound stands —
-    an output tree is never bigger than the source it was cast from."""
     out_bits = _DTYPE_STORAGE_BITS.get(spec.dtype)
-    if out_bits is None:  # "source", or a container we cannot size
+    if out_bits is None:
         return source_bytes
     if not measured_bits and out_bits <= source_bits:
         return source_bytes
@@ -485,11 +370,6 @@ def _output_tree_bytes(
 
 
 def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
-    """Fail fast when the disk cannot fit the clone. The source plan knows
-    every selected file's size before a byte is downloaded (HF list_repo_tree
-    / civitai version API). The bound covers plan-known files; a repackage
-    tool that fetches missing base components can still fail on its provider
-    download. An unavailable plan skips the check (fail-open)."""
     if plan is None:
         return
     try:
@@ -512,12 +392,6 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             attrs = {"file_layout": SINGLE_FILE, "file_type": source_type}
             if source_type == "gguf":
                 strategy = "gguf"
-        # run_clone routes a strategy="aio_singlefile" source whose family
-        # declares no singlefile->diffusers converter through publish_as_is
-        # regardless of the requested output layout. This preflight only sees
-        # the pre-download classification, so without the probe it would budget
-        # a full layout-repack plus materialized-dtype trees for a clone that
-        # only ever needs the source bytes + margin.
         no_repackager = (
             strategy == "aio_singlefile" and provider == "huggingface"
             and _plan_has_no_repackager(plan)
@@ -544,19 +418,12 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
             and (spec.dtype == "source" or (source_dtype and spec.dtype == source_dtype))
         ]
         materialized = [spec for spec in specs if spec not in passthrough]
-        # Mirror ingest de-shards, so the transient cost is the merged copy of
-        # the LARGEST shard set — its members are unlinked as soon as it
-        # verifies, one component at a time.
         shard_groups: dict[str, int] = {}
         for path, size in files:
             m = _SHARD_MEMBER_RE.match(path)
             if m:
                 shard_groups[m.group("group")] = shard_groups.get(m.group("group"), 0) + size
         deshard_bytes = len(passthrough) * max(shard_groups.values(), default=0)
-        # Bits per stored parameter, MEASURED at plan time off the source's
-        # safetensors headers. An output tree is ``params * out_bits / 8``, so
-        # scaling source bytes by ``out_bits / measured_bits`` is exact even
-        # for a mixed-dtype tree.
         measured_bits = int(getattr(plan, "source_storage_bits", 0) or 0)
         source_bits = measured_bits or _DTYPE_STORAGE_BITS.get(
             source_dtype, _UNRESOLVED_SOURCE_BITS)
@@ -615,25 +482,6 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
 def _reusable_flavor_tree(
     workdir: Path, spec_label: str, flavor_dir: Path,
 ) -> Optional[dict[str, str]]:
-    """The flavor attrs of a retained tree this run may re-publish as-is, or None.
-
-    A publish that failed on a retryable error leaves its session live and its
-    journal entry behind, and ``run_clone``'s ``finally`` RETAINS the workdir.
-    On the retry, a tree the predecessor already finished casting is
-    re-published rather than re-cast — the cast is the expensive part.
-
-    Three conditions, all cheap and all necessary:
-      * a journal entry exists for this spec label (so the predecessor got as
-        far as DECLARING, which happens only after the tree was complete and
-        every file hashed — a run that died mid-cast leaves no entry);
-      * the tree on disk still yields exactly the file set that entry declared;
-      * the entry carries the flavor attrs, so nothing has to be re-derived.
-
-    Bytes are re-proven for free downstream: ``publish_v2`` re-hashes every
-    file and adopts the journalled session only if the artifact key matches,
-    so a same-shape-but-corrupted tree publishes fresh instead of resuming
-    wrong.
-    """
     if not flavor_dir.is_dir():
         return None
     recovery = ProducerRecovery(workdir / JOURNAL_NAME)
@@ -656,10 +504,6 @@ def _reusable_flavor_tree(
 
 
 def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
-    """Remove clone scratch left by crashed predecessors: dirs whose flock is
-    free and that have been idle past COZY_CONVERT_SCRATCH_TTL_S (default 1h).
-    A long-running conversion worker otherwise accumulates each crashed job's
-    scratch until any disk fills."""
     try:
         entries = sorted(base.glob("clone-*"))
     except OSError:
@@ -683,7 +527,7 @@ def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                continue  # a live clone holds this workdir
+                continue
             shutil.rmtree(d, ignore_errors=True)
             logger.info("swept stale clone scratch: %s", d)
         finally:
@@ -691,10 +535,6 @@ def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
 
 
 def _clone_workdir(provider: str, source_key: str, destination: str) -> Path:
-    """Workdir keyed by (provider, source, destination) so concurrent
-    duplicates of the same clone serialize on one flock. Removed after every
-    job — success or failure. Base dir: ``$COZY_CONVERT_WORKDIR`` or
-    ``<tmp>/gen-worker-convert``."""
     base = Path(os.environ.get("COZY_CONVERT_WORKDIR", "").strip()
                 or Path(tempfile.gettempdir()) / "gen-worker-convert")
     digest = hashlib.sha256(
@@ -705,10 +545,6 @@ def _clone_workdir(provider: str, source_key: str, destination: str) -> Path:
 
 
 def _acquire_workdir_lock(workdir: Path) -> int:
-    """Exclusive flock serializing clones that share one keyed workdir.
-    Concurrent duplicates (crash-recovery re-queues of the same clone)
-    otherwise corrupt the shared snapshot: hf_hub's local-dir download
-    unlinks + re-fetches files the peer clone is mid-reading."""
     lock_path = workdir.parent / f".{workdir.name}.lock"
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
@@ -744,11 +580,6 @@ def run_clone(
 
     provider = str(provider or "").strip().lower()
     destination = normalize_destination_ref(destination_repo)
-    # th#1987: every published artifact attaches to an ALREADY-CUT release,
-    # named by the invoking request. Resolved before the download so a clone
-    # that could never publish costs nothing.
-    # th#2202: a SCRATCH destination derives its release hub-side, and since
-    # th#1901 that is what the hub rewrites EVERY producer's destination to.
     release = _destination_release(ctx, destination_release, destination)
     layout_hint = str(target_layout or MULTI_FILE).strip().lower() or MULTI_FILE
     specs = normalize_outputs(outputs, layout_hint=layout_hint)
@@ -759,11 +590,6 @@ def run_clone(
     distilled_fact = bool(distilled)
     if include and provider != "huggingface":
         raise ValueError("source_include is only supported for provider='huggingface'")
-    # normalize_outputs collapses "caller asked for nothing" onto a schema
-    # default (dtype="bf16"), indistinguishable from an EXPLICIT bf16 request
-    # once normalized. Only an explicit request may force a publish_as_is
-    # source through a real conversion; an unspecified request keeps mirroring
-    # the source's own dtype untouched.
     explicit_outputs = bool(outputs)
     effective_hf_token = str(hf_token or "").strip() or str(getattr(ctx, "hf_token", "") or "").strip()
 
@@ -790,8 +616,6 @@ def run_clone(
         hubclient = HubClient.from_ctx(ctx)
         mode = "replace" if overwrite_repo else "merge"
 
-        # Derive the source's identity from provider metadata alone (no
-        # bytes) — the disk preflight below needs every selected file's size.
         _progress(0.02, "clone.plan")
         plan: Any = None
         try:
@@ -814,8 +638,6 @@ def run_clone(
             logger.warning(
                 "clone source plan failed (download-skip disabled for this run): %s", exc)
 
-        # The plan already knows every selected file's size — fail fast on an
-        # undersized disk instead of ENOSPC mid-download.
         _preflight_disk(workdir, plan, specs)
 
         _progress(0.05, "clone.ingest")
@@ -826,10 +648,6 @@ def run_clone(
             if total:
                 _progress(0.05 + 0.45 * min(1.0, done / total), "clone.download")
 
-        # Download and cast are the two phases that talk to the hub NOT AT ALL
-        # — an hour of them, and then the first upload discovers whatever
-        # happened to the path meanwhile. Keep the path warm, and keep a record
-        # of when the hub was reachable.
         keepalive = HubKeepalive(
             hubclient, hubclient._repo_path(destination),
             log=getattr(ctx, "log", None))
@@ -857,17 +675,8 @@ def run_clone(
         from .convert import InlineConversionNotPossible
 
         result = CloneResult(destination_repo=destination, metadata=dict(source.metadata))
-        # Upstream identity (upstream_ref + derivation_op=import) is
-        # orchestrator-derived and rides the capability token; the worker only
-        # ADDS the revision it actually resolved during download.
         provenance = {"upstream_revision": str(source.source_revision or "")}
-        # Non-diffusers-class sources publish as-is; extra output specs that
-        # would need conversion are refused per-flavor, not per-job.
         strategy = source.classification.strategy if source.classification is not None else ""
-        # A bare single/multi-root safetensors repo whose family declares no
-        # singlefile->diffusers converter has nothing to repackage INTO, so it
-        # publishes as-is rather than being handed to a repackager with no rule
-        # for it. Capability is registry membership; no family is named here.
         declared = repackage_family(source.model_family)
         no_repackager = strategy == "aio_singlefile" and (
             declared is None or not declared.supports_singlefile_to_diffusers)
@@ -880,23 +689,9 @@ def run_clone(
                     source_dtype = str(source.attrs.get("dtype") or "").strip().lower()
                     dtype_matches = (not source_dtype) or spec.dtype == source_dtype
                     if dtype_matches or not explicit_outputs:
-                        # Already satisfied, OR nobody actually asked for a
-                        # specific dtype (normalize_outputs' schema default
-                        # just landed on bf16) — mirror the source's own
-                        # dtype untouched rather than force a cast nobody
-                        # requested.
                         tree = source.dir
                         attrs = dict(source.attrs)
                         dtype_label = source_dtype or spec.dtype
-                        # This passthrough bypasses build_flavor_tree entirely
-                        # (every one of ITS branches de-shards), so de-shard
-                        # here too: pure pass-through mirrors are normalised as
-                        # well, so the corpus we own has ONE shape. Hardlink
-                        # into a scratch tree first; only the sharded
-                        # components are rewritten, everything else stays a
-                        # link. An oversized MONOLITHIC file needs no handling
-                        # — the checkpoint grant allows 64 GiB per file and
-                        # chunked CAS carries the transfer.
                         if spec.file_type == "safetensors" \
                                 and tree_has_sharded_safetensors(Path(tree)):
                             deshard_dir = workdir / f"flavor-{spec.label}.__deshard__"
@@ -908,15 +703,6 @@ def run_clone(
                     elif i == 0 and spec.file_type == "safetensors" \
                             and (strategy in _CAST_ELIGIBLE_PUBLISH_AS_IS_STRATEGIES
                                  or no_repackager):
-                        # An EXPLICITLY mismatched requested dtype is real,
-                        # in-line-castable work for these strategies (ordinary
-                        # dense safetensors trees). Never silently republish
-                        # the source's own dtype under the requested flavor's
-                        # label. These strategies publish as-is
-                        # ORGANIZATIONALLY too — no layout repackage here (that
-                        # stays a separate job) — so the cast targets the
-                        # source's own on-disk layout and only the dtype
-                        # changes.
                         effective_layout = (
                             source.layout if source.layout in _KNOWN_FILE_LAYOUTS
                             else SINGLE_FILE
@@ -937,12 +723,6 @@ def run_clone(
                         )
                         dtype_label = str(attrs.get("dtype") or spec.dtype)
                     else:
-                        # Only the source's own flavor is published for
-                        # classes this worker cannot cast in-line (quant/gguf
-                        # containers, mixed-dtype multi-checkpoint bundles —
-                        # those run as a separate job) or for i>0 extra
-                        # specs. Fail loud instead of silently republishing
-                        # under the wrong flavor label.
                         raise InlineConversionNotPossible(
                             reason=f"{strategy} sources publish as-is; "
                                    f"run a conversion job for {spec.dtype}",
@@ -950,10 +730,6 @@ def run_clone(
                         )
                 else:
                     flavor_dir = workdir / f"flavor-{spec.label}"
-                    # A tree a predecessor already CAST and DECLARED is
-                    # re-published, not re-cast. Anything else is wiped: a
-                    # partial tree from a run that died mid-cast is not
-                    # resumable.
                     reused = _reusable_flavor_tree(workdir, spec.label, flavor_dir)
                     if reused is not None:
                         tree, attrs = flavor_dir, reused
@@ -967,10 +743,7 @@ def run_clone(
                             objective=objective_fact,
                             distilled=distilled_fact,
                         )
-                    # dtype="source" resolves to the detected on-disk dtype.
                     dtype_label = str(attrs.get("dtype") or spec.dtype)
-                # The gguf dtype-axis label ("gguf:q4_k_m") publishes as
-                # "gguf-q4_k_m"; the hub's dtype column takes the dash form.
                 dtype_label = _dtype_token(dtype_label)
             except InlineConversionNotPossible as exc:
                 entry: dict[str, Any] = {
@@ -986,15 +759,10 @@ def run_clone(
                 result.failed_flavors.append({
                     "spec_label": spec.label, "dtype": spec.dtype,
                     "file_type": spec.file_type, "reason": str(exc),
-                    # spec/source combination rejections are input verdicts,
-                    # not conversion faults.
                     "input_rejection": isinstance(exc, (ValueError, ValidationError)),
                 })
                 continue
 
-            # EVERY publish path emits canonical filenames — this seam also
-            # covers the publish-as-is lane build_flavor_tree never touches.
-            # Idempotent on already-normalized trees.
             if spec.file_type != "gguf" and dtype_label in _CAST_NORMALIZE_DTYPES:
                 _normalize_variant_filenames(Path(tree))
 
@@ -1006,12 +774,6 @@ def run_clone(
                 })
                 continue
 
-            # The last gate before bytes leave: no component this producer
-            # NARROWED below its families.facts pin is publishable, on ANY lane
-            # — cast, quant, publish-as-is or a reused tree. A source that
-            # already ships the component narrow is still mirrorable (the fact
-            # is about the architecture, not a licence to refuse upstream's
-            # bytes); only OUR truncation fails.
             try:
                 produced_dtypes = verify_produced_tree(
                     tree, source_dir=Path(source.dir))
@@ -1023,7 +785,6 @@ def run_clone(
                 })
                 continue
 
-            # Size facts for VRAM-aware placement (advisory).
             metadata: dict[str, Any] = {k: v for k, v in source.metadata.items()}
             try:
                 from .size_walk import compute_size_facts
@@ -1033,20 +794,12 @@ def run_clone(
                     metadata["size_facts"] = facts
             except Exception:
                 pass
-            # The flavor's scalar dtype describes the tree, not every part of
-            # it. Publish the per-component precision so a downcast is a
-            # queryable fact instead of a byte count someone has to notice.
             if produced_dtypes:
                 metadata["component_dtypes"] = dict(produced_dtypes)
             for k, v in attrs.items():
                 metadata.setdefault(f"attr_{k}", str(v))
 
             _progress(0.55 + 0.4 * (i / max(1, len(specs))), f"clone.publish.{spec.label}")
-            # Every file here is a real local file (`files_from_tree`), which
-            # publish_v2 requires: its guarantee is that a digest is PROVEN
-            # from bytes in hand. A `merge` into a prior v1/blake3 manifest is
-            # a TYPED refusal (`mixed_algorithm_manifest`) rather than a silent
-            # partial.
             commit = hubclient.publish_v2(
                 destination_repo=destination,
                 files=files,
@@ -1055,23 +808,12 @@ def run_clone(
                 dtype=str(attrs.get("dtype") or spec.dtype),
                 file_layout=str(attrs.get("file_layout") or spec.file_layout),
                 file_type=str(attrs.get("file_type") or spec.file_type),
-                # The caller's checkpoint facts must reach the DECLARE, not
-                # just `apply_objective_scheduler_config`: the hub refuses a
-                # publish into a repo whose live rows carry classification
-                # unless the request restates it, so without these two a clone
-                # can never re-publish into a classified repo.
                 objective=objective_fact,
                 distilled=distilled_fact,
                 metadata=metadata,
                 provenance=provenance,
                 repo_spec=source.repo_spec,
-                # The session id lands beside the produced bytes before the
-                # first PUT, so a retry re-uploads instead of re-cloning. Kept
-                # at the workdir root, out of every flavor tree
-                # `files_from_tree` walks.
                 journal_path=workdir / JOURNAL_NAME,
-                # What `_reusable_flavor_tree` reads back on the retry so the
-                # cast does not have to run again.
                 journal_state={
                     "spec_label": str(spec.label),
                     "tree": str(tree),
@@ -1079,8 +821,6 @@ def run_clone(
                 },
             )
             result.published.append({
-                # The report states the DTYPE it published, not a flavor token
-                # — the token names nothing catalog-side.
                 "dtype": dtype_label,
                 "spec_label": spec.label,
                 "revision_id": commit.revision_id,
@@ -1094,9 +834,6 @@ def run_clone(
             reasons = "; ".join(
                 str(f.get("reason") or "") for f in result.failed_flavors
             ) or "no output spec produced anything"
-            # When every failure was an input-combination rejection (e.g.
-            # dtype="source" with a non-safetensors source), the verdict is
-            # about the request, not the release — INVALID, not FATAL.
             if result.failed_flavors and all(f.get("input_rejection") for f in result.failed_flavors):
                 raise ValidationError(f"clone produced no publishable flavor: {reasons}")
             raise RuntimeError(f"clone produced no publishable flavor: {reasons}")
@@ -1118,18 +855,6 @@ def run_clone(
                     "%.0fs, reachable at exit=%s",
                     keepalive.probes, keepalive.longest_outage_s,
                     keepalive.reachable)
-        # A long-running worker must not leak scratch: the workdir goes after
-        # every job that has nothing left to resume. There is deliberately no
-        # retain-workdir env — retaining a failed job's scratch is a debugging
-        # action against one run, and an env could only be set fleet-wide and
-        # forgotten.
-        #
-        # ONE exception, machine-checkable rather than a mode: a publish that
-        # failed with its session still live has a journal entry naming it, and
-        # the produced tree is the only copy of bytes that cost hours of GPU.
-        # The tree survives exactly as long as there is a session to resume it
-        # into. `_sweep_stale_workdirs` reaps any unlocked workdir past
-        # COZY_CONVERT_SCRATCH_TTL_S at the start of the next clone.
         resumable = (
             0 if succeeded else ProducerRecovery(workdir / JOURNAL_NAME).count()
         )
@@ -1142,7 +867,7 @@ def run_clone(
             shutil.rmtree(workdir, ignore_errors=True)
             if not succeeded:
                 logger.warning("clone failed; workdir %s removed", workdir)
-        os.close(lock_fd)  # releases the flock
+        os.close(lock_fd)
 
 
 def from_huggingface(ctx: Any, payload: Any, *, hf_token: str | None = None) -> CloneResult:

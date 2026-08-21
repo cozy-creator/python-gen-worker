@@ -1,40 +1,4 @@
-"""The canonical object planner, in pure Python. FIRST-PARTY, not vendored.
-
-pgw#1575 moved this module out of `_vendor/tensorfs/`, where it had been
-masquerading as a vendored file it never was: it exists at NO upstream rev.
-Upstream deleted the Python chunker (`chunking.py`, the greedy small-tensor
-packer) at `00c57c1` — "pgw#1259: one chunker, the legacy Python data plane is
-gone" — because its grid disagreed with the Rust planner's: packed tensors own
-no digest of their own and cannot be inherited by `TensorWriter`. Upstream's
-successor is `crates/tensorfs-core/src/planner/{mod,safetensors,gguf}.rs`,
-reachable from Python only through the compiled extension, and pgw#1310 rules a
-compiled extension out of a source-vendored wheel. So the grid is restored here
-in pure Python — the pgw#1344 precedent — and pinned to upstream's own released
-conformance corpus (`spec/v1/planner-vectors`), vendored at
-`tests/testdata/planner-vectors/` and asserted object-for-object by
-`tests/test_planner_grid.py`.
-
-The grid, in one paragraph. A safetensors file is its header region, then one
-region per declared tensor, each split every 64 MiB from ITS OWN start. A GGUF
-file is three header domains kept apart — metadata block, tensor directory,
-pre-data padding — then every tensor's unpadded extent with its trailing
-alignment padding as a region of its own. Everything else is `blob-v1`: ONE
-unchunked region of any size, never a grid. Isolating padding and starting the
-grid at each tensor's own start is the whole mechanism: it is what lets the
-same weights share objects across a safetensors/GGUF pair, across a fused and
-a split packaging, and across two publishes of the same checkpoint.
-
-The safetensors structural proof below (`_tensor_spans`) is unchanged from the
-retired module — it was already a faithful port of `safetensors.rs::read_layout`
-and it survives; only the greedy packing it fed died.
-
-ONE structural refusal this port cannot see: `gguf.rs::parse` refuses a
-duplicate metadata KEY, and `gguf.read_header` skips metadata values without
-recording their keys. A GGUF carrying one would be planned on the tensor grid
-here and as `blob-v1` upstream. Coverage is still exact and the manifest is
-still valid; the cost is a dedup miss on a file that is already malformed.
-`test_the_duplicate_metadata_key_gap_is_named` keeps it from becoming folklore.
-"""
+"""The canonical object planner, in pure Python."""
 
 from __future__ import annotations
 
@@ -45,22 +9,8 @@ from typing import BinaryIO
 from .._vendor.tensorfs import gguf
 from .._vendor.tensorfs.manifest import MAX_CHUNK_SIZE
 
-# THE SAFETENSORS HEADER BOUND IS UPSTREAM'S, AND IT IS IMPORTED RATHER THAN
-# RESTATED. pgw#973 says one threat, one number, and it is right — but there
-# are two OWNERS here, not two copies of one number.
-# `models/safetensors_header.MAX_HEADER_BYTES` is 100 MiB (104_857_600) and is
-# a REFUSAL bound for readers. This one is `planner/safetensors.rs`'s
-# `MAX_HEADER_SIZE` (100_000_000, safetensors' own `tensor.rs` limit); it
-# decides a PLAN rather than a refusal — above it a file is `blob-v1`, not an
-# error — and the released `spec/v1/planner-vectors` corpus is keyed on it.
-# Swapping in the reader's number would make this port disagree with the Rust
-# planner for any header between the two, a dedup miss the conformance suite
-# cannot see. So it comes from the vendored snapshot, which states it once for
-# this lineage.
 from .._vendor.tensorfs.tensors import _MAX_HEADER_BYTES as _MAX_SAFETENSORS_HEADER_BYTES
 
-# `planner/mod.rs`: the tensor chunk grid constant. It is NOT a store admission
-# cap — a blob is one object of any size.
 MAX_OBJECT_SIZE = MAX_CHUNK_SIZE
 MAX_OBJECT_COUNT = 1_000_000
 
@@ -72,13 +22,8 @@ HEADER = "header"
 TENSOR = "tensor"
 BLOB = "blob"
 
-# TensorFS v1 targets 64-bit Linux/POSIX. Safetensors decodes every shape
-# dimension into Rust usize before it checks tensor byte lengths.
 _MAX_USIZE = (1 << 64) - 1
 
-# This mirrors safetensors::tensor::Dtype::bitsize at upstream 6eb4dc9, and
-# `safetensors.rs::dtype_bits`. Unknown future dtypes make the file a blob
-# rather than being guessed here.
 _DTYPE_BITS = {
     "F4": 4,
     "F6_E2M3": 6,
@@ -106,11 +51,7 @@ _DTYPE_BITS = {
 
 
 class ObjectLimit(Exception):
-    """A plan would exceed the bounded object cardinality.
-
-    `try_plan` in both Rust planners turns this into "not a tensor container",
-    so the file falls back to `blob-v1` rather than refusing.
-    """
+    """A plan would exceed the bounded object cardinality."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,11 +81,6 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _append_split(regions: list[Region], offset: int, length: int, kind: str) -> None:
-    """`planner/mod.rs::append_split_region` — the 64 MiB grid inside one region.
-
-    The grid starts at the region's OWN start, which is what makes a fused
-    file's objects the split file's objects.
-    """
 
     if length == 0:
         return
@@ -160,18 +96,13 @@ def _append_split(regions: list[Region], offset: int, length: int, kind: str) ->
 
 
 def _blob_plan(file_size: int) -> Plan:
-    """`planner/mod.rs::blob_plan` — one unchunked region of any size."""
 
     if file_size == 0:
         return Plan(BLOB_V1, 0, ())
     return Plan(BLOB_V1, file_size, (Region(0, file_size, BLOB),))
 
 
-# -- safetensors -------------------------------------------------------------
-
-
 def _tensor_spans(source: BinaryIO, size: int) -> tuple[int, tuple[tuple[int, int], ...]] | None:
-    """`safetensors.rs::read_layout` — the whole structural proof, no body read."""
 
     if size < 10:
         return None
@@ -268,7 +199,6 @@ def _tensor_spans(source: BinaryIO, size: int) -> tuple[int, tuple[tuple[int, in
 
 
 def _safetensors_plan(source: BinaryIO, size: int) -> Plan | None:
-    """`safetensors.rs::try_plan` — the header, then one grid per tensor."""
 
     parsed = _tensor_spans(source, size)
     if parsed is None:
@@ -284,11 +214,7 @@ def _safetensors_plan(source: BinaryIO, size: int) -> Plan | None:
     return Plan(SAFETENSORS_V1, size, tuple(regions))
 
 
-# -- GGUF --------------------------------------------------------------------
-
-
 def _gguf_plan(source: BinaryIO, size: int) -> Plan | None:
-    """`gguf.rs::try_plan` — three header domains, then tensors with padding split off."""
 
     if size < 24:
         return None
@@ -305,21 +231,15 @@ def _gguf_plan(source: BinaryIO, size: int) -> Plan | None:
     except (gguf.GGUFError, OSError, UnicodeDecodeError):
         return None
 
-    # `gguf.rs::parse` refuses these; `read_header` is a superset that does not.
-    # Each one makes the file a blob upstream, so it has to make it a blob here.
     if header.alignment < gguf.MIN_ALIGNMENT:
         return None
     names = {tensor.name for tensor in header.tensors}
     if len(names) != len(header.tensors):
         return None
 
-    # An empty GGUF has no data section to align to, which is the one case
-    # where the planner does not round the directory up.
     data_start = header.data_start if header.tensors else header.directory_end
     expected = 0
     for tensor in header.tensors:
-        # Offsets are declared relative to `data_start` and must be sequential
-        # over the padded extents, with no gap and no reordering.
         if tensor.offset != data_start + expected:
             return None
         expected += gguf.align_up(tensor.nbytes, header.alignment)
@@ -345,16 +265,8 @@ def _gguf_plan(source: BinaryIO, size: int) -> Plan | None:
     return Plan(GGUF_V1, size, tuple(regions))
 
 
-# -- the automatic registry --------------------------------------------------
-
-
 def plan(source: BinaryIO, size: int) -> Plan:
-    """`planner/mod.rs::plan_once` — the closed automatic planner registry.
-
-    Format parse failure is not a refusal: every stable byte stream has an
-    automatic plan, and a malformed or unsupported container falls back
-    atomically to the whole-blob plan. The choice cannot be selected by callers.
-    """
+    """`planner/mod.rs::plan_once` — the closed automatic planner registry."""
 
     if size < 10:
         return _blob_plan(size)
@@ -369,24 +281,7 @@ def plan(source: BinaryIO, size: int) -> Plan:
 
 
 def plan_chunks(source: BinaryIO, size: int) -> tuple[int, ...]:
-    """The v1-manifest adapter: ordered chunk lengths, or `()` for a whole blob.
-
-    A tensor container becomes its planned regions verbatim, which is the point
-    of this module. `blob-v1` becomes a chunkless entry, which is the same
-    single object the plan names.
-
-    THE ONE DEVIATION, and it is upstream's counterpart's, not a preference.
-    A blob above 64 MiB is still cut on the fixed grid here, because
-    tensorhub's publish-v2 lane promotes an object with a SINGLE PUT
-    and would refuse the whole-blob entry terminally. Its refusal, quoted from
-    `internal/s3/sha256_cas.go` so a reader who hits it can grep for it, reads
-    "verified promote: size %d is outside the HashRepo single-PUT range
-    0..67108864". Files at or below 64 MiB — every `config.json`, every
-    small non-tensor file — are already exactly blob-v1. The residual is
-    tracked as pgw#1366: it closes when publish-v2 grants ride th#2064's
-    multipart blob lane, and `test_the_oversized_blob_deviation_is_the_only_one`
-    fails the moment anyone widens it.
-    """
+    """The v1-manifest adapter: ordered chunk lengths, or `()` for a whole blob."""
 
     planned = plan(source, size)
     if planned.planner != BLOB_V1:

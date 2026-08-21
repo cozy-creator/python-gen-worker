@@ -1,5 +1,4 @@
-"""GGUF helpers: llama.cpp toolchain wrappers + header read via the ``gguf``
-package (replaces the hand-rolled binary parser in gguf_utils.py)."""
+"""GGUF helpers: llama.cpp toolchain wrappers + header read via the ``gguf`` package (replaces the hand-rolled binary parser in gguf_utils.py)."""
 
 from __future__ import annotations
 
@@ -15,15 +14,6 @@ from ..subproc import ProcessStalledError, run_process
 
 logger = logging.getLogger(__name__)
 
-# The llama.cpp toolchain is chatty per TENSOR (convert_hf_to_gguf.py prints a
-# line per tensor, llama-quantize prints one per quantized block), so silence
-# is the honest wedge signal and elapsed time is not: a 200GB source legitimately
-# runs for hours on a shared conversion pod. Fifteen minutes of total silence is
-# orders of magnitude past any real inter-tensor gap.
-#
-# Deliberately not a flat wall-clock timeout, which kills conversions mid-write
-# purely for taking hours: a wall clock cannot tell a healthy long job from a
-# wedge, so it is either useless or it kills real work.
 GGUF_TOOLCHAIN_STALL_WINDOW_S = 900.0
 
 _SUPPORTED_ARCH_ALIASES: dict[str, str] = {
@@ -89,8 +79,7 @@ def prepare_hf_source_tree_for_gguf(
     input_weights: Path,
     source_repo_dir: str | None,
 ) -> tuple[Path, str]:
-    """Assemble an HF-model dir (weights + config + tokenizer) for
-    ``convert_hf_to_gguf.py``."""
+    """Assemble an HF-model dir (weights + config + tokenizer) for ``convert_hf_to_gguf.py``."""
     explicit = str(source_repo_dir or "").strip()
     if explicit:
         source_dir = Path(explicit)
@@ -130,21 +119,10 @@ def run_hf_to_gguf_conversion(
     output_path: Path,
     encoding: str,
 ) -> None:
-    # `convert_hf_to_gguf.py` is a SUBPROCESS reading the tree itself, so it
-    # gets real files (pgw#1303's gate).
-    #
-    # pgw#1344 SCOPED WHAT IS LEFT HERE, and it is no longer "the conversion".
-    # The TENSOR plane is native: `convert/gguf_native.py` reads a snapshot
-    # through tensorfs, permutes and casts per tensor, and composes the GGUF
-    # through the store so an unchanged tensor keeps the objects it already
-    # has. What this subprocess still owns is the METADATA block -- a model's
-    # vocabulary, its chat template and its pre-tokenizer identity. That is
-    # deliberate and it is not laziness: reproducing a tokenizer faithfully is
-    # thousands of lines of upstream script that changes weekly, and a GGUF
-    # whose vocabulary this repo GUESSED would load and be quietly wrong --
-    # exactly the silent change pgw#1344 exists to prevent. So the honest state
-    # is one named hatch, fenced by `tests/test_gguf_native_pgw1344.py`, rather
-    # than a second tokenizer nobody can verify.
+    # The one named hatch (pgw#1344), fenced by tests/test_gguf_native_pgw1344.py:
+    # the upstream script owns the METADATA block (vocabulary, chat template,
+    # pre-tokenizer identity) — a vocabulary this repo GUESSED would load and be
+    # quietly wrong, so the subprocess stays, as one named hatch.
     cmd = [sys.executable, str(script_path),
            str(third_party_dir(hf_model_dir, why="convert_hf_to_gguf.py subprocess")),
            "--outfile", str(output_path), "--outtype", normalize_gguf_encoding(encoding)]

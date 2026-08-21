@@ -25,11 +25,6 @@ import pytest
 from gen_worker.serving import lane_ladder as L
 
 
-# --------------------------------------------------------------------------
-# Fabricated declarations — the shape pgw#1599 ships
-# --------------------------------------------------------------------------
-
-
 def declared(topology: str, quant: str) -> L.DeclaredLane:
     """A REAL pgw#1599/pgw#1621 `DeclaredLane`, not a stand-in.
 
@@ -60,7 +55,6 @@ BF16 = declared("sdxl.diffusers@1", "plain.bf16@1")
 FP8 = declared("sdxl.diffusers@1", "cozy.fp8-rowwise@1")
 NVFP4 = declared("sdxl.diffusers@1", "cozy.nvfp4-flat@1")
 
-#: Real cards. sm = major*10 + minor, the fleet's own integer form.
 ADA = L.CardFacts(sm=89, vram_gb=8.0, name="RTX 4070 Laptop")
 AMPERE = L.CardFacts(sm=86, vram_gb=24.0, name="RTX 3090")
 HOPPER = L.CardFacts(sm=90, vram_gb=80.0, name="H100")
@@ -115,14 +109,8 @@ def _reasons(resolved: L.ResolvedLane) -> list[tuple[str, str]]:
     return [(r.body, r.reason) for r in resolved.rejected]
 
 
-# --------------------------------------------------------------------------
-# The ladder order — fp8, then nvfp4, then bf16
-# --------------------------------------------------------------------------
-
-
 def test_ada_with_everything_staged_takes_fp8_and_names_what_it_passed_over():
-    """fp8 is canonical: on sm_89 with a gate-passed artifact it wins, and the
-    confession must name nvfp4's rejection BY REASON, not merely omit it."""
+    """fp8 is canonical: on sm_89 with a gate-passed artifact it wins, and the confession must name nvfp4's rejection BY REASON, not merely omit it."""
     resolved = L.resolve_lane(
         declared=ALL_THREE, card=ADA,
         verdicts=Verdicts(staged=[l.contract_id for l in ALL_THREE]),
@@ -131,8 +119,6 @@ def test_ada_with_everything_staged_takes_fp8_and_names_what_it_passed_over():
     assert resolved.body == "fp8-w8a8-dynamic"
     assert resolved.reason == L.CHOSE_GATE_PASSED
     assert resolved.declared is FP8, "the DeclaredLane must be carried, not rebuilt"
-    # nvfp4 is floored out by the card; bf16 is outranked by a lane that also
-    # has bytes. Both must appear, in ladder order.
     assert _reasons(resolved) == [
         ("nvfp4-w4a4-static", L.REJECT_SM_FLOOR),
         ("bf16-w16a16", L.REJECT_OUTRANKED),
@@ -144,8 +130,7 @@ def test_ada_with_everything_staged_takes_fp8_and_names_what_it_passed_over():
 
 
 def test_blackwell_still_prefers_fp8_because_the_table_ranks_it_first():
-    """nvfp4 on Blackwell is a RUNG, not a preference. The fleet's own ranked
-    table puts fp8 first and this ladder does not grow a second opinion."""
+    """nvfp4 on Blackwell is a RUNG, not a preference."""
     resolved = L.resolve_lane(
         declared=ALL_THREE, card=BLACKWELL,
         verdicts=Verdicts(staged=[l.contract_id for l in ALL_THREE]),
@@ -193,16 +178,8 @@ def test_a_cpu_host_floors_out_every_quantized_rung_without_a_special_case():
     assert all(r.reason == L.REJECT_SM_FLOOR for r in resolved.rejected)
 
 
-# --------------------------------------------------------------------------
-# The host's own veto — the gate that is really a benchmark
-# --------------------------------------------------------------------------
-
-
 def test_an_unqualified_fp8_gemm_rejects_fp8_even_on_hopper_with_bytes():
-    """`w8a8_gemm_mode()` returning '' is a REAL veto (a 4096-cubed GEMM that
-    did not clear 1.10x over bf16). The ladder consumes it; it must not
-    second-guess it, and the rejection must say so in words an operator can
-    act on."""
+    """`w8a8_gemm_mode()` returning '' is a REAL veto (a 4096-cubed GEMM that did not clear 1.10x over bf16)."""
     resolved = L.resolve_lane(
         declared=(BF16, FP8), card=HOPPER,
         verdicts=Verdicts(staged=[BF16.contract_id, FP8.contract_id]),
@@ -245,18 +222,7 @@ def test_an_unknown_quant_rule_is_a_named_rejection_not_a_crash():
     assert ("?", L.REJECT_UNKNOWN_RULE) in _reasons(resolved)
 
 
-# --------------------------------------------------------------------------
-# The upcast-from-fp8-download rung
-# --------------------------------------------------------------------------
-
-
 def test_upcast_rung_fetches_the_fp8_bytes_and_measures_the_saving():
-    """pgw#1606's rung: the card cannot RUN fp8, but fetching fp8 bytes and
-    upcasting at load is half the transfer for the same served precision.
-
-    This is the first place in the tree that rung is CHOSEN rather than
-    entered because a gate failed — and the first place its saving is a
-    number rather than an assertion."""
     resolved = L.resolve_lane(
         declared=(BF16, FP8), card=AMPERE,
         verdicts=Verdicts(
@@ -275,9 +241,7 @@ def test_upcast_rung_fetches_the_fp8_bytes_and_measures_the_saving():
 
 
 def test_the_upcast_rung_refuses_to_claim_a_saving_it_cannot_measure():
-    """A rung that cannot show its saving does not get to claim one. Sizes
-    unknown (0) means we serve the baseline tree and say `baseline`, not
-    `upcast_from_quantized` with an unmeasured number."""
+    """A rung that cannot show its saving does not get to claim one."""
     resolved = L.resolve_lane(
         declared=(BF16, FP8), card=AMPERE,
         verdicts=Verdicts(staged=[BF16.contract_id, FP8.contract_id]),
@@ -300,11 +264,6 @@ def test_the_upcast_rung_declines_when_the_quantized_tree_is_not_smaller():
     assert resolved.reason == L.CHOSE_BASELINE
 
 
-# --------------------------------------------------------------------------
-# No artifact is a CONVERSION, never a refusal
-# --------------------------------------------------------------------------
-
-
 def test_no_bytes_for_any_lane_yields_a_priced_conversion_never_a_refusal():
     resolved = L.resolve_lane(
         declared=ALL_THREE, card=ADA,
@@ -319,9 +278,7 @@ def test_no_bytes_for_any_lane_yields_a_priced_conversion_never_a_refusal():
 
 
 def test_the_conversion_targets_a_lane_THIS_CARD_CAN_RUN():
-    """Nothing staged, and the card is floored out of fp8 and nvfp4. The ask
-    must name bf16 — converting towards a lane this card cannot run spends
-    money to arrive back at the same refusal."""
+    """Nothing staged, and the card is floored out of fp8 and nvfp4."""
     resolved = L.resolve_lane(
         declared=ALL_THREE, card=AMPERE, verdicts=Verdicts(), gates=Gates(),
     )
@@ -331,9 +288,7 @@ def test_the_conversion_targets_a_lane_THIS_CARD_CAN_RUN():
 
 
 def test_the_conversion_prefers_a_DERIVABLE_target_over_a_merely_runnable_one():
-    """On Ada both fp8 and bf16 are runnable. If the bind gate says the fp8
-    lane is derivable from what is on disk, that is the cheaper truth and the
-    ask should name it rather than the baseline."""
+    """On Ada both fp8 and bf16 are runnable."""
     resolved = L.resolve_lane(
         declared=ALL_THREE, card=ADA,
         verdicts=Verdicts(derivable=[FP8.contract_id]), gates=Gates(),
@@ -343,9 +298,6 @@ def test_the_conversion_prefers_a_DERIVABLE_target_over_a_merely_runnable_one():
 
 
 def test_an_incompatible_lane_is_distinguished_from_an_absent_one():
-    """tensorfs#123's tri-state is a tri-state here too: 'this checkpoint can
-    never satisfy the lane' and 'nobody staged it' are different operator
-    problems and must not share a reason token."""
     resolved = L.resolve_lane(
         declared=(BF16, FP8), card=ADA,
         verdicts=Verdicts(staged=[BF16.contract_id],
@@ -357,11 +309,6 @@ def test_an_incompatible_lane_is_distinguished_from_an_absent_one():
     assert rung.reason == L.REJECT_INCOMPATIBLE
 
 
-# --------------------------------------------------------------------------
-# Declaration defects, and only those, raise
-# --------------------------------------------------------------------------
-
-
 def test_an_empty_candidate_set_is_a_declaration_defect():
     with pytest.raises(L.LaneLadderError, match="candidate set is EMPTY"):
         L.resolve_lane(declared=(), card=ADA, verdicts=Verdicts(),
@@ -369,8 +316,7 @@ def test_an_empty_candidate_set_is_a_declaration_defect():
 
 
 def test_a_single_declared_lane_still_walks_the_ladder():
-    """The fleet is all single-lane today. Nothing about that path may change
-    shape: one lane in, one chosen, nothing rejected."""
+    """The fleet is all single-lane today."""
     resolved = L.resolve_lane(
         declared=(BF16,), card=ADA,
         verdicts=Verdicts(staged=[BF16.contract_id]), gates=Gates(),
@@ -382,8 +328,6 @@ def test_a_single_declared_lane_still_walks_the_ladder():
 
 
 def test_author_declaration_order_carries_no_priority():
-    """pgw#1599 ruled declaration order is not ranking. Reversing it must not
-    move the pick."""
     forward = L.resolve_lane(
         declared=(BF16, FP8), card=ADA,
         verdicts=Verdicts(staged=[BF16.contract_id, FP8.contract_id]),
@@ -397,15 +341,8 @@ def test_author_declaration_order_carries_no_priority():
     assert forward.body == backward.body == "fp8-w8a8-dynamic"
 
 
-# --------------------------------------------------------------------------
-# The instrument must be able to go red
-# --------------------------------------------------------------------------
-
-
 def test_the_confession_would_change_if_the_ladder_changed_its_mind():
-    """A guard that cannot fail proves nothing. Same declarations, two cards,
-    two different confessions — so the line is reporting the DECISION and not
-    a constant."""
+    """A guard that cannot fail proves nothing."""
     staged = Verdicts(staged=[l.contract_id for l in ALL_THREE])
     ada = L.resolve_lane(declared=ALL_THREE, card=ADA, verdicts=staged,
                          gates=Gates()).confession()

@@ -1,27 +1,4 @@
-"""SERVABILITY: ``gen-worker compile`` succeeds only if the SERVING READER agrees.
-
-The subject is one contract — *what this verb owes is not builds that returned,
-it is an endpoint the boot-time adopt path can arm* — and everything here is a
-precondition of it: that a built artifact lands in the band adoption addresses,
-that the graph-set document adoption enumerates through gets published, that the
-verdict and the exit code are computed from a reader rather than from a tally,
-and that the mint child can find a CUDA root on the box it is actually running
-on (no root, no artifact, so it belongs to the same claim).
-
-pgw#1545 extends the same contract to a run that is deliberately INCOMPLETE:
-the specialization the caller names is built first, the rest are deferred, and
-the verdict has to stay honest about which is which — a deferred artifact is
-not a missing one, and no arrangement of half-done work may print the
-all-complete line. Its last two tests close the loop on the serving side,
-because deferring is only safe if a specialization that is not built yet costs
-eager execution and never a refusal.
-
-Every test drives the REAL ``compile_all`` — its work ledger, its store, its
-publish, its census — with only the inductor child replaced by a seam emitting a
-real torchcg artifact (``tests/tcg_artifacts``: no inductor, no GPU), and the
-serving pair drives the real ``AdoptSession`` with only the bytes->callable
-loader seamed. The red arms are the point, because each of them was once GREEN.
-"""
+"""SERVABILITY: ``gen-worker compile`` succeeds only if the SERVING READER agrees."""
 
 from __future__ import annotations
 
@@ -52,11 +29,6 @@ MODULE = "sd15.main"
 LANE = "sd15.diffusers@1+plain.bf16@1"
 TARGET = "unet"
 
-#: Three graphs, because "all of them", "some of them" and "the ONE the caller
-#: asked for first" are three different verdicts, and a one-graph fixture can
-#: tell none of them apart. They differ in the two facets `--first` selects on
-#: — target module path and input shape — because a fixture whose
-#: specializations are indistinguishable cannot prove an ORDER was honoured.
 GRAPHS = (
     "cg-graph-v1-" + "a" * 56,
     "cg-graph-v1-" + "b" * 56,
@@ -92,17 +64,9 @@ def document() -> GraphSetDocument:
 
 @pytest.fixture()
 def endpoint(tmp_path: Path) -> Path:
-    """An endpoint directory carrying the one thing ``compile`` reads: its lock.
-
-    The lock IS the authored graph-set document — ``specializations()`` reads
-    the specs out of it and ``_publish_document`` publishes the same bytes — so
-    a fixture that wrote the document twice would be testing agreement between
-    two things this design deliberately has only one of.
-    """
+    """An endpoint directory carrying the one thing ``compile`` reads: its lock."""
     root = tmp_path / "endpoint"
     root.mkdir()
-    # The compile stack is read from the endpoint's own uv.lock and NOWHERE
-    # else (pgw#1489), so the env half of every artifact key comes from here.
     (root / "uv.lock").write_text(
         "version = 1\n"
         + "".join(
@@ -129,11 +93,6 @@ def endpoint(tmp_path: Path) -> Path:
 
 
 def _seed_programs(store: LocalGraphStore, tmp_path: Path) -> None:
-    """This box's serialized programs, banked under their graph identities.
-
-    ``compile`` re-derives when they are absent; they are present here because
-    the subject is what happens AFTER a build, not the derive.
-    """
     for graph in GRAPHS:
         blob = tmp_path / f"{graph[-8:]}.pt2"
         blob.write_bytes(b"exported-program-" + graph.encode("ascii"))
@@ -142,22 +101,12 @@ def _seed_programs(store: LocalGraphStore, tmp_path: Path) -> None:
 
 @pytest.fixture(autouse=True)
 def _box_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every run's mint scratch lands in THIS test's tmpdir, never the box cache.
-
-    The old builders `mkdir(exist_ok=True)`-ed into the REAL
-    `~/.cache/cozy/compiled-graphs` and leaked fixture directories there for
-    every suite run on a developer box; `tcg_artifacts.unpacked` materializes
-    atomically (refusing occupied destinations, like the engine) and turned
-    that leak into a cross-run flake. The suite was always supposed to be
-    hermetic; now it is.
-    """
     monkeypatch.setattr(
         workspace, "artifacts_root", lambda: tmp_path / "box-artifacts"
     )
 
 
 def _builder(built: List[str]) -> compile_cli.Builder:
-    """A compile that really produces an artifact, without inductor or a card."""
 
     def build(spec: compile_cli.Spec, program: Path, destination: Path) -> Path:
         assert program.is_file(), "the builder must be handed this box's program"
@@ -180,15 +129,9 @@ def _run(endpoint: Path, cas: Path, **kwargs: Any) -> compile_cli.Report:
     )
 
 
-# --------------------------------------------------------------------------
-# Green arm
-# --------------------------------------------------------------------------
-
-
 def test_a_built_graph_lands_where_boot_time_adoption_reads_it(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    # pgw#1533: `built=14 (of 14)`, rc 0, 26 min of real GPU work, 0 artifacts armed.
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
@@ -201,8 +144,6 @@ def test_a_built_graph_lands_where_boot_time_adoption_reads_it(
         [compile_cli.BUILT] * len(GRAPHS))
     assert report.unservable == []
 
-    # The witness that matters: a store object this run did not publish
-    # through, built exactly the way `cli/daemon._adoption_source` builds it.
     reader = compile_cli.serving_reader(cas)
     assert reader.get_graphs(MODULE) == document()
     for graph in GRAPHS:
@@ -215,22 +156,7 @@ def test_a_built_graph_lands_where_boot_time_adoption_reads_it(
 def test_a_build_lands_in_the_box_cache_and_never_in_the_endpoint_tree(
     endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """# pgw#1526: `compile` wrote its scratch to `<endpoint>/.compiled-graphs`.
-
-    Machine-scoped bytes inside a source tree, untracked and unignored and
-    indistinguishable from endpoint content — which is how 172 MB of local
-    compile output took an sd15 source tarball from 75,164 to 59,408,521 bytes
-    (cl#88) and killed the first build on an S3 fault over a residential link.
-
-    Asserted at the PATH level rather than through adoption: the peer #1532
-    lane reports adoption enumerating zero records over a full store for a
-    cause of its own, so an adoption-based assertion here would go green or red
-    for their reason instead of this one.
-    """
     box = tmp_path / "box-artifacts"
-    # Patched on `cli.workspace` itself, which is where the answer lives —
-    # `compile` looks the attribute up at call time, so this is the real seam
-    # rather than a re-export the module never promised.
     monkeypatch.setattr(workspace, "artifacts_root", lambda: box)
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
@@ -251,20 +177,12 @@ def test_a_build_lands_in_the_box_cache_and_never_in_the_endpoint_tree(
     for destination in destinations:
         assert box in destination.parents, destination
         assert endpoint not in destination.parents, destination
-    # The endpoint tree is UNTOUCHED — the property a `.gitignore` or an
-    # upload-exclusion can only paper over.
     assert not (endpoint / ".compiled-graphs").exists()
 
 
 def test_a_second_run_over_a_full_store_reports_present_and_stays_servable(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """The warm path — the ONLY path pgw#1491's acceptance ever exercised.
-
-    It short-circuits at ``has_artifact`` before any build, which is exactly why
-    a green acceptance certified a verb whose build path had never run. It must
-    still be the census that decides, not the short-circuit.
-    """
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
@@ -279,25 +197,8 @@ def test_a_second_run_over_a_full_store_reports_present_and_stays_servable(
     assert compile_cli.summarize(report)[1] == 0
 
 
-# --------------------------------------------------------------------------
-# Red arms — each one is a compile that used to come out green
-# --------------------------------------------------------------------------
-
-
 class PublishesNowhere:
-    """A store that reports a successful publish, believes itself, and wrote
-    nothing where adoption reads.
-
-    THE DEFECT ITSELF, in a dozen lines. ``Engine.compile`` banked bytes into
-    torchcg's own engine cache and had every reason to call that a success —
-    it could resolve them right back. What it could not do was answer for the
-    ``(cg-graph-v1, cg-env-v2)`` band, and nothing asked it to.
-
-    So this double ALSO answers ``has_artifact`` from its own record of what it
-    published. That is the whole reason the read-back must go through a store
-    object the run did not publish through: a writer asked about its own write
-    is not a witness. Everything else is the real ``LocalGraphStore``.
-    """
+    """A store that reports a successful publish, believes itself, and wrote nothing where adoption reads."""
 
     def __init__(self, real: LocalGraphStore) -> None:
         self._real = real
@@ -319,7 +220,6 @@ class PublishesNowhere:
 def test_a_compile_that_publishes_nowhere_fails_loudly(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    # pgw#1533: the CLI never called `publish_artifact`; only the runtime mint did.
     cas = tmp_path / "graph-cas"
     real = LocalGraphStore(LocalCAS(cas))
     _seed_programs(real, tmp_path)
@@ -328,10 +228,8 @@ def test_a_compile_that_publishes_nowhere_fails_loudly(
 
     report = _run(endpoint, cas, store=store, builder=_builder(built))
 
-    # The build genuinely happened and the publish genuinely claimed success.
     assert built == list(GRAPHS)
     assert store.publishes == len(GRAPHS)
-    # And every one of them is a FAILURE, at the moment it happened.
     assert {outcome.state for outcome in report.outcomes} == {compile_cli.FAILED}
     assert all("NOT loadable" in outcome.detail for outcome in report.outcomes)
     assert len(report.unservable) == len(GRAPHS)
@@ -343,14 +241,6 @@ def test_a_compile_that_publishes_nowhere_fails_loudly(
 def test_an_unpublished_graph_set_document_is_a_gap_even_when_every_artifact_is_there(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """pgw#1533: the publish and the document are independent, and either gap alone
-    serves eager.
-
-    Adoption enumerates lanes out of the document and never reaches the
-    artifacts without one, so a store full of correctly addressed bytes and no
-    document adopts exactly nothing. The census must say so rather than counting
-    the artifacts and calling it servable.
-    """
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
@@ -358,8 +248,6 @@ def test_an_unpublished_graph_set_document_is_a_gap_even_when_every_artifact_is_
 
     specs = compile_cli.specializations(endpoint / el.LOCK_FILENAME)
     assert compile_cli.unservable(cas, specs, ENV, MODULE) == []
-    # Ask under a name nothing published: the artifacts are still all present,
-    # and that is not enough.
     gaps = compile_cli.unservable(cas, specs, ENV, "some.other")
     assert [gap.detail for gap in gaps] == [
         "graph-set document 'some.other': absent"]
@@ -369,12 +257,7 @@ def test_an_unpublished_graph_set_document_is_a_gap_even_when_every_artifact_is_
 def test_an_artifact_under_the_wrong_env_is_absent_to_the_reader(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """The env axis is real, and the census asks the reader on THIS card's axis.
-
-    A publish that lands under a different ``cg-env-v2`` is the same silent
-    failure wearing different clothes: the write succeeded, the position the
-    boot reads is empty.
-    """
+    """The env axis is real, and the census asks the reader on THIS card's axis."""
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
@@ -389,17 +272,7 @@ def test_an_artifact_under_the_wrong_env_is_absent_to_the_reader(
         "every gap is attributed, so a deferred one can be told from a missing one")
 
 
-# --------------------------------------------------------------------------
-# The exit code IS the verdict
-# --------------------------------------------------------------------------
-
-
 def test_the_shell_learns_unservable_even_when_every_build_returned() -> None:
-    """pgw#1533: the exact shape of the night it was found — 14 BUILT, rc 0, 14 holes.
-
-    Driven against a real ``Report`` rather than through argparse, because the
-    thing under test is which fact the exit code is computed from.
-    """
     spec = compile_cli.Spec(contract=LANE, graph=GRAPHS[0], target=TARGET, ingress={})
     green = compile_cli.Report([compile_cli.Outcome(spec, compile_cli.BUILT)], [])
     assert compile_cli.summarize(green)[1] == 0
@@ -418,17 +291,6 @@ def test_the_shell_learns_unservable_even_when_every_build_returned() -> None:
 def test_a_tiny_grant_no_longer_refuses_the_mint(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """pgw#1587 — THE REFUSAL IS GONE, and this is the red arm for its return.
-
-    This ran `BELOW_FLOOR` before: a declared lane number bigger than the run's
-    VRAM grant no-opped every specialization, which is how a 12 GiB declaration
-    made a 7.3 GiB card unable to mint SDXL at all (va#3 leg C). Paul,
-    2026-08-20: *"we should be able to serve no-compiled below this limit."*
-    Building is not serving; whether a PARTICULAR card can arm the artifact is
-    decided on that card, by probe, at load.
-
-    Named `--vram-budget 1.0` because that is the operand the old gate read.
-    """
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
@@ -449,33 +311,20 @@ def test_a_tiny_grant_no_longer_refuses_the_mint(
     assert not hasattr(compile_cli, "BELOW_FLOOR")
 
 
-# --------------------------------------------------------------------------
-# pgw#1533: the CUDA root the mint child points torch at — no root, no artifact
-# --------------------------------------------------------------------------
-
-
 def test_the_cuda_root_is_composed_where_this_process_can_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A box whose ``/usr/local`` is root-owned must not be told to write there.
-
-    Measured: fourteen specializations died on ``FileNotFoundError:
-    '/usr/local/cuda/include'`` while the toolkit sat in the venv's own
-    ``nvidia-*`` wheels — which is what ``compose()`` builds a root FROM.
-    """
+    """A box whose ``/usr/local`` is root-owned must not be told to write there."""
     from gen_worker import cuda_root
 
     monkeypatch.setattr(cuda_root, "CUDA_ROOT", tmp_path / "usr" / "local" / "cuda")
     monkeypatch.setattr(cuda_root, "USER_CUDA_ROOT", tmp_path / "cache" / "cuda-root")
 
-    # /usr/local absent and uncreatable by this process -> the user root.
     assert cuda_root.default_root() == tmp_path / "cache" / "cuda-root"
 
-    # /usr/local writable -> the image answer, unchanged.
     (tmp_path / "usr" / "local").mkdir(parents=True)
     assert cuda_root.default_root() == tmp_path / "usr" / "local" / "cuda"
 
-    # An existing root always wins, writable or not.
     (tmp_path / "usr" / "local" / "cuda").mkdir()
     assert cuda_root.default_root() == tmp_path / "usr" / "local" / "cuda"
 
@@ -483,8 +332,7 @@ def test_the_cuda_root_is_composed_where_this_process_can_write(
 def test_a_composition_names_where_it_wrote_not_where_the_constant_points(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``CUDA_HOME`` comes from ``Composition.path``; reading the constant is
-    what made this correct only on a pod."""
+    """``CUDA_HOME`` comes from ``Composition.path``; reading the constant is what made this correct only on a pod."""
     from gen_worker import cuda_root
 
     root = tmp_path / "composed"
@@ -512,13 +360,7 @@ def test_a_relocated_root_says_so_rather_than_relocating_silently(
 
 
 
-# --------------------------------------------------------------------------
-# pgw#1546: the warm paths are structurally cheap, not merely fast
-# --------------------------------------------------------------------------
-
-
 class _PublishRefused:
-    """A store proxy that fails the test the moment anything re-publishes."""
 
     def __init__(self, real: LocalGraphStore) -> None:
         self._real = real
@@ -533,14 +375,6 @@ class _PublishRefused:
 def test_an_all_present_run_asks_no_policy_questions_and_republishes_nothing(
     endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The fully-warm run (pgw#1546): every artifact already in the serving
-    band means NO builder and NO publish. The census still decides.
-
-    pgw#1587 dropped the two policy reads this test also fenced (the declared
-    floor and the grant probe) — with no gate there is no ~4.5 s import to
-    avoid — but the builder/publish half of the claim is unchanged and is the
-    half that guards real work.
-    """
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
@@ -559,16 +393,6 @@ def test_an_all_present_run_asks_no_policy_questions_and_republishes_nothing(
 def test_a_mint_in_the_engine_cache_is_reused_without_a_child_or_a_program(
     endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """pgw#1546's other warm state: present in the ENGINE cache (cg-key band),
-    absent from the serving band — the exact state of the 140.5 s run. The old
-    path spawned a mint child per specialization (torch import + export.load,
-    5.47 s measured) purely to re-derive keys the cache already stores; the
-    reuse path resolves them torch-free and still runs the [[pgw#1533]]
-    publish + read-back, so the witness survives the optimization.
-
-    The programs are deliberately NOT seeded: a reuse needs no program blob,
-    and a builder that raises proves no child path was reached.
-    """
     from gen_worker._vendor.tensorfs import LocalCAS as VendoredCAS
     from gen_worker._vendor.torchcg.engine import Engine
     from gen_worker import toolchain as compile_cache
@@ -581,9 +405,6 @@ def test_a_mint_in_the_engine_cache_is_reused_without_a_child_or_a_program(
         artifact = tcg_artifacts.build(
             tmp_path / f"{graph[-8:]}.tar.gz",
             graph_specialization=graph, sm=SM,
-            # Distinct witnesses: the cg-key hashes the graph CONTENT, not its
-            # name, so two fixture graphs sharing one witness share one key and
-            # the second import lands DIVERGENT instead of stored.
             witness=graph[-16:],
         )
         engine.import_artifact(tcg_artifacts.key_of(artifact), artifact)
@@ -612,9 +433,7 @@ def test_a_mint_in_the_engine_cache_is_reused_without_a_child_or_a_program(
 def test_a_cached_mint_on_a_different_toolchain_is_not_reused(
     endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """RED ARM: the reuse index answers only the exact (sm x toolchain) axis.
-    A cache row minted under another compiler stack must fall through to the
-    build path, never be republished as this env's artifact."""
+    """RED ARM: the reuse index answers only the exact (sm x toolchain) axis."""
     from gen_worker._vendor.tensorfs import LocalCAS as VendoredCAS
     from gen_worker._vendor.torchcg.engine import Engine
     from gen_worker import toolchain as compile_cache
@@ -643,17 +462,10 @@ def test_a_cached_mint_on_a_different_toolchain_is_not_reused(
     assert report.unservable == []
 
 
-# --------------------------------------------------------------------------
-# pgw#1561: the published bytes are the ENVELOPE, and the witness LOADS them
-# --------------------------------------------------------------------------
-
-
 def test_published_bytes_are_the_envelope_and_materialize(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """The publish banks what the boot loader reads: tar+gzip, metadata and
-    all — not the bare `.pt2` ZIP that left va#3 arm 2 with 0/14 armed over a
-    band `SERVABLE` had just certified."""
+    """The publish banks what the boot loader reads: tar+gzip, metadata and all — not the bare `.pt2` ZIP that left va#3 arm 2 with 0/14 armed over a band `SERVABLE` had just certified."""
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
     _seed_programs(store, tmp_path)
@@ -675,13 +487,6 @@ def test_published_bytes_are_the_envelope_and_materialize(
 def test_a_legacy_bare_package_position_is_named_and_then_replaced(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """Tonight's field failure as a fixture (pgw#1561, va#3 arm 2).
-
-    A position seeded the way every pre-envelope publisher seeded it — the
-    bare `model.pt2` — must (1) read as a NAMED gap in the census, never as
-    `SERVABLE`, and (2) read as a MISS to the next run, whose publish
-    REPLACES the skewed incumbent through the store's tcg#75 migration arm.
-    """
     from gen_worker._vendor.torchcg import RequirementsManifest
 
     cas = tmp_path / "graph-cas"
@@ -694,12 +499,10 @@ def test_a_legacy_bare_package_position_is_named_and_then_replaced(
         RequirementsManifest(include_set=(("torch", ">=2.13.0"),), sm_compiled=SM),
     )
 
-    # (1) The census names the skew — this exact state used to print SERVABLE.
     specs = compile_cli.specializations(endpoint / el.LOCK_FILENAME)
     gaps = compile_cli.unservable(cas, specs[:1], ENV, "some.other")
     assert any("bare AOTI .pt2 package" in str(gap) for gap in gaps), gaps
 
-    # (2) The next run treats it as a miss and the publish replaces it.
     built: List[str] = []
     report = _run(endpoint, cas, store=store, builder=_builder(built))
     assert GRAPHS[0] in built, "a skewed position must route back through the publish"
@@ -712,10 +515,6 @@ def test_a_legacy_bare_package_position_is_named_and_then_replaced(
 def test_the_witness_goes_red_when_the_publisher_banks_the_package(
     endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """RED ARM, the coordinator's fixture: revert the publish fix and the
-    witness must refuse — a `has_artifact` read-back certified exactly this
-    state as SERVABLE on 2026-08-20 09:22, minutes after the defect was filed
-    against it."""
     from gen_worker.serving import mint as mint_mod
 
     monkeypatch.setattr(
@@ -738,13 +537,6 @@ def test_the_witness_goes_red_when_the_publisher_banks_the_package(
 def test_an_unreadable_module_name_is_a_typed_refusal_not_a_traceback(
     tmp_path: Path,
 ) -> None:
-    """pgw#1537: `compile` reads the endpoint's module name and can now fail on
-    the author's own import.
-
-    An unreadable module NAME is not "no name" — nothing can be published
-    under a name that could not be read — so it refuses, in one sentence, with
-    the cause.
-    """
     empty = tmp_path / "not-an-endpoint"
     empty.mkdir()
 
@@ -757,12 +549,6 @@ def test_an_unreadable_module_name_is_a_typed_refusal_not_a_traceback(
     assert str(empty) in message, "and which endpoint it was asked about"
 
 
-# --------------------------------------------------------------------------
-# pgw#1545: FIRST the specialization the workflow needs; the rest in the
-# background. Time-to-first-served is the number, not total mint wall.
-# --------------------------------------------------------------------------
-
-
 def _cas_with_programs(tmp_path: Path) -> Tuple[Path, LocalGraphStore]:
     cas = tmp_path / "graph-cas"
     store = LocalGraphStore(LocalCAS(cas))
@@ -773,11 +559,7 @@ def _cas_with_programs(tmp_path: Path) -> Tuple[Path, LocalGraphStore]:
 def test_the_selector_addresses_a_specialization_by_the_facets_it_has(
     endpoint: Path,
 ) -> None:
-    """A specialization has no human name, so `--first` matches its FACETS.
-
-    Asserted through the real `specializations()` output rather than a hand-built
-    Spec, because the facets are read off the ingress the lock actually carries.
-    """
+    """A specialization has no human name, so `--first` matches its FACETS."""
     specs = compile_cli.specializations(endpoint / el.LOCK_FILENAME)
 
     assert compile_cli.select(specs, "").graph == GRAPHS[0], (
@@ -799,9 +581,7 @@ def test_the_selector_addresses_a_specialization_by_the_facets_it_has(
 def test_a_selector_that_names_nothing_refuses_rather_than_building_the_default(
     endpoint: Path,
 ) -> None:
-    """The whole point of the argument is that the FIRST artifact is the one
-    that serves. Silently building the default instead would report success
-    over a specialization the caller never asked for."""
+    """The whole point of the argument is that the FIRST artifact is the one that serves."""
     specs = compile_cli.specializations(endpoint / el.LOCK_FILENAME)
 
     with pytest.raises(compile_cli.CompileError) as refusal:
@@ -815,12 +595,7 @@ def test_a_selector_that_names_nothing_refuses_rather_than_building_the_default(
 def test_only_truncates_the_PRIORITY_order_not_the_document_order(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """The two bring-up flags have to compose.
-
-    `--only` truncating before `--first` was resolved would make
-    `--only 1 --first vae` refuse — the selector would be asked about a list the
-    truncation had already removed its answer from.
-    """
+    """The two bring-up flags have to compose."""
     cas, store = _cas_with_programs(tmp_path)
     built: List[str] = []
 
@@ -836,12 +611,7 @@ def test_only_truncates_the_PRIORITY_order_not_the_document_order(
 def test_the_named_specialization_is_the_only_one_built_and_it_is_servable(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """THE ACCEPTANCE, in miniature: one build, and the endpoint serves it.
-
-    ``--fill none`` is the sharpest form of the claim — no background process
-    to confuse the reading, so the store's contents are exactly what the
-    priority build put there.
-    """
+    """THE ACCEPTANCE, in miniature: one build, and the endpoint serves it."""
     cas, store = _cas_with_programs(tmp_path)
     built: List[str] = []
 
@@ -863,14 +633,7 @@ def test_the_named_specialization_is_the_only_one_built_and_it_is_servable(
 def test_the_graph_set_document_is_published_before_the_first_build(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """A REVERSAL, and the property that makes incremental serving possible.
-
-    The document used to be published after every build, so a run that had
-    landed some artifacts and not others left adoption unable to enumerate a
-    single one: the row it enumerates FROM had not landed. Observed from inside
-    the builder — the only place that can see the store as it was BEFORE any
-    artifact existed.
-    """
+    """A REVERSAL, and the property that makes incremental serving possible."""
     cas, store = _cas_with_programs(tmp_path)
     seen: List[Any] = []
 
@@ -888,8 +651,7 @@ def test_the_graph_set_document_is_published_before_the_first_build(
 def test_a_deferred_run_never_reports_the_all_complete_line(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """rc semantics: servable FOR the priority artifact, rc 0, and the
-    all-complete sentence is unreachable while the reader still has holes."""
+    """rc semantics: servable FOR the priority artifact, rc 0, and the all-complete sentence is unreachable while the reader still has holes."""
     cas, store = _cas_with_programs(tmp_path)
 
     report = _run(endpoint, cas, store=store, builder=_builder([]),
@@ -907,12 +669,7 @@ def test_a_deferred_run_never_reports_the_all_complete_line(
 def test_a_gap_in_what_this_run_PROMISED_is_still_fatal(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """Deferral must not become a way to launder a failure.
-
-    The priority build publishes nowhere — the pgw#1533 defect — while two
-    specializations are legitimately deferred. The deferred ones stay silent;
-    the promised one is NOT SERVABLE and rc is 1.
-    """
+    """Deferral must not become a way to launder a failure."""
     cas, real = _cas_with_programs(tmp_path)
     store = PublishesNowhere(real)
 
@@ -929,9 +686,7 @@ def test_a_gap_in_what_this_run_PROMISED_is_still_fatal(
 def test_the_background_fill_finishes_what_the_foreground_deferred(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """The fill runs the SAME per-specialization path, and the verdict is
-    computed from the reader afterwards — which is the only way the
-    all-complete line is ever reached."""
+    """The fill runs the SAME per-specialization path, and the verdict is computed from the reader afterwards — which is the only way the all-complete line is ever reached."""
     cas, store = _cas_with_programs(tmp_path)
     built: List[str] = []
     handed: List[Tuple[str, ...]] = []
@@ -957,13 +712,7 @@ def test_the_background_fill_finishes_what_the_foreground_deferred(
 def test_the_detached_fill_is_THIS_verb_with_every_input_restated(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """The fill is not a second code path with its own resume state.
-
-    It is ``gen-worker compile --fill all`` for the same endpoint, so
-    everything already built resolves as PRESENT and it continues from there.
-    Every resolved input is restated on the argv: a child that re-derived its
-    sm or its module name could publish somewhere else and still exit 0.
-    """
+    """The fill is not a second code path with its own resume state."""
     cas, store = _cas_with_programs(tmp_path)
     seen: List[compile_cli.Fill] = []
 
@@ -984,7 +733,6 @@ def test_the_detached_fill_is_THIS_verb_with_every_input_restated(
         ("--verdict", str(seen[0].verdict)),
     ):
         assert argv[argv.index(flag) + 1] == value, flag
-    # And the argv is a real one: the parser this verb installs accepts it.
     parser = argparse.ArgumentParser()
     compile_cli.add_subparser(parser.add_subparsers(dest="verb"))
     parsed = parser.parse_args(list(argv[argv.index("compile"):]))
@@ -994,14 +742,7 @@ def test_the_detached_fill_is_THIS_verb_with_every_input_restated(
 def test_detach_really_spawns_a_surviving_child_and_captures_its_output(
     tmp_path: Path
 ) -> None:
-    """The PRODUCTION runner, exercised — not just the seam it hides behind.
-
-    Every other test here states its own `fill_runner`, so `detach` would
-    otherwise be correct code no test path calls, which is the exact defect
-    class this repo keeps finding (pgw#1543 C1). Driven over a harmless argv:
-    what is under test is that a child is started, survives being detached, and
-    lands its output where the returned sentence says it will.
-    """
+    """The PRODUCTION runner, exercised — not just the seam it hides behind."""
     log = tmp_path / "fill" / "fill.log"
     fill = compile_cli.Fill(
         specs=(),
@@ -1024,8 +765,7 @@ def test_detach_really_spawns_a_surviving_child_and_captures_its_output(
 def test_a_fill_that_cannot_start_is_stated_and_is_not_a_failure(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """The priority artifact is servable and the endpoint runs. A fill that
-    will not spawn leaves work undone, not a broken deliverable."""
+    """The priority artifact is servable and the endpoint runs."""
     cas, store = _cas_with_programs(tmp_path)
 
     def refuses(fill: compile_cli.Fill) -> str:
@@ -1043,23 +783,12 @@ def test_a_fill_that_cannot_start_is_stated_and_is_not_a_failure(
 def test_a_killed_fill_resumes_as_reuse_and_finishes_the_remainder(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """Interruption safety, over the real store rather than a resume file.
-
-    The fill dies after one of its two specializations. The re-run rebuilds
-    NOTHING that landed — the finished ones resolve as PRESENT through the same
-    store lookup a warm run uses — and builds only what is missing.
-    """
+    """Interruption safety, over the real store rather than a resume file."""
     cas, store = _cas_with_programs(tmp_path)
     first_pass: List[str] = []
 
     def dies_after_one(fill: compile_cli.Fill) -> str:
-        """A fill that lands ONE of its two and is then killed.
-
-        Modelled the way production actually looks: the runner returns a pid
-        and the parent goes on. A detached child's death is invisible to the
-        foreground by construction, so the resume can only be proved by what is
-        in the store afterwards — which is the point.
-        """
+        """A fill that lands ONE of its two and is then killed."""
         compile_cli.compile_all(
             endpoint_dir=endpoint, lock_path=endpoint / el.LOCK_FILENAME,
             cas_root=cas, sm=SM, lockfile=None, module=MODULE, store=store,
@@ -1086,16 +815,10 @@ def test_a_killed_fill_resumes_as_reuse_and_finishes_the_remainder(
 def test_the_verb_writes_a_durable_per_specialization_verdict(
     endpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A detached fill's exit status reaches nobody, so it states its result
-    where a later reader can find it — per specialization, because "the fill
-    failed" over fourteen graphs is not a fact anyone can act on.
-
-    Driven through argparse and :func:`run_compile`, so the flags, the handler
-    and the writer are all the real ones.
-    """
+    """A detached fill's exit status reaches nobody, so it states its result where a later reader can find it — per specialization, because "the fill failed" over fourteen graphs is not a fact anyone can ..."""
     cas, store = _cas_with_programs(tmp_path)
     monkeypatch.setattr(workspace, "artifacts_root", lambda: tmp_path / "box")
-    _run(endpoint, cas, store=store, builder=_builder([]))  # everything present
+    _run(endpoint, cas, store=store, builder=_builder([]))
 
     verdict = tmp_path / "fill" / "fill.json"
     parser = argparse.ArgumentParser()
@@ -1116,19 +839,7 @@ def test_the_verb_writes_a_durable_per_specialization_verdict(
     assert banked["unservable"] == []
 
 
-# --------------------------------------------------------------------------
-# ...and what SERVING does with a store that is only partly filled. This is
-# the other half of pgw#1545: deferring is only safe because a specialization
-# that is not built yet costs eager execution and NEVER a refusal.
-# --------------------------------------------------------------------------
-
-
 def _adopt_session(cas: Path, artifacts: Path, armed: List[str]) -> Any:
-    """A REAL ``AdoptSession`` over the store `compile` published into.
-
-    Only the bytes->callable loader is seamed (there is no card here); the
-    fetch, the claim, the per-graph arm and the dispatcher are torchcg's own.
-    """
     from gen_worker._vendor.torchcg.adopt import AdoptSession
 
     def loader(artifact: Path, record: Any, module: Any) -> Any:
@@ -1154,12 +865,7 @@ def _marked_module() -> Any:
 def test_a_specialization_that_is_not_built_yet_serves_EAGER_and_never_refuses(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """The property the whole deferral rests on.
-
-    One artifact in the store, three in the document. The call that matches it
-    dispatches compiled; the calls that do not run the author's own forward.
-    Neither refuses, and neither waits for a build.
-    """
+    """The property the whole deferral rests on."""
     import torch
 
     cas, store = _cas_with_programs(tmp_path)
@@ -1185,12 +891,7 @@ def test_a_specialization_that_is_not_built_yet_serves_EAGER_and_never_refuses(
 def test_the_fill_ARMS_into_a_live_session_without_a_reboot(
     endpoint: Path, tmp_path: Path
 ) -> None:
-    """Per-artifact adoption: each specialization arms the instant it lands.
-
-    The session is built while two specializations are still missing, a request
-    is served eager for one of them, then the fill lands it and the SAME live
-    module dispatches compiled — no restart, no re-adopt.
-    """
+    """Per-artifact adoption: each specialization arms the instant it lands."""
     import torch
 
     cas, store = _cas_with_programs(tmp_path)
@@ -1202,8 +903,6 @@ def test_the_fill_ARMS_into_a_live_session_without_a_reboot(
     module = session.adopt(_marked_module())
     assert module(torch.zeros(SHAPES[0])) == ("eager", SHAPES[0])
 
-    # The fill lands the deferred specializations, exactly as `--fill
-    # background` would, through the same verb.
     _run(endpoint, cas, store=store, builder=_builder([]))
 
     hole = session.holes[0]

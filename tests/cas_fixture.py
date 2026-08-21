@@ -1,16 +1,4 @@
-"""Whole-directory admission. A TEST FIXTURE, and it lives here because of it.
-
-`LocalCAS.ingest_repository` used to be production surface — it was one of the
-five methods the pre-genesis `8bafdfbb` snapshot was pinned for. pgw#1575 asked
-what actually calls it and the answer was: nothing in `src/`, ever. Production
-admits bytes one file at a time (`publish_v2` -> `gen_worker.cas.ingest_file`)
-or adopts them from a hub grant with the hub's own manifest
-(`transfer/grants.py`). Admitting a directory tree is what a TEST does to build
-a real store to read back out of.
-
-So it is here rather than in `src/gen_worker/cas/`, where
-`scripts/lint_unreached_surface.py` would be right to call it stranded.
-"""
+"""Whole-directory admission."""
 
 from __future__ import annotations
 
@@ -22,12 +10,7 @@ from gen_worker.cas import ingest_file
 
 
 def ingest_repository(cas: LocalCAS, source: str | Path) -> RepositoryManifest:
-    """Admit every regular file below a directory into one manifest.
-
-    V1 manifests describe files, not symlinks or empty directories. Refusing
-    those entry types keeps projection portable and prevents a source-tree link
-    from escaping the repository root.
-    """
+    """Admit every regular file below a directory into one manifest."""
 
     root = Path(source)
     if not root.is_dir():

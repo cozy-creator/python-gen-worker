@@ -1,12 +1,4 @@
-"""Worker-local mutable release config.
-
-The hub's desired state carries (release_id, config_generation); parameter
-values for declared knobs propagate over the existing gRPC stream. On each
-push the worker updates memory AND atomically rewrites a local snapshot file
-at a known path — per-invoke SUBPROCESSES read that file (`read_snapshot`)
-and pick up the latest values on their next invoke. Envs are boot-injected
-and never mutated here; bindings ride desired-residency (lifecycle.py).
-"""
+"""Worker-local mutable release config."""
 
 from __future__ import annotations
 
@@ -22,8 +14,6 @@ from .api.errors import RetryableError
 
 logger = logging.getLogger(__name__)
 
-# Known path contract: the worker exports this env var so every subprocess
-# it spawns can locate the snapshot without plumbing.
 SNAPSHOT_PATH_ENV = "GEN_WORKER_CONFIG_SNAPSHOT_PATH"
 DEFAULT_SNAPSHOT_PATH = "/app/.tensorhub/runtime_config.msgpack"
 
@@ -33,7 +23,6 @@ class ConfigSnapshot(msgspec.Struct, frozen=True, kw_only=True):
 
     config_generation: int = 0
     release_id: str = ""
-    # function name -> parameter name -> value
     parameters: Dict[str, Dict[str, Any]] = msgspec.field(default_factory=dict)
 
 
@@ -46,8 +35,7 @@ def _decode_snapshot(raw: bytes) -> ConfigSnapshot:
 
 
 def read_snapshot(path: Optional[str] = None) -> ConfigSnapshot:
-    """Subprocess-side read of the worker's config snapshot file. Returns an
-    empty generation-0 snapshot when the file is absent/unreadable."""
+    """Subprocess-side read of the worker's config snapshot file."""
     p = path or os.environ.get(SNAPSHOT_PATH_ENV) or DEFAULT_SNAPSHOT_PATH
     try:
         with open(p, "rb") as f:
@@ -60,12 +48,10 @@ def read_snapshot(path: Optional[str] = None) -> ConfigSnapshot:
 
 
 class ConfigStore:
-    """Current config + the snapshot-file writer. One per worker process."""
+    """Current config + the snapshot-file writer."""
 
     def __init__(self, path: str = "") -> None:
         self._path = path or os.environ.get(SNAPSHOT_PATH_ENV) or DEFAULT_SNAPSHOT_PATH
-        # Export the known path so every child process (subproc.run_process
-        # or arbitrary Popen in endpoint code) inherits it.
         os.environ[SNAPSHOT_PATH_ENV] = self._path
         self._lock = threading.Lock()
         self._snap = ConfigSnapshot()
@@ -99,11 +85,7 @@ class ConfigStore:
         self._on_snapshot_failure = on_snapshot_failure
 
     def observe(self, generation: int, *, release_id: str = "") -> bool:
-        """A hub desired-state push advertised ``generation``
-        (DesiredResidency.config_generation). Advances the observed gen
-        monotonically, keeping known parameter values; stale/duplicate
-        generations are ignored. Returns True when state advanced (memory
-        updated + snapshot file atomically rewritten)."""
+        """A hub desired-state push advertised ``generation`` (DesiredResidency.config_generation)."""
         gen = int(generation)
         with self._lock:
             if gen <= self._snap.config_generation:
@@ -174,11 +156,7 @@ class ConfigStore:
         values: Mapping[str, Any],
         generation: int,
     ) -> bool:
-        """RunJob-stamped effective parameter values for one function (the
-        class-1 read-at-dispatch carrier). Values at a generation older than
-        the observed one are ignored; otherwise the function's values are
-        full-replaced and the snapshot rewritten, so per-invoke subprocesses
-        read the latest values as of this invoke."""
+        """RunJob-stamped effective parameter values for one function (the class-1 read-at-dispatch carrier)."""
         gen = int(generation)
         with self._lock:
             if gen < self._snap.config_generation:
@@ -226,12 +204,7 @@ class ConfigStore:
         values: Mapping[str, Any],
         generation: int,
     ) -> bytes:
-        """Encode the config stamped on one invocation.
-
-        ``run_process(ctx=...)`` gives this immutable snapshot to its child,
-        so an older in-flight job cannot accidentally read a newer global
-        generation that arrived before the child started.
-        """
+        """Encode the config stamped on one invocation."""
         with self._lock:
             snap = ConfigSnapshot(
                 config_generation=int(generation),
@@ -241,8 +214,6 @@ class ConfigStore:
         return msgspec.msgpack.encode(snap)
 
     def _write_snapshot_locked(self, snapshot: ConfigSnapshot) -> None:
-        """Atomic write: tmp file in the same dir + os.replace, so a
-        subprocess mid-read never sees a torn file."""
         try:
             d = os.path.dirname(self._path) or "."
             os.makedirs(d, exist_ok=True)
@@ -263,9 +234,7 @@ class ConfigStore:
 
 
 def extract_config_push(ack: Any) -> Optional[Tuple[int, str]]:
-    """(config_generation, release_id) from a HelloAck's DesiredResidency,
-    using the A+C wire contract (``release_id = 5;
-    config_generation = 6``)."""
+    """(config_generation, release_id) from a HelloAck's DesiredResidency, using the A+C wire contract (``release_id = 5; config_generation = 6``)."""
     desired = ack.desired_residency
     gen = int(desired.config_generation or 0)
     if gen <= 0:
@@ -274,11 +243,7 @@ def extract_config_push(ack: Any) -> Optional[Tuple[int, str]]:
 
 
 def extract_job_config(run: Any) -> Tuple[int, Optional[Dict[str, Any]]]:
-    """(config_generation, values) stamped on the RunJob (class-1
-    read-at-dispatch; ``config_generation = 16; bytes config_params = 17``,
-    a msgpack param-name -> value map for the invoked function). A
-    dispatched job runs with the values it was stamped with — a gen bump
-    never rewrites it. (0, None) when unstamped."""
+    """(config_generation, values) stamped on the RunJob (class-1 read-at-dispatch; ``config_generation = 16; bytes config_params = 17``, a msgpack param-name -> value map for the invoked function)."""
     gen = int(run.config_generation or 0)
     raw = run.config_params or b""
     if not raw:

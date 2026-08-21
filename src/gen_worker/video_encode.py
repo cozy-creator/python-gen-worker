@@ -1,24 +1,4 @@
-"""Video encode backend selection + streaming encoder.
-
-Software x264 at the PyAV default (preset medium) can dominate request wall
-time on CPU-weak or contended hosts: the B200 gauntlet measured one 10s@1080p
-clip spending 179.6s in mp4 encode against 118s of GPU compute, and a 5s@4K
-probe spent ~25 minutes encoding while the GPU idle-billed. Two fixes live
-here:
-
-- **NVENC when the silicon has it**: consumer RTX (4090/5090) and L40S-class
-  cards carry the dedicated encoder ASIC — encode costs zero SMs and runs at
-  hardware speed. H100/A100/B200 datacenter parts ship WITHOUT NVENC (decode
-  only), so the probe is empirical: one tiny real encode at import of the
-  first video, never per-request. Falls back to libx264.
-- **Fast software preset**: x264 ``veryfast`` + CRF 18 for generated content.
-  The default (medium, CRF 23) is archival tuning — 5-10x the encode CPU for
-  gains invisible on short synthetic clips with high bitrate tolerance.
-
-:class:`StreamingVideoEncoder` feeds frames to the encoder in chunks as they
-are produced (e.g. VAE framewise decode), so long/4K clips never materialize
-a second full raw array inside the encode path.
-"""
+"""Video encode backend selection + streaming encoder."""
 
 from __future__ import annotations
 
@@ -35,22 +15,10 @@ from fractions import Fraction
 
 logger = logging.getLogger(__name__)
 
-#: Max concurrent buffered CPU finalize encodes (a host-RAM bound).
 ENCODE_CONCURRENCY_ENV = "GEN_WORKER_VIDEO_ENCODE_CONCURRENCY"
-#: PER EXECUTION GROUP. The bound exists so raw frame buffers do not pile up in
-#: host RAM — and host RAM is bought per pod, not per process. A flat
-#: process-global 2 makes a G-group worker's tail serialize across unrelated
-#: cards: at G=4 two of four groups always wait for a sibling's encode. Groups
-#: multiply it; a single-group worker keeps exactly 2.
-#:
-#: Immaterial for images (a whole image tail is a ~150 ms webp encode); material
-#: for video, where the buffered x264 finalize is seconds.
 DEFAULT_ENCODE_CONCURRENCY_PER_GROUP = 2
 
-# Fast presets tuned for short, high-bitrate-tolerant generated clips.
 X264_OPTIONS: Dict[str, str] = {"preset": "veryfast", "crf": "18"}
-# NVENC runs on the dedicated ASIC (zero SMs). p4 + capped-quality VBR
-# mirrors the x264 rung's visual quality at hardware speed.
 NVENC_OPTIONS: Dict[str, str] = {"preset": "p4", "tune": "hq", "rc": "vbr", "cq": "19"}
 
 
@@ -70,15 +38,7 @@ def _x264() -> EncoderChoice:
 
 
 def _probe_nvenc() -> bool:
-    """One tiny real encode. Codec presence in the PyAV build is not enough:
-    opening h264_nvenc needs the driver's libnvidia-encode AND a card whose
-    silicon has the encoder block (absent on H100/A100/B200) AND a tenancy
-    whose driver grants encode sessions (RunPod SECURE 4090/5090 refuse with
-    "OpenEncodeSessionEx failed: unsupported device"; the L4 grants them).
-
-    Probe frame is 256x256: NVENC enforces minimum encode dimensions (H.264 min
-    is 145x49) — a 64x64 probe fails "Frame Dimension less than the minimum
-    supported value" on GENUINELY capable cards."""
+    """One tiny REAL encode: codec presence in the PyAV build is not enough — opening h264_nvenc needs the driver's libnvidia-encode AND a card whose silicon has the encoder block (absent on H100/A100/B200) AND a tenancy whose driver grants encode sessions. The probe frame is 256x256 because NVENC enforces minimum encode dimensions (H.264 min 145x49) — a 64x64 probe fails "Frame Dimension less than the minimum supported value" on GENUINELY capable cards."""
 
     try:
         import av
@@ -109,14 +69,11 @@ def _probe_nvenc() -> bool:
 
 
 def detect_encoder(*, refresh: bool = False) -> EncoderChoice:
-    """Pick the video encoder for this process. Probed ONCE, then cached."""
+    """Pick the video encoder for this process."""
     global _detected
     with _detect_lock:
         if _detected is not None and not refresh:
             return _detected
-        # th#1887: there is no encoder switch. The PROBE is always the decision — an
-        # env could only make a pod encode on CPU while its NVENC ASIC sat idle, and
-        # never report the gap.
         if _probe_nvenc():
             _detected = EncoderChoice("h264_nvenc", dict(NVENC_OPTIONS), hardware=True)
         else:
@@ -126,16 +83,12 @@ def detect_encoder(*, refresh: bool = False) -> EncoderChoice:
         return _detected
 
 
-# ---- bounded finalize concurrency ---------------------------------
-
 _finalize_sem: Optional[threading.BoundedSemaphore] = None
 _finalize_sem_lock = threading.Lock()
 
 
 def finalize_concurrency() -> int:
-    """Concurrent buffered CPU encodes this PROCESS allows: two per execution
-    group. The bound is a host-RAM bound and host RAM is bought per pod, so it
-    scales with the number of groups the pod runs."""
+    """Concurrent buffered CPU encodes this PROCESS allows: two per execution group."""
     raw = os.environ.get(ENCODE_CONCURRENCY_ENV, "").strip()
     if raw:
         try:
@@ -161,9 +114,7 @@ def _finalize_semaphore() -> threading.BoundedSemaphore:
 
 @contextmanager
 def finalize_permit() -> Iterator[None]:
-    """Bound concurrent buffered CPU encodes. Acquired BEFORE the GPU slot is
-    released so back-pressure holds the slot (pausing new decodes) instead of
-    letting raw-frame buffers pile up in host RAM."""
+    """Bound concurrent buffered CPU encodes."""
     sem = _finalize_semaphore()
     sem.acquire()
     try:
@@ -172,17 +123,8 @@ def finalize_permit() -> Iterator[None]:
         sem.release()
 
 
-# ---- frame coercion ---------------------------------------------------------
-
 def frames_to_uint8(frames: Any) -> Any:
-    """Coerce PIL list / float array / torch tensor to uint8 ``[F, H, W, 3]``.
-
-    Accepts a single ``[H, W, 3]`` frame too (expanded to ``F=1``). Floats in
-    [0, 1] are scaled; anything else is clipped to [0, 255].
-
-    CUDA tensors are converted on-device FIRST so only uint8 crosses PCIe
-    (4x fewer bytes than float32, 2x fewer than bf16).
-    """
+    """Coerce PIL list / float array / torch tensor to uint8 ``[F, H, W, 3]``."""
     import numpy as np
 
     if isinstance(frames, (list, tuple)):
@@ -191,7 +133,7 @@ def frames_to_uint8(frames: Any) -> Any:
         frames = np.stack(
             [np.asarray(f.convert("RGB") if hasattr(f, "convert") else f) for f in frames]
         )
-    if hasattr(frames, "detach"):  # torch tensor
+    if hasattr(frames, "detach"):
         if getattr(frames, "is_cuda", False):
             from .media_transfer import cuda_tensor_to_uint8_host
 
@@ -213,24 +155,8 @@ def frames_to_uint8(frames: Any) -> Any:
     return arr
 
 
-# ---- streaming encoder ------------------------------------------------------
-
 class StreamingVideoEncoder:
-    """Incremental H.264/AAC mp4 encoder — feed frame chunks as they exist.
-
-    Built for the VAE-framewise-decode seam: call :meth:`add` with
-    each decoded chunk instead of buffering the whole clip, then
-    :meth:`finish` (optionally with the audio waveform). Dimensions latch
-    from the first chunk; odd rows/columns are cropped (yuv420p needs even
-    dims). ``audio_sample_rate`` must be declared up front when audio will be
-    muxed — both streams must exist before the first packet writes the mp4
-    header.
-
-    If the selected hardware encoder fails to OPEN (driver contention,
-    session limits), the encode falls back to libx264 once — before any
-    packet is written. Mid-stream failures propagate: they fail exactly the
-    request that owns this encode.
-    """
+    """Incremental H.264/AAC mp4 encoder — feed frame chunks as they exist."""
 
     def __init__(
         self,
@@ -240,7 +166,7 @@ class StreamingVideoEncoder:
         audio_sample_rate: Optional[int] = None,
         encoder: Optional[EncoderChoice] = None,
     ) -> None:
-        import av  # hard dep for this class; callers gate on the video extra
+        import av
 
         self._av = av
         self._path = str(path)
@@ -252,9 +178,6 @@ class StreamingVideoEncoder:
         self._audio_stream: Any = None
         self._frames = 0
         self._closed = False
-        # Wrap contiguous rgb24 arrays with PyAV's from_numpy_buffer (no
-        # intermediate copy into the AVFrame) when the installed av supports it;
-        # one failure disables it for this encode.
         self._zero_copy = hasattr(av.VideoFrame, "from_numpy_buffer")
 
     @property
@@ -273,16 +196,10 @@ class StreamingVideoEncoder:
         except Exception as exc:
             if not self._encoder.hardware:
                 raise
-            # Opening the hardware encoder can fail even after a positive
-            # boot probe (NVENC session limits under concurrency). Nothing
-            # is muxed yet, so fall back to software for THIS encode only.
             logger.warning(
                 "hardware encoder %s failed to open (%s: %s); "
                 "falling back to libx264 for this encode",
                 self._encoder.codec, type(exc).__name__, exc)
-            # add_stream() leaves the failed hardware stream attached. A
-            # second stream in that container makes PyAV retry the orphan
-            # when muxing starts, so the advertised fallback fails too.
             try:
                 self._container.close()
             except Exception:
@@ -300,17 +217,11 @@ class StreamingVideoEncoder:
         stream.width = width
         stream.height = height
         stream.pix_fmt = "yuv420p"
-        # Open the codec NOW instead of lazily at the first encode() so a
-        # hardware refusal (NVENC session limit / dimension gate, which surfaces
-        # as "InitializeEncoder failed" only at first encode) lands in
-        # _open()'s per-encode fallback instead of failing the request
-        # mid-encode.
         stream.codec_context.open(strict=False)
         return stream
 
     def add(self, frames: Any) -> int:
-        """Encode one chunk (``[F, H, W, 3]`` array / torch tensor / PIL list
-        / single frame). Returns frames encoded so far."""
+        """Encode one chunk (``[F, H, W, 3]`` array / torch tensor / PIL list / single frame)."""
         if self._closed:
             raise RuntimeError("StreamingVideoEncoder is finished")
         arr = frames_to_uint8(frames)
@@ -330,12 +241,6 @@ class StreamingVideoEncoder:
         return self._frames
 
     def _video_frame(self, frame_array: Any) -> Any:
-        """One rgb24 VideoFrame — zero-copy buffer wrap when possible.
-
-        The wrapped buffer is only read inside ``stream.encode`` (the rgb24
-        source is consumed by the yuv420p reformat before encode returns), so
-        reusing the caller's staging buffer afterwards is safe.
-        """
         if self._zero_copy and getattr(frame_array, "flags", None) is not None \
                 and frame_array.flags["C_CONTIGUOUS"]:
             try:
@@ -346,8 +251,7 @@ class StreamingVideoEncoder:
         return self._av.VideoFrame.from_ndarray(frame_array, format="rgb24")
 
     def finish(self, audio: Any = None) -> str:
-        """Flush the video stream, mux ``audio`` (waveform ``[C, samples]``)
-        when given, close the container. Returns the output path."""
+        """Flush the video stream, mux ``audio`` (waveform ``[C, samples]``) when given, close the container."""
         if self._closed:
             return self._path
         if self._container is None:
@@ -386,8 +290,6 @@ class StreamingVideoEncoder:
             self.abort()
 
 
-# ---- audio mux --------------------------------------------------------------
-
 def _prepare_audio_stream(container: Any, sample_rate: int, av: Any) -> Any:
 
     stream = container.add_stream("aac", rate=sample_rate)
@@ -399,7 +301,6 @@ def _prepare_audio_stream(container: Any, sample_rate: int, av: Any) -> Any:
 
 
 def _mux_audio(container: Any, stream: Any, audio: Any, sample_rate: int, av: Any, np: Any) -> None:
-    """Append an AAC stereo track (mirrors diffusers ltx2 export_utils)."""
     if hasattr(audio, "detach"):
         audio = audio.detach().to("cpu").float().numpy()
     wave = np.asarray(audio, dtype="float32")
@@ -414,9 +315,7 @@ def _mux_audio(container: Any, stream: Any, audio: Any, sample_rate: int, av: An
     wave = np.ascontiguousarray(np.clip(wave, -1.0, 1.0))
 
     cc = stream.codec_context
-    # One packed-s16 input frame; the resampler converts to the encoder's
-    # format and assigns pts (mirrors diffusers ltx2 export_utils._write_audio).
-    pcm = (wave.T * 32767.0).astype("int16")  # [samples, 2] interleaved
+    pcm = (wave.T * 32767.0).astype("int16")
     frame_in = av.AudioFrame.from_ndarray(
         np.ascontiguousarray(pcm.reshape(1, -1)), format="s16", layout="stereo"
     )

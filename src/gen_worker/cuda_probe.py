@@ -1,12 +1,4 @@
-"""Boot-time CUDA health probe.
-
-RunPod occasionally allocates a host whose CUDA device is present but wedged
-("CUDA-capable device(s) is/are busy or unavailable"). Left unchecked, the
-worker says hello, accepts a job, and terminal-fails it at model load —
-burning the invoker's request on a provider fault we could catch first.
-Call ``probe_cuda`` before the orchestrator handshake; on failure the caller
-logs ``CUDA_PROBE_FAILED_MARKER`` and exits nonzero so the pod is replaced.
-"""
+"""Boot-time CUDA health probe."""
 
 from __future__ import annotations
 
@@ -18,19 +10,9 @@ from .manifest_blocks import declaration_rows
 
 CUDA_PROBE_FAILED_MARKER = "GEN_WORKER_CUDA_PROBE_FAILED"
 
-#: The reason `probe_cuda` records when the predicate itself says no. Named,
-#: because `classify_probe_failure` MATCHES on it: spelling it twice is how a
-#: cardless box starts being classified `cuda_error` and condemned as a host
-#: fault (pgw#1120).
 NO_DEVICE_REASON = "hostfacts.cuda_ready() is False"
 
-#: Wall budget for one `nvidia-smi` subprocess. The exact fault this module
-#: exists for — a wedged CUDA device — is also the fault that makes `nvidia-smi`
-#: hang indefinitely rather than answer, so a call with no timeout turns a
-#: diagnostic into the hang it was diagnosing. A wall clock rather than a
-#: progress window by shape: `nvidia-smi` emits nothing until it exits, so
-#: there is no progress signal to window over, and expiry kills no work — the
-#: caller degrades to an unmeasured field. ONE owner for the number.
+# Wall budget for one nvidia-smi subprocess: the wedged-CUDA fault this module diagnoses is also the fault that makes nvidia-smi hang indefinitely, so a call with no timeout turns the diagnostic into the hang it was diagnosing.
 NVIDIA_SMI_TIMEOUT_S = 5.0
 
 
@@ -40,10 +22,7 @@ class CudaProbeResult(msgspec.Struct, frozen=True):
 
 
 def probe_cuda(device_index: int = 0) -> CudaProbeResult:
-    """Allocate, run one op on, sync, and free a tiny tensor on
-    ``device_index``. Never raises — every failure (import, is_available,
-    alloc, op, sync) becomes a typed ``CudaProbeResult(ok=False, reason=...)``.
-    """
+    """Allocate, run one op on, sync, and free a tiny tensor on ``device_index``."""
     try:
         import torch
     except Exception as e:
@@ -63,24 +42,11 @@ def probe_cuda(device_index: int = 0) -> CudaProbeResult:
     return CudaProbeResult(ok=True)
 
 
-#: ``cuda_probe.classify_probe_failure`` classes that mean THERE IS NO CUDA
-#: DEVICE HERE, as against a device this host cannot drive. A cardless box is a
-#: different mistake and must not be reported as a host fault (pgw#1120) — but
-#: "cardless" is a fact about the PROBE, not about whether `nvidia-smi` could be
-#: read: only a host with a driver to fail can answer `driver_too_old` or
-#: `cuda_error`, so a broken diagnostic can no longer buy an exemption.
 CARDLESS_PROBE_CLASSES = frozenset({"cuda_unavailable", "torch_unavailable"})
 
 
 def classify_probe_failure(reason: str) -> str:
-    """Typed vocabulary for ``CudaProbeResult.reason`` — the wire
-    class the hub's pod_events row and death-taxonomy correlation key on.
-    Never free-form: torch_unavailable | cuda_unavailable | driver_too_old |
-    cuda_error | unknown. ``driver_too_old`` matches torch's own CUDA
-    initialization message ("driver too old (found version ...)") — a strictly
-    stronger, in-container-measured version of what a pre-rent
-    provider-telemetry floor infers from the outside.
-    """
+    """Typed vocabulary for ``CudaProbeResult.reason`` — the wire class the hub's pod_events row and death-taxonomy correlation key on."""
     r = (reason or "").strip().lower()
     if not r:
         return "unknown"
@@ -96,23 +62,7 @@ def classify_probe_failure(reason: str) -> str:
 def should_probe_cuda(
     manifest: Optional[dict[str, Any]], *, cuda_build: Optional[bool] = None
 ) -> bool:
-    """Whether this concrete worker image must pass the CUDA health probe.
-
-    Read off EVERY declaration the image carries — ``@endpoint`` functions and
-    ``@job`` functions alike, via ``manifest_blocks.declaration_rows``. Both
-    row shapes carry the same ``resources.gpu``, so the question is one
-    question. pgw#1354: this walked ``functions[]`` alone, so a jobs-only GPU
-    image (10 of 27 conversion jobs declare ``gpu=True``) returned False and
-    was never probed — the gw#529 bad-host guard silently did not apply to the
-    whole jobs program.
-
-    A manifest may contain both CPU and GPU declarations because one endpoint
-    release can publish separate ``accelerator=none`` and ``accelerator=cuda``
-    images.  In that mixed case the installed torch build is the authoritative
-    signal: probe CUDA images and let CPU-only images serve the CPU lane.  A
-    GPU-only manifest is always probed so an accidentally CPU-built image
-    fails before it can register.
-    """
+    """Whether this concrete worker image must pass the CUDA health probe."""
     rows = declaration_rows(manifest)
     gpu_requirements = [bool((row.get("resources") or {}).get("gpu")) for row in rows]
     if not any(gpu_requirements):

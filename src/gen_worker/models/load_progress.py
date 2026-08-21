@@ -1,36 +1,4 @@
-"""Byte-level progress for the model load path.
-
-Staging/hydration is one long blocking diffusers call with nothing ticking, so
-without a PRODUCER during the load the hub's stall clock has nothing to hold
-the worker to and a SIGKILL has no "where".
-
-One reporter fixes both, riding the EXISTING channels (no parallel heartbeat
-systems):
-
-* a sampler thread ticks a byte counter from ``/proc/self/io`` read_bytes
-  plus anonymous-RSS growth — real external evidence of staging progress,
-  independent of any loader hook — which the 10s app beat then carries to
-  the hub as counter advancement (``activity.on_beat``);
-* every tick overwrites a small breadcrumb file
-  (:func:`gen_worker.postmortem.write_load_progress`); a SIGKILL mid-load
-  is then attributed by the surviving parent as "died at
-  hydrate:transformer, N/M GiB" instead of a blank.
-* every phase transition emits a typed, DURABLE activity event naming the
-  component — ``load_phase`` on entry, ``load_phase_done`` on exit with the
-  measured span in ``duration_ms``. The counter says a number is moving; the
-  events say WHAT the worker is doing, which is what a long load needs while it
-  is still ALIVE. The breadcrumb only reaches the hub through a death, and a
-  slow load that eventually succeeds leaves no death to read.
-
-Why events and not the counter name or the activity's phase: the hub makes a
-RUNNING update durable only on a phase transition, and this load
-does not own the phase of the activity it runs under — ``ensure_setup``'s
-``self_mint_compile`` does. ``emit_event`` sends a COMPLETED update, which is
-always durable, and deliberately does not touch the open activity.
-
-Off-Linux (/proc missing) the reporter still reports phases; only the byte
-sampling is an honest no-op.
-"""
+"""Byte-level progress for the model load path."""
 
 from __future__ import annotations
 
@@ -60,35 +28,14 @@ COUNTER_NAME = "load:ingested_bytes"
 #: pgw#1632 lint reads; this is the declaration at the site that produces it.
 COUNTER_SOURCE = byte_sources.Source.PROC_READ_IO
 
-#: A load phase STARTED (``duration_ms`` 0 — nothing is measured yet). This
-#: is the row that names the component a hung load is hung on.
 EVENT_PHASE = "load_phase"
-#: A load phase ENDED, carrying its measured span (the number goes in the
-#: column, never interpolated into the detail). pgw#1334: "done" here means
-#: the phase is over, NOT that it succeeded and NOT that any tree is complete
-#: — `stop()` fires it from `provision.load_slot`'s `finally`, so the row a
-#: failed load emits is this one. Nothing on this path measures completeness
-#: of anything; the detail says which way it ended.
 EVENT_PHASE_DONE = "load_phase_done"
-#: This phase is RE-READING its own set instead of staging it — the
-#: direct-reclaim crawl, confessed while the worker is still alive.
 EVENT_PHASE_THRASH = "load_phase_thrash"
 
 _INTERVAL_S = 5.0
 _GIB = float(1 << 30)
 
-#: How many full passes over a phase's own bytes count as staging before the
-#: reads are re-reads. THREAT: a staging admitted against an estimate that
-#: turned out low crawls in direct reclaim (measured: 1.578 TB read for a 105 GB
-#: set, a 15x re-read, across 37 minutes of billed H100 before the kernel
-#: OOM-killed it). Derivation: a cold load reads each byte ONCE (1x) and a
-#: page-cache-warm load reads ~0; 3x is three full passes, which no legitimate
-#: staging shape reaches. Conjunctive with the ceiling fraction below, so a
-#: merely large load cannot trip it.
 _REREAD_MULTIPLE = 3.0
-#: Fraction of the cgroup limit anon RSS must occupy for the re-reads to be
-#: attributable to reclaim pressure rather than to a big tree. Measured at the
-#: incident: 232.9 GiB anon of a 233.76 GiB cgv1 ceiling = 99.6%.
 _CEILING_FRACTION = 0.9
 
 _lock = threading.Lock()
@@ -120,12 +67,7 @@ def _gib(n: float) -> str:
 
 
 class LoadProgressReporter:
-    """Samples staging progress while a model load blocks the caller.
-
-    ``label`` names the load (function/ref); ``total_bytes`` is the on-disk
-    tree size about to be staged (0 = unknown; the counter then reports
-    done-only). ``phase`` is updated by the loader as it moves through
-    components (:func:`set_phase`)."""
+    """Samples staging progress while a model load blocks the caller."""
 
     def __init__(
         self,
@@ -143,9 +85,6 @@ class LoadProgressReporter:
         self._phase_bytes = 0
         self._phase_started = time.monotonic()
         self._staged = 0
-        # This phase's own read/anon baselines and the verdict once it has been
-        # reached (sticky — the regime does not un-happen, and the loader reads
-        # it between components).
         self._phase_read0 = 0
         self._phase_anon0 = 0
         self._thrash = ""
@@ -155,12 +94,8 @@ class LoadProgressReporter:
         self._io0: Optional[int] = None
         self._started_unix = 0.0
 
-    # -- loader-facing ------------------------------------------------------
-
     def set_phase(self, phase: str, nbytes: int = 0) -> None:
-        """Enter ``phase`` (``nbytes`` = the tree this phase stages, when the
-        caller knows it). Closes the phase being left, so the pair of events
-        is a phase table with real spans."""
+        """Enter ``phase`` (``nbytes`` = the tree this phase stages, when the caller knows it)."""
         if phase == self._phase:
             self._phase_bytes = max(self._phase_bytes, int(nbytes))
             return
@@ -172,18 +107,7 @@ class LoadProgressReporter:
         self._announce_phase()
         self._tick()
 
-    # -- phase events -------------------------------------------------------
-
     def _progress(self) -> str:
-        """This phase's byte line, in words that say what the numbers ARE.
-
-        pgw#1334: NEITHER number is a staging fraction, and the row deliberately
-        offers no words that suggest one. The left is this PROCESS's resident anon
-        memory (or its /proc read delta, whichever is smaller — :meth:`_tick`); the
-        right is ``os.walk`` over the tree ALREADY on disk. Their ratio is a
-        memory-residency observation about a complete tree and cannot reach 100%
-        for a load that mmaps.
-        """
         return (f"resident {_gib(self._staged)} anon; tree on disk "
                 f"{_gib(self.total_bytes)}")
 
@@ -199,19 +123,8 @@ class LoadProgressReporter:
             logger.debug("load-phase event dropped", exc_info=True)
 
     def _close_phase(self, outcome: str = "") -> None:
-        """Close the current phase's span.
-
-        ``outcome`` is set only by :meth:`stop` — a mid-load ``set_phase``
-        transition ends a phase but decides nothing about the LOAD, so it
-        says nothing. pgw#1334.
-        """
         try:
             span_ms = int(max(0.0, time.monotonic() - self._phase_started) * 1000)
-            # "ended", never "complete": `load_slot` stops the reporter from a
-            # `finally`, so this row also closes a phase that RAISED. The span
-            # is the honest fact either way; the outcome is the raised error's
-            # to report. pgw#1334 read one of these as a completion claim,
-            # which is why the sentence now says which way it ended.
             activity_mod.emit_event(
                 EVENT_PHASE_DONE,
                 f"{self.label}: {self._phase} ended{outcome}; "
@@ -220,8 +133,6 @@ class LoadProgressReporter:
             )
         except Exception:  # noqa: BLE001 - reporting must never break a load
             logger.debug("load-phase event dropped", exc_info=True)
-
-    # -- lifecycle ----------------------------------------------------------
 
     def start(self) -> "LoadProgressReporter":
         global _active
@@ -239,15 +150,7 @@ class LoadProgressReporter:
         return self
 
     def stop(self, *, clean: bool, raised: bool = False) -> None:
-        """``clean`` clears the death breadcrumb; ``raised`` says the load
-        this reporter wrapped is unwinding.
-
-        pgw#1334: the two are INDEPENDENT and were conflated by absence.
-        ``load_slot`` stops from a ``finally`` with ``clean=True`` on both
-        paths — the breadcrumb has done its job either way — so ``clean`` was
-        never evidence about the outcome, and the closing row said nothing at
-        all. A pod's `load_phase_done` was then read as a completion claim.
-        """
+        """``clean`` clears the death breadcrumb; ``raised`` says the load this reporter wrapped is unwinding."""
         global _active
         self._stop.set()
         t = self._thread
@@ -256,9 +159,6 @@ class LoadProgressReporter:
         with _lock:
             if _active is self:
                 _active = None
-        # The last phase closes on ANY stop: a raise is still a span that
-        # ended, and the event names where the time went. Only a kernel kill
-        # skips this — that one is the breadcrumb's job.
         self._close_phase(" on a RAISE" if raised else " without error")
         try:
             c = activity_mod.scoped_counter(
@@ -268,7 +168,6 @@ class LoadProgressReporter:
             pass
         if clean:
             postmortem.clear_load_progress(self.marker_path)
-        # An unclean stop leaves the breadcrumb for the death attribution.
 
     def __enter__(self) -> "LoadProgressReporter":
         return self.start()
@@ -276,47 +175,19 @@ class LoadProgressReporter:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.stop(clean=exc_type is None)
 
-    # -- the re-read (direct-reclaim) verdict ---------------------
-
     @property
     def thrash(self) -> str:
-        """This load's re-read verdict, or ``""``. Sticky once reached."""
+        """This load's re-read verdict, or ``""``."""
         return self._thrash
 
     def _cgroup_limit_bytes(self) -> int:
         if not self._cgroup_limit:
-            # CYCLE: memory imports nothing from here.
             from .memory import cgroup_memory_limit_bytes
 
             self._cgroup_limit = int(cgroup_memory_limit_bytes() or 0)
         return self._cgroup_limit
 
     def _check_thrash(self, read: Optional[int], anon: int) -> None:
-        """Decide whether this phase is STAGING or RE-READING.
-
-        THREAT: a staging admitted against an estimate that turned out low
-        does not fail — it crawls. Every fault goes through direct reclaim, the
-        process reads its own set over and over, and the only thing that ends
-        it is the kernel's OOM killer, tens of minutes and tens of dollars
-        later (measured: 1.578 TB read for a 105 GB set, 37 minutes, rss_anon
-        232.9 GiB of a 233.76 GiB ceiling).
-
-        The observable that decides it correctly is a CONJUNCTION, because
-        each half alone has an innocent explanation: a big tree reads a lot,
-        and a load with room may sit high. Together — reads past several
-        full passes over this phase's OWN bytes, WHILE anon sits against the
-        cgroup limit — there is no innocent reading left: a healthy load
-        reads each byte about once and a page-cache-warm one reads ~none.
-
-        Anon GROWTH is deliberately not treated as proof of progress: in the
-        incident it grew the whole time (130 -> 232.9 GiB) while the estimate
-        was simply wrong about what the set weighed.
-
-        The verdict is a confession, not a kill: the counter above already
-        stopped crediting re-reads, so the existing stall authority sees a
-        stalled load, and the loader refuses the next component with these
-        numbers instead of admitting one more into the crawl.
-        """
         if self._thrash or self._phase_bytes <= 0 or read is None:
             return
         phase_read = max(0, read - self._phase_read0)
@@ -344,8 +215,6 @@ class LoadProgressReporter:
         except Exception:  # noqa: BLE001 - reporting must never break a load
             logger.debug("load-thrash event dropped", exc_info=True)
 
-    # -- sampling -----------------------------------------------------------
-
     def _run(self) -> None:
         while not self._stop.wait(self.interval_s):
             self._tick()
@@ -358,21 +227,10 @@ class LoadProgressReporter:
                 if io_now is not None and self._io0 is not None else 0
             )
             rss_anon_kb = _proc_rss_anon_kb() or 0
-            # Bytes STAGED is evidenced by whichever is further along:
-            # cold reads show in io, page-cache-warm loads show as anon RSS.
-            # Reads BEYOND the set's own size are re-reads, not progress —
-            # crediting them lets a direct-reclaim crawl report TB of
-            # "advancement" so the stall clock never sees a stalled load. Cap
-            # the read-derived credit at what there is to read; anon growth
-            # (real staged bytes) still advances it honestly.
             readable = self.total_bytes or read
             done = max(0, min(read, readable), rss_anon_kb * 1024)
             self._staged = done
-            # ABSOLUTE counters: the phase baselines are absolute too, and a
-            # delta-from-load-start would silently zero the comparison.
             self._check_thrash(io_now, rss_anon_kb * 1024)
-            # Activity-owned, so a load advances the clock of the phase doing it
-            # and not whatever else is open on this pod.
             c = activity_mod.scoped_counter(
                 COUNTER_NAME, "bytes",
                 max(self.total_bytes, done),
@@ -404,11 +262,7 @@ def set_phase(phase: str, nbytes: int = 0) -> None:
 
 
 def thrash_verdict() -> str:
-    """The active load's re-read verdict, or ``""``.
-
-    Non-empty means THIS process has been measured re-reading a set it
-    cannot hold instead of staging it. The loader refuses the next
-    component with it rather than admitting one more into the crawl."""
+    """The active load's re-read verdict, or ``""``."""
     with _lock:
         rep = _active
     return rep.thrash if rep is not None else ""

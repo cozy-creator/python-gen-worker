@@ -1,13 +1,3 @@
-"""One enumerated payload the ENDPOINT cannot serve (pgw#1527).
-
-h3's shape: `fps=60` was mathematically unservable, so one member of a
-7-payload sweep raised from the author's own code and cost every graph the
-other six would have produced.
-
-`Size.LARGE` here is that payload — the author's own arithmetic refuses it,
-from a frame in THIS file. `Size.SMALL` serves and produces graphs.
-"""
-
 from __future__ import annotations
 
 from enum import StrEnum
@@ -52,11 +42,6 @@ class UnservableModel(
 
 
 def _side_for(size: Size) -> int:
-    """The author's own arithmetic, and it refuses one of its own enum values.
-
-    Deliberately raised from ENDPOINT code, at a line in this file — that is
-    the whole predicate under test.
-    """
 
     if size is Size.LARGE:
         raise ValueError("this checkpoint cannot serve the large bucket")

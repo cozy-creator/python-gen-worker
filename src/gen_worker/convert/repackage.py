@@ -1,16 +1,4 @@
-"""Layout repackaging — the generic engine that executes declared maps.
-
-singlefile <-> diffusers. This module owns the *mechanics*: locating weight
-files under diffusers' several naming conventions, applying an ordered set of
-key-rewrite rules, casting dtypes, driving the single-file pipeline loader, and
-refusing a converter whose family disagrees with the tree on disk.
-
-It owns **no family knowledge**. Every rename table, component signature,
-pipeline class and config donor arrives as a :class:`~.repack_spec.RepackageFamily`
-declaration registered by the endpoint that owns the family. Hand-ported
-per-family tensor surgery here means two copies of a family signature that can
-disagree, and a tree handed to the wrong converter with no exception raised.
-"""
+"""Layout repackaging — the generic engine that executes declared maps."""
 
 from __future__ import annotations
 
@@ -76,7 +64,6 @@ def _load_sharded_safetensors(index_json: Path) -> dict[str, torch.Tensor]:
     weight_map = idx.get("weight_map")
     if not isinstance(weight_map, dict) or not weight_map:
         raise ValueError("invalid_safetensors_index")
-    # Load each shard once, merge dicts. This is memory heavy but conversion needs full weights anyway.
     shard_names: list[str] = sorted({str(v) for v in weight_map.values() if isinstance(v, str) and v.strip()})
     out: dict[str, torch.Tensor] = {}
     for name in shard_names:
@@ -91,22 +78,6 @@ def _load_component_state_dict(
     safetensors_bases: list[str] | tuple[str, ...],
     bin_base: str | None = None,
 ) -> dict[str, torch.Tensor]:
-    """
-    Loads a diffusers component state_dict from common weight naming patterns.
-
-    Supported safetensors names:
-    - <base>.safetensors
-    - <base>.safetensors.index.json (sharded)
-    - <base>.bin.safetensors (common in some HF repos)
-    - <base>.bin.safetensors.index.json (rare; but cheap to support)
-    - <base>.<variant>.safetensors and its sharded index (HF dtype-variant
-      downloads keep the suffix — e.g. diffusion_pytorch_model.fp16.safetensors
-      in repo-cas mirrors cloned with a dtype preference)
-
-    A component that offers only a pickle (``<bin_base>.bin``) is REFUSED:
-    pickles are banned platform-wide, and the remedy is to mirror the source
-    repo without the pickle rather than to unpickle it here.
-    """
     for raw_base in safetensors_bases:
         base = str(raw_base or "").strip()
         if not base:
@@ -125,7 +96,6 @@ def _load_component_state_dict(
         if st_index.exists():
             return _load_sharded_safetensors(st_index)
 
-        # Dtype-variant names, exact-name misses only.
         for st in sorted(component_dir.glob(f"{base}.*.safetensors")):
             return _st_load(st)
         for idx in sorted(component_dir.glob(f"{base}.safetensors.*.index.json")) + sorted(
@@ -136,13 +106,6 @@ def _load_component_state_dict(
     if bin_base:
         bin_path = component_dir / f"{bin_base}.bin"
         if bin_path.exists():
-            # The clone lane feeds this ARBITRARY tenant-submitted repos, so a
-            # `.bin` here is an untrusted pickle and reading it is arbitrary
-            # code execution inside a pod holding hub credentials and other
-            # tenants' work (cozy_snapshot.py:285-292). Pickles are banned
-            # platform-wide; `classifier.py` already refuses a pickle-only repo
-            # with `pickle_only`, and this is the same refusal at the component
-            # door.
             raise ConversionImplementationError(
                 f"pickle_only:{bin_path.name}: this component offers only a "
                 f"pickle, and pickles are refused. Mirror the source repo "
@@ -181,11 +144,6 @@ def _torch_dtype(canonical: str) -> Any:
 
 
 def _repackage_torch_dtype(dtype: str | None, policy: DtypePolicy | None = None) -> Any:
-    """Map a requested output dtype onto the torch dtype the single-file pipeline
-    is materialized in. Dtypes the policy marks ``preserve`` are loaded as-is —
-    an fp16 source loaded bf16 rounds a 10-bit mantissa to 7 bits and the later
-    fp16 cast cannot recover it. Everything else (quant targets) loads at the
-    policy default."""
     pol = policy or DtypePolicy()
     canonical = _canonical_dtype(dtype)
     if canonical and canonical in pol.preserve:
@@ -201,17 +159,7 @@ def present_components(model_dir: Path) -> frozenset[str]:
 
 
 def detect_diffusers_family(model_dir: Path) -> str:
-    """Detect the family of a diffusers tree from the *declared* signatures.
-
-    There is exactly ONE copy of each family's signature — the one in its
-    declaration, which is also what the converter guard checks. That is what
-    makes a wrong-converter divergence structurally impossible rather than
-    merely fixed: detection and the guard cannot disagree, because they
-    read the same field.
-
-    Two families claiming one tree is a declaration bug and is refused by name,
-    never resolved by pick-the-first.
-    """
+    """Detect the family of a diffusers tree from the *declared* signatures."""
     present = present_components(model_dir)
     claims: list[str] = []
     for name in registered_repackage_families():
@@ -236,11 +184,6 @@ def detect_diffusers_family(model_dir: Path) -> str:
 
 
 def _family_from_pipeline_class(model_dir: Path) -> str:
-    """Fallback: ``model_index.json``'s ``_class_name`` against declared targets.
-
-    Still declaration-driven — a family is claimed only if it declares that
-    pipeline class in ``to_diffusers``.
-    """
     model_index = model_dir / "model_index.json"
     if not model_index.exists():
         return "unknown"
@@ -261,12 +204,7 @@ def _family_from_pipeline_class(model_dir: Path) -> str:
 
 
 def assert_converter_matches_signature(model_dir: Path, spec: RepackageFamily) -> None:
-    """Refuse to run a converter whose declared signature disagrees with disk.
-
-    The permanent guard. Whichever way the family arrives — detected
-    here or passed in by a caller — the component set on disk is ground truth,
-    and a mismatch is a named refusal rather than a wrong output file.
-    """
+    """Refuse to run a converter whose declared signature disagrees with disk."""
     violations = spec.signature.violations(present_components(model_dir))
     if violations:
         raise ConverterSignatureError(
@@ -280,18 +218,12 @@ def _ensure_parent(p: Path) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
 
 
-# diffusers wraps SingleFileComponentError with a remedy snippet naming both
-# the component and its class: "{name} = {class_name}.from_pretrained('...')".
 _MISSING_COMPONENT_RE = re.compile(r"(\w+) = (\w+)\.from_pretrained\('\.\.\.'\)")
 
 
 def _load_component_from_config_repo(
     config: str, name: str, class_name: str, torch_dtype: Any
 ) -> Any:
-    """Load a pipeline component the checkpoint doesn't carry from the family's
-    declared config repo. DiT-only fine-tunes (common on civitai) ship no
-    text-encoder/VAE weights — sourcing them from the declared donor is exactly
-    the CAS dedup story: the fine-tune tree stores only its denoiser."""
 
     comp_cls = None
     for lib in ("transformers", "diffusers"):
@@ -302,7 +234,7 @@ def _load_component_from_config_repo(
         raise ConversionImplementationError(f"component_class_unavailable:{class_name}")
     try:
         return comp_cls.from_pretrained(config, subfolder=name, torch_dtype=torch_dtype)
-    except TypeError:  # non-torch components (tokenizers etc.) reject torch_dtype
+    except TypeError:
         return comp_cls.from_pretrained(config, subfolder=name)
 
 
@@ -332,8 +264,6 @@ def _load_singlefile_pipeline(
         def loader(path: str, **kw: Any) -> Any:
             return fn(cls, path, **kw)
 
-    # Components missing from the checkpoint are pulled from the config repo
-    # (bounded: a pipeline has a handful of components).
     for _ in range(6):
         try:
             return loader(str(input_path), **kwargs)
@@ -353,7 +283,6 @@ def _load_singlefile_pipeline(
 
 
 def _singlefile_attempts(spec: RepackageFamily) -> list[tuple[str, str | None]]:
-    """Declared pipeline classes: each tried bare first, then with each donor config."""
     attempts: list[tuple[str, str | None]] = []
     seen: set[tuple[str, str]] = set()
     for target in spec.to_diffusers:
@@ -396,8 +325,6 @@ def singlefile_to_diffusers(
             }
         except Exception as exc:  # noqa: BLE001
             cfg = f" config={config}" if config else ""
-            # single-line: the worker fatal path keeps only the first line,
-            # which hid 5 of 6 attempt errors (e2e #112 flux diagnosis).
             flat = str(exc).replace("\n", " | ")
             errors.append(f"{pipeline_class}{cfg}: {flat}")
             continue
@@ -408,7 +335,6 @@ def singlefile_to_diffusers(
 
 
 def _repack_component(model_dir: Path, comp: ComponentRepack) -> dict[str, torch.Tensor]:
-    """Load ONE component and rewrite its keys per the matching declared variant."""
     component_dir = model_dir / comp.name
     if not component_dir.is_dir():
         if comp.required:
@@ -448,8 +374,6 @@ def convert_diffusers_to_singlefile(
     """Drive loop: resolve the declaration, guard it, execute it, cast, save."""
     requested = str(family or "").strip().lower()
     if requested and requested != "unknown":
-        # A caller that NAMES a family is refused by name when nothing declares
-        # it — never quietly re-detected into some other family's converter.
         spec = require_repackage_family(requested)
     else:
         detected = detect_diffusers_family(model_dir)
@@ -469,8 +393,6 @@ def convert_diffusers_to_singlefile(
     if not canonical or canonical not in spec.dtypes.allowed_output:
         raise ValueError("invalid_output_dtype")
 
-    # The guard, kept independent of detection: a converter must never run
-    # against a component set its declaration does not describe.
     assert_converter_matches_signature(model_dir, spec)
 
     state_dict: dict[str, torch.Tensor] = {}

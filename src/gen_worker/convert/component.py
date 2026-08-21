@@ -1,12 +1,4 @@
-"""Component — one diffusers subfolder (unet/transformer/vae/text_encoder/...).
-
-A diffusers-layout ``Source`` exposes ``components: dict[str, Component]``.
-Each Component is a self-contained HF module directory with its own
-config.json and weight file(s). Tenants can iterate tensors of one specific
-component (``source.components['transformer'].iter_tensors()``) or let the
-library's snapshot writers auto-passthrough components the tenant didn't
-touch.
-"""
+"""Component — one diffusers subfolder (unet/transformer/vae/text_encoder/...)."""
 
 from __future__ import annotations
 
@@ -20,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class Component:
-    """One diffusers subfolder. Constructed by the library; tenants don't."""
+    """One diffusers subfolder."""
 
     __slots__ = ("_name", "_path", "_config")
 
@@ -41,7 +33,7 @@ class Component:
 
     @property
     def config(self) -> dict:
-        """Parsed component ``config.json``. Empty dict if the file is absent."""
+        """Parsed component ``config.json``."""
         if self._config is None:
             cfg_path = self._path / "config.json"
             if cfg_path.exists():
@@ -52,12 +44,7 @@ class Component:
         return self._config
 
     def iter_tensors(self) -> Iterator[tuple[str, "torch.Tensor"]]:
-        """Yield ``(name, tensor)`` pairs for every weight in this component.
-
-        Handles sharded safetensors via .index.json transparently. Names are
-        local to the component (e.g. ``conv_in.weight``), NOT prefixed with
-        the component name.
-        """
+        """Yield ``(name, tensor)`` pairs for every weight in this component."""
 
         yield from iter_component_tensors(self._path)
 

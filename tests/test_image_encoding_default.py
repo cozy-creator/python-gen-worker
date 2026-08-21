@@ -1,12 +1,3 @@
-"""Paul's ruling (2026-07-24): image encoding defaults to WebP always, with
-PNG and JPEG as first-class alternatives (th#1126 item 4 follow-up).
-
-Real PIL round trips through the ONE encode core both surfaces now share
-(``gw_io.encode_image``), plus ``ctx.save_image`` driven over a real
-RequestContext and a real local media-upload sink — same pattern as
-tests/test_p9_result_upload_metrics.py, no encode mocking.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -25,12 +16,8 @@ from gen_worker.api.errors import ValidationError
 Image = pytest.importorskip("PIL.Image")
 
 
-# ---- real encode core -------------------------------------------------------
-
-
 def _img(mode: str = "RGB", size: Tuple[int, int] = (64, 48)) -> Any:
     img = Image.new(mode, size)
-    # Non-uniform content so a lossy codec has something to lose.
     for x in range(size[0]):
         for y in range(size[1]):
             v = (x * 4 + y * 2) % 256
@@ -44,7 +31,6 @@ def test_the_framework_default_is_webp() -> None:
     assert gw_io.DEFAULT_IMAGE_FORMAT == "webp"
     payload, ext = gw_io.encode_image(_img())
     assert ext == ".webp"
-    # RIFF....WEBP container magic.
     assert payload[:4] == b"RIFF" and payload[8:12] == b"WEBP"
     assert Image.open(BytesIO(payload)).size == (64, 48)
 
@@ -78,7 +64,6 @@ def test_jpeg_of_a_transparent_image_converts_instead_of_exploding() -> None:
     decoded = Image.open(BytesIO(payload))
     decoded.load()
     assert decoded.mode == "RGB"
-    # Palette mode too (the other JPEG-hostile mode).
     payload, _ = gw_io.encode_image(_img("RGB").convert("P"), format="jpeg")
     assert payload.startswith(b"\xff\xd8\xff")
 
@@ -115,7 +100,6 @@ def test_both_encode_surfaces_share_one_default(monkeypatch: Any) -> None:
         assert params["format"].default == gw_io.DEFAULT_IMAGE_FORMAT == "webp"
         assert params["quality"].default == gw_io.DEFAULT_IMAGE_QUALITY == 95
 
-    # ...and they must route through the same core object, not their own copy.
     import gen_worker.request_context as rc
 
     assert rc.encode_image is gw_io.encode_image
@@ -152,12 +136,7 @@ def test_write_image_derives_the_extension_when_the_ref_has_none() -> None:
     assert saved == ["image.webp", "image.jpg", "already.png"]
 
 
-# ---- ctx.save_image over a real context + real upload sink ------------------
-
-
 class _UploadSink(BaseHTTPRequestHandler):
-    """Real stand-in for tensorhub's /api/v1/media/:owner/uploads (dedup
-    response, so no S3 part PUT scripting is needed)."""
 
     requests_seen: ClassVar[List[Dict[str, Any]]] = []
 

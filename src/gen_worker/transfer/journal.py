@@ -30,12 +30,7 @@ class TransferSession:
 
 
 class TransferJournal:
-    """A process-safe durable map from caller operation names to sessions.
-
-    The caller owns the meaning of ``name`` and obtains grants. TensorFS stores
-    only the remote session and manifest identity needed to ask that service for
-    a resumed plan after a restart.
-    """
+    """A process-safe durable map from caller operation names to sessions."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)

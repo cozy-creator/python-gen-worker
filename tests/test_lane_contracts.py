@@ -259,7 +259,7 @@ def _sibling_tensorfs() -> Path:
         candidate = ancestor / "tensorfs"
         if (candidate / ".git").exists():
             return candidate
-    return ROOT.parent / "tensorfs"  # a stable non-existent path -> honest skip
+    return ROOT.parent / "tensorfs"
 
 
 UPSTREAM = _sibling_tensorfs()
@@ -283,8 +283,6 @@ def _upstream_blob(path: str) -> bytes | None:
         ["git", "-C", str(UPSTREAM), "show", f"{rev}:{path}"],
         capture_output=True,
     )
-    # An unfetched rev is "cannot check here", never "drifted": the sibling is
-    # a convenience, and CI has no sibling at all.
     return done.stdout if done.returncode == 0 else None
 
 
@@ -462,8 +460,6 @@ def test_a_lane_naming_no_ratified_document_refuses_at_DECLARATION() -> None:
         ):
             def load(self, ctx: object) -> None: ...
 
-    # `requires=` is deleted and the refusal names the spelling that replaces
-    # it — a silently-ignored floor is exactly what this class of bug was.
     with pytest.raises(ModelDeclarationError, match="requires.*is DELETED"):
 
         class Floored(Model[SDXL], requires={"sdxl.diffusers@1": "vram12g"}):

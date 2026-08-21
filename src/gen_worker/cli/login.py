@@ -1,25 +1,4 @@
-"""``gen-worker login`` / ``logout`` — hub auth, once per machine.
-
-pgw#1491. The credential is written USER-GLOBAL (``cli/credentials``), so one
-login serves every endpoint venv on the box.
-
-Two ways in, and the difference is only where the token comes from:
-
-    gen-worker login --token cozy_st_...      # paste a machine token
-    gen-worker login --email you@example.com  # password login, then MINT one
-
-The second path deliberately does not keep what it logged in with. It exchanges
-the session for a MACHINE token (``POST /api/v1/orgs/:org/tokens``) and stores
-only that, discarding the access/refresh pair. A refresh token is rotating
-shared state — the thing that revoked 737 of 740 sessions on this box on
-2026-08-11 and the thing that kills a token in the middle of a long build.
-Nothing this command stores can rotate, so neither failure has a mechanism
-here.
-
-``gen-worker logout`` deletes the file. It does not revoke the token hub-side
-(that is ``tokens revoke``, deliberately separate: forgetting a credential on
-one machine and killing it for every machine are different intentions).
-"""
+"""``gen-worker login`` / ``logout`` — hub auth, once per machine."""
 
 from __future__ import annotations
 
@@ -35,17 +14,13 @@ from typing import Any, Dict
 from . import credentials
 from .credentials import Credential, CredentialError
 
-#: One explicit budget per hub hop. A hung login must fail visibly.
 HTTP_TIMEOUT_S = 60.0
 
-#: What a minted machine token is allowed to do. Named, never defaulted: the
-#: hub refuses an empty scope list on purpose, and a token minted with "all"
-#: would be a credential nobody can reason about later.
 PUBLISH_SCOPES = ("org:endpoint:upsert", "org:endpoint:list", "org:endpoint:deploy")
 
 
 class LoginError(RuntimeError):
-    """Authentication failed. Always says which step."""
+    """Authentication failed."""
 
 
 def _hub_url(stated: str) -> str:
@@ -90,11 +65,7 @@ def _get(url: str, *, bearer: str) -> Dict[str, Any]:
 
 
 def whoami(base_url: str, token: str) -> Dict[str, Any]:
-    """``GET /api/v1/tokens/self`` — the only way a bare token learns its org.
-
-    Called on every login so a stored credential has been PROVEN to work once,
-    rather than discovered to be wrong at the first publish.
-    """
+    """``GET /api/v1/tokens/self`` — the only way a bare token learns its org."""
     return _get(f"{base_url}/api/v1/tokens/self", bearer=token)
 
 

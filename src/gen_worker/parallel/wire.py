@@ -1,32 +1,4 @@
-"""The rank command wire: what rank 0 may say to a follower, and in what bytes.
-
-**Why this module exists.** The command channel's writer is rank 0 — the
-compute process that imports TENANT endpoint code and marshals tenant-supplied
-model-call arguments into every RUN. Its readers are the D−1 followers.
-Unpickling that queue makes every follower a deserialization gadget driven by
-tenant-reachable input, so the wire is msgspec msgpack and the
-decoder never names a class the payload chose: commands decode as a CLOSED
-tagged union, and a RUN's leaves decode as plain msgpack data (scalars, lists,
-maps, bytes). There is no constructor reachable from a payload.
-
-**Tensors ride this queue, so msgspec alone does not close it.** The model call
-is the SPMD unit and its arguments are latents, embeddings and masks. Tensors
-therefore travel as **safetensors** bytes — the org's mandated tensor container,
-already a hard dependency, and not a second serialization format: msgspec owns
-the envelope, safetensors owns the tensor.
-
-**The value vocabulary is CLOSED.** msgpack scalars, list, tuple, str-keyed
-dict, `torch.Tensor` and `torch.Generator` — that is all. Anything else is a
-typed refusal raised on rank 0 at send time, with the group still coherent and
-the followers still parked at ``queue.get``. Under pickle the vocabulary was
-open by construction (a PIL image, a numpy array or an endpoint's own class
-crossed silently), and "it pickled" is not the same question as "every rank can
-rebuild it identically".
-
-A `torch.Generator` is not crossable at all and is carried as its seed: the
-seed is the only part that has to agree, and every rank rebuilds an identical
-generator on its own device.
-"""
+"""The rank command wire. The writer is rank 0 — the process that imports TENANT endpoint code and marshals tenant-supplied model-call arguments — so the wire is msgspec msgpack, NEVER pickle: an unpickling follower would be a deserialization gadget on tenant-reachable input. Commands decode as a CLOSED tagged union and RUN leaves as plain msgpack data; no constructor is reachable from a payload. Tensors travel as safetensors bytes (msgspec owns the envelope, safetensors the tensor). The value vocabulary is CLOSED — msgpack scalars, list, tuple, str-keyed dict, torch.Tensor, and torch.Generator carried as its seed — and anything else is a typed refusal raised on rank 0 at send time, with the group still coherent."""
 
 from __future__ import annotations
 
@@ -36,9 +8,6 @@ import msgspec
 
 from .plan import BootPlan, GroupPlan
 
-# The one key that distinguishes an envelope from a plain value. A model-call
-# argument that happens to use it as a dict key is refused rather than
-# escaped — an escape scheme is a second grammar to get wrong.
 _TAG = "__sp__"
 _VAL = "v"
 
@@ -48,21 +17,21 @@ class UncrossableArgument(TypeError):
 
 
 class Arm(msgspec.Struct, tag="arm", tag_field="op"):
-    """Build the SAME pipeline, then obey THIS plan. Sent once per group."""
+    """Build the SAME pipeline, then obey THIS plan."""
 
     boot: BootPlan
     plan: GroupPlan
 
 
 class Run(msgspec.Struct, tag="run", tag_field="op"):
-    """One model call, marshalled. Leaves are wire values, never objects."""
+    """One model call, marshalled."""
 
     args: Tuple[Any, ...] = ()
     kwargs: Dict[str, Any] = {}
 
 
 class Close(msgspec.Struct, tag="close", tag_field="op"):
-    """Teardown. The only way a follower is supposed to exit."""
+    """Teardown."""
 
 
 Command = Union[Arm, Run, Close]
@@ -76,13 +45,8 @@ def encode(command: Command) -> bytes:
 
 
 def decode(raw: bytes) -> Command:
-    """Bytes -> one of exactly three commands. Never anything else."""
+    """Bytes -> one of exactly three commands."""
     return cast(Command, _DECODER.decode(raw))
-
-
-# ---------------------------------------------------------------------------
-# values
-# ---------------------------------------------------------------------------
 
 
 def marshal(value: Any, *, path: str = "") -> Any:
@@ -152,8 +116,7 @@ def unmarshal(value: Any, *, device: str) -> Any:
 
 
 def run_command(args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> Run:
-    """Marshal a model call. Raises `UncrossableArgument` naming the argument
-    — on rank 0, before anything is queued."""
+    """Marshal a model call."""
     return Run(
         args=tuple(marshal(a, path=f"args[{i}]") for i, a in enumerate(args)),
         kwargs={k: marshal(v, path=k) for k, v in kwargs.items()},

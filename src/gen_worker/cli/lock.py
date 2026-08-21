@@ -1,19 +1,11 @@
 """``gen-worker lock`` — discovery + the graph trace, in one command.
 
-pgw#1466, Paul's verb 1: "go through the code and produce the endpoint.lock".
-
-Two things were separate before and had no business being: discovery
-(``python -m gen_worker.discovery``, static, seconds) and the trace
-(``gen-worker release derive``, real author code on a real device, ~165s). Both
-answer "what does this endpoint consist of", both are invalidated by the same
-edit, and a lock carrying one without the other is a lock every later verb has
-to finish. So ``lock`` runs both and writes one file.
-
-The expensive half is skipped on a re-run. Paul: "re-runs don't need to
-regenerate". The skip key is a digest over the derive's INPUTS — author source,
-``uv.lock`` closure, checkpoint ref, trace device, torchcg's format versions —
-so it can be computed in milliseconds and answered before paying anything. See
-``endpoint_lock`` for why it is inputs and not outputs.
+Discovery (static, seconds) and the instrumented derive (real author code on a
+real device) both answer "what does this endpoint consist of" and are
+invalidated by the same edits, so ``lock`` runs both and writes one file. The
+expensive derive is skipped on a re-run whose input digest (author source,
+``uv.lock`` closure, checkpoint ref, trace device, torchcg format versions) is
+unchanged — see ``endpoint_lock`` for why the key is inputs, not outputs.
 """
 
 from __future__ import annotations
@@ -43,11 +35,6 @@ def add_subparser(sub: Any) -> None:
         help="endpoint project root — the directory holding pyproject.toml "
              "and endpoint.toml (default: cwd)",
     )
-    # pgw#1508: REPEATABLE, and each may name the SLOT it belongs to. An
-    # entrypoint with two model slots is two models with two checkpoints —
-    # h3's `generate` is video -> minimax-h3 plus rife -> rife-4.25 — and the
-    # serving binding table has been per-slot since 0.9.0. The BARE form is
-    # the primary/single-slot case and behaves exactly as it always has.
     parser.add_argument(
         "--checkpoint-ref",
         action="append",
@@ -77,11 +64,6 @@ def add_subparser(sub: Any) -> None:
         action="store_true",
         help="re-trace even when the saved trace is reusable",
     )
-    # pgw#1599: `--dynamic-axes` is DELETED — the choice is DECLARED on the
-    # model class (`shapes={"aspect": STATIC|DYNAMIC}`), by the author who
-    # measured it (pgw#1548), and travels in the release document's
-    # `fork_axes`. A flag could re-key every graph in the fleet and leave no
-    # record of what was chosen or why.
     parser.add_argument(
         "--discovery-only",
         action="store_true",
@@ -103,17 +85,10 @@ def add_subparser(sub: Any) -> None:
 
 
 def _say(message: str) -> None:
-    """Progress to stderr, so stdout stays the machine-readable summary."""
     print(message, file=sys.stderr, flush=True)
 
 
 def _split_slot(value: str) -> tuple[str, str]:
-    """``slot=rest`` -> ("slot", "rest"); a bare value -> ("", value).
-
-    Split on the FIRST ``=`` and only when the left side is a plain
-    identifier, so a checkpoint ref or a path that happens to contain ``=``
-    is not mistaken for a slot spelling.
-    """
 
     slot, sep, rest = value.partition("=")
     if sep and slot.isidentifier():
@@ -126,8 +101,6 @@ def _one_tree(checkpoint: str, ref_text: str) -> tuple[Optional[Path], str]:
         tree = Path(checkpoint).resolve()
         if not tree.is_dir():
             raise ws.WorkspaceError(f"--checkpoint {tree} is not a directory")
-        # A local tree still needs an identity for the skip key. Without one,
-        # swapping the tree under a stable path would reuse a stale trace.
         return tree, ref_text or f"local:{tree}"
     if not ref_text:
         return None, ""
@@ -138,12 +111,6 @@ def _one_tree(checkpoint: str, ref_text: str) -> tuple[Optional[Path], str]:
 def _checkpoint_tree(
     args: argparse.Namespace,
 ) -> tuple[Optional[Path], str, dict[str, Path], tuple[str, ...]]:
-    """(primary tree, primary ref, per-slot trees, per-slot ref strings).
-
-    Everything may be absent — a weightless endpoint has no checkpoint at all.
-    The per-slot halves are EMPTY for every endpoint that names one model, so
-    the reuse key and the derive are bit-for-bit what they were (pgw#1508).
-    """
 
     refs: dict[str, str] = {}
     trees: dict[str, str] = {}
@@ -176,9 +143,6 @@ def _checkpoint_tree(
                 f"slot {slot!r} was named with no resolvable checkpoint"
             )
         slot_trees[slot] = tree
-        # Sorted and slot-qualified so the reuse key moves when an AUXILIARY
-        # checkpoint moves — otherwise swapping rife under a stable primary
-        # would silently reuse a trace of the old one.
         slot_refs.append(f"{slot}={ref_text}")
     return primary_tree, primary_ref, slot_trees, tuple(slot_refs)
 
@@ -199,7 +163,6 @@ def run_lock(args: argparse.Namespace) -> int:
         _say(f"error: {root}: {exc}")
         return 2
 
-    # ---------------------------------------------------------------- discovery
     started = time.monotonic()
     try:
         manifest = discover_manifest(root)
@@ -218,7 +181,6 @@ def run_lock(args: argparse.Namespace) -> int:
         print(json.dumps({"lock": str(out), "derive": "skipped:--discovery-only"}))
         return 0
 
-    # ------------------------------------------------------------------- trace
     try:
         tree, ref_text, slot_trees, slot_refs = _checkpoint_tree(args)
     except ws.WorkspaceError as exc:
@@ -235,12 +197,6 @@ def run_lock(args: argparse.Namespace) -> int:
         lockfile_beside,
     )
 
-    # pgw#1489: the endpoint's own uv.lock IS the env identity — its
-    # torch/triton/nvidia rows are the compile stack this trace runs under and
-    # the env half of every artifact key. The venv is compared to it as a
-    # DIAGNOSTIC (a wrong torch costs a failed load and a re-mint, never a
-    # wrong answer), and the lock's file digest is what invalidates a saved
-    # trace (`inputs_digest`).
     lockfile = lockfile_beside(root)
     if lockfile is None:
         _say(f"error: no uv.lock beside {root}; a lock states the compile "
@@ -263,8 +219,6 @@ def run_lock(args: argparse.Namespace) -> int:
         checkpoint_ref=ref_text,
         trace_device=device,
         lockfile=lockfile,
-        # pgw#1508: an AUXILIARY checkpoint is an input too. Empty for every
-        # single-slot endpoint, so their reuse keys do not move.
         extra=slot_refs,
     )
 
@@ -276,15 +230,6 @@ def run_lock(args: argparse.Namespace) -> int:
         existing = None
 
     if args.check:
-        # endpoint.lock is SOURCE: it is committed beside the endpoint and a
-        # stale one builds the wrong thing. The gate is cheap in the common
-        # case ON PURPOSE — the inputs digest is the derive's own definition of
-        # "would this trace differently", computed in milliseconds, so CI can
-        # run it on every push. Only when the inputs MOVED does it pay for a
-        # re-derive, and then it compares the produced document against the
-        # committed one: an input that changed without changing the output is
-        # not drift, and reporting it as drift would train people to ignore
-        # this check.
         if existing is None:
             _say(f"error: {out} has no saved trace to check — run `gen-worker lock`")
             return 2
@@ -307,16 +252,9 @@ def run_lock(args: argparse.Namespace) -> int:
         existing,
         want_inputs_digest=want,
         want_trace_device=device,
-        # BY GRAPH IDENTITY. The saved trace is reusable only if THIS box still
-        # holds a serialized program for every graph the document names — a
-        # question about local bytes, asked with the one key that is portable.
         cas_has=lambda graph: bool(store.has_program(graph)),
     )
     if reuse.ok and not args.force:
-        # The whole point of the verb. Rewrite the lock so freshly-discovered
-        # blocks land, but carry the saved [derive] through untouched — the
-        # bytes are the document's identity and re-encoding would break the
-        # digest that makes it verifiable.
         el.write_lock(out, manifest, reuse.block)
         assert reuse.block is not None
         _say(f"lock: reusing saved trace ({reuse.reason})")
@@ -334,9 +272,6 @@ def run_lock(args: argparse.Namespace) -> int:
         _say(f"lock: tracing — {reuse.reason}")
 
     if tree is None:
-        # Weightless is legal (pgw#1392) and derive_release handles it, but a
-        # model-bearing endpoint reaching here with no tree would trace nothing
-        # and write a document that looks eager-permanent. Refuse by name.
         _say(
             "lock: no --checkpoint-ref/--checkpoint. Tracing a weightless "
             "endpoint; if this endpoint declares a model slot the derive will "
@@ -365,10 +300,6 @@ def run_lock(args: argparse.Namespace) -> int:
     graphs = sum(len(h) for h in result.lane_graphs.values())
     programs = el.graph_identities(json.loads(result.document))
     _say_posture(result)
-    # pgw#1449: an entrypoint the enumerator could not reach no longer kills
-    # the lock — it is written with everything that COULD be enumerated and
-    # the rest is stated. Said here as well as in the document because the
-    # operator running this verb is the one who can reshape the signature.
     for name, reason in result.unenumerable_entrypoints:
         _say(f"lock: entrypoint {name} NOT enumerated -- {reason}")
     for skipped in result.unservable_payloads:
@@ -398,11 +329,6 @@ def run_lock(args: argparse.Namespace) -> int:
     return 0
 
 
-#: The compile posture of a derived endpoint — ONE WORD, always printed.
-#: Silence used to be a posture: `lanes=()` disabled compilation with no
-#: output at all, and a missing contract document refused to trace. pgw#1599
-#: deletes both spellings — every class declares real lanes, and the posture
-#: is read off the MARK.
 POSTURE_WEIGHTLESS = "weightless"
 POSTURE_NO_COMPILE_TARGETS = "traced-no-compile-targets"
 POSTURE_TRACED = "traced"
@@ -417,7 +343,6 @@ def _posture(result: Any) -> str:
 
 
 def _say_posture(result: Any) -> None:
-    """State what this endpoint compiles, and why, in the author's words."""
 
     for lane, hashes in result.lane_graphs.items():
         _say(f"lock: lane {lane}: {len(hashes)} specialization(s)")
@@ -447,13 +372,6 @@ def _trace(
     lockfile: Optional[Path] = None,
     slot_trees: Optional[dict[str, Path]] = None,
 ) -> Optional[tuple[Any, float]]:
-    """Import the author's module and derive it. ``None`` = said why, failed.
-
-    ``lockfile`` is the endpoint's ``uv.lock`` — the compile stack this trace
-    runs under and the env half of every artifact key (pgw#1489). Absent, the
-    one beside ``root`` is used; a derive with neither refuses by name rather
-    than restating what happens to be installed.
-    """
 
     from ..discovery.discover import prime_sys_path
     from ..release.derive import DeriveError, derive_release
@@ -497,13 +415,6 @@ def _check_by_rederive(
     lockfile: Optional[Path] = None,
     slot_trees: Optional[dict[str, Path]] = None,
 ) -> int:
-    """``--check``'s expensive arm: does the committed DOCUMENT still hold?
-
-    Inputs moving is not drift — a comment, a retimed dependency, a new tracer
-    that emits the same graphs all move the inputs digest and change nothing
-    anyone builds. Only the document decides, so only the document is compared,
-    and NOTHING IS WRITTEN either way: `--check` is a question.
-    """
 
     traced = _trace(
         config, root, tree, graph_cas_root, device, lockfile, slot_trees,

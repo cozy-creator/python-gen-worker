@@ -1,18 +1,4 @@
-"""gen_worker.convert — Cozy Creator's model ETL (hub ingest, dtype cast / quant, repackage, publish).
-
-Tenant SDK (conversion endpoints)::
-
-    from gen_worker.convert import Source, ProducedFlavor, Dataset
-
-Clone / mirror::
-
-    from gen_worker.convert import clone
-    result = clone.from_huggingface(ctx, payload)
-
-Heavy deps (torch/safetensors) are imported lazily by the modules that need
-them; ``import gen_worker.convert`` stays cheap. Anything not re-exported
-here is still importable from its defining submodule.
-"""
+"""gen_worker.convert — Cozy Creator's model ETL (hub ingest, dtype cast / quant, repackage, publish)."""
 
 from __future__ import annotations
 
@@ -75,13 +61,11 @@ from .writer import (
     verify_w8a8_snapshot,
 )
 
-# `gen_worker.convert.clone` module alias (clone.from_huggingface style).
 from . import clone
 
 __all__ = [
     "build_svdq_flavor_tree",
     "fetch_svdq_checkpoint",
-    # Tenant SDK
     "Source",
     "Dataset",
     "write_jsonl_shard",
@@ -92,14 +76,12 @@ __all__ = [
     "verify_w8a8_snapshot",
     "fp8_te_components",
     "resolve_calibration_action",
-    # Ingest + clone + publish
     "ingest_huggingface",
     "ingest_civitai",
     "clone",
     "CloneResult",
     "PrecisionClassRefusal",
     "publish_flavors",
-    # Family declarations: the endpoint declares, the SDK executes.
     "CIVITAI",
     "ComponentRepack",
     "DirMatch",
@@ -120,7 +102,6 @@ __all__ = [
     "registered_layouts",
     "registered_repackage_families",
     "require_repackage_family",
-    # §1.33: the layout converter registry — the CONVERTIBLE rung.
     "ConversionCase",
     "ConversionHop",
     "ConversionIO",

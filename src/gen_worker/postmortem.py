@@ -1,23 +1,4 @@
-"""Name a death the dying process cannot report.
-
-`worker_fatal` covers every death Python can observe: an exception anywhere in
-boot/run, and the clean `return 0` from the run loop. This module covers the
-remaining class — the process dies BELOW Python, by signal (cgroup OOM
-SIGKILL, SIGSEGV in a C extension, an external kill). No `except` catches that
-and no in-process reporter can dial out after it.
-
-So the reporter is the NEXT process, not the dying one. Two carriers:
-
-  * the supervisor parent (``supervisor.py``) survives the child and reads its
-    ``waitpid`` status directly — WIFSIGNALED / WTERMSIG / WCOREDUMP;
-  * a boot record on the container filesystem covers the case where the whole
-    cgroup goes (``memory.oom.group``) or the container is restarted: the next
-    boot finds an unfinished record and reports it.
-
-Both carry the container's memory facts — ``memory.max`` vs ``memory.current``
-vs ``memory.peak``, and the ``memory.events`` ``oom_kill`` counter delta — so
-"the kernel OOM-killed us" is a fact in the report, not an inference.
-"""
+"""Name a death the dying process cannot report."""
 
 from __future__ import annotations
 
@@ -41,16 +22,12 @@ _PROC_SELF_CGROUP = Path("/proc/self/cgroup")
 _PROC_MOUNTS = Path("/proc/mounts")
 _GIB = 1024 ** 3
 
-# Filesystems whose contents die with the container's memory — i.e. exactly
-# the death this record exists to report.
 _VOLATILE_FSTYPES = {"tmpfs", "ramfs"}
 
 _BOOT_RECORD_NAME = "gen-worker-boot-record.json"
 
 
 def _fstype_for(path: Path, mounts: Path = _PROC_MOUNTS) -> str:
-    """fstype of the longest mount point that is a prefix of ``path``.
-    Empty string when /proc/mounts is unreadable (non-Linux, sandboxes)."""
     try:
         lines = mounts.read_text().splitlines()
     except OSError:
@@ -70,22 +47,12 @@ def _fstype_for(path: Path, mounts: Path = _PROC_MOUNTS) -> str:
 
 
 def boot_record_is_volatile(path: Path, mounts: Path = _PROC_MOUNTS) -> bool:
-    """Whether the record's carrier is wiped by the very death it instruments.
-
-    ``/tmp`` is tmpfs — RAM — on many container images. A cgroup OOM kill (the
-    headline case this module reports) frees that RAM, so the evidence dies
-    with the process and the next boot finds nothing, indistinguishable from
-    "no death happened".
-    """
+    """Whether the record's carrier is wiped by the very death it instruments."""
     probe = path if path.exists() else path.parent
     return _fstype_for(probe, mounts) in _VOLATILE_FSTYPES
 
 
 def _default_boot_record_path() -> Path:
-    """Prefer a DURABLE carrier. ``GEN_WORKER_BOOT_RECORD`` wins; otherwise the
-    model-cache volume (a real RunPod disk) when it is not itself volatile;
-    ``/tmp`` only as the last resort, and then :func:`write_boot_record` says
-    so loudly rather than pretending the record is durable."""
     explicit = os.environ.get("GEN_WORKER_BOOT_RECORD", "").strip()
     if explicit:
         return Path(explicit)
@@ -148,18 +115,7 @@ def _deepest(name: str) -> Optional[Path]:
     return None
 
 
-# ---- cgroup v1 --------------------------------------------------
-#
-# Some fleets (RunPod's AP-JP-1 H100 hosts among them) mount the memory
-# controller at /sys/fs/cgroup/memory and have NO memory.max /
-# memory.current / memory.events; without this fallback the postmortem is
-# blind on exactly the pod class that OOM-kills. v1 spells the same facts
-# differently:
-#     memory.limit_in_bytes / memory.usage_in_bytes / memory.max_usage_in_bytes
-#     memory.oom_control ("oom_kill N" line, kernel >= 4.13)
-
 _V1_MEM = _CGROUP_ROOT / "memory"
-# v1 "unlimited" territory (kernel reports ~0x7ffffffffffff000).
 _V1_UNLIMITED = 1 << 60
 
 
@@ -175,12 +131,7 @@ def _v1_oom_control() -> Dict[str, int]:
 
 
 def oom_kill_count() -> int:
-    """Kernel OOM kills in this cgroup since creation (0 when unreadable).
-
-    v2: ``memory.events`` oom_kill; v1 fallback: the ``oom_kill`` counter in
-    ``memory.oom_control``. A delta across a worker death is direct proof
-    the kernel did it.
-    """
+    """Kernel OOM kills in this cgroup since creation (0 when unreadable)."""
     p = _deepest("memory.events")
     if p is not None:
         events = _read_keyed(p)
@@ -189,13 +140,7 @@ def oom_kill_count() -> int:
 
 
 def container_limits() -> Dict[str, Any]:
-    """Memory/CPU facts for the container we are actually running inside.
-
-    Everything the "we sized for a bigger box than we got" family of bugs
-    needs: the cgroup ceiling, what we are using against it, the high-water
-    mark, the OOM counters, and the CPU quota vs the host's core count (the
-    number ``os.cpu_count()`` reports, which is the HOST's, not ours).
-    """
+    """Memory/CPU facts for the container we are actually running inside."""
     facts: Dict[str, Any] = {}
     mem_max = _deepest("memory.max")
     mem_cur = _deepest("memory.current")
@@ -209,18 +154,12 @@ def container_limits() -> Dict[str, Any]:
     facts["memory_events"] = _read_keyed(ev) if ev else {}
     facts["cgroup_flavor"] = "v2" if mem_max is not None else "none"
     if mem_max is None and (_V1_MEM / "memory.limit_in_bytes").exists():
-        # v1 host — the same facts under their v1 names.
         facts["cgroup_flavor"] = "v1"
         facts["memory_max_bytes"] = _v1_int("memory.limit_in_bytes")
         facts["memory_current_bytes"] = _v1_int("memory.usage_in_bytes")
         facts["memory_peak_bytes"] = _v1_int("memory.max_usage_in_bytes")
         facts["memory_swap_max_bytes"] = _v1_int("memory.memsw.limit_in_bytes")
         facts["memory_events"] = _v1_oom_control()
-    # The one fact deciding whether the process split can report at all:
-    # `memory.oom.group=1` makes the kernel kill the whole cgroup as a unit,
-    # parent included, and `mem_cgroup_get_oom_group()` is consulted on the
-    # GLOBAL oom path too, so `memory.max=unlimited` does not rule it out.
-    # Every death and every boot record carries it.
     oom_group = _deepest("memory.oom.group")
     facts["memory_oom_group"] = _read_int(oom_group) if oom_group else None
     facts["cpu_max"] = hostfacts.cpu_quota_raw()
@@ -237,21 +176,12 @@ def container_limits() -> Dict[str, Any]:
 
 
 def cpu_quota_cores() -> Optional[float]:
-    """Cores this cgroup may actually use (None = uncapped). One reader,
-    in :mod:`hostfacts` — this module's copy had no cgroup-v1 fallback while
-    ``cpu_budget``'s had no chain walk, so a v1 host and a nested cgroup got
-    different answers from the two."""
+    """Cores this cgroup may actually use (None = uncapped)."""
     return hostfacts.cpu_quota()
 
 
 def effective_cpu_count() -> int:
-    """Honest usable-core count: host cores min'd with affinity and quota.
-
-    ``floor``, not ``int(x + 0.5)``: rounding a 2.5-core quota UP to 3 while
-    ``cpu_budget.cpu_allowance`` keeps 2.5 makes the fleet plan against 3 while
-    torch runs under a throttling kernel. The integer derivation is stated once,
-    in :class:`hostfacts.CpuAllowance`.
-    """
+    """Honest usable-core count: host cores min'd with affinity and quota."""
     return hostfacts.cpu_allowance().whole_cores
 
 
@@ -318,8 +248,6 @@ def format_detail(
             _gb(limits.get("memory_swap_max_bytes")),
         )
     )
-    # `1` means the kernel kills the cgroup as a unit, so this report is only
-    # reaching you because the parent happened to outlive it.
     oom_group = limits.get("memory_oom_group")
     head.append(
         "memory.oom.group=%s%s"
@@ -352,14 +280,6 @@ def format_detail(
     return "\n".join(head)
 
 
-# ---- boot record ----------------------------------------------------------
-#
-# Covers the death the supervisor parent cannot survive (memory.oom.group, an
-# external `docker kill`, the whole container going): the record is written at
-# boot and cleared on a clean exit, so an unfinished record found at the NEXT
-# boot IS the previous process's unreported death.
-
-
 def write_boot_record(path: Path = BOOT_RECORD_PATH, **extra: Any) -> None:
     """Stamp this boot: pid, time, and the OOM counter to diff against."""
     volatile = boot_record_is_volatile(path)
@@ -368,8 +288,6 @@ def write_boot_record(path: Path = BOOT_RECORD_PATH, **extra: Any) -> None:
         "boot_unix": time.time(),
         "oom_kill_at_boot": oom_kill_count(),
         "limits": container_limits(),
-        # Carried IN the record so a reader can tell "the pod did not die"
-        # from "the evidence was on RAM and died with it".
         "carrier_volatile": volatile,
     }
     record.update(extra)
@@ -410,8 +328,7 @@ def take_boot_record(path: Path = BOOT_RECORD_PATH) -> Optional[Dict[str, Any]]:
 
 
 def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
-    """A report for a previous process that vanished without clearing its
-    record — i.e. one killed so hard even the supervisor did not survive."""
+    """A report for a previous process that vanished without clearing its record — i.e."""
     record = take_boot_record(path)
     if record is None:
         return None
@@ -432,9 +349,6 @@ def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
             "kill, container restart, or external kill)"
         ),
     }
-    # The previous process's in-flight marker + fault dump are the death's
-    # attribution; consuming them here also feeds the crash registry so this
-    # boot's gate can refuse a crash-streak function.
     extra.update(attribute_all_signal_deaths(
         signal_name="container_death", marker_dir=path.parent,
     ))
@@ -448,43 +362,20 @@ def previous_boot_detail(path: Path = BOOT_RECORD_PATH) -> Optional[str]:
     )
 
 
-# ---- in-flight marker + native-crash streaks --------------------
-#
-# A bare exit_code=139 carries NOTHING: no frame, no function, and the
-# restarted process takes the same request shape and dies again. Three pieces
-# close that class:
-#
-#   * a faulthandler dump file the dying process writes below Python — the
-#     surviving supervisor attaches its tail, so a signal death carries the
-#     Python stacks of every thread;
-#   * an in-flight marker naming what was executing (function, kind,
-#     request id) — written at request/warmup start, cleared on finish;
-#   * a per-pod crash registry: a function whose in-flight execution died by
-#     signal ``NATIVE_CRASH_REFUSE_STREAK`` times is refused at the next
-#     boot's gate (degrade-never-die across process death: siblings keep
-#     serving, the refusal is loud and typed, the hub reroutes).
-
 _INFLIGHT_NAME = "gen-worker-inflight.json"
 _CRASH_REGISTRY_NAME = "gen-worker-crash-streaks.json"
 _FAULT_DUMP_NAME = "gen-worker-fault-dump.txt"
 _LOAD_PROGRESS_NAME = "gen-worker-load-progress.json"
 
-#: Signal deaths mid-flight on one function, on one pod, before the gate
-#: refuses it. 2 = one free retry for a genuinely transient fault.
 NATIVE_CRASH_REFUSE_STREAK = 2
 
 _FAULT_DUMP_TAIL_BYTES = 8000
 
 
 def _sibling(name: str) -> Path:
-    """Same durable carrier the boot record chose."""
     return BOOT_RECORD_PATH.parent / name
 
 
-# A compute group is a separate OS process, so its transient markers need one
-# writer each; otherwise one child replaces or truncates a sibling's evidence.
-# The crash registry stays pod-wide on purpose: it is the worker-level refusal
-# fact consumed by every group on its next boot.
 def _group_marker_path(
     name: str, ordinal: int, marker_dir: Optional[Path] = None,
 ) -> Path:
@@ -505,8 +396,6 @@ def group_fault_dump_path(
 
 
 def _local_marker_path(name: str) -> Path:
-    # Importing procsplit's tiny environment helpers here keeps the reserved
-    # names canonical without pulling in the parent or any compute dependency.
 
     if host_siblings() > 1:
         return _group_marker_path(name, group_ordinal())
@@ -528,9 +417,7 @@ def group_load_progress_path(
 def write_load_progress(
     record: Dict[str, Any], path: Optional[Path] = None,
 ) -> None:
-    """The load path's death breadcrumb — overwritten every reporter tick,
-    consumed by the death attribution, so a SIGKILL mid-load names the
-    phase/component and the last byte count instead of nothing."""
+    """The load path's death breadcrumb — overwritten every reporter tick, consumed by the death attribution, so a SIGKILL mid-load names the phase/component and the last byte count instead of nothing."""
     path = path or LOAD_PROGRESS_PATH
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -567,12 +454,7 @@ _fault_dump_file: Optional[Any] = None
 
 
 def enable_fault_dump(path: Optional[Path] = None) -> None:
-    """Point ``faulthandler`` at a file the supervisor can read after we die.
-
-    ``faulthandler.enable`` writes every thread's Python stack from inside
-    the signal handler (SIGSEGV/SIGFPE/SIGABRT/SIGBUS) without allocating,
-    then the default action re-raises — so the file has content by the time
-    ``waitpid`` returns to the parent."""
+    """Point ``faulthandler`` at a file the supervisor can read after we die."""
 
     global _fault_dump_file
     path = path or FAULT_DUMP_PATH
@@ -625,11 +507,7 @@ def note_inflight(
     kind: str, function: str, *, request_id: str = "",
     path: Optional[Path] = None,
 ) -> int:
-    """Stamp an execution about to touch the GPU; returns a token for
-    :func:`clear_inflight`. The file carries EVERY active execution (a
-    background-mint seed can overlap another instance's request), so a
-    signal death attributes to all of them — usually exactly one. Cheap:
-    one tiny json write off the compute path."""
+    """Stamp an execution about to touch the GPU; returns a token for :func:`clear_inflight`."""
     global _inflight_next_token
     path = path or INFLIGHT_PATH
     record = {
@@ -650,8 +528,7 @@ def note_inflight(
 def clear_inflight(
     token: Optional[int] = None, path: Optional[Path] = None,
 ) -> None:
-    """Retire one execution (or, with no token, every marker — boot/exit
-    hygiene)."""
+    """Retire one execution (or, with no token, every marker — boot/exit hygiene)."""
     path = path or INFLIGHT_PATH
     with _inflight_lock:
         if token is None:
@@ -662,9 +539,7 @@ def clear_inflight(
 
 
 def current_inflight_request(kind: str = "request") -> str:
-    """The request id of the newest LIVE in-flight execution of ``kind``, so a
-    serve-time guard-miss confession names the exact request that hit it. ''
-    when none is marked."""
+    """The request id of the newest LIVE in-flight execution of ``kind``, so a serve-time guard-miss confession names the exact request that hit it."""
     with _inflight_lock:
         for _token, record in sorted(_inflight_active.items(), reverse=True):
             if record.get("kind") == kind and record.get("request_id"):
@@ -694,8 +569,6 @@ def take_inflight(path: Optional[Path] = None) -> list[Dict[str, Any]]:
         active, list) else []
 
 
-#: How many contributing request ids a streak row remembers. Only needs to
-#: outlive one request's retry ladder.
 _CRASH_REQUEST_MEMORY = 8
 
 
@@ -703,25 +576,13 @@ def record_native_crash(
     function: str, *, kind: str = "", signal_name: str = "",
     request_id: str = "", path: Optional[Path] = None,
 ) -> int:
-    """Count one signal death attributed to ``function``; returns the new
-    streak. The registry lives on the pod's container fs, so it survives
-    process restarts and dies with the pod — per-SKU-instance by
-    construction.
-
-    The streak counts DISTINCT REQUESTS, not attempts: the hub's blame ladder
-    re-runs one deterministically fatal payload on the same pod, and counting
-    attempts would condemn a healthy pod `worker_native_crash_loop` on retries
-    of a SINGLE request. The gate exists for a function that keeps killing this
-    pod across DIFFERENT work. A death with no request id (a background
-    compile) still counts every time.
-    """
+    """Count one signal death attributed to ``function``; returns the new streak."""
     path = path or CRASH_REGISTRY_PATH
     streaks = native_crash_streaks(path)
     row = streaks.get(function) or {"count": 0}
     request_id = str(request_id or "").strip()
     seen = [str(r) for r in (row.get("requests") or []) if r]
     if request_id and request_id in seen:
-        # Same request, another attempt: one fault, already counted.
         row["last_kind"] = kind
         row["last_signal"] = signal_name
         row["last_unix"] = time.time()
@@ -763,19 +624,12 @@ def native_crash_streaks(
     }
 
 
-#: Inflight-marker kind for a background torch.compile (hot-swap warm thread,
-#: mint compile units). Its presence at a signal death makes the COMPILE the
-#: prime suspect — dynamo/inductor run native codegen — so the streak is
-#: recorded against the compile marker, never the tenant request that happened
-#: to be in flight (that misattribution condemns a whole SKU for a software
-#: race).
 COMPILE_KIND = "compile"
 _COMPILE_FN_PREFIX = "compile:"
 
 
 def compile_marker(label: str) -> str:
-    """Registry/marker function name for a background compile of ``label``.
-    Namespaced so it can never collide with (or refuse) a serving function."""
+    """Registry/marker function name for a background compile of ``label``."""
     return _COMPILE_FN_PREFIX + str(label or "unknown")
 
 
@@ -783,18 +637,6 @@ def compile_marker(label: str) -> str:
 def compile_inflight(
     label: str, *, path: Optional[Path] = None,
 ) -> Iterator[None]:
-    """Name a device-touching COMPILE span before it starts, and retire it on
-    every exit (pgw#1262).
-
-    The `finally` is the load-bearing half: a leaked marker would make the NEXT
-    unrelated signal death read as a compile crash, which is the same
-    misattribution this exists to prevent, pointed the other way.
-
-    Wrapping a span in this is what makes :func:`compile_crash_rows` — and so
-    pgw#714's eager-only reboot — cover it. A device-touching compile/adopt
-    phase that does NOT hold one of these is invisible to that mechanism, and
-    its deaths are charged to whatever tenant request happened to be in flight.
-    """
     token = note_inflight(COMPILE_KIND, compile_marker(label), path=path)
     try:
         yield
@@ -820,14 +662,7 @@ def attribute_signal_death(
     dump_path: Optional[Path] = None,
     load_progress_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Everything the post-mortem reporter can attach to a signal death:
-    the in-flight markers (consumed), the fault-dump tail, and — for each
-    marker naming a function — the recorded crash streak.
-
-    When a ``compile`` marker is in flight the streak is recorded ONLY against
-    the compile marker(s): a background dynamo/inductor compile racing a tenant
-    forward is the native suspect, and charging the request's function would
-    refuse serving and condemn the SKU for a software bug."""
+    """Everything the post-mortem reporter can attach to a signal death: the in-flight markers (consumed), the fault-dump tail, and — for each marker naming a function — the recorded crash streak."""
     extra: Dict[str, Any] = {}
     inflight = take_inflight(inflight_path)
     if inflight:
@@ -851,9 +686,6 @@ def attribute_signal_death(
     tail = fault_dump_tail(dump_path)
     if tail:
         extra["fault_dump_tail"] = tail
-    # A death mid-load names the phase/component and last byte count — the
-    # difference between "SIGKILL" and "SIGKILL at hydrate:transformer,
-    # 48.2/94.3 GiB staged".
     progress = take_load_progress(load_progress_path)
     if progress:
         extra["last_load_progress"] = progress
@@ -861,12 +693,6 @@ def attribute_signal_death(
 
 
 def _group_marker_dirs(marker_dir: Optional[Path] = None) -> list[Path]:
-    """Existing ``gN`` marker dirs, sorted by ordinal.
-
-    The whole-worker supervisor and next-container reporter do not own the
-    delivered topology, so the durable filesystem is their census.  Only the
-    exact directory form this module creates is admitted.
-    """
     marker_dir = marker_dir or BOOT_RECORD_PATH.parent
     try:
         dirs = [
@@ -901,13 +727,7 @@ def clear_all_fault_dumps(marker_dir: Optional[Path] = None) -> None:
 def attribute_all_signal_deaths(
     *, signal_name: str, marker_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Consume signal evidence after the whole control process/container dies.
-
-    A per-slot death calls :func:`attribute_signal_death` with its ordinal.
-    The outer supervisor and next boot instead lost the owner of every slot,
-    so they aggregate all one-writer group files without letting one group's
-    record overwrite another's.
-    """
+    """Consume signal evidence after the whole control process/container dies."""
     pairs = [(
         "worker",
         marker_dir / _INFLIGHT_NAME if marker_dir is not None else INFLIGHT_PATH,

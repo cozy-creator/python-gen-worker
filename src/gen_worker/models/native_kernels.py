@@ -1,14 +1,4 @@
-"""Native-kernel implementations behind the format-1 baseline.
-
-TCG owns the complete compiled-graph declaration and artifact schema. That
-closed schema carries no worker kernel-lane verdict, so the worker must not
-smuggle a second, unauthenticated execution policy beside it. Format 1 is
-therefore explicitly ``baseline`` linears plus ``dense`` modulation.
-
-The fused/packed implementations and their direct tests remain available for a
-future TCG-owned format decision. The prebuilt ``_cozy_kernels`` extension is
-also probed independently; extension presence never changes the format-1 lane.
-"""
+"""Native-kernel implementations behind the format-1 baseline."""
 
 from __future__ import annotations
 
@@ -26,14 +16,12 @@ NATIVE_LIB_ENV = "GEN_WORKER_NATIVE_KERNELS_LIB"
 _EXT_DEFAULT = "/opt/cozy/native/libcozy_kernels.so"
 _EXT_NAMESPACE = "cozy_kernels"
 
-# Two independent decisions, each cached with the reason that produced it.
 _EXECUTION_LANES: Dict[str, str] = {}
 _REASONS: Dict[str, str] = {}
 
 
 def native_kernels_requested() -> Optional[bool]:
-    """Env tri-state: True (opt-in), False (kill), None (unset => off while
-    the rollout is env-gated)."""
+    """Env tri-state: True (opt-in), False (kill), None (unset => off while the rollout is env-gated)."""
     raw = os.environ.get(NATIVE_ENV, "").strip().lower()
     if raw in ("1", "true", "on", "yes"):
         return True
@@ -50,7 +38,6 @@ def _record(axis: str, value: str, reason: str) -> str:
 def _decide(
     axis: str, off: str,
 ) -> str:
-    """Return the one format-1 lane, cached with an explicit reason."""
     if axis in _EXECUTION_LANES:
         return _EXECUTION_LANES[axis]
 
@@ -69,15 +56,12 @@ def _decide(
 
 
 def svdq_linear_execution_lane() -> str:
-    """``"fused"`` | ``"baseline"`` for the W4A4 linears in this process.
-    Call at LOAD time — the first call compiles kernels and self-checks."""
+    """``"fused"`` | ``"baseline"`` for the W4A4 linears in this process."""
     return _decide("linear", "baseline")
 
 
 def svdq_modulation_execution_lane() -> str:
-    """``"packed"`` | ``"dense"`` for the W4A16 AdaLN modulation. Independent
-    of the linear lane: a card that wants the baseline linears can still want
-    packed modulation, and sm_100 does."""
+    """``"packed"`` | ``"dense"`` for the W4A16 AdaLN modulation."""
     return _decide("modulation", "dense")
 
 
@@ -99,15 +83,8 @@ def reset_native_kernels_arming() -> None:
     _REASONS.clear()
 
 
-# ---------------------------------------------------------------------------
-# The C++/CUDA extension (`csrc/`, prebuilt .so). Probed separately; no lane
-# depends on it until a kernel actually ships there.
-# ---------------------------------------------------------------------------
-
-
 def extension_path() -> Optional[str]:
-    """Where the prebuilt extension would be, or None. Env override first,
-    then the base-image bake path."""
+    """Where the prebuilt extension would be, or None."""
     override = os.environ.get(NATIVE_LIB_ENV, "").strip()
     if override:
         return override
@@ -117,8 +94,7 @@ def extension_path() -> Optional[str]:
 
 
 def load_extension() -> Optional[str]:
-    """Load the extension library. Returns None on success, else the typed
-    reason it is unavailable."""
+    """Load the extension library."""
     path = extension_path()
     if path is None:
         return (f"no extension library (checked {NATIVE_LIB_ENV} and "
@@ -142,8 +118,7 @@ def extension_ops() -> Any:
 
 
 def extension_available() -> bool:
-    """Extension loaded + probe op present + (GPU) probe numerics.
-    Never raises."""
+    """Extension loaded + probe op present + (GPU) probe numerics."""
     try:
         reason = load_extension()
         if reason is not None:

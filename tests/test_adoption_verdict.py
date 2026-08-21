@@ -1,20 +1,3 @@
-"""pgw#1564: a boot that arms ZERO claimed graphs says so, WITH the reasons.
-
-The field shape this encodes (2026-08-20 09:41, sd15, `gen-worker up -d`):
-adoption claimed 14 graphs and holed all 14 — each Hole carrying
-`cannot decompress` (pgw#1561's bare-ZIP blobs) — and NOT ONE LINE reached
-the resident log, because the adopt summary sat at INFO (`up` surfaces
-WARNING+ only) and hole REASONS were logged nowhere at any level. The zero
-was then investigated for hours as a brand-new silent-adoption defect. A
-zero that cannot go red is the disease; these tests are the cure's red arm.
-
-Same fixture ecosystem as ``test_serving_adopt_first``: the real endpoint
-fixture, a real ``LocalGraphStore``, real publish-time discovery — and for
-the red arm deliberately NO loader stub, because the reason under test is
-produced by the REAL loader refusing real unloadable bytes (torchcg's
-``materialize`` raises on a ZIP long before any GPU work).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -44,8 +27,7 @@ import json
 
 
 def make_binding(tmp_path: Path) -> DeployBinding:
-    """The adopt-first suite's binding, built directly (its `binding` is a
-    pytest fixture and fixtures do not import)."""
+    """The adopt-first suite's binding, built directly (its `binding` is a pytest fixture and fixtures do not import)."""
     from test_serving_adopt_first import OVERRIDES
 
     root = tmp_path / "checkpoint"
@@ -62,19 +44,18 @@ def make_binding(tmp_path: Path) -> DeployBinding:
 def test_zero_armed_is_a_warning_with_its_hole_reasons(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from test_serving_adopt_first import (  # the suite's own real fixtures
+    from test_serving_adopt_first import (
         fresh_host,
         publish_document,
     )
 
     binding = make_binding(tmp_path)
     host = fresh_host(binding, tmp_path)
-    host.setup()  # the eager bridge boot the publish-time derive drives
+    host.setup()
     document = publish_document(host)
 
     store = LocalGraphStore(LocalCAS(tmp_path / "cas"))
     for record in document.lanes[0].graphs:
-        # What every pre-pgw#1561 publisher banked: the bare AOTI package.
         bare = tcg_artifacts.aoti_package(
             tmp_path / f"{record.graph[-8:]}.pt2",
             graph_specialization=record.graph,
@@ -89,7 +70,6 @@ def test_zero_armed_is_a_warning_with_its_hole_reasons(
     with caplog.at_level(logging.INFO):
         booted.setup(
             store=store, document=document, sm=SM,
-            # NO loader stub: the reason under test is the REAL loader's.
             artifacts_dir=tmp_path / "adopted",
             stack=STACK,
         )
@@ -107,7 +87,6 @@ def test_zero_armed_is_a_warning_with_its_hole_reasons(
         "the reason class the real loader raised must be named"
     )
 
-    # And the reasons are handle-visible facts, not log-only prose.
     for hole in booted.holes:
         assert "ArtifactFormatSkew" in hole.reason
 
@@ -115,8 +94,7 @@ def test_zero_armed_is_a_warning_with_its_hole_reasons(
 def test_an_armed_boot_stays_quiet(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Polarity: the WARNING fires only on the zero — an armed boot logs one
-    INFO summary, or the alarm becomes noise operators learn to ignore."""
+    """Polarity: the WARNING fires only on the zero — an armed boot logs one INFO summary, or the alarm becomes noise operators learn to ignore."""
     from test_serving_adopt_first import (
         counting_loader,
         fresh_host,
@@ -151,8 +129,7 @@ def test_an_armed_boot_stays_quiet(
 
 
 def test_the_handle_carries_hole_reasons_and_the_verdict(tmp_path: Path) -> None:
-    """The handle is the ONE thing an out-of-process caller can read after
-    boot; names without reasons is what made the field zero reasonless."""
+    """The handle is the ONE thing an out-of-process caller can read after boot; names without reasons is what made the field zero reasonless."""
     booted = daemon_mod.Booted(
         host=SimpleNamespace(adoption=SimpleNamespace()),
         loaded=SimpleNamespace(module_name="m", entrypoints={}),
@@ -183,11 +160,6 @@ def test_the_handle_carries_hole_reasons_and_the_verdict(tmp_path: Path) -> None
 def test_the_mint_mints_what_it_was_armed_on_not_a_second_read(
     tmp_path: Path,
 ) -> None:
-    """The 13 ms `completed 0/14` (L4 pod, 2026-08-20): ``arm`` counted holes
-    off the LIVE ``host.holes`` property, ``run`` re-read it, the second read
-    answered empty, and an empty run settles as COMPLETE — a mint that did
-    nothing, declared done, with the status still claiming N holes. The
-    work-list is read ONCE at arm; what was armed is what gets minted."""
     from gen_worker.serving.self_mint import SelfMint
 
     from gen_worker.serving.mint_store import graph_store
@@ -219,9 +191,6 @@ def test_the_mint_mints_what_it_was_armed_on_not_a_second_read(
     compiled: list[str] = []
 
     def compiler(blob: Path, record: SimpleNamespace, destination: Path) -> Path:
-        # A REAL unpacked artifact (pgw#1573): the mint publishes it and then
-        # arms what the store hands back, so a `b"artifact"` placeholder no
-        # longer survives the round trip it now makes.
         compiled.append(record.graph)
         return tcg_artifacts.unpacked(
             destination, graph_specialization=record.graph, sm=SM)
@@ -260,9 +229,6 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> "list[tuple]":
 def test_the_armed_zero_verdict_is_a_durable_row_not_a_log_line(
     tmp_path: Path, wire: "list[tuple]", caplog: pytest.LogCaptureFixture
 ) -> None:
-    """pgw#1564, second lesson: the 09:41 zero was diagnosable from the hole
-    reasons — which lived in a resident log; the next instance was on a pod
-    whose SSH was dead. The reasons now ride the wire."""
     import tcg_artifacts
     from gen_worker._vendor.torchcg.requirements import RequirementsManifest
     from test_serving_adopt_first import fresh_host, publish_document
@@ -342,10 +308,7 @@ def test_the_mint_terminal_verdict_rides_the_wire_with_its_identity(
 def test_a_divergent_work_list_is_named_on_the_verdict(
     tmp_path: Path, wire: "list[tuple]",
 ) -> None:
-    """The 13/23 ms no-op class, as ONE named fact: the run processed fewer
-    holes than were armed. Constructed directly — a pod running older bytes
-    cannot emit new instruments, so the row's job is to make the NEXT
-    executed-bytes question answerable, not to time-travel."""
+    """The 13/23 ms no-op class, as ONE named fact: the run processed fewer holes than were armed."""
     from gen_worker.serving.mint import MintOutcome
     from gen_worker.serving.self_mint import SelfMint
 

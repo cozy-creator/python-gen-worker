@@ -1,16 +1,4 @@
-"""Process-wide HTTP timeout floor for huggingface_hub.
-
-huggingface_hub's default HTTP client has NO timeout (httpx.Client(timeout=None)
-on 1.x; requests never times out by default on 0.x), and several HfApi methods
-pass an explicit ``timeout=None``. One stalled connection then blocks a clone
-forever: sockets sit in CLOSE-WAIT, the job never fails, and tensorhub's mirror
-demand rows dedup-join the hung job (observed live on cozy-r2).
-
-:func:`install_hf_http_timeouts` installs a client factory whose requests can
-never wait forever: caller-provided numeric timeouts are kept, infinite ones
-are floored to env-tunable defaults. The read timeout applies per socket read,
-so it doubles as a stall detector for streaming bodies.
-"""
+"""Process-wide HTTP timeout floor for huggingface_hub."""
 
 from __future__ import annotations
 
@@ -29,15 +17,7 @@ _installed = False
 
 
 class HfHttpFloorError(RuntimeError):
-    """The huggingface_hub timeout floor could not be installed or PROVEN.
-
-    This patch is load-bearing and reaches into ``huggingface_hub``'s backend,
-    which has already been reshaped once (requests -> httpx). A silent revert
-    puts the whole fleet back on infinite HTTP timeouts and nothing would say
-    so. So installation ends in a behavioural assertion
-    on the session huggingface_hub will actually use, and a failure is loud at
-    boot instead of a wedge weeks later.
-    """
+    """The huggingface_hub timeout floor could not be installed or PROVEN."""
 
 
 def _env_seconds(name: str, default: float) -> float:
@@ -59,8 +39,6 @@ def http_timeouts() -> tuple[float, float]:
 
 
 def _floor_timeout_hook(request: Any) -> None:
-    """httpx request event hook: entries in request.extensions['timeout'] are
-    None when infinite — replace only those; explicit numbers win."""
     connect, read = http_timeouts()
     defaults = {"connect": connect, "read": read, "write": read, "pool": connect}
     current = dict(request.extensions.get("timeout") or {})
@@ -80,14 +58,8 @@ def _hf_version() -> str:
 
 
 def _verify_httpx_floor() -> None:
-    """Prove the floor on the session huggingface_hub will actually use."""
-    # 1.x-only module (see install_hf_http_timeouts): absent on 0.x, so a
-    # top-of-file import would make net.py unimportable there.
     from huggingface_hub.utils import _http as hf_http
 
-    # Drop any client built before the factory was registered, so this checks
-    # the client huggingface_hub will BUILD, not one that happens to be cached
-    # (set_client_factory does this today; do not depend on it).
     close = getattr(hf_http, "close_session", None)
     if callable(close):
         close()
@@ -103,8 +75,6 @@ def _verify_httpx_floor() -> None:
 
 
 def _verify_requests_floor() -> None:
-    # Deferred with its 0.x sibling above: this runs only on the requests
-    # backend, and keeping the pair local keeps the 0.x path self-contained.
     from huggingface_hub.utils import get_session
 
     session = get_session()
@@ -117,22 +87,18 @@ def _verify_requests_floor() -> None:
 
 
 def install_hf_http_timeouts() -> None:
-    """Idempotent; call before any huggingface_hub network use. Raises
-    :class:`HfHttpFloorError` if the floor cannot be proven."""
+    """Idempotent; call before any huggingface_hub network use."""
     global _installed
     with _lock:
         if _installed:
             return
         try:
-            # The version probe itself: `utils._http` exists only on 1.x, and its
-            # absence (ImportError) is what selects the 0.x branch below. Hoisting
-            # it would move the probe to module-import time and break 0.x outright.
             from huggingface_hub.utils import _http as hf_http
 
             default_factory = hf_http.default_client_factory
             set_factory = hf_http.set_client_factory
         except (ImportError, AttributeError):
-            _install_requests_backend()  # huggingface_hub 0.x
+            _install_requests_backend()
             _verify_requests_floor()
             _installed = True
             return
@@ -150,7 +116,6 @@ def install_hf_http_timeouts() -> None:
 
 
 class _TimeoutSession(requests.Session):
-    """huggingface_hub 0.x backend: floor every otherwise-infinite timeout."""
 
     def request(self, method: str, url: str, **kwargs: Any) -> Any:  # type: ignore[override]
         if kwargs.get("timeout") is None:
@@ -159,26 +124,14 @@ class _TimeoutSession(requests.Session):
 
 
 def _install_requests_backend() -> None:
-    """huggingface_hub 0.x (requests): default a (connect, read) timeout on
-    every Session request that would otherwise wait forever."""
-    # DEFERRED ON PURPOSE: `configure_http_backend` was DELETED in huggingface_hub
-    # 1.x (requests -> httpx). Top-of-file it is an ImportError that kills net.py
-    # — and with it every convert/ module — on the version the fleet actually runs.
     from huggingface_hub import configure_http_backend
 
     configure_http_backend(backend_factory=_TimeoutSession)
 
 
 def hf() -> Any:
-    """THE sanctioned huggingface_hub accessor: installs the timeout
-    floor, then returns the module. Every network entry point (HfApi,
-    snapshot_download, hf_hub_download, ...) must be reached through here,
-    so the floor is structurally unskippable.
-    Non-network imports (huggingface_hub.errors / .constants) stay direct."""
+    """THE sanctioned huggingface_hub accessor: installs the timeout floor, then returns the module."""
     install_hf_http_timeouts()
-    # Kept below the install call, not at module top: binding the module only
-    # after the floor is proven is what makes "reached through hf()" mean
-    # "reached with timeouts installed".
     import huggingface_hub
 
     return huggingface_hub

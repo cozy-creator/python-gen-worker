@@ -1,21 +1,3 @@
-"""pgw#1481 — a MODULAR ``model_index.json`` must load, and must refuse BY NAME.
-
-The article is a real diffusers pipeline saved by ``streaming_fixture``, whose
-``model_index.json`` is then rewritten into the 3-element modular form that
-``tensorhub/minimax-h3`` actually ships:
-
-    "vae": ["diffusers", "AutoencoderKL",
-            {"type_hint": [...], "pretrained_model_name_or_path": "...",
-             "subfolder": "vae", "variant": null, "revision": null}]
-
-Before the fix ``skeleton.build`` filtered on ``len(spec) != 2`` and
-``continue``d, so every component vanished and the walk died on
-``declares no nn.Module component`` — a sentence that is false when the index
-declares nine, and that names none of them. The red arm here is that exact
-mutation: revert the walker to a 2-element filter and ``test_modular_index_loads``
-fails.
-"""
-
 from __future__ import annotations
 
 import json
@@ -34,7 +16,6 @@ from streaming_fixture import build_source  # noqa: E402
 
 
 def _modularize(source: Path, **overrides: object) -> None:
-    """Rewrite a classic index in place as a modular one."""
     index_path = source / "model_index.json"
     index = json.loads(index_path.read_text())
     for name, spec in list(index.items()):
@@ -65,11 +46,7 @@ def modular_source(
 
 
 def test_modular_index_loads(modular_source: tuple[Path, type, dict[str, object]]) -> None:
-    """Every component a modular index declares must reach the skeleton.
-
-    THE RED ARM: restore ``len(spec) != 2: continue`` in ``skeleton.build`` and
-    this fails with ``declares no nn.Module component``.
-    """
+    """Every component a modular index declares must reach the skeleton."""
     source, pipeline_cls, classic = modular_source
     declared = {k for k in classic if not k.startswith("_")}
 
@@ -81,8 +58,6 @@ def test_modular_index_loads(modular_source: tuple[Path, type, dict[str, object]
         f"{sorted(reached)} — a component the walker drops is streamed nowhere"
     )
     assert built.modules, "no nn.Module component survived the modular walk"
-    # Identity, not truthiness — the pgw#1410 fence's property, restated here so
-    # a modular index cannot reintroduce the orphan it was written to catch.
     for name, module in built.modules.items():
         assert getattr(built.pipeline, name, None) is module
 
@@ -125,12 +100,7 @@ def test_pinned_variant_or_revision_is_refused_by_name(
     ids=["one-element", "no-metadata-object"],
 )
 def test_unreadable_entry_names_itself(tmp_path: Path, bad: object) -> None:
-    """An entry the walker cannot read is refused, and the message names it.
-
-    This is the half that outlives minimax-h3: before pgw#1481 an unreadable
-    entry was skipped, so N specific failures became one count-of-zero at the
-    end of the loop.
-    """
+    """An entry the walker cannot read is refused, and the message names it."""
     source = tmp_path / "unreadable"
     pipeline_cls = build_source(source)
     _modularize(source)
@@ -144,35 +114,8 @@ def test_unreadable_entry_names_itself(tmp_path: Path, bad: object) -> None:
     assert "vae" in str(excinfo.value)
 
 
-# ── pgw#1618: a SCALAR entry is pipeline CONFIG ─────────────────────────────
-#
-# The `scalar` case was removed from `test_unreadable_entry_names_itself`
-# above, and that removal is the point rather than a concession. It asserted
-# that a non-list entry is unreadable; a CANONICAL diffusers index carries two
-# of them, so the assertion made a correct checkpoint unloadable. pgw#1481's
-# real subject — a LIST-shaped entry the walker cannot read — is untouched and
-# still covered by the two surviving ids.
-
-
 def test_canonical_diffusers_scalars_are_config_not_components(tmp_path: Path) -> None:
-    """SDXL's own `model_index.json` must build.
-
-    MEASURED, from the tree `tensorhub/wai-illustrious@prod-fp16vae`
-    materialises on a pod:
-
-        "force_zeros_for_empty_prompt": true,
-        "add_watermarker": null,
-
-    Neither starts with `_`, so the prefix skip does not cover them. Before
-    this fix, sdxl 0.4.0 on a rented RTX 4090 (pod cwnu3dyz72c1wn, se#819)
-    fetched 6.7 GB of weights and then died
-    `SkeletonError: … entry 'force_zeros_for_empty_prompt' is True, which is
-    not [library, class_name]` — as `boot_warmup_failed` first, then as a
-    FATAL request result the blame ladder burned the worker on.
-
-    THE RED ARM: restore `not isinstance(spec, (list, tuple)) or len(spec) < 2`
-    as one refusal in `skeleton.build` and this fails on the first scalar.
-    """
+    """SDXL's own `model_index.json` must build."""
     source = tmp_path / "canonical-scalars"
     pipeline_cls = build_source(source)
     index_path = source / "model_index.json"

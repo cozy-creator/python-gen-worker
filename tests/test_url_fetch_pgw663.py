@@ -1,11 +1,3 @@
-"""pgw#663: one guarded URL fetch, and it survives the redirect bypass.
-
-Real HTTP servers on loopback, real policy — the only thing stubbed is the
-address classifier, because a test cannot make a public IP appear on this box.
-That stub is exactly one function (`_url_is_blocked`), and the rows that matter
-(redirect re-validation, byte caps, MIME) run the real code end to end.
-"""
-
 from __future__ import annotations
 
 import json
@@ -21,7 +13,6 @@ from gen_worker.api.errors import ValidationError
 
 
 class _Origin(BaseHTTPRequestHandler):
-    """Serves payloads, redirects, and an oversize body."""
 
     state: dict[str, Any] = {}
 
@@ -39,9 +30,6 @@ class _Origin(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if self.path == "/no-length":
-            # No Content-Length at all: HTTP/1.0 read-until-close, i.e. a body
-            # whose size the client cannot know before reading it. This is the
-            # shape an unbounded `resp.read()` blows the pod up on.
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"x" * 5000)
@@ -71,12 +59,7 @@ def origin():
 
 @pytest.fixture
 def public(monkeypatch):
-    """Treat every 127.0.0.1 URL as public EXCEPT ones marked ``blocked``.
-
-    The classifier itself (`_is_private_ip_str`) is covered by its own callers;
-    what this suite is for is the policy AROUND it — above all whether it is
-    consulted on redirect hops at all.
-    """
+    """Treat every 127.0.0.1 URL as public EXCEPT ones marked ``blocked``."""
     def _blocked(url: str) -> bool:
         return "blocked" in url
 
@@ -93,15 +76,12 @@ def test_plain_fetch(origin, public) -> None:
 
 
 def test_redirect_into_a_blocked_destination_is_refused(origin, public) -> None:
-    """THE bug this issue exists for. `urlopen` follows redirects silently, so
-    a pre-flight check on the caller's URL says nothing about where the bytes
-    actually come from — the metadata-service bypass in one line."""
+    """THE bug this issue exists for."""
     base, state = origin
     state["targets"]["meta"] = f"{base}/blocked-metadata"
     with pytest.raises(ValidationError) as exc:
         url_fetch.fetch_bytes(f"{base}/redirect-to-meta")
     assert "redirect hop 1" in str(exc.value)
-    # It refused BEFORE fetching the destination.
     assert not any("blocked-metadata" in p for p in state["paths"])
 
 
@@ -143,7 +123,6 @@ def test_deployment_allowlist_is_an_outer_bound(origin, public, monkeypatch) -> 
     state["body"] = b"ok"
     monkeypatch.setenv(url_fetch.ALLOWED_HOSTS_ENV, "cdn.example.com")
     with pytest.raises(ValidationError, match="allowlist"):
-        # even with the caller explicitly permitting the host
         url_fetch.fetch_bytes(f"{base}/ok", allowed_hosts=("127.0.0.1",))
 
 
@@ -155,17 +134,14 @@ def test_declared_oversize_is_refused_before_reading(origin, public) -> None:
 
 
 def test_a_body_with_no_declared_length_is_still_capped(origin, public) -> None:
-    """The cap cannot depend on the server declaring a size — the per-chunk
-    accounting is what actually bounds the read."""
+    """The cap cannot depend on the server declaring a size — the per-chunk accounting is what actually bounds the read."""
     base, _ = origin
     with pytest.raises(ValidationError, match="exceeds its"):
         url_fetch.fetch_bytes(f"{base}/no-length", max_bytes=1000)
 
 
 def test_an_error_status_is_a_typed_refusal_for_callers(origin, public) -> None:
-    """`fetch_bytes` maps a bad status to a caller refusal — but the OPENER
-    re-raises it untouched, so `input_assets` keeps its own (retryable)
-    reading of a 404 on an authorized transport."""
+    """`fetch_bytes` maps a bad status to a caller refusal — but the OPENER re-raises it untouched, so `input_assets` keeps its own (retryable) reading of a 404 on an authorized transport."""
     import urllib.error
 
     base, state = origin

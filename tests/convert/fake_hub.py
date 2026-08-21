@@ -1,5 +1,3 @@
-"""Shared fake of tensorhub's publish APIs — v1 /commits AND th#1303 v2 /publishes."""
-
 from __future__ import annotations
 
 import json
@@ -15,7 +13,6 @@ import hashlib as _hashlib
 
 
 def _b64_sha(hexdigest: str) -> str:
-    """R2's `x-amz-checksum-sha256` is the base64 of the RAW digest."""
     return _base64.b64encode(bytes.fromhex(hexdigest)).decode()
 
 
@@ -23,7 +20,7 @@ class _FakeHub(BaseHTTPRequestHandler):
     server_version = "FakeTensorhub/1.0"
     state: dict[str, Any] = {}
 
-    def log_message(self, *args: Any) -> None:  # silence
+    def log_message(self, *args: Any) -> None:
         pass
 
     def _read_json(self) -> dict:
@@ -40,8 +37,6 @@ class _FakeHub(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_v2_repudiation(self, pid: str, failure: dict) -> None:
-        """A typed refusal, projection-shaped. The STATUS follows the hub's own
-        split (`failCASPublishV2`): retryable is 409, terminal is 422."""
         self._send(409 if failure.get("retryable") else 422, {"status": {
             "publish_id": pid, "stage": "repudiated", "terminal": True,
             "stages": [{"stage": "verify", "status": "failed"}],
@@ -49,9 +44,6 @@ class _FakeHub(BaseHTTPRequestHandler):
         }})
 
     def _send_proxy_page(self, code: int) -> None:
-        """Answer as a PROXY would (ngrok offline page): text/html, no hub
-        error envelope. pgw#738/#743: origin discrimination must classify
-        this as an outage, never as the hub speaking."""
         body = (b"<!DOCTYPE html><html><body>"
                 b"ngrok: the endpoint is offline</body></html>")
         self.send_response(code)
@@ -61,17 +53,13 @@ class _FakeHub(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
-        """Read surface. pgw#743's keepalive probes a repo GET, and the real
-        hub answers 200 JSON (or its 404 envelope) — either way, definitely
-        itself."""
+        """Read surface."""
         st = _FakeHub.state
         if st.get("proxy_gets", 0) > 0:
             st["proxy_gets"] -= 1
             self._send_proxy_page(int(st.get("proxy_status", 503)))
             return
         if self.path.split("?", 1)[0].endswith("/resolve"):
-            # answer the pgw#654 resolve shape
-            # from state["resolve_body"], 404 when unset.
             st.setdefault("resolve_gets", []).append(self.path)
             body = st.get("resolve_body")
             if body is None:
@@ -85,14 +73,10 @@ class _FakeHub(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         st = _FakeHub.state
         if st.get("proxy_posts", 0) > 0:
-            # The whole hub is behind a dead tunnel: every POST answers the
-            # proxy's offline page with the given status.
             st["proxy_posts"] -= 1
             self._send_proxy_page(int(st.get("proxy_status", 404)))
             return
         if self.path.endswith("/clone-manifests/lookup"):
-            # th#592 download-skip bank lookup. `ready` mirrors tensorhub:
-            # every manifest blob must still be in CAS.
             if st.get("fail_bank_lookups", 0) > 0:
                 st["fail_bank_lookups"] -= 1
                 self._send(503, {"error": "unavailable"})
@@ -115,7 +99,6 @@ class _FakeHub(BaseHTTPRequestHandler):
             self._send(200, {"results": results})
             return
         if self.path.endswith("/clone-manifests"):
-            # refuse manifests whose blobs aren't in CAS.
             req = self._read_json()
             st.setdefault("bank_records", []).append(req)
             manifests = st.setdefault("bank_manifests", {})
@@ -130,12 +113,6 @@ class _FakeHub(BaseHTTPRequestHandler):
                 results.append({"key": key, "status": "recorded"})
             self._send(200, {"results": results})
             return
-        # ---- th#1303 v2: chunked sha256 CAS -------------------------------
-        # The clone/mirror path publishes over these now (clone.py:1192), so a
-        # fake that only knows /commits would make every clone test exercise a
-        # protocol the product no longer uses. Deliberately ENFORCES like R2 on
-        # the PUT: bytes that do not hash to the key are refused and nothing is
-        # stored, because that enforcement IS the v2 design.
         if self.path.endswith("/publishes"):
             req = self._read_json()
             st["publish_request"] = req
@@ -159,11 +136,6 @@ class _FakeHub(BaseHTTPRequestHandler):
         if "/publishes/" in self.path and self.path.endswith("/complete"):
             pid = self.path.split("/publishes/")[1].split("/")[0]
             st.setdefault("complete_attempts", []).append(pid)
-            # pgw#1435 / th#2182: the front door alone is down, and only for
-            # the LAST call. `proxy_posts` cannot express this — it fails the
-            # declare too, so nothing is ever staged and the shape under test
-            # (16-18 GB uploaded, staged, AUDITED, then destroyed) never
-            # occurs. Counted BEFORE any state moves: the hub never saw it.
             if st.get("proxy_completes", 0) > 0:
                 st["proxy_completes"] -= 1
                 self._send_proxy_page(int(st.get("proxy_status", 503)))
@@ -183,17 +155,10 @@ class _FakeHub(BaseHTTPRequestHandler):
                 self._send(409, {"error": {"code": "upload_incomplete",
                                            "message": "objects still awaiting upload"}})
                 return
-            # th#1301 typed refusals, projection-shaped: `retryable` is the
-            # hub's OWN classification and the client must honour it
-            # (pgw#1002 A) rather than re-derive one from the message.
             verdict = st.get("complete_failure")
             if verdict is not None:
                 self._send_v2_repudiation(pid, dict(verdict))
                 return
-            # th#1980: the release is resolved INSIDE the publish transaction
-            # and must already have been CUT — publishing never cuts one.
-            # `release_not_found` is outside chunkcas' retryable allowlist, so
-            # the projection is a repudiation the producer must not retry.
             release = str(req.get("release") or "").strip()
             if release and release not in st.setdefault("releases", set()):
                 self._send_v2_repudiation(pid, {
@@ -239,7 +204,7 @@ class _FakeHub(BaseHTTPRequestHandler):
                 base = f"http://127.0.0.1:{self.server.server_port}"
                 st.setdefault("upload_paths", {})[uid] = op["path"]
                 total_parts = int(st.get("force_parts") or 1)
-                part_size = max(1, -(-int(op["size_bytes"]) // total_parts))  # ceil div
+                part_size = max(1, -(-int(op["size_bytes"]) // total_parts))
                 uploads.append({
                     "path": op["path"], "blake3": op["blake3"], "exists": False,
                     "upload_id": uid,
@@ -247,29 +212,19 @@ class _FakeHub(BaseHTTPRequestHandler):
                     "part_size": part_size,
                     "total_parts": total_parts,
                 })
-            # Uploaded blobs land in the fake CAS (tests simulating GC or
-            # missing blobs mutate state["cas_blobs"] directly).
             cas.update(op["blake3"] for op in req.get("operations", [])
                        if op["type"] == "add")
             self._send(201, {"revision_id": "rev-1", "uploads": uploads,
                              "deletions": [], "copies": [], "tags": req.get("tags") or [],
-                             # The hub's normalizePublishMode("")
-                             # returns "replace" on BOTH routes now. A double
-                             # that still echoed "merge" would assert the
-                             # retired default back into existence.
                              "mode": req.get("mode") or "replace"})
             return
         if "/commits/" in self.path and self.path.endswith("/uploads"):
-            # fresh presigned upload for one stashed add whose
-            # staged bytes were lost (mirrors handleReopenRepoCommitUpload).
             req = self._read_json()
             path_label = str(req.get("path") or "")
             n = st.get("reopen_count", 0) + 1
             st["reopen_count"] = n
             st.setdefault("reopens", []).append(path_label)
             if st.get("reopen_dedup"):
-                # The blob landed in CAS between the loss and the re-open:
-                # the server records the dedup and no bytes move.
                 self._send(201, {"path": path_label, "exists": True})
                 return
             uid = f"re-{n}"
@@ -294,8 +249,6 @@ class _FakeHub(BaseHTTPRequestHandler):
             path_label = st.get("upload_paths", {}).get(uid, "")
             misses = st.get("staging_missing") or {}
             if misses.get(path_label, 0) > 0:
-                # The staged bytes vanished server-side; retrying this
-                # complete can never succeed — the client must re-open.
                 misses[path_label] -= 1
                 st.setdefault("staging_missing_hits", []).append(uid)
                 self._send(409, {"error": {"code": "staging_object_missing",
@@ -303,18 +256,12 @@ class _FakeHub(BaseHTTPRequestHandler):
                 return
             expired = st.get("session_expired") or {}
             if expired.get(path_label, 0) > 0:
-                # The up-front-minted session outlived its fixed
-                # expiry mid-publish; only a re-open can mint a fresh one.
                 expired[path_label] -= 1
                 st.setdefault("session_expired_hits", []).append(uid)
                 self._send(410, {"error": {"code": "upload_session_expired",
                                            "message": "upload session expired"}})
                 return
             if st.get("complete_race_count", 0) > 0:
-                # Simulates a still-finalizing concurrent attempt (tensorhub
-                # verifies large single files synchronously and can outlast
-                # the client's timeout -- e2e tracker #110): the caller must
-                # poll rather than treat this 409 as fatal.
                 st["complete_race_count"] -= 1
                 st.setdefault("complete_race_polls", []).append(self.path)
                 self._send(409, {"error": {"code": "upload_complete_in_progress",
@@ -333,22 +280,15 @@ class _FakeHub(BaseHTTPRequestHandler):
                 self._send(503, {"error": {"code": "service_unavailable"}})
                 return
             if n == 1:
-                self._send(202, {"status": "running"})  # first call -> poll
+                self._send(202, {"status": "running"})
             else:
-                # Real shape (repo_publish.go): the minted id is nested under
-                # `checkpoint` — the flat key was fake-hub drift (gw#413 class).
                 self._send(200, {"ok": True,
                                  "checkpoint": {"checkpoint_id": "blake3:abc"}})
             return
-        # Real hub envelope shape (docs/api-conventions.md) — a string
-        # `error` was fake-hub drift and reads as PROXY-origin under
-        # pgw#738's discrimination.
         self._send(404, {"error": {"code": "not_found", "message": "no route"}})
 
 
     def _v2_plan(self, req: dict) -> dict:
-        """`{have, need}` answered from the fake CAS — residency comes from the
-        STORE, never from a client claim."""
         st = _FakeHub.state
         cas = st.setdefault("v2_cas", set())
         base = f"http://127.0.0.1:{self.server.server_port}"
@@ -370,9 +310,6 @@ class _FakeHub(BaseHTTPRequestHandler):
                     "put_url": f"{base}/v2put/{d}",
                     "headers": {"x-amz-checksum-sha256": _b64_sha(d)},
                 }
-                # th#1303 ObjectGrant.ExpiresAt (2 h TTL in production). Tests
-                # override `grant_ttl_s` — negative mints an already-dead
-                # grant, which is what pgw#1004 C is about.
                 ttl = st.get("grant_ttl_s")
                 if ttl is not None:
                     grant["expires_at"] = (
@@ -384,23 +321,18 @@ class _FakeHub(BaseHTTPRequestHandler):
                 "resident_objects": len(have)}
 
     def do_DELETE(self) -> None:  # noqa: N802
-        """`DELETE /publishes/:id` — hub-side this repudiates the session AND
-        reclaims (deletes) every staged chunk. Recorded so a test can prove the
-        client only ever sends it for a terminal refusal (pgw#1002 B)."""
+        """`DELETE /publishes/:id` — hub-side this repudiates the session AND reclaims (deletes) every staged chunk."""
         st = _FakeHub.state
         st.setdefault("aborts", []).append(self.path)
         if "/publishes/" in self.path:
             pid = self.path.rstrip("/").rsplit("/", 1)[-1]
             st.setdefault("aborted_publishes", []).append(pid)
-            # The staged bytes go with it — that is the whole cost.
             st["v2_cas"] = set()
         self._send(200, {"status": {"stage": "repudiated", "terminal": True}})
 
     def do_PUT(self) -> None:  # noqa: N802
         st = _FakeHub.state
         if st.get("reset_puts", 0) > 0:
-            # Sever the connection mid-request (no HTTP answer at all):
-            # the client sees a connection reset / aborted response.
             st["reset_puts"] -= 1
             try:
                 self.connection.close()
@@ -411,10 +343,6 @@ class _FakeHub(BaseHTTPRequestHandler):
         data = self.rfile.read(n) if n else b""
         counts = st.setdefault("put_counts", {})
         counts[self.path] = counts.get(self.path, 0) + 1
-        # The 5xx and expired-presign injectors apply to EVERY PUT
-        # surface, v1 part URLs and v2 chunk grants alike. They used to sit
-        # below the v2 branch, so the chunk-CAS data plane — the one every
-        # producer now rides — could not be made to fail at all.
         fail_paths = st.get("fail_put_paths") or {}
         if st.get("fail_puts", 0) > 0 or fail_paths.get(self.path, 0) > 0:
             if fail_paths.get(self.path, 0) > 0:
@@ -427,7 +355,6 @@ class _FakeHub(BaseHTTPRequestHandler):
             return
         expired_puts = st.get("expired_put_paths") or {}
         if expired_puts.get(self.path, 0) > 0:
-            # S3 answers 403 for an expired presigned URL.
             expired_puts[self.path] -= 1
             self.send_response(403)
             self.send_header("Content-Length", "0")

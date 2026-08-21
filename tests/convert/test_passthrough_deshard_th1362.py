@@ -1,18 +1,4 @@
-"""A produced flavor's PASSTHROUGH components are one file too.
-
-`build_svdq_flavor_tree` marries our 4-bit denoiser to the base checkpoint's
-other components by hardlinking them through `copy_non_weight_files`. A base
-component that is still a legacy shard set then rides into the produced tree and
-`publish_flavors`' producer invariant refuses it (`sharded_producer_output`).
-The guard is RIGHT — a flavor is our artifact whole, not just the component we
-computed — so de-sharding happens at the door every passthrough weight enters a
-produced tree, not in the mirror arms alone.
-
-Real trees, real safetensors, real `publish_flavors` over HTTP to the fake hub —
-the assertion is on the FILE LIST THAT GOES ON THE WIRE, not on an internal call.
-
-    pytest tests/convert/test_passthrough_deshard_th1362.py -q
-"""
+"""A produced flavor's PASSTHROUGH components are one file too."""
 
 from __future__ import annotations
 
@@ -66,8 +52,6 @@ def _write_sharded(comp: Path, prefix: str, tensors, per_shard: int) -> None:
 
 
 def _svdq_file(path: Path) -> Path:
-    """A real nunchaku single-file checkpoint — self-describing metadata is
-    what `detect_svdq_artifact` keys on, so this must be genuine."""
     safetensors_torch.save_file(
         _tensors(90, 2), str(path),
         metadata={
@@ -79,8 +63,6 @@ def _svdq_file(path: Path) -> Path:
 
 
 def _base_tree(root: Path, *, sharded_text_encoder: bool) -> dict[str, "torch.Tensor"]:
-    """The qwen-image shape: a text_encoder (sharded or not), a vae, and the
-    transformer whose weights the svdq file replaces."""
     te = _tensors(1, 18)
     if sharded_text_encoder:
         _write_sharded(root / "text_encoder", "model", te, per_shard=2)
@@ -114,10 +96,6 @@ def _publish_svdq_flavor(fake_hub: Any, tmp_path: Path, *, sharded: bool):
     return base, tree, te, paths, results
 
 
-# --------------------------------------------------------------------------
-# The multi-shard producer output — the te#137 case
-# --------------------------------------------------------------------------
-
 def test_a_sharded_passthrough_component_publishes_as_ONE_file(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
@@ -133,7 +111,6 @@ def test_a_sharded_passthrough_component_publishes_as_ONE_file(
     ], paths
     assert results and results[0].checkpoint_id
 
-    # Every tensor survived the merge, byte-exact.
     got = {}
     with safe_open(str(tree / "text_encoder" / "model.safetensors"),
                    framework="pt", device="cpu") as f:
@@ -145,21 +122,13 @@ def test_a_sharded_passthrough_component_publishes_as_ONE_file(
 
 
 def test_the_source_snapshot_is_not_mutated(fake_hub: Any, tmp_path: Path) -> None:
-    """The passthrough files are HARDLINKS into the source snapshot. Collapsing
-    them must unlink OUR tree's names and nothing else — the ingested source
-    stays exactly as the mirror left it, so a second flavor off the same source
-    still has its input."""
+    """The passthrough files are HARDLINKS into the source snapshot."""
     base, _tree, _te, _paths, _ = _publish_svdq_flavor(
         fake_hub, tmp_path, sharded=True)
     members = sorted(p.name for p in (base / "text_encoder").iterdir())
     assert members == [f"model-{i:05d}-of-00009.safetensors" for i in range(1, 10)] \
         + ["model.safetensors.index.json"], members
 
-
-# --------------------------------------------------------------------------
-# The single-file producer output — the other half, so the fix cannot be a
-# rewrite-everything pass
-# --------------------------------------------------------------------------
 
 def test_an_unsharded_passthrough_component_publishes_unchanged(
     fake_hub: Any, tmp_path: Path,
@@ -176,24 +145,16 @@ def test_an_unsharded_passthrough_component_publishes_unchanged(
     ], paths
     assert results and results[0].checkpoint_id
 
-    # Untouched means UNTOUCHED: still the same inode the source holds, so a
-    # component that needed nothing done to it costs no bytes and no rewrite.
     src = base / "text_encoder" / "model.safetensors"
     dst = tree / "text_encoder" / "model.safetensors"
     assert src.stat().st_ino == dst.stat().st_ino
     assert src.read_bytes() == dst.read_bytes()
 
 
-# --------------------------------------------------------------------------
-# The guard is a BACKSTOP, not a formality — it must still fail closed
-# --------------------------------------------------------------------------
-
 def test_publish_still_refuses_a_shard_set_the_copy_cannot_collapse(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
-    """A `-NNNNN-of-MMMMM` set with NO index is not collapsible (nothing names
-    the members' order), so it must still be REFUSED rather than published.
-    Normalizing the collapsible case must not soften the invariant."""
+    """A `-NNNNN-of-MMMMM` set with NO index is not collapsible (nothing names the members' order), so it must still be REFUSED rather than published."""
     tree = tmp_path / "flavor"
     (tree / "text_encoder").mkdir(parents=True)
     safetensors_torch.save_file(
@@ -207,9 +168,6 @@ def test_publish_still_refuses_a_shard_set_the_copy_cannot_collapse(
 
 
 def test_an_index_naming_a_missing_shard_fails_the_PRODUCE(tmp_path: Path) -> None:
-    """The klein-4b bug class: an index that disagrees with the bytes it names
-    used to publish and die on a GPU pod at load. The merge verifies against
-    the index, so it now dies here — in the producer, before any upload."""
     base = tmp_path / "base"
     _base_tree(base, sharded_text_encoder=True)
     next((base / "text_encoder").glob("model-00003-of-00009.safetensors")).unlink()

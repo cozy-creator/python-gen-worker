@@ -1,30 +1,4 @@
-"""Inline conversion dispatch for clone_huggingface / clone_civitai.
-
-When the user requests an output dtype the source repo doesn't ship, the
-clone path runs the conversion in-process — the same library code paths
-other worker functions can call. The clone reuses its existing upload
-session so all flavors land atomically under the same destination tag group.
-
-Three buckets:
-
-1. **Direct ingest** — caller decides this *before* calling here, by
-   matching ``target_dtype`` against what the classifier saw in the source
-   files. No conversion needed.
-
-2. **Inline-supported** — weight-only schemes that don't need calibration,
-   streaming per-tensor (peak anon RAM ≈ largest single tensor):
-   - ``bf16`` / ``fp16`` / ``fp32`` (streaming dtype cast)
-   - ``fp8`` / ``fp8:e4m3`` (streaming fp8-E4M3 storage cast — the ``#fp8``
-     flavor; scale-free, consumed via diffusers layerwise casting)
-   - GGUF quants (``q4_k_m``, ``q8_0``, …) via convert_hf_to_gguf + llama-quantize
-
-3. **Calibration-required** — raise ``InlineConversionNotPossible`` with a
-   clear structured refusal: ``nvfp4`` (modelopt + calibration dataset + GPU).
-
-The exception carries structured requirements so callers can render their own
-guidance without this worker package knowing about any particular published
-endpoint.
-"""
+"""Inline conversion dispatch for clone_huggingface / clone_civitai."""
 
 from __future__ import annotations
 
@@ -42,18 +16,9 @@ from ..models.file_layout import SINGLE_FILE
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class DeferredConversionRequirement:
-    """Structured follow-up requirement for work the clone path will not run.
-
-    This deliberately avoids endpoint names, operator commands, and tenant
-    function names. Those are deployment choices owned outside the gen-worker
-    library.
-    """
+    """Structured follow-up requirement for work the clone path will not run."""
 
     kind: str
     target_dtype: str
@@ -79,11 +44,7 @@ class DeferredConversionRequirement:
 
 
 class InlineConversionNotPossible(Exception):
-    """Requested target dtype can't be produced inline by the clone path.
-
-    Carries an optional structured ``deferred_requirement`` the caller can
-    render using its own product surface.
-    """
+    """Requested target dtype can't be produced inline by the clone path."""
 
     def __init__(
         self,
@@ -98,21 +59,13 @@ class InlineConversionNotPossible(Exception):
         super().__init__(self.reason)
 
 
-# ---------------------------------------------------------------------------
-# Dispatch policy
-# ---------------------------------------------------------------------------
-
-# fp8-E4M3 storage flavor (`#fp8`) — a streaming per-tensor cast with the
-# layerwise-casting skip patterns honored. No model load, no scales.
 _INLINE_FP8_STORAGE_DTYPES: frozenset[str] = frozenset({"fp8", "fp8:e4m3"})
 
-# Pure dtype casts that go through the streaming primitive — no HF model load.
 _INLINE_CAST_DTYPES: frozenset[str] = frozenset({
     "bf16", "fp16", "fp32",
-    "f16", "f32",  # GGUF spelling; treat as fp16/fp32 for safetensors output
+    "f16", "f32",
 })
 
-# GGUF quants — run via convert_hf_to_gguf.py (+ optional llama-quantize).
 _INLINE_GGUF_ENCODINGS: frozenset[str] = frozenset({
     "f32", "f16", "bf16", "q8_0",
     "q6_k", "q6_k_l",
@@ -122,13 +75,6 @@ _INLINE_GGUF_ENCODINGS: frozenset[str] = frozenset({
     "q2_k",
 })
 
-# Calibration-required quants. We refuse these inline — they need a calibration
-# dataset and a GPU; running them silently as part of clone would either hang
-# or produce garbage. nvfp4 in particular is NOT producible weight-only: the
-# quality verdict (sd15, real forward passes through a generic prompt pool)
-# was a hard FAIL, so there is no honest calibration-free nvfp4 path.
-# The caller renders any product-specific follow-up guidance from the
-# structured requirement.
 _CALIBRATED_DTYPES: dict[str, DeferredConversionRequirement] = {
     "nvfp4": DeferredConversionRequirement(
         kind="calibrated_quantization",
@@ -146,18 +92,9 @@ def deferred_conversion_requirement(target_dtype: str) -> DeferredConversionRequ
     return _CALIBRATED_DTYPES.get(_normalize(target_dtype))
 
 
-# ---------------------------------------------------------------------------
-# Result type
-# ---------------------------------------------------------------------------
-
 @dataclass
 class InlineConversionResult:
-    """Result of an inline conversion pass.
-
-    Mirrors the shape of streaming_dtype_cast / streaming_fp8_storage_cast so
-    callers can promote ``output_paths`` to CAS the same
-    way they handle the existing per-component conversion jobs.
-    """
+    """Result of an inline conversion pass."""
 
     output_paths: list[Path] = field(default_factory=list)
     target_dtype: str = ""
@@ -165,10 +102,6 @@ class InlineConversionResult:
     attributes: dict[str, str] = field(default_factory=dict)
     summary: dict[str, Any] = field(default_factory=dict)
 
-
-# ---------------------------------------------------------------------------
-# Dispatcher
-# ---------------------------------------------------------------------------
 
 def run_inline_conversion(
     *,
@@ -180,27 +113,12 @@ def run_inline_conversion(
     source_repo_dir: Path | None = None,
     fp8_block_scope: bool = False,
 ) -> InlineConversionResult:
-    """Run the appropriate inline conversion for the requested target_dtype.
-
-    ``source_path`` is the materialized input — for cast / fp8 paths this is
-    the safetensors file (or .index.json) we'll read; for GGUF this is also
-    the safetensors file (we look up sidecar configs via ``source_repo_dir``).
-
-    ``source_repo_dir`` is the parent component directory containing
-    ``config.json`` and tokenizer assets — used by the GGUF path and by
-    the calibrated paths (which load the component as an HF model). When
-    omitted we fall back to ``source_path.parent``.
-
-    Raises ``InlineConversionNotPossible`` for calibrated dtypes; the
-    exception carries structured requirements the caller can render to the
-    user.
-    """
+    """Run the appropriate inline conversion for the requested target_dtype."""
     dtype = _normalize(target_dtype)
     ftype = _normalize(target_file_type) or "safetensors"
     if dtype == "":
         raise ValueError("inline_convert: target_dtype is required")
 
-    # Calibration-required quants — refuse cleanly with a suggested job.
     if dtype in _CALIBRATED_DTYPES:
         raise InlineConversionNotPossible(
             reason=(
@@ -214,7 +132,6 @@ def run_inline_conversion(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # GGUF target — convert_hf_to_gguf.py (+ optional llama-quantize) regardless of source dtype.
     if ftype == "gguf":
         return _run_gguf_inline(
             source_path=source_path,
@@ -223,7 +140,6 @@ def run_inline_conversion(
             encoding=dtype,
         )
 
-    # Pure streaming dtype cast — bf16/fp16/fp32 (and the GGUF spelling f16/f32).
     if dtype in _INLINE_CAST_DTYPES:
         return _run_cast_inline(
             source_path=source_path,
@@ -232,7 +148,6 @@ def run_inline_conversion(
             output_stem=output_stem,
         )
 
-    # fp8-E4M3 storage flavor — streaming per-tensor cast, no model load.
     if dtype in _INLINE_FP8_STORAGE_DTYPES:
         return _run_fp8_storage_inline(
             source_path=source_path,
@@ -241,16 +156,11 @@ def run_inline_conversion(
             block_scope=fp8_block_scope,
         )
 
-    # Fallthrough: dtype is not in any known bucket.
     raise InlineConversionNotPossible(
         reason=f"target dtype {dtype!r} is not recognized as a runnable inline conversion",
         target_dtype=dtype,
     )
 
-
-# ---------------------------------------------------------------------------
-# Bucket implementations
-# ---------------------------------------------------------------------------
 
 def _run_cast_inline(
     *,
@@ -259,7 +169,6 @@ def _run_cast_inline(
     target_dtype: str,
     output_stem: str,
 ) -> InlineConversionResult:
-    """bf16/fp16/fp32 streaming dtype cast."""
     import torch
 
     dtype = _normalize(target_dtype)
@@ -307,12 +216,6 @@ def _run_fp8_storage_inline(
     output_stem: str,
     block_scope: bool = False,
 ) -> InlineConversionResult:
-    """fp8-E4M3 storage cast of one weight set (the ``#fp8`` flavor),
-    streaming per-tensor. Layerwise-casting skip patterns are honored so a
-    consumer's ``apply_fp8_storage`` reproduces the runtime fp8-storage lane
-    exactly. Stamps dtype ``fp8`` — the detector keys on F8_E4M3 headers.
-    ``block_scope=True`` = the transformers-backbone lane (repeated-block
-    params only)."""
 
     result = streaming_fp8_storage_cast(
         Path(source_path), Path(out_dir), output_stem=output_stem,
@@ -342,7 +245,6 @@ def _run_gguf_inline(
     out_dir: Path,
     encoding: str,
 ) -> InlineConversionResult:
-    """GGUF quantization — convert_hf_to_gguf.py (+ optional llama-quantize)."""
 
     dtype = _normalize(encoding)
     if dtype not in _INLINE_GGUF_ENCODINGS:
@@ -351,8 +253,6 @@ def _run_gguf_inline(
             target_dtype=dtype,
         )
 
-    # convert_hf_to_gguf.py only emits f16/bf16/q8_0/f32 directly; everything
-    # else goes through a two-step F16 → llama-quantize pass.
     direct_encodings = {"f32", "f16", "bf16", "q8_0"}
 
     out_dir = Path(out_dir)
@@ -377,7 +277,6 @@ def _run_gguf_inline(
             encoding=dtype,
         )
     else:
-        # Two-step: HF → F16 GGUF, then llama-quantize → target encoding.
         intermediate = work_dir / "model.f16.gguf"
         run_hf_to_gguf_conversion(
             script_path=script,
@@ -387,9 +286,6 @@ def _run_gguf_inline(
         )
         llama_quantize = "llama-quantize"
         cmd = [llama_quantize, str(intermediate), str(final_path), dtype.upper()]
-        # No wall clock: llama-quantize prints a line per quantized tensor, so
-        # SILENCE is the wedge signal and elapsed time is not (a large source
-        # legitimately runs for hours). The tail is kept only for the error.
         tail: list[str] = []
 
         def _quantize_line(line: str) -> None:
@@ -414,9 +310,6 @@ def _run_gguf_inline(
         if not final_path.exists() or final_path.stat().st_size <= 0:
             raise RuntimeError(f"llama-quantize produced no output for {dtype}")
 
-    # Scratch is part of the peak working set, never part of the published
-    # flavor tree. A cleanup failure must fail the flavor rather than leak an
-    # F16 intermediate and tool sidecars into Tensorhub.
     shutil.rmtree(work_dir)
 
     attrs = {
@@ -436,10 +329,6 @@ def _run_gguf_inline(
         summary={"encoding": dtype, "file_size_bytes": final_path.stat().st_size},
     )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _normalize(value: str) -> str:
     return str(value or "").strip().lower()

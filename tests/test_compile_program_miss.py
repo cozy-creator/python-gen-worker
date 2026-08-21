@@ -1,27 +1,4 @@
-"""`compile` answers a missing exported program by DERIVING it, not by failing.
-
-Lineage: pgw#1525. `cli/compile.py`'s module docstring calls the re-derive
-load-bearing — *"when this machine's graph CAS does not hold the program for a
-specialization, `compile` RE-DERIVES it locally"* — and on the one state that
-sentence is about, a box that has never derived this endpoint, the branch was
-unreachable.
-
-Two implementations of one `GraphStore` protocol disagree about what a miss IS:
-`torchcg.store.LocalGraphStore.fetch_program` returns `None`;
-`serving.mint_store.WorkerGraphStore.fetch_program` — which is what `_store()`
-actually builds — RAISES `ProgramBlobUnreachable`, its own message calling the
-condition "ORDINARY". `_ensure_program` tested only for `None`, so the raise
-escaped past `rederive()`.
-
-MEASURED on a wiped store, canonical master, the real verb with no flags:
-`failed=14 (of 14)`, exit 1, **6.04 s**, having never logged "re-deriving" —
-and the error told the user to run `compile`, which is what they had just run.
-A verb whose job is a half-hour of compilation returning in six seconds is what
-a dead branch looks like.
-
-These tests drive `_ensure_program` against BOTH spellings of a miss, because a
-fix written against one store is how this happened in the first place.
-"""
+"""`compile` answers a missing exported program by DERIVING it, not by failing."""
 
 from __future__ import annotations
 
@@ -40,7 +17,6 @@ def spec() -> Spec:
 
 
 class _Store:
-    """A store whose miss spelling and post-derive answer are both dialled in."""
 
     def __init__(self, *, raises: bool, lands: bool) -> None:
         self.raises = raises
@@ -104,7 +80,7 @@ def test_a_present_program_is_returned_without_paying_for_a_derive(
 ) -> None:
     """The cache hit is the common path and must not have gotten slower."""
     store = _Store(raises=False, lands=True)
-    store.derived = True  # already on this box
+    store.derived = True
 
     def rederive() -> None:  # pragma: no cover - must not run
         raise AssertionError("a present program must never trigger a derive")
@@ -114,12 +90,7 @@ def test_a_present_program_is_returned_without_paying_for_a_derive(
 
 
 def test_a_malformed_graph_key_refuses_before_paying_for_a_derive() -> None:
-    """A wiring bug is not a miss, and no derive can satisfy it.
-
-    Checked by `is_graph_hash` UP FRONT rather than by recognising the store's
-    refusal wording — matching on message text would leave this one prose edit
-    away from silently paying a two-minute derive per specialization.
-    """
+    """A wiring bug is not a miss, and no derive can satisfy it."""
     bad = Spec(contract="c", graph="not-a-graph-identity", target="unet", ingress=None)
 
     def rederive() -> None:  # pragma: no cover - must not run

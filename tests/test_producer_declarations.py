@@ -1,28 +1,4 @@
-"""The producer plane's declarations on ``@entrypoint`` — what a function may write.
-
-pgw#1406: pgw#983 deleted ``@job`` and every one of the 27 conversion producers
-in ``cozy-creator/jobs`` is one, so ``@entrypoint`` grew the declaration set
-they carry. These tests pin it: what the four kwargs mean, what reaches the
-manifest, and what each one refuses.
-
-The kwargs' semantics are v1's (``git show 722e30b9^:src/gen_worker/api/jobs.py``)
-with two deliberate deltas, both named at their assertion:
-
-1. ``emits_media`` is TRI-STATE here and a bool on ``@job``. Undeclared must
-   stay the inference default, because on the request path the hub grants
-   ``upload_media`` unconditionally.
-2. ``emits_media`` rides a JOB-KIND row only (th#2177 narrowed this lane's
-   first ruling, which withheld it everywhere). On the REQUEST path
-   ``capability_subject_th2068.go:124`` sets ``UploadsMedia: true``
-   unconditionally and there is no column to store it in; on the JOB path
-   ``jobCapabilitySubject`` gates on ``endpoint_release_jobs.emits_media``,
-   which exists. Right about requests, wrong about jobs — so the fence
-   narrowed rather than reversed.
-
-``publishes`` and ``env`` need NO hub change at all: the hub already decodes
-``functions[].publishes`` / ``functions[].env``, and ``entrypoints[]`` folds
-into ``Functions`` at ParseManifest's one decode site (th#2146).
-"""
+"""The producer plane's declarations on ``@entrypoint`` — what a function may write."""
 
 from __future__ import annotations
 
@@ -66,15 +42,10 @@ def spec(fn: object) -> EntrypointSpec:
     return stamped
 
 
-# -- the declarations reach the spec ----------------------------------------
-
-
 def test_publishes_reaches_the_spec(producers: ModuleType) -> None:
     assert spec(producers.cast_dtype).publishes is True
     assert spec(producers.clone_repo).publishes is True
     assert spec(producers.quality_matrix).publishes is True
-    # score_bench emits media and writes NO repo — the two are independent in
-    # both directions, exactly as they were on `@job`.
     assert spec(producers.score_bench).publishes is False
     assert spec(producers.describe).publishes is False
 
@@ -87,26 +58,18 @@ def test_env_is_normalized_to_a_tuple(producers: ModuleType) -> None:
 def test_kind_reaches_the_spec_and_the_row(
     producers: ModuleType, rows: dict[str, dict]
 ) -> None:
-    """The fourth gap, and the one the three ruled kwargs do not cover.
-
-    A producer that leaves `kind` at `inference` gets
-    `NamesReservedRefs(kind) == false` hub-side, so the reserved `source`
-    payload field it depends on is never resolved and never granted — the body
-    raises on its own first line. The vocabulary is copied verbatim from
-    `internal/functionkind.All`."""
+    """The fourth gap, and the one the three ruled kwargs do not cover."""
     assert spec(producers.cast_dtype).kind == "conversion"
     assert spec(producers.score_bench).kind == "eval"
     assert spec(producers.describe).kind == ""
 
     assert rows["cast_dtype"]["kind"] == "conversion"
     assert rows["score_bench"]["kind"] == "eval"
-    # Undeclared is the hub's own default, unchanged.
     assert rows["describe"]["kind"] == "inference"
 
 
 def test_an_unknown_kind_is_refused() -> None:
-    """A value the hub does not normalize would silently become `inference`
-    — the exact silence this kwarg exists to end."""
+    """A value the hub does not normalize would silently become `inference` — the exact silence this kwarg exists to end."""
     with pytest.raises(EntrypointDeclarationError, match="kind= must be one of"):
         _probe(
             "import msgspec\n"
@@ -120,19 +83,11 @@ def test_an_unknown_kind_is_refused() -> None:
 
 
 def test_emits_media_is_tri_state(producers: ModuleType) -> None:
-    """DELIBERATE DELTA 1 from `@job`, which defaulted to False.
-
-    On the request path the hub grants `upload_media` unconditionally
-    (`capability_subject_th2068.go:124`), so an UNDECLARED entrypoint must
-    read as "not job-scoped" — None — and keep today's behaviour. Only an
-    explicit False opts out."""
+    """DELIBERATE DELTA 1 from `@job`, which defaulted to False."""
     assert spec(producers.quality_matrix).emits_media is True
     assert spec(producers.score_bench).emits_media is True
     assert spec(producers.describe).emits_media is None
     assert spec(producers.cast_dtype).emits_media is None
-
-
-# -- what the manifest carries ----------------------------------------------
 
 
 def test_the_manifest_row_carries_publishes_and_env(rows: dict[str, dict]) -> None:
@@ -143,43 +98,22 @@ def test_the_manifest_row_carries_publishes_and_env(rows: dict[str, dict]) -> No
 
 
 def test_a_non_publishing_row_omits_the_key(rows: dict[str, dict]) -> None:
-    """`omitempty` on both sides: absent IS "did not declare", which is the
-    fail-closed reading the hub's capability minter already uses."""
+    """`omitempty` on both sides: absent IS "did not declare", which is the fail-closed reading the hub's capability minter already uses."""
     assert "publishes" not in rows["score_bench"]
     assert "publishes" not in rows["describe"]
     assert "env" not in rows["describe"]
 
 
 def test_emits_media_rides_a_job_kind_row_only(rows: dict[str, dict]) -> None:
-    """DELIBERATE DELTA 2, NARROWED rather than reversed (th#2177).
-
-    Both halves are measured at tensorhub master and they disagree, which is
-    the whole point:
-
-    * REQUEST path — `capability_subject_th2068.go:124` sets
-      `UploadsMedia: true` unconditionally, `manifestFunction` has no field
-      and `endpoint_function_schemas` no COLUMN. Emitting on an inference row
-      is the mirror-with-no-reader th#2087's fence catches.
-    * JOB path — `jobCapabilitySubject` sets `UploadsMedia: d.EmitsMedia` from
-      `endpoint_release_jobs.emits_media`, a column that already exists. Here
-      the key is READ and it GATES, so withholding it would silently downgrade
-      a producer that declared media to no media at all.
-
-    So the first ruling was right about requests and did not survive a job.
-    `quality_matrix` and `score_bench` are job kinds and carry it; `describe`
-    and `cast_dtype` declared nothing and stay absent either way."""
-    assert rows["quality_matrix"]["emits_media"] is True   # kind="conversion"
-    assert rows["score_bench"]["emits_media"] is True      # kind="eval"
-    # Undeclared is ABSENT on every kind — the tri-state's whole purpose.
-    assert "emits_media" not in rows["cast_dtype"]         # job kind, undeclared
+    assert rows["quality_matrix"]["emits_media"] is True
+    assert rows["score_bench"]["emits_media"] is True
+    assert "emits_media" not in rows["cast_dtype"]
     assert "emits_media" not in rows["clone_repo"]
-    assert "emits_media" not in rows["describe"]           # inference, undeclared
+    assert "emits_media" not in rows["describe"]
 
 
 def test_an_inference_row_never_carries_emits_media() -> None:
-    """The half of the fence that STAYS. An inference entrypoint that declares
-    the field explicitly still emits nothing, because nothing on the request
-    path can store or read it."""
+    """The half of the fence that STAYS."""
     from gen_worker.discovery.entrypoints_v2 import _entrypoint_row
 
     module = type(sys)("pgw1406_inference_media")
@@ -203,15 +137,11 @@ def test_an_inference_row_never_carries_emits_media() -> None:
 
 
 def test_the_undeclared_row_is_byte_identical(rows: dict[str, dict]) -> None:
-    """pgw#1406 must be invisible to every endpoint that does not use it."""
     assert set(rows["describe"]) == {
         "name", "python_name", "module", "declared_module", "class_name",
         "kind", "input_schema", "payload_schema_sha256", "output_schema",
         "output_schema_sha256", "incremental_output", "slots",
     }
-
-
-# -- what the declarations REFUSE -------------------------------------------
 
 
 def _probe(source: str, name: str) -> None:
@@ -281,12 +211,8 @@ def test_publishes_must_be_a_bool() -> None:
         )
 
 
-# -- the SDK half of "one fact, two enforcers" ------------------------------
-
-
 def test_an_undeclared_function_is_refused_the_publisher_surface() -> None:
-    """The hub mints no repo-write grant for an undeclared function, so the
-    refusal arrives at the call site instead of after an upload."""
+    """The hub mints no repo-write grant for an undeclared function, so the refusal arrives at the call site instead of after an upload."""
     ctx: RequestContext = RequestContext("req-undeclared", publishes=False)
     with pytest.raises(PublishNotDeclaredError):
         ctx._require_publish_declaration("save_checkpoint")
@@ -294,7 +220,7 @@ def test_an_undeclared_function_is_refused_the_publisher_surface() -> None:
 
 def test_a_declared_producer_reaches_the_publisher_surface() -> None:
     ctx: RequestContext = RequestContext("req-declared", publishes=True)
-    ctx._require_publish_declaration("save_checkpoint")  # does not raise
+    ctx._require_publish_declaration("save_checkpoint")
 
 
 def test_an_explicit_emits_media_false_refuses_media() -> None:
@@ -304,28 +230,19 @@ def test_an_explicit_emits_media_false_refuses_media() -> None:
 
 
 def test_an_undeclared_context_keeps_intrinsic_media_authority() -> None:
-    """Every endpoint that never says the word is unchanged: media IS the
-    product of a request, and the hub grants it unconditionally."""
+    """Every endpoint that never says the word is unchanged: media IS the product of a request, and the hub grants it unconditionally."""
     ctx: RequestContext = RequestContext("req-plain")
-    ctx._require_media_declaration("save_file")  # does not raise
+    ctx._require_media_declaration("save_file")
     assert ctx.emits_media is True
 
 
-# -- the serve loop stamps the declaration onto the body's context ----------
-
-
 def test_the_serve_loop_stamps_the_declaration(producers: ModuleType) -> None:
-    """The declaration is useless if the running body never sees it. This is
-    the wire from the spec to `ctx.publishes` the hub's grant mirrors."""
+    """The declaration is useless if the running body never sees it."""
     from gen_worker.serving.serve_loop import ServeLoop
 
     host = object.__new__(ServeLoop)
     host._context_kwargs = {}
     host._output_dir = None
-    # pgw#1475: this hand-built host must state every field `_make_context`
-    # reads. Left absent it is an AttributeError, which is the right answer —
-    # a `getattr(..., "")` default in production would turn "this loop was
-    # never given the pod's HF credential" into "the pod has none".
     host._hf_token = ""
 
     producer = host._make_context("r1", None, spec(producers.cast_dtype))
@@ -333,13 +250,10 @@ def test_the_serve_loop_stamps_the_declaration(producers: ModuleType) -> None:
 
     control = host._make_context("r2", None, spec(producers.describe))
     assert control.publishes is False
-    assert control.emits_media is True  # undeclared -> intrinsic
+    assert control.emits_media is True
 
 
 def test_the_producer_context_carries_the_producer_surface() -> None:
-    """ONE context class (pgw#1294/pgw#1306): `mktemp` and the reserved
-    source/destination contract are on the class every entrypoint receives,
-    and the DECLARATION — not the class — decides what may be written."""
     ctx: RequestContext = RequestContext(
         "req-producer", publishes=True, source_info={"ref": "org/model@r1"}
     )

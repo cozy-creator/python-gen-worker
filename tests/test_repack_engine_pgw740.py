@@ -1,15 +1,3 @@
-"""pgw#740 — the convert/ genericity migration: declarative engine.
-
-The acceptance test Paul set for this migration is *onboarding a new family =
-write its declaration, ZERO SDK changes*. Every family used here is synthetic
-(``alpha`` / ``beta`` / ``gamma``) and declared inside the test — if the engine
-needed SDK knowledge about a real family, none of this could pass.
-
-Round-trips write and read REAL safetensors files (tiny synthetic tensors, no
-model weights) so the whole path — weight discovery, rename rules, variant
-selection, prefixing, transpose, dtype cast, save — is exercised end to end.
-"""
-
 from __future__ import annotations
 
 import re
@@ -49,10 +37,6 @@ def _clean_registries():
     reset_component_vocabulary()
 
 
-# --------------------------------------------------------------------------
-# synthetic declarations — everything a new family needs, and nothing more
-# --------------------------------------------------------------------------
-
 _DENOISER = ComponentRepack(
     name="unet",
     safetensors_bases=("diffusion_pytorch_model",),
@@ -71,7 +55,6 @@ _ENCODER = ComponentRepack(
     name="text_encoder",
     safetensors_bases=("model", "pytorch_model"),
     variants=(
-        # v2-style tree: selected by the probe key's presence.
         RepackVariant(
             probe_key="text_model.embeddings.position_ids",
             out_prefix="cond_stage_model.model.",
@@ -92,7 +75,7 @@ _ENCODER_2 = ComponentRepack(
     ),
 )
 
-ALPHA = RepackageFamily(  # single-encoder family
+ALPHA = RepackageFamily(
     family="alpha",
     aliases=("alpha-legacy",),
     alias_prefixes=("alpha-",),
@@ -101,14 +84,14 @@ ALPHA = RepackageFamily(  # single-encoder family
     to_diffusers=(SinglefileTarget("AlphaPipeline", config_repos=("acme/alpha-base",)),),
 )
 
-BETA = RepackageFamily(  # dual-encoder family — alpha's sibling, and the trap
+BETA = RepackageFamily(
     family="beta",
     signature=LayoutSignature(requires_all=("unet",), requires_any=(("text_encoder_2", "tokenizer_2"),)),
     to_singlefile=(_DENOISER, _ENCODER, _ENCODER_2),
     to_diffusers=(SinglefileTarget("BetaPipeline"),),
 )
 
-GAMMA = RepackageFamily(  # singlefile->diffusers only: no converter the other way
+GAMMA = RepackageFamily(
     family="gamma",
     to_diffusers=(SinglefileTarget("GammaPipeline"),),
 )
@@ -139,10 +122,6 @@ def _beta_tree(root: Path) -> Path:
     return root
 
 
-# --------------------------------------------------------------------------
-# 1. the engine executes a declaration — real safetensors round trip
-# --------------------------------------------------------------------------
-
 def test_declared_family_round_trips_through_real_safetensors(tmp_path: Path) -> None:
     registry.register_repackage_family(ALPHA)
     tree = _alpha_tree(tmp_path / "src")
@@ -171,7 +150,6 @@ def test_probe_key_selects_the_declared_variant(tmp_path: Path) -> None:
     repackage.convert_diffusers_to_singlefile(tree, out, family="alpha", output_dtype="bf16")
 
     produced = load_file(str(out))
-    # v2 variant: different prefix AND the alternation rule stripped the encoder path
     assert "cond_stage_model.model.layers.0.weight" in produced
     assert not any(k.startswith("cond_stage_model.transformer.") for k in produced)
 
@@ -191,9 +169,7 @@ def test_declared_transpose_is_applied(tmp_path: Path) -> None:
 
 
 def test_onboarding_a_family_needs_no_sdk_change(tmp_path: Path) -> None:
-    """The acceptance test, stated directly: a family the SDK has never heard of
-    converts correctly the moment its declaration is registered — and is refused
-    by name before that."""
+    """The acceptance test, stated directly: a family the SDK has never heard of converts correctly the moment its declaration is registered — and is refused by name before that."""
     tree = _alpha_tree(tmp_path / "src")
     out = tmp_path / "out.safetensors"
 
@@ -206,13 +182,7 @@ def test_onboarding_a_family_needs_no_sdk_change(tmp_path: Path) -> None:
     assert out.exists()
 
 
-# --------------------------------------------------------------------------
-# 2. the wrong-converter defect, made structurally impossible
-# --------------------------------------------------------------------------
-
 def test_dual_encoder_tree_is_refused_by_the_single_encoder_converter(tmp_path: Path) -> None:
-    """The pgw#740 defect in its generic form: a caller naming the wrong family
-    must be refused, not silently handed the wrong converter."""
     registry.register_repackage_family(ALPHA)
     registry.register_repackage_family(BETA)
 
@@ -233,8 +203,6 @@ def test_single_encoder_tree_is_refused_by_the_dual_encoder_converter(tmp_path: 
 
 
 def test_detection_and_the_guard_read_the_same_field(tmp_path: Path) -> None:
-    """Detection can no longer disagree with the guard: both consult the ONE
-    declared signature. Auto-detect on a dual-encoder tree resolves to beta."""
     registry.register_repackage_family(ALPHA)
     registry.register_repackage_family(BETA)
 
@@ -283,10 +251,6 @@ def test_missing_required_component_refuses_by_name(tmp_path: Path) -> None:
     assert "text_encoder" in str(exc.value)
 
 
-# --------------------------------------------------------------------------
-# 3. rename-rule semantics
-# --------------------------------------------------------------------------
-
 def test_prefix_rule_only_rewrites_a_leading_match() -> None:
     rule = RenameRule(kind="prefix", pairs=(("conv_in.", "input_blocks.0.0."),))
     assert rule.apply("conv_in.weight") == "input_blocks.0.0.weight"
@@ -299,8 +263,7 @@ def test_substring_rule_rewrites_every_occurrence() -> None:
 
 
 def test_alternation_rule_is_single_pass_so_output_is_never_rewritten() -> None:
-    """A sequential pass would rewrite its own output; the CLIP keyspaces
-    depend on this not happening."""
+    """A sequential pass would rewrite its own output; the CLIP keyspaces depend on this not happening."""
     rule = RenameRule(kind="alternation", pairs=(("a.", "b."), ("b.", "c.")))
     assert rule.apply("a.x") == "b.x"
 
@@ -316,10 +279,6 @@ def test_empty_rule_is_refused() -> None:
     with pytest.raises(DeclarationError):
         RenameRule(kind="nonsense", pairs=(("a", "b"),))  # type: ignore[arg-type]
 
-
-# --------------------------------------------------------------------------
-# 4. registry: aliases, direction, refusal by name
-# --------------------------------------------------------------------------
 
 def test_alias_and_prefix_normalization_replaces_the_ladder() -> None:
     registry.register_repackage_family(ALPHA)
@@ -356,7 +315,7 @@ def test_conflicting_registration_is_refused() -> None:
                 to_singlefile=(_DENOISER,),
             )
         )
-    registry.register_repackage_family(ALPHA)  # identical re-registration is a no-op
+    registry.register_repackage_family(ALPHA)
 
 
 def test_alias_collision_between_families_is_refused() -> None:
@@ -366,10 +325,6 @@ def test_alias_collision_between_families_is_refused() -> None:
             RepackageFamily(family="other", aliases=("alpha-legacy",))
         )
 
-
-# --------------------------------------------------------------------------
-# 5. layout detection from declarations (B14) — including the LTX2-style sentinel
-# --------------------------------------------------------------------------
 
 _ALPHA_LAYOUT = LayoutDeclaration(
     variant="alpha1",
@@ -385,8 +340,6 @@ _BETA_LAYOUT = LayoutDeclaration(
     order=10,
     hints=(HintMatch(any_tokens=("beta2",)),),
     dirs=(DirMatch(requires=("unet", "text_encoder_2"),),),
-    # A repackage layout whose filenames carry no family token at all: the
-    # generic form of the LTX-2 sentinel that used to be hand-synced into te#70.
     root_sentinels=("video_vae_encoder.safetensors", "text_encoder_post_modules.safetensors"),
 )
 
@@ -460,12 +413,8 @@ def test_nothing_is_detected_when_nothing_is_declared(tmp_path: Path) -> None:
     info = layout.detect_huggingface_source_layout(
         repo_dir=tmp_path, files=["unet/config.json", "model_index.json"])
     assert (info.model_family, info.model_family_variant) == ("unknown", "unknown")
-    assert info.source_layout == "multi-file"  # layout shape is family-free
+    assert info.source_layout == "multi-file"
 
-
-# --------------------------------------------------------------------------
-# 6. foreign catalog enums are injected (B13)
-# --------------------------------------------------------------------------
 
 def test_civitai_map_is_injected_not_shipped() -> None:
     assert base_model_families.civitai_to_family("SDXL 1.0") is None
@@ -482,13 +431,8 @@ def test_foreign_maps_are_namespaced_per_catalog() -> None:
     assert base_model_families.civitai_to_family("X") is None
 
 
-# --------------------------------------------------------------------------
-# 7. ONE component vocabulary (B5/B6)
-# --------------------------------------------------------------------------
-
 def test_the_generic_vocabulary_covers_the_components_that_were_being_missed() -> None:
     vocab = component_vocabulary()
-    # transformer_2 (second MoE expert) was absent from several of the copies.
     assert vocab.is_denoiser("transformer_2")
     assert vocab.is_denoiser("transformer")
     assert vocab.is_denoiser("unet")
@@ -503,7 +447,6 @@ def test_an_endpoint_declares_its_own_components() -> None:
     vocab = component_vocabulary()
     assert "connectors" in vocab.all
     assert vocab.role_of("connectors") == "extra"
-    # additive and idempotent — a second declaration cannot reorder the first
     before = component_vocabulary().denoisers
     declare_components(denoisers=("unet",))
     assert component_vocabulary().denoisers == before

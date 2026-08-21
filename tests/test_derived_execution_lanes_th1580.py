@@ -67,8 +67,6 @@ def decode_fp8(tensors):
     return tensors
 '''
 
-# A decoder whose dependency is absent — the real failure this excludes is an
-# image built without the kernel extension its decoder imports at module top.
 _BROKEN = '''
 import a_dependency_this_image_does_not_have  # noqa: F401
 
@@ -126,10 +124,8 @@ def test_import_failure_is_excluded_with_a_reason(fake_image):
     reason = excluded["fake_decoders.broken_decoder"]
     assert "ModuleNotFoundError" in reason
     assert "a_dependency_this_image_does_not_have" in reason
-    # Excluded means excluded — not "declared but flagged".
     lanes = set(derived.execution_lanes)
     assert "nvfp4-w4a4-static+compiled" not in lanes
-    # ...and the exclusion is VISIBLE in what the hub receives.
     block = manifest_block(derived)
     assert block["excluded_modules"] == [
         {"module": "fake_decoders.broken_decoder", "reason": reason}
@@ -155,25 +151,12 @@ def test_execution_axis_comes_from_the_runtime_table(fake_image):
 
 
 def test_the_function_lane_set_is_the_image_set_ranked(fake_image):
-    """pgw#1599 sweep: `lora_bucket` and the per-function EXCLUSION it
-    computed are DELETED, so a function's lane set IS the image's, ranked.
-
-    The deleted machinery narrowed a function's lanes by `lora_bucket x
-    composes_lora`. It could never fire: nothing in the tree ever set
-    `lora_bucket` non-zero — the sole production caller passed a literal 0 —
-    so the narrowing was unreachable and its always-empty exclusions list
-    looked like a live instrument. The axis survives in two sibling places
-    that die in their own changes: torchcg still HASHES it into graph
-    identity (a dead axis in an identity hash is a live source of phantom
-    cache misses), and tensorhub still accepts it on the wire."""
     derived = derive_execution_lanes(packages=(fake_image,))
 
     lanes = execution_lanes_for_function(derived)
     assert set(lanes) == set(derived.execution_lanes)
-    # RANKED, deterministically — the one thing this function still does.
     assert list(lanes) == sorted(lanes, key=list(lanes).index)
 
-    # The vocabulary is gone from the signature, not merely defaulted.
     import inspect
 
     assert "lora_bucket" not in inspect.signature(

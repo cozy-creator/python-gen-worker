@@ -1,17 +1,3 @@
-"""pgw#1548: the benchmark harness reads a REAL lock, and says so when it can't.
-
-Caught by running the reader against a real `endpoint.lock` before the GPU
-window rather than during it: `endpoint_lock.read_lock` answers a plain **dict**
-(not an object with attributes) and the derive document sits under
-`["derive"]["document"]` as a JSON **string**. The harness had `block.document`,
-which would have raised on the pod — minutes into a paid window, after the
-compile it was supposed to plan.
-
-The lesson is the test: every structural assumption the harness makes about
-another module's return value is asserted at $0, because the alternative is
-asserting it at $0.49/hr.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -27,8 +13,6 @@ _MODULE = Path(__file__).resolve().parents[1] / "benchmarks" / "dynamic_dims_pgw
 _spec = importlib.util.spec_from_file_location("dynamic_dims_pgw1548", _MODULE)
 assert _spec and _spec.loader
 harness = importlib.util.module_from_spec(_spec)
-# Registered BEFORE exec: dataclass field resolution reads the module out of
-# sys.modules, and an unregistered module fails deep inside `dataclasses`.
 sys.modules["dynamic_dims_pgw1548"] = harness
 _spec.loader.exec_module(harness)
 
@@ -45,12 +29,6 @@ def _bench(tmp_path: Path) -> Any:
 
 
 def _lock(room: Path, records: list[dict], *, derive: bool = True) -> Path:
-    """A lock in the REAL shape: TOML, with derive.document a JSON STRING.
-
-    Both facts matter and both were assumed wrong at some point: the file is
-    TOML (not JSON), and the document inside it is a JSON string (not a
-    table).
-    """
 
     room.mkdir(parents=True, exist_ok=True)
     lines = ["[[entrypoints]]", 'name = "generate"', ""]
@@ -93,12 +71,7 @@ def test_the_reader_gets_every_specialization_out_of_a_real_shaped_lock(
 def test_a_discovery_only_lock_REFUSES_instead_of_reading_zero(
     tmp_path: Path,
 ) -> None:
-    """`--discovery-only` writes no [derive]; benchmarking it is meaningless.
-
-    Silently reading zero specializations would compile nothing, serve eager
-    and report a 0% delta — the same vacuous green the preflight exists to
-    stop, arriving from the lock side instead of the tree side.
-    """
+    """`--discovery-only` writes no [derive]; benchmarking it is meaningless."""
 
     room = _lock(tmp_path / "arm", [], derive=False)
     with pytest.raises(SystemExit, match="no .derive. document"):
@@ -114,14 +87,7 @@ def test_a_lock_declaring_zero_graphs_REFUSES(tmp_path: Path) -> None:
 def test_the_default_selectors_are_PREFIXES_the_compiler_can_match(
     tmp_path: Path,
 ) -> None:
-    """`--first` matches a facet by equality or the graph id by PREFIX.
-
-    `compile.Spec.short` is `graph[:16]` — scheme included — and `_selects`
-    does `spec.graph.startswith(term)`. A suffix matches neither, so a harness
-    passing one gets "names no specialization this endpoint has" for every
-    arm, on the pod, inside the paid window. This test fails if the harness
-    ever goes back to a suffix.
-    """
+    """`--first` matches a facet by equality or the graph id by PREFIX."""
 
     graph = "cg-graph-v1-" + "a" * 52
     room = _lock(tmp_path / "arm", [_record(graph, [2, 4, 64, 64])])
@@ -153,7 +119,6 @@ def _sample(compiled: int, eager: int, displaced: tuple = ()) -> Any:
 
 
 def test_an_arm_serving_ZERO_compiled_calls_REFUSES(tmp_path: Path) -> None:
-    """pgw#1591's lesson, keyed on the COUNT rather than on a log string."""
 
     bench = _bench(tmp_path)
     bench._daemon_log = {}
@@ -173,12 +138,6 @@ def test_MIXED_execution_REFUSES(tmp_path: Path) -> None:
 def test_a_DISPLACED_module_that_STILL_SERVED_COMPILED_is_allowed(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    """pgw#1591's fix: displacement and dispatch are SEPARATE facts.
-
-    The old check aborted on the word DISPLACED alone. After #1591 a displaced
-    module can still have served every call compiled, and refusing that would
-    throw away a valid arm for a flag that no longer implies what it used to.
-    """
 
     bench = _bench(tmp_path)
     bench._daemon_log = {}
@@ -193,7 +152,6 @@ def test_a_clean_compiled_arm_PASSES(tmp_path: Path) -> None:
 
 
 def test_an_envelope_without_dispatch_facts_REFUSES(tmp_path: Path) -> None:
-    """No counter means the premise is unmeasured — the pgw#1591 near-miss."""
 
     bench = _bench(tmp_path)
     with pytest.raises(SystemExit, match="no `dispatch` facts"):

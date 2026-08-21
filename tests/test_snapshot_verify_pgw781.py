@@ -1,22 +1,3 @@
-"""pgw#781 / th#1303: the mandatory volume check must never pass without hashing.
-
-This drives the REAL call site — `ModelStore._verify_snapshot_tree` — over real
-files on disk, because the bug is not in the hashing helper (that was always
-correct) but in what the call site READS off the manifest entry.
-
-The defect: `_verify_snapshot_tree` took the digest from `f.blake3`. Under
-manifest v2 that field is EMPTY and the digest lives in `f.digest` as
-`"sha256:<hex>"`. So `digest` was `""`, the `if digest and ...` hash check was
-skipped, and the tree was reported CLEAN WITHOUT BEING HASHED — while a real
-verification and a vacuous one produce byte-identical "ok" results. That is the
-whole `entries`-vs-`files` lesson pointed at a security control: pgw#769's fill
-check is what the NFS/shared-volume verdict rests on, so a no-op that reports
-success is a hole, not a cosmetic gap.
-
-Every assertion below therefore checks the DENOMINATOR — that bytes were
-actually read — not merely that the verdict was "ok".
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -34,8 +15,6 @@ def sha(b: bytes) -> str:
 
 
 class _File:
-    """Duck-typed pb.SnapshotFile. The legacy `blake3` field is still carried
-    on the wire (it dies at a proto rev), but nothing reads it any more."""
 
     def __init__(self, path, size_bytes, digest="", blake3=""):
         self.path = path
@@ -50,15 +29,12 @@ class _Snap:
 
 
 def verify(tree: Path, files):
-    # _verify_snapshot_tree never touches `self`; calling it unbound keeps the
-    # test on the real code path without standing up a whole ModelStore.
     return ModelStore._verify_snapshot_tree(None, tree, _Snap(files))
 
 
 @pytest.fixture
 def counted(monkeypatch):
-    """Record every verify_files report so a test can assert on the
-    denominators the call site actually produced."""
+    """Record every verify_files report so a test can assert on the denominators the call site actually produced."""
     seen = []
     real = volume_verify.verify_files
 
@@ -67,9 +43,6 @@ def counted(monkeypatch):
         seen.append(rep)
         return rep
 
-    # Patch BOTH the defining module and the binding the call site looks up:
-    # executor imports the name at module scope, so patching only the
-    # source module would leave the real function bound in the caller.
     monkeypatch.setattr(volume_verify, "verify_files", spy)
     monkeypatch.setattr(store_mod, "verify_files", spy)
     return seen
@@ -83,8 +56,7 @@ def _tree(tmp_path: Path, name: str, data: bytes) -> Path:
 
 
 def test_a_v2_snapshot_is_actually_hashed_not_merely_declared_clean(tmp_path, counted):
-    """THE regression. Before the fix this returned ok=True having read ZERO
-    bytes; the assertion that fails on the old code is `bytes_hashed`."""
+    """THE regression."""
     data = b"\x01\x02\x03" * 4096
     root = _tree(tmp_path, "model.safetensors", data)
 
@@ -108,8 +80,6 @@ def test_a_corrupt_v2_file_is_caught_and_named_for_quarantine(tmp_path, counted)
     root = _tree(tmp_path, "model.safetensors", good)
     ref = "sha256:" + sha(good)
 
-    # Flip one byte, keeping the SIZE identical: only the hash can catch this,
-    # so it fails iff the file was really hashed.
     raw = bytearray(good)
     raw[4000] ^= 0xFF
     (root / "model.safetensors").write_bytes(bytes(raw))
@@ -117,8 +87,8 @@ def test_a_corrupt_v2_file_is_caught_and_named_for_quarantine(tmp_path, counted)
     ok, bad = verify(root, [_File("model.safetensors", len(good), digest=ref)])
 
     assert not ok
-    assert bad == [ref], bad  # the DIGEST, so the bad blob is quarantinable
-    assert counted[-1].bytes_hashed == 0  # a failed hash reports no clean bytes
+    assert bad == [ref], bad
+    assert counted[-1].bytes_hashed == 0
     assert counted[-1].examined == 1
 
 
@@ -143,13 +113,6 @@ def test_each_materialized_copy_is_hashed_before_it_is_trusted(tmp_path, counted
 
 
 def test_an_entry_carrying_only_the_legacy_mirror_is_SKIPPED_not_passed(tmp_path, counted):
-    """th#1303 S1 replaces `test_legacy_blake3_snapshots_still_verify`.
-
-    The blake3 fallback is gone, so a mirror-only entry names no digest. It
-    must be reported as skipped and hash NOTHING — and the denominator is the
-    point: 1 expected, 0 hashed is a different verdict from 1 expected,
-    1 hashed, and only the denominator can tell them apart.
-    """
     from gen_worker.models.volume_verify import snapshot_verify_targets
 
     data = b"legacy-bytes-" * 512
@@ -161,8 +124,7 @@ def test_an_entry_carrying_only_the_legacy_mirror_is_SKIPPED_not_passed(tmp_path
 
 
 def test_a_mixed_tree_hashes_every_covered_file(tmp_path, counted):
-    """Two entries in one snapshot: BOTH must be hashed. Any per-entry
-    algorithm assumption drops one of them silently."""
+    """Two entries in one snapshot: BOTH must be hashed."""
     a = b"sha-side" * 300
     b = b"blake-side" * 300
     root = tmp_path / "snap"

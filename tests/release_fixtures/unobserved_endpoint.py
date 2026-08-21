@@ -1,9 +1,4 @@
-"""Red fixture: a marked module the code never CALLS.
-
-``vae`` is real and markable, but the pipeline calls ``vae.decode()``, which
-bypasses ``Module.__call__`` -- the hook observes nothing. The derive must
-refuse with the name in the message, never emit a silent zero-graph lane.
-"""
+"""Red fixture: a marked module the code never CALLS."""
 
 from __future__ import annotations
 
@@ -32,14 +27,12 @@ class UnobservedMark(
     )},
     shapes={"aspect": STATIC},
 ):
-    # diffusers pipelines compose their components dynamically; the static
-    # class carries no `unet`/`vae`.
     pipe: Any
 
     def load(self, ctx: LoadContext[Any]) -> None:
         self.pipe = ctx.load(StableDiffusionPipeline)
         self.pipe.unet = ctx.compile(self.pipe.unet)
-        self.pipe.vae = ctx.compile(self.pipe.vae)  # .decode() bypasses __call__
+        self.pipe.vae = ctx.compile(self.pipe.vae)
 
 
 @entrypoint

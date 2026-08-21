@@ -1,37 +1,3 @@
-"""pgw#1607: the checkpoint juggle's card-side legs.
-
-Run inside a coordinator-arbitrated GPU window (the box's RTX 4070), under
-the micro-rig carve-out and nothing more: the checkpoints are GENERATED on
-this box (random-init toy trees, < 500 MB total, nothing downloaded), the
-device budget is enforced through the arena, the compile phase is STUBBED —
-the zero-re-arm proof here is pointer/forward-identity, and the
-real-compiled arm runs pod-side (phase 4).
-
-    nice -n 19 .venv/bin/python benchmarks/checkpoint_juggle_pgw1607.py --arms ABCDEF
-
-* **A — distinct outputs.** Same input, same seed: serving ck0 -> y0, switch
-  ck1 -> y1, switch back ck0 -> y0'. y0 != y1 (the switch actually switched)
-  and y0 == y0' BITWISE (a round trip restores the checkpoint exactly).
-* **B — zero re-arms.** Every managed parameter's data_ptr and every
-  module's forward identity are snapshotted before the first switch and
-  asserted UNCHANGED after every switch; `juggler.rearms == 0`.
-* **C — integrity.** After each switch, every backed region is read back
-  D2H and its digest compared against the ingest digest banked for the
-  serving checkpoint. Content-level, this lane's half of the va#12 split.
-* **D — the franken fence (RED leg).** A refill is KILLED mid-switch by
-  fault injection at the copy seam. The region must go INVALID, serving
-  must REFUSE under both identities, and an unpatched re-switch must
-  recover to green digests.
-* **E — teardown.** release + `committed == mapped == 0`.
-* **F — the numbers.** Warm switch wall vs the transfer bound (a pinned
-  H2D floor measured on THIS card in the same window), serving-switch ~ 0,
-  disk-cold switch, and a 200-request zipf juggle vs the single-checkpoint
-  baseline.
-
-Discipline: fleet line asserted first, load gate at 24, `uptime` recorded,
-one heavy thing at a time, verdict JSON written before exit.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -48,7 +14,6 @@ from typing import Any, Dict, List
 MIB = 1 << 20
 GIB = 1 << 30
 
-#: Micro-rig bound: generated weights, total under 500 MB.
 CHECKPOINTS = 4
 SEED = 1607
 
@@ -65,9 +30,7 @@ def loud(msg: str) -> None:
 
 
 def load_gate(limit: float = 24.0) -> None:
-    """Refuse above the limit. A raised limit is DELIBERATE and printed —
-    only the load-insensitive correctness arms may run over it (the
-    coordinator's window grant, 2026-08-20); arm F stays behind 24."""
+    """Refuse above the limit."""
     load1 = os.getloadavg()[0]
     if load1 > limit:
         raise SystemExit(f"load gate: 1-min load {load1:.1f} > {limit}; refusing to start")
@@ -77,23 +40,18 @@ def load_gate(limit: float = 24.0) -> None:
          f"{subprocess.run(['uptime'], capture_output=True, text=True).stdout.strip()}")
 
 
-# ---------------------------------------------------------------------------
-# The toy lane: a real tree with stream-sized leaves, generated checkpoints
-# ---------------------------------------------------------------------------
-
-
 def build_template(torch: Any, nn: Any) -> Any:
     class ToyLane(nn.Module):
         """~118 MB fp32: three stream-sized leaves + a core, real forward."""
 
         def __init__(self) -> None:
             super().__init__()
-            self.blk0 = nn.Linear(2048, 2048, bias=False)  # 16 MiB
-            self.blk1 = nn.Linear(2048, 2048, bias=False)  # 16 MiB
-            self.blk2 = nn.Linear(2048, 4096, bias=False)  # 32 MiB
-            self.blk3 = nn.Linear(4096, 2048, bias=False)  # 32 MiB
-            self.mid = nn.Linear(1024, 1024, bias=False)  # 4 MiB
-            self.head = nn.Linear(2048, 64, bias=False)  # 0.5 MiB -> core
+            self.blk0 = nn.Linear(2048, 2048, bias=False)
+            self.blk1 = nn.Linear(2048, 2048, bias=False)
+            self.blk2 = nn.Linear(2048, 4096, bias=False)
+            self.blk3 = nn.Linear(4096, 2048, bias=False)
+            self.mid = nn.Linear(1024, 1024, bias=False)
+            self.head = nn.Linear(2048, 64, bias=False)
             self.norm = nn.LayerNorm(2048)
 
         def forward(self, x: Any) -> Any:
@@ -106,11 +64,7 @@ def build_template(torch: Any, nn: Any) -> Any:
 
 
 def generate_checkpoints(torch: Any, template: Any, directory: Path) -> List[Path]:
-    """CHECKPOINTS distinct random inits of the SAME architecture, on disk.
-
-    Real safetensors files via the test fixture's writer (one header
-    implementation on each side of the seam).
-    """
+    """CHECKPOINTS distinct random inits of the SAME architecture, on disk."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
     from test_checkpoint_juggle import write_safetensors  # noqa: E402
 
@@ -132,18 +86,12 @@ def generate_checkpoints(torch: Any, template: Any, directory: Path) -> List[Pat
     return out
 
 
-# ---------------------------------------------------------------------------
-# Rig assembly
-# ---------------------------------------------------------------------------
-
-
 def make_rig(torch: Any, nn: Any, ck_dirs: List[Path], *, budget_bytes: int):
     from gen_worker.models.arena_residency import ArenaResidency
     from gen_worker.models.checkpoint_juggle import CheckpointJuggler, read_manifest
 
     template = build_template(torch, nn)
     manifests = {f"ck{i}": read_manifest(d) for i, d in enumerate(ck_dirs)}
-    # Serve ck0: load its bytes into the live tree, move to the card.
     state = {}
     m0 = manifests["ck0"]
     for key, src in m0.items():
@@ -186,11 +134,6 @@ def backed_region_digest(torch: Any, residency: Any, region: Any) -> str:
         host = view.detach().to("cpu")
         h.update(host.view(torch.uint8).view(-1).numpy().tobytes())
     return h.hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# Legs
-# ---------------------------------------------------------------------------
 
 
 def leg_a_distinct_outputs(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
@@ -274,9 +217,6 @@ def leg_d_franken_fence(torch: Any, juggler: Any, template: Any) -> Dict[str, An
         1 for r in residency.layout.regions if residency.is_resident(r.name)
     )
     assert backed_count >= 1, "no backed regions; nothing to kill"
-    # Die on the LAST backed refill: everything before it (and every unbacked
-    # free-swap) has already moved to the target — the franken shape — while
-    # this region dies with some bytes possibly moved.
     kill_at = backed_count
     calls = {"n": 0}
 
@@ -286,7 +226,7 @@ def leg_d_franken_fence(torch: Any, juggler: Any, template: Any) -> Dict[str, An
             raise RuntimeError("injected: H2D died mid-transfer")
         return real(region, image, manifest, stream)
 
-    juggler._refill_backed = dying_refill  # fault injection at the copy seam
+    juggler._refill_backed = dying_refill
     died = False
     try:
         juggler.switch_to("ck1")
@@ -301,7 +241,7 @@ def leg_d_franken_fence(torch: Any, juggler: Any, template: Any) -> Dict[str, An
         juggler.assert_servable()
     except RegionInvalid:
         refused["as_old"] = True
-    juggler.serving_id = "ck1"  # even claiming the new identity must refuse
+    juggler.serving_id = "ck1"
     try:
         juggler.assert_servable()
     except RegionInvalid:
@@ -311,7 +251,6 @@ def leg_d_franken_fence(torch: Any, juggler: Any, template: Any) -> Dict[str, An
         f"franken state served: {refused}"
     )
 
-    # Recovery: an unpatched re-switch is idempotent and lands green.
     juggler.switch_to("ck1")
     juggler.assert_servable()
     image = juggler.catalog.warm("ck1")
@@ -329,9 +268,6 @@ def leg_d_franken_fence(torch: Any, juggler: Any, template: Any) -> Dict[str, An
 def leg_e_teardown(torch: Any, residency: Any) -> Dict[str, Any]:
     stats_before = residency.stats()
     residency.release()
-    # release() unbacks everything; the chunks land in the recycled-idle pool,
-    # still COMMITTED against the budget. Zeroing the budget is the caller's
-    # half of the va#3 teardown discipline — budget-fed to the end.
     residency.arena.set_budget(0)
     stats = dict(residency.arena.stats())
     committed, mapped = int(stats["committed_bytes"]), int(stats["mapped_bytes"])
@@ -362,8 +298,6 @@ def measure_h2d_floor(torch: Any, nbytes: int) -> float:
 
 
 def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
-    # The box is shared and drifts: every timed row carries the 1-min load at
-    # its moment, so a poisoned median is REPORTED load-stamped, never clean.
     def load1() -> float:
         return round(os.getloadavg()[0], 1)
 
@@ -375,7 +309,6 @@ def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
     floor_gbps = measure_h2d_floor(torch, max(64 * MIB, lane_bytes))
     x = torch.zeros(4, 2048, device="cuda")
 
-    # Warm switches, round-robin, median of ~11, each row load-stamped.
     walls: List[float] = []
     wall_rows: List[Dict[str, float]] = []
     seq = [f"ck{i % CHECKPOINTS}" for i in range(12)]
@@ -388,12 +321,8 @@ def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
     warm_median = statistics.median(walls)
     warm_gbps = (lane_bytes / warm_median / 1e9) if warm_median else 0.0
 
-    # Serving no-op.
     noop = juggler.switch_to(juggler.serving_id)
 
-    # Cold, both shapes. (1) evicted image, switch rebuilds it: disk -> image
-    # -> VRAM, the D5 cold path. (2) hysteresis-cold: image refused, the
-    # switch streams disk-direct into the arena.
     cold_target = "ck1" if juggler.serving_id != "ck1" else "ck2"
     cold_rebuild_load = load1()
     juggler.catalog.evict(cold_target)
@@ -412,7 +341,6 @@ def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
     assert direct_report.tier == "disk-cold", direct_report.tier
     del juggler.catalog._evicted_epoch[direct_target]
 
-    # Zipf-ish juggle vs single-checkpoint baseline, 200 requests each.
     import random
 
     rng = random.Random(SEED)
@@ -459,11 +387,6 @@ def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
     }
     loud(f"leg F: {json.dumps(out)}")
     return out
-
-
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
 
 
 def main() -> int:

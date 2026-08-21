@@ -1,11 +1,3 @@
-"""The pgw#1377 read-side decode + Knob resolution, exercised end to end.
-
-The decode matrix (absent / partial / full / ill-typed / unclassified /
-mistyped), the narrowest-range knob merge, the evolution rule in both
-directions, and clamp caller-visibility through the REAL
-``RequestContext.clamp`` ledger — no mock context.
-"""
-
 from __future__ import annotations
 
 import pathlib
@@ -35,44 +27,32 @@ from gen_worker.models.model_types import SdxlLoraDefaults
 from gen_worker.request_context import RequestContext
 
 
-# ── platform values (zero-arg = the platform opinion, servable) ──────────────
-
-
 def test_sdxl_zero_arg_is_the_platform_opinion() -> None:
     d = SDXL.Defaults()
     assert d.steps == Knob(28, lo=1, hi=80, name="steps")
     assert d.guidance == Knob(6.0, lo=1.5, hi=15.0, name="guidance")
     assert d.cfg is True
-    # Paul's ruling: the quality vocabulary lives HERE, not in endpoint code.
     assert d.positive_preamble == "masterpiece, best quality"
     assert d.negative_preamble == "worst quality, low quality"
-    # Checkpoints carry NO scheduler metadata — the tree IS the choice
-    # (Paul's tree-only ruling; ingest synthesis covers scheduler-less trees).
     assert not hasattr(d, "scheduler")
     assert d.timesteps == ()
-    # Checkpoint-level fact, decoupled from cfg (the guidance axis).
     assert d.step_distilled is False
 
 
 def test_sdxl_lora_zero_arg_is_lightning_shaped() -> None:
     d = SDXL.Lora.Defaults()
     assert d.cfg is False
-    assert d.scheduler == "euler_trailing"  # the adapter's scheduler DEMAND
-    assert d.distillation is False  # rows for distill adapters set it True
+    assert d.scheduler == "euler_trailing"
+    assert d.distillation is False
     assert d.steps.default == 4
     assert d.timesteps == ()
     assert d.strength == Knob(1.0, lo=-4.0, hi=4.0, name="strength")
-    # Inert while cfg=False; the base platform knob, so a row that flips cfg
-    # on without narrowing still serves sanely.
     assert d.guidance == SDXL.Defaults().guidance
-    # Both defaults types ARE the one nominal config type.
     assert isinstance(d, SDXL.Config)
     assert isinstance(SDXL.Defaults(), SDXL.Config)
 
 
 def test_every_zero_arg_defaults_is_servable() -> None:
-    """Zero-arg constructions double as trace fixtures (pgw#1377 point 7):
-    every knob default must sit inside its own [lo, hi]."""
     for name, cls in defaults_vocabularies().items():
         d = cls()
         for f in msgspec.structs.fields(cls):
@@ -86,15 +66,11 @@ def test_every_zero_arg_defaults_is_servable() -> None:
 
 
 def test_every_knob_names_its_own_field() -> None:
-    """The clamp ledger names fields through ``Knob.name`` — a drifted name
-    would mislabel every adjustment row."""
+    """The clamp ledger names fields through ``Knob.name`` — a drifted name would mislabel every adjustment row."""
     for wire_name, cls in defaults_vocabularies().items():
         for f in msgspec.structs.fields(cls):
             if isinstance(f.default, Knob):
                 assert f.default.name == f.encode_name, f"{wire_name}.{f.encode_name}"
-
-
-# ── the decode matrix ────────────────────────────────────────────────────────
 
 
 def test_absent_row_decodes_to_platform_values() -> None:
@@ -110,9 +86,7 @@ def test_partial_row_overlays_field_by_field() -> None:
     )
     assert d.cfg is False
     assert d.steps.default == 8
-    # Untouched halves of a knob keep the platform range.
     assert (d.steps.lo, d.steps.hi) == (1, 80)
-    # Untouched fields keep the platform values.
     assert d.guidance == SDXL.Defaults().guidance
     assert d.positive_preamble == "masterpiece, best quality"
 
@@ -126,8 +100,6 @@ def test_full_row_overrides_every_field() -> None:
         "negative_preamble": "",
         "step_distilled": True,
         "timesteps": [999, 749, 499, 249],
-        # Checkpoints carry no scheduler metadata: a stray key is an UNKNOWN
-        # field the evolution rule ignores, never a refusal.
         "scheduler": "lcm",
     }
     d = decode_model_defaults(SDXL, model="sdxl", defaults=row)
@@ -146,14 +118,11 @@ def test_knob_ranges_merge_to_the_narrowest_layer() -> None:
         model="sdxl",
         defaults={"guidance": {"default": 5.0, "lo": 1.0, "hi": 9.0}},
     )
-    # The row narrows hi (9.0 < 15.0) but cannot widen lo (1.0 < 1.5 loses).
     assert (d.guidance.lo, d.guidance.hi) == (1.5, 9.0)
     assert d.guidance.default == 5.0
 
 
 def test_a_row_default_outside_the_merged_range_is_pulled_inside() -> None:
-    # resolve(None) returns the default UNCLAMPED, so decode keeps the
-    # struct servable by construction.
     d = decode_model_defaults(
         SDXL, model="sdxl", defaults={"guidance": {"default": 20.0}}
     )
@@ -182,7 +151,6 @@ def test_ill_typed_rows_are_typed_refusals_naming_the_field(
 def test_unclassified_serves_platform_fallbacks_with_the_named_warning() -> None:
     with pytest.warns(CheckpointDefaultsUnclassified) as caught:
         d = decode_model_defaults(SDXL, model=None, defaults={"steps": {"default": 5}})
-    # Fallbacks, never a silent guess: the untyped row is not decoded.
     assert d == SDXL.Defaults()
     assert CheckpointDefaultsUnclassified.code == "checkpoint_defaults_unclassified"
     assert "unclassified" in str(caught[0].message)
@@ -195,14 +163,11 @@ def test_a_mistyped_checkpoint_is_a_typed_refusal_not_a_warning() -> None:
 
 
 def test_a_base_mismatched_adapter_is_refused_at_bind() -> None:
-    """pgw#1377 acceptance (f): an sd15.lora row where sdxl.lora is expected."""
     with pytest.raises(ModelTypeMismatch):
         decode_model_defaults(SDXL.Lora, model="sd15.lora", defaults=None)
 
 
 def test_an_out_of_vocabulary_adapter_scheduler_is_refused() -> None:
-    # ddim_trailing is outside the launch SchedulerName vocabulary (additive
-    # evolution can admit it); an out-of-vocabulary DEMAND is typed garbage.
     with pytest.raises(DefaultsDecodeError) as caught:
         decode_model_defaults(
             SDXL.Lora, model="sdxl.lora", defaults={"scheduler": "ddim_trailing"}
@@ -231,16 +196,13 @@ def test_a_lora_row_decodes_through_the_adapter_surface() -> None:
     assert d.timesteps == (999, 749, 499, 249)
 
 
-# ── the evolution rule, both directions (pgw#1377 acceptance c) ──────────────
-
-
 class _V1Defaults(msgspec.Struct, frozen=True):
     steps: Knob[int] = Knob(28, lo=1, hi=80, name="steps")
 
 
 class _V2Defaults(msgspec.Struct, frozen=True):
     steps: Knob[int] = Knob(28, lo=1, hi=80, name="steps")
-    shine: float = 0.5  # the additive v2 field
+    shine: float = 0.5
 
 
 def test_a_v1_row_decodes_under_a_v2_struct_on_fallbacks() -> None:
@@ -259,12 +221,8 @@ def test_a_v2_row_decodes_under_a_v1_struct_ignoring_the_unknown_field() -> None
 
 def test_unknown_knob_keys_are_ignored_too() -> None:
     d = decode_defaults(_V1Defaults, {"steps": {"default": 12, "name": "bogus", "extra": 1}})
-    # The decode restamps the field name; wire input never names knobs.
     assert d.steps.name == "steps"
     assert d.steps.default == 12
-
-
-# ── Knob.resolve through the real RequestContext ledger ──────────────────────
 
 
 def test_resolve_none_returns_the_checkpoint_default_with_no_adjustment() -> None:
@@ -295,24 +253,15 @@ def test_resolve_in_range_changes_nothing_and_records_nothing() -> None:
 
 
 def test_resolve_never_rejects_inside_the_envelope() -> None:
-    # The API Meta bounds rejected upstream; whatever reaches resolve serves.
     ctx: RequestContext[GenerationDefaults] = RequestContext("req-4")
     d = decode_model_defaults(SD15, model="sd15", defaults=None)
     assert d.steps.resolve(79, ctx) == 79
-    assert d.steps.resolve(-5, ctx) == 1  # clamped, not raised
+    assert d.steps.resolve(-5, ctx) == 1
     assert ctx.adjustments[0]["field"] == "steps"
 
 
-# ── the contract-file (main_v2.py) usage, against fixture rows ───────────────
-
-
 def test_the_contract_files_exact_usage_holds() -> None:
-    """Every ``main_v2.py`` defaults expression over fixture hub rows: the
-    config-driven single entrypoint — ``config: SDXL.Config`` from the
-    distillation adapter's defaults when one rides, else the checkpoint's
-    own; positive preamble applies in EVERY mode while negatives exist only
-    under CFG; the scheduler chain is request > adapter demand > the tree
-    stands; a pinned ladder belongs to the config's own scheduler."""
+    """Every ``main_v2.py`` defaults expression over fixture hub rows: the config-driven single entrypoint — ``config: SDXL.Config`` from the distillation adapter's defaults when one rides, else the check..."""
     ctx: RequestContext[GenerationDefaults] = RequestContext("req-main-v2")
     d = decode_model_defaults(
         SDXL,
@@ -320,9 +269,6 @@ def test_the_contract_files_exact_usage_holds() -> None:
         defaults={"guidance": {"default": 5.0, "hi": 9.0}},
     )
 
-    # The stacking gate is step_distilled, NOT cfg — and it WARNS-AND-IGNORES
-    # the adapter (`turbo = None`), never an error: a guidance-distilled
-    # full-step checkpoint (cfg=False, step_distilled=False) MAY take one.
     assert not d.step_distilled
     guidance_distilled = decode_model_defaults(
         SDXL, model="sdxl", defaults={"cfg": False}
@@ -332,20 +278,16 @@ def test_the_contract_files_exact_usage_holds() -> None:
         SDXL, model="sdxl",
         defaults={"cfg": False, "step_distilled": True},
     )
-    assert fused_merge.step_distilled  # -> adapter ignored with a ctx.warn
+    assert fused_merge.step_distilled
 
-    # No adapter: the config is the checkpoint's own Defaults — one nominal
-    # type, both Defaults inherit SDXL.Config.
     config: SDXL.Config = d
     assert isinstance(config, SDXL.Config)
-    steps = config.steps.resolve(None, ctx)  # payload sent None
+    steps = config.steps.resolve(None, ctx)
     assert steps == 28
     assert config.cfg
-    guidance = config.guidance.resolve(14.0, ctx)  # inside the API envelope
-    assert guidance == 9.0  # clamped to the row's narrowed hi
+    guidance = config.guidance.resolve(14.0, ctx)
+    assert guidance == 9.0
 
-    # Positive preamble: EVERY mode (the positive prompt always exists);
-    # skipped when already present. Negative preamble: CFG arm only.
     prompt = "a cat"
     if d.positive_preamble and d.positive_preamble not in prompt:
         prompt = f"{d.positive_preamble}, {prompt}"
@@ -359,13 +301,8 @@ def test_the_contract_files_exact_usage_holds() -> None:
         negative = f"{d.negative_preamble}, {negative}" if negative else d.negative_preamble
     assert negative == "worst quality, low quality"
 
-    # _pick_scheduler chain, no adapter: request None + no demand -> None,
-    # the tree's shipped scheduler stands (nullcontext arm); checkpoints
-    # carry no scheduler field at all.
     assert not hasattr(config, "scheduler")
 
-    # A distillation adapter rides: its defaults ARE the config, and its
-    # scheduler DEMAND drives the swap (the base tree cannot know it).
     turbo = decode_model_defaults(
         SDXL.Lora,
         model="sdxl.lora",
@@ -373,14 +310,12 @@ def test_the_contract_files_exact_usage_holds() -> None:
                   "distillation": True},
     )
     config = turbo
-    assert not config.cfg  # the cfg-off arm: no guidance, no negatives
-    assert turbo.scheduler == "lcm"  # adapter demand -> LCMScheduler swap
-    assert turbo.distillation  # the distillation-slot marker (hub-validated)
-    assert list(config.timesteps) == [999, 749, 499, 249]  # pinned ladder
+    assert not config.cfg
+    assert turbo.scheduler == "lcm"
+    assert turbo.distillation
+    assert list(config.timesteps) == [999, 749, 499, 249]
     assert config.steps.resolve(None, ctx) == 4
 
-    # The independent-axes counterexample: a Hyper-SD-style CFG-preserving
-    # few-step adapter row — few-step AND cfg on at its recommended 5-8.
     hyper = decode_model_defaults(
         SDXL.Lora,
         model="sdxl.lora",
@@ -396,7 +331,6 @@ def test_the_contract_files_exact_usage_holds() -> None:
 def _pick_scheduler(
     request: str | None, turbo: "SdxlLoraDefaults | None"
 ) -> str | None:
-    """main_v2.py's chain verbatim: request > adapter demand > None (tree)."""
     served = {"dpmpp_2m_karras", "dpmpp_2m", "euler", "euler_trailing",
               "euler_a", "unipc", "ddim", "lcm"}
     if request is not None:
@@ -404,7 +338,7 @@ def _pick_scheduler(
     if turbo is not None and turbo.scheduler is not None:
         if turbo.scheduler in served:
             return turbo.scheduler
-        return None  # warn + the tree stands
+        return None
     return None
 
 
@@ -415,10 +349,7 @@ def _pick_scheduler(
 def test_the_serving_interaction_matrix(
     adapter_rides: bool, cfg: bool, pinned: bool, request_scheduler: str | None
 ) -> None:
-    """The ruled interaction matrix (scheduler-override × pinned-timesteps ×
-    cfg × adapter-state): the decoded config fields drive main_v2.py's arms
-    for every combination — no combination raises, every conflict resolves
-    by the documented precedence."""
+    """The ruled interaction matrix (scheduler-override × pinned-timesteps × cfg × adapter-state): the decoded config fields drive main_v2.py's arms for every combination — no combination raises, every co..."""
     ctx: RequestContext[GenerationDefaults] = RequestContext("req-matrix")
     ladder = [999, 749, 499, 249]
     row: dict[str, object] = {"cfg": cfg}
@@ -438,15 +369,12 @@ def test_the_serving_interaction_matrix(
 
     picked = _pick_scheduler(request_scheduler, turbo)
     if request_scheduler is not None:
-        assert picked == request_scheduler  # the request always wins
+        assert picked == request_scheduler
     elif adapter_rides:
-        # zero-arg demand is euler_trailing unless the row said otherwise
         assert picked == "euler_trailing"
     else:
-        assert picked is None  # the tree stands
+        assert picked is None
 
-    # The step ladder: a pinned ladder owns the step count, unless the
-    # request overrode the scheduler it belongs to (then it is dropped).
     steps = config.steps.resolve(7, ctx)
     timesteps: list[int] | None = None
     if config.timesteps:
@@ -457,31 +385,11 @@ def test_the_serving_interaction_matrix(
     else:
         assert (steps, timesteps) == (7, None)
 
-    # cfg gates guidance resolution; the cfg-off arm serves guidance 0.0.
     guidance = config.guidance.resolve(None, ctx) if config.cfg else 0.0
     assert guidance == (6.0 if cfg else 0.0)
 
 
-# ── the vocabulary registry + ingest fingerprint seam ────────────────────────
-
-
 def test_no_defaults_field_comment_dangles_without_its_field() -> None:
-    """THE FENCE (pgw#1446). A `#:` block whose field line is gone reads as a
-    documented field and is not one.
-
-    pgw#1426 dropped `ErnieDefaults.max_sequence_length` in a rebase and left its
-    four-line `#:` comment behind, running straight into the next `class`
-    statement. Nothing here noticed: no pgw code reads that field, the module
-    imports, mypy is clean, and the struct is still valid — the ONLY consumer is
-    an endpoint in another repository, so it surfaced days later as
-    `"ErnieDefaults" has no attribute "max_sequence_length"` in that endpoint's
-    mypy gate, on a pin bump, pointing at the wrong repo.
-
-    A surviving comment is what made it invisible in review: the diff read as
-    "field documented" rather than "field deleted". So the assertion is
-    structural — every `#:` block in a Defaults struct must be followed by a
-    field declaration.
-    """
     import re
 
     source = (
@@ -502,10 +410,6 @@ def test_no_defaults_field_comment_dangles_without_its_field() -> None:
                     continue
                 nxt = cand
                 break
-            # `nxt is None` is the pgw#1426 shape EXACTLY and the arm this test
-            # first got wrong: the comment block ends the struct body, so a scan
-            # that only inspects a FOLLOWING line finds nothing and the fence
-            # cannot fail. Red-verified against the real breakage.
             if nxt is None or not re.match(r"^    \w+\s*:", nxt):
                 dangling.append(
                     f"{name}: comment {line.strip()[:60]!r} is followed by "
@@ -519,19 +423,6 @@ def test_no_defaults_field_comment_dangles_without_its_field() -> None:
 
 
 def test_every_model_type_exports_a_defaults_vocabulary() -> None:
-    """THE FENCE (pgw#1439). ``MODEL_TYPES`` and ``defaults_vocabularies()`` are
-    two hand-maintained lists of the same thing, and nothing cross-checked them:
-    ``test_the_launch_vocabulary_is_the_ruled_set`` pins ``MODEL_TYPES`` ONLY.
-
-    pgw#1427 added three types to the tuple and to both lazy re-export lists,
-    passed every gate, and merged — while `defaults_vocabularies()`, whose own
-    docstring calls it "the export emitter's source", did not carry them. The
-    failure mode is silence: those families export NO defaults schema at all,
-    and nothing raises.
-
-    A subset assertion, not equality: the mapping legitimately carries the LoRA
-    overlays too, which are not ``ModelType``s.
-    """
     missing = {mt.name for mt in MODEL_TYPES} - set(defaults_vocabularies())
     assert not missing, (
         f"{sorted(missing)} are in MODEL_TYPES but export no defaults "
@@ -541,63 +432,38 @@ def test_every_model_type_exports_a_defaults_vocabulary() -> None:
 
 
 def test_the_launch_vocabulary_is_the_ruled_set() -> None:
-    # se#769 wave 3 (pgw#1427) appends krea-2, anima and ernie. The list is
-    # pinned deliberately: a type appearing here without a ruling is the thing
-    # this assertion exists to catch, so growing it is an EDIT, never a fixup.
     assert [mt.name for mt in MODEL_TYPES] == [
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
         "qwen3.6-27b-mtp", "qwen3.6-35b-a3b", "flux1", "flux2-klein",
         "krea-2", "anima", "ernie", "qwen-image", "z-image",
-        # pgw#1430 (se#769 audio lane): the fleet's audio modality.
         "stable-audio", "musicgen",
-        # pgw#1420 (se#769): LTX-2 and its 2x spatial latent upsampler. TWO
-        # roots, not one — their headers share ZERO keys (4186 tensors of joint
-        # audio+video DiT against 72 of 3-D convnet), so the Flux2Klein
-        # one-root standard ("diff to nothing but the type name and one VRAM
-        # floor") is failed at its first clause. The upsampler is the Rife
-        # mould: name + fingerprint, no canonical lane.
         "ltx-2", "ltx-2-upsampler",
         "internvl-u",
-        # pgw#1424 (se#769 3D lane): the two 3D roots.
         "trellis2", "hunyuan3d",
-        # pgw#1574 (se#798): the LLaVA captioner — the LAST of the 26
-        # serverless endpoints to acquire a type. Non-diffusion, and the
-        # QwenTextGen sampling triple under its own wire names.
         "joycaption",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
-    # pgw#1393: FLUX.1 (dev/schnell/Flex.2) and FLUX.2 Klein (4b/9b) are TWO
-    # roots, and neither is spelled bare "flux".
     from gen_worker.models import Flux1, Flux2Klein, MusicGen, StableAudio
 
     assert model_type_by_name("flux1") is Flux1
     assert model_type_by_name("flux2-klein") is Flux2Klein
     assert model_type_by_name("flux") is None
-    # se#779: the family root is `internvl-u`, which is what the endpoint's own
-    # register_family() call used and what the hub's family column carries — NOT
-    # the endpoint slug `internvl-U`, whose capital U would never match.
     from gen_worker.models import InternVLU
 
     assert model_type_by_name("internvl-u") is InternVLU
     assert model_type_by_name("internvl-U") is None
     assert model_type_by_name("internvl") is None
-    # pgw#1422: the two qwen3.6 LLM roots are likewise SEPARATE vocabularies
-    # (temperature 0.6 vs 0.7 — the family owner registered two schemas), and
-    # neither is spelled bare "qwen" or shares a root with `qwen-image`.
     from gen_worker.models import Qwen36A3b, Qwen36Mtp
 
     assert model_type_by_name("qwen3.6-27b-mtp") is Qwen36Mtp
     assert model_type_by_name("qwen3.6-35b-a3b") is Qwen36A3b
-    # pgw#1424 (se#769 3D lane): the two 3D roots.
     from gen_worker.models import Hunyuan3d, Trellis2
 
     assert model_type_by_name("trellis2") is Trellis2
     assert model_type_by_name("hunyuan3d") is Hunyuan3d
     assert model_type_by_name("qwen") is None
     assert model_type_by_name("qwen3.6") is None
-    # pgw#1426: qwen-image covers t2i AND Qwen-Image-Edit-2511 (one root), and
-    # z-image covers the base AND the Decoupled-DMD Turbo.
     from gen_worker.models import QwenImage, ZImage
 
     assert model_type_by_name("qwen-image") is QwenImage
@@ -605,24 +471,6 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert model_type_by_name("qwen-image-edit") is None
 
 
-#: The documents tensorfs#130 owed, and the SINGLE place that had to be flipped
-#: when the vendor bump landed. **EMPTY AS OF rev 1da68d58** — all nine shipped
-#: and are vendored, so every Model class in the fleet can name a real
-#: contract. Three of the names differ from what this list predicted, which is
-#: exactly why the helper below refuses an unlisted absence rather than
-#: trusting a remembered spelling: musicgen is `musicgen.transformers-fp16`
-#: (not `.diffusers-bf16`), joycaption is `joycaption.llava-bf16`, and the two
-#: qwen documents are `qwen3.6-27b-mtp.gguf-ud-q4-k-xl` and
-#: `qwen3.6-35b-a3b.vllm-fp8`.
-#:
-#: Kept rather than deleted: it is the shape a future owed-document set is
-#: recorded in, and an empty frozenset makes the helper below assert that
-#: EVERY absence is now unexplained. Each name here is a family whose endpoint CANNOT
-#: declare `lanes=` today and is therefore refused at import (pgw#1599) —
-#: which is the whole reason tensorfs#130 is sequenced ahead of se#816's
-#: fleet migration. Delete a row when its document is vendored; the
-#: assertions below go red if you delete one that is not there yet, or leave
-#: one that is.
 TENSORFS_130_OWED: frozenset[str] = frozenset()
 # pgw#1621 REOPENED this list with one row and then CLOSED it again in the same
 # change, which is the behaviour the row exists to have rather than a tidy-up.
@@ -643,19 +491,10 @@ TENSORFS_130_OWED: frozenset[str] = frozenset()
 # topology digests came out byte-identical, which is what says the regrouping
 # changed the expressible set and not the existing answers.
 
-#: hunyuan3d-2.1 is NOT on that list and never will be by this route: its repo
-#: is PICKLE-only, so no safetensors-shaped document can describe it. The
-#: answer is a repack-to-safetensors at ingest, pod-side (weights-locality) —
-#: never teaching tensorfs to describe pickles. Until then its class carries a
-#: typed refusal, which is honest, rather than a guess.
 PICKLE_ONLY: frozenset[str] = frozenset({"hunyuan3d.dit"})
 
 
 def _library_lacks(name: str) -> bool:
-    """Assert-helper: the library does NOT ship ``name``, AND that absence is
-    a KNOWN one. A document going missing that nobody planned for is a
-    different event from one that has not been written yet, and reading them
-    as the same is how a vendor bump silently strands an endpoint."""
 
     assert name in TENSORFS_130_OWED or name in PICKLE_ONLY, (
         f"{name!r} is absent from the vendored v2 topology corpus and is on "
@@ -690,24 +529,16 @@ def _library_has(name: str) -> bool:
 
 
 def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
-    """pgw#1422. Both qwen3.6 roots are EXTERNAL-BINARY runtimes (llama.cpp,
-    vLLM) that never call `ctx.load`, so they carry no canonical contract —
-    the `Rife` shape, and an ABSENT contract rather than a `MissingContract`
-    sentinel. And `max_tokens` must never inherit an endpoint's card budget:
-    a platform `hi` only ever NARROWS a checkpoint row (the pgw#1393
-    `Flux1.guidance` defect), so a 16k/32k KV cap here would make the
-    family's real 262k context unreachable forever."""
     from gen_worker.models import Qwen36A3b, Qwen36Mtp
 
     for model_type in (Qwen36Mtp, Qwen36A3b):
-        assert not hasattr(model_type, "canonical_contract")  # pgw#1599
+        assert not hasattr(model_type, "canonical_contract")
         assert model_type.canonical_scheduler_config == {}
         defaults = model_type.Defaults()
         assert defaults.max_tokens.default == 256
         assert defaults.max_tokens.lo == 1
         assert defaults.max_tokens.hi is None
         assert defaults.top_p.default == 0.95
-        # no bounds are sourced for the sampler knobs, so none are declared
         assert (defaults.temperature.lo, defaults.temperature.hi) == (None, None)
 
     assert Qwen36Mtp.Defaults().temperature.default == 0.6
@@ -715,23 +546,6 @@ def test_the_llm_roots_declare_no_lane_and_no_card_budget() -> None:
 
 
 def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None:
-    """pgw#1430 (se#769 audio lane).
-
-    ONE root serves stable-audio-open AND foundation-1: the two prod
-    checkpoints have the SAME 445-tensor transformer header sha256 and
-    byte-identical scheduler values, so no MECHANISM differs — the only thing
-    the :class:`Flux2Klein` split precedent splits on. They diverge only in
-    weight digests, which is a CHECKPOINT ROW. There is deliberately no
-    "foundation-1" model type.
-
-    MusicGen is the :class:`Rife` shape — name + fingerprint + Defaults, NO
-    contract. Absent is honest rather than unfinished, on four independent
-    measurements: a single-file `transformers` tree; the hub records no
-    `file_layout` (which th#1937/th#2109 rule CORRECT for transformers); the
-    endpoint loads through `Slot(str)`; and its served tree carries no
-    `model_index.json` at all, so the streaming branch that consumes a lane
-    document is unreachable for it.
-    """
     from gen_worker.models import MusicGen, StableAudio
 
     assert model_type_by_name("stable-audio") is StableAudio
@@ -753,8 +567,6 @@ def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None
     assert display_names()["musicgen.transformers@1+plain.f16@1"] == (
         "musicgen.transformers-fp16@1")
     assert MusicGen.canonical_scheduler_config == {}
-    # StableAudio DOES carry both, and the scheduler config is real (read from
-    # the served manifest, identical on both checkpoints) rather than {}.
     assert StableAudio.canonical_scheduler_config["prediction_type"] == "v_prediction"
     assert StableAudio.canonical_scheduler_config["_class_name"] == (
         "CosineDPMSolverMultistepScheduler"
@@ -762,8 +574,6 @@ def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None
 
 
 def test_the_two_3d_roots_declare_their_lanes_by_evidence() -> None:
-    """pgw#1424. The point is that the two 3D families declare OPPOSITE lane
-    facts, and each is falsifiable here rather than in prose."""
     from gen_worker.models import Hunyuan3d, Trellis2
     from gen_worker.models.model_types import Rife
 
@@ -785,38 +595,23 @@ def test_the_two_3d_roots_declare_their_lanes_by_evidence() -> None:
     # is refused at import until the repack-to-safetensors job runs pod-side.
     assert _library_lacks("hunyuan3d.dit")
 
-    # Rife WAS the precedent Hunyuan3D followed. tensorfs#130 ends that: one
-    # shared `rife.flownet-fp32@1` document now covers the three classes that
-    # used to declare the same type three different ways.
     del Rife
 
-    # Neither noise schedule is invented. Both are {} for a stated reason:
-    # TRELLIS.2-4B ships no scheduler/ directory at all, and Hunyuan3D's shape
-    # DiT is flow-matching with no diffusers scheduler.
     assert Trellis2.canonical_scheduler_config == {}
     assert Hunyuan3d.canonical_scheduler_config == {}
 
-    # Zero-arg construction must be SERVABLE (they double as trace fixtures).
     assert Trellis2.Defaults().steps.default == 12
     assert Hunyuan3d.Defaults().num_shape_steps.default == 50
     assert Hunyuan3d.Defaults().guidance_scale.default == 5.0
 
 
 def test_the_3d_fingerprints_do_not_claim_the_shared_dit_fragment() -> None:
-    """pgw#1424. The Flux1 trap checked for TRELLIS rather than assumed away:
-    ``dit.blocks-fused-qkv@1`` is a family-PLURAL timm-spelling fragment and
-    must classify to NOTHING. It is also a measured non-match against a real
-    TRELLIS header — it requires ``blocks.{i}.attn.qkv.weight`` while TRELLIS
-    spells ``blocks.{i}.self_attn.to_qkv.weight`` (0 of 640 tensors)."""
     from gen_worker.models import Hunyuan3d, Trellis2
 
     assert model_type_for_contract("trellis2.dit-bf16@1") is Trellis2
     assert model_type_for_contract("dit.blocks-fused-qkv@1") is not Trellis2
     assert model_type_for_contract("dit.blocks-fused-qkv@1") is None
-    # hunyuan3d has a fingerprint even with no document — the name seam is what
-    # lets a future stamp classify without claiming a lane.
     assert model_type_for_contract("hunyuan3d.anything@1") is Hunyuan3d
-    # And neither may claim the other's stamp.
     assert model_type_for_contract("hunyuan3d.anything@1") is not Trellis2
     assert model_type_for_contract("trellis2.dit-bf16@1") is not Hunyuan3d
 
@@ -857,49 +652,23 @@ def test_contract_stamps_classify_through_the_fingerprint() -> None:
 
 
 def test_the_audio_fingerprints_do_not_cross_claim_with_flux() -> None:
-    """pgw#1430 / se#769 TRAP A.
-
-    The hub MIS-ROOTS ``tensorhub/stable-audio-open`` under ``family=flux``
-    (ingest fell back after ``_class_name=StableAudioPipeline not in family
-    map``), and the mis-rooting is not arbitrary: MEASURED from the real
-    prod header, 432 of the StableAudio DiT's 445 tensors are spelled
-    ``transformer_blocks.*`` — the SAME spelling a FLUX transformer uses. The
-    collision is therefore real at the TENSOR level, which is where a
-    tensorfs document matches.
-
-    This test guards the level THIS module owns: the recorded contract STAMP.
-    The two namespaces must not be confused — a stamp collision would need
-    someone to widen a flux fingerprint to a bare ``flux*``, which is why the
-    RED arm below pins that it would in fact be caught.
-    """
     from gen_worker.models import Flux1, Flux2Klein, MusicGen, StableAudio
 
     assert model_type_for_contract("stable-audio.diffusers-fp16@1") is StableAudio
     assert model_type_for_contract("musicgen.native@1") is MusicGen
 
-    # No audio stamp may land on a flux root, and no flux stamp on an audio one.
     for stamp in ("stable-audio.diffusers-fp16@1", "musicgen.native@1"):
         assert model_type_for_contract(stamp) not in (Flux1, Flux2Klein)
     for stamp in ("flux1.diffusers-bf16@1", "flux2-klein.diffusers-bf16@1"):
         assert model_type_for_contract(stamp) not in (StableAudio, MusicGen)
 
-    # RED ARM — the assertion above is only meaningful if a WIDER flux pattern
-    # would actually capture an audio stamp. Pin that it would, so nobody
-    # widens `flux1.*` to `flux*` believing the separation is structural.
     from fnmatch import fnmatchcase
 
     assert not fnmatchcase("stable-audio.diffusers-fp16@1", "flux*")
     assert fnmatchcase("stable-audio.diffusers-fp16@1", "stable-audio.*")
-    # The separation rests on the NAME we chose, not on any guard — which is
-    # exactly why the document is named `stable-audio.*` and never `flux*`.
     assert StableAudio.contracts == ("stable-audio.*",)
     assert MusicGen.contracts == ("musicgen.*",)
-    # Unrecognized = unclassified, legal and visible — never a guess.
     assert model_type_for_contract("flux.diffusers-bf16@1") is None
-    # pgw#1393: the two flux roots fingerprint separately, and the SHARED
-    # block-spelling fragment classifies NOTHING — its own description says it
-    # is "shared by Flux-family and timm-derived transformers", so matching on
-    # it would claim every timm ViT for Flux.
     from gen_worker.models import Flux1, Flux2Klein
 
     assert model_type_for_contract("flux1.diffusers-bf16@1") is Flux1
@@ -908,8 +677,7 @@ def test_the_audio_fingerprints_do_not_cross_claim_with_flux() -> None:
 
 
 def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
-    """The ingest-synthesis data (Paul's ruling: a bare scheduler class
-    carries library-default betas, not the family's training schedule)."""
+    """The ingest-synthesis data (Paul's ruling: a bare scheduler class carries library-default betas, not the family's training schedule)."""
     import json
 
     sdxl = SDXL.canonical_scheduler_config
@@ -919,12 +687,8 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     assert sdxl["_class_name"] == "EulerDiscreteScheduler"
     sd15 = SD15.canonical_scheduler_config
     assert (sd15["beta_start"], sd15["beta_end"]) == (0.00085, 0.012)
-    # JSON-serializable as-is: ingest writes it verbatim as
-    # scheduler_config.json into a classified tree that ships none.
     for mt in MODEL_TYPES:
         json.dumps(dict(mt.canonical_scheduler_config))
-    # No canonical recorded for these yet — ingest synthesizes nothing
-    # (flagged in the tracker; do not invent a family's noise schedule).
     from gen_worker.models import HiDreamO1, SD2, Wan22
 
     from gen_worker.models import MiniMaxH3, Rife
@@ -934,34 +698,14 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     assert Wan22.canonical_scheduler_config == {}
     assert MiniMaxH3.canonical_scheduler_config == {}
     assert Rife.canonical_scheduler_config == {}
-    # pgw#1393: Flux is FLOW-MATCHING — there is no beta schedule to record at
-    # all, and FlowMatchEulerDiscreteScheduler's shift parameters are
-    # resolution-dependent, so this never borrows SDXL's scaled_linear betas.
-    #
-    # tensorfs#136 CORRECTED THE REASON. pgw#1393 recorded "HF-gated and could
-    # not be fetched", which has since dissolved: both files are whole-file
-    # entries in the hub's resolve manifest for tensorhub/flux1-dev and
-    # tensorhub/flux1-schnell, and both were read. It stays empty on the
-    # measured fact instead — the two checkpoints under this one root DISAGREE
-    # (dev shift 3.0 with use_dynamic_shifting True; schnell shift 1.0 with it
-    # False), so no single value is right for the root, and Klein's 3.0/dynamic
-    # would be right for dev and wrong for schnell. A `{}` whose reason has
-    # gone stale is the one the next reader clears wrongly.
     from gen_worker.models import Flux1, Flux2Klein
 
     assert Flux1.canonical_scheduler_config == {}
-    # ...but FLUX.2 Klein's IS recorded now: black-forest-labs/FLUX.2-klein-4B
-    # is the ONE BFL flux repo that is not HF-gated, so its shipped
-    # scheduler_config.json was fetched verbatim (pgw#1393 follow-up).
     klein = Flux2Klein.canonical_scheduler_config
     assert klein["_class_name"] == "FlowMatchEulerDiscreteScheduler"
-    # FLOW-MATCHING: a shift ladder, NOT a beta schedule. Asserting the
-    # absence is the point — this is what "don't copy SDXL across" means.
     for beta_field in ("beta_start", "beta_end", "beta_schedule", "trained_betas"):
         assert beta_field not in klein
     assert (klein["base_shift"], klein["max_shift"], klein["shift"]) == (0.5, 1.15, 3.0)
-    # The reason no frozen triple could have been invented: the effective
-    # shift is a function of image sequence length.
     assert klein["use_dynamic_shifting"] is True
     assert (klein["base_image_seq_len"], klein["max_image_seq_len"]) == (256, 4096)
     assert klein["num_train_timesteps"] == 1000
@@ -981,54 +725,33 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     assert _library_has("rife.flownet")
 
 
-# ── the flux family (pgw#1393) ───────────────────────────────────────────────
-
-
 def test_flux_platform_values_are_the_shipped_endpoint_numbers() -> None:
-    """Every value cited to the flux endpoints' own source (pgw#1393)."""
     from gen_worker.models import Flux1, Flux2Klein
 
     f1 = Flux1.Defaults()
-    # flux.1-dev/main.py:69-70 == flux.1-schnell/main.py:61-62, both under
-    # register_family("flux1", ...) — the family owner saying dev and schnell
-    # are ONE vocabulary.
     assert f1.steps == Knob(28, lo=1, hi=100, name="steps")
     assert f1.guidance == Knob(3.5, lo=0.0, hi=10.0, name="guidance")
-    # flux.1-dev/main.py:277-280: guidance is the DISTILLATION EMBEDDING, a
-    # DiT input tensor — not CFG. Both BFL checkpoints serve cfg-off.
     assert f1.cfg is False
     assert f1.step_distilled is False
-    assert f1.max_sequence_length == 512  # :117
+    assert f1.max_sequence_length == 512
 
     k = Flux2Klein.Defaults()
-    assert k.steps == Knob(28, lo=1, hi=50, name="steps")  # :84, :306
-    assert k.guidance == Knob(4.0, lo=1.0, hi=10.0, name="guidance")  # :85, :310
-    # flux.2-klein-4b/main.py:123-129, :307 — Klein Base runs a real second
-    # uncond forward. The opposite of Flux1, which is why these are two types.
+    assert k.steps == Knob(28, lo=1, hi=50, name="steps")
+    assert k.guidance == Knob(4.0, lo=1.0, hi=10.0, name="guidance")
     assert k.cfg is True
-    assert k.max_sequence_length == 512  # :121
+    assert k.max_sequence_length == 512
 
-    # Sourcing rule: no knob was invented where none could be sourced.
     for d in (f1, k):
         assert not hasattr(d, "scheduler")
         assert not hasattr(d, "timesteps")
-    # No flux endpoint registers a lora vocabulary, so there is no overlay.
     assert not hasattr(Flux1, "Lora")
     assert not hasattr(Flux2Klein, "Lora")
 
 
 def test_flux_platform_floors_admit_the_distilled_checkpoints() -> None:
-    """The floors are the ENDPOINTS' checkpoint facts, not their wire bounds.
-
-    ``_merge_*_knob`` only ever NARROWS and clamps a row's default into the
-    platform range, so a platform floor copied from a Base handler's payload
-    envelope silently rewrites the distilled checkpoint's own recipe. Both
-    cases below were MEASURED failing before the floors were corrected.
-    """
+    """The floors are the ENDPOINTS' checkpoint facts, not their wire bounds."""
     from gen_worker.models import Flux1, Flux2Klein
 
-    # flux.1-schnell/main.py:388-389 pins guidance_scale=0.0. Under dev's wire
-    # ge=1.0 (flux.1-dev/main.py:281) this decoded to lo=1.0, hi=0.0 — empty.
     schnell = decode_model_defaults(Flux1, model="flux1", defaults={
         "steps": {"default": 4, "hi": 4},
         "guidance": {"default": 0.0, "lo": 0.0, "hi": 0.0},
@@ -1040,8 +763,6 @@ def test_flux_platform_floors_admit_the_distilled_checkpoints() -> None:
     assert schnell.step_distilled is True
     assert schnell.max_sequence_length == 256
 
-    # flux.2-klein-4b/main.py:94-95: Turbo's published recipe is 4 steps at
-    # guidance 1.0. The Base HANDLER declares ge=12 / ge=1.5 (:306, :310).
     turbo = decode_model_defaults(Flux2Klein, model="flux2-klein", defaults={
         "steps": {"default": 4},
         "guidance": {"default": 1.0},
@@ -1052,8 +773,6 @@ def test_flux_platform_floors_admit_the_distilled_checkpoints() -> None:
     assert turbo.guidance.default == 1.0
     assert turbo.cfg is False and turbo.step_distilled is True
 
-    # flux.1-schnell/main.py:267 — the Flex.2 lane's le=100 is why the platform
-    # ceiling is 100 and not dev's 50: the merge cannot widen.
     flex2 = decode_model_defaults(Flux1, model="flux1", defaults={
         "steps": {"default": 28, "hi": 100}, "cfg": True,
     })
@@ -1061,43 +780,27 @@ def test_flux_platform_floors_admit_the_distilled_checkpoints() -> None:
 
 
 def test_qwen_and_z_platform_values_are_the_shipped_endpoint_numbers() -> None:
-    """pgw#1426. Every number below is the family's OWN v1 endpoint code."""
     from gen_worker.models import QwenImage, ZImage
 
     q = QwenImage.Defaults()
-    # qwen-image/src/qwen_image/main.py:138-140.
     assert q.steps.default == 30 and q.guidance.default == 4.0
     assert q.negative == " ", "Qwen's uncond convention is a SPACE, never ''"
     assert q.cfg is True and q.step_distilled is False
-    # :173 — the t2i pin; the edit checkpoint's ROW carries 1024 (:303).
     assert q.max_sequence_length == 512
-    # v1's `max_guidance` clamp field does NOT come across: Knob.hi IS the clamp.
     assert not hasattr(q, "max_guidance")
 
     z = ZImage.Defaults()
-    # z-image/src/z_image/main.py:90-91.
     assert z.steps.default == 28 and z.guidance.default == 4.0
     assert z.cfg is True and z.step_distilled is False
-    assert z.max_sequence_length == 512  # :131
+    assert z.max_sequence_length == 512
 
-    # Neither family registers a lora vocabulary with a sourceable strength
-    # range, so neither declares an overlay (the Flux1/Flux2Klein posture).
     assert not hasattr(QwenImage, "Lora")
     assert not hasattr(ZImage, "Lora")
 
 
 def test_qwen_and_z_platform_floors_admit_their_distilled_checkpoints() -> None:
-    """pgw#1426, and it is RED-CONTROLLED below rather than merely asserted.
-
-    Both families ship a distilled sibling, so a platform floor copied from the
-    BASE handler's wire envelope would silently rewrite the distilled row --
-    ``_merge_*_knob`` only narrows, and clamps a row's default INTO the range.
-    """
     from gen_worker.models import QwenImage, ZImage
 
-    # z-image/src/z_image/main.py:245 — official Turbo's card recipe is 9
-    # scheduler steps, and :702 PINS guidance 0.0. The base handler's wire
-    # floor is ge=1.0 (:278); copying it would have made this row empty.
     dmd = decode_model_defaults(ZImage, model="z-image", defaults={
         "steps": {"default": 9}, "guidance": {"default": 0.0},
         "cfg": False, "step_distilled": True,
@@ -1106,16 +809,12 @@ def test_qwen_and_z_platform_floors_admit_their_distilled_checkpoints() -> None:
     assert dmd.guidance.default == 0.0 and dmd.guidance.lo == 0.0
     assert dmd.cfg is False and dmd.step_distilled is True
 
-    # :244 — the PAI 2603 8-step distill reaches the same state as an overlay.
     pai = decode_model_defaults(ZImage, model="z-image", defaults={
         "steps": {"default": 8, "hi": 16}, "guidance": {"default": 0.0},
         "cfg": False, "step_distilled": True,
     })
     assert pai.steps.default == 8 and pai.steps.hi == 16
 
-    # qwen-image/src/qwen_image/main.py:430 — the Lightning regime is 8 steps
-    # with CFG off. The base handler declares ge=10 (:317) and ge=1.5 (:324);
-    # either copied up would corrupt this row.
     lightning = decode_model_defaults(QwenImage, model="qwen-image", defaults={
         "steps": {"default": 8}, "guidance": {"default": 1.0},
         "cfg": False, "step_distilled": True,
@@ -1124,7 +823,6 @@ def test_qwen_and_z_platform_floors_admit_their_distilled_checkpoints() -> None:
     assert lightning.guidance.default == 1.0
     assert lightning.cfg is False and lightning.step_distilled is True
 
-    # The edit checkpoint narrows ONLY the text pin (:303).
     edit = decode_model_defaults(QwenImage, model="qwen-image", defaults={
         "max_sequence_length": 1024,
     })
@@ -1133,13 +831,7 @@ def test_qwen_and_z_platform_floors_admit_their_distilled_checkpoints() -> None:
 
 
 def test_a_base_handlers_wire_floor_really_would_corrupt_a_distilled_row() -> None:
-    """The RED control for the test above: prove the hazard is real HERE, so
-    the floors are known-good rather than merely never-exercised.
-
-    An assertion that has never failed is not known to be able to fail, and the
-    corruption is silent by construction -- no exception, just a different
-    recipe -- so nothing else would have caught a mechanical port.
-    """
+    """The RED control for the test above: prove the hazard is real HERE, so the floors are known-good rather than merely never-exercised."""
     from gen_worker.models.defaults_decode import decode_defaults
 
     class PortedZImage(msgspec.Struct, frozen=True):
@@ -1152,16 +844,12 @@ def test_a_base_handlers_wire_floor_really_would_corrupt_a_distilled_row() -> No
 
         steps: Knob[int] = Knob(30, lo=10, hi=80, name="steps")
 
-    # Against Turbo's pinned guidance 0.0.
     corrupted = decode_defaults(PortedZImage, {"guidance": {"default": 0.0}})
     assert corrupted.guidance.default == 1.0, "the port silently serves CFG on"
 
-    # Against Lightning's 8 steps.
     corrupted2 = decode_defaults(PortedQwen, {"steps": {"default": 8}})
     assert corrupted2.steps.default == 10, "the port silently serves 10 steps"
 
-    # And the SHIPPED floors do not do that -- the same two rows, decoded
-    # through the real vocabularies, keep their own values.
     from gen_worker.models import QwenImage, ZImage
 
     assert decode_model_defaults(
@@ -1192,21 +880,10 @@ def test_no_warning_leaks_from_a_classified_decode() -> None:
         decode_model_defaults(SDXL, model="sdxl", defaults={"cfg": False})
 
 
-# ── ltx-2: two roots, no knobs (pgw#1420) ────────────────────────────────────
-#
-# pgw#1420: `Ltx2` + `Ltx2Upsampler`, and the two hazards the vocabulary had to
-# clear — the clamp-direction defect and fingerprint capture across a shared
-# name prefix. Both are red/green'd here because both review as correct when
-# they are wrong.
-
 from gen_worker.models import Ltx2, Ltx2Defaults, Ltx2Upsampler
 from gen_worker.models.defaults_decode import decode_defaults
 from gen_worker.models.model_types import LTX2_SCHEDULER_CONFIG
 
-#: The unserved `tensorhub/ltx-2.3-dev` fine-tune base: a 30-step CFG recipe,
-#: i.e. the exact "distilled sibling" shape the clamp hazard corrupts. It is a
-#: real catalog row (`jobs/catalog/launch_ltx_2026-07-07.toml` clones it to
-#: `tensorhub/ltx-2.3-dev`), not a hypothetical.
 _DEV_ROW = {
     "guidance": 3.0,
     "audio_guidance": 3.0,
@@ -1215,12 +892,8 @@ _DEV_ROW = {
 }
 
 
-# ── the vocabulary itself ────────────────────────────────────────────────────
-
-
 def test_the_root_is_the_registered_family_name_not_the_endpoint_slug() -> None:
-    """`register_family("ltx-2", ...)` is the family owner's own shipped call;
-    `ltx-video-2.3` is an endpoint slug and was never the vocabulary name."""
+    """`register_family("ltx-2", ...)` is the family owner's own shipped call; `ltx-video-2.3` is an endpoint slug and was never the vocabulary name."""
 
     assert Ltx2.name == "ltx-2"
     assert model_type_by_name("ltx-2") is Ltx2
@@ -1280,13 +953,12 @@ def test_the_upsampler_now_HAS_its_lane_document() -> None:
 
 
 def test_the_scheduler_config_is_ltx_s_own_and_not_klein_s() -> None:
-    """Fetched verbatim from the pinned revision. The three values below are
-    exactly where a fill-by-analogy from FLUX.2 Klein would have gone wrong."""
+    """Fetched verbatim from the pinned revision."""
 
-    assert LTX2_SCHEDULER_CONFIG["use_dynamic_shifting"] is False  # Klein: True
-    assert LTX2_SCHEDULER_CONFIG["shift"] == 1.0                   # Klein: 3.0
-    assert LTX2_SCHEDULER_CONFIG["base_shift"] == 0.95             # Klein: 0.5
-    assert LTX2_SCHEDULER_CONFIG["max_shift"] == 2.05              # Klein: 1.15
+    assert LTX2_SCHEDULER_CONFIG["use_dynamic_shifting"] is False
+    assert LTX2_SCHEDULER_CONFIG["shift"] == 1.0
+    assert LTX2_SCHEDULER_CONFIG["base_shift"] == 0.95
+    assert LTX2_SCHEDULER_CONFIG["max_shift"] == 2.05
 
 
 def test_both_types_are_registered() -> None:
@@ -1294,18 +966,11 @@ def test_both_types_are_registered() -> None:
     assert "ltx-2" in names and "ltx-2-upsampler" in names
 
 
-# ── hazard 1: fingerprint capture across a shared name prefix ────────────────
-
-
 def test_the_ltx_2_fingerprint_does_not_capture_the_upsampler() -> None:
-    """`ltx-2.*` is an fnmatch pattern and `ltx-2-upsampler...` shares its
-    first five characters. If `.` were treated loosely the auxiliary's stamps
-    would classify as the DiT — a wrong `model` column on every upsampler
-    artifact, silently."""
+    """`ltx-2.*` is an fnmatch pattern and `ltx-2-upsampler...` shares its first five characters."""
 
     assert model_type_for_contract("ltx2.diffusers@1") is Ltx2
     assert model_type_for_contract("ltx2-upsampler.diffusers@1") is Ltx2Upsampler
-    # and the reverse direction must not hold either
     assert model_type_for_contract("ltx2-upsampler.diffusers@1") is not Ltx2
     # ...and it holds through the full stamp pair too, where the topology is
     # the PREFIX of the render — which is why `model_type_for_contract` splits
@@ -1314,23 +979,15 @@ def test_the_ltx_2_fingerprint_does_not_capture_the_upsampler() -> None:
         "ltx2-upsampler.diffusers@1+plain.bf16@1") is Ltx2Upsampler
 
 
-# ── hazard 2: the clamp direction, RED and GREEN ─────────────────────────────
-
-
 def test_ltx2_declares_no_knob_at_all() -> None:
-    """The structural reason this family is immune. A `Knob` is for a value the
-    wire exposes and the platform must CLAMP; `ltx-video-2.3` exposes neither
-    `steps` nor `guidance` and REJECTS an override with a typed 400 rather than
-    narrowing it (ie#345). A knob that can only ever refuse is not a knob."""
+    """The structural reason this family is immune."""
 
     for field in msgspec.structs.fields(Ltx2Defaults):
         assert not isinstance(field.default, Knob), field.name
 
 
 def test_a_distilled_sibling_row_survives_the_merge_unmodified() -> None:
-    """GREEN. The `ltx-2.3-dev` 30-step CFG recipe must come back out exactly
-    as written — no floor applied to `guidance`, no clamp on the sigma ladder,
-    `cfg` flipped."""
+    """GREEN."""
 
     merged = decode_defaults(Ltx2Defaults, _DEV_ROW, model_name="ltx-2")
 
@@ -1338,16 +995,12 @@ def test_a_distilled_sibling_row_survives_the_merge_unmodified() -> None:
     assert merged.audio_guidance == 3.0
     assert merged.sigmas == (1.0, 0.75, 0.5, 0.25)
     assert merged.cfg is True
-    # untouched fields fall through to the platform opinion
     assert merged.stage2_sigmas == Ltx2Defaults().stage2_sigmas
     assert merged.max_sequence_length == 1024
 
 
 def test_the_zero_arg_default_is_the_SERVED_distilled_recipe() -> None:
-    """`Defaults()` zero-arg is the platform opinion and must be SERVABLE. The
-    checkpoint this endpoint actually serves is the distilled one, so the 8
-    fixed sigmas and CFG-off are the right default — not a base-model recipe
-    the served weights would run wrong."""
+    """`Defaults()` zero-arg is the platform opinion and must be SERVABLE."""
 
     d = Ltx2Defaults()
     assert len(d.sigmas) == 8
@@ -1358,14 +1011,7 @@ def test_the_zero_arg_default_is_the_SERVED_distilled_recipe() -> None:
 
 
 def test_RED_the_same_row_shape_IS_clamped_when_the_field_is_a_knob() -> None:
-    """The control. This proves the merge really does clamp — so the green
-    above is a property of `Ltx2Defaults` having no knobs, and not of the test
-    being unable to fail.
-
-    A knob-bearing struct with a base-model floor of 30 steps, handed the
-    distilled row's 10, comes back FLOORED to 30: three times the work, wrong
-    regime. That is the defect verbatim, reproduced here on purpose.
-    """
+    """The control."""
 
     class _KnobbyDefaults(msgspec.Struct, frozen=True):
         steps: Knob[int] = Knob(30, lo=30, hi=80, name="steps")

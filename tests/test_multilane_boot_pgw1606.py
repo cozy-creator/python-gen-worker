@@ -62,17 +62,12 @@ class _Gates:
 
 class TwoLaneModel(
     Model[SDXL],
-    # Two REAL lanes with REAL per-lane demand formulas. Per-lane and not
-    # per-model is the point (pgw#1599/se#816): fp8 halves the weight bytes
-    # AND shrinks the activation coefficients, so one formula would be
-    # wrong for one of these two.
     lanes={
         BF16: lane(request=const(GiB(1.2)) + per_mp_batch(MiB(220))),
         FP8: lane(request=const(GiB(0.7)) + per_mp_batch(MiB(140))),
     },
 ):
-    """One Model class, two REAL lanes — the shape Paul's multi-lane example
-    ratified and the shape that could not boot before this issue."""
+    """One Model class, two REAL lanes — the shape Paul's multi-lane example ratified and the shape that could not boot before this issue."""
 
     def load(self, ctx: Any) -> None:  # pragma: no cover — never run here
         self.pipe = ctx.load_pipeline(object)
@@ -103,9 +98,7 @@ def test_the_declaration_itself_is_accepted_with_two_lanes():
 
 
 def test_lane_still_refuses_to_GUESS_but_now_points_at_the_ladder():
-    """`lane()` answering "the" lane of a multi-lane model would be a silent
-    default, which is exactly what must not exist. It still refuses — but the
-    refusal is now a wiring message, not a dead end."""
+    """`lane()` answering "the" lane of a multi-lane model would be a silent default, which is exactly what must not exist."""
     with pytest.raises(EndpointLoadError, match="ask `resolve\\(\\)`"):
         _loaded(TwoLaneModel).lane(TwoLaneModel, "")
 
@@ -138,8 +131,7 @@ def test_resolve_falls_to_bf16_on_ampere_using_the_DERIVED_floor():
 
 
 def test_the_upcast_rung_on_a_real_two_lane_sdxl_class():
-    """Ampere cannot run fp8, and the fp8 tree is half the bytes. Fetch those,
-    upcast at load, serve full precision — and report the saving."""
+    """Ampere cannot run fp8, and the fp8 tree is half the bytes."""
     resolved = _loaded(TwoLaneModel).resolve(
         TwoLaneModel, card=AMPERE,
         verdicts=_Verdicts(staged=[BF16_ID, FP8_ID],
@@ -153,15 +145,12 @@ def test_the_upcast_rung_on_a_real_two_lane_sdxl_class():
 
 
 def test_an_operator_pin_narrows_the_candidate_set_and_still_walks_the_ladder():
-    """`--lane` is an override, not a bypass: a pinned lane the card cannot run
-    says WHY, here rather than deeper in the load."""
+    """`--lane` is an override, not a bypass: a pinned lane the card cannot run says WHY, here rather than deeper in the load."""
     resolved = _loaded(TwoLaneModel).resolve(
         TwoLaneModel, card=AMPERE,
         verdicts=_Verdicts(staged=[FP8_ID]), gates=_Gates(),
         contract=FP8_ID,
     )
-    # The only candidate is floored out, so nothing has runnable bytes — and
-    # the answer is a conversion ask, never a refusal.
     assert resolved.conversion is not None
     assert [r.reason for r in resolved.rejected] == [L.REJECT_SM_FLOOR]
 
@@ -174,8 +163,7 @@ def test_pinning_a_lane_the_model_does_not_declare_refuses_by_name():
 
 
 def test_the_single_lane_fleet_path_is_unchanged():
-    """Every endpoint in the fleet is single-lane today. `lane()` must still
-    answer directly, and `resolve()` must agree with it."""
+    """Every endpoint in the fleet is single-lane today."""
     loaded = _loaded(OneLaneModel)
     assert loaded.lane(OneLaneModel, "").render() == BF16_ID
     resolved = loaded.resolve(
@@ -187,9 +175,6 @@ def test_the_single_lane_fleet_path_is_unchanged():
 
 
 def test_the_declared_lane_object_is_carried_not_rebuilt():
-    """pgw#1599's ask: `request=` and `resident=` must travel intact to varena
-    and `min_sm` must keep one producer, so the resolver carries the declared
-    lane rather than re-deriving anything off the Contract."""
     resolved = _loaded(TwoLaneModel).resolve(
         TwoLaneModel, card=ADA, verdicts=_Verdicts(staged=[FP8_ID]),
         gates=_Gates(),

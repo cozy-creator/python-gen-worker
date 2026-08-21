@@ -1,18 +1,3 @@
-"""Quantization lanes (th#960/pgw#609 Phase 2b): a consolidated kept file
-for the W8A8/W4A4/FP8 storage+load contract — the one bucket the coordinator
-authorized a dedicated file for (no P-test home; this surface is orthogonal
-to the worker<->hub lifecycle contract P1-P10 cover, but is flagship-
-critical and carries real incident history).
-
-Absorbed from (all deleted after this file lands): test_w8a8.py,
-test_w4a4.py, test_fp8_and_emergency_loading.py,
-test_promote_device_integrity.py (gw#409, J17 9%-request-loss incident).
-Their other ~40 tests (numerics-heavy GPU lanes, ladder/compile-key
-bookkeeping, emergency-rung sizing arithmetic) have no incident pin and are
-git-history-archived, not reproduced here (bucket-level triage, not
-per-file absorb-or-accept-loss).
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,13 +8,6 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("diffusers")
 pytest.importorskip("accelerate")
-
-
-# ---------------------------------------------------------------------------
-# W8A8 fp8-GEMM contract — real tiny diffusers pipeline (CPU, no
-# network), producer writes the exact tensor-layout contract, loader dequants to
-# bf16-resident and reproduces source weights to fp8 rounding.
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -67,12 +45,6 @@ def test_w8a8_contract_artifact_detects_and_dequants_to_source_weights(
 
     w8a8.w8a8_gemm_mode.cache_clear() if hasattr(w8a8.w8a8_gemm_mode, "cache_clear") else None
     pipe = load_from_pretrained(DDPMPipeline, w8a8_tree)
-    # was `in ("", "bf16-resident")`, which could never fail —
-    # `pipeline_weight_lane` collapses "bf16-resident" to "" (loading.py: it
-    # traces identically to plain bf16), so the second arm was unreachable and
-    # the assertion was satisfied unconditionally. What the test means is that
-    # a dequanted W8A8 tree serves on the BASE lane, not fp8-hooks/w8a8 — say
-    # exactly that, so a regression that leaves fp8 hooks attached goes red.
     assert pipeline_weight_lane(pipe) == ""
     ref = UNet2DModel.from_pretrained(str(tiny_ddpm / "unet"))
     name = art.quantized[0] + ".weight"
@@ -82,11 +54,6 @@ def test_w8a8_contract_artifact_detects_and_dequants_to_source_weights(
     assert rel < 0.13, "fp8 e4m3 dequant must reproduce source weights to fp8 rounding"
 
 
-# ---------------------------------------------------------------------------
-# W4A4 nvfp4 contract — same real-pipeline shape, distinct format.
-# ---------------------------------------------------------------------------
-
-
 def test_w4a4_contract_artifact_detects_and_round_trips(tiny_ddpm: Path) -> None:
     from gen_worker.models.w4a4 import detect_w4a4_artifact, quantize_tree_w4a4
 
@@ -94,22 +61,10 @@ def test_w4a4_contract_artifact_detects_and_round_trips(tiny_ddpm: Path) -> None
     art = detect_w4a4_artifact(w4a4_tree)
     assert art is not None and art.component == "unet" and len(art.quantized) > 0
 
-    # A w8a8-shaped tree must never cross-detect as w4a4 (the two contract
-    # shapes share a directory layout; disambiguation is the bug class).
     from gen_worker.models.w8a8 import quantize_tree_w8a8
 
     w8a8_tree = quantize_tree_w8a8(tiny_ddpm, tiny_ddpm.parent / "w8a8-cross")
     assert detect_w4a4_artifact(w8a8_tree) is None
-
-
-# ---------------------------------------------------------------------------
-# fp8 storage targets the denoiser specifically (not the whole
-# pipeline) and defaults bf16 compute. pgw#727 made the mechanism module
-# STRUCTURE instead of diffusers cast hooks, so this asserts the RESULT on a
-# real tiny denoiser (fp8-resident leaves, bf16 upcast, VAE untouched) rather
-# than that a cast method was called. Mechanism detail lives in
-# tests/test_fp8_storage_pgw727.py.
-# ---------------------------------------------------------------------------
 
 
 def _tiny_denoiser() -> Any:
@@ -126,7 +81,7 @@ def _tiny_denoiser() -> Any:
 class _FakeDiffusionPipeline:
     def __init__(self) -> None:
         self.unet = _tiny_denoiser()
-        self.vae = _tiny_denoiser()  # a non-denoiser component: never cast
+        self.vae = _tiny_denoiser()
 
 
 def test_fp8_storage_targets_denoiser_defaults_bf16_compute() -> None:
@@ -134,7 +89,7 @@ def test_fp8_storage_targets_denoiser_defaults_bf16_compute() -> None:
     from gen_worker.models.loading import apply_fp8_storage, pipeline_weight_lane
 
     pipe = _FakeDiffusionPipeline()
-    assert apply_fp8_storage(pipe) is True  # compute_dtype defaults to bf16
+    assert apply_fp8_storage(pipe) is True
     assert pipeline_weight_lane(pipe) == "fp8-hooks"
 
     leaves = fp8_storage_leaves(pipe.unet)
@@ -145,17 +100,10 @@ def test_fp8_storage_targets_denoiser_defaults_bf16_compute() -> None:
     assert not fp8_storage_leaves(pipe.vae)
     assert all(p.dtype is torch.bfloat16 for p in pipe.vae.parameters())
 
-    with torch.no_grad():  # the restructured denoiser still runs
+    with torch.no_grad():
         out = pipe.unet(torch.randn(1, 3, 8, 8, dtype=torch.bfloat16),
                         torch.tensor([1])).sample
     assert out.dtype is torch.bfloat16
-
-
-# ---------------------------------------------------------------------------
-# gw#409 (J17: ~9% of requests lost to "tensors on different devices"): a
-# promote whose .to() raises mid-move is refused and rolled back — never
-# booked IN_VRAM as a mixed-device pipeline.
-# ---------------------------------------------------------------------------
 
 
 class _MovablePipe:

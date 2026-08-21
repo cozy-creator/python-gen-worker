@@ -1,16 +1,3 @@
-"""pgw#685 S2b — the AWQ W4A16 modulation decoder, inverted against UPSTREAM.
-
-The reference below is deepcompressor's own forward path, vendored verbatim so the
-tests invert the real exporter rather than a paraphrase of it:
-  ``deepcompressor/backend/tinychat/utils.py``  (pack_w4, ceil_num_groups,
-                                                 convert_to_tinychat_w4x16y16)
-  ``deepcompressor/backend/nunchaku/utils.py``  (convert_to_nunchaku_w4x16, the
-                                                 adanorm_splits transform)
-Bit-exact inversion of that code is the S2b acceptance standard; the real
-artifact's geometry is additionally pinned in
-`test_real_qwen_modulation_geometry`.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -28,9 +15,6 @@ from gen_worker.models.svdq_awq import (  # noqa: E402
     unpack_w4x16,
 )
 from gen_worker.models.svdq_layout import SvdqLayoutError  # noqa: E402
-
-
-# --- UPSTREAM reference (verbatim; see module docstring) --------------------
 
 
 def _up_ceil_num_groups(in_features: int, group_size: int) -> int:
@@ -53,7 +37,6 @@ def _up_pack_w4(weight: Any) -> Any:
 
 
 def _up_convert_w4x16(weight: Any, scale: Any, zero: Any) -> tuple:
-    """zero_pre_scaled=True, as the nunchaku caller passes it."""
     dtype = torch.bfloat16
     weight = weight.to(torch.float32)
     scale = scale.to(torch.float32)
@@ -85,7 +68,6 @@ def _up_adanorm(weight: Any, bias: Any, splits: int) -> tuple:
 
 
 def _awq_params(w: Any, group_size: int) -> tuple[Any, Any]:
-    """Per-group asymmetric AWQ scale + PRE-SCALED zero, so q lands in [0,15]."""
     oc, ic = w.shape
     g = w.reshape(oc, ic // group_size, group_size)
     lo, hi = g.amin(dim=-1), g.amax(dim=-1)
@@ -95,7 +77,6 @@ def _awq_params(w: Any, group_size: int) -> tuple[Any, Any]:
 
 def _synth_awq(oc: int, ic: int, *, group_size: int = 64, splits: int = 1,
                seed: int = 0) -> tuple[dict, Any, Any]:
-    """A checkpoint entry in the exporter's layout + the ORIGINAL weight/bias."""
     gen = torch.Generator().manual_seed(seed)
     w = torch.randn(oc, ic, generator=gen).to(torch.bfloat16).float()
     b = torch.randn(oc, generator=gen).to(torch.bfloat16).float()
@@ -106,11 +87,8 @@ def _synth_awq(oc: int, ic: int, *, group_size: int = 64, splits: int = 1,
              "bias": b_t.to(torch.bfloat16)}, w, b)
 
 
-# --- the packing inverse ---------------------------------------------------
-
-
 @pytest.mark.parametrize("oc,ic", [
-    (18432, 3072),  # the real qwen img_mod.1 / txt_mod.1 shape
+    (18432, 3072),
     (64, 128), (256, 192),
 ])
 def test_unpack_w4x16_inverts_the_upstream_packer(oc: int, ic: int) -> None:
@@ -124,14 +102,11 @@ def test_unpack_w4x16_inverts_the_upstream_packer(oc: int, ic: int) -> None:
 
 
 def test_real_qwen_modulation_geometry() -> None:
-    """Pins the geometry read off the REAL artifact header by range request
-    (nunchaku-ai/nunchaku-qwen-image, svdq-fp4_r128, transformer_blocks.0.
-    img_mod.1): qweight I32 [4608, 1536], wscales/wzeros BF16 [48, 18432],
-    bias BF16 [18432] — i.e. oc=18432, ic=3072, group 64, 6 adaLN splits."""
+    """Pins the geometry read off the REAL artifact header by range request (nunchaku-ai/nunchaku-qwen-image, svdq-fp4_r128, transformer_blocks.0."""
     oc, ic, gs = 18432, 3072, 64
     assert (oc // 4, ic // 2) == (4608, 1536)
     assert num_scale_rows(ic, gs) == 48
-    assert oc // ic == 6  # adanorm_splits for qwen modulation
+    assert oc // ic == 6
 
 
 def test_unpack_refuses_a_shape_that_is_not_this_layout() -> None:
@@ -142,14 +117,8 @@ def test_unpack_refuses_a_shape_that_is_not_this_layout() -> None:
         unpack_w4x16(packed, 18434, 3072)
 
 
-# --- dequant ---------------------------------------------------------------
-
-
 def test_dequantize_is_bit_exact_against_the_exporters_own_dequant() -> None:
-    """The decisive check. Weight-recovery error is dominated by the 4-bit
-    format, so it cannot distinguish a correct decoder from a nearly-correct
-    one. This reconstructs what the EXPORTER itself would dequantize from the
-    stored bf16 scales/zeros and demands equality to the bit."""
+    """The decisive check."""
     oc, ic, gs = 3072, 3072, 64
     gen = torch.Generator().manual_seed(3)
     w = torch.randn(oc, ic, generator=gen).to(torch.bfloat16).float()
@@ -172,8 +141,7 @@ def test_dequantize_is_bit_exact_against_the_exporters_own_dequant() -> None:
 
 
 def test_padded_scale_rows_are_recognized_not_misread_as_groups() -> None:
-    """ceil_num_groups pads: ic=128 at group 64 is 2 real groups but 16 stored
-    rows. Reading 16 as the group count would rescale every weight."""
+    """ceil_num_groups pads: ic=128 at group 64 is 2 real groups but 16 stored rows."""
     oc, ic = 128, 128
     assert num_scale_rows(ic, 64) == 16
     tensors, w, _ = _synth_awq(oc, ic, seed=4)
@@ -191,13 +159,9 @@ def test_dequantize_refuses_mismatched_grids() -> None:
                          tensors["wzeros"][:, :16], 3072, 3072)
 
 
-# --- the adaLN trap -------------------------------------------------------
-
-
 @pytest.mark.parametrize("splits", [2, 3, 6])
 def test_undo_adanorm_splits_round_trips_exactly(splits: int) -> None:
-    """Both halves: the output-channel interleave AND the +1 on splits 1 and
-    splits-2."""
+    """Both halves: the output-channel interleave AND the +1 on splits 1 and splits-2."""
     oc, ic = 3072 * splits, 128
     gen = torch.Generator().manual_seed(6)
     w = torch.randn(oc, ic, generator=gen)
@@ -210,8 +174,7 @@ def test_undo_adanorm_splits_round_trips_exactly(splits: int) -> None:
 
 
 def test_adanorm_bias_delta_is_on_splits_one_and_minus_two() -> None:
-    """Nails WHICH splits carry the +1 — a decoder that subtracts it from the
-    wrong pair is off by exactly 1.0 on two adaLN channels."""
+    """Nails WHICH splits carry the +1 — a decoder that subtracts it from the wrong pair is off by exactly 1.0 on two adaLN channels."""
     splits, per, ic = 6, 4, 64
     w = torch.zeros(splits * per, ic)
     b = torch.zeros(splits * per)
@@ -227,13 +190,8 @@ def test_undo_adanorm_is_a_noop_for_a_plain_layer() -> None:
     assert w2 is w and b2 is b
 
 
-# --- end to end -----------------------------------------------------------
-
-
 def test_decode_awq_linear_reproduces_the_original_modulation_linear() -> None:
-    """The whole S2b path at the real qwen modulation shape: exporter forward
-    (adaLN transform + AWQ quantize + TinyChat pack) -> our decode -> a plain
-    Linear whose forward matches the ORIGINAL module."""
+    """The whole S2b path at the real qwen modulation shape: exporter forward (adaLN transform + AWQ quantize + TinyChat pack) -> our decode -> a plain Linear whose forward matches the ORIGINAL module."""
     oc, ic, splits = 18432, 3072, 6
     tensors, w, b = _synth_awq(oc, ic, splits=splits, seed=7)
     lin = decode_awq_linear(tensors, oc, ic, adanorm_splits=splits,
@@ -246,8 +204,7 @@ def test_decode_awq_linear_reproduces_the_original_modulation_linear() -> None:
 
 
 def test_decoding_with_the_wrong_split_count_is_visibly_wrong() -> None:
-    """Documents WHY adanorm_splits is required rather than inferred: the wrong
-    count still produces a full-rank plausible weight."""
+    """Documents WHY adanorm_splits is required rather than inferred: the wrong count still produces a full-rank plausible weight."""
     oc, ic, splits = 3072 * 6, 3072, 6
     tensors, w, b = _synth_awq(oc, ic, splits=splits, seed=9)
     torch.manual_seed(10)
@@ -269,8 +226,6 @@ def test_is_awq_linear_discriminates_on_wzeros() -> None:
     with pytest.raises(SvdqLayoutError, match="missing"):
         decode_awq_linear({"qweight": tensors["qweight"]}, 128, 64)
 
-
-# --- pgw#755: the production forward encoders ------------------------------
 
 from gen_worker.models.svdq_awq import (  # noqa: E402
     apply_adanorm_splits,
@@ -302,15 +257,14 @@ def test_apply_adanorm_matches_upstream_and_round_trips(splits: int) -> None:
 
 
 @pytest.mark.parametrize("oc,ic,splits", [
-    (18432, 3072, 6),   # real qwen modulation geometry
+    (18432, 3072, 6),
     (3072, 3072, 1),
-    (128, 128, 1),      # ceil_num_groups padding case
+    (128, 128, 1),
 ])
 def test_encode_awq_linear_is_bit_exact_vs_the_vendored_exporter(
     oc: int, ic: int, splits: int,
 ) -> None:
-    """The production encoder must emit the same BYTES the upstream exporter
-    chain emits for the same weight — packed codes, padded bf16 grids, bias."""
+    """The production encoder must emit the same BYTES the upstream exporter chain emits for the same weight — packed codes, padded bf16 grids, bias."""
     tensors, w, b = _synth_awq(oc, ic, splits=splits, seed=22)
     got = encode_awq_linear(w.clone(), b.clone(),
                             group_size=64, adanorm_splits=splits)

@@ -1,17 +1,3 @@
-"""pgw#1497 — per-module budgeted partial residency + streamed weight cast.
-
-Every test here runs the REAL mechanism over a REAL ``nn.Module`` tree: the
-planner's arithmetic, the forward hooks, the cast ring and the partial
-unload/load transitions. Nothing is mocked, because the defects this rung can
-have (a weight left bound to a reused cast buffer, a plan that fits at rest
-and overshoots in flight, an unload that promotes) are all defects of the
-interaction, not of a unit.
-
-The CPU arm is not a simulation of the CUDA one: it is the same driver loop
-with a null stream and synchronous copies, so every ordering decision is
-exercised here and only the OVERLAP is left for the card to prove.
-"""
-
 from __future__ import annotations
 
 from typing import Any, cast
@@ -20,12 +6,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-# A real static import, not `nn = torch.nn`. The rebinding form leaves `nn` a
-# module-valued VARIABLE, so `class Block(nn.Module)` gives mypy no type to use
-# as a base and it reports `Name "nn.Module" is not defined` — 19 of the 23
-# errors that took master's `fast gates` red. The skip guard above still runs
-# first, so this import cannot fire on a torch-less host. Same idiom as
-# `test_engine_placement.py`.
 import torch.nn as nn  # noqa: E402
 
 from gen_worker.models.stream_residency import (  # noqa: E402
@@ -41,18 +21,9 @@ from gen_worker.models.stream_residency import (  # noqa: E402
 )
 
 
-# ---------------------------------------------------------------------------
-# Trees
-# ---------------------------------------------------------------------------
-
-
 class Block(nn.Module):
     def __init__(self, width: int) -> None:
         super().__init__()
-        # A plain int, not read back off `norm.normalized_shape`: `nn.Module`'s
-        # `__getattr__` is typed `Tensor | Module`, so reaching through a child
-        # to recover a shape is two mypy errors and one more indirection than
-        # the test needs.
         self.width = width
         self.fc1 = nn.Linear(width, width * 2)
         self.fc2 = nn.Linear(width * 2, width)
@@ -63,14 +34,10 @@ class Block(nn.Module):
 
 
 class Stack(nn.Module):
-    """Eight blocks of decreasing width — a tree where a budget genuinely
-    splits, instead of one that is all-or-nothing."""
+    """Eight blocks of decreasing width — a tree where a budget genuinely splits, instead of one that is all-or-nothing."""
 
     def __init__(self) -> None:
         super().__init__()
-        # `nn.ModuleList` iterates as bare `Module`, so the per-block width is
-        # carried alongside as plain ints rather than reached back out of a
-        # child (which `Module.__getattr__` types `Tensor | Module`).
         self.widths = [256 - 16 * i for i in range(8)]
         self.blocks = nn.ModuleList([Block(w) for w in self.widths])
         self.proj = nn.Linear(256, 256)
@@ -93,16 +60,9 @@ def _pyramid(n: int = 6, unit: int = 1_000_000) -> list[LeafCost]:
     return [LeafCost(f"m{i}", (i + 1) * unit) for i in range(n)]
 
 
-# ---------------------------------------------------------------------------
-# 1. The budget split
-# ---------------------------------------------------------------------------
-
-
 def test_budget_split_is_deterministic_and_largest_first() -> None:
     costs = _pyramid()
     first = plan_residency(costs, budget_bytes=14_000_000, min_stream_bytes=1)
-    # Same inputs in a different order must give the same answer: a mint's
-    # traced graph specializations and a residency reservation both depend on it.
     shuffled = plan_residency(
         list(reversed(costs)), budget_bytes=14_000_000, min_stream_bytes=1
     )
@@ -113,8 +73,7 @@ def test_budget_split_is_deterministic_and_largest_first() -> None:
 
 
 def test_the_in_flight_window_is_reserved_out_of_the_budget() -> None:
-    """The subtle half of the port. A plan that ignores the window fits at
-    rest and overshoots the instant two casts are in flight."""
+    """The subtle half of the port."""
     costs = _pyramid()
     plan = plan_residency(
         costs, budget_bytes=14_000_000, streams=2, min_stream_bytes=1
@@ -125,8 +84,6 @@ def test_the_in_flight_window_is_reserved_out_of_the_budget() -> None:
     assert plan.device_bytes <= plan.budget_bytes
     assert plan.fits
 
-    # RED ARM: had the window not been reserved, the same fill would have put
-    # this much on the card and the tail's casts would have had nowhere to go.
     unreserved = sum(
         c.resident_bytes
         for c in sorted(costs, key=lambda c: -c.resident_bytes)
@@ -146,9 +103,7 @@ def _fits_ignoring_window(cost: LeafCost, costs: list[LeafCost], budget: int) ->
 
 
 def test_a_budget_at_the_model_size_means_full_residency() -> None:
-    """The window must terminate at zero when nothing streams. ComfyUI's
-    lookahead formula reserves for a tail that isn't there and reports an
-    empty resident set on a budget that fits the whole model."""
+    """The window must terminate at zero when nothing streams."""
     costs = _pyramid()
     total = sum(c.resident_bytes for c in costs)
     plan = plan_residency(costs, budget_bytes=total, min_stream_bytes=1)
@@ -180,21 +135,13 @@ def test_excluded_leaves_are_never_streamed() -> None:
 
 
 def test_an_unload_never_promotes() -> None:
-    """The greedy fill is NOT monotone in the budget — dropping a large leaf
-    frees room a smaller one can take — so a re-plan at a lower budget can
-    genuinely want to move bytes ONTO the card. A call asked to free bytes
-    must never answer by claiming some.
-
-    These three sizes are a measured instance of that: at a 9 MB budget the
-    5 MB leaf is resident, and at 8 MB it is the 3 MB leaf instead."""
+    """The greedy fill is NOT monotone in the budget — dropping a large leaf frees room a smaller one can take — so a re-plan at a lower budget can genuinely want to move bytes ONTO the card."""
     mib = 1_000_000
     costs = [LeafCost("a", 5 * mib), LeafCost("b", 4 * mib), LeafCost("c", 3 * mib)]
     wide = plan_residency(costs, budget_bytes=9 * mib, streams=1, min_stream_bytes=1)
     narrow = plan_residency(costs, budget_bytes=8 * mib, streams=1, min_stream_bytes=1)
     assert wide.resident == ("a",) and narrow.resident == ("c",)
 
-    # The instrument's own red arm: with promotion allowed this transition
-    # DOES promote, so a test that could not see it would be measuring nothing.
     assert plan_transition(wide, narrow, costs, allow_promote=True).promote == ("c",)
 
     move = plan_transition(wide, narrow, costs, allow_promote=False)
@@ -203,14 +150,8 @@ def test_an_unload_never_promotes() -> None:
     assert move.freed_bytes == 5 * mib
 
 
-# ---------------------------------------------------------------------------
-# 2. The streaming tail over a real tree
-# ---------------------------------------------------------------------------
-
-
 def test_every_residency_state_computes_the_same_answer(tree: nn.Module) -> None:
-    """Resident, fully streamed, and partially streamed must be numerically
-    indistinguishable. This is the test the whole rung rests on."""
+    """Resident, fully streamed, and partially streamed must be numerically indistinguishable."""
     x = torch.randn(2, 256)
     with torch.no_grad():
         want = tree(x).clone()
@@ -242,9 +183,7 @@ def test_every_residency_state_computes_the_same_answer(tree: nn.Module) -> None
 def test_a_streamed_weight_is_unbound_from_the_cast_buffer_after_its_forward(
     tree: nn.Module,
 ) -> None:
-    """The single most dangerous defect this rung can have: a weight left
-    pointing into a buffer the ring is about to refill for another leaf. The
-    bytes would be silently wrong, load-order dependent, and only sometimes."""
+    """The single most dangerous defect this rung can have: a weight left pointing into a buffer the ring is about to refill for another leaf."""
     residency = StreamedResidency(
         module_roots(tree), device="cpu", budget_bytes=0, min_stream_bytes=1
     )
@@ -261,9 +200,7 @@ def test_a_streamed_weight_is_unbound_from_the_cast_buffer_after_its_forward(
 
 
 def test_the_cast_buffer_costs_the_window_not_the_tail(tree: nn.Module) -> None:
-    """The memory argument, measured: the ring holds ``streams`` buffers sized
-    to the largest streamed leaf, never the tail's own size — and the planner's
-    reservation is exactly that number, not an estimate of it."""
+    """The memory argument, measured: the ring holds ``streams`` buffers sized to the largest streamed leaf, never the tail's own size — and the planner's reservation is exactly that number, not an estima..."""
     residency = StreamedResidency(
         module_roots(tree),
         device="cpu",
@@ -304,8 +241,6 @@ def test_partial_unload_trims_the_cold_tail_instead_of_dropping_the_model(
     with torch.no_grad():
         assert torch.equal(tree(x), want)
 
-    # Smallest-first is the point: the tail that leaves is the CHEAP end, so
-    # the expensive leaves keep their residency.
     by_name = {c.name: c for c in residency.costs}
     smallest_resident = min(
         by_name[n].resident_bytes for n in residency.plan.all_resident
@@ -358,8 +293,7 @@ def test_release_removes_every_hook(tree: nn.Module) -> None:
 
 
 def test_a_module_owning_both_children_and_weights_is_never_hooked() -> None:
-    """Its post-hook would fire AFTER its children's forwards, holding a
-    cast-buffer view alive while the ring hands the same buffer to a child."""
+    """Its post-hook would fire AFTER its children's forwards, holding a cast-buffer view alive while the ring hands the same buffer to a child."""
 
     class Mixed(nn.Module):
         def __init__(self) -> None:
@@ -382,10 +316,7 @@ def test_a_module_owning_both_children_and_weights_is_never_hooked() -> None:
 
 
 def test_attached_lora_leaves_are_forced_resident() -> None:
-    """Our LoRA is attach-based, so an adapter is a pair of tiny leaves next
-    to the base layer, never a patch fused into the base weight. They stay
-    resident and the base layer streams unchanged — which is why no
-    LowVramPatch equivalent is needed (see the module docstring)."""
+    """Our LoRA is attach-based, so an adapter is a pair of tiny leaves next to the base layer, never a patch fused into the base weight."""
 
     class Attached(nn.Module):
         def __init__(self) -> None:
@@ -412,15 +343,8 @@ def test_attached_lora_leaves_are_forced_resident() -> None:
         assert torch.equal(model(x), want)
 
 
-# ---------------------------------------------------------------------------
-# 3. The serve-loop host tier
-# ---------------------------------------------------------------------------
-
-
 def test_the_serve_loop_backend_tiers_a_real_author_model() -> None:
-    """``demote_to_host``/``promote_to_device`` raised NotImplementedError
-    until this issue; the manager was run with a zero host budget so eviction
-    was always a drop. Drive the REAL backend arms over a real tree."""
+    """``demote_to_host``/``promote_to_device`` raised NotImplementedError until this issue; the manager was run with a zero host budget so eviction was always a drop."""
     from gen_worker.serving.serve_loop import _InstanceBackend
 
     class AuthorModel:
@@ -428,11 +352,6 @@ def test_the_serve_loop_backend_tiers_a_real_author_model() -> None:
             torch.manual_seed(7)
             self.pipe = Stack().eval()
 
-    # The author object is deliberately NOT a `Model` subclass: these arms must
-    # work over whatever an author's `load` left behind, and `backend.model` is
-    # typed `Model[Any] | None`. Keep a typed local and inject through `cast`,
-    # so the test reads its own object and mypy is told the injection is
-    # intentional rather than silenced with an ignore.
     author = AuthorModel()
     backend = _InstanceBackend.__new__(_InstanceBackend)
     backend.model_cls = AuthorModel
@@ -458,9 +377,7 @@ def test_the_serve_loop_backend_tiers_a_real_author_model() -> None:
 
 
 def test_a_tier_move_on_a_weightless_instance_refuses_loudly() -> None:
-    """Silence is the one answer a placement report must never give: an
-    instance with no module tree cannot be tiered, and must say so rather than
-    report a successful demote that moved nothing."""
+    """Silence is the one answer a placement report must never give: an instance with no module tree cannot be tiered, and must say so rather than report a successful demote that moved nothing."""
     from gen_worker.serving.residency import ResidencyError
     from gen_worker.serving.serve_loop import _InstanceBackend
 

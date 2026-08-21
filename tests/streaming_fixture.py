@@ -1,13 +1,3 @@
-"""A real bf16 diffusers pipeline on disk — the article both pgw#1380 suites load.
-
-Real classes, real ``save_pretrained``, real safetensors. Nothing here is
-shaped to be convenient for the loader: ``text_encoder`` and ``text_encoder_2``
-share every parameter name (which is what a pipeline checkpoint looks like and
-what a globally-indexed reader collides on), and the weights are randomly
-initialized rather than filled, so a byte-equality assertion can actually see a
-wrong offset.
-"""
-
 from __future__ import annotations
 
 import json
@@ -64,9 +54,6 @@ def build_source(target: Path) -> type:
         text_encoder_2=CLIPTextModel(text_config),
         scheduler=DDIMScheduler(),
     )
-    # bf16 on disk, so "dtype passthrough" is a claim with something to pass
-    # through: nothing in the engine names a dtype, and bf16 must come back
-    # bf16 without a `torch_dtype=` anywhere.
     pipeline.to(torch.bfloat16)
     pipeline.save_pretrained(str(target), safe_serialization=True)
     for container in sorted(target.rglob("*.safetensors")):
@@ -92,13 +79,6 @@ def tied_pipeline_class() -> type:
 
 
 def build_tied_source(target: Path) -> type:
-    """pgw#1626's article: a real T5-bearing pipeline saved to ``target``.
-
-    `T5EncoderModel` ties `encoder.embed_tokens.weight` to `shared.weight`, so
-    `save_pretrained` writes the SOURCE ALONE — nothing here arranges that, it
-    is what transformers does and what every T5 on the hub looks like. That is
-    the checkpoint the loader called defective.
-    """
     from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
     from transformers import T5Config, T5EncoderModel
 
@@ -131,20 +111,7 @@ def build_tied_source(target: Path) -> type:
 
 
 def scramble_offsets(path: Path) -> None:
-    """Rewrite a container so its HEADER order is not its OFFSET order.
-
-    ``safetensors`` writes tensors in header-key order, so a checkpoint saved
-    by the library has name order == offset order — and against such a file a
-    loader that walked in NAME order would look perfectly sequential. That is
-    the exact trap tensorfs#115 named ("assert order against a fixture whose
-    header order differs from offset order"), and without this the file-order
-    claim is untestable: a mutation that scrambles the walk stays green.
-
-    The header keys keep their sorted order; the BODY is laid out in reverse.
-    Both orders are legal safetensors — the format addresses by
-    ``data_offsets``, not by position — so the library still reads it, which
-    is what keeps the byte-equality control arm honest.
-    """
+    """Rewrite a container so its HEADER order is not its OFFSET order."""
     import struct
 
     raw = path.read_bytes()
@@ -201,7 +168,7 @@ def source_tensors(source: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def assert_byte_equal(pipeline: Any, source: Path) -> int:
-    """Every parameter byte-equal to its source file. Returns the tensor count."""
+    """Every parameter byte-equal to its source file."""
     checked = 0
     for component, tensors in source_tensors(source).items():
         module = getattr(pipeline, component)
@@ -227,9 +194,6 @@ class Lane:
     """The minimum of a lane contract the engine reads: its dtype."""
 
     dtype = torch.bfloat16
-
-
-# -- read tracing -----------------------------------------------------------
 
 
 class TracedStream:
@@ -268,12 +232,7 @@ class TracedStore:
         )
 
     def assert_file_order(self) -> int:
-        """One forward pass per container, never a seek backwards.
-
-        Returns how many windows were read, so a caller can insist the walk
-        was actually multi-window — a single-window read is trivially ordered
-        and proves nothing about the ordering.
-        """
+        """One forward pass per container, never a seek backwards."""
         assert self.reads, "the engine read nothing"
         per_container: Dict[str, List[Tuple[int, int]]] = {}
         for container, offset, length in self.reads:

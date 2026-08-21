@@ -1,14 +1,4 @@
-"""Capability byte-budget back-pressure for worker-side uploads.
-
-There is NO file-level upload parallelism: files are uploaded serially and the
-fan-out lives *inside* one file (S3 parts in ``presigned_upload.py``, CAS chunks
-in tensorfs), each with its own bounded, process-wide PUT
-budget.
-
-What lives here is ``BudgetGate``: the ``max_total_bytes`` /
-``max_bytes_per_file`` back-pressure derived from the worker capability token.
-Library-internal, ``_``-prefixed module name — don't import from tenant code.
-"""
+"""Capability byte-budget back-pressure for worker-side uploads."""
 
 from __future__ import annotations
 
@@ -22,40 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class BudgetExceededError(RuntimeError):
-    """Raised when a single file exceeds the per-file or total byte budget.
-
-    Per-request budgets come from the worker_capability_token's
-    ``max_total_bytes`` + ``max_bytes_per_file`` claims (issued by tensorhub).
-    The pool's per-file fan-out can over-commit if multiple very large
-    shards run in parallel — this gate back-pressures starts until in-flight
-    bytes fit the aggregate budget.
-    """
+    """Raised when a single file exceeds the per-file or total byte budget."""
 
 
 class BudgetGate:
-    """Capability-budget back-pressure for the concurrent upload pool.
-
-    The upload coordinator may run several files in parallel. Tensorhub's
-    worker_capability_token caps aggregate in-flight bytes per session via
-    ``max_total_bytes`` and per-file via ``max_bytes_per_file``. Without
-    back-pressure, multiple 30 GiB shards could exceed a typical 50 GiB
-    total budget; the server would reject them mid-upload, leaving partial
-    parts.
-
-    The gate sits between the pool and the upload entry points
-    (``save_file``, ``save_checkpoint``, ``save_file_create``). Each entry
-    point computes ``size = os.path.getsize(src)`` and wraps its upload
-    work in ``with gate.reserve(size): ...``.
-
-    Reentrancy: ``save_checkpoint``'s non-streaming branch calls
-    ``save_file`` internally. The reservation is thread-scoped — a nested
-    ``reserve()`` from the same thread is a no-op so the outer reservation
-    isn't double-counted.
-
-    Unbounded axis: when ``max_total_bytes <= 0`` or ``max_bytes_per_file <= 0``,
-    that axis is treated as unbounded. A gate constructed with both at
-    zero is a pure pass-through (no blocking, no rejection).
-    """
+    """Capability-budget back-pressure for the concurrent upload pool."""
 
     def __init__(self, max_total_bytes: int = 0, max_bytes_per_file: int = 0) -> None:
         self._max_total_bytes = int(max_total_bytes) if int(max_total_bytes) > 0 else 0
@@ -87,25 +48,19 @@ class _BudgetReservation:
     def __enter__(self) -> "_BudgetReservation":
         gate = self._gate
         size = self._size
-        # Per-file ceiling — fail fast before any reservation work.
         if gate._max_bytes_per_file > 0 and size > gate._max_bytes_per_file:
             raise BudgetExceededError(
                 f"file size {size} exceeds capability max_bytes_per_file {gate._max_bytes_per_file}"
             )
-        # Reentrancy guard: nested reserve() from the same thread is a no-op.
-        # save_checkpoint -> save_file pattern would otherwise double-count.
         depth = getattr(gate._tls, "depth", 0)
         gate._tls.depth = depth + 1
         if depth > 0:
             return self
-        # Acquire aggregate-bytes budget. Unbounded axis (== 0) skips the wait.
         if gate._max_total_bytes > 0:
             with gate._cond:
                 while gate._inflight + size > gate._max_total_bytes:
-                    # If no other reservation is in flight, this single file is
-                    # larger than the total budget — fail rather than deadlock.
                     if gate._inflight == 0:
-                        gate._tls.depth = depth  # release the depth bump
+                        gate._tls.depth = depth
                         raise BudgetExceededError(
                             f"file size {size} > capability max_total_bytes {gate._max_total_bytes}"
                         )
@@ -119,7 +74,6 @@ class _BudgetReservation:
         depth = getattr(gate._tls, "depth", 0)
         if depth > 0:
             gate._tls.depth = depth - 1
-        # Only the outermost reservation releases bytes.
         if not self._held:
             return
         if gate._max_total_bytes > 0:
@@ -130,18 +84,7 @@ class _BudgetReservation:
 
 
 def budget_gate_from_capability_jwt(token: str) -> BudgetGate:
-    """Construct a BudgetGate from a worker_capability_token's budget claims.
-
-    Reads ``max_total_bytes`` and ``max_bytes_per_file`` from the JWT
-    payload (unverified — these are advisory caps from the issuer; the
-    server enforces them authoritatively). Missing/zero claims yield an
-    unbounded gate on that axis.
-
-    Returns a pass-through gate (both axes 0) when the token is missing,
-    malformed, or has neither claim set — back-pressure becomes a no-op
-    in dev/test paths without a server-issued JWT.
-    """
-    # Import locally to avoid a module-level circular dep on _helpers.
+    """Construct a BudgetGate from a worker_capability_token's budget claims."""
 
     claims = _decode_unverified_jwt_claims(token) if token else {}
 

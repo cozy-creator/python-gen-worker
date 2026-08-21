@@ -1,11 +1,4 @@
-"""The hub-double: an in-process ``grpc.server`` playing the orchestrator,
-driving a REAL ``gen_worker.worker.Worker`` over a REAL TCP gRPC socket.
-
-Extracted from ``tests/test_worker_grpc_e2e.py``'s ``FakeScheduler`` (#365) per
-th#960/pgw#609 — this is the ONLY double anywhere in the pgw suite: the true
-process boundary the worker does not own. Everything downstream of the
-socket (transport, lifecycle, executor, registry) is the real worker.
-"""
+"""The hub-double: an in-process ``grpc.server`` playing the orchestrator, driving a REAL ``gen_worker.worker.Worker`` over a REAL TCP gRPC socket."""
 
 from __future__ import annotations
 
@@ -33,16 +26,8 @@ from harness.progress_wait import Cadence, StalledError
 
 DEFAULT_TIMEOUT_S = 15.0
 
-# pgw#795: how often a progress-gated wait re-evaluates its staleness window
-# while nothing is arriving. Not a deadline — the condition variable wakes it
-# the instant a message lands; this only bounds how stale the window estimate
-# may get when the peer is silent.
 _REEVALUATE_S = 0.25
 
-#: What a compute child pays before it can say anything: a fresh interpreter,
-#: the Worker import (torch rides in on it) and the endpoint modules the child
-#: was told to load. Nothing observes that gap from the hub side, so it is the
-#: one silence a healthy boot really produces — and it is what gets measured.
 _BOOT_PROBE_SRC = """
 import importlib, os
 from gen_worker.worker import Worker  # noqa: F401
@@ -53,12 +38,6 @@ for m in os.environ.get("PGW763_CHILD_MODULES", "harness.procsplit_endpoints").s
 
 
 def measure_child_boot_cost_s(env: Optional[Mapping[str, str]] = None) -> float:
-    """Spawn-plus-import, measured on THIS runner at THIS moment (pgw#960).
-
-    Boot cost is a property of the loaded box, not of the code under test, so a
-    wait that must cover it asks rather than assumes. Called only when a wait is
-    already about to give up, so the common path pays nothing.
-    """
     child_env: Dict[str, str] = dict(os.environ)
     child_env.update(env or {})
     started = time.monotonic()
@@ -68,8 +47,6 @@ def measure_child_boot_cost_s(env: Optional[Mapping[str, str]] = None) -> float:
         check=False, text=True,
     )
     cost = time.monotonic() - started
-    # A probe that failed to import measured nothing, and a too-small sample
-    # SHRINKS the window it is supposed to widen. Say so instead.
     assert done.returncode == 0, (
         f"the child-boot probe could not run ({done.returncode}) — it is not "
         f"measuring what a child boot costs:\n{done.stderr[-2000:]}"
@@ -78,12 +55,6 @@ def measure_child_boot_cost_s(env: Optional[Mapping[str, str]] = None) -> float:
 
 
 def _extended(cadence: Cadence, boot_cost: Optional[Callable[[], float]]) -> bool:
-    """Re-measure the runner; keep waiting only if it says the box got slower.
-
-    Self-limiting: on a steady box the second measurement matches the first, the
-    window does not move, and the wait ends. Only evidence of a genuinely slower
-    runner buys more patience — never a repeat of a literal.
-    """
     if boot_cost is None:
         return False
     before = cadence.window_s
@@ -106,16 +77,10 @@ class Conn:
     def __init__(self) -> None:
         self.hello: Optional[pb.Hello] = None
         self.received: List[pb.WorkerMessage] = []
-        # Shared with the scheduler: fatal/error reporting uses a separate
-        # diagnostic-first Connect, but a failed wait on this primary stream
-        # still needs to print the cause that process delivered.
         self.diagnostic_reports: List[pb.HardwareUnsuitable] = []
         self._recv_cond = threading.Condition()
         self._out: "queue.Queue[Any]" = queue.Queue()
         self.client_done = threading.Event()
-        # pgw#960: set by the scheduler that made this conn. A wait that spans a
-        # child boot (Ready needs every group advertised) has no in-band signal
-        # to gate on, so its window is measured instead of assumed.
         self.boot_cost: Optional[Callable[[], float]] = None
 
     def send(self, **oneof: Any) -> None:
@@ -140,33 +105,6 @@ class Conn:
         describe: Callable[[], str],
         timeout: Optional[float],
     ) -> pb.WorkerMessage:
-        """The one waiting loop (pgw#795).
-
-        ``timeout=None`` — the default for "this MUST happen" waits — is
-        progress-gated: it ends when the worker delivers, when the worker is
-        provably gone (stream ended: definitive, no clock), or when the wait has
-        gone a staleness window without the message it asked for. That window is
-        derived from the advances this run has actually measured, so it widens
-        with the machine. Only the awaited message counts as progress: unrelated
-        traffic on the connection does not reset the window, because a peer
-        chattering about other things is not progress toward what you asked for
-        — and a window that resets on it never closes, so a broken test would
-        hang instead of failing (measured while authoring this).
-
-        Every wait that passes today does so inside the 15s TOTAL budget this
-        replaced, and the floor alone is twice that, so this is strictly more
-        patient than what it replaces — it just stops being patient for the
-        wrong reason.
-
-        An explicit ``timeout`` is preserved verbatim for the callers that
-        probe for ABSENCE ("no result within 2s") — there the bound IS the
-        assertion, and its expiry makes the test pass rather than flake.
-        """
-        # pgw#795 round 4: a FRESH cadence per wait. It used to be per-
-        # connection and, before that, session-wide — and a shared slowest
-        # sample let one slow advance widen every later wait until a
-        # zero-progress wait hung for 13 minutes. A wait that observes no
-        # advance of its own is now bounded by the floor, always.
         cadence = Cadence()
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._recv_cond:
@@ -189,8 +127,6 @@ class Conn:
                     )
                 silent = now - last_advance
                 if silent >= cadence.window_s:
-                    # The probe spawns a process; recording must not be blocked
-                    # behind it, or a message arriving mid-probe reads as silence.
                     self._recv_cond.release()
                     try:
                         widened = _extended(cadence, self.boot_cost)
@@ -253,29 +189,18 @@ class Conn:
 
 
 class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
-    """The hub double. Plays HelloAck-before-anything-else, records every
-    inbound WorkerMessage per connection, and can reject the handshake
-    outright (auth-rejection test rows)."""
+    """The hub double."""
 
     def __init__(
         self, *, reject_unauthenticated: bool = False,
         file_base_url: str = "http://127.0.0.1:1/files",
     ) -> None:
         self.connections: List[Conn] = []
-        # HardwareUnsuitable is also the typed worker fatal/error carrier. It
-        # opens its own Connect and is valid in place of Hello (gw#619/th#988).
-        # Keep the whole payload so a primary-stream failure cannot erase the
-        # exception detail that explains it.
         self.diagnostic_reports: List[pb.HardwareUnsuitable] = []
         self._conn_cond = threading.Condition()
         self.reject_unauthenticated = reject_unauthenticated
         self.file_base_url = file_base_url
-        # pgw#795: set by hub_double() once the worker exists. A worker that
-        # has EXITED can never dial in — that is the definitive give-up for
-        # wait_connection, and it needs no clock.
         self.worker_alive: Optional[Callable[[], bool]] = None
-        # pgw#960: set by harnesses whose worker boots in a SUBPROCESS, where
-        # the silence a wait must tolerate is the child's spawn-plus-import.
         self.boot_cost: Optional[Callable[[], float]] = None
 
     def Connect(self, request_iterator: Any, context: grpc.ServicerContext) -> Any:
@@ -288,8 +213,6 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
             with self._conn_cond:
                 self.diagnostic_reports.append(first.hardware_unsuitable)
                 self._conn_cond.notify_all()
-            # The client half-closes after this one report. Mirror the real hub:
-            # drain it and end the call with no response.
             for _ in request_iterator:
                 pass
             return
@@ -299,8 +222,6 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         conn.hello = first.hello
         conn.boot_cost = self.boot_cost
         conn.diagnostic_reports = self.diagnostic_reports
-        # Queue the HelloAck BEFORE exposing the connection: the contract says
-        # HelloAck precedes all other scheduler->worker traffic.
         conn.send(hello_ack=pb.HelloAck(
             protocol_version=pb.PROTOCOL_VERSION_CURRENT,
             file_base_url=self.file_base_url,
@@ -317,7 +238,7 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
                 pass
             finally:
                 conn.client_done.set()
-                conn._out.put(None)  # end the response stream too
+                conn._out.put(None)
 
         threading.Thread(target=_reader, daemon=True).start()
         while True:
@@ -329,18 +250,6 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
             yield item
 
     def wait_connection(self, index: int, timeout: Optional[float] = None) -> Conn:
-        """Wait for the worker to dial in (pgw#795: progress-gated by default).
-
-        A boot on a loaded runner is slow, not broken — the honest give-up is
-        "the worker process is gone", which is definitive, plus a staleness
-        window calibrated from the advances this run has measured.
-
-        pgw#960: a dial-in has no intermediate signal to advance on — the boot
-        is silent until it lands — so the window is calibrated from what a boot
-        COSTS on this runner, measured only when the wait is already at its
-        floor. That is the difference between a bound the box earns and the
-        180 s literal callers used to pass in to escape this branch entirely.
-        """
         cadence = Cadence()
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._conn_cond:
@@ -363,7 +272,6 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
                     )
                 waited = now - started
                 if waited >= cadence.window_s:
-                    # Probe outside the lock — Connect() appends under it.
                     self._conn_cond.release()
                     try:
                         widened = _extended(cadence, self.boot_cost)
@@ -381,16 +289,7 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
 
 
 class WorkerHarness:
-    """Runs a REAL ``Worker`` against a hub-double connection in a background
-    thread. ``modules`` is the endpoint-module list handed to ``Worker`` —
-    callers pick which toy endpoints to expose per test.
-
-    ``cache_dir`` is REQUIRED to be test-scoped (never the process default):
-    the CAS store persists real bytes to disk keyed by wire ref, so two
-    tests sharing a cache dir (or the host's default) silently see each
-    other's "hub-delivered" state — a real bug this harness hit once
-    (th#960 P3 authoring notes) and now refuses to repeat.
-    """
+    """Runs a REAL ``Worker`` against a hub-double connection in a background thread."""
 
     def __init__(
         self,
@@ -425,17 +324,9 @@ class WorkerHarness:
 
     @property
     def alive(self) -> bool:
-        """Whether the worker is still running — the liveness half of every
-        progress-gated wait against it (pgw#795)."""
         return self._thread.is_alive()
 
     def reconcile_marker(self) -> tuple:
-        """pgw#1373: the residency-reconcile loop was `lifecycle.py`'s, and
-        `lifecycle.py` is deleted with the v1 runtime. The v2 worker has no
-        reconcile pass to mark — residency is per-request admission
-        (`serving/residency.py`), not a background convergence loop — so this
-        REFUSES rather than returning a marker that can never change, which is
-        exactly the never-ending wait pgw#795 exists to prevent."""
         raise NotImplementedError(
             "no residency-reconcile loop on the v2 worker (pgw#1373): residency "
             "is per-request admission, so there is no pass to wait on"
@@ -445,14 +336,7 @@ class WorkerHarness:
         self._thread.start()
 
     def stop(self, timeout: float = DEFAULT_TIMEOUT_S) -> Optional[int]:
-        """Ask the worker to stop, and REQUIRE that it did.
-
-        pgw#795: this used to `join(15.0)` and throw the result away, so a
-        worker that never exited passed teardown in silence — a wedged shutdown
-        is exactly the defect this harness exists to catch, and it was the one
-        outcome nothing asserted. The join is now progress-gated (a thread that
-        is still alive is not progress) and a survivor is a loud failure.
-        """
+        """Ask the worker to stop, and REQUIRE that it did."""
         self.worker.stop()
         self._join_or_fail(timeout, "stop()")
         return self.exit_code
@@ -462,8 +346,6 @@ class WorkerHarness:
         return self.exit_code
 
     def _join_or_fail(self, timeout: float, who: str) -> None:
-        # ``timeout`` is a silence FLOOR: a caller's existing number can only
-        # make this more patient, never less.
         cadence = Cadence(floor_s=max(timeout, Cadence().floor_s))
         started = time.monotonic()
         while self._thread.is_alive():
@@ -490,19 +372,7 @@ def hub_double(
     cache_dir: Optional[Path] = None,
     file_base_url: str = "http://127.0.0.1:1/files",
 ) -> Iterator[Tuple[FakeScheduler, WorkerHarness]]:
-    """Stand up one hub-double gRPC server + one real Worker against it.
-    Tears both down on exit even if the body raises. ``cache_dir`` defaults
-    to a fresh temp dir PER CALL (never a shared/default cache) so real
-    downloaded bytes from one test can never leak into another's "boot saw
-    nothing on disk yet" assumptions.
-
-    ``TENSORHUB_CACHE_DIR`` is the ONLY thing that actually steers the CAS
-    root (``gen_worker.models.cache_paths.tensorhub_cache_dir`` reads the
-    process-wide cached ``gw_config.current()``, not the per-worker ``Settings``
-    instance) — passing ``tensorhub_cache_dir=`` to ``load_settings()``
-    alone does NOT redirect it. Found the hard way authoring P3's
-    boot-precedence test: without this, every hub-double test on a dev box
-    shares (and pollutes) ``/tmp/tensorhub-cache``."""
+    """Stand up one hub-double gRPC server + one real Worker against it."""
     prior_env = os.environ.get("TENSORHUB_CACHE_DIR")
     scheduler = FakeScheduler(
         reject_unauthenticated=reject_unauthenticated, file_base_url=file_base_url,
@@ -545,12 +415,7 @@ def custom_scheduler_server(
     max_workers: int = 8,
     port: Optional[int] = None,
 ) -> Iterator[Tuple[Any, WorkerHarness, int]]:
-    """Like ``hub_double()`` but for a BESPOKE ``WorkerSchedulerServicer``
-    (auth-reject/precondition/redirect/stall scenarios) instead of the
-    ordinary ``FakeScheduler``. ``port`` lets a caller rebind a second
-    server onto the SAME address a worker already dialed (redirect tests).
-    Callers own the servicer's own connection-tracking; only cache-dir
-    isolation and worker lifecycle are handled here."""
+    """Like ``hub_double()`` but for a BESPOKE ``WorkerSchedulerServicer`` (auth-reject/precondition/redirect/stall scenarios) instead of the ordinary ``FakeScheduler``."""
     prior_env = os.environ.get("TENSORHUB_CACHE_DIR")
     servicer = servicer_factory()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
@@ -575,11 +440,6 @@ def custom_scheduler_server(
             else:
                 os.environ["TENSORHUB_CACHE_DIR"] = prior_env
             gw_config.reload_for_test()
-
-
-# ---------------------------------------------------------------------------
-# Predicate helpers shared across P1/P2/P3/P6/P9.
-# ---------------------------------------------------------------------------
 
 
 def is_result_for(rid: str) -> Callable[[pb.WorkerMessage], bool]:

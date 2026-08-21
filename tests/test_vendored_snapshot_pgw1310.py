@@ -1,22 +1,3 @@
-"""pgw#1310: the vendored snapshots are what VENDORED.toml says they are.
-
-Two fences, deliberately different in kind, because either one alone passes on
-a tree the other refuses:
-
-1. CONTENT — every vendored file hashes to the digest recorded beside its rev.
-   Catches a hand-patch, a partial re-vendor, and a rev bump whose manifest was
-   not regenerated.
-2. BEHAVIOUR — a digest fence alone would happily certify a correctly-recorded
-   snapshot of a broken tree, so the pgw#1287 progress fix is asserted by
-   RUNNING it. pgw#1308 moved that code first-party (`gen_worker.transfer`),
-   which is a strengthening rather than a loss: the fence now guards pgw's own
-   source instead of fidelity to an upstream rev, and a third fence refuses
-   the transfer plane's return to the vendored snapshot.
-
-Plus the reason the vendoring exists at all: the built distribution must not
-require either deleted project from an index (ie#738).
-"""
-
 from __future__ import annotations
 
 import dataclasses
@@ -55,15 +36,6 @@ def test_every_vendored_file_matches_its_recorded_digest() -> None:
 
 
 def test_the_vendored_tensorfs_carries_no_transfer_plane() -> None:
-    """pgw#1308: the transfer plane is FIRST-PARTY, and the fence says so.
-
-    The two modules were pinned to a lineage upstream had abandoned -- current
-    tensorfs has no Python transfer plane at all -- so a digest fence over
-    them certified fidelity to a rev nobody would ever fix. They now live at
-    `gen_worker.transfer`, where their behaviour fence (pgw#1287) went with
-    them. Re-vendoring them here would silently restore two implementations of
-    one wire.
-    """
     import gen_worker._vendor.tensorfs as vendored
 
     for retired in ("transfer", "journal", "daemon"):
@@ -79,22 +51,6 @@ def test_the_vendored_tensorfs_carries_no_transfer_plane() -> None:
 
 
 def test_the_tensorfs_snapshot_is_one_rev() -> None:
-    """pgw#1575: ONE rev, and nothing may re-grow a second.
-
-    The snapshot used to carry THREE — a `rev` on a lineage with no common
-    ancestor with upstream master at all, plus a `read_plane_rev` and a
-    `contract_plane_rev` bolted on beside it because the dead rev could not
-    supply either plane. Each was added by a lane that needed one more file,
-    and each was locally reasonable, which is exactly how a snapshot ends up
-    certifying fidelity to a rev nobody would ever fix.
-
-    Paul's 2026-08-20 release-policy ruling ended it: "get rid of the vendored
-    copies … Remove the v1's from the codebase fully." This is the torchcg
-    shape (see below), applied here.
-
-    The rev itself is NOT restated here. VENDORED.toml is "the single home of
-    the fact", and a copy of a rev in a test is a second home that drifts.
-    """
 
     spec = MANIFEST["packages"]["tensorfs"]
     extra = sorted(k for k in spec if k.endswith("_rev") and k != "rev")
@@ -111,16 +67,6 @@ def test_the_tensorfs_snapshot_is_one_rev() -> None:
 
 
 def test_the_write_plane_is_first_party_and_never_returns() -> None:
-    """pgw#1575: the five `8bafdfbb`-only APIs, and where each of them went.
-
-    `8bafdfbb` was held for exactly these. Upstream's current `LocalCAS` has
-    none of them: ingest and GC went to Rust or to nobody, `materialize` moved
-    to `TensorReader`, and the whole-tree copy died with the chokepoint flip
-    (pgw#1308 step 6). Re-vendoring a `local.py` that has them means the dead
-    lineage is back, so this refuses the SYMBOLS rather than the rev — a
-    digest fence would only say "a file changed", which is the message that
-    gets a fence regenerated instead of read.
-    """
 
     from gen_worker._vendor.tensorfs import LocalCAS
 
@@ -139,12 +85,9 @@ def test_the_write_plane_is_first_party_and_never_returns() -> None:
             f"`TensorReader.materialize`."
         )
 
-    # The planner is not upstream's at any rev and must not masquerade as one.
     assert "planner.py" not in MANIFEST["packages"]["tensorfs"]["files"]
     assert not (VENDOR / "tensorfs" / "planner.py").exists()
 
-    # And the successors actually exist, so this is a redirection rather than
-    # a deletion: importing them is the proof.
     from gen_worker._vendor.tensorfs import TensorReader
     from gen_worker.cas import collect_garbage, ingest_file, plan_chunks
 
@@ -154,15 +97,6 @@ def test_the_write_plane_is_first_party_and_never_returns() -> None:
 
 
 def test_the_torchcg_snapshot_is_one_rev() -> None:
-    """pgw#1342/tcg#39: the graft fields are GONE, and nothing may re-grow one.
-
-    Two lanes grafted a newer file over an older storage half — pgw#1328's
-    `selection_rev`, pgw#1332's `recipe_rev` — each because the tip carried a
-    storage re-key its own lane was not entitled to take. Paul ruled the re-key
-    accepted (tcg#39) and this snapshot took the tip whole, so a second rev in
-    this table is now a fork of a storage identity with no ruling behind it.
-    The digest fence above cannot see that: a graft records perfectly well.
-    """
 
     spec = MANIFEST["packages"]["torchcg"]
     extra = sorted(k for k in spec if k.endswith("_rev") and k != "rev")
@@ -170,22 +104,11 @@ def test_the_torchcg_snapshot_is_one_rev() -> None:
         f"the torchcg snapshot grew a second rev ({extra}). One rev, per "
         f"tcg#39 — a graft forks the compiled-graph store's identity."
     )
-    # The rev itself is NOT restated here. VENDORED.toml says it is "the single
-    # home of the fact", and a copy of a rev in a test is a second home that
-    # drifts. What this asserts is the SHAPE the ruling fixed: one rev, and the
-    # post-rename layout it must have been taken from.
     assert spec["subdir"] == "src/torchcg"
 
 
 def test_the_vendored_store_uses_the_frozen_ref_prefix() -> None:
-    """The re-key this bump paid for, asserted where the fleet can see it.
-
-    `torchcg/v1` is the address every compiled graph on every pod is filed
-    under. Moving it again is not a rename: it orphans every stored artifact at
-    once and costs another fleet-wide re-mint. Upstream froze it (torchcg
-    PR #41); this is the consumer-side half, so a rev bump that quietly moved
-    it could not reach a pod through this repo.
-    """
+    """The re-key this bump paid for, asserted where the fleet can see it."""
 
     from gen_worker._vendor.torchcg import storage
 
@@ -197,15 +120,7 @@ def test_the_vendored_store_uses_the_frozen_ref_prefix() -> None:
 
 
 def test_the_selection_contract_is_torch_free_and_registered() -> None:
-    """The property that made the graft safe, executed rather than asserted.
-
-    tcg#37's implementation reads four facts per feed (dtype, shape,
-    contiguity, pointer alignment), so it needs no accelerator — which is why
-    it can be a JSON corpus at all, and why an adopt-only pod can rank a call
-    before anything is loaded. It arrived as a graft (pgw#1328) and is now part
-    of the ordinary one-rev snapshot (pgw#1342); the property that mattered
-    then still has to hold, because an adopt-only boot imports it eagerly.
-    """
+    """The property that made the graft safe, executed rather than asserted."""
     import subprocess
     import sys
 
@@ -226,22 +141,7 @@ def test_the_selection_contract_is_torch_free_and_registered() -> None:
 
 
 def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() -> None:
-    """`recipe.py`'s only siblings are `identity` and `ingress`, and it folds
-    a real key through them.
-
-    pgw#1332 grafted this file at its own `recipe_rev` and this test guarded the
-    graft's compatibility claim. pgw#1342 took the whole package to one rev, so
-    the pairing is no longer a claim — but the EXECUTION still is, and it is the
-    half worth keeping: `recipe_v1` is the vocabulary the typed ModelSpec SDK
-    generates against, so a snapshot where the fold silently stopped producing a
-    key would be a codegen defect nothing else here notices.
-
-    Proved by EXECUTING the pairing — fold a pinned class through
-    `GraphSpecializationVariant.key()` (which reaches `identity.from_axes` and
-    `toolchain_axis_digest`) and project an ingress onto a call signature —
-    rather than by reading the import list, which would pass on a tree where
-    the shared symbols had changed shape.
-    """
+    """`recipe.py`'s only siblings are `identity` and `ingress`, and it folds a real key through them."""
     from gen_worker._vendor.torchcg.identity import is_compiled_graph_key
     from gen_worker._vendor.torchcg.ingress import CallIngress, CallInput
     from gen_worker._vendor.torchcg.recipe import (
@@ -288,14 +188,7 @@ def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() 
 
 
 def test_the_read_plane_runs_without_the_compiled_extension() -> None:
-    """The reason the snapshot is usable at all: it is PURE PYTHON.
-
-    `Layout::project` is Rust and cannot travel into a source-vendored wheel,
-    so a stub that only the extension could render or parse would leave every
-    consumer here unable to read a projected tree. Proved by EXECUTING the
-    render/parse/read path with `tensorfs._tensorfs` made unimportable, not by
-    reading the import list.
-    """
+    """The reason the snapshot is usable at all: it is PURE PYTHON."""
 
     import os
     import subprocess
@@ -343,13 +236,6 @@ print("ok")
 
 
 def test_the_transfer_plane_emits_progress_as_each_object_lands() -> None:
-    """pgw#1287, now asserted against pgw's OWN code rather than a pinned rev.
-
-    The second object cannot finish until the FIRST object's callback has been
-    observed. Post-drain emission (the defect: a 31.6 GB download reporting
-    `0 / total` until its last byte landed, so the hub's 6-minute freshness
-    window condemned a healthy pod) cannot satisfy that, at any timeout.
-    """
     from gen_worker._vendor.tensorfs import CASRef
     from gen_worker.transfer.grants import TransferGrant, _run_parallel
 
@@ -378,39 +264,21 @@ def test_the_transfer_plane_emits_progress_as_each_object_lands() -> None:
         first_reported.set()
 
     report = _run_parallel(grants, worker, parallel=2, progress=progress)
-    # The worker runs on a pool thread, so its assertion arrives as a recorded
-    # failure rather than as this test's traceback. Surface it verbatim.
     assert report.failures == [], report.failures[0][1]
     assert report.succeeded == 2
     assert seen == [1024, 1024]
 
 
 def test_no_deleted_project_is_required_from_an_index() -> None:
-    """ie#738: the break this whole cut exists to close.
-
-    Both PyPI projects are permanently deleted, so ANY index requirement on them
-    makes the published wheel unresolvable for every consumer.
-    """
     text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
     project = tomllib.loads(text)["project"]
     requirements = list(project["dependencies"])
     for extra in project.get("optional-dependencies", {}).values():
         requirements.extend(extra)
-    # This fence's denylist must NAME the dead projects in order to refuse
-    # them; respelling it would delete the refusal.
     dead = [r for r in requirements if r.split()[0].split(">")[0].split("=")[0].strip()
-            # retired-name: the denylist above.
             in {"hashrepo", "tensorfs", "torch-compiled-graphs", "torchcg"}]
     assert dead == [], f"deleted PyPI projects required from an index: {dead}"
     assert "[tool.uv.sources]" in text
-    # pgw#1370 carve-out: `torchcg` may appear as a PEP 735 DEPENDENCY GROUP
-    # requirement + a git source pin. Groups are NOT published in wheel
-    # metadata, so no index consumer ever resolves it — the property this
-    # fence exists for holds — while the release-derive tests get the real
-    # library (the derive imports torchcg from the env it runs in; the
-    # standalone-package decision is tcg#41 open question 3, Paul's).
-    # The [project] tables above stay fenced for it unchanged.
-    # retired-name: the source-pin denylist itself, minus the carved-out row.
     for name in ("hashrepo =", "torch-compiled-graphs =", "tensorfs ="):
         assert name not in text, (
             f"a `{name}` source pin is back in pyproject.toml. A source pin is "
@@ -428,22 +296,6 @@ def test_the_vendored_packages_import_with_no_third_party_present(module: str) -
 
 
 def test_no_vendored_module_imports_its_sibling_by_its_INDEX_name() -> None:
-    """pgw#1457 incident: the re-vendor's one rewrite is easy to forget.
-
-    Vendoring `torchcg` applies exactly one transformation — `from tensorfs
-    import ...` becomes `from ..tensorfs import ...` — because upstream
-    torchcg depends on tensorfs as a normal package and here there is no such
-    package to depend on. Nothing wrote that rule down, so a straight
-    `git archive | tar -x` re-vendor dropped it and shipped four modules
-    importing a PyPI project that is PERMANENTLY DELETED (ie#738).
-
-    It passed every gate: the digest fence recorded the wrong bytes faithfully,
-    the tests passed because the dev venv happens to have a real `tensorfs`
-    installed, and only mypy noticed — as a type mismatch between two classes
-    with the same name, which reads as a nuisance rather than as "this wheel
-    cannot be installed". This fence states the rule so the next re-vendor
-    cannot silently skip it.
-    """
     offenders = []
     for package in MANIFEST["packages"]:
         root = VENDOR / package
@@ -463,19 +315,6 @@ def test_no_vendored_module_imports_its_sibling_by_its_INDEX_name() -> None:
 
 
 def test_the_dev_torchcg_pin_is_the_rev_the_snapshot_was_taken_from() -> None:
-    """pgw#1457 incident #2: pgw runs TWO torchcg copies, by design.
-
-    `_vendor/torchcg` serves the mint and the serving path; the DERIVE imports
-    torchcg from the env it runs in, against the `[tool.uv.sources]` dev pin
-    (in production, the release env's own pin). That is deliberate — but it
-    means a re-vendor that moves only the vendored half leaves two versions
-    live in one tree, and the failure lands two tools away from the cause:
-    the derive died on `TypeError: unexpected keyword 'session'` while the
-    signature was verifiably present in the vendored tree. Both facts true at
-    once is the worst kind of bug report.
-
-    They are a MATCHED PAIR, so this asserts it rather than trusting a comment.
-    """
     import re
 
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()

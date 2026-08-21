@@ -1,26 +1,4 @@
-"""Folding a request's LoRA into the denoiser weights, and undoing it exactly.
-
-The defect these tests exist for, measured on the production seams: a live
-adapter on a COMPILED-ARMED denoiser changes the served tensor by exactly
-``0.0``. The armed dispatcher replaced ``forward`` with the artifact's
-dispatch and bound its constants from the base weights at arm time; peft (and
-our own additive branch) put their work in SUBMODULES the artifact never runs.
-So the request pays for an adapter and receives the base model, with no
-refusal, no eager fallback and no log.
-
-Everything below runs the real code on CPU: a real tiny diffusers
-``UNet2DConditionModel``, the real ``adapter_guard`` seam, the real
-``w8a8_lora`` key resolution under ``lora_fold``. The artifact stand-in is a
-FROZEN DEEP COPY of the pre-fold denoiser called through its own forward —
-semantically exactly what a weightless AOTI package bound once at arm time is:
-the base-weight graph, its own memory, blind to later module surgery. That is
-the property under test, and a stand-in that reproduces it is the honest way to
-test it without a card.
-
-Every arm here is red-armed: the drift test runs a deliberately-broken restore
-(``sub_`` the delta instead of copying the original back) and asserts it is
-CAUGHT, and the guard test asserts the unguarded shape serves the base model.
-"""
+"""Folding a request's LoRA into the denoiser weights, and undoing it exactly."""
 
 from __future__ import annotations
 
@@ -56,8 +34,6 @@ def _tiny_unet() -> Any:
 
 
 class _Pipe:
-    """A pipeline that is nothing but its denoiser — which is all
-    ``branch_targets`` reads."""
 
     def __init__(self, unet: Any) -> None:
         self.unet = unet
@@ -65,8 +41,6 @@ class _Pipe:
 
 
 def _adapter(unet: Any, seed: int, scale: float = 1.0) -> lora_fold.Adapter:
-    """One adapter in the live kohya-flat diffusers grammar, over an
-    attention projection (Linear) and a resnet conv (the LoCon pair class)."""
     torch.manual_seed(seed)
     sd: Dict[str, Any] = {}
 
@@ -98,11 +72,6 @@ def _run(unet: Any, args: Tuple[Any, ...]) -> Any:
 
 
 class _FrozenArtifact:
-    """The AOTI package, in the one respect that matters: it is a copy of the
-    denoiser taken at ARM TIME and it never sees a later module change.
-
-    Implements the ``EntryDispatch`` surface ``wrap_module`` uses.
-    """
 
     def __init__(self, module: Any) -> None:
         self._frozen = copy.deepcopy(module).eval()
@@ -123,10 +92,6 @@ class _FrozenArtifact:
 
 
 class _RecordingPackage:
-    """The AOTI package surface ``rearm_constants`` drives, and the only one
-    it drives: ``load_constants(values, check_full_update, user_managed)``.
-    Records each re-install so the test can assert the fold told the artifact
-    its constants moved."""
 
     def __init__(self) -> None:
         self.loads: List[Dict[str, Any]] = []
@@ -139,8 +104,6 @@ class _RecordingPackage:
 
 
 class _BoundRunner:
-    """``TCGEntryRunner.runner``'s shape: the loaded package plus the constant
-    table that was bound BY REFERENCE at arm time."""
 
     def __init__(self, module: Any) -> None:
         self._package = _RecordingPackage()
@@ -154,10 +117,6 @@ class _Entry:
 
 
 class _PointerArtifact(_FrozenArtifact):
-    """The other half of the truth: an artifact whose constants are the
-    module's OWN tensors, bound by reference (``user_managed=True``). An
-    in-place weight write IS visible to it — which is why the fold is in place
-    and never a tensor swap."""
 
     def __init__(self, module: Any) -> None:
         self._frozen = module
@@ -173,15 +132,6 @@ class _PointerArtifact(_FrozenArtifact):
 
 
 class _Dispatcher:
-    """torchcg's ``_ForwardDispatcher``, in the respects the guard reads.
-
-    pgw#1573: this file armed through ``aot_serve.wrap_module``, which has no
-    production caller — the live arm is ``AdoptSession`` installing one of
-    these as the module's ``forward``. Same doubles, same assertions, the seam
-    a pod actually runs. ``_entries`` is torchcg's ``(record, call)`` shape and
-    ``call.runner`` is the artifact's bound runner, which is what
-    ``adapter_guard.rearm_constants`` re-installs.
-    """
 
     def __init__(self, module: Any, artifact: Any) -> None:
         self.module = module
@@ -198,37 +148,20 @@ class _Dispatcher:
 
 
 def _arm(unet: Any, artifact: Any) -> None:
-    """Arm through the LIVE seam: torchcg's dispatcher, plus pgw#1573's guard.
-
-    ``adapter_guard.install`` is what ``ctx.compile`` runs on every adopted
-    module on both serving hosts, so what this file measures is what a pod
-    does.
-    """
     unet.forward = _Dispatcher(unet, artifact)
     assert adapter_guard.install(unet), (
         "the guard did not recognise the dispatcher, so every peft row below "
         "would pass for the wrong reason")
 
 
-# ---------------------------------------------------------------------------
-# The defect
-# ---------------------------------------------------------------------------
-
-
 def test_an_artifact_bound_by_value_is_blind_to_module_side_weight_surgery() -> None:
-    """The defect in one assertion. An artifact whose constants are a COPY —
-    which is what a bound-and-then-copied table is, and what peft's submodule
-    wrapping is always up against — returns the base model bit-identically
-    while an adapter is live on the module. RED ARM for the guard below."""
+    """The defect in one assertion."""
     unet = _tiny_unet()
     args = _inputs()
     baseline = _run(unet, args)
 
     artifact = _FrozenArtifact(unet)
     _arm(unet, artifact)
-    # Exactly the module state peft's `inject_adapter_in_model` leaves behind
-    # (verified against peft 0.19.1: absent -> {'name': cfg} -> absent on
-    # unload). Set directly so the assertion does not need peft installed.
     scope = lora_fold.compute_deltas(unet, [_adapter(unet, 1)])
     held = lora_fold.apply_fold(unet, scope)
     try:
@@ -263,15 +196,8 @@ def test_the_peft_guard_routes_a_compiled_armed_module_to_eager() -> None:
     assert artifact.calls == before + 1, "unloading the adapter must resume compiled"
 
 
-# ---------------------------------------------------------------------------
-# The fold
-# ---------------------------------------------------------------------------
-
-
 def test_the_fold_reaches_a_pointer_bound_artifact() -> None:
-    """An in-place fold is visible to an artifact that holds the module's own
-    tensors — the property ``load_constants(user_managed=True)`` provides and
-    the reason the fold must never swap a fresh tensor onto the module."""
+    """An in-place fold is visible to an artifact that holds the module's own tensors — the property ``load_constants(user_managed=True)`` provides and the reason the fold must never swap a fresh tensor o..."""
     unet = _tiny_unet()
     args = _inputs()
     artifact = _PointerArtifact(unet)
@@ -293,9 +219,7 @@ def test_the_fold_reaches_a_pointer_bound_artifact() -> None:
 
 
 def test_the_fold_matches_the_eager_adapter_it_replaces() -> None:
-    """Folding is not an approximation of the adapter: ``W += B@A*s`` and an
-    additive branch compute the same thing, so the folded weights must agree
-    with the branch path to floating-point noise."""
+    """Folding is not an approximation of the adapter: ``W += B@A*s`` and an additive branch compute the same thing, so the folded weights must agree with the branch path to floating-point noise."""
     from gen_worker.models import w8a8_lora
 
     unet = _tiny_unet()
@@ -330,15 +254,8 @@ def test_two_adapters_fold_together_and_commute_with_the_branch_sum() -> None:
     assert not torch.equal(both, only_a), "the second adapter must contribute"
 
 
-# ---------------------------------------------------------------------------
-# Restore: bit-exact, and the check is proven able to fail
-# ---------------------------------------------------------------------------
-
-
 def _serial_drift(unet: Any, pipe: Any, adapters: List[Any], args: Any,
                   *, break_restore: bool = False) -> List[Any]:
-    """Ten serial requests, alternating A / none / B / none. Returns every
-    bare-request output; each must equal the pre-LoRA baseline exactly."""
     bare: List[Any] = []
     for step in range(10):
         riding = [adapters[(step // 2) % len(adapters)]] if step % 2 == 0 else []
@@ -349,10 +266,6 @@ def _serial_drift(unet: Any, pipe: Any, adapters: List[Any], args: Any,
         scope = lora_fold.apply_fold(unet, deltas)
         _run(unet, args)
         if break_restore:
-            # THE BROKEN RESTORE the exact one exists to avoid: subtract the
-            # delta instead of copying the original bytes back. Algebraically
-            # the inverse; in floating point it is not, and a serial stream
-            # accumulates the difference.
             with torch.no_grad():
                 mods = dict(unet.named_modules())
                 for path, d in deltas.items():
@@ -385,8 +298,7 @@ def test_restore_is_bit_exact_over_ten_serial_alternating_requests(dtype: Any) -
 
 
 def test_the_drift_check_catches_a_deliberately_broken_restore() -> None:
-    """RED ARM. bf16 is where the delta-subtract restore is visibly wrong; if
-    this ever passes, the drift test above is proving nothing."""
+    """RED ARM."""
     unet = _tiny_unet().to(torch.bfloat16)
     pipe = _Pipe(unet)
     args = tuple(
@@ -404,11 +316,6 @@ def test_the_drift_check_catches_a_deliberately_broken_restore() -> None:
     assert drifted_outputs or drifted_weights, (
         "the delta-subtract restore left no trace — the exactness check "
         "cannot go red and therefore proves nothing")
-
-
-# ---------------------------------------------------------------------------
-# Refusals
-# ---------------------------------------------------------------------------
 
 
 def test_a_compiled_armed_module_refuses_a_fold_with_no_rebind_seam() -> None:
@@ -429,8 +336,7 @@ def test_an_eager_module_needs_no_rebind_seam() -> None:
 
 
 def test_a_quantized_leaf_refuses_the_fold_by_name() -> None:
-    """An fp8 grid cannot hold a low-rank delta; folding onto it would round
-    the adapter away and serve a confidently weakened result."""
+    """An fp8 grid cannot hold a low-rank delta; folding onto it would round the adapter away and serve a confidently weakened result."""
     from gen_worker.models.w8a8 import fp8_scaled_linear_class
 
     unet = _tiny_unet()
@@ -450,8 +356,7 @@ def test_a_quantized_leaf_refuses_the_fold_by_name() -> None:
 
 
 def test_the_text_encoder_half_is_folded_too_and_not_dropped() -> None:
-    """A style LoRA usually carries a text-encoder half. Folding only the
-    denoiser would serve the adapter at the wrong strength with a clean log."""
+    """A style LoRA usually carries a text-encoder half."""
     import torch.nn as nn
 
     class _TinyTE(nn.Module):
@@ -491,8 +396,7 @@ def test_a_key_that_lands_on_no_component_refuses_rather_than_being_dropped() ->
 
 
 def test_the_kohya_text_encoder_alias_routes_to_the_same_component() -> None:
-    """`lora_te_`/`lora_te1_` are sd-scripts' own grammar and route through the
-    same table as the dotted form — one alias table, checked from both sides."""
+    """`lora_te_`/`lora_te1_` are sd-scripts' own grammar and route through the same table as the dotted form — one alias table, checked from both sides."""
     import torch.nn as nn
 
     class _TinyTE(nn.Module):
@@ -526,15 +430,6 @@ def test_an_empty_adapter_set_is_a_no_op_that_still_yields() -> None:
 
 
 def test_rearm_constants_still_matches_the_real_runner_surface() -> None:
-    """The stand-in above defines `_package`/`_bound_values`, so it would keep
-    passing if the VENDORED runner renamed them and production started
-    refusing every fold. Assert the two names against the real class.
-
-    `rearm_constants` reaches into those privates on purpose: the right home is
-    a `CompiledGraphRunner.rebind()` upstream, but the vendored snapshot is
-    sha256-fenced (`_vendor/VENDORED.toml`) so it cannot be edited here. This
-    is the tripwire that makes the re-vendor land loudly instead of quietly.
-    """
     import inspect
 
     from gen_worker._vendor.torchcg.runner import CompiledGraphRunner

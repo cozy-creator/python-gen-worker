@@ -1,21 +1,3 @@
-"""The ONE model load+place core, plus the CLI's hub-less resolve (pgw#515).
-
-Production (the executor's setup injection) and the local CLI
-(``gen-worker run`` / ``serve``) drive the SAME code for turning a resolved
-snapshot into a ready slot value: annotation-typed injection, binding
-dtype / storage-dtype honoring, the pre-load cast gate (th#737), the
-adaptive fit ladder outcome stamps (gw#491), worker-owned placement, and
-compiled-artifact arming. Structural reporting (ServePlan / FnDegraded)
-stays with the executor — :class:`SlotLoad` carries the outcomes so the
-caller reports them however it reports.
-
-Resolution differs by necessity: the executor's bytes come from
-orchestrator-resolved snapshots (``ModelStore.ensure_local``); the CLI has
-no orchestrator, so :func:`resolve_local_path` resolves standalone — local
-CAS, tensorhub's public resolve route (th#560), direct HF / Civitai /
-ModelScope downloads — through the same download layer.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -38,7 +20,7 @@ from .loading import (
 )
 from .refs import parse_model_ref
 
-__all__ = ["model_index_components"]  # re-export: single source in loading.py (gw#521)
+__all__ = ["model_index_components"]
 
 logger = logging.getLogger(__name__)
 
@@ -49,22 +31,9 @@ class ModelResolutionError(Exception):
     """A model binding cannot be resolved locally (CLI exit 3)."""
 
 
-# ---------------------------------------------------------------------------
-# pgw#1104: the APPLIED-LANE report. `metrics.lane` used to be a pure function
-# of the binding, so a recipe that quantized in setup() served fp8 under a
-# bf16 label — and the lane id is a KEY (th#935 verdicts, compiled graphs,
-# pricing, the executed-lane proof). A static `handles=`-style declaration
-# cannot fix it: the recipe is runtime-gated (sm89 for w8a8, the compile
-# preflight), so a declaration would over-claim on the card that skips it.
-# Only the code that converted the weights can report provably, so it does —
-# through the same contextvar scope `arm_compile` uses, so the report is
-# attributed to exactly the setup() that made it and cannot be forged later.
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class _AppliedLaneContext:
-    applied: list[Any]  # list[execution_lanes.AppliedLane]; owned by the scope
+    applied: list[Any]
 
 
 _APPLIED_LANE_CTX: "contextvars.ContextVar[Optional[_AppliedLaneContext]]" = (
@@ -73,8 +42,7 @@ _APPLIED_LANE_CTX: "contextvars.ContextVar[Optional[_AppliedLaneContext]]" = (
 
 
 class AppliedLaneScope:
-    """Context manager the executor/CLI holds open around one ``setup()`` call
-    so ``report_applied_lane()`` lands on that instance. Re-entrant-safe."""
+    """Context manager the executor/CLI holds open around one ``setup()`` call so ``report_applied_lane()`` lands on that instance."""
 
     def __init__(self) -> None:
         self._applied: list[Any] = []
@@ -103,19 +71,7 @@ def report_applied_lane(
     modules: int = 0,
     kept_bf16: int = 0,
 ) -> bool:
-    """Report the lane a serve-time recipe just APPLIED to ``component``'s
-    weights. Call it from ``setup()`` immediately after the conversion
-    returns — the way ``arm_compile()`` is called after placement.
-
-    ``lane_body`` is one of ``known_execution_lane_bodies()`` (the th#1050
-    vocabulary, e.g. ``"fp8-w8a8-dynamic"``); an unknown token raises
-    ``ValueError`` — the lane vocabulary is shared with the hub and is never
-    extended from an endpoint. The execution axis is NOT the author's: the
-    worker composes ``+compiled``/``+eager`` from live compile state.
-
-    Returns whether the report was recorded. Outside a setup scope (hub-less
-    ``cozy run``, a unit rig) it logs once and returns False — never raises,
-    so every endpoint can call it unconditionally."""
+    """Report the lane a serve-time recipe just APPLIED to ``component``'s weights."""
     from . import execution_lanes
 
     body = str(lane_body or "").strip().lower()
@@ -139,17 +95,9 @@ def report_applied_lane(
     return True
 
 
-# ---------------------------------------------------------------------------
-# The attention axis (pgw#1043 §PRODUCTIZATION) — same shape as the lane report
-# above, deliberately: only the code that INSTALLED the attention path can prove
-# what it installed, and a static declaration would over-claim on a card whose
-# kernel gate refused (the exact reason pgw#1104 rejected position 2).
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class _AppliedAttentionContext:
-    applied: list[Any]  # list[attention_modes.AppliedAttention]
+    applied: list[Any]
 
 
 _APPLIED_ATTENTION_CTX: (
@@ -158,8 +106,7 @@ _APPLIED_ATTENTION_CTX: (
 
 
 class AppliedAttentionScope:
-    """Held open by the executor around one ``setup()`` so a report lands on
-    that instance and cannot be forged from a handler or a background thread."""
+    """Held open by the executor around one ``setup()`` so a report lands on that instance and cannot be forged from a handler or a background thread."""
 
     def __init__(self) -> None:
         self._applied: list[Any] = []
@@ -191,18 +138,7 @@ def report_applied_attention(
     selector: str = "",
     index_ref: str = "",
 ) -> bool:
-    """Report the attention path that was actually INSTALLED on ``component``.
-
-    Call it from ``setup()`` right after the processor/dispatch is patched —
-    the way ``report_applied_lane()`` is called after ``quantize_()`` returns.
-    ``mode`` is ``"dense"`` or ``"sparse-k<N>"``; an ungrammatical token raises
-    ``ValueError``. Reporting nothing means dense, so no endpoint is obliged to
-    call this.
-
-    ``density`` is the MEASURED kept fraction, not the budget: ``k`` is what was
-    asked for and the density is what the geometry produced, and the wall is a
-    function of the second. Returns whether the report was recorded; outside a
-    setup scope it logs once and returns False rather than raising."""
+    """Report the attention path that was actually INSTALLED on ``component``."""
     tok = str(mode or "").strip().lower()
     if not attention_modes.valid_attention_mode(tok):
         raise ValueError(
@@ -237,29 +173,6 @@ def report_attention_backend(
     *,
     wanted: str = "",
 ) -> bool:
-    """Report the attention KERNEL that was actually engaged (th#1871 P1).
-
-    Call it from ``setup()`` wherever the backend is chosen — right after the
-    attention processor is installed, or right after the ``try: import
-    flash_attn`` that decided it. ``backend`` is one of ``fa3``, ``fa2``,
-    ``sdpa``, ``xformers``, ``eager`` (the ecosystem's own spellings —
-    ``flash_attention_2``, ``torch_sdpa``, … — are accepted and normalized).
-    ``wanted`` is what the code ASKED FOR, and passing it is what makes a
-    fallback visible: ``wanted="fa2", backend="sdpa"`` is ie#707 exactly.
-
-    WHY THIS IS A SECOND FUNCTION AND NOT A LOOSER GRAMMAR ON THE FIRST.
-    ``report_applied_attention`` reports SPARSITY (``dense`` / ``sparse-k<N>``)
-    and correctly refuses ``"sdpa"`` — the kernel is not a sparsity budget.
-    Those are two independent axes: the same ``sparse-k8`` costs roughly twice
-    as much on ``sdpa`` as on ``fa3``. Widening one token to cover both would
-    make every measurement of either uninterpretable, which is the vocabulary
-    collapse th#1871 §1.3 measured one layer up.
-
-    Reporting nothing is honest and stays the default: an unreported backend is
-    UNKNOWN to the hub, never "fine". Returns whether the report was recorded;
-    outside a setup scope it logs once and returns False rather than raising.
-    An ungrammatical backend token raises ``ValueError`` — the reporter is the
-    last place a fourth vocabulary can be stopped."""
     engaged = normalize_backend(backend)
     asked = normalize_backend(wanted)
     if not engaged:
@@ -281,17 +194,7 @@ def report_attention_backend(
     return True
 
 
-# ---------------------------------------------------------------------------
-# Standalone (hub-less) resolution — the CLI's half. The executor's bytes
-# come from orchestrator-resolved snapshots via ModelStore.ensure_local.
-# ---------------------------------------------------------------------------
-
-
 def _hub_ref_map_path(cache_dir: Path, thref: Any) -> Path:
-    """CAS-local memory of release->snapshot resolutions, so a
-    previously-fetched release ref keeps working offline:
-    cas/refs/<owner>/<repo>/<release>. A ref naming no release memoizes under
-    `_bare`, which is a repo-identity slot and resolves nothing on its own."""
     name = str(thref.release or "_bare")
     safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in name)
     return cache_dir / "refs" / str(thref.owner) / str(thref.repo) / safe
@@ -309,28 +212,7 @@ def _remember_hub_ref(cache_dir: Path, thref: Any, digest: str) -> None:
 def _fetch_tensorhub_snapshot(
     thref: Any, *, cache_dir: Path, emit: EmitFn, components: Tuple[str, ...] = (),
 ) -> str:
-    """Resolve a Hub ref via th#560 and download its snapshot into the CAS.
-
-    One re-resolve retry on a presigned-URL expiry mid-download (the same
-    contract the orchestrator honors on ``url_expired``).
-
-    ``components`` (pgw#505): th#560's resolve route always returns the
-    FULL repo manifest today (selective CAS resolve is the hub-side
-    desired-snapshot scoping — a separate, not-yet-built platform change).
-    Until then this narrows client-side: the worker fully owns this
-    resolve+download+materialize loop (unlike the production executor path,
-    which digest-verifies against an orchestrator-issued file list), so it
-    can safely fetch only the declared components — ``ensure_snapshot_async``
-    keys the materialized directory by ``(digest, components)`` so a partial
-    fetch never collides with a full one of the same ref. NOTE: offline
-    reuse (``--offline`` / the ``_hub_ref_map_path`` tag memory below) only
-    covers the FULL-repo case — a components=-scoped ref must be fetched
-    online at least once per component set.
-    """
-    # Deferred: cozy_snapshot pulls +305 modules onto the `import gen_worker`
-    # path — the single largest boot-cost import in the SDK.
     from .cozy_snapshot import ensure_snapshot_async, snapshot_dir_key
-    # Deferred: hub_client pulls +129 modules onto the `import gen_worker` path.
     from .hub_client import HubResolveError, resolve_repo
 
     canonical = thref.canonical()
@@ -344,7 +226,6 @@ def _fetch_tensorhub_snapshot(
     emit({"kind": "model_fetch.started", "ref": canonical, "provider": "tensorhub"})
     resolved = _resolve()
 
-    # Already materialized under the resolved (digest, components) key? No download.
     key = snapshot_dir_key(resolved.snapshot_digest, components)
     snap_dir = cache_dir / "snapshots" / key
     if snap_dir.exists():
@@ -395,29 +276,10 @@ def resolve_local_path(
     *, ref: str, provider: str, offline: bool, emit: EmitFn,
     components: Tuple[str, ...] = (),
 ) -> str:
-    """Resolve one model ref to a local tensorfs CAS snapshot dir.
-
-    Order matches the live worker, and since pgw#1524 both have exactly one
-    weight source:
-      1. local CAS lookup (digest-pinned snapshot dirs).
-      2. Cozy refs missing from CAS: standalone resolve against tensorhub's
-         public resolve route (th#560), then the shared ``cozy_snapshot``
-         downloader; ``--offline`` stays CAS-only (exit 3).
-      3. anything else — hf, civitai, modelscope — is an INGEST source and is
-         REFUSED by name (``NonCasWeightSourceRefused``). The direct-download
-         rungs are DELETED: a hub-less CLI that quietly served un-normalized
-         upstream bytes would be a second answer to "what is a servable model",
-         and the whole point of the hardcut is that there is only one.
-
-    ``components`` (pgw#505) narrows the tensorhub fetch to the named pipeline
-    component subfolders (+ root config files) — see
-    ``download.select_component_paths`` / ``cozy_snapshot.snapshot_dir_key``.
-    """
+    """Resolve one model ref to a local tensorfs CAS snapshot dir."""
 
     cache_dir = Path(tensorhub_cas_dir())
 
-    # Decode the bare ref into typed parts using the explicit provider.
-    # No string-prefix sniffing — provider is the source of truth.
     try:
         parsed = parse_model_ref(ref, provider=provider)
     except Exception as e:
@@ -426,19 +288,13 @@ def resolve_local_path(
         ) from e
 
     if parsed.provider == "tensorhub" and parsed.tensorhub and parsed.tensorhub.digest:
-        # Snapshot dirs are keyed by the bare hex digest (no algo prefix).
         digest = parsed.tensorhub.digest.split(":", 1)[-1]
         snap_dir = cache_dir / "snapshots" / digest
         if snap_dir.exists():
             return str(snap_dir)
 
-    # Cozy refs that miss the CAS (#379): resolve standalone against
-    # tensorhub's public resolve route (th#560) and feed the shared
-    # cozy_snapshot downloader. TENSORHUB_URL selects the hub; TENSORHUB_TOKEN
-    # (optional) unlocks private repos. Offline stays CAS-only.
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
         if offline:
-            # Release refs: a previous online resolve remembered release->digest.
             ref_map = _hub_ref_map_path(cache_dir, parsed.tensorhub)
             if ref_map.exists():
                 snap = cache_dir / "snapshots" / ref_map.read_text().strip()
@@ -454,8 +310,6 @@ def resolve_local_path(
             parsed.tensorhub, cache_dir=cache_dir, emit=emit, components=components,
         )
 
-    # THE HARDCUT (pgw#1524). hf / civitai / modelscope are INGEST sources;
-    # this resolver serves, so it refuses them by name and points at the route.
     if parsed.provider in ("hf", "civitai", "modelscope"):
         raise ModelResolutionError(str(non_cas_refusal(
             ref=str(ref), provider=parsed.provider)))

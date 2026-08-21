@@ -1,39 +1,4 @@
-"""``hf.fp8-blockwise@1`` — the consumer half of the layout gate.
-
-The artifact side of the tensor-layout contract shipped in tensorhub
-(`internal/tensorlayout/seed_fp8_blockwise_th1803.go`, transcribed from the
-real header bytes of `tensorhub/minimax-h3`'s fp8 conditioner). Without a
-DECLARATION the hub refuses every rebind onto that artifact, because no decoder
-in any image says it can read those bytes. This module is the declaration, and
-the loader that makes it true.
-
-**The layout, stated once.** fp8 e4m3 weights `[out, in]`, each carrying a
-`weight_scale_inv` F32 twin shaped `[out/128, in/128]` — one scale per
-128x128 block, applied as a MULTIPLIER (`w.float() * scale`, DeepSeek-V3 /
-transformers `FineGrainedFP8` convention; the `_inv` suffix names the
-quantizer's divisor, not the dequant direction). Layers outside
-`modules_to_not_convert` are detected by dtype + scale presence, never by a
-name list.
-
-**Why this cannot be read as ``cozy.fp8-rowwise@1``.** That contract is also
-"fp8 e4m3, dynamic activations" — same element type, same activation scheme,
-one English name. Its scale leaf is `weight_scale`, shaped `[out]`, per ROW.
-A decoder that reads a blockwise `[out/128, in/128]` grid as a per-row vector
-broadcasts one block's scale across a whole row: no exception, no shape
-error at the point that matters, just plausible-looking numbers that are
-wrong. That is why the two are separate handles and why this loader REFUSES
-a rowwise tree instead of adapting to it.
-
-The two are not inter-convertible either (DESIGN-RULINGS §1.33 ladder):
-re-blocking rowwise scales into a 128x128 grid is a RE-QUANTIZATION with new
-numerics, so the pair is PRODUCIBLE-not-CONVERTIBLE — a priced production job
-from a named higher-precision source, never a silent load-time repack.
-
-**No quantization happens here**: quantization is done
-ahead of time by a conversion endpoint and served as an artifact. This module
-only READS a pre-quantized tree. There is deliberately no quantize-if-missing
-fallback.
-"""
+"""hf.fp8-blockwise@1 consumer half of the layout gate. The layout: fp8 e4m3 weights [out, in], each with a weight_scale_inv F32 twin shaped [out/128, in/128] — one scale per 128x128 block, applied as a MULTIPLIER (DeepSeek-V3 / transformers FineGrainedFP8 convention; `_inv` names the quantizer's divisor, not the dequant direction). NOT readable as cozy.fp8-rowwise@1: that contract's scale leaf is weight_scale, shaped [out], per ROW — reading a blockwise grid as a row vector broadcasts one block's scale across a whole row with no error, just plausible wrong numbers — so this loader REFUSES a rowwise tree, and the pair is PRODUCIBLE-not-CONVERTIBLE (re-blocking is a re-quantization). No quantization happens here; this only reads a pre-quantized tree."""
 
 from __future__ import annotations
 
@@ -55,9 +20,6 @@ from .tensor_layout_contract import implements_quant_rule
 #: rowwise conflation above a refusal rather than a silent mis-scale.
 QUANT_RULE = "hf.fp8-blockwise@1"
 
-# The registry's declared reference dequant for this contract. Named here so
-# the SDK's transform and tensorhub's descriptor point at ONE spec rather than
-# two implementations that agree by luck.
 REFERENCE_DEQUANT = "hf.fp8_blockwise.dequant@1"
 
 QUANT_METHOD = "fp8"
@@ -72,12 +34,7 @@ class HfFp8BlockwiseError(RuntimeError):
 
 
 class HfFp8BlockwiseLayoutError(HfFp8BlockwiseError):
-    """The tree is not in ``hf.fp8-blockwise@1``.
-
-    Raised in preference to loading anything: a layout refusal is the whole
-    point of the contract, and the hub's gate exists so this is normally
-    unreachable at serve time.
-    """
+    """The tree is not in ``hf.fp8-blockwise@1``."""
 
 
 class BlockwiseUnit(msgspec.Struct, frozen=True, kw_only=True):
@@ -115,7 +72,6 @@ class HfFp8BlockwiseTree(msgspec.Struct, frozen=True, kw_only=True):
 
 
 def _read_header(path: Path) -> Dict[str, Any]:
-    """One shared, stub-aware reader — see `safetensors_header.read_header`."""
 
     return read_header(
         path,
@@ -181,14 +137,7 @@ def _declared_block(qc: Dict[str, Any], cfg_path: Path) -> Tuple[int, int]:
 def inspect_hf_fp8_blockwise(
     root: Path, *, component: str = "",
 ) -> HfFp8BlockwiseTree:
-    """Verify a tree against ``hf.fp8-blockwise@1`` from headers alone.
-
-    The same tier-1 evidence tensorhub's `tensorlayout.Identify` reads at
-    publish, checked again by the consumer: the declaration on the release
-    row says the image CAN decode this layout, and this says the bytes in
-    front of it really are that layout. Disagreement is a typed refusal —
-    never a best-effort load.
-    """
+    """Verify a tree against ``hf.fp8-blockwise@1`` from headers alone."""
     root = Path(root)
     path = root / component if component else root
     qc = _quant_config(path)
@@ -269,20 +218,7 @@ def inspect_hf_fp8_blockwise(
 
 
 def detect_hf_fp8_blockwise(path: Path) -> Optional[HfFp8BlockwiseTree]:
-    """The verified ``hf.fp8-blockwise@1`` tree at ``path``, or ``None``.
-
-    DETECTION is the config's own claim and nothing else: a
-    ``quantization_config`` whose ``quant_method`` is fp8 and whose
-    ``weight_block_size`` is a ``[block_m, block_n]`` pair. A tree that makes
-    no such claim is not this contract and is left to the caller's own lane —
-    a per-tensor or per-row fp8 tree is ``cozy.fp8-rowwise@1``, detected by its
-    own arm.
-
-    A tree that DOES make the claim is verified against its headers before it
-    is returned, so a mis-blocked, transposed or rowwise-scaled grid raises
-    :class:`HfFp8BlockwiseLayoutError` here rather than reaching a generic
-    loader that reads it as something else.
-    """
+    """The verified ``hf.fp8-blockwise@1`` tree at ``path``, or ``None``."""
     p = Path(path)
     try:
         cfg = json.loads((p / "config.json").read_text("utf-8"))
@@ -300,14 +236,7 @@ def detect_hf_fp8_blockwise(path: Path) -> Optional[HfFp8BlockwiseTree]:
 
 
 def dequantize_block_scaled(weight: Any, scale: Any, *, out_dtype: Any = None) -> Any:
-    """``hf.fp8_blockwise.dequant@1`` — the contract's reference dequant.
-
-    ``w[i, j] * scale[i // block_m, j // block_n]``, with the block size
-    DERIVED from the scale grid rather than the config: one checkpoint may
-    mix granularities, and the grid is the fact. Bit-identical to
-    transformers' `_dequantize_one` for F32 scales; the exactness that makes
-    a §1.33 conversion provable is measured against this function.
-    """
+    """``hf.fp8_blockwise.dequant@1`` — the contract's reference dequant."""
     import torch
 
     q = weight.to(torch.float32)
@@ -319,7 +248,7 @@ def dequantize_block_scaled(weight: Any, scale: Any, *, out_dtype: Any = None) -
         raise HfFp8BlockwiseError(f"scale must be rank 2, got {tuple(s.shape)}")
     srows, scols = s.shape
     block_m, block_n = math.ceil(rows / srows), math.ceil(cols / scols)
-    if s.dtype == torch.uint8:  # ue8m0 exponents stored as bytes
+    if s.dtype == torch.uint8:
         s = (s.to(torch.float32) - 127.0).exp2()
     else:
         s = s.to(torch.float32)
@@ -363,17 +292,7 @@ def load_hf_fp8_blockwise(
     resident: bool = True,
     tree: Optional[HfFp8BlockwiseTree] = None,
 ) -> Any:
-    """Load a pre-quantized ``hf.fp8-blockwise@1`` component.
-
-    ``resident=True`` keeps the fp8 weights and runs the blockwise GEMM
-    (`fp8-w8a8-dynamic`, CUDA); ``resident=False`` upcasts ahead to
-    ``dtype`` at load (`fp8-w8a16`), which is the portable arm and the only
-    one that runs on CPU.
-
-    ``cls`` pins the model class; the default resolves through
-    ``transformers.AutoModel``, which is what the component's own
-    ``config.json`` already names.
-    """
+    """Load a pre-quantized ``hf.fp8-blockwise@1`` component."""
     import torch
     from transformers import FineGrainedFP8Config
 

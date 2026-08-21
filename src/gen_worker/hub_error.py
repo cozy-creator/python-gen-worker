@@ -1,35 +1,3 @@
-"""The hub's typed error envelope, parsed ONCE (pgw#1229).
-
-The hub answers a refusal with a machine-readable code and, often, a sentence
-naming the correct surface:
-
-    {"error": {"code": "forbidden",
-               "message": "worker capabilities must use the exact input-asset
-                           resolver",
-               "request_id": "..."}}
-
-Every caller that reaches ``resp.raise_for_status()`` destroys both.
-``requests`` renders only ``"403 Client Error: Forbidden for url: ..."``, and
-that string is what reaches ``request_state.error_message_safe`` — measured on
-two production ``dj-pipeline/make-video`` invokes, where the hub had named the
-remedy in plain English one stack frame from where it was needed.
-
-So the parse lives here, once, and the exception it raises carries ``code``,
-``message`` and ``request_id`` in its ``str()``. ``executor._map_exception``
-puts that string straight on the wire, so the remedy lands in
-``error_message_safe`` instead of the status line.
-
-Two envelope shapes are real and both are handled: the common
-``{"error": {"code", "message"}}`` object, and the publish/gin shape where
-``error`` is the code STRING alongside a sibling ``message`` (pgw#987). An
-absent or unparseable body degrades to the status line — the failure mode of
-an error path is silence, never a second exception.
-
-Not this module's job: deciding whether the HUB answered (``http_origin``) or
-what a download URL's 404 means (``models.download`` — third-party hosts have
-no envelope).
-"""
-
 from __future__ import annotations
 
 import json
@@ -49,14 +17,10 @@ __all__ = [
 
 _MAX_MESSAGE_CHARS = 400
 
-#: What a machine-readable code looks like on this platform (`not_found`,
-#: `publish_repudiated`, `child_calls_not_declared`). Prose is not a code.
 _CODE_TOKEN = re.compile(r"^[a-z][a-z0-9_.\-]{0,63}$")
 
 
 def _one_line(text: str, limit: int = _MAX_MESSAGE_CHARS) -> str:
-    """Collapse to a single line: ``_map_exception`` keeps ``splitlines()[0]``,
-    so a multi-line message would lose everything after the first newline."""
     return " ".join(str(text or "").split())[:limit]
 
 
@@ -72,8 +36,7 @@ class HubError:
         return bool(self.code or self.message)
 
     def detail(self) -> str:
-        """``"code: message (hub request_id=...)"`` — code FIRST so refusals
-        group by a stable token instead of by prose."""
+        """``"code: message (hub request_id=...)"`` — code FIRST so refusals group by a stable token instead of by prose."""
         head = ": ".join(p for p in (self.code, self.message) if p)
         if self.request_id:
             head = f"{head} (hub request_id={self.request_id})" if head else (
@@ -82,11 +45,7 @@ class HubError:
 
 
 def parse_hub_error(body: Any) -> HubError:
-    """Best-effort ``HubError`` from a response body (``str``/``bytes``/dict).
-
-    Never raises: an error path that can itself fail is worse than the bare
-    status line it was meant to improve.
-    """
+    """Best-effort ``HubError`` from a response body (``str``/``bytes``/dict)."""
     try:
         doc: Any = body
         if isinstance(doc, (bytes, bytearray)):
@@ -111,16 +70,11 @@ def parse_hub_error(body: Any) -> HubError:
                 request_id=_one_line(err.get("request_id") or "", 128) or request_id,
             )
         if isinstance(err, str) and err.strip():
-            # pgw#987: the publish envelope and gin's AbortWithStatusJSON emit
-            # the code as a bare string with the prose in a sibling `message`.
             sibling = doc.get("message")
             if isinstance(sibling, str) and sibling.strip():
                 return HubError(code=_one_line(err, 128),
                                 message=_one_line(sibling),
                                 request_id=request_id)
-            # No sibling prose. A token-shaped value is still the CODE (the
-            # publish path groups refusals by it, pgw#987); anything with
-            # spaces in it is prose and is reported as the message.
             token = err.strip()
             if _CODE_TOKEN.match(token):
                 return HubError(code=token, request_id=request_id)
@@ -154,12 +108,7 @@ def hub_error_of(resp: Any) -> HubError:
 
 
 class HubApiError(WorkerError):
-    """A non-2xx from the hub's HTTP API, carrying what the hub actually said.
-
-    ``str()`` is one line and leads with the code, because it is copied verbatim
-    onto the wire by ``executor._map_exception`` and read by a human hours later
-    with no pod logs.
-    """
+    """A non-2xx from the hub's HTTP API, carrying what the hub actually said."""
 
     def __init__(
         self,
@@ -192,17 +141,7 @@ class HubApiError(WorkerError):
 
 
 def raise_for_hub_error(resp: Any, *, what: str = "") -> Any:
-    """``resp.raise_for_status()``'s replacement for calls to OUR hub.
-
-    On a non-2xx, raises :class:`HubApiError` carrying the parsed envelope.
-    ``what`` names the call in human terms (``"presign input assets"``), since
-    the URL alone is not a sentence anybody can act on.
-
-    Retry classification follows ``http_origin``: an answer that is NOT the
-    hub's own envelope came from something in front of it (a proxy with no
-    healthy backend), which is transient — except for the statuses determined
-    by the bytes we sent, which earn the same refusal forever.
-    """
+    """``resp.raise_for_status()``'s replacement for calls to OUR hub."""
     status = int(getattr(resp, "status_code", 0) or 0)
     if 200 <= status < 300:
         return resp

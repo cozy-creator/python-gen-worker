@@ -1,16 +1,4 @@
-"""Text-sequence pinning helper.
-
-qwen-image / z-image / hidream-o1 feed a prompt-length-dependent SEQUENCE dim
-into a statically compiled denoiser, so every distinct prompt length would mint
-a new graph — unbounded and un-warmable, with every paid request missing the
-shipped graph. The contract declares the axis (``Compile(text_len=...)``); this
-helper is how the handler HONORS it.
-
-Dynamo guards on STRIDES, and ``.contiguous()`` is a no-op when dim 0 is size 1
-— **a pin that fixes only the size is not a pin**. This helper therefore always
-returns FRESH canonically-strided allocations (``torch.zeros`` + ``copy_``),
-never a view or a maybe-contiguous alias of the input.
-"""
+"""Text-sequence pinning helper: a prompt-length-dependent sequence dim feeding a statically compiled denoiser would mint a new graph per distinct prompt length, so the contract declares the axis (Compile(text_len=...)) and this helper is how the handler honors it. Dynamo guards on STRIDES, and .contiguous() is a no-op when dim 0 is size 1 — a pin that fixes only the size is not a pin — so this always returns FRESH canonically-strided allocations (torch.zeros + copy_), never a view or a maybe-contiguous alias of the input."""
 
 from __future__ import annotations
 
@@ -18,9 +6,7 @@ from typing import Any, Optional, Tuple
 
 
 class TextLengthExceededError(ValueError):
-    """The encoded prompt is longer than the declared ``Compile(text_len=)``
-    pin — a request outside the declared envelope. Typed refusal (same posture
-    as over-rank LoRAs), never a silently minted graph."""
+    """The encoded prompt is longer than the declared ``Compile(text_len=)`` pin — a request outside the declared envelope."""
 
 
 def pad_text_sequence(
@@ -30,15 +16,7 @@ def pad_text_sequence(
     mask: Optional[Any] = None,
     dim: int = 1,
 ) -> Tuple[Any, Optional[Any]]:
-    """Pad ``embeds`` (and optionally ``mask``) along ``dim`` to exactly
-    ``length`` tokens, returning fresh canonically-strided tensors.
-
-    ``embeds`` is the encoder output ``[B, seq, hidden]`` (``dim=1``);
-    ``mask`` is the matching attention mask ``[B, seq]`` (padded with 0).
-    A sequence longer than ``length`` raises
-    :class:`TextLengthExceededError` — the declared contract is the
-    contract.
-    """
+    """Pad ``embeds`` (and optionally ``mask``) along ``dim`` to exactly ``length`` tokens, returning fresh canonically-strided tensors."""
     import torch
 
     n = int(length)

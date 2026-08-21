@@ -1,11 +1,4 @@
-"""sd15's shape exactly: a bf16 lane whose patterns are UNET-INTERNAL.
-
-pgw#1528. The real library contract `sd15.diffusers-bf16@1` states its tensors
-as `conv_in.weight`, `down_blocks.…`, `mid_block.…` — the DENOISER's own
-parameter names, with no `unet.` prefix. Every fixture written before this one
-used component-prefixed patterns (`unet.conv_out.weight`), which is a spelling
-the shipped contracts do not use.
-"""
+"""sd15's shape exactly: a bf16 lane whose patterns are UNET-INTERNAL."""
 
 from __future__ import annotations
 

@@ -1,16 +1,3 @@
-"""th#850 managed-tier ruling: the CAS root stays on local/pod disk
-as a managed, bounded LRU tier. A RunPod endpoint volume, when attached, is
-FILL SOURCE #1 (checked before R2, FILL SOURCE #2); an R2 fill writes
-through to the volume so the next same-endpoint pod finds it warm. This
-supersedes the CAS-root-on-volume shape
-(test_shared_cas_root_multiwriter.py covers that mechanism's multi-writer
-temp-file safety, which write-through publishing still relies on).
-
-Outcome-level tests only, against the real ``ensure_snapshot_async`` CAS
-path with the R2 transport stubbed — no mocks of the fill-source mechanism
-itself, since it is just filesystem copy+verify.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +18,7 @@ from gen_worker.models.refs import TensorhubRef
 from gen_worker.models.store import ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
-_PAYLOAD = b"managed-tier-fill-source-payload" * 4096  # ~128KB
+_PAYLOAD = b"managed-tier-fill-source-payload" * 4096
 _HEX = hashlib.sha256(_PAYLOAD).hexdigest()
 _DIGEST = "sha256:" + _HEX
 _SNAPSHOT = "c7" * 32
@@ -75,10 +62,6 @@ def _stub_r2(monkeypatch, calls: list) -> None:
     monkeypatch.setattr(snap_mod, "download", _download)
 
 
-# ---------------------------------------------------------------------------
-# Fill-source ordering (cozy_snapshot layer)
-# ---------------------------------------------------------------------------
-
 def test_volume_blob_preferred_over_r2(tmp_path: Path, monkeypatch) -> None:
     calls: list = []
     _stub_r2(monkeypatch, calls)
@@ -94,9 +77,9 @@ def test_volume_blob_preferred_over_r2(tmp_path: Path, monkeypatch) -> None:
             base_dir=local, ref=ref, resolved=_resolved(), fill_source_dir=volume,
         ))
     assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD
-    assert calls == []  # no R2 fetch — the volume already had it
+    assert calls == []
     assert scope.network_bytes == 0
-    assert _blob(local).read_bytes() == _PAYLOAD  # copied into local CAS
+    assert _blob(local).read_bytes() == _PAYLOAD
 
 
 def test_r2_fetch_writes_through_to_volume(tmp_path: Path, monkeypatch) -> None:
@@ -111,16 +94,15 @@ def test_r2_fetch_writes_through_to_volume(tmp_path: Path, monkeypatch) -> None:
             base_dir=local, ref=ref, resolved=_resolved(), fill_source_dir=volume,
         ))
     assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD
-    assert calls == [1]  # exactly one R2 fetch
+    assert calls == [1]
     assert scope.network_bytes == len(_PAYLOAD)
-    assert _blob(volume).read_bytes() == _PAYLOAD  # warmed for the next pod
+    assert _blob(volume).read_bytes() == _PAYLOAD
 
 
 def test_no_fill_source_is_byte_identical_to_pre_th850(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """cozy-local / no-volume degenerate case: straight to R2, no new branch
-    taken, no volume path ever touched."""
+    """cozy-local / no-volume degenerate case: straight to R2, no new branch taken, no volume path ever touched."""
     calls: list = []
     _stub_r2(monkeypatch, calls)
     local = tmp_path / "local"
@@ -136,16 +118,14 @@ def test_no_fill_source_is_byte_identical_to_pre_th850(
 
 
 def test_corrupt_volume_blob_falls_through_to_r2(tmp_path: Path, monkeypatch) -> None:
-    """Revert-turns-red guard: digest-verification of volume-read blobs is
-    mandatory (Paul's ruling) — a same-SIZE, wrong-content volume blob must
-    never be silently trusted just because it's the right length."""
+    """Revert-turns-red guard: digest-verification of volume-read blobs is mandatory (Paul's ruling) — a same-SIZE, wrong-content volume blob must never be silently trusted just because it's the right len..."""
     calls: list = []
     _stub_r2(monkeypatch, calls)
     volume = tmp_path / "volume"
     local = tmp_path / "local"
     blob = _blob(volume)
     blob.parent.mkdir(parents=True, exist_ok=True)
-    corrupt = bytes(b ^ 0xFF for b in _PAYLOAD)  # same length, different bytes
+    corrupt = bytes(b ^ 0xFF for b in _PAYLOAD)
     assert len(corrupt) == len(_PAYLOAD)
     blob.write_bytes(corrupt)
 
@@ -154,35 +134,13 @@ def test_corrupt_volume_blob_falls_through_to_r2(tmp_path: Path, monkeypatch) ->
         snap = asyncio.run(ensure_snapshot_async(
             base_dir=local, ref=ref, resolved=_resolved(), fill_source_dir=volume,
         ))
-    assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD  # real bytes
-    assert calls == [1]  # fell through to R2, not the corrupt volume copy
+    assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD
+    assert calls == [1]
     assert scope.network_bytes == len(_PAYLOAD)
 
 
-# ---------------------------------------------------------------------------
-# pgw#1556 — HOW FAST the volume fill is, as behaviour rather than as a comment
-#
-# `test_corrupt_volume_blob_falls_through_to_r2` above is the revert-turns-red
-# guard for the RULING (digest verification of volume-read blobs is mandatory)
-# and it stays green through both changes below. That is the load-bearing fact:
-# the hash pass that was deleted proved nothing the surviving one does not.
-# ---------------------------------------------------------------------------
-
-
 def test_a_volume_fill_hashes_the_source_ONCE(tmp_path: Path, monkeypatch) -> None:
-    """Two full SHA-256 passes over every byte, on the flagship 134 GB path.
-
-    `filled()` called `fill.verify_object` — a whole-file read and hash whose
-    only product is a verdict — and then handed the same path to `put_file`,
-    which reads it again and hashes it again while copying. Measured on this
-    box over 48 synthetic 64 MiB objects through the REAL `LocalCAS` (paired
-    alternation, min of 3): 203.6 MiB/s with both passes, 348.9 MiB/s with one,
-    1.71x, before any fan-out.
-
-    The verification is not relaxed: `put_file(expected=..., size=...)` hashes
-    streaming alongside the copy and raises `DigestMismatch`, which is what
-    keeps the corrupt-blob test above green.
-    """
+    """Two full SHA-256 passes over every byte, on the flagship 134 GB path."""
     calls: list = []
     _stub_r2(monkeypatch, calls)
     volume = tmp_path / "volume"
@@ -227,14 +185,7 @@ def test_a_volume_fill_hashes_the_source_ONCE(tmp_path: Path, monkeypatch) -> No
 def test_the_residency_and_fill_scan_runs_MORE_THAN_ONE_OBJECT_AT_A_TIME(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """`await asyncio.to_thread(...)` inside a `for` buys zero parallelism.
-
-    It is awaited in the loop body, so exactly one object is ever in flight —
-    while the R2 fetch on the very same pod has run `DEFAULT_PARALLEL`-wide
-    since pgw#1308. The barrier below is the proof, and it is the honest one:
-    if the scan is serial, no two objects are ever inside it at once and the
-    barrier times out rather than the test passing on a timing coincidence.
-    """
+    """`await asyncio.to_thread(...)` inside a `for` buys zero parallelism."""
     import threading as _threading
 
     calls: list = []
@@ -267,8 +218,6 @@ def test_the_residency_and_fill_scan_runs_MORE_THAN_ONE_OBJECT_AT_A_TIME(
             live[0] += 1
             peak[0] = max(peak[0], live[0])
         try:
-            # Every object must be inside the scan simultaneously, or this
-            # raises BrokenBarrierError and the test names the reason.
             barrier.wait()
         except _threading.BrokenBarrierError as exc:  # pragma: no cover
             raise AssertionError(
@@ -296,17 +245,6 @@ def test_the_residency_and_fill_scan_runs_MORE_THAN_ONE_OBJECT_AT_A_TIME(
         assert projection_fixture.bytes_at(snap, f"shard-{digest[:8]}.safetensors") == body
 
 
-# ---------------------------------------------------------------------------
-# tensorhub_fill_source_dir(): ismount-guarded, Settings-driven
-#
-# "env-driven" was the old description and it is no longer accurate.
-# The value reaches this helper through the `Settings` the process entry
-# published, so a test that changes the environment must RELOAD — the same step
-# a real deployment performs exactly once, at boot. Under the deleted
-# `get_settings()` these tests passed without it, because a cleared cache would
-# lazily re-read env from whatever depth first asked.
-# ---------------------------------------------------------------------------
-
 def test_fill_source_dir_unset_is_none(monkeypatch) -> None:
     monkeypatch.delenv("TENSORHUB_FILL_SOURCE_DIR", raising=False)
     gw_config.reload_for_test()
@@ -314,21 +252,16 @@ def test_fill_source_dir_unset_is_none(monkeypatch) -> None:
 
 
 def test_fill_source_dir_requires_a_real_mount(tmp_path: Path, monkeypatch) -> None:
-    """A plain directory (baked into the image, or a stray path) must never
-    be mistaken for the real per-endpoint volume."""
+    """A plain directory (baked into the image, or a stray path) must never be mistaken for the real per-endpoint volume."""
     plain_dir = tmp_path / "not-a-mount"
     plain_dir.mkdir()
     monkeypatch.setenv("TENSORHUB_FILL_SOURCE_DIR", str(plain_dir))
     gw_config.reload_for_test()
-    assert tensorhub_fill_source_dir() is None  # ismount() is False -> rejected
+    assert tensorhub_fill_source_dir() is None
 
     monkeypatch.setattr(os.path, "ismount", lambda p: str(p) == str(plain_dir))
     assert tensorhub_fill_source_dir() == plain_dir
 
-
-# ---------------------------------------------------------------------------
-# Disk-residency network_bytes reaches the wire (executor layer)
-# ---------------------------------------------------------------------------
 
 def test_network_bytes_reaches_on_disk_model_event(tmp_path: Path, monkeypatch) -> None:
     calls: list = []
@@ -360,15 +293,9 @@ def test_network_bytes_reaches_on_disk_model_event(tmp_path: Path, monkeypatch) 
         and m.model_event.state == pb.MODEL_STATE_ON_DISK
     ]
     assert on_disk, "expected at least one ON_DISK ModelEvent"
-    # Residency's own generic transition event (network_bytes-blind) and the
-    # executor's explicit evidence event (network_bytes-carrying) may land
-    # in either order — protocol-v3 events are observation, not
-    # convergence, so a receiver reads the most informative one it saw.
-    assert max(e.network_bytes for e in on_disk) == len(_PAYLOAD)  # fetched from R2
-    assert _blob(volume).read_bytes() == _PAYLOAD  # write-through happened
+    assert max(e.network_bytes for e in on_disk) == len(_PAYLOAD)
+    assert _blob(volume).read_bytes() == _PAYLOAD
 
-    # A second, fresh ref whose blob is already warm on the volume reports
-    # network_bytes == 0 — the "warm boot ⇒ ~0 R2 bytes" signal.
     calls.clear()
     sent.clear()
     payload2 = _PAYLOAD + b"-2"
@@ -396,9 +323,5 @@ def test_network_bytes_reaches_on_disk_model_event(tmp_path: Path, monkeypatch) 
     ]
     assert on_disk2
     assert max(e.network_bytes for e in on_disk2) == 0
-    assert calls == []  # no R2 fetch at all — warm from the volume
+    assert calls == []
 
-
-# ---------------------------------------------------------------------------
-# No fill source on a datacenter pod must be LOUD
-# ---------------------------------------------------------------------------

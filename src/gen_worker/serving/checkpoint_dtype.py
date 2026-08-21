@@ -1,31 +1,3 @@
-"""What dtype a checkpoint IS, for a lane that declares none (pgw#1488).
-
-A layout contract states its load dtype, and a class that declares a contract
-lane reads it there. A class that declares NO contract still has to load at
-some precision, and the trace's precision is graph identity — a bf16 trace and
-an fp32 trace are different graphs, so "whatever happens" is not an answer.
-
-The checkpoint is the answer. Two sources, in order of how directly they know:
-
-1. the root config's ``torch_dtype``/``dtype`` (``model_index.json`` for a
-   diffusers pipeline, ``config.json`` for a bare module) — what the packager
-   SAID;
-2. the safetensors headers — what the tensors ARE, read through
-   ``models.safetensors_header.read_header``, the ONE header reader in this
-   repo (bounded length, projection-stub aware). Headers are headers, so this
-   costs a few KB and never opens a weight.
-
-(1) leads because a packager who states a dtype is stating the serving
-intent — an fp32 file saved from a bf16 recipe is real. (2) is the fallback
-because it cannot be absent, and it is the only source for the many
-checkpoints that ship raw ``.safetensors`` with no config at all. ``None``
-means neither source spoke, and the author's loader keeps its own default.
-
-Both ends of the pipeline read this: the trace (``TraceLoadContext.load``) and
-the serve (``LoadContext``). One function, so they cannot disagree about the
-precision a derived lane runs at.
-"""
-
 from __future__ import annotations
 
 import json
@@ -33,7 +5,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
-#: safetensors dtype spellings -> torch attribute names.
 _ST_DTYPES = {
     "BF16": "bfloat16",
     "F16": "float16",
@@ -43,7 +14,6 @@ _ST_DTYPES = {
     "F8_E5M2": "float8_e5m2",
 }
 
-#: Root config files, most specific first.
 _CONFIGS = ("model_index.json", "config.json")
 
 
@@ -82,13 +52,6 @@ def _config_dtype(tree: Path) -> Any:
 
 
 def _header_dtypes(path: Path) -> Counter[str]:
-    """The floating dtype tally of one safetensors file's header.
-
-    Through `read_header`, never a second hand-rolled reader: the declared
-    header length comes off the file and sizes an allocation, and this repo
-    keeps exactly one bound on that (pgw#1013). It is also the only reader
-    that knows a projection stub from a real file.
-    """
 
     from ..models.safetensors_header import read_header
 
@@ -112,13 +75,6 @@ def _header_dtypes(path: Path) -> Counter[str]:
 
 
 def _tensor_dtype(tree: Path) -> Any:
-    """The dominant floating dtype across the tree's safetensors headers.
-
-    Every shard is read (headers only) rather than just the first: a pipeline
-    keeps its text encoder and its VAE beside the denoiser, and the file that
-    happens to sort first is not the one that decides the recipe. The majority
-    of DECLARED TENSORS wins, which is the denoiser in every real checkpoint.
-    """
 
     tally: Counter[str] = Counter()
     for path in sorted(tree.rglob("*.safetensors")):

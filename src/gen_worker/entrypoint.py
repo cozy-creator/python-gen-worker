@@ -1,46 +1,14 @@
-"""
-Worker entrypoint module.
-
-This is the main entry point for running a Cozy worker. It loads the manifest,
-discovers the image's ``@entrypoint`` declarations, and starts the worker loop.
-
-Usage:
-    python -m gen_worker.entrypoint
-
-**THE MODULE NAME IS A WIRE CONTRACT (th#2168).** Every hub-synthesized
-Dockerfile writes ``ENTRYPOINT ["python3", "-m", "gen_worker.entrypoint"]``
-(`internal/builder/image/generate_dockerfile.go`) and the publish gate REFUSES
-an image whose entrypoint does not run it (`matchesWorkerEntrypoint`,
-`internal/builder/executor.go`). A `worker_main` rename therefore killed every
-image built from a live endpoint pin at CONTAINER START, before any refusal
-class could speak. The name is restored here and does not move again without
-the hub half moving in the same window.
-"""
+"""Worker entrypoint — run as `python -m gen_worker.entrypoint`. THE MODULE NAME IS A WIRE CONTRACT: every hub-synthesized Dockerfile writes ENTRYPOINT ["python3","-m","gen_worker.entrypoint"] and the publish gate refuses an image whose entrypoint does not run it, so the name does not move without the hub half moving in the same window."""
 
 import os
 import faulthandler
 import signal
 
-# pgw#1049: the declared process env (PYTORCH_CUDA_ALLOC_CONF, the autograd
-# cache disable, PYTHONHASHSEED for children), imposed BEFORE any module
-# imports torch — several are read at torch import / first cudaMalloc. The
-# entrypoint is the first module loaded in every worker process, so this is
-# library-wide coverage; the values and their rationales live in ONE place,
-# settings_authority.DECLARED_ENV. Imposed, not setdefault'd: an ambient
-# value would be erased by env_seal.scrub_env anyway (never honored).
 from .settings_authority import impose_process_env  # noqa: E402
 
 impose_process_env()
 
-# pgw#763: this process becomes the CONTROL PARENT — gRPC stream, identity,
-# JWT, child supervision — and must run BEFORE the heavy imports below so it
-# never loads torch. It spawns/respawns compute children (this same entrypoint
-# with GEN_WORKER_COMPUTE_CHILD=1) and only ever exits deliberately. The split
-# is unconditional; only a compute child falls through to the imports below.
 if __name__ == "__main__":
-    # pgw#1049: interpreter-level declared env (PYTHONHASHSEED) — CPython
-    # read it at interpreter start, so a pod whose image env lacks it gets
-    # ONE re-exec here, before the procsplit fork; every child inherits it.
     from .settings_authority import ensure_interpreter_env  # noqa: E402
 
     ensure_interpreter_env()
@@ -52,22 +20,10 @@ if __name__ == "__main__":
 
         os._exit(run_parent())
 
-    # pgw#975: "the OOM killer picks the fat child, not the reporter" (below)
-    # was true only by accident — the margin is the 479 MiB of torch, worth
-    # under 4 oom_score_adj points out of 1000 on a real pod and NEGATIVE for
-    # the seconds this child spends pre-torch. Declare it here, first thing and
-    # before any import of ours, so a child that dies during its own boot is
-    # already ranked. Descendants (mint child, AOT entry children) inherit.
     from .procsplit.oom_rank import raise_own_oom_score_adj  # noqa: E402
 
     raise_own_oom_score_adj()
 
-# gw#640: fork the supervisor BEFORE the heavy imports below. The parent stays
-# a bare interpreter (so the OOM killer picks the fat child, not the reporter)
-# and outlives the worker to report WTERMSIG / cgroup oom_kill over the wire.
-# In the child this returns immediately; the parent never returns from it.
-# (In split mode the compute child skips this: the control parent IS the
-# survivor, and it sets GEN_WORKER_SUPERVISOR=0 in the child's env.)
 if __name__ == "__main__":
     from .supervisor import supervise  # noqa: E402
 
@@ -99,8 +55,6 @@ except ImportError as e:
     print("Please ensure the gen_worker package is installed.", file=sys.stderr)
     sys.exit(1)
 
-# Default baked container location; overridden by Settings.endpoint_lock_path
-# (env ENDPOINT_LOCK_PATH) for non-container runs.
 MANIFEST_PATH = Path("/app/.tensorhub/endpoint.lock")
 
 logging.basicConfig(
@@ -109,11 +63,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("WorkerEntrypoint")
 
-# FILE-WIDE IMPORT RULE (the one sanctioned exception to top-of-file imports):
-# this module runs as TWO process roles. The control parent must stay a bare
-# interpreter — no torch, no credentials — for OOM-victim ordering (gw#640,
-# pgw#763), and the env `setdefault`s at the top are read once at torch import,
-# so anything that could reach torch stays inside a function body below.
+# File-wide import rule (the sanctioned exception to top-of-file imports): this module runs as TWO process roles, and the control parent must stay a bare interpreter — no torch, no credentials — for OOM-victim ordering, so anything that could reach torch stays inside a function body below.
 
 
 def _startup_payload(phase: str, status: str = "ok", **extra: Any) -> Dict[str, Any]:
@@ -144,12 +94,6 @@ def _log_worker_fatal(
     exit_code: int,
     settings: Optional[Any] = None,
 ) -> None:
-    """Record this process's cause of death to stdout AND to the hub.
-
-    gw#640/th#1077: stdout alone is unreachable on RunPod (no container-logs
-    API), so every cloud-only crash was un-debuggable. The wire report reuses
-    the HardwareUnsuitable carrier and lands as a durable pod_events row.
-    """
     try:
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     except Exception:
@@ -198,12 +142,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> Optional[Dict[str, Any]]:
 
 
 def get_modules_from_manifest(manifest: Dict[str, Any]) -> List[str]:
-    """Every user module this image must import, from ``entrypoints[]``.
-
-    One block since pgw#1373; `manifest_blocks` owns the row derivation and
-    both this and the CUDA probe feed off it, so neither can go blind on a
-    shape the other was written for (pgw#1354, pgw#1395).
-    """
+    """Every user module this image must import, from ``entrypoints[]``."""
     modules = set()
     for row in declaration_rows(manifest):
         module = row.get("module")
@@ -245,7 +184,6 @@ def _check_cache_path(label: str, path_str: str) -> tuple[bool, Dict[str, Any]]:
 
 
 def _preflight_cache_dirs() -> Dict[str, str]:
-    """Validate model cache directory writeability before worker startup."""
     primary = str(tensorhub_cas_dir())
 
     _log_startup_phase(
@@ -269,41 +207,21 @@ def _preflight_cache_dirs() -> Dict[str, str]:
 
 
 def _install_stack_dump_handler() -> None:
-    """pgw#639: SIGUSR2 dumps every thread's stack to stderr.
-
-    A wedged worker heartbeats fine (the asyncio loop owns the beat; model
-    work runs on threads), so "connected" proves nothing about progress and
-    hub-side logs cannot see which thread is stuck. This is the pod-side
-    forensic surface: `kill -USR2 <pid>` from any exec channel prints the
-    full picture into the pod log. Registration is free and always on —
-    the signal is never sent unless a human asks for it. SIGUSR2 is unused
-    by CPython and by torch; faulthandler writes without allocating, so it
-    works even when the process is wedged on memory.
-    """
 
     try:
         faulthandler.register(signal.SIGUSR2, all_threads=True, chain=True)
-    except (AttributeError, ValueError, OSError) as exc:  # non-POSIX / no tty
+    except (AttributeError, ValueError, OSError) as exc:
         logger.debug("stack-dump handler unavailable: %s", exc)
     else:
         logger.info(
             "pgw#639: SIGUSR2 dumps all thread stacks to stderr (pid=%d)",
             os.getpid())
-    # pgw#676: fatal signals (SIGSEGV/SIGABRT/SIGBUS/SIGFPE) dump every
-    # thread's stack to a file the surviving supervisor attaches to its
-    # post-mortem — exit_code=139 carries frames instead of nothing.
     from . import postmortem
 
     postmortem.enable_fault_dump()
 
 
 def _establish_env_seal() -> Dict[str, Any]:
-    """pgw#694/#696 boot wiring (the ONE executor-side hook): refuse unknown
-    ``TORCH*`` env vars, pin the canonical config surface, and record the
-    effective seal — BEFORE the CUDA probe or any model/compile work, so
-    every graph this process ever mints or serves runs under the sealed
-    posture and the ``env_seal`` axis describes reality. A process that
-    cannot be sealed must not advertise: the caller exits typed."""
     from . import env_seal
 
     seal = env_seal.establish()
@@ -319,20 +237,6 @@ def _establish_env_seal() -> Dict[str, Any]:
 
 
 def _isolate_group_inductor_cache() -> None:
-    """pgw#783: give each compute child its OWN inductor + triton cache dir when
-    G children share this pod, so concurrent minting/compilation does not race a
-    process-global cache dir.
-
-    Set AFTER the seal — env_seal scrubs the whole ``TORCH*``/``TRITON*``
-    namespace at boot, and the sanctioned window to point the SDK's own capture
-    redirects is after that scrub (same as compiled graph ``capture_env``). A per-group
-    PATH is plumbing, not a behaviour flag, so it does not touch the seal
-    digest or minted kernels (inductor keys are content-addressed).
-
-    Gated on ``host_siblings() > 1``: a single child (or no split) keeps torch's
-    default dir untouched — byte-identical to today. A respawned child of the
-    same group reuses its group dir, so cache hits survive a respawn.
-    """
     import tempfile
 
     from .procsplit import group_ordinal, host_siblings
@@ -358,21 +262,6 @@ def _isolate_group_inductor_cache() -> None:
 
 
 def _impose_group_host_policy() -> None:
-    """pgw#782: the host-side posture that depends on HOW MANY execution groups
-    share this process — today, the intra-op thread budget.
-
-    Ordered here, right after the seal and before the CUDA probe, for the same
-    reason the seal is: the decision belongs to CODE, and every group this
-    process ever runs must have been started under it. The executor re-asserts
-    it from its authoritative slot count for the cli/serve and harness paths;
-    the imposition is idempotent and de-escalation-only.
-
-    Reads the DELIVERED env, deliberately not ``delivered_topology()``, whose
-    fabric gate consults the host canary and therefore measures the device —
-    this hook runs before anything touches CUDA. The gate only ever demotes
-    ``D`` (raising ``G``), so the rare demoted-sharding pod picks its true group
-    count up from the executor's re-assertion instead.
-    """
     from . import cpu_budget
     from .topology import ExecutionTopology
 
@@ -388,14 +277,6 @@ def _impose_group_host_policy() -> None:
 
 
 def _bootstrap_configuration() -> config.Settings:
-    """THE bootstrap-owned load for this process entry (§1.18), and the one
-    place derived process facts are published from it.
-
-    One function rather than four lines in `_run_main` because these must not
-    drift apart: the goal set and the boot credential are DERIVED from these
-    exact `Settings`, so a second entry that loaded config without publishing
-    them would leave the process holding two answers (§4.22).
-    """
     settings = config.install(config.load_settings())
     for name in config.unrecognised_owned_env():
         logger.warning(
@@ -414,11 +295,6 @@ def _run_main() -> int:
         logger.exception("Failed to load worker settings: %s", e)
         _log_worker_fatal("settings_load", e, exit_code=1)
         return 1
-    # pgw#696: seal the execution environment before the CUDA probe touches
-    # the device and before any model/compile work. Ordered AFTER settings
-    # (which reads no torch config) so a refusal can DIAL THE HUB typed —
-    # the 0.70.3 pre-settings ordering made a seal refusal a silent
-    # pod_exited the fleet could not attribute.
     try:
         _establish_env_seal()
     except Exception as e:
@@ -429,10 +305,6 @@ def _run_main() -> int:
     manifest = load_manifest(manifest_path)
     user_modules: List[str] = []
     if manifest:
-        # The decode-set the hub was told about is the one stamped in this
-        # lock at IMAGE BUILD. If this process would derive a different one,
-        # the code that runs is not the code the hub selected against, and
-        # every downstream answer is about the wrong image (pgw#1245).
         try:
             from .discovery.decode_set import assert_matches_baked
 
@@ -466,10 +338,6 @@ def _run_main() -> int:
         logger.error(str(e))
         return 1
 
-    # Boot-time CUDA probe (gw#529): on a GPU-needing manifest, verify the
-    # device actually works BEFORE we hello the orchestrator and accept a
-    # job — a busy/unavailable GPU (RunPod bad-host fault) must kill this
-    # pod now, not terminal-fail a real request at model load.
     if should_probe_cuda(manifest):
         probe = probe_cuda()
         if not probe.ok:
@@ -477,9 +345,6 @@ def _run_main() -> int:
             from .procsplit import is_compute_child
 
             if is_compute_child():
-                # pgw#826: a hardware verdict is terminal for every child this
-                # pod could spawn. This process holds no credential — hand the
-                # typed report to the parent, which relays it and exits 1.
                 from .hardware_report import build_hardware_report
                 from .procsplit.child import send_boot_fatal
 
@@ -494,10 +359,6 @@ def _run_main() -> int:
                 )
                 _log_worker_fatal("cuda_probe", RuntimeError(probe.reason), exit_code=1)
                 return 1
-            # gw#619/th#988: dial the hub with a typed hardware-unsuitable
-            # report BEFORE exiting — closes the th#986 blindness where this
-            # exit was previously silent pre-hello. Best-effort/bounded: the
-            # exit below happens regardless of whether the hub is reachable.
             try:
                 delivered = report_hardware_unsuitable(settings, probe)
                 _log_startup_phase(
@@ -508,9 +369,6 @@ def _run_main() -> int:
                 )
             except Exception:
                 logger.warning("hardware-unsuitable report raised unexpectedly", exc_info=True)
-            # settings=None: this path ALREADY dialed the hub with the typed
-            # HardwareUnsuitable report just above — a second wire dial would
-            # only duplicate it (and double the pre-exit budget).
             _log_worker_fatal("cuda_probe", RuntimeError(probe.reason), exit_code=1)
             return 1
         _log_startup_phase("cuda_probe_ok", status="ok")
@@ -519,9 +377,6 @@ def _run_main() -> int:
         logger.error("Settings.orchestrator_public_addr is empty (set ORCHESTRATOR_PUBLIC_ADDR env). Refusing to start worker.")
         return 1
 
-    # C2PA content-credential signing (th#714): ON iff a cert is configured;
-    # logs a loud warning when off, refuses to start when configured-but-broken
-    # (a worker that believes it signs but doesn't is a compliance hole).
     try:
         from .content_credentials import configure as _c2pa_configure
 
@@ -540,14 +395,6 @@ def _run_main() -> int:
         logger.info("  Local Model Cache Dir: %s", cache_cfg["local_model_cache_dir"])
 
     if not user_modules:
-        # pgw#1354: dial TYPED, like every other fatal in this function. RunPod
-        # exposes no container-logs API, so a bare `return 1` reaches the hub as
-        # `exit:1` with no reason class and is condemned `[hardware-unsuitable]` —
-        # a boot bug wearing a hardware verdict. The message DISCRIMINATES the two
-        # gaps, because they have
-        # different owners: no manifest at all is a Dockerfile that never ran
-        # discovery, while declarations-without-modules is a manifest this wheel
-        # cannot read (a block it does not walk, or rows with no `module`).
         declared = declared_row_count(manifest)
         if manifest and declared:
             reason = (

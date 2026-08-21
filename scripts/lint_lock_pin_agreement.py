@@ -1,27 +1,4 @@
 #!/usr/bin/env python3
-"""pgw#1477: `pyproject.toml`'s git pins and `uv.lock` must name the same rev.
-
-Every job in every workflow begins with `uv sync --locked`. When a re-vendor
-moves the torchcg rev in `[tool.uv.sources]` and nobody re-locks, that step dies
-with
-
-    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
-
-before ANY gate runs — so `fast gates`, `tests` and `drift` all go red at
-install, on PRs that touched neither file, and nothing in the required set can
-report the cause. It happened twice on 2026-08-19, twenty minutes apart.
-
-This check is the FIRST step of those jobs, ahead of `Install uv`: stdlib only,
-no venv, no network, ~30 ms. Its verdict NAMES both files and both revs.
-
-It also fences the third spelling — `_vendor/VENDORED.toml`'s `rev`, the
-snapshot the mint and serving path run — so a re-vendor cannot leave the derive
-and the mint on different libraries either.
-
-Usage:
-    python3 scripts/lint_lock_pin_agreement.py
-    python3 scripts/lint_lock_pin_agreement.py --selftest   # prove it goes red
-"""
 
 from __future__ import annotations
 
@@ -33,26 +10,20 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
-#: uv writes a git source as `<repo>?rev=<rev>#<resolved>` (lock `source.git`),
-#: and as `<repo>?rev=<rev>` in the `[package.metadata]` tables. One pattern
-#: reads both.
 _LOCK_GIT = re.compile(r"^(?P<repo>[^?#]+)\?(?:[^#]*&)?rev=(?P<rev>[0-9a-fA-F]+)")
 
 RELOCK = "uv lock   # then commit uv.lock"
 
 
 def _norm(repo: str) -> str:
-    """Compare repo URLs the way a human means them: no `.git`, no trailing /."""
     return repo.removesuffix("/").removesuffix(".git")
 
 
 def _agree(a: str, b: str) -> bool:
-    """Revs agree when one is a prefix of the other (short vs 40-hex spelling)."""
     return a.startswith(b) or b.startswith(a)
 
 
 def _pyproject_git_pins(pyproject: dict[str, Any]) -> dict[str, tuple[str, str]]:
-    """`{package: (repo, rev)}` for every `[tool.uv.sources]` entry pinned by rev."""
     sources = pyproject.get("tool", {}).get("uv", {}).get("sources", {})
     pins: dict[str, tuple[str, str]] = {}
     for name, spec in sources.items():
@@ -73,7 +44,6 @@ def _strings(node: object) -> list[str]:
 
 
 def _lock_revs_for_repo(lock: dict[str, Any], repo: str) -> set[str]:
-    """Every rev uv.lock spells for `repo`, anywhere in the document."""
     revs: set[str] = set()
     for url in _strings(lock):
         match = _LOCK_GIT.match(url)
@@ -112,7 +82,6 @@ def check(root: Path) -> list[str]:
                 f"the same act so these two cannot diverge."
             )
 
-    # Third spelling: the vendored snapshot. Same library, different copy.
     if manifest_path.is_file():
         manifest = tomllib.loads(manifest_path.read_text())
         for name, package in sorted(manifest.get("packages", {}).items()):
@@ -152,7 +121,6 @@ source = {{ git = "https://example.invalid/org/lib?rev={rev}#{rev}" }}
 
 
 def _selftest() -> int:
-    """Prove the check can go red — a guard that cannot fail proves nothing."""
     import tempfile
 
     agreeing = "a" * 40
@@ -180,7 +148,6 @@ def _selftest() -> int:
                 print(f"SELFTEST FAILED: the verdict never names {owed!r}:\n{message}")
                 return 1
 
-        # And a lock that names the repo nowhere is red too, not silently green.
         (root / "uv.lock").write_text("version = 1\n")
         if not check(root):
             print("SELFTEST FAILED: a lock missing the pin entirely went green")

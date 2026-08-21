@@ -1,16 +1,3 @@
-"""pgw#1508: a secondary model slot has its OWN checkpoint.
-
-`_derive_lane` hydrated every aide with the PRIMARY's `checkpoint_dir` while
-its own comment said "an auxiliary model with its own checkpoint (e.g. h3's
-RIFE interpolator)". No per-slot plumbing existed anywhere -- `gen-worker
-lock` took ONE `--checkpoint-ref` -- so an entrypoint naming two slots backed
-by two checkpoints was unlockable by construction. h3's `generate` is exactly
-that: `video` -> minimax-h3, `rife` -> rife-4.25, and its binding rows have
-been per-slot since 0.9.0.
-
-The fix makes the derive's world-model match the binding table's.
-"""
-
 from __future__ import annotations
 
 import json
@@ -47,11 +34,7 @@ def primary_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="module")
 def aide_tree(primary_tree: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The auxiliary model's OWN tree: a bare UNet config, not a pipeline.
-
-    Deliberately a different SHAPE, so pointing the aide at the primary tree
-    fails the way h3's RIFE did rather than quietly succeeding.
-    """
+    """The auxiliary model's OWN tree: a bare UNet config, not a pipeline."""
 
     tree = tmp_path_factory.mktemp("aide-config-only")
     for name in ("config.json",):
@@ -95,13 +78,6 @@ def test_two_slots_with_two_checkpoints_derive(
 def test_the_aide_pointed_at_the_PRIMARY_tree_refuses_naming_slot_and_tree(
     primary_tree: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The diagnosis has to be one read, which is what pgw#1508 cost.
-
-    The failure that produced this issue read as a broken aide class when it
-    was a wrong checkpoint. The refusal now names the SLOT, the TREE it was
-    given, and -- when the slot has no ref of its own -- says so and spells
-    the flag that fixes it.
-    """
 
     code, _out = _derive(tmp_path, str(primary_tree))
     assert code == 1
@@ -116,20 +92,13 @@ def test_the_aide_pointed_at_the_PRIMARY_tree_refuses_naming_slot_and_tree(
 def test_an_eager_only_slot_STILL_hydrates(
     primary_tree: Path, aide_tree: Path, tmp_path: Path
 ) -> None:
-    """Skipping eager_only slots was the tempting shortcut and is wrong.
-
-    The drive executes the entrypoint body, which CALLS the aide, so a `None`
-    there fails one layer later with a worse message. `AideModel` is
-    `eager_only=` and the fixture asserts it is real inside the handler --
-    this derive passing IS that assertion running at trace.
-    """
+    """Skipping eager_only slots was the tempting shortcut and is wrong."""
 
     from gen_worker.models import __name__ as _models  # noqa: F401
 
     code, out = _derive(tmp_path, str(primary_tree), f"aide={aide_tree}")
     assert code == 0
     document = json.loads(out.read_bytes())
-    # One lane, the primary's. The eager_only aide contributes no lane row.
     assert len(document["graphs"]["lanes"]) == 1
 
 
@@ -166,11 +135,7 @@ def test_the_slot_spelling_never_eats_a_ref_or_a_path() -> None:
 
 
 def test_an_auxiliary_checkpoint_moves_the_REUSE_KEY(tmp_path: Path) -> None:
-    """Otherwise swapping rife under a stable primary reuses a stale trace.
-
-    And the key must NOT move for a single-slot endpoint, or every existing
-    committed lock re-derives for nothing.
-    """
+    """Otherwise swapping rife under a stable primary reuses a stale trace."""
 
     from gen_worker.cli import endpoint_lock as el
 

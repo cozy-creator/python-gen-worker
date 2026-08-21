@@ -101,13 +101,7 @@ def _ctx(tree: Path, lane: Any) -> TraceLoadContext:
 
 @pytest.fixture(scope="module")
 def sd15_shaped_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """sd15's shape, built in-repo: a config-only pipeline tree whose TEXT
-    ENCODER config declares float32 while nothing else declares anything.
-
-    That is the real sd15 fixture's shape — `text_encoder/config.json` says
-    `float32` because it is the PUBLISHER's config, and a store conversion
-    rewrites bytes, not configs.
-    """
+    """sd15's shape, built in-repo: a config-only pipeline tree whose TEXT ENCODER config declares float32 while nothing else declares anything."""
 
     import sys
 
@@ -197,7 +191,7 @@ def test_a_v2_topology_declares_its_components_so_pgw1512_cannot_recur() -> None
 
 
 def test_sd15s_UNET_traces_at_the_LANES_dtype_not_at_float32(sd15_shaped_tree: Path) -> None:
-    """The regression, at the seam. Was float32 under a bfloat16 lane."""
+    """The regression, at the seam."""
 
     ctx = _ctx(sd15_shaped_tree, _contract())
     assert ctx.component_dtype(sd15_shaped_tree, "unet") is torch.bfloat16
@@ -206,12 +200,7 @@ def test_sd15s_UNET_traces_at_the_LANES_dtype_not_at_float32(sd15_shaped_tree: P
 def test_the_WHOLE_sd15_pipeline_agrees_so_no_activation_crosses_a_boundary(
     sd15_shaped_tree: Path,
 ) -> None:
-    """Uniformity is the point: a mixed pipeline is what raised.
-
-    `text_encoder/config.json` in this tree says float32. Under the corrected
-    order the lane answers first, so the encoder and the denoiser agree and
-    `prompt_embeds` can reach the UNet.
-    """
+    """Uniformity is the point: a mixed pipeline is what raised."""
 
     ctx = _ctx(sd15_shaped_tree, _contract())
     seen = {
@@ -222,7 +211,6 @@ def test_the_WHOLE_sd15_pipeline_agrees_so_no_activation_crosses_a_boundary(
 
 
 def _tree_at(root: Path, dtype: Any) -> Path:
-    """A tiny two-component tree whose safetensors headers carry ``dtype``."""
 
     safetensors = pytest.importorskip("safetensors.torch")
 
@@ -241,14 +229,6 @@ def _tree_at(root: Path, dtype: Any) -> Path:
 
 
 def test_the_LANE_outranks_the_mounted_checkpoints_own_bytes(tmp_path: Path) -> None:
-    """pgw#1567, Paul's ruling: the checkpoint is IRRELEVANT to the trace.
-
-    Built with real safetensors so the stub-aware reader is the thing under
-    test, not a stand-in. These bytes say float16 and the lane says bfloat16;
-    under the old order the bytes won, and a dev-box derive against a stock
-    fp16 tree keyed a whole fleet of fp16 graphs that a bf16 pod could never
-    enter (14 armed, 0 entered).
-    """
 
     tree = _tree_at(tmp_path / "tree", torch.float16)
     ctx = _ctx(tree, _contract())
@@ -259,16 +239,7 @@ def test_the_LANE_outranks_the_mounted_checkpoints_own_bytes(tmp_path: Path) -> 
 def test_FLIPPING_the_checkpoints_dtype_does_not_move_the_traced_precision(
     tmp_path: Path,
 ) -> None:
-    """The deliverable, stated as a property: same lane, two checkpoints.
-
-    Two trees identical but for the dtype their containers carry. Precision is
-    graph identity (pgw#1458), so if the checkpoint could move it, the two
-    would derive DIFFERENT graph sets under one contract-template — which is
-    exactly the fleet of unenterable graphs pgw#1567 measured. A weight-free
-    artifact plus runtime constant folding means any conforming checkpoint
-    folds in at load; nothing about the trace may depend on which one is
-    mounted.
-    """
+    """The deliverable, stated as a property: same lane, two checkpoints."""
 
     lane = _contract()
     answers = []
@@ -284,12 +255,7 @@ def test_FLIPPING_the_checkpoints_dtype_does_not_move_the_traced_precision(
 def test_a_checkpoint_that_disagrees_with_the_lane_is_NAMED(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Following the lane silently would hide an unconverted tree.
-
-    The trace still follows the lane — that is the fix — but a tree the store
-    never converted is a store defect worth one line, the same fact
-    `streaming.engine._warn_on_lane` reports from the serve side.
-    """
+    """Following the lane silently would hide an unconverted tree."""
 
     import logging
 
@@ -320,11 +286,7 @@ def test_a_checkpoint_that_AGREES_with_the_lane_says_nothing(
 def test_a_stale_component_CONFIG_does_not_outrank_the_lane(
     sd15_shaped_tree: Path,
 ) -> None:
-    """The precedence inversion that produced the crash.
-
-    sd15's `text_encoder/config.json` says float32 in a tree the store
-    converts to bf16 — a conversion rewrites bytes, not configs.
-    """
+    """The precedence inversion that produced the crash."""
 
     declared = json.loads(
         (sd15_shaped_tree / "text_encoder" / "config.json").read_text()
@@ -342,12 +304,11 @@ def test_the_config_is_still_read_when_NOTHING_else_can_speak(tmp_path: Path) ->
     (tree / "thing").mkdir(parents=True)
     (tree / "thing" / "config.json").write_text(json.dumps({"torch_dtype": "float16"}))
 
-    ctx = _ctx(tree, None)  # no lane, no bytes
+    ctx = _ctx(tree, None)
     assert ctx.component_dtype(tree, "thing") is torch.float16
 
 
 def test_nothing_anywhere_means_NO_CAST_rather_than_a_default(tmp_path: Path) -> None:
-    """The absence of a conversion is not a default precision (pgw#1448)."""
 
     tree = tmp_path / "tree"
     (tree / "thing").mkdir(parents=True)

@@ -1,11 +1,4 @@
-"""Per-job capability-token renewal (worker half).
-
-While a job is in flight, a background task renews its capability token at
-~80% of the token's TTL via ``POST {file_base_url}/v1/worker/capability/renew``
-(worker-JWT auth; body ``{request_id, attempt, capability_token}``). The hub
-re-mints the SAME grants iff the job is still RUNNING on this worker and the
-attempt matches; response is ``{capability_token, expires_at_unix}``.
-"""
+"""Per-job capability-token renewal (worker half)."""
 from __future__ import annotations
 
 import asyncio
@@ -20,20 +13,8 @@ from .request_context._helpers import _decode_unverified_jwt_claims
 logger = logging.getLogger(__name__)
 
 RENEW_PATH = "/v1/worker/capability/renew"
-# Renew at 80% of the token's OWN lifetime, so the fraction is
-# a statement about the remaining budget rather than a duration anybody picked:
-# whatever TTL the hub issues, a fifth of it is left for the retries below.
-# The threat is a job losing its capability MID-FLIGHT — an in-flight upload or
-# hub call fails on an expired token with the work already done — and nothing
-# else prevents it: the token carries no refresh, and the hub does not push.
 RENEW_FRACTION = 0.8
-#: Floor on the sleep before a renewal attempt, so a token already past its
-#: renew point cannot spin this loop against the hub at full speed.
 _MIN_SLEEP_S = 1.0
-#: Attempts for a TRANSIENT failure only (a refusal is terminal on the first).
-#: Three x 5/10/15 s spans ~30 s of the 20% of TTL this loop has left, so a
-#: brief hub blip is ridden out and a real outage still surfaces while the
-#: token is valid — a fourth attempt would spend budget it cannot afford.
 _TRANSIENT_RETRIES = 3
 _TRANSIENT_BACKOFF_S = 5.0
 
@@ -50,16 +31,9 @@ def renew_once(
     attempt: int,
     capability_token: str,
 ) -> Tuple[str, int]:
-    """One renewal POST. Returns (new_token, expires_at_unix).
+    """One renewal POST."""
 
-    Raises ``RenewDenied`` on terminal refusals (401/403/404/409) and
-    ``RuntimeError`` on transient failures (5xx / malformed response).
-    """
-
-    # Under the process split this runs in the compute child,
-    # which holds no worker JWT — the parent performs the renewal (it also
-    # proves the request is one it dispatched) and returns only the new token.
-    # Off the split, this is the same POST it always was.
+    # Under the process split this runs in the compute child, which holds no worker JWT — the parent performs the renewal and returns only the new token. Off the split it is the same POST.
     resp = broker.request(
         "POST",
         RENEW_PATH,
@@ -84,8 +58,6 @@ def renew_once(
 
 
 def _renew_at(token: str, *, now: float) -> Optional[float]:
-    """Absolute time to renew ``token`` (iat + RENEW_FRACTION·TTL), or None
-    when the token carries no usable exp."""
     claims = _decode_unverified_jwt_claims(token)
     try:
         exp = float(claims.get("exp") or 0)
@@ -110,20 +82,14 @@ async def renew_capability_while_running(
     get_token: Callable[[], str],
     set_token: Callable[[str], None],
 ) -> None:
-    """Background renewal loop for one in-flight job. Cancel when it ends.
-
-    Sleeps until ~80% of the current token's TTL, renews, swaps the stored
-    token via ``set_token``, and repeats with the fresh token. Transient
-    failures retry a few times with backoff; a terminal denial stops the
-    loop loudly (the job keeps its current token and fails on next use).
-    """
+    """Background renewal loop for one in-flight job."""
     while True:
         token = get_token()
         if not token:
             return
         due = _renew_at(token, now=time.time())
         if due is None:
-            return  # non-expiring / opaque token: nothing to renew
+            return
         await asyncio.sleep(max(_MIN_SLEEP_S, due - time.time()))
 
         renewed = False
@@ -139,9 +105,6 @@ async def renew_capability_while_running(
                 )
             except RenewDenied as exc:
                 logger.warning("capability renewal for %s stopped: %s", request_id, exc)
-                # The job keeps a token that will expire; its next
-                # upload fails with a bare auth error unless the denial is
-                # named on the wire NOW.
                 activity_mod.emit_event(
                     activity_mod.KIND_CAPABILITY_RENEWAL,
                     f"request={request_id} attempt={attempt}: terminal "
@@ -166,9 +129,6 @@ async def renew_capability_while_running(
                 "capability renewal for %s exhausted retries; token will expire",
                 request_id,
             )
-            # retries exhausted silently — the downstream symptom
-            # (an expired-token upload failure minutes later) never names
-            # this cause without the typed event.
             activity_mod.emit_event(
                 activity_mod.KIND_CAPABILITY_RENEWAL,
                 f"request={request_id} attempt={attempt}: "

@@ -1,16 +1,3 @@
-"""One entrypoint, TWO model slots, backed by TWO checkpoints (pgw#1508).
-
-h3's `generate` shape: `video` is the primary (a diffusers pipeline out of the
-DiT's tree) and `aide` is an auxiliary model with a checkpoint of its own --
-h3's is the RIFE interpolator at `rife-4.25`. The serving binding table has
-been per-slot since 0.9.0; the derive used to hand every slot the PRIMARY's
-tree, so the aide tried to build itself out of the wrong checkpoint.
-
-The aide here loads a bare `UNet2DConditionModel` from its own tree, which the
-primary tree does NOT contain at the top level -- so pointing it at the primary
-fails the way h3's RIFE did, and pointing it at its own succeeds.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -49,19 +36,9 @@ class VideoModel(
 
 class AideModel(
     Model[SDXL],
-    # A REAL lane and no mark. The aide is a second CHECKPOINT, so it answers
-    # lane selection and checkpoint compatibility exactly like the primary
-    # does; what it does not do is compile — an interpolator has no AOT story
-    # here — and the absent `ctx.compile` in `load` is the entire statement.
-    # No `shapes=` follows from that: nothing of this class's is keyed.
     lanes={TINY_DIFFUSERS_FP32: lane(request=const(MiB(32)))},
 ):
-    """Marks nothing, and it STILL hydrates -- the drive calls it.
-
-    Skipping hydration for a model that compiles nothing was the tempting
-    shortcut and is wrong: the entrypoint body runs at trace and calls this
-    model, so a `None` here fails one layer later with a worse message.
-    """
+    """Marks nothing, and it STILL hydrates -- the drive calls it."""
 
     net: Any
 
@@ -84,6 +61,5 @@ def generate(
             callback_on_step_end=ctx.step_callback(2),
             output_type="latent",
         )
-        # The aide is CALLED, which is why it has to be real at trace.
         assert aide.net is not None
     return Out(model_used=ctx.checkpoint_ref)

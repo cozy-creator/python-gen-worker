@@ -1,22 +1,4 @@
-"""Hub and worker must apply THE SAME fabric predicate.
-
-There is deliberately no HelloAck demote field: both sides gate on the SAME
-boot-canary measurement, so they agree by construction — but only while the
-predicates match. The hub's is two-term (`nvlink AND peer_gbps >= 200`,
-tensorhub topology/interconnect.go SPMinPeerGbps); a worker reading
-`interconnect` alone breaks the construction. In the disagreement band
-(`interconnect == "nvlink" AND peer_gbps < 200`):
-
-  - a 2x2 pod: hub re-packs 4x1 and dispatches indices 0..3; the worker still
-    holds 2x2, so `group_ordinal_exact` refuses indices 1 and 3 RETRYABLE,
-    forever — half the pod is a permanent retry loop;
-  - a 1x4 pod: hub sees 4 slots, worker arms 1 group — capacity overstated 4x.
-
-The design stays two independent gates over one measurement: the worker applies
-the same two-term predicate, and a WEDGED fabric (peer access, exactly zero
-bandwidth — the collective hangs with no error) refuses at boot, typed, for
-any multi-GPU topology.
-"""
+"""Hub and worker must apply THE SAME fabric predicate."""
 
 from __future__ import annotations
 
@@ -39,9 +21,6 @@ def _env(raw: str) -> dict:
 
 
 def test_predicate_matches_the_hub_constant() -> None:
-    # The floor is the hub's SPMinPeerGbps, verbatim. The measured populations
-    # it separates: NVLink 241.9-273.9 GB/s a2a (388.2-389.8 D2D) vs
-    # everything else <= 30.2 (<= 52.9 D2D) — 200 sits inside both gaps.
     assert SP_MIN_PEER_GBPS == 200.0
     assert sp_admits(INTERCONNECT_NVLINK, 241.9)
     assert not sp_admits(INTERCONNECT_NVLINK, 199.9)
@@ -50,9 +29,6 @@ def test_predicate_matches_the_hub_constant() -> None:
 
 
 def test_disagreement_band_now_demotes_like_the_hub() -> None:
-    # THE pgw#818 band: class says nvlink, bandwidth says degraded (best NVL
-    # host measured 30.2 GB/s). The hub demotes to G×1; pre-fix the worker
-    # kept G×D and refused half of every dispatch forever.
     for raw, want in ((_SP_2x2, (4, 1)), (_SP_1x4, (4, 1))):
         topo = delivered_topology(_env(raw), interconnect=INTERCONNECT_NVLINK, peer_gbps=30.2)
         assert (topo.gpu_count, topo.degree) == want, (
@@ -69,12 +45,8 @@ def test_proven_fabric_keeps_the_group() -> None:
 
 
 def test_wedged_fabric_refuses_at_boot_typed() -> None:
-    # Machine 8n9k05n0sz03, reproduced twice: peer access TRUE, 0.0 GB/s, the
-    # collective HUNG with no error/timeout. classify_interconnect calls it
-    # nvlink, so the class gate passes and the pod strands every request. A
-    # typed boot refusal closes the race the hub-side drain can lose.
     assert is_fabric_wedge(True, 0.0)
-    assert not is_fabric_wedge(False, 0.0)  # not measured, no verdict
+    assert not is_fabric_wedge(False, 0.0)
     assert not is_fabric_wedge(True, 30.2)
 
     for raw in (_SP_2x2, '{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"internal"}'):
@@ -89,8 +61,6 @@ def test_wedged_fabric_refuses_at_boot_typed() -> None:
 
 
 def test_internal_groups_still_never_bandwidth_demoted() -> None:
-    # The devices are the model's, not the platform's: a slow fabric demotes
-    # nothing on parallel="internal" (only a WEDGE refuses, above).
     raw = '{"gpu_count":2,"gpus_per_execution_group":2,"execution_groups":1,"parallel":"internal"}'
     topo = delivered_topology(_env(raw), interconnect="host-staged", peer_gbps=1.96)
     assert (topo.execution_groups, topo.degree, topo.parallel) == (1, 2, "internal")

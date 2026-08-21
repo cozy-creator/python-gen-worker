@@ -1,17 +1,4 @@
-"""Progress registry: named monotonic counters for
-long-running phases.
-
-Long phases register a counter (download per-ref bytes, watchdog evidence
-during load/compile, warmup jobs, upload bytes, inference steps); the 10s
-app heartbeat (activity.on_beat) snapshots the registry onto the wire and
-self-diagnoses a counter stalled past its per-phase window. The hub kills
-on counter non-advancement or that confession — never on CPU inference.
-
-The counter-name family (prefix before ":") selects the self-diagnosis
-window. Windows are code constants — no env knobs — and all sit under the
-hub's 10-minute layer-3 backstop so a worker that can still speak
-confesses before the hub must infer.
-"""
+"""Progress registry: named monotonic counters for long-running phases."""
 
 from __future__ import annotations
 
@@ -22,9 +9,6 @@ from typing import Dict, List, Optional, Tuple
 
 UNIT_BYTES = "bytes"
 UNIT_STEPS = "steps"
-# Combined watchdog evidence (process+children CPU seconds + process disk
-# IO MB, see activity._default_evidence) — covers load/compile phases with
-# no natural app-level counter.
 UNIT_EVIDENCE = "evidence"
 
 STALL_WINDOW_S: Dict[str, float] = {
@@ -38,21 +22,10 @@ STALL_WINDOW_S: Dict[str, float] = {
 }
 DEFAULT_STALL_WINDOW_S = 300.0
 
-# Overridable in tests (fake clock).
 _now = time.monotonic
 
 _lock = threading.Lock()
 
-#: ``(owner, name) -> Counter``. The owner is part of the key: keyed on the NAME
-#: alone, one process-global namespace holds every phase's counters and
-#: `freshest()` returns whichever advanced most recently regardless of which work
-#: it described — a serving request's `infer:steps` then refreshes a background
-#: mint's stall clock and declines its condemnation.
-#:
-#: The OWNER is the scope the counter belongs to (an activity id, a request
-#: id). Registry-wide queries still exist and still mean what they meant — "is
-#: this process doing anything at all" — but a scope's stall verdict is now
-#: computed from that scope's own counters.
 _counters: Dict[Tuple[str, str], "Counter"] = {}
 
 
@@ -61,15 +34,11 @@ class Snapshot:
     name: str
     unit: str
     done: float
-    total: float  # 0 = unknown
+    total: float
     rate_per_s: float
-    age_s: float  # since last advance
+    age_s: float
     window_s: float
     elapsed_s: float
-    #: The scope that owns this counter ("" = unowned/process-wide). LAST and
-    #: defaulted on purpose: a Snapshot is constructed by hand in tests and by
-    #: readers that do not care whose counter it is, and a new field must be
-    #: additive rather than a positional break.
     owner: str = ""
 
 
@@ -89,7 +58,6 @@ class Counter:
         self._total = max(0.0, float(total))
         self._started = now
         self._advanced = now
-        # Rate sample anchor, refreshed by each snapshot() call.
         self._rate_t = now
         self._rate_v = 0.0
         self._rate = 0.0
@@ -132,13 +100,7 @@ class Counter:
 def counter(
     name: str, unit: str, total: float = 0.0, *, owner: str = "",
 ) -> Counter:
-    """Register-or-get the open counter `name` within `owner` (idempotent).
-
-    ``owner`` scopes the counter to the work it describes. Two
-    scopes may use the same NAME — two concurrent requests both counting
-    ``infer:steps`` is the ordinary case — and neither can advance the
-    other's clock.
-    """
+    """Register-or-get the open counter `name` within `owner` (idempotent)."""
     key = (owner, name)
     with _lock:
         existing = _counters.get(key)
@@ -179,34 +141,13 @@ def snapshot(owner: Optional[str] = None) -> List[Snapshot]:
 
 
 def freshest(owner: Optional[str] = None) -> Optional[Snapshot]:
-    """The most recently advanced open counter.
-
-    ``owner=None`` is the PROCESS liveness view and is unchanged: any
-    advancing counter proves the process is doing real work, which is exactly
-    what a "did this pod wedge" question wants.
-
-    ``owner="..."`` is the SCOPE view, and it is the one a stall verdict must
-    use. A mint asking "am I still advancing" must not be answered
-    by a request that happens to be running beside it.
-    """
+    """The most recently advanced open counter."""
     snaps = snapshot(owner)
     return min(snaps, key=lambda s: s.age_s) if snaps else None
 
 
 def self_diagnosis(owner: Optional[str] = None) -> Optional[Snapshot]:
-    """Non-None when even the FRESHEST open counter is stale past its own
-    window — the typed self_stalled confession the beat reports so the hub
-    kills on fact, not inference.
-
-    Scoped to ``owner`` when one is named, registry-wide otherwise:
-    registry-wide is the right answer to "is this process alive" and the wrong
-    one to "is this mint stalled" — a request running beside a wedged mint would
-    answer for it. `Activity.on_beat` passes the activity's own id.
-
-    Counter LIFETIME still has to be honest within a scope: a counter left
-    open after its producer's phase ended is the min-age counter of a phase it
-    knows nothing about, and confesses for it. `Activity.counter()` scopes
-    them to the phase for that reason."""
+    """Non-None when even the FRESHEST open counter is stale past its own window — the typed self_stalled confession the beat reports so the hub kills on fact, not inference."""
     fresh = freshest(owner)
     if fresh is not None and fresh.age_s > fresh.window_s:
         return fresh

@@ -1,26 +1,4 @@
-"""The fp8-storage lane is module STRUCTURE, not a cast hook.
-
-Every assertion here runs the REAL codepath (``loading.apply_fp8_storage`` on
-a real, tiny ``UNet2DConditionModel``) on CPU — no mocks, no weights, no GPU.
-The lane the SDK ships must be:
-
-1. hook-free, where the diffusers hook lane demonstrably HAS hooks (the red
-   half: the same tape proves the old shape and the new shape apart);
-2. coverage-equivalent to diffusers' own rule — same leaf set, so residency
-   and numerics cannot silently drift when upstream changes its rule;
-3. numerically equivalent — bitwise-equal outputs vs the hook lane;
-4. residency-honest on BOTH axes: coverage parity with the hook lane (module
-   walk) AND no orphaned bf16 originals when something outside the module
-   still holds the Parameters — an L4 measured +50.3% before that fix, and a
-   module-only walk cannot see it;
-5. exportable, where the hook lane is REFUSED by ``torch.export``;
-6. a DIFFERENT traced graph, visible as a different
-   ``compile_cache.execution_contract`` signature (new compiled graph keys — intended)
-   while the ``fp8-hooks`` wire lane value is unchanged;
-7. still a LoRA branch target, with ``_Fp8ScaledLinear``'s
-   ``lora_a``/``lora_b`` as DECLARED buffer slots that ``register_buffer``
-   accepts without popping ``__dict__`` first.
-"""
+"""The fp8-storage lane is module STRUCTURE, not a cast hook."""
 
 from __future__ import annotations
 
@@ -63,16 +41,12 @@ def _tiny_unet() -> Any:
 
 
 class _Pipe:
-    """The minimal shape ``apply_fp8_storage`` consumes: an object with a
-    denoiser component attribute."""
 
     def __init__(self, unet: Any) -> None:
         self.unet = unet
 
 
 def _hook_execution_lane(unet: Any) -> List[str]:
-    """Arm diffusers' layerwise casting (the lane as it shipped) and return
-    the leaf paths it hooked."""
     unet.enable_layerwise_casting(storage_dtype=STORAGE, compute_dtype=COMPUTE)
     hooked: List[str] = []
     for name, mod in unet.named_modules():
@@ -128,9 +102,7 @@ def test_hook_execution_lane_has_hooks_restructured_execution_lane_has_none(exec
 
 
 def test_coverage_matches_diffusers_own_rule(execution_lanes: Dict[str, Any]) -> None:
-    """Anti-drift: our mirrored selection rule and the installed diffusers'
-    rule must name the SAME leaves. If upstream changes its supported-layer
-    set or default skip patterns, this fails here instead of on a pod."""
+    """Anti-drift: our mirrored selection rule and the installed diffusers' rule must name the SAME leaves."""
     restructured = execution_lanes["restructured"]
     covered = sorted(fp8_storage.fp8_storage_leaves(restructured))
     assert covered == sorted(execution_lanes["hooked_paths"])
@@ -138,8 +110,7 @@ def test_coverage_matches_diffusers_own_rule(execution_lanes: Dict[str, Any]) ->
 
 
 def test_weights_reside_in_fp8_and_round_trip(execution_lanes: Dict[str, Any]) -> None:
-    """Storage really is fp8, upcast really is the compute dtype, and the
-    quantized values are the same bytes the hook lane holds."""
+    """Storage really is fp8, upcast really is the compute dtype, and the quantized values are the same bytes the hook lane holds."""
     hooked, restructured = execution_lanes["hooked"], execution_lanes["restructured"]
     checked = 0
     for path in execution_lanes["hooked_paths"]:
@@ -165,10 +136,6 @@ def test_outputs_are_bitwise_equal_to_the_hook_execution_lane(execution_lanes: D
 
 
 def _distinct_storage_bytes(*roots: Any) -> Dict[str, int]:
-    """Bytes per dtype over DISTINCT storages reachable from ``roots`` (which
-    may be modules or plain tensor lists). Deduped by storage pointer, so a
-    tensor and a view of it count once — and a bf16 original that is no longer
-    on the module but is still held elsewhere DOES count."""
     seen: set = set()
     out: Dict[str, int] = {}
     for root in roots:
@@ -187,24 +154,10 @@ def _distinct_storage_bytes(*roots: Any) -> Dict[str, int]:
 
 
 def test_no_bf16_original_survives_an_external_holder() -> None:
-    """THE VRAM test, and the one the first cut of this tape got wrong.
-
-    A class pun replaces the weight tensor OBJECT. Anything still holding the
-    original ``Parameter`` — accelerate's device hooks, ``low_cpu_mem_usage``
-    bookkeeping, any earlier ``list(model.parameters())`` — therefore kept the
-    bf16 storage alive next to the new fp8 copy. Measured on an L4: fp8 storage
-    7.35 GB vs plain bf16 4.89 GB, i.e. +50.3%, i.e. BOTH copies resident;
-    reproduced here at +49.9% before the fix. The hook lane never had this
-    failure mode: ``module.to(dtype=)`` swaps storage INSIDE the Parameter, so
-    holders follow the cast. ``_to_storage_buffer`` restores that property by
-    rebinding the outgoing Parameter onto the fp8 storage.
-
-    A module-only walk CANNOT see this (the leaked tensor is no longer on the
-    module), which is exactly why the original tape passed while an L4 said
-    otherwise. This one holds the parameters the way a pod does."""
+    """THE VRAM test, and the one the first cut of this tape got wrong."""
     unet = _tiny_unet()
     before = _distinct_storage_bytes(unet)
-    held = list(unet.parameters())  # what accelerate/low_cpu_mem_usage does
+    held = list(unet.parameters())
 
     covered = fp8_storage.restructure_fp8_storage(
         unet, storage_dtype=STORAGE, compute_dtype=COMPUTE)
@@ -215,8 +168,6 @@ def test_no_bf16_original_survives_an_external_holder() -> None:
     assert total_after < total_before * 0.6, (
         f"fp8 storage must HALVE resident weight bytes, not add to them: "
         f"{total_before} -> {total_after} ({after})")
-    # Every held Parameter of a covered leaf (weight AND bias) now points at
-    # fp8 storage — i.e. the holder followed the cast, as under the hook lane.
     expected = sum(
         1
         for path in covered
@@ -224,7 +175,6 @@ def test_no_bf16_original_survives_an_external_holder() -> None:
         if getattr(unet.get_submodule(path), attr, None) is not None
     )
     assert sum(1 for p in held if p.dtype is STORAGE) == expected
-    # No bf16 storage survives except the leaves upstream deliberately skips.
     skipped_bytes = sum(
         t.untyped_storage().nbytes()
         for name, leaf in unet.named_modules()
@@ -247,18 +197,6 @@ def test_restructured_execution_lane_exports_and_the_hook_execution_lane_is_refu
     assert fp8_valued > 0, "the resident fp8 buffers must be visible in the graph"
     with pytest.raises(RuntimeError, match="Couldn't swap"):
         torch.export.export(execution_lanes["hooked"], args, strict=False)
-
-
-# pgw#1573: `test_execution_lane_value_kept_and_graph_contract_changed` stood
-# here and drove `compile_cache.execution_contract` — the v1 STRUCTURAL
-# signature (a walk over resolved targets' module types, shapes and hook
-# presence), deleted with its tier. Its claim was that restructuring the
-# weights must not adopt the pre-restructure compiled graph, and that claim is
-# now STRUCTURALLY true rather than checked: a v2 artifact is addressed by
-# `cg-graph-v1`, a content hash of the EXPORTED PROGRAM, so a restructured
-# module traces to a different graph identity and cannot collide. The row
-# above it (`torch.export` refuses the hooked module outright) is the part of
-# that property this file can still measure directly.
 
 
 def test_idempotent_and_refuses_to_compose_with_hooks() -> None:
@@ -307,9 +245,7 @@ def test_conv_transpose_and_embedding_leaves_restructure() -> None:
 
 
 def test_fp8_storage_leaf_is_a_lora_branch_target() -> None:
-    """gw#547/#627: the branch machinery selects by exact class. A pgw#727
-    leaf must be targeted as the plain class it was restructured from, and its
-    branch must compute in the compute dtype (never fp8)."""
+    """gw#547/#627: the branch machinery selects by exact class."""
     unet = _tiny_unet()
     plain_targets = set(w8a8_lora.branch_modules(unet))
     fp8_storage.restructure_fp8_storage(
@@ -329,14 +265,9 @@ def test_fp8_storage_leaf_is_a_lora_branch_target() -> None:
 
 
 def test_model_dtype_still_reports_the_compute_dtype(execution_lanes: Dict[str, Any]) -> None:
-    """The defect this lane found (measured, CPU): diffusers resolves
-    ``ModelMixin.dtype`` from the first floating-point PARAMETER, special-casing
-    an armed layerwise-cast hook to return its ``compute_dtype``. Drop the hook
-    and leave fp8 PARAMETERS and ``model.dtype`` starts answering fp8 — which
-    silently breaks every denoiser that casts to ``self.dtype`` inside forward.
-    fp8 storage therefore lives in BUFFERS."""
-    assert execution_lanes["hooked"].dtype is COMPUTE  # upstream's answer
-    assert execution_lanes["restructured"].dtype is COMPUTE  # ours must match it
+    """The defect this lane found (measured, CPU): diffusers resolves ``ModelMixin.dtype`` from the first floating-point PARAMETER, special-casing an armed layerwise-cast hook to return its ``compute_dtyp..."""
+    assert execution_lanes["hooked"].dtype is COMPUTE
+    assert execution_lanes["restructured"].dtype is COMPUTE
     for leaf in fp8_storage.fp8_storage_leaves(execution_lanes["restructured"]).values():
         assert "weight" in leaf._buffers and "weight" not in leaf._parameters
         assert all(p.dtype is COMPUTE for p in leaf.parameters())
@@ -345,9 +276,7 @@ def test_model_dtype_still_reports_the_compute_dtype(execution_lanes: Dict[str, 
 def test_state_dict_keys_and_module_identity_are_preserved(
     execution_lanes: Dict[str, Any],
 ) -> None:
-    """A class pun, not a module replacement: same FQNs, same state_dict keys,
-    same objects — so the offload rung, LoRA branch and every held reference
-    keep working."""
+    """A class pun, not a module replacement: same FQNs, same state_dict keys, same objects — so the offload rung, LoRA branch and every held reference keep working."""
     plain = _tiny_unet()
     assert sorted(plain.state_dict()) == sorted(execution_lanes["restructured"].state_dict())
     for path in execution_lanes["hooked_paths"]:
@@ -356,8 +285,7 @@ def test_state_dict_keys_and_module_identity_are_preserved(
 
 
 def test_a_denoiser_that_casts_to_self_dtype_runs_and_matches() -> None:
-    """UNet2DModel's ``get_time_embed`` does ``t_emb.to(dtype=self.dtype)`` —
-    the exact shape that fails when ``self.dtype`` is fp8."""
+    """UNet2DModel's ``get_time_embed`` does ``t_emb.to(dtype=self.dtype)`` — the exact shape that fails when ``self.dtype`` is fp8."""
     from diffusers import UNet2DModel
 
     torch.manual_seed(0)
@@ -381,18 +309,14 @@ def test_a_denoiser_that_casts_to_self_dtype_runs_and_matches() -> None:
 
 
 def test_scaled_linear_lora_slots_are_declared_buffers() -> None:
-    """pgw#726: declared slots, so ``register_buffer`` does not have to fight
-    a plain attribute and the FQN is a structural fact from construction."""
     cls = fp8_scaled_linear_class()
     mod = cls(8, 4, bias=False, compute_dtype=COMPUTE,
               static_input_scale=False, gemm_mode="pertensor")
     assert "lora_a" in mod._buffers and mod._buffers["lora_a"] is None
     assert "lora_b" in mod._buffers and mod._buffers["lora_b"] is None
     assert "lora_a" not in mod.__dict__
-    # The shape that used to raise KeyError("attribute 'lora_a' already exists").
     mod.register_buffer("lora_a", torch.zeros(16, 8), persistent=False)
     assert mod.lora_a.shape == (16, 8)
-    # Declared None slots stay out of the state_dict.
     assert not [k for k in mod.state_dict() if k.startswith("lora_")]
 
 

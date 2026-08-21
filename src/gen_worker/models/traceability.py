@@ -1,50 +1,11 @@
-"""Can this pipeline, AS LOADED, be traced at all?
-
-A pipeline that carries `torch.compiler.disable`d work in its forward path
-cannot be exported. `torch.export(strict=True)` does not degrade around it — it
-refuses, per graph specialization, with `Unsupported: Skip inlining
-torch.compiler.disable()d function`.
-
-THE CASE THIS EXISTS FOR. Offload hooks. diffusers' group offloading marks
-`ModuleGroup.onload_` (verified on diffusers 0.39.0:
-`ModuleGroup.onload_._torchdynamo_disable is True`); accelerate's model/
-sequential offload marks `CpuOffload.pre_forward`. Either puts disabled work in
-a forward path, and then every one of a family's declared graph specializations refuses,
-one at a time, for the same reason.
-
-**It is not a card-size story.** sdxl refused on a 16 GiB A4000 and z-image on a
-**48 GiB A40 holding a 19 GiB model** — so offload here is a pipeline
-CONFIGURATION, not a response to memory pressure. This module therefore asks
-about HOOKS and never about capacity, which is also what §1.35 requires: every
-model runs on every GPU, feasibility is never asked.
-
-WHY A PRE-EXPORT CHECK RATHER THAN LETTING THE PER-ENTRY SKIP HANDLE IT.
-The per-entry skip would dutifully skip all 36 and publish nothing: thirty-six
-typed refusals and an hour of wall clock to say once what is knowable
-before the first export begins. The per-entry skip is for a class that is
-individually unexportable; this is the whole PIPELINE being untraceable as
-loaded, which is a different fact and deserves its own sentence.
-
-It reads no placement logic and does no card arithmetic — it asks the object in
-front of it whether it carries disabled work. That keeps it true for any future
-source of such hooks, not just the offload rung that produced the first one.
-"""
+"""Can this pipeline, AS LOADED, be traced at all? A pipeline that carries `torch.compiler.disable`d work in its forward path cannot be exported."""
 
 from __future__ import annotations
 
 from typing import Any, Iterator, List, Tuple
 
-#: The attribute `torch.compiler.disable` stamps on what it wraps. Read rather
-#: than inferred from a class name: the marker is torch's own contract and
-#: survives diffusers renaming or re-homing its hooks.
 DISABLE_MARKER = "_torchdynamo_disable"
 
-#: How far into a hook's own object graph to look. A registered hook does not
-#: usually CARRY the disabled function — diffusers' `GroupOffloadingHook` holds
-#: a `ModuleGroup` and the marker is on `ModuleGroup.onload_` — so one hop past
-#: the hook is required to see it at all. Two hops is where it stops: deeper is
-#: someone else's object graph, and an unbounded walk over live model state is
-#: how a diagnostic becomes a hang.
 _DEPTH = 2
 
 
@@ -53,18 +14,10 @@ def _is_disabled(obj: Any) -> bool:
 
 
 def _disabled_in(obj: Any, depth: int = _DEPTH) -> str:
-    """The name of a `torch.compiler.disable`d callable reachable from ``obj``.
-
-    Empty string when there is none. Checks the object, its class's methods,
-    and (one hop at a time) the objects it holds — which is what it takes to
-    see `hook.group.onload_` from a registered hook.
-    """
     if obj is None or depth < 0:
         return ""
     if _is_disabled(obj):
         return getattr(obj, "__qualname__", None) or type(obj).__name__
-    # A bound method's owner, and the class's own methods: the marker lives on
-    # the FUNCTION, so it is reached through the type rather than the instance.
     for holder in (obj, type(obj)):
         try:
             names = list(vars(holder))
@@ -96,12 +49,6 @@ def _disabled_in(obj: Any, depth: int = _DEPTH) -> str:
 
 
 def _hooks_of(module: Any) -> Iterator[Tuple[str, Any]]:
-    """Every hook registered on ``module``, however it was registered.
-
-    Both torch's own dicts and diffusers' `HookRegistry` (`_diffusers_hook`),
-    because group offloading uses the registry and a walk that only knew
-    torch's dicts would see nothing at all on the case this module exists for.
-    """
     for attr in ("_forward_pre_hooks", "_forward_hooks",
                  "_forward_pre_hooks_with_kwargs"):
         table = getattr(module, attr, None)
@@ -120,13 +67,7 @@ def _hooks_of(module: Any) -> Iterator[Tuple[str, Any]]:
 
 
 def untraceable_hooks(pipeline: Any) -> Tuple[Tuple[str, str, str], ...]:
-    """``(module path, where the hook was registered, the disabled callable)``
-    for every hook on ``pipeline`` that puts `torch.compiler.disable`d work in
-    a forward path. Empty means the pipeline is traceable as loaded.
-
-    Walks the pipeline's component modules and their submodules — offload hooks
-    are installed per LEAF group, not on the pipeline object.
-    """
+    """``(module path, where the hook was registered, the disabled callable)`` for every hook on ``pipeline`` that puts `torch.compiler.disable`d work in a forward path."""
     try:
         import torch.nn as nn
     except Exception:  # noqa: BLE001 — torch-less: nothing to trace either

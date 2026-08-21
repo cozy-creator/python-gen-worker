@@ -1,17 +1,4 @@
-"""I/O codecs for endpoint payloads — read/write Assets to/from common formats.
-
-Free functions over methods so :class:`Asset` stays a small data struct.
-Optional codec deps (Pillow, soundfile) are lazy-imported so the core wheel
-doesn't drag them in.
-
-Usage::
-
-    from gen_worker import io as gw_io
-
-    speech, sr = gw_io.read_audio(payload.audio, target_sample_rate=16000)
-    img = gw_io.read_image(payload.image)
-    out = gw_io.write_image(ctx, "out", img)
-"""
+"""I/O codecs for endpoint payloads — read/write Assets to/from common formats."""
 
 from __future__ import annotations
 
@@ -33,7 +20,6 @@ if TYPE_CHECKING:
 
 
 def _local_path(asset: Asset) -> Path:
-    """Coerce ``asset.local_path`` to :class:`Path`; raise :class:`ValidationError` if missing."""
     p = asset.local_path
     if p is None:
         raise ValidationError(
@@ -49,7 +35,7 @@ def read_bytes(asset: Asset) -> bytes:
 
 
 def open(asset: Asset, mode: str = "rb") -> IO[Any]:
-    """Open the Asset's materialized file. Defaults to binary read mode."""
+    """Open the Asset's materialized file."""
     return _local_path(asset).open(mode)
 
 
@@ -60,12 +46,7 @@ def exists(asset: Asset) -> bool:
 
 
 def read_image(asset: Asset, mode: str = "RGB") -> Any:
-    """Decode an Asset as a PIL image.
-
-    Requires Pillow (``pip install gen-worker[images]``). If ``mode`` is set
-    and differs from the source image, the image is converted via
-    ``PIL.Image.convert(mode)``.
-    """
+    """Decode an Asset as a PIL image."""
     try:
         from PIL import Image
     except ImportError as e:
@@ -84,18 +65,8 @@ def read_audio(
     target_sample_rate: int | None = None,
     mono: bool = True,
 ) -> tuple["np.ndarray", int]:
-    """Decode an Asset as a float32 numpy array + sample rate.
-
-    Requires soundfile + numpy (``pip install gen-worker[audio]``).
-
-    - If ``mono`` is True (default), multi-channel audio is mixed down to mono.
-    - If ``target_sample_rate`` is set and differs from the source rate, the
-      signal is resampled in-process with :func:`scipy.signal.resample_poly`.
-    """
+    """Decode an Asset as a float32 numpy array + sample rate."""
     try:
-        # numpy is imported for its PRESENCE: soundfile returns ndarrays, so a
-        # missing numpy must be the typed ImportError below rather than an
-        # AttributeError three lines later.
         import numpy  # noqa: F401
         import soundfile as sf
     except ImportError as e:
@@ -107,9 +78,6 @@ def read_audio(
     if mono and data.ndim == 2:
         data = data.mean(axis=1)
     if target_sample_rate is not None and sr != target_sample_rate:
-        # scipy is declared by the `audio` extra alongside soundfile/numpy, so
-        # this is the resampler that runs — there is no quieter second one to
-        # fall through to (pgw#1307).
         from math import gcd
 
         from scipy.signal import resample_poly
@@ -122,19 +90,11 @@ def read_audio(
     return data, sr
 
 
-# The platform image-encoding default (Paul's ruling, 2026-07-24): WebP
-# always, with PNG and JPEG as first-class alternatives. Endpoints expose the
-# choice as an `output_format` payload field; they never hardcode a format.
-# ``ctx.save_image``'s value vocabulary IS this type (Paul ruling,
-# 2026-08-17): a ctx method's accepted values are defined by gen-worker next
-# to the method and EXPORTED — endpoints import the SDK's capability
-# (payload fields, signatures) instead of restating it as a local type.
 ImageFormat = Literal["webp", "png", "jpg", "jpeg"]
 
 DEFAULT_IMAGE_FORMAT: Final[ImageFormat] = "webp"
 DEFAULT_IMAGE_QUALITY = 95
 
-# tenant-facing name -> (PIL format, file extension)
 IMAGE_FORMATS: dict[str, tuple[str, str]] = {
     "webp": ("WEBP", ".webp"),
     "png": ("PNG", ".png"),
@@ -144,13 +104,7 @@ IMAGE_FORMATS: dict[str, tuple[str, str]] = {
 
 
 def image_format(format: ImageFormat = DEFAULT_IMAGE_FORMAT) -> tuple[str, str]:
-    """``(PIL format, file extension)`` for a tenant-facing format name.
-
-    Split out of :func:`encode_image` so the deferred-tail path can
-    validate the format and derive the ref's extension EAGERLY, at the
-    ``save_image`` call — a bad format must raise in the handler, never in the
-    finalize tail.
-    """
+    """``(PIL format, file extension)`` for a tenant-facing format name."""
     fmt = str(format or DEFAULT_IMAGE_FORMAT).strip().lower()
     try:
         return IMAGE_FORMATS[fmt]
@@ -170,21 +124,10 @@ def encode_image(
     method: int = 4,
     **encode_kwargs: Any,
 ) -> tuple[bytes, str]:
-    """THE image encode core — returns ``(payload_bytes, file_extension)``.
-
-    Both encode surfaces (:func:`write_image` and ``ctx.save_image``) route
-    here, so the default format/quality cannot drift apart again.
-
-    ``quality`` applies to WebP and JPEG. ``lossless`` and ``method`` are WebP
-    only. Extra ``encode_kwargs`` are forwarded to
-    :meth:`PIL.Image.Image.save`. Unknown formats raise
-    :class:`~gen_worker.api.errors.ValidationError` rather than surfacing a
-    PIL traceback.
-    """
+    """THE image encode core — returns ``(payload_bytes, file_extension)``."""
     pil_format, ext = image_format(format)
 
     img = image
-    # JPEG has no alpha channel and no palette; convert or PIL raises.
     if pil_format == "JPEG" and getattr(img, "mode", "") in {"RGBA", "LA", "P"}:
         img = img.convert("RGB")
 
@@ -193,8 +136,6 @@ def encode_image(
         save_kwargs["quality"] = max(1, min(int(quality), 100))
     if pil_format == "WEBP":
         save_kwargs["lossless"] = bool(lossless)
-        # method=4 (default): method=6 costs ~2.6x the encode CPU for ~4%
-        # smaller files (#382 measurements).
         save_kwargs["method"] = int(method)
     save_kwargs.update(encode_kwargs)
 
@@ -213,32 +154,11 @@ def write_image(
     as_type: Optional[type] = None,
     **encode_kwargs: Any,
 ) -> Asset:
-    """Encode ``image`` via :func:`encode_image` and save via ``ctx.save_bytes``.
-
-    Prefer ``ctx.save_image`` — it is what the whole endpoint fleet calls and it
-    returns a typed :class:`~gen_worker.api.types.ImageAsset` directly. This
-    free-function form exists only for its terminal decode->finalize handoff
-    (see below), which ``ctx.save_image`` deliberately does not perform.
-
-    ``as_type`` optionally re-wraps the returned ``Asset`` as a subclass such as
-    :class:`~gen_worker.api.types.ImageAsset`, so endpoints whose output struct
-    is typed ``ImageAsset`` don't have to round-trip through
-    ``msgspec.to_builtins``.
-    """
-    # the encode+upload tail runs slotless so it overlaps the next
-    # request's denoise, the same terminal handoff write_video performs. The
-    # release is TERMINAL and once-only — safe here because this call is the
-    # handler's last GPU-relevant act, which is why it is not applied to
-    # ctx.save_image (endpoints call that mid-pipeline and in N-image loops).
-    # Deferred: video_encode is not on the `import gen_worker` path and must
-    # stay off it (+2 modules; `python -m gen_worker.discover` stays cheap).
+    """Encode ``image`` via :func:`encode_image` and save via ``ctx.save_bytes``."""
     from .video_encode import finalize_permit
 
     with finalize_permit():
         _release_gpu_slot_for_finalize(ctx)
-        # look at the PIXELS before the encode. A rejected output
-        # raises and is never encoded, never uploaded, never banked. Its own
-        # stage so the floor's wall is ATTRIBUTED, never residual.
         if judged(ctx):
             with _stage(ctx, "output_integrity"):
                 guard_image(image, ref=ref)
@@ -256,12 +176,7 @@ def write_image(
 
 
 def probe_video(source: "bytes | str | Path") -> dict[str, Any]:
-    """Probe a video container (PyAV) for media metadata.
-
-    Returns a dict with any of ``duration_s``, ``fps``, ``width``, ``height``,
-    ``has_audio``, ``sample_rate`` — empty when PyAV is missing or the probe
-    fails. Used by ``ctx.save_video`` to fill :class:`VideoAsset` metadata.
-    """
+    """Probe a video container (PyAV) for media metadata."""
     try:
         import av
     except ImportError:
@@ -306,31 +221,7 @@ def write_video(
     audio: Any = None,
     audio_sample_rate: Optional[int] = None,
 ) -> Asset:
-    """Encode ``frames`` (+ optional ``audio``) to an H.264/AAC mp4 and save
-    via ``ctx.save_video(ref=...)``.
-
-    Requires PyAV + numpy (``pip install gen-worker[video]``). Mirrors
-    diffusers' ltx2 ``export_utils.encode_video`` so video endpoints stop
-    hand-rolling tempfile + ``export_to_video`` and audio survives the mux.
-
-    - ``frames``: list of PIL images, a numpy array ``[F, H, W, C]`` (float in
-      [0, 1] or uint8), a torch tensor of the same shape, OR an iterator/
-      generator of such chunks — chunks are encoded as they are produced
-      (VAE framewise decode seam) and the full clip is never rebuffered.
-    - ``audio``: waveform ``[channels, samples]`` (numpy or torch, float in
-      [-1, 1]); mono is duplicated to stereo. ``audio_sample_rate`` is
-      required when audio is given.
-
-    Encoder selection + GPU-slot handoff: the backend is
-    NVENC when the card has the encoder block (probed once per process),
-    else libx264 at a fast preset. For array input the request's GPU slot is
-    terminally released once the frames are on the host — the CPU encode and
-    the upload overlap the next request's denoise instead of idling the GPU
-    (measured up to 179s of idle on a CPU-contended host). Do not run more
-    GPU work on ``ctx`` after this call. For iterator input the release
-    happens when the iterator is exhausted (the producer is still decoding
-    on the GPU while chunks stream into the encoder).
-    """
+    """Encode frames (+ optional audio) to an H.264/AAC mp4 and save via ctx.save_video(ref=...). Requires PyAV + numpy (gen-worker[video]). Frames may be PIL list, [F,H,W,C] numpy/torch, or an iterator of chunks (encoded as produced, never rebuffered). For array input the request's GPU slot is TERMINALLY released once frames are on host so the encode+upload overlaps the next request's denoise — do NOT run more GPU work on ctx after this call; for iterator input the release happens when the iterator is exhausted."""
     try:
         import numpy as np  # noqa: F401  (hard dep of the encode path)
 
@@ -355,44 +246,24 @@ def write_video(
             tmp_path, fps=fps, audio_sample_rate=sample_rate or None
         ) as encoder:
             if streaming:
-                # Chunks arrive while the producer still owns the GPU; the
-                # encode interleaves (NVENC costs zero SMs). Release the slot
-                # only once decode is done, before the flush + upload tail.
-                # CUDA-tensor chunks take the staging pipeline: uint8
-                # conversion on-GPU (2-4x PCIe byte cut) + pinned async D2H
-                # one chunk behind the producer, so chunk N's copy overlaps
-                # chunk N+1's decode and chunk N-1's CPU encode. Other chunk
-                # types pass through unchanged.
                 from .media_transfer import staged_uint8_chunks
 
-                # Each chunk is judged INSIDE the loop — the staged
-                # host buffer a chunk borrows is only valid until the next
-                # iteration step, and nothing here may rebuffer the clip. Its
-                # wall lands on `video_encode` (it interleaves with the
-                # encoder, and a per-chunk bracket would truncate the request's
-                # interval log on a long clip); `StreamCollector.verdict()`
-                # reports the measured seconds on the event either way.
                 integrity = StreamCollector()
                 for chunk in staged_uint8_chunks(frames):
                     integrity.observe(chunk)
                     encoder.add(chunk)
                 _release_gpu_slot_for_finalize(ctx)
-                # Before the flush + upload tail: a rejected clip is never
-                # muxed and `ctx.save_video` below is never reached.
                 if judged(ctx):
                     with _stage(ctx, "output_integrity"):
                         enforce(integrity.verdict(), ref=ref, kind="video")
                 encoder.finish(audio)
             else:
                 arr = frames_to_uint8(frames)
-                # Bounded CPU-finalize admission BEFORE the slot release:
-                # back-pressure holds the GPU slot rather than stacking raw
-                # frame buffers in host RAM.
                 with finalize_permit():
                     _release_gpu_slot_for_finalize(ctx)
                     if judged(ctx):
                         with _stage(ctx, "output_integrity"):
-                            guard_frames(arr, ref=ref)  # pre-encode
+                            guard_frames(arr, ref=ref)
                     encoder.add(arr)
                     del arr
                     encoder.finish(audio)
@@ -403,18 +274,12 @@ def write_video(
 
 
 def _is_chunk_iterator(frames: Any) -> bool:
-    """True for generators/iterators of frame chunks (streaming input).
-
-    Lists/tuples (PIL frames), numpy arrays, and torch tensors are buffered
-    input; everything else with ``__next__`` streams.
-    """
     if isinstance(frames, (list, tuple)) or hasattr(frames, "__array__") or hasattr(frames, "detach"):
         return False
     return hasattr(frames, "__next__") or hasattr(frames, "__iter__")
 
 
 def _release_gpu_slot_for_finalize(ctx: Any) -> None:
-    """Terminal GPU-slot release at the decode->finalize handoff."""
     release = getattr(ctx, "_release_gpu_slot_for_finalize", None)
     if callable(release):
         release()

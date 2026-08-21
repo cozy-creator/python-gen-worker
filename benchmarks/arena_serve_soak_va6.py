@@ -1,51 +1,16 @@
-"""va#6 Lane A, arm 2: the REAL-SERVE soak — sd1.5 served out of the arena under churn.
+"""Real-serve soak: sd1.5 served out of the arena while residency churns underneath.
 
-The composite instrument. Everything the varena facade has been proven with so far is a
-SHORT proof: pgw#1507 measured bitwise identity over a handful of demote/promote cycles and
-called it done. Nothing has ever run REAL generations for hours while residency moves
-underneath them, and the races that matter live exactly there — refills on offload streams
-concurrent with forward pre-hooks, a rebudget landing between two requests, a staging chunk
-recycled while the previous request's kernels are still draining.
+Two verdicts per run, deliberately different instruments:
 
-Two verdicts come out of one run, and they are deliberately different instruments:
+1. OUTPUT IDENTITY — every Nth request compared BITWISE against a banked eager
+   reference for the same seed; any divergence is red, with the churn history
+   since the last green banked for repro.
+2. CONTENT INTEGRITY — per-region digests taken from the LIVE weights before
+   adoption, re-verified on every re-promotion and at teardown; catches
+   corruption that a byte-identical output would hide.
 
-**1. OUTPUT IDENTITY.** Every Nth request is compared BITWISE against a banked eager
-reference for the same seed, generated before the arena ever touched the tree. Any
-divergence is red, with the full churn history since the last green banked for repro.
-
-**2. CONTENT INTEGRITY.** Per-region digests, taken from the LIVE weights before adoption and
-re-verified on every re-promotion and at teardown. This is the half output comparison cannot
-do: a corrupted weight in a region that this seed's path barely touches, or one whose damage
-is below fp16 rounding, produces a byte-identical image and a rotten model. The digest sees
-it either way. (The `byte` poke below exists to show precisely that asymmetry.)
-
-## Leases are inviolable mid-request — and the lock is the mechanism, not a promise
-
-The ruled model says residency may move only BETWEEN requests. The churn thread here is a
-real thread that takes `request_lock` before it acts, so it blocks while a generation is in
-flight and does its work in the gap. `--prove-boundary-matters` runs it WITHOUT the lock,
-which is expected to fault the process — that is the point: it shows the boundary rule is
-load-bearing rather than decorative. DESTRUCTIVE; never part of a soak run.
-
-## Discipline
-
-* `VARENA_GPU_WINDOW=1` gates every card-touching path (varena's own rule, restated here
-  because this file is the one driving the card).
-* `--self-test` is CPU-ONLY, needs no window and no card: it red-arms the comparator, the
-  digest fold, the churn history and the boundary lock.
-* A poke run INVERTS the verdict — detecting the corruption is the pass.
-* EAGER ONLY. Compiled-under-churn is roadmap phase 3's and is deliberately out of scope; a
-  run that finds an armed graph refuses rather than quietly measuring something else.
-
-    .venv/bin/python benchmarks/arena_serve_soak_va6.py --self-test
-    VARENA_GPU_WINDOW=1 .venv/bin/python benchmarks/arena_serve_soak_va6.py \
-        --wall-secs 900 --out benchmarks/va6 --seeds 3 --compare-every 2
-    VARENA_GPU_WINDOW=1 .venv/bin/python benchmarks/arena_serve_soak_va6.py \
-        --poke weight --poke-at 3 --out benchmarks/va6
-
-The digest primitive is varena's `tests/digest.py` — ONE definition, shared, so the arena-level
-soak and this one cannot drift apart. Point `--varena-tests` at that directory (default
-`~/cozy/varena/tests`, override with `VARENA_TESTS`).
+Residency may move only BETWEEN requests: the churn thread takes
+``request_lock`` before acting, so it blocks while a generation is in flight.
 """
 
 from __future__ import annotations
@@ -78,11 +43,7 @@ POKE_MODES = ("byte", "weight")
 
 
 def load_digest(path: str):
-    """Import varena's digest primitive. Refuse loudly rather than reimplement it.
-
-    A second copy of the definition here would be the worst outcome available: the two soaks
-    would silently stop agreeing about what a region's bytes are, and neither would say so.
-    """
+    """Import varena's digest primitive."""
     directory = Path(os.environ.get("VARENA_TESTS", path)).expanduser()
     module = directory / "digest.py"
     if not module.exists():
@@ -122,11 +83,7 @@ def nvsmi(query: str) -> str:
 
 
 def substrate(config: dict[str, Any]) -> dict[str, Any]:
-    """Conditions block. Card identity comes from nvidia-smi, NOT from torch.
-
-    `torch.cuda.get_device_name()` creates a ~128 MiB CUDA context as a side effect, which
-    va#3 caught polluting its own substrate stamp. Stating the card must not cost the card.
-    """
+    """Card identity comes from nvidia-smi, never torch: torch.cuda.get_device_name() creates a ~128 MiB CUDA context as a side effect."""
     return {
         "when": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "uptime": uptime_line(),
@@ -154,20 +111,8 @@ def bank(path: str, payload: dict[str, Any]) -> str:
     return path
 
 
-# ---------------------------------------------------------------------------
-# Region digests over the facade's own layout
-# ---------------------------------------------------------------------------
-
-
 class RegionDigests:
-    """One digest per region, folded over its SLOTS — never over its span.
-
-    A region's span is granularity-aligned and its slots are 512-B aligned inside it, so
-    between and after the slots there are bytes no refill ever writes. Their content is
-    undefined by construction; folding them in would make the instrument report a failure
-    every time the arena handed back a different physical chunk, which is legal behaviour.
-    Only the bytes a fill is responsible for are digested.
-    """
+    """One digest per region, folded over its SLOTS — never over its span."""
 
     def __init__(self, D, torch, residency) -> None:
         self.D = D
@@ -188,12 +133,7 @@ class RegionDigests:
         return t.detach().contiguous().view(-1).view(self.torch.uint8)
 
     def take_reference(self) -> dict[str, int]:
-        """From the LIVE tree, BEFORE the arena has touched a byte.
-
-        Not from the first promotion: blessing whatever the first fill produced would make
-        the whole soak a consistency check against itself. The basis is the model as torch
-        loaded it.
-        """
+        """From the LIVE tree, BEFORE the arena has touched a byte."""
         for region in self.res.layout.regions:
             views = [self._as_bytes(self.res._live(slot)) for slot in region.slots]
             self.reference[region.name] = self._fold(views)
@@ -235,16 +175,10 @@ class RegionDigests:
         return bad
 
     def _whose(self, got: int) -> str | None:
-        """If the bytes belong to a DIFFERENT region, name it — that names the bug."""
         for name, value in self.reference.items():
             if value == got:
                 return name
         return None
-
-
-# ---------------------------------------------------------------------------
-# The soak
-# ---------------------------------------------------------------------------
 
 
 class ServeSoak:
@@ -275,7 +209,6 @@ class ServeSoak:
             {"req": self.requests, "t": round(time.time() - self.t0, 3), "kind": kind, **kw}
         )
 
-    # -- the served request ---------------------------------------------------
     def generate(self, torch, pipe, seed: int):
         generator = torch.Generator(device="cuda").manual_seed(seed)
         with torch.no_grad():
@@ -291,7 +224,6 @@ class ServeSoak:
         torch.cuda.synchronize()
         return out.images.detach().clone()
 
-    # -- churn, between requests only -----------------------------------------
     def churn_once(self, rng, residency, digests, basis: int) -> None:
         action = rng.choice(
             ["rebudget-low", "rebudget-full", "demote-promote", "partial-unload", "partial-load"]
@@ -303,8 +235,6 @@ class ServeSoak:
             plan = residency.rebudget(int(basis * frac))
             detail = {"fraction": frac, "streamed": len(plan.streamed), "fits": bool(plan.fits)}
         elif action == "rebudget-full":
-            # The real lease, not an infinity: at `basis` every region is resident and the
-            # arena ceiling stays a number the allocator can actually refuse against.
             plan = residency.rebudget(basis)
             detail = {"streamed": len(plan.streamed), "fits": bool(plan.fits)}
         elif action == "demote-promote":
@@ -340,8 +270,6 @@ class ServeSoak:
                     continue
             try:
                 if self.in_request:
-                    # Under the lock this is impossible; without it, this counter is the
-                    # measurement of how often the unsafe variant is racing a live forward.
                     self.boundary_violations += 1
                 self.churn_once(rng, residency, digests, basis)
             except Exception as exc:  # noqa: BLE001
@@ -353,7 +281,6 @@ class ServeSoak:
                     self.request_lock.release()
             time.sleep(self.args.churn_gap)
 
-    # -- the deliberate corruption -------------------------------------------
     def poke(self, torch, residency, digests, rng) -> None:
         live = [r for r in residency.layout.regions if residency.is_resident(r.name)
                 and r.name != "__core__" and r.slots]
@@ -366,7 +293,7 @@ class ServeSoak:
             at = slot.nbytes // 2
             view[at] = view[at] ^ 1
             detail = {"byte_offset": at}
-        else:  # "weight": destroy a whole slot, so the OUTPUT comparator must also go red
+        else:
             view.fill_(0xA5)
             detail = {"bytes_destroyed": slot.nbytes}
         torch.cuda.synchronize()
@@ -378,7 +305,6 @@ class ServeSoak:
         self.record("POKE", **self.poke_record)
         print(f"[poke] {self.args.poke} into {region.name} / {slot.leaf}.{slot.attr}")
 
-    # -- the run --------------------------------------------------------------
     def run(self) -> int:
         args = self.args
         import torch
@@ -397,8 +323,6 @@ class ServeSoak:
         pipe.set_progress_bar_config(disable=True)
         pipe = pipe.to("cuda")
 
-        # EAGER ONLY. A compiled graph on this tree would make every number below measure
-        # something this lane did not sign up for, so it refuses rather than proceeds.
         armed = getattr(getattr(pipe.unet, "forward", None), "_entries", None)
         if armed:
             raise SystemExit(
@@ -511,7 +435,6 @@ class ServeSoak:
         if failure is None and self.churn_error:
             failure = self.churn_error
 
-        # Teardown verify: the last word on the bytes, after every churn this run did.
         if not args.poke:
             try:
                 final = digests.verify("teardown")
@@ -595,13 +518,6 @@ class ServeSoak:
         return 0
 
     def _wrap_page_in(self, residency, digests) -> None:
-        """Verify EVERY streamed refill, at the moment it lands. Short legs only.
-
-        This is the deepest form of the check — the streamed tail is refilled hundreds of
-        times per step and is otherwise only ever verified once it has been promoted back to
-        resident. It costs a device sync and a digest per page-in, so it is minutes of
-        requests, not hours.
-        """
         original = residency._page_in
         soak = self
 
@@ -631,11 +547,6 @@ class ServeSoak:
         )
 
 
-# ---------------------------------------------------------------------------
-# CPU-only red-arm
-# ---------------------------------------------------------------------------
-
-
 def self_test(args, D) -> int:
     import torch
 
@@ -645,11 +556,9 @@ def self_test(args, D) -> int:
         if not cond:
             fails.append(f"{name}{': ' + detail if detail else ''}")
 
-    # 1. the shared digest primitive's own red-arm must pass, here, in THIS interpreter
     check("varena digest selftest", D.selftest(verbose=False) == 0,
           "the shared primitive fails its own red-arm in the pgw venv")
 
-    # 2. the window gate refuses
     saved = os.environ.pop("VARENA_GPU_WINDOW", None)
     try:
         require_window()
@@ -660,8 +569,6 @@ def self_test(args, D) -> int:
         if saved is not None:
             os.environ["VARENA_GPU_WINDOW"] = saved
 
-    # 3. the region fold: live-tensor bytes and a host copy must agree, and a single flipped
-    #    byte anywhere in ANY slot must move the region digest.
     rd = RegionDigests(D, torch, residency=None)
     tensors = [torch.randn(500, dtype=torch.float32), torch.randn(250, dtype=torch.float32)]
     views = [rd._as_bytes(t) for t in tensors]
@@ -674,15 +581,11 @@ def self_test(args, D) -> int:
               rd._fold([rd._as_bytes(x) for x in tensors]) != base)
         flat[len(flat) // 3] ^= 1
     check("fold restored", rd._fold([rd._as_bytes(t) for t in tensors]) == base)
-    # slot ORDER must matter: a cross-slot DMA that swaps two slots is a real defect shape
     check("fold is order sensitive", rd._fold(list(reversed(views))) != base)
-    # length is part of the digest: a region that lost a slot must not look identical
     check("fold sees a missing slot", rd._fold(views[:1]) != base)
-    # and a slot whose bytes moved 8 bytes along must not collide with itself
     shifted = rd._as_bytes(tensors[0])[8:]
     check("fold is position sensitive", rd._fold([shifted]) != rd._fold([views[0]]))
 
-    # 4. the bitwise output comparator must go red on the smallest possible difference
     ref = torch.randn(1, 4, 64, 64, dtype=torch.float16)
     check("comparator green on a clone", bool(torch.equal(ref, ref.clone())))
     doctored = ref.clone()
@@ -694,7 +597,6 @@ def self_test(args, D) -> int:
     same_bits.view(torch.int16).view(-1)[11] ^= 1
     check("comparator red on one flipped MANTISSA BIT", not bool(torch.equal(ref, same_bits)))
 
-    # 5. the boundary lock: churn must never run while a request is in flight
     soak = ServeSoak.__new__(ServeSoak)
     soak.history = deque(maxlen=200)
     soak.request_lock = threading.Lock()
@@ -726,8 +628,6 @@ def self_test(args, D) -> int:
     check("boundary respected", observed["violations"] == 0,
           f"{observed['violations']} churn actions saw a live request")
 
-    # ...and the same detector must SEE a violation when the lock is removed, or it proves
-    # nothing about the locked case.
     soak.in_request = False
     stop2 = threading.Event()
     seen = {"violations": 0}
@@ -749,7 +649,6 @@ def self_test(args, D) -> int:
     check("violation detector can go red", seen["violations"] > 0,
           "the unlocked variant saw no violation — the detector is blind")
 
-    # 6. bank() refuses a naked number
     try:
         bank(os.path.join(args.out, "naked.json"), {"requests": 1})
         fails.append("bank() accepted a result with no substrate block")

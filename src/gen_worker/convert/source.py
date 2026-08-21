@@ -1,17 +1,4 @@
-"""Source — library-constructed handle to the materialized source snapshot.
-
-Tenants receive a ``Source`` as the reserved ``source`` parameter (and on
-additional ``Source``-typed parameters tagged with the training-private
-``_PayloadRef`` Annotated marker).
-Source abstracts over singlefile vs diffusers layouts, resolves
-sharded-safetensors via .index.json, and provides convenience methods for
-loading into HF / diffusers / tokenizer APIs.
-
-There is NO pickle -> safetensors conversion. pgw#1227 deleted the converter
-and the pickle ban is absolute (E1/E5): reading a pickle IS the banned act, so
-a pickle-only source is a typed ``pickle_only`` RepoRefusal before a byte
-moves, never a format this class quietly normalizes.
-"""
+"""Source — library-constructed handle to the materialized source snapshot."""
 
 from __future__ import annotations
 
@@ -36,21 +23,17 @@ from ..component_vocab import (
 
 def _diffusers_component_dirs() -> frozenset[str]:
     return frozenset(pipeline_component_dirs())
-# Component dirs that carry model weights (as opposed to scheduler/tokenizer
-# configuration). iter_tensors skips the rest unless explicitly named.
 def _weight_component_dirs() -> frozenset[str]:
     return frozenset(weight_components())
 
 
 def _detect_file_layout(path: Path) -> FileLayout:
-    """MULTI_FILE when the snapshot has a model_index.json, else SINGLE_FILE."""
     if (path / "model_index.json").exists():
         return MULTI_FILE
     return SINGLE_FILE
 
 
 def _enumerate_components(path: Path) -> dict[str, Component]:
-    """Build the ``components`` map for a diffusers-layout snapshot."""
     result: dict[str, Component] = {}
     if not path.is_dir():
         return result
@@ -63,24 +46,7 @@ def _enumerate_components(path: Path) -> dict[str, Component]:
 
 
 class Source:
-    """Handle to a materialized source snapshot.
-
-    Constructed by the library from ``ctx.source_path`` + the resolved variant's
-    attributes. Tenants never construct directly.
-
-    Public surface:
-      path              -- root of materialized snapshot (filesystem escape hatch)
-      file_layout       -- "single-file" | "multi-file" (th#1937 vocabulary)
-      attributes        -- full resolved variant attribute map (provenance)
-      ref               -- the wire ref string (e.g. "owner/repo") for logging
-      components        -- dict[str, Component] for diffusers; {} for singlefile
-      config()          -- parsed config.json / model_index.json
-      tokenizer()       -- AutoTokenizer.from_pretrained(path)
-      as_hf_model()     -- auto-dispatch to CausalLM / DiffusionPipeline / ...
-      iter_tensors()    -- yield (component, name, tensor) across all weights
-      state_dict()      -- eager variant of iter_tensors
-      hf_dir()          -- directory suitable for path-in-path-out tools
-    """
+    """Handle to a materialized source snapshot."""
 
     def __init__(
         self,
@@ -96,8 +62,6 @@ class Source:
         self._components: dict[str, Component] | None = None
         self._config: dict | None = None
         self._tokenizer: Any = None
-
-    # ----- simple attrs ------------------------------------------------
 
     @property
     def path(self) -> Path:
@@ -117,7 +81,7 @@ class Source:
 
     @property
     def components(self) -> dict[str, Component]:
-        """Diffusers component map. Empty for singlefile sources."""
+        """Diffusers component map."""
         if self._components is None:
             if self._file_layout == MULTI_FILE:
                 self._components = _enumerate_components(self._path)
@@ -125,14 +89,8 @@ class Source:
                 self._components = {}
         return self._components
 
-    # ----- cached loaders ---------------------------------------------
-
     def config(self) -> dict:
-        """Parsed top-level config. model_index.json for diffusers, config.json for singlefile.
-
-        Returns ``{}`` if no config file is present (rare — a snapshot should
-        always have one but we don't want to crash the tenant on odd sources).
-        """
+        """Parsed top-level config."""
         if self._config is None:
             if self._file_layout == MULTI_FILE:
                 candidate = self._path / "model_index.json"
@@ -146,11 +104,7 @@ class Source:
         return self._config
 
     def tokenizer(self) -> Any:
-        """Load via ``transformers.AutoTokenizer.from_pretrained(source.path)``.
-
-        Cached across calls within the same tenant invocation. Raises if the
-        snapshot doesn't contain tokenizer files.
-        """
+        """Load via ``transformers.AutoTokenizer.from_pretrained(source.path)``."""
         if self._tokenizer is None:
             from transformers import AutoTokenizer
             self._tokenizer = AutoTokenizer.from_pretrained(
@@ -158,10 +112,7 @@ class Source:
         return self._tokenizer
 
     def diffusers_variant(self) -> str | None:
-        """Detect a diffusers ``variant=`` value from files on disk
-        (e.g. ``unet/diffusion_pytorch_model.fp16.safetensors`` → ``"fp16"``).
-        Mirrors gen_worker.models.loading.detect_diffusers_variant — repo-cas
-        mirrors cloned with a dtype preference keep HF's variant suffix."""
+        """Detect a diffusers ``variant=`` value from files on disk (e.g."""
         if self._file_layout != MULTI_FILE:
             return None
         candidates = ("bf16", "fp8", "fp16", "int8", "int4")
@@ -176,12 +127,7 @@ class Source:
         return None
 
     def as_hf_model(self, **kwargs: Any) -> Any:
-        """Auto-dispatch model load.
-
-        Diffusers layout → ``diffusers.DiffusionPipeline.from_pretrained``.
-        Singlefile layout → ``transformers.AutoModelForCausalLM.from_pretrained``.
-        Override by passing an explicit ``model_cls=SomeClass`` kwarg.
-        """
+        """Auto-dispatch model load."""
         model_cls = kwargs.pop("model_cls", None)
         if self._file_layout == MULTI_FILE and "variant" not in kwargs:
             if v := self.diffusers_variant():
@@ -200,22 +146,10 @@ class Source:
             str(third_party_dir(self._path, why="conversion source causal LM")),
             **kwargs)
 
-    # ----- tensor access ----------------------------------------------
-
     def iter_tensors(
         self, components: list[str] | None = None,
     ) -> Iterator[tuple[str, str, "torch.Tensor"]]:
-        """Stream every weight tensor. Yields ``(component, name, tensor)``.
-
-        - For singlefile sources: component='' for all yields.
-        - For diffusers sources: component is the subdir name (unet/vae/...).
-          Only components with weight files are iterated; scheduler/tokenizer
-          subdirs are skipped.
-        - If ``components`` is passed, only those components are iterated.
-
-        Resolves sharded-safetensors via .index.json internally; the tenant
-        sees a flat iteration. A pickle weight file is REFUSED, not converted.
-        """
+        """Stream every weight tensor."""
 
         yield from iter_source_tensors(
             self._path,
@@ -226,12 +160,7 @@ class Source:
     def state_dict(
         self, components: list[str] | None = None,
     ) -> dict[str, "torch.Tensor"]:
-        """Eager variant of iter_tensors.
-
-        Returns ``{dotted_name: tensor}``. For diffusers, dotted names include
-        the component prefix (e.g. 'unet.conv_in.weight'). For singlefile,
-        dotted names are the raw safetensors keys.
-        """
+        """Eager variant of iter_tensors."""
         result: dict[str, Any] = {}
         for component, name, tensor in self.iter_tensors(components=components):
             key = f"{component}.{name}" if component else name
@@ -239,31 +168,11 @@ class Source:
         return result
 
     def hf_dir(self) -> Path:
-        """Return a directory path suitable for path-in-path-out subprocess tools.
-
-        For most cases this is ``self.path`` directly. Subclasses / future
-        helpers may return a prepared subtree (e.g. for llama.cpp's
-        prepare_hf_source_tree_for_gguf fixup).
-        """
+        """Return a directory path suitable for path-in-path-out subprocess tools."""
         return self._path
 
     def weights_size_bytes(self) -> int:
-        """Approximate on-disk size of all weight files in this snapshot.
-
-        Walks the weight-bearing component dirs (transformer / unet / vae /
-        text_encoder* / image_encoder / prior / controlnet) for
-        diffusers-layout sources, or the entire snapshot for singlefile
-        sources, and sums the file sizes of any ``.safetensors``,
-        ``.bin``, ``.pt``, ``.pth``, ``.ckpt`` files found.
-
-        Used by quant tenants to size their own working set from real bytes
-        without depending on the snapshot manifest plumbing — the loader only
-        needs a number of bytes to reason about. It feeds no placement gate:
-        th#1867 deleted the per-function VRAM declarations entirely. For bf16 sources
-        this number ≈ ``num_params * 2``, which is the right multiplicand
-        for the heuristic ``required_vram = scheme_factor * source_size +
-        working_overhead``.
-        """
+        """Approximate on-disk size of all weight files in this snapshot."""
         weight_exts = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
         total = 0
         if self._file_layout == MULTI_FILE:

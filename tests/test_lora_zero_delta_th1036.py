@@ -1,13 +1,3 @@
-"""th#1036 zero-delta refusal lives in ``load_adapter_state_dict``.
-
-One implementation of the attach-but-invisible rule: an adapter whose
-low-rank product is provably zero is refused at PARSE time, typed, before it
-can ride any attach path (executor overlays, BYO per-request loras, endpoint
-code). The old endpoint-side copies checked ``any(tensor != 0)`` over the
-WHOLE dict — vacuous whenever a (nonzero-by-construction) alpha key exists —
-so these rows pin the pair-aware semantics, not just the happy path.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,14 +24,10 @@ def test_healthy_kohya_adapter_loads(tmp_path: Path) -> None:
         "lora_unet_a.lora_up.weight": torch.randn(8, 4),
     })
     sd = load_adapter_state_dict(path, ref="t/healthy")
-    # alpha injection still happens after the guard
     assert "lora_unet_a.alpha" in sd
 
 
 def test_zero_up_half_is_refused_even_with_nonzero_down_and_alpha(tmp_path: Path) -> None:
-    # delta = up @ down == 0 when up is all-zero; the stored alpha (nonzero
-    # float) must not vouch for the delta — the exact hole in the deleted
-    # endpoint-side any(tensor)!=0 copies.
     path = _write(tmp_path, {
         "lora_unet_a.lora_down.weight": torch.randn(4, 8),
         "lora_unet_a.lora_up.weight": torch.zeros(8, 4),
