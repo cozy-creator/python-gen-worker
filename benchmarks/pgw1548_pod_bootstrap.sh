@@ -87,9 +87,27 @@ export VIRTUAL_ENV=/workspace/venv
 PY=/workspace/venv/bin/python
 uv pip install --python $PY -r /workspace/pgw/requirements.txt 2>/dev/null || true
 uv pip install --python $PY -e /workspace/pgw || exit 91
-uv pip install --python $PY diffusers==0.39.0 transformers safetensors accelerate huggingface_hub || exit 91
+# The ENDPOINT's own third-party imports, read off its `main.py` rather than
+# guessed -- a missing one is an ImportError at the smoke gate, i.e. after the
+# venv, after the multi-GB weight download, on a rented card.
+#   sdxl  -> diffusers, msgspec, torch, tensorfs
+#   anima -> diffsynth, msgspec, safetensors, torch, transformers
+uv pip install --python $PY diffusers==0.39.0 transformers safetensors \
+    accelerate huggingface_hub || exit 91
+if [ "$PGW1548_MODE" = "anima-derive" ]; then
+  # diffsynth IS on PyPI (checked: 200); torchvision is its hard requirement.
+  uv pip install --python $PY "diffsynth==2.0.17" torchvision || exit 91
+fi
 
-export PYTHONPATH=/workspace/pgw/src
+# `import tensorfs` (sdxl/main.py, top level) is satisfied WITHOUT shipping or
+# cloning anything: pgw VENDORS tensorfs at src/gen_worker/_vendor, and that
+# directory on PYTHONPATH makes the vendored copy importable under its own
+# top-level name. tensorfs is NOT on PyPI (checked: 404 -- pgw's own pyproject
+# says both projects are "permanently deleted"), and its source is 2.1 MB
+# base64, far over the env cliff, so the vendor path is the only free answer.
+export PYTHONPATH=/workspace/pgw/src:/workspace/pgw/src/gen_worker/_vendor
+$PY -c "import tensorfs; print('tensorfs ok', tensorfs.__file__)" || exit 91
+
 
 # --- 2b. the endpoint source, from env --------------------------------------
 # MEASURED CEILING, 2026-08-20: RunPod's REST create takes a ~50 KB `env` and
