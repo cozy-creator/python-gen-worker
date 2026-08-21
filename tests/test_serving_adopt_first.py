@@ -191,8 +191,15 @@ def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
     assert sorted(loaded.entrypoints) == ["generate"]
     (model_cls,) = loaded.models
     lane = loaded.lane(model_cls, LANE)
-    assert lane.contract == LANE
-    assert lane.dtype is torch.float32
+    # pgw#1621: `lane()` answers the PARSED stamp pair (a `LayoutId`), read
+    # once at class definition. Its dtype is not a field on the lane object
+    # any more and is not the fixture's to pick — it is `declared_dtype` on
+    # the ratified QUANT RULE, so it is read from there.
+    from gen_worker.models.tensor_layout_contract import rule_dtype
+
+    assert lane.render() == LANE
+    assert (lane.topology, lane.quant) == ("sdxl.diffusers@1", "plain.bf16@1")
+    assert rule_dtype(lane.quant) == "bfloat16"
     # Two declared lanes: `lane()` still refuses to GUESS one — a silent
     # default lane is exactly what must not exist. pgw#1606 changed only what
     # the refusal points AT: picking among declared lanes is platform work and
@@ -200,8 +207,9 @@ def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
     # multi-lane endpoints unbootable on a pod.
     with pytest.raises(EndpointLoadError, match=r"ask `resolve\(\)`"):
         loaded.lane(model_cls)
-    with pytest.raises(EndpointLoadError, match="no lane 'other.fp8@1'"):
-        loaded.lane(model_cls, "other.fp8@1")
+    with pytest.raises(EndpointLoadError,
+                       match="no lane 'sd15.diffusers@1\\+cozy.fp8-rowwise@1'"):
+        loaded.lane(model_cls, "sd15.diffusers@1+cozy.fp8-rowwise@1")
     with pytest.raises(EndpointLoadError, match="no endpoint.toml"):
         load_endpoint(tmp_path)
 

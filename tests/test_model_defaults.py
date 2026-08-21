@@ -623,14 +623,25 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
 #: fleet migration. Delete a row when its document is vendored; the
 #: assertions below go red if you delete one that is not there yet, or leave
 #: one that is.
-TENSORFS_130_OWED: frozenset[str] = frozenset({
-    # pgw#1621 REOPENED this list with one row. v1's `trellis2.dit-bf16@1`
-    # (tensorfs#132) has no v2 counterpart: the corpus banks no trellis2
-    # headers, so no `trellis2.*` topology exists and `trellis-3d` is refused
-    # at import again. Delete this row when the headers are banked upstream —
-    # the assertions below go red if you delete it early.
-    "trellis2.dit",
-})
+TENSORFS_130_OWED: frozenset[str] = frozenset()
+# pgw#1621 REOPENED this list with one row and then CLOSED it again in the same
+# change, which is the behaviour the row exists to have rather than a tidy-up.
+#
+# The row was `trellis2.dit`: v1's `trellis2.dit-bf16@1` (tensorfs#132) had no
+# v2 counterpart, so `trellis-3d` was refused at import again — the exact
+# blocking state tensorfs#130 had closed, one family over. tensorfs#152
+# (`ac9c9d4`) banked the headers, `trellis2.dit@1` exists, and the assertion
+# below went red on the vendor bump naming the stale row. It also closed
+# `flux1`, `stable-audio`, `qwen-image`, `internvl-u`, `krea-2` and `rife`,
+# none of which ever reached this list.
+#
+# `trellis2` is worth remembering for a different reason: its upstream
+# `ckpts/` is one flat directory holding three DIFFERENT 640-key DiTs that
+# separate only on `input_layer.weight` ([1536,8]/[1536,32]/[1536,64]).
+# Directory-based grouping could not express that at all, so tensorfs#152 had
+# to group by shard-family name and key disjointness — and all 21 pre-existing
+# topology digests came out byte-identical, which is what says the regrouping
+# changed the expressible set and not the existing answers.
 
 #: hunyuan3d-2.1 is NOT on that list and never will be by this route: its repo
 #: is PICKLE-only, so no safetensors-shaped document can describe it. The
@@ -756,14 +767,15 @@ def test_the_two_3d_roots_declare_their_lanes_by_evidence() -> None:
     from gen_worker.models import Hunyuan3d, Trellis2
     from gen_worker.models.model_types import Rife
 
-    # ⚠️ TRELLIS.2 LOST ITS DOCUMENT IN THE v2 CUT, and that is a real
-    # regression rather than a re-spelling. v1 shipped `trellis2.dit-bf16@1`
-    # (tensorfs#132); the v2 corpus banks no trellis2 HEADERS, so there is no
-    # `trellis2.*` TOPOLOGY and `trellis-3d` cannot declare `lanes=` again —
-    # exactly the blocking state pgw#1599 created and tensorfs#130 closed, one
-    # family over. It is recorded on the owed list below rather than silently
-    # tolerated, and this assertion goes RED the day the headers are banked.
-    assert _library_lacks("trellis2.dit")
+    # TRELLIS.2 briefly lost its document in the v2 cut and got it back in the
+    # same change. v1 shipped `trellis2.dit-bf16@1` (tensorfs#132); the first
+    # v2 corpus banked no trellis2 HEADERS, so `trellis-3d` could not declare
+    # `lanes=` — the blocking state tensorfs#130 had closed, one family over.
+    # It was recorded on `TENSORFS_130_OWED` rather than tolerated, the
+    # assertion here was written to go RED the day the headers landed, and
+    # tensorfs#152 (`ac9c9d4`) landed them. This is the other side of that
+    # assertion: `trellis2.dit@1` EXISTS, so the family is declarable.
+    assert _library_has("trellis2.dit")
 
     # Hunyuan3D has NO document and never had one. Its
     # checkpoint is a PICKLE, so no safetensors-shaped document can describe
@@ -958,14 +970,15 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     # with the family split across the `.` and the precision glued on).
     assert _library_has("minimax-h3.diffusers")
     assert _library_has("minimax-h3.native")
-    # Rife has NO v2 topology: v1's shared `rife.flownet-fp32@1` document has
-    # no counterpart because rife headers are not banked in `spec/v2/headers`.
-    # Its stamps still CLASSIFY through the name seam (asserted in
-    # `test_contract_stamps_classify_through_the_fingerprint`), which is a
-    # different fact from being declarable as a lane.
-    from gen_worker.models.tensor_layout_contract import known_topologies
-
-    assert not [h for h in known_topologies() if h.startswith("rife.")]
+    # Rife HAS a v2 topology, and it arrived by an unusual route worth naming.
+    # v1's shared `rife.flownet-fp32@1` had no counterpart in the first v2
+    # corpus, and the recorded reason was "no upstream header to extract from,
+    # re-derive from the producing module's state_dict" — which was FALSE:
+    # tensorhub SERVES the produced checkpoint, so tensorfs#152 banked the
+    # headers off the hub tree itself. `rife.flownet@1` therefore describes
+    # exactly what the fleet binds rather than an upstream packaging nobody
+    # ships. Its pair is `rife.flownet@1+plain.f32@1`.
+    assert _library_has("rife.flownet")
 
 
 # ── the flux family (pgw#1393) ───────────────────────────────────────────────
