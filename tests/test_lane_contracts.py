@@ -422,6 +422,28 @@ def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
     SILENT floor of none, which the resolver reads as "runs anywhere" —
     th#1754's shape with a new cause, and strictly worse because nothing
     raises. A floor is the one place failing open is invisible.
+
+    **RE-AUDITED at tensorfs rev 1da68d58 (tensorfs#130), and the set GREW
+    from three to five. The two new ones are NOT fragments, and that is a
+    finding rather than a formality — the fence did the job it exists for.**
+
+    * `sdxl.diffusers-nvfp4-flat@1` — a real serve lane, dtypeless because
+      nvfp4 is BLOCK-SCALED: the weight nibbles and their per-block scales are
+      two different dtypes, so no single top-level one is true. Not adoptable
+      yet regardless (a multi-lane class cannot boot until pgw#1606), so it
+      blocks nothing today.
+    * `qwen3.6-27b-mtp.gguf-ud-q4-k-xl@1` — **a real serve lane that an
+      endpoint is waiting on, and it STILL cannot be declared.** GGUF is a
+      quant CONTAINER with per-tensor ggml types and no single torch dtype, so
+      `lane_dtype` refuses it at declaration and `qwen3.6-27b-mtp-gguf` stays
+      blocked. tensorfs#130 shipped the document; the LANE-VS-FRAGMENT FORMAT
+      GAP it lands in is tensorfs#127, and that is what has to close before
+      the endpoint can migrate.
+
+    **Neither is being waived.** `DTYPELESS_UPSTREAM_LANES` stays EMPTY: an
+    entry there knowingly accepts a lane whose serve-side `ctx.lane.dtype`
+    raises on a rented pod, and a blocked endpoint is a better state than a
+    green declaration that dies at load.
     """
 
     from gen_worker._vendor.tensorfs import contracts
@@ -431,9 +453,14 @@ def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
 
     dtypeless = [c for c in contracts.all() if getattr(c, "_dtype", None) is None]
     assert {c.stamp for c in dtypeless} == {
+        # FRAGMENTS — a `lanes=` header never names one on its own.
         "dit.blocks-fused-qkv@1",
         "sdxl.clip-g-fused-qkv@1",
         "sdxl.clip-g-split-qkv@1",
+        # REAL SERVE LANES whose FORMAT has no single top-level dtype
+        # (tensorfs#127). See the docstring: these are blocked, not waived.
+        "sdxl.diffusers-nvfp4-flat@1",
+        "qwen3.6-27b-mtp.gguf-ud-q4-k-xl@1",
     }, "the dtypeless set moved; re-audit the derivation against it"
 
     for contract in dtypeless:

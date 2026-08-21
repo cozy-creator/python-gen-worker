@@ -27,7 +27,7 @@
 
 [packages.tensorfs]
 repo = "https://github.com/cozy-creator/tensorfs"
-rev = "da1f3d2f91efc0a12de4ed2b74a8d43009a577d5"
+rev = "1da68d58459ef0018cb9378a3a8776206dd3e944"
 subdir = "python/src/tensorfs"
 # ONE REV, ONE LINEAGE (pgw#1575), on Paul's release-policy ruling of
 # 2026-08-20, verbatim: "it's fine if old wheels are on pypi historically. I
@@ -119,6 +119,34 @@ subdir = "python/src/tensorfs"
 # `stable-audio.diffusers-fp16` is the only document whose top-level dtype is
 # `float16`; the served checkpoints histogram {F16: 445} and the hub records
 # dtype=fp16, so do not correct it toward its siblings.
+#
+# tensorfs#130 (this rev) ADDED NINE DOCUMENTS and two Contract methods, and
+# only the documents are vendored. `Contract.recipe` and `Contract.verdict`
+# are DELIBERATELY NOT PORTED, and this is a third rewrite in substance even
+# though it is an absence rather than a change: both delegate straight to the
+# Rust core (`contract_recipe` / `contract_verdict` ->
+# `crates/tensorfs-core/src/verdict.rs`), which pgw#1310 rules out of a
+# source-vendored wheel. Porting them would mean writing a SECOND
+# implementation of a bind ADMIT decision in Python — which upstream's own
+# docstring names as the hazard: "A second implementation of an admit decision
+# is a second chance to admit a bind that should have been refused, which stays
+# invisible until a pod 500s." Nothing in this repo needs them: the verdict is
+# the HUB's gate (Go), reading the same one implementation. `generate.py` (the
+# generate-from-header producer, new at this rev) is likewise not vendored — it
+# is an INGEST-side tool, `__init__` does not import it, and it reaches for the
+# extension too.
+#
+# The nine are `anima.diffsynth-bf16`, `joycaption.llava-bf16`,
+# `krea-2.diffusers-bf16`, `ltx-2-upsampler.diffusers-bf16`,
+# `musicgen.transformers-fp16`, `qwen3.6-27b-mtp.gguf-ud-q4-k-xl`,
+# `qwen3.6-35b-a3b.vllm-fp8`, `rife.flownet-fp32` and
+# `sdxl.diffusers-nvfp4-flat`. Eight of them UNBLOCK a Model class that
+# pgw#1599 refuses at import for naming no contract; `rife.flownet-fp32` is ONE
+# document for the three classes that used to declare the same `Rife` type
+# three different ways. `sdxl.diffusers-nvfp4-flat` is not an unblocking
+# document at all — it is a NEW LANE for an endpoint that already declares a
+# real one, and it cannot be adopted until pgw#1606's resolver, because a
+# multi-lane class cannot boot on a pod today.
 #
 # THE FENCE READS ONE TABLE NOW. `[packages.tensorfs.files]` is the
 # path -> sha256 inventory `test_every_vendored_file_matches_its_recorded_
@@ -300,23 +328,32 @@ rewrites = [
 
 [packages.tensorfs.files]
 "__init__.py" = "80affc975c054134411f4b22167d73aaa5ee5e969a71bff61e3b42afa7db2fcf"
+"_contracts/anima.diffsynth-bf16.v1.json" = "f1dfe7deebb9f2787a2f8431fe01350ae400e1e5512f96c7f8b6fb0a21192bfa"
 "_contracts/dit.blocks-fused-qkv.v1.json" = "95681781643548fc3bb696b84fee3d4c421f42e5fa5633c82fa6aae31f8e51e0"
 "_contracts/ernie.diffusers-bf16.v1.json" = "b4879a6c02962b873c81495acd561922c0271b809a6816f217d580b174a92514"
 "_contracts/flux1.diffusers-bf16.v1.json" = "74deb96dc6e295496ef107f12dd34932d31deadb14c8dec264cfbabccb405fa6"
 "_contracts/flux2-klein.diffusers-bf16.v1.json" = "7f792d62c7e7bd7bb8fa2cca84204f4911b8022c95417f004c2eb733b043974f"
 "_contracts/hidream-o1.diffusers-bf16.v1.json" = "c74f3489b21b8acdbf1acce919d1dade4128c59829ced2f36e89dc937836e347"
 "_contracts/internvl-u.diffusers-bf16.v1.json" = "8ca4c24045ee7b41b153ccfc34a913414806a0685a9f18a9a4630a4920482327"
+"_contracts/joycaption.llava-bf16.v1.json" = "007e066da25710bf278223d3e840408e2ff7cab564abf46007108f790c35a60e"
+"_contracts/krea-2.diffusers-bf16.v1.json" = "e062490504f31f91a14bd233c8fdb7cf4931b7bf3e886eb669cf9d6ff6b2cfe8"
+"_contracts/ltx-2-upsampler.diffusers-bf16.v1.json" = "8125def3fe2f2d79be92f702f695643c1ef5a41b40ac93e1c5be3945e971dd2f"
 "_contracts/ltx-2.diffusers-bf16.v1.json" = "524334e6ddc686e165f8cd924422351bf4d0abc8d3a64aa3f40834f408501b2c"
 "_contracts/minimax.h3-dit-diffusers.v1.json" = "40fedde5e31dbed2bb5c34b350f76d2961c3e40ef61a03c102c1ae9aab99e1e1"
 "_contracts/minimax.h3-dit-fp8-rowwise.v1.json" = "08249c337eda48c7b63d269eb0501b445abc43dd58ea323afb13f2e44af01a2b"
 "_contracts/minimax.h3-dit-native.v1.json" = "d8c738a10c688bfbcb7b3135a5de1b903c3eea1cba55d50ba2cde220607b154f"
+"_contracts/musicgen.transformers-fp16.v1.json" = "09dff803d9881ea5074ce3864fa1a89e49c7431ab46c5324adb934e6a6660662"
 "_contracts/qwen-image.diffusers-bf16.v1.json" = "d9671ac9cd9f32035897cab2dd909d7445ab1ed53425a4d84e1ff0592cd466fe"
+"_contracts/qwen3.6-27b-mtp.gguf-ud-q4-k-xl.v1.json" = "70d60f00e01c7bd36a9f71dce96ab52c316b5993707ece2cf68a78f4af32c6fd"
+"_contracts/qwen3.6-35b-a3b.vllm-fp8.v1.json" = "2ae50fb78d4dce1763936c29a0f6ae402a2ceb716346ab358a323c9dd059e170"
+"_contracts/rife.flownet-fp32.v1.json" = "fd052e48d8d1c4e3ecb82054e4e9c9ebbeb8121c517fe0b57d019fc117fc0147"
 "_contracts/sd15.diffusers-bf16.v1.json" = "01f3cdfca73430bf2f53546b8fbdfc9c946bb6c45ed8882e67abcf66e3b778ff"
 "_contracts/sd2.diffusers-bf16.v1.json" = "3ef484feb44e38adc278d75f002bbdf2375600fd5026ecf27d47cc0a2e406d83"
 "_contracts/sdxl.clip-g-fused-qkv.v1.json" = "2fe796a2c14d615e972655144b4cc6c2a01bd74d400c9dbe0eb2b3887d78ca98"
 "_contracts/sdxl.clip-g-split-qkv.v1.json" = "5d82d4dcad7ca97cc5291a4fc60e4916e24e6bc8baa14e0429be428b99d9d09a"
 "_contracts/sdxl.diffusers-bf16.v1.json" = "6612c3d61e495f62d9f06096c11a2182a8a440d969e4faa0f23258eec35abe60"
 "_contracts/sdxl.diffusers-fp8-rowwise.v1.json" = "f082ff98421cd21827d10ed2a69f6447e8694dcf43baf08a7c47d2de6b373c20"
+"_contracts/sdxl.diffusers-nvfp4-flat.v1.json" = "6a4fbb7f0293ad17da3134f17cbdf8f57f16fc567b027ac2107c3c6c0a1012b0"
 "_contracts/stable-audio.diffusers-fp16.v1.json" = "ad06436e3b67c92a843ad8778a7fdfc04cf237e9fcedd1718552d3c8e9d1958a"
 "_contracts/trellis2.dit-bf16.v1.json" = "84bc7689d8f86372affc03cf2f25d895e55bfc824af395fd5af6cc54fdd50f0f"
 "_contracts/wan22.diffusers-bf16.v1.json" = "bca462c22c83e43e28516fa21a7d7798d73f3a46c242f61a37d532701903e13b"
@@ -331,7 +368,6 @@ rewrites = [
 "refs.py" = "f3a144543f423a6b01043294b21104ababaafdbfb31798560de678b69f27ac2f"
 "tensors.py" = "7876bc45dd13ca9bff141d437e16762189c74cd12b08e7439012e6cdc028f47c"
 "writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
-
 [packages.torchcg.files]
 "__init__.py" = "a1734b7d8218f7f9e97765a505460e77b7332f495c8cf52b3dbd76b7d99fce2f"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"

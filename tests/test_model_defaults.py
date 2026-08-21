@@ -605,23 +605,25 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert model_type_by_name("qwen-image-edit") is None
 
 
-#: The documents tensorfs#130 is authoring, and the SINGLE place to flip when
-#: the vendor bump lands. Each name here is a family whose endpoint CANNOT
+#: The documents tensorfs#130 owed, and the SINGLE place that had to be flipped
+#: when the vendor bump landed. **EMPTY AS OF rev 1da68d58** — all nine shipped
+#: and are vendored, so every Model class in the fleet can name a real
+#: contract. Three of the names differ from what this list predicted, which is
+#: exactly why the helper below refuses an unlisted absence rather than
+#: trusting a remembered spelling: musicgen is `musicgen.transformers-fp16`
+#: (not `.diffusers-bf16`), joycaption is `joycaption.llava-bf16`, and the two
+#: qwen documents are `qwen3.6-27b-mtp.gguf-ud-q4-k-xl` and
+#: `qwen3.6-35b-a3b.vllm-fp8`.
+#:
+#: Kept rather than deleted: it is the shape a future owed-document set is
+#: recorded in, and an empty frozenset makes the helper below assert that
+#: EVERY absence is now unexplained. Each name here is a family whose endpoint CANNOT
 #: declare `lanes=` today and is therefore refused at import (pgw#1599) —
 #: which is the whole reason tensorfs#130 is sequenced ahead of se#816's
 #: fleet migration. Delete a row when its document is vendored; the
 #: assertions below go red if you delete one that is not there yet, or leave
 #: one that is.
-TENSORFS_130_OWED: frozenset[str] = frozenset({
-    "anima.diffsynth-bf16",
-    "rife.flownet-fp32",           # ONE document, three drifted declarations
-    "musicgen.diffusers-bf16",
-    "joycaption.diffusers-bf16",
-    "krea-2.diffusers-bf16",
-    "ltx-2-upsampler.diffusers-bf16",
-    "qwen3.6-mtp.gguf-native",
-    "qwen3.6-a3b.fp8",
-})
+TENSORFS_130_OWED: frozenset[str] = frozenset()  # tensorfs#130 SHIPPED all nine
 
 #: hunyuan3d-2.1 is NOT on that list and never will be by this route: its repo
 #: is PICKLE-only, so no safetensors-shaped document can describe it. The
@@ -714,7 +716,10 @@ def test_the_audio_roots_are_one_stable_audio_and_a_lane_less_musicgen() -> None
     assert model_type_by_name("foundation-1") is None
     assert model_type_by_name("musicgen") is MusicGen
 
-    assert _library_lacks("musicgen.diffusers-bf16")
+    # tensorfs#130: musicgen HAS a lane document now, and its name is
+    # `musicgen.transformers-fp16` — the checkpoint is a single-file
+    # transformers tree, not a diffusers one, so the format segment says so.
+    assert _library_has("musicgen.transformers-fp16")
     assert MusicGen.canonical_scheduler_config == {}
     # StableAudio DOES carry both, and the scheduler config is real (read from
     # the served manifest, identical on both checkpoints) rather than {}.
@@ -1166,13 +1171,21 @@ def test_the_lane_document_resolves_and_is_not_a_sentinel() -> None:
     assert len(contract.digest) == 64
 
 
-def test_the_upsampler_has_no_lane_document_and_no_sentinel() -> None:
-    """Absent is honest; a sentinel would be a standing lie with a to-do
-    attached. pgw#1599 makes the absence LOUD rather than quiet: there is no
-    `lanes=()` spelling left, so `Model[Ltx2Upsampler]` cannot be declared at
-    all until tensorfs#130 publishes `ltx-2-upsampler.*`."""
+def test_the_upsampler_now_HAS_its_lane_document() -> None:
+    """The full arc, in one assertion.
 
-    assert _library_lacks("ltx-2-upsampler.diffusers-bf16")
+    Absent was honest, and a `MissingContract` sentinel would have been a
+    standing lie with a to-do attached — so this type carried NOTHING. pgw#1599
+    then made the absence LOUD rather than quiet: with `lanes=()` deleted,
+    `Model[Ltx2Upsampler]` could not be declared AT ALL, which is what turned a
+    quiet gap into a blocking one. tensorfs#130 closed it by making a contract
+    CHEAP (generate-from-header) rather than optional, and the class can now
+    name a real document.
+
+    That sequence is the whole design in miniature: refuse the implicit, and
+    the refusal becomes the work list."""
+
+    assert _library_has("ltx-2-upsampler.diffusers-bf16")
 
 
 def test_the_scheduler_config_is_ltx_s_own_and_not_klein_s() -> None:
