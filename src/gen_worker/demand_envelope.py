@@ -209,11 +209,24 @@ def _upper_bound(annotation: Any, extras: Sequence[Any]) -> Optional[int]:
 
 
 def _fields(payload_type: Any) -> tuple[tuple[str, Any], ...]:
+    """``((field name, annotation), …)`` for a payload struct.
+
+    ``get_type_hints`` is tried first and the RAW ``__annotations__`` are the
+    fallback, because a payload whose forward references cannot be resolved
+    from this module's scope must lose its shape axes LOUDLY (an empty
+    envelope) rather than silently: the annotation objects msgspec already
+    resolved at class creation are usually right there, and reaching them is
+    the difference between an envelope and a zero.
+    """
+
     try:
         info = msgspec.inspect.type_info(payload_type)
     except Exception:  # noqa: BLE001 — a payload we cannot introspect has no envelope
         return ()
-    hints = typing.get_type_hints(payload_type, include_extras=True)
+    try:
+        hints = typing.get_type_hints(payload_type, include_extras=True)
+    except Exception:  # noqa: BLE001
+        hints = dict(getattr(payload_type, "__annotations__", {}) or {})
     return tuple(
         (field.name, hints.get(field.name))
         for field in getattr(info, "fields", ())

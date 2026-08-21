@@ -9,13 +9,16 @@ tested.
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Annotated, Any, List, cast
 
 import pytest
 
 from gen_worker import activity as activity_mod
 from gen_worker import demand_falsifier as falsifier
+import msgspec
+
 from gen_worker.demand import Basis, GiB, MiB, RequestShape, const, per_mp_batch
+from gen_worker.demand_envelope import Shape
 
 SHAPE = RequestShape(width=1024, height=1024, batch=2)
 FORMULA = const(GiB(1.2)) + per_mp_batch(MiB(220))
@@ -214,3 +217,101 @@ def test_measure_request_arena_is_inert_and_silent_with_no_card() -> None:
         pass
     assert arena[0].measured is False
     assert arena[0].driver_bytes == 0
+
+
+# --------------------------------------------------------------------------
+# THE PRODUCTION WIRING, exercised as production code
+#
+# Both halves are real methods called with real arguments. Without these the
+# banking path is only ever reached on a card, which this box does not have and
+# is not allowed to use — so the wiring would ship unverified while the module
+# under it was thoroughly green. That is the shape of a silent gap.
+# --------------------------------------------------------------------------
+
+
+def _lane_pair() -> tuple:
+    return ("sdxl.diffusers@1", "plain.bf16@1")
+
+
+#: A payload shaped exactly like sdxl's: an aspect ENUM over a bucket table and
+#: no `width` field anywhere. Module level, because that is where a real
+#: endpoint's payload lives.
+_BUCKETS = {"wide": (1536, 640), "square": (1024, 1024)}
+
+
+class _In(msgspec.Struct):
+    aspect: Annotated[str, Shape(pixels=_BUCKETS)] = "square"
+
+
+def test_the_serve_loop_builds_a_HALF_record_from_the_real_declaration() -> None:
+    """`ServeLoop._pending_demand` reads the formula through
+    `model_declared_lanes` — pgw#1599's one read surface — and the request's
+    shape through the platform extractor."""
+
+    from gen_worker import Model, lane
+    from gen_worker.models import SDXL
+    from gen_worker.serving.serve_loop import ServeLoop
+
+    class _M(Model[SDXL], lanes={_lane_pair(): lane(request=FORMULA)}):
+        def load(self, ctx: Any) -> None: ...
+
+    class _Spec:
+        model_params = (("model", _M),)
+
+    class _Stub:
+        def _lane_of(self, cls: type) -> tuple:
+            return None, "sdxl.diffusers@1+plain.bf16@1"
+
+    arena = _arena(GiB(2))
+    unbound = cast(Any, ServeLoop._pending_demand)
+    pending = unbound(_Stub(), _Spec(), _In(aspect="wide"), arena)
+    assert pending is not None
+    assert pending.lane == "sdxl.diffusers@1+plain.bf16@1"
+    assert pending.shape.width == 1536 and pending.shape.height == 640
+    assert pending.demand.coefficients() == FORMULA.coefficients()
+
+    # And an UNMEASURED arena produces no record at all, so a cardless box
+    # cannot manufacture a sample.
+    assert unbound(_Stub(), _Spec(), _In(), falsifier.MeasuredArena()) is None
+
+
+def test_the_worker_adds_the_REGIME_off_the_lane_metric_it_already_emits(
+    wire: List[tuple],
+) -> None:
+    """One producer for the metric and the sample key.
+
+    `_served_lane` renders `"<body>+compiled"` / `"+eager"`; `_bank_demand`
+    reads the regime off that same string, so the metric a hub reader sees and
+    the regime the miss is filed under cannot disagree.
+    """
+
+    from gen_worker.serving.serve_loop import PendingDemand
+    from gen_worker.worker import Worker
+
+    pending = PendingDemand(
+        lane="sdxl.diffusers@1+plain.bf16@1",
+        demand=FORMULA, shape=SHAPE, measured=_arena(PREDICTED + MiB(32)),
+    )
+    cast(Any, Worker._bank_demand)(
+        object(), pending, "sdxl.diffusers-bf16@1+compiled", solo=True,
+    )
+    (row,) = falsifier.banked()
+    assert row.regime == "compiled" and row.misses == 1
+    assert wire[-1][1].endswith("|p0_stamp_defect")
+
+
+def test_a_CONCURRENT_request_banks_NOTHING(wire: List[tuple]) -> None:
+    """Both halves are ambiguous when jobs overlap — the dispatch counter is
+    per-worker (which is why `_served_lane` already withholds the suffix) and
+    the arena measurement is per-process. An unbanked request is a smaller loss
+    than a sample attributed to the wrong lane."""
+
+    from gen_worker.serving.serve_loop import PendingDemand
+    from gen_worker.worker import Worker
+
+    pending = PendingDemand(
+        lane="L", demand=FORMULA, shape=SHAPE, measured=_arena(GiB(40)),
+    )
+    cast(Any, Worker._bank_demand)(object(), pending, "sdxl.diffusers-bf16@1", solo=False)
+    assert falsifier.banked() == ()
+    assert not wire
