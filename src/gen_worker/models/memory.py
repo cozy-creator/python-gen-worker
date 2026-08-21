@@ -32,7 +32,7 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import msgspec
 
@@ -1492,6 +1492,190 @@ def _execution_device() -> Any:
 _LAST_RESERVE: Dict[str, Any] = {}
 
 
+def _component_declaration(pipeline: Any) -> List[Any]:
+    """The endpoint's components as a DECLARATION: name, bytes, phase, pinned.
+
+    This is the whole author-visible vocabulary of the grant seam (pgw#1602 /
+    varena#10). Today it is DERIVED from the live pipeline rather than written
+    by the author, because that is what the 26 shipped endpoints give us — but
+    the derivation is the only thing that changes when they start declaring, and
+    nothing downstream of here knows the difference.
+
+    ``phase`` is the execution order diffusers already publishes
+    (``model_cpu_offload_seq``), which is exactly the STATIC phase sequence the
+    paging schedule wants: varena needs no tracing machinery to prefetch because
+    the plan is known (varena#10, the ZeRO-Infinity steal-list entry).
+
+    ``pinned`` is the union of "must not move" (dtype-fragile VAEs, content-
+    shared encoders) and "cannot be ENTERED by a forward hook" — diffusers calls
+    ``self.vae.decode(...)``, not ``forward``, so a parked VAE never onloads.
+    pgw#1619 ruled that a REFUSAL rather than a second hook, and this is where
+    that refusal is now stated up front instead of discovered by the planner.
+    """
+    from .grant import ComponentDecl
+    from .partial_resident import (
+        _named_components_of,
+        _pipeline_component_names,
+        method_driven_components,
+    )
+
+    order = _pipeline_component_names(pipeline)
+    phase_of = {name: i for i, name in enumerate(order)}
+    pinned = set(unhookable_components(pipeline)) | set(
+        method_driven_components(pipeline))
+    decls = []
+    for name, module in _named_components_of(pipeline):
+        nbytes = module_storage_bytes(module)
+        if nbytes <= 0:
+            continue
+        decls.append(
+            ComponentDecl(
+                name=name,
+                weight_bytes=int(nbytes),
+                phase=phase_of.get(name, len(order)),
+                pinned=name in pinned,
+            )
+        )
+    return decls
+
+
+def _grant_for_pipeline(
+    pipeline: Any,
+    log: logging.Logger,
+    *,
+    peak_vram_gb: Optional[float] = None,
+    model_size_gb: Optional[float] = None,
+    regime: str = "eager",
+    compiled_demand_bytes: int = 0,
+) -> Tuple[Any, Any]:
+    """Ask for a grant. Returns ``(grant, streamed_plan)``, or ``(None, None)``.
+
+    ``None`` is the answer whenever the DECLARATION cannot be built — no CUDA,
+    an unreadable card, a tree the sizer cannot walk. Those are the cases
+    ``select_auto_mode``'s zero-cause branching exists for and the grant does not
+    model them; it decides RESIDENCY, and residency is not a question you can ask
+    of a card you cannot read. It never raises: this sits on the load path of
+    every pipeline, and a decider that raises takes out placements that work.
+
+    ``streamed_plan`` is the ``ResidencyPlan`` the selector produced when the
+    grant came back streamed, carried out so the probe loop does not have to
+    re-derive it.
+    """
+    try:
+        from .grant import RequestArena, Spendable, plan_grant
+        from .partial_resident import (
+            _placement_attribution,
+            method_driven_components,
+            plan_for_pipeline,
+        )
+
+        free_gb = get_available_vram_gb()
+        if free_gb <= 0.0:
+            return None, None
+        decls = _component_declaration(pipeline)
+        if not decls:
+            return None, None
+
+        # The two halves of the money, split the way pgw#1627 proved they must
+        # be: driver_free is what a new allocation gets, cache is reserved-but-
+        # unallocated inside torch's allocator. Eager may spend both; AOTI's
+        # first-call pool lives outside the allocator and may spend only the
+        # first. `_placement_attribution` is best-effort — a card that will not
+        # answer contributes zero cache, which is the conservative direction.
+        try:
+            import torch as _t
+
+            attr = _placement_attribution(_t)
+            cache_bytes = int(attr.get("attr_cache_bytes", 0) or 0)
+        except Exception:  # noqa: BLE001
+            cache_bytes = 0
+        spendable = Spendable(
+            driver_free_bytes=int(free_gb * _GIB),
+            allocator_cache_bytes=cache_bytes,
+        )
+
+        # THE REQUEST ARENA, and this is where two 2 GiB guesses became one
+        # number with a stated basis. `peak_vram_gb` is a TOTAL requirement, so
+        # the activation share is what it asks for beyond the weights. Nothing
+        # declares it today (measured: 0 of 26 endpoints), so the live answer is
+        # `cold()` — ask for the probe floor and let the CARD decide, rather than
+        # reserve 2 GiB against a shape nobody measured. The probe is the
+        # measurement, it already exists, and it is why this rung was never
+        # estimate-first in the first place.
+        request = RequestArena.cold()
+        if peak_vram_gb is not None and peak_vram_gb > 0.0:
+            weights_gb = (
+                model_size_gb if model_size_gb is not None
+                else estimate_pipeline_size_gb(pipeline)
+            )
+            declared = max(0.0, float(peak_vram_gb) - float(weights_gb))
+            if declared > 0.0:
+                request = RequestArena(
+                    bytes=int(declared * _GIB),
+                    basis="declared",
+                    compiled_extra_bytes=(
+                        int(compiled_demand_bytes) if compiled_demand_bytes else None
+                    ),
+                )
+        elif compiled_demand_bytes:
+            request = RequestArena(
+                bytes=request.bytes,
+                basis=request.basis,
+                compiled_extra_bytes=int(compiled_demand_bytes),
+            )
+
+        captured: Dict[str, Any] = {}
+
+        def _selector(components: Any, *, budget_bytes: int) -> Tuple[str, ...]:
+            # The SEARCH stays where it is measured and tested: minimum BYTES
+            # moved, never minimum count, denoiser never a candidate.
+            plan = plan_for_pipeline(
+                pipeline,
+                budget_bytes=int(budget_bytes),
+                free_bytes=int(free_gb * _GIB),
+                sizer=lambda m: module_storage_bytes(m),
+                forced_resident=(
+                    list(unhookable_components(pipeline))
+                    + list(method_driven_components(pipeline))
+                ),
+            )
+            captured["plan"] = plan
+            return tuple(plan.offloaded) if plan.fits else ()
+
+        grant = plan_grant(
+            decls,
+            spendable=spendable,
+            request=request,
+            compile_intent=(regime == "compiled"),
+            stream_selector=_selector,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "low_vram: could not plan a grant (%s: %s); falling back to the "
+            "free-VRAM walk", type(exc).__name__, exc,
+        )
+        return None, None
+    return grant, captured.get("plan")
+
+
+def _resident_flavor(pipeline: Any, requirement_gb: float) -> str:
+    """``off`` vs ``vae_only`` for a grant that came back fully resident.
+
+    BOTH are resident; this refinement only toggles VAE slicing, which changes
+    the traced decode graph class and hence the compiled object set a mint
+    proves. It stays keyed on the card's TOTAL capacity — a per-SKU constant —
+    never on live free VRAM, because the live margin hovering at this threshold
+    split one identical L4 fleet's mints 6/13 into off/vae_only cohorts
+    (pgw#750). The GRANT decides residency; this decides a graph class, and the
+    two must not be keyed on the same number.
+    """
+    total = get_total_vram_gb()
+    if total > 0.0:
+        sku_usable = max(0.0, total - GPU_VRAM_OVERHEAD_GB - _DEFAULT_SAFETY_MARGIN_GB)
+        return "off" if (sku_usable - requirement_gb) >= _DEFAULT_OFF_HEADROOM_GB else "vae_only"
+    return "vae_only"
+
+
 def _plan_partial_resident(
     pipeline: Any, log: logging.Logger, *, min_moved_bytes: int = 0,
     peak_vram_gb: Optional[float] = None, model_size_gb: Optional[float] = None,
@@ -2510,11 +2694,48 @@ def apply_low_vram_config(
             type(exc).__name__, exc)
 
     effective_mode = mode
+    grant = None
+    grant_plan = None
     if effective_mode == "auto":
-        effective_mode = select_auto_mode(
-            pipeline=pipeline, model_size_gb=model_size_gb, peak_vram_gb=peak_vram_gb,
+        # THE GRANT SEAM (pgw#1602 / varena#10). One decision, one reserve, one
+        # place. It replaces the FIT half of `select_auto_mode` and both of the
+        # lease-driven UPGRADE branches below, which between them asked the same
+        # question — does this fit resident — three times against three different
+        # margins, with an explicit rule that none of them may overrule another
+        # ("a fit decision `select_auto_mode` already made against a different
+        # margin. Do not overrule it from here."). That rule is what left the
+        # anima serve pinned at 6102 MiB on a card ComfyUI ran fully resident at
+        # 6778-7226 MiB, 20-37% faster, four times, with no OOM (varena#3).
+        #
+        # `select_auto_mode` keeps everything the grant does not model: the
+        # zero-cause branching (no CUDA vs unreadable are different facts and get
+        # different answers, pgw#940) and the unknown-model-size walk.
+        grant, grant_plan = _grant_for_pipeline(
+            pipeline, log,
+            peak_vram_gb=peak_vram_gb, model_size_gb=model_size_gb,
+            regime=regime, compiled_demand_bytes=int(compiled_demand_bytes),
         )
-        log.info("low_vram: auto-selected mode=%s", effective_mode)
+        if grant is not None:
+            log.info("low_vram: %s", grant.line())
+            if grant.fully_resident:
+                requirement = (
+                    model_size_gb if model_size_gb is not None
+                    else estimate_pipeline_size_gb(pipeline)
+                )
+                if peak_vram_gb is not None and peak_vram_gb > 0.0:
+                    requirement = max(requirement, float(peak_vram_gb))
+                effective_mode = _resident_flavor(pipeline, requirement)
+            else:
+                effective_mode = "partial_resident"
+            log.info("low_vram: grant-selected mode=%s", effective_mode)
+        else:
+            effective_mode = select_auto_mode(
+                pipeline=pipeline, model_size_gb=model_size_gb,
+                peak_vram_gb=peak_vram_gb,
+            )
+            log.info(
+                "low_vram: auto-selected mode=%s (no grant — the card could not "
+                "be read or the tree could not be declared)", effective_mode)
     if effective_mode in ("group_offload", "sequential") and getattr(
         pipeline, "_cozy_gguf_quant", None
     ):
@@ -2534,9 +2755,16 @@ def apply_low_vram_config(
     # leaves. The budget is the SMALLER of the lease and what the card actually
     # has free: both are facts, and admitting more than the card holds would
     # OOM under a lease that was written when the card was emptier.
-    if effective_mode in ("model_offload", "group_offload", "sequential") and int(
-        stream_budget_bytes
-    ) > 0:
+    #
+    # ⚠️ SUPERSEDED BY THE GRANT for every load the grant could decide, and gated
+    # on that rather than deleted in this change: the grant does not model the
+    # zero-cause / unknown-size walk, so a load that fell through to
+    # `select_auto_mode` still needs the upgrade it always had. This branch dies
+    # with the rest of the ladder when the declaration covers those cases too —
+    # named in pgw#1602's deletion list, not left as a second decider.
+    if grant is None and effective_mode in (
+        "model_offload", "group_offload", "sequential"
+    ) and int(stream_budget_bytes) > 0:
         headroom = int(
             max(0.0, get_available_vram_gb() - _DEFAULT_SAFETY_MARGIN_GB) * _GIB
         )
@@ -2572,13 +2800,23 @@ def apply_low_vram_config(
     # non-raising allocator to thrash inside, and no except-OOM retry — an OOM
     # in a compiled graph is process death, so before the weights land is the
     # only honest place to decide.
-    partial_resident_plan = None
-    if effective_mode == "model_offload":
+    partial_resident_plan = grant_plan
+    if grant is None and effective_mode == "model_offload":
         partial_resident_plan = _plan_partial_resident(
             pipeline, log, peak_vram_gb=peak_vram_gb, model_size_gb=model_size_gb,
         )
         if partial_resident_plan is not None:
             effective_mode = "partial_resident"
+    if effective_mode == "partial_resident" and partial_resident_plan is None:
+        # The grant said stream but the search could not name a set the card
+        # accepts. The coarse rung is the honest answer, not a resident
+        # placement — and it is a fall-through, not a refusal: varena always
+        # says yes, so what changes here is HOW the bytes move, never whether
+        # the load proceeds.
+        log.info(
+            "low_vram: the grant asked for a streamed set the search could not "
+            "produce; falling to model_offload")
+        effective_mode = "model_offload"
 
     applied: Dict[str, Any] = {
         "mode": effective_mode,

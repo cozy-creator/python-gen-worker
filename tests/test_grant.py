@@ -1,0 +1,436 @@
+"""The grant seam's admission rule, on a cardless box.
+
+Every number in this file is a BANKED MEASUREMENT with a tracker citation, not a fixture
+invented to make an assertion pass. The decision is the part of the memory system that has
+been wrong, so it is the part that has to be falsifiable without a GPU window.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from gen_worker.models.grant import (
+    COMPILED,
+    EAGER,
+    RESIDENT,
+    STREAMED,
+    ComponentDecl,
+    Grant,
+    RequestArena,
+    Spendable,
+    plan_grant,
+)
+
+MIB = 1 << 20
+GIB = 1 << 30
+
+# --- the banked substrate ------------------------------------------------------------------
+# RTX 4070 Laptop, 8188 MiB total / 7803 MiB usable (7.62 GiB). varena#3, 2026-08-21.
+#
+# anima head-to-head: ComfyUI served the identical 1024x1024/20-step/CFG request FULLY
+# RESIDENT at a 6778-7226 MiB peak across four legs with no OOM, and ran 20-37% faster than
+# our budget-fed arm, whose peak pinned at 6102 MiB in every leg.
+ANIMA_FULLY_RESIDENT_PEAK = 7226 * MIB
+ANIMA_BUDGET_FED_PEAK = 6102 * MIB
+
+# The card's free bytes are taken FROM THE DEMONSTRATION rather than from a baseline reading:
+# ComfyUI reached a 7226 MiB peak on this card without an OOM, so the card had at least that
+# much to give. Nothing is inferred and no baseline is assumed.
+CARD_FREE = ANIMA_FULLY_RESIDENT_PEAK
+
+# pgw#1586's GREEN arm: SDXL, weights pinned for the process's life, 7540 MiB peak over
+# 5693 MiB of resident weights => 1847 MiB of activations under the fully-resident allocator
+# regime (fragmentation the offloaded rung never pays).
+SDXL_WEIGHTS = 5693 * MIB
+SDXL_ACTIVATIONS = 1847 * MIB
+
+# pgw#1627: AOTI's first-call pool, allocated OUTSIDE torch's caching allocator. sdxl sm_89,
+# 4/4 runs, batch-invariant.
+AOTI_FIRST_CALL = 1154 * MIB
+
+
+def anima_components(weights: int) -> list[ComponentDecl]:
+    """A three-component pipeline shaped like anima: denoiser, text encoder, VAE."""
+    te = int(weights * 0.22)
+    vae = int(weights * 0.06)
+    # The denoiser takes the remainder so the split is EXACT — a test that loses two bytes to
+    # truncation cannot assert against a measured peak.
+    return [
+        ComponentDecl("transformer", weights - te - vae, phase=1),
+        ComponentDecl("text_encoder", te, phase=0),
+        ComponentDecl("vae", vae, phase=2, pinned=True),
+    ]
+
+
+def cheapest_streamed(components, *, budget_bytes):
+    """A stand-in for `partial_resident.plan_component_residency`: page out the smallest
+    unpinned non-denoiser components until the resident set fits. The real search is that
+    function; this one only has to be honest enough to exercise the seam."""
+    movable = sorted(
+        (c for c in components if not c.pinned and c.phase != 1),
+        key=lambda c: c.weight_bytes,
+    )
+    resident = sum(c.weight_bytes for c in components)
+    out = []
+    for c in movable:
+        if resident <= budget_bytes:
+            break
+        out.append(c.name)
+        resident -= c.weight_bytes
+    return out
+
+
+# --- the case the whole redesign exists for ------------------------------------------------
+
+
+def test_full_residency_is_granted_where_comfyui_demonstrated_it_fits():
+    """THE anima self-harm case, in one assertion.
+
+    ComfyUI ran this exact request fully resident at a 7226 MiB peak on this card, four
+    times, without an OOM, 20-37% faster than we did. Our decider refused full
+    residency and pinned at 6102 MiB. A grant that does not come back RESIDENT here has
+    reproduced the defect.
+    """
+    # Weights are sized so that weights + the cold request arena is EXACTLY the peak ComfyUI
+    # demonstrated. No number is invented: the demand under test is the measured peak.
+    weights = ANIMA_FULLY_RESIDENT_PEAK - RequestArena.cold().bytes
+    g = plan_grant(
+        anima_components(weights),
+        spendable=Spendable(driver_free_bytes=CARD_FREE),
+        request=RequestArena.cold(),
+        stream_selector=cheapest_streamed,
+    )
+    assert g.fully_resident, g.line()
+    assert g.regime == EAGER
+    assert set(g.residency.values()) == {RESIDENT}
+    assert g.streamed_bytes == 0
+    # And the grant spends the card it was given, rather than a number below it: the granted
+    # occupancy is the demonstrated peak, which is 1124 MiB more of the card than our own
+    # budget-fed arm used — and that arm was the slower one.
+    assert g.resident_bytes + g.request_bytes == ANIMA_FULLY_RESIDENT_PEAK
+    assert g.resident_bytes + g.request_bytes > ANIMA_BUDGET_FED_PEAK
+
+
+def test_the_old_two_gib_reserve_is_what_refused_it():
+    """The falsifier for the claim above: reintroduce the deleted guess and the same card,
+    the same weights and the same measurement stop granting full residency.
+
+    This is not testing a code path — it is pinning WHY the constant had to go, so a later
+    reader cannot restore it as a safety improvement without seeing what it costs.
+    """
+    weights = ANIMA_FULLY_RESIDENT_PEAK - RequestArena.cold().bytes
+    two_gib_guess = RequestArena(bytes=2 * GIB, basis="declared")
+    g = plan_grant(
+        anima_components(weights),
+        spendable=Spendable(driver_free_bytes=CARD_FREE),
+        request=two_gib_guess,
+        stream_selector=cheapest_streamed,
+    )
+    assert not g.fully_resident
+    assert g.streamed, "the 2 GiB guess pages components the card had room for"
+
+
+# --- the admission rule ---------------------------------------------------------------------
+
+
+def test_compiled_requires_full_residency_and_driver_free_alone():
+    """COMPILED IFF FULLY RESIDENT — and the AOTI pool must fit in driver_free, never cache.
+
+    Cache is eager-spendable money. The same demand admits compiled when driver_free covers
+    it and does NOT when only the cache makes up the difference; that difference is what
+    killed every 8 GiB compiled-SDXL leg.
+    """
+    comps = [ComponentDecl("unet", SDXL_WEIGHTS, phase=1)]
+    req = RequestArena(
+        bytes=SDXL_ACTIVATIONS, basis="measured", compiled_extra_bytes=AOTI_FIRST_CALL
+    )
+    need = SDXL_WEIGHTS + SDXL_ACTIVATIONS + AOTI_FIRST_CALL
+
+    ok = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=need),
+        request=req,
+        compile_intent=True,
+        stream_selector=cheapest_streamed,
+    )
+    assert ok.regime == COMPILED
+    assert ok.headroom_basis == "driver_free"
+    assert ok.fully_resident
+
+    # Same total money, but half of it is allocator cache. AOTI cannot spend it.
+    split = plan_grant(
+        comps,
+        spendable=Spendable(
+            driver_free_bytes=need - AOTI_FIRST_CALL,
+            allocator_cache_bytes=AOTI_FIRST_CALL,
+        ),
+        request=req,
+        compile_intent=True,
+        stream_selector=cheapest_streamed,
+    )
+    assert split.regime == EAGER, split.line()
+    assert split.headroom_basis == "free+cache"
+    # The eager arm may spend the cache, so it still gets full residency here.
+    assert split.fully_resident
+
+
+def test_an_unmeasured_compile_intent_is_eager_and_says_so():
+    """No stamp, no compiled admit — structurally, and NAMED.
+
+    A mid-graph OOM in a compiled artifact is process death, so "we did not measure it" can
+    never be spent as "it probably fits". The note is the point: pgw#1627's lesson is that a
+    branch nobody reaches reports as a branch that passed.
+    """
+    comps = [ComponentDecl("unet", 1 * GIB, phase=1)]
+    g = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=64 * GIB),
+        request=RequestArena.cold(),
+        compile_intent=True,
+        stream_selector=cheapest_streamed,
+    )
+    assert g.regime == EAGER
+    assert g.fully_resident
+    assert any("compiled not admitted" in n for n in g.notes), g.notes
+
+    # A measured request peak alone is still not enough: the mint stamp is the other half.
+    half = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=64 * GIB),
+        request=RequestArena(bytes=1 * GIB, basis="measured"),
+        compile_intent=True,
+        stream_selector=cheapest_streamed,
+    )
+    assert half.regime == EAGER
+    assert any("mint demand stamp" in n for n in half.notes), half.notes
+
+
+def test_compiled_is_refused_when_anything_would_be_streamed():
+    """Full residency is NECESSARY. A grant that pages one component is eager, whatever the
+    lane wanted and however good the stamp is."""
+    comps = anima_components(6 * GIB)
+    g = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=5 * GIB),
+        request=RequestArena(bytes=512 * MIB, basis="measured", compiled_extra_bytes=AOTI_FIRST_CALL),
+        compile_intent=True,
+        stream_selector=cheapest_streamed,
+    )
+    assert g.regime == EAGER
+    assert not g.fully_resident
+    assert STREAMED in g.residency.values()
+
+
+# --- varena always says yes -------------------------------------------------------------
+
+
+def test_a_demand_the_card_cannot_hold_still_gets_a_grant():
+    """varena always says yes. There is no `fits` field and no refusal to branch on.
+
+    What the caller gets instead is a grant with `over_card` set — an honest statement that
+    the reactive net (oom_ladder's tile and attention ladders) is what stands between this
+    and an OOM. Endpoint code never sees the difference.
+    """
+    comps = anima_components(40 * GIB)
+    g = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=4 * GIB),
+        request=RequestArena.cold(),
+        stream_selector=cheapest_streamed,
+    )
+    assert isinstance(g, Grant)
+    assert not hasattr(g, "refusal")
+    assert g.over_card, g.line()
+    assert g.line()  # the confession renders rather than raising
+
+
+def test_no_selector_still_yields_a_grant():
+    """A caller with nothing to page — one component, or no search wired — is not an error."""
+    g = plan_grant(
+        [ComponentDecl("unet", 40 * GIB, phase=1)],
+        spendable=Spendable(driver_free_bytes=4 * GIB),
+        request=RequestArena.cold(),
+    )
+    assert g.regime == EAGER
+    assert g.streamed_bytes == 0
+    assert g.over_card
+
+
+def test_a_pinned_component_is_never_streamed_even_if_the_selector_says_so():
+    """pgw#1619 ruled a method-driven component a REFUSAL rather than a second hook. Paging a
+    dtype-fragile VAE does not fail loudly — it produces black images — so a selector that
+    names one is overruled and the override is recorded."""
+    comps = anima_components(40 * GIB)
+
+    def bad_selector(components, *, budget_bytes):
+        return [c.name for c in components]
+
+    g = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=1 * GIB),
+        request=RequestArena.cold(),
+        stream_selector=bad_selector,
+    )
+    assert "vae" not in g.streamed
+    assert g.residency["vae"] == RESIDENT
+    assert any("refused" in n for n in g.notes), g.notes
+
+
+# --- the confession ------------------------------------------------------------------------
+
+
+def test_the_headroom_basis_can_go_red():
+    """`headroom_basis` shipped as a constant "free+cache" and could not report the bug it was
+    added to expose (pgw#1627). Both values must be reachable from the production entry
+    point, or the field is decoration."""
+    comps = [ComponentDecl("unet", 1 * GIB, phase=1)]
+    stamped = RequestArena(bytes=1 * GIB, basis="measured", compiled_extra_bytes=AOTI_FIRST_CALL)
+    compiled = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=64 * GIB),
+        request=stamped,
+        compile_intent=True,
+    )
+    eager = plan_grant(
+        comps, spendable=Spendable(driver_free_bytes=64 * GIB), request=RequestArena.cold()
+    )
+    assert {compiled.headroom_basis, eager.headroom_basis} == {"driver_free", "free+cache"}
+
+
+def test_the_line_names_every_input_not_the_verdict():
+    comps = anima_components(6 * GIB)
+    g = plan_grant(
+        comps,
+        spendable=Spendable(driver_free_bytes=5 * GIB, allocator_cache_bytes=256 * MIB),
+        request=RequestArena.cold(),
+        stream_selector=cheapest_streamed,
+    )
+    line = g.line()
+    for token in ("regime=", "weights=", "request=", "spendable=", "probe", "free+cache"):
+        assert token in line, line
+
+
+@pytest.mark.parametrize("regime,extra", [(EAGER, 0), (COMPILED, AOTI_FIRST_CALL)])
+def test_the_request_arena_demand_is_regime_split(regime, extra):
+    req = RequestArena(bytes=512 * MIB, basis="measured", compiled_extra_bytes=AOTI_FIRST_CALL)
+    assert req.demand(regime) == 512 * MIB + extra
+
+
+# --- THE WIRING, and it is the half that shipped dead last time -----------------------------
+#
+# pgw#1627's lesson, verbatim from the tracker: "'Both guards proven red-able' was true of the
+# FUNCTION and false of the WIRING — the green-test-on-an-unreached-seam class." Every test
+# above exercises `plan_grant` directly. On a cardless box `apply_low_vram_config` never
+# reaches it (the grant returns None when free VRAM reads 0 and the old walk takes over), so
+# without the tests below this whole module would be green and unreached in production.
+
+import logging  # noqa: E402
+from typing import Any, cast  # noqa: E402
+
+import torch  # noqa: E402
+from diffusers import DiffusionPipeline  # noqa: E402
+from diffusers.configuration_utils import ConfigMixin, register_to_config  # noqa: E402
+from diffusers.models.modeling_utils import ModelMixin  # noqa: E402
+
+
+class _Block(ModelMixin, ConfigMixin):
+    @register_to_config
+    def __init__(self, width: int = 8):
+        super().__init__()
+        self.lin = torch.nn.Linear(width, width)
+
+    def forward(self, x):
+        return self.lin(x)
+
+
+class _ThreeStagePipeline(DiffusionPipeline):
+    model_cpu_offload_seq = "text_encoder->unet->vae"
+    text_encoder: Any
+    unet: Any
+    vae: Any
+
+    def __init__(self, text_encoder: Any, unet: Any, vae: Any) -> None:
+        super().__init__()
+        cast(Any, self).register_modules(text_encoder=text_encoder, unet=unet, vae=vae)
+
+
+def _pipe():
+    return _ThreeStagePipeline(_Block(8), _Block(16), _Block(4))
+
+
+def _with_card(monkeypatch, free_gb: float, total_gb: float = 24.0):
+    """Present a readable card to `memory`. Without this every test in this file that goes
+    through the production entry point silently exercises the fallback instead."""
+    import gen_worker.models.memory as m
+
+    monkeypatch.setattr(m, "get_available_vram_gb", lambda *a, **k: free_gb)
+    monkeypatch.setattr(m, "get_total_vram_gb", lambda *a, **k: total_gb)
+    monkeypatch.setattr(m, "unhookable_components", lambda *a, **k: [])
+    return m
+
+
+def test_the_production_entry_point_actually_reaches_the_grant(monkeypatch):
+    """The wiring guard. A readable card must produce a GRANT, not the free-VRAM walk."""
+    m = _with_card(monkeypatch, free_gb=24.0)
+    seen = {}
+    real = m._grant_for_pipeline
+
+    def spy(*a, **k):
+        g, p = real(*a, **k)
+        seen["grant"] = g
+        return g, p
+
+    monkeypatch.setattr(m, "_grant_for_pipeline", spy)
+    monkeypatch.setattr(
+        m, "select_auto_mode",
+        lambda **k: pytest.fail("the free-VRAM walk ran; the grant seam was not reached"),
+    )
+    applied = m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
+    assert seen.get("grant") is not None
+    assert seen["grant"].fully_resident
+    assert applied["mode"] in ("off", "vae_only")
+
+
+def test_the_wiring_guard_can_go_red(monkeypatch):
+    """Falsification, in the file rather than in a scratch edit: an UNREADABLE card must take
+    the fallback. If this passes while the test above also passes, both are measuring
+    something real; if the seam were unreachable, this would be the only reachable path."""
+    m = _with_card(monkeypatch, free_gb=0.0)
+    walked = []
+    monkeypatch.setattr(
+        m, "select_auto_mode", lambda **k: walked.append(1) or "group_offload"
+    )
+    m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
+    assert walked, "an unreadable card must fall through to the free-VRAM walk"
+
+
+def test_a_tiny_card_streams_through_the_grant_and_not_the_upgrade_branch(monkeypatch):
+    """The other side of the seam: when the grant cannot give full residency it selects the
+    streamed set, and the lease-driven UPGRADE branches must NOT also fire. Two deciders for
+    one question is the defect this issue exists to remove."""
+    m = _with_card(monkeypatch, free_gb=0.000_5, total_gb=24.0)
+    monkeypatch.setattr(
+        m, "_plan_partial_resident",
+        lambda *a, **k: pytest.fail("the legacy partial_resident upgrade ran beside the grant"),
+    )
+    applied = m.apply_low_vram_config(
+        _pipe(), mode="auto", logger=logging.getLogger("t"), stream_budget_bytes=1 << 20
+    )
+    # Whatever it lands on, it is NOT the lease upgrade — that branch is gated on `grant is
+    # None` now, and the fixture above would have failed the test if it had run.
+    assert applied["mode"] != "partial_stream"
+
+
+def test_the_declaration_marks_a_dtype_fragile_vae_pinned(monkeypatch):
+    """`pinned` is the author saying *never page this*. Today it is derived, and the derivation
+    has to keep carrying pgw#1619's refusal: diffusers drives the VAE by `.decode(...)`, so a
+    parked one never onloads."""
+    import gen_worker.models.memory as m
+
+    monkeypatch.setattr(m, "unhookable_components", lambda *a, **k: ["vae"])
+    decls = m._component_declaration(_pipe())
+    by_name = {d.name: d for d in decls}
+    assert by_name["vae"].pinned
+    assert not by_name["unet"].pinned
+    # And the phase order is diffusers' own published sequence, not an invention.
+    assert by_name["text_encoder"].phase < by_name["unet"].phase < by_name["vae"].phase
