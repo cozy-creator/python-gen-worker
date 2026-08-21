@@ -124,18 +124,42 @@ def test_the_envelope_serves_end_to_end_with_fake_tensors(tmp_path: Path) -> Non
     # is intact and is everything above this line: THE REQUEST SUCCEEDED on a
     # host with no CUDA device at all.
     #
-    # The warning half has ONE input now instead of two. This fixture's lanes
-    # are float32 stand-ins (CPU, fake weights), so `capability_floor_for_dtype`
-    # derives NO floor for them and there is no VRAM floor left to be under:
-    # the string that used to say `vram12g` is deleted, and the number that
-    # replaces it is COMPUTED from the lane's demand formula over the
-    # advertised shape envelope (pgw#1600), which is not wired yet.
+    # The warning half has ONE input now instead of two. The VRAM arm lost its
+    # input with the floor STRINGS (Paul: "there is no required VRAM"); the
+    # number that replaces it is COMPUTED from the lane's demand formula over
+    # the advertised shape envelope (pgw#1600) and is not wired yet.
     #
-    # So this asserts the honest present state — no floor declared, no
-    # shortfall reported — and the test below proves the surviving `min_sm`
-    # arm can still go RED, so a silently-dead instrument cannot hide here.
-    assert outcome.warnings == ()
-    assert not [row for row in outcome.adjustments if row["field"] == ""]
+    # The `min_sm` arm, though, now FIRES here — and it is right to.
+    # pgw#1621: this fixture used to declare `LaneRef("sdxl.diffusers-bf16@1",
+    # dtype=torch.float32)` — a lane NAMED bf16 carrying an author-typed
+    # float32 — and the old `warnings == ()` was bought by exactly that
+    # incoherence, not by the endpoint genuinely being an fp32 one. Under v2
+    # the dtype is not the fixture's to pick: it is `declared_dtype` on the
+    # ratified quant rule, and `spec/v2/rules/plain.bf16.v1.json` states
+    # `capability_floor_sm: 80`. So a real bf16 lane on a host with no CUDA
+    # device is a real shortfall, and the warning is the system working.
+    #
+    # THE HALF THAT MATTERS IS STILL EVERYTHING ABOVE THIS LINE: the request
+    # SUCCEEDED. This is the whole degrade-never-refuse ruling measured on the
+    # real serve path — it warns loudly, and it serves.
+    (warned,) = outcome.warnings
+    assert warned.startswith("DEGRADED PLACEMENT: cpu (no CUDA device)")
+    assert "sdxl.diffusers@1+plain.bf16@1 needs sm_80+" in warned
+    assert "Running anyway" in warned
+    # ONE row, not two: the unpack above is the assertion that the VRAM arm
+    # stayed quiet, and it is quiet for a stated reason rather than because the
+    # instrument is dead — `min_vram_gb` is deleted and pgw#1600 has not landed
+    # its computed replacement. `test_the_degraded_placement_warning_can_still
+    # _go_red` holds the other polarity: an h100 that MEETS the floor reports
+    # nothing, so an always-warning instrument cannot hide here either.
+    #
+    # And it reaches the caller through the ADJUSTMENT LEDGER — the field-less
+    # row `ctx.warn` writes — rather than a second channel beside it. That was
+    # asserted here as an absence while this fixture warned about nothing; it
+    # is asserted as the row itself now, which is the stronger form.
+    (placement,) = [row for row in outcome.adjustments if row["field"] == ""]
+    assert placement["reason"] == warned
+    assert (placement["requested"], placement["applied"]) == ("", "")
 
 
 def test_the_degraded_placement_warning_can_still_go_red(tmp_path: Path) -> None:

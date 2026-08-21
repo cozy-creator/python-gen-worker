@@ -82,7 +82,12 @@ def test_the_axis_is_the_imported_vocabulary_not_a_transcription() -> None:
     same-looking copy. This half of pgw#1252 is untouched by the v2 cut."""
     from gen_worker.convert import publish
 
-    assert publish.validate_file_layout is fl.validate_file_layout
+    # `getattr`, not attribute syntax: `publish` IMPORTS this name to use it
+    # and does not re-export it, so strict mypy is right to refuse
+    # `publish.validate_file_layout`. Putting it in `publish.__all__` to
+    # satisfy the checker would make the module claim a public export it does
+    # not have — the identity below is the claim, and it is unchanged.
+    assert getattr(publish, "validate_file_layout") is fl.validate_file_layout
     assert fl.KNOWN_FILE_LAYOUTS == {fl.MULTI_FILE, fl.SINGLE_FILE}
 
 

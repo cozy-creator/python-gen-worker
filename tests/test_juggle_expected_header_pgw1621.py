@@ -24,7 +24,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from gen_worker._vendor.tensorfs.layout2 import ExpectedHeader  # noqa: E402
+from gen_worker._vendor.tensorfs.layout2 import (  # noqa: E402
+    ExpectedHeader,
+    LayoutTensor,
+)
 from gen_worker.models.checkpoint_juggle import (  # noqa: E402
     LANE_VERDICT_DERIVABLE,
     LANE_VERDICT_INCOMPATIBLE,
@@ -299,19 +302,27 @@ def test_the_verdict_gate_runs_before_the_byte_diff(
 
 def test_the_arena_arm_refuses_the_v2_keywords() -> None:
     """One gate, two templates — and the keywords do not bleed. An arena layout
-    is this process's own allocation; there is no carried decision for it."""
+    is this process's own allocation; there is no carried decision for it.
 
-    class _Layout:
-        regions = ()
+    The template is a REAL `ArenaLayout`, not a duck-typed stand-in: the arm is
+    selected by `isinstance`, so a stand-in would exercise the fallthrough
+    rather than the arm it names.
+    """
+    from gen_worker.models.arena_residency import DEFAULT_GRANULARITY, ArenaLayout
 
-    assert admission_refusal(_Layout(), {}) is None
+    empty = ArenaLayout(
+        granularity=DEFAULT_GRANULARITY, regions=(), core_names=(),
+        virtual_bytes=0, weight_bytes=0,
+    )
+
+    assert admission_refusal(empty, {}) is None
     with pytest.raises(TypeError, match="ExpectedHeader arm"):
-        admission_refusal(_Layout(), {}, verdict=LANE_VERDICT_SATISFIES)
+        admission_refusal(empty, {}, verdict=LANE_VERDICT_SATISFIES)
     with pytest.raises(TypeError, match="ExpectedHeader arm"):
-        admission_refusal(_Layout(), {}, component="vae")
+        admission_refusal(empty, {}, component="vae")
 
 
-def _entry_for(expected: ExpectedHeader, key: str):
+def _entry_for(expected: ExpectedHeader, key: str) -> LayoutTensor:
     if len(expected.components) == 1:
         return next(iter(expected.components.values()))[key]
     component, _, rest = key.partition(".")
