@@ -25,7 +25,9 @@ _STAGING_POLL_S = 1.0
 
 _COLLECTIVE_TIMEOUT_S = 300.0
 
-_FIRST_COMMAND_WAIT_S = 1800.0
+# th#2267 §6 deleted _FIRST_COMMAND_WAIT_S = 1800.0 from here: a half-hour wall
+# that was referenced by nothing. A duration nobody reads is not a bound, it is
+# a claim about how the system behaves that no code has to honour.
 
 _STORE_CONNECT_TIMEOUT_S = 180.0
 
