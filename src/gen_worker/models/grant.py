@@ -16,6 +16,23 @@ moves, which is what lets a compiled artifact survive a residency change (pgw#16
 allocator and are never paged by us. The request arena is a NUMBER the weight arena must
 leave unspent, not a place bytes live. varena is never told about it.
 
+## The rule that governs both admissions
+
+**A placement that cannot be CAUGHT IN FLIGHT must be funded by a MEASUREMENT, never by a
+default.** pgw#1601 ruled this for compiled; it is not a fact about compiled graphs. Two
+placements here cannot be caught, for different reasons, and both take the same funding rule:
+
+* **compiled** — a mid-graph OOM inside an AOTI artifact is process death, never catchable
+  in-process (pgw#1255 leg 2). Funded by a mint-time demand stamp from a SUCCESSFUL run.
+* **fully resident** — nothing probes it. ``apply_component_residency``, which owns
+  ``probe_plan``, is reached only under ``partial_resident``. Funded by a banked per-endpoint
+  request peak.
+
+The STREAMED path is the one that IS probed — the worst onload is done once, free is read, the
+plan is parked back — which is why a cold arena may fund it and nothing else. In code:
+``RequestArena.funds_resident``, with ``funds_compiled`` defined as *that plus a stamp*, so
+the two cannot drift apart.
+
 ## The one admission rule
 
 **COMPILED IFF FULLY RESIDENT, ELSE EAGER-STREAMED.** There is no compiled-below-residency
