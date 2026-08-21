@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import json
 import subprocess
 import sys
@@ -242,10 +243,17 @@ def main(argv: list[str] | None = None) -> int:
     if hf:
         env["HF_TOKEN"] = hf
 
-    boot = (HERE / "pgw1548_pod_bootstrap.sh").read_text()
-    env["PGW1548_BOOT_B64"] = base64.b64encode(boot.encode()).decode()
+    # GZIP then base64. The bootstrap is heavily commented on purpose -- every
+    # launch fact this lane paid for is written where the next person will hit
+    # it -- and that pushed the plain base64 to 25 KB, which combined with the
+    # endpoint archive and the lock cache tripped the env ceiling below. The
+    # guard refused the launch rather than letting RunPod answer HTTP 500, so
+    # nothing was rented; the fix is to stop shipping the comments UNCOMPRESSED,
+    # not to delete them. Measured: 19,128 raw -> 25,504 b64 -> 9,956 gz+b64.
+    boot = (HERE / "pgw1548_pod_bootstrap.sh").read_bytes()
+    env["PGW1548_BOOT_GZ_B64"] = base64.b64encode(gzip.compress(boot, 9)).decode()
     start = ["/bin/bash", "-lc",
-             'printf %s "$PGW1548_BOOT_B64" | base64 -d > /pgw1548-boot.sh; '
+             'printf %s "$PGW1548_BOOT_GZ_B64" | base64 -d | gunzip > /pgw1548-boot.sh; '
              'bash /pgw1548-boot.sh; sleep infinity']
 
     body: dict = {
