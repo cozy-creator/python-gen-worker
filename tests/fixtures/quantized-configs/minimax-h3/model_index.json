@@ -1,0 +1,18 @@
+{
+  "_class_name": "MiniMaxH3ModularPipeline",
+  "_diffusers_version": "0.36.0.dev0",
+  "text_encoder": [
+    "transformers",
+    "Qwen3VLForConditionalGeneration",
+    {
+      "type_hint": [
+        "transformers",
+        "Qwen3VLForConditionalGeneration"
+      ],
+      "pretrained_model_name_or_path": "MiniMaxAI/MiniMax-H3",
+      "subfolder": "text_encoder",
+      "variant": null,
+      "revision": null
+    }
+  ]
+}

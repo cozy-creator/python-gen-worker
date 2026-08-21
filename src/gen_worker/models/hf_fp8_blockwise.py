@@ -217,6 +217,35 @@ def inspect_hf_fp8_blockwise(
         modules_to_not_convert=skip, units=tuple(units), files=files)
 
 
+def declares_quant_rule(quantization_config: Any) -> bool:
+    """Does this ``quantization_config`` DECLARE ``hf.fp8-blockwise@1``?
+
+    CONFIG ONLY — no header is read and no file beside ``config.json`` is
+    touched, which is what makes it usable from the meta skeleton
+    (pgw#1638): ``ctx.load`` builds from configs and never opens a tensor
+    container to find out what a class wants. The header verification stays
+    in :func:`inspect_hf_fp8_blockwise`, where a tree with bytes is present.
+
+    Takes the mapping out of ``config.json`` or the typed
+    ``FineGrainedFP8Config``; ``quant_method`` may be a plain string or
+    transformers' str-Enum, so the value is unwrapped before comparing.
+    """
+    qc = quantization_config
+    if qc is None:
+        return False
+    if isinstance(qc, dict):
+        read = qc.get
+    else:
+        def read(key: str, default: Any = None) -> Any:
+            return getattr(qc, key, default)
+    method = read("quant_method", "")
+    method = getattr(method, "value", method)
+    if str(method or "").lower() != QUANT_METHOD:
+        return False
+    raw = read("weight_block_size", None)
+    return isinstance(raw, (list, tuple)) and len(raw) == 2
+
+
 def detect_hf_fp8_blockwise(path: Path) -> Optional[HfFp8BlockwiseTree]:
     """The verified ``hf.fp8-blockwise@1`` tree at ``path``, or ``None``."""
     p = Path(path)
@@ -225,12 +254,7 @@ def detect_hf_fp8_blockwise(path: Path) -> Optional[HfFp8BlockwiseTree]:
     except (OSError, ValueError):
         return None
     qc = cfg.get("quantization_config") if isinstance(cfg, dict) else None
-    if not isinstance(qc, dict):
-        return None
-    if str(qc.get("quant_method", "")).lower() != QUANT_METHOD:
-        return None
-    raw = qc.get("weight_block_size")
-    if not (isinstance(raw, (list, tuple)) and len(raw) == 2):
+    if not isinstance(qc, dict) or not declares_quant_rule(qc):
         return None
     return inspect_hf_fp8_blockwise(p)
 
@@ -327,6 +351,7 @@ __all__ = [
     "HfFp8BlockwiseTree",
     "QUANT_RULE",
     "REFERENCE_DEQUANT",
+    "declares_quant_rule",
     "dequantize_block_scaled",
     "detect_hf_fp8_blockwise",
     "inspect_hf_fp8_blockwise",

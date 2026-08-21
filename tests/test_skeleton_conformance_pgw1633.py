@@ -39,6 +39,7 @@ NO WEIGHTS AND NO GPU. Every fill is a zero-storage `expand` of a scalar, so a
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
 
@@ -51,6 +52,22 @@ pytest.importorskip("transformers")
 from gen_worker.serving.streaming import skeleton  # noqa: E402
 
 CORPUS = Path(__file__).parent / "fixtures" / "checkpoint-configs"
+
+#: pgw#1638's corpus: trees whose component configs declare a QUANTIZATION.
+#: Separate from the fleet roster because its pipeline class is the
+#: endpoint's, not diffusers' — see the corpus README.
+QUANTIZED = Path(__file__).parent / "fixtures" / "quantized-configs"
+
+SCALE_LEAF = "weight_scale_inv"
+
+#: endpoint -> (component, the scale tensors its checkpoint carries, the
+#: module class the declared quantizer must produce). The COUNT is the
+#: incident's own number, not a shape chosen to pass: minimax-h3's conditioner
+#: is 51 layers x 7 quantized linears = 357, and 357 is exactly what the H200
+#: reported as orphaned.
+QUANTIZED_FLEET: Mapping[str, Tuple[str, int, str]] = {
+    "minimax-h3": ("text_encoder", 357, "FP8Linear"),
+}
 
 # THE ROSTER IS DATA, AND IT IS CHECKED. Coverage that can quietly shrink is
 # not coverage: deleting a fixture must turn this suite red, not green with
@@ -309,12 +326,263 @@ def test_the_corpus_carries_no_weights_pgw1633() -> None:
     in it is a mistake that must fail here, not in a review.
     """
     offenders: List[str] = []
-    for path in CORPUS.rglob("*"):
-        if not path.is_file():
-            continue
-        name = path.name.lower()
-        if name.endswith(".index.json"):
-            continue
-        if any(name.endswith(ext) for ext in (".safetensors", ".gguf", ".bin", ".pt", ".pth", ".ckpt")):
-            offenders.append(str(path.relative_to(CORPUS)))
+    for root in (CORPUS, QUANTIZED):
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            name = path.name.lower()
+            if name.endswith(".index.json"):
+                continue
+            if any(name.endswith(ext) for ext in (".safetensors", ".gguf", ".bin", ".pt", ".pth", ".ckpt")):
+                offenders.append(str(path.relative_to(root.parent)))
     assert not offenders, f"tensor containers in a config-only corpus: {offenders}"
+
+
+# ── the QUANTIZED arm (pgw#1638) ────────────────────────────────────────────
+#
+# pgw#1626 was "the meta skeleton is built from the config alone, so the
+# `from_pretrained` machinery never runs" costing `tie_weights()`. pgw#1638 is
+# the SAME SENTENCE costing `HfQuantizer.preprocess_model`: `cls(config)` left
+# 357 plain `nn.Linear` where `from_pretrained` leaves `FP8Linear`, so all 357
+# `weight_scale_inv` tensors in H3's fp8 conditioner named nothing and the load
+# died — deterministically, three attempts, on a rented H200.
+#
+# The tie arm above asks its question per architecture, from configs, for free.
+# This asks the quantizer's, the same way. Both are members of one family and
+# a third is presumably waiting; what makes the family statically detectable is
+# that a meta-built skeleton either has a home for every key the contract
+# declares or it does not, and configs are enough to know which.
+
+
+def _quantized_tree(endpoint: str) -> Path:
+    return QUANTIZED / endpoint
+
+
+def _scale_names(module: Any) -> List[str]:
+    return sorted(
+        name for name, _ in module.named_parameters(remove_duplicate=False)
+        if name.endswith(f".{SCALE_LEAF}")
+    )
+
+
+def test_the_quantized_corpus_is_exactly_the_declared_roster_pgw1638() -> None:
+    on_disk = {p.name for p in QUANTIZED.iterdir() if p.is_dir()}
+    assert on_disk == set(QUANTIZED_FLEET), (
+        "the quantized corpus and its roster disagree; "
+        f"on disk only: {sorted(on_disk - set(QUANTIZED_FLEET))}, "
+        f"declared only: {sorted(set(QUANTIZED_FLEET) - on_disk)}"
+    )
+
+
+@pytest.mark.parametrize("endpoint", sorted(QUANTIZED_FLEET))
+def test_the_meta_build_runs_the_declared_quantizer_pgw1638(endpoint: str) -> None:
+    """The fix: the swap happens, and the arithmetic closes on the incident.
+
+    `FP8Linear` is `nn.Linear`'s SUBCLASS, so `isinstance` would have been
+    green against the very bug this test exists to catch — the class is
+    compared by identity.
+    """
+    component, expected_scales, swapped_class = QUANTIZED_FLEET[endpoint]
+    module = skeleton.build_modules(_quantized_tree(endpoint))[component]
+
+    scales = _scale_names(module)
+    assert len(scales) == expected_scales, (
+        f"{endpoint}/{component}: {len(scales)} {SCALE_LEAF} parameter(s), "
+        f"expected {expected_scales} — the meta build no longer matches the "
+        f"key set this checkpoint carries"
+    )
+    swapped = {
+        type(module.get_submodule(name.rsplit(".", 1)[0])).__name__
+        for name in scales
+    }
+    assert swapped == {swapped_class}, (
+        f"{endpoint}/{component}: the quantized linears came up as {swapped}, "
+        f"not {{{swapped_class!r}}} — a plain `nn.Linear` here is pgw#1638"
+    )
+
+
+@pytest.mark.parametrize("endpoint", sorted(QUANTIZED_FLEET))
+def test_the_declared_key_set_leaves_nothing_on_meta_pgw1638(endpoint: str) -> None:
+    """Fill by the checkpoint's key set, retie, zero survivors — with the
+    scale tensors CONSUMED rather than orphaned."""
+    component, expected_scales, _ = QUANTIZED_FLEET[endpoint]
+    tree = _quantized_tree(endpoint)
+    aliases = _alias_map(skeleton.build_modules(tree)[component])
+
+    module = skeleton.build_modules(tree)[component]
+    filled = _fill(module, aliases)
+    assert filled > expected_scales, filled
+    skeleton.retie(module)
+    survivors = skeleton.meta_survivors(module)
+    assert survivors == (), (
+        f"{endpoint}/{component}: {len(survivors)} parameter(s) stay on meta "
+        f"after a checkpoint-shaped fill and retie: {survivors[:8]}"
+    )
+
+
+@pytest.mark.parametrize("endpoint", sorted(QUANTIZED_FLEET))
+def test_without_the_quantizer_step_the_incident_reproduces_pgw1638(
+    endpoint: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The red arm: neuter the quantizer step and the orphans are EXACTLY the
+    357-pattern — every one a `weight_scale_inv`, and no other key moves.
+
+    Asserted as the H200's own sentence: `N tensor(s) name nothing in
+    component 'text_encoder'`, all of them scales. A weaker "some keys are
+    unplaced" assertion would stay green under a swap that produced the wrong
+    module set.
+    """
+    component, expected_scales, _ = QUANTIZED_FLEET[endpoint]
+    tree = _quantized_tree(endpoint)
+    carried = set(_scale_names(skeleton.build_modules(tree)[component]))
+    assert len(carried) == expected_scales
+
+    monkeypatch.setattr(
+        skeleton, "_prepare_quantized",
+        lambda *args, **kwargs: None,
+    )
+    plain = skeleton.build_modules(tree)[component]
+    homes = {name for name, _ in plain.named_parameters(remove_duplicate=False)}
+    homes |= {name for name, _ in plain.named_buffers(remove_duplicate=False)}
+    orphans = carried - homes
+
+    assert orphans == carried, (
+        f"{endpoint}/{component}: with the quantizer step neutered "
+        f"{len(orphans)} of {len(carried)} scale tensor(s) name nothing — "
+        f"this arm no longer reproduces pgw#1638 and proves nothing about "
+        f"the fix"
+    )
+    assert all(name.endswith(f".{SCALE_LEAF}") for name in orphans)
+    assert not _scale_names(plain), (
+        "the neutered build still registered scale parameters, so the red arm "
+        "is not measuring the swap"
+    )
+
+
+#: (endpoint, component) -> the module class carrying live `Dropout(p>0)` in
+#: its config-built skeleton, with the count MEASURED at the time of writing
+#: for the record (73 for a T5-XXL/UMT5-XXL, 37 for a T5-XL). Every one is a
+#: T5-family conditioner, and every one was ARMED on the streaming path until
+#: pgw#1638 added `model.eval()`. The SET is checked in both directions — a
+#: new live-dropout component appearing is a failure, not a quieter suite —
+#: while the count is evidence rather than an assertion, so a library refactor
+#: does not fail a suite about eval mode.
+LIVE_DROPOUT: Mapping[Tuple[str, str], str] = {
+    ("flux.1-dev", "text_encoder_2"): "T5EncoderModel",       # 73 measured
+    ("flux.1-schnell", "text_encoder_2"): "T5EncoderModel",   # 73
+    ("foundation-1", "text_encoder"): "T5EncoderModel",       # 37
+    ("stable-audio-open", "text_encoder"): "T5EncoderModel",  # 37
+    ("wan-2.2", "text_encoder"): "UMT5EncoderModel",          # 73
+}
+
+
+def _live_dropouts(module: Any) -> int:
+    return sum(
+        1 for sub in module.modules()
+        if isinstance(sub, torch.nn.Dropout) and float(getattr(sub, "p", 0.0)) > 0.0
+    )
+
+
+@pytest.mark.parametrize("endpoint", sorted(FLEET))
+def test_every_declared_module_comes_off_meta_in_eval_mode_pgw1638(
+    endpoint: str,
+) -> None:
+    """The family's THIRD member, found by audit and not by a rental.
+
+    Both `from_pretrained` implementations end with `model.eval()` —
+    transformers' own source says why: "Set model in evaluation mode to
+    deactivate Dropout modules by default". A config-built module is in TRAIN
+    mode, and nothing on the streaming path ever changed it.
+    """
+    for name, module in skeleton.build_modules(_tree(endpoint)).items():
+        assert not module.training, (
+            f"{endpoint}/{name} ({type(module).__name__}) comes off the meta "
+            f"skeleton in TRAIN mode; `from_pretrained` would have returned it "
+            f"in eval, and this one carries {_live_dropouts(module)} live "
+            f"dropout module(s)"
+        )
+        for sub_name, sub in module.named_modules():
+            assert not sub.training, f"{endpoint}/{name}.{sub_name} is in train mode"
+
+
+def test_the_live_dropout_exposure_is_the_one_recorded_pgw1638() -> None:
+    """What train mode actually cost, measured — not asserted from memory.
+
+    Dropout with p=0 is a no-op, so "every component was in train mode" is
+    only alarming where a dropout is LIVE. These five are, they are every
+    T5/UMT5 conditioner on the fleet, and each was randomizing its
+    conditioning on every request. The roster is pinned so a new one cannot
+    appear silently.
+    """
+    found: Dict[Tuple[str, str], str] = {}
+    for endpoint in sorted(FLEET):
+        for name, module in skeleton.build_modules(_tree(endpoint)).items():
+            if _live_dropouts(module):
+                found[(endpoint, name)] = type(module).__name__
+    assert found == dict(LIVE_DROPOUT), (
+        f"the corpus's live-dropout exposure moved.\n  new: "
+        f"{sorted(set(found) - set(LIVE_DROPOUT))}\n  gone: "
+        f"{sorted(set(LIVE_DROPOUT) - set(found))}\n  reclassified: "
+        f"{sorted(k for k in set(found) & set(LIVE_DROPOUT) if found[k] != LIVE_DROPOUT[k])}"
+    )
+
+
+@pytest.mark.parametrize("endpoint", sorted(QUANTIZED_FLEET))
+def test_the_quantizer_s_replacement_modules_are_in_eval_mode_too_pgw1638(
+    endpoint: str,
+) -> None:
+    """The eval pass runs AFTER the swap, or it misses everything the
+    quantizer built — replacement modules are constructed in train mode like
+    any other, so the order is the assertion."""
+    component, _, swapped_class = QUANTIZED_FLEET[endpoint]
+    module = skeleton.build_modules(_quantized_tree(endpoint))[component]
+    swapped = [
+        sub for sub in module.modules() if type(sub).__name__ == swapped_class
+    ]
+    assert swapped, f"{endpoint}/{component}: no {swapped_class} to check"
+    assert all(not sub.training for sub in swapped)
+
+
+def test_an_unknown_quantization_method_is_refused_by_name_pgw1638(
+    tmp_path: Path,
+) -> None:
+    """A method with no quant rule must REFUSE, not build plain linears.
+
+    Without this the next quantized architecture repeats pgw#1638 exactly:
+    a config declares a quantization, `cls(config)` ignores it, and the
+    checkpoint gets blamed N tensors later. The refusal names the method.
+    """
+    src = _quantized_tree("minimax-h3")
+    config = json.loads((src / "text_encoder" / "config.json").read_text())
+    config["quantization_config"] = {"quant_method": "awq", "bits": 4}
+    (tmp_path / "text_encoder").mkdir()
+    (tmp_path / "text_encoder" / "config.json").write_text(json.dumps(config))
+    shutil.copyfile(src / skeleton.MODEL_INDEX, tmp_path / skeleton.MODEL_INDEX)
+
+    with pytest.raises(skeleton.SkeletonError, match="awq"):
+        skeleton.build_modules(tmp_path)
+
+
+def test_a_diffusers_component_declaring_a_quantization_is_refused_pgw1638(
+    tmp_path: Path,
+) -> None:
+    """The other half of the family, refused rather than silently mis-built.
+
+    The diffusers `from_config` path runs no quantizer either. It has no
+    quantized tree on the fleet today, which is exactly why it must fail
+    loudly the day it gets one instead of producing pgw#1638's silence.
+    """
+    src = _tree("sdxl")
+    config = json.loads((src / "vae" / "config.json").read_text())
+    config["quantization_config"] = {
+        "quant_method": "fp8", "weight_block_size": [128, 128],
+    }
+    (tmp_path / "vae").mkdir()
+    (tmp_path / "vae" / "config.json").write_text(json.dumps(config))
+    (tmp_path / skeleton.MODEL_INDEX).write_text(json.dumps({
+        "_class_name": "StableDiffusionXLPipeline",
+        "vae": ["diffusers", "AutoencoderKL"],
+    }))
+
+    with pytest.raises(skeleton.SkeletonError, match="runs no quantizer"):
+        skeleton.build_modules(tmp_path)
