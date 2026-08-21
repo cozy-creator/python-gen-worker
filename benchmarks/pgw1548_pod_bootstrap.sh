@@ -113,29 +113,62 @@ fail_out() {  # fail_out <stage> <message>
 
 # --- 1. toolchain -----------------------------------------------------------
 timeout 600 apt-get update -y && timeout 600 apt-get install -y --no-install-recommends git curl ca-certificates
-curl -LsSf https://astral.sh/uv/install.sh | sh || true
-export PATH="$HOME/.local/bin:$PATH"
 
-# python-gen-worker is a PUBLIC repo, so this needs no credential. The
+# --- 1a. THE EVIDENCE CHANNEL IS BUILT BEFORE THE STEP IT MUST OBSERVE -------
+# 🔴 THIS ORDER IS THE WHOLE POINT, and getting it wrong cost three pods.
+#
+# Attempts 1-3 all died BEFORE their first publish and left NOTHING to read:
+# container alive, uptime climbing 42 -> 14,382 s, zero variants on the release.
+# The reason was structural, not bad luck. The publish machinery needs the
+# CLONE (publish.py imports HubClient out of /workspace/pgw/src) and the pip
+# set -- and both used to sit AFTER `curl astral.sh | sh`, the ONE UNBOUNDED
+# step in the whole pre-heartbeat sequence. So the only step that can hang
+# forever was also the one step no instrument could survive. A channel that
+# comes after the thing it is supposed to observe is not a channel.
+#
+# So: clone and the publish deps now come FIRST, using the IMAGE's python (the
+# venv does not exist yet and building it needs uv, which is what we are about
+# to test). The suspect step below is then left verbatim, with a published
+# marker on each side of it. Silence now LOCALISES instead of just happening.
+#
+# python-gen-worker is a PUBLIC repo, so the clone needs no credential. The
 # PRIVATE sibling is never cloned at all -- its endpoint arrives as bytes in
 # env (see 2b), which keeps a GitHub PAT off rented hardware entirely.
-# ⚠️ THESE THREE EXITS CANNOT PUBLISH, BY CONSTRUCTION, AND THAT IS THE ONE
-# REMAINING SILENT WINDOW. `publish.py` imports `HubClient` out of
-# /workspace/pgw/src and needs the pip set installed in 2a, so a failure BEFORE
-# the clone and venv exist has no channel to report itself on -- the box sees a
-# pod that started and said nothing. Every LATER death is now a published
-# verdict (fail_out), so silence past the boot heartbeat narrows to exactly
-# this window: clone, checkout, venv. Read a mute pod as "died in the
-# toolchain", not as "died anywhere", and the driver's boot-heartbeat deadline
-# turns that into a rotation in ~6 min rather than a 40-minute wait.
 timeout 900 git clone --filter=blob:none https://github.com/cozy-creator/python-gen-worker /workspace/pgw || exit 90
 git -C /workspace/pgw checkout "${PGW1548_SHA}" || exit 90
+timeout 900 python3 -m pip install --no-cache-dir \
+    requests msgspec psutil grpcio grpcio-tools grpcio-health-checking \
+    grpcio-reflection protobuf PySocks typing_extensions certifi \
+    charset-normalizer idna urllib3 > /workspace/out/syspip.log 2>&1 || true
+
+# INSTRUMENT SEEN GREEN ONCE. Until this publishes, silence proves nothing --
+# it cannot be told apart from a channel that never worked. Everything after
+# this marker is interpretable; everything before it is not.
+note probe-alive-1 '{"stage":"probe-alive-1","step":"apt + clone + system-pip DONE","next":"curl astral.sh | sh — the unbounded suspect"}'
+
+# The series. Forked HERE, before the suspect, so a hang leaves a TAIL whose
+# last sample names the step it stopped after. `${PY:-python3}` resolves to the
+# image python at fork time, which is why this works before the venv exists.
+telemetry &
+TELE=$!
+
+# ⚠️ THE PRE-REGISTERED SUSPECT, LEFT VERBATIM AND UNBOUNDED ON PURPOSE.
+# Bounding it would hide the very behaviour this pod was rented to observe.
+# PREDICTION: the telemetry series stops after probe-alive-1 and probe-alive-2
+# never lands. FALSIFIED IF: probe-alive-2 lands (the hang is downstream), or
+# the series never starts at all (the script never ran -- suspect the env
+# payload / gunzip in dockerStartCmd instead).
+curl -LsSf https://astral.sh/uv/install.sh | sh || true
+export PATH="$HOME/.local/bin:$PATH"
+note probe-alive-2 '{"stage":"probe-alive-2","step":"curl astral.sh | sh RETURNED — the suspect is NOT the hang"}'
 
 
 # --- 2. venv ----------------------------------------------------------------
-timeout 600 uv venv --python 3.12 /workspace/venv || exit 91
+timeout 600 uv venv --python 3.12 /workspace/venv || {
+  fail_out toolchain "uv venv failed or timed out"; exit 91; }
 export VIRTUAL_ENV=/workspace/venv
 PY=/workspace/venv/bin/python
+note probe-alive-3 '{"stage":"probe-alive-3","step":"uv venv built"}'
 
 # --- 2a. WHY THERE IS NO PRE-INSTALL HEARTBEAT HERE ---------------------------
 # One was written, shipped, and RETRACTED. The idea was to publish a liveness
@@ -264,8 +297,9 @@ case "$PGW1548_MODE" in
 install-probe)
   # INSTALL ONLY. No tree, no smoke, no matrix -- the question is whether the
   # torch install survives, and every extra step is a way to lose the answer.
-  telemetry &
-  TELE=$!
+  # The sidecar is ALREADY RUNNING (forked in 1a, before the unbounded suspect)
+  # -- starting a second one here would double every sample and race the same
+  # publish paths for no gain.
   echo "PROBE: RAM requested $(free -m | awk '/^Mem:/{print $2}') MiB"
   start=$(date +%s)
   timeout 2700 uv pip install --python $PY -e /workspace/pgw \
