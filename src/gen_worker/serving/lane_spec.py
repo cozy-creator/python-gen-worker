@@ -5,7 +5,7 @@ What the author writes, and nothing else::
 
     class SdxlModel(
         Model[SDXL],
-        lanes={contracts.SDXL_DIFFUSERS_BF16: lane(
+        lanes={("sdxl.diffusers@1", "plain.bf16@1"): lane(
             request=const(GiB(1.2)) + per_mp_batch(MiB(220)),
             resident=("vae",),
         )},
@@ -20,9 +20,17 @@ What the author writes, and nothing else::
 Paul's rule, stated once and enforced here: **the author declares only what
 only the author knows** — demand SCALING, fork AXES, "my VAE decode will
 thrash if streamed" — and the platform DERIVES everything derivable (weight
-bytes from the manifest, the capability floor from the contract dtype,
+bytes from the manifest, the capability floor from the QUANT RULE,
 launch-residency from the ``ctx.compile`` marks, coefficients from
 measurement). A VRAM STRING is none of those things, which is why it is gone.
+
+**pgw#1621 re-keyed what a lane is NAMED BY, and nothing else here.** The key
+was a tensorfs v1 ``Contract`` object (``contracts.SDXL_DIFFUSERS_BF16``); it
+is now the ``(topology, quant)`` stamp pair, which is what tensor-layout v2
+makes identity. The per-lane ``request=`` formula, the residency override, the
+fork axes and the refusals are untouched — se#816's surface SHAPE survives the
+cut intact. The old spellings survive as DISPLAY names on the catalog record
+and are never parsed.
 
 Three things live here and only here:
 
@@ -111,15 +119,31 @@ class DeclaredLane(msgspec.Struct, frozen=True, kw_only=True):
     selection ladder, derive, placement) so that nothing re-parses a stamp
     and nothing re-derives a floor:
 
-    * ``contract`` — the tensorfs ``Contract`` object the author named.
-    * ``contract_id`` — its stable handle, e.g. ``sdxl.diffusers-bf16@1``.
-    * ``dtype`` — the contract's OWN load dtype, READ (a dtype-less lane is
-      refused at declaration, never discovered at load on a rented pod).
-    * ``min_sm`` — DERIVED via ``capability_floor_for_dtype``. An 8-bit lane
-      needs 8-bit kernels because of what it IS; a hand-written floor is a
-      second producer of one fact and is a declaration-time refusal. It is
+    * ``layout`` — the ``(topology, quant)`` STAMP PAIR the author named, as a
+      :class:`~gen_worker.models.tensor_layout_contract.LayoutId`. This is the
+      lane's IDENTITY, and it is compared FIELD-WISE: a whole-string compare
+      cannot express "topology differs, quant matches", which is the DERIVABLE
+      rung the hub's admission is built on.
+    * ``topology`` / ``quant`` — the two halves, spelled out, so a consumer
+      that wants one axis does not have to take the pair apart.
+    * ``contract_id`` — the WIRE rendering, ``"<topology>+<quant>"``. th#1809's
+      spelling, shared with the hub's ``tensorfs.LayoutID.String`` and with the
+      derived-artifact CAS address. A drift here is a fork, not a cosmetic bug.
+    * ``dtype`` — the QUANT RULE's declared dtype, READ from the ratified rule
+      document. Under v1 this was a top-level field on a per-lane document that
+      could simply be missing, which is why there was a declaration-time refusal
+      and a waiver set for it. A v2 rule cannot lack one: the corpus is
+      conformance-checked and `declared_dtype` is required, so the dtype-less
+      lane is now inexpressible rather than guarded.
+    * ``min_sm`` — the rule's ``capability_floor_sm``, read from the same
+      document. An 8-bit lane needs 8-bit kernels because of what it IS. It is
       per LANE, which is exactly why one hand-written number could never be
-      right for a bf16/fp8/nvfp4 class.
+      right for a bf16/fp8/nvfp4 class — and it is now per RULE, which is why
+      it cannot be lost by spelling the dtype differently.
+    * ``display_name`` — the v1 lane-handle spelling this pair used to be known
+      by (``"sdxl.diffusers-bf16@1"``), or ``""``. **NEVER PARSED, GATES
+      NOTHING.** It exists so a refusal message names the lane the way the
+      operator still thinks of it.
     * ``spec`` — this lane's demand formula and residency override.
 
     Selection among lanes is PLATFORM machinery (pgw#1606) and never appears
@@ -127,11 +151,18 @@ class DeclaredLane(msgspec.Struct, frozen=True, kw_only=True):
     and carries no priority.
     """
 
-    contract: Any
-    contract_id: str
-    dtype: Any
+    layout: Any
+    topology: str
+    quant: str
+    dtype: str
     min_sm: int
+    display_name: str = ""
     spec: LaneSpec
+
+    @property
+    def contract_id(self) -> str:
+        """The wire rendering of the pair — ``"<topology>+<quant>"``."""
+        return f"{self.topology}+{self.quant}"
 
     @property
     def request(self) -> Demand:

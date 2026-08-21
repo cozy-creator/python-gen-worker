@@ -99,145 +99,31 @@ class Knob(msgspec.Struct, Generic[Number], frozen=True):
         return type(self.default)(applied)
 
 
-# ── tensorfs contract seam ───────────────────────────────────────────────────
+# ── The tensor-layout seam, after v2 (pgw#1621) ──────────────────────────────
 #
-# A canonical contract is an IMPORTED OBJECT, never a pointer-string (Paul's
-# contract-objects ruling 2026-08-18), and pgw#1391 makes the object REAL: the
-# constants below resolve against the vendored tensorfs contract library, so a
-# lane stamp is now falsifiable rather than free text.
+# THE CONTRACT-OBJECT CONSTANTS ARE GONE, and so is the machinery around them:
+# `TensorLayoutContract`, `MissingContract`, `MissingContractError`, `_library`
+# and the fifteen `NAME: Final = _library(...)` rows.
 #
-# What that replaced (pgw#1391, measured): ``PendingContract(name, version)``
-# was a placeholder that answered ``stamp``/``contract`` for ANY name. Four of
-# the six constants named documents tensorfs does not ship, so a ``Model``
-# subclass that omitted ``lanes=`` fell through ``model_lanes()`` to one of
-# them and claimed, all the way into the published manifest, a lane the hub
-# cannot intern (se#757 blocker A). The live sdxl lane was no better off: a
-# placeholder has no ``document`` and no ``digest``, so every release shipped
-# ``"document": null`` for a contract tensorfs really does publish.
+# They existed because a v1 lane was an IMPORTED OBJECT (Paul's
+# contract-objects ruling, 2026-08-18) resolved against a per-lane document
+# library, and because that library did not carry a document for every lane the
+# fleet wanted to declare — so `MissingContract` was the shape that let a
+# `ModelType` exist before its document did, refusing loudly on any read
+# instead of answering a `stamp` for a name nobody had authored.
 #
-# A name the library does not carry becomes a ``MissingContract`` sentinel.
-# Import stays clean — the module must remain importable or every consumer
-# breaks — and CLAIMING one as a lane is what refuses. All ten current names
-# resolve, so no sentinel is live today; the MACHINERY STAYS, because se#757
-# blocker B is 21 more endpoints that will each want a ``ModelType`` before
-# their document exists, and this is the shape that lets them declare one
-# without shipping a lie. Clearing the original four took zero code change,
-# which is the property worth keeping.
-
-from .._vendor.tensorfs import contracts as _tensorfs_contracts
-
-
-class TensorLayoutContract(Protocol):
-    """The tensorfs ``Contract`` surface a ``lanes=`` header, discovery and
-    derive all read."""
-
-    @property
-    def stamp(self) -> str: ...
-    @property
-    def document(self) -> str: ...
-    @property
-    def digest(self) -> str: ...
-    @property
-    def dtype(self) -> str: ...
-
-
-class MissingContractError(LookupError):
-    """A lane names a layout contract tensorfs ships no document for.
-
-    Raised on ANY lane-ish read of a :class:`MissingContract`, which is what
-    turns the se#757 silent lie loud: the stamp cannot be spelled, so it cannot
-    reach a manifest, a release document or a load.
-    """
-
-
-class MissingContract:
-    """A named contract the vendored tensorfs library does not carry.
-
-    INERT AT IMPORT, LOUD ON USE. A hard refusal at module import would make
-    ``gen_worker.models`` unimportable and break everything downstream, so the
-    constant exists — but every attribute a lane header, discovery, derive or a
-    load would read (``stamp``, ``contract``, ``dtype``, ``document``,
-    ``digest``, ``label``, ``tensors``, ``sets``) refuses instead of answering.
-    It is deliberately NOT a ``LaneContract``-shaped liar: there is no path by
-    which it produces a string somebody could publish.
-    """
-
-    _name: str
-    _version: int
-
-    __slots__ = ("_name", "_version")
-
-    def __init__(self, name: str, version: int) -> None:
-        object.__setattr__(self, "_name", name)
-        object.__setattr__(self, "_version", version)
-
-    def __setattr__(self, attribute: str, value: object) -> None:
-        raise AttributeError("a MissingContract is frozen")
-
-    def _refuse(self) -> MissingContractError:
-        carried = ", ".join(sorted(contract.stamp for contract in _tensorfs_contracts.all()))
-        return MissingContractError(
-            f"lane {self._name}@{self._version} names a tensorfs layout "
-            f"contract that DOES NOT EXIST. The vendored library carries: "
-            f"{carried}. A lane stamp is a promise the hub interns and the "
-            f"loader reads — it cannot be claimed by naming it. Author "
-            f"'{self._name}.v{self._version}.json' in tensorfs "
-            f"spec/v1/contracts (see its README), then re-vendor per "
-            f"gen_worker/_vendor/VENDORED.toml; this constant becomes a real "
-            f"contract with no code change. Until then declare a lane the "
-            f"library carries, or lanes=() for eager-permanent."
-        )
-
-    # Every read a lane header, discovery, derive or a load performs.
-    @property
-    def stamp(self) -> str:
-        raise self._refuse()
-
-    @property
-    def contract(self) -> str:
-        raise self._refuse()
-
-    @property
-    def dtype(self) -> str:
-        raise self._refuse()
-
-    @property
-    def document(self) -> str:
-        raise self._refuse()
-
-    @property
-    def digest(self) -> str:
-        raise self._refuse()
-
-    @property
-    def label(self) -> str:
-        raise self._refuse()
-
-    @property
-    def tensors(self) -> tuple[object, ...]:
-        raise self._refuse()
-
-    @property
-    def sets(self) -> dict[str, tuple[str, ...]]:
-        raise self._refuse()
-
-    def __repr__(self) -> str:
-        return f"MissingContract({self._name!r}, {self._version!r}, NO DOCUMENT)"
-
-
-def _library(name: str, version: int) -> TensorLayoutContract:
-    """The library contract ``name@version``, or the sentinel that refuses.
-
-    The lookup happens at import so a name the library DOES carry is a real
-    ``Contract`` from that moment on — document, digest and dtype included —
-    while a name it does not carry costs nothing until somebody claims it.
-    """
-
-    try:
-        return _tensorfs_contracts.get(f"{name}@{version}")
-    except KeyError:
-        return MissingContract(name, version)
-
+# v2 removes the problem the sentinel solved rather than the sentinel alone.
+# There is no per-lane document any more: a lane is `(topology, quant)`, the
+# eight quant rules cover the whole fleet, and a topology is EXTRACTED
+# MECHANICALLY from a reference checkpoint's headers. So "this lane's document
+# has not been authored yet" is no longer a state a model type can be in — the
+# topology either was extracted from real bytes or it does not exist, and
+# `parse_lane_stamp` refuses the second case at class definition, naming the
+# corpus. A sentinel that stood in for an unauthored document has nothing left
+# to stand in for.
+#
+# What remains here is the INGEST fingerprint below (`ModelType.contracts`),
+# which maps a recorded stamp to a model name and never gates anything.
 
 #: stabilityai/stable-diffusion-xl-base-1.0 scheduler_config.json — SDXL's
 #: training-time noise schedule (scaled_linear 0.00085/0.012, epsilon).
@@ -481,144 +367,11 @@ INTERNVL_U_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
     "variance_type": None,
 }
 
-#: REAL — a tensorfs library document. Live on deploy lane
-#: ``a55e45a571cdb6188``.
-SDXL_DIFFUSERS_BF16: Final = _library("sdxl.diffusers-bf16", 1)
-#: REAL — beside ``minimax.h3-dit-native``; the H3 contract file names it in
-#: ``lanes=``. Live on deploy lane ``ab56185761f1597f1``.
-MINIMAX_H3_DIT_DIFFUSERS: Final = _library("minimax.h3-dit-diffusers", 1)
-
-#: REAL as of tensorfs#121, which authored these four for se#757 blocker A.
-#: They were ``MissingContract`` sentinels between pgw#1391's first commit and
-#: its re-vendor, and clearing them took NO code change here — the property the
-#: sentinel shape exists to have. ``sd15`` and ``sd2`` are SEPARATE documents
-#: with separate digests, not one shared one.
-SD15_DIFFUSERS_BF16: Final = _library("sd15.diffusers-bf16", 1)
-SD2_DIFFUSERS_BF16: Final = _library("sd2.diffusers-bf16", 1)
-HIDREAM_O1_DIFFUSERS_BF16: Final = _library("hidream-o1.diffusers-bf16", 1)
-WAN22_DIFFUSERS_BF16: Final = _library("wan22.diffusers-bf16", 1)
-
-#: REAL as of tensorfs#131 — the qwen-image and z-image transformer-only lane
-#: documents (45 and 56 declarations), both derived from the trees the fleet
-#: SERVES rather than from HuggingFace. `qwen-image.diffusers-bf16@1` covers
-#: BOTH shipped repos (`tensorhub/qwen-image` and
-#: `tensorhub/qwen-image-edit-2511`), whose transformers are byte-layout
-#: identical — 1933 tensors, zero name/shape/dtype diffs;
-#: `z-image.diffusers-bf16@1` likewise covers `tensorhub/z-image` and
-#: `tensorhub/z-image-turbo` (521 tensors, same measurement).
-#:
-#: THE Z-IMAGE DOCUMENT IS DELIBERATELY NOT THE HUGGINGFACE PACKAGING.
-#: `Tongyi-MAI/Z-Image-Turbo` ships its transformer in F32 (521/521, measured);
-#: the hub's served bf16 republish of the same revision is BF16 (521/521), with
-#: identical names and shapes. The document follows the served tree, so the F32
-#: packaging misses it entirely instead of half-matching.
-QWEN_IMAGE_DIFFUSERS_BF16: Final = _library("qwen-image.diffusers-bf16", 1)
-Z_IMAGE_DIFFUSERS_BF16: Final = _library("z-image.diffusers-bf16", 1)
-
-#: REAL as of tensorfs#124 — FLUX.2 Klein's own transformer-only lane document
-#: (29 declarations). This is what makes ``flux.2-klein-4b``/``-9b``
-#: migratable — the document ``flux.2-klein-*`` names in its ``lanes=``.
-FLUX2_KLEIN_DIFFUSERS_BF16: Final = _library("flux2-klein.diffusers-bf16", 1)
-
-#: REAL as of tensorfs#137 — InternVL-U's generation-decoder lane document (46
-#: declarations explaining all 654 tensors of
-#: ``generation_decoder/model.safetensors``, zero unexplained).
-#:
-#: GENERATION DECODER ONLY, and the two exclusions are measured rather than
-#: intended. The VAE is ``AutoencoderKLQwenImage`` — literally qwen-image's
-#: autoencoder — and against the hub's served qwen-image tree the two VAEs have
-#: IDENTICAL tensor-name sets: 194 of 194, Jaccard 1.0, zero shape
-#: disagreements. Declaring it would tie detection ACROSS FAMILY LINES, where
-#: every earlier instance of the tensorfs#122 regression was within one family.
-#: The ``vlm`` component is excluded prospectively for the reason
-#: ``flux2-klein`` excludes its Qwen3 text encoder: an InternViT-300M tower over
-#: a stock Qwen3 language model, both of which a future InternViT or Qwen3 lane
-#: would collide with. Re-running the document's patterns against those two
-#: headers explains 0 of 658 and 0 of 194 respectively, so the exclusions are
-#: zero-intersection by construction.
-INTERNVL_U_DIFFUSERS_BF16: Final = _library("internvl-u.diffusers-bf16", 1)
-#: REAL as of tensorfs#132 — the TRELLIS.2 DiT lane document, 31 declarations
-#: covering all 640 tensors of every one of the five DiT checkpoints, derived
-#: from the real safetensors headers of ``microsoft/TRELLIS.2-4B`` at revision
-#: ``af44b45f2e35a493886929c6d786e563ec68364d``.
-#:
-#: Note the format segment: ``dit-bf16``, NOT ``diffusers-bf16``. TRELLIS.2
-#: ships upstream's own ``ckpts/`` layout and is not a diffusers tree at all;
-#: naming it ``diffusers`` would be the wrong-packaging claim tensorfs#124
-#: warns about, and a document derived from the wrong packaging is worse than
-#: no document because it would match, load, and be wrong.
-TRELLIS2_DIT_BF16: Final = _library("trellis2.dit-bf16", 1)
 
 #: REAL as of tensorfs#124's second half (tensorfs#136). It was a
 #: ``MissingContract`` sentinel until this document was vendored, and clearing
 #: it took NO code change — the property the sentinel shape exists to have.
 
-
-#: REAL as of tensorfs#135 — LTX-2's own transformer-only lane document, 144
-#: declarations covering 4186 of 4186 tensors of the shipped
-#: `LTX2VideoTransformer3DModel` header. Derived from the on-disk safetensors
-#: HEADERS of all eight shards by ranged read, never from a constructed
-#: pipeline. It declares dtype PER TENSOR (3896 BF16 + 290 F32 adaptive-norm
-#: modulation tables) and that is load-bearing rather than pedantic: a
-#: flattened all-BF16 variant of the same header identifies as
-#: `flux2-klein.diffusers-bf16@1` through the real matcher, i.e. the real
-#: checkpoint would silently resolve to another family's lane.
-LTX2_DIFFUSERS_BF16: Final = _library("ltx-2.diffusers-bf16", 1)
-
-#: NO DOCUMENT YET — tensorfs#124 owes it (blocked on HF access to the BFL
-#: repos), so this is a ``MissingContract`` sentinel and ``Model[Flux1]``
-#: refuses loudly, naming the document it wants.
-#:
-#: THE SENTINEL WAS RIGHT TWICE OVER, and the second reason was only measured
-#: when the document was authored. ``Flux1`` once pointed at
-#: ``dit.blocks-fused-qkv@1``, a family-PLURAL block-spelling FRAGMENT in the
-#: timm/native ``blocks.{i}.attn.qkv`` spelling: it declares that pattern
-#: ``required: true`` and matches ZERO tensors in a real Flux transformer
-#: header, whose tree is
-#: ``transformer_blocks.*``/``single_transformer_blocks.*``. That was a
-#: guaranteed refusal dressed as a resolved lane. But the alternative on offer
-#: was worse and quieter — ``flux2-klein.diffusers-bf16@1`` explains 308 of a
-#: FLUX.1 transformer's 1160 tensors with NO dtype or rank refusal, so it WON
-#: every FLUX.1 file until this document existed (measured upstream on dev,
-#: schnell and Flex.2-preview alike). Pointing at nothing beat both.
-#:
-#: The document is transformer-only and covers all three checkpoints the fleet
-#: serves: FLUX.1-dev 1160/1160, FLUX.1-schnell 1156/1156 (the four-tensor
-#: ``guidance_embedder`` delta is declared optional) and ostris/Flex.2-preview
-#: 808/808, whose ``x_embedder`` is 196 channels wide rather than 64 — its
-#: declarations constrain rank and dtype and never shape.
-FLUX1_DIFFUSERS_BF16: Final = _library("flux1.diffusers-bf16", 1)
-
-#: REAL, and the only shipped document whose own ``description`` names the Flux
-#: family — but it is a FRAGMENT, not a lane document, and nothing here points
-#: any ``lanes=`` header at it (see ``FLUX1_DIFFUSERS_BF16``). It
-#: declares no top-level ``dtype`` on purpose, as the two ``sdxl.clip-g-*``
-#: component fragments do, so claiming it as a serve lane refuses at
-#: declaration instead of reading ``None`` at load.
-DIT_BLOCKS_FUSED_QKV: Final = _library("dit.blocks-fused-qkv", 1)
-
-#: NO DOCUMENT YET — tensorfs#139 owes it (se#769's audio lane authors it in the
-#: same wave). A ``MissingContract`` sentinel until that document lands and is
-#: re-vendored here, at which point it resolves with NO code change on this side
-#: — the property the sentinel shape exists to have (the ``sd15``/``sd2``/
-#: ``hidream-o1``/``wan22`` four did exactly this across pgw#1391's re-vendor).
-#:
-#: This is NOT the ``FLUX1_DIFFUSERS_BF16`` hazard. That one names a document
-#: that EXISTS and CANNOT MATCH — a guaranteed refusal dressed as a resolved
-#: lane. This one names a document that does not exist yet, which refuses
-#: loudly while naming exactly what it wants. Pointing at nothing beats pointing
-#: at something that cannot match.
-#:
-#: ``fp16``, not ``bf16``: the served checkpoints are fp16 and the document
-#: describes what the hub serves. MEASURED by ranged safetensors-header reads
-#: (``http=206``, header bytes only, zero weight bytes) against both prod
-#: manifests — the transformer histograms ``{F16: 445}`` on
-#: ``tensorhub/stable-audio-open`` AND ``tensorhub/foundation-1``, and the hub
-#: records ``dtype=fp16`` on both checkpoints. The endpoints' inherited
-#: ``plain.bf16@1`` layout string disagrees with every checkpoint the fleet
-#: actually ships and dies with the se#769 migration (umbrella ruling,
-#: 2026-08-18: the bytes win).
-STABLE_AUDIO_DIFFUSERS_FP16: Final = _library("stable-audio.diffusers-fp16", 1)
 
 #: stabilityai/stable-audio-open-1.0 ``scheduler/scheduler_config.json``, read
 #: VERBATIM from the served prod manifest rather than transcribed from a model
@@ -1871,7 +1624,7 @@ class SDXL(ModelType[SdxlDefaults]):
     """Stable Diffusion XL."""
 
     name = "sdxl"
-    contracts = ("sdxl.*",)
+    contracts = ("sdxl.*", "sdxl-inpainting.*")
     canonical_scheduler_config = SDXL_SCHEDULER_CONFIG
     # TypeAlias so `config: SDXL.Config` is a valid annotation (main_v2.py).
     Config: TypeAlias = SdxlConfig
@@ -1931,7 +1684,7 @@ class MiniMaxH3(ModelType[MiniMaxH3Defaults]):
     this vocabulary nothing — it is why H3 is an ORDINARY entry here."""
 
     name = "minimax-h3"
-    contracts = ("minimax.h3-*",)
+    contracts = ("minimax-h3.*",)
     Defaults = MiniMaxH3Defaults
 
 
@@ -2043,7 +1796,7 @@ class Qwen36A3b(ModelType[QwenA3bDefaults]):
     """
 
     name = "qwen3.6-35b-a3b"
-    contracts = ("qwen3.6-35b-a3b.*",)
+    contracts = ("qwen3-6-35b-a3b.*",)
     Defaults = QwenA3bDefaults
 
 
@@ -2338,7 +2091,7 @@ class Ltx2(ModelType[Ltx2Defaults]):
     """
 
     name = "ltx-2"
-    contracts = ("ltx-2.*",)
+    contracts = ("ltx2.*",)
     canonical_scheduler_config = LTX2_SCHEDULER_CONFIG
     Defaults = Ltx2Defaults
 
@@ -2370,7 +2123,7 @@ class Ltx2Upsampler(ModelType[Ltx2UpsamplerDefaults]):
     """
 
     name = "ltx-2-upsampler"
-    contracts = ("ltx-2-upsampler.*",)
+    contracts = ("ltx2-upsampler.*",)
     Defaults = Ltx2UpsamplerDefaults
 
 
@@ -2454,12 +2207,29 @@ def model_type_by_name(name: str) -> type[ModelType[msgspec.Struct]] | None:
 
 
 def model_type_for_contract(stamp: str) -> type[ModelType[msgspec.Struct]] | None:
-    """Ingest classification assist: recorded tensorfs contract stamp
-    (``<name>@<version>``) → model type, via the fingerprint patterns.
-    Returns None for an unrecognized stamp — unclassified is LEGAL and
-    VISIBLE (NULL ``model``, serves on fallbacks with the named warning)."""
+    """Ingest classification assist: a recorded layout stamp → model type.
+
+    Accepts the v2 pair rendering (``"sdxl.diffusers@1+plain.bf16@1"``) or a
+    bare topology handle, and **matches on the TOPOLOGY HALF ONLY**. Which
+    architecture a checkpoint is, is a fact about WHICH TENSORS it has — the
+    topology — and never about how they are quantized: `sdxl.diffusers@1` is
+    SDXL whether the weights are bf16, fp8 or nvfp4, and a pattern that could
+    see the quant half would be a fingerprint that changes when nothing about
+    the architecture did.
+
+    Splitting first also keeps the patterns from matching by accident. They are
+    prefix globs, and the topology is the prefix of the render, so
+    ``fnmatchcase`` over the whole string would agree today and start
+    disagreeing the first time a quant rule is named after a family.
+
+    Returns None for an unrecognized stamp — unclassified is LEGAL and VISIBLE
+    (NULL ``model``, serves on fallbacks with the named warning).
+    """
+    topology = stamp.split("+", 1)[0].strip()
+    if not topology:
+        return None
     for mt in MODEL_TYPES:
-        if any(fnmatchcase(stamp, pattern) for pattern in mt.contracts):
+        if any(fnmatchcase(topology, pattern) for pattern in mt.contracts):
             return mt
     return None
 
@@ -2518,11 +2288,7 @@ def defaults_vocabularies() -> dict[str, type[msgspec.Struct]]:
 
 
 __all__ = [
-    "DIT_BLOCKS_FUSED_QKV",
-    "FLUX1_DIFFUSERS_BF16",
-    "FLUX2_KLEIN_DIFFUSERS_BF16",
     "FLUX2_KLEIN_SCHEDULER_CONFIG",
-    "LTX2_DIFFUSERS_BF16",
     "LTX2_SCHEDULER_CONFIG",
     "Ltx2",
     "Ltx2Defaults",
@@ -2532,7 +2298,6 @@ __all__ = [
     "Flux1Defaults",
     "Flux2Klein",
     "Flux2KleinDefaults",
-    "HIDREAM_O1_DIFFUSERS_BF16",
     "Hunyuan3d",
     "Hunyuan3dDefaults",
     "HiDreamO1",
@@ -2542,7 +2307,6 @@ __all__ = [
     "Knob",
     "LORA_OVERLAYS",
     "LoraOverlay",
-    "MINIMAX_H3_DIT_DIFFUSERS",
     "MiniMaxH3",
     "MiniMaxH3Defaults",
     "MusicGen",
@@ -2554,25 +2318,18 @@ __all__ = [
     "QwenTextGenDefaults",
     "Rife",
     "RifeDefaults",
-    "STABLE_AUDIO_DIFFUSERS_FP16",
     "STABLE_AUDIO_SCHEDULER_CONFIG",
     "StableAudio",
     "StableAudioDefaults",
     "MODEL_TYPES",
-    "QWEN_IMAGE_DIFFUSERS_BF16",
     "QWEN_IMAGE_SCHEDULER_CONFIG",
     "QwenImage",
     "QwenImageDefaults",
     "ModelType",
-    "MissingContract",
-    "MissingContractError",
     "SD15",
     "SchedulerName",
-    "SD15_DIFFUSERS_BF16",
     "SD2",
-    "SD2_DIFFUSERS_BF16",
     "SDXL",
-    "SDXL_DIFFUSERS_BF16",
     "Sd15Defaults",
     "Sd15LoraDefaults",
     "Sd15Config",
@@ -2581,14 +2338,10 @@ __all__ = [
     "SdxlLoraDefaults",
     "SdxlConfig",
     "SupportsClamp",
-    "TRELLIS2_DIT_BF16",
-    "TensorLayoutContract",
     "Trellis2",
     "Trellis2Defaults",
-    "WAN22_DIFFUSERS_BF16",
     "Wan22",
     "Wan22Defaults",
-    "Z_IMAGE_DIFFUSERS_BF16",
     "Z_IMAGE_SCHEDULER_CONFIG",
     "ZImage",
     "ZImageDefaults",

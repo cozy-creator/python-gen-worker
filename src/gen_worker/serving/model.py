@@ -72,125 +72,72 @@ class ModelDeclarationError(TypeError):
     """A model class header does not state a valid declaration."""
 
 
-@runtime_checkable
-class LaneContract(Protocol):
-    """A lane IS a tensorfs layout contract — an object carrying the layout
-    the load code expects, with its load ``dtype`` readable
-    (``ctx.lane.dtype``). Until tensorfs#111 ships contract objects, the
-    vendored torchcg ``LaneRef`` (contract handle + dtype) satisfies this
-    seam; the Protocol is what the SDK checks, never a class identity."""
-
-    @property
-    def dtype(self) -> Any: ...
-
-
 def lane_handle(lane: Any) -> str:
-    """The lane's stable string handle, read off the SHIPPED tensorfs surface.
+    """The lane's stable string handle — the WIRE rendering of its stamp pair.
 
-    tensorfs#111 landed and its ``Contract`` spells the handle ``stamp``
-    (``name@version`` for a library contract, ``sha256:<hex>`` for an
-    anonymous one). ``digest`` is a BARE 64-hex string — a real attribute,
-    but not a handle: reading it as one produced
-    ``f1455f56…`` where ``sdxl.diffusers-bf16@1`` belonged, and torchcg
-    refused the lane. So ``stamp`` leads, ``contract`` stays for objects that
-    spell it that way, ``name``+``version`` is the structural fallback, and
-    ``digest`` is only ever used PREFIXED.
+    pgw#1621: a lane used to be a tensorfs v1 ``Contract`` OBJECT, and this
+    function was four fallbacks deep because that object spelled its handle
+    four different ways (``stamp``, ``contract``, ``name``+``version``, and a
+    BARE 64-hex ``digest`` that read as a handle and was not one — it once
+    produced ``f1455f56…`` where ``sdxl.diffusers-bf16@1`` belonged). A lane is
+    now the ``(topology, quant)`` pair and there is exactly one rendering of
+    it, so the fallbacks are gone with the ambiguity that needed them.
+
+    Accepts a :class:`DeclaredLane`, a ``LayoutId``, the rendered string, or
+    the author's two-tuple — every spelling of the same identity that reaches
+    this repo — and answers ``"<topology>+<quant>"``. That string is shared
+    with the hub's ``tensorfs.LayoutID.String`` and with the derived-artifact
+    CAS address; a drift is a fork.
     """
 
-    # pgw#1391: a lane that names a contract tensorfs ships no document for
-    # refuses HERE, at the one chokepoint every stamp-reading surface goes
-    # through (declaration, discovery's `_lane_stamps`, derive's
-    # `_lane_model_class`) — restated as a ModelDeclarationError so derive's
-    # existing conversion to a loud DeriveError needs no second pattern.
-    from ..models.model_types import MissingContractError
+    from ..models.tensor_layout_contract import LayoutDeclarationError, parse_lane_stamp
 
+    rendered = getattr(lane, "contract_id", None)
+    if isinstance(rendered, str) and rendered:
+        return rendered
     try:
-        for attribute in ("stamp", "contract"):
-            value = getattr(lane, attribute, None)
-            if isinstance(value, str) and value:
-                return value
-        name = getattr(lane, "name", None)
-        version = getattr(lane, "version", None)
-        if isinstance(name, str) and name and isinstance(version, int):
-            return f"{name}@{version}"
-        digest = getattr(lane, "digest", None)
-        if isinstance(digest, str) and digest:
-            return digest if digest.startswith("sha256:") else f"sha256:{digest}"
-    except MissingContractError as exc:
+        return parse_lane_stamp(lane, where="lane_handle").render()
+    except LayoutDeclarationError as exc:
         raise ModelDeclarationError(str(exc)) from exc
-    raise ModelDeclarationError(
-        f"lane {lane!r} carries no string handle (`stamp`, `contract`, "
-        "`name`+`version` or `digest`); a lane is a tensorfs layout contract "
-        "object"
-    )
 
 
-#: Lane stamps whose contract document declares no top-level dtype UPSTREAM,
-#: waived at declaration time so a live model class is not refused for a gap
-#: only tensorfs can close.
-#:
-#: EMPTY, AND IT SHOULD STAY THAT WAY — the fence already did its job once. It
-#: briefly held ``minimax.h3-dit-diffusers@1`` while that document was
-#: dtype-less and its endpoint was live (deploy lane ``ab56185761f1597f1``);
-#: tensorfs#121 gave it ``bfloat16``, re-vendoring made
-#: ``test_the_h3_dtype_waiver_deletes_itself_when_upstream_lands_the_dtype``
-#: fail, and the entry was deleted. A waiver is a fact about the vendored
-#: document, never a preference, so it cannot outlive its reason.
-#:
-#: Three vendored documents are STILL dtype-less on purpose
-#: (``dit.blocks-fused-qkv``, ``sdxl.clip-g-fused-qkv``,
-#: ``sdxl.clip-g-split-qkv``) and need no waiver: they are FRAGMENTS a
-#: ``lanes=`` header never names on its own, so they never reach this check.
-#: Adding an entry here means knowingly accepting a lane whose serve-side
-#: ``ctx.lane.dtype`` will raise — do it only against a named upstream issue.
-DTYPELESS_UPSTREAM_LANES: frozenset[str] = frozenset()
+def lane_dtype(lane: Any, *, where: str) -> str:
+    """The lane's load dtype — the QUANT RULE's ``declared_dtype``.
 
+    pgw#1621 deleted the refusal that used to live here, and deleted it by
+    making the failure inexpressible rather than by relaxing the check.
 
-def lane_dtype(lane: Any, *, where: str) -> Any:
-    """The lane's declared load dtype, READ rather than looked for.
+    Under v1 the dtype was a top-level field on a per-lane document that could
+    simply be absent: ``sdxl.diffusers-nvfp4-flat@1`` shipped without one, a
+    dtype-less lane cleared declaration through a ``runtime_checkable``
+    Protocol that never invokes its own getter, and it died at load on a rented
+    pod. That cost a waiver set (``DTYPELESS_UPSTREAM_LANES``), a fence test
+    over the vendored corpus, and a self-deleting-waiver test to make sure the
+    waiver could not outlive its reason.
 
-    pgw#1391: ``isinstance(lane, LaneContract)`` is not this check. A
-    ``runtime_checkable`` Protocol with a property member resolves through
-    ``inspect.getattr_static`` on py3.12, so it never invokes the getter — a
-    ``@property`` that RAISES satisfies it. That is exactly how a contract
-    declaring no dtype used to clear declaration and die at load on a pod, and
-    how a documentless lane used to clear it at all.
-
-    So the dtype is read. ``MissingDtype`` (and the ``MissingContractError``
-    that a documentless lane raises first) become a declaration refusal naming
-    the author's own class header.
+    A v2 quant rule cannot lack a dtype. ``declared_dtype`` is required by the
+    rule schema, the corpus is conformance-checked against
+    ``spec/v2/vectors/digests.json``, and there are EIGHT rules for the whole
+    fleet rather than one document per lane. So the answer is a read with no
+    arm for absence — and a handle the corpus does not carry refuses in
+    :func:`~gen_worker.models.tensor_layout_contract.rule_dtype` before it ever
+    gets here.
     """
 
-    from ..models.model_types import MissingContractError
+    from ..models.tensor_layout_contract import LayoutDeclarationError, rule_dtype
 
-    handle = lane_handle(lane)  # refuses first if there is no document at all
+    quant = getattr(lane, "quant", None)
+    if not isinstance(quant, str) or not quant:
+        from ..models.tensor_layout_contract import parse_lane_stamp
+
+        try:
+            quant = parse_lane_stamp(lane, where=where).quant
+        except LayoutDeclarationError as exc:
+            raise ModelDeclarationError(str(exc)) from exc
     try:
-        dtype = lane.dtype
-    except MissingContractError as exc:  # pragma: no cover - lane_handle refuses first
-        raise ModelDeclarationError(str(exc)) from exc
-    except Exception as exc:
-        if handle in DTYPELESS_UPSTREAM_LANES:
-            return None
-        raise ModelDeclarationError(
-            f"{where}: lane {handle} declares no load dtype "
-            f"({type(exc).__name__}: {exc}). `ctx.lane.dtype` is on the serve "
-            f"path, so this refuses HERE rather than reading None at load on a "
-            f"rented pod. A tensorfs document with no top-level dtype is "
-            f"usually a FRAGMENT — a shared block or component spelling, not a "
-            f"serve layout — and the fix is then to author the real lane "
-            f"document in tensorfs spec/v1/contracts and re-vendor, NOT to add "
-            f"a dtype to the fragment. Declaring the fragment in `lanes=` "
-            f"explicitly does not make it a lane."
-        ) from exc
-    if dtype is None:
-        if handle in DTYPELESS_UPSTREAM_LANES:
-            return None
-        raise ModelDeclarationError(
-            f"{where}: lane {handle} answers None for its load dtype. A lane "
-            f"IS a tensorfs layout contract and its dtype is the contract's; "
-            f"None is not an answer."
-        )
-    return dtype
+        return rule_dtype(quant)
+    except LayoutDeclarationError as exc:
+        raise ModelDeclarationError(f"{where}: {exc}") from exc
 
 
 def _calls_ctx_compile(fn: Any) -> bool:
@@ -266,10 +213,10 @@ def load_marks_compile(definition: Any) -> bool:
 def _parse_lanes(
     cls: type, lanes: Mapping[Any, Any]
 ) -> tuple[DeclaredLane, ...]:
-    """``lanes={contract: lane(...)}`` -> the fully READ ``DeclaredLane``s.
+    """``lanes={(topology, quant): lane(...)}`` -> the READ ``DeclaredLane``s.
 
     ONE declaration, and it is the class's whole memory story. The mapping
-    KEY is a real tensorfs contract object — never a name string, never
+    KEY is the ``(topology, quant)`` STAMP PAIR — never a name string, never
     implicit, never borrowed from the model type — and the VALUE is this
     lane's :func:`~gen_worker.serving.lane_spec.lane` declaration: its demand
     FORMULA and its optional additive residency override.
@@ -281,52 +228,60 @@ def _parse_lanes(
     stood for every request a lane would ever serve was wrong for all of
     them, so it is replaced by the formula rather than moved.
 
-    What survives, unchanged in substance: ``min_sm`` is DERIVED from the
-    lane contract's own load dtype (:func:`capability_floor_for_dtype`) and
-    an author who writes it by hand is refused. It is a per-LANE fact — an
-    8-bit lane needs 8-bit kernels because of what it IS — which is exactly
-    why a hand-written floor could never be right for a class declaring
-    bf16, fp8 and nvfp4 at once (pgw#1606).
+    What CHANGED (pgw#1621): the key. It was an imported tensorfs v1
+    ``Contract`` object; it is now the pair, because tensor-layout v2 makes
+    the digest pair identity and a v1 handle a display name. The refusals
+    below are the same refusals — a bad key, a duplicate, a VRAM string, a
+    non-``LaneSpec`` value — re-aimed at the new vocabulary.
+
+    What survives, unchanged in substance: ``min_sm`` is DERIVED and an author
+    who writes it by hand is refused. It is a per-LANE fact — an 8-bit lane
+    needs 8-bit kernels because of what it IS — which is exactly why a
+    hand-written floor could never be right for a class declaring bf16, fp8
+    and nvfp4 at once (pgw#1606). It now falls out of the QUANT RULE, which is
+    where the ratified number lives.
     """
-    from ..models.tensor_layout_contract import capability_floor_for_dtype
+    from ..models.tensor_layout_contract import (
+        LayoutDeclarationError,
+        capability_floor_for_rule,
+        display_names,
+        parse_lane_stamp,
+        rule_dtype,
+    )
 
     where = f"{cls.__qualname__}: lanes="
     if not isinstance(lanes, Mapping):
         raise ModelDeclarationError(
-            f"{where} is a MAPPING of tensorfs contract -> lane(...), got "
+            f"{where} is a MAPPING of (topology, quant) -> lane(...), got "
             f"{type(lanes).__name__}. The tuple form is deleted: every lane "
             f"declares its own demand formula, so there is nothing for a bare "
             f"tuple to carry. Write "
-            f"`lanes={{contracts.SDXL_DIFFUSERS_BF16: lane(request=…)}}`."
+            f'`lanes={{("sdxl.diffusers@1", "plain.bf16@1"): lane(request=…)}}`.'
         )
     if not lanes:
         raise ModelDeclarationError(
             f"{where} is EMPTY. `lanes=()` and `lanes={{}}` are deleted "
             f"(pgw#1597 ruling pair): a lane answers checkpoint COMPATIBILITY "
             f"and lane SELECTION, not just compilation, so every model class "
-            f"names at least one real tensorfs contract. If you do not want "
-            f"this model compiled, simply do not call `ctx.compile()` in "
-            f"`load()` — that is the entire eager declaration."
+            f"names at least one real stamp pair. If you do not want this "
+            f"model compiled, simply do not call `ctx.compile()` in `load()` "
+            f"— that is the entire eager declaration."
         )
 
+    display = display_names()
     declared: list[DeclaredLane] = []
     seen: set[str] = set()
-    for contract, spec in lanes.items():
-        if not isinstance(contract, LaneContract):
-            raise ModelDeclarationError(
-                f"{cls.__qualname__}: lane {contract!r} is not a layout "
-                "contract (no `dtype`); a lane is an imported "
-                "tensorfs contract object, never a name string"
-            )
-        # The isinstance above only proves the ATTRIBUTE exists; this
-        # READS it, which is the pgw#1391 difference.
-        dtype = lane_dtype(contract, where=cls.__qualname__)
-        handle = lane_handle(contract)
+    for key, spec in lanes.items():
+        try:
+            layout = parse_lane_stamp(key, where=f"{cls.__qualname__}: lanes=")
+        except LayoutDeclarationError as exc:
+            raise ModelDeclarationError(str(exc)) from exc
+        handle = layout.render()
         site = f"{where}[{handle!r}]"
         if handle in seen:
             raise ModelDeclarationError(
                 f"{site}: declared twice. One row per lane — two rows for one "
-                f"contract can only disagree about its demand."
+                f"pair can only disagree about its demand."
             )
         seen.add(handle)
 
@@ -348,30 +303,28 @@ def _parse_lanes(
                 f"`from gen_worker.demand import const, per_mp_batch, GiB, MiB`."
             )
 
-        # A lane with no dtype cannot state a capability floor, and a floor is
-        # the one place failing OPEN is invisible: an absent `min_sm` reads to
-        # the resolver as "runs anywhere", which is th#1754's shape with a new
-        # cause. `lane_dtype` already refuses a dtypeless contract — EXCEPT for
-        # a handle in `DTYPELESS_UPSTREAM_LANES`, where it answers None.
-        if not dtype:
-            raise ModelDeclarationError(
-                f"{site}: lane {handle} declares no load dtype, so no "
-                "compute-capability floor can be derived for it. A lane that "
-                "cannot state `min_sm` would publish a floor the resolver "
-                "reads as 'runs anywhere' — silently, which is worse than the "
-                "load crash a dtypeless contract used to cause. Declare the "
-                "dtype on the tensorfs contract document (a fused-QKV or "
-                "text-encoder COMPONENT layout is usually not a serve lane at "
-                "all, and the fix is then to name the real lane document)."
-            )
+        # Both reads REFUSE an unratified quant rule rather than defaulting.
+        # `parse_lane_stamp` has already proven the handle is in the corpus, so
+        # neither can fail here — the conversion below exists so that if that
+        # ever stops being true, the failure is a named declaration refusal and
+        # not a KeyError from inside a lane ladder on a rented pod.
+        try:
+            dtype = rule_dtype(layout.quant)
+            floor = capability_floor_for_rule(layout.quant)
+        except LayoutDeclarationError as exc:  # pragma: no cover - see above
+            raise ModelDeclarationError(f"{site}: {exc}") from exc
+
         declared.append(
             DeclaredLane(
-                contract=contract,
-                contract_id=handle,
+                layout=layout,
+                topology=str(layout.topology),
+                quant=str(layout.quant),
                 dtype=dtype,
-                # The capability floor falls out of the CONTRACT, never the
-                # header. Two producers of one fact is how they drift apart.
-                min_sm=capability_floor_for_dtype(dtype),
+                # The capability floor falls out of the RULE, never the header
+                # and never the author. Two producers of one fact is how they
+                # drift apart.
+                min_sm=floor,
+                display_name=display.get(handle, ""),
                 spec=spec,
             )
         )
@@ -388,8 +341,9 @@ def lane_requirements(declared: DeclaredLane) -> Any:
     number the hub shops on (se#810). Until it does, this row states the one
     floor that IS a lane fact: an 8-bit lane needs 8-bit kernels.
 
-    ``None`` for a lane whose dtype derives NO floor — fp32, and any dtype
-    ``DTYPE_MIN_SM`` does not know. That is the honest answer and it must not
+    ``None`` for a lane whose RULE states no floor — `plain.f32@1` is the one
+    that does, and it states its 0 explicitly. That is the honest answer and
+    it must not
     be spelled as an empty requirement row: ``parse_layout_requirements``
     refuses one by name ("omit the entry rather than declaring an empty
     one"), and it is right to — an empty row reads to the resolver as a
@@ -553,7 +507,7 @@ class Model(Generic[MT]):
         if lanes is not None:
             declared_lanes = _parse_lanes(cls, lanes)
             cls.__cozy_declared_lanes__ = declared_lanes
-            cls.__cozy_lanes__ = tuple(row.contract for row in declared_lanes)
+            cls.__cozy_lanes__ = tuple(row.layout for row in declared_lanes)
             cls.__cozy_requires__ = {
                 row.contract_id: requirements
                 for row, requirements in (
@@ -748,10 +702,8 @@ _DELETED_KWARGS: dict[str, str] = {
 
 __all__ = [
     "DECLARED_LANES_ATTR",
-    "DTYPELESS_UPSTREAM_LANES",
     "DYNAMIC",
     "LANES_ATTR",
-    "LaneContract",
     "LaneSpec",
     "DeclaredLane",
     "MODEL_TYPE_ATTR",
