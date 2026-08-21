@@ -384,8 +384,41 @@ class ServeLoop:
         )
         if resolved is not None:
             logger.info("lane ladder: %s", resolved.confession())
+            # pgw#1620: THE CONFESSION HAS TO LEAVE THE POD. This line is the
+            # audit record pgw#1606 wrote so a ladder that only reports its
+            # winner cannot exist — and it was a `logger.info` on a RunPod pod,
+            # which has no logs API, so it was measured appearing ZERO times in
+            # the hub log and in zero `worker_activity_events` rows. Once per
+            # (class, checkpoint), because this method is the cache.
+            #
+            # `phase` is the ranked lane BODY, which is a closed fleet
+            # vocabulary and therefore countable hub-side; the contract, the
+            # card, the reason and every rejected rung ride `detail`.
+            try:
+                from .. import activity
+
+                activity.emit_event(
+                    activity.KIND_APPLIED_LANE,
+                    f"{model_cls.__name__} <- {binding.checkpoint_ref}: "
+                    f"{resolved.confession()}",
+                    phase=str(resolved.body or "?"),
+                    family=str(resolved.contract_id or ""),
+                )
+            except Exception:  # noqa: BLE001 — a confession never fails a boot
+                logger.debug("lane ladder: could not emit applied_lane",
+                             exc_info=True)
             self._resolved[key] = resolved
         return resolved
+
+    def resolved_lane_for(self, model_cls: type, binding: DeployBinding) -> Any:
+        """The ladder's pick for this (class, binding), if it has run.
+
+        Read-only: the ladder runs at instance build (`_backend_factory`), so
+        by the time a request holds a live instance this is populated. It
+        answers ``None`` for a model whose instance this process never built,
+        which is UNPROVEN and must be reported as absent rather than guessed.
+        """
+        return self._resolved.get((model_cls, str(binding.checkpoint_ref)))
 
     def _lane_of(self, model_cls: type) -> Tuple[Any, str]:
         lane = self.lanes[model_cls]
@@ -640,9 +673,18 @@ class ServeLoop:
             # The executing lane is the PRIMARY slot's; a weightless entrypoint
             # has none and keeps the default.
             if spec.model_params:
-                primary_lane, primary_handle = self._lane_of(spec.model_params[0][1])
+                primary_cls = spec.model_params[0][1]
+                primary_lane, primary_handle = self._lane_of(primary_cls)
                 if primary_lane is not None:
                     ctx._set_execution_lane(primary_handle)
+                # pgw#1620: and the LADDER's own answer, which is the one the
+                # request metric reports. `_lane_of` above reads the deploy's
+                # per-class pick and is `None` for a multi-lane model; the
+                # resolved lane is never None once an instance exists, and it
+                # carries the contract, the body and the reason together.
+                if primary_binding is not None:
+                    ctx._set_resolved_lane(
+                        self.resolved_lane_for(primary_cls, primary_binding))
 
             # The author's own span. Everything outside it — envelope decode,
             # input fetch, admission, weight load — is platform time, and
