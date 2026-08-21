@@ -180,6 +180,11 @@ def main() -> int:
         "supportPublicIp": True,
         "ports": ["22/tcp"],
         "env": {"PUBLIC_KEY": pub},
+        # The fleet line is torch cu13.0; a host driver below the 580 class
+        # cannot init it (measured on pod mrgr6tbpa56k9w: driver 570.172.08 /
+        # CUDA 12.8 -> torch 2.13+cu130 refuses, $0.01 to learn). Filter at
+        # the provider, not after boot.
+        "minCudaVersion": "13.0",
     }
     if args.dry_run:
         print(json.dumps(body, indent=2))
@@ -258,7 +263,7 @@ def main() -> int:
         log(f"terminating {pod_id} (elapsed {elapsed_h:.2f} h, "
             f"~${rate * elapsed_h:.2f}) ...")
         dead = podguard.terminate_and_confirm(api, pod_id)
-        podguard.record_release(pod_id, dead, note="pgw1607 driver finally")
+        podguard.record_release(pod_id, dead, reason="pgw1607 driver finally")
         mark_released(pod_id)
         log(f"provider-404 confirmed: {dead}")
         if not dead:
