@@ -32,7 +32,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .document import GraphRecord, LaneGraphs
-from .dynamic import DimPolicy, alias_ingress, plan_exports, resolve_policy
+from .dynamic import (
+    DimPolicy,
+    alias_ingress,
+    contradicted_axes,
+    decomposition_narrowing,
+    format_narrowing,
+    plan_exports,
+    resolve_policy,
+    without_axes,
+)
 from .graph_identity import GraphIdentityError, graph_hash
 from .ingress import IngressError, build_call_ingress
 from .lane import LaneError, LaneRef, require_targets, resolve_target
@@ -429,6 +438,67 @@ def discover_modules(
                     f"(strict={strict}) failed for the observed call: "
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
+            if plan.dynamic:
+                # tcg#78: export ACCEPTING a Dim is not the graph agreeing to
+                # serve its range. The guards that contradict a range live in
+                # the DECOMPOSED graph -- `aten.to.dtype` asks nothing,
+                # `torch._prims.convert_element_type` asks whether the tensor
+                # can be size-1 -- so an axis torch.export admits can still be
+                # narrowed to a single value 84-129 s into the AOTI compile
+                # that finally decomposes it. Asking here costs ~2 s of CPU and
+                # no compiler, and the artifact it prevents is not a slow
+                # failure but a SILENT one: minted past this point, an sd15
+                # UNet whose batch range collapsed to [2, 2] answers a batch-1
+                # call with a batch-2 tensor of garbage and raises nothing.
+                try:
+                    with synthesis:
+                        moved = decomposition_narrowing(program)
+                except Exception as exc:  # the compile would decompose too
+                    moved = {}
+                    logger.warning(
+                        "lane %s target %s: the range probe over %s could not "
+                        "decompose (%s: %s); falling back to one static export "
+                        "per observed shape for this group",
+                        contract, path, sorted(plan.symbols),
+                        type(exc).__name__, exc,
+                    )
+                    pending = plan.static_fallback() + pending
+                    continue
+                if moved:
+                    try:
+                        refused = contradicted_axes(
+                            path,
+                            build_call_ingress(
+                                program, list(plan.param_names), args, kwargs
+                            ),
+                            moved,
+                        )
+                    except IngressError:
+                        refused = set()
+                    dims = without_axes(dims, refused)
+                    logger.warning(
+                        "lane %s target %s: dynamic export over %s was REFUSED "
+                        "— the graph's own guards contradict the declared "
+                        "range (%s); re-planning this group with %s held "
+                        "static",
+                        contract, path, sorted(plan.symbols),
+                        format_narrowing(moved),
+                        sorted(refused) or "the whole group",
+                    )
+                    # Only the CONTRADICTED axes are demoted, and only this
+                    # group is re-planned. A batch axis the guards refuse must
+                    # not take the aspect collapse down with it -- collapsing
+                    # the aspect fan is what the dynamic-dims program is for.
+                    # With nothing left to offer, the re-plan yields exactly
+                    # tcg#77's static fallback, so there is one path, not two.
+                    #
+                    # The probe SHARES this program's ShapeEnv, so the program
+                    # is now polluted by the refinement it revealed. It is
+                    # discarded here and never declared; the re-plan exports
+                    # again from the module.
+                    with synthesis:
+                        pending = plan_exports(path, list(plan.covers), dims) + pending
+                    continue
             # tcg#64: the drive ran on a device that EXISTS; the graph is
             # stamped with the device the session STATES. This is the one
             # place the two meet, and it is before the hash, so a GPU-less

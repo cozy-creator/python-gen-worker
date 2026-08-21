@@ -131,7 +131,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "14e8b4dfde79f34eefef81f8bbfa1fdef69e7a7f"
+rev = "c609d65142c3046a4bb792b4fe9a5929580fb03d"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's
@@ -350,11 +350,11 @@ rewrites = [
 "contracts/literal_identity_v1.json" = "50cb80e750a8124a45b982415258d8590c37f90ca804326588dfde1b368c6863"
 "contracts/recipe_v1.json" = "d319b5f2e4a3d5c13587da2b7d7cdc25c83b92e0b5b22311c317948c3e610d1a"
 "contracts/toolchain_identity_v1.json" = "f4114c38ae373f62ddcb2aae5498ffbee30630e80adf11fee99e68bcbdb24282"
-"declaration.py" = "8b42bae864a4127cc5e418915f8395d980b8a439a51fd4d6f5ecbb42ba613b21"
-"discovery.py" = "7b294cab60126763cc634f536e3b94f8df36523b42b94bf2ef66deec676de4ec"
+"declaration.py" = "5ea9ad7653ccbc1bda7dffe6e643dc1a55e37de26d5120c8f8bfd918d2d8de9b"
+"discovery.py" = "172f40ea2e7f7c6e88b45699d74a2d029bdb0151f289307a6e9563709042726e"
 "document.py" = "a70f4e53d75dd4cdc5fb6f52be4c8c105e49efee168ab6c295094a09f779d0ad"
-"dynamic.py" = "8466c4a7330513e9ebd381fe89e53ba72e276bfc0dcf8499e004bf0f92961b6d"
-"engine.py" = "577ae142365a67947625df738a10ebc9565ab205c8d470e068a7eccd946a3de2"
+"dynamic.py" = "9aa0e6e094344b74ba62a693da272fd7c86be5b5b00e0f31d45398f249b666a6"
+"engine.py" = "66cf857bc9b9e0fb147385f767d2aeca1868a6c79422dba017ec75fede7aabad"
 "graph_identity.py" = "88c731a681eb1e0b878f30bc33fcaa4efdbfc16bdc612fd6d406a088e299e567"
 "hollow.py" = "d9a0b57b01036588b9182d737ea925c34885b14a4bf88e76c8bb38d6d4ae97f9"
 "host_isa.py" = "679aa81547be2d60ae6593b6e8f75dd29dcd56ab85d8e858e219b5af5d0eadc4"

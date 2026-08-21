@@ -78,7 +78,19 @@ class _Symbols:
 
 
 def _render_symbol(value: Any, symbols: _Symbols) -> str:
-    expression = getattr(getattr(value, "node", None), "expr", None)
+    # `_expr` is the symbol the EXPORT established; `.expr` is a property that
+    # folds in whatever the ShapeEnv has been told since. tcg#78: an AOTI
+    # compile shares the program's ShapeEnv and installs replacements there
+    # (measured: `.expr` s53 -> 2 across one compile, `._expr` still s53), so
+    # reading `.expr` made this canonical form a function of COMPILER STATE
+    # rather than of the exported program -- the same program declared twice
+    # around a compile produced two witnesses. A declaration must describe its
+    # input. What the compiler later concludes about the ranges is a separate,
+    # explicit question, asked by name in `engine._admit_symbol_ranges`.
+    node = getattr(value, "node", None)
+    expression = getattr(node, "_expr", None)
+    if expression is None:
+        expression = getattr(node, "expr", None)
     free = getattr(expression, "free_symbols", None) or ()
     if expression is None or not free:
         return str(expression if expression is not None else value)
