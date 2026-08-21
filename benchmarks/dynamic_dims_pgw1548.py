@@ -357,7 +357,54 @@ class Bench:
         venv = self._venv()
         if venv.exists():
             (room / ".venv").symlink_to(venv)
+        self._declare_axis(room, arm)
         return room
+
+    #: The endpoint's own shape declaration, which is now the ONLY thing that
+    #: decides an arm. `STATIC`/`DYNAMIC` are plain strings ("static" /
+    #: "dynamic") in `serving.lane_spec`, so the arm is expressed by rewriting
+    #: the VALUE and the endpoint's imports are left alone.
+    _DECL = 'shapes={"aspect": STATIC}'
+
+    def _declare_axis(self, room: Path, arm: str) -> None:
+        """Write this arm's shape choice into the room's own endpoint source.
+
+        **pgw#1599 DELETED `--dynamic-axes`.** The axis choice is no longer a
+        flag on `gen-worker lock`; it is DECLARED on the model class as
+        `shapes={"aspect": STATIC|DYNAMIC}` and travels in the release
+        document's `fork_axes`. The flag is not merely ignored -- the CLI
+        REJECTS it (`gen-worker: error: unrecognized arguments: --dynamic-axes
+        off`, measured), so the old call could only ever have worked by
+        accident, via a lock-cache hit that skipped the CLI entirely.
+
+        That accident is exactly why this must REFUSE rather than warn. If the
+        declaration cannot be found and rewritten, both arms compile from the
+        same source, the ABBA table compares an arm against ITSELF, and every
+        number in it looks perfectly reasonable. A silent no-op here does not
+        produce a wrong row; it produces a wrong TABLE that reads as right.
+        """
+
+        target = {"static": "STATIC", "aspect": '"dynamic"'}.get(arm)
+        if target is None:
+            raise SystemExit(
+                f"[{arm}] no shape declaration is defined for this arm. "
+                f"pgw#1599 makes `batch` PERMANENTLY STATIC "
+                f"(PERMANENTLY_STATIC_SHAPE_AXES), so the batch/all arms are "
+                f"not expressible and CFG is not re-litigated here.")
+        main = room / "src" / "sdxl" / "main.py"
+        if not main.exists():
+            raise SystemExit(f"[{arm}] {main} absent — cannot declare the axis")
+        source = main.read_text()
+        if source.count(self._DECL) != 1:
+            raise SystemExit(
+                f"[{arm}] REFUSING: expected exactly one {self._DECL!r} in "
+                f"{main}, found {source.count(self._DECL)}. The arm cannot be "
+                f"expressed, and running anyway would compare an arm against "
+                f"itself while every number still looked plausible.")
+        main.write_text(source.replace(
+            self._DECL, f'shapes={{"aspect": {target}}}'))
+        print(f"[{arm}] declared shapes={{'aspect': {target}}} in the room's "
+              f"own source (pgw#1599: the declaration IS the arm)")
 
     def _venv(self) -> Path:
         """The environment the endpoint's own code runs in.
@@ -467,7 +514,9 @@ class Bench:
         started = time.monotonic()
         result = self._gen_worker(
             room,
-            ["lock", str(room), "--force", "--dynamic-axes", AXES[arm],
+            # NO `--dynamic-axes`: pgw#1599 deleted it and the CLI REJECTS it.
+            # The arm now rides the room's own declaration (`_declare_axis`).
+            ["lock", str(room), "--force",
              "--checkpoint", str(self.args.checkpoint)],
             timeout=self.args.lock_timeout,
         )
