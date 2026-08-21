@@ -878,6 +878,40 @@ class Worker:
             else f"{body}+eager"
         )
 
+    def _bank_demand(self, pending: Any, served_lane: str, *, solo: bool) -> None:
+        """pgw#1600's falsifier: complete the serve loop's half-record and bank it.
+
+        The REGIME is added here and only here, because the dispatch counter
+        that answers it lives here. It is read off the very string
+        :meth:`_served_lane` already produced, so the metric the hub sees and
+        the regime the sample is keyed under can never disagree — one
+        producer, and `demand_miss` grouped by a regime the lane metric
+        contradicts would be unreadable.
+
+        A CONCURRENT request banks NOTHING. Both halves are ambiguous when
+        jobs overlap: the dispatch counter is per-worker (which is why
+        :meth:`_served_lane` already withholds the suffix), and the arena
+        measurement is per-process, so a co-tenant's activations would land
+        in this request's sample. An unbanked request is a smaller loss than
+        a sample attributed to the wrong lane.
+        """
+
+        if pending is None or not solo:
+            return
+        suffix = served_lane.rsplit("+", 1)[-1] if "+" in served_lane else ""
+        try:
+            from . import demand_falsifier
+
+            demand_falsifier.observe(
+                lane=pending.lane,
+                regime=suffix,
+                demand=pending.demand,
+                shape=pending.shape,
+                measured=pending.measured,
+            )
+        except Exception:  # noqa: BLE001 — a falsifier never fails a result
+            logger.debug("demand falsifier: not banked", exc_info=True)
+
     async def _run_one(self, run: pb.RunJob, key: Tuple[str, int]) -> None:
         accepted_at = time.monotonic()
         if key in self._canceled:
@@ -894,6 +928,7 @@ class Worker:
         stages: Optional[Any] = None
         started = accepted_at
         ctx_box: List[Any] = []
+        pending_demand: Optional[Any] = None
         solo = len(self._jobs) <= 1
         self._dispatch_counter().reset()
         try:
@@ -949,6 +984,7 @@ class Worker:
             inline = msgspec.msgpack.encode(outcome.result)
             adjustments = outcome.adjustments
             stages = outcome.stages
+            pending_demand = outcome.demand
             status = pb.JOB_STATUS_OK
         except asyncio.CancelledError:
             await self._send_result(*key, pb.JOB_STATUS_CANCELED, safe_message="canceled")
@@ -983,6 +1019,7 @@ class Worker:
             queue_ms=int((started - accepted_at) * 1000),
         )
         metrics.lane = self._served_lane(ctx_box, solo=solo)
+        self._bank_demand(pending_demand, metrics.lane, solo=solo)
         metrics.stage_ms.update(stage_ms_for_metrics(stages, runtime_ms))
         await self._send_result(
             *key,

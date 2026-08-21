@@ -78,6 +78,7 @@ from pathlib import Path
 from types import MappingProxyType, ModuleType
 from typing import Any, Optional
 
+from ..demand_envelope import advertised_envelope, demand_document
 from ..serving.entrypoints import ENTRYPOINT_ATTR
 from ..serving.model import (
     Model,
@@ -1300,6 +1301,17 @@ def derive_release(
             floor = requires.get(lane_graphs.contract)
             if floor is not None:
                 entry["requires"] = floor.render()
+            # pgw#1600. THE DEMAND FORMULA, SERIALIZED. Data, not Python: a
+            # term list plus the closed vocabulary it is written against, so
+            # tensorhub (Go) evaluates `worst_case = manifest weight bytes +
+            # demand(advertised envelope)` at pod-buy time without running any
+            # of ours. The envelope is taken over EVERY entrypoint this
+            # release serves, because the pod must hold the worst case of the
+            # whole advertised surface, not of one function.
+            entry["demand"] = demand_document(
+                lane.request,
+                advertised_envelope(*(plan.payload_type for plan, _ in plans)),
+            )
             # THE FIRST field: the map KEY. Key != stamp is the hub's hard
             # refusal `release_compiled_graphs_invalid_lane`, which is why this
             # is the same expression and not a second spelling of it.

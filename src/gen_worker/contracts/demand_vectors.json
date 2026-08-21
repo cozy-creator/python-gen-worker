@@ -1,0 +1,386 @@
+{
+  "version": 1,
+  "vocabulary_version": 1,
+  "algebra": "C + sum(coefficient_i * value_i / scale_i), floor, int64",
+  "vocabulary": {
+    "const": {
+      "scale": 1,
+      "inputs": [],
+      "doc": "a fixed floor, independent of the request"
+    },
+    "megapixels": {
+      "scale": 1000000,
+      "inputs": [
+        "width",
+        "height"
+      ],
+      "doc": "output width x height / 1e6"
+    },
+    "mp_batch": {
+      "scale": 1000000,
+      "inputs": [
+        "width",
+        "height",
+        "batch"
+      ],
+      "doc": "megapixels x batch (the CFG pair counts as 2)"
+    },
+    "batch": {
+      "scale": 1,
+      "inputs": [
+        "batch"
+      ],
+      "doc": "the launch batch size (2 with CFG, 1 without)"
+    },
+    "frames": {
+      "scale": 1,
+      "inputs": [
+        "frames"
+      ],
+      "doc": "the video frame count"
+    },
+    "frames_squared": {
+      "scale": 1,
+      "inputs": [
+        "frames"
+      ],
+      "doc": "frame count SQUARED — the quadratic attention term"
+    },
+    "latent_tokens": {
+      "scale": 1,
+      "inputs": [
+        "latent_tokens"
+      ],
+      "doc": "the denoiser's latent sequence length"
+    }
+  },
+  "shape_bounds": {
+    "width": 65536,
+    "height": 65536,
+    "batch": 4096,
+    "frames": 1048576,
+    "latent_tokens": 2147483648
+  },
+  "cases": [
+    {
+      "name": "a const-only formula ignores the shape entirely",
+      "terms": [
+        {
+          "term": "const",
+          "bytes": 1288490188
+        }
+      ],
+      "shape": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 2,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "bytes": 1288490188
+    },
+    {
+      "name": "the sdxl reference shape",
+      "terms": [
+        {
+          "term": "const",
+          "bytes": 1288490188
+        },
+        {
+          "term": "mp_batch",
+          "bytes": 230686720
+        }
+      ],
+      "shape": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 2,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "bytes": 1772275304,
+      "why": "1024x1024 with the CFG pair — the shape pgw#1577 measured and the one tcg#80 re-ran compiled on sm_89"
+    },
+    {
+      "name": "a coefficient that is not a multiple of its scale FLOORS",
+      "terms": [
+        {
+          "term": "megapixels",
+          "bytes": 1000003
+        }
+      ],
+      "shape": {
+        "width": 1023,
+        "height": 1021,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "bytes": 1044486,
+      "why": "1_000_003 * 1_044_483 / 1_000_000 is not an integer; a float divide and a floor divide answer differently here"
+    },
+    {
+      "name": "a coefficient SMALLER than its scale is the pure-remainder arm",
+      "terms": [
+        {
+          "term": "megapixels",
+          "bytes": 7
+        }
+      ],
+      "shape": {
+        "width": 999,
+        "height": 997,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "bytes": 6,
+      "why": "quotient is 0, so the whole answer comes out of (remainder * value) // scale"
+    },
+    {
+      "name": "a sub-megapixel request rounds DOWN to zero on a small coefficient",
+      "terms": [
+        {
+          "term": "mp_batch",
+          "bytes": 1024
+        }
+      ],
+      "shape": {
+        "width": 64,
+        "height": 64,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "bytes": 4
+    },
+    {
+      "name": "every video term at once",
+      "terms": [
+        {
+          "term": "const",
+          "bytes": 536870912
+        },
+        {
+          "term": "frames",
+          "bytes": 3145728
+        },
+        {
+          "term": "frames_squared",
+          "bytes": 65536
+        },
+        {
+          "term": "batch",
+          "bytes": 11534336
+        }
+      ],
+      "shape": {
+        "width": 1280,
+        "height": 720,
+        "batch": 1,
+        "frames": 241,
+        "latent_tokens": 0
+      },
+      "bytes": 5112922112
+    },
+    {
+      "name": "latent tokens, the transformer-shaped term",
+      "terms": [
+        {
+          "term": "const",
+          "bytes": 734003200
+        },
+        {
+          "term": "latent_tokens",
+          "bytes": 8192
+        }
+      ],
+      "shape": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 4096
+      },
+      "bytes": 767557632
+    },
+    {
+      "name": "the zero shape: every non-const term contributes nothing",
+      "terms": [
+        {
+          "term": "const",
+          "bytes": 67108864
+        },
+        {
+          "term": "megapixels",
+          "bytes": 4294967296
+        },
+        {
+          "term": "mp_batch",
+          "bytes": 4294967296
+        },
+        {
+          "term": "batch",
+          "bytes": 4294967296
+        },
+        {
+          "term": "frames",
+          "bytes": 4294967296
+        },
+        {
+          "term": "frames_squared",
+          "bytes": 4294967296
+        },
+        {
+          "term": "latent_tokens",
+          "bytes": 4294967296
+        }
+      ],
+      "shape": {
+        "width": 0,
+        "height": 0,
+        "batch": 0,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "bytes": 67108864,
+      "why": "a lane whose request advertises no shape axis is not a lane with an unbounded demand"
+    },
+    {
+      "name": "the domain ceiling on every axis with a large coefficient",
+      "terms": [
+        {
+          "term": "const",
+          "bytes": 68719476736
+        },
+        {
+          "term": "megapixels",
+          "bytes": 1073741824
+        },
+        {
+          "term": "mp_batch",
+          "bytes": 1073741824
+        },
+        {
+          "term": "batch",
+          "bytes": 1048576
+        },
+        {
+          "term": "frames",
+          "bytes": 1048576
+        },
+        {
+          "term": "frames_squared",
+          "bytes": 1
+        },
+        {
+          "term": "latent_tokens",
+          "bytes": 1
+        }
+      ],
+      "shape": {
+        "width": 65536,
+        "height": 65536,
+        "batch": 4096,
+        "frames": 1048576,
+        "latent_tokens": 2147483648
+      },
+      "bytes": 18896351802680239,
+      "why": "THE OVERFLOW CASE. Forming coefficient*value before dividing overflows int64 here in both languages; the split division does not, and both sides must return this exact integer"
+    },
+    {
+      "name": "the term ORDER in the document does not change the sum",
+      "terms": [
+        {
+          "term": "mp_batch",
+          "bytes": 230686720
+        },
+        {
+          "term": "const",
+          "bytes": 1288490188
+        }
+      ],
+      "shape": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 2,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "bytes": 1772275304,
+      "why": "same answer as the sdxl reference case above"
+    }
+  ],
+  "refusals": [
+    {
+      "name": "an unknown term name is refused, never skipped",
+      "terms": [
+        {
+          "term": "gigaflops",
+          "bytes": 1024
+        }
+      ],
+      "shape": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "reason": "unknown_term",
+      "why": "a formula evaluated without one of its terms is a LOW number, and low is the direction that buys too little card"
+    },
+    {
+      "name": "a shape past the declared domain is refused",
+      "terms": [
+        {
+          "term": "mp_batch",
+          "bytes": 230686720
+        }
+      ],
+      "shape": {
+        "width": 65537,
+        "height": 1024,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "reason": "shape_out_of_domain"
+    },
+    {
+      "name": "a result past int64 is refused, never wrapped",
+      "terms": [
+        {
+          "term": "latent_tokens",
+          "bytes": 8589934592
+        }
+      ],
+      "shape": {
+        "width": 0,
+        "height": 0,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 2147483648
+      },
+      "reason": "result_out_of_range",
+      "why": "THE ROW THE GO SIDE FOUND. Python's bignums cannot notice an int64 overflow, so the shared constraint is on the ANSWER: 2**33 bytes per latent token at 2**31 tokens is 2**64, and a wrapped answer is a SMALL number"
+    },
+    {
+      "name": "a negative shape scalar is refused",
+      "terms": [
+        {
+          "term": "const",
+          "bytes": 1048576
+        }
+      ],
+      "shape": {
+        "width": -1,
+        "height": 1024,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 0
+      },
+      "reason": "shape_out_of_domain"
+    }
+  ]
+}

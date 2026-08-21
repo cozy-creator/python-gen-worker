@@ -113,6 +113,7 @@ tasks:
       - cmd: uv run python scripts/check_hub_worker_boundary_contracts_digest.py
       - cmd: uv run python scripts/check_grammar_corpus_digest.py
       - cmd: uv run python scripts/check_formula_corpus_digest.py
+      - cmd: uv run python scripts/check_demand_corpus_digest.py
       - cmd: uv run python scripts/assemble_changelog.py --check
 
   test:

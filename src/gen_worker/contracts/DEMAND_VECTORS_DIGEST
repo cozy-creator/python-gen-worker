@@ -1,0 +1,10 @@
+# sha256 of demand_vectors.json — the shared tensorhub/python-gen-worker
+# demand-formula conformance corpus (pgw#1600 acceptance (a)).
+#
+# The corpus is GENERATED, never hand-edited: `scripts/gen_demand_corpus.py`
+# writes it from this repository's own evaluator, so a case's expected bytes
+# cannot drift away from what Python actually computes. A corpus change is a
+# coupled cross-repo contract change: pgw lands first, then tensorhub bumps
+# its peers.lock row to the merge commit and re-runs its Go evaluator against
+# these bytes.
+c852afdd7277c5fe670491672e46511ff0143b21accbb1cff2fab47efd648276

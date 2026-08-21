@@ -241,6 +241,8 @@ jobs:
         run: uv run python scripts/check_grammar_corpus_digest.py
       - name: pgw#1236 gate - the shared formula corpus matches its digest
         run: uv run python scripts/check_formula_corpus_digest.py
+      - name: pgw#1600 gate - the shared demand corpus is REGENERATED and digested
+        run: uv run python scripts/check_demand_corpus_digest.py
 
       # GATING (pgw#968): a changelog fragment whose name does not parse as
       # <prefix><number>.md would otherwise refuse the RELEASE CUT, weeks after
