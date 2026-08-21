@@ -428,6 +428,14 @@ def test_the_generated_candidates_declare_themselves_UNRATIFIED() -> None:
     THIS TEST IS EXPECTED TO GO RED when the documents are ratified and the
     marker is dropped. That is the point: the day it fails is the day se#816
     is unblocked, and someone will read this docstring to find out why.
+
+    ✅ **AND IT HAPPENED, ONCE, ON 2026-08-20** (tensorfs `51adc50`, vendored
+    by pgw#1616): `rife.flownet-fp32@1` now reads *"GENERATED, THEN RATIFIED"*
+    and has left the list below — **the first document in the set to be
+    ratified by a human**. Eight remain. The count on the last line moved with
+    it, and it must keep moving one at a time; a bulk drop to zero would mean
+    the MARKER was deleted rather than the documents ratified, which is the one
+    way this gate can be satisfied dishonestly.
     """
 
     from gen_worker._vendor.tensorfs import contracts
@@ -445,13 +453,13 @@ def test_the_generated_candidates_declare_themselves_UNRATIFIED() -> None:
         "musicgen.transformers-fp16@1",
         "qwen3.6-27b-mtp.gguf-ud-q4-k-xl@1",
         "qwen3.6-35b-a3b.vllm-fp8@1",
-        "rife.flownet-fp32@1",
         "sdxl.diffusers-nvfp4-flat@1",
     ]
 
-    # ...and the twenty-one that predate tensorfs#130 carry no such marker, so
-    # this is a property of the GENERATED set and not of every document.
-    assert len(list(contracts.all())) - len(unratified) == 21
+    # ...and the rest carry no such marker, so this is a property of the
+    # GENERATED set and not of every document. 21 predate tensorfs#130, +1 for
+    # `rife.flownet-fp32@1`, which is generated AND ratified.
+    assert len(list(contracts.all())) - len(unratified) == 22
 
 
 def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
@@ -471,26 +479,43 @@ def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
     raises. A floor is the one place failing open is invisible.
 
     **RE-AUDITED at tensorfs rev 1da68d58 (tensorfs#130), and the set GREW
-    from three to five. The two new ones are NOT fragments, and that is a
-    finding rather than a formality — the fence did the job it exists for.**
+    from three to five** — then **SHRANK BACK TO THREE at `51adc50`, because
+    the reason given for the two additions was WRONG.** Both halves are kept
+    here, because the mistake is more instructive than the fix.
 
-    * `sdxl.diffusers-nvfp4-flat@1` — a real serve lane, dtypeless because
-      nvfp4 is BLOCK-SCALED: the weight nibbles and their per-block scales are
-      two different dtypes, so no single top-level one is true. Not adoptable
-      yet regardless (a multi-lane class cannot boot until pgw#1606), so it
-      blocks nothing today.
-    * `qwen3.6-27b-mtp.gguf-ud-q4-k-xl@1` — **a real serve lane that an
-      endpoint is waiting on, and it STILL cannot be declared.** GGUF is a
-      quant CONTAINER with per-tensor ggml types and no single torch dtype, so
-      `lane_dtype` refuses it at declaration and `qwen3.6-27b-mtp-gguf` stays
-      blocked. tensorfs#130 shipped the document; the LANE-VS-FRAGMENT FORMAT
-      GAP it lands in is tensorfs#127, and that is what has to close before
-      the endpoint can migrate.
+    What this docstring used to say, and what was wrong with it:
 
-    **Neither is being waived.** `DTYPELESS_UPSTREAM_LANES` stays EMPTY: an
-    entry there knowingly accepts a lane whose serve-side `ctx.lane.dtype`
-    raises on a rented pod, and a blocked endpoint is a better state than a
-    green declaration that dies at load.
+    * *"`sdxl.diffusers-nvfp4-flat@1` — dtypeless because nvfp4 is
+      BLOCK-SCALED: the weight nibbles and their per-block scales are two
+      different dtypes, so no single top-level one is true."*
+    * *"`qwen3.6-27b-mtp.gguf-ud-q4-k-xl@1` — GGUF is a quant CONTAINER with
+      per-tensor ggml types and no single torch dtype."*
+
+    Both are true statements about TENSOR CONTAINER TYPES and both are wrong
+    about the FIELD. `dtype` on a lane contract does not mean "the one torch
+    spelling every tensor in this tree shares" — it never did. It means **THE
+    LANE'S QUANTIZATION**, which is why `sdxl.diffusers-fp8-rowwise@1` declares
+    `float8_e4m3fn` across 257 declarations of which only 36 are fp8. Read
+    that way, nvfp4 declares `float4_e2m1fn` and the GGUF declares `q4_k` (the
+    ggml type name), and neither needed a format change to say so.
+
+    **The cost of the wrong reading was a REFUSAL WITH NO REMEDY.** Under
+    pgw#1599's always-required `lanes=`, a dtypeless serve lane cannot be
+    declared at all — so `QwenMtpModel` was undeclarable and
+    `qwen3.6-27b-mtp-gguf` stayed blocked, with the block attributed to a
+    format gap (tensorfs#127) that was not actually in the way. pgw#1606's
+    lane fence reached the same "correctly refused" verdict about nvfp4 and
+    was wrong for the same reason. The tensorfs#130 lane priced it, diverged
+    from both readings, and taught the generator to REFUSE a document that
+    omits the field rather than emit one without it.
+
+    So the set is the three FRAGMENTS again — and this time for a reason that
+    survives scrutiny: a fragment is a shared block or component spelling that
+    a `lanes=` header never names on its own, so it has no lane and therefore
+    no lane quantization to declare. That is a statement about what the
+    document IS, not about what its tensors contain.
+
+    `DTYPELESS_UPSTREAM_LANES` stays EMPTY, and now nothing is blocked by it.
     """
 
     from gen_worker._vendor.tensorfs import contracts
@@ -504,10 +529,9 @@ def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
         "dit.blocks-fused-qkv@1",
         "sdxl.clip-g-fused-qkv@1",
         "sdxl.clip-g-split-qkv@1",
-        # REAL SERVE LANES whose FORMAT has no single top-level dtype
-        # (tensorfs#127). See the docstring: these are blocked, not waived.
-        "sdxl.diffusers-nvfp4-flat@1",
-        "qwen3.6-27b-mtp.gguf-ud-q4-k-xl@1",
+        # NOTHING ELSE. Both former entries now declare their lane's
+        # quantization (`float4_e2m1fn`, `q4_k`) — see the docstring for why
+        # the reasoning that put them here was wrong.
     }, "the dtypeless set moved; re-audit the derivation against it"
 
     for contract in dtypeless:
