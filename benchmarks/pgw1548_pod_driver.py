@@ -295,6 +295,11 @@ def main(argv: list[str] | None = None) -> int:
     api, _pub = podguard.creds()
     lease = podguard.rent(api, body, lane="pgw1548",
                           lease_seconds=900, orig_cmd=start)
+    # DECLARE the renewal channel (pgw#1617). A raw rented pod cannot be renewed
+    # over SSH at all (pgw#1568), so saying so explicitly puts the caveat in the
+    # reaper's own reason string instead of leaving it implicit in a default.
+    lease.renewal_channel = "none"
+    lease.save()
     # BEFORE the first wait, per the coordinator's rider.
     bank(lease.pod_id, args.mode,
          {"rate_per_hr": lease.rate_per_hr, "image": IMAGE,
