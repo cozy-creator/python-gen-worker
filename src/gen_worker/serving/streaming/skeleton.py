@@ -554,6 +554,8 @@ def build(
             f"`ctx.load` a pipeline class that keeps its constructor arguments."
         )
 
+    _refuse_uncensused_components(pipeline, modules)
+
     logger.info(
         "ctx.load: meta skeleton %s built from configs — %d module component(s), "
         "%d passthrough, %d quantized, 0 tensor bytes read",
@@ -566,6 +568,45 @@ def build(
         pipeline=pipeline, modules=modules, passthrough=tuple(passthrough),
         quantized=quantized,
     )
+
+
+def _refuse_uncensused_components(
+    pipeline: Any, modules: Mapping[str, Any]
+) -> None:
+    """No weight-bearing module may reach the pipeline outside the module set.
+
+    The census, the fill, the lane assertion and the fence all have exactly ONE
+    jurisdiction — ``Skeleton.modules`` — and this is what makes that safe to
+    say. The sweep this replaces used to fold ``pipeline.components`` in as a
+    SECOND root set, which meant a module could be placed by the engine and
+    described by nothing. An uncensused module is the thing this whole seam
+    exists to make impossible, so it is refused rather than swept.
+
+    By construction a passthrough component is not an ``nn.Module`` (:func:`build`
+    only routes non-modules through the stock ``from_pretrained``), so this
+    cannot fire on any tree the loader serves today. It fires the day a pipeline
+    class starts building a weight-bearing component of its own — which is
+    precisely the fifth family member, arriving as a name nobody wrote down.
+    """
+    import torch
+
+    known = {id(module) for module in modules.values()}
+    components = getattr(pipeline, "components", None)
+    if not isinstance(components, Mapping):
+        return
+    stray = sorted(
+        name for name, held in components.items()
+        if isinstance(held, torch.nn.Module) and id(held) not in known
+    )
+    if stray:
+        raise SkeletonError(
+            f"{type(pipeline).__name__} carries weight-bearing component(s) "
+            f"{stray} that are not in the module set this loader builds, fills "
+            f"and fences ({sorted(modules)}). Nothing would stream into them, "
+            f"nothing would place them, and the construction census would not "
+            f"describe them — they would be found empty, or on the wrong "
+            f"device, at the first forward (pgw#1647)"
+        )
 
 
 def finish_quantized(module: "torch.nn.Module", quantization: Quantization) -> None:

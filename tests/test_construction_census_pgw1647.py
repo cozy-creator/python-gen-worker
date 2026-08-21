@@ -445,7 +445,7 @@ def test_I4_the_sweep_walks_a_module_that_no_pipeline_registry_exposes_pgw1647()
     class _ModularShaped:
         components: Dict[str, Any] = {}
 
-        def __init__(self, module: torch.nn.Module) -> None:
+        def __init__(self, module: Any) -> None:
             self.module = module
 
     inner = torch.nn.Module()
@@ -631,7 +631,9 @@ def test_the_serve_engine_and_the_suite_call_the_SAME_predicate_pgw1647() -> Non
         "the serving engine no longer calls the census fence; whatever it does "
         "instead is a second predicate"
     )
-    assert engine._census is census
+    assert getattr(engine, "_census") is census, (
+        "the engine bound some other module under the census name"
+    )
 
 
 def test_the_prepare_seam_is_ENUMERATED_and_lives_in_one_module_pgw1647() -> None:
@@ -646,7 +648,7 @@ def test_the_prepare_seam_is_ENUMERATED_and_lives_in_one_module_pgw1647() -> Non
     """
     import ast
 
-    root = Path(skeleton.__file__).parent
+    root = Path(str(skeleton.__file__)).parent
     owned = {"skeleton.py", "census.py"}
     forbidden = {"preprocess_model", "postprocess_model", "tie_weights"}
     offenders: List[str] = []
@@ -669,3 +671,36 @@ def test_the_prepare_seam_is_ENUMERATED_and_lives_in_one_module_pgw1647() -> Non
     )
     assert skeleton.PREPARE_STEPS[0] == "build on meta"
     assert skeleton.PREPARE_STEPS[-1] == "device sweep"
+
+
+def test_no_weight_bearing_module_reaches_the_pipeline_uncensused_pgw1647() -> None:
+    """The census has ONE jurisdiction, and this is what makes that safe.
+
+    The sweep this replaces folded `pipeline.components` in as a SECOND root
+    set, which meant a module could be PLACED by the engine and described by
+    nothing. An uncensused module is what this seam exists to make impossible,
+    so it is refused rather than swept — and the refusal names it.
+    """
+    from gen_worker.serving.streaming.skeleton import (
+        SkeletonError,
+        _refuse_uncensused_components,
+    )
+
+    censused = torch.nn.Linear(2, 2)
+    stray = torch.nn.Linear(2, 2)
+
+    class _Pipe:
+        def __init__(self, components: Dict[str, Any]) -> None:
+            self.components = components
+
+    _refuse_uncensused_components(_Pipe({"unet": censused}), {"unet": censused})
+    # A passthrough component is not an nn.Module, which is why this cannot fire
+    # on any tree the loader serves today.
+    _refuse_uncensused_components(
+        _Pipe({"unet": censused, "tokenizer": object()}), {"unet": censused})
+
+    with pytest.raises(SkeletonError, match="safety_checker"):
+        _refuse_uncensused_components(
+            _Pipe({"unet": censused, "safety_checker": stray}),
+            {"unet": censused},
+        )

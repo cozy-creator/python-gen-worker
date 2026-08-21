@@ -20,6 +20,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -63,7 +64,7 @@ def lockfile(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
-def _endpoint(name: str):
+def _endpoint(name: str) -> ModuleType:
     import importlib
 
     sys.path.insert(0, str(FIXTURES))
