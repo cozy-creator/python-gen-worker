@@ -871,10 +871,33 @@ class Bench:
         """
 
         static = self.mint.get("static") or {}
-        per_spec = static.get("compile_s_per_spec")
+        # A `gen-worker compile` that finds its artifact already in the box CAS
+        # returns in under a second. That is a CACHE HIT, not a mint, and using
+        # it to price a specialization would value the removed graphs at ~0 —
+        # the ROI would then say every axis is free to keep, which is the
+        # opposite of the truth. So the price comes from an arm that ACTUALLY
+        # BUILT, and if no arm did, the paid side is reported as unpriced
+        # rather than as cheap.
+        CACHE_HIT_S = 5.0
+        built: list[tuple[str, float]] = [
+            (arm, row["compile_s_per_spec"])
+            for arm, row in self.mint.items()
+            if (row.get("compile_s_per_spec") or 0.0) > CACHE_HIT_S
+        ]
+        per_spec = max((w for _a, w in built), default=None)
+        priced_from = max(built, key=lambda pair: pair[1])[0] if built else None
         out: dict[str, Any] = {
             "dtype_lanes": self.args.dtype_lanes,
             "measured_compile_s_per_spec": per_spec,
+            "compile_price_from_arm": priced_from,
+            "compile_price_note": (
+                f"priced from the {priced_from!r} arm's own build"
+                if priced_from else
+                "UNPRICED: every arm's artifacts were already in the box CAS, "
+                "so no mint wall was measured this run — the specializations "
+                "removed are counted but not costed"
+            ),
+            "static_compile_s_per_spec_raw": static.get("compile_s_per_spec"),
             "axes": {},
         }
         for arm in self.table.arms():
@@ -1104,6 +1127,29 @@ def self_test() -> int:
     check("the dtype-lane floor travels with the arithmetic",
           roi_bench.roi()["dtype_lanes"] == 2)
 
+    print("[self-test] a CACHE HIT is never mistaken for a mint wall")
+    roi_bench.mint = {
+        "static": {"specializations": 18, "compile_s_per_spec": 0.54,
+                   "lock_s": 865.6},
+        "aspect": {"specializations": 2, "compile_s_per_spec": 0.51,
+                   "lock_s": 201.4},
+    }
+    cached = roi_bench.roi()
+    check("sub-second per-spec walls do not price a specialization",
+          cached["measured_compile_s_per_spec"] is None)
+    check("and the report SAYS the paid side is unpriced",
+          "UNPRICED" in cached["compile_price_note"])
+    check("the removed specializations are still COUNTED",
+          cached["axes"]["aspect"]["specializations_saved"] == 16)
+    check("but not costed from a cache hit",
+          cached["axes"]["aspect"]["compile_s_saved"] is None)
+    roi_bench.mint["aspect"]["compile_s_per_spec"] = 111.0
+    priced = roi_bench.roi()
+    check("one arm that really built prices the axis",
+          abs(priced["measured_compile_s_per_spec"] - 111.0) < 1e-9)
+    check("and the report names WHICH arm the price came from",
+          priced["compile_price_from_arm"] == "aspect")
+
     print()
     if failures:
         print(f"SELF-TEST RED: {len(failures)} check(s) failed: {failures}")
@@ -1147,6 +1193,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="comma-separated `gen-worker compile --first` "
                              "selectors; default: every specialization in the "
                              "arm's lock")
+    parser.add_argument("--latents", default="",
+                        help="aspect=HxW LATENT dims, comma separated "
+                             "(sd15 512-native: `1:1=64x64,3:2=56x80,2:3=80x56`; "
+                             "SDXL: `1:1=128x128,3:2=104x152,2:3=152x104`). "
+                             "Stated rather than derived: the endpoint's bucket "
+                             "table is its own code, and a harness that guessed "
+                             "one would silently select the wrong specialization "
+                             "and measure eager")
     parser.add_argument("--defaults", default="",
                         help='checkpoint-defaults JSON for `up --defaults`, '
                              'e.g. \'{"cfg": false}\' for the batch-1 half of '
@@ -1189,6 +1243,18 @@ def main(argv: list[str] | None = None) -> int:
     args.aspects = [a for a in args.aspects.split(",") if a]
     args.cfg = [c for c in args.cfg.split(",") if c]
     args.selectors = [s for s in args.selectors.split(",") if s]
+    latents: dict[str, tuple[int, int]] = {}
+    for entry in (e for e in args.latents.split(",") if e):
+        aspect, _, dims = entry.partition("=")
+        height, _, width = dims.partition("x")
+        latents[aspect] = (int(height), int(width))
+    args.latents = latents
+    if not args.selectors and not latents:
+        parser.error(
+            "--latents is required (or pass explicit --selectors): without it "
+            "the harness cannot know which specialization each shape enters, "
+            "and building every record would spend the card on buckets this "
+            "run does not measure")
 
     arms = args.arms.split(",")
     for arm in arms:

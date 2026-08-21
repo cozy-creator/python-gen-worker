@@ -86,6 +86,9 @@ class LoraSample:
     eager_calls: int = 0
     displaced: tuple[str, ...] = ()
     load1: float = 0.0
+    #: The pgw#1586 probe pair for THIS request: what PyTorch's allocator
+    #: believes it took, beside what the driver actually handed out.
+    vram: dict = field(default_factory=dict)
 
     @property
     def per_step_ms(self) -> float:
@@ -179,6 +182,7 @@ class LoraBench(Bench):
             fold_s=float(facts.get("fold_s", 0.0)),
             restore_s=float(facts.get("restore_s", 0.0)),
             rearm_calls=int(facts.get("rearm_calls", 0) or 0),
+            vram=dict(facts.get("vram") or {}),
             steps=int(facts.get("steps", 0) or 0),
             compiled_calls=sample.compiled_calls,
             eager_calls=sample.eager_calls,
@@ -381,6 +385,7 @@ def self_test() -> int:
         endpoint=".", checkpoint=".", out="/tmp/pgw1548-lora-selftest",
         aspects=["1:1"], cfg=["on"], steps=20, lora="x.safetensors",
         lora_scale=1.0, lora_ref="", substrate="local", spread_limit=15.0,
+        latents={"1:1": (64, 64)}, defaults="", venv="",
         lane_note="euler/float32 lane", reps=1, rounds=2, sm="", prompt="p",
         guidance=7.5, seed=1, selectors=[], lock_cache="",
     )
@@ -509,6 +514,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lane-note", default="euler/float32 timestep lane only")
     parser.add_argument("--spread-limit", type=float, default=15.0)
     parser.add_argument("--selectors", default="")
+    parser.add_argument("--venv", default="",
+                        help="the environment the endpoint runs in; the endpoint's own .venv may be CPU-only torch")
+    parser.add_argument("--defaults", default="",
+                        help='checkpoint-defaults JSON for `up --defaults`, e.g. \'{"cfg": false}\'')
+    parser.add_argument("--latents", default="",
+                        help="aspect=HxW LATENT dims (see the dynamic-dims harness); required unless --selectors is given")
     parser.add_argument("--lock-cache", default="",
                         help="directory of pre-derived endpoint.lock.<arm> files; "
                              "the derive needs no card and must not be paid for "
@@ -529,19 +540,34 @@ def main(argv: list[str] | None = None) -> int:
     args.aspects = [a for a in args.aspects.split(",") if a][:1]
     args.cfg = [c for c in args.cfg.split(",") if c][:1]
     args.selectors = [s for s in args.selectors.split(",") if s]
+    latents = {}
+    for entry in (e for e in args.latents.split(",") if e):
+        aspect, _, dims = entry.partition("=")
+        height, _, width = dims.partition("x")
+        latents[aspect] = (int(height), int(width))
+    args.latents = latents
+    if not args.selectors and not latents:
+        parser.error("--latents is required (or explicit --selectors)")
     modes = [m for m in args.modes.split(",") if m]
     for mode in modes:
         if mode not in MODES:
             parser.error(f"unknown mode {mode!r}; one of {list(MODES)}")
 
     bench = LoraBench(args)
+    # Same refusal as the dynamic-dims harness: a CPU-only torch would
+    # produce a complete, plausible fold/eager table measured on the wrong
+    # device, and nothing downstream would notice.
+    bench.card = bench.assert_card()
     if bench.trace.exists():
         bench.trace.unlink()
     bench.set_mode("base")
     room = bench.instrumented_room(args.arm)
     lock_s = bench.lock(room, args.arm)
     records = bench.specializations(room)
-    selectors = args.selectors or [r["graph"][:16] for r in records]
+    # The SAME derivation the dynamic-dims harness uses: build only the
+    # specialization this one shape enters. Building all 14 would spend the
+    # card on thirteen buckets the LoRA arm never sends a request to.
+    selectors = args.selectors or bench.covering_selectors(args.arm, records)
     compile_s = bench.compile(room, args.arm, selectors)
     bench.mint[args.arm] = {
         "lock_s": lock_s, "compile_s": compile_s,

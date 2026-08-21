@@ -193,6 +193,8 @@ def install() -> None:
             _flush()
 
     def _bench_run(model, ctx, *, steps: int, fmt, seed, **call_kwargs):
+        import threading
+
         import torch
 
         generator = (
@@ -200,6 +202,42 @@ def install() -> None:
             if seed is not None else None
         )
         _pending["steps"] = int(steps)
+
+        # --- the pgw#1586 probe, riding a request that was happening anyway ---
+        # QUESTION: does AOTI's request-time workspace allocate OUTSIDE
+        # PyTorch's caching allocator (a direct cudaMalloc), making it invisible
+        # to `max_memory_allocated` and therefore invisible to any residency
+        # ledger built on allocator statistics?
+        #
+        # The two readings answer it TOGETHER and neither answers it alone:
+        #   allocator_peak_delta -- what PyTorch believes it allocated
+        #   driver_used_peak_delta -- what the DRIVER handed out, sampled
+        #     because a before/after pair cannot see a peak that is released
+        #     before the request returns.
+        # If the driver delta materially exceeds the allocator delta, the
+        # ledger must sample driver-level in the compiled regime.
+        device = 0
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        free_before, total = torch.cuda.mem_get_info(device)
+        allocated_before = torch.cuda.memory_allocated()
+        min_free = [free_before]
+        sampling = threading.Event()
+        sampling.set()
+
+        def _sample() -> None:
+            while sampling.is_set():
+                try:
+                    free, _ = torch.cuda.mem_get_info(device)
+                except Exception:  # noqa: BLE001 — a probe must never kill a request
+                    return
+                if free < min_free[0]:
+                    min_free[0] = free
+                time.sleep(0.05)
+
+        sampler = threading.Thread(target=_sample, daemon=True)
+        sampler.start()
+
         with torch.inference_mode():
             started = time.perf_counter()
             result = model.pipe(
@@ -208,7 +246,21 @@ def install() -> None:
                 callback_on_step_end=ctx.step_callback(steps),
                 **call_kwargs,
             )
+            torch.cuda.synchronize()
             _pending["denoise_s"] = time.perf_counter() - started
+
+        sampling.clear()
+        sampler.join(timeout=1.0)
+        _pending["vram"] = {
+            "total_bytes": int(total),
+            "free_before_bytes": int(free_before),
+            "driver_min_free_bytes": int(min_free[0]),
+            "driver_used_peak_delta_bytes": int(free_before - min_free[0]),
+            "allocator_before_bytes": int(allocated_before),
+            "allocator_peak_bytes": int(torch.cuda.max_memory_allocated()),
+            "allocator_peak_delta_bytes": int(
+                torch.cuda.max_memory_allocated() - allocated_before),
+        }
         started = time.perf_counter()
         asset = ctx.save_image(result.images[0], format=fmt)
         _pending["save_s"] = time.perf_counter() - started
