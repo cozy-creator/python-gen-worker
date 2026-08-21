@@ -1332,7 +1332,7 @@ def _derive_lane_item(
                     f"session: {type(exc).__name__}: {exc}"
                 ) from exc
             if not load_ctx.marked_modules:
-                return None
+                return None, 0, 0
             modules = _named_marked_modules(model, load_ctx.marked_modules)
 
             aides: dict[str, Any] = {}
