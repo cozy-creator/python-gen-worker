@@ -106,6 +106,11 @@ fi
 # says both projects are "permanently deleted"), and its source is 2.1 MB
 # base64, far over the env cliff, so the vendor path is the only free answer.
 export PYTHONPATH=/workspace/pgw/src:/workspace/pgw/src/gen_worker/_vendor
+# The CLI reads TENSORHUB_URL, not our PGW1548_HUB. Measured from a pod's
+# own published log: `gen-worker download: no tensorhub base URL: set
+# TENSORHUB_URL` — three anima rentals died on this in under a minute
+# each, and it was only legible because the failure PUBLISHED its log.
+export TENSORHUB_URL="$PGW1548_HUB"
 $PY -c "import tensorfs; print('tensorfs ok', tensorfs.__file__)" || exit 91
 
 
