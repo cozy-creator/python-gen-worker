@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from ..models import execution_lanes as el
 from .lane_ladder import ResolvedLane, is_baseline
