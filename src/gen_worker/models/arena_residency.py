@@ -43,6 +43,34 @@ only decision this module makes is arithmetic. varena's minimalism ruling
 applies to its caller too — the dtype→DLPack table, the layout, the triple
 resolution and the fencing live HERE because they are caller policy, and
 nothing in this lane asked varena to grow.
+
+**Two contracts every caller of this facade inherits** (va#12; varena's
+README carries the same words — this paragraph exists for readers who never
+open it):
+
+* **The arena governs WEIGHTS only.** Activations, VAE workspaces and
+  text-encoder transients live outside it, in torch's allocator, and are the
+  caller's problem — both arms of the ComfyUI floor measurement died at
+  ``VAEDecode``, on memory varena would never have been asked about.
+  "Demand-paged VRAM residency" is a promise about a model's parameters,
+  never about its peak. Weights are immutable and CAS-backed, so demote is
+  unmap-only — parking MUTABLE state would need a write-back leg varena
+  deliberately lacks (refill is one-way disk→pin→VRAM).
+* **The launch window: nothing is unbacked between pre-resident and
+  launch-complete.** The caller is the only party that ever calls
+  ``unback``, so this is a contract to KEEP, not a mechanism varena can
+  enforce or violate on its own. Pre-resident the whole working set, launch,
+  and only then re-budget — the :class:`UnbackRing`'s event gating is this
+  module's implementation of exactly that. It is what makes a stable pointer
+  safe to bake into a compiled artifact or a CUDA graph, and it is universal
+  practice in the field, not a peculiarity of ours: no comparable system
+  pages during a compiled launch.
+
+Residency signatures (scalar ``signature()`` and va#12's per-2 MiB-chunk
+``page_signatures``) are BACKING signatures, never CONTENT signatures: bytes
+changed under an unchanged mapping are invisible to them, and content
+integrity is a caller-side D2H digest (the checkpoint juggle, pgw#1607,
+banks per-region digests at ingest for that reason).
 """
 
 from __future__ import annotations
