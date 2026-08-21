@@ -465,11 +465,12 @@ class GraphSpecializationVariant:
         # compile policy here keeps this module's no-Torch property intact --
         # and the policy is a pod axis exactly as sm and toolchain are: the
         # recipe pins the graph, the pod states what its compiler was told.
-        from .compiler import compile_policy_digest
+        from .compiler import compile_policy_digest, declared_input_layout, device_type_of
 
         return from_axes(
             {
-                "compile_policy": compile_policy_digest(),
+                "compile_policy": compile_policy_digest(device_type_of(runtime.sm)),
+                "declared_input_layout": declared_input_layout(),
                 "graph": str(self.specialization_hash),
                 "sm": runtime.sm,
                 "toolchain": toolchain_axis_digest(runtime.toolchain),

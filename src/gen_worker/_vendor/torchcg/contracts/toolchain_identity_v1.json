@@ -20,8 +20,9 @@
     "aot_inductor.use_runtime_constant_folding": false
   },
   "compile_policy_axis": "31652c1e5b99bdf2",
+  "declared_input_layout": "torch.contiguous@1",
   "graph": "c59210f4ddf6b420",
-  "key": "cg-key-v2-aa3c3ca0bbc8d1425d5828d18098ed9cda5fc1399c98468302af7174",
+  "key": "cg-key-v3-6bda42792e286526b8ff390df5601c54f7473def3e22013f347b7a65",
   "sm": "sm_89",
   "toolchain_axis": "88abf09ce9c69ecb"
 }

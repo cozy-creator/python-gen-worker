@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from .identity import GRAPH_SPECIALIZATION_BLOCK
+from .layout import LayoutMorphism, require_morphism
 
 
 class VerifiedGraph(Protocol):
@@ -125,6 +126,7 @@ class CompiledGraphRunner:
     calls: int
     _graph: VerifiedGraph
     _constants: tuple[_Constant, ...]
+    _layout: LayoutMorphism
     _package: Any
     _bound_values: dict[str, Any]
     _retained_values: dict[str, Any]
@@ -145,6 +147,9 @@ class CompiledGraphRunner:
         self.name = str(graph_specialization["name"])
         self._graph = graph
         self._constants = _constants(graph)
+        # Artifact validation already refused any non-catalog value, so this
+        # cannot fail on bytes that reached a store (tcg#83).
+        self._layout = require_morphism(graph.metadata["declared_input_layout"])
         try:
             self._package = _load_package(graph.package, self.name)
         except ConstantBindingError as exc:
@@ -174,6 +179,58 @@ class CompiledGraphRunner:
     @property
     def declared_fqns(self) -> tuple[str, ...]:
         return tuple(constant.fqn for constant in self._constants)
+
+    def _require_declared_layout(self, constant: _Constant, value: Any) -> None:
+        """Refuse bytes that are not in the layout THIS ARTIFACT DECLARES.
+
+        tcg#83, and this line is the design's named first blocker. What stood
+        here was an unconditional NCHW normalize::
+
+            if not bool(value.is_contiguous()):
+                value = value.detach().contiguous()
+
+        `is_contiguous()` asks about row-major, so a channels_last tree was
+        silently copied back to NCHW -- at full weight cost, on every load,
+        undoing exactly the delivery the layout-morphism design exists to make
+        possible, and quietly disagreeing with the layout the artifact was
+        compiled against.
+
+        Layout is CONTRACT IDENTITY (`0-DESIGN.md` §2): a wrong pairing is a
+        typed refusal, never a silent handoff. Bytes already in the declared
+        layout bind BY REFERENCE with zero copies, which is the whole win --
+        inductor's `require_strides` emits no copy when the strides match, so
+        the per-call permute kernels are never generated. Bytes in any other
+        layout are a mismatch the loader must fix in flight (tensorfs#154), not
+        something to repack here behind the caller's back.
+        """
+
+        morphism = self._layout
+        try:
+            satisfied = morphism.matches(value)
+        except AttributeError:
+            return  # not a tensor; `load_constants` owns that refusal
+        except Exception as exc:
+            self._failed = True
+            oom = _oom_in_chain(exc)
+            reason = "out_of_memory" if oom is not None else "layout_unreadable"
+            cause = oom or exc
+            raise ConstantBindingError(
+                reason,
+                f"cannot read the layout of constant {constant.fqn!r} "
+                f"({type(cause).__name__}: {cause})",
+            ) from exc
+        if satisfied:
+            return
+        self._failed = True
+        raise ConstantBindingError(
+            "layout_mismatch",
+            f"constant {constant.fqn!r} is not in the layout this artifact "
+            f"declares: {morphism.describe(value)}. The artifact was compiled "
+            f"against {morphism.handle!r} and binds by raw pointer, so these "
+            f"bytes would be read in the wrong order. Deliver the tree through "
+            f"the declared morphism (the load applies it in flight) or serve an "
+            f"artifact minted against the layout these bytes are in (tcg#83).",
+        )
 
     def bind(self, state: Mapping[str, Any], *, device: str) -> None:
         """Bind the complete constant table by reference, exactly once."""
@@ -242,21 +299,7 @@ class CompiledGraphRunner:
                 missing.append(f"{constant.fqn} (source={constant.source})")
                 continue
             if constant.source == "state_dict":
-                try:
-                    if not bool(value.is_contiguous()):
-                        value = value.detach().contiguous()
-                except AttributeError:
-                    pass
-                except Exception as exc:
-                    self._failed = True
-                    oom = _oom_in_chain(exc)
-                    reason = "out_of_memory" if oom is not None else "normalization_failed"
-                    cause = oom or exc
-                    raise ConstantBindingError(
-                        reason,
-                        f"cannot normalize constant {constant.fqn!r} for by-reference "
-                        f"binding ({type(cause).__name__}: {cause})",
-                    ) from exc
+                self._require_declared_layout(constant, value)
             values[constant.fqn] = value
         if missing:
             self._failed = True
