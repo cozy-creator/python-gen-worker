@@ -407,6 +407,53 @@ def test_no_vendored_stamp_ties_between_two_model_types() -> None:
     assert not ties, f"stamps claimed by more than one model type: {ties}"
 
 
+def test_the_generated_candidates_declare_themselves_UNRATIFIED() -> None:
+    """tensorfs#130's nine new documents are GENERATED CANDIDATES, and every
+    one of them says so in its own `description`. Pinned here because that
+    fact GATES se#816 and is otherwise invisible at the call site.
+
+    tensorfs#130's design is *generate -> human-ratify -> publish*, which is
+    what makes a contract CHEAP without making it a guess. These nine are
+    published and generated; the ratify step is what is outstanding. Nothing
+    is wrong with vendoring them — pgw ships no `lanes=` naming any of them
+    yet, so no endpoint is bound to an unchecked layout — but an endpoint that
+    DOES name one is binding its checkpoints to a header nobody read.
+
+    Why it cannot be left as prose: a contract's job is to be the FALSIFIABLE
+    statement about a checkpoint's bytes. A generated one is a hypothesis
+    shaped exactly like a ratified one, and the bind gate cannot tell them
+    apart — it will refuse a real checkpoint, or admit a wrong one, with equal
+    confidence either way.
+
+    THIS TEST IS EXPECTED TO GO RED when the documents are ratified and the
+    marker is dropped. That is the point: the day it fails is the day se#816
+    is unblocked, and someone will read this docstring to find out why.
+    """
+
+    from gen_worker._vendor.tensorfs import contracts
+
+    unratified = sorted(
+        contract.stamp
+        for contract in contracts.all()
+        if "NOT RATIFIED" in contract.description.upper()
+    )
+    assert unratified == [
+        "anima.diffsynth-bf16@1",
+        "joycaption.llava-bf16@1",
+        "krea-2.diffusers-bf16@1",
+        "ltx-2-upsampler.diffusers-bf16@1",
+        "musicgen.transformers-fp16@1",
+        "qwen3.6-27b-mtp.gguf-ud-q4-k-xl@1",
+        "qwen3.6-35b-a3b.vllm-fp8@1",
+        "rife.flownet-fp32@1",
+        "sdxl.diffusers-nvfp4-flat@1",
+    ]
+
+    # ...and the twenty-one that predate tensorfs#130 carry no such marker, so
+    # this is a property of the GENERATED set and not of every document.
+    assert len(list(contracts.all())) - len(unratified) == 21
+
+
 def test_a_dtypeless_lane_cannot_buy_a_silent_runs_anywhere_floor() -> None:
     """pgw#1404: the derivation FAILS CLOSED on a contract with no dtype.
 
