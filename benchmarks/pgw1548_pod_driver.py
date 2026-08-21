@@ -35,18 +35,29 @@ HERE = Path(__file__).resolve().parent
 IMAGE = "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
 
 
-def endpoint_tarball(name: str) -> str:
-    """The endpoint source as tar.gz+base64, straight from `origin/master`.
+#: MEASURED CEILING, 2026-08-20: RunPod's REST create accepts a ~50 KB `env`
+#: and returns HTTP 500 on ~150 KB -- and the 500 is its own backend failing
+#: to parse an upstream error (`invalid character 'I'`), so it reads as a
+#: server fault rather than as "your body is too big". Isolated with three
+#: probe creates (tiny / 50 KB / 150 KB); the first two created and were
+#: terminated immediately. The endpoint source therefore rides the hub.
+ENV_BYTES_CEILING = 60_000
 
-    Shipped in `env` rather than cloned. `serverless-endpoints` is PRIVATE, so
-    a clone would need a GitHub PAT on rented hardware — an exposure this leg
-    does not need to take for ~140 KB of author source.
+
+def endpoint_tarball(name: str) -> str:
+    """The MINIMAL endpoint source as tar.gz+base64, from `origin/master`.
+
+    `src` + `endpoint.toml` + `pyproject.toml` only. The full archive is
+    141 KB (anima) / 108 KB (sdxl) and blows the env ceiling above; nearly
+    all of that is `uv.lock`, which the pod does not use because it builds
+    its own venv. Minimal is 27 KB / 17 KB.
     """
 
     repo = Path.home() / "cozy/serverless-endpoints"
-    raw = subprocess.run(["git", "archive", "--format=tar.gz",
-                          f"origin/master:{name}"],
-                         cwd=repo, capture_output=True, check=True).stdout
+    raw = subprocess.run(
+        ["git", "archive", "--format=tar.gz", f"origin/master:{name}",
+         "src", "endpoint.toml", "pyproject.toml"],
+        cwd=repo, capture_output=True, check=True).stdout
     return base64.b64encode(raw).decode()
 
 
@@ -101,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gpu", default="", help="RunPod gpuTypeId; empty = CPU pod")
     parser.add_argument("--disk", type=int, default=120)
     parser.add_argument("--vcpu", type=int, default=8)
+    parser.add_argument("--cpu-flavors", default="cpu5m,cpu3m",
+                        help="RunPod CPU flavors, priority order; the anima derive is MEMORY-bound (weight-full loads), so the memory-optimised flavors lead")
     parser.add_argument("--ram", type=int, default=64)
     parser.add_argument("--budget-usd", type=float, default=4.0)
     parser.add_argument("--max-minutes", type=float, default=180.0)
@@ -108,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="comma-separated stages that mean SUCCESS")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    args.cpu_flavors = [f for f in args.cpu_flavors.split(",") if f]
 
     cred = json.loads(CRED.read_text())
     sha = subprocess.run(["git", "rev-parse", "origin/master"],
@@ -146,13 +160,31 @@ def main(argv: list[str] | None = None) -> int:
         "dockerStartCmd": start,
     }
     if args.gpu:
+        # `computeType` is stated explicitly rather than left to the default:
+        # the schema's default is GPU, and a leg that relies on a default is a
+        # leg that changes meaning when the provider changes one.
+        body["computeType"] = "GPU"
         body["gpuTypeIds"] = [args.gpu]
         body["gpuCount"] = 1
+        body["minRAMPerGPU"] = args.ram
+        body["minVCPUPerGPU"] = args.vcpu
     else:
-        body["gpuCount"] = 0
+        # A CPU pod is NOT "a GPU pod with gpuCount 0" — the REST schema pins
+        # `gpuCount` to minimum 1 and rejects 0 outright (measured: HTTP 400,
+        # `At /pods/properties/gpuCount/minimum: got 0, want 1`). CPU sizing
+        # rides `cpuFlavorIds` + `vcpuCount`, and `gpuCount` must be ABSENT.
+        body["computeType"] = "CPU"
+        body["cpuFlavorIds"] = list(args.cpu_flavors)
         body["vcpuCount"] = args.vcpu
-        body["minMemoryInGb"] = args.ram
 
+    env_bytes = sum(len(k) + len(v) for k, v in env.items())
+    if env_bytes > ENV_BYTES_CEILING:
+        print(f"REFUSING: env is {env_bytes} bytes, over the measured "
+              f"{ENV_BYTES_CEILING} ceiling. RunPod answers HTTP 500 with a "
+              f"backend parse error, which reads as an outage rather than "
+              f"as an oversized body — so this refuses HERE, where the "
+              f"reason is legible.")
+        return 1
     print(f"[plan] mode={args.mode} endpoint={args.endpoint} "
           f"gpu={args.gpu or 'CPU-only'} sha={sha[:12]} "
           f"env_bytes={sum(len(k) + len(v) for k, v in env.items())}")

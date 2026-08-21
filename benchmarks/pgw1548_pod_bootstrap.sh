@@ -13,8 +13,8 @@
 #   PGW1548_TOKEN         machine token, org:repo:write ONLY
 #   PGW1548_REPO          org/name of the verdicts repo
 #   PGW1548_RELEASE       release the verdicts attach to (MUST pre-exist)
-#   PGW1548_ENDPOINT_B64  the endpoint source, tar.gz+base64 (no GitHub PAT on
-#                         rented hardware, and no private clone)
+#   PGW1548_ENDPOINT_B64  the MINIMAL endpoint source (src + the two tomls),
+#                         tar.gz+base64 -- 27 KB, under the measured env cliff
 #   PGW1548_SHA           pgw commit to check out (public repo, no auth)
 #   HF_TOKEN              optional, for the SDXL snapshot download
 set -u
@@ -58,7 +58,7 @@ PYEOF
 
 note() {  # note <stage> <json-string>
   printf '%s\n' "$2" > "/workspace/out/$1.json"
-  python3 /workspace/publish.py "$1" "/workspace/out/$1.json" || true
+  "${PY:-python3}" /workspace/publish.py "$1" "/workspace/out/$1.json" || true
 }
 
 fail_out() {  # fail_out <stage> <message>
@@ -66,7 +66,7 @@ fail_out() {  # fail_out <stage> <message>
     "$1" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$2")" \
     "$(tail -c 4000 /workspace/pgw1548-boot.log | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" \
     > "/workspace/out/$1.json"
-  python3 /workspace/publish.py "$1" "/workspace/out/$1.json" || true
+  "${PY:-python3}" /workspace/publish.py "$1" "/workspace/out/$1.json" || true
 }
 
 # --- 1. toolchain -----------------------------------------------------------
@@ -74,14 +74,12 @@ apt-get update -y && apt-get install -y --no-install-recommends git curl ca-cert
 curl -LsSf https://astral.sh/uv/install.sh | sh || true
 export PATH="$HOME/.local/bin:$PATH"
 
-# python-gen-worker is a PUBLIC repo, so this needs no credential. The private
-# sibling is NOT cloned: its endpoint arrives as bytes in env, which keeps a
-# GitHub PAT off rented hardware entirely.
+# python-gen-worker is a PUBLIC repo, so this needs no credential. The
+# PRIVATE sibling is never cloned at all -- its endpoint arrives as bytes in
+# env (see 2b), which keeps a GitHub PAT off rented hardware entirely.
 git clone --filter=blob:none https://github.com/cozy-creator/python-gen-worker /workspace/pgw || exit 90
 git -C /workspace/pgw checkout "${PGW1548_SHA}" || exit 90
 
-mkdir -p /workspace/endpoint
-printf '%s' "$PGW1548_ENDPOINT_B64" | base64 -d | tar xz -C /workspace/endpoint --strip-components=1
 
 # --- 2. venv ----------------------------------------------------------------
 uv venv --python 3.12 /workspace/venv || exit 91
@@ -92,6 +90,24 @@ uv pip install --python $PY -e /workspace/pgw || exit 91
 uv pip install --python $PY diffusers==0.39.0 transformers safetensors accelerate huggingface_hub || exit 91
 
 export PYTHONPATH=/workspace/pgw/src
+
+# --- 2b. the endpoint source, from env --------------------------------------
+# MEASURED CEILING, 2026-08-20: RunPod's REST create takes a ~50 KB `env` and
+# returns HTTP 500 on ~150 KB -- and that 500 is its own backend failing to
+# parse an upstream error ("invalid character 'I'"), which reads as an outage
+# rather than as "your body is too big". Isolated with three probe creates
+# (tiny / 50 KB / 150 KB); the first two created and were terminated at once.
+#
+# The FULL endpoint archive is 141 KB (anima) and 108 KB (sdxl) -- over the
+# cliff, and almost all of it is `uv.lock`, which this pod does not use because
+# it builds its own venv. The MINIMAL archive (src + endpoint.toml +
+# pyproject.toml) is 27 KB and 17 KB, comfortably under. So the source rides
+# env after all, and no GitHub PAT and no private clone ever touch rented
+# hardware.
+mkdir -p /workspace/endpoint
+printf '%s' "$PGW1548_ENDPOINT_B64" | base64 -d | tar xz -C /workspace/endpoint
+ls -la /workspace/endpoint
+
 note bootstrap "$(printf '{"stage":"bootstrap","ok":true,"mode":"%s","sha":"%s","python":"%s"}' \
   "$PGW1548_MODE" "$PGW1548_SHA" "$($PY -V 2>&1)")"
 
@@ -102,36 +118,72 @@ anima-derive)
   # The checkpoint is PUBLIC on our hub and readable with NO credential
   # (verified from the box before renting), so nothing here carries a
   # checkpoint-read token.
-  $PY -m gen_worker.cli download tensorhub/anima --release "${PGW1548_ANIMA_RELEASE:-latest-cut}" \
-      --dest /workspace/anima-tree > /workspace/out/download.log 2>&1 || {
-        fail_out download "anima checkpoint download failed"; exit 92; }
-  note download "$(printf '{"stage":"download","ok":true,"tree":"/workspace/anima-tree","du":"%s"}' \
-      "$(du -sh /workspace/anima-tree 2>/dev/null | cut -f1)")"
+  #
+  # `gen-worker download` takes REFs positionally and has NO --dest/--release:
+  # it materializes into the machine's weight store "through the same path a
+  # pod's boot uses (integrity gate included)". So the tree's location is
+  # DISCOVERED afterwards rather than dictated -- a hardcoded path would be a
+  # guess, and a wrong guess here is a 3-hour derive against nothing.
+  ( cd /workspace/endpoint && timeout 3600 $PY -m gen_worker.cli download \
+      "tensorhub/anima@${PGW1548_ANIMA_RELEASE:-latest-cut}" ) \
+      > /workspace/out/download.log 2>&1
+  rc=$?
+  "${PY:-python3}" /workspace/publish.py download /workspace/out/download.log || true
+  [ $rc -ne 0 ] && { fail_out download "gen-worker download exited $rc"; exit 92; }
+
+  TREE=$($PY - <<'TREEEOF'
+import os, sys
+from pathlib import Path
+# The DiT container names the tree, whatever layout it landed in (anima ships
+# both a component layout and a flat split_files/ one -- main.py carries both
+# glob families, so neither may be assumed).
+roots = [Path.home() / ".cache/cozy", Path("/workspace"), Path("/root/.cache")]
+best = ""
+for root in roots:
+    if not root.exists():
+        continue
+    for hit in root.rglob("anima-base-v1.0.safetensors"):
+        # the tree ROOT is the parent of the component directory
+        cand = hit.parent if hit.parent.name in ("", ".") else hit.parent.parent
+        if (cand / "model_index.json").exists() or any(cand.iterdir()):
+            best = str(cand)
+            break
+    if best:
+        break
+print(best)
+TREEEOF
+)
+  if [ -z "$TREE" ]; then
+    fail_out download "downloaded, but no anima-base-v1.0.safetensors found — the tree layout is not what the endpoint's globs expect"
+    exit 92
+  fi
+  note download "$(printf '{"stage":"download","ok":true,"tree":"%s","du":"%s"}' \
+      "$TREE" "$(du -sh "$TREE" 2>/dev/null | cut -f1)")"
 
   # The derive drives the entrypoint once per (payload variant x defaults
   # variant) — measured 16 on anima, each a WEIGHT-FULL load. It is the
   # expensive half and the reason this runs on a CPU pod at all.
   ( cd /workspace/endpoint && timeout 10800 $PY -m gen_worker.cli lock . --force \
-      --checkpoint /workspace/anima-tree ) > /workspace/out/derive.log 2>&1
+      --checkpoint "$TREE" ) > /workspace/out/derive.log 2>&1
   rc=$?
   cp /workspace/endpoint/endpoint.lock /workspace/out/endpoint.lock 2>/dev/null || true
   if [ $rc -ne 0 ]; then
     # Publish the LOG even on failure: per the coordinator's rider, a derive
     # that dies at drive 9 must leave drives 1-8 diagnosable.
-    python3 /workspace/publish.py derive /workspace/out/derive.log || true
+    "${PY:-python3}" /workspace/publish.py derive /workspace/out/derive.log || true
     fail_out derive "gen-worker lock exited $rc"
     exit 93
   fi
-  python3 /workspace/publish.py derive /workspace/out/derive.log /workspace/out/endpoint.lock || true
-  note derive-ok "$(printf '{"stage":"derive","ok":true,"rc":0}')"
+  "${PY:-python3}" /workspace/publish.py derive /workspace/out/derive.log /workspace/out/endpoint.lock || true
+  note derive-ok '{"stage":"derive","ok":true,"rc":0}'
   ;;
 
 sdxl-matrix)
   $PY /workspace/pgw/benchmarks/pgw1548_pod_sdxl_tree.py \
       --dest /workspace/sdxl-bf16 > /workspace/out/tree.log 2>&1 || {
-        python3 /workspace/publish.py tree /workspace/out/tree.log || true
+        "${PY:-python3}" /workspace/publish.py tree /workspace/out/tree.log || true
         fail_out tree "bf16 tree build failed"; exit 92; }
-  python3 /workspace/publish.py tree /workspace/out/tree.log || true
+  "${PY:-python3}" /workspace/publish.py tree /workspace/out/tree.log || true
 
   SM=$($PY -c "import torch;m,n=torch.cuda.get_device_capability(0);print(f'sm_{m}{n}')")
   FREE=$($PY -c "import torch;print(torch.cuda.mem_get_info(0)[0]//1048576)")
@@ -147,7 +199,7 @@ sdxl-matrix)
       --lane-note 'sdxl, euler/float32 timestep lane' --dtype-lanes 2 \
       --out /workspace/out/smoke ) > /workspace/out/smoke.log 2>&1
   rc=$?
-  python3 /workspace/publish.py smoke /workspace/out/smoke.log /workspace/out/smoke/verdict.json || true
+  "${PY:-python3}" /workspace/publish.py smoke /workspace/out/smoke.log /workspace/out/smoke/verdict.json || true
   [ $rc -ne 0 ] && { fail_out smoke "smoke gate exited $rc"; exit 94; }
 
   # MATRIX — ABBA arm order, per-shape, never averaged.
@@ -160,7 +212,7 @@ sdxl-matrix)
       --lane-note 'sdxl, euler/float32 timestep lane; ABBA arm order' --dtype-lanes 2 \
       --out /workspace/out/matrix ) > /workspace/out/matrix.log 2>&1
   rc=$?
-  python3 /workspace/publish.py matrix /workspace/out/matrix.log /workspace/out/matrix/verdict.json || true
+  "${PY:-python3}" /workspace/publish.py matrix /workspace/out/matrix.log /workspace/out/matrix/verdict.json || true
   [ $rc -ne 0 ] && { fail_out matrix "matrix exited $rc"; exit 95; }
   note matrix-ok '{"stage":"matrix","ok":true}'
   ;;
