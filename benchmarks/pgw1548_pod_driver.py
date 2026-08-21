@@ -186,7 +186,7 @@ def published_stages(cred: dict) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", required=True,
-                        choices=("anima-derive", "sdxl-matrix"))
+                        choices=("anima-derive", "sdxl-matrix", "install-probe"))
     parser.add_argument("--endpoint", required=True, help="anima | sdxl")
     parser.add_argument("--gpu", default="", help="RunPod gpuTypeId; empty = CPU pod")
     # MEASURED CEILING: RunPod refuses a container disk over the flavor's

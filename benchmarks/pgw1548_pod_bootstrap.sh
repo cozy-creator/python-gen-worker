@@ -56,6 +56,32 @@ except Exception as exc:
     print(f"[publish] {stage}: FAILED {exc!r}")
 PYEOF
 
+# --- THE TELEMETRY SIDECAR (pgw#1548 install probe) --------------------------
+# Publishes `free -m`, `df -h` and `dmesg | tail` every 60 s, EACH AS ITS OWN
+# PUBLISH, so a pod that dies mid-series still leaves every earlier sample.
+#
+# Why it exists: three GPU pods started and then went silent inside the torch
+# install, and the `timeout ... || fail_out` guard NEVER SPOKE. That asymmetry
+# is the clue -- a timeout kills with SIGTERM, whose handler runs, but the
+# kernel OOM-killer sends SIGKILL, which no trap can catch. (Same mechanism
+# this lane used deliberately to hand a pod between attendants without firing
+# the outgoing process's `finally`.) So the `dmesg` tail is the point: it
+# catches the oom-kill line directly, from outside the dying process.
+telemetry() {
+  local n=0
+  while :; do
+    n=$((n+1))
+    {
+      echo "=== sample $n  $(date -Is) ==="
+      echo "--- free -m ---";        free -m 2>/dev/null
+      echo "--- df -h /workspace /root ---"; df -h /workspace /root / 2>/dev/null
+      echo "--- dmesg tail ---";     dmesg 2>/dev/null | tail -25
+    } > "/workspace/out/telemetry-$n.txt" 2>&1
+    "${PY:-python3}" /workspace/publish.py "telemetry$n" "/workspace/out/telemetry-$n.txt" || true
+    sleep 60
+  done
+}
+
 note() {  # note <stage> <json-string>
   printf '%s\n' "$2" > "/workspace/out/$1.json"
   "${PY:-python3}" /workspace/publish.py "$1" "/workspace/out/$1.json" || true
@@ -207,6 +233,26 @@ note bootstrap "$(printf '{"stage":"bootstrap","ok":true,"mode":"%s","sha":"%s",
 
 # --- 3. the leg -------------------------------------------------------------
 case "$PGW1548_MODE" in
+
+install-probe)
+  # INSTALL ONLY. No tree, no smoke, no matrix -- the question is whether the
+  # torch install survives, and every extra step is a way to lose the answer.
+  telemetry &
+  TELE=$!
+  echo "PROBE: RAM requested $(free -m | awk '/^Mem:/{print $2}') MiB"
+  start=$(date +%s)
+  timeout 2700 uv pip install --python $PY -e /workspace/pgw \
+      > /workspace/out/probe-install.log 2>&1
+  rc=$?
+  end=$(date +%s)
+  sleep 2; kill $TELE 2>/dev/null
+  printf '{"stage":"probe","install_rc":%s,"wall_s":%s,"ram_total_mib":%s}\n' \
+    "$rc" "$((end-start))" "$(free -m | awk '/^Mem:/{print $2}')" \
+    > /workspace/out/probe.json
+  "${PY:-python3}" /workspace/publish.py probe \
+      /workspace/out/probe.json /workspace/out/probe-install.log || true
+  note probe-done "$(printf '{"stage":"probe-done","install_rc":%s}' "$rc")"
+  ;;
 
 anima-derive)
   # The checkpoint is PUBLIC on our hub and readable with NO credential
