@@ -933,7 +933,7 @@ def test_the_seam_gate_reads_the_DENOISER_not_whichever_module_holds_the_hook():
     pipe = _MidStagePipeline(_Block(8), _Block(12), _Block(16), _Block(4))
     sizer = lambda mod: sum(  # noqa: E731
         p.numel() * p.element_size() for p in mod.parameters())
-    total = sum(sizer(c) for c in pipe.components.values())
+    total = sum(sizer(c) for c in cast(Any, pipe).components.values())
     plan = plan_for_pipeline(
         pipe,
         # Room for everything but the text encoder: the cheapest legal plan
