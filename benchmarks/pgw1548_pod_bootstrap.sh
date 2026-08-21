@@ -398,6 +398,60 @@ sdxl-matrix)
       /workspace/out/smoke-vram-verdict.txt || true
   [ $rc -ne 0 ] && { fail_out smoke "smoke gate exited $rc"; exit 94; }
 
+  # MATRIX — ABBA arm order, per-shape, never averaged.
+  ( cd /workspace/pgw && timeout 10800 $PY benchmarks/dynamic_dims_pgw1548.py \
+      --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
+      --venv /workspace/venv --lock-cache /workspace/locks \
+      --latents '1:1=128x128,3:2=104x152,2:3=152x104' \
+      --arms static,aspect --aspects '1:1,3:2,2:3' --cfg on --reps 3 --rounds 4 \
+      --sm "$SM" --substrate raw-pod --steps 20 --idle-timeout 1800 \
+      --lane-note 'sdxl, euler/float32 timestep lane; ABBA arm order' --dtype-lanes 2 \
+      --out /workspace/out/matrix ) > /workspace/out/matrix.log 2>&1
+  rc=$?
+  "${PY:-python3}" /workspace/publish.py matrix /workspace/out/matrix.log /workspace/out/matrix/verdict.json || true
+  [ $rc -ne 0 ] && { fail_out matrix "matrix exited $rc"; exit 95; }
+  note matrix-ok '{"stage":"matrix","ok":true}'
+
+  # --- the LoRA amortization arm, on the SAME graph and one shape ------------
+  # A small public SDXL LoRA, downloaded ON THE POD (never through the box).
+  LORA=$($PY - <<'LORAEOF'
+from huggingface_hub import hf_hub_download
+print(hf_hub_download("nerijs/pixel-art-xl", "pixel-art-xl.safetensors"))
+LORAEOF
+)
+  LORA2=$($PY - <<'LORAEOF'
+try:
+    from huggingface_hub import hf_hub_download
+    print(hf_hub_download("ostris/ikea-instructions-lora-sdxl",
+                          "ikea_instructions_xl_v1_5.safetensors"))
+except Exception:
+    print("")
+LORAEOF
+)
+  ( cd /workspace/pgw && timeout 7200 $PY benchmarks/pgw1548_lora_amortization.py \
+      --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
+      --venv /workspace/venv --lock-cache /workspace/locks \
+      --latents '1:1=128x128' --arm static \
+      --modes base,fold,eager,prefused,sticky,multi \
+      --lora "$LORA" --lora-ref nerijs/pixel-art-xl \
+      ${LORA2:+--lora2 "$LORA2"} --sticky-n 3 \
+      --aspects 1:1 --cfg on --reps 3 --rounds 3 --steps 20 \
+      --sm "$SM" --substrate raw-pod \
+      --lane-note 'sdxl, euler/float32 timestep lane' \
+      --out /workspace/out/lora ) > /workspace/out/lora.log 2>&1
+  rc=$?
+  "${PY:-python3}" /workspace/publish.py lora /workspace/out/lora.log /workspace/out/lora/lora-verdict.json || true
+  [ $rc -ne 0 ] && { fail_out lora "lora arm exited $rc"; exit 96; }
+  note lora-ok '{"stage":"lora","ok":true}'
+  # ⚠️ STAGE ORDER: the PRIMARY deliverables (matrix, lora) run BEFORE the
+  # pgw#1586 rider legs. Without the pre-#1599 lock cache every stage derives
+  # on-pod, so the riders cost ~38 min of rented card AHEAD of the tables this
+  # campaign exists to produce -- and those tables have never once run in six
+  # attempts. The rider is not starved by this: pgw#1586's probe PAIR now rides
+  # the SMOKE stage's out-of-process sampler above, which has already published
+  # by this point. What follows the tables is the extra DEPTH (does the first
+  # compiled excursion release or persist), which is the part that can be cut
+  # by a budget cap without losing the rider itself.
   # --- FOLDING INSTRUMENTATION (pgw#1586 rider) -----------------------------
   # Answers Paul's "why does compiled want so much more VRAM" with a MECHANISM
   # rather than a number: does the first compiled request spike and RELEASE
@@ -454,51 +508,6 @@ sdxl-matrix)
       /workspace/out/vram-nograph.tsv /workspace/out/nograph-verdict.txt \
       /workspace/out/nograph.log || true
 
-  # MATRIX — ABBA arm order, per-shape, never averaged.
-  ( cd /workspace/pgw && timeout 10800 $PY benchmarks/dynamic_dims_pgw1548.py \
-      --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
-      --venv /workspace/venv --lock-cache /workspace/locks \
-      --latents '1:1=128x128,3:2=104x152,2:3=152x104' \
-      --arms static,aspect --aspects '1:1,3:2,2:3' --cfg on --reps 3 --rounds 4 \
-      --sm "$SM" --substrate raw-pod --steps 20 --idle-timeout 1800 \
-      --lane-note 'sdxl, euler/float32 timestep lane; ABBA arm order' --dtype-lanes 2 \
-      --out /workspace/out/matrix ) > /workspace/out/matrix.log 2>&1
-  rc=$?
-  "${PY:-python3}" /workspace/publish.py matrix /workspace/out/matrix.log /workspace/out/matrix/verdict.json || true
-  [ $rc -ne 0 ] && { fail_out matrix "matrix exited $rc"; exit 95; }
-  note matrix-ok '{"stage":"matrix","ok":true}'
-
-  # --- the LoRA amortization arm, on the SAME graph and one shape ------------
-  # A small public SDXL LoRA, downloaded ON THE POD (never through the box).
-  LORA=$($PY - <<'LORAEOF'
-from huggingface_hub import hf_hub_download
-print(hf_hub_download("nerijs/pixel-art-xl", "pixel-art-xl.safetensors"))
-LORAEOF
-)
-  LORA2=$($PY - <<'LORAEOF'
-try:
-    from huggingface_hub import hf_hub_download
-    print(hf_hub_download("ostris/ikea-instructions-lora-sdxl",
-                          "ikea_instructions_xl_v1_5.safetensors"))
-except Exception:
-    print("")
-LORAEOF
-)
-  ( cd /workspace/pgw && timeout 7200 $PY benchmarks/pgw1548_lora_amortization.py \
-      --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
-      --venv /workspace/venv --lock-cache /workspace/locks \
-      --latents '1:1=128x128' --arm static \
-      --modes base,fold,eager,prefused,sticky,multi \
-      --lora "$LORA" --lora-ref nerijs/pixel-art-xl \
-      ${LORA2:+--lora2 "$LORA2"} --sticky-n 3 \
-      --aspects 1:1 --cfg on --reps 3 --rounds 3 --steps 20 \
-      --sm "$SM" --substrate raw-pod \
-      --lane-note 'sdxl, euler/float32 timestep lane' \
-      --out /workspace/out/lora ) > /workspace/out/lora.log 2>&1
-  rc=$?
-  "${PY:-python3}" /workspace/publish.py lora /workspace/out/lora.log /workspace/out/lora/lora-verdict.json || true
-  [ $rc -ne 0 ] && { fail_out lora "lora arm exited $rc"; exit 96; }
-  note lora-ok '{"stage":"lora","ok":true}'
   ;;
 
 *)
