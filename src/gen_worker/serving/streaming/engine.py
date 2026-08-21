@@ -252,14 +252,33 @@ class StreamingLoader:
             report.containers = len(self._planned)
 
         for component, module in built.modules.items():
+            # pgw#1626: RE-TIE, THEN ASSERT — in that order, and never instead.
+            # The skeleton was built weight-free, so `post_init()` never ran and
+            # no tie exists yet; the stream then rebinds the SOURCE parameter,
+            # which is why the tie has to be (re-)made here, after the last
+            # container and before the survivor check reads the module.
+            _skeleton.retie(module)
             survivors = _skeleton.meta_survivors(module)
             if survivors:
+                aliases = [
+                    name for name in survivors
+                    if name in set(_skeleton.tied_names(module))
+                ]
                 raise NameMismatch(
-                    f"component {component!r}: {len(survivors)} tensor(s) are "
-                    f"still on meta after the checkpoint's containers were "
-                    f"streamed — the checkpoint does not carry "
+                    f"component {component!r} ({type(module).__name__}): "
+                    f"{len(survivors)} tensor(s) were never filled and are "
+                    f"still on meta after every container was streamed — "
                     f"{', '.join(survivors[:8])}"
                     + (" …" if len(survivors) > 8 else "")
+                    + ". Weight tying was re-established first (pgw#1626), so "
+                    "an untied alias is not the cause"
+                    + (
+                        f"; {', '.join(aliases[:4])} "
+                        f"{'is a name' if len(aliases) == 1 else 'are names'} "
+                        f"{type(module).__name__} TIES to another parameter, "
+                        f"so the parameter it aliases went unfilled too"
+                        if aliases else ""
+                    )
                 )
 
         report.seconds = time.perf_counter() - started

@@ -74,6 +74,62 @@ def build_source(target: Path) -> type:
     return pipeline_cls
 
 
+def tied_pipeline_class() -> type:
+    from diffusers import DiffusionPipeline
+
+    class TinyTiedPipeline(DiffusionPipeline):
+        """A real pipeline whose `text_encoder` TIES two parameter names."""
+
+        def __init__(self, unet: Any, vae: Any, text_encoder: Any,
+                     scheduler: Any) -> None:
+            super().__init__()
+            self.register_modules(  # type: ignore[attr-defined]
+                unet=unet, vae=vae, text_encoder=text_encoder,
+                scheduler=scheduler,
+            )
+
+    return TinyTiedPipeline
+
+
+def build_tied_source(target: Path) -> type:
+    """pgw#1626's article: a real T5-bearing pipeline saved to ``target``.
+
+    `T5EncoderModel` ties `encoder.embed_tokens.weight` to `shared.weight`, so
+    `save_pretrained` writes the SOURCE ALONE — nothing here arranges that, it
+    is what transformers does and what every T5 on the hub looks like. That is
+    the checkpoint the loader called defective.
+    """
+    from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
+    from transformers import T5Config, T5EncoderModel
+
+    torch.manual_seed(1626)
+    unet = UNet2DConditionModel(
+        sample_size=16, in_channels=4, out_channels=4, layers_per_block=1,
+        block_out_channels=(32, 64), norm_num_groups=4, cross_attention_dim=32,
+        attention_head_dim=4,
+        down_block_types=("DownBlock2D", "CrossAttnDownBlock2D"),
+        up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
+    )
+    vae = AutoencoderKL(
+        in_channels=3, out_channels=3, latent_channels=4, norm_num_groups=4,
+        block_out_channels=(32,), down_block_types=("DownEncoderBlock2D",),
+        up_block_types=("UpDecoderBlock2D",),
+    )
+    text_encoder = T5EncoderModel(
+        T5Config(vocab_size=64, d_model=32, d_ff=64, num_layers=1,
+                 num_heads=4, d_kv=8)
+    )
+    pipeline_cls = tied_pipeline_class()
+    pipeline = pipeline_cls(
+        unet=unet, vae=vae, text_encoder=text_encoder, scheduler=DDIMScheduler(),
+    )
+    pipeline.to(torch.bfloat16)
+    pipeline.save_pretrained(str(target), safe_serialization=True)
+    for container in sorted(target.rglob("*.safetensors")):
+        scramble_offsets(container)
+    return pipeline_cls
+
+
 def scramble_offsets(path: Path) -> None:
     """Rewrite a container so its HEADER order is not its OFFSET order.
 
