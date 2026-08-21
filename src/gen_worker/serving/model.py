@@ -520,12 +520,12 @@ class Model(Generic[MT]):
             # class-definition time, before any author code runs.
             raise ModelDeclarationError(
                 f"{cls.__qualname__}: lanes= is REQUIRED and is missing. A "
-                f"lane is a real tensorfs layout CONTRACT, and it answers "
-                f"checkpoint compatibility and lane selection — not just "
-                f"compilation — so there is nothing an implicit or borrowed "
-                f"one could stand in for. A model FAMILY has no canonical "
-                f"layout; a CHECKPOINT has one, and this declaration commits "
-                f"to it. Write "
+                f"lane is a real layout STAMP — the (topology, quant) pair — "
+                f"and it answers checkpoint compatibility and lane selection, "
+                f"not just compilation, so there is nothing an implicit or "
+                f"borrowed one could stand in for. A model FAMILY has no "
+                f"canonical layout; a CHECKPOINT has one, and this declaration "
+                f"commits to it. Write "
                 f'`lanes={{("<topology>@N", "<quant>@N"): lane(request=…)}}`. '
                 f"(The `canonical_contract` borrow, `lanes=()` and "
                 f"`eager_only=` are all deleted — pgw#1599.)"
