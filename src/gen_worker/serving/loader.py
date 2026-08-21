@@ -27,6 +27,71 @@ class EndpointLoadError(RuntimeError):
     """The endpoint module does not state a loadable serve surface."""
 
 
+class _BridgedLane:
+    """A `lane_ladder.DeclaredLane` built from a raw tensorfs contract.
+
+    ⚠️ **DELETED ON REBASE ONTO pgw#1599.** That issue ships
+    `model_declared_lanes(cls) -> tuple[DeclaredLane, ...]`, computed once at
+    class-definition time, which is where these three reads belong: it can
+    refuse a dtype-less lane and a hand-written floor at DECLARATION rather
+    than at boot. This bridge exists only so the ladder is provable before
+    that surface lands; `_declared_lanes` below prefers the real function the
+    moment it exists, and this class then has no callers and goes.
+
+    It deliberately derives `min_sm` the same single way pgw#1599 does —
+    `capability_floor_for_dtype` — so the two can never disagree about a
+    floor while both exist.
+    """
+
+    __slots__ = ("_lane",)
+
+    def __init__(self, lane: Any) -> None:
+        self._lane = lane
+
+    @property
+    def contract(self) -> Any:
+        return self._lane
+
+    @property
+    def contract_id(self) -> str:
+        return lane_handle(self._lane)
+
+    @property
+    def dtype(self) -> Any:
+        from .model import lane_dtype
+
+        try:
+            return lane_dtype(self._lane, where="lane ladder")
+        except Exception:  # noqa: BLE001 — a dtype-less lane is a NAMED
+            # rejection in the ladder ("unknown_dtype"), not a boot crash.
+            return None
+
+    @property
+    def min_sm(self) -> int:
+        from ..models.tensor_layout_contract import capability_floor_for_dtype
+
+        return int(capability_floor_for_dtype(self.dtype) or 0)
+
+    @property
+    def request(self) -> Any:
+        return None
+
+    @property
+    def resident(self) -> Any:
+        return ()
+
+
+def _declared_lanes(model_cls: type, lanes: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    """pgw#1599's declared lanes, or the pre-#1599 bridge above."""
+    try:
+        from .model import model_declared_lanes  # type: ignore[attr-defined]
+    except ImportError:
+        return tuple(_BridgedLane(lane) for lane in lanes)
+    declared = tuple(model_declared_lanes(model_cls))
+    handles = {lane_handle(lane) for lane in lanes}
+    return tuple(d for d in declared if d.contract_id in handles) or declared
+
+
 @dataclass(frozen=True, slots=True)
 class LoadedEndpoint:
     """The author's module, loaded and statically extracted.
@@ -60,10 +125,21 @@ class LoadedEndpoint:
         if not contract:
             if len(lanes) == 1:
                 return lanes[0]
+            # pgw#1606: this used to raise, and that refusal is why no Model
+            # class in the fleet has ever declared more than one lane — a
+            # multi-lane endpoint simply could not boot on a pod, because the
+            # only writers of `contract` are the local CLI and the daemon
+            # (`entrypoint.py` builds `Worker(...)` with no `lane=` at all).
+            # Picking among declared lanes is PLATFORM work and it now has a
+            # home: `serving.lane_ladder.resolve_lane`. Use `resolve()` below,
+            # which ranks them and says why. Reaching here means a caller
+            # asked for "the" lane of a multi-lane model without running the
+            # ladder, which is a wiring defect, not a deployment state.
             raise EndpointLoadError(
                 f"{self.module_name}.{model_cls.__name__}: {len(lanes)} lanes "
-                f"declared ({declared}); the active lane must be named by "
-                "contract"
+                f"declared ({declared}); ask `resolve()` for the boot ladder's "
+                "pick — `lane()` answers only a lane named by contract or a "
+                "single declared one"
             )
         for lane in lanes:
             if lane_handle(lane) == contract:
@@ -71,6 +147,40 @@ class LoadedEndpoint:
         raise EndpointLoadError(
             f"{self.module_name}.{model_cls.__name__}: no lane {contract!r} "
             f"(declared: {declared})"
+        )
+
+    def resolve(
+        self, model_cls: type, *, card: Any, verdicts: Any, gates: Any,
+        contract: str = "",
+    ) -> Any:
+        """THE boot pick: rank this model's declared lanes and choose one.
+
+        pgw#1606. Returns a `lane_ladder.ResolvedLane` — the chosen lane, the
+        reason, and the rejected rungs in order — or ``None`` for a model that
+        declares no lanes (`eager_only`), which has nothing to resolve.
+
+        A non-empty ``contract`` is an OPERATOR OVERRIDE (the local CLI's
+        ``--lane``): it pins the candidate set to one lane, and the ladder
+        still evaluates that lane's floor, gate and bytes so a pinned lane
+        that cannot run says why instead of failing later and elsewhere.
+        """
+        from . import lane_ladder
+
+        lanes = self.lanes_of(model_cls)
+        if not lanes:
+            return None
+        if contract:
+            lanes = tuple(
+                lane for lane in lanes if lane_handle(lane) == contract)
+            if not lanes:
+                raise EndpointLoadError(
+                    f"{self.module_name}.{model_cls.__name__}: no lane "
+                    f"{contract!r} to pin (declared: "
+                    f"{sorted(lane_handle(l) for l in self.lanes_of(model_cls))})"
+                )
+        return lane_ladder.resolve_lane(
+            declared=_declared_lanes(model_cls, lanes),
+            card=card, verdicts=verdicts, gates=gates,
         )
 
 

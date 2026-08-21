@@ -215,6 +215,25 @@ class DeployBinding:
     model: Optional[str] = None
     defaults: Mapping[str, Any] = field(default_factory=dict)
     adapter: Optional[Adapter] = None
+    #: pgw#1606 — THE MULTI-LANE HALF. A binding used to carry exactly one
+    #: tree, which is why a model declaring two lanes could not boot at all
+    #: (``loader.lane`` raised: "the active lane must be named by contract").
+    #: These three say what the deploy staged PER LANE CONTRACT, so the
+    #: boot-time ladder has a candidate set to rank instead of an ambiguity to
+    #: refuse. All three empty is the single-lane deployment — every one in the
+    #: fleet today — and ``checkpoint_dir`` remains its answer.
+    #:
+    #: ``lane_trees``   contract handle -> the staged tree for that lane
+    #: ``lane_verdicts`` contract handle -> the hub bind gate's own tri-state
+    #:                  (``satisfies``/``derivable``/``incompatible``), which
+    #:                  it computed at BIND time with the real Go
+    #:                  ``Contract.Verdict``; the worker consumes it and never
+    #:                  recomputes a rival answer.
+    #: ``lane_bytes``   contract handle -> tree size on the wire, which is what
+    #:                  makes the upcast rung's saving a measurement.
+    lane_trees: Mapping[str, Path] = field(default_factory=dict)
+    lane_verdicts: Mapping[str, str] = field(default_factory=dict)
+    lane_bytes: Mapping[str, int] = field(default_factory=dict)
 
 
 class LoaderEngine(Protocol):
@@ -441,6 +460,7 @@ class LoadContext(Generic[MT_co]):
         binding: DeployBinding,
         model_type: Optional[type] = None,
         lane: Any = None,
+        resolved: Any = None,
         engine: Optional[LoaderEngine] = None,
         compile_sink: Optional[Callable[[Any], Any]] = None,
         device: str = "",
@@ -450,6 +470,11 @@ class LoadContext(Generic[MT_co]):
         self._binding = binding
         self._model_type = model_type
         self._lane = lane
+        #: pgw#1606: the boot ladder's answer — the chosen lane, the reason,
+        #: and the rejected rungs in order. ``None`` for a context built
+        #: before the ladder ran (a fixture, a derive), which is why every
+        #: read of it degrades rather than raising.
+        self._resolved = resolved
         self._engine = engine
         self._compile_sink = compile_sink
         self._engines: list[Any] = []
@@ -484,9 +509,41 @@ class LoadContext(Generic[MT_co]):
 
     @property
     def checkpoint_dir(self) -> Path:
-        """The worker-resolved checkpoint tree, already converted to the
-        active lane's tensor-layout contract."""
-        return Path(self._binding.checkpoint_dir)
+        """The worker-resolved checkpoint tree for the RESOLVED lane.
+
+        pgw#1606: a binding used to carry exactly one tree. It now carries one
+        per staged lane contract, and this answers the one the boot ladder
+        picked — including the upcast rung's case, where the bytes fetched are
+        a quantized lane's and the modules served are baseline. A single-lane
+        deployment has no map and gets ``binding.checkpoint_dir``, unchanged.
+        """
+        tree = self._lane_tree()
+        return Path(tree if tree is not None else self._binding.checkpoint_dir)
+
+    def _lane_tree(self) -> Optional[Path]:
+        """The staged tree for the resolved lane, or ``None`` for "the one"."""
+        resolved = self._resolved
+        if resolved is None:
+            return None
+        trees = getattr(self._binding, "lane_trees", None) or {}
+        if not trees:
+            return None
+        # The upcast rung fetches the QUANTIZED tree and serves baseline
+        # modules out of it, so the bytes to open are `fetch_contract`'s.
+        for key in (getattr(resolved, "fetch_contract", ""),
+                    getattr(resolved, "contract_id", "")):
+            if key and key in trees:
+                return Path(trees[key])
+        return None
+
+    @property
+    def resolved_lane(self) -> Any:
+        """The boot ladder's answer, or ``None`` if the ladder never ran.
+
+        Read by the platform, not by endpoints — an endpoint that branches on
+        this is exactly the code pgw#1606 exists to delete.
+        """
+        return self._resolved
 
     @property
     def checkpoint_ref(self) -> str:
@@ -585,9 +642,59 @@ class LoadContext(Generic[MT_co]):
             )
             return False, pinned
 
+    def load_pipeline(self, pipeline_cls: Type[P]) -> P:
+        """Build ``pipeline_cls`` on the RESOLVED lane — the ONE spelling
+        (pgw#1606), and the only one an endpoint should write::
+
+            self.pipe = ctx.load_pipeline(StableDiffusionXLPipeline)
+
+        There is no dtype argument, no quantization if-tree and no hardware
+        read at the author's site. The platform resolved a lane at boot out of
+        the lanes this Model declared (`serving.lane_ladder`), and this call
+        materializes the pipeline per that lane's contract document: baseline
+        is a plain build; fp8 swaps the denoiser's linears to the scaled-mm
+        modules; nvfp4 swaps them to the block-scaled fp4 modules.
+
+        **It then proves the modules are the lane.** `lane_materialize` runs a
+        marker census and refuses a quantized lane that converted nothing, a
+        half-converted one, and a baseline lane carrying stray quantized
+        leaves. A loader must not be the only witness of what it did — the
+        audit behind this issue found four separate places where it was, and
+        each of them could serve the wrong numerics in silence.
+
+        A context whose ladder never ran (a fixture, a derive, a local CLI
+        run) has no resolved lane, and this degrades to :meth:`load` rather
+        than inventing one. That is the same discipline `ctx.lane` already
+        applies: no silent default lane, ever.
+        """
+        built = self.load(pipeline_cls)
+        resolved = self._resolved
+        if resolved is None:
+            logger.info(
+                "ctx.load_pipeline: no lane was resolved for this context "
+                "(fixture/derive/local run) — built %s with no lane "
+                "materialization (pgw#1606)", pipeline_cls.__name__,
+            )
+            return built
+        from . import lane_materialize
+
+        lane_materialize.materialize(
+            built, resolved, tree=self.checkpoint_dir,
+            compute_dtype=self._lane_dtype(),
+        )
+        logger.info("ctx.load_pipeline: %s", resolved.confession())
+        return built
+
     def load(self, pipeline_cls: Type[P]) -> P:
-        """Build ``pipeline_cls`` with this checkpoint's weights resident —
-        the ONE spelling (pgw#1380)::
+        """Build ``pipeline_cls`` with this checkpoint's weights resident.
+
+        The materialization half of :meth:`load_pipeline`, and the older
+        spelling. Prefer ``ctx.load_pipeline`` in endpoint code: this one puts
+        weights in memory, that one puts them in the right MODULES and proves
+        it. Kept because the derive, the local CLI and every fixture build a
+        context with no resolved lane, and for them the two are the same call.
+
+        The original contract (pgw#1380)::
 
             self.pipe = ctx.load(StableDiffusionXLPipeline)
 
