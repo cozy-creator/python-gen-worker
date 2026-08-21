@@ -23,11 +23,22 @@ rung and no author-visible ladder. Two riders, both from measurement:
 
 * Full residency is NECESSARY but not SUFFICIENT for compiled. The compiled regime also has
   to fit in ``driver_free`` ALONE — AOTI's first-call pool allocates outside torch's caching
-  allocator, so cached blocks are eager-spendable money and cannot fund a compiled admit.
-  Measured +1154 MiB on sdxl sm_89, 4/4 runs, batch-invariant (pgw#1627).
-* Compiled needs a MEASURED demand stamp. Without one this module returns eager, structurally
-  — not by accident. A mid-graph OOM in a compiled artifact is process death (pgw#1255
-  leg 2), so "we did not measure it" can never be spent as "it probably fits".
+  allocator, so cached blocks are eager-spendable money and cannot fund a compiled admit
+  (pgw#1627).
+* Compiled needs a MEASURED demand stamp, **and the stamp must come from a SUCCESSFUL mint
+  run, never from a death trace** (pgw#1627's second re-open, on-card 2026-08-21). That rule
+  was paid for: a "+1154 MiB, 4/4 runs, batch-invariant" figure circulated as sdxl sm_89's
+  compiled first-call demand and was FALSIFIED — with 1326 MiB more freed, the first call
+  consumed ~2474 of 2506 available and died identically. **A death only ever reports the free
+  memory it consumed**, so a demand read off one measures the card, not the artifact. sdxl
+  sm_89's demand is UNKNOWN, lower-bounded >2501 MiB, and 8 GiB is a measured NO for compiled
+  SDXL UNet-only.
+
+  Without a stamp this module returns eager, **structurally** — not by accident. A mid-graph
+  OOM in a compiled artifact is process death (pgw#1255 leg 2), so "we did not measure it"
+  can never be spent as "it probably fits". The falsification above is the argument for that
+  rule rather than a footnote to it: the one number anybody had was an artifact of the
+  failure that produced it.
 
 ## Fully resident when it fits, and why that is the DEFAULT rather than an upgrade
 
@@ -161,6 +172,13 @@ class RequestArena:
     ``compiled_extra_bytes`` is pgw#1601's mint-time demand stamp: what the compiled regime
     additionally spends OUTSIDE torch's allocator on its first call. ``None`` means no stamp
     exists, and no stamp means no compiled admit.
+
+    **The stamp may only come from a SUCCESSFUL mint-child run** (pgw#1627's stamp-source
+    rule, on-card 2026-08-21). A death trace reports the free memory the call consumed before
+    dying, which is a fact about the card, not about the artifact — the figure that
+    circulated as sdxl sm_89's demand was exactly that, and it was falsified by giving the
+    same call more room and watching it consume that too. No consumer of this field can tell
+    a good stamp from a bad one, so the producer carries the rule.
     """
 
     bytes: int

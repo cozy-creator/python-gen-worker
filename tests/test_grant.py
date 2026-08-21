@@ -44,9 +44,17 @@ CARD_FREE = ANIMA_FULLY_RESIDENT_PEAK
 SDXL_WEIGHTS = 5693 * MIB
 SDXL_ACTIVATIONS = 1847 * MIB
 
-# pgw#1627: AOTI's first-call pool, allocated OUTSIDE torch's caching allocator. sdxl sm_89,
-# 4/4 runs, batch-invariant.
-AOTI_FIRST_CALL = 1154 * MIB
+# ⚠️ NOT A MEASUREMENT. pgw#1627's second re-open FALSIFIED the "+1154 MiB, 4/4 runs,
+# batch-invariant" figure on-card 2026-08-21: it was the RED run's consumption, and a death
+# only ever reports the free memory it consumed. Given 1326 MiB more, the same first call
+# consumed ~2474 of 2506 and died identically. sdxl sm_89's compiled demand is UNKNOWN,
+# lower-bounded >2501 MiB; 8 GiB is a MEASURED NO for compiled SDXL UNet-only.
+#
+# The tests below need SOME stamp value to exercise the regime split, so this is a declared
+# HYPOTHETICAL and is named as one. Nothing here asserts it is the real demand — the point
+# under test is that a stamp's PRESENCE gates the compiled admit and its ABSENCE forces
+# eager, which is the rule the falsification above exists to justify.
+_HYPOTHETICAL_STAMP = 1154 * MIB
 
 
 def anima_components(weights: int) -> list[ComponentDecl]:
@@ -137,14 +145,15 @@ def test_compiled_requires_full_residency_and_driver_free_alone():
     """COMPILED IFF FULLY RESIDENT — and the AOTI pool must fit in driver_free, never cache.
 
     Cache is eager-spendable money. The same demand admits compiled when driver_free covers
-    it and does NOT when only the cache makes up the difference; that difference is what
-    killed every 8 GiB compiled-SDXL leg.
+    it and does NOT when only the cache makes up the difference. The stamp value here is a
+    declared HYPOTHETICAL (see `_HYPOTHETICAL_STAMP`) — what is under test is the SPLIT, not
+    the number.
     """
     comps = [ComponentDecl("unet", SDXL_WEIGHTS, phase=1)]
     req = RequestArena(
-        bytes=SDXL_ACTIVATIONS, basis="measured", compiled_extra_bytes=AOTI_FIRST_CALL
+        bytes=SDXL_ACTIVATIONS, basis="measured", compiled_extra_bytes=_HYPOTHETICAL_STAMP
     )
-    need = SDXL_WEIGHTS + SDXL_ACTIVATIONS + AOTI_FIRST_CALL
+    need = SDXL_WEIGHTS + SDXL_ACTIVATIONS + _HYPOTHETICAL_STAMP
 
     ok = plan_grant(
         comps,
@@ -161,8 +170,8 @@ def test_compiled_requires_full_residency_and_driver_free_alone():
     split = plan_grant(
         comps,
         spendable=Spendable(
-            driver_free_bytes=need - AOTI_FIRST_CALL,
-            allocator_cache_bytes=AOTI_FIRST_CALL,
+            driver_free_bytes=need - _HYPOTHETICAL_STAMP,
+            allocator_cache_bytes=_HYPOTHETICAL_STAMP,
         ),
         request=req,
         compile_intent=True,
@@ -212,7 +221,7 @@ def test_compiled_is_refused_when_anything_would_be_streamed():
     g = plan_grant(
         comps,
         spendable=Spendable(driver_free_bytes=5 * GIB),
-        request=RequestArena(bytes=512 * MIB, basis="measured", compiled_extra_bytes=AOTI_FIRST_CALL),
+        request=RequestArena(bytes=512 * MIB, basis="measured", compiled_extra_bytes=_HYPOTHETICAL_STAMP),
         compile_intent=True,
         stream_selector=cheapest_streamed,
     )
@@ -284,7 +293,7 @@ def test_the_headroom_basis_can_go_red():
     added to expose (pgw#1627). Both values must be reachable from the production entry
     point, or the field is decoration."""
     comps = [ComponentDecl("unet", 1 * GIB, phase=1)]
-    stamped = RequestArena(bytes=1 * GIB, basis="measured", compiled_extra_bytes=AOTI_FIRST_CALL)
+    stamped = RequestArena(bytes=1 * GIB, basis="measured", compiled_extra_bytes=_HYPOTHETICAL_STAMP)
     compiled = plan_grant(
         comps,
         spendable=Spendable(driver_free_bytes=64 * GIB),
@@ -310,9 +319,9 @@ def test_the_line_names_every_input_not_the_verdict():
         assert token in line, line
 
 
-@pytest.mark.parametrize("regime,extra", [(EAGER, 0), (COMPILED, AOTI_FIRST_CALL)])
+@pytest.mark.parametrize("regime,extra", [(EAGER, 0), (COMPILED, _HYPOTHETICAL_STAMP)])
 def test_the_request_arena_demand_is_regime_split(regime, extra):
-    req = RequestArena(bytes=512 * MIB, basis="measured", compiled_extra_bytes=AOTI_FIRST_CALL)
+    req = RequestArena(bytes=512 * MIB, basis="measured", compiled_extra_bytes=_HYPOTHETICAL_STAMP)
     assert req.demand(regime) == 512 * MIB + extra
 
 
@@ -509,3 +518,28 @@ def test_a_reserve_read_off_a_roomy_card_overstates_the_requirement():
     )
     assert roomy.over_card, "a roomy-card peak overstates the requirement past the card"
     assert not pressured.over_card, pressured.line()
+
+
+def test_no_stamp_is_the_only_honest_answer_when_the_demand_is_unknown():
+    """pgw#1627's stamp-source rule, as an admission consequence.
+
+    sdxl sm_89's compiled first-call demand is UNKNOWN — the only figure anyone had was a
+    death trace's consumption, and giving the same call 1326 MiB more room made it consume
+    that too. "8 GiB is a MEASURED NO for compiled SDXL UNet-only."
+
+    The grant must reach that verdict from the ABSENCE of a stamp, on a card of any size. A
+    design that only refused compiled when the arithmetic came out short would have admitted
+    it here on a big card, on a demand nobody has ever measured.
+    """
+    comps = [ComponentDecl("unet", SDXL_WEIGHTS, phase=1)]
+    unknown = RequestArena(bytes=SDXL_ACTIVATIONS, basis="measured")  # no compiled stamp
+    for card in (8 * GIB, 24 * GIB, 80 * GIB):
+        g = plan_grant(
+            comps,
+            spendable=Spendable(driver_free_bytes=card),
+            request=unknown,
+            compile_intent=True,
+            stream_selector=cheapest_streamed,
+        )
+        assert g.regime == EAGER, f"{card / GIB:.0f} GiB card: {g.line()}"
+        assert any("mint demand stamp" in n for n in g.notes), g.notes
