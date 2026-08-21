@@ -154,6 +154,7 @@ def main() -> int:
     parser.add_argument("--steps", type=int, default=28)
     parser.add_argument("--requests", type=int, default=24)
     parser.add_argument("--max-hours", type=float, default=2.0)
+    parser.add_argument("--host-floor-gib", type=float, default=0.0)
     parser.add_argument("--name", default="")
     parser.add_argument("--retries", type=int, default=3,
                         help="new-host retries for RETRYABLE_HOST failures "
@@ -288,7 +289,7 @@ def run_once(args: argparse.Namespace, api: str, body: dict, name: str,
             f"python pgw/benchmarks/checkpoint_juggle_pod_pgw1607.py "
             f"--arms {shlex.quote(args.arms)} --repos {args.repos} "
             f"--budget-gib {args.budget_gib} --steps {args.steps} "
-            f"--requests {args.requests}"
+            f"--requests {args.requests} --host-floor-gib {args.host_floor_gib}"
         )
         budget_s = int(args.max_hours * 3600)
         log(f"running harness (wall cap {budget_s}s) ...")
