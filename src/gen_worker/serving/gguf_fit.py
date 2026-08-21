@@ -12,11 +12,15 @@ import msgspec
 
 from ..api.errors import FatalError
 from ..models.materialized_view import third_party_dir
+from ..models.memory import GPU_VRAM_OVERHEAD_GB
 
 logger = logging.getLogger(__name__)
 
 _GiB = 1024**3
-_OVERHEAD_GB = 1.0
+#: pgw#1649 rung (a): the fixed driver/framebuffer/CUDA-context overhead has
+#: ONE owner, and it is the one that carries the reasoning. This file declared
+#: a bare `_OVERHEAD_GB = 1.0` — the same physical quantity, same value, no
+#: statement of what it is. It IMPORTS the owner now (deletes 1).
 _SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}\.gguf$")
 
 __all__ = [
@@ -138,7 +142,7 @@ def plan_fit(
     free_vram_gb: float,
     n_ctx: Optional[int] = None,
     kv_bytes_per_elem: float = 2.0,
-    overhead_gb: float = _OVERHEAD_GB,
+    overhead_gb: float = GPU_VRAM_OVERHEAD_GB,
 ) -> LlamaFitPlan:
     """Size ``-ngl`` / ``-c`` to the VRAM budget."""
     ctx = int(n_ctx or info.n_ctx_train or 4096)
