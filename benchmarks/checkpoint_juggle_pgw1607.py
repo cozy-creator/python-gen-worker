@@ -346,21 +346,29 @@ def measure_h2d_floor(torch: Any, nbytes: int) -> float:
 
 
 def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
+    # The box is shared and drifts: every timed row carries the 1-min load at
+    # its moment, so a poisoned median is REPORTED load-stamped, never clean.
+    def load1() -> float:
+        return round(os.getloadavg()[0], 1)
+
     residency = juggler.residency
     lane_bytes = sum(
         r.span for r in residency.layout.regions if residency.is_resident(r.name)
     )
+    floor_load = load1()
     floor_gbps = measure_h2d_floor(torch, max(64 * MIB, lane_bytes))
     x = torch.zeros(4, 2048, device="cuda")
 
-    # Warm switches, round-robin, median of ~11.
+    # Warm switches, round-robin, median of ~11, each row load-stamped.
     walls: List[float] = []
+    wall_rows: List[Dict[str, float]] = []
     seq = [f"ck{i % CHECKPOINTS}" for i in range(12)]
     for target in seq:
         if target == juggler.serving_id:
             continue
         report = juggler.switch_to(target)
         walls.append(report.wall_s)
+        wall_rows.append({"wall_s": round(report.wall_s, 4), "load1": load1()})
     warm_median = statistics.median(walls)
     warm_gbps = (lane_bytes / warm_median / 1e9) if warm_median else 0.0
 
@@ -371,6 +379,7 @@ def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
     # -> VRAM, the D5 cold path. (2) hysteresis-cold: image refused, the
     # switch streams disk-direct into the arena.
     cold_target = "ck1" if juggler.serving_id != "ck1" else "ck2"
+    cold_rebuild_load = load1()
     juggler.catalog.evict(cold_target)
     t0 = time.perf_counter()
     rebuild_report = juggler.switch_to(cold_target)
@@ -378,6 +387,7 @@ def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
     assert rebuild_report.tier == "host-warm", rebuild_report.tier
 
     direct_target = "ck2" if cold_target != "ck2" else "ck3"
+    cold_direct_load = load1()
     juggler.catalog.evict(direct_target)
     juggler.catalog._evicted_epoch[direct_target] = juggler.catalog.pressure_epoch
     t0 = time.perf_counter()
@@ -392,11 +402,13 @@ def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
     rng = random.Random(SEED)
     ids = [f"ck{i}" for i in range(CHECKPOINTS)]
     weights = [1.0 / (i + 1) ** 1.1 for i in range(CHECKPOINTS)]
+    baseline_load = load1()
     t0 = time.perf_counter()
     for _ in range(200):
         forward_once(torch, juggler, template, x)
     torch.cuda.synchronize()
     baseline = time.perf_counter() - t0
+    zipf_load = load1()
     t0 = time.perf_counter()
     switches_before = juggler.switches
     for _ in range(200):
@@ -411,16 +423,23 @@ def leg_f_numbers(torch: Any, juggler: Any, template: Any) -> Dict[str, Any]:
     out = {
         "lane_backed_bytes": lane_bytes,
         "h2d_floor_gbps": round(floor_gbps, 2),
+        "h2d_floor_load1": floor_load,
         "warm_switch_median_s": round(warm_median, 4),
+        "warm_switch_rows": wall_rows,
         "warm_switch_gbps": round(warm_gbps, 2),
         "warm_vs_floor": round(warm_gbps / floor_gbps, 3) if floor_gbps else None,
         "serving_noop_s": round(noop.wall_s, 6),
         "cold_rebuild_switch_s": round(cold_rebuild_wall, 4),
+        "cold_rebuild_load1": cold_rebuild_load,
         "cold_disk_direct_switch_s": round(cold_direct_wall, 4),
+        "cold_direct_load1": cold_direct_load,
         "zipf_200req_s": round(juggled, 3),
+        "zipf_load1": zipf_load,
         "zipf_switches": zipf_switches,
         "single_ck_200req_s": round(baseline, 3),
+        "baseline_load1": baseline_load,
         "zipf_overhead": round(juggled / baseline, 3) if baseline else None,
+        "end_load1": load1(),
     }
     loud(f"leg F: {json.dumps(out)}")
     return out
