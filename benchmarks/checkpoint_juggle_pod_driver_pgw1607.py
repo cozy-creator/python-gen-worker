@@ -60,7 +60,8 @@ python -c "import torch" 2>/dev/null || \
   uv pip install --python venv/bin/python torch==2.13.0 \
     --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python venv/bin/python \
-  diffusers transformers accelerate huggingface_hub safetensors numpy msgspec
+  diffusers transformers accelerate huggingface_hub safetensors numpy msgspec \
+  protobuf grpcio psutil
 uv pip install --python venv/bin/python --force-reinstall --no-deps /workspace/{wheel}
 python - <<'PY'
 import varena

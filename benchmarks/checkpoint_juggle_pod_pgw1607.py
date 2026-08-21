@@ -495,6 +495,12 @@ def main() -> int:
     import torch
 
     assert torch.cuda.is_available()
+    # FAIL FAST on the whole import closure BEFORE any multi-GB download —
+    # try 2 died on a missing module AFTER 29 GB of fetches ($0.04; this
+    # line makes that class cost $0.01).
+    from gen_worker.models.arena_residency import ArenaResidency  # noqa: F401
+    from gen_worker.models.checkpoint_juggle import CheckpointJuggler  # noqa: F401
+    from diffusers import UNet2DConditionModel  # noqa: F401
     dtype = torch.float16
     ids = [f"ck{i}" for i in range(args.repos)]
     repos = CURATED[: args.repos]
