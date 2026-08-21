@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from . import layout_rung
 from .host import CompileStack
 
 from .. import activity as activity_mod
@@ -272,11 +273,19 @@ class ServeAdoption:
         """The ordered mint work-list, in canonical document order."""
         return tuple(self.adoption.holes) if self.adoption is not None else ()
 
+    @property
+    def layout_rungs(self) -> Tuple[Any, ...]:
+        """Each armed graph's layout position, read off the artifact serving it."""
+        if self.adoption is None:
+            return ()
+        return layout_rung.rungs_of(self.adoption)
+
     def facts(self) -> Dict[str, Any]:
         """Counted, and never silent: `adopted`/`holes` are absent (not zero) when no session was ever built, and `refusal` says why."""
         if self.adoption is None:
             return {"adopting": False, "refusal": self.refusal or "not_attempted"}
         marks = tuple(self.adoption.unclaimed_marks)
+        rungs = self.layout_rungs
         return {
             "adopting": True,
             "adopted": len(self.adoption.adopted),
@@ -285,6 +294,11 @@ class ServeAdoption:
             "unmatched_marks": len(marks),
             "unmatched": [mark.describe() for mark in marks],
             "ambiguous": len(self.adoption.ambiguous),
+            # pgw#1645. Counted the same way everything else here is, and the
+            # rows carry BOTH layouts: a pod on a lower rung must read as
+            # EARNING rather than as a slow pod nobody can explain.
+            "layout_earning": sum(1 for rung in rungs if rung.earning),
+            "layout_rungs": [rung.facts() for rung in rungs],
         }
 
 
