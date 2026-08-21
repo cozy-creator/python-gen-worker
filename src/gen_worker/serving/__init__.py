@@ -72,12 +72,14 @@ from .loader import (
 from .self_mint import SelfMint, SelfMintStatus
 from .serve_adoption import ServeAdoption
 from .residency import (
+    Charge,
     InstanceSizer,
     Lease,
     ModelBackend,
     NeverFits,
     ResidencyError,
     ResidencyManager,
+    admission_charge,
 )
 from .serve_loop import (
     BindingResolver,
@@ -94,7 +96,14 @@ from .model import (
     model_requires,
     model_type,
 )
-from .placement import DeviceFacts, Shortfall, device_facts, shortfalls, warn_if_degraded
+from .placement import (
+    DeviceFacts,
+    Shortfall,
+    declared_vram_bytes,
+    device_facts,
+    shortfalls,
+    warn_if_degraded,
+)
 
 __all__ = [
     "boot_engine",
@@ -114,6 +123,7 @@ __all__ = [
     "ServeLoop",
     "ResidencyManager",
     "ResidencyError",
+    "Charge",
     "NeverFits",
     "ModelBackend",
     "Lease",
@@ -158,6 +168,8 @@ __all__ = [
     "SelfMintStatus",
     "ServeAdoption",
     "model_lanes",
+    "admission_charge",
+    "declared_vram_bytes",
     "model_requires",
     "model_type",
 ]

@@ -504,6 +504,16 @@ class Model(Generic[MT]):
     and says so, never refused, so cozy-local can run anything it has the
     patience for.
 
+    IT IS ALSO WHAT SERVING ADMISSION CHARGES (pgw#1590), and this is the one
+    thing that goes wrong by OMITTING it. With no floor, admission has only
+    the checkpoint tree to size a lane from — the WHOLE tree, at its stored
+    precision, plus 25% — and that number cannot see a ``setup()``-time
+    ``quantize_()`` or a component this lane offloads. minimax-h3's DiT lane
+    was refused as needing 180 GB on a card that had served it, because 133 GB
+    of stored bf16 becomes ~66 GB of w8a8 inside ``load``. Declaring the floor
+    replaces that guess with your number. It only ever LOWERS the charge, so
+    adding one can never make a lane harder to admit than leaving it off.
+
     ``__init__`` stays FREE (no GPU, no weights): construction and loading are
     separate moments, and derive/introspection instantiate without weights.
     """

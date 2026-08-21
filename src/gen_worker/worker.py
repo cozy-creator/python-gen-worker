@@ -476,8 +476,16 @@ class SnapshotSizer:
     """Weight bytes from the materialized tree's tensorfs manifest.
 
     ``tree_bytes`` sizes a PROJECTED tree from its manifest rather than
-    walking stubs, so this is the exact resident cost, known before any byte
-    moves — which is what admission requires.
+    walking stubs, so this is known before any byte moves — which is what
+    admission requires.
+
+    IT IS AN UPPER BOUND, NOT THE RESIDENT COST (pgw#1590), and ``lane`` is a
+    parameter it genuinely cannot answer for: the number is the WHOLE tree at
+    its STORED precision, including components this lane never loads, before
+    any setup()-time `quantize_()` the load path performs. The lane's own
+    declared floor is what corrects it, applied by
+    :func:`~gen_worker.serving.residency.admission_charge`; this class stays
+    the honest answer to "how big is the tree on disk".
     """
 
     def __init__(self, resolver: HubBindingResolver) -> None:

@@ -255,9 +255,11 @@ def test_multi_model_slots_lease_in_stable_slot_name_order(tmp_path: Path) -> No
     lease_order: List[str] = []
     true_lease = manager.lease
 
-    def spying_lease(checkpoint_ref: str, lane: str, factory: Any) -> Any:
+    def spying_lease(
+        checkpoint_ref: str, lane: str, factory: Any, **kwargs: Any
+    ) -> Any:
         lease_order.append(lane)
-        return true_lease(checkpoint_ref, lane, factory)
+        return true_lease(checkpoint_ref, lane, factory, **kwargs)
 
     manager.lease = spying_lease  # type: ignore[method-assign]
     outcome = loop.invoke(
