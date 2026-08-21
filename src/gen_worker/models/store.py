@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
-    Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple, cast,
+    Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, cast,
 )
 
 from .. import activity as activity_mod
@@ -32,7 +32,7 @@ from ..pb import worker_scheduler_pb2 as pb
 from ..redact import sanitize as _sanitize
 from ..topology import current_device_group
 from ..wire_snapshots import resolved_repo_from_snapshot
-from . import cozy_snapshot, disk_gc, disk_telemetry, projection
+from . import cozy_snapshot, disk_gc, disk_telemetry, fill_plan, projection
 from .projection import SNAPSHOTS_DIR
 from . import residency as residency_mod
 from . import staging as staging_mod
@@ -462,6 +462,43 @@ class ModelStore:
         await self._emit(pb.WorkerMessage(
             model_event=self.model_event(ref, state, identity=identity, **kw)
         ))
+
+    @property
+    def cache_dir(self) -> Path:
+        """This pod's CAS root. Read-only; the store resolves it once at boot."""
+        return Path(self._cache_dir)
+
+    async def report_insufficient_disk(self, ref: WireRef, detail: str) -> None:
+        """pgw#1612: tell the hub the SHAPE cannot fit, not that an attempt failed.
+
+        `insufficient_disk` is the hub's existing model-failure reason with a
+        whole migration/clear path behind it (drop the oldest resident non-hot
+        disk goal, advance the capacity generation, clear the failures, re-send
+        desired state). Reusing the token is the point: a second vocabulary
+        would mean building that path twice.
+
+        THE TOKEN IS SENT BARE, and that is a wire contract, not a style
+        choice. `connect_worker.go:3737` reads `failureReason :=
+        strings.TrimSpace(ev.GetError())` and then compares it for EXACT
+        equality against `modelFailureReasonDisk` — so appending detail after a
+        colon, the way `download_failed` does, would silently disable the whole
+        migration path. Verified by reading the hub at HEAD, not from memory.
+
+        The FACTS ride the activity stream instead, where they land in
+        `worker_activity_events` and are readable off the wire: which mount ran
+        out, its statvfs totals, and what the worker was doing. That is
+        pgw#1620's lesson — a confession that only reaches a pod's stdout
+        reaches nobody, because RunPod has no logs API.
+        """
+        try:
+            activity_mod.emit_event(
+                activity_mod.KIND_RESIDENCY_FAULT,
+                f"{ref}: {_sanitize(detail)[:400]}",
+                phase="insufficient_disk",
+            )
+        except Exception:  # noqa: BLE001 — reporting must not mask the failure
+            logger.debug("insufficient_disk fact event dropped", exc_info=True)
+        await self._event(ref, pb.MODEL_STATE_FAILED, error="insufficient_disk")
 
     # ---- per-group residency (pgw#748 phase 1) --------------------------------
 
@@ -1141,93 +1178,83 @@ class ModelStore:
                     return other
         return ""
 
-    def _already_resident_bytes(self, files: Sequence[Any]) -> int:
-        """Bytes of ``files`` whose CAS objects this pod ALREADY holds.
+    def _mount_report(self) -> str:
+        """This CAS root's mount and its real statvfs totals.
 
-        pgw#1596. The headroom gate asks for FREE space, so it must ask for
-        what is still MISSING — the bytes already banked are, by definition,
-        not going to be written again. `contains` is the same content-addressed
-        predicate the fill path uses to decide a grant is satisfied, so this
-        cannot disagree with what the downloader will actually skip.
-
-        A file with no digest is counted as absent: the honest direction, since
-        it will be fetched.
+        pgw#1612: a refusal that does not name the mount is one the hub cannot
+        act on and a lane has to re-derive weeks later. `disk_telemetry`
+        already measures the real mount points; the refusal quotes it.
         """
-        from .cache_paths import open_worker_cas
-
-        try:
-            cas = open_worker_cas(self._cache_dir)
-        except Exception:  # noqa: BLE001 — a probe must not be the failure
-            return 0
-        total = 0
-        for f in files:
-            digest = str(getattr(f, "digest", "") or "").strip()
-            if not digest:
-                continue
-            try:
-                if cas.contains(digest, size=int(f.size_bytes)):
-                    total += int(f.size_bytes)
-            except Exception:  # noqa: BLE001 — an unreadable object is absent
-                continue
-        return total
+        totals = disk_telemetry._statvfs_totals(str(self._cache_dir))
+        if totals is None:
+            return f"mount={self._cache_dir} statvfs=unreadable"
+        total, free = totals
+        return (
+            f"mount={self._cache_dir} statvfs_total={total} "
+            f"statvfs_free={free}"
+        )
 
     async def _ensure_disk_headroom(
         self,
         ref: WireRef,
-        needed_bytes: int,
+        plan: fill_plan.FillPlan,
         identity: _ResidencyIdentity = ("", 0),
         *,
         intent_id: str = "",
-        files: Optional[Sequence[Any]] = None,
     ) -> None:
-        """Gate on the bytes still to be WRITTEN, never on the whole tree.
+        """Gate on the fill's own PLAN. It cannot price anything else.
 
-        pgw#1596: this used to compare free space against the ref's entire
-        manifest, with nothing subtracting the part of that same manifest
-        already on disk. On a first pass over an empty disk that is right. On a
-        RE-ENTRY it is self-defeating — the bytes already fetched are counted
-        as consumed AND demanded again as free — so a materialization restarted
-        by an ordinary residency-generation supersede can never satisfy its own
-        check. It needs 2x the tree, and it fails at the END of its own pull.
+        pgw#1596 was a SHAPE bug, not an arithmetic one: this gate priced the
+        REQUEST (the whole manifest) while the fill priced the DELTA (skip what
+        `contains(digest, size)` already answers for). Two derivations of one
+        quantity drifted and a 105 GB pull died 157 MB from the end on a disk
+        that fit it fine — `need 104956706657 bytes; 65659441152 free after
+        disk GC` on pod `6uneiwhdl7fz8u`, with ~86.2 GB of that same tree
+        already resident.
 
-        MEASURED (pod `6uneiwhdl7fz8u`, 159 GB disk, 2026-08-20):
-        `need 104956706657 bytes; 65659441152 free after disk GC` — it demanded
-        the whole 105 GB tree free while ~86.2 GB of that same tree was already
-        resident, and died 157 MB short of a complete pull.
+        pgw#1631 promotes the fix from patch to construction. The argument is
+        the plan the fill computed, so there is no manifest here to re-price
+        and no second derivation to drift: `missing_bytes` is the arithmetic
+        consequence of the same skip decision the fetch loop will make.
 
-        The boot ladder's supersede-and-restart design already ASSUMES
-        materialization is restart-safe. This is what makes that true.
+        NO GC DURING BOOT (pgw#1631). A boot that needs eviction to fit is a
+        sizing bug upstream (th#2264), and evict-and-retry turns it into a slow
+        expensive one — th#2246 burned two A100 pods and ~$1.72 on a shape that
+        was doomed before it was paid for. At boot the gate refuses with a
+        typed `insufficient_disk` naming the mount, its statvfs totals and the
+        missing bytes, so the hub demotes the shape instead of re-buying it at
+        the identical `container_disk_gb_requested`. Steady state keeps the LRU
+        GC: there, eviction is what the tier is FOR.
         """
-        total = int(needed_bytes)
-        resident = self._already_resident_bytes(files) if files else 0
-        # Never below zero, and never above the total: a stale or oversized
-        # residency reading must not talk this gate out of existence.
-        resident = max(0, min(resident, total))
-        remaining = total - resident
+        remaining = plan.missing_bytes
         target = remaining + _DISK_GC_MARGIN_BYTES
         if self._disk_free() >= target:
             return
-        await self._materialize_await(
-            intent_id or self._materialize_intent(ref),
-            asyncio.to_thread(self.gc_disk, target, exclude=(ref,)),
-            operation=f"disk headroom for {ref}",
-            status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
-            stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM,
-            reason=pb.LIFECYCLE_WAIT_REASON_DISK_HEADROOM,
-        )
+
+        booting = boot_mod.in_boot()
+        if not booting:
+            await self._materialize_await(
+                intent_id or self._materialize_intent(ref),
+                asyncio.to_thread(self.gc_disk, target, exclude=(ref,)),
+                operation=f"disk headroom for {ref}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM,
+                reason=pb.LIFECYCLE_WAIT_REASON_DISK_HEADROOM,
+            )
         free = self._disk_free()
         if free < target:
             await self._event(
                 ref, pb.MODEL_STATE_FAILED,
                 identity=identity, error="insufficient_disk",
             )
-            # Say what is still MISSING and what is already banked. The old
-            # message named only the whole tree, which is exactly why an
-            # 86 GB-resident refusal read as a 105 GB shortfall (pgw#1596).
+            # The plan shows its working. The pre-pgw#1596 message named only
+            # the whole tree, which is why an 86 GB-resident refusal read as a
+            # 105 GB shortfall.
+            after = "at boot (no GC: a boot that needs eviction to fit is a "
+            after += "sizing bug upstream)" if booting else "after disk GC"
             raise InsufficientDiskError(
-                f"need {remaining} more bytes for {ref} "
-                f"({total} manifest - {resident} already resident); "
-                f"{free} free after disk GC",
+                f"need {remaining} more bytes for {ref} — {plan.describe()}; "
+                f"{free} free {after}; {self._mount_report()}",
                 available_bytes=free, required_bytes=remaining,
                 path=str(self._cache_dir),
             )
@@ -1892,17 +1919,18 @@ class ModelStore:
             # list — th#1941 made it exactly what gets fetched.
             fetch_files = list(snapshot.files) if snapshot is not None else []
             if snapshot is not None and snapshot.files:
-                # Sizes are known up front for tensorhub snapshots: gate on
-                # disk headroom, GC-ing LRU refs first (#370).
+                # pgw#1631: THE PLAN IS COMPUTED ONCE AND THE GATE IS HANDED IT.
+                # The gate takes no manifest and no total, so it has nothing to
+                # re-price — which is what makes a divergent precondition
+                # unwritable rather than merely fixed (pgw#1596).
                 failure_stage = pb.LIFECYCLE_INTENT_STAGE_WAIT_DISK_HEADROOM
                 await self._ensure_disk_headroom(
                     ref,
-                    sum(int(f.size_bytes) for f in fetch_files),
+                    await asyncio.to_thread(
+                        fill_plan.plan_for_snapshot, self._cache_dir, fetch_files,
+                    ),
                     operation_identity,
                     intent_id=intent_id,
-                    # pgw#1596: the same list, so the gate can subtract what is
-                    # already banked instead of demanding the tree twice.
-                    files=fetch_files,
                 )
             last_progress = 0.0
             # opened before _progress so

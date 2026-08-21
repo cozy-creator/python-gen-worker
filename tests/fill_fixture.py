@@ -57,6 +57,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if body is None:
             self.send_error(404)
             return
+        if origin.delay_s:
+            time.sleep(origin.delay_s)
         try:
             origin.charge(len(body))
         except _Refused:
@@ -88,6 +90,11 @@ class Origin:
         self.served = 0
         self.cutoff_bytes: Optional[int] = None
         self.refusals = 0
+        #: Per-object service delay. Not a timeout and not a clock the test
+        #: asserts on — it only widens the window in which a fill is genuinely
+        #: mid-flight, so a test that must observe "in flight" waits on BYTES
+        #: SERVED (:meth:`wait_until_served`) rather than on elapsed time.
+        self.delay_s = 0.0
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.server.origin = self  # type: ignore[attr-defined]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -115,11 +122,22 @@ class Origin:
         with self.lock:
             self.cutoff_bytes = cutoff_bytes
 
+    async def wait_until_served(self, at_least: int) -> None:
+        """Yield the loop until the origin has really served ``at_least`` bytes.
+
+        PROGRESS-KEYED, never clock-keyed: the caller wants "the fill is in
+        flight", and the only honest evidence of that is bytes that actually
+        left the origin.
+        """
+        while self.wire_bytes < at_least:
+            await asyncio.sleep(0.005)
+
     def reset(self) -> None:
         with self.lock:
             self.served = 0
             self.refusals = 0
             self.cutoff_bytes = None
+            self.delay_s = 0.0
 
     def close(self) -> None:
         self.server.shutdown()

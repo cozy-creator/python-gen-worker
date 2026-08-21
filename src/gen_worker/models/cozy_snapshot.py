@@ -50,7 +50,7 @@ from .. import boot_phases
 from .. import snapshot_pull
 from ..capability import InsufficientDiskError
 from ..snapshot_pull import SnapshotPullStats
-from . import projection
+from . import fill_plan, projection
 from .cache_paths import open_worker_cas
 from .download import components_present, select_component_paths
 from .errors import (
@@ -545,10 +545,13 @@ class CozySnapshotDownloader:
                 progress(done, total)
 
         def resident(grant: TransferGrant) -> bool:
-            try:
-                return bool(cas.contains(grant.digest, size=grant.size_bytes))
-            except DigestMismatch:
-                return False
+            # pgw#1631: THE ONE SKIP PREDICATE, shared with the headroom gate's
+            # plan (`fill_plan.plan_for_snapshot`). A second spelling here is
+            # how pgw#1596 happened: the gate and the fill each derived "what
+            # is missing" and drifted.
+            return fill_plan.is_present(
+                cas, str(grant.digest), int(grant.size_bytes)
+            )
 
         def filled(grant: TransferGrant) -> bool:
             """Volume -> pod CAS, hashing every byte ONCE (pgw#1556).

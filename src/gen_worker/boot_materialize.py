@@ -72,6 +72,7 @@ from typing import Awaitable, Callable, Dict, Mapping, Optional, Tuple
 from . import activity
 from . import boot_phases
 from . import weight_position
+from .models import disk_errors
 from .models.refs import WireRef
 from .models.store import ModelStore
 from .pb import worker_scheduler_pb2 as pb
@@ -173,6 +174,11 @@ class CheckpointMaterialization:
         #: (th#2233's false-servable gets an actual readiness probe).
         self._warm_cb = warm
         self._task: Optional["asyncio.Task[None]"] = None
+        #: pgw#1631: fills whose config has been superseded. They are HELD, not
+        #: cancelled — a strong reference so the loop cannot garbage-collect a
+        #: task that is still moving bytes into the shared CAS — and they
+        #: decide nothing about readiness.
+        self._superseded: set["asyncio.Task[None]"] = set()
         self._applied: Optional[CheckpointConfig] = None
         self.state: str = STATE_PENDING
         #: Populated in STATE_FAILED: "<ref>: <ExcType>: <message>".
@@ -225,11 +231,32 @@ class CheckpointMaterialization:
             )
             return
 
+        previous = self._applied
         self._applied = config
         if self._task is not None and not self._task.done():
-            # A NEW config supersedes an in-flight materialization of an old
-            # one. This is config replacement, not a reconcile race.
-            self._task.cancel()
+            # pgw#1631: A SUPERSEDE NEVER CANCELS BYTE MOVEMENT.
+            #
+            # This used to `cancel()`. Objects are release-agnostic — they are
+            # keyed by content — so bytes the old plan is mid-way through
+            # fetching are bytes the NEW plan's fill will simply find present.
+            # Cancelling them buys nothing and costs the re-fetch, which is the
+            # class th#2204 measured as phantom downloads and pgw#1596 turned
+            # into a disk-capacity incident: the re-entry that armed it was a
+            # supersede that changed nothing about the ref.
+            #
+            # What supersede DOES mean is that the old task's VERDICT no longer
+            # decides anything — `_materialize` checks `self._applied is
+            # config` before touching state. The old fill drains; at worst some
+            # objects the new plan does not name wait for steady-state GC.
+            self._superseded.add(self._task)
+            self._task.add_done_callback(self._superseded.discard)
+            logger.info(
+                "checkpoint config version=%s superseded by version=%d; the "
+                "in-flight fill DRAINS rather than cancelling — its objects "
+                "are content-keyed and the new plan will find them present",
+                previous.version if previous is not None else "none",
+                config.version,
+            )
 
         if not config.refs:
             # A weightless release, or a release whose config names nothing.
@@ -297,8 +324,22 @@ class CheckpointMaterialization:
         """
         with activity.running(activity.KIND_BOOT_MATERIALIZE) as fetch:
             if not await self._fetch_refs(config, fetch):
-                await self._announce()
+                if self._current(config):
+                    await self._announce()
                 return
+
+        if not self._current(config):
+            # pgw#1631: this fill was SUPERSEDED while it ran. Its bytes are in
+            # the CAS and the live plan's fill will find them present — which is
+            # the whole reason it was allowed to drain — but its verdict is
+            # about a config nobody asked for any more, so it touches neither
+            # readiness nor the warm pass.
+            logger.info(
+                "superseded fill for version=%d completed; %d ref(s) drained "
+                "into the CAS, readiness untouched",
+                config.version, len(config.refs),
+            )
+            return
 
         # pgw#1584: WEIGHTS ARE DOWN, NOTHING IS SERVABLE YET. The warm pass
         # goes exactly here — after the last byte and before the state flips —
@@ -314,6 +355,44 @@ class CheckpointMaterialization:
             config.version, len(config.refs),
         )
         await self._announce()
+
+    async def _report_if_out_of_space(
+        self, ref: WireRef, exc: BaseException
+    ) -> None:
+        """pgw#1612: report an ENOSPC as `insufficient_disk`, with the mount.
+
+        ONE seam for the whole boot fetch, so every raiser under it is covered
+        — a per-call-site catch is how half of them stay generic. The token is
+        the EXISTING one because the hub-side handling already exists behind
+        it; inventing a second vocabulary would mean building the migration
+        path twice.
+        """
+        typed = disk_errors.as_insufficient_disk(
+            exc,
+            doing=f"materializing {ref}",
+            fallback_path=self._store.cache_dir,
+        )
+        if typed is None:
+            return
+        logger.error(
+            "checkpoint materialization ran OUT OF DISK on %s — this SHAPE "
+            "cannot work and re-buying it at the same size will fail the same "
+            "way: %s", ref, typed,
+        )
+        try:
+            await self._store.report_insufficient_disk(ref, str(typed))
+        except Exception:  # noqa: BLE001 — reporting must not mask the failure
+            logger.exception("insufficient_disk report for %s could not be sent", ref)
+
+    def _current(self, config: CheckpointConfig) -> bool:
+        """Is ``config`` still the plan this worker is being judged on?
+
+        A superseded fill keeps moving bytes (they are content-keyed and the
+        successor wants them) but must not set state — a stale FAILED would
+        strand a pod whose live config is fine, and a stale READY would
+        advertise weights the live config does not name.
+        """
+        return self._applied is config
 
     async def _fetch_refs(
         self, config: CheckpointConfig, fetch: "activity.Activity",
@@ -349,6 +428,25 @@ class CheckpointMaterialization:
                 )
                 raise
             except Exception as exc:  # noqa: BLE001 — every failure is a STATE
+                # pgw#1612: an ENOSPC anywhere under this call is a claim about
+                # the SHAPE, not about the attempt. Classified at this ONE boot
+                # seam so every raiser under it is covered, and reported on the
+                # channel the hub's `insufficient_disk` migration path already
+                # reads. Without it the hub sees "this attempt failed" and
+                # requeues onto a machine with the identical
+                # `container_disk_gb_requested` — measured on th#2246:
+                # `8gpqows0j349gm` -> `3zod6pwvn10f4y`, both A100-SXM4-80GB with
+                # the same 100 GB, at $1.59/hr until a human cancelled it.
+                await self._report_if_out_of_space(ref, exc)
+                if not self._current(config):
+                    logger.info(
+                        "superseded fill for version=%d failed on %s (%s: %s); "
+                        "state untouched — a stale verdict must not strand a "
+                        "pod whose live config is fine",
+                        config.version, ref, type(exc).__name__, exc,
+                    )
+                    fetch.failed(exc)
+                    return False
                 self.state = STATE_FAILED
                 self.failure = f"{ref}: {type(exc).__name__}: {exc}"
                 logger.error(
