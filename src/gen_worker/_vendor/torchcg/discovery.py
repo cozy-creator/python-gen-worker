@@ -189,6 +189,8 @@ def discover_lane(
     transforms: TransformSet | None = None,
     session: HollowSession | None = None,
     dynamic_dims: DimPolicy | bool | None = None,
+    static_bind: bool = False,
+    notes: list[str] | None = None,
 ) -> LaneGraphs:
     """Run the author's code once, derive every observed graph, state the rest.
 
@@ -225,6 +227,8 @@ def discover_lane(
         transforms=transforms,
         session=session,
         dynamic_dims=dynamic_dims,
+        static_bind=static_bind,
+        notes=notes,
     )
 
 
@@ -285,6 +289,8 @@ def discover_modules(
     transforms: TransformSet | None = None,
     session: HollowSession | None = None,
     dynamic_dims: DimPolicy | bool | None = None,
+    static_bind: bool = False,
+    notes: list[str] | None = None,
 ) -> LaneGraphs:
     """Discovery over MARKED modules (the imperative ``ctx.compile`` surface).
 
@@ -320,6 +326,24 @@ def discover_modules(
     calls they distinguish collapse into one graph whose ingress states the
     axis as a RANGE. A refused dynamic export falls back to that group's own
     static exports, loudly. See :mod:`torchcg.dynamic`.
+
+    ``static_bind`` (tcg#88, pgw#1603) makes the symbolic export TRACE-ONLY:
+    the collapsed group still costs one ``torch.export`` of the module, but
+    what is DECLARED is one STATIC record per covered call, produced by
+    binding the call's concrete shapes to the symbolic parent (re-exporting
+    ``parent.module()``, which re-traces a flat aten graph instead of the
+    author's Python — measured far cheaper). The bound records are
+    byte-identical to direct static exports — graph hash AND ingress —
+    (pgw#1603's spike falsifier, torch 2.13, real and fake mode), so the
+    author's STATIC serving declaration keeps its per-bucket artifacts while
+    the trace pays structural-variant count, never bucket count. A cover
+    whose bind is refused falls back to its own direct static export, loudly.
+
+    ``notes``, when a caller passes a list, receives every demotion sentence
+    that is otherwise only a ``logger.warning`` — a refused symbolic export,
+    a guard-contradicted range, a refused bind. The derive puts them in the
+    lock's own warnings so the lock SAYS an axis dropped to per-bucket
+    tracing rather than silently paying the old wall (pgw#1603 acceptance c).
 
     ``transforms`` (tcg#52) is the SEALED :class:`~torchcg.transform.
     TransformSet` of the lane's PASS phase. Passing it is what makes PASS ->
@@ -392,6 +416,69 @@ def discover_modules(
     records: list[GraphRecord] = []
     seen_graphs: set[str] = set()
     dims = resolve_policy(dynamic_dims)
+
+    def told(text: str) -> None:
+        """One demotion sentence, to the log AND to the caller's notes."""
+
+        logger.warning("%s", text)
+        if notes is not None:
+            notes.append(text)
+
+    def declare(
+        program: Any,
+        path: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        names: list[str],
+        plan: Any = None,
+        bank: Any = None,
+    ) -> None:
+        # tcg#64: the drive ran on a device that EXISTS; the graph is
+        # stamped with the device the session STATES. This is the one
+        # place the two meet, and it is before the hash, so a GPU-less
+        # box derives the same key a GPU box derives.
+        if session is not None:
+            session.restate(program)
+        _assert_literal_values_are_real(contract, path, program)
+        _demote_example_inputs(program)
+        try:
+            ingress = build_call_ingress(program, names, args, kwargs)
+            if plan is not None:
+                ingress = alias_ingress(ingress, plan)
+            graph = graph_hash(program, ingress, passes=passes)
+        except (IngressError, GraphIdentityError) as exc:
+            raise DiscoveryError(
+                f"lane {contract!r} target {path!r}: observed call cannot "
+                f"state its identity: {exc}"
+            ) from exc
+        if graph in seen_graphs:
+            # Two observed calls that trace identically ARE one graph
+            # class -- dedup is the point of content identity.
+            return
+        seen_graphs.add(graph)
+        # THE SINK'S RETURN IS DISCARDED, and that is the address-free
+        # ruling in one line (Paul, 2026-08-19). The sink still banks this
+        # machine's serialized program -- keyed by `graph`, which it is
+        # handed precisely so it can -- but nothing about those bytes
+        # enters the document. A blob digest is machine-scoped
+        # (pgw#1462p2: 14/14 identities reproduce across boxes, 0/14 blob
+        # digests do), so putting one in a document every machine must
+        # agree on is what made the document unportable.
+        if program_sink is not None:
+            try:
+                # tcg#88: a bound static record banks its symbolic PARENT
+                # under its own identity — the CAS dedups the parent's bytes
+                # to one blob across every bucket it covers, and the compile
+                # seam re-binds on load (`bind.bind_static_spec`). Storage
+                # follows the trace count down, not the bucket count.
+                program_sink(graph, bank if bank is not None else program)
+            except Exception as exc:
+                raise DiscoveryError(
+                    f"lane {contract!r} target {path!r}: graph {graph} "
+                    f"could not be stored: {type(exc).__name__}: {exc}"
+                ) from exc
+        records.append(GraphRecord(graph=graph, target=path, ingress=ingress))
+
     for path, calls in observed.items():
         module = modules[path]
         fake_mode = _fake_mode_of(module)
@@ -424,12 +511,11 @@ def discover_modules(
                     # and the static fan it replaces is still exactly right.
                     # Loud, because a silent fallback is how a lane believes it
                     # collapsed a fan it did not.
-                    logger.warning(
-                        "lane %s target %s: dynamic export over %s was REFUSED "
-                        "(%s: %s); falling back to one static export per "
-                        "observed shape for this group",
-                        contract, path, sorted(plan.symbols),
-                        type(exc).__name__, exc,
+                    told(
+                        f"lane {contract} target {path}: dynamic export over "
+                        f"{sorted(plan.symbols)} was REFUSED "
+                        f"({type(exc).__name__}: {exc}); falling back to one "
+                        f"static export per observed shape for this group"
                     )
                     pending = plan.static_fallback() + pending
                     continue
@@ -455,12 +541,11 @@ def discover_modules(
                         moved = decomposition_narrowing(program)
                 except Exception as exc:  # the compile would decompose too
                     moved = {}
-                    logger.warning(
-                        "lane %s target %s: the range probe over %s could not "
-                        "decompose (%s: %s); falling back to one static export "
-                        "per observed shape for this group",
-                        contract, path, sorted(plan.symbols),
-                        type(exc).__name__, exc,
+                    told(
+                        f"lane {contract} target {path}: the range probe over "
+                        f"{sorted(plan.symbols)} could not decompose "
+                        f"({type(exc).__name__}: {exc}); falling back to one "
+                        f"static export per observed shape for this group"
                     )
                     pending = plan.static_fallback() + pending
                     continue
@@ -476,14 +561,13 @@ def discover_modules(
                     except IngressError:
                         refused = set()
                     dims = without_axes(dims, refused)
-                    logger.warning(
-                        "lane %s target %s: dynamic export over %s was REFUSED "
-                        "— the graph's own guards contradict the declared "
-                        "range (%s); re-planning this group with %s held "
-                        "static",
-                        contract, path, sorted(plan.symbols),
-                        format_narrowing(moved),
-                        sorted(refused) or "the whole group",
+                    told(
+                        f"lane {contract} target {path}: dynamic export over "
+                        f"{sorted(plan.symbols)} was REFUSED — the graph's own "
+                        f"guards contradict the declared range "
+                        f"({format_narrowing(moved)}); re-planning this group "
+                        f"with {sorted(refused) or 'the whole group'} held "
+                        f"static"
                     )
                     # Only the CONTRADICTED axes are demoted, and only this
                     # group is re-planned. A batch axis the guards refuse must
@@ -499,47 +583,62 @@ def discover_modules(
                     with synthesis:
                         pending = plan_exports(path, list(plan.covers), dims) + pending
                     continue
-            # tcg#64: the drive ran on a device that EXISTS; the graph is
-            # stamped with the device the session STATES. This is the one
-            # place the two meet, and it is before the hash, so a GPU-less
-            # box derives the same key a GPU box derives.
-            if session is not None:
-                session.restate(program)
-            _assert_literal_values_are_real(contract, path, program)
-            _demote_example_inputs(program)
-            names = list(plan.param_names)
-            try:
-                ingress = alias_ingress(
-                    build_call_ingress(program, names, args, kwargs), plan
-                )
-                graph = graph_hash(program, ingress, passes=passes)
-            except (IngressError, GraphIdentityError) as exc:
-                raise DiscoveryError(
-                    f"lane {contract!r} target {path!r}: observed call cannot "
-                    f"state its identity: {exc}"
-                ) from exc
-            if graph in seen_graphs:
-                # Two observed calls that trace identically ARE one graph
-                # class -- dedup is the point of content identity.
+            if plan.dynamic and static_bind:
+                # tcg#88 (pgw#1603): the symbolic parent is TRACE-ONLY. What
+                # is declared is one STATIC record per covered call, bound by
+                # re-exporting the parent's flat graph module with the cover's
+                # concrete shapes — spike-proven byte-identical to a direct
+                # static export (hash and ingress), at a fraction of its cost
+                # because it re-traces aten nodes, not the author's Python.
+                # The PARENT is what gets banked, under every bound record's
+                # identity (see `declare`'s bank=). All covers bind from the
+                # pre-restate parent — the same module state a direct static
+                # export traces — and only then does the parent take the
+                # restate-before-serialize pass a declared program takes.
+                with synthesis:
+                    parent = program.module()
+                bindings: list[tuple[Any, tuple[Any, ...], dict[str, Any], Any]] = []
+                for cover_args, cover_kwargs, cover_names in plan.covers:
+                    cover_kwargs = dict(cover_kwargs)
+                    try:
+                        with synthesis:
+                            bound = torch.export.export(
+                                parent, cover_args, cover_kwargs, strict=strict
+                            )
+                    except Exception as exc:
+                        told(
+                            f"lane {contract} target {path}: static bind of an "
+                            f"observed cover was REFUSED "
+                            f"({type(exc).__name__}: {exc}); falling back to "
+                            f"its own direct static export"
+                        )
+                        try:
+                            with synthesis:
+                                bound = torch.export.export(
+                                    module, cover_args, cover_kwargs,
+                                    strict=strict,
+                                )
+                        except Exception as direct_exc:
+                            raise DiscoveryError(
+                                f"lane {contract!r} target {path!r}: "
+                                f"torch.export(strict={strict}) failed for the "
+                                f"observed call: "
+                                f"{type(direct_exc).__name__}: {direct_exc}"
+                            ) from direct_exc
+                    bindings.append((bound, cover_args, cover_kwargs, cover_names))
+                if session is not None:
+                    session.restate(program)
+                _assert_literal_values_are_real(contract, path, program)
+                _demote_example_inputs(program)
+                for bound, cover_args, cover_kwargs, cover_names in bindings:
+                    declare(
+                        bound, path, cover_args, cover_kwargs,
+                        list(cover_names), bank=program,
+                    )
                 continue
-            seen_graphs.add(graph)
-            # THE SINK'S RETURN IS DISCARDED, and that is the address-free
-            # ruling in one line (Paul, 2026-08-19). The sink still banks this
-            # machine's serialized program -- keyed by `graph`, which it is
-            # handed precisely so it can -- but nothing about those bytes
-            # enters the document. A blob digest is machine-scoped
-            # (pgw#1462p2: 14/14 identities reproduce across boxes, 0/14 blob
-            # digests do), so putting one in a document every machine must
-            # agree on is what made the document unportable.
-            if program_sink is not None:
-                try:
-                    program_sink(graph, program)
-                except Exception as exc:
-                    raise DiscoveryError(
-                        f"lane {contract!r} target {path!r}: graph {graph} "
-                        f"could not be stored: {type(exc).__name__}: {exc}"
-                    ) from exc
-            records.append(GraphRecord(graph=graph, target=path, ingress=ingress))
+            declare(
+                program, path, args, kwargs, list(plan.param_names), plan
+            )
 
     unobserved = tuple(sorted(path for path, calls in observed.items() if not calls))
     return LaneGraphs(

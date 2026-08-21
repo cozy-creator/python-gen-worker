@@ -60,6 +60,14 @@ def add_subparser(sub: Any) -> None:
         help=f"exported-program CAS root (default: {ws.DEFAULT_GRAPH_CAS})",
     )
     parser.add_argument(
+        "--trace-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="parallel derive-item processes (default: min(items, cores); "
+             "pgw#1603). 1 forces the sequential in-process path.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="re-trace even when the saved trace is reusable",
@@ -280,6 +288,7 @@ def run_lock(args: argparse.Namespace) -> int:
 
     traced = _trace(
         config, root, tree, graph_cas_root, device, lockfile, slot_trees,
+        trace_workers=args.trace_workers,
     )
     if traced is None:
         return 1
@@ -371,6 +380,7 @@ def _trace(
     device: str,
     lockfile: Optional[Path] = None,
     slot_trees: Optional[dict[str, Path]] = None,
+    trace_workers: Optional[int] = None,
 ) -> Optional[tuple[Any, float]]:
 
     from ..discovery.discover import prime_sys_path
@@ -394,6 +404,7 @@ def _trace(
             lockfile=lockfile if lockfile is not None else lockfile_beside(root),
             graph_cas=graph_cas_root,
             slot_checkpoints=slot_trees or {},
+            trace_workers=trace_workers,
         )
     except DeriveError as exc:
         _say(f"error: derive: {exc}")

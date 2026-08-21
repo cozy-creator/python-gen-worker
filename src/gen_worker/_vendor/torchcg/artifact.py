@@ -10,14 +10,16 @@ import struct
 import tarfile
 import tempfile
 import zlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import IO, Any, BinaryIO, cast
 
 from .compiler import (
     CompileError,
-    compile_policy,
     constant_folding_fenced,
+    declared_input_layout,
+    device_type_of,
+    executed_compile_policy,
     package_constants_in_so,
     policy_fences_folding,
     policy_packages_constants,
@@ -78,8 +80,12 @@ _TOP_LEVEL_FIELDS = frozenset(
         "package_constants_in_so",
         "constant_folding_fenced",
         "compile_policy",
+        "declared_input_layout",
+        "layout_wishlist",
     )
 )
+
+_LAYOUT_WISH_FIELDS = frozenset(("fqn", "morphism", "stride_order"))
 
 #: The artifact-metadata vocabulary, PUBLIC. `validate_metadata` refuses any
 #: metadata whose field set is not exactly this, so it is not a convention a
@@ -409,6 +415,64 @@ def _validate_compile_policy(metadata: Mapping[str, Any]) -> None:
         )
 
 
+def _validate_layout(metadata: Mapping[str, Any]) -> None:
+    """Refuse an artifact that cannot state a RATIFIED input layout (tcg#83).
+
+    Two facts, one closed vocabulary. `declared_input_layout` is the contract:
+    the bytes this artifact's constants must arrive in, and an axis of its key.
+    `layout_wishlist` is the compile's OBSERVATION -- what inductor asked to
+    change while it ran -- and it is deliberately NOT in the key: it is an
+    output of the bytes, and keying on an output would make the address depend
+    on the artifact instead of on its inputs.
+
+    A wish row names a ratified morphism or it names NOTHING: an out-of-catalog
+    wish carries only the stride order inductor asked for, marking it a
+    candidate for ratification. Machines never invent a morphism name.
+    """
+
+    from .layout import LayoutError, is_catalog_handle, require_morphism
+
+    try:
+        require_morphism(metadata.get("declared_input_layout"))
+    except LayoutError as exc:
+        raise ArtifactError(str(exc)) from exc
+    wishlist = metadata.get("layout_wishlist")
+    if not isinstance(wishlist, list):
+        raise ArtifactError("layout_wishlist must be an array of wish rows")
+    seen: set[str] = set()
+    for index, row in enumerate(wishlist):
+        if not isinstance(row, Mapping) or set(row) != _LAYOUT_WISH_FIELDS:
+            raise ArtifactError(
+                f"layout wish {index} fields must be exactly "
+                f"{sorted(_LAYOUT_WISH_FIELDS)!r}"
+            )
+        fqn = row.get("fqn")
+        morphism = row.get("morphism")
+        order = row.get("stride_order")
+        if not isinstance(fqn, str) or not fqn or fqn != fqn.strip():
+            raise ArtifactError(f"layout wish {index} fqn must be a non-empty string")
+        if fqn in seen:
+            raise ArtifactError(f"layout wishlist names {fqn!r} twice")
+        seen.add(fqn)
+        if not isinstance(morphism, str) or (morphism and not is_catalog_handle(morphism)):
+            raise ArtifactError(
+                f"layout wish {index} morphism must be a ratified catalog handle "
+                f"or '' (an UNRATIFIED candidate); got {morphism!r}"
+            )
+        if (
+            not isinstance(order, list)
+            or not order
+            or not all(type(value) is int and value >= 0 for value in order)
+            or sorted(order) != list(range(len(order)))
+        ):
+            raise ArtifactError(
+                f"layout wish {index} stride_order must be a permutation of "
+                f"0..n-1, as torch's `get_stride_order` states it"
+            )
+    if [row["fqn"] for row in wishlist] != sorted(row["fqn"] for row in wishlist):
+        raise ArtifactError("layout_wishlist must be sorted by fqn")
+
+
 def validate_metadata(
     raw: Mapping[str, Any], *, has_literals: bool | None = None
 ) -> dict[str, Any]:
@@ -433,6 +497,7 @@ def validate_metadata(
     if metadata.get("kind") != ARTIFACT_KIND:
         raise ArtifactError(f"kind must be {ARTIFACT_KIND!r}")
     _validate_compile_policy(metadata)
+    _validate_layout(metadata)
     sm = metadata.get("sm")
     if not isinstance(sm, str) or not sm or sm != sm.strip():
         raise ArtifactError("sm must be a non-empty string")
@@ -583,6 +648,7 @@ def build_metadata(
     sm: str,
     toolchain: Mapping[str, str],
     host_isa: Mapping[str, str],
+    layout_wishlist: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Build metadata from recorded facts and stamp the key derived from them."""
 
@@ -595,10 +661,14 @@ def build_metadata(
         "host_isa": dict(host_isa),
         # READ from the compile policy this process mints under, never
         # restated: the axes are the build's own facts or they are decoration
-        # (tcg#80).
+        # (tcg#80). The policy is the EXECUTED one for this artifact's own
+        # target (tcg#85), and the layout is the one the mint declared and
+        # verified its constants against (tcg#83).
         "package_constants_in_so": package_constants_in_so(),
         "constant_folding_fenced": constant_folding_fenced(),
-        "compile_policy": compile_policy(),
+        "compile_policy": executed_compile_policy(device_type_of(sm)),
+        "declared_input_layout": declared_input_layout(),
+        "layout_wishlist": [dict(row) for row in layout_wishlist],
     }
     metadata["compiled_graph_key"] = from_artifact_metadata(metadata).value
     return validate_metadata(metadata)

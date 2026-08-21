@@ -12,6 +12,11 @@ os.environ.setdefault(
     str(Path(tempfile.mkdtemp(prefix="pgw-postmortem-")) / "boot-record.json"),
 )
 
+# pgw#1603: the suite exercises derive BEHAVIOR, not its parallel width —
+# spawned trace workers each pay a torch import, which multiplies fixture
+# derives for nothing. The parallel path has its own dedicated test.
+os.environ.setdefault("GEN_WORKER_TRACE_WORKERS", "1")
+
 if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 

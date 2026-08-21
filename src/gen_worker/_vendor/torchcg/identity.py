@@ -14,7 +14,14 @@ from typing import Any
 #: measured. The scheme moves because the derivation moved; the GRAMMAR does
 #: not (`contracts/compiled_graph_key_vectors.json` already admits an unseen
 #: scheme by shape, th#1183).
-KEY_SCHEME = "cg-key-v2"
+#: v3 (tcg#83): the DECLARED INPUT LAYOUT joined the axes. v2 keyed (policy,
+#: graph, sm, toolchain) and the graph axis is stride-BLIND -- the canonical
+#: graph form renders `t(dtype|[shape]|device)` and never a stride -- so a
+#: contiguous mint and a channels_last mint of one module produce identical
+#: graph, sm, toolchain and policy axes while emitting different `.so` bytes
+#: (measured: the same conv module minted twice, one wrapper with a permute
+#: kernel for `conv_weight` and one without).
+KEY_SCHEME = "cg-key-v3"
 MAX_KEY_LENGTH = 96
 _DIGEST_HEX = 56
 _TOOLCHAIN_DIGEST_HEX = 16
@@ -40,7 +47,18 @@ _TOOLCHAIN_DIGEST_HEX = 16
 #: for the same wheel. Every one of those is a caller-supplied member; the
 #: facts this package does own (`machine`, `host_isa_*`) went unmeasured and
 #: stay fail-closed.
-REQUIRED_AXES: tuple[str, ...] = ("compile_policy", "graph", "sm", "toolchain")
+#: `declared_input_layout` (tcg#83) is the ratified layout-morphism handle the
+#: mint compiled its inputs and constants against -- carried as the HANDLE
+#: itself, not a digest, for the same reason the env carries versions: a
+#: refusal that can say `torch.channels-last@1 != torch.contiguous@1` is worth
+#: more than one that says two hashes differ.
+REQUIRED_AXES: tuple[str, ...] = (
+    "compile_policy",
+    "declared_input_layout",
+    "graph",
+    "sm",
+    "toolchain",
+)
 
 #: The artifact-metadata block carrying graph-specialization facts. Public for the same
 #: reason: a consumer reading a block this package no longer writes fails at
@@ -209,9 +227,18 @@ def from_artifact_metadata(metadata: Mapping[str, Any]) -> CompiledGraphKey:
             "half the compiler's input signature and a key without them "
             "collides across configurations (tcg#80)"
         )
+    from .layout import LayoutError, require_morphism
+
+    try:
+        declared_layout = require_morphism(metadata.get("declared_input_layout")).handle
+    except LayoutError as exc:
+        raise IdentityError(
+            f"artifact states no ratified declared_input_layout: {exc}"
+        ) from exc
     return from_axes(
         {
             "compile_policy": policy_axis_digest(policy),
+            "declared_input_layout": declared_layout,
             "graph": graph,
             "sm": sm,
             "toolchain": toolchain_axis_digest(toolchain),

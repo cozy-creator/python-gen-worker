@@ -110,10 +110,17 @@ class DeriveError(RuntimeError):
 
 
 def dynamic_dim_policy(shapes: Mapping[str, str]) -> Any:
-    """Turn a model class's declared shape axes into torchcg's predicate."""
+    """Turn a model class's declared shape axes into torchcg's predicate.
 
-    aspect = shapes.get("aspect") == DYNAMIC
-    if not aspect:
+    pgw#1603: a declared shape axis is ALWAYS traced symbolically — the
+    author's STATIC/DYNAMIC choice controls what is MINTED (N static
+    binaries vs 1 range binary), never how many traces run. STATIC keeps its
+    per-bucket records, stamped by binding concrete shapes to the shared
+    symbolic parent (:func:`static_bind_declared`); DYNAMIC serves the one
+    range record. Batch (axis 0) stays a structural fork in both cases.
+    """
+
+    if not shapes:
         return None
 
     def policy(_target: str, _name: str, axis: int) -> bool:
@@ -122,6 +129,28 @@ def dynamic_dim_policy(shapes: Mapping[str, str]) -> Any:
         return axis >= 2
 
     return policy
+
+
+def static_bind_declared(shapes: Mapping[str, str]) -> bool:
+    """Whether declared buckets are STAMPED from the symbolic parent.
+
+    True exactly when the class declares shape axes and none is DYNAMIC. A
+    mixed declaration is refused rather than guessed: the dim policy above
+    cannot yet aim a symbol at ONE named axis, so serving would turn a
+    STATIC axis into a range the author never declared.
+    """
+
+    if not shapes:
+        return False
+    choices = set(shapes.values())
+    if DYNAMIC in choices and len(choices) > 1:
+        raise DeriveError(
+            "shapes= mixes STATIC and DYNAMIC axes; the derive's axis policy "
+            "cannot yet aim a symbol at one NAMED axis, so a mixed "
+            "declaration would serve a STATIC axis as a range. Declare the "
+            "shape axes uniformly for now (pgw#1603)."
+        )
+    return DYNAMIC not in choices
 
 
 class PayloadEnumerationRefused(DeriveError):
@@ -230,8 +259,14 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
 
     store = LocalGraphStore(LocalCAS(Path(cas_root)))
 
+    from .._vendor.torchcg.bind import strip_diagnostics
+
     def sink(graph: str, program: Any) -> None:
         _assert_weights_free(torch, program)
+        # pgw#1603: per-node stack traces and nn_module_stack strings were
+        # ~60% of every serialized program (measured: 1.8 MB of a 3.1 MB
+        # sd15 graph JSON) and nothing on the mint path reads them.
+        strip_diagnostics(program)
         with tempfile.TemporaryDirectory() as scratch:
             staged = Path(scratch) / "program.pt2"
             torch.export.save(program, str(staged))
@@ -520,6 +555,7 @@ def _auto_payloads(
     owner: str,
     payload_type: type,
     structural: Mapping[str, Any] = MappingProxyType({}),
+    pinned: Mapping[str, str] = MappingProxyType({}),
 ) -> tuple[tuple[Any, ...], bool]:
 
     import msgspec
@@ -537,6 +573,15 @@ def _auto_payloads(
     for axis, declaration in structural.items():
         variants = declaration.variants()
         if not any(field.name == declaration.field for field in struct_fields):
+            continue
+        # pgw#1603: a pinned axis contributes exactly its item's class — the
+        # cross product over structural classes is the ITEM enumeration, run
+        # in parallel, never a per-item payload fan.
+        pin = pinned.get(axis)
+        if pin is not None:
+            declared_axes[declaration.field] = [
+                value for name, value in variants if name == pin
+            ]
             continue
         declared_axes[declaration.field] = [value for _, value in variants]
     for field in struct_fields:
@@ -991,19 +1036,102 @@ def deepest_endpoint_frame(
     return deepest
 
 
-def _derive_lane(
+@dataclass(frozen=True)
+class DeriveItem:
+    """One trace unit: (lane × defaults-variant × structural-class combo).
+
+    pgw#1603: the item enumeration IS Paul's trace-count directive. Items
+    are the structural variants — each runs ONE author-code drive over its
+    shape fan and pays ONE symbolic export per observed group — and they are
+    independent, so they run in parallel processes. Shape buckets never
+    become items; they are covered inside an item's drive and stamped by
+    static bind when the serving declaration is STATIC.
+    """
+
+    index: int
+    lane_index: int
+    defaults_index: int
+    pinned: tuple[tuple[str, str], ...]
+
+
+def _structural_combos(
+    structural: Mapping[str, Any],
+) -> list[tuple[tuple[str, str], ...]]:
+
+    axes = list(structural.items())
+    if not axes:
+        return [()]
+    choices = [
+        [(axis, name) for name, _value in declaration.variants()]
+        for axis, declaration in axes
+    ]
+    return [tuple(combo) for combo in itertools.product(*choices)]
+
+
+def derive_items(cls: type) -> list[DeriveItem]:
+    """The item enumeration, deterministic and shared by parent and workers."""
+
+    lanes = model_declared_lanes(cls)
+    defaults_count = len(_defaults_variants(model_model_type(cls)))
+    combos = _structural_combos(model_structural(cls))
+    items: list[DeriveItem] = []
+    for lane_index in range(len(lanes)):
+        for defaults_index in range(defaults_count):
+            for combo in combos:
+                items.append(
+                    DeriveItem(len(items), lane_index, defaults_index, combo)
+                )
+    return items
+
+
+def _item_plans(
+    module: ModuleType, cls: type, item: DeriveItem
+) -> list[tuple[_Entrypoint, tuple[Any, ...]]]:
+    """This item's (plan, payloads): structural axes pinned, shape fan whole."""
+
+    structural = model_structural(cls)
+    pinned = dict(item.pinned)
+    first = {
+        axis: declaration.variants()[0][0]
+        for axis, declaration in structural.items()
+    }
+    out: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
+    for plan in _entrypoints(module, cls):
+        fields = set(_payload_field_names(plan.payload_type))
+        absent = [
+            axis for axis in pinned if structural[axis].field not in fields
+        ]
+        if any(pinned[axis] != first[axis] for axis in absent):
+            # A plan that cannot spell a pinned axis rides that axis's FIRST
+            # class only — once per (lane × defaults variant), never per class.
+            continue
+        try:
+            payloads, _capped = _auto_payloads(
+                f"@entrypoint {plan.name}", plan.payload_type, structural,
+                pinned=pinned,
+            )
+        except PayloadEnumerationRefused:
+            continue  # recorded parent-side from the full enumeration
+        out.append((plan, payloads))
+    return out
+
+
+def _derive_lane_item(
     torchcg: ModuleType,
     cls: type,
     lane: Any,
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]],
     checkpoint_dir: Path,
     warnings: list[str],
+    defaults_instance: Any,
     program_sink: Optional[Any] = None,
     slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
     endpoint_root: Optional[Path] = None,
     unservable: Optional[list[dict[str, Any]]] = None,
     dynamic_dims: Any = None,
-) -> Optional[Any]:
+    static_bind: bool = False,
+) -> tuple[Optional[Any], int, int]:
+    """One item's drive + exports: ``(LaneGraphs | None, refused, total)``."""
 
     from ..api.errors import ValidationError
 
@@ -1011,13 +1139,10 @@ def _derive_lane(
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
     resolved = _resolve_lane(torchcg, lane)
     model_type = model_model_type(cls)
-    merged: dict[str, Any] = {}
-    all_targets: set[str] = set()
-    observed_targets: set[str] = set()
     refused = 0
     total_combos = 0
 
-    for defaults_instance in _defaults_variants(model_type):
+    if True:
         model = cls()
         load_ctx = TraceLoadContext(
             lane=resolved,
@@ -1043,7 +1168,7 @@ def _derive_lane(
                     f"session: {type(exc).__name__}: {exc}"
                 ) from exc
             if not load_ctx.marked_modules:
-                return None
+                return None, 0, 0
             modules = _named_marked_modules(model, load_ctx.marked_modules)
 
             aides: dict[str, Any] = {}
@@ -1131,10 +1256,12 @@ def _derive_lane(
                                 if row not in unservable:
                                     unservable.append(row)
 
+            notes: list[str] = []
             try:
                 lane_graphs = torchcg.discover_modules(
                     handle, modules, drive, program_sink=program_sink,
                     session=session, dynamic_dims=dynamic_dims,
+                    static_bind=static_bind, notes=notes,
                 )
                 if set(lane_graphs.targets) - {
                     record.target for record in lane_graphs.graphs
@@ -1143,11 +1270,39 @@ def _derive_lane(
                     lane_graphs = torchcg.discover_modules(
                         handle, modules, drive, program_sink=program_sink,
                         session=session, dynamic_dims=dynamic_dims,
+                        static_bind=static_bind, notes=notes,
                     )
             except DeriveError:
                 raise
             except torchcg.DiscoveryError as exc:
                 raise DeriveError(f"lane {handle!r}: {exc}") from exc
+            # pgw#1603 acceptance (c): an axis that dropped to per-bucket
+            # tracing is said in the LOCK, never only in a logger.
+            warnings.extend(dict.fromkeys(notes))
+
+    return lane_graphs, refused, total_combos
+
+
+def _merge_lane_items(
+    torchcg: ModuleType,
+    handle: str,
+    outcomes: list[tuple[Optional[Any], int, int]],
+    warnings: list[str],
+) -> Optional[Any]:
+    """Merge one lane's item outcomes into its final ``LaneGraphs``."""
+
+    if all(outcome[0] is None for outcome in outcomes):
+        return None
+    merged: dict[str, Any] = {}
+    all_targets: set[str] = set()
+    observed_targets: set[str] = set()
+    refused = 0
+    total_combos = 0
+    for lane_graphs, item_refused, item_total in outcomes:
+        refused += item_refused
+        total_combos += item_total
+        if lane_graphs is None:
+            continue
         all_targets.update(lane_graphs.targets)
         for record in lane_graphs.graphs:
             merged.setdefault(record.graph, record)
@@ -1177,6 +1332,172 @@ def _derive_lane(
     )
 
 
+def _trace_worker_count(requested: Optional[int], items: int) -> int:
+    """The parallel degree, DERIVED: the item count capped by this host.
+
+    Config with a derivation, never a magic number (pgw#1603): the natural
+    width is one process per derive item, a builder pays no more than its
+    core count, and an explicit ``--trace-workers`` (a constrained shared
+    box, a CI runner) caps it below that.
+    """
+
+    if items <= 1:
+        return 1
+    import os
+
+    if requested is None:
+        configured = os.environ.get("GEN_WORKER_TRACE_WORKERS", "").strip()
+        if configured:
+            requested = int(configured)
+    if requested is not None:
+        return max(1, min(int(requested), items))
+    cores = getattr(os, "process_cpu_count", os.cpu_count)() or 1
+    return max(1, min(items, cores))
+
+
+def _run_item_in_process(
+    module: ModuleType,
+    cls: type,
+    item: DeriveItem,
+    *,
+    checkpoint_dir: Path,
+    program_sink: Optional[Any],
+    slot_checkpoints: Mapping[str, Path],
+    warnings: list[str],
+    unservable: list[dict[str, Any]],
+) -> tuple[Optional[Any], int, int]:
+
+    lane = model_declared_lanes(cls)[item.lane_index]
+    defaults_instance = _defaults_variants(model_model_type(cls))[
+        item.defaults_index
+    ]
+    shapes = model_shapes(cls)
+    return _derive_lane_item(
+        _torchcg(), cls, lane, _item_plans(module, cls, item),
+        checkpoint_dir, warnings, defaults_instance,
+        program_sink=program_sink,
+        slot_checkpoints=slot_checkpoints,
+        endpoint_root=endpoint_source_root(module),
+        unservable=unservable,
+        dynamic_dims=dynamic_dim_policy(shapes),
+        static_bind=static_bind_declared(shapes),
+    )
+
+
+def _derive_item_task(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """One derive item, in a spawned worker: re-import, run, report picklable."""
+
+    import importlib
+    import sys
+
+    for entry in reversed(list(spec["sys_path"])):
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+    global TRACE_STEP_BUDGET
+    TRACE_STEP_BUDGET = spec["step_budget"]
+    module = importlib.import_module(str(spec["module"]))
+    cls, _ = _lane_model_class(module)
+    if cls is None:
+        raise DeriveError(
+            f"a derive worker re-imported {spec['module']!r} and found no "
+            f"model class — the module the parent enumerated is not the "
+            f"module this interpreter resolves"
+        )
+    item = derive_items(cls)[int(spec["item_index"])]
+    warnings: list[str] = []
+    unservable: list[dict[str, Any]] = []
+    raw_cas = str(spec["graph_cas"])
+    lane_graphs, refused, total = _run_item_in_process(
+        module, cls, item,
+        checkpoint_dir=Path(str(spec["checkpoint_dir"])),
+        program_sink=_program_sink(Path(raw_cas) if raw_cas else None),
+        slot_checkpoints={
+            name: Path(value)
+            for name, value in dict(spec["slot_checkpoints"]).items()
+        },
+        warnings=warnings,
+        unservable=unservable,
+    )
+    return {
+        "lane_graphs": lane_graphs,
+        "refused": refused,
+        "total": total,
+        "warnings": warnings,
+        "unservable": unservable,
+    }
+
+
+def _run_items(
+    module: ModuleType,
+    cls: type,
+    items: list[DeriveItem],
+    *,
+    checkpoint_dir: Path,
+    graph_cas: Optional[Path],
+    program_sink: Optional[Any],
+    slot_checkpoints: Mapping[str, Path],
+    warnings: list[str],
+    unservable: list[dict[str, Any]],
+    trace_workers: Optional[int],
+) -> list[tuple[Optional[Any], int, int]]:
+    """All derive items, in parallel processes when the host has the width.
+
+    Item order is the merge order either way, so the document does not
+    depend on the parallel degree. Program bytes land in the shared
+    content-addressed store from whichever process derived them — its
+    compare-and-swap refs make concurrent writers safe.
+    """
+
+    workers = _trace_worker_count(trace_workers, len(items))
+    if workers <= 1:
+        return [
+            _run_item_in_process(
+                module, cls, item,
+                checkpoint_dir=checkpoint_dir,
+                program_sink=program_sink,
+                slot_checkpoints=slot_checkpoints,
+                warnings=warnings,
+                unservable=unservable,
+            )
+            for item in items
+        ]
+
+    import concurrent.futures
+    import multiprocessing
+    import sys
+
+    specs = [
+        {
+            "module": module.__name__,
+            "sys_path": list(sys.path),
+            "item_index": item.index,
+            "checkpoint_dir": str(checkpoint_dir),
+            "graph_cas": str(graph_cas) if graph_cas is not None else "",
+            "slot_checkpoints": {
+                name: str(value) for name, value in slot_checkpoints.items()
+            },
+            "step_budget": TRACE_STEP_BUDGET,
+        }
+        for item in items
+    ]
+    context = multiprocessing.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=workers, mp_context=context
+    ) as pool:
+        results = list(pool.map(_derive_item_task, specs))
+
+    outcomes: list[tuple[Optional[Any], int, int]] = []
+    for result in results:
+        warnings.extend(result["warnings"])
+        for row in result["unservable"]:
+            if row not in unservable:
+                unservable.append(row)
+        outcomes.append(
+            (result["lane_graphs"], result["refused"], result["total"])
+        )
+    return outcomes
+
+
 def derive_release(
     module: ModuleType,
     *,
@@ -1184,8 +1505,16 @@ def derive_release(
     lockfile: Optional[Path] = None,
     graph_cas: Optional[Path] = None,
     slot_checkpoints: Mapping[str, Path] = MappingProxyType({}),
+    trace_workers: Optional[int] = None,
 ) -> ReleaseDeriveResult:
-    """Derive the release metadata document for one endpoint module."""
+    """Derive the release metadata document for one endpoint module.
+
+    ``trace_workers`` (pgw#1603) is the parallel degree over derive ITEMS —
+    the (lane × defaults-variant × structural-class) trace units. ``None``
+    derives it from this host: ``min(item count, cores)``. ``1`` runs the
+    items sequentially in-process (also the shape every single-item endpoint
+    takes). Anything else spawns that many worker processes.
+    """
 
     torchcg = _torchcg()
     program_sink = _program_sink(graph_cas)
@@ -1272,14 +1601,28 @@ def derive_release(
                     f"model class."
                 )
         requires = model_requires(cls)
-        for lane in model_declared_lanes(cls):
-            lane_graphs = _derive_lane(
-                torchcg, cls, lane, plans, checkpoint_dir, warnings,
-                program_sink=program_sink,
-                slot_checkpoints=slot_checkpoints,
-                endpoint_root=endpoint_source_root(module),
-                unservable=unservable_payloads,
-                dynamic_dims=dynamic_dim_policy(model_shapes(cls)),
+        declared_lanes = model_declared_lanes(cls)
+        items = derive_items(cls)
+        outcomes = _run_items(
+            module, cls, items,
+            checkpoint_dir=checkpoint_dir,
+            graph_cas=graph_cas,
+            program_sink=program_sink,
+            slot_checkpoints=slot_checkpoints,
+            warnings=warnings,
+            unservable=unservable_payloads,
+            trace_workers=trace_workers,
+        )
+        for lane_index, lane in enumerate(declared_lanes):
+            handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
+            lane_graphs = _merge_lane_items(
+                torchcg, handle,
+                [
+                    outcomes[item.index]
+                    for item in items
+                    if item.lane_index == lane_index
+                ],
+                warnings,
             )
             if lane_graphs is None:
                 unmarked_lanes.append(
@@ -1389,7 +1732,10 @@ __all__ = [
     "DOCUMENT_KIND",
     "ENUM_CAP",
     "DeriveError",
+    "DeriveItem",
     "PayloadEnumerationRefused",
     "ReleaseDeriveResult",
+    "derive_items",
     "derive_release",
+    "static_bind_declared",
 ]

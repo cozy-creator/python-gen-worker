@@ -60,6 +60,44 @@ def test_the_mint_child_compiles_a_real_exported_program(tmp_path: Path) -> None
 
 
 @pytest.mark.slow
+def test_the_child_binds_a_symbolic_parent_for_a_static_record(
+    tmp_path: Path,
+) -> None:
+    """pgw#1603: the store banks the symbolic PARENT under a static record's
+    identity — a stripped parent blob, a static ingress, and the record's
+    exact graph hash must still compile end to end (bind happens at the
+    engine's plan seam and refuses any identity drift)."""
+
+    from gen_worker._vendor.torchcg.bind import strip_diagnostics
+    from gen_worker._vendor.torchcg.graph_identity import graph_hash
+
+    module = Denoiser()
+    height = torch.export.Dim("height", min=2, max=16)
+    example = torch.zeros((8, 8), dtype=torch.float32)
+    parent = torch.export.export(
+        module, (example,), dynamic_shapes={"value": {0: height}}, strict=False
+    )
+    concrete = torch.zeros((4, 8), dtype=torch.float32)
+    bound = torch.export.export(module, (concrete,), strict=False)
+    ingress = build_call_ingress(bound, ("value",), (concrete,), {})
+    graph = graph_hash(bound, ingress)
+
+    strip_diagnostics(parent)
+    blob = tmp_path / "parent.pt2"
+    torch.export.save(parent, blob)
+
+    request = _request(tmp_path)
+    request["blob"] = str(blob)
+    request["graph"] = graph
+    request["ingress"] = ingress.as_dict()
+    Path(request["cas"]).mkdir(parents=True, exist_ok=True)
+
+    destination = compile_one(request)
+    assert destination.is_dir()
+    assert any(Path(request["cas"]).rglob("*"))
+
+
+@pytest.mark.slow
 def test_the_child_request_carries_no_graph_interface_to_get_wrong(
     tmp_path: Path,
 ) -> None:

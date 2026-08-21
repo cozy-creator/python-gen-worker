@@ -178,13 +178,22 @@ def test_batch_CANNOT_be_declared_dynamic_in_either_direction() -> None:
                      marks_compile=True)
 
 
-def test_static_is_the_absence_of_a_policy_and_not_an_empty_one() -> None:
-    """STATIC must yield `None`, so torchcg takes the untouched static path."""
+def test_declared_shape_axes_always_trace_symbolically() -> None:
+    """pgw#1603: STATIC no longer means an absent policy — the trace is
+    symbolic either way, and STATIC means the buckets are STAMPED from the
+    parent (``static_bind_declared``). Only an axis-free class stays on the
+    per-bucket trace path."""
 
-    assert dynamic_dim_policy({"aspect": STATIC}) is None
+    from gen_worker.release.derive import static_bind_declared
+
     assert dynamic_dim_policy({}) is None
-    policy = dynamic_dim_policy({"aspect": DYNAMIC})
-    assert policy("unet", "sample", 0) is False, "batch is NEVER offered"
-    assert policy("unet", "sample", 2) is True
-    assert policy("unet", "sample", 3) is True
-    assert policy("unet", "sample", 1) is False
+    assert static_bind_declared({}) is False
+    for declared in ({"aspect": STATIC}, {"aspect": DYNAMIC}):
+        policy = dynamic_dim_policy(declared)
+        assert policy is not None
+        assert policy("unet", "sample", 0) is False, "batch is NEVER offered"
+        assert policy("unet", "sample", 1) is False
+        assert policy("unet", "sample", 2) is True
+        assert policy("unet", "sample", 3) is True
+    assert static_bind_declared({"aspect": STATIC}) is True
+    assert static_bind_declared({"aspect": DYNAMIC}) is False

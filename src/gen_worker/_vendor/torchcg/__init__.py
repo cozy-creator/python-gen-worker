@@ -13,7 +13,7 @@ from .artifact import (
     ArtifactError,
     ArtifactFormatSkew,
 )
-from .compiler import CompileError
+from .compiler import CompileError, DroppedOptimization, declared_input_layout
 from .declaration import (
     GRAPH_INTERFACE_FORMAT,
     DeclarationError,
@@ -22,6 +22,7 @@ from .declaration import (
     RetiredGraphInterface,
     RuntimeCompatibility,
 )
+from .bind import BindError, bind_static_spec, respecialize, strip_diagnostics
 from .discovery import DiscoveryError, discover_lane, discover_modules
 from .document import (
     DOCUMENT_FORMAT,
@@ -82,6 +83,15 @@ from .lane import (
     require_passes,
     require_targets,
     resolve_target,
+)
+from .layout import (
+    CATALOG as LAYOUT_CATALOG,
+)
+from .layout import (
+    CONTIGUOUS,
+    LayoutError,
+    LayoutMorphism,
+    require_morphism,
 )
 from .quantize import (
     KeptModule,
@@ -206,10 +216,19 @@ __all__ = [
     "ArtifactFormatSkew",
     "ArtifactLoader",
     "CompileError",
+    "CONTIGUOUS",
     "COMPILED_GRAPH_FORMAT",
+    "DroppedOptimization",
+    "LAYOUT_CATALOG",
+    "LayoutError",
+    "LayoutMorphism",
+    "declared_input_layout",
+    "require_morphism",
     "DOCUMENT_FORMAT",
+    "BindError",
     "DimPolicy",
     "DiscoveryError",
+    "bind_static_spec",
     "DocumentError",
     "ENV_SCHEME",
     "EnvIdentity",
@@ -232,6 +251,8 @@ __all__ = [
     "assert_exact_env",
     "compile_stack",
     "discover_lane",
+    "respecialize",
+    "strip_diagnostics",
     "discover_modules",
     "graph_hash",
     "holes",
