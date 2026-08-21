@@ -119,6 +119,15 @@ export PATH="$HOME/.local/bin:$PATH"
 # python-gen-worker is a PUBLIC repo, so this needs no credential. The
 # PRIVATE sibling is never cloned at all -- its endpoint arrives as bytes in
 # env (see 2b), which keeps a GitHub PAT off rented hardware entirely.
+# ⚠️ THESE THREE EXITS CANNOT PUBLISH, BY CONSTRUCTION, AND THAT IS THE ONE
+# REMAINING SILENT WINDOW. `publish.py` imports `HubClient` out of
+# /workspace/pgw/src and needs the pip set installed in 2a, so a failure BEFORE
+# the clone and venv exist has no channel to report itself on -- the box sees a
+# pod that started and said nothing. Every LATER death is now a published
+# verdict (fail_out), so silence past the boot heartbeat narrows to exactly
+# this window: clone, checkout, venv. Read a mute pod as "died in the
+# toolchain", not as "died anywhere", and the driver's boot-heartbeat deadline
+# turns that into a rotation in ~6 min rather than a 40-minute wait.
 timeout 900 git clone --filter=blob:none https://github.com/cozy-creator/python-gen-worker /workspace/pgw || exit 90
 git -C /workspace/pgw checkout "${PGW1548_SHA}" || exit 90
 
@@ -198,7 +207,8 @@ export TENSORHUB_URL="$PGW1548_HUB"
 # verified bf16 tree, which is precisely what happened on pod iorr3zmp41mea9:
 #   "REFUSING: VARENA_GPU_WINDOW=1 is not set."
 export VARENA_GPU_WINDOW=1
-$PY -c "import tensorfs; print('tensorfs ok', tensorfs.__file__)" || exit 91
+$PY -c "import tensorfs; print('tensorfs ok', tensorfs.__file__)" || {
+  fail_out toolchain "tensorfs import failed"; exit 91; }
 
 # --- 2b. the endpoint source, from env --------------------------------------
 # MEASURED CEILING, 2026-08-20: RunPod's REST create takes a ~50 KB `env` and
@@ -358,6 +368,19 @@ sdxl-matrix)
   note headroom "$(printf '{"stage":"headroom","sm":"%s","free_mib":%s,"needed_over_resident_mib":1198}' "$SM" "$FREE")"
 
   # SMOKE GATE — one arm, one shape, three requests, before any matrix spend.
+  #
+  # The pgw#1586 PROBE PAIR rides this stage. The instrument's own `vram` block
+  # supplies the allocator half and a GIL-BLINDED in-process driver half; the
+  # driver half that #1586 can actually use has to come from OUTSIDE the
+  # process, because an AOTI `.so` holds the GIL across the compiled call (the
+  # blind method was measured wrong by 1174 MiB). So the out-of-process sampler
+  # runs across the whole smoke leg and its TSV is published WITH the stage --
+  # publishing both is what lets the blinding be demonstrated instead of
+  # asserted, which is the form #1586 asked for.
+  bash /workspace/pgw/benchmarks/pgw1548_vram_sampler.sh \
+      /workspace/out/vram-smoke.tsv 0.05 &
+  SMOKESAMP=$!
+  sleep 2   # baseline samples of the card before the first request
   ( cd /workspace/pgw && timeout 5400 $PY benchmarks/dynamic_dims_pgw1548.py \
       --endpoint /workspace/endpoint --checkpoint /workspace/sdxl-bf16 \
       --venv /workspace/venv --lock-cache /workspace/locks \
@@ -367,7 +390,12 @@ sdxl-matrix)
       --lane-note 'sdxl, euler/float32 timestep lane' --dtype-lanes 2 \
       --out /workspace/out/smoke ) > /workspace/out/smoke.log 2>&1
   rc=$?
-  "${PY:-python3}" /workspace/publish.py smoke /workspace/out/smoke.log /workspace/out/smoke/verdict.json || true
+  sleep 2; kill $SMOKESAMP 2>/dev/null
+  $PY /workspace/pgw/benchmarks/pgw1548_analyze_folding.py \
+      /workspace/out/vram-smoke.tsv 5222 > /workspace/out/smoke-vram-verdict.txt 2>&1 || true
+  "${PY:-python3}" /workspace/publish.py smoke /workspace/out/smoke.log \
+      /workspace/out/smoke/verdict.json /workspace/out/vram-smoke.tsv \
+      /workspace/out/smoke-vram-verdict.txt || true
   [ $rc -ne 0 ] && { fail_out smoke "smoke gate exited $rc"; exit 94; }
 
   # --- FOLDING INSTRUMENTATION (pgw#1586 rider) -----------------------------

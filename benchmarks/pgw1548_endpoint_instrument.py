@@ -383,6 +383,20 @@ def install() -> None:
         #     before the request returns.
         # If the driver delta materially exceeds the allocator delta, the
         # ledger must sample driver-level in the compiled regime.
+        #
+        # 🔴 THE DRIVER HALF BELOW IS GIL-BLINDED AND IS NOT THE #1586 ANSWER.
+        # The sampler is an in-process thread, and an AOTI `.so` holds the GIL
+        # for the whole compiled call, so this thread cannot run during exactly
+        # the window it exists to observe. pgw#1586 measured the size of that
+        # blindness: an in-process 50 ms sampler reported 1182 MiB minimum free
+        # while the allocator's own warnings from inside the same call said
+        # 8.31 MiB -- WRONG BY 1174 MiB -- and ruled that whoever runs this
+        # probe must not inherit the blind method.
+        # It is kept deliberately, as the CONTROL: the #1586 pair's driver half
+        # comes from the OUT-OF-PROCESS `pgw1548_vram_sampler.sh` TSV that the
+        # smoke stage now runs alongside this request, and publishing both lets
+        # the blinding be shown rather than asserted. Read `driver_*` here only
+        # against that TSV, never on its own.
         device = 0
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
@@ -427,6 +441,9 @@ def install() -> None:
             "allocator_peak_bytes": int(torch.cuda.max_memory_allocated()),
             "allocator_peak_delta_bytes": int(
                 torch.cuda.max_memory_allocated() - allocated_before),
+            "driver_sampler": "in-process-GIL-blinded-CONTROL-ONLY",
+            "driver_authority": "pgw1548_vram_sampler.sh TSV published with "
+                                "this stage; see pgw#1586 method correction",
         }
         started = time.perf_counter()
         asset = ctx.save_image(result.images[0], format=fmt)
