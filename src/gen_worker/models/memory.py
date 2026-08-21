@@ -1506,6 +1506,7 @@ def _plan_partial_resident(
     try:
         from .partial_resident import (
             PARTIAL_RESIDENT_RESERVE_GB,
+            method_driven_components,
             plan_for_pipeline,
         )
 
@@ -1552,7 +1553,15 @@ def _plan_partial_resident(
             budget_bytes=int(max(0.0, free_gb - reserve_gb) * _GIB),
             free_bytes=int(free_gb * _GIB),
             sizer=lambda m: module_storage_bytes(m),
-            forced_resident=unhookable_components(pipeline),
+            # pgw#1619: the union of "must not move" (dtype-fragile,
+            # content-shared) and "CANNOT BE ENTERED by this rung's hooks".
+            # The second is this module's own defect and is scoped HERE rather
+            # than added to `unhookable_components`, because it is a fact about
+            # partial_resident's mechanism, not about the component.
+            forced_resident=(
+                list(unhookable_components(pipeline))
+                + list(method_driven_components(pipeline))
+            ),
             min_moved_bytes=min_moved_bytes,
         )
     except Exception as exc:

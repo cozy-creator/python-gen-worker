@@ -638,3 +638,137 @@ def test_EVERY_rung_confesses_the_decision_time_free_vram_not_a_re_read():
         f"{len(missing)} rung(s) still confess a post-placement re-read as the "
         f"decision's input: {missing}"
     )
+
+
+# --------------------------------------------------------------------------
+# pgw#1619 — a component this rung cannot ENTER must never be parked
+# --------------------------------------------------------------------------
+
+
+class _MethodDrivenBlock(_Block):
+    """Reached the way diffusers reaches a VAE: by name, never via ``__call__``."""
+
+    def decode(self, x: Any) -> Any:
+        return self.lin(x)
+
+    def encode(self, x: Any) -> Any:
+        return self.lin(x)
+
+
+class _PipelineWithMethodDrivenComponent(DiffusionPipeline):
+    model_cpu_offload_seq = "text_encoder->unet->vae"
+    text_encoder: Any
+    unet: Any
+    vae: Any
+
+    def __init__(self, text_encoder: Any, unet: Any, vae: Any) -> None:
+        super().__init__()
+        cast(Any, self).register_modules(
+            text_encoder=text_encoder, unet=unet, vae=vae
+        )
+
+
+def test_a_forward_pre_hook_does_NOT_fire_on_a_named_method():
+    """THE DEFECT ITSELF, asserted so it cannot silently stop being true.
+
+    pgw#1619: `_install_residency_hooks` arms every parked component with
+    `register_forward_pre_hook`, and diffusers reaches the VAE only as
+    `self.vae.decode(...)`. If this ever starts firing, the refusal below
+    becomes unnecessary — and if it stops being asserted, the reason for the
+    refusal is lost.
+    """
+    m = _MethodDrivenBlock(8)
+    fired: List[str] = []
+    m.register_forward_pre_hook(lambda mod, a: fired.append("forward"))
+    m(torch.zeros(1, 8))
+    assert fired == ["forward"], "the hook does not even fire on __call__"
+    fired.clear()
+    m.decode(torch.zeros(1, 8))
+    assert fired == [], (
+        "a forward pre-hook fired on a named method — if torch changed this, "
+        "pgw#1619's refusal can be revisited"
+    )
+
+
+def test_a_component_this_rung_cannot_enter_is_never_parked():
+    """RED ARM for pgw#1619. Before the fix the minimum-byte planner selects the
+    method-driven component — it is small and evicting it is cheap — and the
+    request then dies at decode against host weights:
+
+        Input type (CUDABFloat16Type) and weight type (CPUBFloat16Type)
+        should be the same
+
+    (observed by the pgw#1548 lane, not predicted). After the fix it is forced
+    resident and the planner simply chooses a more expensive plan.
+    """
+    from gen_worker.models.partial_resident import method_driven_components
+
+    pipe = _PipelineWithMethodDrivenComponent(_Block(8), _Block(16), _MethodDrivenBlock(4))
+    assert method_driven_components(pipe) == ["vae"], (
+        "the structural check did not spot the method-driven component"
+    )
+
+    sizer = lambda m: sum(p.numel() * p.element_size() for p in m.parameters())
+    plan = plan_for_pipeline(
+        pipe, budget_bytes=1200, free_bytes=64 * _MIB,
+        sizer=sizer, transient_reserve_bytes=0,
+        forced_resident=method_driven_components(pipe),
+    )
+    assert plan.fits, plan.refusal
+    assert "vae" not in plan.offloaded, (
+        "a component whose onload hook can never fire was selected for parking"
+    )
+
+
+def test_the_PRODUCTION_planner_refuses_to_park_what_it_cannot_enter():
+    """THE ONE THAT GUARDS THE FIX, through `_plan_partial_resident`.
+
+    The tests above call `plan_for_pipeline` and pass `forced_resident`
+    themselves, so they assert the HELPER and would pass with the production
+    wiring torn out — verified, they did. That is the same tautology this lane
+    already shipped once for the reserve invariant, so it is checked here rather
+    than trusted: sizes are chosen so the minimum-byte search WANTS the
+    method-driven component (it is the cheapest subset that clears the budget),
+    and only the guard stops it.
+    """
+    import gen_worker.models.memory as m
+
+    # unet 1088 B forced; vae 360 B is the cheapest way to clear the budget;
+    # text_encoder 1680 B is the next-cheapest and is what the guard forces.
+    pipe = _PipelineWithMethodDrivenComponent(
+        _Block(20), _Block(16), _MethodDrivenBlock(9)
+    )
+    total = 1680 + 1088 + 360
+    free_bytes = int(PARTIAL_RESIDENT_RESERVE_GB * _GIB) + (total - 328)
+
+    real_free, real_unhook = m.get_available_vram_gb, m.unhookable_components
+    m.get_available_vram_gb = lambda *a, **k: free_bytes / _GIB
+    m.unhookable_components = lambda *a, **k: []
+    try:
+        plan = m._plan_partial_resident(pipe, logging.getLogger("t"))
+    finally:
+        m.get_available_vram_gb, m.unhookable_components = real_free, real_unhook
+
+    assert plan is not None and plan.fits, "the planner admitted nothing"
+    assert "vae" not in plan.offloaded, (
+        "the production planner parked a component whose onload hook can NEVER "
+        "fire — this is the pgw#1619 decode-against-host-weights death"
+    )
+    assert "text_encoder" in plan.offloaded, (
+        "the guard did not merely refuse the vae, it broke the plan"
+    )
+
+
+def test_the_structural_check_does_not_over_refuse_the_denoiser_or_encoders():
+    """The guard must cost only what it has to. `UNet2DConditionModel`,
+    `CLIPTextModel` and `CLIPTextModelWithProjection` expose only `forward`, so
+    a capability test separates them from `AutoencoderKL` without hardcoding
+    `"vae"` — and without refusing to park the components this rung exists to
+    park."""
+    from gen_worker.models.partial_resident import method_driven_components
+
+    pipe = _PipelineWithMethodDrivenComponent(_Block(8), _Block(16), _MethodDrivenBlock(4))
+    refused = method_driven_components(pipe)
+    assert "unet" not in refused and "text_encoder" not in refused, (
+        f"the guard over-refused: {refused}"
+    )
