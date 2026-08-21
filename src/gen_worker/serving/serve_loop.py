@@ -57,7 +57,7 @@ from ..stage_timing import StageTimer
 from .context import DeployBinding, LoadContext, LoaderEngine, RequestContext
 from .envelope import DecodedRequest, decode_envelope
 from .host import ServeDispatchError
-from .loader import LoadedEndpoint
+from .loader import EndpointLoadError, LoadedEndpoint
 from .model import Model, lane_handle, model_type
 from .placement import warn_if_degraded
 from .reserved_repos import (
@@ -312,11 +312,26 @@ class ServeLoop:
         self.residency = residency
         self._resolver = resolver
         self._engine = engine
+        #: pgw#1606: an OPERATOR PIN, not the pick. Empty on every pod — only
+        #: the local CLI and the daemon ever write it — and when it is empty a
+        #: multi-lane model is resolved by the ladder at load, not refused.
+        self._lane_contract = str(lane_contract or "")
         #: The deploy's per-class lane pick (contract handle; '' = the single
-        #: declared lane / eager-permanent).
+        #: declared lane / eager-permanent). ``None`` for a multi-lane model,
+        #: whose pick is not knowable until the binding names what is staged —
+        #: `_resolve_for` below answers it then.
         self.lanes: Dict[type, Any] = {
-            cls: loaded.lane(cls, lane_contract) for cls in loaded.models
+            cls: self._single_lane(cls) for cls in loaded.models
         }
+        #: Every lane each class DECLARED — the candidate set the ladder ranks,
+        #: and the set `worker.py` validates a dispatch's `lane=` against.
+        self.declared_lanes: Dict[type, Tuple[Any, ...]] = {
+            cls: tuple(loaded.lanes_of(cls)) for cls in loaded.models
+        }
+        #: Ladder answers, cached per (class, checkpoint). The kernel gates
+        #: behind a resolution are `lru_cache(1)`'d micro-benchmarks, so this
+        #: cache is about not re-deciding, not about not re-measuring.
+        self._resolved: Dict[Tuple[type, str], Any] = {}
         self._compile_sink_for = compile_sink_for
         self._on_loaded = on_loaded
         self._output_dir = output_dir
@@ -333,6 +348,45 @@ class ServeLoop:
 
     # -- placement ----------------------------------------------------------
 
+    def _single_lane(self, model_cls: type) -> Any:
+        """The lane, when there is exactly one (or the operator pinned one).
+
+        pgw#1606: a multi-lane model answers ``None`` here rather than raising,
+        because "which of these" is a question the LADDER answers once the
+        binding says what is staged — and until this issue there was no ladder,
+        which is why the raise made multi-lane endpoints unbootable.
+        """
+        try:
+            return self.loaded.lane(model_cls, self._lane_contract)
+        except EndpointLoadError:
+            return None
+
+    def _resolve_for(self, model_cls: type, binding: DeployBinding) -> Any:
+        """The boot ladder's answer for this (class, binding), cached."""
+        key = (model_cls, str(binding.checkpoint_ref))
+        hit = self._resolved.get(key)
+        if hit is not None:
+            return hit
+        from .lane_host import BindingVerdicts, HostKernelGates, host_card_facts
+
+        verdicts = BindingVerdicts.of(binding)
+        single = self.lanes.get(model_cls)
+        if single is not None:
+            # The single-lane deployment carries no lane map; its one staged
+            # tree IS the answer for its one declared contract. Stated
+            # explicitly rather than inferred, so a MULTI-lane binding that
+            # shipped without its map cannot inherit "everything is staged".
+            verdicts = verdicts.for_single_lane(
+                lane_handle(single), binding.checkpoint_dir)
+        resolved = self.loaded.resolve(
+            model_cls, card=host_card_facts(), verdicts=verdicts,
+            gates=HostKernelGates(), contract=self._lane_contract,
+        )
+        if resolved is not None:
+            logger.info("lane ladder: %s", resolved.confession())
+            self._resolved[key] = resolved
+        return resolved
+
     def _lane_of(self, model_cls: type) -> Tuple[Any, str]:
         lane = self.lanes[model_cls]
         return lane, (lane_handle(lane) if lane is not None else "eager")
@@ -342,6 +396,12 @@ class ServeLoop:
     ) -> Callable[[], _InstanceBackend]:
         def make() -> _InstanceBackend:
             lane, _ = self._lane_of(model_cls)
+            # pgw#1606: the ladder runs HERE, at the one moment both facts are
+            # in hand — the card (process-wide) and what the deploy staged
+            # (per binding). A multi-lane model has no `lane` until now.
+            resolved = self._resolve_for(model_cls, binding)
+            if lane is None and resolved is not None:
+                lane = getattr(resolved.declared, "contract", None)
             sink = (
                 self._compile_sink_for(model_cls, lane)
                 if self._compile_sink_for is not None
@@ -361,6 +421,7 @@ class ServeLoop:
                     binding=binding,
                     model_type=model_type(model_cls),
                     lane=lane,
+                    resolved=resolved,
                     engine=self._engine,
                     compile_sink=sink,
                     # pgw#1497: ADMISSION-FIRST. The `partial_stream` rung

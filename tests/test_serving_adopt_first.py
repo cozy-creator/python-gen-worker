@@ -193,8 +193,12 @@ def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
     lane = loaded.lane(model_cls, LANE)
     assert lane.contract == LANE
     assert lane.dtype is torch.float32
-    # Two declared lanes: the active one is the deploy's pick, never a default.
-    with pytest.raises(EndpointLoadError, match="the active lane must be named"):
+    # Two declared lanes: `lane()` still refuses to GUESS one — a silent
+    # default lane is exactly what must not exist. pgw#1606 changed only what
+    # the refusal points AT: picking among declared lanes is platform work and
+    # now has a home (`resolve()`), where before it was a dead end that made
+    # multi-lane endpoints unbootable on a pod.
+    with pytest.raises(EndpointLoadError, match=r"ask `resolve\(\)`"):
         loaded.lane(model_cls)
     with pytest.raises(EndpointLoadError, match="no lane 'other.fp8@1'"):
         loaded.lane(model_cls, "other.fp8@1")
