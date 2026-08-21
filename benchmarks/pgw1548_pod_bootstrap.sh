@@ -85,6 +85,33 @@ git -C /workspace/pgw checkout "${PGW1548_SHA}" || exit 90
 uv venv --python 3.12 /workspace/venv || exit 91
 export VIRTUAL_ENV=/workspace/venv
 PY=/workspace/venv/bin/python
+
+# --- 2a. THE BOOT HEARTBEAT, before the expensive install --------------------
+# GAP THIS CLOSES, found by living with it: everything below exits on bare
+# `|| exit 90/91` and publishes NOTHING, so a pod that dies in its venv build
+# is indistinguishable from a pod still building it. Measured: the SDXL leg sat
+# 40 minutes with zero published stages and the provider exposes no CPU or
+# network metrics (`GET /pods/{id}` returns none), so there was no way to tell
+# "working" from "dead" from outside. That is the same
+# degrades-to-SILENCE shape this lane keeps cataloguing -- and I had built it
+# into my own script.
+#
+# `requests` alone is seconds, and it is what HubClient needs to talk. The
+# heartbeat is BEST-EFFORT by design: if the import chain needs more than this,
+# the publish fails into `|| true` and the leg still proceeds -- a heartbeat
+# must never be able to kill the run it exists to observe.
+uv pip install --python $PY requests msgspec > /workspace/out/boot-deps.log 2>&1 || true
+PYTHONPATH=/workspace/pgw/src "$PY" - <<'BOOTEOF' > /workspace/out/boot.log 2>&1 || true
+import json, os, time
+from pathlib import Path
+Path("/workspace/out").mkdir(parents=True, exist_ok=True)
+Path("/workspace/out/boot.json").write_text(json.dumps({
+    "stage": "boot", "ok": True, "mode": os.environ.get("PGW1548_MODE"),
+    "sha": os.environ.get("PGW1548_SHA"), "at": time.strftime("%FT%TZ", time.gmtime()),
+    "note": "venv exists; the heavy install has NOT started yet",
+}))
+BOOTEOF
+PYTHONPATH=/workspace/pgw/src "$PY" /workspace/publish.py boot /workspace/out/boot.json || true
 uv pip install --python $PY -r /workspace/pgw/requirements.txt 2>/dev/null || true
 uv pip install --python $PY -e /workspace/pgw || exit 91
 # The ENDPOINT's own third-party imports, read off its `main.py` rather than
