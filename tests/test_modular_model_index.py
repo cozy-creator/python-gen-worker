@@ -120,10 +120,9 @@ def test_pinned_variant_or_revision_is_refused_by_name(
     "bad",
     [
         ["diffusers"],
-        "nonsense",
         ["diffusers", "AutoencoderKL", "not-a-dict", "extra"],
     ],
-    ids=["one-element", "scalar", "no-metadata-object"],
+    ids=["one-element", "no-metadata-object"],
 )
 def test_unreadable_entry_names_itself(tmp_path: Path, bad: object) -> None:
     """An entry the walker cannot read is refused, and the message names it.
@@ -143,3 +142,52 @@ def test_unreadable_entry_names_itself(tmp_path: Path, bad: object) -> None:
     with pytest.raises(SkeletonError) as excinfo:
         sk.build(pipeline_cls, source)
     assert "vae" in str(excinfo.value)
+
+
+# ── pgw#1618: a SCALAR entry is pipeline CONFIG ─────────────────────────────
+#
+# The `scalar` case was removed from `test_unreadable_entry_names_itself`
+# above, and that removal is the point rather than a concession. It asserted
+# that a non-list entry is unreadable; a CANONICAL diffusers index carries two
+# of them, so the assertion made a correct checkpoint unloadable. pgw#1481's
+# real subject — a LIST-shaped entry the walker cannot read — is untouched and
+# still covered by the two surviving ids.
+
+
+def test_canonical_diffusers_scalars_are_config_not_components(tmp_path: Path) -> None:
+    """SDXL's own `model_index.json` must build.
+
+    MEASURED, from the tree `tensorhub/wai-illustrious@prod-fp16vae`
+    materialises on a pod:
+
+        "force_zeros_for_empty_prompt": true,
+        "add_watermarker": null,
+
+    Neither starts with `_`, so the prefix skip does not cover them. Before
+    this fix, sdxl 0.4.0 on a rented RTX 4090 (pod cwnu3dyz72c1wn, se#819)
+    fetched 6.7 GB of weights and then died
+    `SkeletonError: … entry 'force_zeros_for_empty_prompt' is True, which is
+    not [library, class_name]` — as `boot_warmup_failed` first, then as a
+    FATAL request result the blame ladder burned the worker on.
+
+    THE RED ARM: restore `not isinstance(spec, (list, tuple)) or len(spec) < 2`
+    as one refusal in `skeleton.build` and this fails on the first scalar.
+    """
+    source = tmp_path / "canonical-scalars"
+    pipeline_cls = build_source(source)
+    index_path = source / "model_index.json"
+    index = json.loads(index_path.read_text())
+    declared = {k for k in index if not k.startswith("_")}
+    index["force_zeros_for_empty_prompt"] = True
+    index["add_watermarker"] = None
+    index_path.write_text(json.dumps(index))
+
+    built = sk.build(pipeline_cls, source)
+
+    reached = set(built.modules) | set(built.passthrough)
+    assert reached == declared, (
+        f"scalars must be skipped as config and every real component still "
+        f"reached: declared {sorted(declared)}, reached {sorted(reached)}"
+    )
+    assert "force_zeros_for_empty_prompt" not in reached
+    assert "add_watermarker" not in reached

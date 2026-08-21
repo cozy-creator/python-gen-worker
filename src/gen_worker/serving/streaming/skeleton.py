@@ -172,11 +172,32 @@ def build(
     for name, spec in sorted(index.items()):
         if name.startswith("_"):
             continue
-        # pgw#1481: an entry this walker cannot read is REFUSED BY NAME, never
-        # skipped. `continue` here collapsed nine specific failures into one
-        # "declares no nn.Module component" that named none of them — and that
-        # sentence is false when the index declares nine.
-        if not isinstance(spec, (list, tuple)) or len(spec) < 2:
+        # pgw#1618: A SCALAR ENTRY IS PIPELINE CONFIG, NOT A COMPONENT, and a
+        # CANONICAL diffusers index carries several. SDXL's ships
+        # `"force_zeros_for_empty_prompt": true` and `"add_watermarker": null`
+        # right beside its eight component pairs; neither starts with `_`, so
+        # the `_`-prefix skip above does not cover them. Diffusers itself
+        # treats exactly this shape as config — anything that is not a
+        # (library, class_name) pair is handed to the pipeline's `__init__`,
+        # never resolved as a module.
+        #
+        # MEASURED ON A RENTED POD, not reasoned about: sdxl 0.4.0 on an
+        # RTX 4090 (pod cwnu3dyz72c1wn, se#819) fetched its 6.7 GB checkpoint,
+        # then died `SkeletonError: … entry 'force_zeros_for_empty_prompt' is
+        # True, which is not [library, class_name]` — first as
+        # `boot_warmup_failed`, then as a FATAL request result that the blame
+        # ladder burned the worker on. Every diffusers-family endpoint on the
+        # streaming loader is exposed to this.
+        if not isinstance(spec, (list, tuple)):
+            continue
+        # pgw#1481 is UNCHANGED for the case it was actually about: an entry
+        # that IS list-shaped but that this walker cannot read is REFUSED BY
+        # NAME, never skipped. A bare `continue` over those collapsed nine
+        # specific failures into one "declares no nn.Module component" that
+        # named none of them — and that sentence is false when the index
+        # declares nine. A scalar is not that case; it is not a component at
+        # all, and refusing it made a correct index unloadable.
+        if len(spec) < 2:
             raise SkeletonError(
                 f"{index_path} entry {name!r} is {spec!r}, which is not "
                 f"[library, class_name]"
