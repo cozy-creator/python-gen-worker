@@ -144,6 +144,21 @@ def test_the_fp8_arm_refuses_a_tree_that_carries_no_fp8_artifact(
         M.materialize(_Pipe(_tiny_unet()), _resolved(FP8_BODY), tree=tmp_path)
 
 
+def test_the_nvfp4_arm_refuses_the_same_way_the_fp8_arm_does(
+    tmp_path: Path,
+) -> None:
+    """Symmetry is the point. The nvfp4 rung is proven against a FABRICATED
+    document (the flat nvfp4 layout pgw serves has no registered contract —
+    `models/w4a4.py:500-510` says so deliberately, since it is NOT
+    `bfl.nvfp4-preswizzled@1` and conflating them measured LPIPS 1.11), so what
+    can be proven today is that its arm refuses on the same terms rather than
+    being the one path that quietly serves whatever is on disk."""
+    (tmp_path / "transformer").mkdir(parents=True)
+    with pytest.raises(M.LaneMaterializationError, match="no fp4 artifact"):
+        M.materialize(_Pipe(_tiny_unet()), _resolved("nvfp4-w4a4-static"),
+                      tree=tmp_path)
+
+
 def test_a_body_with_no_materializer_is_refused_rather_than_ignored():
     """If the lane table can name a body nothing can build, the table and the
     materializer disagree and one of them is wrong. Silence would pick the
