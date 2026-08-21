@@ -105,15 +105,58 @@ def test_EVERY_shipped_contract_names_the_DENOISERS_OWN_parameters() -> None:
     # and sdxl's contract leads with them — which is itself the point of the
     # next assertion.
     component_words = {"unet", "vae", "transformer", "text_encoder", "tokenizer"}
+
+    # NARROWED at tensorfs rev 1da68d58, by a case that FALSIFIES the fence's
+    # premise rather than merely inconveniencing it.
+    #
+    # The premise: a component word in the first dotted segment means the
+    # contract is naming a DIRECTORY in a diffusers component tree
+    # (`unet/diffusion_pytorch_model.safetensors`) instead of the denoiser's
+    # own parameters. That inference holds for a component TREE and fails flat
+    # for a SINGLE-FILE checkpoint, where several submodules live in ONE file
+    # and their real tensor names carry the submodule prefix.
+    #
+    # `musicgen.transformers-fp16` is that case: `MusicgenForConditionalGeneration`
+    # is one file holding a T5 text encoder, an EnCodec audio codec and the LM
+    # decoder, and its state dict genuinely spells them `text_encoder.*`,
+    # `audio_encoder.*` and `decoder.*`. Those ARE the denoiser tree's own
+    # parameter names — there is no directory anywhere to have confused them
+    # with. Refusing it would be the fence enforcing a tree SHAPE it was never
+    # about.
+    #
+    # Exempted by FORMAT, not by filename: the contract's format segment says
+    # `transformers`, which IS the single-file shape. A `diffusers` contract
+    # leading with a component word is still an offender, which is the whole
+    # fence, and it still catches the case pgw#1512 was about.
     offenders = []
     for path in sorted(CONTRACTS.glob("*.json")):
+        document = json.loads(path.read_text())
         heads = {
             t["pattern"].split(".", 1)[0]
-            for t in json.loads(path.read_text()).get("tensors", [])
+            for t in document.get("tensors", [])
         }
-        if heads & component_words:
-            offenders.append(path.name)
+        if not heads & component_words:
+            continue
+        name = str(document.get("name", path.stem))
+        fmt = name.split(".", 1)[1] if "." in name else ""
+        if fmt.split("-", 1)[0] == "transformers":
+            continue  # a single-file tree: the prefix IS the tensor's name
+        offenders.append(path.name)
     assert offenders == []
+
+    # The exemption is NARROW and stays narrow: exactly one shipped contract
+    # uses it today. If a second appears, read the reasoning above and decide
+    # deliberately rather than widening a set.
+    exempt = [
+        path.name
+        for path in sorted(CONTRACTS.glob("*.json"))
+        if str(json.loads(path.read_text()).get("name", "")).split(".", 1)[-1]
+        .split("-", 1)[0] == "transformers"
+        and {t["pattern"].split(".", 1)[0]
+             for t in json.loads(path.read_text()).get("tensors", [])}
+        & component_words
+    ]
+    assert exempt == ["musicgen.transformers-fp16.v1.json"]
 
 
 def test_a_contract_can_cover_SEVERAL_components_which_settles_the_question() -> None:
