@@ -45,6 +45,7 @@ __all__ = [
     "DemandEvaluationError",
     "GiB",
     "KiB",
+    "MAX_RESULT_BYTES",
     "MiB",
     "RequestShape",
     "SHAPE_BOUNDS",
@@ -167,13 +168,9 @@ TERM_VOCABULARY: dict[str, TermSpec] = {
 _TERM_ORDER = {name: index for index, name in enumerate(TERM_VOCABULARY)}
 
 
-#: The domain each shape scalar is defined on. NOT taste: the evaluation is
-#: specified to be exact in 64-bit integers in BOTH languages, and these are
-#: the bounds under which `coefficient * value` provably cannot overflow one
-#: (see :func:`evaluate` for the split-division that keeps the product small).
-#: A shape outside them is REFUSED in both languages rather than silently
-#: wrapping — a wrapped worst-case is a small number, and a small number is
-#: the direction that buys too little card.
+#: The domain each shape scalar is defined on — the largest request the API
+#: could conceivably describe, an order of magnitude past anything real. A
+#: shape outside it is REFUSED rather than evaluated, in both languages.
 SHAPE_BOUNDS: dict[str, int] = {
     "width": 1 << 16,
     "height": 1 << 16,
@@ -181,6 +178,23 @@ SHAPE_BOUNDS: dict[str, int] = {
     "frames": 1 << 20,
     "latent_tokens": 1 << 31,
 }
+
+#: The result must fit a signed 64-bit integer, because the OTHER evaluator is
+#: Go and that is the widest integer the wire form can carry.
+#:
+#: ⚠️ THIS BOUND IS ON THE RESULT, NOT ON THE INTERMEDIATES, AND THE
+#: DIFFERENCE WAS MEASURED RATHER THAN REASONED. The first version bounded the
+#: shape so that a split division (`c = q*scale + r` → `q*v + (r*v)//scale`)
+#: could not overflow int64 — and the cross-language corpus went RED on its own
+#: ceiling row the first time Go ran it: at `mp_batch` with a 1 GiB
+#: coefficient, `r*v` is 1.3e19, past int64, and Python's bignums hid it
+#: entirely. Python could not have found this; only the Go side could, which is
+#: the entire argument for the corpus. So the arithmetic is now EXACT in both
+#: languages (Python natively, Go through `math/big`) and the only shared
+#: constraint is that the ANSWER is representable. A formula whose worst case
+#: does not fit int64 is refused loudly rather than wrapped into a small
+#: number — small is the direction that buys too little card.
+MAX_RESULT_BYTES = (1 << 63) - 1
 
 
 class RequestShape(msgspec.Struct, frozen=True, kw_only=True):
@@ -255,20 +269,31 @@ def term_value(name: str, shape: RequestShape) -> int:
 
 
 def _scaled(coefficient: int, value: int, scale: int) -> int:
-    """``floor(coefficient * value / scale)`` without forming the product.
+    """``floor(coefficient * value / scale)``, EXACT.
 
-    ``c*v`` overflows 64 bits at plausible shapes (a 4096² batch-8 mp_batch
-    numerator is 1.3e8, and an 80 GiB coefficient is 8.6e10). The identity
-    ``c = q*scale + r`` gives ``floor(c*v/scale) = q*v + floor(r*v/scale)``
-    exactly, and both products stay far inside 64 bits under
-    :data:`SHAPE_BOUNDS`. Go does the same three lines; the conformance
-    corpus proves it.
+    Python computes this natively; Go computes it in ``math/big``. Neither
+    tries to be clever about the intermediate, because the clever version was
+    wrong: a split division (``q*v + (r*v)//scale``) keeps ``q*v`` small and
+    lets ``r*v`` reach 1.3e19 at the domain ceiling — past int64 — and Python's
+    bignums hid that completely. The cross-language corpus caught it on Go's
+    first run. See :data:`MAX_RESULT_BYTES`.
     """
 
-    if scale == 1:
-        return coefficient * value
-    quotient, remainder = divmod(coefficient, scale)
-    return quotient * value + (remainder * value) // scale
+    return (coefficient * value) // scale
+
+
+def _representable(total: int) -> int:
+    """Refuse a result the other evaluator could not carry."""
+
+    if total > MAX_RESULT_BYTES:
+        raise DemandEvaluationError(
+            f"the formula evaluates to {total} bytes, past the largest signed "
+            f"64-bit integer ({MAX_RESULT_BYTES}). The other evaluator is Go "
+            f"and cannot carry this; a wrapped answer would be a SMALL number, "
+            f"which is the direction that buys too little card. Either the "
+            f"coefficients or the envelope are wrong by orders of magnitude."
+        )
+    return total
 
 
 class Term(msgspec.Struct, frozen=True, kw_only=True):
@@ -363,7 +388,7 @@ class Demand(msgspec.Struct, frozen=True, kw_only=True):
         """Bytes of REQUEST arena at ``shape``. $0, CPU, deterministic."""
 
         checked = shape.validated()
-        return sum(term.evaluate(checked) for term in self.terms)
+        return _representable(sum(term.evaluate(checked) for term in self.terms))
 
     def as_document(self) -> list[dict[str, Any]]:
         """The release-document shape of the TERMS."""
@@ -432,7 +457,7 @@ def evaluate(terms: Any, shape: RequestShape) -> int:
                 f"is {sorted(TERM_VOCABULARY)}"
             )
         total += _scaled(int(row["bytes"]), term_value(name, checked), spec.scale)
-    return total
+    return _representable(total)
 
 
 def _term(

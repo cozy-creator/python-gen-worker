@@ -7,4 +7,4 @@
 # coupled cross-repo contract change: pgw lands first, then tensorhub bumps
 # its peers.lock row to the merge commit and re-runs its Go evaluator against
 # these bytes.
-cabe5bdf91e22cd62daf35913346f136386a6e1743494945694326df2999771b
+c852afdd7277c5fe670491672e46511ff0143b21accbb1cff2fab47efd648276

@@ -348,6 +348,24 @@
       "reason": "shape_out_of_domain"
     },
     {
+      "name": "a result past int64 is refused, never wrapped",
+      "terms": [
+        {
+          "term": "latent_tokens",
+          "bytes": 8589934592
+        }
+      ],
+      "shape": {
+        "width": 0,
+        "height": 0,
+        "batch": 1,
+        "frames": 0,
+        "latent_tokens": 2147483648
+      },
+      "reason": "result_out_of_range",
+      "why": "THE ROW THE GO SIDE FOUND. Python's bignums cannot notice an int64 overflow, so the shared constraint is on the ANSWER: 2**33 bytes per latent token at 2**31 tokens is 2**64, and a wrapped answer is a SMALL number"
+    },
+    {
       "name": "a negative shape scalar is refused",
       "terms": [
         {

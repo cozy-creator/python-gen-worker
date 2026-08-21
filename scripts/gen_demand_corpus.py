@@ -174,6 +174,16 @@ def build() -> dict[str, object]:
             "reason": "shape_out_of_domain",
         },
         {
+            "name": "a result past int64 is refused, never wrapped",
+            "terms": _terms(("latent_tokens", 1 << 33)),
+            "shape": RequestShape(latent_tokens=SHAPE_BOUNDS["latent_tokens"]).as_document(),
+            "reason": "result_out_of_range",
+            "why": "THE ROW THE GO SIDE FOUND. Python's bignums cannot notice "
+                   "an int64 overflow, so the shared constraint is on the "
+                   "ANSWER: 2**33 bytes per latent token at 2**31 tokens is "
+                   "2**64, and a wrapped answer is a SMALL number",
+        },
+        {
             "name": "a negative shape scalar is refused",
             "terms": _terms(("const", MiB(1))),
             "shape": {

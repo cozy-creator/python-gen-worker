@@ -27,6 +27,7 @@ from gen_worker.demand import (
     DemandDeclarationError,
     DemandEvaluationError,
     GiB,
+    MAX_RESULT_BYTES,
     MiB,
     RequestShape,
     SHAPE_BOUNDS,
@@ -120,11 +121,14 @@ def test_the_corpus_gate_goes_red_when_the_evaluator_MOVES() -> None:
 
 
 def test_the_overflow_case_is_actually_an_overflow_case() -> None:
-    """The corpus's ceiling row must be one a naive `c*v` would fail on.
+    """The corpus's ceiling row must be one that breaks a 64-bit reader.
 
-    A conformance corpus that cannot fail is decoration. This asserts the
-    naive product genuinely leaves int64, so the Go side's split division is
-    being tested rather than merely exercised.
+    THIS ROW HAS ALREADY EARNED ITS KEEP. The first Go evaluator did a split
+    division (`q*v + (r*v)//scale`) on the premise that the shape bounds kept
+    both products inside int64; `r*v` is 1.3e19 here, and Go wrapped by
+    exactly 2**64/1e6 on the corpus's first run. Python's bignums could not
+    have surfaced that in a thousand green test runs — which is the entire
+    argument for having a corpus a second language executes.
     """
 
     ceiling = RequestShape(
@@ -133,8 +137,25 @@ def test_the_overflow_case_is_actually_an_overflow_case() -> None:
         latent_tokens=SHAPE_BOUNDS["latent_tokens"],
     )
     naive = GiB(1) * ceiling.width * ceiling.height * ceiling.batch
-    assert naive > (1 << 63) - 1, "the ceiling row no longer overflows int64"
-    assert (const(GiB(64)) + per_mp_batch(GiB(1))).evaluate(ceiling) < (1 << 63) - 1
+    assert naive > MAX_RESULT_BYTES, "the ceiling row no longer overflows int64"
+    # The ANSWER still fits, which is what makes this a conformance case rather
+    # than a refusal case.
+    assert (const(GiB(64)) + per_mp_batch(GiB(1))).evaluate(ceiling) < MAX_RESULT_BYTES
+
+
+def test_a_result_past_int64_REFUSES_rather_than_wrapping() -> None:
+    """The bound is on the ANSWER, and it exists because Go is the other reader.
+
+    Python could carry this number forever; the wire form and the Go evaluator
+    cannot. A wrapped answer is a SMALL number, which is the direction that
+    buys too little card, so the refusal is loud instead.
+    """
+
+    huge = RequestShape(latent_tokens=SHAPE_BOUNDS["latent_tokens"])
+    with pytest.raises(DemandEvaluationError, match="64-bit"):
+        evaluate([{"term": "latent_tokens", "bytes": 1 << 33}], huge)
+    # One below the bound is fine — the refusal is a ceiling, not a taste.
+    assert evaluate([{"term": "latent_tokens", "bytes": 1 << 31}], huge) == 1 << 62
 
 
 # --------------------------------------------------------------------------

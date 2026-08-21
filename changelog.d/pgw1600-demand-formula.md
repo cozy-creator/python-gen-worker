@@ -53,3 +53,15 @@
   mint-time stamp exists, and the guard is falsified against a module that
   really does import the plane, so it is known to be armed rather than assumed
   to be.
+
+- **pgw#1600: the cross-language corpus earned its keep on its first Go run, and
+  the arithmetic changed because of it.** The evaluator originally avoided
+  forming `coefficient * value` — it split `c = q*scale + r` and computed
+  `q*v + floor(r*v/scale)` on the premise that the declared shape bounds kept
+  both products inside int64. They do not: at the corpus's own ceiling row,
+  `mp_batch` with a 1 GiB coefficient makes `r*v` 1.3e19, and Go wrapped by
+  exactly 2^64/1e6. **Python's bignums could not have found this in a thousand
+  green runs** — only a second language executing the same table could. Both
+  sides now compute exactly (Python natively, Go through `math/big`) and the
+  one shared constraint is that the ANSWER fits int64; a formula whose worst
+  case does not is refused loudly rather than wrapped into a small number.
