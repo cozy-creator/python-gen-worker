@@ -113,15 +113,21 @@ def main(argv: list[str] | None = None) -> int:
               "are NOT.")
         patterns += ["*.fp16.safetensors"]
     else:
-        # The fp32 masters. Exclude the .fp16 duplicates so the download is not
-        # paid twice for weights that are then thrown away.
-        patterns += ["*.safetensors"]
+        # The fp32 masters, and ONLY the diffusers component tree.
+        # `*.safetensors` alone is a trap: the SDXL base repo also ships the
+        # SINGLE-FILE checkpoints `sd_xl_base_1.0.safetensors` and
+        # `sd_xl_base_1.0_0.9vae.safetensors` (~7 GB each), which the diffusers
+        # pipeline never loads. Measured on a rented pod: that pattern turns a
+        # ~13 GB pull into ~27 GB of which half is discarded. Scoping to the
+        # component directories keeps only what `model_index.json` names.
+        patterns += [f"{name}/*.safetensors" for name in WEIGHT_DIRS]
 
     started = time.monotonic()
     source = Path(snapshot_download(
         args.repo, allow_patterns=patterns,
         cache_dir=args.cache or None,
-        ignore_patterns=None if args.allow_fp16_source else ["*.fp16.safetensors"],
+        ignore_patterns=None if args.allow_fp16_source else [
+            "*.fp16.safetensors", "sd_xl_base_1.0*.safetensors"],
     ))
     print(f"[fetch] {args.repo} -> {source} ({time.monotonic() - started:.1f}s)")
 
