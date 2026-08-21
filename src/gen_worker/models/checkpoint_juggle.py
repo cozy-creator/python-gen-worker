@@ -42,6 +42,41 @@ layout and a real switch); LoRA variants stay on the fold path (pgw#1571);
 tensors outside the managed regions (non-leaf buffers such as
 ``position_ids`` — architecture-derived, not learned) are NOT swapped, and
 the switch report says how many bytes that leaves untouched.
+
+TWO TEMPLATES, AND WHICH ONE IS LIVE (pgw#1621)
+-----------------------------------------------
+:func:`admission_refusal` is the last-line byte gate, and it diffs an incoming
+checkpoint's safetensors headers against a TEMPLATE. There are now two, and
+they are at different stages, so this says plainly which is which rather than
+letting a reader assume the newer one is the one running:
+
+* :class:`~gen_worker.models.arena_residency.ArenaLayout` — the LIVE arm, and
+  the only one anything constructs today. The template is derived from the
+  SERVING MODULE TREE (``plan_layout``), which is why it can also state byte
+  counts and DLPack dtypes: it is the arena this process actually allocated.
+  :class:`CheckpointCatalog` and :class:`CheckpointJuggler` are built on it.
+* :class:`~gen_worker._vendor.tensorfs.layout2.ExpectedHeader` — the v2 arm,
+  AWAITING ITS PRODUCER. The template is the computed ``quant(topology)``
+  header, and this arm is what tracker ``research/tensor-layout-v2/0-DESIGN-v2.md``
+  row "juggle admission consumes v2" describes. Nothing in ``src/`` calls it
+  yet — and nothing in ``src/`` calls the ArenaLayout arm either: this whole
+  module has NO ``src/`` caller as of pgw#1621 (checked: only
+  ``tests/test_checkpoint_juggle.py`` and
+  ``benchmarks/checkpoint_juggle_pgw1607.py``). The serving-side wiring that
+  builds a residency, admits a checkpoint and hands over a binding is pgw#1602's,
+  not landed.
+
+**THE WORKER ENFORCES; IT NEVER RE-DECIDES.** The v2 arm takes BOTH its inputs
+— the expected header AND the admission verdict — from its caller. It computes
+neither. ``quant(topology)`` is evaluated by the Go engine and by nothing else
+(there is deliberately no pyo3 binding for the evaluator or the decision), and
+the tri-state verdict is the hub bind gate's, arriving binding-carried on
+``DeployBinding.lane_verdicts``. v1 shipped three copies of one matching rule
+and the copies were free to disagree about an admit; a fourth one here, in the
+shape of a header this module computed for itself or a verdict it inferred from
+a clean diff, would undo that cut. So ``verdict=`` is a REQUIRED keyword on the
+v2 arm — a missing verdict refuses, because the one direction that fails
+silently is the permissive one.
 """
 
 from __future__ import annotations
@@ -56,6 +91,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from .._vendor.tensorfs.layout2 import ExpectedHeader, LayoutTensor
 from .arena_residency import (
     ArenaLayout,
     ArenaResidency,
@@ -120,6 +156,14 @@ class SlotSource:
     dtype_code: int
     dtype_bits: int
     shape: Tuple[int, ...]
+    #: The safetensors CONTAINER SPELLING, verbatim from the header (``"BF16"``,
+    #: ``"F8_E4M3"``, ``"U8"``). pgw#1621: the v2 arm compares this against
+    #: ``LayoutTensor.dtypes``, which is a list of container spellings, so the
+    #: spelling is KEPT rather than reconstructed from ``(dtype_code,
+    #: dtype_bits)`` — a reverse table would be a second producer of the fact
+    #: the header already states, and the DLPack pair cannot express the
+    #: spellings the arena has no placement for at all (fp8, packed fp4).
+    spelling: str = ""
 
 
 def read_manifest(
@@ -169,6 +213,7 @@ def read_manifest(
                 dtype_code=code_bits[0],
                 dtype_bits=code_bits[1],
                 shape=tuple(int(d) for d in meta["shape"]),
+                spelling=spelling,
             )
     return out
 
@@ -207,18 +252,52 @@ def _slot_key(slot: SlotSpec) -> str:
     return f"{rest}.{slot.attr}" if rest else slot.attr
 
 
-def admission_refusal(
-    layout: ArenaLayout, manifest: Dict[str, SlotSource]
-) -> Optional[str]:
-    """None when the checkpoint is byte-layout-identical to the lane template
-    (up to a float cast); else the first refusal, named.
+#: The hub bind gate's tri-state, exactly as it arrives on
+#: ``DeployBinding.lane_verdicts``. Spelled here so the enforcement side and
+#: the transport side share one vocabulary; this module never PRODUCES one.
+LANE_VERDICT_SATISFIES = "satisfies"
+LANE_VERDICT_DERIVABLE = "derivable"
+LANE_VERDICT_INCOMPATIBLE = "incompatible"
 
-    The tensor-layout contract guarantees the key set, dtypes and RANK — not
-    concrete shapes. This check is what makes "all checkpoints in a lane share
-    the byte layout" a PROVEN property per checkpoint instead of an assumed
-    one. It reads headers only.
+
+def admission_refusal(
+    template: "ArenaLayout | ExpectedHeader",
+    manifest: Dict[str, SlotSource],
+    *,
+    verdict: Optional[str] = None,
+    component: Optional[str] = None,
+) -> Optional[str]:
+    """None when the checkpoint may join this lane's juggle set; else the first
+    refusal, naming the offending tensor.
+
+    Two templates, and :func:`admission_refusal` is one gate over both so a
+    future producer swaps the template without moving the call site. See the
+    module docstring for which arm is live.
+
+    ``ArenaLayout`` — the tree-derived template. ``verdict`` and ``component``
+    do not apply and are refused if passed: the arena IS this process's own
+    allocation, so there is no second party whose decision could be carried,
+    and its slot table is already flat.
+
+    ``ExpectedHeader`` — the computed ``quant(topology)`` template. ``verdict``
+    is REQUIRED: the admission DECISION is the hub's and arrives
+    binding-carried, so this arm enforces one rather than reaching a rival
+    conclusion from a clean diff. ``component`` names which component of a
+    multi-component layout the manifest holds; ``None`` compares the whole
+    layout, keyed the way :func:`merge_component_manifests` keys it.
     """
-    for region in layout.regions:
+    if isinstance(template, ExpectedHeader):
+        return _expected_header_refusal(
+            template, manifest, verdict=verdict, component=component
+        )
+    if verdict is not None or component is not None:
+        raise TypeError(
+            "admission_refusal(ArenaLayout, ...): verdict= and component= "
+            "belong to the ExpectedHeader arm. An arena layout is this "
+            "process's OWN allocation — there is no second party whose "
+            "admission decision could be carried, and its slot table is flat."
+        )
+    for region in template.regions:
         for slot in region.slots:
             key = _slot_key(slot)
             src = manifest.get(key)
@@ -247,6 +326,111 @@ def admission_refusal(
                     f"tensor {key!r} states {src.length} bytes for shape "
                     f"{list(src.shape)}; the lane template holds {slot.nbytes}"
                 )
+    return None
+
+
+def _expected_keys(
+    expected: ExpectedHeader, component: Optional[str]
+) -> Dict[str, LayoutTensor]:
+    """The computed header's finite map, keyed the way a manifest is keyed.
+
+    One component -> its own keys, unprefixed. Several -> ``<component>.<key>``.
+    That is :func:`merge_component_manifests`'s rule verbatim, not a parallel
+    one: two spellings of the same key set is how a gate starts refusing a
+    checkpoint for being spelled differently.
+    """
+    if component is not None:
+        return dict(expected.component(component))
+    if len(expected.components) == 1:
+        return dict(next(iter(expected.components.values())))
+    return {
+        f"{name}.{key}": entry
+        for name, tensors in expected.components.items()
+        for key, entry in tensors.items()
+    }
+
+
+def _expected_header_refusal(
+    expected: ExpectedHeader,
+    manifest: Dict[str, SlotSource],
+    *,
+    verdict: Optional[str],
+    component: Optional[str],
+) -> Optional[str]:
+    """The v2 arm: enforce the hub's verdict, then diff against ``quant(topology)``.
+
+    Key set, shape and dtype — the three facts the computed header states, and
+    the three v1 could not state together (v1's schema was deliberately
+    shapeless, which is how SDXL-inpainting's 9-channel ``conv_in`` legally
+    admitted and served garbage).
+
+    Two details that are load-bearing rather than incidental:
+
+    * ``LayoutTensor.dtypes`` is a LIST. Several entries mean the rule is
+      REFERENCE-TOLERANT — the reference packaging the topology was extracted
+      from really did ship this key in a wider container (an ``I64``
+      ``num_batches_tracked`` on a bf16 tree) — so acceptance is
+      :meth:`LayoutTensor.accepts`, membership in the list, never equality with
+      the first entry. Refusing the others would refuse the very checkpoint the
+      topology came from.
+    * ``LayoutTensor.optional`` marks a key a calibration MAY not have produced
+      (``input_scale``, ``pre_quant_scale``). Absent is fine; PRESENT still has
+      to match, because optional is about existence and never about shape.
+
+    Extra tensors the header does not name are not refused: they are bytes this
+    lane does not read, and the checkpoint's admissibility is a statement about
+    what the lane needs. The hub's stamping already decided what the checkpoint
+    IS.
+    """
+    if verdict is None:
+        return (
+            f"no admission verdict was carried for {expected.stamp}. The "
+            f"verdict is the hub bind gate's and arrives binding-carried "
+            f"(`DeployBinding.lane_verdicts`); the worker ENFORCES it and "
+            f"never re-decides, so an absent verdict refuses rather than "
+            f"being read as an admit"
+        )
+    if verdict != LANE_VERDICT_SATISFIES:
+        if verdict == LANE_VERDICT_DERIVABLE:
+            return (
+                f"the hub bind gate answered {LANE_VERDICT_DERIVABLE!r} for "
+                f"{expected.stamp}: these bytes reach the lane only through a "
+                f"priced conversion job, and the endpoint serves the PRODUCED "
+                f"artifact — never the source"
+            )
+        return (
+            f"the hub bind gate answered {verdict!r} for {expected.stamp}; "
+            f"only {LANE_VERDICT_SATISFIES!r} admits"
+        )
+
+    for key, entry in _expected_keys(expected, component).items():
+        src = manifest.get(key)
+        if src is None:
+            if entry.optional:
+                continue
+            return (
+                f"tensor {key!r} is absent from the checkpoint; "
+                f"{expected.stamp} states it at shape {list(entry.shape)}"
+            )
+        if src.shape != entry.shape:
+            return (
+                f"tensor {key!r} is shaped {list(src.shape)} in the checkpoint "
+                f"and {list(entry.shape)} in {expected.stamp} — a different "
+                f"layout, i.e. a different lane"
+            )
+        if not src.spelling:
+            return (
+                f"tensor {key!r} carries no safetensors dtype spelling, so it "
+                f"cannot be checked against {expected.stamp}'s "
+                f"{list(entry.dtypes)}. Manifests come from `read_manifest`, "
+                f"which keeps the header's own spelling"
+            )
+        if not entry.accepts(src.spelling):
+            return (
+                f"tensor {key!r} is dtype {src.spelling!r} in the checkpoint; "
+                f"{expected.stamp} accepts {list(entry.dtypes)} — a different "
+                f"quant rule, not a representation choice"
+            )
     return None
 
 
@@ -952,6 +1136,9 @@ class CheckpointJuggler:
 
 
 __all__ = [
+    "LANE_VERDICT_DERIVABLE",
+    "LANE_VERDICT_INCOMPATIBLE",
+    "LANE_VERDICT_SATISFIES",
     "CheckpointCatalog",
     "CheckpointImage",
     "CheckpointJuggler",

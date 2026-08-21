@@ -62,21 +62,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
-from .file_layout import MULTI_FILE
-from .tensor_layout_contract import (
-    BAKE_LOW_RANK_BRANCH,
-    CONTRACT_COZY_SVDQ_NVFP4_LR8,
-    CONTRACT_NUNCHAKU_V1,
-    ELEMENT_BF16,
-    ELEMENT_FP8_E4M3,
-    ELEMENT_INT4,
-    ELEMENT_NVFP4,
-    SCALE_GROUP_16,
-    SCALE_PER_CHANNEL_OUT,
-    SCALE_PER_TENSOR,
-    DecodeDimensions,
-    implements_contract,
-)
+from .tensor_layout_contract import unregistered_decode_path
 from .nvfp4_quant import BLOCK, pack_e2m1, to_blocked_scales
 
 # deepcompressor MmaWeightPackerBase geometry, bits=4 / warp_n=128
@@ -491,51 +477,39 @@ def _decode_quantized_lowrank(
 # ---------------------------------------------------------------------------
 
 
-@implements_contract(
-    contract=CONTRACT_NUNCHAKU_V1,
-    serves=("svdq-fp4-w4a4",),
-    composes_lora=False,
-    decodes=DecodeDimensions(
-        elements=(ELEMENT_NVFP4, ELEMENT_INT4, ELEMENT_BF16),
-        # `wscales` are group-of-16; the second level is per-channel
-        # (`wcscales`) or per-tensor (`wtscale`) and the decoder branches on
-        # which is present, so both are decoded shapes of ONE handle.
-        scales=(SCALE_GROUP_16, SCALE_PER_CHANNEL_OUT, SCALE_PER_TENSOR),
-        # UNCONSTRAINED, and that is a statement: the nunchaku descriptor
-        # fixes the keys, so the fact lives on the HANDLE and a synonym for it
-        # here would be a second home (th#1937 declined `contract.native`).
-        key_topologies=(),
-        # MULTI-FILE ONLY, and it is the artifact that is constrained, not the
-        # checkpoint: the nunchaku-format file is one flat namespace, but the
-        # svdq engine refuses an artifact that is only that file —
-        # `load_svdq_native_pipeline` raises on `not art.component` ("a
-        # servable flavor must be a full diffusers tree with the checkpoint
-        # under its denoiser directory"), and `convert/svdq.py` builds exactly
-        # that.
-        file_layouts=(MULTI_FILE,),
-        bakes=(BAKE_LOW_RANK_BRANCH,),
-    ),
-    why="pgw#685: this is THE decoder of the nunchaku v1 single-file layout. "
-        "The decoded SvdqLinear has no additive adapter branch (w8a8_lora is "
-        "branch-capable on w8a8 / fp8-storage / plain bf16 only).",
-)
-@implements_contract(
-    contract=CONTRACT_COZY_SVDQ_NVFP4_LR8,
-    serves=("svdq-fp4-w4a4",),
-    composes_lora=False,
-    decodes=DecodeDimensions(
-        elements=(ELEMENT_NVFP4, ELEMENT_INT4, ELEMENT_FP8_E4M3, ELEMENT_BF16),
-        scales=(SCALE_GROUP_16, SCALE_PER_CHANNEL_OUT, SCALE_PER_TENSOR),
-        key_topologies=(),
-        file_layouts=(MULTI_FILE,),   # same two engine refusals as above
-        # The QUANTIZED low-rank branch is what separates this handle from
-        # nunchaku.v1@1, and the handle is where that fact lives — the ruled
-        # tensor-set registry names the SET, not the scheme it is stored in.
-        bakes=(BAKE_LOW_RANK_BRANCH,),
-    ),
-    why="te#148's quantized low-rank branch is a distinct MAJOR and this "
-        "decoder branches on it (`lowrank_quant`), which is what makes the "
-        "claim true rather than inherited from nunchaku.v1@1.",
+# NO QUANT RULE NAMES THESE BYTES (pgw#1621). The two v1 handles this decoder
+# used to declare — `nunchaku.v1@1` and `cozy.svdq-nvfp4-lr8@1` — died with the
+# v1 corpus, and neither has a ratified v2 successor: the eight rules in
+# tensorfs `spec/v2/rules/` are the three plain dtypes, three fp8 packagings
+# and two nvfp4 packagings, and this is none of them.
+#
+# It is NOT either nvfp4 rule, and the temptation to say otherwise is exactly
+# what those two rules' descriptions warn about. `cozy.nvfp4-flat@1` is LOW-
+# nibble e2m1 with FLAT [out, in/16] block scales; `bfl.nvfp4-preswizzled@1` is
+# HIGH-nibble with cuBLAS-tiled scales; reading one as the other measured LPIPS
+# 1.11. What this module reads is a THIRD packaging again — I8 [out, in/2] in
+# deepcompressor's mma.sync m16n8k64 FRAGMENT interleave, E4M3 [in/16, out]
+# micro-scales in the (4, 4, 8) row split, every vector (`wcscales`,
+# `smooth_factor`, `bias`) swizzled by `pack_scale`, and a BAKED low-rank
+# branch that is part of the arithmetic rather than a side tensor.
+@unregistered_decode_path(
+    reason="nunchaku's 'v1 single-file' SVDQ packaging, and its cozy "
+           "quantized-low-rank-branch extension (`__metadata__.lowrank_quant` "
+           "= int8|fp8_e4m3, te#148). No ratified v2 quant rule names either: "
+           "the weights are I8 [out, in/2] in deepcompressor's mma.sync "
+           "m16n8k64 FRAGMENT interleave with E4M3 [in/16, out] micro-scales "
+           "in the (4, 4, 8) row split, swizzled per-channel (`wcscales`) or "
+           "per-tensor (`wtscale`) second-level scales, and a BAKED low-rank "
+           "branch. That is a THIRD 4-bit packaging — not `cozy.nvfp4-flat@1` "
+           "(LOW-nibble, flat [out, in/16] scales, no low-rank branch) and not "
+           "`bfl.nvfp4-preswizzled@1` (HIGH-nibble, cuBLAS-tiled scales); "
+           "aliasing either measured LPIPS 1.11. What closes this gap is a "
+           "ratified `spec/v2/rules/` document in tensorfs whose conventions "
+           "carry the fragment interleave, the micro-scale pack, the "
+           "second-level rank and the low-rank-branch scheme as IDENTITY, plus "
+           "a re-vendor per `_vendor/VENDORED.toml`. Until then this decoder "
+           "contributes no rule and no execution lane: pgw#685's "
+           "`svdq-fp4-w4a4` body is real code that the decode-set cannot name.",
 )
 def decode_linear(tensors: dict[str, Any], out_features: int,
                   in_features: int, *,

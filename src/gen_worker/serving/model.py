@@ -391,7 +391,7 @@ class Model(Generic[MT]):
 
         class SdxlModel(
             Model[SDXL],
-            lanes={contracts.SDXL_DIFFUSERS_BF16: lane(
+            lanes={("sdxl.diffusers@1", "plain.bf16@1"): lane(
                 request=const(GiB(1.2)) + per_mp_batch(MiB(220)),
                 resident=("vae",),
             )},
@@ -526,7 +526,7 @@ class Model(Generic[MT]):
                 f"one could stand in for. A model FAMILY has no canonical "
                 f"layout; a CHECKPOINT has one, and this declaration commits "
                 f"to it. Write "
-                f"`lanes={{contracts.<YOUR_CONTRACT>: lane(request=…)}}`. "
+                f'`lanes={{("<topology>@N", "<quant>@N"): lane(request=…)}}`. '
                 f"(The `canonical_contract` borrow, `lanes=()` and "
                 f"`eager_only=` are all deleted — pgw#1599.)"
             )

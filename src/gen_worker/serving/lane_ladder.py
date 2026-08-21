@@ -46,7 +46,7 @@ from .lane_spec import DeclaredLane as LaneDeclaredLane
 #: Protocol that outlives the type it stood in for becomes a second opinion
 #: about what a lane is. The ladder reads `contract_id`, `dtype` and `min_sm`
 #: and re-derives none of them — in particular `min_sm` keeps its single
-#: producer (`capability_floor_for_dtype`, applied at declaration), because one
+#: producer (`capability_floor_for_rule`, applied at declaration), because one
 #: hand-written floor could never be right for a bf16/fp8/nvfp4 class at once.
 DeclaredLane = LaneDeclaredLane
 
@@ -465,7 +465,7 @@ def resolve_lane(
     for cand in ranked:
         contract_id = str(getattr(cand.declared, "contract_id", "") or "")
         min_sm = int(getattr(cand.declared, "min_sm", 0) or 0)
-        # THE BASELINE RUNG IS NEVER FLOORED OUT. `capability_floor_for_dtype`
+        # THE BASELINE RUNG IS NEVER FLOORED OUT. `capability_floor_for_rule`
         # answers 80 for bf16, which is a statement about tensor cores and not
         # about whether the model runs — bf16 runs on Ampere, on Pascal and on
         # a CPU, at some speed. Flooring it out would leave a host with no CUDA

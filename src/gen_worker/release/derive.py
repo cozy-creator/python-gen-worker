@@ -8,13 +8,21 @@ instrumented discovery, and stamp the observed graph set -- plus the lane
 contracts and the model type's checkpoint-defaults schema -- as the static
 release metadata document.
 
+**pgw#1621 re-keyed every lane spelling in this document onto the tensor-layout
+v2 STAMP PAIR** — ``"<topology>@N+<quant>@N"``, th#1809's ``LayoutId.render()``,
+byte-shared with the hub's ``tensorfs.LayoutID.String``. Three fields carry it
+and the hub's ``derive_document.go`` cross-checks all three; they have exactly
+one producer here (:func:`lane_contract_handle`) so they cannot disagree. The
+per-lane v1 layout ``document`` is DELETED with the v1 corpus: a v2 layout is
+``quant(topology)``, computed by the Go engine and never stored, so there is
+nothing left for a lane row to inline.
+
 **EVERY model class declares REAL lanes** (Paul's ruling pair, 2026-08-20;
 pgw#1597/pgw#1599). A lane answers checkpoint COMPATIBILITY and lane
 SELECTION, not merely compilation, so there is no derived, borrowed or
-implicit identity to trace under — a class that names no tensorfs contract is
-REFUSED at class definition, before this module ever sees it. Contracts are
-made CHEAP rather than optional (tensorfs#130 generates a candidate from a
-safetensors header). **Compilation participation is the MARK**: a model with
+implicit identity to trace under — a class that names no lane is REFUSED at
+class definition, before this module ever sees it. **Compilation
+participation is the MARK**: a model with
 no ``ctx.compile`` call in ``load()`` traces, marks nothing, and is reported
 as an unmarked lane — measured, not assumed. There is no eager keyword.
 
@@ -74,9 +82,8 @@ from ..serving.entrypoints import ENTRYPOINT_ATTR
 from ..serving.model import (
     Model,
     ModelDeclarationError,
-    lane_handle,
     model_marks_compile,
-    model_lanes,
+    model_declared_lanes,
     model_requires,
     model_shapes,
     model_structural,
@@ -199,10 +206,31 @@ def model_model_type(cls: type) -> Optional[type]:
 
 
 def lane_contract_handle(owner: str, lane: Any) -> str:
-    try:
-        return lane_handle(lane)
-    except ModelDeclarationError as exc:
-        raise DeriveError(f"{owner}: {exc}") from exc
+    """The lane's WIRE spelling — ``"<topology>@N+<quant>@N"``.
+
+    pgw#1621: this used to unwrap a tensorfs v1 ``Contract`` object through
+    four fallbacks. A lane is now a ``DeclaredLane`` that was fully READ at
+    class definition, so the handle is a field read and the only failure left
+    is being handed something that is not a lane at all.
+
+    THE ONE PRODUCER of the three lane-spelling fields the hub's
+    ``derive_document.go`` cross-checks — the ``lane_contracts`` map KEY, that
+    entry's own ``stamp``, and ``graphs.lanes[].contract``. They re-key in
+    LOCKSTEP because they are one call, not three transcriptions: the hub
+    REFUSES the release (``release_compiled_graphs_invalid_lane``) when the key
+    and the stamp disagree, and silently appends a phantom stamp-only lane when
+    a ``graphs.lanes[].contract`` names something ``lane_contracts`` does not.
+    """
+
+    rendered = getattr(lane, "contract_id", None)
+    if isinstance(rendered, str) and rendered:
+        return rendered
+    raise DeriveError(
+        f"{owner}: {lane!r} is not a declared lane — it carries no "
+        f"`contract_id`. Lanes reach the derive as `DeclaredLane` rows read at "
+        f"class definition (`model_declared_lanes`); the tensorfs v1 Contract "
+        f"OBJECT that used to be passed here is deleted (pgw#1621)."
+    )
 
 
 @dataclass(frozen=True)
@@ -410,14 +438,14 @@ def _lane_model_class(module: ModuleType) -> tuple[Optional[type], str]:
         ):
             continue
         try:
-            lanes = model_lanes(value)
-            # pgw#1391: `model_lanes` hands back the lane OBJECTS without
-            # reading them, so a class whose lane is a CONTRACT still has to
-            # have that contract read here.
-            from ..serving.model import lane_dtype
-
-            for lane in lanes:
-                lane_dtype(lane, where=f"class {value.__qualname__!r}")
+            # pgw#1621: the re-read loop that stood here is DELETED with its
+            # reason. pgw#1391 added it because `model_lanes` handed back
+            # UNREAD v1 contract objects whose `dtype` was a property that
+            # could raise, so a dtype-less lane cleared declaration and died at
+            # load on a rented pod. `model_declared_lanes` answers rows that
+            # were fully read at class definition — dtype and sm floor off the
+            # ratified quant rule — so there is nothing left here to re-read.
+            model_declared_lanes(value)
             marked = model_marks_compile(value)
         except ModelDeclarationError as exc:
             raise DeriveError(str(exc)) from exc
@@ -1234,105 +1262,44 @@ def _torch_dtype(value: Any) -> Any:
     raise DeriveError(f"contract dtype {value!r} names no torch dtype")
 
 
-def _contract_document(
-    owner: str, lane: Any, warnings: list[str]
-) -> Optional[dict[str, Any]]:
-    """The lane contract's canonical layout document.
+# ── The per-lane v1 layout DOCUMENT is DELETED (pgw#1621) ───────────────────
+#
+# `_contract_document` and `_contract_digest` stood here and emitted
+# `lane_contracts[<lane>].document` — the lane's whole tensorfs v1 contract
+# document, inlined — plus the producer's digest of it. Both are gone, because
+# the thing they carried no longer exists.
+#
+# There IS no per-lane v1 document under v2. A layout is `quant(topology)`,
+# COMPUTED by the Go engine and never stored (tensorfs `spec/v2/README.md`), so
+# there is nothing for a lane row to inline: N topologies and M rules replace
+# N x M documents. What identifies the lane is the STAMP PAIR, which the row
+# already carries and which the hub's own corpus resolves.
+#
+# The hub side is already there: `release_compiled_graphs.lane_contract.document`
+# is `omitempty`, and th#2250 narrowed the ingest gate to read the STAMP and
+# nothing else. Omitting the field is what the gate now wants — the SPELLING is
+# what it cross-checks, and it cross-checks it three ways (see
+# :func:`lane_contract_handle`).
+#
+# Nothing in this repo READ the field. The three near-misses, checked:
+# `discovery/entrypoints_v2.py` and `discovery/validation.py` mention
+# `lane_contracts` in PROSE only; `serving/hub_store.py` transcribes the hub's
+# th#2133 answer shape in a docstring and consumes `lane`/`graphs` from it, not
+# `lane_contract.document`. The rest of the hits are test fixtures.
 
-    The whole point of contract OBJECTS (Paul, 2026-08-18) is that the full
-    layout TRAVELS in the release metadata, so the platform needs no prior
-    knowledge of it. tensorfs#111 spells it as ``Contract.document``, a
-    canonical JSON **STRING** — an earlier duck-typed reader here accepted
-    only a ``dict`` and therefore shipped ``"document": null`` on every lane
-    while the stamp looked correct.
 
-    A lane that CLAIMS a document must produce a readable one (typed
-    refusal: a stamp with an unreadable layout behind it is worse than no
-    row). A lane object that exposes none at all — a resolved ``LaneRef``
-    stand-in — travels stamp-only with a WARNING naming it, never silently.
+def _resolve_lane(torchcg: ModuleType, lane: Any) -> Any:
+    """The resolved ``ctx.lane``: the pair render plus a REAL torch dtype.
+
+    pgw#1621: both halves are now FIELD READS off a ``DeclaredLane``, so the
+    refusals that stood here are gone with what made them possible. The dtype
+    used to be a tensorfs ``Contract`` property that could RAISE (a v1 document
+    could simply omit its top-level dtype); a v2 quant rule's
+    ``declared_dtype`` is required by the rule schema and read at class
+    definition, so a dtype-less lane is inexpressible rather than guarded.
     """
 
-    claimed = False
-    for attribute in ("document", "as_dict", "to_dict"):
-        value = getattr(lane, attribute, None)
-        if value is None:
-            continue
-        claimed = True
-        if callable(value):
-            value = value()
-        if isinstance(value, dict):
-            return value
-        if isinstance(value, (str, bytes)):
-            try:
-                parsed = json.loads(value)
-            except ValueError:
-                continue
-            if isinstance(parsed, dict):
-                return parsed
-    if claimed:
-        raise DeriveError(
-            f"{owner}: lane {lane!r} exposes a layout document that cannot "
-            f"be read as JSON. The document travels in the release metadata; "
-            f"a stamp with an unreadable layout behind it is worse than no "
-            f"row."
-        )
-    # pgw#1391: this was a WARNING, and it fired on EVERY lane — including the
-    # live `sdxl.diffusers-bf16@1`, whose document tensorfs really does
-    # publish. Every release therefore carried `"document": null` and an empty
-    # digest, which is se#756's "the release proves NO lane". A stamp with no
-    # layout behind it is the bug, so it refuses. Under the contract library
-    # every real lane HAS a document.
-    raise DeriveError(
-        f"{owner}: lane {lane_handle(lane)} carries NO layout document. The "
-        f"whole point of contract OBJECTS is that the layout TRAVELS in the "
-        f"release metadata, so the platform needs no prior knowledge of it — "
-        f"a stamp alone is a claim the hub cannot intern. Declare the lane as "
-        f"an imported tensorfs Contract "
-        f"(`gen_worker.models.SDXL_DIFFUSERS_BF16`-style), never a handle "
-        f"string or a stand-in."
-    )
-
-
-def _contract_digest(lane: Any) -> str:
-    """The contract object's OWN digest of its layout document.
-
-    The hub interns the document and computes its own digest (th#2146); the
-    producer's digest travels beside it so a mismatch is an assertion rather
-    than a silent divergence in canonical serialization. Always the
-    ``sha256:``-prefixed spelling, whatever the object stores.
-    """
-
-    digest = getattr(lane, "digest", None)
-    if not isinstance(digest, str) or not digest:
-        return ""
-    return digest if digest.startswith("sha256:") else f"sha256:{digest}"
-
-
-def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
-    """The resolved ``ctx.lane``: always a LaneRef with a REAL torch dtype.
-
-    A contract OBJECT (tensorfs registry entry / inline Contract) carries its
-    own dtype (tensorfs#113's top-level field, safetensors spelling); the
-    Model class header refuses dtype-less lanes at declaration, so this
-    refusal is the derive-side restatement, never a fallback path.
-    """
-
-    handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
-    try:
-        # tensorfs#113's `dtype` is a PROPERTY that RAISES on a contract
-        # declaring none (minimax.h3-dit-diffusers today), so this is a try,
-        # never a getattr default -- otherwise the refusal below is bypassed
-        # by an un-caught MissingDtype traceback.
-        dtype = getattr(lane, "dtype", None)
-    except Exception:
-        dtype = None
-    if dtype is None:
-        raise DeriveError(
-            f"lane {handle!r}: the contract object carries no dtype. A lane "
-            f"IS a tensorfs layout contract (an imported object; its load "
-            f"dtype is the contract's) — never a bare string."
-        )
-    return torchcg.LaneRef(handle, dtype=_torch_dtype(dtype))
+    return torchcg.LaneRef(lane.contract_id, dtype=_torch_dtype(lane.dtype))
 
 
 def endpoint_source_root(module: ModuleType) -> Optional[Path]:
@@ -1480,7 +1447,7 @@ def _derive_lane(
 
     hollow = _hollow()
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
-    resolved = _resolve_lane(torchcg, cls, lane)
+    resolved = _resolve_lane(torchcg, lane)
     model_type = model_model_type(cls)
     merged: dict[str, Any] = {}
     all_targets: set[str] = set()
@@ -1838,7 +1805,7 @@ def derive_release(
                     f"model class."
                 )
         requires = model_requires(cls)
-        for lane in model_lanes(cls):
+        for lane in model_declared_lanes(cls):
             lane_graphs = _derive_lane(
                 torchcg, cls, lane, plans, checkpoint_dir, warnings,
                 program_sink=program_sink,
@@ -1856,18 +1823,17 @@ def derive_release(
                 )
                 continue
             lanes.append(lane_graphs)
-            entry: dict[str, Any] = {
-                "stamp": lane_graphs.contract,
-                "document": _contract_document(
-                    f"class {cls.__name__!r}", lane, warnings
-                ),
-                # The PRODUCER's own digest of that document. The hub interns
-                # the layout and derives its own digest (th#2146); carrying
-                # this lets it ASSERT the two agree instead of trusting a
-                # re-serialization round-trip. Empty when the lane object
-                # states none.
-                "digest": _contract_digest(lane),
-            }
+            # THE SECOND of the three lane-spelling fields the hub cross-checks.
+            # `lane_graphs.contract` is `lane_contract_handle`'s answer for THIS
+            # lane, carried through `_derive_lane`, and it is the same object
+            # that keys the map below and that `graphs.lanes[].contract`
+            # carries — one producer, so the three cannot drift into
+            # `release_compiled_graphs_invalid_lane`.
+            #
+            # `document` and `digest` are GONE (pgw#1621): a v2 layout is
+            # computed, not stored, so there is no per-lane document to inline.
+            # See the block above `_resolve_lane`.
+            entry: dict[str, Any] = {"stamp": lane_graphs.contract}
             # ie#740 placement floor for THIS lane, read off the class header
             # (`requires=`). Absent = undeclared, and the platform default is
             # what the deployment gets — the honest state, never an invented
@@ -1875,6 +1841,9 @@ def derive_release(
             floor = requires.get(lane_graphs.contract)
             if floor is not None:
                 entry["requires"] = floor.render()
+            # THE FIRST field: the map KEY. Key != stamp is the hub's hard
+            # refusal `release_compiled_graphs_invalid_lane`, which is why this
+            # is the same expression and not a second spelling of it.
             lane_contracts[lane_graphs.contract] = entry
 
     # pgw#1527: a skipped payload is STATED, per entrypoint, and is absent
@@ -1899,6 +1868,12 @@ def derive_release(
         "v": 1,
         "kind": DOCUMENT_KIND,
         "endpoint": endpoint_name,
+        # THE THIRD field lives in here: `graphs.lanes[i].contract`, which is
+        # the `contract=` each `LaneGraphs` was built with — again
+        # `lane_contract_handle`'s one answer. A `graphs.lanes[].contract` the
+        # `lane_contracts` map does not carry does NOT refuse at the hub: it
+        # silently appends a phantom stamp-only lane, which is the failure mode
+        # that makes the lockstep matter more than the refusal does.
         "graphs": graphs_document.as_dict(),
         "lane_contracts": lane_contracts,
         # The per-entrypoint request envelope, DERIVED FROM THE SIGNATURE

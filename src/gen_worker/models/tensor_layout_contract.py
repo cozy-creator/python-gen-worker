@@ -146,7 +146,25 @@ def rule_dtype(quant: object) -> str:
         )
     return str(rule.declared_dtype)
 
-_HANDLE_RE = re.compile(r"^([a-z0-9]+)\.([a-z0-9][a-z0-9._-]*)@([1-9][0-9]*)$")
+#: The handle grammar, transcribed from tensorfs' `isTFM1ContractName`
+#: (`tfm1.go:217`) + `ParseHandle` (`v2doc.go:72`), which is the one authority.
+#:
+#: THE PRODUCER SEGMENT ADMITS A HYPHEN, AND THIS REGEX DID NOT. It was
+#: `^([a-z0-9]+)\.…$`, which is correct for every v1 QUANT handle the fleet ever
+#: had (`plain.bf16`, `cozy.fp8-rowwise` — hyphens only ever fell in the FORMAT
+#: segment) and wrong for half the v2 TOPOLOGY corpus: `flux2-klein.diffusers@1`,
+#: `hidream-o1.diffusers@1`, `minimax-h3.diffusers@1`, `z-image.diffusers@1`,
+#: `ltx2-upsampler.diffusers@1`, `sdxl-inpainting.diffusers@1` and
+#: `qwen3-6-35b-a3b.transformers@1` all refused as "not a handle". Five migrated
+#: endpoints could not have declared a lane at all.
+#:
+#: This is the SAME relaxation tensorfs#121 made and the vendored v1 port had to
+#: follow ("the port refused `hidream-o1.diffusers-bf16` until it did"); the
+#: tensorlayout-side regex simply never had a hyphenated producer to trip over
+#: until the topology axis carried real model names. A LEADING hyphen still
+#: refuses, on both segments, exactly as upstream's does.
+_HANDLE_RE = re.compile(
+    r"^([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9._-]*)@([1-9][0-9]*)$")
 
 # ── The five DECODE DIMENSIONS are DELETED (pgw#1621) ────────────────────────
 #

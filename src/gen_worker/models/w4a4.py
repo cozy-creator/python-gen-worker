@@ -50,7 +50,7 @@ from ..component_vocab import denoiser_components
 from .materialized_view import third_party_dir
 from .safetensors_header import read_header
 from .tensor_source import load_state_dict, open_tensor_source
-from .tensor_layout_contract import unregistered_decode_path
+from .tensor_layout_contract import implements_quant_rule
 from typing import Any, Dict, List, Optional
 import shutil
 from ..hostfacts import cuda_ready
@@ -497,16 +497,27 @@ def _dequant_into(sd: Dict[str, Any], name: str, compute: Any) -> None:
         sd.pop(f"{name}{suffix}", None)
 
 
-# NO `@implements_contract` HERE, deliberately — the marker below records WHY
-# in the derived decode-set rather than only in this comment, so a refusal can
-# name it (pgw#1245).
-@unregistered_decode_path(
-    reason="the flat nvfp4 layout this reads has no registry entry, and it is "
-           "NOT bfl.nvfp4-preswizzled@1 — that one is HIGH-nibble with "
-           "pre-swizzled scales, and conflating them measures LPIPS 1.11. "
-           "Registering ours needs a real artifact to read; none has ever "
-           "passed the publish gate, so this decoder contributes no contract "
-           "and no execution lane.",
+# THE GAP THIS USED TO RECORD IS CLOSED (pgw#1621). Under v1 the flat nvfp4
+# layout had no registry entry and this decoder carried
+# `@unregistered_decode_path`. `cozy.nvfp4-flat@1` is now a RATIFIED v2 rule,
+# and it was transcribed FROM this module — its conventions are the shapes in
+# the module docstring above, fact for fact: LOW-nibble e2m1 pairs in U8
+# [out, in/2], F8_E4M3 [out, in/16] block scales FLAT row-major, an F32 [1, 1]
+# second level, optional `input_scale` / `pre_quant_scale`, `_K_ALIGN` 32 and
+# `_N_ALIGN` 16.
+#
+# It is still NOT `bfl.nvfp4-preswizzled@1` — that one is HIGH-nibble with
+# cuBLAS-tiled scales, and conflating them measured LPIPS 1.11. The difference
+# is now IN THE DIGEST rather than in this comment, which is what makes the
+# mistake a refusal instead of a shipped disaster.
+@implements_quant_rule(
+    rule="cozy.nvfp4-flat@1",
+    serves=("nvfp4-w4a4-static",),
+    composes_lora=False,
+    why="the blockwise fp4 `_scaled_mm` lane over RESIDENT packed weights "
+        "(sm_100+); a qualifying host whose kernel probe or numerics "
+        "self-check fails dequants once at load to bf16-resident, same rule, "
+        "no lane claim. W4A4Linear has no adapter branch, so no runtime LoRA.",
 )
 def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
                        compute_dtype: Any = None, mode: str = "",

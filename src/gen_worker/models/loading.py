@@ -28,27 +28,18 @@ import struct
 from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
 from .materialized_view import third_party_dir
-from .file_layout import (
-    MULTI_FILE,
-    SINGLE_FILE,
-    is_single_file_snapshot,
-    observed_file_layout,
-)
+from .file_layout import is_single_file_snapshot
 from .tensor_layout_contract import (
-    CONTRACT_COZY_FP8_ROWWISE,
-    CONTRACT_HF_FP8_BLOCKWISE,
-    CONTRACT_NUNCHAKU_V1,
-    CONTRACT_PLAIN_BF16,
-    ELEMENT_BF16,
-    ELEMENT_FP16,
-    ELEMENT_FP32,
-    KEYS_DIFFUSERS_SPLIT_QKV,
-    KEYS_TRANSFORMERS_SPLIT_QKV,
-    SCALE_NONE,
-    DecodeDimensions,
-    implements_contract,
+    implements_quant_rule,
     unregistered_decode_path,
 )
+
+#: The ratified v2 quant rules this module's arms decode, by their tensorfs
+#: `spec/v2/rules/` handles. Named once so a lane refusal and the decorator
+#: below spell one handle, never two.
+RULE_PLAIN_BF16 = "plain.bf16@1"
+RULE_COZY_FP8_ROWWISE = "cozy.fp8-rowwise@1"
+RULE_HF_FP8_BLOCKWISE = "hf.fp8-blockwise@1"
 from .fp8_storage import restructure_fp8_storage
 from .rung import touches_host_ram
 from .memory import (
@@ -593,20 +584,24 @@ def apply_block_window_offload(
     return applied
 
 
-def require_decodable(contract: str, path: Any, *, component: str = "") -> None:
+def require_decodable(rule: str, path: Any, *, component: str = "") -> None:
     """Refuse, typed, before handing bytes to a decoder this IMAGE does not
     declare (pgw#1245).
 
-    Three questions, all answered from HEADERS and directory shape, all before
-    any tensor is read: is this contract in the image's decode-set, is the
-    artifact's on-disk SHAPE one a decoder of that contract opens, and is its
-    tensor-KEY convention one that decoder ingests. The third is not the
+    Two questions, both answered from HEADERS and directory shape, both before
+    any tensor is read: is this QUANT RULE in the image's decode-set, and was
+    the tree's tensor-KEY convention classifiable at all. The second is not the
     first: `plain.bf16@1` minimax-native weights (fused `blocks.N.attn.qkv_proj`)
     and `plain.bf16@1` diffusers weights (split `to_q/to_k/to_v`) are the same
-    contract, the same file topology and one key in common, and the diffusers
-    class cannot read the native tree at all. A DENOISER whose convention
-    matches nothing registered refuses too — unknown is never a hopeful pass
-    where a model class is chosen from the architecture.
+    rule with one key in common, and the diffusers class cannot read the native
+    tree at all. A DENOISER whose convention matches nothing this image
+    recognizes refuses — unknown is never a hopeful pass where a model class is
+    chosen from the architecture.
+
+    The per-decoder FILE-LAYOUT axis is gone with the v1 vocabulary (pgw#1621),
+    so the on-disk SHAPE is no longer checked here; `observed_file_layout` is
+    still what a publish-side classifier reads, and nothing in this image
+    intersects on it any more.
 
     The declared decode-set is th#1938's third intersection and the hub answers
     it ahead of time — but the worker is where the bytes actually arrive, so it
@@ -620,12 +615,10 @@ def require_decodable(contract: str, path: Any, *, component: str = "") -> None:
     from ..discovery.decode_set import require_decodable as _require
     from .key_topology import classify_snapshot
 
-    tree = Path(path) / component if component else Path(path)
     _require(
-        contract,
+        rule,
         where=str(path),
         keys=classify_snapshot(Path(path), component),
-        layout=observed_file_layout(tree),
     )
 
 
@@ -652,12 +645,16 @@ def detect_gguf_snapshot(path: Path) -> Optional[tuple[Path, str]]:
 
 
 @unregistered_decode_path(
-    reason="gguf.native@1 is a TOPOLOGY contract; no QUANT contract names the "
-           "ggml block encodings this decodes (`models/gguf_dequant.py`), so "
-           "the bytes are decodable here and unnameable in the decode-set "
-           "until the platform registers a descriptor for them. That "
-           "registration is the tensorhub-side half of pgw#1498's storage "
-           "ruling and is what closes this exemption.",
+    reason="gguf.native@1 is a LOADER-SHAPE topology handle; no ratified v2 "
+           "QUANT RULE names the ggml block encodings this decodes "
+           "(`models/gguf_dequant.py`) — the eight rules are three plain "
+           "dtypes, three fp8 packagings and two nvfp4 packagings, and a "
+           "k-quant block is none of them. So the bytes are decodable here and "
+           "unnameable in the decode-set until a `spec/v2/rules/` document "
+           "describes them (per block quant, with its own capability floor — a "
+           "GGUF rule states an honest 0) and is re-vendored. That authoring "
+           "is the platform-side half of pgw#1498's storage ruling and is what "
+           "closes this exemption.",
 )
 def load_gguf_pipeline(
     cls: Any,
@@ -1465,7 +1462,7 @@ def contract_loaded_component(
     w8a8_art = detect_w8a8_artifact(weights)
     if w8a8_art is not None and _covers(w8a8_art.component):
         require_decodable(
-            CONTRACT_COZY_FP8_ROWWISE, weights, component=w8a8_art.component)
+            RULE_COZY_FP8_ROWWISE, weights, component=w8a8_art.component)
         return load_w8a8_denoiser(
             weights, w8a8_art, compute_dtype=compute_dtype, cls=cls)
     w4a4_art = detect_w4a4_artifact(weights)
@@ -1500,7 +1497,7 @@ def contract_loaded_component(
     blockwise = detect_hf_fp8_blockwise(where)
     if blockwise is not None:
         require_decodable(
-            CONTRACT_HF_FP8_BLOCKWISE, weights,
+            RULE_HF_FP8_BLOCKWISE, weights,
             component=component if where != weights else "")
         return load_hf_fp8_blockwise(
             where, cls=cls, dtype=compute_dtype, tree=blockwise)
@@ -2246,27 +2243,23 @@ def _load_modular_pipeline(
     return pipe
 
 
-@implements_contract(
-    contract=CONTRACT_PLAIN_BF16,
+# ONE RULE PER ELEMENT TYPE, and this arm declares only bf16. `plain.bf16@1`,
+# `plain.f16@1` and `plain.f32@1` are three ratified rules with three digests
+# and three capability floors (80 / 70 / 0) — under v1 they were one handle
+# with an `elements=` side axis listing all three, which is precisely the
+# shape the v2 cut removes. The loader still READS an f16 or f32 tree (it
+# honours the weights' own precision below); what it can no longer do is claim
+# all three under one handle. Declaring the other two is a separate, checkable
+# statement — `serves=` and the floor differ — not a comma in a tuple.
+#
+# `scales=(none,)` is likewise the handle now: a plain rule transforms nothing,
+# and a tree carrying scale tensors is a quantized rule whose own decoder reads
+# them. The `key_topologies=` axis is the v2 TOPOLOGY half of a lane stamp and
+# is no longer a decoder's to declare — see the report note on what that costs.
+@implements_quant_rule(
+    rule=RULE_PLAIN_BF16,
     serves=("bf16-w16a16", "fp8-w8a16"),
     composes_lora=True,
-    decodes=DecodeDimensions(
-        elements=(ELEMENT_BF16, ELEMENT_FP16, ELEMENT_FP32),
-        # `none` is the DECLARATION, not an omission: dense weights carry no
-        # scale tensors, and a tree that does carry them belongs to a
-        # quantized contract whose own decoder reads them.
-        scales=(SCALE_NONE,),
-        # `from_pretrained` addresses tensors by the class's own parameter
-        # names. `native.fused-qkv@1` is registered and DECLARED BY NOTHING
-        # here: a minimax-native tree offered to this loader is refused by
-        # name rather than dying as an md5 miss inside a detection helper.
-        key_topologies=(KEYS_DIFFUSERS_SPLIT_QKV, KEYS_TRANSFORMERS_SPLIT_QKV),
-        # BOTH, and each by its own entry point: a component-directory tree
-        # goes to `from_pretrained`, and `_single_file_checkpoint` routes a
-        # loose checkpoint to `from_single_file` (:2583).
-        file_layouts=(MULTI_FILE, SINGLE_FILE),
-        bakes=(),
-    ),
     why="the dense-weights path: plain bf16 bytes are read as stored "
         "(bf16-w16a16), and `storage_dtype=fp8` restructures the SAME bytes "
         "into fp8 storage with per-layer upcast (fp8-w8a16). Both are "
@@ -2348,7 +2341,13 @@ def load_from_pretrained(
 
     svdq_art = detect_svdq_artifact(Path(path))
     if svdq_art is not None and callable(getattr(cls, "from_pretrained", None)):
-        require_decodable(CONTRACT_NUNCHAKU_V1, path)
+        # NO `require_decodable` ON THIS ARM (pgw#1621), and it is a gap rather
+        # than a decision: the check takes a RULE HANDLE, and no ratified v2
+        # rule names the svdq packaging `models/svdq_layout.py` decodes (see
+        # its `@unregistered_decode_path`). The v1 handle this passed —
+        # `nunchaku.v1@1` — is deleted, and passing it now would refuse the
+        # whole lane, since an unregistered path contributes no decode-set
+        # entry. Ratifying the rule restores the check as one line.
         if components:
             logger.warning("preloaded components ignored on the svdq lane")
         return load_svdq_pipeline(cls, Path(path), svdq_art)
@@ -2359,7 +2358,7 @@ def load_from_pretrained(
 
     w8a8_art = detect_w8a8_artifact(Path(path))
     if w8a8_art is not None and callable(getattr(cls, "from_pretrained", None)):
-        require_decodable(CONTRACT_COZY_FP8_ROWWISE, path)
+        require_decodable(RULE_COZY_FP8_ROWWISE, path)
         compute = None
         if dtype:
             try:
@@ -2424,7 +2423,7 @@ def load_from_pretrained(
     # The generic arm IS the plain.bf16@1 decoder. An image whose decoder
     # modules failed to import declares nothing, and "nothing" must refuse by
     # name here rather than produce a pipeline nobody declared.
-    require_decodable(CONTRACT_PLAIN_BF16, path)
+    require_decodable(RULE_PLAIN_BF16, path)
     kwargs: Dict[str, Any] = {}
     if components:
         kwargs.update(components)
