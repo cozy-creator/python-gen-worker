@@ -328,9 +328,8 @@ import logging  # noqa: E402
 from typing import Any, cast  # noqa: E402
 
 import torch  # noqa: E402
-from diffusers import DiffusionPipeline  # noqa: E402
+from diffusers import DiffusionPipeline, ModelMixin  # noqa: E402
 from diffusers.configuration_utils import ConfigMixin, register_to_config  # noqa: E402
-from diffusers.models.modeling_utils import ModelMixin  # noqa: E402
 
 
 class _Block(ModelMixin, ConfigMixin):
@@ -358,7 +357,7 @@ def _pipe():
     return _ThreeStagePipeline(_Block(8), _Block(16), _Block(4))
 
 
-def _with_card(monkeypatch, free_gb: float, total_gb: float = 24.0):
+def _with_card(monkeypatch: Any, free_gb: float, total_gb: float = 24.0) -> Any:
     """Present a readable card to `memory`. Without this every test in this file that goes
     through the production entry point silently exercises the fallback instead."""
     import gen_worker.models.memory as m
@@ -375,7 +374,7 @@ def test_the_production_entry_point_actually_reaches_the_grant(monkeypatch):
     seen = {}
     real = m._grant_for_pipeline
 
-    def spy(*a, **k):
+    def spy(*a: Any, **k: Any) -> Any:
         g, p = real(*a, **k)
         seen["grant"] = g
         return g, p
@@ -396,10 +395,13 @@ def test_the_wiring_guard_can_go_red(monkeypatch):
     the fallback. If this passes while the test above also passes, both are measuring
     something real; if the seam were unreachable, this would be the only reachable path."""
     m = _with_card(monkeypatch, free_gb=0.0)
-    walked = []
-    monkeypatch.setattr(
-        m, "select_auto_mode", lambda **k: walked.append(1) or "group_offload"
-    )
+    walked: list = []
+
+    def _walk(**k: Any) -> str:
+        walked.append(1)
+        return "group_offload"
+
+    monkeypatch.setattr(m, "select_auto_mode", _walk)
     m.apply_low_vram_config(_pipe(), mode="auto", logger=logging.getLogger("t"))
     assert walked, "an unreadable card must fall through to the free-VRAM walk"
 
