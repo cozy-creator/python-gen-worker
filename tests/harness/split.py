@@ -52,6 +52,13 @@ class SplitHarness:
         *,
         child_cmd: Optional[List[str]] = None,
         watchdog_budget_s: float = 60.0,
+        # pgw#1630: the flatness FLOOR. Separate from the budget above, which is
+        # now only the /proc sampling cadence. A harness that wants to observe a
+        # kill has to say how long "flat" means HERE, because the production
+        # default is a derived 120 s and the ladder needs four of them.
+        # 0 = the production default, which is what most rows want: they are
+        # asserting that nothing is killed.
+        liveness_floor_s: float = 0.0,
         start_limit_burst: int = 3,
         start_limit_interval_s: float = 600.0,
         stop_timeout_s: float = 120.0,
@@ -89,6 +96,7 @@ class SplitHarness:
             transport_backoff_base_s=0.05,
             transport_backoff_cap_s=0.2,
             watchdog_budget_s=watchdog_budget_s,
+            liveness_floor_s=liveness_floor_s,
             start_limit_burst=start_limit_burst,
             start_limit_interval_s=start_limit_interval_s,
             stop_timeout_s=stop_timeout_s,

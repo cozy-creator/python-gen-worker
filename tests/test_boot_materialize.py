@@ -497,27 +497,70 @@ def test_an_ABSENT_ref_records_the_check_it_lost_before_the_fetch_it_starts(
         origin.close()
 
 
-def _hang_verdict(*, activity_kind: str, now: float = 100.0) -> str | None:
-    from types import SimpleNamespace
+# ---------------------------------------------------------------------------
+# pgw#1613 — the fetch runs under an OPEN ACTIVITY.
+#
+# pgw#1630 CHANGED WHAT THAT IS FOR, and this block is the record of the change.
+# The activity used to DECIDE the child's life: the ladder's third rung killed a
+# CPU-burning child whose loop was silent and whose label was missing, which is
+# what happened to two H3 pods with `tree_evidence` provably advancing. The
+# verdict is now kernel-evidence-only, so the activity is TELEMETRY — it names
+# what a stalled child was doing, and it cannot end one.
+#
+# The scope itself STAYS, and the two tests below it are untouched: a stall
+# report that cannot say "during boot_materialize" is a worse bug report, and
+# `activity.py`'s "a silent death is a bug" contract is unaffected.
+# ---------------------------------------------------------------------------
 
-    from gen_worker.procsplit.parent import _ChildSlot
 
-    slot = SimpleNamespace(
-        liveness_evidence=1234.5,
-        liveness_evidence_at=now - 0.5,
-        liveness_activity=activity_kind,
-        p=SimpleNamespace(_evidence_hold_window=15.0),
-    )
-    return _ChildSlot._hang_verdict(cast(Any, slot), now)
+def _ladder_rung(*, activity_kind: str, flat_for: float) -> str:
+    """Run the REAL post-pgw#1630 verdict against a child that has been flat for
+    ``flat_for`` seconds with ``activity_kind`` open.
+
+    Unbound on the production `EvidenceTrack` so the assertion is about the
+    decision object itself. `activity_kind` is deliberately accepted and
+    deliberately unused by the decision — that IS the assertion.
+    """
+    from gen_worker.procsplit.liveness import EvidenceTrack
+
+    track = EvidenceTrack()
+    # evidence is REAL: the child's tree accrued kernel-accounted work, which is
+    # what a CAS fill looks like from the parent's /proc sampler.
+    track.observe(1234.5, 0.0)
+    del activity_kind  # not an input, and the deletion says so
+    return track.verdict(flat_for)
 
 
-def test_the_watchdog_HOLDS_a_cpu_burning_child_only_because_an_activity_is_open() -> None:
-    assert _hang_verdict(activity_kind=activity.KIND_BOOT_MATERIALIZE) == "held", (
-        "a fetch that declares itself must survive a starved event loop"
-    )
-    assert _hang_verdict(activity_kind="") == "loop_wedged_no_activity", (
-        "with nothing open the same child is killed — this is the defect, and "
-        "it is why the fetch has to open an activity at all"
+def test_the_watchdog_HOLDS_a_cpu_burning_child_WHATEVER_it_declared() -> None:
+    """pgw#1613's kill, inverted — and the CLASS closed rather than one site.
+
+    A child mid-materialization is burning CPU with a starved event loop. Under
+    the old ladder the one with a label lived and the one without it was
+    SIGKILLed at 356 s / 687 s on a real H200. Under pgw#1630 they are the same
+    child, because the label is not an input.
+    """
+    from gen_worker.procsplit.liveness import RUNG_ALIVE
+
+    for label in (activity.KIND_BOOT_MATERIALIZE, ""):
+        assert _ladder_rung(activity_kind=label, flat_for=0.5) == RUNG_ALIVE, (
+            f"a child accruing kernel-accounted work was not held with "
+            f"label={label!r}"
+        )
+
+
+def test_the_fetch_activity_STAYS_because_a_stall_report_needs_it() -> None:
+    """pgw#1613's landed scope is kept on purpose.
+
+    "The activity decides nothing" is not "the activity is pointless". It is the
+    label on `compute_child_stalled`, and the difference between a filed bug and
+    a shrug. A reading of pgw#1630 that deletes the scope fails here.
+    """
+    from pathlib import Path as _Path
+
+    from gen_worker import boot_materialize as bm
+
+    assert "activity.running(activity.KIND_BOOT_MATERIALIZE)" in (
+        _Path(bm.__file__).read_text()
     )
 
 
