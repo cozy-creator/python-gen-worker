@@ -627,3 +627,50 @@ def test_one_slot_and_one_ref_is_ARITHMETIC_but_anything_else_is_a_GUESS() -> No
 
     two = pb.DesiredResidency(generation=1, disk_refs=[DREAM, "org/other@1"])
     assert boot_picks(two, loaded, CheckpointConfig.from_wire(two)) == {}
+
+
+def test_a_synthesized_ASSET_survives_the_envelope_the_warm_pass_builds(
+    tmp_path: Path,
+) -> None:
+    """The warm payload becomes an envelope (`msgspec.to_builtins`) and is
+    decoded back by the REAL `decode_envelope` — so `local_path` has to survive
+    the round trip, or an asset-taking entrypoint warms with an asset it cannot
+    open.
+
+    This is the half `materialize_input_assets` would otherwise have destroyed:
+    it NULLs every `local_path` on the correct reasoning that a path in RunJob
+    input is caller-controlled wire data. A boot warm payload is the one input
+    on that path which is not — the platform wrote the file — so `invoke` skips
+    that step, and only that step, under `ctx.boot_warmup`.
+    """
+    import msgspec
+
+    from gen_worker.serving.entrypoints import ENTRYPOINT_ATTR
+    from gen_worker.serving.envelope import decode_envelope
+
+    sys.path.insert(0, str(RELEASE_FIXTURES))
+    try:
+        import media_endpoint  # type: ignore[import-not-found]
+    finally:
+        sys.path.remove(str(RELEASE_FIXTURES))
+    spec = getattr(media_endpoint.analyze, ENTRYPOINT_ATTR)
+
+    payload, reason = neutral_payload(spec.payload_type, str(tmp_path))
+    assert reason == "", reason
+    written = Path(payload.audio.local_path)
+    assert written.is_file() and written.stat().st_size > 0
+
+    decoded = decode_envelope(spec, {"input": msgspec.to_builtins(payload)})
+
+    assert decoded.payload.audio.local_path == str(written)
+    assert decoded.payload.audio.mime_type == "audio/wav"
+    # ...and the handler really can open it — the raise site a production
+    # failure came from (`_local_path`) is satisfied.
+    assert media_endpoint.analyze(
+        RequestContext("boot-warmup-analyze", boot_warmup=True), decoded.payload
+    ).size_bytes == written.stat().st_size
+
+    # The sibling entrypoint's REQUIRED VideoAsset is the honest refusal.
+    video_spec = getattr(media_endpoint.extract_frame, ENTRYPOINT_ATTR)
+    nothing, why = neutral_payload(video_spec.payload_type, str(tmp_path))
+    assert nothing is None and "video" in why
