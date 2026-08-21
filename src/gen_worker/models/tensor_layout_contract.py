@@ -349,7 +349,7 @@ def unregistered_decode_path_of(obj: Any) -> tuple[UnregisteredDecodePath, ...]:
 
 # ── §1.33: the DEMAND side of the same vocabulary ─────────────────────────────
 #
-# `@implements_contract` above is the SUPPLY-adjacent census — "which decoders
+# `@implements_quant_rule` above is the SUPPLY-adjacent census — "which decoders
 # does this IMAGE contain". The DEMAND is what `Slot(layouts=...)` declares:
 # "what does this slot's code need in order to run". Two facts, one vocabulary,
 # so the handle grammar and the registration refusal are shared verbatim rather
