@@ -15,7 +15,7 @@ from gen_worker._vendor.tensorfs import LocalCAS, project_snapshot  # noqa: E402
 from cas_fixture import ingest_repository  # noqa: E402
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR  # noqa: E402
 from gen_worker.serving.streaming import (  # noqa: E402
-    BridgeWeightStore,
+    NativeWeightStore,
     NameMismatch,
     StreamingLoader,
     engine_for,
@@ -37,9 +37,6 @@ from streaming_fixture import (  # noqa: E402
     header_order_differs_from_offset_order,
     write_bytes_now,
 )
-
-WINDOW = 4096
-
 
 def _project(base: Path, source: Path, key: str) -> Path:
     cas = LocalCAS(base)
@@ -70,6 +67,11 @@ def _cas_manifest(tree: Path) -> Tuple[Any, Any]:
     return projected.cas, projected.manifest
 
 
+def _native_store(tree: Path) -> NativeWeightStore:
+    cas, manifest = _cas_manifest(tree)
+    return NativeWeightStore.from_manifest(cas.root, manifest)
+
+
 def test_the_fixture_can_actually_witness_a_scrambled_walk(
     article: dict[str, Any]
 ) -> None:
@@ -95,9 +97,15 @@ def test_ctx_load_streams_store_to_memory_writing_nothing(
     stubs = [p for p in sorted(tree.rglob("*.safetensors")) if stub_at(p) is not None]
     assert stubs, f"{tree} projected no pointer stubs — nothing to stream"
 
-    store = TracedStore(BridgeWeightStore(*_cas_manifest(tree)))
-    loader = StreamingLoader(store, device="cpu", buffer_bytes=WINDOW, buffers=3)
+    store = TracedStore(_native_store(tree))
+    loader = StreamingLoader(store, device="cpu")
 
+    # Warm library-level config/import caches before the process-I/O arm. The
+    # measured load below is still a fresh skeleton and a fresh destination
+    # map; only unrelated one-time interpreter writes are outside the fence.
+    StreamingLoader(_native_store(tree), device="cpu").build(
+        pipeline_cls, checkpoint_dir=tree, lane=Lane()
+    )
     before = write_bytes_now()
     pipeline = loader.build(pipeline_cls, checkpoint_dir=tree, lane=Lane())
     written = write_bytes_now() - before
@@ -106,7 +114,7 @@ def test_ctx_load_streams_store_to_memory_writing_nothing(
     report = loader.last_report
     assert report is not None
     assert report.weights_streamed_bytes > 0
-    assert report.staging == "pageable"
+    assert report.staging == "destination"
     assert report.io == "buffered"
     assert report.containers == 4
 
@@ -115,14 +123,14 @@ def test_ctx_load_streams_store_to_memory_writing_nothing(
     for component in ("unet", "vae", "text_encoder", "text_encoder_2"):
         assert on_meta(getattr(pipeline, component)) == ()
 
-    windows = store.assert_file_order()
-    assert windows > 20, (
-        f"only {windows} window(s) were read; a walk that fits in one window "
-        f"is ordered by accident and cannot witness a scrambled one"
+    fills = store.assert_file_order()
+    assert fills > 20, (
+        f"only {fills} tensor(s) were filled; a one-tensor container "
+        f"cannot witness a scrambled walk"
     )
-    assert report.windows == windows
+    assert report.tensors == fills
 
-    assert written < 1 << 20, (
+    assert written == 0, (
         f"the streamed load wrote {written} bytes; the whole point of the "
         f"2026-08-19 ruling is that it writes none"
     )
@@ -132,8 +140,8 @@ def test_every_container_is_read_end_to_end_exactly_once(
     article: dict[str, Any]
 ) -> None:
     """The windows tile each container's data range: no gap (a tensor read from nowhere) and no overlap (a byte paid for twice)."""
-    store = TracedStore(BridgeWeightStore(*_cas_manifest(article["tree"])))
-    loader = StreamingLoader(store, device="cpu", buffer_bytes=WINDOW, buffers=3)
+    store = TracedStore(_native_store(article["tree"]))
+    loader = StreamingLoader(store, device="cpu")
     loader.build(article["pipeline_cls"], checkpoint_dir=article["tree"], lane=Lane())
 
     per_container: dict[str, list[tuple[int, int]]] = {}

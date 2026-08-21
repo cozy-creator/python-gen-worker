@@ -36,7 +36,7 @@ from cas_fixture import ingest_repository  # noqa: E402
 from gen_worker._vendor.tensorfs import LocalCAS, project_snapshot  # noqa: E402
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR  # noqa: E402
 from gen_worker.serving.streaming import (  # noqa: E402
-    BridgeWeightStore,
+    NativeWeightStore,
     StreamingLoader,
 )
 from gen_worker.serving.streaming.engine import LaneDtypeUnmet  # noqa: E402
@@ -114,8 +114,10 @@ def loaded(tmp_path_factory: pytest.TempPathFactory) -> Any:
     source = base / "source-model"
     pipeline_cls = _heterogeneous_source(source)
     tree = _project(base, source, key="c" * 64)
+    cas, manifest = _cas_manifest(tree)
     loader = StreamingLoader(
-        BridgeWeightStore(*_cas_manifest(tree)), device="cpu", buffer_bytes=4096
+        NativeWeightStore.from_manifest(cas.root, manifest),
+        device="cpu",
     )
     pipeline = loader.build(pipeline_cls, checkpoint_dir=tree, lane=Lane)
     return {"pipeline": pipeline, "report": loader.last_report, "tree": tree,

@@ -211,13 +211,31 @@ class TracedStream:
     def length(self) -> int:
         return self._inner.length
 
-    def readinto(self, offset: int, length: int, buffer: Any) -> int:
-        self._log.append((self._container, int(offset), int(length)))
-        return self._inner.readinto(offset, length, buffer)
+    @property
+    def native_reader(self) -> Any:
+        return self._inner
+
+    def fill_host_address(
+        self,
+        name: str,
+        destination_ptr: int,
+        destination_bytes: int,
+        destination_offset: int = 0,
+        layout: str = "torch.contiguous@1",
+    ) -> Any:
+        tensor = next(item for item in self.tensors if item.name == name)
+        self._log.append((self._container, int(tensor.offset), int(tensor.nbytes)))
+        return self._inner.fill_host_address(
+            name,
+            destination_ptr,
+            destination_bytes,
+            destination_offset,
+            layout,
+        )
 
 
 class TracedStore:
-    """Records every byte range the engine asks the store for."""
+    """Records every tensor range the engine asks tensorfs to fill."""
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
@@ -233,7 +251,7 @@ class TracedStore:
 
     def assert_file_order(self) -> int:
         """One forward pass per container, never a seek backwards."""
-        assert self.reads, "the engine read nothing"
+        assert self.reads, "the engine filled nothing"
         per_container: Dict[str, List[Tuple[int, int]]] = {}
         for container, offset, length in self.reads:
             per_container.setdefault(container, []).append((offset, length))
