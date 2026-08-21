@@ -234,6 +234,17 @@ class CheckpointMaterialization:
             # A weightless release, or a release whose config names nothing.
             # There is nothing to wait for, so readiness is immediate — the
             # gate must never be able to strand a pod that has no weights.
+            #
+            # NO WARM PASS HERE, and the reason is th#2233 rather than this
+            # branch. A config naming zero refs also names zero checkpoint
+            # BINDINGS, so `boot_picks` has nothing to bind and every function
+            # would skip with "no boot-time checkpoint binding" — a warm call
+            # placed here would do nothing but say so. th#2233 measured that
+            # the hub sends zero `disk_refs` for `fixed` bindings FLEET-WIDE
+            # (the only HelloAck seeder covers dynamic slots, of which the hub
+            # has none), so today every pod lands in this branch and the warm
+            # pass rides that fix — which is the same fix that makes
+            # `first_request_servable` mean anything at all.
             self.state = STATE_READY
             self.failure = ""
             logger.info(
