@@ -559,19 +559,39 @@ class _Admission:
 
 
 class SnapshotSizer:
-    """Weight bytes from the materialized tree's tensorfs manifest.
+    """Weight bytes from the materialized tree's manifest — the WHOLE tree.
 
     ``tree_bytes`` sizes a PROJECTED tree from its manifest rather than
-    walking stubs, so this is known before any byte moves — which is what
+    walking stubs, so this is known before any byte moves, which is what
     admission requires.
 
-    IT IS AN UPPER BOUND, NOT THE RESIDENT COST (pgw#1590), and ``lane`` is a
-    parameter it genuinely cannot answer for: the number is the WHOLE tree at
-    its STORED precision, including components this lane never loads, before
-    any setup()-time `quantize_()` the load path performs. The lane's own
-    declared floor is what corrects it, applied by
-    :func:`~gen_worker.serving.residency.admission_charge`; this class stays
-    the honest answer to "how big is the tree on disk".
+    IT IS AN UPPER BOUND, NOT THE RESIDENT COST, and that is deliberate as of
+    pgw#1599. Three narrower answers were tried and MEASURED against the
+    vendored contract library, and all three can UNDER-count — the one
+    direction that OOMs a rented card rather than refusing:
+
+    * **the lane's declared VRAM floor** (pgw#1590) — deleted with every other
+      floor string (Paul: *"there is no required VRAM"*).
+    * **summing the tensors the lane's CONTRACT claims** — a contract is a
+      layout TEMPLATE describing a matching SET, not an inventory. h3's bf16
+      contract declares 10 patterns; anything in the DiT they do not name goes
+      uncounted.
+    * **charging only the FILES the contract claims a tensor in** — measured
+      across four shipped contracts and the coverage is not consistent enough
+      to decide residency from: ``sdxl.diffusers-bf16`` covers unet + vae +
+      text encoders (the whole pipeline), ``sd15.diffusers-bf16`` covers the
+      UNET ONLY, and ``minimax.h3-dit-diffusers`` the DiT only. Narrowing sd15
+      to its contract would drop the VAE and both text encoders that its model
+      class actually holds resident.
+
+    So the tree stands until the number has a producer that cannot be wrong in
+    the OOM direction. What that producer is, is now clear and is not an
+    admission change at all: a lane whose contract states the precision the
+    weights ACTUALLY land at. h3 charges 133 GB of bf16 here and holds ~66.5
+    because it `quantize_()`s inside `setup()` — a runtime quantization that
+    no manifest, header or contract can see, and that the two-arena design
+    (pgw#1605 exclusion 1) bans outright. Its close is h3 serving a real
+    ``minimax.h3-dit-fp8-rowwise@1`` lane, not a cleverer sizer.
     """
 
     def __init__(self, resolver: HubBindingResolver) -> None:

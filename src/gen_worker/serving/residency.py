@@ -12,12 +12,15 @@ because 3 checkpoints were loaded at the same time"*):
    refuses typed at admission — a CUDA OOM mid-load or at first request is a
    design bug, not bad luck.
 
-   pgw#1590 AMENDS WHERE THAT SIZE COMES FROM. This clause used to say "its
-   EXACT weight byte size (the tensorfs manifest per lane)". The manifest is
-   not exact and is not per lane: it is the whole tree at its STORED
-   precision, an upper bound on residency that cannot see a setup()-time
-   `quantize_()` or an offloaded component. So the lane's declared VRAM floor
-   caps the charge when it is smaller — see :func:`admission_charge`.
+   pgw#1590/pgw#1599 SETTLE WHERE THAT SIZE COMES FROM, and it is back to
+   "its EXACT weight byte size, per lane" — but computed rather than walked.
+   The tree walk is the whole checkpoint at its STORED precision and cannot
+   see a setup()-time `quantize_()`, an offloaded component, or a component
+   the lane never touches. The LANE CONTRACT can see all three, because it
+   names the tensors and the load dtype, so
+   :func:`~gen_worker.models.lane_manifest.lane_weight_bytes` computes the
+   number from headers alone ($0, pre-load). The hand-written VRAM floor that
+   briefly stood in for it is deleted with every other floor string.
 2. **Loads serialized per GPU.** Concurrent instance loads must not race the
    VRAM budget or fragment pinned staging: one load gate.
 3. **Two-tier residency.** VRAM -> RAM-resident (host-staged weights;
@@ -73,83 +76,45 @@ class Charge:
         return self.weight_bytes + self.headroom_bytes
 
 
-def admission_charge(
-    tree_weight_bytes: int, tree_headroom_bytes: int, declared_vram_bytes: int
-) -> Charge:
-    """The bytes to reserve for one instance: the smaller of what the LANE
-    DECLARES it needs of a card and what the STORED TREE implies.
+def admission_charge(weight_bytes: int, headroom_bytes: int) -> Charge:
+    """The bytes to reserve for one instance: the tree's weights + headroom.
 
-    pgw#1590. The tree-derived number is an upper bound on residency and
-    nothing more. It reads a checkpoint's on-disk precision and cannot see
-    what the lane's load path does with those bytes — a ``setup()``-time
-    ``quantize_()`` to w8a8, a text encoder that is offloaded and never lands
-    on the card, a component the lane does not touch at all. minimax-h3 is all
-    three at once: a 133 GB bf16 DiT that serves as ~66 GB of fp8, inside a
-    144 GB repo of which the DiT lane loads one part. Charged from the tree it
-    "needs" 180 GB and no card exists; charged from its own declaration it
-    needs 78 GiB, which is the card the hub already bought for it, and which
-    it demonstrably served on.
+    **A KNOWN OVER-CHARGE, kept deliberately (pgw#1599), and this docstring is
+    the record of why.** pgw#1590 measured the cost: on a real H100 pod
+    ``NeverFits`` refused ``minimax.h3-dit-diffusers@1`` as needing
+    180,063,706,300 bytes on a card with 84,368,556,032 — the exact shape the
+    fleet had served on single H100s two weeks earlier. The stored tree cannot
+    see a `setup()`-time `quantize_()`, an offloaded component, or a component
+    the lane never touches; h3 is all three at once.
 
-    So a declared floor CAPS the charge, and only ever downward:
+    pgw#1590 corrected it with the author's hand-written ``vram78g`` floor,
+    capping this charge downward. pgw#1599 deletes every hand-written floor
+    (Paul, 2026-08-20: *"there is no required VRAM"*), and three replacements
+    were built and MEASURED before this was left as it stands — each one can
+    UNDER-count, which is the direction that OOMs a rented card instead of
+    refusing. :class:`~gen_worker.worker.SnapshotSizer` carries the three and
+    the measurements that killed them.
 
-    * **it can never make admission stricter.** ``min`` — a lane whose floor is
-      generous relative to its tree keeps the tree number, so no lane that is
-      admitted today is refused tomorrow.
-    * **it is not optimism.** The floor is a DECLARATION in the author's own
-      class header (``lanes={contract: "vram78g"}``), statically extractable,
-      and already the number the hub filters placement on. Charging more than
-      it is the incoherent position: it says "the platform placed me on a card
-      sized by this floor, and I refuse to run because I believe I need more
-      than the floor". An endpoint whose floor is below its true residency is
-      broken at PLACEMENT, before admission ever sees it, and that failure has
-      a named owner and a loud warning path (``placement.warn_if_degraded``).
-    * **an undeclared floor changes nothing.** No declaration, no cap, and the
-      conservative whole-tree charge stands. A guess is never allowed to be the
-      optimistic input — an OOM on a rented card is worse than a refusal.
-
-    A capped charge carries its whole footprint in ``weight_bytes`` with zero
-    headroom, because that is what the declaration says: ``vram78g`` is what
-    the lane needs OF A CARD, activations included, not a weights subtotal to
-    add 25% to.
+    So the honest state is: this over-charges, it refuses some lanes that
+    would have fit, and it never admits one that does not. **h3's close is not
+    a cleverer charge — it is h3 serving a lane whose contract states the
+    precision its weights actually land at** (``minimax.h3-dit-fp8-rowwise@1``
+    exists and is `float8_e4m3fn`), which needs tensorfs#128's converted
+    artifact and pgw#1606's loader. The runtime `quantize_()` that opened the
+    gap is itself the standing-rule violation pgw#1605 exclusion 1 names.
     """
 
-    tree = Charge(
-        int(tree_weight_bytes),
-        int(tree_headroom_bytes),
-        f"charged from the STORED TREE: {int(tree_weight_bytes)} weight bytes at "
-        f"the checkpoint's on-disk precision + {int(tree_headroom_bytes)} "
-        f"activation headroom",
-    )
-    declared = int(declared_vram_bytes)
-    if declared <= 0:
-        return Charge(
-            tree.weight_bytes,
-            tree.headroom_bytes,
-            tree.basis
-            + ". This lane DECLARES NO VRAM FLOOR, so admission has nothing "
-            "but the tree to go on and charges all of it. If the lane's load "
-            "path holds less than the tree resident — a setup()-time "
-            "quantize, an offloaded or unused component — declare it in the "
-            "class header (`lanes={contract: \"vramNNg\"}`) and admission "
-            "charges the declaration instead",
-        )
-    if declared >= tree.total:
-        return Charge(
-            tree.weight_bytes,
-            tree.headroom_bytes,
-            tree.basis
-            + f". The lane's declared floor ({declared} bytes) is not smaller, "
-            f"so it does not cap this charge",
-        )
+    weights, headroom = int(weight_bytes), int(headroom_bytes)
     return Charge(
-        declared,
-        0,
-        f"charged from the LANE'S OWN DECLARATION: {declared} bytes "
-        f"(`lanes={{contract: \"vram...g\"}}`), the card this lane states it "
-        f"needs — activations included. The stored tree implies {tree.total} "
-        f"bytes ({tree.weight_bytes} + {tree.headroom_bytes} headroom), an "
-        f"on-disk-precision upper bound this lane's load path does not hold "
-        f"resident",
+        weights,
+        headroom,
+        f"charged from the STORED TREE: {weights} weight bytes at the "
+        f"checkpoint's on-disk precision + {headroom} activation headroom. "
+        f"This is an UPPER BOUND (pgw#1599): a lane that holds less resident "
+        f"— a setup()-time quantize, an offloaded or unused component — is "
+        f"charged for bytes it never puts on the card, and the fix is a lane "
+        f"whose CONTRACT states the precision the weights land at, never a "
+        f"hand-written floor",
     )
 
 
@@ -185,15 +150,15 @@ class InstanceSizer(Protocol):
     """Byte facts, known AHEAD of any allocation."""
 
     def resident_bytes(self, checkpoint_ref: str, lane: str) -> int:
-        """Weight bytes for (checkpoint, lane) from the tensorfs manifest,
-        without loading.
+        """Weight bytes THIS LANE puts on the card, without loading.
 
-        AN UPPER BOUND, not an exact resident cost (pgw#1590 — this docstring
-        used to say "exact" and the production sizer answers with the whole
-        tree at its stored precision). A manifest cannot see a setup()-time
-        `quantize_()`, an offloaded component, or a component the lane never
-        touches; only the lane's own declaration can, and
-        :func:`admission_charge` is where the two meet."""
+        Exact where the lane's contract can be read — the contract names its
+        tensors and its load dtype, so both halves of the old over-charge (a
+        component the lane never touches; a precision the file has and the
+        card does not) fall out of arithmetic over headers. An implementation
+        that cannot be confident falls back to the whole-tree upper bound and
+        says so: over-charging is a refusal, under-charging is an OOM on a
+        rented card."""
         ...
 
     def activation_headroom_bytes(self, checkpoint_ref: str, lane: str) -> int:
@@ -323,8 +288,6 @@ class ResidencyManager:
         checkpoint_ref: str,
         lane: str,
         factory: Callable[[], ModelBackend],
-        *,
-        declared_vram_bytes: int = 0,
     ) -> Lease:
         """Admit, place and single-flight one request's model instance.
 
@@ -333,23 +296,18 @@ class ResidencyManager:
         :class:`NeverFits` at ADMISSION when the charge exceeds the whole
         budget — before ``factory`` runs, before any byte moves.
 
-        ``declared_vram_bytes`` is the lane's own floor declaration
-        (``placement.declared_vram_bytes``), passed by the caller that holds
-        the model class. It CAPS the sizer's tree-derived charge and can never
-        raise it — see :func:`admission_charge` for why the declaration is the
-        more trustworthy of the two numbers.
+        The sizer answers for the LANE (pgw#1599), so there is no second
+        number to reconcile here and no caller-supplied floor to pass in.
         """
         key: InstanceKey = (str(checkpoint_ref), str(lane))
-        tree_weight = int(self._sizer.resident_bytes(*key))
-        if tree_weight <= 0:
+        weight = int(self._sizer.resident_bytes(*key))
+        if weight <= 0:
             raise ResidencyError(
-                f"{key}: the lane manifest states {tree_weight} weight bytes; "
+                f"{key}: the lane manifest states {weight} weight bytes; "
                 f"admission needs the real size"
             )
         charge = admission_charge(
-            tree_weight,
-            int(self._sizer.activation_headroom_bytes(*key)),
-            int(declared_vram_bytes),
+            weight, int(self._sizer.activation_headroom_bytes(*key))
         )
         weight, headroom = charge.weight_bytes, charge.headroom_bytes
         self._confess(key, charge)

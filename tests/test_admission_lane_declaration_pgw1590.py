@@ -1,20 +1,54 @@
-"""Serving admission charges the LANE'S DECLARATION, not the stored tree.
+"""Serving admission charges the STORED TREE, and h3 is the price of that.
+
+**pgw#1590 measured the defect; pgw#1599 deleted its fix and could not
+replace it. This file is the record of both, and of the three replacements
+that were built and MEASURED before the over-charge was left standing.**
 
 pgw#1590, filed from a real H100 pod: ``NeverFits`` refused
 ``minimax.h3-dit-diffusers@1`` as needing 180,063,706,300 bytes on a card with
 84,368,556,032 — the exact shape this fleet served on single H100s two weeks
 earlier. The 180 GB is the WHOLE minimax-h3 repo at its stored bf16 precision
 plus 25%; the lane loads one part of it and `quantize_()`s that part to w8a8
-inside ``setup()``, which no manifest can see and which the endpoint's own
-``lanes={contracts.MINIMAX_H3_DIT_DIFFUSERS: "vram78g"}`` header states.
+inside ``setup()``. pgw#1590 corrected it with the endpoint's hand-written
+``lanes={contracts.MINIMAX_H3_DIT_DIFFUSERS: "vram78g"}`` floor, capping the
+charge downward.
+
+pgw#1599 deletes every hand-written floor (Paul, 2026-08-20: *"there is no
+required VRAM"*). Three replacements were tried, each measured against the
+vendored contract library, and **all three can UNDER-count — the one direction
+that OOMs a rented card instead of refusing it**:
+
+1. **sum the tensors the lane's CONTRACT claims.** A contract is a layout
+   TEMPLATE describing a matching SET, not an inventory: h3's declares 10
+   patterns, and anything in the DiT they do not name goes uncounted.
+2. **charge only the FILES the contract claims a tensor in.** Measured across
+   four shipped contracts and the coverage is not consistent enough to decide
+   residency from — ``sdxl.diffusers-bf16`` covers unet + vae + text encoders,
+   ``sd15.diffusers-bf16`` covers the **UNET ONLY**, ``minimax.h3-dit-diffusers``
+   the DiT only. Narrowing sd15 to its contract would drop the VAE and both
+   text encoders its model class holds resident.
+3. **charge at the contract's dtype.** h3's bf16 contract honestly says
+   ~133 GB. The gap to the ~66.5 GB it actually holds is a RUNTIME
+   `quantize_()` that no manifest, header or contract can see.
+
+**The finding underneath, and it is the point of this file now:** (3) is not
+an admission defect at all. h3's `setup()`-time quantization is the
+undeclared runtime numerics change pgw#1605 exclusion 1 bans — *"Quantization
+is a MINT-time, declared, measured decision — never an admission-time
+reflex."* pgw#1590's hand-written 78 was load-bearing precisely because it
+encoded that violation's consequence. **The close is h3 serving a real
+``minimax.h3-dit-fp8-rowwise@1`` lane** (it exists in the library,
+`dtype=float8_e4m3fn`), which needs tensorfs#128's converted artifact and
+pgw#1606's loader — not a cleverer sizer.
+
+The regression is LATENT, not immediate: endpoints pin gen-worker from PyPI
+and this code reaches h3 only at a version cut it adopts.
 
 INTEGRATION, and the arithmetic is never faked: a real ``LocalCAS`` holding a
 real ``RepositoryManifest`` at minimax-h3's measured per-shard byte sizes, the
-production ``SnapshotSizer`` reading it through ``disk_gc.tree_bytes``, the
-production ``ResidencyManager``, and the declaration read off a real
-``Model`` subclass by the production ``placement.declared_vram_bytes``. The
-only stand-in is the resolver seam (WHICH tree), which is not part of the
-number under test.
+production ``SnapshotSizer`` reading it through ``disk_gc.tree_bytes``, and the
+production ``ResidencyManager``. The only stand-in is the resolver seam (WHICH
+tree), which is not part of the number under test.
 """
 
 from __future__ import annotations
@@ -33,14 +67,10 @@ from gen_worker._vendor.tensorfs import (
     RepositoryManifest,
 )
 from gen_worker._vendor.tensorfs import contracts
-from gen_worker.models import MiniMaxH3
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR
-from gen_worker.serving.model import Model
-from gen_worker.serving.placement import declared_vram_bytes
 from gen_worker.serving.residency import (
     NeverFits,
     ResidencyManager,
-    Tier,
     admission_charge,
 )
 from gen_worker.worker import SnapshotSizer
@@ -62,15 +92,13 @@ H100_BUDGET = 84_368_556_032
 #: What the refusal charged: the whole tree + the /4 activation estimate.
 H3_TREE_CHARGE = H3_TREE_BYTES + H3_TREE_BYTES // 4
 
-#: What the endpoint DECLARES (`serverless-endpoints/minimax-h3`, main.py:292).
+#: What the endpoint used to DECLARE, and what h3 actually holds. Neither is
+#: reachable from a manifest, a header or a contract — see the module
+#: docstring. Kept as CONSTANTS rather than deleted because they are the
+#: measurement that says how big the standing over-charge is.
 H3_FLOOR_BYTES = 78 * GIB
-
-
-class H3Model(Model[MiniMaxH3], lanes={contracts.MINIMAX_H3_DIT_DIFFUSERS: "vram78g"}):
-    """The declaration under test, spelled exactly as the shipped endpoint
-    spells it — a real contract object and a real floor, so this test reads
-    the same class attribute production reads."""
-
+H3_LANE_BF16_BYTES = 133_006_919_280   # the DiT at the contract's own dtype
+H3_ACTUALLY_HELD = 66_503_459_640      # after the setup()-time quantize_()
 
 H3_LANE = contracts.MINIMAX_H3_DIT_DIFFUSERS
 H3_KEY = ("tensorhub/minimax-h3@serve-narrowed", "H3Model/minimax.h3-dit-diffusers@1")
@@ -164,7 +192,7 @@ def h3_manager(tmp_path: Path) -> Any:
 def test_the_production_sizer_reads_the_measured_tree_from_a_real_manifest(
     h3_manager: Any,
 ) -> None:
-    """Non-vacuity: the tree number this test is about is the one the pod
+    """Non-vacuity: the tree number this file is about is the one the pod
     computed, produced by the same code, from a manifest — not a constant
     typed into the test."""
     sizer, _ = h3_manager
@@ -174,15 +202,23 @@ def test_the_production_sizer_reads_the_measured_tree_from_a_real_manifest(
     ) == H3_TREE_CHARGE == 180_063_706_300
 
 
-# ── the regression ───────────────────────────────────────────────────────────
-
-
-def test_the_h3_dit_lane_is_refused_when_its_declaration_is_not_read(
+def test_the_h3_dit_lane_is_refused_on_an_h100_and_this_is_the_KNOWN_cost(
     h3_manager: Any,
 ) -> None:
-    """THE BUG, reproduced byte-for-byte on the real objects. Charging the
-    stored tree — which is what a lane with no readable declaration gets —
-    reproduces the pod's exact refusal string."""
+    """THE STANDING REGRESSION, asserted rather than left to be rediscovered.
+
+    pgw#1590 made this pass by reading the endpoint's hand-written floor;
+    pgw#1599 deleted every hand-written floor and the three measured
+    replacements can all under-count (module docstring). So h3 is refused
+    again, and the refusal is REPRODUCED HERE BYTE FOR BYTE so that the day it
+    stops being true, this test says so instead of a pod.
+
+    Its close is NOT here: h3 must serve a lane whose contract states the
+    precision its weights land at (`minimax.h3-dit-fp8-rowwise@1`,
+    float8_e4m3fn), which needs tensorfs#128's converted artifact and
+    pgw#1606's loader. The runtime `quantize_()` that opened the gap is itself
+    the standing-rule violation pgw#1605 exclusion 1 names.
+    """
     _, manager_for = h3_manager
     manager = manager_for(H100_BUDGET)
     journal: List[str] = []
@@ -193,232 +229,77 @@ def test_the_h3_dit_lane_is_refused_when_its_declaration_is_not_read(
     assert "144050965040 weights + 36012741260 activation headroom" in message
     assert "the whole VRAM budget is 84368556032" in message
     assert journal == []  # refused at admission: no byte moved
+    # ...and the CONFESSION says it is an upper bound, so the reader of a pod
+    # log is not left to work out why a card that served this shape refused
+    # it. `admission_charge`'s basis is what the manager confesses.
+    sizer, _ = h3_manager
+    basis = admission_charge(
+        sizer.resident_bytes(*H3_KEY), sizer.activation_headroom_bytes(*H3_KEY)
+    ).basis
+    assert "UPPER BOUND" in basis and "STORED TREE" in basis
 
 
-def test_the_h3_dit_lane_is_admitted_on_a_single_h100_from_its_own_declaration(
-    h3_manager: Any,
-) -> None:
-    """THE FIX, at the production numbers.
+def test_the_gap_the_close_has_to_shut_is_MEASURED_not_asserted() -> None:
+    """How big the over-charge is, in one place, so the fp8-lane close has a
+    number to be judged against rather than a feeling.
 
-    ``vram78g`` -> 83,751,862,272 bytes against this H100's 84,368,556,032 of
-    headroom: it fits, with 616,693,760 bytes (588 MiB) to spare. That margin
-    is tight ON PURPOSE and it is the endpoint's own arithmetic, not this
-    test's: the DiT is 133,006,919,280 bf16 bytes, w8a8 halves the weight
-    tensors to ~66.5 GB, and ~17 GB of activations lands the serve at ~83 GB —
-    which is why the header says 78 GiB and not 40.
-
-    The fleet is the witness that this is a measurement and not a hope: pods
-    yntiu7c3pd70bk, adux79i8nvy2j1, ac939lahn39c63, gqxy5elsartscu,
-    ouu3szyqer3lss and lb27wbsay43z72 each hydrated and SERVED this shape on
-    one NVIDIA H100 80GB HBM3 on 2026-08-14.
+    Three numbers, each from a different source: the tree walk (this file's
+    real manifest), the DiT at its contract's OWN dtype (bf16, so no
+    quantization is assumed), and what the endpoint actually holds after
+    `setup()`. The last one is the only one no producer in this repo can
+    compute, and that is exactly the defect.
     """
-    _, manager_for = h3_manager
-    manager = manager_for(H100_BUDGET)
-    journal: List[str] = []
-
-    declared = declared_vram_bytes(H3Model, H3_LANE)
-    assert declared == H3_FLOOR_BYTES == 83_751_862_272
-    assert declared < H100_BUDGET
-    assert H100_BUDGET - declared == 616_693_760
-
-    with manager.lease(
-        *H3_KEY, lambda: Backend(journal), declared_vram_bytes=declared
-    ):
-        assert manager.tier_of(*H3_KEY) is Tier.VRAM
-    assert journal == ["load"]
-
-    # The reservation IS the declaration — activations included, no 25% on top.
-    reserved, _host = manager.reserved_bytes()
-    assert reserved == H3_FLOOR_BYTES
-    # pgw#1497's seam agrees with what admission actually reserved, rather
-    # than re-asking the sizer and answering 144 GB.
-    assert manager.weight_budget_bytes(*H3_KEY) == H3_FLOOR_BYTES
+    # What admission charges today.
+    assert H3_TREE_BYTES == 144_050_965_040
+    # What a perfect lane-scoped, correct-dtype sizer would charge — still
+    # refused on an 84 GB card once the /4 headroom is added.
+    assert H3_LANE_BF16_BYTES + H3_LANE_BF16_BYTES // 4 > H100_BUDGET
+    # What the card actually holds. Roughly half, because of a runtime
+    # quantize no declaration describes.
+    assert H3_ACTUALLY_HELD * 2 == pytest.approx(H3_LANE_BF16_BYTES, rel=1e-6)
+    assert H3_ACTUALLY_HELD < H3_FLOOR_BYTES < H100_BUDGET
 
 
-def test_a_declared_floor_is_not_blanket_optimism_a_smaller_card_still_refuses(
-    h3_manager: Any,
-) -> None:
-    """The declaration lowers the charge; it does not delete the gate. An
-    L40S/A6000-class 48 GiB card cannot hold this lane and is still refused
-    typed, before any byte moves — an OOM on a rented card is worse than a
-    refusal, which is why the cap is a DECLARED number and never a guess."""
-    _, manager_for = h3_manager
-    manager = manager_for(48 * GIB)
-    journal: List[str] = []
-    with pytest.raises(NeverFits) as excinfo:
-        manager.lease(
-            *H3_KEY,
-            lambda: Backend(journal),
-            declared_vram_bytes=declared_vram_bytes(H3Model, H3_LANE),
-        )
-    message = str(excinfo.value)
-    assert "needs 83751862272 bytes resident" in message
-    assert "LANE'S OWN DECLARATION" in message
-    assert journal == []
-
-
-# ── the properties that keep every other lane where it was ───────────────────
-
-
-def test_no_declaration_leaves_the_conservative_charge_byte_identical() -> None:
-    """The fallback is untouched. A lane that declares nothing is charged the
-    whole stored tree plus 25%, exactly as before — and the refusal now says
-    what to declare instead of leaving the reader to guess."""
-    charge = admission_charge(H3_TREE_BYTES, H3_TREE_BYTES // 4, 0)
+def test_the_charge_is_the_sizer_s_two_numbers_and_nothing_else() -> None:
+    """No cap, no floor, no third input. The whole point of pgw#1599's
+    deletion is that there is exactly ONE producer of this number again — and
+    an over-charging single producer is strictly better than two that
+    disagree, because only one of them can be silently wrong."""
+    charge = admission_charge(H3_TREE_BYTES, H3_TREE_BYTES // 4)
     assert charge.weight_bytes == H3_TREE_BYTES
     assert charge.headroom_bytes == H3_TREE_BYTES // 4
     assert charge.total == H3_TREE_CHARGE
-    assert "DECLARES NO VRAM FLOOR" in charge.basis
-    assert 'lanes={contract: "vramNNg"}' in charge.basis
+    assert "STORED TREE" in charge.basis
+    assert "UPPER BOUND" in charge.basis
+    # The refusal names what actually fixes it, not what to hand-write.
+    assert "never a hand-written floor" in charge.basis
 
 
-@pytest.mark.parametrize(
-    "floor_gb",
-    # The fleet's real declared floors, one per shape class
-    # (`serverless-endpoints/*/src/*/main.py`): sd15 vram6g, sdxl vram7g,
-    # z-image vram32g, flux.1-dev vram38g, ltx-2 vram78g, minimax-h3 vram78g.
-    [6.0, 7.0, 8.0, 12.0, 22.0, 24.0, 30.0, 32.0, 36.0, 38.0, 44.0, 78.0],
-)
-@pytest.mark.parametrize(
-    "tree_gb", [0.5, 2.0, 4.3, 6.9, 13.9, 16.0, 24.0, 60.0, 134.0]
-)
-def test_a_declared_floor_can_only_ever_lower_the_charge(
-    floor_gb: float, tree_gb: float
+@pytest.mark.parametrize("tree_gb", [0.5, 2.0, 4.3, 6.9, 13.9, 16.0, 24.0, 60.0, 134.0])
+def test_the_charge_is_monotone_in_the_tree_and_never_optimistic(
+    tree_gb: float,
 ) -> None:
-    """THE SAFETY PROPERTY, over every (fleet floor x plausible tree) pair:
-    the charge is never larger than it was, so no lane admitted today can be
-    refused tomorrow. This is what makes the change safe to land for the whole
-    fleet on the evidence of one endpoint."""
+    """THE SAFETY PROPERTY that survived the deletion: the charge is a
+    function of the tree alone and is never smaller than it. Every rejected
+    replacement failed exactly here — each could return a number BELOW what
+    the lane holds resident, and an under-charge is an OOM on a rented card
+    while an over-charge is a typed refusal."""
     weights = int(tree_gb * GIB)
     headroom = weights // 4
-    before = weights + headroom
-    after = admission_charge(weights, headroom, int(floor_gb * GIB))
-    assert after.total <= before
-    assert after.total == min(before, int(floor_gb * GIB))
+    charge = admission_charge(weights, headroom)
+    assert charge.total == weights + headroom
+    assert charge.weight_bytes >= weights
 
 
-def test_a_floor_above_the_tree_leaves_the_charge_exactly_where_it_was() -> None:
-    """z-image's shape and the reason sd15/sdxl/z-image do not move: a lane
-    whose floor is generous relative to its tree keeps the tree number,
-    weights-and-headroom split included. The cap is `min`, so it is inert
-    until the tree crosses the declaration."""
-    weights, floor = 16 * GIB, 32 * GIB
-    charge = admission_charge(weights, weights // 4, floor)
-    assert (charge.weight_bytes, charge.headroom_bytes) == (weights, weights // 4)
-    assert "does not cap this charge" in charge.basis
-
-
-# ── the whole serve path, class header to reservation ────────────────────────
-
-
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
-FIXTURE_REF = "org/oversized@1"
-
-
-class _LoopResolver:
-    """One object for both seams the serve path resolves through: the deploy
-    binding ServeLoop asks for, and the tree SnapshotSizer sizes."""
-
-    def __init__(self, tree: Path) -> None:
-        self.tree = tree
-
-    def resolve(self, model_cls: type, checkpoint_ref: str) -> Any:
-        from gen_worker.serving import DeployBinding
-
-        return DeployBinding(
-            checkpoint_ref=checkpoint_ref,
-            checkpoint_dir=self.tree,
-            model="sdxl",
-            defaults={},
-        )
-
-    def default_pick(self, model_cls: type, slot_name: str) -> str:
-        return ""
-
-    def tree_for(self, model_cls: type, checkpoint_ref: str) -> Path:
-        return self.tree
-
-
-def test_the_declaration_reaches_admission_through_the_real_serve_path(
-    tmp_path: Path,
+def test_a_smaller_card_is_still_refused_typed_before_any_byte_moves(
+    h3_manager: Any,
 ) -> None:
-    """END TO END on the production dispatcher, because the defect was never
-    in the arithmetic — it was that the ONE caller holding the model class did
-    not hand its declaration to the ONE object doing the arithmetic.
-
-    A real endpoint (``load_endpoint``), its real ``lanes={contract:
-    "vram12g"}`` header, a real ``ServeLoop``, a real ``ResidencyManager`` over
-    the real ``SnapshotSizer``, and a real projected manifest carrying
-    minimax-h3's measured 144,050,965,040 bytes. Under the tree charge this
-    request is a ``JOB_STATUS_FATAL``; under the declaration it serves.
-    """
-    from gen_worker.serving import load_endpoint
-    from gen_worker.serving.serve_loop import ServeLoop
-
-    tree = project(tmp_path / "store", "oversized", H3_TREE_LAYOUT)
-    resolver = _LoopResolver(tree)
-    manager = ResidencyManager(H100_BUDGET, SnapshotSizer(cast(Any, resolver)))
-    loop = ServeLoop(
-        load_endpoint(FIXTURE_DIR),
-        residency=manager,
-        resolver=resolver,
-        lane_contract="sdxl.diffusers-bf16@1",
-        output_dir=tmp_path / "outputs",
-    )
-
-    outcome = loop.invoke(
-        "generate",
-        {"model": FIXTURE_REF, "input": {"prompt": "a lighthouse", "seed": 3}},
-        request_id="pgw1590",
-    )
-    assert outcome.result.model == FIXTURE_REF
-
-    lane_key = "SdxlModel/sdxl.diffusers-bf16@1"
-    assert manager.tier_of(FIXTURE_REF, lane_key) is Tier.VRAM
-    # Charged the header's `vram12g`, not the 180,063,706,300 the tree implies.
-    reserved, _host = manager.reserved_bytes()
-    assert reserved == 12 * GIB
-    assert manager.weight_budget_bytes(FIXTURE_REF, lane_key) == 12 * GIB
-
-
-def test_the_serve_path_still_refuses_when_the_declaration_cannot_help(
-    tmp_path: Path,
-) -> None:
-    """The same real path, on a card under the endpoint's own floor: 8 GiB
-    against a `vram12g` lane. Still ``NeverFits``, still before the author's
-    class is constructed — the fix is a smaller HONEST charge, not a smaller
-    gate."""
-    from gen_worker.serving import load_endpoint
-    from gen_worker.serving.serve_loop import ServeLoop
-
-    tree = project(tmp_path / "store", "oversized", H3_TREE_LAYOUT)
-    resolver = _LoopResolver(tree)
-    manager = ResidencyManager(8 * GIB, SnapshotSizer(cast(Any, resolver)))
-    loop = ServeLoop(
-        load_endpoint(FIXTURE_DIR),
-        residency=manager,
-        resolver=resolver,
-        lane_contract="sdxl.diffusers-bf16@1",
-        output_dir=tmp_path / "outputs",
-    )
-    with pytest.raises(NeverFits) as excinfo:
-        loop.invoke(
-            "generate",
-            {"model": FIXTURE_REF, "input": {"prompt": "x"}},
-            request_id="pgw1590-small",
-        )
-    assert "refuse at admission" in str(excinfo.value)
-    assert manager.tier_of(FIXTURE_REF, "SdxlModel/sdxl.diffusers-bf16@1") is Tier.ABSENT
-
-
-def test_the_crossover_is_exact_and_has_no_gap() -> None:
-    """Where the two arms meet, stated byte-exactly rather than in prose: at
-    the floor the charge is the tree's (they are equal), one byte over it is
-    the floor's."""
-    floor = 6 * GIB
-    for total, expect_declared in ((floor - 1, False), (floor, False), (floor + 1, True)):
-        weights = total - total // 5  # total = weights + weights//4, near enough
-        headroom = total - weights
-        charge = admission_charge(weights, headroom, floor)
-        assert charge.total == min(total, floor)
-        assert ("LANE'S OWN DECLARATION" in charge.basis) is expect_declared
+    """The gate itself is intact. An L40S/A6000-class 48 GiB card cannot hold
+    this lane under any of the numbers above, and is refused TYPED at
+    admission — before the factory runs, before a byte moves."""
+    _, manager_for = h3_manager
+    manager = manager_for(48 * GIB)
+    journal: List[str] = []
+    with pytest.raises(NeverFits):
+        manager.lease(*H3_KEY, lambda: Backend(journal))
+    assert journal == []

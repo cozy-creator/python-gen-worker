@@ -113,7 +113,6 @@ from .model import (
 from .placement import (
     DeviceFacts,
     Shortfall,
-    declared_vram_bytes,
     device_facts,
     shortfalls,
     warn_if_degraded,
@@ -185,7 +184,6 @@ __all__ = [
     "model_lane_spec",
     "model_lanes",
     "admission_charge",
-    "declared_vram_bytes",
     "model_marks_compile",
     "model_requires",
     "model_shapes",
