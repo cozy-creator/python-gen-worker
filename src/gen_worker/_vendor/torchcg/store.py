@@ -52,6 +52,7 @@ from typing import Protocol, runtime_checkable
 
 from ..tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
 
+from .artifact import IO_BUFFER_BYTES
 from .document import DocumentError, GraphSetDocument, LaneGraphs
 from .graph_identity import EnvIdentity, is_graph_hash
 from .lane import LaneError, require_pass_ref
@@ -60,7 +61,9 @@ from .requirements import RequirementsError, RequirementsManifest
 logger = logging.getLogger(__name__)
 
 _REF_PREFIX = "torchcg/v2"
-_READ_BUFFER = 1 << 20
+#: tcg#86: `artifact.IO_BUFFER_BYTES` is the owner; this was the third of
+#: three names for one buffer.
+_READ_BUFFER = IO_BUFFER_BYTES
 
 
 class StoreError(RuntimeError):

@@ -46,12 +46,39 @@ PACKAGE_NAME = "model.pt2"
 LITERALS_NAME = "constants.safetensors"
 _REQUIRED_MEMBERS = frozenset((METADATA_NAME, PACKAGE_NAME))
 _MEMBERS = _REQUIRED_MEMBERS | {LITERALS_NAME}
-_COPY_BUFFER = 1 << 20
+#: THE ONE streaming I/O buffer for this package (tcg#86). One MiB is the
+#: block size at which a sequential read stops being syscall-bound on every
+#: filesystem this runs on; it is not a capacity and it bounds nothing. It
+#: lived under THREE names in three files -- `artifact._COPY_BUFFER`,
+#: `storage._READ_BUFFER`, `store._READ_BUFFER` -- with no shared owner, so a
+#: reader could not tell whether the three were one policy or three.
+IO_BUFFER_BYTES = 1 << 20
+
+#: metadata.json's admission cap. Eight MiB is ~20x the largest metadata this
+#: repo has produced (397,582 B for SDXL's UNet at tcg#80's constant count) --
+#: a plausibility floor, not a tuned capacity, in the shape
+#: `safetensors_header.MAX_HEADER_BYTES` set.
 _MAX_METADATA_BYTES = 8 << 20
+
+#: The safetensors HEADER cap for `constants.safetensors`. tcg#86: this
+#: deliberately no longer shares a literal with `_MAX_METADATA_BYTES` above --
+#: two unrelated policies wearing one value drift together the first time
+#: either is tuned, and nothing at either site said which was which. Same
+#: reasoning, independently: ~20x anything observed, bounding a length field
+#: read from an untrusted archive before any allocation happens.
 _MAX_SAFETENSORS_HEADER_BYTES = 8 << 20
+
 # A code-only AOTI package must not carry model weights. Sixteen GiB is four
 # times ZIP32's 4 GiB boundary: enough for unusually large generated host/CUDA
 # code while still making remote decompression a finite admission operation.
+#
+# tcg#86 on the x4, which is the half that was picked rather than derived: the
+# largest package this repo has measured is 15,739,930 B (tcg#80's fold-on SDXL
+# UNet, +37% cubin bytes over the fold-off arm) -- three orders of magnitude
+# under the 4 GiB anchor alone. The multiplier buys headroom for a future
+# multi-GB codegen without a second ZIP boundary argument; it is AUTHOR-
+# DECLARED slack above a derived anchor, and the anchor is the load-bearing
+# half. If a package ever approaches even 4 GiB, re-derive rather than raise.
 _MAX_PACKAGE_BYTES = 16 << 30
 # Literal constants are the only tensor bytes this envelope permits. Four GiB
 # is the ZIP32 boundary; larger payloads are model-state in practice and belong
@@ -225,7 +252,7 @@ def _bounded_chunks(source: BinaryIO, offset: int, size: int) -> Iterator[bytes]
     source.seek(offset)
     remaining = size
     while remaining:
-        chunk = source.read(min(_COPY_BUFFER, remaining))
+        chunk = source.read(min(IO_BUFFER_BYTES, remaining))
         if not chunk:
             raise ArtifactError("safetensors tensor data is truncated")
         remaining -= len(chunk)
@@ -820,10 +847,10 @@ def _validate_single_gzip_member(artifact: Path) -> None:
     uncompressed = 0
     try:
         with artifact.open("rb") as source:
-            while compressed := source.read(1 << 16):
+            while compressed := source.read(IO_BUFFER_BYTES):
                 pending = compressed
                 while pending:
-                    output = decoder.decompress(pending, _COPY_BUFFER)
+                    output = decoder.decompress(pending, IO_BUFFER_BYTES)
                     uncompressed += len(output)
                     if uncompressed > _MAX_TAR_BYTES:
                         raise ArtifactError(
@@ -882,7 +909,7 @@ def _members(artifact: Path) -> tuple[tarfile.TarFile, dict[str, tarfile.TarInfo
         if not 0 <= remaining_padding <= tarfile.RECORDSIZE:
             raise ArtifactError("artifact has a non-canonical USTAR end marker")
         while remaining_padding:
-            trailer = archive.fileobj.read(min(_COPY_BUFFER, remaining_padding))
+            trailer = archive.fileobj.read(min(IO_BUFFER_BYTES, remaining_padding))
             if not trailer:
                 raise ArtifactError("artifact has truncated USTAR padding")
             if trailer.strip(b"\0"):
@@ -962,7 +989,7 @@ def _read_member(source: IO[bytes], info: tarfile.TarInfo, remaining: int) -> by
     """Read one chunk of an archive member, naming a read failure as bad bytes."""
 
     try:
-        return source.read(min(_COPY_BUFFER, remaining))
+        return source.read(min(IO_BUFFER_BYTES, remaining))
     except (EOFError, OSError, tarfile.TarError) as exc:
         raise ArtifactError(f"cannot read artifact member {info.name!r}: {exc}") from exc
 

@@ -13,6 +13,7 @@ from .artifact import (
     ArtifactError,
     ArtifactFormatSkew,
 )
+from .bind import BindError, bind_static_spec, respecialize, strip_diagnostics
 from .compiler import CompileError, DroppedOptimization, declared_input_layout
 from .declaration import (
     GRAPH_INTERFACE_FORMAT,
@@ -22,7 +23,6 @@ from .declaration import (
     RetiredGraphInterface,
     RuntimeCompatibility,
 )
-from .bind import BindError, bind_static_spec, respecialize, strip_diagnostics
 from .discovery import DiscoveryError, discover_lane, discover_modules
 from .document import (
     DOCUMENT_FORMAT,

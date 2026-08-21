@@ -55,7 +55,23 @@ CHUNK = 250
 
 #: Below this the TU is not the pathological shape this exists for, and the
 #: transform declines rather than adding a mechanism nobody needs.
-MIN_STATEMENTS = 2000
+#:
+#: tcg#86 (d): the comment justified this gate's EXISTENCE and never its
+#: VALUE, and a TU one statement under it forfeits the whole measured win in
+#: silence. The value stated: the observed pathological shape is 26,642
+#: statements, and 2000 is `8 x CHUNK` -- the point below which the transform
+#: would emit fewer than eight helpers and stop being "not one enormous
+#: function" in any meaningful sense. It is deliberately an ORDER OF MAGNITUDE
+#: under the observed shape rather than fitted near it, so a merely-large TU
+#: is still split.
+#:
+#: **UNMEASURED between 2000 and 26,642** -- no sweep exists in that band, and
+#: the honest consequence is that the gate is known-correct at the ends and
+#: assumed in the middle. THE FALSIFIER: a compile whose wall time is
+#: dominated by a single wrapper function of 2,000-26,000 statements. That is
+#: cheap to look for in an existing ledger (`spans.py`) and has not been
+#: looked for; tcg#86 row: blocked-on-measurement.
+MIN_STATEMENTS = 8 * CHUNK
 
 #: Name prefix for every symbol this module introduces.
 PREFIX = "_tcg_constants_info_"

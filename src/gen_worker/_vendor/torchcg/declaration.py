@@ -202,7 +202,7 @@ def _normalized_call(node: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:
         return tuple(node.args), dict(node.kwargs)
     args: list[Any] = []
     kwargs: dict[str, Any] = {}
-    for argument, value in zip(arguments, node.args):
+    for argument, value in zip(arguments, node.args, strict=False):
         if not argument.has_default_value():
             args.append(value)
         elif value != argument.default_value:
