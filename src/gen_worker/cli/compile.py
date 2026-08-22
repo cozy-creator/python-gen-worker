@@ -364,12 +364,19 @@ class _ArtifactReuse:
     only through the engine; with ONE key the question is just an address, so
     there is nothing to enumerate, nothing to cache, and no window in which the
     index disagrees with the store.
+
+    **The env this keys with must be the env the MINT keys with**, and that is
+    `toolchain_digest()` — what `_default_builder` hands the child at
+    `"toolchain"`. Keying reuse off the lockfile compile stack instead looks
+    reasonable and is silently wrong: the two blocks differ, so every lookup
+    misses and `gen-worker compile` rebuilds artifacts it already holds. There
+    is no error, only a bill. Read the env from ONE place so the two cannot
+    drift.
     """
 
-    def __init__(self, cas_root: Path, sm: str, env: Any) -> None:
+    def __init__(self, cas_root: Path, sm: str) -> None:
         self._cas_root = Path(cas_root)
         self._sm = sm
-        self._env = env
         self._store: Any = None
 
     def _opened(self) -> Any:
@@ -384,11 +391,13 @@ class _ArtifactReuse:
         from .._vendor.torchcg.identity import artifact_key
         from .._vendor.torchcg.mint import compile_policy, declared_input_layout
 
+        from ..toolchain import toolchain_digest
+
         device = "cuda" if self._sm.startswith("sm_") else "cpu"
         return artifact_key(
             graph,
             sm=self._sm,
-            env=self._env.block,
+            env=dict(toolchain_digest()),
             policy=compile_policy(device),
             layout=declared_input_layout(),
         ).value
@@ -526,7 +535,7 @@ def compile_all(
             return False
         return True
 
-    reuse = _ArtifactReuse(Path(cas_root), sm, env)
+    reuse = _ArtifactReuse(Path(cas_root), sm)
 
     from ..serving.mint import publish_compiled
 

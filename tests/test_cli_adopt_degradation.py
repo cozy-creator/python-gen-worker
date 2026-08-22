@@ -51,14 +51,14 @@ def test_the_discard_itself_is_announced_and_names_what_went_away(
     spec = BootSpec(endpoint_dir=tmp_path, graph_store=store, sm="sm_89")
 
     with caplog.at_level(
-        logging.WARNING, logger="gen_worker._vendor.torchcg.store"
+        logging.WARNING, logger="gen_worker.graphs.store"
     ):
         _adoption_source(spec, "toy.main")
 
     said = "\n".join(
         r.getMessage()
         for r in caplog.records
-        if r.name == "gen_worker._vendor.torchcg.store"
+        if r.name == "gen_worker.graphs.store"
     )
     assert "DISCARDED" in said
     assert "toy.main" in said
@@ -106,7 +106,7 @@ def test_the_shape_actually_found_on_disk_is_the_version_mismatch(
 
     spec = BootSpec(endpoint_dir=tmp_path, graph_store=store, sm="sm_89")
     with caplog.at_level(
-        logging.WARNING, logger="gen_worker._vendor.torchcg.store"
+        logging.WARNING, logger="gen_worker.graphs.store"
     ):
         _, document = _adoption_source(spec, "toy.main")
 
