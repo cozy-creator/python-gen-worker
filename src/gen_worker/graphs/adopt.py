@@ -176,6 +176,26 @@ def _structure_key(record: GraphRecord) -> tuple[Any, ...]:
     )
 
 
+class _Live:
+    """The callable currently armed for one graph, resolved per call.
+
+    One indirection, and it exists so that `_entries` stays the single source of
+    truth for WHAT runs — see `_ForwardDispatcher._sync`.
+    """
+
+    __slots__ = ("_dispatcher", "_graph")
+
+    def __init__(self, dispatcher: Any, graph: str) -> None:
+        self._dispatcher = dispatcher
+        self._graph = graph
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        for record, compiled in self._dispatcher._entries:
+            if record.graph == self._graph:
+                return compiled(*args, **kwargs)
+        raise AdoptError(f"graph {self._graph} is no longer armed on this module")
+
+
 class _ForwardDispatcher:
     """One module's serve-path router: armed graphs by call structure, else eager.
 
@@ -223,11 +243,20 @@ class _ForwardDispatcher:
     def _sync(self) -> None:
         """Re-hand the armed set to torchcg. Order is decided HERE — a concrete
         bucket must beat a symbolic range that also spans it — and torchcg's own
-        sort is stable, so the order set above survives."""
+        sort is stable, so the order set above survives.
+
+        The callable handed over INDIRECTS through `_entries` rather than being
+        the callable itself. `_entries` is mutated IN PLACE after arming —
+        `serving.dispatch_counter.rearm()` swaps each compiled callable for a
+        counting wrapper, and that is how the fleet knows a call served
+        compiled. An arm-time snapshot would go stale the moment it did, and the
+        failure is silent and inverted: the artifact serves compiled while the
+        counter reports zero, which reads as "armed and never entered".
+        """
 
         self._tcg.arm([
-            _TCGRecord(record.graph, record.ingress, compiled)
-            for record, compiled in self._entries
+            _TCGRecord(record.graph, record.ingress, _Live(self, record.graph))
+            for record, _compiled in self._entries
         ])
 
     def disarm(self, graph: str) -> None:
