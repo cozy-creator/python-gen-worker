@@ -103,24 +103,31 @@ def compile_one(request: Mapping[str, Any]) -> Path:
         )
     import torch
 
-    from .._vendor.torchcg import CallIngress, Engine, GraphSpecialization, RuntimeCompatibility
-    from .._vendor.tensorfs import LocalCAS
+    from .._vendor.torchcg import CallIngress, GraphSpec
+    from .._vendor.torchcg.mint import mint
 
     _ensure_cuda_home(str(request.get("target_arch", "")))
     weightless_program.install()
     program = torch.export.load(str(request["blob"]))
     _place_constants(program, str(request["target_arch"]))
-    spec = GraphSpecialization(
-        name=str(request["graph"]),
+    spec = GraphSpec(
+        graph=str(request["graph"]),
         target=str(request["target"]),
         program=program,
         ingress=CallIngress.decode(request["ingress"]),
     )
-    runtime = RuntimeCompatibility(
-        str(request["target_arch"]), toolchain=dict(request["toolchain"]))
-    engine = Engine(LocalCAS(Path(str(request["cas"]))))
+    target_arch = str(request["target_arch"])
     destination = Path(str(request["destination"]))
-    engine.compile(spec, runtime, destination)
+    # The parent reads back a PATH; the key rides in the artifact's own
+    # metadata, which is what `publish_artifact` reads, so the child protocol
+    # does not have to carry it separately.
+    mint(
+        spec,
+        sm=target_arch,
+        env=dict(request["toolchain"]),
+        device_type="cuda" if target_arch.startswith("sm_") else "cpu",
+        destination=destination,
+    )
     return destination
 
 

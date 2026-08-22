@@ -335,7 +335,7 @@ def _empty_parameters() -> Iterator[None]:
     try:
         yield
     finally:
-        torch.nn.Module.register_parameter = original
+        torch.nn.Module.register_parameter = original  # type: ignore[method-assign]
 
 
 def _tensor_attributes(submodule: Any) -> list[tuple[str, Any]]:
@@ -871,8 +871,8 @@ def _hollow_module_moves(device: str) -> Iterator[None]:
     try:
         yield
     finally:
-        torch.nn.Module.to = original_to
-        torch.nn.Module.cuda = original_cuda
+        torch.nn.Module.to = original_to  # type: ignore[method-assign]
+        torch.nn.Module.cuda = original_cuda  # type: ignore[method-assign]
 
 
 #: Device spellings author code uses that the session redirects to its own.
