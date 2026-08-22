@@ -267,16 +267,18 @@ class ReleaseDeriveResult:
 
 def _torchcg() -> ModuleType:
 
-    from .._vendor import torchcg
+    # tcg#90/pgw#1656: the discovery, lane and document surface is pgw's now.
+    # torchcg is `program -> keyed artifact` and knows nothing of lanes.
+    from .. import graphs
 
-    return torchcg
+    return graphs
 
 
 def _hollow() -> ModuleType:
 
     import importlib
 
-    return importlib.import_module("gen_worker._vendor.torchcg.hollow")
+    return importlib.import_module("gen_worker.graphs.hollow")
 
 
 def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
@@ -293,7 +295,7 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
 
     store = LocalGraphStore(LocalCAS(Path(cas_root)))
 
-    from .._vendor.torchcg.bind import strip_diagnostics
+    from .._vendor.torchcg.mint import strip_diagnostics
 
     def sink(graph: str, program: Any) -> None:
         _assert_weights_free(torch, program)

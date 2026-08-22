@@ -46,7 +46,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol
 
-from .._vendor.torchcg.document import (
+from ..graphs.document import (
     DOCUMENT_FORMAT,
     DocumentError,
     GraphSetDocument,

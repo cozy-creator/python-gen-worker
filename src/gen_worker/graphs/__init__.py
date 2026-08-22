@@ -33,10 +33,40 @@ from .lane import (
     resolve_target,
 )
 
+#: Names that live in torch-shaped modules. Resolved on ATTRIBUTE ACCESS so that
+#: importing `gen_worker.graphs` — which `document` and `lane` alone satisfy —
+#: never drags torch in. The derive imports torch anyway; the adopt-first boot
+#: and the lock reader do not, and they read documents.
+_LAZY = {
+    "DiscoveryError": "discovery",
+    "discover_lane": "discovery",
+    "discover_modules": "discovery",
+    "HollowError": "hollow",
+    "HollowSession": "hollow",
+    "hollow_session": "hollow",
+}
+
+
+def __getattr__(name: str) -> object:
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    return getattr(import_module(f"{__name__}.{module}"), name)
+
+
+def __dir__() -> list[str]:
+    return sorted([*__all__, *_LAZY])
+
+
 __all__ = [
+    "DiscoveryError",
     "DocumentError",
     "GraphRecord",
     "GraphSetDocument",
+    "HollowError",
+    "HollowSession",
     "LaneError",
     "LaneGraphs",
     "LaneRef",
@@ -45,5 +75,8 @@ __all__ = [
     "require_lane_id",
     "require_passes",
     "require_targets",
+    "discover_lane",
+    "discover_modules",
+    "hollow_session",
     "resolve_target",
 ]

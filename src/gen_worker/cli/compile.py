@@ -337,7 +337,7 @@ def witness_materializes(cas_root: Path, graph: str, env: Any) -> Optional[str]:
 
 
 def _publish_document(cas_root: Path, lock_path: Path, module: str) -> None:
-    from .._vendor.torchcg.document import GraphSetDocument
+    from ..graphs.document import GraphSetDocument
 
     block = el.read_derive_block(lock_path)
     if block is None:
