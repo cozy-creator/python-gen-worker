@@ -106,6 +106,11 @@ from ..serving.model import (
 )
 from ..serving.lane_spec import DYNAMIC
 from ..serving.model import model_type as _strict_model_type
+from .drive_hygiene import (
+    accelerator_is_alive,
+    dead_accelerator_sentence,
+    eager_only_compile,
+)
 from .trace_context import (
     StepBudgetReached,
     TraceLoadContext,
@@ -307,6 +312,24 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
 def _trace_device() -> str:
 
     return "cuda"
+
+
+def _refuse_a_dead_accelerator(
+    said: str, session: Any, cause: Optional[BaseException] = None
+) -> None:
+    """A drive that killed the card is refused BY THE DRIVE (pgw#1659).
+
+    Asked right after discovery, so the refusal names what happened instead of
+    whatever touched the device next. ``cause`` is the message discovery
+    produced; it stays as the chained exception because it is real evidence,
+    just not a diagnosis.
+    """
+
+    if session is None or accelerator_is_alive(session.drive_device):
+        return
+    raise DeriveError(
+        f"{said}: {dead_accelerator_sentence(session.drive_device_type)}"
+    ) from cause
 
 
 def _assert_weights_free(torch: Any, program: Any) -> None:
@@ -1332,7 +1355,11 @@ def _derive_lane_item(
             checkpoint_ref=f"trace:{checkpoint_dir.name}",
             step_budget=TRACE_STEP_BUDGET,
         )
-        with hollow.hollow_session(
+        # pgw#1659: `torch.compile` is IDENTITY for the whole drive. An author
+        # arming a compiled module in `load()` would otherwise have inductor
+        # generate a real kernel and launch it on a FAKE data pointer, which
+        # kills this process's accelerator for everything after it.
+        with eager_only_compile(), hollow.hollow_session(
             _trace_device(), dtype_for=load_ctx.component_dtype
         ) as session:
             try:
@@ -1455,9 +1482,15 @@ def _derive_lane_item(
                         session=session, dynamic_dims=dynamic_dims,
                         static_bind=static_bind, notes=notes,
                     )
+                _refuse_a_dead_accelerator(said, session)
             except DeriveError:
                 raise
             except torchcg.DiscoveryError as exc:
+                # pgw#1659: a sticky accelerator fault raised mid-drive and
+                # swallowed by author code surfaces as whatever discovery
+                # touched the card next — a literal constant, most of the time.
+                # Ask the machine before relaying the message.
+                _refuse_a_dead_accelerator(said, session, exc)
                 raise DeriveError(f"{said}: {exc}") from exc
             # pgw#1603 acceptance (c): an axis that dropped to per-bucket
             # tracing is said in the LOCK, never only in a logger.
