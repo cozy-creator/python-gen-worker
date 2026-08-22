@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol, Sequence, Tuple
 
@@ -67,8 +68,8 @@ class HostFillClient:
 
     @staticmethod
     def _native() -> Any:
-        from tensorfs.native import HostFillClient as NativeHostFillClient
-
+        native = importlib.import_module("tensorfs.native")
+        NativeHostFillClient = getattr(native, "HostFillClient")
         return NativeHostFillClient()
 
     def fill_address(
@@ -104,8 +105,8 @@ class CudaFillClient:
     staging = "tensorfs-pinned"
 
     def __init__(self, staging_bytes: int, device: int) -> None:
-        from tensorfs.native import CudaFillClient as NativeCudaFillClient
-
+        native = importlib.import_module("tensorfs.native")
+        NativeCudaFillClient = getattr(native, "CudaFillClient")
         self._client = NativeCudaFillClient(staging_bytes, device)
 
     def fill(self, reader: Any, destination: Destination) -> Any:

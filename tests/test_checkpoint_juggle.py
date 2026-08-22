@@ -345,10 +345,14 @@ class _FillCapture:
 
 
 def _fake_residency(layout: Any, compile_calls: List[int]) -> Any:
+    def compile_(value: Any) -> Any:
+        compile_calls.append(1)
+        return value
+
     fake_torch = SimpleNamespace(
         no_grad=nullcontext,
         cuda=SimpleNamespace(synchronize=lambda _device: None),
-        compile=lambda value: compile_calls.append(1) or value,
+        compile=compile_,
     )
     return SimpleNamespace(
         adopted=True,
