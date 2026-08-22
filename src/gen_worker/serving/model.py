@@ -5,6 +5,7 @@ import inspect
 import textwrap
 import typing
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 from .lane_spec import (
@@ -104,38 +105,147 @@ def lane_dtype(lane: Any, *, where: str) -> str:
         raise ModelDeclarationError(f"{where}: {exc}") from exc
 
 
-def _calls_ctx_compile(fn: Any) -> bool:
+MARKED = "marked"
+UNMARKED = "unmarked"
+UNREADABLE = "unreadable"
 
+
+@dataclass(frozen=True)
+class CompileMark:
+    """One TOTAL read of a ``load``'s compile subjecthood — never a guess.
+
+    ``state`` is :data:`MARKED`, :data:`UNMARKED` or :data:`UNREADABLE`.
+    ``lineno``/``spelling`` carry the site that decided it, so a refusal can
+    name the line instead of the class.
+    """
+
+    state: str
+    lineno: int = 0
+    spelling: str = ""
+
+    @property
+    def marked(self) -> bool:
+        return self.state == MARKED
+
+
+def _enclosing_statement(definition: Any, target: Any) -> str:
+    """The smallest statement holding ``target``, re-rendered for a refusal."""
+
+    parents: dict[int, Any] = {}
+    for parent in ast.walk(definition):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    node = target
+    while node is not None and not isinstance(node, ast.stmt):
+        node = parents.get(id(node))
+    if node is None:
+        return ""
+    rendered = ast.unparse(node).splitlines()[0]
+    return rendered if len(rendered) <= 120 else rendered[:117] + "..."
+
+
+def load_compile_mark(definition: Any) -> CompileMark:
+    """Read one ``load`` DEFINITION's compile subjecthood, TOTALLY (pgw#1655).
+
+    ONE PRODUCER, and it is the ``ctx.compile`` NAME in ``load()``. Naming it
+    is the mark whether it is called here (``ctx.compile(self.unet)``) or
+    handed to the component that owns the partition
+    (``engine.compile_dit(ctx.compile)``) — se#827's design, where the engine
+    and not the model knows which DiT partition is called. Never naming it,
+    and never handing the CONTEXT itself away, is :data:`UNMARKED`: the absent
+    mark IS the eager declaration (Paul, 2026-08-20), and there is no keyword.
+
+    Handing ``ctx`` ITSELF to something this reader cannot follow —
+    ``helper(ctx)``, ``getattr(ctx, "compile")``, a rebinding — is
+    :data:`UNREADABLE`. That answer is STATED at the declaration
+    (:meth:`Model.__init_subclass__` refuses it) rather than reported as
+    "does not compile".
+
+    pgw#1655: the reader this replaces answered ``False`` for both of the
+    last two states. That was safe while every consumer was permissive and
+    became a REFUSAL the day pgw#1650 gave it gate weight — minimax-h3, whose
+    only mark is delegated, could not derive at all, and wan-2.2's two MoE
+    classes were silently dropped from the subject set. "Cannot tell" is not
+    "does not", and it is never answered by guessing.
+    """
+
+    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return CompileMark(UNMARKED)
+    names = {argument.arg for argument in definition.args.args[1:2]}
+    if not names:
+        return CompileMark(UNMARKED)
+    borne: set[int] = set()
+    for node in ast.walk(definition):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in names
+        ):
+            borne.add(id(node.value))
+            if node.attr == "compile":
+                return CompileMark(
+                    MARKED, node.lineno, f"{node.value.id}.compile"
+                )
+    for node in ast.walk(definition):
+        if (
+            isinstance(node, ast.Name)
+            and node.id in names
+            and isinstance(node.ctx, ast.Load)
+            and id(node) not in borne
+        ):
+            return CompileMark(
+                UNREADABLE, node.lineno, _enclosing_statement(definition, node)
+            )
+    return CompileMark(UNMARKED)
+
+
+def _read_load(fn: Any) -> CompileMark:
+    """:func:`load_compile_mark` over a LIVE ``load``, via its own source."""
+
+    if fn is None:
+        return CompileMark(UNMARKED)
     try:
         source = textwrap.dedent(inspect.getsource(fn))
     except (OSError, TypeError):
-        return False
+        return CompileMark(UNREADABLE, 0, "its source is not on disk to read")
     try:
         tree = ast.parse(source)
     except SyntaxError:  # pragma: no cover - dedent of a nested def
-        return False
+        return CompileMark(UNREADABLE, 0, "its source does not parse alone")
     definition = tree.body[0] if tree.body else None
-    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return False
-    return load_marks_compile(definition)
+    return load_compile_mark(definition)
 
 
-def load_marks_compile(definition: Any) -> bool:
-    """Whether this ``load`` DEFINITION marks a compile target — the AST half of :func:`_calls_ctx_compile`, taking the parsed node instead of a live function."""
+def _class_compile_mark(cls: type) -> CompileMark:
+    """A class's compile mark: its own ``load``, else the one it inherits."""
 
-    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return False
-    names = {argument.arg for argument in definition.args.args[1:2]}
-    for node in ast.walk(definition):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "compile"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in names
-        ):
-            return True
-    return False
+    for owner in cls.__mro__:
+        definition = owner.__dict__.get("load")
+        if definition is None:
+            continue
+        mark = _read_load(definition)
+        if mark.state != UNMARKED:
+            return mark
+    return CompileMark(UNMARKED)
+
+
+def _refuse_unreadable_mark(cls: type, mark: CompileMark) -> None:
+    """State the one answer the platform cannot read, at the site that owns it."""
+
+    where = f" (line {mark.lineno}: `{mark.spelling}`)" if mark.lineno else ""
+    raise ModelDeclarationError(
+        f"{cls.__qualname__}: `load()` hands the LOAD CONTEXT itself "
+        f"away{where}, so whether this class marks a compile target cannot "
+        f"be read — and it is not guessed. Compile subjecthood decides "
+        f"whether the release DERIVES this class (pgw#1650) and whether "
+        f"`shapes=` is required, so an unreadable mark is a refusal here "
+        f"rather than a wrong answer there (pgw#1655). Hand the MARK, never "
+        f"the context: `helper(ctx.compile, ...)` and call it inside — that "
+        f"is se#827's shape, `engine.compile_dit(ctx.compile)`, and it keeps "
+        f"partition ownership with the component while leaving the "
+        f"declaration readable. Marking nothing is also readable: name "
+        f"neither `ctx.compile` nor bare `ctx`."
+    )
 
 
 def _parse_lanes(
@@ -343,7 +453,8 @@ class Model(Generic[MT]):
     any ctx.compile() invocations in your model's 'load' method."*
     ``eager_only=`` is DELETED; the presence or absence of a ``ctx.compile``
     mark in ``load()`` is the entire statement, and it is statically readable
-    by AST (:func:`load_marks_compile`) with no author code executed.
+    by AST (:func:`load_compile_mark`) with no author code executed, and
+    a mark this reader cannot see is a REFUSAL rather than a silent "no".
 
     **THE AUTHOR DECLARES ONLY WHAT ONLY THE AUTHOR KNOWS.** Demand SCALING,
     fork AXES, "my VAE decode will thrash if streamed". The platform derives
@@ -420,7 +531,15 @@ class Model(Generic[MT]):
             cls.__cozy_model_type__ = declared_type
 
         concrete = getattr(cls, MODEL_TYPE_ATTR, None) is not None
-        marks_compile = _calls_ctx_compile(cls.__dict__.get("load"))
+        # pgw#1655: ONE read of compile subjecthood, and it is TOTAL. The
+        # `shapes=` requirement below and pgw#1650's subject gate in
+        # `release/derive.py` are the same fact asked twice — an unreadable
+        # mark is refused HERE, where the author can make it readable,
+        # instead of being answered "no" at both call sites.
+        mark = _class_compile_mark(cls)
+        if mark.state == UNREADABLE:
+            _refuse_unreadable_mark(cls, mark)
+        marks_compile = mark.marked
 
         if lanes is not None:
             declared_lanes = _parse_lanes(cls, lanes)
@@ -532,14 +651,16 @@ def model_requires(cls: type) -> dict[str, Any]:
 
 
 def model_marks_compile(cls: type) -> bool:
-    """Whether this class's own ``load()`` marks a compile target."""
+    """Whether this class marks a compile target — a FACT, not a guess.
+
+    The answer is a bool and not a tri-state because the third state cannot
+    reach here: a class whose mark is unreadable is refused at its own
+    definition (:func:`_refuse_unreadable_mark`), so every class that EXISTS
+    has a readable one. That is what makes this safe to gate on (pgw#1655).
+    """
 
     model_type(cls)
-    return _calls_ctx_compile(cls.__dict__.get("load")) or any(
-        _calls_ctx_compile(base.__dict__.get("load"))
-        for base in cls.__mro__[1:]
-        if "load" in base.__dict__
-    )
+    return _class_compile_mark(cls).marked
 
 
 _DELETED_KWARGS: dict[str, str] = {
@@ -568,6 +689,7 @@ _DELETED_KWARGS: dict[str, str] = {
 
 
 __all__ = [
+    "CompileMark",
     "DECLARED_LANES_ATTR",
     "DYNAMIC",
     "LANES_ATTR",
@@ -584,7 +706,7 @@ __all__ = [
     "lane_dtype",
     "lane_handle",
     "lane_requirements",
-    "load_marks_compile",
+    "load_compile_mark",
     "model_declared_lanes",
     "model_lane_spec",
     "model_lanes",

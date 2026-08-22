@@ -175,6 +175,56 @@ def test_check_refuses_when_there_is_no_lock_to_check(
     assert _lock(endpoint, checkpoint, tmp_path / "graph-cas", "--check")[0] == 2
 
 
+#: A second model class, no mark on either — pgw#1650's surviving refusal, the
+#: cheapest derive REFUSAL this fixture can produce.
+_SECOND_CLASS = '''
+
+class OtherModel(
+    Model[Unlaned],
+    lanes={SDXL_BF16: lane(request=const(GiB(1)))},
+    self_loading="the second class that makes the subject unreadable",
+):
+    def load(self, ctx: LoadContext[Unlaned]) -> None:
+        self.ready = True
+'''
+
+
+def test_a_derive_refusal_exits_NONZERO_and_writes_nothing(
+    endpoint: Path, checkpoint: Path, tmp_path: Path
+) -> None:
+    """se#838 reported `lock` exiting 0 on a refusal. It must never.
+
+    A lock-regeneration loop reads the exit status, so a refusal that exits 0
+    reports a clean sweep having changed nothing. Both arms are asserted here
+    — refusal nonzero AND success zero — because a status that is always
+    nonzero is no more useful than one that is always zero.
+    """
+
+    graph_cas = tmp_path / "graph-cas"
+    lock = endpoint / "endpoint.lock"
+
+    assert _lock(endpoint, checkpoint, graph_cas)[0] == 0
+    assert lock.is_file()
+    good = lock.read_bytes()
+
+    source = endpoint / "src" / "lockcheck_fixture" / "main.py"
+    source.write_text(
+        source.read_text(encoding="utf-8") + _SECOND_CLASS, encoding="utf-8"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "gen_worker.cli", "lock", str(endpoint),
+         "--checkpoint", str(checkpoint), "--graph-cas", str(graph_cas),
+         "--force"],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode != 0, completed.stderr
+    assert "has more than one model class" in completed.stderr
+    # Nothing was written, and the previous good lock is untouched.
+    assert lock.read_bytes() == good
+    assert completed.stdout.strip() == ""
+
+
 def _safetensors(path: Path, dtypes: dict[str, int]) -> None:
 
     import struct

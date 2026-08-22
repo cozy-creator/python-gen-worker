@@ -6,7 +6,7 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import LoadContext, Model, RequestContext, entrypoint, lane
+from gen_worker import STATIC, LoadContext, Model, RequestContext, entrypoint, lane
 from gen_worker.demand import MiB, const, per_mp_batch
 from gen_worker.models import SDXL
 from lane_contracts import TINY_DIFFUSERS_FP32
@@ -28,11 +28,14 @@ class Engine:
         self.pipeline = pipeline
         self.step_cache: dict[str, Any] = {}
 
-    def compile_dit(self, ctx: Any) -> None:
+    def compile_dit(self, mark: Any) -> None:
+        # se#827/pgw#1655: the ENGINE owns the partition, so the engine applies
+        # the mark -- and it takes the MARK, never the load context, so the
+        # class's compile subjecthood stays readable at its declaration.
         for name in ("unet", "unet_ref"):
             module = getattr(self.pipeline, name, None)
             if module is not None:
-                setattr(self.pipeline, name, ctx.compile(module))
+                setattr(self.pipeline, name, mark(module))
                 return
 
 
@@ -41,12 +44,13 @@ class EngineModel(
     lanes={TINY_DIFFUSERS_FP32: lane(
         request=const(MiB(64)) + per_mp_batch(MiB(16)),
     )},
+    shapes={"aspect": STATIC},
 ):
     engine: Any
 
     def load(self, ctx: LoadContext[SDXL]) -> None:
         self.engine = Engine(self, ctx.load(StableDiffusionPipeline))
-        self.engine.compile_dit(ctx)
+        self.engine.compile_dit(ctx.compile)
 
 
 @entrypoint
