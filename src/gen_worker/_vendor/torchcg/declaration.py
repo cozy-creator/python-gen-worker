@@ -335,26 +335,6 @@ def _literal_digest(program: object) -> str:
     return _literal_digest_for(program, _literal_names(program))
 
 
-def _reading_a_device_is_not_the_constant(value: Any) -> str:
-    """The sentence that keeps a sticky accelerator fault off a constant's name.
-
-    Reading a constant that lives on an accelerator is a real copy to host, so
-    it is one of the first places a fault raised EARLIER surfaces -- the fault
-    is process-wide and sticky, and every later touch reports it identically.
-    pgw#1659 cost a lane a day because this message named ``lifted_tensor_0``
-    and nothing was wrong with ``lifted_tensor_0``.
-    """
-
-    device = getattr(value, "device", None)
-    if device is None or device.type == "cpu":
-        return ""
-    return (
-        f" — reading a constant off {device.type} is a copy to host, so a "
-        f"fault raised EARLIER in this process surfaces here: check whether "
-        f"the {device.type} context is dead before suspecting this constant"
-    )
-
-
 def _literal_digest_for(program: object, names: Iterable[str]) -> str:
     names = tuple(sorted({str(name) for name in names}))
     if not names:
@@ -378,8 +358,7 @@ def _literal_digest_for(program: object, names: Iterable[str]) -> str:
             )
         except Exception as exc:
             raise DeclarationError(
-                f"literal constant {name!r} (on {value.device}) could not be "
-                f"digested: {type(exc).__name__}: {exc}{_reading_a_device_is_not_the_constant(value)}"
+                f"literal constant {name!r} could not be digested: {type(exc).__name__}: {exc}"
             ) from exc
     return digest.hexdigest()[:32]
 

@@ -37,6 +37,12 @@ class LatentOutput(msgspec.Struct):
     model_used: str
 
 
+def _compile_probe(x: Any) -> Any:
+    """A callable whose only job is to be handed to `torch.compile` (pgw#1659)."""
+
+    return x
+
+
 class ModularModel(
     Model[SDXL],
     lanes={TINY_DIFFUSERS_FP32: lane(
@@ -48,6 +54,17 @@ class ModularModel(
 
     def load(self, ctx: LoadContext[SDXL]) -> None:
         self.pipe = ctx.load(TinyStreamingPipeline)
+        # pgw#1659, asserted from INSIDE a real derive's `load()` because that
+        # is the only place the property is real. An author arming a compiled
+        # module here (minimax-h3 does, on its VAE decoder) must get the eager
+        # callable back: a compiled one is handed FAKE tensors by the hollow
+        # drive and launches a real kernel on a fake data pointer, which kills
+        # the process's accelerator for everything after it.
+        if torch.compile(_compile_probe, dynamic=False) is not _compile_probe:
+            raise AssertionError(
+                "pgw#1659: torch.compile is LIVE inside the derive's hollow "
+                "drive — `eager_only_compile()` is not wrapping the session"
+            )
         self.pipe.unet = ctx.compile(self.pipe.unet)
 
 
