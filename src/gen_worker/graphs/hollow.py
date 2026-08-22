@@ -829,13 +829,19 @@ def _hollow_module_moves(device: str) -> Iterator[None]:
     """
 
     import torch
-    from torch._subclasses.fake_tensor import FakeTensor
 
     original_to = torch.nn.Module.to
     original_cuda = torch.nn.Module.cuda
 
+    from ..meta_instantiation import is_virtual
+
     def is_hollow(module: Any) -> bool:
-        return any(isinstance(p, FakeTensor) for p in module.parameters())
+        # STORAGE, not TYPE (pgw#1661/#1662). A wrapper subclass over a fake
+        # tensor — torchao's `Float8Tensor` and every quantized wrapper after
+        # it — is NOT a `FakeTensor`, so an isinstance check reads a quantized
+        # hollow module as REAL and lets author `.to("cuda")` take torch's real
+        # path on parameters that allocated nothing.
+        return any(is_virtual(p) for p in module.parameters())
 
     def hollow_to(module: Any, *args: Any, **kwargs: Any) -> Any:
         if not is_hollow(module):
@@ -906,8 +912,9 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
     """The two torch-function shims the hollow drive runs under."""
 
     import torch
-    from torch._subclasses.fake_tensor import FakeTensor
     from torch.overrides import TorchFunctionMode
+
+    from ..meta_instantiation import is_virtual
 
     class OneTraceDevice(TorchFunctionMode):
         def __torch_function__(
@@ -949,7 +956,9 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
             if (
                 func in _HOST_EGRESS
                 and isinstance(host, torch.Tensor)
-                and not isinstance(host, FakeTensor)
+                # STORAGE, not TYPE: a wrapper over fake has no bytes to copy,
+                # and `.cpu()`-ing it is a no-op that fails a frame later.
+                and not is_virtual(host)
                 and host.device.type != "cpu"
             ):
                 # The copy MUST run with torch-function dispatch disabled.
@@ -963,7 +972,7 @@ def observation_shims(device: str = DEFAULT_TRACE_DEVICE) -> Iterator[None]:
                 with torch._C.DisableTorchFunction():
                     moved = host.detach().to("cpu")
                 return func(moved, *args[1:], **kwargs)
-            if isinstance(host, FakeTensor):
+            if isinstance(host, torch.Tensor) and is_virtual(host):
                 # `__array__` alongside `numpy`: `np.array(t)` and `t.numpy()`
                 # are the same egress through two different functions, and a
                 # fake tensor has to answer both (tcg#57).

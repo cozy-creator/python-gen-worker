@@ -295,7 +295,7 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
 
     store = LocalGraphStore(LocalCAS(Path(cas_root)))
 
-    from .._vendor.torchcg.mint import strip_diagnostics
+    from .._vendor.torchcg.mint import flatten_weight_subclasses, strip_diagnostics
 
     def sink(graph: str, program: Any) -> None:
         _assert_weights_free(torch, program)
@@ -303,6 +303,15 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
         # ~60% of every serialized program (measured: 1.8 MB of a 3.1 MB
         # sd15 graph JSON) and nothing on the mint path reads them.
         strip_diagnostics(program)
+        # pgw#1662: a `__tensor_flatten__` subclass (torchao Float8Tensor, and
+        # every quantized wrapper after it) takes the generic pickle path in
+        # `torch.export.save` and drags in the inner FakeTensorMode's weakref
+        # closure — h3 dies on 1442 state-dict entries. The banked program is a
+        # WRAPPER is what cannot be pickled, not the weight — so it is
+        # replaced by the tensor it wraps, keeping the device story pgw#1465
+        # fences. Key-neutral: `graph_hash` reads parameters and buffers as
+        # names/dtypes/shapes only.
+        flatten_weight_subclasses(program)
         with tempfile.TemporaryDirectory() as scratch:
             staged = Path(scratch) / "program.pt2"
             torch.export.save(program, str(staged))

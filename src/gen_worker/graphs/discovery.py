@@ -270,10 +270,14 @@ def _assert_literal_values_are_real(contract: str, path: str, program: Any) -> N
     assertion that the property holds rather than a repair step.
     """
 
-    from torch._subclasses.fake_tensor import FakeTensor
+    from ..meta_instantiation import is_virtual
 
     constants = getattr(program, "constants", None) or {}
-    faked = sorted(name for name, value in constants.items() if isinstance(value, FakeTensor))
+    # STORAGE, not TYPE (pgw#1661/#1662). A wrapper subclass over a fake tensor
+    # IS a table of zeros — that is the whole hazard — but it is not a
+    # `FakeTensor`, so an isinstance check waves it straight through the
+    # assertion that exists to catch it.
+    faked = sorted(name for name, value in constants.items() if is_virtual(value))
     if not faked:
         return
     raise DiscoveryError(
