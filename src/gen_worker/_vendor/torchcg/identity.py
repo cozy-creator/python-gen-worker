@@ -483,6 +483,47 @@ def require_morphism(handle: object, root: Path | None = None) -> LayoutMorphism
     )
 
 
+@cache
+def _probe_stride_order(memory_format: str, rank: int) -> tuple[int, ...] | None:
+    """The stride ORDER a memory format produces at one rank, per torch.
+
+    Inductor states a layout wish as a stride order, so pairing a wish to a
+    ratified morphism has to compare in that vocabulary. Read from torch's own
+    `get_stride_order` rather than written down, so the two cannot drift.
+    """
+
+    import torch
+    from torch._inductor.ir import get_stride_order
+
+    size = tuple(range(2, 2 + rank))
+    try:
+        probe = torch.empty(size, device="meta").to(
+            memory_format=getattr(torch, memory_format)
+        )
+    except RuntimeError:
+        return None
+    return tuple(int(v) for v in get_stride_order(probe.stride()))
+
+
+def morphism_for_stride_order(
+    order: Sequence[int], root: Path | None = None
+) -> LayoutMorphism | None:
+    """The ratified morphism one stride order names, or None (a CANDIDATE).
+
+    `None` is the design's permanent fallback, not a failure: the mint compiles
+    against the stored layout and the order is emitted as an unratified
+    candidate. Never invent a name for it.
+    """
+
+    wanted = tuple(int(v) for v in order)
+    for morphism in _paired(_corpus_root(root))[0].values():
+        if not morphism.applies_to(len(wanted)):
+            continue
+        if _probe_stride_order(morphism.memory_format, len(wanted)) == wanted:
+            return morphism
+    return None
+
+
 def catalog(root: Path | None = None) -> dict[str, LayoutMorphism]:
     return dict(_paired(_corpus_root(root))[0])
 
@@ -1400,6 +1441,7 @@ __all__ = [
     "is_graph_hash",
     "isa_level",
     "literal_digest",
+    "morphism_for_stride_order",
     "literal_names",
     "placement",
     "require_morphism",

@@ -209,10 +209,12 @@ def test_the_rungs_are_read_off_the_ARTIFACT_THAT_IS_SERVING(tmp_path: Path) -> 
     import tcg_artifacts
 
     from gen_worker.graphs.adopt import _ForwardDispatcher
-    from gen_worker._vendor.torchcg.artifact import read_metadata
+    from gen_worker._vendor.torchcg.store import open_artifact
 
+    # tcg#90: metadata is read by OPENING the envelope — the same unpack-and-
+    # verify the serving path performs, rather than a bespoke reader.
     artifact = tcg_artifacts.build(tmp_path / "graph.tcg")
-    metadata = read_metadata(artifact)
+    metadata = open_artifact(artifact, tmp_path / "opened").metadata
     # A real mint's real metadata: the layout axis is present because tcg#83
     # made it mandatory, and this build wished for nothing.
     assert metadata["declared_input_layout"] == IDENTITY

@@ -162,7 +162,7 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "47adb766df8a6860e1bf1f60b2cdae8e5d0f9353"
+rev = "5f096f2311d1c97087196db3895e071c184aa6fe"
 subdir = "src/torchcg"
 # pgw#1474 / tcg#61 RE-VENDOR (2026-08-19), from `6c91b83d`. `CompiledGraphCall`
 # stops pre-flattening the call: the loaded package is torch's
@@ -399,8 +399,8 @@ rewrites = [
 [packages.torchcg.files]
 "__init__.py" = "19bbd45bfb18d3b9e9121a99ff138164510de1bf7e1d41d249560e9b2b6b8843"
 "adopt.py" = "6e24c858bf965638dd7648d407e722caad4e1afa155ba17820074c66aaa5483c"
-"identity.py" = "e1fd133356d8c0e0908d58ad5f30997f8c2cefe237990daddc362a137f778e81"
-"mint.py" = "c456bcf728b6c85adf80c4a5400b148e342c32f6dcff9b8dadefba84a76048b3"
+"identity.py" = "b13fa0b5cc902bb1b50d93ff8f8dcc4e3a5d0b1f9b9e9071a46cbb1400c5142e"
+"mint.py" = "c2b00048a6bd2a4c9822a1a93a9fd67148a427577a9352d183522dca6cec3384"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "refuse.py" = "ed1f4a75d4cf552eb44add3cca77405b78774c3c3388dc3b43ea4409c1140a3a"
 "store.py" = "d22ba732f7c8f7e116d1f8b825f530f5255094068228d98e77e66de0791dad6a"

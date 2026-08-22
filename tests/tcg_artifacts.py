@@ -99,6 +99,9 @@ def metadata(
         "env": env,
         "compile_policy": policy,
         "declared_input_layout": contiguous_handle(),
+        # ALWAYS written by a real mint, empty included (pgw#1645) — an absent
+        # field and "the mint asked for nothing" are different facts.
+        "layout_wishlist": [],
         "placement": ["cuda:0"] if sm.startswith("sm_") else ["cpu"],
         "ingress": ingress.as_dict(),
         "passes": [],

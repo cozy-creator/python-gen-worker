@@ -9,9 +9,10 @@ what the artifact would claim.
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from importlib import import_module
@@ -25,10 +26,13 @@ from .identity import (
     contiguous_handle,
     graph_hash,
     literal_names,
+    morphism_for_stride_order,
     placement,
     require_morphism,
 )
 from .refuse import BindError, DroppedOptimization, MintError, RangeNarrowed
+
+logger = logging.getLogger("torchcg")
 
 # ---------------------------------------------------------------------------
 # The compile policy -- five options, sealed
@@ -644,20 +648,150 @@ def _export_context(program: Any) -> Iterator[None]:
         cast(Any, mode).shape_env = previous
 
 
-def compile_package(program: Any, name: str, output: Path, device_type: str) -> Path:
-    """AOTI-compile one exported program into a `.pt2` package."""
+
+# ---------------------------------------------------------------------------
+# Layout wishes -- what inductor asked of each CONSTANT, read from inductor
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class LayoutWish:
+    """One constant whose layout inductor asked to CHANGE during this compile.
+
+    ``name`` is inductor's own buffer name for the constant (``conv_weight``);
+    the mint translates it to the artifact fqn through the package's own
+    constant table, which is the second, independent witness.
+
+    ``morphism`` is the ratified catalog handle when the wanted layout is one,
+    and ``""`` when it is not -- an out-of-catalog wish is a CANDIDATE carrying
+    only the stride order inductor asked for. Nothing here invents a name.
+    """
+
+    name: str
+    stride_order: tuple[int, ...]
+    morphism: str
+
+    @property
+    def ratified(self) -> bool:
+        return bool(self.morphism)
+
+
+@contextmanager
+def _observing_layout_wishes(wishes: dict[str, LayoutWish]) -> Iterator[None]:
+    """Record what inductor asks of each CONSTANT's layout, from inductor.
+
+    ``ExternKernel.require_strides`` is the single choke point where inductor
+    states the layout it wants for an input (`require_channels_last`,
+    `require_stride_order` and `require_contiguous` all route through it), and
+    it inserts a copy only when the strides do not already match. So a wish is
+    exactly: a graph CONSTANT whose require_strides call returned a DIFFERENT
+    buffer. Measured at micro scale on CPU, no card: a contiguous conv weight
+    is copied under order [3, 0, 2, 1]; the same weight delivered channels_last
+    is returned unchanged, and the per-call permute kernel is never generated.
+
+    Read, never steered: the original is always called, its result is always
+    returned, and any failure inside the observer leaves the compile alone.
+    """
+
+    try:
+        module = import_module("torch._inductor.ir")
+        virtualized = import_module("torch._inductor.virtualized")
+        extern_kernel = vars(module)["ExternKernel"]
+        graph_state = vars(virtualized)["V"]
+    except (ImportError, KeyError):  # pragma: no cover - exercised with torch extra
+        logger.debug("layout wishes: torch._inductor is unavailable")
+        yield
+        return
+
+    original = extern_kernel.require_strides.__func__
+    #: Constants two kernels want in DIFFERENT layouts. There is no single
+    #: ideal layout for them, so they carry no wish -- an unsatisfiable wish is
+    #: worse than none, because the whole point of the wishlist is that a
+    #: re-mint against it deletes copies rather than moving them.
+    conflicted: set[str] = set()
+
+    def _record(node: object, requested: object, result: object) -> None:
+        name = getattr(node, "get_name", lambda: None)()
+        if not isinstance(name, str) or name not in (
+            getattr(graph_state.graph, "constants", None) or {}
+        ):
+            return
+        if getattr(result, "get_name", lambda: None)() == name:
+            # No copy: the constant is ALREADY in the layout inductor wants.
+            # That is the win this axis exists to make expressible, and it says
+            # nothing about any OTHER kernel that did copy it, so it never
+            # erases a wish already recorded.
+            return
+        order = tuple(int(value) for value in cast(Any, requested))
+        known = wishes.get(name)
+        if known is not None and known.stride_order != order:
+            conflicted.add(name)
+            return
+        morphism = morphism_for_stride_order(order)
+        wishes[name] = LayoutWish(name, order, morphism.handle if morphism else "")
+
+    def _patched(
+        cls: Any,
+        x: Any,
+        order: Any = None,
+        exact_strides: Any = None,
+        allow_padding: bool = False,
+    ) -> Any:
+        result = original(
+            cls, x, order=order, exact_strides=exact_strides, allow_padding=allow_padding
+        )
+        try:
+            requested = order
+            if requested is None and exact_strides is not None:
+                from torch._inductor.ir import get_stride_order
+
+                requested = get_stride_order(exact_strides)
+            if requested is not None:
+                _record(x, requested, result)
+        except Exception:  # pragma: no cover - an observer never breaks a mint
+            logger.warning("layout wishes: could not read one request", exc_info=True)
+        return result
+
+    extern_kernel.require_strides = classmethod(_patched)
+    try:
+        yield
+    finally:
+        extern_kernel.require_strides = classmethod(original)
+        for name in conflicted:
+            wishes.pop(name, None)
+            logger.info(
+                "layout wishes: constant %r is wanted in two layouts; no single "
+                "ideal layout exists for it, so it carries no wish",
+                name,
+            )
+
+
+def compile_package(
+    program: Any, name: str, output: Path, device_type: str,
+    wishlist: list[LayoutWish] | None = None,
+) -> Path:
+    """AOTI-compile one exported program into a `.pt2` package.
+
+    `wishlist`, when a caller passes one, receives what inductor asked of each
+    CONSTANT's layout during this compile — the input pgw#1645's serving rung
+    reads to say which layout an artifact is EARNING. It is an out-parameter
+    rather than a second return value because the compile's product is the
+    package; the wishes are an observation made along the way.
+    """
 
     impose_host_policy()
     args, kwargs = compile_inputs(program)
     options = dict(POLICY)
     compile_policy(device_type)  # refuses an unclassified or silently-dropped option
+    wishes: dict[str, LayoutWish] = {}
     try:
-        with _export_context(program):
+        with _export_context(program), _observing_layout_wishes(wishes):
             files = vars(import_module("torch._inductor"))["aot_compile"](
                 program.module(check_guards=False), args, kwargs, options=options
             )
     except Exception as exc:
         raise MintError(f"AOTInductor compile failed: {type(exc).__name__}: {exc}") from exc
+    if wishlist is not None:
+        wishlist.extend(wishes[name] for name in sorted(wishes))
     if not isinstance(files, list) or not files:
         raise MintError("AOTInductor did not return a non-empty loose-file list")
     try:
@@ -685,7 +819,8 @@ def write_literals(program: Any, destination: Path) -> Path | None:
 
 
 def metadata(spec: GraphSpec, *, key: str, sm: str, env: Mapping[str, str],
-             device_type: str) -> dict[str, Any]:
+             device_type: str,
+             wishlist: Sequence[LayoutWish] = ()) -> dict[str, Any]:
     return {
         "kind": "aot-inductor",
         "key": key,
@@ -696,6 +831,16 @@ def metadata(spec: GraphSpec, *, key: str, sm: str, env: Mapping[str, str],
         "env": dict(env),
         "compile_policy": compile_policy(device_type),
         "declared_input_layout": declared_input_layout(),
+        # pgw#1645 reads this to say which layout an artifact is EARNING. It is
+        # ALWAYS written, even empty: an absent field and "the mint asked for
+        # nothing" are different facts, and the consumer's own wording ("the
+        # mint asked for no layout change") is a POSITIVE claim it can only
+        # make honestly if the mint actually looked.
+        "layout_wishlist": [
+            {"name": w.name, "stride_order": list(w.stride_order),
+             "morphism": w.morphism}
+            for w in wishlist
+        ],
         "placement": list(placement(spec.program)),
         "ingress": spec.ingress.as_dict(),
         "passes": list(spec.passes),
@@ -763,13 +908,17 @@ def mint(
     require_morphism(declared_input_layout())
     with tempfile.TemporaryDirectory() as scratch:
         workspace = Path(scratch)
-        compile_package(bound.program, bound.graph, workspace / "model.pt2", device_type)
+        wishlist: list[LayoutWish] = []
+        compile_package(
+            bound.program, bound.graph, workspace / "model.pt2", device_type,
+            wishlist=wishlist,
+        )
         assert_ranges_hold(bound.program, bound.graph)
         write_literals(bound.program, workspace / "constants.safetensors")
         (workspace / "metadata.json").write_text(
             json.dumps(
                 metadata(bound, key=key.value, sm=sm, env=dict(key.env),
-                         device_type=device_type),
+                         device_type=device_type, wishlist=wishlist),
                 sort_keys=True,
                 indent=2,
             )
@@ -790,6 +939,7 @@ __all__ = [
     "bind_static_spec",
     "compile_inputs",
     "compile_package",
+    "LayoutWish",
     "compile_policy",
     "declared_input_layout",
     "declared_ranges",
