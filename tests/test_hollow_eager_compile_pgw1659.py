@@ -70,9 +70,9 @@ def test_an_authors_torch_compile_is_identity_inside_a_session() -> None:
         assert torch.compile(module) is module
         # `@torch.compile(mode=...)` -- the decorator FACTORY, no model given.
         assert torch.compile(mode="max-autotune")(eager) is eager
-        # `Module.compile()` mutates in place and returns None either way.
-        assert module.compile() is None
-        assert type(module.forward.__self__) is Decoder
+        # `Module.compile()` mutates in place -- and must not.
+        module.compile()
+        assert getattr(module.forward, "__self__", None) is module
 
     assert torch.compile is outside
 
@@ -95,7 +95,10 @@ def test_a_compiled_module_in_a_hollow_drive_returns_the_eager_answer() -> None:
 
     with hollow_session("cpu"):
         module = Decoder()
-        module.forward = torch.compile(module.forward, dynamic=False)
+        # h3's own spelling, verbatim (`_compile_with_eager_fallback`).
+        module.forward = torch.compile(  # type: ignore[method-assign]
+            module.forward, dynamic=False
+        )
         observed: list[tuple[int, ...]] = []
         module.register_forward_pre_hook(
             lambda _m, args: observed.append(tuple(args[0].shape))
