@@ -333,15 +333,23 @@ def _refuse_a_dead_accelerator(
 
 
 def _assert_weights_free(torch: Any, program: Any) -> None:
+    """The last thing between a hollow derive and a graph blob.
 
-    from torch._subclasses.fake_tensor import FakeTensor
+    Asked of the STORAGE, never of the TYPE (pgw#1198, re-broken here and fixed
+    in pgw#1661). `isinstance(..., FakeTensor)` cannot see a wrapper subclass
+    over fake data — what a `setup()`-time quantizer leaves on a hollow denoiser
+    — and such a tensor prices itself off its OUTER metadata, so h3's 300
+    virtual weights read as ~23 GB of weights on a card holding 0.0 GiB.
+    `is_virtual` recurses through `__tensor_flatten__` and answers meta too,
+    which is why the separate meta arm that stood here is gone.
+    """
+
+    from ..meta_instantiation import is_virtual
 
     heavy = []
     for holder in ("state_dict", "constants"):
         for name, value in (getattr(program, holder, None) or {}).items():
-            if not isinstance(value, torch.Tensor) or isinstance(value, FakeTensor):
-                continue
-            if value.device.type == "meta":
+            if not isinstance(value, torch.Tensor) or is_virtual(value):
                 continue
             if value.numel() * value.element_size() > _REAL_TENSOR_BYTES_CEILING:
                 heavy.append(f"{holder}.{name} ({value.numel() * value.element_size()} bytes)")
