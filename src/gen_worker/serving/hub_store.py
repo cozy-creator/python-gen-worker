@@ -1,6 +1,6 @@
-"""The hub-backed GraphStore (pgw#1372): th#2133's adopt route, thin.
+"""The hub-backed GraphStore: the Bind Contract's graph references, thin.
 
-One ask per boot — ``GET /v1/worker/releases/<release>/compiled-graphs
+One ask per bind — ``GET /v1/worker/bind-contracts/<digest>/compiled-graphs
 ?lane=<lane>&sm=<sm>`` — answers, for every graph in the release's lane, the
 artifact for THIS release's exact env + this sm (content digest, presigned
 transport manifest, the mint's requirements manifest) or a per-graph MISS.
@@ -19,8 +19,9 @@ THE ANSWER SHAPE IS th#2133's, verbatim — this module was written against a
 SPECULATED ``{document, artifacts, misses}`` shape before the route landed,
 and the route answers something else::
 
-    {"object": "release_compiled_graphs", "release_id": "...",
-     "binding_generation": 0, "env_compile_stack": [["torch", "2.13.0"], ...],
+    {"object": "bind_compiled_graphs", "release_id": "...",
+     "bind_contract_digest": "sha256:...",
+     "env_compile_stack": [["torch", "2.13.0"], ...],
      "lane": "sdxl.diffusers@1+plain.bf16@1", "lane_stamped": true,
      "lane_contract": {"stamp": ..., "contract_digest": ..., "document": {...},
                        "requires": ...},
@@ -57,7 +58,7 @@ from .._vendor.torchcg.store import PublishOutcome, StoreError
 
 HTTP_TIMEOUT_S = 60.0
 
-ADOPT_PATH = "/v1/worker/releases/{release_id}/compiled-graphs"
+ADOPT_PATH = "/v1/worker/bind-contracts/{bind_contract_digest}/compiled-graphs"
 
 HIT = "hit"
 
@@ -69,8 +70,8 @@ class ReleaseNotStamped(Exception):
 class ReleaseGraphTransport(Protocol):
     """What the hub wiring must provide — and all it must provide."""
 
-    def release_compiled_graphs(
-        self, release_id: str, lane: str, sm: str
+    def bind_compiled_graphs(
+        self, bind_contract_digest: str, lane: str, sm: str
     ) -> Mapping[str, Any]:
         """The one boot ask: the release's per-graph adopt answer."""
         ...
@@ -94,14 +95,14 @@ class BrokerReleaseGraphTransport:
         self.bearer = bearer
         self.timeout_s = timeout_s
 
-    def release_compiled_graphs(
-        self, release_id: str, lane: str, sm: str
+    def bind_compiled_graphs(
+        self, bind_contract_digest: str, lane: str, sm: str
     ) -> Mapping[str, Any]:
         from ..procsplit import broker
 
         response = broker.request(
             "GET",
-            ADOPT_PATH.format(release_id=str(release_id)),
+            ADOPT_PATH.format(bind_contract_digest=str(bind_contract_digest)),
             base_url=self.base_url,
             bearer=self.bearer,
             params={"lane": str(lane), "sm": str(sm)},
@@ -109,13 +110,12 @@ class BrokerReleaseGraphTransport:
         )
         if response.status_code == 404:
             raise ReleaseNotStamped(
-                f"release {release_id} carries no stamped compiled-graph "
-                f"document; serving eager"
+                f"Bind Contract {bind_contract_digest} is unavailable; serving eager"
             )
         if response.status_code != 200:
             raise StoreError(
                 f"adopt route answered {response.status_code} for release "
-                f"{release_id} lane={lane} sm={sm}: {response.text[:400]}"
+                f"{bind_contract_digest} lane={lane} sm={sm}: {response.text[:400]}"
             )
         payload = response.json()
         if not isinstance(payload, Mapping):
@@ -140,10 +140,12 @@ def _graph_rows(answer: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
 class HubGraphStore:
 
     def __init__(
-        self, transport: ReleaseGraphTransport, release_id: str, lane: str, sm: str
+        self, transport: ReleaseGraphTransport, release_id: str,
+        bind_contract_digest: str, lane: str, sm: str,
     ) -> None:
         self._transport = transport
         self._release_id = str(release_id)
+        self._bind_contract_digest = str(bind_contract_digest)
         self._lane = str(lane)
         self._sm = str(sm)
         self._answer: Optional[Mapping[str, Any]] = None
@@ -152,8 +154,8 @@ class HubGraphStore:
 
     def _resolve(self) -> Mapping[str, Any]:
         if self._answer is None:
-            answer = self._transport.release_compiled_graphs(
-                self._release_id, self._lane, self._sm
+            answer = self._transport.bind_compiled_graphs(
+                self._bind_contract_digest, self._lane, self._sm
             )
             if not isinstance(answer, Mapping):
                 raise StoreError(
@@ -203,6 +205,17 @@ class HubGraphStore:
         if self._document is not None:
             return self._document
         answer = self._resolve()
+        if str(answer.get("object") or "") != "bind_compiled_graphs":
+            raise StoreError(
+                f"Bind Contract {self._bind_contract_digest}: adopt route "
+                f"answered object={answer.get('object')!r}, not "
+                "'bind_compiled_graphs'"
+            )
+        if str(answer.get("bind_contract_digest") or "") != self._bind_contract_digest:
+            raise StoreError(
+                f"Bind Contract {self._bind_contract_digest}: adopt route "
+                f"answered for {answer.get('bind_contract_digest')!r}"
+            )
         raw_stack = answer.get("env_compile_stack")
         if not isinstance(raw_stack, (list, tuple)) or not raw_stack:
             raise StoreError(

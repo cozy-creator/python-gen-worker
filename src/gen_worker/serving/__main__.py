@@ -31,13 +31,13 @@ class HttpReleaseGraphTransport:
         self.bearer = bearer
         self.timeout_s = timeout_s
 
-    def release_compiled_graphs(
-        self, release_id: str, lane: str, sm: str
+    def bind_compiled_graphs(
+        self, bind_contract_digest: str, lane: str, sm: str
     ) -> Mapping[str, Any]:
         query = urllib.parse.urlencode({"lane": lane, "sm": sm})
         url = (
-            f"{self.base_url}/v1/worker/releases/"
-            f"{urllib.parse.quote(release_id, safe='')}/compiled-graphs?{query}"
+            f"{self.base_url}/v1/worker/bind-contracts/"
+            f"{urllib.parse.quote(bind_contract_digest, safe='')}/compiled-graphs?{query}"
         )
         request = urllib.request.Request(url)
         if self.bearer:
@@ -50,8 +50,7 @@ class HttpReleaseGraphTransport:
                 from .hub_store import ReleaseNotStamped
 
                 raise ReleaseNotStamped(
-                    f"release {release_id} carries no stamped compiled-graph "
-                    f"document; serving eager"
+                    f"Bind Contract {bind_contract_digest} is unavailable; serving eager"
                 ) from exc
             raise SystemExit(
                 f"adopt route answered {exc.code} from {url}: "
@@ -106,13 +105,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hub-base-url", default="",
                         help="hub base URL for the th#2133 adopt route")
     parser.add_argument("--release", default="", help="endpoint-release id (hub adopt)")
+    parser.add_argument("--bind-contract-digest", default="",
+                        help="immutable Bind Contract selected for --checkpoint")
     parser.add_argument("--hub-token", default="",
                         help="worker bearer for the adopt route (local/CI only; "
                              "in production the parent holds the credential)")
     parser.add_argument("--via-broker", action="store_true",
                         help="make the adopt ask through procsplit's action "
                              "broker — the PRODUCTION path, allowlisted as "
-                             "`release.compiled_graphs`")
+                             "`bind.compiled_graphs`")
     parser.add_argument("--sm", default="", help="this GPU's sm (e.g. sm_89)")
     parser.add_argument(
         "--env-lockfile", default="",
@@ -168,6 +169,8 @@ def _adoption_source(
 
         if not args.release:
             raise SystemExit("--release is required with --hub-base-url")
+        if not args.bind_contract_digest:
+            raise SystemExit("--bind-contract-digest is required with --hub-base-url")
         transport: Any = (
             BrokerReleaseGraphTransport(
                 base_url=args.hub_base_url, bearer=args.hub_token
@@ -175,7 +178,9 @@ def _adoption_source(
             if args.via_broker
             else HttpReleaseGraphTransport(args.hub_base_url, args.hub_token)
         )
-        store: Any = HubGraphStore(transport, args.release, args.lane, args.sm)
+        store: Any = HubGraphStore(
+            transport, args.release, args.bind_contract_digest, args.lane, args.sm
+        )
         try:
             document = store.get_graphs(args.release)
         except ReleaseNotStamped as exc:

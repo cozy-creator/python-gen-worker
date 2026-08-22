@@ -26,6 +26,7 @@ from test_serving_adopt_first import (  # noqa: E402
 )
 
 RELEASE = "rel-pgw1573"
+BIND_DIGEST = "sha256:" + "b" * 64
 
 
 @pytest.fixture()
@@ -275,7 +276,8 @@ def _fleet_answer(document: Any, base_url: str, blobs: dict,
             },
         })
     return {
-        "object": "release_compiled_graphs", "release_id": RELEASE,
+        "object": "bind_compiled_graphs", "release_id": RELEASE,
+        "bind_contract_digest": BIND_DIGEST,
         "env_compile_stack": [[name, value] for name, value in STACK],
         "lane": LANE, "lane_stamped": True, "sm": SM, "empty": False,
         "hits": len(rows), "misses": 0, "graphs": rows,
@@ -289,7 +291,7 @@ def _remote_store(cas: Path, base_url: str) -> Any:
     from gen_worker.serving.hub_store import HubGraphStore
 
     upstream = HubGraphStore(
-        HttpReleaseGraphTransport(base_url), RELEASE, LANE, SM)
+        HttpReleaseGraphTransport(base_url), RELEASE, BIND_DIGEST, LANE, SM)
     return graph_store(cas, upstream, cas.parent / "no-baked")
 
 

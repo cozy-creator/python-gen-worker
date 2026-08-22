@@ -40,7 +40,7 @@ class ServeAdoption:
         transport: Any = None,
         stack: Optional[CompileStack] = None,
         loader: Optional[Callable[[Path, Any, Any], Any]] = None,
-        on_adopted: Optional[Callable[["ServeAdoption"], Any]] = None,
+        on_adopted: Optional[Callable[[Any, Any], Any]] = None,
     ) -> None:
         self.release_id = str(release_id)
         self.sm = str(sm)
@@ -51,8 +51,10 @@ class ServeAdoption:
         self._loader = loader
         self._on_adopted = on_adopted
         self._lock = threading.Lock()
-        self._settled = False
-        self._triggered = False
+        self._sessions: Dict[Tuple[type, str, str], Any] = {}
+        self._stores: Dict[Tuple[str, str], Any] = {}
+        self._class_keys: Dict[type, Tuple[type, str, str]] = {}
+        self._triggered: set[Tuple[type, str, str]] = set()
         self.adoption: Any = None
         self.store: Any = None
         self.refusal: str = ""
@@ -60,81 +62,96 @@ class ServeAdoption:
         self.refusal_permanent: bool = False
         self.contract: str = ""
 
-    def sink_for(self, model_cls: type, lane: Any) -> Optional[Callable[..., Any]]:
+    def sink_for(
+        self, model_cls: type, lane: Any, binding: Any,
+    ) -> Optional[Callable[..., Any]]:
         """``ctx.compile``'s sink for one model class — the adopt arm.
 
-        pgw#1650: a release derives EVERY compile-marking class, so this is
-        called once per class. Classes that share a lane share this session —
-        the document under that stamp carries all of their graphs and a mark
-        claims one by STRUCTURE. A class on a DIFFERENT lane gets no sink and
-        serves eager, LOUDLY: this session was built for one lane, and handing
-        it back for another silently adopts the wrong lane's graphs. Per-lane
-        sessions in one boot are owed (pgw#1650, serving half).
+        Sessions are keyed by (class, Bind Contract, lane), while classes that
+        share a bind reuse its graph store. A class bound to a second config
+        tree gets that Bind Contract's graphs and can never inherit the
+        primary's.
         """
+        from .model import lane_handle
+
+        contract = lane_handle(lane) if lane is not None else ""
+        bind = getattr(binding, "bind_contract", None)
+        bind_digest = str(getattr(bind, "digest", "") or "").strip()
+        key = (model_cls, bind_digest, contract)
         with self._lock:
-            if self._settled:
-                from .model import lane_handle
-
-                contract = lane_handle(lane) if lane is not None else ""
-                if self.contract and contract and contract != self.contract:
-                    logger.warning(
-                        "adopt: %s declares lane %s, but this boot adopted "
-                        "lane %s — %s serves EAGER. One boot holds one lane "
-                        "document.",
-                        model_cls.__name__, contract, self.contract,
-                        model_cls.__name__,
-                    )
+            self._class_keys[model_cls] = key
+        if lane is None:
+            self._refuse("eager_permanent", "this model class declares no lane")
+            return None
+        if not bind_digest:
+            self._refuse(
+                "bind_contract_missing",
+                f"{model_cls.__name__} carries no Bind Contract",
+            )
+            return None
+        bind_key = (bind_digest, contract)
+        with self._lock:
+            session = self._sessions.get(key)
+            if session is None:
+                try:
+                    built = self._build(lane, bind_digest, bind_key)
+                except Exception as exc:  # noqa: BLE001 — adoption never kills a boot
+                    self._refuse(type(exc).__name__, str(exc))
                     return None
-                return self._sink()
-            self._settled = True
-            try:
-                self._build(lane)
-            except Exception as exc:  # noqa: BLE001 — adoption never kills a boot
-                self._refuse(type(exc).__name__, str(exc))
-                return None
-        return self._sink()
+                if built is None:
+                    return None
+                store, session = built
+                self._stores[bind_key] = store
+                self._sessions[key] = session
+                if self.adoption is None:
+                    self.adoption, self.store, self.contract = session, store, contract
+        return self._sink(session)
 
-    def _sink(self) -> Optional[Callable[..., Any]]:
+    def _sink(self, session: Any = None) -> Optional[Callable[..., Any]]:
         from .adapter_guard import sink as guarded_sink
 
-        if self.adoption is None:
+        selected = self.adoption if session is None else session
+        if selected is None:
             return None
-        return guarded_sink(self.adoption.adopt)
+        return guarded_sink(selected.adopt)
 
     def loaded(self, model_cls: type = type(None), lane: Any = None) -> None:
         """THE MINT'S TRIGGER: the author's ``load(ctx)`` has returned."""
         with self._lock:
-            if self._triggered:
+            key = self._class_keys.get(model_cls)
+            if key is None or key in self._triggered:
                 return
-            self._triggered = True
-            session = self.adoption
+            self._triggered.add(key)
+            session = self._sessions.get(key)
+            store = self._stores.get((key[1], key[2]))
             hook = self._on_adopted
-            contract = self.contract
+            contract = key[2]
         if session is None:
-            self._say_boot_end(armed=0, claimed=0, mint_running=False)
+            self._say_boot_end(session, contract, armed=0, claimed=0, mint_running=False)
             return
-        self._say_outcome(contract)
+        self._say_outcome(session, contract)
         armed, holes = len(session.adopted), len(session.holes)
         mint_running = False
         if hook is not None:
             try:
-                started = hook(self)
+                started = hook(store, session)
                 running = getattr(started, "running", None)
                 mint_running = bool(holes) if running is None else bool(running)
             except Exception:  # noqa: BLE001 — the pod serves either way
                 logger.exception("adopt: the post-load mint trigger raised")
-        self._say_boot_end(armed=armed, claimed=armed + holes,
+        self._say_boot_end(session, contract, armed=armed, claimed=armed + holes,
                            mint_running=mint_running)
 
     def _say_boot_end(
-        self, *, armed: int, claimed: int, mint_running: bool
+        self, session: Any, contract: str, *, armed: int, claimed: int,
+        mint_running: bool,
     ) -> None:
         from ..compiled_graph_adopt import EagerPhase
         from .self_mint import KIND_SKIPPED
 
         if armed or mint_running:
             return
-        declared = self.adoption is not None or (
+        declared = session is not None or (
             bool(self.refusal_phase)
             and self.refusal_phase not in EAGER_BY_DESIGN_REFUSALS
         )
@@ -143,12 +160,12 @@ class ServeAdoption:
         why = (
             f"the release declared {claimed} graph specialization(s) for this "
             f"(lane x sm) and none armed"
-            if self.adoption is not None
+            if session is not None
             else f"the adopt refused ({self.refusal})"
         )
         activity_mod.emit_event(
             KIND_SKIPPED,
-            f"release={self.release_id} lane={self.contract or '(unresolved)'} "
+            f"release={self.release_id} lane={contract or '(unresolved)'} "
             f"sm={self.sm}: boot ended with ZERO armed graph specializations "
             f"and no mint in flight — {why}. This pod serves EAGER for the "
             f"rest of its life against a release that declared compile.",
@@ -157,7 +174,12 @@ class ServeAdoption:
             total_steps=claimed,
         )
 
-    def _build(self, lane: Any) -> None:
+    def _build(
+        self,
+        lane: Any,
+        bind_contract_digest: str,
+        bind_key: Tuple[str, str],
+    ) -> Optional[Tuple[Any, Any]]:
         from .._vendor.torchcg.adopt import AdoptSession
         from ..env_identity import installed_stack_drift
         from .mint_store import graph_store
@@ -168,17 +190,21 @@ class ServeAdoption:
         )
         from .model import lane_handle
 
-        if lane is None:
-            self._refuse("eager_permanent", "this model class declares no lane")
-            return
         contract = lane_handle(lane)
         transport = (
             self._transport if self._transport is not None
             else BrokerReleaseGraphTransport()
         )
-        store = HubGraphStore(transport, self.release_id, contract, self.sm)
+        store = self._stores.get(bind_key)
+        upstream = (
+            getattr(store, "upstream", None)
+            if store is not None
+            else HubGraphStore(
+                transport, self.release_id, bind_contract_digest, contract, self.sm
+            )
+        )
         try:
-            document = store.get_graphs(self.release_id)
+            document = upstream.get_graphs(self.release_id)
         except ReleaseNotStamped as exc:
             self._refuse("release_not_stamped", str(exc))
             return
@@ -201,10 +227,10 @@ class ServeAdoption:
                 "not be banked and a minted one could not be published — the "
                 "adopt would be read-only against the fleet pool forever")
             return
-        self.store = graph_store(self.cas_dir, store)
-        self.contract = contract
-        self.adoption = AdoptSession(
-            self.store, document, contract, self.sm,
+        if store is None:
+            store = graph_store(self.cas_dir, upstream)
+        session = AdoptSession(
+            store, document, contract, self.sm,
             loader=self._loader,
             artifacts_dir=self.artifacts_dir,
             stack=stack,
@@ -214,11 +240,11 @@ class ServeAdoption:
             "document; what this boot arms is decided by the author's "
             "ctx.compile calls and reported after load",
             self.release_id, contract, self.sm,
-            len(self.adoption.lane.graphs),
+            len(session.lane.graphs),
         )
+        return store, session
 
-    def _say_outcome(self, contract: str) -> None:
-        session = self.adoption
+    def _say_outcome(self, session: Any, contract: str) -> None:
         if session is None:
             return
         adopted, holes = len(session.adopted), len(session.holes)
@@ -271,29 +297,32 @@ class ServeAdoption:
     @property
     def holes(self) -> Tuple[Any, ...]:
         """The ordered mint work-list, in canonical document order."""
-        return tuple(self.adoption.holes) if self.adoption is not None else ()
+        return tuple(hole for session in self._sessions.values() for hole in session.holes)
 
     @property
     def layout_rungs(self) -> Tuple[Any, ...]:
         """Each armed graph's layout position, read off the artifact serving it."""
-        if self.adoption is None:
-            return ()
-        return layout_rung.rungs_of(self.adoption)
+        return tuple(
+            rung for session in self._sessions.values()
+            for rung in layout_rung.rungs_of(session)
+        )
 
     def facts(self) -> Dict[str, Any]:
         """Counted, and never silent: `adopted`/`holes` are absent (not zero) when no session was ever built, and `refusal` says why."""
-        if self.adoption is None:
+        if not self._sessions:
             return {"adopting": False, "refusal": self.refusal or "not_attempted"}
-        marks = tuple(self.adoption.unclaimed_marks)
+        sessions = tuple(self._sessions.values())
+        marks = tuple(mark for session in sessions for mark in session.unclaimed_marks)
         rungs = self.layout_rungs
         return {
             "adopting": True,
-            "adopted": len(self.adoption.adopted),
-            "holes": len(self.adoption.holes),
-            "unclaimed": len(self.adoption.unclaimed),
+            "bind_sessions": len(sessions),
+            "adopted": sum(len(session.adopted) for session in sessions),
+            "holes": sum(len(session.holes) for session in sessions),
+            "unclaimed": sum(len(session.unclaimed) for session in sessions),
             "unmatched_marks": len(marks),
             "unmatched": [mark.describe() for mark in marks],
-            "ambiguous": len(self.adoption.ambiguous),
+            "ambiguous": sum(len(session.ambiguous) for session in sessions),
             # pgw#1645. Counted the same way everything else here is, and the
             # rows carry BOTH layouts: a pod on a lower rung must read as
             # EARNING rather than as a slow pod nobody can explain.

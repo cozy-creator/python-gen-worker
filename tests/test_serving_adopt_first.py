@@ -29,6 +29,7 @@ from gen_worker.serving.hub_store import HubGraphStore
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
 LANE = "sdxl.diffusers@1+plain.bf16@1"
 SM = "sm_89"
+BIND_DIGEST = "sha256:" + "b" * 64
 STACK: tuple[tuple[str, str], ...] = (("torch", torch.__version__),)
 ENV = EnvIdentity(stack=STACK, sm=SM)
 
@@ -326,8 +327,8 @@ class StubTransport:
         self.blobs = dict(blobs)
         self.asks = 0
 
-    def release_compiled_graphs(
-        self, release_id: str, lane: str, sm: str
+    def bind_compiled_graphs(
+        self, bind_contract_digest: str, lane: str, sm: str
     ) -> Mapping[str, Any]:
         self.asks += 1
         return self.answer
@@ -378,9 +379,9 @@ def _adopt_answer(
         return base
 
     return {
-        "object": "release_compiled_graphs",
+        "object": "bind_compiled_graphs",
         "release_id": "release-1",
-        "binding_generation": 0,
+        "bind_contract_digest": BIND_DIGEST,
         "env_compile_stack": [list(row) for row in document.stack],
         "lane": lane.contract,
         "lane_stamped": True,
@@ -405,7 +406,7 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     payload = b"presigned-compiled-bytes"
     answer = _adopt_answer(document, hit, hole, payload)
     transport = StubTransport(answer, {"https://presigned.example/hit": payload})
-    store = HubGraphStore(transport, "release-1", LANE, SM)
+    store = HubGraphStore(transport, "release-1", BIND_DIGEST, LANE, SM)
 
     rebuilt = store.get_graphs("release-1")
     assert rebuilt is not None and rebuilt.stack == document.stack
@@ -428,7 +429,9 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     assert hit_manifest is not None and hit_manifest.sm_compiled == SM
 
     transport.blobs["https://presigned.example/hit"] = b"tampered"
-    tampered_store = HubGraphStore(transport, "release-1", LANE, SM)
+    tampered_store = HubGraphStore(
+        transport, "release-1", BIND_DIGEST, LANE, SM
+    )
     tampered_host = fresh_host(binding, tmp_path)
     tampered_host.setup(
         store=tampered_store, document=tampered_store.get_graphs("release-1"),
@@ -450,22 +453,22 @@ def test_the_adopt_route_is_allowlisted_in_procsplit_pgw1372() -> None:
 
     action, query, _ = actions.authorize({
         "method": "GET",
-        "path": "/v1/worker/releases/rel-123/compiled-graphs",
+        "path": f"/v1/worker/bind-contracts/{BIND_DIGEST}/compiled-graphs",
         "query": {"lane": LANE, "sm": SM},
     })
-    assert action.name == "release.compiled_graphs"
+    assert action.name == "bind.compiled_graphs"
     assert query == {"lane": LANE, "sm": SM}
 
     with pytest.raises(actions.ActionRefused, match="org_id"):
         actions.authorize({
             "method": "GET",
-            "path": "/v1/worker/releases/rel-123/compiled-graphs",
+            "path": f"/v1/worker/bind-contracts/{BIND_DIGEST}/compiled-graphs",
             "query": {"lane": LANE, "sm": SM, "org_id": "someone-elses"},
         })
 
     with pytest.raises(actions.ActionRefused, match="not an allowlisted"):
         actions.authorize({
             "method": "GET",
-            "path": "/v1/worker/releases/rel-123/extra/compiled-graphs",
+            "path": f"/v1/worker/bind-contracts/{BIND_DIGEST}/extra/compiled-graphs",
             "query": {"lane": LANE, "sm": SM},
         })

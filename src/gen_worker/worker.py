@@ -571,13 +571,13 @@ class Worker:
         artifacts = tensorhub_cache_dir() / "compiled-graphs"
         self._mint_box: List[Any] = []
 
-        def _arm(adoption: Any) -> Any:
+        def _arm(store: Any, session: Any) -> Any:
             mint = production_mint(
-                store=adoption.store, artifacts_dir=artifacts,
+                store=store, artifacts_dir=artifacts,
                 cas_dir=tensorhub_cas_dir(), sm=sm,
             )
             self._mint_box.append(mint)
-            return mint.arm(adoption)
+            return mint.arm(session)
 
         return ServeAdoption(
             release_id, sm=sm, artifacts_dir=artifacts,

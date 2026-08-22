@@ -40,6 +40,11 @@ def hole_work_list(host: Any) -> Tuple[Any, ...]:
     return tuple(getattr(host, "holes", ()) or ())
 
 
+def adoption_session(host: Any) -> Any:
+    """The one graph session a mint owns, directly or through a host."""
+    return getattr(host, "adoption", host)
+
+
 def entry_workers(
     holes: int,
     *,
@@ -806,7 +811,8 @@ class BackgroundMint:
         )
 
     def _mint_one(self, record: Any, arm_lock: threading.Lock) -> MintedHole:
-        env = self.host.adoption.env
+        session = adoption_session(self.host)
+        env = session.env
         scratch = self.artifacts_dir / env.value / "build" / record.graph
         scratch.parent.mkdir(parents=True, exist_ok=True)
         position = self.artifacts_dir / env.value / f"{record.graph}.so"
@@ -837,7 +843,7 @@ class BackgroundMint:
         armed = False
         try:
             with arm_lock:
-                self.host.adoption.arm(record, Path(fetched))
+                session.arm(record, Path(fetched))
             armed = True
         except Exception as exc:  # noqa: BLE001 — published beats armed
             logger.warning(
