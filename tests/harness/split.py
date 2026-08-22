@@ -5,7 +5,7 @@ import sys
 import threading
 from concurrent import futures
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import grpc
 import msgspec
@@ -65,8 +65,9 @@ class SplitHarness:
         stop_flush_timeout_s: float = 30.0,
         beat_interval_s: float = 0.0,
         extra_child_env: Optional[dict] = None,
+        hello_ack: Optional[Callable] = None,
     ) -> None:
-        self.scheduler = FakeScheduler()
+        self.scheduler = FakeScheduler(hello_ack=hello_ack)
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
         pb_grpc.add_WorkerSchedulerServicer_to_server(self.scheduler, self.server)
         port = self.server.add_insecure_port("127.0.0.1:0")

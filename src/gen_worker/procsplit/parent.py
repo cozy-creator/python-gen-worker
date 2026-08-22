@@ -44,6 +44,7 @@ from . import (
     procdiag,
 )
 from .group import ChildGroup, GroupPlan
+from .lifecycle_relay import LifecycleRelay
 from .seam import SeamAccountant
 
 logger = logging.getLogger(__name__)
@@ -217,6 +218,11 @@ class _ChildSlot:
         # re-sends the merge of all groups'.
         self.last_state_delta: Optional[pb.WorkerMessage] = None
         self.last_state_delta_at = 0.0
+        # This group's freshest protocol-v5 projection and its answers to the
+        # hub's desired-state commands. Cleared on respawn: a dead incarnation's
+        # projection is not evidence about the one that replaced it.
+        self.last_lifecycle: Optional[pb.LifecycleSnapshot] = None
+        self.goal_receipts: Dict[str, pb.GoalReceipt] = {}
         self.generation = 0
         self.participating = True
         self.last_crash_loop_report_at = _NEVER_REPORTED
@@ -234,6 +240,8 @@ class _ChildSlot:
         """A NEW incarnation of this group starts speaking."""
         self.generation += 1
         self.participating = True
+        self.last_lifecycle = None
+        self.goal_receipts = {}
 
     async def start_server(self) -> None:
         try:
@@ -1030,6 +1038,10 @@ class ParentControl:
         ]
 
         self._worker_session_id = uuid.uuid4().hex
+        # The hub sees ONE worker: the emitted lifecycle sequence, the terminal
+        # intent history and the all-or-nothing pair are the PARENT's, because a
+        # compute child restarts its own registry at seq 1 on every respawn.
+        self._relay = LifecycleRelay(self._worker_session_id, "")
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stopping = asyncio.Event()
@@ -1311,7 +1323,7 @@ class ParentControl:
             if hello is None:
                 return pb.Hello()
             self._apply_identity_and_resources(hello)
-            hello.worker_session_id = self._worker_session_id
+            self._stamp_hello_lifecycle(hello, [hello])
             if self._beat_interval <= 0 and hello.heartbeat_interval_ms > 0:
                 self._beat_interval = hello.heartbeat_interval_ms / 1000.0
             seen = {(j.request_id, j.attempt) for j in hello.in_flight}
@@ -1338,10 +1350,32 @@ class ParentControl:
             extra_in_flight=extra,
         )
         self._apply_identity_and_resources(hello)
+        self._stamp_hello_lifecycle(hello, hellos)
         promised = [h.heartbeat_interval_ms for h in hellos if h.heartbeat_interval_ms]
         if self._beat_interval <= 0 and promised:
             self._beat_interval = min(promised) / 1000.0
         return hello
+
+    def _stamp_hello_lifecycle(
+        self, hello: pb.Hello, sources: List[pb.Hello]
+    ) -> None:
+        """Put the ALL-OR-NOTHING pair on the merged Hello, or neither half of it.
+
+        `worker_session_id` without `lifecycle_snapshot` is the exact defect this
+        issue exists for (`hello_session_id_missing_snapshot`); the snapshot
+        without the session id is its mirror. The pair comes back from one call
+        so this Hello cannot carry half of it.
+        """
+        self._relay.set_release(self._identity()[1] or hello.release_id)
+        session_id, snapshot = self._relay.hello([
+            h.lifecycle_snapshot if h.HasField("lifecycle_snapshot") else None
+            for h in sources
+        ])
+        hello.worker_session_id = session_id
+        if snapshot is None:
+            hello.ClearField("lifecycle_snapshot")
+        else:
+            hello.lifecycle_snapshot.CopyFrom(snapshot)
 
     def _apply_identity_and_resources(self, hello: pb.Hello) -> None:
         worker_id, release_id = self._identity()
@@ -1530,9 +1564,17 @@ class ParentControl:
     def _fan_in(
         self, slot: _ChildSlot, msg: pb.WorkerMessage,
     ) -> Optional[pb.WorkerMessage]:
+        kind = msg.WhichOneof("msg")
+        # Lifecycle state is relayed for EVERY topology, single group included:
+        # the sequence and the terminal intent history belong to the parent, and
+        # a child that respawned would otherwise re-enter the stream at seq 1.
+        if kind == "lifecycle_snapshot":
+            return self._relay_lifecycle(slot, msg)
+        if kind == "goal_receipt":
+            return self._relay_goal_receipt(slot, msg)
         if self.execution_groups == 1:
             return msg
-        which = msg.WhichOneof("msg")
+        which = kind
         if which in _WORKER_SCOPED_MSGS and not slot.participating:
             return None
         if which == "state_delta":
@@ -1545,6 +1587,39 @@ class ParentControl:
         if which == "fn_degraded":
             return self._reconcile_fn_degraded(slot, msg)
         return msg
+
+    def _relay_lifecycle(
+        self, slot: _ChildSlot, msg: pb.WorkerMessage,
+    ) -> Optional[pb.WorkerMessage]:
+        slot.last_lifecycle = msg.lifecycle_snapshot
+        if not self._relay.announced:
+            # The Hello withheld the pair, so the hub holds no session id for
+            # this stream and would book a worker_session_mismatch rejection.
+            return None
+        live = [s for s in self._live_slots()] or [slot]
+        merged = merge.merge_lifecycle_snapshots([s.last_lifecycle for s in live])
+        if merged is None:
+            return None
+        stamped = self._relay.stamp(merged)
+        if stamped is None:
+            return None
+        return pb.WorkerMessage(lifecycle_snapshot=stamped)
+
+    def _relay_goal_receipt(
+        self, slot: _ChildSlot, msg: pb.WorkerMessage,
+    ) -> Optional[pb.WorkerMessage]:
+        receipt = msg.goal_receipt
+        slot.goal_receipts[str(receipt.goal_id)] = receipt
+        live = [s for s in self._live_slots()] or [slot]
+        answer = merge.worker_goal_receipt({
+            s.ordinal: s.goal_receipts.get(str(receipt.goal_id)) for s in live
+        })
+        if answer is None:
+            return None
+        stamped = self._relay.receipt(answer)
+        if stamped is None:
+            return None
+        return pb.WorkerMessage(goal_receipt=stamped)
 
     def _reconcile_activity(
         self, slot: _ChildSlot, msg: pb.WorkerMessage,

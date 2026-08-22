@@ -8,7 +8,8 @@ import os
 import time
 import uuid
 from collections import OrderedDict
-from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, TypeVar
 
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .pb import worker_scheduler_pb2 as pb
@@ -80,6 +81,45 @@ def _intent_identity_digest(intent: "pb.DesiredIntent") -> bytes:
 
 class UnreportedIntentWait(RuntimeError):
     """A protocol-owned await outlived the reporting grace period."""
+
+
+@dataclass(frozen=True)
+class CapabilityFacts:
+    """What a v2 worker knows about itself, in the shape the capability projection consumes.
+
+    The v1 ``Executor`` this projection used to read is DELETED (#1373). Three of
+    its six inputs had no v2 equivalent, so the projection takes a stated record
+    instead of an object it introspects — one producer per field, and a caller
+    that cannot silently supply half of one.
+    """
+
+    #: The generation the hub's config push advertised (DesiredResidency /
+    #: DesiredStateCommand ``config_generation``). 0 = none pushed yet.
+    config_generation: int = 0
+    #: The generation whose parameter snapshot this process has durably written.
+    parameter_snapshot_generation: int = 0
+    #: The generation whose desired BINDINGS (the hub's checkpoint residency for
+    #: this release) this process has finished reconciling. Without it the config
+    #: application never converges, every capability stays APPLYING, and a typed
+    #: release cannot be dispatched to at all.
+    binding_ready_generation: int = 0
+    #: Functions this worker can serve RIGHT NOW.
+    available: frozenset[str] = frozenset()
+    #: Functions this worker has declared it cannot serve.
+    unavailable: frozenset[str] = frozenset()
+    #: function name -> the hub's own DesiredInstance for it. The binding digest
+    #: the hub compares against is derived from THIS message.
+    hot: Mapping[str, "pb.DesiredInstance"] = field(default_factory=dict)
+    #: model ref -> its residency record on this worker.
+    residency: Mapping[str, "pb.ModelResidency"] = field(default_factory=dict)
+    #: model ref -> the execution lane the HUB resolved for it
+    #: (``HelloAck.resolutions[].lane``). Never this worker's own ladder pick:
+    #: the hub compares the capability's lane to the lane IT projected.
+    lanes: Mapping[str, str] = field(default_factory=dict)
+    #: function name -> "eager" | "compiled" for a READY capability.
+    serving_tiers: Mapping[str, str] = field(default_factory=dict)
+    #: function name -> compile-target incarnation id.
+    compile_targets: Mapping[str, str] = field(default_factory=dict)
 
 
 class IntentRegistry:
@@ -1040,38 +1080,47 @@ class IntentRegistry:
             return
         self._advance_config_target(gen, changed_classes)
 
-    def refresh_projection(
-        self,
-        executor: Any,
-        desired: Optional["pb.DesiredResidency"],
-        resolutions: dict[str, tuple[Any, ...]],
-    ) -> None:
+    def binding_digest(self, function_name: str, instance: Optional["pb.DesiredInstance"]) -> bytes:
+        """The digest the hub compares a READY capability against.
+
+        Preferred source is the hub's OWN ``FUNCTION_READY`` intent, byte for
+        byte: `workerHasExactReadyCapabilityLocked` does `bytes.Equal` against
+        that field, so echoing it can never disagree with the hub, while
+        re-deriving it can (a marshalling difference on either side is a silent
+        `exact_binding_digest_mismatch` — dispatch starve, not an error). The
+        derivation stays as the fallback for a function the current command
+        names no ready intent for.
+        """
+        for intent_id, intent in self._desired_intents.items():
+            if int(intent.kind) != pb.DESIRED_INTENT_KIND_FUNCTION_READY:
+                continue
+            if str(intent.function_name or "").strip() != function_name:
+                continue
+            state = self._intents.get(intent_id)
+            if state is not None and int(state.status) in _ACTIVE_INTENT_STATES:
+                if bytes(intent.binding_digest):
+                    return bytes(intent.binding_digest)
+        return _binding_digest(function_name, instance)
+
+    def refresh_projection(self, facts: "CapabilityFacts") -> None:
         """Project exact capabilities and proven parameter snapshot state."""
-        parameter_generation = int(
-            getattr(executor.runtime_config, "parameter_snapshot_generation", 0)
-        )
+        parameter_generation = int(facts.parameter_snapshot_generation)
         if parameter_generation > int(self._config_application.parameter_snapshot_generation):
             self.config_snapshot_applied(parameter_generation)
+        binding_generation = int(facts.binding_ready_generation)
+        if binding_generation > int(self._config_application.binding_ready_generation):
+            self.bindings_applied(binding_generation)
         if not self.release_id:
             capabilities: list[pb.FunctionCapability] = []
         else:
-            hot = {
-                instance.function_name: instance
-                for instance in (desired.hot if desired is not None else ())
-                if instance.function_name
-            }
-            residency = {model.ref: model for model in executor.store.residency_snapshot()}
-            available = set(executor.available_functions())
-            compile_targets = {
-                name: target.incarnation_id
-                for target in executor.compile_targets()
-                for name in target.function_names
-            }
-            tiers_fn = getattr(executor, "serving_tiers", None)
-            tiers: dict[str, str] = tiers_fn() if callable(tiers_fn) else {}
+            hot = facts.hot
+            residency = facts.residency
+            available = set(facts.available)
+            compile_targets = facts.compile_targets
+            tiers = facts.serving_tiers
             config_state = int(self._config_application.state)
             target_generation = int(
-                self._config_application.target_generation or executor.runtime_config.generation
+                self._config_application.target_generation or facts.config_generation
             )
             capabilities = []
             for name in sorted(self.function_names):
@@ -1081,9 +1130,9 @@ class IntentRegistry:
                 )
                 execution_lanes = sorted(
                     {
-                        resolutions.get(ref, ("", "", ""))[2]
+                        facts.lanes[ref]
                         for ref in model_refs
-                        if resolutions.get(ref, ("", "", ""))[2]
+                        if str(facts.lanes.get(ref, "") or "")
                     }
                 )
                 if config_state == pb.CONFIG_APPLICATION_STATE_FAILED:
@@ -1096,7 +1145,7 @@ class IntentRegistry:
                     state = pb.FUNCTION_CAPABILITY_STATE_APPLYING
                 elif name in available:
                     state = pb.FUNCTION_CAPABILITY_STATE_READY
-                elif name in executor.unavailable:
+                elif name in facts.unavailable:
                     state = pb.FUNCTION_CAPABILITY_STATE_FAILED
                 else:
                     state = pb.FUNCTION_CAPABILITY_STATE_APPLYING
@@ -1105,7 +1154,7 @@ class IntentRegistry:
                         function_name=name,
                         release_id=self.release_id,
                         config_generation=target_generation,
-                        binding_digest=_binding_digest(name, instance),
+                        binding_digest=self.binding_digest(name, instance),
                         lane=",".join(execution_lanes),
                         models=[
                             pb.ModelIdentity(
@@ -1216,4 +1265,4 @@ class IntentRegistry:
         return snapshot
 
 
-__all__ = ["IntentRegistry", "UnreportedIntentWait"]
+__all__ = ["CapabilityFacts", "IntentRegistry", "UnreportedIntentWait"]
