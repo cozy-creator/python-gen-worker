@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def _store_faults() -> tuple[type[BaseException], ...]:
     from .._vendor.tensorfs.local import DigestMismatch
-    from .._vendor.torchcg.store import StoreError
+    from ..graphs.store import StoreError
 
     return (StoreError, DigestMismatch, FileNotFoundError, ValueError)
 
@@ -183,7 +183,7 @@ def graph_store(
     from .._vendor.tensorfs import LocalCAS
     from ..models.cache_paths import baked_program_cas_dir
 
-    from .._vendor.torchcg.store import LocalGraphStore
+    from ..graphs.store import LocalGraphStore
 
     root = baked_program_cas_dir() if baked_root is None else Path(baked_root)
     baked = (

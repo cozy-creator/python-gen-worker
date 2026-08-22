@@ -141,7 +141,7 @@ def tree_bytes(tree: Path) -> int:
 
 def local_graph_store(root: Path) -> Any:
     """torchcg's ``LocalGraphStore`` over the graph CAS at ``root``."""
-    from .._vendor.torchcg.store import LocalGraphStore
+    from ..graphs.store import LocalGraphStore
 
     return LocalGraphStore(local_cas(root))
 

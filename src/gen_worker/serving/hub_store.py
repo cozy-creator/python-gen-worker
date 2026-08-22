@@ -43,10 +43,10 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
-from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol
 
+from ..graphs.store import PublishOutcome
 from ..graphs.document import (
     DOCUMENT_FORMAT,
     DocumentError,
@@ -62,17 +62,6 @@ ADOPT_PATH = "/v1/worker/releases/{release_id}/compiled-graphs"
 
 HIT = "hit"
 
-
-class PublishOutcome(StrEnum):
-    """What a publish to the hub DID.
-
-    pgw's vocabulary, not the compile library's: torchcg stores artifacts in a
-    local content-addressed store and has no notion of a hub. It moved here with
-    the rest of the release-process orchestration (tcg#90).
-    """
-
-    PUBLISHED = "published"
-    PRESENT = "present"
 
 
 class ReleaseNotStamped(Exception):

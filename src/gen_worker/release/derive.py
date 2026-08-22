@@ -291,7 +291,7 @@ def _program_sink(cas_root: Optional[Path]) -> Optional[Any]:
     import torch
 
     from .._vendor.tensorfs import LocalCAS
-    from .._vendor.torchcg.store import LocalGraphStore
+    from ..graphs.store import LocalGraphStore
 
     store = LocalGraphStore(LocalCAS(Path(cas_root)))
 
