@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 from pathlib import Path
 from types import SimpleNamespace
@@ -676,6 +677,54 @@ def test_a_bf16_source_asked_only_for_a_repack_is_still_repacked(
     assert published[0].path.resolve() != source_dir.resolve(), (
         "the SOURCE tree was handed to the publisher — the repack was skipped")
     assert _tensor_digests(source_dir), "the ingest tree was consumed rather than read"
+
+
+def test_the_repack_never_writes_through_a_hardlink_into_the_ingest_tree(
+    tmp_path: Path,
+) -> None:
+    """The silent-corruption hazard the clone's own flavor build creates.
+
+    `build_flavor_tree`'s cast arm calls `copy_non_weight_files`, which
+    HARDLINKS every non-weight file out of the INGEST tree into the flavor
+    tree — the config, the tokenizer documents, the card. The repack then moves
+    those files into `tokenizer/` and REWRITES one of them (`tokenizer_class`
+    -> `Qwen2TokenizerFast`). Writing through the link would edit the ingest
+    tree, which is the source every other flavor in the same run is built from,
+    and nothing downstream would notice.
+
+    Every other case in this file builds its tree with ordinary writes, so none
+    of them can see this. The fixture is the hardlinks.
+    """
+
+    source = _flat_tree(tmp_path / "ingest")
+    before = {p.name: p.read_bytes() for p in sorted(source.iterdir())}
+    inodes = {p.name: p.stat().st_ino for p in sorted(source.iterdir())}
+
+    flavor = tmp_path / "flavor"
+    flavor.mkdir()
+    for p in sorted(source.iterdir()):
+        if p.suffix == ".safetensors":
+            (flavor / p.name).write_bytes(p.read_bytes())  # the cast's own output
+        else:
+            os.link(p, flavor / p.name)  # exactly what copy_non_weight_files does
+    shared = [n for n, ino in inodes.items()
+              if n != "model.safetensors" and (flavor / n).stat().st_ino == ino]
+    assert len(shared) >= 5, f"the fixture did not hardlink: {shared}"
+
+    apply_tree_repack(flavor, require_tree_repack("sensenova-u1.mot"))
+
+    after = {p.name: p.read_bytes() for p in sorted(source.iterdir())}
+    assert after == before, (
+        "the repack wrote through a hardlink into the INGEST tree: "
+        f"{sorted(k for k in before if before[k] != after.get(k))}")
+    # And the override really did happen on the repacked side, so the
+    # comparison above is not vacuous.
+    assert json.loads(
+        (flavor / "tokenizer" / "tokenizer_config.json").read_text()
+    )["tokenizer_class"] == "Qwen2TokenizerFast"
+    assert json.loads(
+        (source / "tokenizer_config.json").read_text()
+    )["tokenizer_class"] == "Qwen2Tokenizer"
 
 
 # ------------------------------------ the REAL key set and the REAL config
