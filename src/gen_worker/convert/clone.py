@@ -41,6 +41,7 @@ from .ingest import (
     plan_civitai,
     plan_huggingface,
 )
+from .clone_position import ClonePosition
 from .keepalive import HubKeepalive
 from .publish import destination_release as _destination_release
 from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
@@ -742,13 +743,21 @@ def run_clone(
     explicit_outputs = bool(outputs)
     effective_hf_token = str(hf_token or "").strip() or str(getattr(ctx, "hf_token", "") or "").strip()
 
-    def _progress(p: float, stage: str) -> None:
+    def _emit_position(
+        fraction: float, stage: str, position: int, total: Optional[int]
+    ) -> None:
         fn = getattr(ctx, "progress", None)
-        if callable(fn):
-            try:
-                fn(p, stage=stage)
-            except Exception:
-                pass
+        if not callable(fn):
+            return
+        try:
+            fn(fraction, stage, position=float(position), total=total)
+        except Exception:
+            pass
+
+    position = ClonePosition(_emit_position)
+
+    def _progress(p: float, stage: str) -> None:
+        position.enter(p, stage)
 
     source_key = source_ref if provider == "huggingface" else str(civitai_model_version_id or 0)
     if source_revision:
@@ -766,6 +775,10 @@ def run_clone(
         mode = "replace" if overwrite_repo else "merge"
 
         _progress(0.02, "clone.plan")
+
+        def _plan_progress(done: int, total: Optional[int]) -> None:
+            position.units(0.02, "clone.plan", done, total)
+
         plan: Any = None
         try:
             if provider == "huggingface":
@@ -776,12 +789,14 @@ def run_clone(
                     gguf_quant=gguf_quant,
                     hf_token=effective_hf_token,
                     source_include=include,
+                    progress=_plan_progress,
                 )
             else:
                 plan = plan_civitai(
                     int(civitai_model_version_id or 0),
                     civitai_api_key=civitai_api_key,
                     gguf_quant=gguf_quant,
+                    progress=_plan_progress,
                 )
         except Exception as exc:
             logger.warning(
@@ -794,8 +809,9 @@ def run_clone(
 
         def _dl_progress(done: int, total: Optional[int]) -> None:
             dl_bytes["done"] = max(dl_bytes["done"], int(done or 0))
-            if total:
-                _progress(0.05 + 0.45 * min(1.0, done / total), "clone.download")
+            fraction = 0.05 + 0.45 * min(1.0, done / total) if total else 0.05
+            position.bytes_moved(
+                fraction, "clone.download", dl_bytes["done"], total)
 
         keepalive = HubKeepalive(
             hubclient, hubclient._repo_path(destination),
@@ -954,7 +970,19 @@ def run_clone(
             for k, v in attrs.items():
                 metadata.setdefault(f"attr_{k}", str(v))
 
-            _progress(0.55 + 0.4 * (i / max(1, len(specs))), f"clone.publish.{spec.label}")
+            publish_fraction = 0.55 + 0.4 * (i / max(1, len(specs)))
+            publish_phase = f"clone.publish.{spec.label}"
+            _progress(publish_fraction, publish_phase)
+            # The upload is the other leg that outlasts the phase budget on a
+            # real-sized model, and it has a byte channel of its own. Called
+            # from the uploader's threads; `ClonePosition` holds the lock.
+            uploaded_bytes = {"done": 0}
+
+            def _up_progress(_parts: int, _total_parts: int, n: int,
+                             *, _f: float = publish_fraction,
+                             _p: str = publish_phase) -> None:
+                uploaded_bytes["done"] += max(0, int(n or 0))
+                position.bytes_moved(_f, _p, uploaded_bytes["done"], None)
             commit = hubclient.publish_v2(
                 destination_repo=destination,
                 files=files,
@@ -974,6 +1002,7 @@ def run_clone(
                     "tree": str(tree),
                     "attrs": {str(k): str(v) for k, v in attrs.items()},
                 },
+                part_progress=_up_progress,
             )
             result.published.append({
                 "dtype": dtype_label,
