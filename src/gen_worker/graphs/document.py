@@ -18,13 +18,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .graph_identity import (
-    EnvIdentity,
-    GraphIdentityError,
-    is_graph_hash,
-    require_stack,
-)
-from .ingress import CallIngress, IngressError
+from .._vendor.torchcg.identity import CallIngress, compile_stack, is_graph_hash
+from .._vendor.torchcg.refuse import IdentityError, IngressError
 from .lane import LaneError, require_lane_id, require_passes, require_targets
 
 # tcg#79 bumped 3 -> 4: the lane row key changed grammar, from the v1 contract
@@ -190,23 +185,31 @@ class GraphSetDocument:
 
     def __post_init__(self) -> None:
         try:
-            # Validated by the ONE definition of a stack, so a document and an
-            # artifact position can never disagree about what a stack is.
-            object.__setattr__(self, "stack", require_stack(self.stack))
-        except GraphIdentityError as exc:
+            # Validated by the ONE definition of a compile stack, so a document
+            # and an artifact's env block can never disagree about what a stack
+            # is. Stored as sorted rows because a document is a frozen value.
+            selected = compile_stack(dict(self.stack))
+        except IdentityError as exc:
             raise DocumentError(f"document states an invalid compile stack: {exc}") from exc
+        object.__setattr__(self, "stack", tuple(sorted(selected.items())))
         ordered = tuple(sorted(self.lanes, key=lambda lane: lane.contract))
         if len({lane.contract for lane in ordered}) != len(ordered):
             raise DocumentError("document repeats a lane contract")
         object.__setattr__(self, "lanes", ordered)
 
-    def env(self, sm: str) -> EnvIdentity:
-        """This document's env identity on a card: (compile stack, sm)."""
+    def env_block(self) -> dict[str, str]:
+        """This document's compile stack as the env fingerprint block.
 
-        try:
-            return EnvIdentity(stack=self.stack, sm=sm)
-        except GraphIdentityError as exc:
-            raise DocumentError(str(exc)) from exc
+        torchcg keys an artifact on ONE address over (graph x env x layout x
+        policy x sm), so the stack is carried as the named-version block that
+        feeds `artifact_key(env=...)` rather than as a second identity object.
+        The HOST ISA facts are not here and must not be: `torchcg.mint` imposes
+        them from the machine it runs on, and a serving host reproduces them
+        only if it is ISA-compatible -- which is the fail-closed behaviour we
+        want, because an artifact built for x86-64-v3 cannot run on a v2 host.
+        """
+
+        return {name: version for name, version in self.stack}
 
     @property
     def eager_permanent(self) -> bool:
@@ -302,7 +305,7 @@ class GraphSetDocument:
             return cls(
                 stack=tuple((row[0], row[1]) for row in raw_stack), lanes=tuple(lanes)
             )
-        except GraphIdentityError as exc:  # pragma: no cover - stack re-validation
+        except IdentityError as exc:  # pragma: no cover - stack re-validation
             raise DocumentError(str(exc)) from exc
 
 

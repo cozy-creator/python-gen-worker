@@ -43,15 +43,22 @@ from .dynamic import (
     resolve_policy,
     without_axes,
 )
-from .graph_identity import GraphIdentityError, graph_hash
-from .ingress import IngressError, build_call_ingress
-from .lane import LaneError, LaneRef, require_targets, resolve_target
+from .._vendor.torchcg.identity import graph_hash
+from .._vendor.torchcg.refuse import IdentityError
+from .._vendor.torchcg.identity import build_call_ingress
+from .._vendor.torchcg.refuse import IngressError
+from .lane import (
+    LaneError,
+    LaneRef,
+    require_declared_passes,
+    require_targets,
+    resolve_target,
+)
 
 logger = logging.getLogger(__name__)
 
-if TYPE_CHECKING:  # torch-free import closure: transform.py is torch-shaped
+if TYPE_CHECKING:
     from .hollow import HollowSession
-    from .transform import TransformSet
 
 
 class DiscoveryError(RuntimeError):
@@ -187,7 +194,6 @@ def discover_lane(
     *,
     strict: bool = False,
     program_sink: Callable[[str, Any], object] | None = None,
-    transforms: TransformSet | None = None,
     session: HollowSession | None = None,
     dynamic_dims: DimPolicy | bool | None = None,
     static_bind: bool = False,
@@ -225,7 +231,6 @@ def discover_lane(
         drive,
         strict=strict,
         program_sink=program_sink,
-        transforms=transforms,
         session=session,
         dynamic_dims=dynamic_dims,
         static_bind=static_bind,
@@ -287,7 +292,6 @@ def discover_modules(
     *,
     strict: bool = False,
     program_sink: Callable[[str, Any], object] | None = None,
-    transforms: TransformSet | None = None,
     session: HollowSession | None = None,
     dynamic_dims: DimPolicy | bool | None = None,
     static_bind: bool = False,
@@ -326,7 +330,7 @@ def discover_modules(
     axes that VARY across the observed calls as ``torch.export.Dim``s, so the
     calls they distinguish collapse into one graph whose ingress states the
     axis as a RANGE. A refused dynamic export falls back to that group's own
-    static exports, loudly. See :mod:`torchcg.dynamic`.
+    static exports, loudly. See :mod:`gen_worker.graphs.dynamic`.
 
     ``static_bind`` (tcg#88, pgw#1603) makes the symbolic export TRACE-ONLY:
     the collapsed group still costs one ``torch.export`` of the module, but
@@ -346,22 +350,19 @@ def discover_modules(
     lock's own warnings so the lock SAYS an axis dropped to per-bucket
     tracing rather than silently paying the old wall (pgw#1603 acceptance c).
 
-    ``transforms`` (tcg#52) is the SEALED :class:`~torchcg.transform.
-    TransformSet` of the lane's PASS phase. Passing it is what makes PASS ->
-    DISCOVERY -> EXPORT structural: the pass names enter every graph hash and
-    the lane row, every transformed root must be on one of the marked
-    modules' trees, and each marked module is stamped export-sealed so a pass
-    can never run after this point. A lane that DECLARES passes and is handed
-    no sealed set is refused -- silence is not an outcome here either.
+    A lane's DECLARED passes still enter every graph hash and lane row, and are
+    reconciled by :func:`~gen_worker.graphs.lane.require_declared_passes`. The
+    transform MACHINERY that once ran them (`TransformSet`, export sealing,
+    root-relation checks) is gone with torchcg's `transform.py`: nothing in this
+    repo has ever run a pass, so the sealing had no reader and the sealed-set
+    parameter had no producer (tcg#90).
     """
 
     import torch
 
-    from .transform import require_transform_set, seal_for_export
-
     resolved = lane if isinstance(lane, LaneRef) else LaneRef(lane)
     contract = resolved.contract
-    passes = require_transform_set(contract, transforms, resolved.passes)
+    passes = require_declared_passes(contract, resolved.passes)
     if not modules:
         raise DiscoveryError(
             f"lane {contract!r}: nothing is marked for compilation"
@@ -373,23 +374,6 @@ def discover_modules(
                 f"lane {contract!r} marked object {path!r} is a "
                 f"{type(module).__name__}, not a torch.nn.Module"
             )
-
-    if transforms is not None:
-        from .transform import related
-
-        for index, root in enumerate(transforms.roots):
-            if not any(related(root, module) for module in modules.values()):
-                raise DiscoveryError(
-                    f"lane {contract!r}: pass "
-                    f"{transforms.passes[index] if index < len(transforms.passes) else '?'}"
-                    f" transformed a {type(root).__name__} that is on no marked "
-                    f"module's tree; the graph identified here would not be the "
-                    f"graph the pass rewrote"
-                )
-    # From here the marked modules are export-bound: a pass that ran after
-    # this point would mint an artifact for a module that no longer exists.
-    for module in modules.values():
-        seal_for_export(module)
 
     observed: dict[str, dict[str, _ObservedCall]] = {path: {} for path in targets}
     handles = []
@@ -447,7 +431,7 @@ def discover_modules(
             if plan is not None:
                 ingress = alias_ingress(ingress, plan)
             graph = graph_hash(program, ingress, passes=passes)
-        except (IngressError, GraphIdentityError) as exc:
+        except (IngressError, IdentityError) as exc:
             raise DiscoveryError(
                 f"lane {contract!r} target {path!r}: observed call cannot "
                 f"state its identity: {exc}"

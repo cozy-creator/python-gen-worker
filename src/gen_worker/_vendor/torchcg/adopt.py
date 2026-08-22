@@ -1,230 +1,122 @@
-"""Adopt-first swap-in behind ``ctx.compile`` (pgw#1372, ruling 2026-08-18).
+"""Serving the artifact: load, verify, dispatch.
 
-Module marking is IMPERATIVE — the author writes the torch.compile idiom::
+**The selector IS the dispatcher.** One function decides whether a call fits a
+record, and the same function states what must be done to the call to make it
+fit; the dispatcher then does exactly that and nothing else. There is no plan
+that can be computed and not executed, because computing it is how the match is
+decided (se#837: the old tree computed a recast plan nothing ever called, so a
+ddim/dpmpp/unipc request -- which ends `set_timesteps` in `.to(int64)` -- was
+refused on dtype and served eager while the contract said it was covered).
 
-    self.pipe.unet = ctx.compile(self.pipe.unet)
+There is no selection ladder here. Which artifact a pod should hold is the serve
+ladder's question, not this library's.
 
-At publish time that call records + hooks the module (the derive's half); at
-serve time it lands here: :class:`AdoptSession` holds one boot's adoption
-state for the active lane, and ``session.adopt(module)`` consults the store
-per graph — hit -> the module comes back with the compiled graph armed
-behind a per-module dispatcher; miss -> the module comes back UNCHANGED
-(eager) and the graph is registered as a :class:`Hole`, the ordered
-work-list the background mint (pgw#1371's mechanism) consumes, arming each
-artifact as it lands via :meth:`AdoptSession.arm`. ``adopt`` on a pipeline
-container walks its ``components`` mapping.
-
-The exact-env audit runs at session CONSTRUCTION — before any author code
-touches an artifact — and a mismatch is a loud ``EnvironmentMismatch``
-(a build-system bug surfacing, never a compat decision). Everything after is
-partial-hit by construction: an unreadable row is a hole, never a boot
-failure, and a call no armed graph matches runs the module's own eager
-forward — the author's code stays the serve host.
+Nothing on the hot path raises. A call that fits nothing serves eager, which is
+the correct answer -- only speed is lost.
 """
 
 from __future__ import annotations
 
-import inspect
 import logging
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from pathlib import Path
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from importlib import import_module
+from typing import Any
 
-from .artifact import ArtifactError
-from .document import GraphRecord, GraphSetDocument, LaneGraphs
-from .ingress import symbol_terms
-from .requirements import assert_exact_env
-from .runner import ConstantBindingError
-from .store import GraphStore, StoreError
+from .identity import CallIngress, CallInput, require_morphism, symbol_terms
+from .refuse import AdoptError, KeyMismatch
+from .store import StoredArtifact
 
-if TYPE_CHECKING:  # torch-free import closure: transform.py is torch-shaped
-    from .transform import TransformSet
+logger = logging.getLogger("torchcg")
 
-logger = logging.getLogger(__name__)
-
-#: Turns one fetched artifact into the callable that replaces the target
-#: module's forward for its graph specialization.
-#:
-#: Three arguments, and every one of them is load-bearing (tcg#58): the
-#: ARTIFACT is weightless by sealed policy, the RECORD's ingress is what maps
-#: the author's nested call onto the package's flat positional feeds, and the
-#: live MODULE is the only place the constant table's values exist on the
-#: device. A loader handed fewer than three cannot produce a callable that
-#: serves -- which is exactly the shape every consumer wrote until tcg#58.
-#: :func:`torchcg.serve.aoti_loader` is the production implementation and the
-#: default; the seam stays open only so adoption is testable without a GPU.
-ArtifactLoader = Callable[[Path, GraphRecord, Any], Callable[..., Any]]
-
-HOLE_MISS = "miss"
+#: The dtypes a rank-0 feed may be recast TO. bfloat16 and float16 are
+#: deliberately absent: bf16's 8 mantissa bits round timestep 999 to 1000, which
+#: is a numeric change, not a normalization.
+RECAST_TARGETS = ("float32", "float64")
+RECAST_SOURCES = ("int8", "int16", "int32", "int64", "uint8")
 
 
-class AdoptError(RuntimeError):
-    """Adoption cannot even start: bad lane name, bad target, bad document."""
+@dataclass(frozen=True, slots=True)
+class Recast:
+    """One rank-0 feed that fits after a dtype change, and nothing else.
 
-
-class Hole:
-    """One graph this env still needs minted, with the reason it is a hole."""
-
-    __slots__ = ("record", "reason")
-
-    def __init__(self, record: GraphRecord, reason: str) -> None:
-        self.record = record
-        self.reason = reason
-
-    def __repr__(self) -> str:  # pragma: no cover - diagnostics
-        return f"Hole({self.record.graph}, {self.reason!r})"
-
-
-class UnclaimedMark:
-    """A module the author MARKED with ``ctx.compile`` that fit no record.
-
-    tcg#70. This used to be a bare ``return`` with a comment on it — a marked
-    module that claims nothing is eager FOREVER, and nothing anywhere said so.
-    Together with a lane whose records also go unclaimed it produces
-    ``adopted=0, holes=0``: two zeros indistinguishable from "there was nothing
-    to do", over a store holding every artifact the document asked for.
-
-    A hole would be the wrong shape for it — a hole is a graph the mint should
-    build, and these graphs are already built. What is broken is the MATCH, so
-    what gets recorded is both sides of it: the module's own forward signature,
-    and the parameters the nearest record needed that this signature does not
-    have. That difference IS the diagnosis, and it costs one set subtraction.
+    Value-preserving by construction: rank 0, integral source, float target wide
+    enough to hold every integer it admits. The scalar timestep dtype is a
+    per-request SAMPLER fact -- euler-family present float32, ddim/dpmpp/unipc
+    present int64 -- and the sampler is deliberately not a compile axis.
     """
 
-    __slots__ = ("module", "parameters", "nearest", "missing")
+    input: str
+    position: int
+    dtype: str
 
-    def __init__(
-        self,
-        module: str,
-        parameters: tuple[str, ...],
-        nearest: str,
-        missing: tuple[str, ...],
-    ) -> None:
-        self.module = module
-        self.parameters = parameters
-        self.nearest = nearest
-        self.missing = missing
+    def apply(self, value: Any) -> Any:
+        import torch
 
-    def __repr__(self) -> str:  # pragma: no cover - diagnostics
-        return (
-            f"UnclaimedMark({self.module}, missing={list(self.missing)}, "
-            f"nearest={self.nearest[-12:] if self.nearest else None})"
-        )
-
-    def describe(self) -> str:
-        """One operator-facing line naming what did not match and why."""
-
-        if not self.parameters:
-            # THE MOST LIKELY CAUSE GETS THE MOST DIRECT SENTENCE. A denoiser
-            # with no NAMED forward parameters does not exist; a `*args,
-            # **kwargs` wrapper installed over one does, and every parameter
-            # name the match is made on disappears behind it. Measured exactly
-            # this way (pgw#1534): an OOM-retry wrapper installed at load time
-            # turned a 13-parameter forward into an empty set, and every record
-            # in the lane went unclaimed in silence.
-            return (
-                f"{self.module}: marked with ctx.compile, and its forward "
-                f"accepts NO named parameters — so no record can name anything "
-                f"it takes. That is the signature of a `*args, **kwargs` "
-                f"wrapper installed over the real forward: a wrapper must "
-                f"carry the wrapped signature (functools.wraps, or an explicit "
-                f"__signature__), or it silently disables adoption for this "
-                f"module"
-            )
-        if not self.nearest:
-            return (
-                f"{self.module}: marked with ctx.compile and this lane has no "
-                f"records left to match it against"
-            )
-        return (
-            f"{self.module}: marked with ctx.compile, matched NO graph in this "
-            f"lane. Nearest record {self.nearest[-12:]} needs "
-            f"{sorted(self.missing)!r}, which this module's forward does not "
-            f"accept; it accepts {sorted(self.parameters)!r}"
-        )
+        return value.to(getattr(torch, self.dtype))
 
 
-class AmbiguousStructure(Exception):
-    """Two graph specializations share one tensor structure; neither can be dispatched."""
+def _row_gap(
+    row: CallInput,
+    args: Sequence[Any],
+    kwargs: Mapping[str, Any],
+    bounds: Mapping[str, tuple[int, int]],
+    symbols: dict[str, tuple[int, str]],
+) -> tuple[str, Recast | None]:
+    """Why this ONE row refuses this call, or how to make it fit.
 
-    def __init__(self, armed: GraphRecord) -> None:
-        self.armed = armed
-        super().__init__(f"structure collides with armed graph {armed.graph}")
+    THE single source for the match decision, its diagnosis, AND the
+    normalization. `("", None)` is a clean pass; `("", Recast(...))` is a pass
+    that costs one staged copy; a non-empty sentence is a refusal. Because the
+    normalization is produced by the same pass that decides admission, a plan
+    that is computed and never executed cannot exist.
 
-
-def _is_concrete(record: GraphRecord) -> bool:
-    return all(
-        all(isinstance(dimension, int) for dimension in row.shape)
-        for row in record.ingress.inputs
-    )
-
-
-def _structure_key(record: GraphRecord) -> tuple[Any, ...]:
-    """The dispatchable identity of a record's tensor structure.
-
-    Two graph specializations whose tensor feeds are identical (they differ only in
-    baked-in literals) cannot be told apart at call time; arming both would
-    be a coin flip, so the dispatcher refuses the pair instead.
+    A symbolic dim is not a wildcard. `bounds` is the record's own
+    `symbol_bounds` and `symbols` is the binding table carried ACROSS the
+    record's rows, so a dynamic record guards exactly what it was exported for:
+    the value is inside the exported range, it respects the symbol's stride, and
+    one symbol takes one value everywhere it appears. Without the table each row
+    would answer alone and the dispatcher would enter a graph whose shape env
+    refuses the call -- a wrong answer, not a slow one.
     """
 
-    return tuple(
-        (row.param, row.path, row.dtype, row.shape) for row in record.ingress.inputs
-    )
-
-
-def _row_mismatch(
-    row: Any,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    bounds: Mapping[str, tuple[int, int]] = MappingProxyType({}),
-    symbols: dict[str, tuple[int, str]] | None = None,
-) -> str | None:
-    """Why this ONE ingress row refuses this call, or ``None`` when it passes.
-
-    THE single source for both the match decision and the diagnosis (tcg#76):
-    ``_matches`` is ``every row answers None``, and the first-mismatch trace
-    prints exactly what this function refused on — one predicate, so the guard
-    and its explanation cannot drift into telling two stories.
-
-    tcg#77: a SYMBOLIC dim is not a wildcard. ``bounds`` is the record's own
-    ``ingress.symbol_bounds`` and ``symbols`` is the binding table the caller
-    carries ACROSS the record's rows, so a dynamic record guards exactly what
-    it was exported for: the value is inside the exported range, and one
-    symbol takes one value everywhere it appears (a batch symbol shared by
-    ``sample`` and ``encoder_hidden_states`` refuses a call that disagrees
-    with itself). Without the table each row would answer alone and the
-    dispatcher would enter a graph whose shape env refuses the call —
-    a wrong answer, not a slow one.
-    """
     import torch
 
     resolved, value = row.resolve(args, kwargs)
     if not resolved:
         return (
             f"input {row.param!r} (position {row.position}, path {row.path!r}) "
-            f"never resolved from the call — absent from args/kwargs"
-        )
+            f"never resolved from the call -- absent from args/kwargs"
+        ), None
     if not isinstance(value, torch.Tensor):
         received = repr(value)
         if len(received) > 60:
-            received = received[:60] + "…"
+            received = received[:60] + "..."
         return (
             f"input {row.param!r}: received py-type {type(value).__name__} "
             f"({received}), expected a torch.Tensor {row.dtype} {tuple(row.shape)}"
-        )
+        ), None
     dtype = str(value.dtype).removeprefix("torch.")
+    recast: Recast | None = None
     if dtype != row.dtype:
-        return (
-            f"input {row.param!r}: dtype {dtype} != expected {row.dtype} "
-            f"(received shape {tuple(value.shape)})"
-        )
+        if (
+            not row.shape
+            and value.shape == ()
+            and row.dtype in RECAST_TARGETS
+            and dtype in RECAST_SOURCES
+        ):
+            recast = Recast(row.name, row.position, row.dtype)
+        else:
+            return (
+                f"input {row.param!r}: dtype {dtype} != expected {row.dtype} "
+                f"(received shape {tuple(value.shape)})"
+            ), None
     if len(value.shape) != len(row.shape):
         return (
             f"input {row.param!r}: rank {len(value.shape)} (shape "
             f"{tuple(value.shape)}) != expected rank {len(row.shape)} (shape "
             f"{tuple(row.shape)})"
-        )
+        ), None
     for axis, (got, want) in enumerate(zip(value.shape, row.shape, strict=True)):
         got = int(got)
         if isinstance(want, int):
@@ -232,469 +124,336 @@ def _row_mismatch(
                 return (
                     f"input {row.param!r}: shape {tuple(value.shape)} != expected "
                     f"{tuple(row.shape)}"
-                )
+                ), None
             continue
         span = bounds.get(want)
         if span is None:
-            # A record whose shape names a symbol its ingress does not bound
-            # cannot be dispatched at all; `CallIngress` refuses to construct
-            # one, so reaching here means a hand-built record.
             return (
-                f"input {row.param!r}: dim {axis} names symbol {want!r}, which "
-                f"this record declares no range for"
-            )
+                f"input {row.param!r}: dim {axis} names symbol {want!r}, which this "
+                f"record declares no range for"
+            ), None
         low, high = span
         if not low <= got <= high:
             return (
-                f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} "
-                f"outside the exported range [{low}, {high}] "
-                f"(received shape {tuple(value.shape)})"
-            )
+                f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} outside "
+                f"the exported range [{low}, {high}] (received shape "
+                f"{tuple(value.shape)})"
+            ), None
         stride, root = symbol_terms(want)
         if got % stride:
             return (
-                f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} is "
-                f"not a multiple of {stride}, which this graph's shape guards "
-                f"require (received shape {tuple(value.shape)})"
-            )
-        if symbols is not None:
-            bound = got // stride
-            prior = symbols.get(root)
-            if prior is not None and prior[0] != bound:
-                return (
-                    f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} "
-                    f"puts {root} at {bound}, but input {prior[1]!r} put it at "
-                    f"{prior[0]}"
-                )
-            symbols.setdefault(root, (bound, row.name))
-    return None
+                f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} is not a "
+                f"multiple of {stride}, which this graph's shape guards require "
+                f"(received shape {tuple(value.shape)})"
+            ), None
+        bound = got // stride
+        prior = symbols.get(root)
+        if prior is not None and prior[0] != bound:
+            return (
+                f"input {row.param!r}: dim {axis} (symbol {want!r}) = {got} puts "
+                f"{root} at {bound}, but input {prior[1]!r} put it at {prior[0]}"
+            ), None
+        symbols.setdefault(root, (bound, row.name))
+    return "", recast
 
 
-def _record_mismatch(
-    record: GraphRecord, args: tuple[Any, ...], kwargs: dict[str, Any]
-) -> tuple[int, str] | None:
-    """(rows passed, the first failure's sentence), or ``None`` when it matches.
+def fit(
+    ingress: CallIngress, args: Sequence[Any], kwargs: Mapping[str, Any]
+) -> tuple[str, tuple[Recast, ...], int]:
+    """(refusal sentence, normalizations, rows that passed).
 
-    ONE walk answers both questions (tcg#76's property, kept): the match
-    decision is "this returned None" and the diagnosis is what it returned.
-    The symbol table lives here rather than in a row because symbol
-    consistency is a RECORD-level fact (tcg#77).
+    An empty sentence means the call fits once the normalizations are applied.
     """
 
-    bounds = record.ingress.symbol_bounds
+    bounds = ingress.symbol_bounds
     symbols: dict[str, tuple[int, str]] = {}
-    passed = 0
-    for row in record.ingress.inputs:
-        sentence = _row_mismatch(row, args, kwargs, bounds, symbols)
-        if sentence is not None:
-            return passed, sentence
-        passed += 1
-    return None
+    recasts: list[Recast] = []
+    for passed, row in enumerate(ingress.inputs):
+        gap, recast = _row_gap(row, args, kwargs, bounds, symbols)
+        if gap:
+            return gap, (), passed
+        if recast is not None:
+            recasts.append(recast)
+    return "", tuple(recasts), len(ingress.inputs)
 
 
-def _matches(record: GraphRecord, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
-    return _record_mismatch(record, args, kwargs) is None
+def _normalize(
+    row: CallInput,
+    recast: Recast,
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> None:
+    """Rewrite one feed in place along its ingress path.
 
-
-def _first_mismatch(
-    record: GraphRecord, args: tuple[Any, ...], kwargs: dict[str, Any]
-) -> tuple[int, str]:
-    """(rows passed before the first failure, that failure's sentence).
-
-    A record with no failing row never reaches here — ``_matches`` would have
-    dispatched it.
-    """
-    outcome = _record_mismatch(record, args, kwargs)
-    if outcome is None:
-        return (
-            len(record.ingress.inputs),
-            "every enumerated row matched (a non-row guard refused?)",
-        )
-    return outcome
-
-
-class _ForwardDispatcher:
-    """One module's serve-path router: armed graphs by call structure, else eager.
-
-    Installed as the module's instance ``forward`` so ``Module.__call__``
-    (which reads ``self.forward``) routes through it -- hooks and everything
-    else on the module keep working, and removing the instance attribute
-    restores the eager class forward untouched.
+    Containers on the path are copied rather than mutated: the caller's own
+    dict is not ours to change, and a sampler that reuses its kwargs across
+    steps would otherwise see a dtype it did not set.
     """
 
-    __slots__ = ("eager_forward", "module", "_entries", "_mismatch_reported")
-
-    def __init__(self, module: Any) -> None:
-        #: The module this dispatcher fronts, kept because arming needs it:
-        #: the loader binds the compiled graph's constants to THESE tensors
-        #: (tcg#58), and the late-mint :meth:`AdoptSession.arm` reaches the
-        #: module only through here.
-        self.module = module
-        self.eager_forward = module.forward
-        self._entries: list[tuple[GraphRecord, Callable[..., Any]]] = []
-        #: tcg#76: the first all-miss call is DIAGNOSED, once. Not per call —
-        #: the fall-through is per-request hot path — and not never, which is
-        #: what "armed 14, entered 0" cost a full night of counter-reading:
-        #: three confident root causes died against a store whose dispatcher
-        #: knew the exact divergent input on every single call and said
-        #: nothing.
-        self._mismatch_reported = False
-
-    def arm(self, record: GraphRecord, compiled: Callable[..., Any]) -> None:
-        key = _structure_key(record)
-        for armed, _ in self._entries:
-            if armed.graph == record.graph:
-                raise AdoptError(f"graph {record.graph} is already armed on this module")
-            if _structure_key(armed) == key:
-                raise AmbiguousStructure(armed)
-        # Concrete-shape records dispatch before symbolic ones so an exact
-        # bucket wins over a dynamic-range graph that also spans it.
-        if _is_concrete(record):
-            insert_at = sum(1 for armed, _ in self._entries if _is_concrete(armed))
-            self._entries.insert(insert_at, (record, compiled))
+    if row.param in kwargs:
+        root: Any = kwargs[row.param]
+        holder: Any = kwargs
+        slot: Any = row.param
+    elif row.param_position < len(args):
+        root = args[row.param_position]
+        holder = args
+        slot = row.param_position
+    else:  # pragma: no cover - fit() proved it resolves
+        return
+    if not row.path:
+        holder[slot] = recast.apply(root)
+        return
+    trail: list[tuple[Any, Any]] = []
+    value = root
+    for step in row.path:
+        trail.append((value, step))
+        value = value[step]
+    value = recast.apply(value)
+    for container, step in reversed(trail):
+        if isinstance(container, Mapping):
+            replaced: Any = dict(container)
+            replaced[step] = value
         else:
-            self._entries.append((record, compiled))
+            replaced = list(container)
+            replaced[step] = value
+            if isinstance(container, tuple):
+                replaced = tuple(replaced)
+        value = replaced
+    holder[slot] = value
 
-    def disarm(self, graph: str) -> None:
-        self._entries = [(r, c) for r, c in self._entries if r.graph != graph]
 
-    def armed_graphs(self) -> tuple[str, ...]:
-        return tuple(record.graph for record, _ in self._entries)
+@dataclass(frozen=True, slots=True)
+class Record:
+    """One armed graph: its call contract and the compiled thing behind it."""
+
+    graph: str
+    ingress: CallIngress
+    call: Any
+
+    @property
+    def dynamic(self) -> bool:
+        return bool(self.ingress.symbols)
+
+
+@dataclass
+class Dispatcher:
+    """Exact-match-or-eager, with the normalization applied on the way in.
+
+    Installed as an INSTANCE attribute (`module.forward = dispatcher`), so
+    `Module.__call__` still routes through it while hooks and the class forward
+    stay intact; deleting the attribute restores eager.
+    """
+
+    eager: Any
+    records: tuple[Record, ...] = ()
+    compiled_calls: int = 0
+    eager_calls: int = 0
+    recast_calls: int = 0
+    _reported: bool = field(default=False, repr=False)
+
+    def arm(self, records: Sequence[Record]) -> None:
+        # A concrete bucket beats a dynamic range that also spans it.
+        self.records = tuple(sorted(records, key=lambda r: r.dynamic))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        for record, compiled in self._entries:
-            if _matches(record, args, kwargs):
-                return compiled(*args, **kwargs)
-        if self._entries and not self._mismatch_reported:
-            self._mismatch_reported = True
-            self._say_first_mismatch(args, kwargs)
-        return self.eager_forward(*args, **kwargs)
+        for record in self.records:
+            gap, recasts, _ = fit(record.ingress, args, kwargs)
+            if gap:
+                continue
+            if recasts:
+                rows = {row.name: row for row in record.ingress.inputs}
+                call_args, call_kwargs = list(args), dict(kwargs)
+                for recast in recasts:
+                    _normalize(rows[recast.input], recast, call_args, call_kwargs)
+                self.compiled_calls += 1
+                self.recast_calls += 1
+                return record.call(*call_args, **call_kwargs)
+            self.compiled_calls += 1
+            return record.call(*args, **kwargs)
+        self.eager_calls += 1
+        if self.records and not self._reported:
+            self._reported = True
+            self._say_first_gap(args, kwargs)
+        return self.eager(*args, **kwargs)
 
-    def _say_first_mismatch(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
-        """Name the FIRST divergence of the BEST-matching armed record (tcg#76).
+    def _say_first_gap(self, args: Any, kwargs: Any) -> None:
+        """Name the closest record once per module, never more.
 
-        Fires on the first call no armed graph matches, once per module per
-        boot, at WARNING — the level a bare ``gen-worker up`` actually
-        surfaces. "Armed and never entered" is a per-call silence by design
-        (eager is correct), but an UNEXPLAINED one is a diagnosis this object
-        already holds and used to discard: every guard refusal knows exactly
-        which input diverged and what it received.
-
-        Best-matching = the record that passes the MOST rows before its first
-        failure (ties broken by graph hash, so two boots print the same
-        record). Never raises: a diagnostic that can take down a serving
-        forward is worse than the silence it replaces.
+        Wrapped whole: a diagnostic must never kill a serving forward.
         """
+
         try:
-            best: tuple[int, str, GraphRecord, str] | None = None
-            for record, _compiled in self._entries:
-                passed, sentence = _first_mismatch(record, args, kwargs)
-                candidate = (-passed, record.graph, record, sentence)
-                if best is None or candidate < (best[0], best[1], best[2], best[3]):
-                    best = candidate
-            if best is None:  # pragma: no cover — guarded by `self._entries`
-                return
-            _negative_passed, _graph, record, sentence = best
-            rows = len(record.ingress.inputs)
+            best = max(
+                (
+                    (fit(record.ingress, args, kwargs), record)
+                    for record in self.records
+                ),
+                key=lambda item: (item[0][2], item[1].graph),
+            )
+            (gap, _, passed), record = best
             logger.warning(
-                "torchcg dispatch: NO armed graph matched a call on %s — %d "
-                "graph(s) armed, serving eager. Closest record %s (%d/%d "
-                "input row(s) matched); first divergence: %s. Reported once "
-                "per module; further unmatched calls fall through silently.",
-                type(self.module).__name__, len(self._entries),
-                record.graph[-16:], -_negative_passed, rows, sentence,
+                "torchcg dispatch: NO armed graph matched a call -- %d graph(s) "
+                "armed, serving eager. Closest record %s (%d/%d input row(s) "
+                "matched); first divergence: %s. Reported once per module; "
+                "further unmatched calls fall through silently.",
+                len(self.records),
+                record.graph,
+                passed,
+                len(record.ingress.inputs),
+                gap,
             )
-        except Exception:  # noqa: BLE001 — the diagnostic must never cost a call
-            logger.debug("torchcg dispatch: first-mismatch trace failed", exc_info=True)
-
-
-def _forward_parameters(module: Any) -> frozenset[str]:
-    return frozenset(
-        parameter.name
-        for parameter in inspect.signature(module.forward).parameters.values()
-        if parameter.kind
-        in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        )
-    )
-
-
-def _describe_unclaimed(
-    module: Any, signature: frozenset[str], records: Iterable[GraphRecord]
-) -> UnclaimedMark:
-    """Why this marked module fits nothing, in the terms the match is made in.
-
-    "Nearest" is the record needing the FEWEST parameters this signature lacks
-    — the one whose gap is most likely to be the real story. Ties break on the
-    graph hash so the message is deterministic across boots, because an operator
-    comparing two runs must not be reading a set-iteration order.
-    """
-
-    best: tuple[int, str, tuple[str, ...]] | None = None
-    for record in records:
-        missing = tuple(sorted(set(record.ingress.parameters) - signature))
-        candidate = (len(missing), record.graph, missing)
-        if best is None or candidate < best:
-            best = candidate
-    return UnclaimedMark(
-        module=type(module).__name__,
-        parameters=tuple(sorted(signature)),
-        nearest="" if best is None else best[1],
-        missing=() if best is None else best[2],
-    )
-
-
-class AdoptSession:
-    """One boot's adoption for the active (lane, sm) — ``ctx.compile``'s engine.
-
-    A record is CLAIMED by the first ``adopt``-ed module whose forward
-    signature admits every parameter the record's ingress names; runtime
-    dispatch still verifies the full call structure per call, so a record on
-    a signature-twin module can never serve a wrong answer — it simply never
-    matches and the call runs eager.
-
-    ``store`` may be ``None`` (metadata known, no artifact source yet):
-    every claimed record is then a hole — the mint work-list still forms.
-    """
-
-    def __init__(
-        self,
-        store: GraphStore | None,
-        document: GraphSetDocument,
-        contract: str,
-        sm: str,
-        *,
-        loader: ArtifactLoader | None = None,
-        artifacts_dir: str | Path,
-        stack: Mapping[str, str] | Sequence[tuple[str, str]],
-        transforms: TransformSet | None = None,
-    ) -> None:
-        lane = next((row for row in document.lanes if row.contract == contract), None)
-        if lane is None:
-            available = sorted(row.contract for row in document.lanes)
-            raise AdoptError(
-                f"document has no lane {contract!r} "
-                f"({'lanes: ' + repr(available) if available else 'eager-permanent document'})"
-            )
-        self.lane: LaneGraphs = lane
-        self.env = document.env(sm)
-        # The exact-env audit, BEFORE any artifact or module is touched. Both
-        # sides are the endpoint's own lockfile stack now (pgw#1489), so this
-        # fires on a real compile-stack difference and on nothing else.
-        assert_exact_env(self.env, stack=stack, sm=sm)
-        # And the PASS audit, in the same breath and for the same reason
-        # (tcg#52): a pass name is a cg-graph-v1 derivation input, so a boot
-        # whose ran-pass set differs from the document's lane row is about to
-        # arm graphs derived from a module it does not have. Refusing here is
-        # what makes "a pass after export" unrepresentable on the serve side
-        # -- the set is stated before any author code is adopted.
-        self.passes = self._reconcile_passes(lane, transforms)
-        self._store = store
-        self._loader = loader
-        self._artifacts_dir = Path(artifacts_dir)
-        self._unclaimed: dict[str, GraphRecord] = {
-            record.graph: record for record in lane.graphs
-        }
-        self._dispatchers: list[tuple[Any, _ForwardDispatcher]] = []
-        self._home: dict[str, _ForwardDispatcher] = {}
-        self._adopted: set[str] = set()
-        self._holes: dict[str, Hole] = {}
-        self._ambiguous: set[str] = set()
-        self._unclaimed_marks: list[UnclaimedMark] = []
-
-    @staticmethod
-    def _reconcile_passes(
-        lane: LaneGraphs, transforms: TransformSet | None
-    ) -> tuple[str, ...]:
-        from .transform import TransformOrderError, require_transform_set
-
-        try:
-            return require_transform_set(lane.contract, transforms, lane.passes)
-        except TransformOrderError as exc:
-            raise AdoptError(str(exc)) from exc
-
-    # -- ctx.compile --------------------------------------------------------
-
-    def adopt(self, target: Any) -> Any:
-        """The serve half of ``ctx.compile``: returns ``target``, armed.
-
-        An ``nn.Module`` is adopted directly; a pipeline-shaped container
-        (anything with a ``components`` mapping) has each nn.Module
-        component adopted and comes back itself. Anything else is a typed
-        refusal — a silently ignored mark would be an eager-forever module
-        nobody stated.
-        """
-
-        import torch
-
-        if isinstance(target, torch.nn.Module):
-            self._adopt_module(target)
-            return target
-        components = getattr(target, "components", None)
-        if isinstance(components, Mapping):
-            for component in components.values():
-                if isinstance(component, torch.nn.Module):
-                    self._adopt_module(component)
-            return target
-        raise AdoptError(
-            f"ctx.compile expects an nn.Module or a pipeline with a "
-            f"`components` mapping, got {type(target).__name__}"
-        )
-
-    def _dispatcher_for(self, module: Any) -> _ForwardDispatcher:
-        for known, dispatcher in self._dispatchers:
-            if known is module:
-                return dispatcher
-        dispatcher = _ForwardDispatcher(module)
-        module.forward = dispatcher  # instance attr: Module.__call__ reads it
-        self._dispatchers.append((module, dispatcher))
-        return dispatcher
-
-    def _adopt_module(self, module: Any) -> None:
-        from .transform import seal_for_export
-
-        # Export-bound from here: a pass handed this module later is refused
-        # from the pass side too (TransformSession.run), so the ordering holds
-        # whichever end someone starts from.
-        seal_for_export(module)
-        signature = _forward_parameters(module)
-        claimed = [
-            record
-            for record in self._unclaimed.values()
-            if set(record.ingress.parameters) <= signature
-        ]
-        if not claimed:
-            # RECORDED, not returned from silently (tcg#70). Eager is a safe
-            # answer and stays one; an unexplained eager is not.
-            self._unclaimed_marks.append(
-                _describe_unclaimed(module, signature, self._unclaimed.values())
-            )
-            return
-        dispatcher = self._dispatcher_for(module)
-        for record in claimed:
-            del self._unclaimed[record.graph]
-            self._home[record.graph] = dispatcher
-            if self._store is None:
-                self._holes[record.graph] = Hole(record, HOLE_MISS)
-                continue
-            destination = self._artifacts_dir / self.env.value / f"{record.graph}.so"
-            try:
-                artifact = self._store.fetch_artifact(record.graph, self.env, destination)
-            except StoreError as exc:
-                self._holes[record.graph] = Hole(record, f"store_error: {exc}")
-                continue
-            if artifact is None:
-                self._holes[record.graph] = Hole(record, HOLE_MISS)
-                continue
-            self._arm(dispatcher, record, artifact)
-
-    def _load(self, dispatcher: _ForwardDispatcher, artifact: Path, record: GraphRecord) -> Any:
-        """The loader call, with the module it must bind against (tcg#58)."""
-
-        loader = self._loader
-        if loader is None:
-            from .serve import aoti_loader
-
-            loader = aoti_loader
-        return loader(Path(artifact), record, dispatcher.module)
-
-    def _arm(self, dispatcher: _ForwardDispatcher, record: GraphRecord, artifact: Path) -> None:
-        try:
-            compiled = self._load(dispatcher, Path(artifact), record)
-        except (ArtifactError, ConstantBindingError) as exc:
-            # Bytes that will not verify, or a constant table that will not
-            # bind to THIS module, is a hole with a stated reason -- never a
-            # dead boot and never a silent arm. Both refusals are typed at
-            # their source precisely so this arm can be narrow: anything else
-            # escaping the loader is a bug and keeps escaping.
-            self._holes[record.graph] = Hole(record, f"{type(exc).__name__}: {exc}")
-            return
-        try:
-            dispatcher.arm(record, compiled)
-        except AmbiguousStructure as exc:
-            # Neither twin can be dispatched honestly: de-arm the survivor too
-            # and serve both structures eager. A re-mint cannot fix this, so
-            # the pair is reported, not queued.
-            dispatcher.disarm(exc.armed.graph)
-            self._adopted.discard(exc.armed.graph)
-            self._ambiguous.update((exc.armed.graph, record.graph))
-            return
-        self._adopted.add(record.graph)
-        self._holes.pop(record.graph, None)
-
-    # -- the mint handoff ---------------------------------------------------
-
-    def arm(self, record: GraphRecord, artifact: Path) -> None:
-        """Arm one late-landing mint onto the module that claimed its graph.
-
-        The background mint calls this per graph as each publish completes —
-        partial-hit, no reboot."""
-
-        dispatcher = self._home.get(record.graph)
-        if dispatcher is None:
-            raise AdoptError(
-                f"graph {record.graph} was never claimed by a ctx.compile-ed "
-                f"module; there is nothing to arm it onto"
-            )
-        self._arm(dispatcher, record, artifact)
-
-    def _canonical(self, graphs: set[str] | Mapping[str, Any]) -> tuple[GraphRecord, ...]:
-        return tuple(record for record in self.lane.graphs if record.graph in graphs)
+        except Exception:  # pragma: no cover - a diagnostic never kills a forward
+            logger.debug("torchcg dispatch: no armed graph matched", exc_info=True)
 
     @property
-    def adopted(self) -> tuple[GraphRecord, ...]:
-        return self._canonical(self._adopted)
-
-    @property
-    def holes(self) -> tuple[Hole, ...]:
-        """THE ordered mint work-list: canonical document order, full
-        GraphRecord per row (graph hash + ingress), reason stated."""
-        return tuple(
-            self._holes[record.graph]
-            for record in self.lane.graphs
-            if record.graph in self._holes
-        )
-
-    @property
-    def ambiguous(self) -> tuple[GraphRecord, ...]:
-        return self._canonical(self._ambiguous)
-
-    @property
-    def unclaimed(self) -> tuple[GraphRecord, ...]:
-        """Records no ``ctx.compile`` call claimed — stated, never dropped:
-        an unclaimed record has no module to arm onto, so it is NOT mint
-        work; it is evidence the author stopped marking a module the derive
-        once observed."""
-        return self._canonical(self._unclaimed)
-
-    @property
-    def unclaimed_marks(self) -> tuple[UnclaimedMark, ...]:
-        """The MODULE side of the same fact: every ``ctx.compile``-ed module
-        that matched no record, with the signature gap that explains it.
-
-        :attr:`unclaimed` says which graphs found no home; this says which
-        marks found no graph. Reading only one of them is how ``adopted=0,
-        holes=0`` became a silent verdict (tcg#70) — a boot needs both to tell
-        "the author stopped marking a module" from "the module the author
-        marks no longer has the forward the derive traced"."""
-        return tuple(self._unclaimed_marks)
-
     def silently_eager(self) -> bool:
-        """Nothing armed, nothing to mint, and marks that matched nothing.
+        """Armed nothing and reported nothing -- indistinguishable from "no work"
+        unless something asks."""
 
-        The exact state that used to print as two zeros. It is not an error —
-        eager costs speed, never correctness — but it is never a quiet success
-        either, and a caller that reports adoption MUST say so."""
-        return bool(self._unclaimed_marks) and not self._adopted and not self._holes
+        return not self.records
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+
+def resident_constants(module: Any) -> dict[str, Any]:
+    """The live module's tensors by fqn.
+
+    `state_dict()` PLUS `named_buffers()`: torch.export lifts non-persistent
+    buffers as inputs and AOTI declares them state-dict constants, so
+    `state_dict()` alone under-declares and the bind fails on a set mismatch.
+    """
+
+    values = dict(module.state_dict())
+    for name, buffer in module.named_buffers():
+        values.setdefault(name, buffer)
+    return values
+
+
+def module_device(module: Any) -> str:
+    for table in (module.state_dict().values(), (b for _, b in module.named_buffers())):
+        for value in table:
+            if hasattr(value, "device"):
+                return str(value.device)
+    raise AdoptError("module holds no tensors, so it states no device")
+
+
+def load(artifact: StoredArtifact, module: Any, *, key: str | None = None) -> Any:
+    """Load one artifact and bind its constants to the LIVE module's weights.
+
+    Weightless by construction: constants are bound `user_managed=True`, so they
+    are raw pointers into tensors the module already holds. There is no second
+    copy of the checkpoint on the device, which is also why this needs the
+    module and a bare `load_package(path)` is unservable.
+    """
+
+    if key is not None and artifact.metadata.get("key") != key:
+        raise KeyMismatch(
+            f"artifact states key {artifact.metadata.get('key')!r}, fetched under {key!r}"
+        )
+    name = artifact.metadata["name"]
+    declared_placement = artifact.metadata.get("placement") or []
+    device = module_device(module)
+    if declared_placement and device.split(":", 1)[0] not in {
+        str(p).split(":", 1)[0] for p in declared_placement
+    }:
+        raise AdoptError(
+            f"artifact was traced onto {sorted(declared_placement)!r} and the live "
+            f"module is on {device!r}; a graph cannot be re-homed after tracing"
+        )
+    try:
+        package = vars(import_module("torch._inductor.package"))["load_package"](
+            str(artifact.package), model_name=name
+        )
+    except Exception as exc:
+        raise AdoptError(f"package load failed: {type(exc).__name__}: {exc}") from exc
+
+    declared = set(package.get_constant_fqns())
+    stated = artifact.metadata.get("constants") or {}
+    literals_named = set(stated.get("literal") or ())
+    state_named = set(stated.get("state") or ())
+    # The independent witness: the package's own table against what the mint
+    # said it packed. Two producers of one fact must agree or neither is trusted.
+    if declared != literals_named | state_named:
+        raise AdoptError(
+            f"artifact constant table disagrees with its own stamp: package-only "
+            f"{sorted(declared - literals_named - state_named)[:6]!r}, stamp-only "
+            f"{sorted((literals_named | state_named) - declared)[:6]!r}"
+        )
+
+    literals: dict[str, Any] = {}
+    if artifact.literals is not None:
+        from safetensors.torch import load_file
+
+        literals = load_file(str(artifact.literals), device=device)
+    state = resident_constants(module)
+    morphism = require_morphism(artifact.metadata["declared_input_layout"])
+    values: dict[str, Any] = {}
+    missing: list[str] = []
+    for fqn in sorted(declared):
+        if fqn in literals_named:
+            value = literals.get(fqn)
+        else:
+            value = state.get(fqn)
+            if value is not None and not morphism.matches(value):
+                raise AdoptError(
+                    f"constant {fqn!r} is not in the declared layout "
+                    f"{morphism.handle}: {morphism.describe(value)}. Deliver through "
+                    f"the declared morphism or serve an artifact minted against the "
+                    f"layout these bytes are in -- never a silent repack, which "
+                    f"copies channels-last back to row-major at full weight cost on "
+                    f"every load."
+                )
+        if value is None:
+            missing.append(fqn)
+        else:
+            values[fqn] = value
+    if missing:
+        raise AdoptError(
+            f"artifact declares {len(missing)} constant(s) nothing resolves: "
+            f"{missing[:6]!r}"
+        )
+    try:
+        package.load_constants(values, check_full_update=True, user_managed=True)
+    except Exception as exc:
+        raise AdoptError(f"constant binding failed: {type(exc).__name__}: {exc}") from exc
+    # The user-managed pointers must not outlive their Python owners.
+    package._torchcg_retained = values
+    return package
+
+
+def adopt(module: Any, artifacts: Sequence[tuple[StoredArtifact, Any]]) -> Dispatcher:
+    """Arm one module with every artifact whose ingress its forward can serve."""
+
+    dispatcher = Dispatcher(eager=module.forward)
+    records = []
+    for artifact, package in artifacts:
+        ingress = CallIngress.decode(artifact.metadata["ingress"])
+        records.append(Record(artifact.metadata["graph"], ingress, package))
+    dispatcher.arm(records)
+    module.forward = dispatcher
+    return dispatcher
+
+
+def release(module: Any) -> None:
+    """Restore eager by removing the instance attribute."""
+
+    if isinstance(module.__dict__.get("forward"), Dispatcher):
+        del module.__dict__["forward"]
 
 
 __all__ = [
-    "AdoptError",
-    "AdoptSession",
-    "ArtifactLoader",
-    "HOLE_MISS",
-    "Hole",
-    "UnclaimedMark",
+    "RECAST_SOURCES",
+    "RECAST_TARGETS",
+    "Dispatcher",
+    "Recast",
+    "Record",
+    "adopt",
+    "fit",
+    "load",
+    "module_device",
+    "release",
+    "resident_constants",
 ]
