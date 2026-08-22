@@ -16,12 +16,12 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import torch
 
 from gen_worker._vendor.torchcg.identity import CallIngress, CallInput
 from gen_worker.graphs.adopt import _ForwardDispatcher
 from gen_worker.graphs.document import GraphRecord
 
-torch = pytest.importorskip("torch")
 
 
 def _record() -> GraphRecord:
@@ -36,7 +36,7 @@ def _record() -> GraphRecord:
     )
 
 
-class _Module(torch.nn.Module):  # type: ignore[misc]
+class _Module(torch.nn.Module):
     def forward(self, *args: Any, **kwargs: Any) -> str:
         return "eager"
 
@@ -47,8 +47,8 @@ def test_a_callable_swapped_AFTER_arming_is_the_one_that_runs() -> None:
     record = _record()
     dispatcher.arm(record, lambda *a, **k: "original")
 
-    call = (torch.zeros(2, 4),), {}
-    assert dispatcher(*call[0], **call[1]) == "original"
+    sample = torch.zeros(2, 4)
+    assert dispatcher(sample) == "original"
 
     # What `rearm()` does: mutate the entry in place.
     seen: list[str] = []
@@ -60,7 +60,7 @@ def test_a_callable_swapped_AFTER_arming_is_the_one_that_runs() -> None:
     entries = dispatcher._entries
     entries[0] = (entries[0][0], wrapper)
 
-    assert dispatcher(*call[0], **call[1]) == "wrapped", (
+    assert dispatcher(sample) == "wrapped", (
         "the dispatcher called an arm-time snapshot, so the counter's wrapper "
         "never runs and compiled_graph_calls reports 0 while serving compiled"
     )
