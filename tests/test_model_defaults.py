@@ -435,7 +435,7 @@ def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert [mt.name for mt in MODEL_TYPES] == [
         "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
         "qwen3.6-27b-mtp", "qwen3.6-35b-a3b", "flux1", "flux2-klein",
-        "krea-2", "anima", "ernie", "qwen-image", "z-image",
+        "krea-2", "anima", "ernie", "qwen-image", "z-image", "sensenova-u1",
         "stable-audio", "musicgen",
         "ltx-2", "ltx-2-upsampler",
         "internvl-u",
@@ -839,6 +839,96 @@ def test_qwen_and_z_platform_floors_admit_their_distilled_checkpoints() -> None:
     })
     assert edit.max_sequence_length == 1024
     assert edit.steps.default == 30, "the edit row shares the family recipe"
+
+
+def test_sensenova_platform_values_are_the_REFERENCE_SERVING_numbers() -> None:
+    """se#840's measurement: two of these disagree with the checkpoint's own
+    `config.json`, and the config is the one that is wrong."""
+    from gen_worker.models import SenseNovaU1
+
+    s = SenseNovaU1.Defaults()
+    assert s.steps.default == 50 and s.guidance.default == 4.0
+    # THE ONE THAT WOULD HAVE BEEN COPIED FROM THE CONFIG. `config.timestep_shift`
+    # is 1.0; every upstream example passes 3.0 and `time_schedule` is forced to
+    # "standard", so the config value is dead. 1.0 here is a different, worse
+    # trajectory on every request — silently.
+    assert s.timestep_shift == 3.0
+    # The edit arm's second axis. 1.0 == two arms; above it, three.
+    assert s.img_guidance.default == 1.0 and s.img_guidance.lo == 1.0
+    assert s.cfg is True and s.step_distilled is False
+
+    # No scheduler and no diffusers pipeline: the trajectory is built in the
+    # sampler and the model is VAE-free, so there is nothing to synthesize.
+    assert SenseNovaU1.canonical_scheduler_config == {}
+    assert not hasattr(SenseNovaU1, "Lora")
+    # `timestep_shift` is deliberately NOT a Knob — it reshapes the trajectory
+    # rather than trading quality for time, and no upstream surface exposes it.
+    assert not isinstance(s.timestep_shift, Knob)
+
+
+def test_sensenova_is_declarable_and_classifies_by_its_topology() -> None:
+    from gen_worker.models import SenseNovaU1
+
+    # tensorfs#161, vendored by pgw#1665/#1656: without this document the
+    # endpoint's `lanes=` is refused at import and the vocabulary row below is
+    # a name with nothing behind it.
+    assert _library_has("sensenova-u1.mot")
+
+    assert model_type_by_name("sensenova-u1") is SenseNovaU1
+    assert model_type_by_name("sensenova") is None
+    assert model_type_by_name("sensenova-u1.5") is None
+
+    # The lane the endpoint actually declares, and the stamp the UPSTREAM tree
+    # actually carries — the fingerprint reads the topology half, so both
+    # classify to the same family even though only one of them is our artifact.
+    assert model_type_for_contract(
+        "sensenova-u1.mot@1+plain.bf16@1") is SenseNovaU1
+    assert model_type_for_contract(
+        "sensenova-u1.mot@1+plain.f32@1") is SenseNovaU1
+    assert model_type_for_contract("sensenova-u1.mot@1") is SenseNovaU1
+
+
+def test_a_distilled_sensenova_row_flips_the_recipe_without_a_new_root() -> None:
+    """The 8-step distill LoRA upstream ships is a CHECKPOINT fact."""
+    from gen_worker.models import SenseNovaU1
+
+    distilled = decode_model_defaults(
+        SenseNovaU1, model="sensenova-u1", defaults={
+            "steps": {"default": 8}, "guidance": {"default": 1.0},
+            "cfg": False, "step_distilled": True,
+        },
+    )
+    assert distilled.steps.default == 8
+    assert distilled.guidance.default == 1.0
+    assert distilled.cfg is False and distilled.step_distilled is True
+    # ...and the family recipe is untouched for everyone else.
+    assert SenseNovaU1.Defaults().steps.default == 50
+
+
+def test_an_unregistered_handle_names_the_corpus_that_answered() -> None:
+    """pgw#1664: the refusal that used to read as an authoring mistake.
+
+    `lanes=` is checked against the VENDORED snapshot, never the PEP 508
+    `tensorfs` pin — so an author who pins tensorfs at the exact commit that
+    added their record is still refused, correctly, and the only useful next
+    act is a re-vendor. The message has to say which corpus said no.
+    """
+    from gen_worker._vendor import vendored_rev
+    from gen_worker.models.tensor_layout_contract import (
+        LayoutDeclarationError,
+        parse_lane_stamp,
+    )
+
+    with pytest.raises(LayoutDeclarationError) as caught:
+        parse_lane_stamp(("nope.nothing@1", "plain.bf16@1"), where="test")
+    message = str(caught.value)
+    assert vendored_rev("tensorfs") in message
+    assert "gen_worker._vendor.tensorfs" in message
+    assert "PEP 508" in message
+
+    # The RED control: the registered handle beside it is NOT refused, so the
+    # message above is reachable only for a genuinely absent name.
+    parse_lane_stamp(("sensenova-u1.mot@1", "plain.bf16@1"), where="test")
 
 
 def test_a_base_handlers_wire_floor_really_would_corrupt_a_distilled_row() -> None:

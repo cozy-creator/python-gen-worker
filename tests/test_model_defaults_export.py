@@ -23,7 +23,7 @@ LAUNCH_SET_NAMES: list[str] = [
     "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
     "qwen3.6-27b-mtp", "qwen3.6-35b-a3b",
     "flux1", "flux2-klein",
-    "qwen-image", "z-image",
+    "qwen-image", "z-image", "sensenova-u1",
     "krea-2", "anima", "ernie",
     "stable-audio", "musicgen",
     "ltx-2", "ltx-2-upsampler",

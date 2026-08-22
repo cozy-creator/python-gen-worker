@@ -933,10 +933,27 @@ def _stamp_half(value: object, *, axis: str, where: str) -> str:
                 "checkpoint's headers — it is never hand-authored — so the fix "
                 "is to bank the headers in tensorfs `spec/v2/headers/`, add the "
                 "`CORPUS.tsv` row, rebuild, and re-vendor.")
+        # NAME THE CORPUS THAT ANSWERED (pgw#1664). An author who pinned
+        # `tensorfs` at the very commit that added their record still lands
+        # here, because this reads the VENDORED snapshot and never the PEP 508
+        # pin. Without the rev the message reads "fix your declaration" when the
+        # truth is "wait for a re-vendor" — two different people's work.
         raise LayoutDeclarationError(
-            f"{where}: {axis} {text!r} is not in the vendored v2 corpus. "
+            f"{where}: {axis} {text!r} is not in the vendored v2 corpus "
+            f"(gen_worker._vendor.tensorfs @ {_vendored_corpus_rev()}; the "
+            f"PEP 508 `tensorfs` pin is NOT consulted here). "
             f"Known {axis}: {', '.join(known)}.{extra}")
     return text
+
+
+def _vendored_corpus_rev() -> str:
+    """The tensorfs commit the vendored corpus was taken at — refusals only."""
+    try:
+        from .._vendor import vendored_rev
+
+        return vendored_rev("tensorfs")
+    except Exception:  # pragma: no cover - a refusal must never raise its own
+        return "unknown rev"
 
 
 def _display_hint(text: str) -> str:
