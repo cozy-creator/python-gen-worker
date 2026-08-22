@@ -4,9 +4,9 @@ Every arm reads the rung off ARTIFACT METADATA, which is where both facts
 actually live (`declared_input_layout` and `layout_wishlist`, tcg#83), and
 never off a caller's belief about the artifact. The deliverability arms move
 the one real source of truth there is today: whether a layout-applying fill is
-REACHABLE FROM THIS PROCESS. It is not (varena#13), so the decline arm is what
-production takes; installing the capability is what makes EARNING reachable,
-and that is the same branch production will take the day varena#13 lands.
+REACHABLE FROM THIS PROCESS. It is not, so the decline arm is what production
+takes; installing the capability is what makes EARNING reachable, and that is
+the same branch production will take the day pgw#1648's fill client lands.
 """
 
 from __future__ import annotations
@@ -41,9 +41,9 @@ def fill_installed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Put a layout-applying fill in this process's reach.
 
     Moves the SOURCE the probe reads -- the vendored tensorfs module's own
-    surface -- rather than handing the predicate an argument. varena#13 makes
-    this attribute real; until then this is the only way the EARNING branch can
-    be reached, and it must be reachable or the vocabulary carries a member
+    surface -- rather than handing the predicate an argument. pgw#1648's fill
+    client makes a real one; until then this is the only way the EARNING branch
+    can be reached, and it must be reachable or the vocabulary carries a member
     nothing can produce.
     """
 
@@ -119,11 +119,11 @@ def test_two_ratified_wishes_are_NO_SINGLE_IDEAL_not_a_coin_flip() -> None:
 
 
 def test_with_no_fill_in_reach_a_ratified_wish_is_a_TYPED_DECLINE() -> None:
-    """What production does TODAY, and it must not be silent. `tensorfs-py`
-    exports no `fill` and varena implements no sink, so the arrangement cannot
-    be delivered to VRAM at all -- and the confession says exactly that, names
-    varena#13, and carries the tensorfs#157 measurement that will price the
-    decision once a fill exists."""
+    """What production does TODAY, and it must not be silent. No fill client is
+    reachable from a worker process, so the arrangement cannot be delivered to
+    VRAM at all -- and the confession says exactly that, names the lanes
+    building one (pgw#1648 / tensorfs#159), and carries the tensorfs#157
+    measurement that will price the decision once one exists."""
 
     assert rung_mod.fill_path() is None, "a fill became reachable; retire this arm"
     rung = read_rung(
@@ -132,7 +132,7 @@ def test_with_no_fill_in_reach_a_ratified_wish_is_a_TYPED_DECLINE() -> None:
     assert rung.state is LayoutState.DECLINED
     assert rung.ideal == CHANNELS_LAST
     assert rung.settled and not rung.earning
-    assert "varena#13" in rung.detail
+    assert "pgw#1648" in rung.detail and "tensorfs#159" in rung.detail
     assert "tensorfs#157" in rung.detail
     # A decline is a SETTLED position with a stated cause. Reading it as
     # pending would make a permanent state look like a stuck mint queue.

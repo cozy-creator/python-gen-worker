@@ -50,8 +50,9 @@ __all__ = [
 #:
 #: WHAT REPLACES THIS, and it is not a guess: `FillStats::runs_per_element` is
 #: the number, computed by the one implementation that folds the runs. The
-#: moment the fill path is reachable from Python (varena#13) this constant dies
-#: and the decision is read from the stats of the fill that would be performed.
+#: moment the fill path is reachable from Python (tensorfs#159 / pgw#1648) this
+#: constant dies and the decision is read from the stats of the fill that would
+#: be performed.
 #: gen-worker deliberately does NOT compute a run count of its own -- that would
 #: be a second implementation of the fold, which is the defect this whole
 #: program keeps removing.
@@ -66,9 +67,13 @@ PER_ELEMENT_DECLINE = (
 class LayoutState(StrEnum):
     """Where a serving artifact sits against the layout it wished for.
 
-    The values are a wire contract in the same way `EagerPhase`'s are: the hub
-    groups activity rows on them, so a member may be added and must not be
-    renamed.
+    The values are INTENDED as a wire contract in the same way `EagerPhase`'s
+    are -- a member may be added, and renaming one would orphan history the day
+    something joins to them. **Nothing consumes them yet**, and saying otherwise
+    would be a claim about a contract that does not exist: today the rungs reach
+    `ServeAdoption.facts()` -> `worker.mint_facts()` -> a `logger.debug` call,
+    and no hub query groups on them. Freeze the spellings anyway -- they are
+    cheap to fix now and unfixable once a query does.
     """
 
     #: The mint asked for no layout change. This artifact IS at its ideal.
@@ -189,14 +194,25 @@ def fill_path() -> Any:
     A PROBE of what is installed, not a flag: the transform has exactly one
     implementation (`tensorfs_core::fill`, one plan, two backends behind the
     `FillSink` trait), and a worker either has it in reach or it does not.
-    Today it does not -- `tensorfs-py` exports no `fill` and varena implements
-    no sink (varena#13) -- so every non-identity arrangement is declined for
-    the plainest possible reason: nothing in this process can apply one.
+    Today it does not, so every non-identity arrangement is declined for the
+    plainest possible reason: nothing in this process can apply one.
 
-    The day varena#13 lands, this returns a callable and the decline moves from
-    "there is no fill" to the per-arrangement judgement
+    **THIS PROBE IS AIMED AT THE WRONG SURFACE AND IS OWED A REPOINT** (pgw#1648).
+    It asks the vendored tensorfs for a `fill` attribute. The real client is
+    `serving.streaming.fill_client.client_for` over tensorfs' native
+    `CudaFillClient` / `HostFillClient` (tensorfs#159) -- and this probe could
+    never go true anyway, because those live in the COMPILED extension and the
+    vendored tensorfs deliberately carries none (pgw#1310, which is why
+    `tensors.py` has a pure-Python `_MappedObject`). It is left aimed here, and
+    said out loud, rather than pointed at a module that does not exist on this
+    branch: the VERDICT it produces is correct today either way -- there is no
+    fill in reach -- and a probe that lies about which absence it found is
+    worse than one that names its own aim.
+
+    Once `fill_client` lands, this returns that client and the decline moves
+    from "there is no fill" to the per-arrangement judgement
     :data:`PER_ELEMENT_DECLINE` describes, priced by the fill's own
-    `runs_per_element`. Neither reason is ever a silent drop.
+    `runs_per_element` rather than by anything computed here.
     """
 
     try:
@@ -212,10 +228,10 @@ def _delivery(handle: str) -> str:
     if fill_path() is None:
         return (
             f"no layout-applying fill is reachable from this process, so "
-            f"{handle!r} cannot be delivered to VRAM at all (varena#13: "
-            f"tensorfs owns the plan and the transform, varena implements the "
-            f"sink over a reservation, and neither is exposed to Python yet). "
-            f"{PER_ELEMENT_DECLINE}"
+            f"{handle!r} cannot be delivered to VRAM at all (pgw#1648 + "
+            f"tensorfs#159: tensorfs owns the plan and the transform and is "
+            f"being bound to Python as a fill client; varena hands it the "
+            f"destination address). {PER_ELEMENT_DECLINE}"
         )
     return ""
 
