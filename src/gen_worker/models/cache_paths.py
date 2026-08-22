@@ -8,9 +8,6 @@ from gen_worker._vendor.tensorfs import LocalCAS
 
 from ..config import Settings, current_or
 
-if TYPE_CHECKING:
-    from gen_worker._vendor.torchcg import Engine
-
 _STANDALONE = Settings()
 
 
@@ -46,13 +43,6 @@ def open_worker_cas(root: Path | None = None) -> LocalCAS:
     """Open the worker's one tensorfs store."""
 
     return LocalCAS(tensorhub_cas_dir() if root is None else Path(root))
-
-
-def open_worker_engine(root: Path | None = None) -> Engine:
-    """Open TCG on the worker's one canonical tensorfs store."""
-    from gen_worker._vendor.torchcg.engine import Engine
-
-    return Engine(open_worker_cas(root))
 
 
 def tensorhub_fill_source_dir() -> Path | None:

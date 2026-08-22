@@ -462,7 +462,7 @@ def driver_floor() -> Optional[str]:
 
 def artifact_manifest(env: Any, package: Path) -> Any:
     """The COMPATIBILITY SET of these bytes, read off the artifact itself."""
-    from .._vendor.torchcg import RequirementsManifest
+    from ..graphs.requirements import RequirementsManifest
 
     rows = dict(artifact_constraints(package))
     name, floor = torch_shim_floor()
@@ -475,7 +475,9 @@ def artifact_manifest(env: Any, package: Path) -> Any:
 
 
 def artifact_envelope(artifact: Path, workspace: Path) -> Path:
-    from .._vendor.torchcg.artifact import pack_artifact
+    import shutil
+
+    from .._vendor.torchcg.store import pack
 
     source = Path(artifact)
     if source.is_file():
@@ -498,14 +500,20 @@ def artifact_envelope(artifact: Path, workspace: Path) -> Path:
         )
     import json
 
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    json.loads(metadata_path.read_text(encoding="utf-8"))  # refuse unreadable metadata here
+    # torchcg packs a DIRECTORY whose members already carry their canonical
+    # names, and refuses any other member on the way back out. Stage rather than
+    # hand it the source tree, because the package file is not always named
+    # `model.pt2` on disk and a rename at pack time is cheaper than a member
+    # whitelist that has to know about aliases.
+    staging = workspace / "envelope"
+    staging.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(metadata_path, staging / "metadata.json")
+    shutil.copy2(artifact_package(source), staging / "model.pt2")
     literals = source / "constants.safetensors"
-    return pack_artifact(
-        artifact_package(source),
-        workspace / "compiled_graph.tar.gz",
-        metadata,
-        literals=literals if literals.is_file() else None,
-    )
+    if literals.is_file():
+        shutil.copy2(literals, staging / "constants.safetensors")
+    return pack(staging, workspace / "compiled_graph.tar.gz")
 
 
 def publish_compiled(store: Any, graph: str, env: Any, artifact: Path) -> str:
@@ -562,7 +570,7 @@ def present_libraries(names: Sequence[str]) -> Dict[str, str]:
 
 def assert_satisfied(manifest: Any, *, sm: str) -> None:
     """Refuse loudly when this host cannot satisfy an artifact's floors."""
-    from .._vendor.torchcg import EnvironmentMismatch
+    from ..graphs.requirements import EnvironmentMismatch
 
     stated = str(getattr(manifest, "sm_compiled", "") or "")
     if stated and sm and stated != sm:
