@@ -74,6 +74,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Any
 
 
@@ -334,7 +335,7 @@ def _empty_parameters() -> Iterator[None]:
     try:
         yield
     finally:
-        torch.nn.Module.register_parameter = original  # type: ignore[method-assign]
+        torch.nn.Module.register_parameter = original
 
 
 def _tensor_attributes(submodule: Any) -> list[tuple[str, Any]]:
@@ -739,6 +740,21 @@ def _hollow_transformers(session: HollowSession) -> Any:
     return classmethod(from_pretrained)
 
 
+def _optional_module(name: str) -> ModuleType | None:
+    """Import one loader module, or None when the library is not installed.
+
+    Three copies of the same try/except said this three times; a library's
+    absence is a value, not a control-flow shape.
+    """
+
+    from importlib import import_module
+
+    try:
+        return import_module(name)
+    except ImportError:
+        return None
+
+
 @contextlib.contextmanager
 def _loader_interception(session: HollowSession) -> Iterator[None]:
     """Patch the model-bearing loaders of whichever libraries are present.
@@ -755,18 +771,9 @@ def _loader_interception(session: HollowSession) -> Iterator[None]:
     """
 
     patched: list[tuple[Any, Any]] = []
-    try:
-        import diffusers.models.modeling_utils as _dmu
-    except ImportError:
-        _dmu = None
-    try:
-        import transformers.modeling_utils as _tmu
-    except ImportError:
-        _tmu = None
-    try:
-        import diffusers.modular_pipelines.modular_pipeline as _dmp
-    except ImportError:
-        _dmp = None
+    _dmu = _optional_module("diffusers.models.modeling_utils")
+    _tmu = _optional_module("transformers.modeling_utils")
+    _dmp = _optional_module("diffusers.modular_pipelines.modular_pipeline")
     if _dmu is None and _tmu is None:
         raise HollowError(
             "hollow instantiation intercepts diffusers and/or transformers "
@@ -864,8 +871,8 @@ def _hollow_module_moves(device: str) -> Iterator[None]:
     try:
         yield
     finally:
-        torch.nn.Module.to = original_to  # type: ignore[method-assign]
-        torch.nn.Module.cuda = original_cuda  # type: ignore[method-assign]
+        torch.nn.Module.to = original_to
+        torch.nn.Module.cuda = original_cuda
 
 
 #: Device spellings author code uses that the session redirects to its own.
