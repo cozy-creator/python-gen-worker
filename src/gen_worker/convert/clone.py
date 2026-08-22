@@ -48,6 +48,7 @@ from .keepalive import HubKeepalive
 from .publish import destination_release as _destination_release
 from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
 from .registry import repackage_family
+from .tree_repack import apply_tree_repack, require_tree_repack
 from .writer import (
     CAST_NORMALIZE_DTYPES as _CAST_NORMALIZE_DTYPES,
 )
@@ -89,11 +90,19 @@ _MIN_CONVERT_BYTES = 100 * 1024 * 1024
 
 @dataclass(frozen=True)
 class OutputSpec:
-    """One requested output flavor: dtype + file layout + container."""
+    """One requested output flavor: dtype + file layout + container + tree shape.
+
+    ``repack`` names a declared tree-repack family (pgw#1670) and is the third
+    axis of *what the produced artifact IS*: the flat transformers shape a
+    mirror reproduces, or the diffusers component shape ``ctx.load`` can reach.
+    It is NAMED and never detected — an unknown name is refused at normalize
+    time, at $0, before a pod exists.
+    """
 
     dtype: str
     file_layout: str
     file_type: str
+    repack: str = ""
 
     @property
     def label(self) -> str:
@@ -169,6 +178,7 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = MULTI_
         dtype = {"fp8-e4m3": "fp8", "fp8:e4m3": "fp8"}.get(dtype, dtype)
         layout = str(get("file_layout") or "").strip().lower() or layout_hint
         ftype = str(get("file_type") or "").strip().lower() or "safetensors"
+        repack = str(get("repack") or "").strip().lower()
         if not dtype:
             raise ValueError("output.dtype is required")
         if dtype not in _KNOWN_DTYPES:
@@ -177,10 +187,20 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = MULTI_
             raise ValueError(f"unsupported output.file_layout: {layout!r}")
         if ftype not in _KNOWN_FILE_TYPES:
             raise ValueError(f"unsupported output.file_type: {ftype!r}")
+        if repack:
+            # Refused HERE — at normalize time, before a pod exists — because
+            # a repack name that is only checked on the pod costs a whole
+            # download to learn it was misspelled.
+            require_tree_repack(repack)
+            if ftype != "safetensors":
+                raise ValueError(
+                    f"output.repack={repack!r} needs file_type=safetensors; a repack is a "
+                    f"transform over safetensors headers and {ftype!r} has none")
         key = (dtype, layout, ftype)
         if key not in seen:
             seen.add(key)
-            out.append(OutputSpec(dtype=dtype, file_layout=layout, file_type=ftype))
+            out.append(OutputSpec(dtype=dtype, file_layout=layout, file_type=ftype,
+                                  repack=repack))
     if not out:
         layout = layout_hint if layout_hint in _KNOWN_FILE_LAYOUTS else MULTI_FILE
         out.append(OutputSpec(dtype="bf16", file_layout=layout, file_type="safetensors"))
@@ -201,7 +221,41 @@ def build_flavor_tree(
 
     ``progress`` receives the output bytes of each tensor written, cumulative
     across components — the convert phase's declared position.
+
+    THE REPACK IS THE LAST LEG AND IT IS PART OF THIS TREE (pgw#1670, se#840's
+    ruling). ``spec.repack`` names a declared key map; the dtype pass writes the
+    weights and the repack then routes their KEYS into diffusers component
+    directories, derives each component's ``config.json`` from the source
+    config, moves the tokenizer files and writes ``model_index.json``. It runs
+    here rather than at publish time so that ONE producer emits the artifact and
+    the 50 GB read the cast already pays is not paid twice.
     """
+
+    tree, attrs = _build_flavor_tree(
+        source, spec, out_dir, quantize_components=quantize_components,
+        objective=objective, distilled=distilled, progress=progress,
+    )
+    if spec.repack:
+        report = apply_tree_repack(tree, require_tree_repack(spec.repack))
+        # The produced layout is READ OFF the produced tree, never echoed from
+        # the request. pgw#1669 is the standing record of what echoing costs: a
+        # `multi-file` request against a single-file source published
+        # `single-file` bytes under a `multi-file` label, silently.
+        attrs.update(report.as_attrs())
+    return tree, attrs
+
+
+def _build_flavor_tree(
+    source: IngestedSource,
+    spec: OutputSpec,
+    out_dir: Path,
+    *,
+    quantize_components: list[str] | None = None,
+    objective: str = "",
+    distilled: bool = False,
+    progress: Any = None,
+) -> tuple[Path, dict[str, str]]:
+    """The dtype/layout half — see :func:`build_flavor_tree`."""
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -475,13 +529,42 @@ def spec_actions(
             actions.append(CAST_OUTPUT)
             continue
         dtype_matches = (not source_dtype) or spec.dtype == source_dtype
-        if dtype_matches or not explicit_outputs:
+        # A REQUESTED REPACK IS WORK, even when the dtype already matches
+        # (pgw#1670). PUBLISH_SOURCE hands the ingest tree straight to the
+        # publisher, so letting a repack request take that arm would drop the
+        # transform and publish the flat tree under a label that says it was
+        # repacked — the exact silent-substitution shape pgw#1668/#1669
+        # already cost this checkpoint two jobs.
+        if spec.repack:
+            actions.append(
+                CAST_OUTPUT if (index == 0 and spec.file_type == "safetensors"
+                                and cast_eligible)
+                else NOT_POSSIBLE)
+        elif dtype_matches or not explicit_outputs:
             actions.append(PUBLISH_SOURCE)
         elif index == 0 and spec.file_type == "safetensors" and cast_eligible:
             actions.append(CAST_OUTPUT)
         else:
             actions.append(NOT_POSSIBLE)
     return actions
+
+
+def _tree_repack_transient_bytes(spec: OutputSpec, tree_bytes: int) -> int:
+    """What a declared tree repack costs on TOP of the tree it repacks.
+
+    Derived from the DECLARATION, not guessed: a repack whose key map is the
+    identity and whose single weight component takes every key moves each
+    member with ``os.replace`` and costs nothing. Anything else rebuilds
+    members (renamed keys, or one member split across components) and the
+    originals are only unlinked once every component has read them — so the
+    peak is the produced tree, twice. Stating zero for the move case matters:
+    over-demanding here refuses a job that fits, which is the same class of
+    wrong answer as pgw#1666's under-demand, pointing the other way.
+    """
+
+    if not spec.repack:
+        return 0
+    return 0 if require_tree_repack(spec.repack).is_pure_move else tree_bytes
 
 
 def plan_disk_demand(
@@ -572,6 +655,7 @@ def plan_disk_demand(
             published_bytes += source_bytes
             if spec.file_type == "safetensors":
                 deshard_bytes += sharded_bytes
+            repack = max(repack, _tree_repack_transient_bytes(spec, source_bytes))
             continue
         size = _output_tree_bytes(spec, source_bytes, source_bits, measured_bits)
         output_sizes.append(size)
@@ -585,6 +669,7 @@ def plan_disk_demand(
         layout = source_layout if publish_as_is else spec.file_layout
         if spec.file_type != "gguf" and source_layout and layout != source_layout:
             repack = max(repack, size)
+        repack = max(repack, _tree_repack_transient_bytes(spec, size))
 
     if output_sizes:
         stages.append(DiskStage(
@@ -594,7 +679,7 @@ def plan_disk_demand(
     if gguf_intermediate:
         stages.append(DiskStage("one intermediate F16 GGUF tree", gguf_intermediate))
     if repack:
-        stages.append(DiskStage("one layout-repack tree", repack))
+        stages.append(DiskStage("one repack tree", repack))
     if publish_as_is:
         notes.append(f"{strategy} publishes the source tree directly")
     if reused_in_place:
@@ -913,6 +998,12 @@ def run_clone(
                         cast_spec = OutputSpec(
                             dtype=spec.dtype, file_layout=effective_layout,
                             file_type=spec.file_type,
+                            # `file_layout` is deliberately overridden here
+                            # (pgw#1669) and `repack` deliberately is NOT: it
+                            # is the caller's request about the produced tree's
+                            # SHAPE, and this arm has no source fact to
+                            # substitute for it.
+                            repack=spec.repack,
                         )
                         flavor_dir = workdir / f"flavor-{spec.label}"
                         shutil.rmtree(flavor_dir, ignore_errors=True)
