@@ -25,7 +25,7 @@ from gen_worker.models.download import (
 
 from ..net import hf, install_hf_http_timeouts
 from ..models.materialized_view import third_party_dir
-from ..models.safetensors_header import header_len_ok
+from ..models.safetensors_header import FLOAT_DTYPES, header_len_ok
 from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
 from ..models.file_layout import SINGLE_FILE
@@ -96,7 +96,34 @@ _SAFETENSORS_DTYPE_BITS = {
     "F16": 16, "BF16": 16, "I16": 16, "U16": 16,
     "F8_E4M3": 8, "F8_E5M2": 8, "I8": 8, "U8": 8, "BOOL": 8,
 }
-_MAX_DTYPE_HEADER_READS = 3
+MIXED_DTYPE = "mixed"
+
+
+def rollup_dtype(bytes_by_dtype: Mapping[str, int]) -> str:
+    """The ONE dtype a float-tensor mass distribution IS — or ``MIXED_DTYPE``.
+
+    Strict on purpose, and it is the whole of pgw#1668. Two questions used to
+    be answered by two different measures that disagreed: *"would casting this
+    tree change any bytes?"* (the CAST decision) and *"what dtype is this
+    tree?"* (the published LABEL). The old label was a majority by TENSOR
+    COUNT, so SenseNova-U1.5's 601 BF16 norm/bias islands out-voted its 30 GB
+    F32 bulk: a bf16 request "already matched", nothing was cast, and 50 GB of
+    F32-dominant weights were published stamped ``bf16``.
+
+    A majority — by count OR by bytes — cannot answer the first question at
+    all, because the question is not *what is this tree mostly*. So there is no
+    majority here and no threshold to pick: one float dtype present means the
+    tree IS that dtype and a cast to it is provably a no-op; more than one
+    means a cast to ANY target rewrites bytes, and the honest name for the
+    tree is ``mixed``. One rule, so the decision and the label cannot drift.
+    """
+
+    present = {str(d) for d, b in bytes_by_dtype.items() if int(b) > 0}
+    if not present:
+        return ""
+    if len(present) > 1:
+        return MIXED_DTYPE
+    return next(iter(present))
 
 
 def _remote_safetensors_width(
@@ -106,13 +133,19 @@ def _remote_safetensors_width(
     hf_token: str | None,
     ticker: PlanTicker | None = None,
 ) -> tuple[str, int]:
+    """``(dtype token, bits per parameter)`` for a REMOTE weight set.
+
+    Every selected header is read, not a sample: "this tree is uniformly bf16"
+    is a claim about tensors nobody looked at unless all of them were looked
+    at, and it is the claim the cast decision turns on. One small range read
+    per shard, ticked, against a plan phase that already reports its position.
+    """
+
     api = hf().HfApi(token=(hf_token or None))
-    bytes_by_dtype: dict[str, int] = {}
+    float_bits_by_dtype: dict[str, int] = {}
+    total_bits = 0
     total_params = 0
-    read = 0
     for name in filenames:
-        if read >= _MAX_DTYPE_HEADER_READS:
-            break
         try:
             meta = api.parse_safetensors_file_metadata(
                 repo_id, name, revision=revision)
@@ -120,27 +153,34 @@ def _remote_safetensors_width(
             if ticker is not None:
                 ticker.tick()
             continue
-        read += 1
         if ticker is not None:
             ticker.tick()
         for raw_dtype, params in (getattr(meta, "parameter_count", None) or {}).items():
-            bits = _SAFETENSORS_DTYPE_BITS.get(str(raw_dtype).upper())
+            key = str(raw_dtype).upper()
+            bits = _SAFETENSORS_DTYPE_BITS.get(key)
             if not bits:
                 continue
-            key = str(raw_dtype).upper()
-            bytes_by_dtype[key] = bytes_by_dtype.get(key, 0) + bits * int(params)
+            total_bits += bits * int(params)
             total_params += int(params)
-    if not bytes_by_dtype or total_params <= 0:
+            if key in FLOAT_DTYPES:
+                token = _SAFETENSORS_DTYPE_NAMES.get(key, key.lower())
+                float_bits_by_dtype[token] = (
+                    float_bits_by_dtype.get(token, 0) + bits * int(params))
+    if total_params <= 0:
         return "", 0
-    top = max(bytes_by_dtype, key=lambda k: bytes_by_dtype[k])
-    bits_per_param = max(1, sum(bytes_by_dtype.values()) // total_params)
-    return _SAFETENSORS_DTYPE_NAMES.get(top, ""), bits_per_param
+    bits_per_param = max(1, total_bits // total_params)
+    return rollup_dtype(float_bits_by_dtype), bits_per_param
 
 
-def detect_snapshot_dtype(root: Path) -> str:
-    """Majority weight dtype across a snapshot's safetensors headers ('bf16' / 'fp16' / 'fp32' / 'fp8', '' when undetectable)."""
+def snapshot_float_dtype_bytes(root: Path) -> dict[str, int]:
+    """``{dtype token: tensor-data bytes}`` over every FLOAT tensor in a tree.
 
-    counts: dict[str, int] = {}
+    Bytes, from each tensor's own ``data_offsets`` — the same thing the disk
+    preflight and the hub's header audit weigh. Non-float tensors are excluded
+    because a cast copies them through untouched (see ``FLOAT_DTYPES``).
+    """
+
+    by_dtype: dict[str, int] = {}
     try:
         for p in sorted(Path(root).rglob("*.safetensors")):
             with open(p, "rb") as f:
@@ -151,15 +191,31 @@ def detect_snapshot_dtype(root: Path) -> str:
                 if not header_len_ok(n):
                     continue
                 header = json.loads(f.read(n))
+            if not isinstance(header, dict):
+                continue
             for value in header.values():
-                if isinstance(value, dict) and "dtype" in value:
-                    counts[str(value["dtype"])] = counts.get(str(value["dtype"]), 0) + 1
-    except (OSError, ValueError):
-        return ""
-    if not counts:
-        return ""
-    top = max(counts, key=lambda k: counts[k])
-    return _SAFETENSORS_DTYPE_NAMES.get(top, "")
+                if not isinstance(value, dict) or "dtype" not in value:
+                    continue
+                key = str(value["dtype"]).upper()
+                if key not in FLOAT_DTYPES:
+                    continue
+                offsets = list(value.get("data_offsets") or ())
+                if len(offsets) != 2:
+                    continue
+                span = int(offsets[1]) - int(offsets[0])
+                if span <= 0:
+                    continue
+                token = _SAFETENSORS_DTYPE_NAMES.get(key, key.lower())
+                by_dtype[token] = by_dtype.get(token, 0) + span
+    except (OSError, TypeError, ValueError):
+        return {}
+    return by_dtype
+
+
+def detect_snapshot_dtype(root: Path) -> str:
+    """The dtype a snapshot IS — one float dtype's token, ``'mixed'``, or ``''`` when undetectable."""
+
+    return rollup_dtype(snapshot_float_dtype_bytes(root))
 
 
 @dataclass

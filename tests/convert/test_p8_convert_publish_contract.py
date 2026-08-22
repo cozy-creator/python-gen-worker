@@ -48,7 +48,7 @@ def _install_fake_ingest(monkeypatch: pytest.MonkeyPatch, source: IngestedSource
 
 def _stub_build_flavor_tree(monkeypatch: pytest.MonkeyPatch, calls: list) -> None:
     def fake_build_flavor_tree(source, spec, out_dir, *, quantize_components=None,
-                                objective="", distilled=False):
+                                objective="", distilled=False, progress=None):
         calls.append({"dtype": spec.dtype, "file_layout": spec.file_layout})
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "model.safetensors").write_bytes(b"\x01" * 32)

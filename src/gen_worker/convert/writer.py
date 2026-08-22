@@ -256,8 +256,7 @@ def iter_source_tensors(
             yield entry.name, name, tensor
 
 
-_ST_FLOAT_DTYPES: frozenset[str] = frozenset(
-    {"F64", "F32", "F16", "BF16", "F8_E4M3", "F8_E5M2"})
+from gen_worker.models.safetensors_header import FLOAT_DTYPES as _ST_FLOAT_DTYPES
 
 
 def stream_reencode(
@@ -267,8 +266,17 @@ def stream_reencode(
     out_st_dtype_for: Any,
     transform: Any,
     output_stem: str,
+    progress: Any = None,
 ) -> dict[str, Any]:
-    """Two-pass streaming re-encode over safetensors input(s)."""
+    """Two-pass streaming re-encode over safetensors input(s).
+
+    ``progress`` is called with the OUTPUT bytes of each tensor as it lands —
+    the clone's declared position for the convert phase. A cast of a real
+    checkpoint runs for tens of minutes and this loop is the whole of it, so
+    without it the phase reports one entry tick and then nothing (pgw#1667's
+    shape, in the one phase that only does real work once a cast is actually
+    chosen — which is what pgw#1668 made happen).
+    """
     from safetensors import safe_open
 
     shards_in = _resolve_input_shards(Path(input_path))
@@ -319,6 +327,8 @@ def stream_reencode(
                         f"planned {out_dtype}")
                 w.write_tensor(name, _tensor_to_bytes(result))
                 del t, result
+                if progress is not None:
+                    progress(size_map.get(name, 0))
     finally:
         for f in handles.values():
             try:
@@ -341,6 +351,7 @@ def streaming_dtype_cast(
     *,
     target_dtype: "torch.dtype",
     output_stem: str = "model",
+    progress: Any = None,
 ) -> dict[str, Any]:
     """Cast float tensors to ``target_dtype``, streaming directly into N shards."""
     target_st = torch_dtype_to_st(target_dtype)
@@ -356,7 +367,7 @@ def streaming_dtype_cast(
     return stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
-        output_stem=output_stem,
+        output_stem=output_stem, progress=progress,
     )
 
 
@@ -404,6 +415,7 @@ def streaming_fp8_storage_cast(
     output_stem: str = "model",
     skip_patterns: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS,
     block_scope: bool = False,
+    progress: Any = None,
 ) -> dict[str, Any]:
     """Produce the fp8-E4M3 storage flavor of one weight set, streaming."""
     import torch
@@ -423,7 +435,7 @@ def streaming_fp8_storage_cast(
     return stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
-        output_stem=output_stem,
+        output_stem=output_stem, progress=progress,
     )
 
 
@@ -799,6 +811,7 @@ def streaming_fp8_te_cast(
     *,
     castable_keys: frozenset[str],
     output_stem: str = "model",
+    progress: Any = None,
 ) -> dict[str, Any]:
     """fp8-E4M3 storage cast of one transformers weight set: exactly the ``castable_keys`` (the loader's block-window weight set) become F8_E4M3 (clamp ±448 first — torch's cast does not saturate); every ..."""
     import torch
@@ -816,7 +829,7 @@ def streaming_fp8_te_cast(
     return stream_reencode(
         Path(input_path), Path(out_dir),
         out_st_dtype_for=out_st_dtype_for, transform=transform,
-        output_stem=output_stem,
+        output_stem=output_stem, progress=progress,
     )
 
 

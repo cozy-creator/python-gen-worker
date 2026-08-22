@@ -9,6 +9,14 @@ from typing import Any, Dict
 
 MAX_HEADER_BYTES: int = 100 << 20
 
+# The safetensors storage dtypes a dtype cast REWRITES. Everything else
+# (indices, masks, ids) is copied through unchanged, so it can neither make a
+# cast necessary nor make one a no-op. Stated once because two places ask the
+# same question: the writer, deciding what to re-encode, and the header reader,
+# deciding what a tree's dtype IS.
+FLOAT_DTYPES: frozenset[str] = frozenset(
+    {"F64", "F32", "F16", "BF16", "F8_E4M3", "F8_E5M2"})
+
 
 def header_len_ok(n: int) -> bool:
     """Whether a declared safetensors header length is plausible."""
@@ -50,4 +58,5 @@ def read_metadata(path: Path | str, *, why: str) -> Dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
-__all__ = ["MAX_HEADER_BYTES", "header_len_ok", "read_header", "read_metadata"]
+__all__ = ["FLOAT_DTYPES", "MAX_HEADER_BYTES", "header_len_ok", "read_header",
+           "read_metadata"]

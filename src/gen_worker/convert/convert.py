@@ -112,8 +112,16 @@ def run_inline_conversion(
     output_stem: str = "model",
     source_repo_dir: Path | None = None,
     fp8_block_scope: bool = False,
+    progress: Any = None,
 ) -> InlineConversionResult:
-    """Run the appropriate inline conversion for the requested target_dtype."""
+    """Run the appropriate inline conversion for the requested target_dtype.
+
+    ``progress`` receives the output bytes of each tensor written. It is the
+    clone's declared position for the convert phase: this call is the whole of
+    a phase that runs for tens of minutes on a real checkpoint, and a position
+    that does not advance inside its budget is indistinguishable from a wedged
+    job (pgw#1667's rule, pgw#1668's newly reachable phase).
+    """
     dtype = _normalize(target_dtype)
     ftype = _normalize(target_file_type) or "safetensors"
     if dtype == "":
@@ -146,6 +154,7 @@ def run_inline_conversion(
             out_dir=out_dir,
             target_dtype=dtype,
             output_stem=output_stem,
+            progress=progress,
         )
 
     if dtype in _INLINE_FP8_STORAGE_DTYPES:
@@ -154,6 +163,7 @@ def run_inline_conversion(
             out_dir=out_dir,
             output_stem=output_stem,
             block_scope=fp8_block_scope,
+            progress=progress,
         )
 
     raise InlineConversionNotPossible(
@@ -168,6 +178,7 @@ def _run_cast_inline(
     out_dir: Path,
     target_dtype: str,
     output_stem: str,
+    progress: Any = None,
 ) -> InlineConversionResult:
     import torch
 
@@ -189,6 +200,7 @@ def _run_cast_inline(
         Path(out_dir),
         target_dtype=torch_dtype,
         output_stem=output_stem,
+        progress=progress,
     )
 
     output_paths = [Path(p) for p in result.get("output_paths") or []]
@@ -215,11 +227,12 @@ def _run_fp8_storage_inline(
     out_dir: Path,
     output_stem: str,
     block_scope: bool = False,
+    progress: Any = None,
 ) -> InlineConversionResult:
 
     result = streaming_fp8_storage_cast(
         Path(source_path), Path(out_dir), output_stem=output_stem,
-        block_scope=block_scope,
+        block_scope=block_scope, progress=progress,
     )
     attrs = {
         "dtype": "fp8",

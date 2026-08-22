@@ -35,7 +35,9 @@ from .dtype_pins import (
     verify_produced_tree,
 )
 from .ingest import (
+    MIXED_DTYPE,
     IngestedSource,
+    detect_snapshot_dtype,
     ingest_civitai,
     ingest_huggingface,
     plan_civitai,
@@ -193,8 +195,13 @@ def build_flavor_tree(
     quantize_components: list[str] | None = None,
     objective: str = "",
     distilled: bool = False,
+    progress: Any = None,
 ) -> tuple[Path, dict[str, str]]:
-    """Materialize one output flavor as a local file tree."""
+    """Materialize one output flavor as a local file tree.
+
+    ``progress`` receives the output bytes of each tensor written, cumulative
+    across components — the convert phase's declared position.
+    """
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -231,6 +238,7 @@ def build_flavor_tree(
             source_path=groups[0][1], out_dir=out_dir, target_dtype=spec.dtype,
             target_file_type="gguf",
             source_repo_dir=(source_dir / groups[0][0]) if groups[0][0] else source_dir,
+            progress=progress,
         )
         attrs.update(result.attributes)
         return out_dir, attrs
@@ -318,6 +326,7 @@ def build_flavor_tree(
             source_path=entry, out_dir=dest, target_dtype=spec.dtype,
             target_file_type="safetensors", output_stem=stem or "model",
             source_repo_dir=comp_dir, fp8_block_scope=fp8_block_scope,
+            progress=progress,
         )
         attrs.update({k: v for k, v in result.attributes.items() if k not in attrs})
         converted.add(comp)
@@ -448,6 +457,16 @@ def spec_actions(
     "publishes the source tree directly" and stopped — while the run went on
     to CAST a whole second tree, which the budget then had no term for. The
     two must never again be able to disagree about what happens.
+
+    The question this asks is *"would casting to `spec.dtype` change any
+    bytes?"* — not *"what is this tree mostly?"*. `source_dtype` answers the
+    first because it is strict (``ingest.rollup_dtype``): a tree is a dtype
+    only when every float tensor in it is that dtype, and anything else is
+    ``mixed``. ``mixed`` is not a dtype a caller can request, so it matches
+    nothing and the cast runs — which is right, because a mixed tree WOULD
+    change under any target. Pre-pgw#1668 this line read a majority by tensor
+    COUNT and SenseNova-U1.5's 601 small BF16 islands out-voted its 30 GB F32
+    bulk, so a bf16 request "already matched" a tree that was not bf16.
     """
 
     actions: list[str] = []
@@ -582,8 +601,9 @@ def plan_disk_demand(
         notes.append("hardlink passthrough")
     if (output_sizes and not measured_bits
             and source_dtype not in _DTYPE_STORAGE_BITS):
+        why = "mixed" if source_dtype == MIXED_DTYPE else "unreadable"
         notes.append(
-            f"source dtype unreadable, assumed {_UNRESOLVED_SOURCE_BITS}-bit")
+            f"source dtype {why}, assumed {_UNRESOLVED_SOURCE_BITS}-bit")
 
     # The LAST stage of every clone is a publish, and it is the one the old
     # budget forgot. Its cost is not guessed here: `publish_v2` states it.
@@ -837,6 +857,18 @@ def run_clone(
             )
 
         _progress(0.5, "clone.convert")
+
+        # THE CAST IS THE LONGEST PHASE OF A REAL CLONE and until pgw#1668 it
+        # was almost never chosen, so it never had to say so. Now a 50 GB
+        # F32-dominant source really is re-encoded here, for tens of minutes,
+        # and a phase whose position does not advance inside the hub's budget
+        # is killed as wedged (pgw#1667). One unit per MiB written.
+        cast_bytes = {"done": 0}
+
+        def _cast_progress(n: int) -> None:
+            cast_bytes["done"] += max(0, int(n or 0))
+            position.bytes_moved(0.5, "clone.convert", cast_bytes["done"], None)
+
         from .convert import InlineConversionNotPossible
 
         result = CloneResult(destination_repo=destination, metadata=dict(source.metadata))
@@ -891,6 +923,7 @@ def run_clone(
                             quantize_components=quantize_components,
                             objective=objective_fact,
                             distilled=distilled_fact,
+                            progress=_cast_progress,
                         )
                         dtype_label = str(attrs.get("dtype") or spec.dtype)
                     else:
@@ -913,6 +946,7 @@ def run_clone(
                             quantize_components=quantize_components,
                             objective=objective_fact,
                             distilled=distilled_fact,
+                            progress=_cast_progress,
                         )
                     dtype_label = str(attrs.get("dtype") or spec.dtype)
                 dtype_label = _dtype_token(dtype_label)
@@ -956,6 +990,17 @@ def run_clone(
                 })
                 continue
 
+            # THE DECLARED DTYPE IS READ OFF THE PRODUCED TREE (pgw#1668).
+            # `spec.dtype` is what was ASKED for and `attrs["dtype"]` is what
+            # the flavor builder INTENDED; neither is evidence. A publish-as-is
+            # of a mixed tree, a cast that skipped a pinned component, a
+            # `dtype="source"` passthrough — each lands bytes that no request
+            # describes, and the old label was the request. The tree's own
+            # headers are the only thing that cannot be wrong about it.
+            observed = detect_snapshot_dtype(Path(tree))
+            dtype_label = _dtype_token(
+                observed or str(attrs.get("dtype") or spec.dtype))
+
             metadata: dict[str, Any] = {k: v for k, v in source.metadata.items()}
             try:
                 from .size_walk import compute_size_facts
@@ -988,7 +1033,7 @@ def run_clone(
                 files=files,
                 release=release,
                 mode=mode if i == 0 else "merge",
-                dtype=str(attrs.get("dtype") or spec.dtype),
+                dtype=dtype_label,
                 file_layout=str(attrs.get("file_layout") or spec.file_layout),
                 file_type=str(attrs.get("file_type") or spec.file_type),
                 objective=objective_fact,
