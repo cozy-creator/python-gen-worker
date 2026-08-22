@@ -413,3 +413,92 @@ def test_a_cast_that_a_PIN_made_mixed_declares_mixed_not_the_request(
     assert _wire_dtype() == MIXED_DTYPE, (
         "a tree with an fp32 component was published as bf16")
     assert result.published[0]["dtype"] == MIXED_DTYPE
+
+
+# ------------------------------------------------ the phase the fix reaches
+
+
+class _RecordingCtx(_Ctx):
+    """A ctx that keeps what reached `ctx.progress`, the way the hub sees it."""
+
+    def __init__(self, server: Any) -> None:
+        super().__init__(server)
+        self.ticks: list[tuple[str, int]] = []
+
+    def progress(self, progress: Any = None, stage: Any = None, *,
+                 step: Any = None, total: Any = None, position: Any = None,
+                 phase: Any = None) -> None:
+        self.ticks.append((str(stage or phase), int(position or 0)))
+
+
+def _accepted(ticks: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """`AdvanceJobProgress` updates the row — and with it the stall clock —
+    only on a STRICT increase. Every other tick is dropped."""
+
+    out: list[tuple[str, int]] = []
+    last = -1
+    for stage, position in ticks:
+        if position > last:
+            last = position
+            out.append((stage, position))
+    return out
+
+
+def test_the_CAST_declares_a_position_because_it_is_now_the_longest_phase(
+    fake_hub: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pgw#1667's rule, in the phase this fix made reachable.
+
+    `clone.convert` used to be instantaneous on a publish-as-is source, because
+    the cast was almost never chosen — a majority vote said the tree already
+    matched. Now a 50 GB F32-dominant source really is re-encoded there, for
+    tens of minutes, against a hub that kills a job whose declared position
+    stops advancing inside its budget. Entering the phase is one tick; the
+    re-encode has to be the rest.
+
+    The fixture is sized past the position's MiB unit on purpose: a cast that
+    writes less than 1 MiB advances nothing and would pass a weaker assertion
+    while proving nothing about a real one.
+    """
+
+    mib = 1024 * 1024
+    source_dir = _tree(tmp_path / "source", {
+        # 4 x 1 MiB of BF16 output from 2 MiB of F32 input, plus the islands
+        # that make the tree mixed in the first place.
+        **{f"blocks.{i}.mlp.weight": ("F32", mib // 2) for i in range(4)},
+        **{f"blocks.{i}.norm.weight": ("BF16", 8) for i in range(601)},
+    })
+    ctx = _RecordingCtx(fake_hub)
+
+    plan = _fake_plan(source_dir, "transformers", "single-file")
+    attrs = dict(plan.classification.attrs)
+    attrs["dtype"] = detect_snapshot_dtype(source_dir)
+    plan.classification.attrs.update(attrs)
+    monkeypatch.setenv("COZY_CONVERT_WORKDIR", str(tmp_path / "work"))
+    monkeypatch.setattr("gen_worker.convert.clone.plan_huggingface",
+                        lambda *a, **k: plan)
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.ingest_huggingface",
+        lambda source_ref, dest_dir, **kw: IngestedSource(
+            provider="huggingface", source_ref=source_ref,
+            source_revision="13a8d0f3", dir=source_dir, layout="single-file",
+            model_family="fake", model_family_variant="fake1",
+            classification=plan.classification, attrs=attrs,
+            metadata={"source_provider": "huggingface"},
+            repo_spec={"kind": "model", "library_name": "transformers"},
+        ))
+
+    result = run_clone(
+        ctx, provider="huggingface", source_ref="sensenova/fake",
+        destination_repo="sensenova/fake-tree", destination_release="r1",
+        outputs=[{"dtype": "bf16", "file_layout": "multi-file",
+                  "file_type": "safetensors"}],
+    )
+    assert not result.failed_flavors, result.failed_flavors
+
+    convert = [p for stage, p in _accepted(ctx.ticks) if stage == "clone.convert"]
+    assert len(convert) >= 4, (
+        f"the cast declared {len(convert)} accepted position(s) while writing "
+        f"4 MiB — a frozen position is a job the hub kills as wedged: "
+        f"{_accepted(ctx.ticks)}")
+    assert convert == sorted(set(convert)), "positions must strictly increase"

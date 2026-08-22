@@ -195,8 +195,13 @@ def build_flavor_tree(
     quantize_components: list[str] | None = None,
     objective: str = "",
     distilled: bool = False,
+    progress: Any = None,
 ) -> tuple[Path, dict[str, str]]:
-    """Materialize one output flavor as a local file tree."""
+    """Materialize one output flavor as a local file tree.
+
+    ``progress`` receives the output bytes of each tensor written, cumulative
+    across components — the convert phase's declared position.
+    """
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -233,6 +238,7 @@ def build_flavor_tree(
             source_path=groups[0][1], out_dir=out_dir, target_dtype=spec.dtype,
             target_file_type="gguf",
             source_repo_dir=(source_dir / groups[0][0]) if groups[0][0] else source_dir,
+            progress=progress,
         )
         attrs.update(result.attributes)
         return out_dir, attrs
@@ -320,6 +326,7 @@ def build_flavor_tree(
             source_path=entry, out_dir=dest, target_dtype=spec.dtype,
             target_file_type="safetensors", output_stem=stem or "model",
             source_repo_dir=comp_dir, fp8_block_scope=fp8_block_scope,
+            progress=progress,
         )
         attrs.update({k: v for k, v in result.attributes.items() if k not in attrs})
         converted.add(comp)
@@ -850,6 +857,18 @@ def run_clone(
             )
 
         _progress(0.5, "clone.convert")
+
+        # THE CAST IS THE LONGEST PHASE OF A REAL CLONE and until pgw#1668 it
+        # was almost never chosen, so it never had to say so. Now a 50 GB
+        # F32-dominant source really is re-encoded here, for tens of minutes,
+        # and a phase whose position does not advance inside the hub's budget
+        # is killed as wedged (pgw#1667). One unit per MiB written.
+        cast_bytes = {"done": 0}
+
+        def _cast_progress(n: int) -> None:
+            cast_bytes["done"] += max(0, int(n or 0))
+            position.bytes_moved(0.5, "clone.convert", cast_bytes["done"], None)
+
         from .convert import InlineConversionNotPossible
 
         result = CloneResult(destination_repo=destination, metadata=dict(source.metadata))
@@ -904,6 +923,7 @@ def run_clone(
                             quantize_components=quantize_components,
                             objective=objective_fact,
                             distilled=distilled_fact,
+                            progress=_cast_progress,
                         )
                         dtype_label = str(attrs.get("dtype") or spec.dtype)
                     else:
@@ -926,6 +946,7 @@ def run_clone(
                             quantize_components=quantize_components,
                             objective=objective_fact,
                             distilled=distilled_fact,
+                            progress=_cast_progress,
                         )
                     dtype_label = str(attrs.get("dtype") or spec.dtype)
                 dtype_label = _dtype_token(dtype_label)
