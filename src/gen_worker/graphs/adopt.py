@@ -484,12 +484,20 @@ class AdoptSession:
     def _arm(self, dispatcher: _ForwardDispatcher, record: GraphRecord, artifact: Path) -> None:
         try:
             compiled = self._load(dispatcher, Path(artifact), record)
-        except (ArtifactError, ConstantBindingError) as exc:
-            # Bytes that will not verify, or a constant table that will not
-            # bind to THIS module, is a hole with a stated reason -- never a
-            # dead boot and never a silent arm. Both refusals are typed at
-            # their source precisely so this arm can be narrow: anything else
-            # escaping the loader is a bug and keeps escaping.
+        except (ArtifactError, ConstantBindingError, StoreError) as exc:
+            # Bytes that will not verify, a constant table that will not bind to
+            # THIS module, or bytes the store cannot even OPEN, is a hole with a
+            # stated reason -- never a dead boot and never a silent arm. All
+            # three refusals are typed at their source precisely so this arm can
+            # be narrow: anything else escaping the loader is a bug and keeps
+            # escaping.
+            #
+            # tcg#90 added the third. The loader now goes through
+            # `torchcg.store.open_artifact`, which raises `StoreError` for a
+            # malformed envelope -- and that is exactly the class this arm
+            # exists for. Without it a skewed artifact stopped being a hole and
+            # started taking the whole boot down, which is the failure tcg#69's
+            # doctrine forbids.
             self._holes[record.graph] = Hole(record, f"{type(exc).__name__}: {exc}")
             return
         try:

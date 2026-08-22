@@ -219,6 +219,21 @@ def unpack(artifact: Path, destination: Path) -> Path:
     """
 
     destination.mkdir(parents=True, exist_ok=True)
+    # NAME THE SKEW. A bare AOTI `.pt2` is a ZIP, and it is the one wrong input
+    # a caller actually produces -- it is what a mint hands over before
+    # `pack` wraps it. Left to `tarfile`, it comes back as "not a gzip file",
+    # which reads as CORRUPTION and sends the reader to scrub the disk. The
+    # remedy is to re-publish, so the refusal has to say which mistake it is.
+    with Path(artifact).open("rb") as probe:
+        magic = probe.read(4)
+    if magic[:2] == b"PK":
+        raise StoreError(
+            f"{artifact} is a bare AOTI .pt2 package, not a compiled-graph "
+            f"envelope. A package carries no metadata, so nothing can be built "
+            f"from it at load time -- the producer must PUBLISH an envelope "
+            f"(metadata.json + model.pt2). Re-publish it; the bytes on disk are "
+            f"not corrupt."
+        )
     try:
         with tarfile.open(artifact, "r:gz") as tar:
             for member in tar.getmembers():

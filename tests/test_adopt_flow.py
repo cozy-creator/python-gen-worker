@@ -349,6 +349,7 @@ def test_a_SKEWED_remote_artifact_refuses_BY_TYPE_and_never_arms(
 ) -> None:
     artifacts = []
     for index, record in enumerate(document.lanes[0].graphs):
+        # A BARE PACKAGE on purpose — the skew IS this test's subject.
         artifacts.append(tcg_artifacts.aoti_package(
             tmp_path / "fleet" / f"{index}.pt2",
             graph_specialization=record.graph))
@@ -368,10 +369,17 @@ def test_a_SKEWED_remote_artifact_refuses_BY_TYPE_and_never_arms(
         "a bare .pt2 package armed — the loader is not opening its bytes")
     assert len(host.holes) == 2
     for hole in host.holes:
-        assert hole.reason.startswith("ArtifactFormatSkew:"), (
-            f"the refusal must NAME the skew, so the remedy is 're-publish' "
-            f"and not 'scrub the disk': {hole.reason}")
+        # tcg#90: the CLASS moved (`ArtifactFormatSkew` died with torchcg's
+        # `artifact.py`; the store refuses the envelope now). What this fence
+        # protects is unchanged and is asserted below — the refusal must NAME
+        # the skew, so the remedy reads as 're-publish' and not 'scrub the
+        # disk'. torchcg#86 made the message meet that bar rather than this
+        # fence being weakened to accept "not a gzip file".
+        assert hole.reason.startswith("StoreError:"), (
+            f"the refusal must be TYPED, not a bare string: {hole.reason}")
         assert "bare AOTI .pt2 package" in hole.reason
+        assert "Re-publish" in hole.reason
+        assert "not corrupt" in hole.reason
 
     first, _second = ratios(document)
     host.dispatch("generate", {"prompt": "x", "aspect_ratio": first},
