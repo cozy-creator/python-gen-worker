@@ -87,7 +87,7 @@ import json
 import types
 import traceback
 import typing
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType, ModuleType
@@ -939,6 +939,51 @@ def _is_wrapper(value: Any) -> bool:
     return hasattr(value, "__dict__") and isinstance(getattr(value, "__dict__"), dict)
 
 
+def _round_guard(
+    said: str, request_ctx: Any, notes: list[str]
+) -> Callable[[str, int], None]:
+    """Stop a drive whose author loop does not honour the step budget (pgw#1671).
+
+    `ctx.step_callback()` hands the author a callable that raises
+    `StepBudgetReached` on the budget-th call. That is the whole enforcement,
+    and it is CONSENSUAL: an author who accepts the callback and never invokes
+    it -- or never asks for one -- drives the entire sampling schedule against
+    FAKE weights, with no error, no warning and no output, and the derive is
+    read as a hung `torch.export` it never reached (se#840: 139 s per payload,
+    x 24 auto-enumerated payloads).
+
+    Discovery counts ROUNDS at the marked module itself, which is the platform's
+    own seam. Stopping on a round boundary loses nothing that has been seen: by
+    definition of "round" every signature of the completed rounds is banked. It
+    can only lose a signature a LATER step would have introduced -- so it says
+    so, in the lock, by name.
+    """
+
+    told: set[str] = set()
+
+    def guard(target: str, rounds: int) -> None:
+        budget = request_ctx.step_budget
+        if budget is None or rounds <= budget:
+            return
+        sentence = (
+            f"{said}: the drive was STOPPED at step {budget} of target "
+            f"{target!r} by the platform, not by the endpoint. This "
+            f"endpoint's sampling loop does not call the callback "
+            f"`ctx.step_callback()` returns, so the trace step budget is "
+            f"unenforceable from the entrypoint and the drive would run the "
+            f"whole schedule against fake weights. Every graph the completed "
+            f"step produced is banked; a shape only a LATER step introduces "
+            f"is NOT, and will mint on first live encounter. Call the "
+            f"callback once per step."
+        )
+        if sentence not in told:
+            told.add(sentence)
+            notes.append(sentence)
+        raise StepBudgetReached
+
+    return guard
+
+
 def _named_marked_modules(instance: Any, marked: list[Any]) -> dict[str, Any]:
 
     candidates: dict[int, str] = {}
@@ -1486,11 +1531,12 @@ def _derive_lane_item(
                                     unservable.append(row)
 
             notes: list[str] = []
+            on_round = _round_guard(said, request_ctx, notes)
             try:
                 lane_graphs = torchcg.discover_modules(
                     handle, modules, drive, program_sink=program_sink,
                     session=session, dynamic_dims=dynamic_dims,
-                    static_bind=static_bind, notes=notes,
+                    static_bind=static_bind, notes=notes, on_round=on_round,
                 )
                 if set(lane_graphs.targets) - {
                     record.target for record in lane_graphs.graphs
@@ -1500,6 +1546,7 @@ def _derive_lane_item(
                         handle, modules, drive, program_sink=program_sink,
                         session=session, dynamic_dims=dynamic_dims,
                         static_bind=static_bind, notes=notes,
+                        on_round=on_round,
                     )
                 _refuse_a_dead_accelerator(said, session)
             except DeriveError:

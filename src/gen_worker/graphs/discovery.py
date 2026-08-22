@@ -198,6 +198,7 @@ def discover_lane(
     dynamic_dims: DimPolicy | bool | None = None,
     static_bind: bool = False,
     notes: list[str] | None = None,
+    on_round: Callable[[str, int], None] | None = None,
 ) -> LaneGraphs:
     """Run the author's code once, derive every observed graph, state the rest.
 
@@ -235,6 +236,7 @@ def discover_lane(
         dynamic_dims=dynamic_dims,
         static_bind=static_bind,
         notes=notes,
+        on_round=on_round,
     )
 
 
@@ -300,6 +302,7 @@ def discover_modules(
     dynamic_dims: DimPolicy | bool | None = None,
     static_bind: bool = False,
     notes: list[str] | None = None,
+    on_round: Callable[[str, int], None] | None = None,
 ) -> LaneGraphs:
     """Discovery over MARKED modules (the imperative ``ctx.compile`` surface).
 
@@ -348,6 +351,16 @@ def discover_modules(
     the trace pays structural-variant count, never bucket count. A cover
     whose bind is refused falls back to its own direct static export, loudly.
 
+    ``on_round`` (pgw#1671) is called ``(target, round)`` each time a marked
+    module's FIRST-seen call signature comes round again — i.e. each time the
+    author's loop starts another step, whatever its arm count and whether or
+    not it calls the callback ``ctx.step_callback()`` handed it. It may RAISE,
+    and raising is the point: the drive's step budget is otherwise enforceable
+    only by author cooperation, and an author who never calls the callback
+    drives the whole schedule under a hollow session with no error and no
+    output. se#840 measured that shape at 139 s per payload x 24 payloads,
+    which reads as a hung ``torch.export`` and is not one.
+
     ``notes``, when a caller passes a list, receives every demotion sentence
     that is otherwise only a ``logger.warning`` — a refused symbolic export,
     a guard-contradicted range, a refused bind. The derive puts them in the
@@ -381,6 +394,8 @@ def discover_modules(
 
     observed: dict[str, dict[str, _ObservedCall]] = {path: {} for path in targets}
     handles = []
+    first_key: dict[str, str] = {}
+    rounds: dict[str, int] = {}
 
     def _recorder(path: str) -> Callable[..., None]:
         def record(
@@ -388,6 +403,21 @@ def discover_modules(
         ) -> None:
             call = _ObservedCall(args=tuple(args), kwargs=tuple(kwargs.items()))
             key = _signature_of(args) + "|" + _signature_of(dict(kwargs))
+            # pgw#1671: a ROUND is the marked module's first-seen call
+            # signature coming round again. A denoise loop repeats its
+            # signatures once per timestep whatever its arm count, so this
+            # counts the author's STEPS at the seam the platform owns rather
+            # than at a callback the author may never invoke. `on_round` may
+            # raise; it is called BEFORE the call is recorded, so a stop lands
+            # on a round boundary and every signature of the completed rounds
+            # is already banked.
+            if path not in first_key:
+                first_key[path] = key
+                rounds[path] = 1
+            elif key == first_key[path]:
+                rounds[path] += 1
+                if on_round is not None:
+                    on_round(path, rounds[path])
             observed[path].setdefault(key, call)
 
         return record
