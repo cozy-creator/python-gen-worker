@@ -42,6 +42,22 @@ from .registry import (
     registered_repackage_families,
     require_repackage_family,
 )
+from .tree_repack import (
+    RepackReport,
+    apply_tree_repack,
+    register_tree_repack,
+    registered_tree_repacks,
+    require_tree_repack,
+    tree_repack,
+)
+from .tree_repack_spec import (
+    ComponentConfig,
+    ConfigField,
+    FileRoute,
+    RepackComponent,
+    TreeRepack,
+    TreeRepackError,
+)
 from .repack_spec import (
     ComponentRepack,
     LayoutSignature,
@@ -102,6 +118,18 @@ __all__ = [
     "registered_layouts",
     "registered_repackage_families",
     "require_repackage_family",
+    "ComponentConfig",
+    "ConfigField",
+    "FileRoute",
+    "RepackComponent",
+    "RepackReport",
+    "TreeRepack",
+    "TreeRepackError",
+    "apply_tree_repack",
+    "register_tree_repack",
+    "registered_tree_repacks",
+    "require_tree_repack",
+    "tree_repack",
     "ConversionCase",
     "ConversionHop",
     "ConversionIO",
