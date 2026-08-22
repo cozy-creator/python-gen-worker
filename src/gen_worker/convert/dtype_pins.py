@@ -110,10 +110,30 @@ def check_explicit_pin_conflict(
 
 
 def component_dtype(component_dir: Path | str) -> str:
-    """Majority on-disk dtype of one component's safetensors, '' if unreadable."""
+    """The dtype a component IS: one float dtype's token, ``'mixed'``, or ``''``."""
     from .ingest import detect_snapshot_dtype
 
     return detect_snapshot_dtype(Path(component_dir))
+
+
+def component_narrowest_dtype(component_dir: Path | str) -> str:
+    """The NARROWEST float dtype a component actually carries, ``''`` if unreadable.
+
+    A PIN is violated by any tensor below it, not by what the component is
+    mostly — so the pin fence reads this and never the rollup. pgw#1668 made
+    that distinction load-bearing: the rollup answers ``mixed`` for a component
+    that is half cast and half not, ``dtype_bits("mixed")`` is 0, and
+    ``is_narrowing`` is False for everything — so a HALF-violated pin published
+    silently while a fully-violated one was refused. The fence was strictly
+    less able to fire the more of the component survived.
+    """
+
+    from .ingest import snapshot_float_dtype_bytes
+
+    present = [d for d, b in snapshot_float_dtype_bytes(Path(component_dir)).items() if b > 0]
+    if not present:
+        return ""
+    return min(present, key=lambda d: dtype_bits(d) or (1 << 30))
 
 
 def component_dtypes_on_disk(tree: Path | str) -> Dict[str, str]:
@@ -156,18 +176,30 @@ def verify_produced_tree(
     tree: Path | str, *, source_dir: Optional[Path | str] = None,
     source_dtypes: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, str]:
-    """Publish gate."""
+    """Publish gate.
+
+    Returns the per-component dtype REPORT (the rollup, which is what a reader
+    of the checkpoint wants) and refuses on the per-component NARROWEST dtype,
+    which is the only thing a pin can be violated by. The two are deliberately
+    different reads of the same headers: ``mixed`` is an honest label and a
+    useless comparand.
+    """
+
     produced = component_dtypes_on_disk(tree)
     pins = component_pins(tree)
-    if source_dtypes is None:
-        source_dtypes = (component_dtypes_on_disk(source_dir)
-                         if source_dir is not None else {})
     classes = model_index_classes(tree)
+    explicit = source_dtypes is not None
     for comp, fact in pins.items():
-        got = produced.get(comp, "")
+        got = component_narrowest_dtype(Path(tree) / comp)
         if not got or not is_narrowing(got, fact.dtype):
             continue
-        src = str(source_dtypes.get(comp, "") or "")
+        # The source is allowed to have been below the pin already — a mirror
+        # of a tree that ships narrow is not this job narrowing it.
+        if explicit:
+            src = str((source_dtypes or {}).get(comp, "") or "")
+        else:
+            src = (component_narrowest_dtype(Path(source_dir) / comp)
+                   if source_dir is not None else "")
         if src and is_narrowing(src, fact.dtype):
             continue
         raise ComponentDtypePinViolation(
@@ -183,6 +215,7 @@ __all__ = [
     "check_explicit_pin_conflict",
     "component_dtype",
     "component_dtypes_on_disk",
+    "component_narrowest_dtype",
     "component_pins",
     "dtype_bits",
     "is_narrowing",
