@@ -64,6 +64,12 @@ supplies the session that makes that code run hollow:
   ids) are untouched -- the whole-pipeline ambient-fake drive was measured
   non-viable precisely because scheduler ``.item()`` needs real values.
 
+* **Eager-only compile** (pgw#1659) -- ``torch.compile`` is IDENTITY inside a
+  session. An author who arms a compiled module in ``load()`` would otherwise
+  have inductor generate a real kernel and launch it on a FAKE data pointer,
+  which kills the process's accelerator context for everything after it. What
+  author code compiles at load reaches neither the exported graph nor its key.
+
 The session deliberately does NOT wrap the run in an ambient
 ``FakeTensorMode``: only tensors DERIVED from hollow parameters are fake, so
 the author's control flow keeps its real values.
@@ -868,6 +874,78 @@ def _hollow_module_moves(device: str) -> Iterator[None]:
         torch.nn.Module.cuda = original_cuda  # type: ignore[method-assign]
 
 
+@contextlib.contextmanager
+def _eager_only_compile() -> Iterator[None]:
+    """``torch.compile`` is IDENTITY for the life of a hollow session.
+
+    Authors arm compiled modules in ``load()`` -- minimax-h3 does, on its VAE
+    decoder -- and a hollow drive then hands that compiled callable FAKE
+    tensors. dynamo/inductor compile against them and the generated wrapper
+    reads a FAKE data pointer, so a real kernel launches on a pointer that
+    addresses nothing:
+
+        Warning: Accessing the data pointer of FakeTensor ...
+        AcceleratorError: CUDA error: an illegal memory access was encountered
+
+    A CUDA fault is STICKY and process-wide, and the author caught this one
+    broadly and carried on ("serving eager for the life of this process"), so
+    the derive kept running against a dead accelerator and died hundreds of
+    frames later in the literal digest -- naming a constant that had nothing
+    wrong with it (pgw#1659).
+
+    Nothing is lost by making it identity. The derive's product is a
+    ``torch.export`` of the MARKED module; what author code compiles at load
+    reaches neither the graph nor its key. What it cost was minutes of
+    inductor work per session and, on a real card, the accelerator.
+    """
+
+    import torch
+
+    original_compile = torch.compile
+    original_module_compile = torch.nn.Module.compile
+
+    def eager_compile(model: Any = None, *args: Any, **kwargs: Any) -> Any:
+        if model is None:
+            # `@torch.compile(mode=...)` -- the decorator-factory spelling.
+            return lambda inner: inner
+        return model
+
+    def eager_module_compile(module: Any, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    torch.compile = eager_compile  # type: ignore[assignment]
+    torch.nn.Module.compile = eager_module_compile  # type: ignore[method-assign, assignment]
+    try:
+        yield
+    finally:
+        torch.compile = original_compile  # type: ignore[assignment]
+        torch.nn.Module.compile = original_module_compile  # type: ignore[method-assign]
+
+
+def accelerator_is_alive(device: Any) -> bool:
+    """Can this process still round-trip ONE real byte through ``device``?
+
+    The one probe for a fault that has already happened. It is not a device
+    availability check -- ``torch.cuda.is_available()`` keeps answering True
+    on a context an illegal access killed -- it is a real allocation and a
+    real copy to host, which is exactly what every later victim does.
+    """
+
+    import torch
+
+    if str(device).split(":", 1)[0] == "cpu":
+        return True
+    try:
+        # Outside the session's own redirection: `OneTraceDevice` answers
+        # `Tensor.cpu`/a `cpu` ask with the trace device, which would make the
+        # probe a no-op that proves nothing.
+        with torch._C.DisableTorchFunction():
+            torch.empty(1, device=device).detach().to("cpu")
+    except Exception:
+        return False
+    return True
+
+
 #: Device spellings author code uses that the session redirects to its own.
 _DEVICE_TYPES = ("cuda", "cpu", "mps", "xpu")
 
@@ -1041,6 +1119,7 @@ def hollow_session(
     with (
         _loader_interception(session),
         _hollow_module_moves(session.drive_device),
+        _eager_only_compile(),
         observation_shims(session.drive_device),
     ):
         yield session
@@ -1049,6 +1128,7 @@ def hollow_session(
 __all__ = [
     "DEFAULT_TRACE_DEVICE",
     "HollowError",
+    "accelerator_is_alive",
     "attach_lazy_components",
     "HollowSession",
     "TraceDeviceUnavailable",

@@ -280,6 +280,37 @@ def _assert_literal_values_are_real(contract: str, path: str, program: Any) -> N
     )
 
 
+def _assert_the_drive_left_the_accelerator_alive(contract: str, session: Any) -> None:
+    """A dead accelerator is the DRIVE's fault, never a later victim's.
+
+    An accelerator fault is sticky and process-wide: once it happens every
+    later touch raises the same error, wherever it happens to be. Author code
+    catches broadly -- minimax-h3's compiled-decoder fallback and diffusers'
+    modular block runner both swallow any ``Exception`` and carry on -- so a
+    fault raised mid-drive can be reported as a degrade and the drive finishes
+    green against a corpse. The next thing to touch the device then wears the
+    blame: in pgw#1659 that was the literal digest, and the derive's whole
+    refusal named a constant nothing was wrong with.
+
+    Probed HERE, once, right after the drive, so the refusal names the drive.
+    """
+
+    from .hollow import accelerator_is_alive
+
+    if session is None or accelerator_is_alive(session.drive_device):
+        return
+    raise DiscoveryError(
+        f"lane {contract!r}: the drive left this process's "
+        f"{session.drive_device_type} context DEAD — a real kernel faulted "
+        f"while the pipeline was being driven and author code swallowed it, "
+        f"so nothing after this point can touch the device. The graphs are "
+        f"NOT the cause and re-running the export will not help: find what "
+        f"launched a real kernel during a hollow drive (a `torch.compile`d "
+        f"module handed FAKE tensors is the known one, pgw#1659) or drive on "
+        f"cpu. Re-run with CUDA_LAUNCH_BLOCKING=1 to place the fault."
+    )
+
+
 def discover_modules(
     lane: LaneRef | str,
     modules: Mapping[str, Any],
@@ -413,6 +444,7 @@ def discover_modules(
     finally:
         for handle in handles:
             handle.remove()
+    _assert_the_drive_left_the_accelerator_alive(contract, session)
 
     records: list[GraphRecord] = []
     seen_graphs: set[str] = set()
