@@ -145,7 +145,8 @@ class IntentRegistry:
         self._state_seq = 1
         self._updated_at_ms = _now_ms()
         self._last_command_seq = 0
-        self._last_command_digest = b""
+        self._last_goal_id = ""
+        self._command_binding_digests: dict[str, bytes] = {}
         self._last_receipt: Optional[pb.GoalReceipt] = None
         self._command_receipts: "OrderedDict[tuple[int, bytes], pb.GoalReceipt]" = OrderedDict()
         self._target_config_generation = 0
@@ -291,9 +292,17 @@ class IntentRegistry:
             )
         elif (
             int(command.command_seq) == self._last_command_seq
-            and self._last_command_digest
-            and digest != self._last_command_digest
+            and self._last_goal_id
+            and str(command.goal_id or "").strip() != self._last_goal_id
         ):
+            # KEYED ON goal_id, NOT ON THE COMMAND DIGEST (#1660). The hub keys
+            # same-seq identity on (goal_id, release_id) itself
+            # (`applyGoalReceiptLocked`), and a digest comparison rejects a
+            # perfectly legal RE-STATEMENT of the same goal: `config_digest` is
+            # empty on the first HelloAck of a boot and filled in on the
+            # reconnect after, at the SAME command_seq. That reads as a conflict,
+            # costs the ACCEPTED receipt for the current command, and starves
+            # every dispatch on the release from the first reconnect onward.
             command_errors.append(
                 (
                     "",
@@ -365,14 +374,12 @@ class IntentRegistry:
                     )
                 )
             kind = int(intent.kind)
-            if int(intent.cause) == pb.DESIRED_INTENT_CAUSE_UNSPECIFIED:
-                command_errors.append(
-                    (
-                        intent_id,
-                        pb.LIFECYCLE_ERROR_CODE_MISSING_MANDATORY_FIELD,
-                        "intent cause is required",
-                    )
-                )
+            # NO `cause is required` RULE. `DesiredIntentCause` is provenance
+            # telemetry — nothing the worker does with an intent depends on it —
+            # and the intent carrying it is often the ONE mandatory CONFIG_APPLY,
+            # where declining latches `protocol_rejected` and bricks the process.
+            # Refusing work over a missing label is the same defect class as the
+            # `config_digest` rule this issue deleted.
             if kind not in _SUPPORTED_INTENT_KINDS:
                 command_errors.append(
                     (
@@ -527,7 +534,14 @@ class IntentRegistry:
                 self._intents[intent_id] = declined_state
         self._trim_intents()
         self._last_command_seq = int(command.command_seq)
-        self._last_command_digest = digest
+        self._last_goal_id = str(command.goal_id or "").strip()
+        self._command_binding_digests = {
+            str(intent.function_name or "").strip(): bytes(intent.binding_digest)
+            for intent in command.intents
+            if int(intent.kind) == pb.DESIRED_INTENT_KIND_FUNCTION_READY
+            and str(intent.function_name or "").strip()
+            and bytes(intent.binding_digest)
+        }
         changed_classes = (
             command.changed_config_classes if command.HasField("changed_config_classes") else None
         )
@@ -1094,16 +1108,17 @@ class IntentRegistry:
         `exact_binding_digest_mismatch` — dispatch starve, not an error). The
         derivation stays as the fallback for a function the current command
         names no ready intent for.
+
+        Read off the COMMAND, deliberately, not off this registry's intent
+        bookkeeping. "The hub says function F binds to digest X" is true whether
+        or not the intent carrying it was accepted, superseded or trimmed at the
+        128-intent bound — and a function whose binding changed would otherwise
+        fall back to the derivation permanently, which is the silent mismatch
+        this echo exists to prevent.
         """
-        for intent_id, intent in self._desired_intents.items():
-            if int(intent.kind) != pb.DESIRED_INTENT_KIND_FUNCTION_READY:
-                continue
-            if str(intent.function_name or "").strip() != function_name:
-                continue
-            state = self._intents.get(intent_id)
-            if state is not None and int(state.status) in _ACTIVE_INTENT_STATES:
-                if bytes(intent.binding_digest):
-                    return bytes(intent.binding_digest)
+        stated = self._command_binding_digests.get(function_name)
+        if stated:
+            return stated
         return _binding_digest(function_name, instance)
 
     def refresh_projection(self, facts: "CapabilityFacts") -> None:

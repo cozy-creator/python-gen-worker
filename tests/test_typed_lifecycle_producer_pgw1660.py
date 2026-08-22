@@ -382,6 +382,74 @@ def test_a_command_with_a_generation_but_no_config_digest_is_ACCEPTED() -> None:
         )
 
 
+def test_the_same_goal_restated_with_a_filled_in_digest_is_ACCEPTED() -> None:
+    """The reconnect after a cold boot, and the third starve of the same family.
+
+    Boot 1 gets `config_generation=N` with an EMPTY `config_digest` (the hub had
+    no resolution config yet). The stream drops; the reconnect gets the SAME
+    generation — so the same `command_seq`, since the hub uses the residency
+    generation for it — now WITH a digest. Keyed on the command digest that reads
+    as `COMMAND_SEQ_CONFLICT` and costs the accepted receipt forever after. The
+    hub keys same-seq identity on `goal_id`/`release_id` itself, so this worker
+    does too, and a genuine goal drift is still refused
+    (`test_intent_registry_th1283`).
+    """
+    registry = IntentRegistry(RELEASE, list(FUNCTIONS))
+    boot = pb.DesiredStateCommand(
+        worker_session_id=registry.worker_session_id,
+        command_seq=9,
+        goal_id="goal-stable",
+        release_id=RELEASE,
+        config_generation=4,
+        parameter_snapshot=b"\x80",
+    )
+    assert registry.apply_command(boot).status == pb.GOAL_RECEIPT_STATUS_ACCEPTED
+
+    reconnect = pb.DesiredStateCommand()
+    reconnect.CopyFrom(boot)
+    reconnect.config_digest = b"now-the-hub-has-one"
+    receipt = registry.apply_command(reconnect)
+    assert receipt.status == pb.GOAL_RECEIPT_STATUS_ACCEPTED, (
+        f"the same goal restated was refused: {receipt.error_code} {receipt.detail}"
+    )
+    assert not registry.protocol_rejected
+
+
+def test_a_REBOUND_function_still_echoes_the_hubs_current_digest() -> None:
+    """The echo is a fact about the COMMAND, not about intent bookkeeping.
+
+    Re-issuing the same intent id with a different binding is "intent_id reused
+    for different work" — an advisory decline that drops the intent out of the
+    accepted set. Read the digest off the registry's intents and a re-bound
+    function falls back to the derivation permanently, which is exactly the
+    silent `exact_binding_digest_mismatch` the echo exists to prevent.
+    """
+    registry = IntentRegistry(RELEASE, list(FUNCTIONS))
+
+    def _command(seq: int, goal: str, digest: bytes) -> pb.DesiredStateCommand:
+        return pb.DesiredStateCommand(
+            worker_session_id=registry.worker_session_id,
+            command_seq=seq, goal_id=goal, release_id=RELEASE,
+            intents=[pb.DesiredIntent(
+                intent_id="intent-echo",
+                kind=pb.DESIRED_INTENT_KIND_FUNCTION_READY,
+                cause=pb.DESIRED_INTENT_CAUSE_COLD_BOOT,
+                function_name="echo",
+                binding_digest=digest,
+            )],
+        )
+
+    registry.apply_command(_command(1, "goal-1", b"digest-one"))
+    registry.apply_command(_command(2, "goal-2", b"digest-two"))
+    registry.refresh_projection(CapabilityFacts(available=frozenset(FUNCTIONS)))
+    echo = next(
+        c for c in registry.snapshot().capabilities if c.function_name == "echo"
+    )
+    assert echo.binding_digest == b"digest-two", (
+        "the capability must carry the digest the hub's CURRENT command states"
+    )
+
+
 def test_the_two_digests_keep_their_OPPOSITE_encodings() -> None:
     """`DesiredIntent.snapshot_digest` is the UTF-8 bytes of the digest STRING;
     `FunctionCapability.binding_digest` is raw sha256 bytes. The asymmetry is the
