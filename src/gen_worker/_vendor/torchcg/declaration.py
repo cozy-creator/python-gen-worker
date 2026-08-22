@@ -181,14 +181,53 @@ def _node_value(node: Any) -> tuple[bool, Any]:
     return False, None
 
 
+#: Ops whose CALL SPELLING varies with the trace path while the call itself
+#: does not (tcg#88). A direct ``torch.export`` of author code passes
+#: ``_assert_tensor_metadata``'s optional dtype as a kwarg; re-exporting the
+#: same program's flat graph module materializes it positionally behind two
+#: ``None`` placeholders. Same op, same bound values, two renders — which
+#: split the graph hash between a direct static export and a static bind of
+#: the symbolic parent. Normalizing by the op's own schema (defaults dropped,
+#: optionals under their schema names) gives both traces ONE spelling, and it
+#: is scoped to the named ops so no existing direct-export hash moves.
+_SPELLING_NORMALIZED_SUFFIXES = ("::_assert_tensor_metadata",)
+
+
+def _normalized_call(node: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    schema = getattr(getattr(node, "target", None), "_schema", None)
+    if schema is None:
+        return tuple(node.args), dict(node.kwargs)
+    arguments = list(schema.arguments)
+    if len(node.args) > len(arguments):
+        return tuple(node.args), dict(node.kwargs)
+    args: list[Any] = []
+    kwargs: dict[str, Any] = {}
+    for argument, value in zip(arguments, node.args, strict=False):
+        if not argument.has_default_value():
+            args.append(value)
+        elif value != argument.default_value:
+            kwargs[argument.name] = value
+    by_name = {argument.name: argument for argument in arguments}
+    for name, value in node.kwargs.items():
+        argument = by_name.get(name)
+        if argument is None or not argument.has_default_value():
+            kwargs[name] = value
+        elif value != argument.default_value:
+            kwargs[name] = value
+    return tuple(args), kwargs
+
+
 def _graph_lines(graph: Any, symbols: _Symbols) -> list[str]:
     names = {node: f"%{index}" for index, node in enumerate(graph.nodes)}
     lines: list[str] = []
     for index, node in enumerate(graph.nodes):
-        args = ",".join(_render_argument(item, names, symbols) for item in node.args)
+        node_args, node_kwargs = tuple(node.args), dict(node.kwargs)
+        if _target(node).endswith(_SPELLING_NORMALIZED_SUFFIXES):
+            node_args, node_kwargs = _normalized_call(node)
+        args = ",".join(_render_argument(item, names, symbols) for item in node_args)
         kwargs = ",".join(
             f"{key}={_render_argument(item, names, symbols)}"
-            for key, item in sorted(node.kwargs.items())
+            for key, item in sorted(node_kwargs.items())
         )
         present, raw_value = _node_value(node)
         value = _render_value(raw_value, symbols) if present else "-"

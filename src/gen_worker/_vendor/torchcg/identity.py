@@ -22,9 +22,28 @@ from typing import Any
 #: (measured: the same conv module minted twice, one wrapper with a permute
 #: kernel for `conv_weight` and one without).
 KEY_SCHEME = "cg-key-v3"
-MAX_KEY_LENGTH = 96
 _DIGEST_HEX = 56
 _TOOLCHAIN_DIGEST_HEX = 16
+
+#: The exact length of a key THIS package makes: ``<scheme>-<digest>``.
+_OWN_KEY_LENGTH = len(KEY_SCHEME) + len("-") + _DIGEST_HEX
+
+#: How much longer a FOREIGN scheme's name may be than ours.
+#:
+#: tcg#86 (b)+(d). `MAX_KEY_LENGTH` was a bare 96 and the derivable part of it
+#: was never stated: 66 of those bytes are `_OWN_KEY_LENGTH`, above, and they
+#: move when the scheme or digest width moves. The remaining 30 are the whole
+#: reason a length bound exists at all -- `_KEY_RE` anchors the DIGEST but
+#: leaves the scheme name unbounded by design (`is_compiled_graph_key` admits
+#: an unseen scheme BY SHAPE, th#1183), so without a cap a boundary would run
+#: an unanchored regex over an arbitrarily long untrusted string. Thirty bytes
+#: is ~3x this scheme's own name: room for a longer successor without making
+#: the bound a second place a scheme rename has to be remembered.
+_FOREIGN_SCHEME_ALLOWANCE = 30
+
+#: The boundary admission bound. Derived, so the day the digest widens this
+#: follows instead of silently refusing every key the package itself mints.
+MAX_KEY_LENGTH = _OWN_KEY_LENGTH + _FOREIGN_SCHEME_ALLOWANCE
 
 #: The v1 identity axes, in canonical order. Public because consumers otherwise
 #: re-declare it and fence the copy; a duplicate that drifts is how a correctly

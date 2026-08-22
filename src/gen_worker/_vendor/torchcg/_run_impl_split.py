@@ -71,7 +71,23 @@ CTX = f"{PREFIX}run_ctx"
 DEFAULT_PARTS = 8
 
 #: Below this the function is not the pathological shape this exists for.
-MIN_COMPUTE_LINES = 4000
+#:
+#: tcg#86 (d). The one observed pathological `run_impl` measures 4,231 compute
+#: lines, and 4000 sits suspiciously close under it -- close enough that the
+#: gate reads as FITTED TO ITS ONE OBSERVATION, which is the thing this repo's
+#: honest rows do not do. Stated rather than left to be inferred: the bound
+#: that is actually argued for is `DEFAULT_PARTS x 500` -- below eight parts
+#: of ~500 lines each the split stops buying parallelism on the 4-vCPU pod
+#: `DEFAULT_PARTS` was swept on, and the per-TU 0.8 s header floor that sweep
+#: measured starts to dominate. That the two agree to within 6% of the single
+#: observed shape is a coincidence worth naming, not a derivation.
+#:
+#: **UNMEASURED below 4,231 lines** -- exactly the tcg#86 shape: a function at
+#: 3,999 pays the full superlinear cost and no event says so. THE FALSIFIER is
+#: the same one `_wrapper_split.MIN_STATEMENTS` carries: a compile ledger whose
+#: wall is dominated by one un-split `run_impl` under the gate. Row:
+#: blocked-on-measurement.
+MIN_COMPUTE_LINES = DEFAULT_PARTS * 500
 
 
 class Declined(Exception):

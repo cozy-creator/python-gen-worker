@@ -263,6 +263,13 @@ class Engine:
 
     @staticmethod
     def _plan(spec: GraphSpecialization, runtime: RuntimeCompatibility) -> _GraphSpecializationPlan:
+        # tcg#88: the store banks ONE symbolic parent under every static
+        # bucket identity it covers, so a compile position can be handed a
+        # symbolic program for a static record — it binds here, and the bound
+        # program must restate the exact identity requested or it refuses.
+        from .bind import bind_static_spec
+
+        spec = bind_static_spec(spec)
         declaration = spec.declare()
         return _GraphSpecializationPlan(spec, declaration, runtime, runtime.key(declaration))
 

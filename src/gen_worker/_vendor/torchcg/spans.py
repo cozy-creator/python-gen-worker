@@ -103,24 +103,77 @@ def phase_snapshot() -> dict[str, float]:
         return {}
 
 
+#: Every span in this ledger is recorded to millisecond precision. It is ONE
+#: number (tcg#86): the `round(..., 3)` quantum, the drop floor below, and the
+#: partition tolerance all follow from it, and before this they were three
+#: independent literals that happened to agree.
+LEDGER_PRECISION = 3
+_QUANTUM_S = 10.0 ** -LEDGER_PRECISION
+
+#: A delta below HALF the recording quantum cannot be a real span -- it is the
+#: rounding of two snapshots. Was a bare `0.0005`, which IS half the quantum
+#: and said so nowhere.
+_DROP_FLOOR_S = _QUANTUM_S / 2
+
+def _rounding_bound_s() -> float:
+    """The closure error PURE ROUNDING can produce, in seconds.
+
+    Every span and every partition total is stored to `LEDGER_PRECISION`, so
+    each contributes at most half a quantum; the widest partition plus its own
+    rounded total is the worst chain. Derived, so it follows the precision.
+    """
+    widest = max(len(members) for members in PARTITIONS.values())
+    return (widest + 1) * _QUANTUM_S / 2
+
+
+#: Slack carried ON TOP of `_rounding_bound_s()` before a partition is called
+#: broken.
+#:
+#: tcg#86 (b)+(d), and the split is the point. The bare `0.05` this replaces
+#: was ~11x what rounding can explain, so most of it was never a rounding
+#: argument at all -- it was unstated tolerance for a ledger whose members are
+#: sampled around real work. The rounding half is DERIVED above; this half is
+#: AUTHOR-DECLARED and **UNMEASURED**, and it is set so the total does not
+#: move: no ledger that closed before this change fails after it.
+#:
+#: THE FALSIFIER: a `check()` that reports a violation an operator can trace
+#: to a genuinely missing member says this slack is too wide; a partition that
+#: quietly absorbs 40 ms of real work says the same. Tighten it against a
+#: banked ledger, never by feel -- none exists yet, which is exactly why the
+#: number kept its value.
+#: 45.5 ms: exactly what the retired `0.05` carried above today's 4.5 ms
+#: rounding bound, so the total is unchanged for the current partition shape
+#: and GROWS with the widest partition, which the flat literal could not.
+_CLOSURE_SLACK_S = 0.0455
+
+
+def _closure_tolerance_s() -> float:
+    return _rounding_bound_s() + _CLOSURE_SLACK_S
+
+
 def phase_delta(
     before: Mapping[str, float], after: Mapping[str, float]
 ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     """Return ``(partition, overlays, raw)`` between two snapshots."""
 
     raw = {
-        name: round(float(after.get(name, 0.0)) - float(before.get(name, 0.0)), 3)
+        name: round(
+            float(after.get(name, 0.0)) - float(before.get(name, 0.0)),
+            LEDGER_PRECISION,
+        )
         for name in set(after) | set(before)
     }
-    raw = {name: value for name, value in raw.items() if value > 0.0005}
+    raw = {name: value for name, value in raw.items() if value > _DROP_FLOOR_S}
     partition = {
-        label: round(sum(raw.get(name, 0.0) for name in names), 3)
+        label: round(sum(raw.get(name, 0.0) for name in names), LEDGER_PRECISION)
         for label, names in PARTITION_KEYS.items()
     }
     overlays = {
         label: value
         for label, names in OVERLAY_KEYS.items()
-        if (value := round(sum(raw.get(name, 0.0) for name in names), 3))
+        if (value := round(
+            sum(raw.get(name, 0.0) for name in names), LEDGER_PRECISION
+        ))
     }
     triton = round(
         sum(
@@ -128,7 +181,7 @@ def phase_delta(
             for name, value in raw.items()
             if "async_compile" in name or "triton" in name.lower()
         ),
-        3,
+        LEDGER_PRECISION,
     )
     if triton:
         overlays["triton_s"] = triton
@@ -152,11 +205,11 @@ class SpanLedger:
         finally:
             self.spans[name] = round(
                 self.spans.get(name, 0.0) + time.monotonic() - started,
-                3,
+                LEDGER_PRECISION,
             )
 
     def mark(self, name: str, seconds: float) -> None:
-        self.spans[name] = round(float(seconds), 3)
+        self.spans[name] = round(float(seconds), LEDGER_PRECISION)
 
     def elapsed(self) -> float:
         return time.monotonic() - self._started
@@ -166,14 +219,18 @@ class SpanLedger:
         named = sum(
             value for name, value in self.spans.items() if name not in (total_name, residual_name)
         )
-        self.spans[total_name] = round(total, 3)
-        self.spans[residual_name] = round(total - named, 3)
+        self.spans[total_name] = round(total, LEDGER_PRECISION)
+        self.spans[residual_name] = round(total - named, LEDGER_PRECISION)
         return dict(self.spans)
 
 
-def check(spans: Mapping[str, float], *, tolerance_s: float = 0.05) -> list[str]:
+def check(
+    spans: Mapping[str, float], *, tolerance_s: float | None = None
+) -> list[str]:
     """Return partition violations; an empty list is a closed ledger."""
 
+    if tolerance_s is None:
+        tolerance_s = _closure_tolerance_s()
     problems: list[str] = []
     for total, members in PARTITIONS.items():
         if total not in spans:
@@ -211,7 +268,10 @@ def dark_fraction(spans: Mapping[str, float]) -> float:
     if total <= 0:
         return 0.0
     dark = sum(float(spans.get(name, 0.0)) for name in RESIDUALS)
-    return round(dark / total, 4)
+    # A FRACTION, not a span: one digit finer than the ledger's own precision so
+    # the ratio of two millisecond figures is not itself quantized to them.
+    # tcg#86: the lone `round(, 4)` among six `round(, 3)` now says why.
+    return round(dark / total, LEDGER_PRECISION + 1)
 
 
 __all__ = [

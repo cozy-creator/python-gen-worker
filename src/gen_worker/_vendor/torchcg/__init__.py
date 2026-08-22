@@ -13,6 +13,7 @@ from .artifact import (
     ArtifactError,
     ArtifactFormatSkew,
 )
+from .bind import BindError, bind_static_spec, respecialize, strip_diagnostics
 from .compiler import CompileError, DroppedOptimization, declared_input_layout
 from .declaration import (
     GRAPH_INTERFACE_FORMAT,
@@ -224,8 +225,10 @@ __all__ = [
     "declared_input_layout",
     "require_morphism",
     "DOCUMENT_FORMAT",
+    "BindError",
     "DimPolicy",
     "DiscoveryError",
+    "bind_static_spec",
     "DocumentError",
     "ENV_SCHEME",
     "EnvIdentity",
@@ -248,6 +251,8 @@ __all__ = [
     "assert_exact_env",
     "compile_stack",
     "discover_lane",
+    "respecialize",
+    "strip_diagnostics",
     "discover_modules",
     "graph_hash",
     "holes",

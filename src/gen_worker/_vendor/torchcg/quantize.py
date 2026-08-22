@@ -69,7 +69,32 @@ class ModuleSelect:
 
     root: str = ""
     skip: tuple[str, ...] = ()
-    #: in/out feature alignment the kernel requires; 0 disables the check
+    #: In/out FEATURE-COUNT alignment, in ELEMENTS, both dimensions of a
+    #: Linear's weight must satisfy or the module is silently KEPT at its
+    #: original dtype. The highest-consequence number in this file: it decides
+    #: which weights get quantized at all, and a miss is a capability loss no
+    #: refusal names -- only the `unaligned` row in the plan.
+    #:
+    #: WHOSE 16 THIS IS (tcg#86; the comment used to say only "the kernel
+    #: requires"). It is the scaled-GEMM constraint: `torch._scaled_mm`, and
+    #: the cuBLASLt/CUTLASS fp8 and int8 kernels underneath it, require the
+    #: contracted and output dimensions to be multiples of 16 ELEMENTS. That
+    #: is a property of the kernels this recipe's `granularity` selects, so a
+    #: recipe targeting a kernel with a different tile may legitimately state
+    #: a different value -- which is exactly why this is a per-scope field and
+    #: not a module constant.
+    #:
+    #: ⚠️ It VALUE-COLLIDES with `selection.AOTI_ALIGNMENT = 16`, and they are
+    #: unrelated: that one is 16 BYTES of ADDRESS alignment on an input
+    #: pointer. Same number, different unit, different subject. Do not
+    #: unify them.
+    #:
+    #: **NOT MEASURED on this repo's cards** -- it is a stated kernel
+    #: precondition, not a sweep. THE FALSIFIER: quantize a Linear whose
+    #: features are 8-aligned but not 16-aligned and run the recipe's own
+    #: kernel; if it produces correct output at speed, this bound is too
+    #: strict and is costing coverage. That run needs a card and has not
+    #: happened (tcg#86 row: blocked-on-measurement).
     align: int = 16
     dtypes: tuple[str, ...] = ("bfloat16", "float16")
 

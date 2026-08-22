@@ -27,12 +27,20 @@ from pathlib import Path
 
 from ..tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
 
-from .artifact import ArtifactError, _fsync_dir, read_metadata, unpack_artifact
+from .artifact import (
+    IO_BUFFER_BYTES,
+    ArtifactError,
+    _fsync_dir,
+    read_metadata,
+    unpack_artifact,
+)
 from .identity import CompiledGraphKey, is_compiled_graph_key
 
 _COMPILED_GRAPH_PATH = "compiled_graph.tar.gz"
 _REF_PREFIX = "torchcg/v1"
-_READ_BUFFER = 1 << 20
+#: tcg#86: `artifact.IO_BUFFER_BYTES` is the owner; this was the second of
+#: three names for one buffer.
+_READ_BUFFER = IO_BUFFER_BYTES
 
 
 class StorageError(RuntimeError):

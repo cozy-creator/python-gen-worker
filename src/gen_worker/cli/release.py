@@ -53,6 +53,14 @@ def add_subparser(sub: Any) -> None:
         "(pgw#1508); the bare form is every class that names neither.",
     )
     derive.add_argument(
+        "--trace-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="parallel derive-item processes (default: min(items, cores); "
+             "pgw#1603). 1 forces the sequential in-process path.",
+    )
+    derive.add_argument(
         "--lockfile",
         default=None,
         help="the endpoint's uv.lock, whose torch/triton/nvidia-* rows are "
@@ -125,6 +133,7 @@ def _run_derive(args: argparse.Namespace) -> int:
             lockfile=lockfile,
             graph_cas=Path(args.graph_cas).resolve() if args.graph_cas else None,
             checkpoint_trees=trees,
+            trace_workers=args.trace_workers,
         )
     except DeriveError as exc:
         print(f"derive error: {exc}", file=sys.stderr)
