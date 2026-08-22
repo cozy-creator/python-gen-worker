@@ -33,8 +33,12 @@ tasks:
       name the same revs. $0, no venv, no network, ~30ms. Run it before pushing:
       a stale lock breaks `uv sync --locked`, the FIRST step of EVERY CI job,
       so it costs three red checks that name neither file.
+
+      pgw#1657 rides along: .python-version must pin an interpreter uv.lock
+      records a hash for, or `uv sync --locked` dies on `Hash mismatch`.
     cmds:
       - python3 scripts/lint_lock_pin_agreement.py
+      - python3 scripts/lint_locked_interpreter.py
 
   vendor:
     desc: |
@@ -102,6 +106,7 @@ tasks:
       # pgw#1477 FIRST, and with bare python3 — every line below it is a
       # `uv run`, which silently RE-RESOLVES a stale lock instead of refusing it.
       - cmd: python3 scripts/lint_lock_pin_agreement.py
+      - cmd: python3 scripts/lint_locked_interpreter.py
       - cmd: uv run --extra dev mypy src/gen_worker tests
       - cmd: uv run --extra dev ruff check src/gen_worker
         # Advisory, matched by continue-on-error in CI.
