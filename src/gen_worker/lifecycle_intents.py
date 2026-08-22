@@ -562,6 +562,26 @@ class IntentRegistry:
             received_at_unix_ms=now,
             command_digest=digest,
         )
+        # A RE-STATEMENT of the same goal at the same seq answers with the
+        # receipt the hub ALREADY HOLDS, byte for byte. The command still
+        # applied in full above — only the answer is stabilised. The hub keys
+        # receipt identity on `command_seq` and refuses a second one at that seq
+        # that is not `proto.Equal` ("goal receipt command_seq conflict"), and a
+        # fresh `received_at_unix_ms` alone is enough to differ. That books a
+        # `worker_protocol_rejected` row on the FIRST reconnect of every pod
+        # whose boot HelloAck carried no `config_digest` — harmless to dispatch,
+        # since the hub keeps the older accepted receipt, and still a rejection
+        # row on a fleet whose acceptance bar is ZERO of them.
+        prior = self._receipts.get(command.goal_id)
+        if (
+            prior is not None
+            and int(prior.command_seq) == int(command.command_seq)
+            and int(prior.status) == pb.GOAL_RECEIPT_STATUS_ACCEPTED
+            and str(prior.release_id) == str(command.release_id)
+            and [(r.intent_id, int(r.error_code)) for r in prior.rejections]
+            == [(r.intent_id, int(r.error_code)) for r in receipt.rejections]
+        ):
+            receipt = _clone(prior)
         self._touch()
         self._remember_receipt(receipt)
         self._remember_command_receipt(

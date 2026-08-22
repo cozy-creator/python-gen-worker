@@ -403,7 +403,8 @@ def test_the_same_goal_restated_with_a_filled_in_digest_is_ACCEPTED() -> None:
         config_generation=4,
         parameter_snapshot=b"\x80",
     )
-    assert registry.apply_command(boot).status == pb.GOAL_RECEIPT_STATUS_ACCEPTED
+    first = registry.apply_command(boot)
+    assert first.status == pb.GOAL_RECEIPT_STATUS_ACCEPTED
 
     reconnect = pb.DesiredStateCommand()
     reconnect.CopyFrom(boot)
@@ -413,6 +414,17 @@ def test_the_same_goal_restated_with_a_filled_in_digest_is_ACCEPTED() -> None:
         f"the same goal restated was refused: {receipt.error_code} {receipt.detail}"
     )
     assert not registry.protocol_rejected
+    assert receipt.SerializeToString(deterministic=True) == first.SerializeToString(
+        deterministic=True
+    ), (
+        "and it must be the receipt the hub ALREADY HOLDS, byte for byte. The "
+        "hub refuses a second receipt at the same command_seq that is not "
+        "proto.Equal, and a fresh received_at_unix_ms alone differs — that is a "
+        "`worker_protocol_rejected` row on a fleet whose bar is zero of them"
+    )
+    assert registry.snapshot().config_application.target_generation == 4, (
+        "the command still APPLIED in full; only the answer was stabilised"
+    )
 
 
 def test_a_REBOUND_function_still_echoes_the_hubs_current_digest() -> None:
